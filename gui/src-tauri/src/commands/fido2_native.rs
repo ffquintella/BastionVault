@@ -254,7 +254,7 @@ fn request_pin_from_frontend(
 
 /// Handle all `StatusUpdate` variants, including interactive PIN collection.
 /// `pin_rx` is the receiving end of a channel whose sender is held in `AppState.pin_sender`.
-fn handle_status_updates(
+pub(crate) fn handle_status_updates(
     status_rx: std::sync::mpsc::Receiver<StatusUpdate>,
     handle: AppHandle,
     pin_rx: std::sync::mpsc::Receiver<String>,
@@ -542,43 +542,27 @@ pub async fn fido2_native_register(
 
 // ── Authentication ───────────────────────────────────────────────────
 
-#[tauri::command]
-pub async fn fido2_native_login(
-    username: String,
-    state: State<'_, AppState>,
-    app_handle: AppHandle,
-) -> CmdResult<Fido2LoginResponse> {
-    // 1. Read FIDO2 config
-    let (_rp_id, rp_origin, _rp_name) = read_fido2_config(&state).await?;
+/// Run one WebAuthn assertion ceremony against the operator's authenticator
+/// and return the `PublicKeyCredential` JSON the vault's relying party
+/// expects.
+///
+/// Shared by FIDO2 login and the connect-time MFA step-up: both need exactly
+/// this ceremony, and duplicating it would let the two drift apart in how
+/// they build `clientDataJSON` — which the RP hashes, so a divergence is an
+/// authentication failure, not a cosmetic one.
+///
+/// `challenge` is the server's `RequestChallengeResponse`, either the whole
+/// object or its inner `publicKey`.
+pub(crate) async fn assert_webauthn(
+    state: &State<'_, AppState>,
+    app_handle: &AppHandle,
+    challenge: &Value,
+) -> CmdResult<String> {
+    let (cfg_rp_id, rp_origin, _rp_name) = read_fido2_config(state).await?;
 
-    // 2. Call login/begin to get challenge
-    let mut body = Map::new();
-    body.insert("username".to_string(), Value::String(username.clone()));
-
-    let resp = match make_request(
-        &state,
-        Operation::Write,
-        "auth/userpass/fido2/login/begin".to_string(),
-        Some(body),
-    ).await {
-        Ok(r) => r,
-        // 404 here means the user has no registered FIDO2 credentials
-        // (or FIDO2 isn't configured). Either way, the GUI should drop
-        // to password entry — translate to a substring the LoginPage
-        // fall-through detector recognises.
-        Err(e) if is_not_configured_err(&e) => {
-            return Err("FIDO2 credential not found for this user".into());
-        }
-        Err(e) => return Err(e),
-    };
-
-    let data = resp
-        .and_then(|r| r.data)
-        .ok_or("FIDO2 credential not found for this user")?;
-
-    // 3. Parse RequestChallengeResponse
-    let data_value = Value::Object(data.clone());
-    let public_key = data.get("publicKey").unwrap_or(&data_value);
+    // WebAuthn wraps the request options in `publicKey`; some callers hand
+    // us the inner object directly. Accept either.
+    let public_key = challenge.get("publicKey").unwrap_or(challenge);
 
     let challenge_b64 = public_key.get("challenge")
         .and_then(|v| v.as_str())
@@ -586,7 +570,7 @@ pub async fn fido2_native_login(
 
     let rp_id = public_key.get("rpId")
         .and_then(|v| v.as_str())
-        .unwrap_or(&_rp_id);
+        .unwrap_or(&cfg_rp_id);
 
     // Parse allowCredentials
     let allow_list: Vec<PublicKeyCredentialDescriptor> = public_key
@@ -707,6 +691,52 @@ pub async fn fido2_native_login(
         "response": response_obj,
         "extensions": {}
     });
+
+    Ok(credential_json.to_string())
+}
+
+
+#[tauri::command]
+pub async fn fido2_native_login(
+    username: String,
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> CmdResult<Fido2LoginResponse> {
+    // 1. Confirm FIDO2 is configured before prompting for a key. The
+    //    assertion ceremony re-reads the config for the rp id / origin it
+    //    hashes into clientDataJSON; this early read exists so an
+    //    unconfigured deployment falls through to password entry instead of
+    //    asking the operator to tap a key that can never be accepted.
+    let _ = read_fido2_config(&state).await?;
+
+    // 2. Call login/begin to get challenge
+    let mut body = Map::new();
+    body.insert("username".to_string(), Value::String(username.clone()));
+
+    let resp = match make_request(
+        &state,
+        Operation::Write,
+        "auth/userpass/fido2/login/begin".to_string(),
+        Some(body),
+    ).await {
+        Ok(r) => r,
+        // 404 here means the user has no registered FIDO2 credentials
+        // (or FIDO2 isn't configured). Either way, the GUI should drop
+        // to password entry — translate to a substring the LoginPage
+        // fall-through detector recognises.
+        Err(e) if is_not_configured_err(&e) => {
+            return Err("FIDO2 credential not found for this user".into());
+        }
+        Err(e) => return Err(e),
+    };
+
+    let data = resp
+        .and_then(|r| r.data)
+        .ok_or("FIDO2 credential not found for this user")?;
+
+    // 3-7. Run the assertion ceremony against the authenticator.
+    let credential_json = assert_webauthn(&state, &app_handle, &Value::Object(data)).await?;
+
 
     // 8. Send to login/complete
     let mut body = Map::new();

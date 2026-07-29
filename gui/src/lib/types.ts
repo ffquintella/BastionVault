@@ -506,6 +506,23 @@ export type CredentialSource =
     }
   | {
       /**
+       * Authenticate with the *connecting operator's own FIDO2 security key*
+       * — an OpenSSH `sk-ssh-ed25519@openssh.com` /
+       * `sk-ecdsa-sha2-nistp256@openssh.com` credential whose private half
+       * never leaves the authenticator. Every connect needs a physical touch.
+       *
+       * SSH only. RDP has no FIDO2 authentication method; use the `pki`
+       * source for smartcard-style RDP, and `require_mfa` if what you want is
+       * a security-key prompt before the session opens.
+       *
+       * Carries no fields: the key is resolved at connect time from the
+       * operator's enrolment (Settings → Security key), never pinned on the
+       * profile. The login name still comes from `username` on the profile.
+       */
+      kind: "fido2";
+    }
+  | {
+      /**
        * Use the *connecting operator's* default resource account (set per
        * user under Users → Edit User → Default Resource Account) as the login
        * name, rather than pinning a username on the profile. The login name is
@@ -569,6 +586,20 @@ export interface ConnectionProfile {
    * traffic. Has no effect for SSH profiles.
    */
   rdp_aggressive_performance?: boolean;
+  /**
+   * Require the connecting operator to re-prove a second factor (TOTP code
+   * or FIDO2 security key) immediately before the session opens. Applies to
+   * both protocols and every credential source.
+   *
+   * The flag is read server-side off the stored profile and the factor is
+   * verified server-side, so a patched client cannot skip it. What it cannot
+   * do is stop an operator who holds `read` on the resource's secret from
+   * bypassing BastionVault entirely and dialling the target themselves —
+   * pair it with connect-only access or the Rustion transport when you need
+   * a hard control rather than a prompt. See
+   * features/connect-mfa-and-fido2-ssh.md.
+   */
+  require_mfa?: boolean;
   /**
    * `kind === "rustion"` only — ordered list of Rustion target ids
    * to try. Empty/unset = pick at random from the global pool of

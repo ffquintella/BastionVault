@@ -363,3 +363,88 @@ describe("default-account credential source", () => {
     expect(needsOperatorPrompt(defaultAccountSshProfile())).toBe(false);
   });
 });
+
+// ── FIDO2 credential source + MFA gate ───────────────────────────
+// features/connect-mfa-and-fido2-ssh.md
+
+function fido2Profile(protocol: "ssh" | "rdp" = "ssh"): ConnectionProfile {
+  return {
+    id: "p_sk",
+    name: "security key",
+    protocol,
+    username: "deploy",
+    credential_source: { kind: "fido2" },
+  };
+}
+
+describe("fido2 credential source", () => {
+  it("validates on SSH profiles", () => {
+    expect(validateProfile(fido2Profile("ssh"))).toBeNull();
+  });
+
+  it("is refused on RDP profiles, pointing at the alternatives", () => {
+    const err = validateProfile(fido2Profile("rdp"));
+    expect(err).toBeTruthy();
+    // The message has to name what to do instead, not just say no.
+    expect(err).toMatch(/PKI/);
+    expect(err).toMatch(/Require MFA re-validation/);
+  });
+
+  it("is launchable on SSH and not on RDP", () => {
+    expect(isLaunchableProfile(fido2Profile("ssh"))).toBe(true);
+    expect(isLaunchableProfile(fido2Profile("rdp"))).toBe(false);
+  });
+
+  it("needs no interactive operator prompt", () => {
+    // The touch happens inside the session open, not as a GUI pre-prompt,
+    // so the card-level quick-Connect can launch these directly.
+    expect(needsOperatorPrompt(fido2Profile("ssh"))).toBe(false);
+  });
+
+  it("is offered on unbrokered resources but not brokered ones", () => {
+    expect(loginClassGate(undefined).allowedKinds).toContain("fido2");
+    expect(loginClassGate("shared-credential").allowedKinds).toContain("fido2");
+    // A brokered resource must mint per-connect from the SSH engine; the
+    // operator's key is on their desk, not on the bastion.
+    expect(loginClassGate("brokered").allowedKinds).not.toContain("fido2");
+  });
+
+  it("is rejected against a brokered resource with a reason", () => {
+    const err = validateProfileForLoginClass(fido2Profile("ssh"), "brokered");
+    expect(err).toBeTruthy();
+    expect(err).toMatch(/bastion/);
+  });
+
+  it("does not block a brokered RDP profile (the gate is SSH-only)", () => {
+    expect(validateProfileForLoginClass(fido2Profile("rdp"), "brokered")).toBeNull();
+  });
+});
+
+describe("require_mfa", () => {
+  it("defaults to absent on a blank profile", () => {
+    // Every profile written before this feature must keep its old behaviour.
+    expect(blankProfile("linux").require_mfa).toBeUndefined();
+  });
+
+  it("does not affect validation or launchability either way", () => {
+    // The gate is enforced server-side at connect; it is not a save-time or
+    // launch-time property of the profile.
+    const gated: ConnectionProfile = { ...secretProfile(), require_mfa: true };
+    expect(validateProfile(gated)).toBeNull();
+    expect(isLaunchableProfile(gated)).toBe(true);
+    expect(needsOperatorPrompt(gated)).toBe(false);
+  });
+
+  it("survives a round trip through readProfiles", () => {
+    const parsed = readProfiles({
+      connection_profiles: [
+        { ...secretProfile(), require_mfa: true },
+        { ...fido2Profile("ssh") },
+      ],
+    });
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0].require_mfa).toBe(true);
+    expect(parsed[1].credential_source.kind).toBe("fido2");
+    expect(parsed[1].require_mfa).toBeUndefined();
+  });
+});

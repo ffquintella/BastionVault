@@ -115,6 +115,7 @@ pub fn build_leaf(
     leaf_signer: &CompositeSigner,
     ca_signer: &CompositeSigner,
     ca_cert_pem: &str,
+    urls: &super::x509::IssuanceUrls,
 ) -> Result<(String, Vec<u8>), RvError> {
     // `signatureAlgorithm` reflects the *CA*'s algorithm — it's the OID
     // operators verify against. The leaf's SPKI carries its own (which
@@ -152,6 +153,12 @@ pub fn build_leaf(
     }
     if let Some(san) = x509_pqc::build_subject_alt_name(subject)? {
         extensions.push(san);
+    }
+    if let Some(sid) = x509_pqc::build_ad_sid_extension(subject)? {
+        extensions.push(sid);
+    }
+    if let Some(cdp) = x509_pqc::build_crl_distribution_points(urls)? {
+        extensions.push(cdp);
     }
 
     let tbs = TbsCertificateInner {

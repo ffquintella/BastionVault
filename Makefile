@@ -97,7 +97,7 @@ $(FAST_BUILD_TARGETS): export RUSTFLAGS := $(strip $(RUSTFLAGS) -Z threads=$(RUS
 endif
 endif
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi gui-macos-pkg gui-packages sign-packages
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi gui-macos-pkg gui-packages macos-client-install sign-packages
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -762,6 +762,57 @@ else ifeq ($(shell uname -s),Darwin)
 	@$(MAKE) gui-macos-pkg
 else
 	@echo "ERROR: unknown host — no GUI installer format wired"; exit 1
+endif
+
+# ── Install the macOS client on this Mac ───────────────────────────────
+#
+# Build both halves of the macOS client — the Tauri GUI (.app wrapped into
+# a .pkg) and the bvault CLI (.pkg) — for the host arch, then hand them to
+# Apple's installer(8) so they land where macOS expects:
+#
+#   /Applications/BastionVault.app
+#   /usr/local/bin/bvault (+ manpage + bash/zsh completions)
+#
+# The install step needs administrator rights and will prompt for your
+# password once. macOS only (Tauri needs macOS for the .app, and
+# pkgbuild/installer are Apple tools).
+#
+#   make macos-client-install                       # build + install both
+#   make macos-client-install BV_QUIT_RUNNING=1     # also quit a running GUI
+#   make macos-client-install MACOS_CLIENT_PARTS=cli # CLI only (or gui)
+#
+# The GUI half refuses to install over a running BastionVault.app — it may
+# be holding an unsealed embedded vault — unless BV_QUIT_RUNNING=1 asks it
+# to quit gracefully first.
+#
+# Set INSTALLER_IDENTITY to sign the packages before installing; a local
+# unsigned .pkg installs fine via installer(8).
+
+# Which halves to build + install: gui, cli, or both.
+MACOS_CLIENT_PARTS ?= both
+MACOS_CLIENT_ARCH  := $(shell uname -m)
+MACOS_CLIENT_GUI_PKG := target/pkg/BastionVault-$(VERSION)-$(MACOS_CLIENT_ARCH).pkg
+MACOS_CLIENT_CLI_PKG := target/pkg/bvault-$(VERSION)-darwin-$(MACOS_CLIENT_ARCH).pkg
+
+macos-client-install: ## Build the macOS client (GUI .app + bvault CLI) and install it on this Mac
+ifneq ($(shell uname -s),Darwin)
+	@echo "ERROR: macos-client-install must run on macOS (Tauri needs macOS for the .app;"; \
+	 echo "       pkgbuild/installer are Apple tools)."; exit 1
+else
+	@case "$(MACOS_CLIENT_PARTS)" in \
+	   both|gui|cli) ;; \
+	   *) echo "ERROR: MACOS_CLIENT_PARTS must be both, gui, or cli (got '$(MACOS_CLIENT_PARTS)')"; exit 1 ;; \
+	 esac
+ifneq ($(MACOS_CLIENT_PARTS),cli)
+	@$(MAKE) gui-macos-pkg
+endif
+ifneq ($(MACOS_CLIENT_PARTS),gui)
+	@$(MAKE) macos-cli-pkg
+endif
+	@GUI_PKG=$(if $(filter-out cli,$(MACOS_CLIENT_PARTS)),$(MACOS_CLIENT_GUI_PKG),) \
+	 CLI_PKG=$(if $(filter-out gui,$(MACOS_CLIENT_PARTS)),$(MACOS_CLIENT_CLI_PKG),) \
+	 BV_QUIT_RUNNING=$(BV_QUIT_RUNNING) \
+		bash installers/macos/install-client.sh
 endif
 
 # ── Container image push (Sonatype Nexus, Docker Hub, GHCR, …) ─────────

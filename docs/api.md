@@ -487,6 +487,88 @@ Returns the caller's `entity_id`, `username`, `mount_path`,
 entity from the caller's alias if the token's metadata has no
 `entity_id` yet.
 
+### Self-Service Profile
+
+Everything a signed-in operator may change about their own account
+without an administrator. Every route resolves the principal from the
+request token — none of them take a username, and none can reach another
+operator's record. **v2-only.** Granted to every authenticated token by
+the built-in `default` policy (see `features/self-service-profile.md`).
+
+~~~
+GET  /v2/sys/identity/profile/self
+POST /v2/sys/identity/profile/self/password
+POST /v2/sys/identity/profile/self/contact
+GET  /v2/sys/identity/default-account/self
+POST /v2/sys/identity/default-account/self
+~~~
+
+**Read the profile.** Never 404s: a token with no userpass login behind
+it (root, `auth/token/create` child, AppRole, OIDC) still gets a
+well-formed document with the `can_*` flags false.
+
+~~~json
+{
+  "username": "alice",
+  "auth_mount": "auth/pass/",
+  "auth_method": "userpass",
+  "entity_id": "…",
+  "policies": ["standard-user", "default"],
+  "email": "alice@example.com",
+  "phone": "+55 21 1234-5678",
+  "disabled": false,
+  "fido2_enabled": false,
+  "totp_mfa_enabled": false,
+  "can_change_password": true,
+  "can_edit_contact": true,
+  "can_edit_default_account": true,
+  "default_account": {
+    "mount": "userpass/", "name": "alice",
+    "linux": "alice-svc", "macos": "", "windows": "CORP\\alice",
+    "has_windows_password": true,
+    "updated_at": "2026-07-01T00:00:00Z"
+  }
+}
+~~~
+
+The auth mount is recovered from the token's own login path, so it names
+the mount that actually issued the token (`auth/pass/`) rather than the
+`userpass/` literal every userpass mount stamps into token metadata.
+
+**Change your own password.** Both fields required; the current password
+is verified before anything is written. Refused (400) when the token did
+not come from a userpass login, when the account is FIDO2-only, and when
+the new password is shorter than 8 characters or equal to the current
+one; 403 when the account is disabled or the current password is wrong.
+A wrong current password is recorded on the user-audit trail but does
+**not** feed the account-lockout counter — otherwise anyone holding a
+live token could lock its owner out. Sessions issued before the change
+are not revoked.
+
+~~~json
+{ "current_password": "…", "new_password": "…" }
+~~~
+
+**Contact details.** Write-preserve: a field absent from the body keeps
+its stored value, an empty string clears it. Informational only — never
+used for authentication, notification, or account recovery.
+
+~~~json
+{ "email": "alice@fgv.br", "phone": "+55 21 9999-0000" }
+~~~
+
+**Your own default resource accounts.** The caller-scoped sibling of the
+admin `/{mount}/{name}` route below. Every field is write-preserve, so a
+partial update is safe and re-saving without retyping the stored Windows
+RDP password does not wipe it; clearing every field deletes the record.
+The write response masks the password (`has_windows_password` only). The
+`GET` is the one place the stored password is returned, and only ever to
+its own owner — the connect host injects it into the RDP session.
+
+~~~json
+{ "linux": "alice-svc", "windows": "CORP\\alice", "windows_password": "…" }
+~~~
+
 ### Connect-Only Access
 
 The `connect` capability lets a policy grant the ability to open a

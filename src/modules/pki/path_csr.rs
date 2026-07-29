@@ -236,10 +236,14 @@ impl PkiBackendInner {
             return Err(RvError::ErrPkiKeyTypeInvalid);
         };
 
+        // No AD smart-card material in generated CSRs: the upstream CA
+        // decides the identity claims on the cert it issues, and a
+        // requested UPN / SID in a CSR is a hint at best.
         let subject = SubjectInput {
             common_name: common_name.clone(),
             alt_names: alt_dns,
             ip_sans: alt_ips,
+            ..Default::default()
         };
         let csr = x509::build_leaf_csr(&role, &subject, classical)?;
         let csr_pem = csr.pem().map_err(super::crypto::rcgen_err)?;

@@ -22,6 +22,7 @@ import { PoliciesPage } from "./routes/PoliciesPage";
 import { NamespacesPage } from "./routes/NamespacesPage";
 import { MountsPage } from "./routes/MountsPage";
 import { SettingsPage } from "./routes/SettingsPage";
+import { ProfilePage } from "./routes/ProfilePage";
 import { HsmStatusPage } from "./routes/HsmStatusPage";
 import { ExchangePage } from "./routes/ExchangePage";
 import { PkiPage } from "./routes/PkiPage";
@@ -155,6 +156,13 @@ export default function App() {
             <Route
               path="/settings"
               element={<ProtectedRoute><SettingsPage /></ProtectedRoute>}
+            />
+            {/* Self-service profile. Deliberately NOT under /settings —
+                that page is server-level operator config; this one only
+                ever touches the signed-in user's own account. */}
+            <Route
+              path="/profile"
+              element={<ProtectedRoute><ProfilePage /></ProtectedRoute>}
             />
             <Route
               path="/hsm"

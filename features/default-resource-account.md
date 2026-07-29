@@ -132,6 +132,15 @@ default accounts never use it (those logins are brokered).
   modal; other principals are set via the generic admin API); per-OS passwords
   beyond Windows (SSH is always brokered, so only Windows/RDP needs one).
 
+**Self-service (see `features/self-service-profile.md`).** The record describes
+the *connecting operator*, not the vault, so the operator now owns it:
+`v2/sys/identity/default-account/self` gained a **Write** op alongside its read,
+and the GUI's **My Profile** page edits all three OS fields plus the stored
+Windows password. Every field is write-preserve there (absent ⇒ keep, `""` ⇒
+clear), and the write response is masked exactly like the admin read. The admin
+`{mount}/{name}` route and the Edit User section are unchanged — an admin can
+still set an account on someone's behalf.
+
 ## Current State
 
 **Done, including both follow-ups.** Storage + store tests, v2 API + HTTP-route

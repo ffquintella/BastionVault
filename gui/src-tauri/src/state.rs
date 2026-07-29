@@ -163,7 +163,10 @@ pub struct AppState {
     /// Channel for receiving PIN input from the frontend during FIDO2 ceremonies.
     /// The status handler thread stores a sender here; the `fido2_submit_pin` command
     /// sends the user-entered PIN (or empty string for cancel) through it.
-    pub pin_sender: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>>,
+    /// `Arc` because the connect-time security-key signer runs inside the
+    /// russh session task, which outlives the borrow of `State<AppState>`
+    /// that started it — it needs an owned handle, not a reference.
+    pub pin_sender: std::sync::Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>>>,
     /// Pending cloud-target OAuth consent sessions, keyed by an
     /// opaque session id handed back to the frontend. Removed on
     /// completion, timeout, or cancel — the underlying TCP listener
@@ -227,7 +230,7 @@ impl AppState {
             backend: Mutex::new(None),
             token: Mutex::new(None),
             active_namespace: Mutex::new(None),
-            pin_sender: std::sync::Mutex::new(None),
+            pin_sender: std::sync::Arc::new(std::sync::Mutex::new(None)),
             cloud_sessions: std::sync::Mutex::new(HashMap::new()),
             oidc_sessions: std::sync::Mutex::new(HashMap::new()),
             connect_sessions: tokio::sync::Mutex::new(HashMap::new()),

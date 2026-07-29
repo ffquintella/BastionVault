@@ -394,17 +394,38 @@ impl PkiBackendInner {
             x509::validate_dns_name(&role, dns)?;
         }
         alt_dns.retain(|d| d != &common_name);
+        // ACME identity is proven by a DNS / HTTP challenge, never by an
+        // AD account, so no UPN SAN or SID extension here regardless of
+        // what the backing role permits.
         let subject = x509::SubjectInput {
             common_name: common_name.clone(),
             alt_names: alt_dns,
             ip_sans: parsed.requested_ip_sans.clone(),
+            ..Default::default()
+        };
+
+        // ACME leaves carry the mount's configured CRL distribution
+        // points like any other leaf, so a revoked ACME cert is
+        // discoverable by the same verifiers.
+        let urls: x509::IssuanceUrls = {
+            let cfg: pki_storage::UrlsConfig =
+                pki_storage::get_json(req, pki_storage::KEY_CONFIG_URLS).await?.unwrap_or_default();
+            x509::IssuanceUrls {
+                crl_distribution_points: cfg
+                    .crl_distribution_points
+                    .into_iter()
+                    .map(|u| u.trim().to_string())
+                    .filter(|u| !u.is_empty())
+                    .collect(),
+            }
         };
 
         // Same dispatch as `sign_csr_role`. Mixed-class chains rejected.
         let (cert_pem, serial_bytes) = match (&parsed.algorithm_class, &ca_signer) {
             (CsrAlgClass::Classical, Signer::Classical(ca)) => {
-                let (cert, serial) =
-                    x509::build_leaf_from_spki(&role, &subject, ttl, &parsed.spki_der, ca, &ca_cert_pem)?;
+                let (cert, serial) = x509::build_leaf_from_spki(
+                    &role, &subject, ttl, &parsed.spki_der, ca, &ca_cert_pem, &urls,
+                )?;
                 (cert.pem(), serial)
             }
             (CsrAlgClass::MlDsa(level), Signer::MlDsa(ca_ml)) => x509_pqc::build_leaf_from_pqc_spki(
@@ -415,6 +436,7 @@ impl PkiBackendInner {
                 *level,
                 ca_ml,
                 &ca_cert_pem,
+                &urls,
             )?,
             _ => return Err(RvError::ErrPkiKeyTypeInvalid),
         };

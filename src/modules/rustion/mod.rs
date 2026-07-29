@@ -575,6 +575,8 @@ impl RustionBackend {
                     pattern: r"v2/session/open$",
                     fields: {
                         "resource_name": { field_type: FieldType::Str, default: "", description: "Resource whose secret path gates the connect capability and is resolved server-side." },
+                        "profile_id": { field_type: FieldType::Str, required: false, description: "Connection-profile id. Required when the profile carries `require_mfa` — the server reads the flag off the stored profile, so omitting this on a gated profile fails closed." },
+                        "connect_ticket": { field_type: FieldType::SecretStr, required: false, description: "Single-use ticket from `resources/v2/connect/mfa/verify`. Mandatory when the named profile requires MFA re-validation." },
                         "credential_source": { field_type: FieldType::Map, required: false, description: "Credential reference, e.g. {\"kind\":\"secret\",\"secret_id\":\"…\"}. When set and credential_material is empty, BastionVault resolves it server-side." },
                         "target_host": { field_type: FieldType::Str, default: "", description: "Target SSH/RDP destination host." },
                         "target_port": { field_type: FieldType::Int, default: 22, description: "Target SSH/RDP destination port." },
@@ -1738,6 +1740,58 @@ impl RustionBackendInner {
             return Err(RvError::ErrPermissionDenied);
         }
 
+        // (1b) Connect-time MFA gate. The `require_mfa` flag is read off the
+        // *stored* connection profile, never from this request body, so a
+        // patched client cannot declare itself exempt. Deliberately placed
+        // before every credential resolver below: on a gated profile nothing
+        // is minted, read, or sealed until the ticket has been redeemed.
+        //
+        // A gated profile with no `profile_id` in the request fails closed —
+        // `enforce` cannot find the profile, so the caller gets the explicit
+        // "profile_id is required" refusal below rather than a silent pass.
+        {
+            use crate::modules::resource::connect_mfa;
+
+            let profile_id = req
+                .get_data("profile_id")
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+                .unwrap_or_default();
+            let ticket = req
+                .get_data("connect_ticket")
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+                .unwrap_or_default();
+
+            if profile_id.is_empty() {
+                // No profile named: verify that *no* profile on this resource
+                // is gated before letting an unattributed open through. A
+                // caller that omits `profile_id` on a resource carrying any
+                // gated profile is refused rather than routed around the gate.
+                if self.resource_has_gated_profile(&ns_prefix, &resource_name).await? {
+                    return Err(bv_error_response_status!(
+                        400,
+                        "mfa_required: this resource has a connection profile that requires \
+                         MFA re-validation. Pass `profile_id` (and `connect_ticket` when the \
+                         named profile is gated) so the server can evaluate the gate."
+                    ));
+                }
+            } else {
+                let ticket_opt = if ticket.is_empty() { None } else { Some(ticket.as_str()) };
+                if let Some(record) =
+                    connect_mfa::enforce(&self.core, req, &ns_prefix, &resource_name, &profile_id, ticket_opt)
+                        .await?
+                {
+                    log::info!(
+                        "connect.mfa.authorized transport=rustion resource={resource_name} \
+                         profile={profile_id} principal={} method={}",
+                        record.principal,
+                        record.method
+                    );
+                }
+            }
+        }
+
         // (2) Server-side credential resolution. Only when the caller did
         // not already supply raw `credential_material` (the deferred
         // ldap/ssh-engine/pki kinds still resolve client-side and pass
@@ -1860,6 +1914,36 @@ impl RustionBackendInner {
 
         // (3) Delegate to the shared brokering engine.
         self.handle_session_open(b, req).await
+    }
+
+    /// True when *any* connection profile on this resource carries
+    /// `require_mfa`.
+    ///
+    /// Used only for the fail-closed branch when a caller opens a brokered
+    /// session without naming a profile: the gate cannot be evaluated
+    /// without a profile id, so an un-attributed open against a resource that
+    /// has any gated profile is refused rather than allowed through. A
+    /// resource with no gated profiles is unaffected, which keeps every
+    /// pre-existing caller working unchanged.
+    async fn resource_has_gated_profile(
+        &self,
+        ns_prefix: &str,
+        resource_name: &str,
+    ) -> Result<bool, RvError> {
+        use crate::modules::resource::connect_mfa::profile_gate_flag;
+
+        let path = format!("{ns_prefix}resources/resources/{resource_name}");
+        let mut sub = Request::new(&path);
+        sub.operation = Operation::Read;
+        let Some(resp) = self.core.router.handle_request(&mut sub).await? else {
+            return Ok(false);
+        };
+        let data = resp.data.unwrap_or_default();
+        Ok(data
+            .get("connection_profiles")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().any(profile_gate_flag))
+            .unwrap_or(false))
     }
 
     /// Resolve a resource-stored secret to base64-encoded ssh-password

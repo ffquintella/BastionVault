@@ -17,6 +17,7 @@ pub mod path_fido2_credentials;
 pub mod path_fido2_login;
 pub mod path_fido2_register;
 pub mod path_login;
+pub mod path_step_up;
 pub mod path_users;
 
 static USERPASS_BACKEND_HELP: &str = r#"
@@ -75,6 +76,10 @@ impl UserPassBackend {
         backend.paths.push(Arc::new(self.fido2_login_begin_path()));
         backend.paths.push(Arc::new(self.fido2_login_complete_path()));
         backend.paths.push(Arc::new(self.fido2_credentials_path()));
+        // Verify-only second-factor re-validation. Authenticated callers
+        // only — deliberately absent from `unauth_paths` above.
+        backend.paths.push(Arc::new(self.step_up_begin_path()));
+        backend.paths.push(Arc::new(self.step_up_verify_path()));
 
         backend
     }

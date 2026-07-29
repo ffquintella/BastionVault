@@ -621,7 +621,11 @@ async fn record_user_audit(
 /// one. This is deliberately *not* an RFC 5322 grammar — strict validators
 /// reject many real addresses. The goal is only to catch obvious typos before
 /// storing what is purely informational contact metadata.
-fn is_plausible_email(s: &str) -> bool {
+///
+/// Shared with the self-service contact route
+/// (`modules::system::self_profile`) so an address an admin may store for a
+/// user is exactly one the user may store for themselves.
+pub(crate) fn is_plausible_email(s: &str) -> bool {
     let mut parts = s.split('@');
     match (parts.next(), parts.next(), parts.next()) {
         (Some(local), Some(domain), None) => {

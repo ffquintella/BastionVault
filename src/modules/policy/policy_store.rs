@@ -153,6 +153,32 @@ path "identity/entity/self" {
   capabilities = ["read"]
 }
 
+# Self-service profile. Every handler behind these paths resolves the
+# principal from the calling token and refuses to touch anyone else's
+# record, so they are safe for any authenticated principal:
+#   * `profile/self`                  -- read your own account
+#   * `profile/self/password`         -- change your own password
+#                                        (requires the current one)
+#   * `profile/self/contact`          -- your own email / phone
+#   * `default-account/self`          -- your own per-OS login names and
+#                                        stored Windows RDP password
+# The `update` on `default-account/self` is what makes it self-editable;
+# the admin `default-account/{mount}/{name}` route is deliberately absent
+# here -- that one reaches other people's records and needs a real
+# operator policy.
+path "sys/identity/profile/self" {
+  capabilities = ["read"]
+}
+path "sys/identity/profile/self/password" {
+  capabilities = ["update"]
+}
+path "sys/identity/profile/self/contact" {
+  capabilities = ["update"]
+}
+path "sys/identity/default-account/self" {
+  capabilities = ["read", "update"]
+}
+
 # Allow a token to list shares granted to it (direct entity shares plus
 # group shares when the assigned policy carries the
 # `group_shared_resources = "true"` metadata tag). This is a
@@ -329,6 +355,12 @@ path "sys/internal/ui/resultant-acl"  { capabilities = ["read"] }
 path "identity/entity/self"   { capabilities = ["read"] }
 path "identity/sharing/for-me" { capabilities = ["read", "list"] }
 
+# --- Self-service profile (each handler is scoped to the calling token) ---
+path "sys/identity/profile/self"          { capabilities = ["read"] }
+path "sys/identity/profile/self/password" { capabilities = ["update"] }
+path "sys/identity/profile/self/contact"  { capabilities = ["update"] }
+path "sys/identity/default-account/self"  { capabilities = ["read", "update"] }
+
 # --- Own notification inbox (scoped to the caller's entity_id server-side) ---
 path "notifications/inbox"   { capabilities = ["read", "list"] }
 path "notifications/inbox/*" { capabilities = ["read", "update", "delete"] }
@@ -436,6 +468,22 @@ path "sys/internal/ui/resultant-acl" {
     capabilities = ["read"]
 }
 
+# Self-service profile: own password (current password required), own
+# contact details, own default resource accounts. Caller-scoped
+# server-side, so none of it reaches another principal's record.
+path "sys/identity/profile/self" {
+    capabilities = ["read"]
+}
+path "sys/identity/profile/self/password" {
+    capabilities = ["update"]
+}
+path "sys/identity/profile/self/contact" {
+    capabilities = ["update"]
+}
+path "sys/identity/default-account/self" {
+    capabilities = ["read", "update"]
+}
+
 # --- KV secrets (owner/shared-scoped) ---
 #
 # The `owner` scope carries a first-write carve-out: a Write against
@@ -525,6 +573,12 @@ path "auth/token/audit-login" { capabilities = ["update"] }
 path "sys/capabilities-self"  { capabilities = ["update"] }
 path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
 
+# --- Self-service profile (each handler is scoped to the calling token) ---
+path "sys/identity/profile/self"          { capabilities = ["read"] }
+path "sys/identity/profile/self/password" { capabilities = ["update"] }
+path "sys/identity/profile/self/contact"  { capabilities = ["update"] }
+path "sys/identity/default-account/self"  { capabilities = ["read", "update"] }
+
 # --- KV secrets (owner-scoped read) ---
 path "secret/*" {
     capabilities = ["read", "list"]
@@ -569,6 +623,12 @@ path "auth/token/revoke-self" { capabilities = ["update"] }
 path "auth/token/audit-login" { capabilities = ["update"] }
 path "sys/capabilities-self"  { capabilities = ["update"] }
 path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
+
+# --- Self-service profile (each handler is scoped to the calling token) ---
+path "sys/identity/profile/self"          { capabilities = ["read"] }
+path "sys/identity/profile/self/password" { capabilities = ["update"] }
+path "sys/identity/profile/self/contact"  { capabilities = ["update"] }
+path "sys/identity/default-account/self"  { capabilities = ["read", "update"] }
 
 # --- KV secrets (full CRUD on authored/shared items) ---
 path "secret/*" {

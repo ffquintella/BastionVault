@@ -10,7 +10,8 @@ use std::{net::IpAddr, str::FromStr, time::Duration};
 use rand::Rng;
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
-    ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType, SerialNumber,
+    ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, OtherNameValue, SanType,
+    SerialNumber,
 };
 use time::OffsetDateTime;
 
@@ -27,6 +28,38 @@ pub struct SubjectInput {
     pub common_name: String,
     pub alt_names: Vec<String>,
     pub ip_sans: Vec<IpAddr>,
+    /// AD smart-card logon: UPNs to emit as `subjectAltName` `otherName`
+    /// entries (OID 1.3.6.1.4.1.311.20.2.3). Gated by the role's
+    /// `allow_upn_sans` and validated by
+    /// [`super::ad_ext::validate_upn`] before it lands here.
+    pub upn_sans: Vec<String>,
+    /// AD smart-card logon: the account SID to emit in the
+    /// `szOID_NTDS_CA_SECURITY_EXT` extension for KB5014754 strong
+    /// mapping. Gated by the role's `allow_ad_sid`; already normalised
+    /// and validated by [`super::ad_ext::validate_ad_sid`].
+    pub ad_sid: Option<String>,
+}
+
+/// Mount-level URLs from `pki/config/urls` that get embedded in issued
+/// leaves.
+///
+/// Only the CRL distribution points are wired today. They matter for AD
+/// smart-card logon in particular: a domain controller that cannot reach a
+/// CRL for the logon certificate has no revocation source, and Microsoft's
+/// third-party-CA guidance calls for a populated, reachable CDP.
+///
+/// Empty is the default and emits nothing, so a mount that never
+/// configured `config/urls` produces byte-identical certificates to before
+/// this was wired up.
+#[derive(Debug, Default, Clone)]
+pub struct IssuanceUrls {
+    pub crl_distribution_points: Vec<String>,
+}
+
+impl IssuanceUrls {
+    pub fn is_empty(&self) -> bool {
+        self.crl_distribution_points.is_empty()
+    }
 }
 
 fn params_for_subject(
@@ -34,6 +67,7 @@ fn params_for_subject(
     subject: &SubjectInput,
     ttl: Duration,
     serial_bytes: &[u8],
+    urls: &IssuanceUrls,
 ) -> Result<CertificateParams, RvError> {
     let mut sans: Vec<String> = Vec::new();
     if !subject.common_name.is_empty() {
@@ -45,6 +79,36 @@ fn params_for_subject(
 
     for ip in &subject.ip_sans {
         params.subject_alt_names.push(SanType::IpAddress(*ip));
+    }
+
+    // AD smart-card logon: the UPN rides in the *same* SAN extension as
+    // the DNS / IP names (a second subjectAltName extension would make
+    // the certificate invalid), so it has to go through rcgen's SAN list
+    // rather than a custom extension.
+    if !subject.upn_sans.is_empty() {
+        let upn_arcs = super::ad_ext::upn_san_arcs();
+        for upn in &subject.upn_sans {
+            params.subject_alt_names.push(SanType::OtherName((
+                upn_arcs.clone(),
+                OtherNameValue::Utf8String(upn.clone()),
+            )));
+        }
+    }
+
+    // The SID extension has no rcgen representation, so it goes in as a
+    // custom extension. `from_oid_content` wraps the content we hand it
+    // in the extension's OCTET STRING, so we pass the bare GeneralNames
+    // DER — matching what the hand-rolled DER paths put in `extn_value`.
+    if let Some(sid) = &subject.ad_sid {
+        let content = super::ad_ext::sid_extension_der(sid)?;
+        let oid = super::ad_ext::parse_oid_arcs(super::ad_ext::SID_EXT_OID)?;
+        params.custom_extensions.push(rcgen::CustomExtension::from_oid_content(&oid, content));
+    }
+
+    if !urls.crl_distribution_points.is_empty() {
+        params.crl_distribution_points = vec![rcgen::CrlDistributionPoint {
+            uris: urls.crl_distribution_points.clone(),
+        }];
     }
 
     let mut dn = DistinguishedName::new();
@@ -75,7 +139,7 @@ fn params_for_subject(
     params.not_after = now + lifetime;
 
     params.key_usages = parse_key_usages(&role.key_usage);
-    params.extended_key_usages = parse_ext_key_usages(role, &role.ext_key_usage);
+    params.extended_key_usages = parse_ext_key_usages(role, &role.ext_key_usage)?;
     params.serial_number = Some(SerialNumber::from_slice(serial_bytes));
 
     Ok(params)
@@ -112,26 +176,81 @@ fn parse_key_usages(values: &[String]) -> Vec<KeyUsagePurpose> {
         .collect()
 }
 
-fn parse_ext_key_usages(role: &RoleEntry, values: &[String]) -> Vec<ExtendedKeyUsagePurpose> {
-    let mut out: Vec<ExtendedKeyUsagePurpose> = values
-        .iter()
-        .filter_map(|v| match v.to_ascii_lowercase().as_str() {
-            "serverauth" => Some(ExtendedKeyUsagePurpose::ServerAuth),
-            "clientauth" => Some(ExtendedKeyUsagePurpose::ClientAuth),
-            "codesigning" => Some(ExtendedKeyUsagePurpose::CodeSigning),
-            "emailprotection" => Some(ExtendedKeyUsagePurpose::EmailProtection),
-            "timestamping" => Some(ExtendedKeyUsagePurpose::TimeStamping),
-            "ocspsigning" => Some(ExtendedKeyUsagePurpose::OcspSigning),
-            _ => None,
-        })
-        .collect();
+/// Resolve one `ext_key_usage` entry.
+///
+/// Named purposes keep their historical spelling. Two Microsoft EKUs get
+/// friendly names because they have no RFC 5280 equivalent and typing the
+/// OID by hand is error-prone: `smartcardlogon` and `kdcauthentication`.
+/// Anything shaped like a dotted-decimal OID is parsed as one, so an
+/// operator can drop a raw OID into `ext_key_usage` without reaching for
+/// the separate `ext_key_usage_oids` field.
+///
+/// Unknown *names* return `Ok(None)` and are skipped, preserving the
+/// pre-existing lenient behaviour for roles already in storage. A
+/// malformed *OID* is an error — it can only be a typo, and silently
+/// dropping it would emit a certificate missing the usage the operator
+/// asked for.
+fn resolve_ext_key_usage(value: &str) -> Result<Option<ExtendedKeyUsagePurpose>, RvError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    // Dotted-decimal shape → treat as an OID.
+    if trimmed.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        let arcs = super::ad_ext::parse_oid_arcs(trimmed)
+            .map_err(|e| RvError::ErrString(format!("ext_key_usage: {e}")))?;
+        return Ok(Some(ExtendedKeyUsagePurpose::Other(arcs)));
+    }
+    let named = match trimmed.to_ascii_lowercase().as_str() {
+        "serverauth" => Some(ExtendedKeyUsagePurpose::ServerAuth),
+        "clientauth" => Some(ExtendedKeyUsagePurpose::ClientAuth),
+        "codesigning" => Some(ExtendedKeyUsagePurpose::CodeSigning),
+        "emailprotection" => Some(ExtendedKeyUsagePurpose::EmailProtection),
+        "timestamping" => Some(ExtendedKeyUsagePurpose::TimeStamping),
+        "ocspsigning" => Some(ExtendedKeyUsagePurpose::OcspSigning),
+        "any" | "anyextendedkeyusage" => Some(ExtendedKeyUsagePurpose::Any),
+        "smartcardlogon" => Some(ExtendedKeyUsagePurpose::Other(
+            super::ad_ext::parse_oid_arcs(super::ad_ext::SMARTCARD_LOGON_EKU_OID)?,
+        )),
+        "kdcauthentication" => Some(ExtendedKeyUsagePurpose::Other(
+            super::ad_ext::parse_oid_arcs(super::ad_ext::KDC_AUTH_EKU_OID)?,
+        )),
+        _ => None,
+    };
+    Ok(named)
+}
+
+fn parse_ext_key_usages(
+    role: &RoleEntry,
+    values: &[String],
+) -> Result<Vec<ExtendedKeyUsagePurpose>, RvError> {
+    let mut out: Vec<ExtendedKeyUsagePurpose> = Vec::new();
+    for v in values {
+        if let Some(purpose) = resolve_ext_key_usage(v)? {
+            if !out.contains(&purpose) {
+                out.push(purpose);
+            }
+        }
+    }
+    // `ext_key_usage_oids` is the OID-only channel — every entry must
+    // parse (it was already validated at role-write time, so a failure
+    // here means the role predates validation or storage was edited
+    // out-of-band).
+    for oid in &role.ext_key_usage_oids {
+        let arcs = super::ad_ext::parse_oid_arcs(oid)
+            .map_err(|e| RvError::ErrString(format!("ext_key_usage_oids: {e}")))?;
+        let purpose = ExtendedKeyUsagePurpose::Other(arcs);
+        if !out.contains(&purpose) {
+            out.push(purpose);
+        }
+    }
     if role.server_flag && !out.contains(&ExtendedKeyUsagePurpose::ServerAuth) {
         out.push(ExtendedKeyUsagePurpose::ServerAuth);
     }
     if role.client_flag && !out.contains(&ExtendedKeyUsagePurpose::ClientAuth) {
         out.push(ExtendedKeyUsagePurpose::ClientAuth);
     }
-    out
+    Ok(out)
 }
 
 /// Build a self-signed CA certificate. Returns the cert plus the serial bytes
@@ -172,9 +291,10 @@ pub fn build_leaf(
     leaf_signer: &CertSigner,
     ca_signer: &CertSigner,
     ca_cert_pem: &str,
+    urls: &IssuanceUrls,
 ) -> Result<(Certificate, Vec<u8>), RvError> {
     let serial = random_serial_bytes();
-    let params = params_for_subject(role, subject, ttl, &serial)?;
+    let params = params_for_subject(role, subject, ttl, &serial, urls)?;
     let issuer = reload_issuer(ca_signer, ca_cert_pem)?;
     let cert = params.signed_by(leaf_signer.key_pair(), &issuer).map_err(rcgen_err)?;
     Ok((cert, serial))
@@ -191,9 +311,10 @@ pub fn build_leaf_from_spki(
     spki_der: &[u8],
     ca_signer: &CertSigner,
     ca_cert_pem: &str,
+    urls: &IssuanceUrls,
 ) -> Result<(Certificate, Vec<u8>), RvError> {
     let serial = random_serial_bytes();
-    let params = params_for_subject(role, subject, ttl, &serial)?;
+    let params = params_for_subject(role, subject, ttl, &serial, urls)?;
     let issuer = reload_issuer(ca_signer, ca_cert_pem)?;
     let public_key = rcgen::SubjectPublicKeyInfo::from_der(spki_der).map_err(rcgen_err)?;
     let cert = params.signed_by(&public_key, &issuer).map_err(rcgen_err)?;
@@ -288,7 +409,9 @@ pub fn build_leaf_csr(
     // serialises the subject + extensions + pubkey, so the serial /
     // validity drop on the floor.
     let serial_throwaway = random_serial_bytes();
-    let params = params_for_subject(role, subject, role.ttl, &serial_throwaway)?;
+    // No CDP in a generated CSR: rcgen refuses CRL-DP in a CSR, and the
+    // upstream CA sets its own distribution points anyway.
+    let params = params_for_subject(role, subject, role.ttl, &serial_throwaway, &IssuanceUrls::default())?;
     params.serialize_request(signer.key_pair()).map_err(rcgen_err)
 }
 

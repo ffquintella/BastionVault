@@ -175,6 +175,15 @@ export function validateProfile(p: ConnectionProfile): string | null {
         return "PKI role is required";
       }
       return null;
+    case "fido2":
+      // RDP has no FIDO2 authentication method at all — the closest thing is
+      // smartcard/PKINIT, which is the `pki` source. Blocking the save here
+      // mirrors the host's own refusal, so the operator finds out in the
+      // editor rather than at 3am on a locked-out connect.
+      if (p.protocol !== "ssh") {
+        return "FIDO2 security keys can only authenticate SSH sessions. For Windows, use the PKI (smartcard) source, and tick \u201cRequire MFA re-validation\u201d if you want a security-key prompt before the session opens.";
+      }
+      return null;
     case "default-account":
       // SSH brokers a cert/OTP from the engine, so it needs the same
       // mount/role as `ssh-engine`. RDP carries no extra fields (the
@@ -211,6 +220,9 @@ export function isLaunchableProfile(p: ConnectionProfile): boolean {
       // an ML-DSA-65 cert); the connect path rejects it with a clear
       // message, but the other modes launch.
       return p.credential_source.mode !== "pqc";
+    case "fido2":
+      // SSH only; see validateProfile.
+      return p.protocol === "ssh";
     case "default-account":
       // SSH brokers via the engine (same pqc caveat as `ssh-engine`); RDP
       // prompts for the password at connect and launches.
@@ -248,7 +260,14 @@ export function loginClassGate(loginClass: SshLoginClass | undefined): {
   }
   return {
     brokered: false,
-    allowedKinds: ["secret", "ldap", "ssh-engine", "pki", "default-account"],
+    allowedKinds: [
+      "secret",
+      "ldap",
+      "ssh-engine",
+      "pki",
+      "default-account",
+      "fido2",
+    ],
     forcedKind: null,
   };
 }
@@ -270,6 +289,9 @@ export function validateProfileForLoginClass(
     p.credential_source.kind !== "ssh-engine" &&
     p.credential_source.kind !== "default-account"
   ) {
+    if (p.credential_source.kind === "fido2") {
+      return "This resource is brokered: every SSH login must be minted per-connect from the SSH engine. A FIDO2 security key can't satisfy that \u2014 the key is on your desk, not on the bastion. Use the SSH-engine source, and tick \u201cRequire MFA re-validation\u201d if you want a security-key prompt before the session opens.";
+    }
     return "This resource is brokered: SSH logins must use the SSH-engine (or default-account) credential source (no static credential).";
   }
   return null;

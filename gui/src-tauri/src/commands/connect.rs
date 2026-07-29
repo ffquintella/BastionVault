@@ -47,6 +47,12 @@ pub struct SshOpenRequest {
     /// the typed username/password through this field.
     #[serde(default)]
     pub operator_credential: Option<OperatorCredential>,
+    /// Single-use ticket from the connect-time MFA ceremony. Required when
+    /// the profile carries `require_mfa`; the *server* decides that, so
+    /// omitting it on a gated profile is refused rather than ignored. See
+    /// `features/connect-mfa-and-fido2-ssh.md`.
+    #[serde(default)]
+    pub connect_ticket: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -121,6 +127,8 @@ pub async fn session_open_ssh(
         let r = open_rustion_session_v2_ssh(
             &state,
             &request.resource_name,
+            &request.profile_id,
+            request.connect_ticket.as_deref(),
             &meta,
             &profile,
             &primary_target_host,
@@ -152,10 +160,26 @@ pub async fn session_open_ssh(
         String,
         Option<crate::session::SessionCleanup>,
     ) = if let Some(r) = v2_route {
+        // Brokered: `rustion/v2/session/open` already evaluated the profile's
+        // MFA gate and burnt the ticket. Redeeming it again here would fail —
+        // exactly one server-side consumer runs per connect.
         (r, None, username, None)
     } else {
+        // Direct dial: this is the one place the ticket gets redeemed. Runs
+        // before any credential is resolved or minted, so on a gated profile
+        // nothing happens until the server has verified the factor. On an
+        // ungated profile the server answers `authorized` straight away.
+        crate::commands::connect_mfa::authorize_direct(
+            &state,
+            &request.resource_name,
+            &request.profile_id,
+            request.connect_ticket.as_deref(),
+        )
+        .await?;
+
         let (resolved, lc) = resolve_ssh_credential(
             &state,
+            &app,
             &request.resource_name,
             &profile,
             &meta,
@@ -443,6 +467,9 @@ pub struct RdpOpenRequest {
     /// `LdapBindMode::Operator` profiles only.
     #[serde(default)]
     pub operator_credential: Option<OperatorCredential>,
+    /// Same connect-time MFA ticket as `SshOpenRequest::connect_ticket`.
+    #[serde(default)]
+    pub connect_ticket: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -475,6 +502,17 @@ pub async fn session_open_rdp(
             request.profile_id, request.resource_name
         ))
     })?;
+    // Connect-time MFA gate — see the note on the SSH path above. RDP has no
+    // FIDO2 authentication method of its own, so for RDP profiles this gate is
+    // the entire FIDO2 story.
+    crate::commands::connect_mfa::authorize_direct(
+        &state,
+        &request.resource_name,
+        &request.profile_id,
+        request.connect_ticket.as_deref(),
+    )
+    .await?;
+
     let host_candidates = profile_host_candidates(&profile, &meta);
     if host_candidates.is_empty() {
         return Err(CommandError::from(
@@ -1549,6 +1587,29 @@ async fn resolve_ssh_connect_route(
         SshCredential::Cert { pem, cert_openssh } => {
             BrokeredCred { kind: "ssh-cert", material_b64: encode(pem.as_bytes()), cert: Some(cert_openssh.clone()) }
         }
+        SshCredential::SecurityKey { .. } => {
+            // A `sk-` key cannot be brokered: the private half lives in the
+            // operator's authenticator, which is on their desk, not on the
+            // bastion. There is no material to seal into an envelope, and the
+            // bastion's russh client has no way to reach the token. Same
+            // shape as the passphrase-protected-key case above — fail closed
+            // under rustion-required rather than silently dialling direct.
+            if effective.transport == "rustion-required" {
+                return Err(CommandError::from(
+                    "rustion-required policy: a FIDO2 security-key credential can't be brokered \
+                     through the bastion — the private key is in the operator's authenticator, \
+                     which the bastion cannot reach. Use the SSH-engine (brokered cert) source \
+                     on this resource, or move this profile to the direct transport. Refusing \
+                     to dial direct."
+                        .to_string(),
+                ));
+            }
+            log::warn!(
+                "resource-connect/ssh: rustion-preferred but the profile uses a FIDO2 \
+                 security-key credential, which cannot be brokered; falling back to direct dial"
+            );
+            return Ok(ConnectRoute::Direct);
+        }
     };
 
     let ttl_secs = profile.get("ttl_secs").and_then(|v| v.as_u64()).and_then(|n| u32::try_from(n).ok()).unwrap_or(3600);
@@ -1640,6 +1701,8 @@ async fn parse_rustion_ticket_bundle(
 async fn open_rustion_session_v2_ssh(
     state: &State<'_, AppState>,
     resource_name: &str,
+    profile_id: &str,
+    connect_ticket: Option<&str>,
     meta: &Map<String, Value>,
     profile: &Value,
     target_host: &str,
@@ -1674,6 +1737,14 @@ async fn open_rustion_session_v2_ssh(
     let mut body = Map::new();
     // The reference, not the material — BastionVault resolves it.
     body.insert("resource_name".into(), Value::String(resource_name.to_string()));
+    // The server reads `require_mfa` off this profile and, when it is set,
+    // demands and burns the ticket before it builds an envelope. Always send
+    // the profile id: omitting it on a resource that has any gated profile is
+    // refused server-side rather than waved through.
+    body.insert("profile_id".into(), Value::String(profile_id.to_string()));
+    if let Some(t) = connect_ticket.map(str::trim).filter(|t| !t.is_empty()) {
+        body.insert("connect_ticket".into(), Value::String(t.to_string()));
+    }
     body.insert("credential_source".into(), credential_source.clone());
     body.insert("target_host".into(), Value::String(target_host.to_string()));
     body.insert("target_port".into(), Value::Number(target_port.into()));
@@ -1903,6 +1974,7 @@ struct ResolvedSshCredential {
 
 async fn resolve_ssh_credential(
     state: &State<'_, AppState>,
+    app: &AppHandle,
     resource_name: &str,
     profile: &Value,
     meta: &Map<String, Value>,
@@ -1944,9 +2016,77 @@ async fn resolve_ssh_credential(
         "pki" => resolve_pki_ssh(state, resource_name, cs).await,
         "ssh-engine" => resolve_ssh_engine_ssh(state, profile, meta, cs).await,
         "default-account" => resolve_default_account_ssh(state, profile, meta, cs).await,
+        "fido2" => resolve_security_key_ssh(state, app).await,
         other => Err(CommandError::from(format!("unknown credential source `{other}`"))),
     }?;
     Ok((resolved, lc))
+}
+
+/// `fido2` credential source — authenticate with the connecting operator's
+/// own FIDO2 security key (`features/connect-mfa-and-fido2-ssh.md`).
+///
+/// There is no credential to resolve in the usual sense: the private key is
+/// in the operator's authenticator and never leaves it. What we fetch is the
+/// *enrolment* — the public key to present, the credential handle to put in
+/// the CTAP allow-list, and the application string the signature is bound to.
+///
+/// Fails closed when the operator has no key enrolled. Falling back to any
+/// other source would be exactly the silent downgrade this credential source
+/// exists to prevent.
+async fn resolve_security_key_ssh(
+    state: &State<'_, AppState>,
+    app: &AppHandle,
+) -> Result<ResolvedSshCredential, CommandError> {
+    let resp =
+        make_request(state, Operation::Read, "sys/identity/ssh-security-key/self".to_string(), None)
+            .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+
+    let enrolled = data.get("enrolled").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !enrolled {
+        return Err(CommandError::from(
+            "This profile authenticates with your FIDO2 security key, but you have not \
+             enrolled one. Go to Settings → Security key → Enrol SSH security key, then \
+             add the generated public key to the target's authorized_keys."
+                .to_string(),
+        ));
+    }
+
+    let field = |k: &str| data.get(k).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let public_key_openssh = field("public_key");
+    let algorithm = field("algorithm");
+    let application = field("application");
+    let credential_id_b64 = field("credential_id");
+
+    if public_key_openssh.is_empty() || algorithm.is_empty() || credential_id_b64.is_empty() {
+        return Err(CommandError::from(
+            "your SSH security-key enrolment is incomplete; re-enrol the key from \
+             Settings → Security key"
+                .to_string(),
+        ));
+    }
+
+    let credential_id = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(credential_id_b64.as_str())
+        .map_err(|e| CommandError::from(format!("stored security-key credential id is not valid base64url: {e}")))?;
+
+    Ok(ResolvedSshCredential {
+        credential: SshCredential::SecurityKey {
+            public_key_openssh,
+            identity: crate::session::sk_signer::SecurityKeyIdentity {
+                algorithm,
+                application,
+                credential_id,
+            },
+            app: app.clone(),
+            pin_slot: state.pin_sender.clone(),
+        },
+        // The security key carries no username — the profile's own
+        // `username` (or the default-account resolution above it) supplies it.
+        effective_username: None,
+        on_close: None,
+        engine_mint: None,
+    })
 }
 
 /// The connecting operator's default resource accounts, fetched from

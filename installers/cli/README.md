@@ -65,6 +65,10 @@ ls target/pkg/            # bvault-<version>-darwin-<arch>.pkg
 Set `INSTALLER_IDENTITY="Developer ID Installer: <team>"` to sign the
 pkg locally; notarisation (`xcrun notarytool` + `stapler`) is a CI step.
 
+To build **and install** the CLI (plus the GUI) on your own Mac in one
+step, use `make macos-client-install` — see
+[installers/macos/README.md](../macos/README.md).
+
 ### Windows (.msi / .nupkg)
 
 Two build paths, auto-selected by host OS:

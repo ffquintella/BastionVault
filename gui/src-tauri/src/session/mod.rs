@@ -11,6 +11,7 @@
 //! credential sources land in Phases 5–6.
 
 pub mod rdp;
+pub mod sk_signer;
 pub mod ssh;
 
 use tokio::sync::mpsc;

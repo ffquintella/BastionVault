@@ -366,74 +366,37 @@ impl UserPassBackendInner {
     }
 
     /// Validate a submitted TOTP `code` against the key this user is bound
-    /// to in the TOTP secret engine. The engine is a sibling mount, so we
-    /// read its key policy through the router's barrier view for that mount
-    /// and run the RFC 6238 check locally, reusing the engine's own crypto
-    /// primitives. Fails closed: an unmounted engine, a missing/unreadable
-    /// key, or a malformed policy is an error (login refused), never a
-    /// silent bypass. Mirrors the cross-mount read pattern used by AppRole's
-    /// FerroGate machine lookup.
+    /// to in the TOTP secret engine. The engine is a sibling mount, so the
+    /// shared helper reads its key policy through the router's barrier view
+    /// for that mount and runs the RFC 6238 check locally, reusing the
+    /// engine's own crypto primitives. Fails closed: an unmounted engine, a
+    /// missing/unreadable key, or a malformed policy is an error (login
+    /// refused), never a silent bypass.
     ///
-    /// Note: replay protection (the engine's `used/` index) is intentionally
-    /// not consulted here — that index lives under the TOTP engine's own
-    /// contract and writing into it from userpass would couple the two
-    /// backends' storage layouts. A TOTP code is single-use within its short
-    /// period and is combined with the password, so the residual replay
-    /// window is one validity period.
+    /// The check itself lives in [`crate::modules::totp::mfa`] so the
+    /// connect-time step-up ceremony validates codes exactly the same way
+    /// this login path does — see that module for the note on why the
+    /// engine's replay index is not consulted.
     async fn verify_totp_mfa(
         &self,
         user: &UserEntry,
         mfa: &TotpMfaConfig,
         code: &str,
     ) -> Result<bool, RvError> {
-        use crate::{
-            modules::totp::{
-                crypto::{ct_eq, hotp, step_for},
-                policy::KeyPolicy,
-            },
-            storage::Storage,
-        };
+        use crate::modules::totp::mfa;
 
         if user.totp_key.trim().is_empty() {
             return Err(RvError::ErrResponse(
                 "TOTP MFA is enabled for this account but no TOTP key is bound".to_string(),
             ));
         }
-        let mount = if user.totp_mount.trim().is_empty() {
-            mfa.default_mount.clone()
-        } else {
-            let m = user.totp_mount.trim().to_string();
-            if m.ends_with('/') { m } else { format!("{m}/") }
+        let mount = match mfa::normalize_mount(&user.totp_mount) {
+            m if m.is_empty() => mfa::normalize_mount(&mfa.default_mount),
+            m => m,
         };
-
-        let Some(view) = self.core.router.matching_view(&mount)? else {
-            return Err(RvError::ErrResponse(format!(
-                "TOTP MFA misconfigured: no secret engine mounted at `{mount}`"
-            )));
-        };
-        let Some(entry) = view.get(&format!("key/{}", user.totp_key)).await? else {
-            return Err(RvError::ErrResponse(format!(
-                "TOTP MFA misconfigured: key `{}` not found in `{mount}`",
-                user.totp_key
-            )));
-        };
-        let policy: KeyPolicy = serde_json::from_slice(&entry.value)?;
 
         let now = super::path_users::now_secs().max(0) as u64;
-        let centre = step_for(now, policy.period);
-        for off in 0..=policy.skew as i64 {
-            for sign in if off == 0 { &[0i64][..] } else { &[-1i64, 1][..] } {
-                let step = centre as i64 + sign * off;
-                if step < 0 {
-                    continue;
-                }
-                let expect = hotp(&policy.key, step as u64, policy.algorithm, policy.digits);
-                if ct_eq(&expect, code) {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
+        Ok(mfa::verify_code(&self.core, &mount, &user.totp_key, code, now).await?)
     }
 
     pub async fn login_renew(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {

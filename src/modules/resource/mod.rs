@@ -13,6 +13,8 @@
 //!   smeta/<resource>/<key>              -> ResourceSecretMeta JSON (version index)
 //!   sver/<resource>/<key>/<version>     -> ResourceSecretVersion JSON (old values)
 
+pub mod connect_mfa;
+
 use std::{any::Any, collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::Utc;
@@ -219,6 +221,9 @@ impl ResourceBackend {
         let h_sec_ver = self.inner.clone();
         let h_noop1 = self.inner.clone();
         let h_noop2 = self.inner.clone();
+        let h_mfa_begin = self.inner.clone();
+        let h_mfa_verify = self.inner.clone();
+        let h_authorize = self.inner.clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -383,6 +388,92 @@ impl ResourceBackend {
                         {op: Operation::Delete, handler: h_sec_delete.handle_secret_delete}
                     ],
                     help: "Read, create/update, or delete a secret within a resource."
+                },
+                {
+                    // Connect-time MFA gate — step 1. Reports whether the
+                    // named profile is gated and which factors the caller
+                    // can satisfy it with. See
+                    // features/connect-mfa-and-fido2-ssh.md.
+                    pattern: r"v2/connect/mfa/begin$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name the profile lives on."
+                        },
+                        "profile_id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Connection-profile id."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_mfa_begin.handle_connect_mfa_begin}
+                    ],
+                    help: "Begin connect-time MFA re-validation for a connection profile."
+                },
+                {
+                    // Connect-time MFA gate — step 2. Verifies one factor and
+                    // mints the single-use connect ticket.
+                    pattern: r"v2/connect/mfa/verify$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name the profile lives on."
+                        },
+                        "profile_id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Connection-profile id."
+                        },
+                        "method": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Factor to verify: `totp` or `fido2`."
+                        },
+                        "totp_code": {
+                            field_type: FieldType::SecretStr,
+                            required: false,
+                            description: "Current TOTP code. Required when method = totp."
+                        },
+                        "credential": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "JSON-encoded FIDO2 assertion. Required when method = fido2."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_mfa_verify.handle_connect_mfa_verify}
+                    ],
+                    help: "Verify a second factor and mint a single-use connect ticket."
+                },
+                {
+                    // Direct-path pre-flight: consume the ticket (when the
+                    // profile is gated) and authorize the session open.
+                    pattern: r"v2/connect/authorize$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name the profile lives on."
+                        },
+                        "profile_id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Connection-profile id."
+                        },
+                        "connect_ticket": {
+                            field_type: FieldType::SecretStr,
+                            required: false,
+                            description: "Ticket from connect/mfa/verify. Required for gated profiles."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_authorize.handle_connect_authorize}
+                    ],
+                    help: "Authorize a direct-path session open, consuming the connect \
+                           MFA ticket when the profile requires re-validation."
                 }
             ],
             secrets: [{
@@ -479,7 +570,7 @@ fn diff_field_names(old: Option<&Map<String, Value>>, new: &Map<String, Value>) 
 /// at the canonical key — i.e., new resources are always lowercase, and
 /// any existing CI-equal record is updated in place rather than
 /// duplicated.
-async fn resolve_resource_name(
+pub(crate) async fn resolve_resource_name(
     req: &mut Request,
     raw: &str,
 ) -> Result<String, RvError> {

@@ -645,6 +645,79 @@ export const setDefaultAccount = (
     windowsPassword,
   });
 
+// ── Self-service profile (features/self-service-profile.md) ────────────
+//
+// Everything below is caller-scoped: the server resolves the principal from
+// the request token, so none of these take a username and none can reach
+// another operator's record. The admin equivalents live above
+// (`getUser` / `updateUser` / `setDefaultAccount`).
+
+/** The signed-in operator's own default resource accounts. */
+export interface MyDefaultAccount {
+  /** Auth mount of the identity principal the record is keyed on. */
+  mount: string;
+  /** Principal name the record is keyed on. */
+  name: string;
+  linux: string;
+  macos: string;
+  windows: string;
+  /** Whether a Windows RDP password is stored. The plaintext never reaches
+   *  the frontend — only the connect path (in Rust) reads it. */
+  has_windows_password: boolean;
+  updated_at: string;
+}
+
+/** The signed-in operator's profile. The `can_*` flags are decided
+ *  server-side: whether a password can be changed depends on how the token
+ *  was minted (userpass vs AppRole / OIDC / root) and on account state
+ *  (disabled, FIDO2-only), neither of which the UI can determine itself. */
+export interface MyProfile {
+  username: string;
+  display_name: string;
+  entity_id: string;
+  /** Real auth mount that issued the token (e.g. "auth/pass/"); empty when
+   *  the login was not username/password. */
+  auth_mount: string;
+  auth_method: string;
+  policies: string[];
+  email: string;
+  phone: string;
+  disabled: boolean;
+  fido2_enabled: boolean;
+  totp_mfa_enabled: boolean;
+  can_change_password: boolean;
+  can_edit_contact: boolean;
+  can_edit_default_account: boolean;
+  default_account: MyDefaultAccount;
+}
+
+export const getMyProfile = () => invoke<MyProfile>("get_my_profile");
+
+/** Change your own password. The server re-authenticates with
+ *  `currentPassword`, so holding a token is not enough to rotate it. */
+export const changeMyPassword = (currentPassword: string, newPassword: string) =>
+  invoke<void>("change_my_password", { currentPassword, newPassword });
+
+/** Update your own contact details. `undefined` leaves a field untouched;
+ *  `""` clears it. */
+export const updateMyContact = (email?: string, phone?: string) =>
+  invoke<void>("update_my_contact", { email, phone });
+
+/** Set your own default resource accounts. Every field is write-preserve:
+ *  `undefined` keeps the stored value, `""` clears it. */
+export const setMyDefaultAccount = (
+  linux?: string,
+  macos?: string,
+  windows?: string,
+  windowsPassword?: string,
+) =>
+  invoke<void>("set_my_default_account", {
+    linux,
+    macos,
+    windows,
+    windowsPassword,
+  });
+
 // Resource type configuration
 export const resourceTypesRead = () =>
   invoke<Record<string, unknown> | null>("resource_types_read");
@@ -2435,6 +2508,12 @@ export type SessionOpenSshRequest = {
    *  Connection panel pops a small modal that collects these and
    *  forwards them through this field. */
   operator_credential?: OperatorCredential;
+  /** Single-use ticket from the connect-time MFA ceremony. Required when the
+   *  profile carries `require_mfa` — the server decides that, so omitting it
+   *  on a gated profile is refused rather than ignored. Obtain it with
+   *  {@link connectMfaBegin} + {@link connectMfaVerifyTotp} /
+   *  {@link connectMfaVerifyFido2}. */
+  connect_ticket?: string;
 };
 
 export type SessionOpenSshResponse = {
@@ -2451,6 +2530,8 @@ export type SessionOpenRdpRequest = {
   resource_name: string;
   profile_id: string;
   operator_credential?: OperatorCredential;
+  /** See {@link SessionOpenSshRequest.connect_ticket}. */
+  connect_ticket?: string;
 };
 
 export type SessionOpenRdpResponse = {
@@ -2464,6 +2545,90 @@ export type SessionOpenRdpResponse = {
 
 export const sessionOpenRdp = (request: SessionOpenRdpRequest) =>
   invoke<SessionOpenRdpResponse>("session_open_rdp", { request });
+
+
+// ── Connect-time MFA re-validation + SSH security keys ──────────
+// features/connect-mfa-and-fido2-ssh.md
+
+/** What the server says about a profile's MFA gate. `required: false` means
+ *  connect straight through — the frontend never decides this itself. */
+export type ConnectMfaChallenge = {
+  required: boolean;
+  /** Factors the calling operator can actually use, server-ordered
+   *  (FIDO2 first when available). Empty on an ungated profile. */
+  methods: string[];
+  /** WebAuthn request options, present only when `fido2` is in `methods`.
+   *  Opaque — hand it straight back to {@link connectMfaVerifyFido2}. */
+  fido2?: unknown;
+};
+
+export type ConnectMfaTicket = {
+  connect_ticket: string;
+  expires_at: string;
+  method: string;
+};
+
+export const connectMfaBegin = (resourceName: string, profileId: string) =>
+  invoke<ConnectMfaChallenge>("connect_mfa_begin", {
+    resourceName,
+    profileId,
+  });
+
+export const connectMfaVerifyTotp = (
+  resourceName: string,
+  profileId: string,
+  code: string,
+) =>
+  invoke<ConnectMfaTicket>("connect_mfa_verify_totp", {
+    resourceName,
+    profileId,
+    code,
+  });
+
+export const connectMfaVerifyFido2 = (
+  resourceName: string,
+  profileId: string,
+  challenge: unknown,
+) =>
+  invoke<ConnectMfaTicket>("connect_mfa_verify_fido2", {
+    resourceName,
+    profileId,
+    challenge,
+  });
+
+/** One principal's SSH security-key enrolment. Everything here is public
+ *  material: an OpenSSH public key and a CTAP credential handle. */
+export type SshSecurityKeyInfo = {
+  mount: string;
+  name: string;
+  enrolled: boolean;
+  algorithm: string;
+  /** Full authorized_keys line to install on target hosts. */
+  public_key: string;
+  credential_id: string;
+  application: string;
+  comment: string;
+  updated_at: string;
+};
+
+export const sshSecurityKeySelfRead = () =>
+  invoke<SshSecurityKeyInfo>("ssh_security_key_self_read");
+export const sshSecurityKeySelfDelete = () =>
+  invoke<void>("ssh_security_key_self_delete");
+export const sshSecurityKeyEnroll = (
+  userLabel: string,
+  application?: string,
+  comment?: string,
+) =>
+  invoke<SshSecurityKeyInfo>("ssh_security_key_enroll", {
+    userLabel,
+    application,
+    comment,
+  });
+export const sshSecurityKeyList = () =>
+  invoke<SshSecurityKeyInfo[]>("ssh_security_key_list");
+export const sshSecurityKeyAdminDelete = (mount: string, name: string) =>
+  invoke<void>("ssh_security_key_admin_delete", { mount, name });
 
 /// Phase 7.4: per-session Rustion bundle. Returned by
 /// `session_rustion_info` when the open path routed through a bastion;

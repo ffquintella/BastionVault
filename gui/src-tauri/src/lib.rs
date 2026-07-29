@@ -342,6 +342,10 @@ pub fn run() {
             commands::users::get_default_account,
             commands::users::get_default_account_self,
             commands::users::set_default_account,
+            commands::profile::get_my_profile,
+            commands::profile::change_my_password,
+            commands::profile::update_my_contact,
+            commands::profile::set_my_default_account,
             // Policies
             commands::policies::list_policies,
             commands::policies::read_policy,
@@ -641,6 +645,16 @@ pub fn run() {
             commands::fido2_native::fido2_native_register,
             commands::fido2_native::fido2_native_login,
             commands::fido2_native::fido2_submit_pin,
+            // Connect-time MFA re-validation + SSH security keys
+            // (features/connect-mfa-and-fido2-ssh.md)
+            commands::connect_mfa::connect_mfa_begin,
+            commands::connect_mfa::connect_mfa_verify_totp,
+            commands::connect_mfa::connect_mfa_verify_fido2,
+            commands::ssh_security_key::ssh_security_key_self_read,
+            commands::ssh_security_key::ssh_security_key_self_delete,
+            commands::ssh_security_key::ssh_security_key_enroll,
+            commands::ssh_security_key::ssh_security_key_list,
+            commands::ssh_security_key::ssh_security_key_admin_delete,
             commands::fido2::fido2_config_read,
             commands::fido2::fido2_config_write,
             commands::fido2::fido2_register_begin,

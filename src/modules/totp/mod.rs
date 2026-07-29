@@ -28,6 +28,7 @@ use crate::{
 pub mod backend;
 pub mod barcode;
 pub mod crypto;
+pub mod mfa;
 pub mod path_code;
 pub mod path_keys;
 pub mod policy;

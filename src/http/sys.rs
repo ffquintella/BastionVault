@@ -565,17 +565,80 @@ async fn sys_default_account_list_request_handler(
     handle_request(core, &mut r).await
 }
 
-/// GET `/v2/sys/identity/default-account/self` — read the calling principal's
-/// own default resource accounts. HTTP shim over the sys-backend logical route
-/// `identity/default-account/self`. Readable by any authenticated caller.
+/// GET / POST|PUT `/v2/sys/identity/default-account/self` — read or set the
+/// calling principal's own default resource accounts. HTTP shim over the
+/// sys-backend logical route `identity/default-account/self`. Reachable by any
+/// authenticated caller; the handler resolves the principal from the request
+/// token, so a caller can only ever touch their own record.
 async fn sys_default_account_self_request_handler(
     req: HttpRequest,
+    mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
     let mut r = request_auth(&req);
     r.path = "sys/identity/default-account/self".to_string();
+    copy_namespace_header(&req, &mut r);
+    match *req.method() {
+        actix_web::http::Method::POST | actix_web::http::Method::PUT => {
+            r.operation = Operation::Write;
+            if !body.is_empty() {
+                r.body = Some(serde_json::from_slice(&body)?);
+                body.clear();
+            }
+        }
+        _ => r.operation = Operation::Read,
+    }
+    handle_request(core, &mut r).await
+}
+
+/// GET `/v2/sys/identity/profile/self` — read the calling operator's own
+/// profile. HTTP shim over the sys-backend logical route
+/// `identity/profile/self`. Caller-scoped: the handler resolves the principal
+/// from the request token, never from the URL.
+async fn sys_profile_self_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/identity/profile/self".to_string();
     r.operation = Operation::Read;
     copy_namespace_header(&req, &mut r);
+    handle_request(core, &mut r).await
+}
+
+/// POST|PUT `/v2/sys/identity/profile/self/password` — change the calling
+/// operator's own password. Requires `current_password` + `new_password`.
+async fn sys_profile_self_password_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/identity/profile/self/password".to_string();
+    r.operation = Operation::Write;
+    copy_namespace_header(&req, &mut r);
+    if !body.is_empty() {
+        r.body = Some(serde_json::from_slice(&body)?);
+        body.clear();
+    }
+    handle_request(core, &mut r).await
+}
+
+/// POST|PUT `/v2/sys/identity/profile/self/contact` — update the calling
+/// operator's own contact details (`email` / `phone`, write-preserve).
+async fn sys_profile_self_contact_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/identity/profile/self/contact".to_string();
+    r.operation = Operation::Write;
+    copy_namespace_header(&req, &mut r);
+    if !body.is_empty() {
+        r.body = Some(serde_json::from_slice(&body)?);
+        body.clear();
+    }
     handle_request(core, &mut r).await
 }
 
@@ -590,6 +653,72 @@ async fn sys_default_account_path_request_handler(
 ) -> Result<HttpResponse, RvError> {
     let mut r = request_auth(&req);
     r.path = format!("sys/identity/default-account/{}", path.into_inner());
+    copy_namespace_header(&req, &mut r);
+    match *req.method() {
+        actix_web::http::Method::POST | actix_web::http::Method::PUT => {
+            r.operation = Operation::Write;
+            if !body.is_empty() {
+                r.body = Some(serde_json::from_slice(&body)?);
+                body.clear();
+            }
+        }
+        actix_web::http::Method::DELETE => r.operation = Operation::Delete,
+        _ => r.operation = Operation::Read,
+    }
+    handle_request(core, &mut r).await
+}
+
+/// LIST `/v2/sys/identity/ssh-security-key` — list principals with an enrolled
+/// SSH security key. HTTP shim over the sys-backend logical route
+/// `identity/ssh-security-key`. See
+/// `features/connect-mfa-and-fido2-ssh.md`.
+async fn sys_ssh_security_key_list_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/identity/ssh-security-key".to_string();
+    r.operation = Operation::List;
+    copy_namespace_header(&req, &mut r);
+    handle_request(core, &mut r).await
+}
+
+/// GET / POST|PUT / DELETE `/v2/sys/identity/ssh-security-key/self` — read,
+/// enrol, or remove the calling principal's own SSH security key. Reachable by
+/// any authenticated caller; the handler resolves the principal from the
+/// request token, so a caller can only ever touch their own enrolment.
+async fn sys_ssh_security_key_self_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/identity/ssh-security-key/self".to_string();
+    copy_namespace_header(&req, &mut r);
+    match *req.method() {
+        actix_web::http::Method::POST | actix_web::http::Method::PUT => {
+            r.operation = Operation::Write;
+            if !body.is_empty() {
+                r.body = Some(serde_json::from_slice(&body)?);
+                body.clear();
+            }
+        }
+        actix_web::http::Method::DELETE => r.operation = Operation::Delete,
+        _ => r.operation = Operation::Read,
+    }
+    handle_request(core, &mut r).await
+}
+
+/// GET / POST|PUT / DELETE `/v2/sys/identity/ssh-security-key/{mount}/{name}` —
+/// admin view of one principal's SSH security-key enrolment.
+async fn sys_ssh_security_key_path_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = format!("sys/identity/ssh-security-key/{}", path.into_inner());
     copy_namespace_header(&req, &mut r);
     match *req.method() {
         actix_web::http::Method::POST | actix_web::http::Method::PUT => {
@@ -4128,7 +4257,28 @@ pub fn init_sys_service(cfg: &mut web::ServiceConfig) {
             )
             .service(
                 web::resource("/identity/default-account/self")
-                    .route(web::get().to(sys_default_account_self_request_handler)),
+                    .route(web::get().to(sys_default_account_self_request_handler))
+                    .route(web::post().to(sys_default_account_self_request_handler))
+                    .route(web::put().to(sys_default_account_self_request_handler)),
+            )
+            // Self-service profile (features/self-service-profile.md). v2-only,
+            // caller-scoped: each handler resolves the principal from the
+            // request token. Registered before the default-account wildcard for
+            // the same ordering reason — distinct prefix, but keep them
+            // adjacent so the grouping stays obvious.
+            .service(
+                web::resource("/identity/profile/self")
+                    .route(web::get().to(sys_profile_self_request_handler)),
+            )
+            .service(
+                web::resource("/identity/profile/self/password")
+                    .route(web::post().to(sys_profile_self_password_request_handler))
+                    .route(web::put().to(sys_profile_self_password_request_handler)),
+            )
+            .service(
+                web::resource("/identity/profile/self/contact")
+                    .route(web::post().to(sys_profile_self_contact_request_handler))
+                    .route(web::put().to(sys_profile_self_contact_request_handler)),
             )
             .service(
                 web::resource("/identity/default-account/{path:.*}")
@@ -4136,6 +4286,30 @@ pub fn init_sys_service(cfg: &mut web::ServiceConfig) {
                     .route(web::post().to(sys_default_account_path_request_handler))
                     .route(web::put().to(sys_default_account_path_request_handler))
                     .route(web::delete().to(sys_default_account_path_request_handler)),
+            )
+            // Per-principal SSH security keys
+            // (features/connect-mfa-and-fido2-ssh.md). Same shape as the
+            // default-account routes above, and registered in the same order:
+            // the literal `/self` must precede the `{path:.*}` catch-all or the
+            // catch-all swallows it.
+            .service(
+                web::resource("/identity/ssh-security-key")
+                    .route(web::method(list_method()).to(sys_ssh_security_key_list_request_handler))
+                    .route(web::get().to(sys_ssh_security_key_list_request_handler)),
+            )
+            .service(
+                web::resource("/identity/ssh-security-key/self")
+                    .route(web::get().to(sys_ssh_security_key_self_request_handler))
+                    .route(web::post().to(sys_ssh_security_key_self_request_handler))
+                    .route(web::put().to(sys_ssh_security_key_self_request_handler))
+                    .route(web::delete().to(sys_ssh_security_key_self_request_handler)),
+            )
+            .service(
+                web::resource("/identity/ssh-security-key/{path:.*}")
+                    .route(web::get().to(sys_ssh_security_key_path_request_handler))
+                    .route(web::post().to(sys_ssh_security_key_path_request_handler))
+                    .route(web::put().to(sys_ssh_security_key_path_request_handler))
+                    .route(web::delete().to(sys_ssh_security_key_path_request_handler)),
             ),
     );
 }
@@ -4650,6 +4824,301 @@ mod default_account_route_tests {
         assert_eq!(status, 200, "read-after-delete should be empty, not 404: {resp:?}");
         let data = resp.get("data").unwrap_or(&resp);
         assert_eq!(data.get("linux").and_then(|v| v.as_str()), Some(""));
+    }
+}
+
+#[cfg(test)]
+mod self_profile_route_tests {
+    //! HTTP coverage for the self-service profile routes
+    //! (`features/self-service-profile.md`). These are v2-only sys shims and
+    //! are reached with a *non-root* userpass token, so the test also proves
+    //! the built-in `default` policy actually grants them — a caller-scoped
+    //! endpoint nobody is allowed to call is not self-service.
+
+    use serde_json::{json, Value};
+
+    use crate::test_utils::TestHttpServer;
+
+    /// Point the test client at the `/v2` scope — these routes are v2-only.
+    fn v2(server: &mut TestHttpServer) {
+        server.url_prefix = server.url_prefix.replace("/v1", "/v2");
+    }
+
+    /// Log in at `auth/pass/login/<user>` and return the issued client token.
+    fn login(server: &TestHttpServer, user: &str, password: &str) -> Option<String> {
+        let (status, resp) = server
+            .login(
+                &format!("auth/pass/login/{user}"),
+                json!({ "password": password }).as_object().cloned(),
+                None,
+            )
+            .unwrap();
+        if status != 200 {
+            return None;
+        }
+        resp.get("auth")
+            .and_then(|a| a.get("client_token"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    }
+
+    fn data_of(resp: &Value) -> Value {
+        resp.get("data").cloned().unwrap_or_else(|| resp.clone())
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_self_profile_roundtrip_over_http() {
+        let mut server = TestHttpServer::new("test_self_profile_http", true).await;
+        v2(&mut server);
+        server.token = server.root_token.clone();
+        let root = server.root_token.clone();
+
+        // An admin provisions the account; everything after this is the user
+        // acting on their own behalf with their own token.
+        assert!(server.mount_auth("pass", "userpass").is_ok());
+        let (status, resp) = server
+            .write(
+                "auth/pass/users/alice",
+                json!({ "password": "old-password-1", "policies": "standard-user" })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert!(status == 200 || status == 204, "create user failed: {status} {resp:?}");
+
+        let alice = login(&server, "alice", "old-password-1").expect("alice should log in");
+
+        // --- Read own profile -------------------------------------------
+        let (status, resp) = server
+            .request("GET", "sys/identity/profile/self", None, Some(&alice), None)
+            .unwrap();
+        assert_eq!(status, 200, "profile read must be granted by `default`: {resp:?}");
+        let d = data_of(&resp);
+        assert_eq!(d.get("username").and_then(|v| v.as_str()), Some("alice"));
+        // The real mount is recovered from the token's login path, not from the
+        // `userpass/` literal every userpass mount stamps in its metadata.
+        assert_eq!(d.get("auth_mount").and_then(|v| v.as_str()), Some("auth/pass/"));
+        assert_eq!(d.get("can_change_password").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(d.get("email").and_then(|v| v.as_str()), Some(""));
+
+        // --- Contact details --------------------------------------------
+        let (status, resp) = server
+            .write(
+                "sys/identity/profile/self/contact",
+                json!({ "email": "alice@example.com", "phone": "+55 21 1234-5678" })
+                    .as_object()
+                    .cloned(),
+                Some(&alice),
+            )
+            .unwrap();
+        assert_eq!(status, 200, "contact write failed: {resp:?}");
+
+        // Write-preserve: a body with only `phone` must not clear the email.
+        let (status, _resp) = server
+            .write(
+                "sys/identity/profile/self/contact",
+                json!({ "phone": "+55 21 9999-0000" }).as_object().cloned(),
+                Some(&alice),
+            )
+            .unwrap();
+        assert_eq!(status, 200);
+        let (_status, resp) = server
+            .request("GET", "sys/identity/profile/self", None, Some(&alice), None)
+            .unwrap();
+        let d = data_of(&resp);
+        assert_eq!(d.get("email").and_then(|v| v.as_str()), Some("alice@example.com"));
+        assert_eq!(d.get("phone").and_then(|v| v.as_str()), Some("+55 21 9999-0000"));
+
+        // A malformed address is refused rather than stored.
+        let (status, _resp) = server
+            .write(
+                "sys/identity/profile/self/contact",
+                json!({ "email": "not-an-address" }).as_object().cloned(),
+                Some(&alice),
+            )
+            .unwrap();
+        assert_eq!(status, 400, "implausible email must be rejected");
+
+        // --- Default resource accounts ----------------------------------
+        let (status, resp) = server
+            .write(
+                "sys/identity/default-account/self",
+                json!({ "linux": "alice-svc", "windows": "CORP\\alice", "windows_password": "rdp-pw" })
+                    .as_object()
+                    .cloned(),
+                Some(&alice),
+            )
+            .unwrap();
+        assert_eq!(status, 200, "self default-account write failed: {resp:?}");
+        let d = data_of(&resp);
+        assert!(
+            d.get("windows_password").is_none(),
+            "the write response must not echo the stored password: {resp:?}"
+        );
+
+        // Write-preserve across every field: re-saving only `linux` keeps the
+        // Windows login name and the stored RDP password.
+        let (status, _resp) = server
+            .write(
+                "sys/identity/default-account/self",
+                json!({ "linux": "alice-ops" }).as_object().cloned(),
+                Some(&alice),
+            )
+            .unwrap();
+        assert_eq!(status, 200);
+        let (_status, resp) = server
+            .request("GET", "sys/identity/profile/self", None, Some(&alice), None)
+            .unwrap();
+        let acct = data_of(&resp).get("default_account").cloned().unwrap();
+        assert_eq!(acct.get("linux").and_then(|v| v.as_str()), Some("alice-ops"));
+        assert_eq!(acct.get("windows").and_then(|v| v.as_str()), Some("CORP\\alice"));
+        assert_eq!(
+            acct.get("has_windows_password").and_then(|v| v.as_bool()),
+            Some(true),
+            "omitting windows_password must preserve it: {resp:?}"
+        );
+        assert!(
+            acct.get("windows_password").is_none(),
+            "the profile read must mask the stored RDP password: {resp:?}"
+        );
+
+        // The admin view of the same record agrees — the self write landed on
+        // the identity principal the admin route addresses.
+        let (_status, resp) = server
+            .request("GET", "sys/identity/default-account/userpass/alice", None, Some(&root), None)
+            .unwrap();
+        assert_eq!(
+            data_of(&resp).get("linux").and_then(|v| v.as_str()),
+            Some("alice-ops")
+        );
+
+        // --- Password change --------------------------------------------
+        // A wrong current password is refused and does not rotate anything.
+        let (status, _resp) = server
+            .write(
+                "sys/identity/profile/self/password",
+                json!({ "current_password": "wrong", "new_password": "new-password-1" })
+                    .as_object()
+                    .cloned(),
+                Some(&alice),
+            )
+            .unwrap();
+        assert_eq!(status, 403, "wrong current password must be refused");
+        assert!(
+            login(&server, "alice", "old-password-1").is_some(),
+            "a refused change must leave the old password working"
+        );
+
+        // Too-short passwords are refused server-side.
+        let (status, _resp) = server
+            .write(
+                "sys/identity/profile/self/password",
+                json!({ "current_password": "old-password-1", "new_password": "short" })
+                    .as_object()
+                    .cloned(),
+                Some(&alice),
+            )
+            .unwrap();
+        assert_eq!(status, 400, "a password below the floor must be refused");
+
+        // The real change.
+        let (status, resp) = server
+            .write(
+                "sys/identity/profile/self/password",
+                json!({ "current_password": "old-password-1", "new_password": "new-password-1" })
+                    .as_object()
+                    .cloned(),
+                Some(&alice),
+            )
+            .unwrap();
+        assert_eq!(status, 200, "password change failed: {resp:?}");
+        assert!(
+            login(&server, "alice", "old-password-1").is_none(),
+            "the old password must stop working"
+        );
+        assert!(
+            login(&server, "alice", "new-password-1").is_some(),
+            "the new password must work"
+        );
+
+        // The change did not disturb the rest of the record.
+        let (_status, resp) = server
+            .request("GET", "sys/identity/profile/self", None, Some(&alice), None)
+            .unwrap();
+        let d = data_of(&resp);
+        assert_eq!(d.get("email").and_then(|v| v.as_str()), Some("alice@example.com"));
+        assert_eq!(
+            d.get("policies").and_then(|v| v.as_array()).map(|a| a
+                .iter()
+                .any(|p| p.as_str() == Some("standard-user"))),
+            Some(true),
+            "self-service must not drop the user's policies: {resp:?}"
+        );
+    }
+
+    /// A second principal's token resolves to *its own* record, never alice's,
+    /// and a token with no userpass login behind it cannot change a password.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_self_profile_is_caller_scoped() {
+        let mut server = TestHttpServer::new("test_self_profile_scope", true).await;
+        v2(&mut server);
+        server.token = server.root_token.clone();
+        let root = server.root_token.clone();
+
+        assert!(server.mount_auth("pass", "userpass").is_ok());
+        for (user, pw) in [("alice", "alice-password-1"), ("bob", "bob-password-1")] {
+            let (status, _resp) = server
+                .write(
+                    &format!("auth/pass/users/{user}"),
+                    json!({ "password": pw, "policies": "standard-user" }).as_object().cloned(),
+                    Some(&root),
+                )
+                .unwrap();
+            assert!(status == 200 || status == 204);
+        }
+
+        let bob = login(&server, "bob", "bob-password-1").expect("bob should log in");
+        let (_status, resp) = server
+            .request("GET", "sys/identity/profile/self", None, Some(&bob), None)
+            .unwrap();
+        assert_eq!(data_of(&resp).get("username").and_then(|v| v.as_str()), Some("bob"));
+
+        // Bob's own change must not touch alice: alice's password still works.
+        let (status, _resp) = server
+            .write(
+                "sys/identity/profile/self/password",
+                json!({ "current_password": "bob-password-1", "new_password": "bob-password-2" })
+                    .as_object()
+                    .cloned(),
+                Some(&bob),
+            )
+            .unwrap();
+        assert_eq!(status, 200);
+        assert!(login(&server, "alice", "alice-password-1").is_some());
+        assert!(login(&server, "bob", "bob-password-2").is_some());
+
+        // The root token has no userpass login behind it. The profile read
+        // still succeeds (so the GUI renders a read-only page) but reports the
+        // password section as unavailable, and the write refuses explicitly.
+        let (status, resp) = server
+            .request("GET", "sys/identity/profile/self", None, Some(&root), None)
+            .unwrap();
+        assert_eq!(status, 200, "profile read must not 404 for a non-userpass token: {resp:?}");
+        assert_eq!(
+            data_of(&resp).get("can_change_password").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        let (status, _resp) = server
+            .write(
+                "sys/identity/profile/self/password",
+                json!({ "current_password": "x", "new_password": "whatever-123" })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert_eq!(status, 400, "a non-password login has no password to change");
     }
 }
 

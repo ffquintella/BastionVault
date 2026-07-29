@@ -45,6 +45,201 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-07-29
+
+### Added
+- **A connection profile can now demand a fresh second factor before the
+  session opens** (`features/connect-mfa-and-fido2-ssh.md`,
+  `src/modules/resource/connect_mfa.rs`,
+  `src/modules/credential/userpass/path_step_up.rs`) -- tick **Require MFA
+  re-validation** on any SSH or RDP profile and the connecting operator must
+  re-prove a TOTP code or their security key at the moment they connect, not
+  just at login. A vault token is a bearer token: without this, everything an
+  operator's policies allow stays reachable for the life of that token,
+  including production RDP at 3am.
+  - The decision and the verification are both server-side. `require_mfa` is
+    read off the stored profile, never from the request body, and the factor
+    is checked against the caller's own account -- a patched client cannot
+    declare itself exempt.
+  - A successful check mints a **single-use ticket**, valid 120 seconds and
+    bound to one (principal, namespace, resource, profile) tuple. Only its
+    SHA-256 is persisted, and redemption deletes the record *before* it
+    validates, so two concurrent redemptions cannot both win.
+  - Enforced at `rustion/v2/session/open` (brokered -- no ticket, no envelope,
+    no session) and at the new `resources/v2/connect/authorize` pre-flight
+    that every direct open must pass.
+  - **Scope, stated plainly:** on a brokered profile, and for any connect-only
+    operator, this is a hard control. On a direct profile whose operator holds
+    `read` on the resource's secret, it is a prompt and an audit record --
+    that operator can always read the credential and dial the target
+    themselves, with or without this feature. The profile editor says so
+    inline. Pair it with `features/connect-only-access.md` or the Rustion
+    transport when you need it enforced.
+  - New verify-only ceremony at `auth/userpass/v2/step-up/{begin,verify}`:
+    same TOTP / FIDO2 checks as login, but it mints no token and creates no
+    lease. Authenticated callers only, and the principal always comes from the
+    caller's own token -- never from the body -- so it cannot be used to probe
+    another account's factors.
+- **FIDO2 security keys can now authenticate SSH sessions themselves**
+  (`features/connect-mfa-and-fido2-ssh.md`,
+  `gui/src-tauri/src/session/sk_signer.rs`,
+  `src/modules/identity/ssh_security_key.rs`) -- a new `fido2` credential
+  source logs in with the connecting operator's OpenSSH `sk-` key
+  (`sk-ssh-ed25519@openssh.com` or `sk-ecdsa-sha2-nistp256@openssh.com`).
+  The private half never leaves the authenticator, cannot be exported, and
+  every connect needs a physical touch. This closes the last unmanaged
+  credential in the chain: the operator's own SSH key on their own laptop.
+  - Enrol from **Settings -> SSH security key**. The desktop client registers
+    the credential over CTAP2 under the OpenSSH `ssh:` application, derives
+    the public key, and stores it against your principal; you install the
+    shown `authorized_keys` line on each host as usual.
+  - New caller-scoped routes `v2/sys/identity/ssh-security-key/{self,
+    {mount}/{name}}` and the list endpoint. The record holds a public key and
+    a CTAP credential handle -- nothing secret, and compromising the vault
+    grants no ability to authenticate as the operator.
+  - Signing runs `getAssertion` with the SSH signed data in place of
+    WebAuthn's client-data hash and emits the PROTOCOL.u2f signature blob,
+    byte-identical to what an ssh-agent produces for the same key. An
+    assertion carrying extension or attested-credential data is refused
+    outright rather than shipped as a signature the target cannot verify.
+  - SSH only, and it fails closed everywhere it cannot work: refused on RDP
+    profiles at save time and at connect (use the `pki` smartcard source, plus
+    the MFA gate above), and refused on a brokered/`rustion-required` profile
+    because the authenticator is on the operator's desk, not the bastion's.
+    No enrolled key means an explicit error, never a fallback to a weaker
+    credential.
+
+- **Users can now maintain their own profile** (`features/self-service-profile.md`,
+  `src/modules/system/self_profile.rs`, `gui/src/routes/ProfilePage.tsx`) -- a
+  signed-in operator can change their **password**, their **contact details**,
+  and their **default resource accounts** without an administrator. Before
+  this, all three were admin-only: rotating a password meant a ticket, and
+  whoever typed the new one knew it; contact details drifted stale exactly
+  when they matter (offboarding, incident follow-up); and the per-OS login
+  names in `features/default-resource-account.md` -- which describe *the
+  connecting operator*, not the vault -- were editable only from the admin
+  Users page.
+  - New v2 routes, all caller-scoped: `GET v2/sys/identity/profile/self`
+    (identity, capability flags, contact details, default accounts),
+    `POST .../self/password`, `POST .../self/contact`, and a new **write** op
+    on the existing `v2/sys/identity/default-account/self`. None of them
+    accept a username -- the principal comes from the request token -- so none
+    can reach another operator's record.
+  - The userpass record is located via the token's own login path
+    (`TokenEntry::path` -> `Router::matching_mount`), so the **real** issuing
+    mount is used. Metadata alone could not do this: every userpass mount
+    stamps the literal `userpass/` into `mount_path`, so two userpass mounts
+    are indistinguishable there and one mount's `alice` could have rewritten
+    the other's record.
+  - A password change **requires the current password**, so a stolen or
+    borrowed token is not by itself enough to lock the real operator out. It
+    is refused for FIDO2-only and disabled accounts, for tokens not minted by
+    a userpass mount, and for a new password under 8 characters or equal to
+    the current one. A wrong current password is written to the user-audit
+    trail but deliberately does **not** feed the account-lockout counter --
+    that would hand anyone holding a live token a reliable way to deny the
+    account to its owner. Sessions issued before the change are not revoked
+    (there is no per-principal lease index to revoke by); the GUI says so.
+  - Contact and default-account writes are **write-preserve**: a field absent
+    from the body keeps its stored value, an empty string clears it. So
+    re-saving the form without retyping the stored Windows RDP password --
+    which the operator never sees -- does not wipe it. The write response
+    masks it to `has_windows_password`, exactly like the admin read.
+  - Granted to every authenticated token by the built-in `default` policy
+    (plus the implicit `namespace-self` policy and the `standard-user` /
+    `standard-user-readonly` / `secret-author` baselines). The `read` on
+    `default-account/self` also closes a latent gap: the `default-account`
+    connect path reads that route with the *caller's* token, which no baseline
+    policy previously granted.
+  - GUI: a **My Profile** page at `/profile`, reached from the sidebar footer
+    (labelled with the operator's login name, next to Sign Out). Three
+    independently-saved cards; the password card explains why it is
+    unavailable -- FIDO2-only, disabled, or a non-password login -- instead of
+    rendering a dead form.
+- **The PKI engine can now issue Windows / Active Directory smart-card logon
+  certificates** (`src/modules/pki/ad_ext.rs`, `src/modules/pki/x509.rs`,
+  `src/modules/pki/x509_pqc.rs`, `src/modules/pki/x509_composite.rs`,
+  `src/modules/pki/path_roles.rs`, `src/modules/pki/path_issue.rs`) -- the
+  `pki` credential source for RDP resolved a cert and wrapped it as a
+  synthetic PIV smart card, but the certs the in-tree PKI engine minted could
+  never actually authenticate against AD: they carried DNS/IP SANs only, and
+  `ext_key_usage` mapped just the six named RFC 5280 purposes. Three
+  Microsoft-specific pieces were therefore unreachable. All three now emit,
+  each closed by default:
+  - **UPN in `subjectAltName` as an `otherName`** (OID
+    `1.3.6.1.4.1.311.20.2.3`, value a UTF8String -- Microsoft's guidance
+    calls out non-UTF8 encodings as a common cause of AD refusing an
+    otherwise valid cert). New `upn_sans` request field on `pki/issue/:role`
+    and `pki/sign/:role`, gated by the role's new `allow_upn_sans`, with an
+    optional `allowed_upn_domains` realm allow-list (case-insensitive, and
+    subdomains are *not* implied). The UPN joins the existing SAN extension
+    rather than adding a second one, which would make the cert invalid.
+  - **Arbitrary EKU OIDs.** New role field `ext_key_usage_oids` takes
+    dotted-decimal OIDs; `ext_key_usage` additionally accepts raw OIDs and
+    two friendly aliases, `smartcardlogon` (`1.3.6.1.4.1.311.20.2.2`, which
+    Windows requires) and `kdcauthentication` (`1.3.6.1.5.2.3.5`, for minting
+    DC certs), plus `any`. OIDs are validated at role-write time so a typo
+    surfaces there instead of as a Windows logon failure.
+  - **The `szOID_NTDS_CA_SECURITY_EXT` SID extension** (OID
+    `1.3.6.1.4.1.311.25.2`), required for KB5014754 strong certificate
+    mapping. This is the piece that makes short-lived certs viable at all:
+    the September 9, 2025 update removed the
+    `StrongCertificateBindingEnforcement` fallback, so patched DCs are
+    permanently in Full Enforcement, and the strong `altSecurityIdentities`
+    mappings (`X509IssuerSerialNumber` / `X509SKI` / `X509SHA1PublicKey`) all
+    bind to one specific certificate -- unusable when a fresh cert and key
+    are minted per session. Configurable both ways: a role-level `ad_sid`
+    default (for a pinned service identity) and a per-request `ad_sid` that
+    overrides it, both gated by the role's new `allow_ad_sid` and validated
+    (revision 1, numeric components, u64-bounded, length-capped) then
+    normalised to an upper-case `S-` prefix, since Windows compares the
+    extension against the account SID.
+
+  `pki/sign-verbatim`, `pki/csr/generate`, and the ACME path deliberately
+  emit none of this -- there is no role to gate them (or the identity is
+  proven by a DNS challenge), and an ungated SID extension is an
+  unauthenticated identity claim. Covered by `tests/test_pki_ad_smartcard.rs`
+  across both the classical (`rcgen`) and ML-DSA (hand-rolled DER) issuer
+  paths, which are separate implementations of the same profile.
+- **`pki/config/urls`' CRL distribution points are now embedded in issued
+  certificates** (`src/modules/pki/x509.rs`, `x509_pqc.rs`,
+  `x509_composite.rs`, `path_issue.rs`, `acme/order.rs`) -- the config had
+  been accepted and persisted since Phase 1 but no certificate builder ever
+  read it, so every leaf shipped without a CDP extension and verifiers had no
+  revocation source. Matters for AD smart-card logon in particular, where a
+  domain controller validating a logon cert wants a reachable CRL. Emitted by
+  `issue`, `sign/:role`, `sign-verbatim`, and ACME; a mount that never
+  configured `config/urls` produces the same certificates as before. AIA
+  (`issuing_certificates` / `ocsp_servers`) is still stored-but-unused and
+  remains a separate track.
+- **`make macos-client-install` — build the macOS client and install it on this
+  Mac in one command** (`Makefile`, `installers/macos/install-client.sh`) --
+  building the desktop client for local testing meant remembering two targets
+  (`gui-macos-pkg`, `macos-cli-pkg`), finding the two `.pkg`s under
+  `target/pkg/`, and running `installer(8)` on each by hand. The new target
+  builds both halves for the host arch and hands them to Apple's `installer`,
+  so `/Applications/BastionVault.app` and `/usr/local/bin/bvault` (+ manpage +
+  bash/zsh completions) are in place when it finishes. The one `sudo` prompt is
+  taken up front rather than once per package, and the install is verified
+  afterwards -- both the app bundle and the binary must exist, and their
+  versions are printed -- so a package that installs "successfully" without
+  landing anything can't pass silently. It also warns when `/usr/local/bin` is
+  missing from `PATH`. The GUI half refuses to install over a **running**
+  `BastionVault.app`: that app may hold an unsealed embedded vault, and
+  overwriting a live bundle leaves it half-old/half-new; `BV_QUIT_RUNNING=1`
+  opts into a graceful quit (letting the app seal on its way out) instead of a
+  kill. `MACOS_CLIENT_PARTS=gui|cli` installs a single half, and
+  `INSTALLER_IDENTITY` signs the packages first. macOS only -- Tauri needs
+  macOS for the `.app`, and `pkgbuild`/`installer` are Apple tools.
+  (`features/packaging-client-binaries.md`)
+
+### Changed
+- **TOTP second-factor verification now has one implementation**
+  (`src/modules/totp/mfa.rs`) -- the userpass login path and the new
+  connect-time step-up share it, so the skew window and the constant-time
+  comparison cannot drift apart between the two. No behaviour change to
+  login.
+
 ## [0.37.9] - 2026-07-28
 
 ### Fixed

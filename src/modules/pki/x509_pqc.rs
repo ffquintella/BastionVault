@@ -29,9 +29,10 @@ use x509_cert::{
     },
     ext::{
         pkix::{
-            name::{GeneralName, GeneralNames},
-            AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, KeyUsage, KeyUsages,
-            SubjectAltName, SubjectKeyIdentifier,
+            crl::dp::DistributionPoint,
+            name::{DistributionPointName, GeneralName, GeneralNames},
+            AuthorityKeyIdentifier, BasicConstraints, CrlDistributionPoints, ExtendedKeyUsage,
+            KeyUsage, KeyUsages, SubjectAltName, SubjectKeyIdentifier,
         },
         Extension,
     },
@@ -99,6 +100,7 @@ pub fn build_leaf(
     leaf_signer: &MlDsaSigner,
     ca_signer: &MlDsaSigner,
     ca_cert_pem: &str,
+    urls: &super::x509::IssuanceUrls,
 ) -> Result<(String, Vec<u8>), RvError> {
     let leaf_alg = AlgorithmIdentifierOwned { oid: leaf_signer.level().oid(), parameters: None };
     let ca_alg = AlgorithmIdentifierOwned { oid: ca_signer.level().oid(), parameters: None };
@@ -133,6 +135,12 @@ pub fn build_leaf(
     if let Some(san) = build_subject_alt_name(subject)? {
         extensions.push(san);
     }
+    if let Some(sid) = build_ad_sid_extension(subject)? {
+        extensions.push(sid);
+    }
+    if let Some(cdp) = build_crl_distribution_points(urls)? {
+        extensions.push(cdp);
+    }
 
     let tbs = TbsCertificateInner {
         version: Version::V3,
@@ -163,6 +171,7 @@ pub fn build_leaf_from_pqc_spki(
     leaf_level: MlDsaLevel,
     ca_signer: &MlDsaSigner,
     ca_cert_pem: &str,
+    urls: &super::x509::IssuanceUrls,
 ) -> Result<(String, Vec<u8>), RvError> {
     let leaf_alg = AlgorithmIdentifierOwned { oid: leaf_level.oid(), parameters: None };
     let ca_alg = AlgorithmIdentifierOwned { oid: ca_signer.level().oid(), parameters: None };
@@ -195,6 +204,12 @@ pub fn build_leaf_from_pqc_spki(
     }
     if let Some(san) = build_subject_alt_name(subject)? {
         extensions.push(san);
+    }
+    if let Some(sid) = build_ad_sid_extension(subject)? {
+        extensions.push(sid);
+    }
+    if let Some(cdp) = build_crl_distribution_points(urls)? {
+        extensions.push(cdp);
     }
 
     let tbs = TbsCertificateInner {
@@ -413,14 +428,52 @@ pub(super) fn build_extended_key_usage(role: &RoleEntry) -> Result<Option<Extens
     if role.client_flag {
         oids.push(client_auth);
     }
+    // Named + dotted entries from `ext_key_usage`, then the OID-only
+    // `ext_key_usage_oids` channel. Mirrors the classical path's
+    // `parse_ext_key_usages` so a role behaves identically whether it
+    // runs on a classical or a PQC issuer.
+    for extra in role.ext_key_usage.iter().chain(role.ext_key_usage_oids.iter()) {
+        if let Some(oid) = resolve_ext_key_usage_oid(extra)? {
+            if !oids.contains(&oid) {
+                oids.push(oid);
+            }
+        }
+    }
     if oids.is_empty() {
         return Ok(None);
     }
     Ok(Some(encode_ext(false, &ExtendedKeyUsage(oids))?))
 }
 
+/// Resolve one `ext_key_usage` / `ext_key_usage_oids` entry to an OID for
+/// the hand-rolled DER paths. Same name table and same leniency rule as
+/// [`super::x509::resolve_ext_key_usage`]: unknown names are skipped,
+/// malformed OIDs are an error.
+fn resolve_ext_key_usage_oid(value: &str) -> Result<Option<ObjectIdentifier>, RvError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        return Ok(Some(super::ad_ext::parse_oid(trimmed)?));
+    }
+    let dotted = match trimmed.to_ascii_lowercase().as_str() {
+        "serverauth" => "1.3.6.1.5.5.7.3.1",
+        "clientauth" => "1.3.6.1.5.5.7.3.2",
+        "codesigning" => "1.3.6.1.5.5.7.3.3",
+        "emailprotection" => "1.3.6.1.5.5.7.3.4",
+        "timestamping" => "1.3.6.1.5.5.7.3.8",
+        "ocspsigning" => "1.3.6.1.5.5.7.3.9",
+        "any" | "anyextendedkeyusage" => "2.5.29.37.0",
+        "smartcardlogon" => super::ad_ext::SMARTCARD_LOGON_EKU_OID,
+        "kdcauthentication" => super::ad_ext::KDC_AUTH_EKU_OID,
+        _ => return Ok(None),
+    };
+    Ok(Some(super::ad_ext::parse_oid(dotted)?))
+}
+
 pub(super) fn build_subject_alt_name(subject: &SubjectInput) -> Result<Option<Extension>, RvError> {
-    if subject.alt_names.is_empty() && subject.ip_sans.is_empty() {
+    if subject.alt_names.is_empty() && subject.ip_sans.is_empty() && subject.upn_sans.is_empty() {
         return Ok(None);
     }
     let mut names: GeneralNames = Vec::new();
@@ -435,7 +488,45 @@ pub(super) fn build_subject_alt_name(subject: &SubjectInput) -> Result<Option<Ex
         };
         names.push(GeneralName::IpAddress(OctetString::new(bytes).map_err(der_err)?));
     }
+    // AD smart-card logon: UPN otherNames share this one SAN extension
+    // with the DNS / IP names.
+    for upn in &subject.upn_sans {
+        names.push(super::ad_ext::upn_general_name(upn)?);
+    }
     Ok(Some(encode_ext(false, &SubjectAltName(names))?))
+}
+
+/// The AD SID extension for a subject, when one was requested. Returns
+/// `None` for every subject that did not ask for it, so the PQC / composite
+/// certificate profile is unchanged unless the role opted in.
+pub(super) fn build_ad_sid_extension(subject: &SubjectInput) -> Result<Option<Extension>, RvError> {
+    match &subject.ad_sid {
+        Some(sid) => Ok(Some(super::ad_ext::sid_extension(sid)?)),
+        None => Ok(None),
+    }
+}
+
+/// CRL distribution points from `pki/config/urls`, as a single
+/// `DistributionPoint` holding every configured URI. Mirrors what the
+/// classical path hands `rcgen::CrlDistributionPoint`, so a chain that
+/// mixes issuer classes presents the same CDP shape to verifiers.
+pub(super) fn build_crl_distribution_points(
+    urls: &super::x509::IssuanceUrls,
+) -> Result<Option<Extension>, RvError> {
+    if urls.crl_distribution_points.is_empty() {
+        return Ok(None);
+    }
+    let mut names: GeneralNames = Vec::new();
+    for uri in &urls.crl_distribution_points {
+        let ia5 = Ia5String::new(uri.as_str()).map_err(der_err)?;
+        names.push(GeneralName::UniformResourceIdentifier(ia5));
+    }
+    let dp = DistributionPoint {
+        distribution_point: Some(DistributionPointName::FullName(names)),
+        reasons: None,
+        crl_issuer: None,
+    };
+    Ok(Some(encode_ext(false, &CrlDistributionPoints(vec![dp]))?))
 }
 
 pub(super) fn parse_cert_pem(pem: &str) -> Result<Certificate, RvError> {

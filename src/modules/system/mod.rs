@@ -4,6 +4,7 @@
 pub mod access_audit_reconciler;
 pub mod access_audit_store;
 pub mod denial_audit_store;
+pub mod self_profile;
 
 use std::{
     any::Any,
@@ -172,9 +173,20 @@ impl SystemBackend {
         let sys_backend_nsassign_delete = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_defacct_list = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_defacct_self = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_defacct_self_write = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_profile_self = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_profile_password = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_profile_contact = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_defacct_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_defacct_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_defacct_delete = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_skkey_list = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_skkey_self = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_skkey_self_write = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_skkey_self_delete = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_skkey_read = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_skkey_write = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_skkey_delete = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_dos_config_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_dos_config_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_dos_stats = self.self_ptr.upgrade().unwrap().clone();
@@ -1003,12 +1015,188 @@ impl SystemBackend {
                     // The *calling* principal's own default accounts, resolved
                     // from the request token. Readable by any authenticated
                     // caller (NOT root-scoped) so the Connect path can fetch the
-                    // connecting operator's accounts with its own token.
+                    // connecting operator's accounts with its own token, and
+                    // writable by that caller so the operator owns the record
+                    // that describes them (features/self-service-profile.md).
+                    // The admin `{mount}/{name}` route below stays the only way
+                    // to touch anyone else's.
                     pattern: "identity/default-account/self$",
+                    fields: {
+                        "linux": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Your default login name on Linux/Unix/BSD SSH targets. Omit to keep the stored value; empty string clears it."
+                        },
+                        "macos": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Your default login name on macOS SSH targets. Omit to keep the stored value; empty string clears it."
+                        },
+                        "windows": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Your default login name on Windows RDP targets. Omit to keep the stored value; empty string clears it."
+                        },
+                        "windows_password": {
+                            field_type: FieldType::SecretStr,
+                            required: false,
+                            description: "Optional password for your Windows RDP account. Omit to keep the stored value; empty string clears it. Never echoed back on write."
+                        }
+                    },
                     operations: [
-                        {op: Operation::Read, handler: sys_backend_defacct_self.handle_default_account_self}
+                        {op: Operation::Read,  handler: sys_backend_defacct_self.handle_default_account_self},
+                        {op: Operation::Write, handler: sys_backend_defacct_self_write.handle_default_account_self_write}
                     ],
-                    help: "Read the calling principal's default resource accounts."
+                    help: "Read or set the calling principal's own default resource accounts."
+                },
+                {
+                    // Self-service profile for the calling operator. Caller-
+                    // scoped like `default-account/self`: every handler resolves
+                    // the principal from the request token, so a caller can only
+                    // ever read or change their own account. Granted to every
+                    // authenticated token by the built-in `default` /
+                    // `namespace-self` policies. See `self_profile.rs`.
+                    pattern: "identity/profile/self$",
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_profile_self.handle_self_profile_read}
+                    ],
+                    help: "Read the calling operator's own profile (identity, contact details, default resource accounts)."
+                },
+                {
+                    pattern: "identity/profile/self/password$",
+                    fields: {
+                        "current_password": {
+                            field_type: FieldType::SecretStr,
+                            required: true,
+                            description: "Your current password. Required: a self-service change re-authenticates."
+                        },
+                        "new_password": {
+                            field_type: FieldType::SecretStr,
+                            required: true,
+                            description: "The new password."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_profile_password.handle_self_profile_password_write}
+                    ],
+                    help: "Change the calling operator's own password (requires the current password)."
+                },
+                {
+                    pattern: "identity/profile/self/contact$",
+                    fields: {
+                        "email": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Your contact email. Informational only; never used for authentication or recovery. Omit to keep the stored value."
+                        },
+                        "phone": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Your contact phone number. Informational only. Omit to keep the stored value."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_profile_contact.handle_self_profile_contact_write}
+                    ],
+                    help: "Update the calling operator's own contact details."
+                },
+                {
+                    // Per-principal SSH security keys
+                    // (features/connect-mfa-and-fido2-ssh.md). List every
+                    // principal with an enrolment on record.
+                    pattern: "identity/ssh-security-key/?$",
+                    operations: [
+                        {op: Operation::List, handler: sys_backend_skkey_list.handle_ssh_security_key_list}
+                    ],
+                    help: "List principals with an enrolled SSH security key."
+                },
+                {
+                    // The *calling* principal's own enrolment. Caller-scoped,
+                    // not root — the connect path resolves the connecting
+                    // operator's key with that operator's own token, exactly
+                    // like `identity/default-account/self`. Nothing here is
+                    // secret: a public key and a CTAP credential handle.
+                    pattern: "identity/ssh-security-key/self$",
+                    fields: {
+                        "algorithm": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "sk-ssh-ed25519@openssh.com or sk-ecdsa-sha2-nistp256@openssh.com."
+                        },
+                        "public_key": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Full authorized_keys line for the security key."
+                        },
+                        "credential_id": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "CTAP credential id, unpadded base64url."
+                        },
+                        "application": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "OpenSSH application string. Defaults to `ssh:`; must start with `ssh:`."
+                        },
+                        "comment": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Free-text label, e.g. the make of the key."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read,   handler: sys_backend_skkey_self.handle_ssh_security_key_self},
+                        {op: Operation::Write,  handler: sys_backend_skkey_self_write.handle_ssh_security_key_self_write},
+                        {op: Operation::Delete, handler: sys_backend_skkey_self_delete.handle_ssh_security_key_self_delete}
+                    ],
+                    help: "Read, enrol, or remove the calling principal's own SSH security key."
+                },
+                {
+                    // Admin view of one principal's enrolment.
+                    pattern: r"identity/ssh-security-key/(?P<mount>[^/]+)/(?P<name>.+)$",
+                    fields: {
+                        "mount": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Auth mount the principal belongs to (e.g. userpass)."
+                        },
+                        "name": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Principal name."
+                        },
+                        "algorithm": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "sk-ssh-ed25519@openssh.com or sk-ecdsa-sha2-nistp256@openssh.com."
+                        },
+                        "public_key": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Full authorized_keys line for the security key."
+                        },
+                        "credential_id": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "CTAP credential id, unpadded base64url."
+                        },
+                        "application": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "OpenSSH application string. Defaults to `ssh:`; must start with `ssh:`."
+                        },
+                        "comment": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Free-text label, e.g. the make of the key."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read,   handler: sys_backend_skkey_read.handle_ssh_security_key_read},
+                        {op: Operation::Write,  handler: sys_backend_skkey_write.handle_ssh_security_key_write},
+                        {op: Operation::Delete, handler: sys_backend_skkey_delete.handle_ssh_security_key_delete}
+                    ],
+                    help: "Read, enrol, or remove a principal's SSH security key."
                 },
                 {
                     // Address one principal by mount + name. `mount` is a single
@@ -1054,13 +1242,15 @@ impl SystemBackend {
                     help: "Read, set, or clear a principal's default resource accounts."
                 }
             ],
-            // NB: `identity/default-account/*` is intentionally NOT root-scoped.
+            // NB: `identity/default-account/*` and `identity/ssh-security-key/*`
+            // are intentionally NOT root-scoped, for the same reason.
             // The `self` sub-path must stay readable by any authenticated caller
             // (the Connect path resolves the connecting operator's accounts with
             // its own token), and `root_paths` glob matching is longest-prefix —
             // a `default-account/*` entry would swallow `default-account/self`.
             // Admin reads/writes are gated by policy on the explicit
-            // mount/name paths instead.
+            // mount/name paths instead. `identity/profile/*` is caller-scoped
+            // for the same reason and is likewise never root-scoped.
             root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*", "identity/ns-assignment", "identity/ns-assignment/*", "dos/config", "dos/stats", "dos/bans/*"],
             unauth_paths: ["internal/ui/mounts", "internal/ui/mounts/*", "init", "seal-status", "unseal", "sso/providers"],
             help: SYSTEM_BACKEND_HELP,
@@ -3965,6 +4155,32 @@ impl SystemBackend {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
+        let (candidates, existing) = self.self_default_account(req).await?;
+        if let Some(a) = existing {
+            return Ok(Some(Self::default_account_to_response(
+                Some(&a),
+                &a.mount,
+                &a.name,
+                true,
+            )));
+        }
+
+        // Nothing on file — echo the best-known principal for context.
+        let (em, en) = candidates.first().cloned().unwrap_or_default();
+        Ok(Some(Self::default_account_to_response(None, &em, &en, true)))
+    }
+
+    /// The `(mount, name)` principals the calling token may own a default
+    /// resource account under, in priority order.
+    ///
+    /// Mounts are normalized to the trailing-slash form the admin write path
+    /// keys on. Order matters: the first candidate is the one a *new* record is
+    /// created under, and the first candidate with an existing record is the
+    /// one that resolves at connect time.
+    pub(crate) async fn self_default_account_candidates(
+        &self,
+        req: &Request,
+    ) -> Result<Vec<(String, String)>, RvError> {
         let auth_module = self.get_module::<AuthModule>("auth")?;
         let Some(token_store) = auth_module.token_store.load_full() else {
             return Err(RvError::ErrPermissionDenied);
@@ -3974,8 +4190,6 @@ impl SystemBackend {
             .await?
             .ok_or(RvError::ErrPermissionDenied)?;
 
-        // Candidate principals to try, in priority order. Mounts are normalized
-        // to the trailing-slash form the admin writes key on.
         let mut candidates: Vec<(String, String)> = Vec::new();
         let push = |c: &mut Vec<(String, String)>, mount: &str, name: &str| {
             if !mount.trim().is_empty() && !name.trim().is_empty() {
@@ -4008,21 +4222,311 @@ impl SystemBackend {
             }
         }
 
+        Ok(candidates)
+    }
+
+    /// The caller's candidate principals plus the first one that already has a
+    /// default-account record on file (`None` when the caller has none).
+    pub(crate) async fn self_default_account(
+        &self,
+        req: &Request,
+    ) -> Result<
+        (
+            Vec<(String, String)>,
+            Option<crate::modules::identity::DefaultResourceAccount>,
+        ),
+        RvError,
+    > {
+        let candidates = self.self_default_account_candidates(req).await?;
         let store = self.resolve_default_account_store()?;
         for (mount, name) in &candidates {
             if let Some(a) = store.get(mount, name).await? {
-                return Ok(Some(Self::default_account_to_response(
-                    Some(&a),
-                    mount,
-                    name,
-                    true,
-                )));
+                return Ok((candidates, Some(a)));
             }
         }
+        Ok((candidates, None))
+    }
 
-        // Nothing on file — echo the best-known principal for context.
+    /// Set the *calling* principal's own default resource accounts.
+    ///
+    /// The caller-scoped sibling of [`Self::handle_default_account_write`]. It
+    /// resolves the principal from the request token exactly like the `self`
+    /// read, so a token can only ever rewrite its own record — the `{mount}` /
+    /// `{name}` admin route stays the only way to touch someone else's.
+    ///
+    /// Every field is **write-preserve**: one that is absent from the body
+    /// keeps its stored value, and an explicit empty string clears it. That
+    /// makes a partial update (say, only the Windows login name) safe, and it
+    /// means re-saving the form without re-typing the stored Windows RDP
+    /// password does not wipe it. Clearing every field deletes the record,
+    /// returning the principal to "unconfigured".
+    ///
+    /// The response is masked like the admin read — the stored Windows password
+    /// is reported only as `has_windows_password`, never echoed back.
+    pub async fn handle_default_account_self_write(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let (candidates, existing) = self.self_default_account(req).await?;
+        // Update the record that already exists; otherwise create one under the
+        // highest-priority principal, which is what the `self` read resolves.
+        let (mount, name) = match (&existing, candidates.first()) {
+            (Some(a), _) => (a.mount.clone(), a.name.clone()),
+            (None, Some((m, n))) => (m.clone(), n.clone()),
+            (None, None) => {
+                return Err(bv_error_response_status!(
+                    400,
+                    "this token has no identity principal to attach a default resource account to"
+                ))
+            }
+        };
+
+        let field = |key: &str, stored: &str| -> Result<String, RvError> {
+            match req.get_data(key) {
+                Ok(v) => Ok(v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string()),
+                Err(_) => Ok(stored.to_string()),
+            }
+        };
+        let stored = existing.unwrap_or_default();
+        let linux = field("linux", &stored.linux)?;
+        let macos = field("macos", &stored.macos)?;
+        let windows = field("windows", &stored.windows)?;
+        let windows_password = field("windows_password", &stored.windows_password)?;
+
+        let store = self.resolve_default_account_store()?;
+        let rec = store
+            .set(&mount, &name, &linux, &macos, &windows, &windows_password)
+            .await?;
+
+        Ok(Some(Self::default_account_to_response(
+            rec.as_ref(),
+            &mount,
+            &name,
+            false,
+        )))
+    }
+
+    // ── SSH security keys (features/connect-mfa-and-fido2-ssh.md) ────
+
+    fn resolve_ssh_security_key_store(
+        &self,
+    ) -> Result<crate::modules::identity::SshSecurityKeyStore, RvError> {
+        crate::modules::identity::SshSecurityKeyStore::new(&self.core)
+    }
+
+    /// Render an enrolment record. Everything here is public material (a
+    /// public key and a CTAP credential handle), so unlike the default-account
+    /// response there is nothing to mask — the admin and self views are
+    /// identical.
+    fn ssh_security_key_to_response(
+        rec: Option<&crate::modules::identity::SshSecurityKey>,
+        echo_mount: &str,
+        echo_name: &str,
+    ) -> Response {
+        let mut data = serde_json::Map::new();
+        match rec {
+            Some(k) => {
+                data.insert("mount".into(), Value::String(k.mount.clone()));
+                data.insert("name".into(), Value::String(k.name.clone()));
+                data.insert("enrolled".into(), Value::Bool(true));
+                data.insert("algorithm".into(), Value::String(k.algorithm.clone()));
+                data.insert("public_key".into(), Value::String(k.public_key.clone()));
+                data.insert("credential_id".into(), Value::String(k.credential_id.clone()));
+                data.insert("application".into(), Value::String(k.application.clone()));
+                data.insert("comment".into(), Value::String(k.comment.clone()));
+                data.insert("updated_at".into(), Value::String(k.updated_at.clone()));
+            }
+            None => {
+                // Not enrolled ⇒ report explicitly rather than 404, so the GUI
+                // renders an "enrol a key" form instead of an error.
+                data.insert("mount".into(), Value::String(echo_mount.to_string()));
+                data.insert("name".into(), Value::String(echo_name.to_string()));
+                data.insert("enrolled".into(), Value::Bool(false));
+                data.insert("algorithm".into(), Value::String(String::new()));
+                data.insert("public_key".into(), Value::String(String::new()));
+                data.insert("credential_id".into(), Value::String(String::new()));
+                data.insert("application".into(), Value::String(String::new()));
+                data.insert("comment".into(), Value::String(String::new()));
+                data.insert("updated_at".into(), Value::String(String::new()));
+            }
+        }
+        Response::data_response(Some(data))
+    }
+
+    pub async fn handle_ssh_security_key_list(
+        &self,
+        _backend: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_ssh_security_key_store()?;
+        let mut records = store.list().await?;
+        records.sort_by(|a, b| {
+            (a.mount.as_str(), a.name.as_str()).cmp(&(b.mount.as_str(), b.name.as_str()))
+        });
+        let keys: Vec<Value> = records
+            .iter()
+            .map(|k| {
+                json!({
+                    "mount": k.mount,
+                    "name": k.name,
+                    "algorithm": k.algorithm,
+                    "public_key": k.public_key,
+                    "application": k.application,
+                    "comment": k.comment,
+                    "updated_at": k.updated_at,
+                })
+            })
+            .collect();
+        Ok(Some(Response::data_response(json!({ "keys": keys }).as_object().cloned())))
+    }
+
+    pub async fn handle_ssh_security_key_read(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_ssh_security_key_store()?;
+        let mount = Self::normalize_assignment_mount(&req.get_data_as_str("mount")?);
+        let name = req.get_data_as_str("name")?;
+        let rec = store.get(&mount, &name).await?;
+        Ok(Some(Self::ssh_security_key_to_response(rec.as_ref(), &mount, &name)))
+    }
+
+    pub async fn handle_ssh_security_key_write(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_ssh_security_key_store()?;
+        let mount = Self::normalize_assignment_mount(&req.get_data_as_str("mount")?);
+        let name = req.get_data_as_str("name")?;
+        self.write_ssh_security_key(&store, req, &mount, &name).await
+    }
+
+    pub async fn handle_ssh_security_key_delete(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_ssh_security_key_store()?;
+        let mount = Self::normalize_assignment_mount(&req.get_data_as_str("mount")?);
+        let name = req.get_data_as_str("name")?;
+        store.delete(&mount, &name).await?;
+        Ok(None)
+    }
+
+    /// Resolve the *calling* principal's own enrolment. Caller-scoped (not
+    /// root), because the connect path reads the connecting operator's key
+    /// with that operator's own token — the same reason
+    /// `identity/default-account/self` is not root-scoped.
+    ///
+    /// Reuses the default-account candidate walk so both records key off the
+    /// identical principal for a given token; a key enrolled under one
+    /// candidate and an account under another would silently fail to pair up
+    /// at connect time.
+    pub async fn handle_ssh_security_key_self(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let candidates = self.self_default_account_candidates(req).await?;
+        let store = self.resolve_ssh_security_key_store()?;
+        for (mount, name) in &candidates {
+            if let Some(k) = store.get(mount, name).await? {
+                return Ok(Some(Self::ssh_security_key_to_response(Some(&k), mount, name)));
+            }
+        }
         let (em, en) = candidates.first().cloned().unwrap_or_default();
-        Ok(Some(Self::default_account_to_response(None, &em, &en, true)))
+        Ok(Some(Self::ssh_security_key_to_response(None, &em, &en)))
+    }
+
+    /// Enrol (or replace) the calling principal's own security key.
+    pub async fn handle_ssh_security_key_self_write(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let candidates = self.self_default_account_candidates(req).await?;
+        let store = self.resolve_ssh_security_key_store()?;
+
+        // Replace an existing enrolment in place; otherwise create under the
+        // highest-priority principal, which is what the `self` read resolves.
+        let mut target: Option<(String, String)> = None;
+        for (mount, name) in &candidates {
+            if store.get(mount, name).await?.is_some() {
+                target = Some((mount.clone(), name.clone()));
+                break;
+            }
+        }
+        let (mount, name) = match target.or_else(|| candidates.first().cloned()) {
+            Some(p) => p,
+            None => {
+                return Err(bv_error_response_status!(
+                    400,
+                    "this token has no identity principal to attach an SSH security key to"
+                ))
+            }
+        };
+
+        self.write_ssh_security_key(&store, req, &mount, &name).await
+    }
+
+    /// Delete the calling principal's own enrolment.
+    pub async fn handle_ssh_security_key_self_delete(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let candidates = self.self_default_account_candidates(req).await?;
+        let store = self.resolve_ssh_security_key_store()?;
+        for (mount, name) in &candidates {
+            if store.get(mount, name).await?.is_some() {
+                store.delete(mount, name).await?;
+                break;
+            }
+        }
+        Ok(None)
+    }
+
+    /// Shared body parsing + write for the admin and self enrolment paths.
+    ///
+    /// Unlike the default-account record this is **not** write-preserve: an
+    /// `sk-` enrolment is a single indivisible unit (algorithm, public key,
+    /// credential id, and application all describe one credential on one
+    /// authenticator), so a partial update could only ever produce a record
+    /// that fails at connect time. Every field is required except the
+    /// application, which defaults to OpenSSH's `ssh:`, and the comment.
+    async fn write_ssh_security_key(
+        &self,
+        store: &crate::modules::identity::SshSecurityKeyStore,
+        req: &mut Request,
+        mount: &str,
+        name: &str,
+    ) -> Result<Option<Response>, RvError> {
+        let required = |req: &mut Request, key: &str| -> Result<String, RvError> {
+            let v = req
+                .get_data(key)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty());
+            v.ok_or_else(|| bv_error_response_status!(400, &format!("`{key}` is required")))
+        };
+
+        let algorithm = required(req, "algorithm")?;
+        let public_key = required(req, "public_key")?;
+        let credential_id = required(req, "credential_id")?;
+        let application =
+            req.get_data("application").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        let comment =
+            req.get_data("comment").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+
+        let rec = store
+            .set(mount, name, &algorithm, &public_key, &credential_id, &application, &comment)
+            .await
+            .map_err(|e| bv_error_response_status!(400, &format!("{e}")))?;
+
+        Ok(Some(Self::ssh_security_key_to_response(Some(&rec), mount, name)))
     }
 }
 

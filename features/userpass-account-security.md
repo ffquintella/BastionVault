@@ -89,6 +89,13 @@ principal out-of-band (offboarding notice, incident follow-up). These are
 - not used for notifications, magic links, or password/account recovery,
 - not part of any TOTP/FIDO2 enrollment.
 
+Because they are informational — never a recovery channel — they are also
+**self-editable**: see `features/self-service-profile.md`, which lets a user
+maintain their own email/phone (and change their own password) through
+caller-scoped `v2/sys/identity/profile/self*` routes. That feature also
+documents why a failed self-service password check deliberately does *not* feed
+the lockout counter described above.
+
 `write_user` only touches each field when it is present in the request, so a
 partial update (e.g. a policy change) never clears them. The email is validated
 with a permissive sanity check (`is_plausible_email`: single `@`, non-empty

@@ -38,7 +38,9 @@ impl PkiBackend {
                 "ip_sans": { field_type: FieldType::Str, default: "", description: "Comma-separated IP SANs." },
                 "ttl": { field_type: FieldType::Str, default: "", description: "Requested TTL." },
                 "issuer_ref": { field_type: FieldType::Str, default: "", description: "Issuer ID or name to sign with; empty = role pin or mount default." },
-                "key_ref": { field_type: FieldType::Str, default: "", description: "Managed key ID or name to pin (Phase L2). Requires role.allow_key_reuse=true." }
+                "key_ref": { field_type: FieldType::Str, default: "", description: "Managed key ID or name to pin (Phase L2). Requires role.allow_key_reuse=true." },
+                "upn_sans": { field_type: FieldType::Str, default: "", description: "Comma-separated UPNs emitted as otherName SANs for AD smart-card logon. Requires role.allow_upn_sans=true." },
+                "ad_sid": { field_type: FieldType::Str, default: "", description: "AD account SID for the strong-mapping extension (KB5014754). Empty = role default. Requires role.allow_ad_sid=true." }
             },
             operations: [{op: Operation::Write, handler: r.issue_cert}],
             help: "Issue a certificate against the named role."
@@ -56,7 +58,9 @@ impl PkiBackend {
                 "alt_names": { field_type: FieldType::Str, default: "", description: "Override SANs if role.use_csr_sans is false." },
                 "ttl": { field_type: FieldType::Str, default: "", description: "Requested TTL." },
                 "issuer_ref": { field_type: FieldType::Str, default: "", description: "Issuer ID or name to sign with; empty = role pin or mount default." },
-                "key_ref": { field_type: FieldType::Str, default: "", description: "Managed key ID or name the CSR's SPKI must match (Phase L2). Requires role.allow_key_reuse=true." }
+                "key_ref": { field_type: FieldType::Str, default: "", description: "Managed key ID or name the CSR's SPKI must match (Phase L2). Requires role.allow_key_reuse=true." },
+                "upn_sans": { field_type: FieldType::Str, default: "", description: "Comma-separated UPNs emitted as otherName SANs for AD smart-card logon. Requires role.allow_upn_sans=true." },
+                "ad_sid": { field_type: FieldType::Str, default: "", description: "AD account SID for the strong-mapping extension (KB5014754). Empty = role default. Requires role.allow_ad_sid=true." }
             },
             operations: [{op: Operation::Write, handler: r.sign_csr_role}],
             help: "Sign a CSR against the named role."
@@ -168,18 +172,20 @@ impl PkiBackendInner {
             None => Signer::generate(role_alg)?,
         };
 
-        let subject = SubjectInput { common_name, alt_names: alt_dns, ip_sans: alt_ips };
+        let (upn_sans, ad_sid) = resolve_ad_smartcard_input(req, &role)?;
+        let urls = load_issuance_urls(req).await?;
+        let subject = SubjectInput { common_name, alt_names: alt_dns, ip_sans: alt_ips, upn_sans, ad_sid };
         let (cert_pem, serial_bytes) = match (role_alg.class(), &ca_signer, &leaf_signer) {
             (AlgorithmClass::Classical, Signer::Classical(ca), Signer::Classical(leaf)) => {
-                let (cert, serial) = x509::build_leaf(&role, &subject, ttl, leaf, ca, &ca_cert_pem)?;
+                let (cert, serial) = x509::build_leaf(&role, &subject, ttl, leaf, ca, &ca_cert_pem, &urls)?;
                 (cert.pem(), serial)
             }
             (AlgorithmClass::Pqc, Signer::MlDsa(ca), Signer::MlDsa(leaf)) => {
-                x509_pqc::build_leaf(&role, &subject, ttl, leaf, ca, &ca_cert_pem)?
+                x509_pqc::build_leaf(&role, &subject, ttl, leaf, ca, &ca_cert_pem, &urls)?
             }
             #[cfg(feature = "pki_pqc_composite")]
             (AlgorithmClass::Composite, Signer::Composite(ca), Signer::Composite(leaf)) => {
-                super::x509_composite::build_leaf(&role, &subject, ttl, leaf, ca, &ca_cert_pem)?
+                super::x509_composite::build_leaf(&role, &subject, ttl, leaf, ca, &ca_cert_pem, &urls)?
             }
             // Mixed cases were already screened above; this arm is here to
             // make the compiler happy without falling through silently.
@@ -339,8 +345,19 @@ impl PkiBackendInner {
         let ca_signer = super::issuers::take_signer(issuer.signer, &issuer.name)?;
         let issuer_id = issuer.id.clone();
 
-        let subject =
-            super::x509::SubjectInput { common_name: common_name.clone(), alt_names: alt_dns, ip_sans: alt_ips };
+        // `sign/:role` honours the same AD knobs as `issue/:role`. A CSR
+        // cannot carry a UPN otherName or the SID extension through our
+        // parser, so both come from the request body / role policy — the
+        // engine is the authority on what identity claim it asserts.
+        let (upn_sans, ad_sid) = resolve_ad_smartcard_input(req, &role)?;
+        let urls = load_issuance_urls(req).await?;
+        let subject = super::x509::SubjectInput {
+            common_name: common_name.clone(),
+            alt_names: alt_dns,
+            ip_sans: alt_ips,
+            upn_sans,
+            ad_sid,
+        };
 
         // Dispatch on (CSR class, CA class). Mixed-chain rejection is the
         // same default-secure rule as Phase 2's `pki/issue`: a PQC CA can
@@ -349,7 +366,7 @@ impl PkiBackendInner {
         let (cert_pem, serial_bytes) = match (&parsed.algorithm_class, &ca_signer) {
             (CsrAlgClass::Classical, Signer::Classical(ca_classical)) => {
                 let (cert, serial) = x509::build_leaf_from_spki(
-                    &role, &subject, ttl, &parsed.spki_der, ca_classical, &ca_cert_pem,
+                    &role, &subject, ttl, &parsed.spki_der, ca_classical, &ca_cert_pem, &urls,
                 )?;
                 (cert.pem(), serial)
             }
@@ -362,6 +379,7 @@ impl PkiBackendInner {
                     *level,
                     ca_ml,
                     &ca_cert_pem,
+                    &urls,
                 )?
             }
             // Mixed CSR / CA classes — refuse to issue.
@@ -462,10 +480,15 @@ impl PkiBackendInner {
 
         let mut alt_dns = parsed.requested_dns_sans.clone();
         alt_dns.retain(|d| d != &common_name);
+        // sign-verbatim deliberately carries no AD smart-card material:
+        // there is no role to gate it, and an unauthenticated identity
+        // claim is exactly what the SID extension must never be.
+        let urls = load_issuance_urls(req).await?;
         let subject = super::x509::SubjectInput {
             common_name: common_name.clone(),
             alt_names: alt_dns,
             ip_sans: parsed.requested_ip_sans.clone(),
+            ..Default::default()
         };
 
         // Same class-match dispatch as `sign_csr_role`. PQC CSR + PQC CA →
@@ -476,7 +499,7 @@ impl PkiBackendInner {
         let (cert_pem, serial_bytes) = match (&parsed.algorithm_class, &ca_signer) {
             (CsrAlgClass::Classical, Signer::Classical(ca_classical)) => {
                 let (cert, serial) = x509::build_leaf_from_spki(
-                    &role, &subject, ttl, &parsed.spki_der, ca_classical, &ca_cert_pem,
+                    &role, &subject, ttl, &parsed.spki_der, ca_classical, &ca_cert_pem, &urls,
                 )?;
                 (cert.pem(), serial)
             }
@@ -489,6 +512,7 @@ impl PkiBackendInner {
                     *level,
                     ca_ml,
                     &ca_cert_pem,
+                    &urls,
                 )?
             }
             _ => return Err(RvError::ErrPkiKeyTypeInvalid),
@@ -568,6 +592,72 @@ async fn resolve_pinned_key(
         return Err(RvError::ErrPkiKeyTypeInvalid);
     }
     Ok(entry)
+}
+
+/// Load the mount's `config/urls` and project it into the subset the
+/// certificate builders embed.
+///
+/// Returns the default (empty) value when the mount never configured
+/// URLs, so certificates are unchanged for every deployment that hasn't
+/// opted in. AD smart-card logon wants a reachable CDP so the domain
+/// controller has a revocation source for the logon certificate.
+#[maybe_async::maybe_async]
+async fn load_issuance_urls(req: &Request) -> Result<x509::IssuanceUrls, RvError> {
+    let cfg: storage::UrlsConfig =
+        storage::get_json(req, storage::KEY_CONFIG_URLS).await?.unwrap_or_default();
+    Ok(x509::IssuanceUrls {
+        crl_distribution_points: cfg
+            .crl_distribution_points
+            .into_iter()
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty())
+            .collect(),
+    })
+}
+
+/// Resolve the AD smart-card knobs (`upn_sans`, `ad_sid`) for one
+/// issue/sign request against the role's policy.
+///
+/// Both are closed by default and fail loudly rather than silently
+/// dropping: if a caller asks for a UPN SAN on a role that doesn't permit
+/// one, they get an error instead of a certificate that looks fine but
+/// will never authenticate against AD.
+///
+/// `ad_sid` resolution order is request body > role default > absent.
+fn resolve_ad_smartcard_input(
+    req: &Request,
+    role: &RoleEntry,
+) -> Result<(Vec<String>, Option<String>), RvError> {
+    let upn_raw = req.get_data_or_default("upn_sans")?.as_str().unwrap_or("").to_string();
+    let mut upn_sans: Vec<String> = Vec::new();
+    for candidate in upn_raw.split(',') {
+        let upn = candidate.trim();
+        if upn.is_empty() {
+            continue;
+        }
+        super::ad_ext::validate_upn(role, upn)?;
+        if !upn_sans.iter().any(|existing| existing == upn) {
+            upn_sans.push(upn.to_string());
+        }
+    }
+
+    let requested_sid = req.get_data_or_default("ad_sid")?.as_str().unwrap_or("").trim().to_string();
+    let sid_source = if !requested_sid.is_empty() {
+        Some(requested_sid)
+    } else if !role.ad_sid.trim().is_empty() {
+        Some(role.ad_sid.trim().to_string())
+    } else {
+        None
+    };
+    let ad_sid = match sid_source {
+        Some(sid) => {
+            super::ad_ext::validate_ad_sid(role, &sid)?;
+            Some(super::ad_ext::normalize_ad_sid(&sid))
+        }
+        None => None,
+    };
+
+    Ok((upn_sans, ad_sid))
 }
 
 fn parse_optional_ttl(req: &Request, key: &str) -> Result<Option<Duration>, RvError> {

@@ -64,6 +64,7 @@ import {
 import { resourceLoginClass, loginClassChipLabel } from "../lib/sshBroker";
 import type { EffectiveLoginClass } from "../lib/types";
 import * as api from "../lib/api";
+import { useConnectMfa } from "../components/ConnectMfaPrompt";
 import { extractError } from "../lib/error";
 import { useAuthStore } from "../stores/authStore";
 import { useNamespaceStore } from "../stores/namespaceStore";
@@ -209,6 +210,8 @@ function pushRecent(name: string): string[] {
 
 export function ResourcesPage() {
   const { toast } = useToast();
+  // Connect-time MFA gate for the card-level quick-Connect.
+  const { gateConnect, mfaPrompt } = useConnectMfa();
   const activeNamespace = useNamespaceStore((s) => s.active);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -536,10 +539,15 @@ export function ResourcesPage() {
     // One-click launch of the default profile.
     setRecent(pushRecent(name));
     try {
+      // Server-side gate first: on a profile marked `require_mfa` nothing
+      // opens until the operator re-proves a factor. Returns `{}` when the
+      // profile is ungated, so the spread below is a no-op in that case.
+      const mfa = await gateConnect(name, target.id, target.name);
+      if (!mfa) return; // operator cancelled the prompt
       if (target.protocol === "ssh") {
-        await api.sessionOpenSsh({ resource_name: name, profile_id: target.id });
+        await api.sessionOpenSsh({ resource_name: name, profile_id: target.id, ...mfa });
       } else {
-        await api.sessionOpenRdp({ resource_name: name, profile_id: target.id });
+        await api.sessionOpenRdp({ resource_name: name, profile_id: target.id, ...mfa });
       }
     } catch (e: unknown) {
       toast("error", extractError(e));
@@ -752,6 +760,7 @@ export function ResourcesPage() {
             onConfirm={handleDelete} title="Delete Resource"
             message={`Delete "${deleteTarget}" and all its secrets? This cannot be undone.`}
             confirmLabel="Delete" />
+          {mfaPrompt}
         </div>
       </Layout>
     );
@@ -938,6 +947,7 @@ export function ResourcesPage() {
             toast={toast}
           />
         )}
+        {mfaPrompt}
       </div>
     </Layout>
   );
@@ -1394,6 +1404,9 @@ function ConnectionProfilesPanel({
   // request's `operator_credential` field.
   const [operatorPrompt, setOperatorPrompt] = useState<ConnectionProfile | null>(null);
 
+  // Connect-time MFA gate for the Connection-tab launcher.
+  const { gateConnect, mfaPrompt } = useConnectMfa();
+
   async function handleConnect(profile: ConnectionProfile) {
     // RDP default-account: the host uses the operator's *stored* Windows
     // password when one is set, so only prompt when there isn't one.
@@ -1423,17 +1436,27 @@ function ConnectionProfilesPanel({
   ) {
     setConnecting(profile.id);
     try {
+      // See the note on the card-level launcher: the gate is server-decided,
+      // and `{}` on an ungated profile keeps this a no-op.
+      const mfa = await gateConnect(
+        String(resource.name),
+        profile.id,
+        profile.name,
+      );
+      if (!mfa) return; // operator cancelled the prompt
       if (profile.protocol === "ssh") {
         await api.sessionOpenSsh({
           resource_name: String(resource.name),
           profile_id: profile.id,
           operator_credential: operatorCredential,
+          ...mfa,
         });
       } else {
         await api.sessionOpenRdp({
           resource_name: String(resource.name),
           profile_id: profile.id,
           operator_credential: operatorCredential,
+          ...mfa,
         });
       }
     } catch (e: unknown) {
@@ -1686,6 +1709,8 @@ function ConnectionProfilesPanel({
           }}
         />
       )}
+
+      {mfaPrompt}
     </Card>
   );
 }
@@ -1844,6 +1869,8 @@ function describeCredentialSource(c: CredentialSource): string {
       return c.ssh_mount
         ? `default-account • ${c.ssh_mount}role=${c.ssh_role ?? ""} (${c.mode ?? "ca"})`
         : "default-account • connecting user";
+    case "fido2":
+      return "fido2 • connecting user's security key";
   }
 }
 
@@ -2123,8 +2150,12 @@ function ConnectionProfileEditor({
               { value: "ssh-engine", label: "SSH secret engine (CA-signed cert / OTP)" },
               { value: "pki", label: "PKI client cert (SSH publickey / RDP CredSSP smartcard)" },
               { value: "default-account", label: "Connecting user's default account" },
+              { value: "fido2", label: "Connecting user's FIDO2 security key" },
             ] as { value: CredentialSource["kind"]; label: string }[]
-          ).filter((o) => credGate.allowedKinds.includes(o.value))}
+          )
+            .filter((o) => credGate.allowedKinds.includes(o.value))
+            // FIDO2 authenticates SSH only; RDP has no equivalent method.
+            .filter((o) => o.value !== "fido2" || profile.protocol === "ssh")}
         />
 
         {profile.credential_source.kind === "secret" ? (
@@ -2173,6 +2204,8 @@ function ConnectionProfileEditor({
             onChange={updateCredentialSource}
             protocol={profile.protocol}
           />
+        ) : profile.credential_source.kind === "fido2" ? (
+          <SecurityKeyCredentialEditor />
         ) : (
           <SshEngineCredentialEditor
             cs={profile.credential_source}
@@ -2199,6 +2232,40 @@ function ConnectionProfileEditor({
           }
           hint="Leave empty for TOFU on first connect. The session window will surface the observed fingerprint so you can pin it on the next save."
         />
+
+        <hr className="border-[var(--color-border)]" />
+
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={profile.require_mfa ?? false}
+            onChange={(e) =>
+              update("require_mfa", e.target.checked ? true : undefined)
+            }
+          />
+          <span>
+            <span className="font-medium">Require MFA re-validation</span>
+            <span className="block text-xs text-[var(--color-text-muted)]">
+              Before this session opens, the connecting operator must re-prove
+              a second factor &mdash; a TOTP code or their security key,
+              whichever they have enrolled. The check runs server-side against
+              their own account, so a modified client can&rsquo;t skip it.
+              Operators with no second factor on file are refused.
+            </span>
+            {(profile.require_mfa ?? false) && (
+              <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                <strong className="text-[var(--color-text)]">Scope:</strong>{" "}
+                on a bastion-brokered profile this is a hard control &mdash; no
+                factor, no session. On a direct profile it is a prompt and an
+                audit record: an operator who can <em>read</em> this
+                resource&rsquo;s secret can always bypass BastionVault and dial
+                the target themselves. Pair it with connect-only access or the
+                Rustion transport when you need it enforced.
+              </span>
+            )}
+          </span>
+        </label>
 
         {profile.protocol === "rdp" && (
           <label className="flex items-start gap-2 text-sm">
@@ -2647,6 +2714,37 @@ function SshEngineCredentialEditor({
  * explanatory note — the account supplies the Windows login user and the
  * password is prompted at connect (a username-only account can't carry one).
  */
+function SecurityKeyCredentialEditor() {
+  return (
+    <div className="space-y-2 rounded-md border border-[var(--color-border)] p-3 text-xs text-[var(--color-text-muted)]">
+      <p>
+        The session authenticates with the{" "}
+        <strong className="text-[var(--color-text)]">
+          connecting operator&rsquo;s own FIDO2 security key
+        </strong>{" "}
+        &mdash; an OpenSSH <code>sk-</code> credential whose private half never
+        leaves the authenticator. Every connect needs a physical touch.
+      </p>
+      <p>
+        Each operator enrols their own key under{" "}
+        <strong className="text-[var(--color-text)]">
+          Settings &rarr; Security key
+        </strong>
+        , then adds the generated public key to this host&rsquo;s{" "}
+        <code>~/.ssh/authorized_keys</code>. Connecting without an enrolment
+        fails with a clear error rather than falling back to another
+        credential.
+      </p>
+      <p>
+        The login name still comes from{" "}
+        <strong className="text-[var(--color-text)]">Username</strong> above.
+        This source can&rsquo;t be brokered through a Rustion bastion &mdash;
+        the key is on the operator&rsquo;s desk, not the bastion&rsquo;s.
+      </p>
+    </div>
+  );
+}
+
 function DefaultAccountCredentialEditor({
   cs,
   onChange,

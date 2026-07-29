@@ -53,6 +53,11 @@ pub struct SshOpenArgs {
     pub on_close: Option<SessionCleanup>,
 }
 
+// The `SecurityKey` variant is materially larger than the others (an OpenSSH
+// public-key line plus a Tauri handle and the CTAP identity). Boxing it would
+// buy a few bytes on a value that exists once per session open and is moved
+// straight into the auth call — not worth the indirection.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum SshCredential {
     Password(Zeroizing<String>),
@@ -70,6 +75,22 @@ pub enum SshCredential {
     Cert {
         pem: Zeroizing<String>,
         cert_openssh: String,
+    },
+    /// FIDO2 security-key auth (`sk-ssh-ed25519@openssh.com` /
+    /// `sk-ecdsa-sha2-nistp256@openssh.com`). There is no private key to
+    /// carry: the operator's authenticator holds it and signs the
+    /// authentication request in place, one touch per connect. We present
+    /// only the enrolled public key and delegate signing to
+    /// [`super::sk_signer::SecurityKeySigner`].
+    ///
+    /// Unlike every other variant this one is not `Zeroizing`-wrapped —
+    /// there is nothing secret in it.
+    SecurityKey {
+        /// Enrolled `authorized_keys` line.
+        public_key_openssh: String,
+        identity: super::sk_signer::SecurityKeyIdentity,
+        app: AppHandle,
+        pin_slot: Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>>>,
     },
 }
 
@@ -164,6 +185,19 @@ pub async fn open_ssh_session(
                 .authenticate_openssh_cert(&args.username, Arc::new(key), cert)
                 .await
                 .map_err(|e| format!("openssh-cert auth: {e}"))?
+        }
+        SshCredential::SecurityKey { public_key_openssh, identity, app, pin_slot } => {
+            let public_key =
+                russh::keys::ssh_key::PublicKey::from_openssh(public_key_openssh.trim())
+                    .map_err(|e| format!("parse enrolled security-key public key: {e}"))?;
+            let mut signer =
+                super::sk_signer::SecurityKeySigner::new(identity, app, pin_slot);
+            // russh drives the ceremony and calls back into the signer with
+            // the buffer to sign; the operator touches the key at that point.
+            session
+                .authenticate_publickey_with(&args.username, public_key, None, &mut signer)
+                .await
+                .map_err(|e| format!("security-key auth: {e}"))?
         }
     };
     if !auth_result.success() {

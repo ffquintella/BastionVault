@@ -484,6 +484,16 @@ No backend changes — resource fields are already a flexible `Map<String, Value
 | Cert zeroized on session close (`Zeroizing<Vec<u8>>`); manual revoke via existing `pki/revoke` if the operator wants it on the CRL | host |
 | Manual integration test against an AD-joined Windows Server with a CA template-mapped issuer | docs |
 
+**Certificate profile (added by PKI Phase 5.7).** Until then the resolver worked but the *in-tree* PKI engine could not mint a cert AD would accept: it emitted DNS/IP SANs only and had no way to express the Microsoft EKUs, so the UPN `otherName`, the Smart Card Logon EKU, and the KB5014754 SID extension were all unreachable — this path only worked with an externally-issued (e.g. ADCS) cert. [PKI Phase 5.7](pki-secret-engine.md) closes that. To use the in-tree engine for RDP+PKI, the role needs:
+
+```
+allow_upn_sans=true  allowed_upn_domains=corp.example.com
+ext_key_usage=clientauth,smartcardlogon
+allow_ad_sid=true
+```
+
+and the issue call needs `upn_sans=<user>@<realm>` plus `ad_sid=<the account SID>`. The SID is the part that matters most here: because this feature mints a fresh cert **and** keypair per session, no strong `altSecurityIdentities` mapping can be used (all three bind to one specific certificate), and patched DCs have been permanently in Full Enforcement since the September 2025 update removed `StrongCertificateBindingEnforcement`. AD-side enrolment — publishing the issuing CA to the forest NTAuth store, trusting the root domain-wide, and a KDC-Authentication cert on each DC — remains operator work.
+
 ### Phase 7 — Polish & per-type policy — **Done**
 
 | Deliverable | Location | Status |
@@ -494,6 +504,28 @@ No backend changes — resource fields are already a flexible `Map<String, Value
 | Hot-key (`⌘K`) "Connect to…" command palette | [gui/src/components/ConnectPalette.tsx](../gui/src/components/ConnectPalette.tsx) (mounted at app root in [gui/src/App.tsx](../gui/src/App.tsx)) | ✅ |
 
 **Current state.** Resource-type editor in Settings carries a "Resource Connect enabled" checkbox; when off, the Connection tab is hidden for every resource of that type and the ⌘K palette filters the type out. Successful `session_open_*` calls append a `RecentSession` entry (capped at 10, oldest evicted) to the resource record's `recent_sessions` array; the Connection tab renders these in a collapsible `<details>` block. `caller_display` resolves the actor via `auth/token/lookup-self`. ⌘K palette opens globally (post-auth), fuzzy-matches across `{resource_name, profile_name, protocol, host, port, username, kind, tags}`, navigates with arrows, launches with Enter — sharing the same `session_open_ssh` / `session_open_rdp` path the per-resource Connect button uses. LDAP operator-bind profiles are listed but defer to the Resources page for the typed-credential prompt rather than embedding it in the palette.
+
+### Phase 7.5 — Connect-time MFA + FIDO2 security-key SSH — **Done**
+
+Split into its own spec:
+[features/connect-mfa-and-fido2-ssh.md](connect-mfa-and-fido2-ssh.md).
+
+Adds a fifth credential source, `fido2` (SSH only — the connecting operator's
+OpenSSH `sk-` key, signed over native CTAP2, one touch per connect), and a
+per-profile `require_mfa` flag that forces a fresh TOTP / FIDO2 check
+immediately before the session opens. Both decisions are made and enforced
+server-side.
+
+Credential-source matrix after this phase:
+
+| Source | SSH | RDP |
+|---|---|---|
+| `secret` | ✅ | ✅ |
+| `ldap` | ✅ | ✅ |
+| `ssh-engine` | ✅ (CA + OTP) | — |
+| `pki` | ✅ | ✅ (CredSSP smartcard) |
+| `default-account` | ✅ | ✅ |
+| `fido2` | ✅ | ✗ (no FIDO2 auth method in RDP; use `pki` + `require_mfa`) |
 
 ### Phase 8 — Future / deferred
 

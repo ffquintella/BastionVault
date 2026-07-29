@@ -18,6 +18,7 @@ use crate::{
 };
 
 pub mod acme;
+pub mod ad_ext;
 #[cfg(feature = "pki_pqc_composite")]
 pub mod composite;
 pub mod crypto;

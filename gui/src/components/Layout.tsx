@@ -167,6 +167,10 @@ export function Layout({ children }: LayoutProps) {
   const remoteProfile = useVaultStore((s) => s.remoteProfile);
   const selectedNode = useVaultStore((s) => s.selectedNode);
   const policies = useAuthStore((s) => s.policies);
+  // Login name of the signed-in operator; labels the profile link in the
+  // footer. Empty until `loadEntity` resolves (or for tokens with no alias),
+  // in which case the link falls back to a generic label.
+  const principal = useAuthStore((s) => s.principal);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const clearAuth = useAuthStore((s) => s.clearAuth);
   const clearSessions = useAuthStore((s) => s.clearSessions);
@@ -562,6 +566,36 @@ export function Layout({ children }: LayoutProps) {
               label={status.sealed ? "Sealed" : "Unsealed"}
             />
           )}
+          {/* Self-service profile. Lives in the footer next to Sign Out
+              rather than in the nav lists: it is about the person, not
+              about the vault's contents, and that is where operators look
+              for "my account". Visible to every authenticated user — the
+              endpoints behind it are caller-scoped, so there is nothing to
+              gate on policy. */}
+          <Link
+            to="/profile"
+            title={principal ? `Signed in as ${principal}` : "My profile"}
+            className={`w-full flex items-center gap-1.5 rounded-md px-1.5 py-1 text-xs transition-colors min-w-0 ${
+              location.pathname.startsWith("/profile")
+                ? "bg-[var(--color-primary)] text-white"
+                : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+            }`}
+          >
+            <svg
+              className="w-3.5 h-3.5 shrink-0"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+              <circle cx="12" cy="7" r="4" />
+            </svg>
+            <span className="truncate">{principal || "My profile"}</span>
+          </Link>
           <button
             onClick={handleSignOut}
             className="w-full text-xs text-[var(--color-text-muted)] hover:text-[var(--color-danger)] transition-colors text-left px-1"

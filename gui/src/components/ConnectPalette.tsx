@@ -20,6 +20,7 @@ import type {
 import { useAuthStore } from "../stores/authStore";
 import { Badge } from "./ui/Badge";
 import { useToast } from "./ui/Toast";
+import { useConnectMfa } from "./ConnectMfaPrompt";
 
 /**
  * Cmd-K Connect palette (Phase 7 polish).
@@ -55,6 +56,8 @@ interface PaletteEntry {
 export function ConnectPalette() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const { toast } = useToast();
+  // Connect-time MFA gate; the prompt renders over the palette.
+  const { gateConnect, mfaPrompt } = useConnectMfa();
   const [open, setOpen] = useState(false);
   const [entries, setEntries] = useState<PaletteEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -219,17 +222,29 @@ export function ConnectPalette() {
     const key = `${entry.resourceLabel}/${entry.profile.id}`;
     setConnecting(key);
     try {
+      // Connect-time MFA gate. The server decides whether this profile needs
+      // a factor; `{}` on an ungated one keeps the spread a no-op. The prompt
+      // renders over the palette, so unlike the operator-bind case above the
+      // palette can satisfy it inline.
+      const mfa = await gateConnect(
+        entry.resourceLabel,
+        entry.profile.id,
+        entry.profile.name,
+      );
+      if (!mfa) return; // operator cancelled — leave the palette open
       if (entry.protocol === "ssh") {
         await api.sessionOpenSsh({
           resource_name: entry.resourceLabel,
           profile_id: entry.profile.id,
           operator_credential: undefined,
+          ...mfa,
         });
       } else {
         await api.sessionOpenRdp({
           resource_name: entry.resourceLabel,
           profile_id: entry.profile.id,
           operator_credential: undefined,
+          ...mfa,
         });
       }
       setOpen(false);
@@ -350,6 +365,7 @@ export function ConnectPalette() {
           <span><kbd className="font-mono">esc</kbd> close</span>
         </div>
       </div>
+      {mfaPrompt}
     </div>
   );
 }

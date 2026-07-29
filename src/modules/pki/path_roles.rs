@@ -107,6 +107,41 @@ pub struct RoleEntry {
     #[serde(default = "default_acme_enabled")]
     #[default(true)]
     pub acme_enabled: bool,
+    /// AD smart-card logon: allow `upn_sans` on issue/sign, emitting the
+    /// UPN as a `subjectAltName` `otherName` (OID 1.3.6.1.4.1.311.20.2.3).
+    /// This is the identifier the KDC maps to an AD account, so it is
+    /// closed by default — a role that does not need Windows logon should
+    /// never widen its SAN surface. `#[serde(default)]` keeps roles
+    /// persisted before this field readable.
+    #[serde(default)]
+    pub allow_upn_sans: bool,
+    /// Optional allow-list of UPN realms this role may issue for (e.g.
+    /// `corp.example.com`). Matched case-insensitively against the part
+    /// after the `@`; subdomains are *not* implied. Empty list with
+    /// `allow_upn_sans = true` means "any realm".
+    #[serde(default)]
+    pub allowed_upn_domains: Vec<String>,
+    /// Extra Extended Key Usage OIDs in dotted-decimal form, appended to
+    /// whatever `ext_key_usage` / `server_flag` / `client_flag` produce.
+    /// Needed for Windows smart-card logon
+    /// (`1.3.6.1.4.1.311.20.2.2`), which has no RFC 5280 name. Validated
+    /// at role-write time so a typo cannot reach an issued certificate.
+    #[serde(default)]
+    pub ext_key_usage_oids: Vec<String>,
+    /// AD smart-card logon: allow the `szOID_NTDS_CA_SECURITY_EXT` SID
+    /// extension (OID 1.3.6.1.4.1.311.25.2) to be emitted. Required for
+    /// KB5014754 strong certificate mapping on any domain controller
+    /// patched past September 2025. Closed by default — the extension
+    /// asserts an identity claim that AD trusts, so it must be
+    /// deliberately enabled.
+    #[serde(default)]
+    pub allow_ad_sid: bool,
+    /// Role-level default SID emitted when a request omits `ad_sid`. Lets
+    /// an operator pin a role to one account (a service identity, say)
+    /// without the caller having to know the SID. Ignored unless
+    /// `allow_ad_sid = true`; a request-body `ad_sid` overrides it.
+    #[serde(default)]
+    pub ad_sid: String,
 }
 
 fn default_acme_enabled() -> bool {
@@ -166,7 +201,12 @@ impl PkiBackend {
                 "allowed_key_refs": { field_type: FieldType::CommaStringSlice, default: "", description: "Allow-list of managed key IDs/names this role may pin to. Empty + allow_key_reuse=true means any." },
                 "allowed_domains": { field_type: FieldType::CommaStringSlice, default: "", description: "Phase L4: allowed parent domains for CN / DNS SANs (used with allow_subdomains / allow_bare_domains / allow_glob_domains). Ignored when allow_any_name=true." },
                 "allow_glob_domains": { field_type: FieldType::Bool, default: false, description: "Phase L4: entries in allowed_domains may contain `*` glob patterns within a label." },
-                "acme_enabled": { field_type: FieldType::Bool, default: true, description: "Phase L4: per-role ACME kill-switch. Default true." }
+                "acme_enabled": { field_type: FieldType::Bool, default: true, description: "Phase L4: per-role ACME kill-switch. Default true." },
+                "allow_upn_sans": { field_type: FieldType::Bool, default: false, description: "Allow UPN otherName SANs (OID 1.3.6.1.4.1.311.20.2.3) for AD smart-card logon. Default false (closed)." },
+                "allowed_upn_domains": { field_type: FieldType::CommaStringSlice, default: "", description: "Allow-list of UPN realms (the part after `@`). Empty + allow_upn_sans=true means any realm." },
+                "ext_key_usage_oids": { field_type: FieldType::CommaStringSlice, default: "", description: "Extra EKU OIDs in dotted-decimal form, e.g. 1.3.6.1.4.1.311.20.2.2 (Smart Card Logon). Validated at write time." },
+                "allow_ad_sid": { field_type: FieldType::Bool, default: false, description: "Allow the AD SID extension (OID 1.3.6.1.4.1.311.25.2) required for KB5014754 strong mapping. Default false (closed)." },
+                "ad_sid": { field_type: FieldType::Str, default: "", description: "Default SID emitted when a request omits `ad_sid` (e.g. S-1-5-21-...-512). Requires allow_ad_sid=true." }
             },
             operations: [
                 {op: Operation::Read, handler: r1.read_role},
@@ -225,6 +265,48 @@ impl PkiBackendInner {
         let ttl = parse_opt_duration(req, "ttl", DEFAULT_TTL)?;
         let max_ttl = parse_opt_duration(req, "max_ttl", DEFAULT_MAX_TTL)?;
 
+        // AD smart-card knobs. Validate the OIDs and the default SID here
+        // so a malformed role fails at write time — an EKU typo or a
+        // mistyped SID that only surfaced at issuance would produce a
+        // certificate Windows silently refuses, which is a miserable
+        // thing to debug from the client side.
+        let ext_key_usage_oids: Vec<String> = req
+            .get_data_or_default("ext_key_usage_oids")?
+            .as_comma_string_slice()
+            .unwrap_or_default();
+        for oid in &ext_key_usage_oids {
+            super::ad_ext::parse_oid_arcs(oid).map_err(|e| {
+                RvError::ErrString(format!("ext_key_usage_oids: {e}"))
+            })?;
+        }
+        let ext_key_usage: Vec<String> =
+            req.get_data_or_default("ext_key_usage")?.as_comma_string_slice().unwrap_or_default();
+        // `ext_key_usage` also accepts raw OIDs. Validate those here too so
+        // both channels fail at the same point; unknown *names* stay
+        // lenient (skipped at issuance), preserving behaviour for roles
+        // already in storage.
+        for entry in &ext_key_usage {
+            let trimmed = entry.trim();
+            if !trimmed.is_empty() && trimmed.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+                super::ad_ext::parse_oid_arcs(trimmed)
+                    .map_err(|e| RvError::ErrString(format!("ext_key_usage: {e}")))?;
+            }
+        }
+        let allow_ad_sid = bool_or(req, "allow_ad_sid", false)?;
+        let ad_sid_raw = str_or(req, "ad_sid")?;
+        let ad_sid = if ad_sid_raw.trim().is_empty() {
+            String::new()
+        } else {
+            if !allow_ad_sid {
+                return Err(RvError::ErrString(
+                    "ad_sid is set but allow_ad_sid is false — enable allow_ad_sid or clear ad_sid".into(),
+                ));
+            }
+            let probe = RoleEntry { allow_ad_sid: true, ..Default::default() };
+            super::ad_ext::validate_ad_sid(&probe, ad_sid_raw.trim())?;
+            super::ad_ext::normalize_ad_sid(&ad_sid_raw)
+        };
+
         let role = RoleEntry {
             ttl,
             max_ttl,
@@ -244,7 +326,7 @@ impl PkiBackendInner {
             use_csr_sans: bool_or(req, "use_csr_sans", true)?,
             use_csr_common_name: bool_or(req, "use_csr_common_name", true)?,
             key_usage: req.get_data_or_default("key_usage")?.as_comma_string_slice().unwrap_or_default(),
-            ext_key_usage: req.get_data_or_default("ext_key_usage")?.as_comma_string_slice().unwrap_or_default(),
+            ext_key_usage,
             country: str_or(req, "country")?,
             province: str_or(req, "province")?,
             locality: str_or(req, "locality")?,
@@ -264,6 +346,14 @@ impl PkiBackendInner {
                 .unwrap_or_default(),
             allow_glob_domains: bool_or(req, "allow_glob_domains", false)?,
             acme_enabled: bool_or(req, "acme_enabled", true)?,
+            allow_upn_sans: bool_or(req, "allow_upn_sans", false)?,
+            allowed_upn_domains: req
+                .get_data_or_default("allowed_upn_domains")?
+                .as_comma_string_slice()
+                .unwrap_or_default(),
+            ext_key_usage_oids,
+            allow_ad_sid,
+            ad_sid,
         };
 
         let entry = StorageEntry::new(format!("role/{name}").as_str(), &role)?;

@@ -113,6 +113,20 @@ CI matrix (Phase 4) remain open, as do the GUI installers.
   ([installers/windows/](../gui/src-tauri/installers/windows/)) — no
   Windows host required, though it needs a one-time base image from a free
   Win11 ARM64 ISO and a first-run validation.
+- **`make macos-client-install` builds and installs the whole macOS client
+  on the developer's own Mac** — it runs `gui-macos-pkg` + `macos-cli-pkg`
+  for the host arch, then hands both `.pkg`s to Apple's `installer(8)` via
+  [`installers/macos/install-client.sh`](../installers/macos/install-client.sh),
+  landing `/Applications/BastionVault.app` and `/usr/local/bin/bvault`
+  (+ manpage + completions). Needs one `sudo` prompt (taken up front, so
+  the two packages don't ask twice) and verifies afterwards that the app
+  bundle and the binary really appeared, reporting both versions. The GUI
+  half **refuses to install over a running `BastionVault.app`** — it may
+  hold an unsealed embedded vault, and overwriting a live bundle leaves it
+  half-swapped — unless `BV_QUIT_RUNNING=1` opts into a graceful
+  AppleScript quit first. `MACOS_CLIENT_PARTS=gui|cli` installs one half
+  only; `INSTALLER_IDENTITY` signs before installing (an unsigned local
+  `.pkg` installs fine through `installer(8)`). macOS only.
 - **Signing is wired as a key-agnostic step** (Phase 4, partial):
   [`installers/sign/sign-artifacts.sh`](../installers/sign/sign-artifacts.sh)
   (`make sign-packages`) signs any artifacts on disk with whatever keys the
