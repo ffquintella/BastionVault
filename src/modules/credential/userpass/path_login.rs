@@ -241,12 +241,21 @@ impl UserPassBackendInner {
         }
 
         // Multi-tenancy: bind this session to the namespace named by the
-        // request header (root when absent). The credential lives in the
-        // root auth mount, but the resulting identity, group expansion, and
-        // token are scoped to the login namespace. Fails closed if the header
-        // names a namespace that does not exist.
+        // request header. The credential lives in the root auth mount, but the
+        // resulting identity, group expansion, and token are scoped to the login
+        // namespace. Fails closed if the header names a namespace that does not
+        // exist. With no header the login lands in the principal's first
+        // assigned namespace (root when it is unrestricted or assigned root), so
+        // a client without a namespace picker can still sign a tenant-only user
+        // in instead of dead-ending on the root denial below.
         let (ns_path, ns_uuid) =
-            crate::modules::namespace::token_binding::resolve_login_namespace(&self.core, req).await?;
+            crate::modules::namespace::token_binding::resolve_login_namespace_for_principal(
+                &self.core,
+                req,
+                "userpass/",
+                &username,
+            )
+            .await?;
 
         // Multi-tenancy: refuse the login if this principal is assigned to a set
         // of namespaces that does not include the login namespace. No assignment

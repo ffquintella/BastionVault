@@ -393,6 +393,17 @@ export function Layout({ children }: LayoutProps) {
   );
   const [aboutOpen, setAboutOpen] = useState(false);
 
+  // Full-vault backup/restore is root-only: the Tauri commands run a
+  // `lookup-self` and refuse any token without the literal `root`
+  // policy (`commands/backup.rs::require_root`). Auth backends can
+  // never mint a root token ("auth methods cannot create root tokens"),
+  // so for every userpass/AppRole/FIDO2 session the menu items are
+  // dead ends that only fail after the operator has typed a 16-char
+  // password twice. Omit the handlers so AppMenu hides the whole
+  // Backup submenu instead. The command-side check stays as the
+  // authority — this is UX, not the security boundary.
+  const canBackup = policySet.has("root");
+
   /**
    * Jump to the vault chooser on the Connect page.
    *
@@ -425,8 +436,8 @@ export function Layout({ children }: LayoutProps) {
           lives at the far left of it. */}
       <TitleBar
         onSignOut={handleSignOut}
-        onBackupExport={() => setBackupMode("export")}
-        onBackupRestore={() => setBackupMode("restore")}
+        onBackupExport={canBackup ? () => setBackupMode("export") : undefined}
+        onBackupRestore={canBackup ? () => setBackupMode("restore") : undefined}
         onAbout={() => setAboutOpen(true)}
         title={`BastionVault — ${subtitle}`}
       />

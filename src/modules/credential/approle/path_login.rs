@@ -405,9 +405,16 @@ impl AppRoleBackendInner {
         metadata.insert("mount_path".to_string(), "approle/".to_string());
 
         // Multi-tenancy: bind the session to the namespace named by the request
-        // header (root when absent). Fails closed on an unknown namespace.
+        // header, or — unscoped — to this role's first assigned namespace. Fails
+        // closed on an unknown namespace.
         let (ns_path, ns_uuid) =
-            crate::modules::namespace::token_binding::resolve_login_namespace(&self.core, req).await?;
+            crate::modules::namespace::token_binding::resolve_login_namespace_for_principal(
+                &self.core,
+                req,
+                "approle/",
+                &role_entry.name,
+            )
+            .await?;
 
         // Multi-tenancy: refuse the login if this role's namespace assignment
         // does not include the login namespace (no record ⇒ unrestricted; fails

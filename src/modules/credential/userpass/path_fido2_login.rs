@@ -237,9 +237,16 @@ impl UserPassBackendInner {
         self.set_user(req, &username, &user_entry).await?;
 
         // Multi-tenancy: bind the FIDO2 session to the namespace named by the
-        // request header, exactly as the password-login path does.
+        // request header — or, unscoped, to the principal's first assigned
+        // namespace — exactly as the password-login path does.
         let (ns_path, ns_uuid) =
-            crate::modules::namespace::token_binding::resolve_login_namespace(&self.core, req).await?;
+            crate::modules::namespace::token_binding::resolve_login_namespace_for_principal(
+                &self.core,
+                req,
+                "userpass/",
+                &username,
+            )
+            .await?;
 
         // Multi-tenancy: refuse the login if this principal's namespace
         // assignment does not include the login namespace (no record ⇒

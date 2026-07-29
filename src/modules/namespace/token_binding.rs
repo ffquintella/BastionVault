@@ -162,7 +162,7 @@ pub async fn resolve_login_namespace(
     core: &crate::core::Core,
     req: &crate::logical::Request,
 ) -> Result<(String, String), crate::errors::RvError> {
-    use super::{router::namespace_header_from_map, NamespaceModule, NAMESPACE_MODULE_NAME};
+    use super::router::namespace_header_from_map;
 
     let raw = namespace_header_from_map(req.headers.as_ref())
         .map(|s| s.trim().to_string())
@@ -170,6 +170,19 @@ pub async fn resolve_login_namespace(
     let Some(raw) = raw else {
         return Ok((String::new(), String::new()));
     };
+
+    resolve_namespace_by_path(core, &raw).await
+}
+
+/// Resolve a namespace path to its canonical `(path, uuid)`. Fails closed: an
+/// unknown path (or an unavailable namespace module/store) is a hard error, so no
+/// caller can silently fall back to root after asking for a tenant.
+#[maybe_async::maybe_async]
+async fn resolve_namespace_by_path(
+    core: &crate::core::Core,
+    raw: &str,
+) -> Result<(String, String), crate::errors::RvError> {
+    use super::{NamespaceModule, NAMESPACE_MODULE_NAME};
 
     let module = core
         .module_manager
@@ -180,11 +193,59 @@ pub async fn resolve_login_namespace(
     let store = module
         .store()
         .ok_or_else(|| crate::bv_error_string!("namespace store not initialized"))?;
-    let ns = store.get_by_path(&raw).await?.ok_or_else(|| {
-        let p = super::store::normalize_path(&raw).unwrap_or(raw);
+    let ns = store.get_by_path(raw).await?.ok_or_else(|| {
+        let p = super::store::normalize_path(raw).unwrap_or_else(|_| raw.to_string());
         crate::bv_error_response_status!(404, &format!("no such namespace: {p:?}"))
     })?;
     Ok((ns.path, ns.uuid))
+}
+
+/// [`resolve_login_namespace`], plus the principal's *default* namespace when the
+/// client named none.
+///
+/// A login request that carries no `X-BastionVault-Namespace` header is asking
+/// for the deployment default, not for root specifically. For a principal whose
+/// namespace assignment excludes root, binding that login to root only to deny it
+/// a moment later in
+/// [`enforce_login_assignment`](super::ns_assignment::enforce_login_assignment)
+/// leaves the credential unable to authenticate at all through a client that has
+/// no namespace picker (the GUI login page, the CLI without `-namespace`). So the
+/// login instead binds to the principal's first assigned namespace.
+///
+/// This cannot widen access: the chosen path always comes from the principal's
+/// own assignment, so the subsequent `enforce_login_assignment` still holds. An
+/// **explicitly** named namespace is never rewritten — it resolves exactly as
+/// [`resolve_login_namespace`] does and fails closed when the assignment
+/// excludes it.
+#[maybe_async::maybe_async]
+pub async fn resolve_login_namespace_for_principal(
+    core: &crate::core::Core,
+    req: &crate::logical::Request,
+    mount: &str,
+    name: &str,
+) -> Result<(String, String), crate::errors::RvError> {
+    use super::router::namespace_header_from_map;
+
+    let explicit = namespace_header_from_map(req.headers.as_ref())
+        .map(|s| s.trim().to_string())
+        .is_some_and(|s| !s.is_empty());
+    if explicit {
+        return resolve_login_namespace(core, req).await;
+    }
+
+    match super::ns_assignment::default_login_namespace_for(core, mount, name).await? {
+        Some(path) => {
+            let resolved = resolve_namespace_by_path(core, &path).await?;
+            log::info!(
+                target: "security",
+                "login for '{mount}{name}' defaulted to assigned namespace {:?} \
+                 (no namespace requested; root is not assigned)",
+                resolved.0
+            );
+            Ok(resolved)
+        }
+        None => Ok((String::new(), String::new())),
+    }
 }
 
 /// Enforce token namespace binding for a routed request. Called after the

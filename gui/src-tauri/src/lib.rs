@@ -357,6 +357,7 @@ pub fn run() {
             commands::policies::write_policy_tests,
             // Namespaces (multi-tenancy)
             commands::namespaces::list_namespaces,
+            commands::namespaces::namespaces_self,
             commands::namespaces::read_namespace,
             commands::namespaces::write_namespace,
             commands::namespaces::delete_namespace,

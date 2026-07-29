@@ -20,6 +20,12 @@
 //!   `permission_denied`; there is no silent fallback to root.
 //! - **Empty list is normalized to no record** ([`NsAssignmentStore::set`]), so
 //!   "unrestricted" has exactly one representation.
+//! - **An unscoped login lands in the first assigned namespace.** A client that
+//!   names no namespace is asking for the *default*, not for root specifically,
+//!   so when the assignment excludes root the login binds to the principal's
+//!   first assigned namespace instead of being denied — see
+//!   [`default_login_namespace`]. A login that names a namespace *explicitly*
+//!   still fails closed.
 //!
 //! This gates *authentication* (where a credential may bind) at login. An
 //! explicit assignment additionally widens *request-time operability*: a
@@ -102,6 +108,26 @@ pub fn namespace_allowed(allowed: &[String], request_ns: &str) -> bool {
     allowed
         .iter()
         .any(|a| a == request_ns || is_descendant(request_ns, a))
+}
+
+/// The namespace a login should *default* to for a principal carrying `allowed`,
+/// when the client named no namespace at all.
+///
+/// Returns `None` when the default (root) is fine — either the principal is
+/// unrestricted (empty list) or root is explicitly among its assignments. When
+/// the assignment excludes root, returns the **first** assigned path: the record
+/// preserves the operator-authored order ([`NsAssignmentStore::set`] only
+/// normalizes and de-duplicates), so "first" is the operator's own preference,
+/// not an arbitrary pick.
+///
+/// This never widens where a principal may authenticate — the returned path is
+/// always one the assignment already permits, so
+/// [`enforce_login_assignment`] still passes on it.
+pub fn default_login_namespace(allowed: &[String]) -> Option<&str> {
+    if allowed.is_empty() || allowed.iter().any(|a| a.is_empty()) {
+        return None;
+    }
+    allowed.first().map(String::as_str)
 }
 
 pub struct NsAssignmentStore {
@@ -216,6 +242,25 @@ pub async fn enforce_login_assignment(
     Ok(())
 }
 
+/// The namespace an *unscoped* login (no `X-BastionVault-Namespace` header) for
+/// `mount`/`name` should bind to, per [`default_login_namespace`]. `None` means
+/// "stay at root".
+///
+/// Fails closed only in the sense that a store error propagates — it never
+/// silently promotes the login into a namespace the assignment excludes.
+#[maybe_async::maybe_async]
+pub async fn default_login_namespace_for(
+    core: &Core,
+    mount: &str,
+    name: &str,
+) -> Result<Option<String>, RvError> {
+    let store = NsAssignmentStore::new(core)?;
+    let Some(assignment) = store.get(mount, name).await? else {
+        return Ok(None);
+    };
+    Ok(default_login_namespace(&assignment.namespaces).map(String::from))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +289,32 @@ mod tests {
         assert!(namespace_allowed(&multi, "ops"));
         assert!(namespace_allowed(&multi, "engineering/platform"));
         assert!(!namespace_allowed(&multi, "sales"));
+    }
+
+    #[test]
+    fn test_default_login_namespace() {
+        // Unrestricted ⇒ no redirection; the login stays at root.
+        assert_eq!(default_login_namespace(&[]), None);
+        // Root explicitly assigned ⇒ stay at root even with tenants alongside.
+        assert_eq!(
+            default_login_namespace(&["".to_string(), "engineering".to_string()]),
+            None
+        );
+        // Root excluded ⇒ land in the first assigned namespace (operator order).
+        assert_eq!(
+            default_login_namespace(&["engineering".to_string(), "ops".to_string()]),
+            Some("engineering")
+        );
+        assert_eq!(
+            default_login_namespace(&["dti/esi".to_string()]),
+            Some("dti/esi")
+        );
+        // Whatever it returns is a namespace the assignment already permits, so
+        // the redirection can never widen where a credential may authenticate.
+        for allowed in [vec!["engineering".to_string(), "ops".to_string()], vec!["dti/esi".to_string()]] {
+            let picked = default_login_namespace(&allowed).unwrap();
+            assert!(namespace_allowed(&allowed, picked));
+        }
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

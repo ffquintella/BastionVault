@@ -80,7 +80,7 @@ describe("namespaceStore", () => {
   it("refresh keeps the cached list when the list fetch fails", async () => {
     // A failed list fetch must NOT be treated as an empty list — otherwise
     // it would blank a good cached list and hide the switcher until restart.
-    vi.spyOn(api, "listNamespaces").mockRejectedValue(new Error("boom"));
+    vi.spyOn(api, "namespacesSelf").mockRejectedValue(new Error("boom"));
     vi.spyOn(api, "getActiveNamespace").mockResolvedValue("");
 
     await useNamespaceStore.getState().refresh();
@@ -92,7 +92,11 @@ describe("namespaceStore", () => {
   });
 
   it("refresh caches a genuinely empty list (single-tenant)", async () => {
-    vi.spyOn(api, "listNamespaces").mockResolvedValue({ namespaces: [] });
+    vi.spyOn(api, "namespacesSelf").mockResolvedValue({
+      namespaces: [],
+      token_namespace: "",
+      root: false,
+    });
     vi.spyOn(api, "getActiveNamespace").mockResolvedValue("");
 
     await useNamespaceStore.getState().refresh();
@@ -101,13 +105,67 @@ describe("namespaceStore", () => {
   });
 
   it("refresh keeps the cached active when the active fetch fails", async () => {
-    vi.spyOn(api, "listNamespaces").mockResolvedValue({
+    vi.spyOn(api, "namespacesSelf").mockResolvedValue({
       namespaces: ["team-a"],
+      token_namespace: "team-a",
+      root: false,
     });
     vi.spyOn(api, "getActiveNamespace").mockRejectedValue(new Error("boom"));
 
     await useNamespaceStore.getState().refresh();
 
     expect(useNamespaceStore.getState().active).toBe("team-a");
+  });
+
+  it("landSession starts a tenant-only session in its own namespace", async () => {
+    // The concrete bug: a principal with no access to root used to log in at
+    // root and then 403 on every fetch. The session must land on the namespace
+    // its token is bound to, and only offer the namespaces it can reach.
+    vi.spyOn(api, "namespacesSelf").mockResolvedValue({
+      namespaces: ["dti/esi"],
+      token_namespace: "dti/esi",
+      root: false,
+    });
+    const setActive = vi
+      .spyOn(api, "setActiveNamespace")
+      .mockResolvedValue(undefined);
+
+    await useNamespaceStore.getState().landSession();
+
+    expect(setActive).toHaveBeenCalledWith("dti/esi");
+    const s = useNamespaceStore.getState();
+    expect(s.active).toBe("dti/esi");
+    expect(s.namespaces).toEqual(["dti/esi"]);
+    expect(s.loaded).toBe(true);
+  });
+
+  it("landSession leaves a root-operable admin at root", async () => {
+    vi.spyOn(api, "namespacesSelf").mockResolvedValue({
+      namespaces: ["", "dti", "dti/esi"],
+      token_namespace: "",
+      root: true,
+    });
+    vi.spyOn(api, "setActiveNamespace").mockResolvedValue(undefined);
+
+    await useNamespaceStore.getState().landSession();
+
+    const s = useNamespaceStore.getState();
+    expect(s.active).toBe("");
+    // Root participates as the empty string, so the switcher can offer it.
+    expect(s.namespaces).toEqual(["", "dti", "dti/esi"]);
+  });
+
+  it("landSession falls back to root when discovery is unavailable", async () => {
+    vi.spyOn(api, "namespacesSelf").mockRejectedValue(new Error("boom"));
+    const setActive = vi
+      .spyOn(api, "setActiveNamespace")
+      .mockResolvedValue(undefined);
+
+    await useNamespaceStore.getState().landSession();
+
+    const s = useNamespaceStore.getState();
+    expect(s.active).toBe("");
+    expect(s.namespaces).toEqual([]);
+    expect(setActive).not.toHaveBeenCalled();
   });
 });

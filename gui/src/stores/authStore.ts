@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import * as api from "../lib/api";
+import { useNamespaceStore } from "./namespaceStore";
 
 /**
  * Snapshot of the post-login auth state for a single vault. Kept in
@@ -216,6 +217,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         entityId: cached.entityId,
         principal: cached.principal,
       });
+      // Multi-tenancy: the vault switch reset the namespace state to root, but a
+      // restored tenant token is bound to its own namespace and may not operate
+      // at root — land the session back where the token belongs, exactly as a
+      // fresh login does.
+      await useNamespaceStore.getState().landSession();
       return true;
     } catch {
       // Stale entry — drop it so we don't keep trying on every switch.

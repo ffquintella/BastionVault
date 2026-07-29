@@ -57,6 +57,17 @@ The HTTP surface follows Vault Enterprise's: every endpoint accepts an `X-Bastio
 > into, across all auth backends, unrestricted by default. See the "Namespace
 > Assignment (Login-Restriction)" design section and the Phase 5 scope table.
 >
+> **A restricted principal can now actually sign in.** Fail-closed enforcement on
+> its own locked tenant-only credentials out of every client without a namespace
+> picker: the GUI login page sends no namespace header, so the login resolved to
+> root and was denied — `HTTP 403: Permission denied` on a correct password. An
+> **unscoped** login (no header) now binds to the principal's first assigned
+> namespace; naming a namespace explicitly still fails closed. The GUI lands the
+> session there via the new caller-introspecting
+> `GET /v2/sys/namespaces-self`, which also drives the namespace switcher, so it
+> only ever offers namespaces the session can operate in and hides itself when
+> there is only one.
+>
 > **Namespace self-service.** Every authenticated token bound to a non-root
 > namespace now implicitly carries a `namespace-self` ACL policy so it can reach
 > the caller-introspecting / self endpoints (`sys/capabilities-self`,
@@ -302,9 +313,9 @@ representation.
 #### Enforcement
 
 A shared helper `ns_assignment::enforce_login_assignment(core, mount, name,
-ns_path)` is called in each login handler immediately **after**
-`resolve_login_namespace(...)` and before the token is stamped. It loads the
-record; if one exists and does not permit `ns_path`, the login fails with
+ns_path)` is called in each login handler immediately **after** the login
+namespace is resolved and before the token is stamped. It loads the record; if
+one exists and does not permit `ns_path`, the login fails with
 `permission_denied`. The decision core is a pure, unit-testable
 `namespace_allowed(allowed, request_ns) -> bool` (empty ⇒ `true`; otherwise
 exact-or-descendant match).
@@ -313,6 +324,59 @@ Wiring sites: `credential/userpass/path_login.rs`,
 `credential/userpass/path_fido2_login.rs`, `credential/approle/path_login.rs`,
 the `cert` login path (`credential/cert/`), and standalone
 `credential/fido2/path_login.rs`.
+
+#### Unscoped login → the principal's default namespace
+
+Fail-closed enforcement alone made a tenant-only credential **unable to
+authenticate at all** from any client that has no namespace picker: the GUI login
+page, and the CLI without `-namespace`, send no `X-BastionVault-Namespace`
+header, so the login resolved to root and then hit the assignment denial —
+`HTTP 403: Permission denied` on a correct password.
+
+The fix distinguishes *"give me the default namespace"* from *"give me root"*.
+Login handlers call `token_binding::resolve_login_namespace_for_principal(core,
+req, mount, name)` instead of `resolve_login_namespace`:
+
+- **Header present** → resolved exactly as before, and the assignment check still
+  fails closed. (Root can be named explicitly as `"/"`, which normalizes to the
+  root path; an *empty* header value is treated as absent.)
+- **No header** → if the principal's assignment excludes root, the login binds to
+  its **first assigned namespace** (`ns_assignment::default_login_namespace` —
+  the record preserves the operator-authored order, so "first" is the operator's
+  own preference). Unrestricted principals, and those assigned root explicitly,
+  still land at root.
+
+This cannot widen access: the chosen path always comes from the principal's own
+assignment, so `enforce_login_assignment` still holds on it, and the redirection
+is logged to the `security` target.
+
+#### `sys/namespaces-self` — which namespaces may I use?
+
+The `sys/namespaces` CRUD surface is a **root-protected (sudo)** path, so a
+tenant principal has no grant on it and could not discover even the namespace it
+had just logged into; a namespace picker built on it either showed nothing or
+offered tenants the caller would be 403'd in.
+
+`GET /v2/sys/namespaces-self` is the caller-introspecting counterpart:
+
+```json
+{ "namespaces": ["tenant-a", "tenant-a/sub"], "token_namespace": "tenant-a", "root": false }
+```
+
+Membership is decided by `token_binding::token_operable_resolved` — the exact
+verdict `enforce_request_token_binding` applies per request — so the list can
+never advertise reach the caller does not have, while a root or child-visible
+token correctly sees the whole subtree. The **root namespace participates as the
+empty string**, so `""` appears exactly when the caller may operate at root.
+Granted by the built-in `default` and `namespace-self` policies (it is
+caller-filtered, so it is safe for every authenticated token).
+
+The GUI uses it for two things: `namespaceStore.landSession()` runs on every
+login (and on a restored session after a vault switch) to set the session's
+active namespace to `token_namespace` — otherwise a tenant token's first fetch
+403s despite a successful sign-in — and the sidebar `NamespaceSwitcher` renders
+its options from `namespaces`, hiding itself entirely when there is only one
+namespace to choose from.
 
 #### HTTP surface
 
@@ -452,7 +516,11 @@ decisions and rationale.
 | File | Purpose | Status |
 |---|---|---|
 | `src/modules/namespace/ns_assignment.rs` | New module: `NsAssignmentStore` (barrier-root CRUD, empty-list ⇒ delete), pure `namespace_allowed(allowed, request_ns)` decision (empty ⇒ all; exact-or-descendant via `is_descendant`), and `enforce_login_assignment(core, mount, name, ns_path)` (fail-closed `permission_denied`). Unit + store-roundtrip tests. | ✅ Done |
-| `src/modules/credential/userpass/path_login.rs`, `…/path_fido2_login.rs`, `src/modules/credential/approle/path_login.rs` | Call `enforce_login_assignment` after `resolve_login_namespace`, before token stamping. Covers userpass password, the GUI's userpass-FIDO2, and approle — the three backends that bind a login namespace today. | ✅ Done |
+| `src/modules/credential/userpass/path_login.rs`, `…/path_fido2_login.rs`, `src/modules/credential/approle/path_login.rs` | Resolve the login namespace via `resolve_login_namespace_for_principal` (header, else the principal's first assigned namespace), then call `enforce_login_assignment` before token stamping. Covers userpass password, the GUI's userpass-FIDO2, and approle — the three backends that bind a login namespace today. | ✅ Done |
+| `src/modules/namespace/ns_assignment.rs::default_login_namespace` + `token_binding::resolve_login_namespace_for_principal` | **Unscoped login lands in the principal's namespace.** A client that names no namespace (GUI login page, CLI without `-namespace`) asked for the *default*, not for root — so a principal whose assignment excludes root binds to its first assigned namespace instead of being denied. An explicitly named namespace (incl. `"/"` = root) still fails closed. Cannot widen access: the chosen path comes from the principal's own assignment. | ✅ Done |
+| `src/modules/system/mod.rs::handle_namespaces_self` + `src/http/sys.rs` + `policy_store.rs` | **`GET /v2/sys/namespaces-self`** — the namespaces the *calling token* may operate in (`token_operable_resolved`-filtered, root as `""`) plus its `token_namespace`. Granted by `default` + `namespace-self`, since the `sys/namespaces` CRUD surface is sudo-gated and left a tenant principal unable to discover its own namespace. | ✅ Done |
+| `gui/src/stores/namespaceStore.ts` (`landSession`) + `gui/src/routes/LoginPage.tsx` + `gui/src/stores/authStore.ts` | Every login (and a session restored after a vault switch) lands on `token_namespace`, so a tenant token's first fetch carries the matching namespace header instead of 403ing at root. Falls back to root when discovery is unavailable. | ✅ Done |
+| `gui/src/components/NamespaceSwitcher.tsx` | Options come from `namespaces-self`, so the picker only offers namespaces the session can actually operate in (root included only when reachable) and hides itself when there is just one. | ✅ Done |
 | `cert` / standalone `fido2/` backends | **Not gated yet, by necessity.** The legacy `cert` auth method is disabled in the OpenSSL-free default build (produces no `Auth`), and the standalone `fido2/` backend is not namespace-aware (it never resolves a login namespace). Assignment enforcement for these is contingent on the separate "`cert`-login namespace binding" follow-up; the assignment **store and endpoints already accept any mount**, so records can be authored ahead of that work. | ⏳ Deferred (prereq: namespace binding) |
 | `src/modules/system/mod.rs` + `src/http/sys.rs` | `v2/sys/identity/ns-assignment/<mount>/<name>` Read/Write/Delete + `v2/sys/identity/ns-assignment` List, registered in `configure_sys_routes` so they serve over HTTP (not embedded-only). The mount segment is normalized to the trailing-slash form (`userpass/`) so API-written records match what the login paths key on. | ✅ Done |
 | `gui/src-tauri/src/commands/namespaces.rs` + `gui/src/lib/api.ts` | `get/set/delete_ns_assignment` Tauri commands (root-scoped via `make_request_root`) + api wrappers. | ✅ Done |
@@ -483,6 +551,7 @@ decisions and rationale.
 - Migration: start with a vault containing existing root-level data, upgrade to namespace-aware build, confirm all data is reachable at the new `namespaces/<root_uuid>/...` prefix and that no client-visible API breaks.
 - Child-visible token: parent admin issues a `child_visible=true` token; uses it in `tenant-a`; admin actions succeed; switches header to `tenant-b`, same actions succeed; switches header to `tenant-c` (sibling of issuer), action fails.
 - Namespace assignment (login-restriction): assign `userpass/alice → [engineering]`; her login with header `engineering` succeeds and her login with header `marketing` is refused with `permission_denied`; after the assignment is deleted both succeed again; a principal that was never assigned logs in everywhere (unrestricted default). Regression-proves the deny cannot silently regress to the unrestricted path.
+- Unscoped login + self-discovery: with `userpass/alice → [tenant-a]`, a login that sends **no** namespace header binds the token to `tenant-a` (not root, not a denial), while a login naming root explicitly (`"/"`) is still refused. `GET /v2/sys/namespaces-self` with her token returns `["tenant-a", "tenant-a/sub"]` and `token_namespace: "tenant-a"` — never root, never a sibling — while root's own token sees `["", "tenant-a", "tenant-a/sub", "tenant-b"]`. Driven both logically (`modules::namespace::tests`) and over the real HTTP pipeline (`http::sys::namespace_route_tests`).
 - Audit mirror: enable root mirror, write in `tenant-a`, confirm event appears in tenant-a's broadcaster *and* the root broadcaster, with the `namespace` field populated.
 - Quota: set `max_storage_bytes=1MiB` on `tenant-a`, write 1.1MiB across many secrets, confirm the write that crosses the threshold fails with `507`; later writes after a delete succeed.
 

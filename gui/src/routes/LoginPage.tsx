@@ -7,6 +7,7 @@ import { Modal } from "../components/ui";
 import { UnsealModal } from "../components/UnsealModal";
 import { useAuthStore } from "../stores/authStore";
 import { useVaultStore } from "../stores/vaultStore";
+import { useNamespaceStore } from "../stores/namespaceStore";
 import * as api from "../lib/api";
 import { extractError, isVaultSealed } from "../lib/error";
 
@@ -32,6 +33,7 @@ export function LoginPage() {
   const sessionExpired = useAuthStore((s) => s.sessionExpired);
   const loadEntity = useAuthStore((s) => s.loadEntity);
   const rememberSession = useAuthStore((s) => s.rememberSession);
+  const landSession = useNamespaceStore((s) => s.landSession);
 
   /**
    * Run after every successful login (Token, UserPass, FIDO2, SSO).
@@ -86,6 +88,15 @@ export function LoginPage() {
     }
 
     setAuth(sessionToken, sessionPolicies);
+
+    // Multi-tenancy: land the session in the namespace this token is bound to
+    // and learn which namespaces it may switch between. A principal restricted
+    // to a child namespace gets a token bound there — one that may not operate
+    // at root — so without this every post-login fetch would 403 despite a
+    // successful sign-in. Awaited (not fire-and-forget) so the namespace header
+    // is in place before the dashboard's first fetches go out.
+    await landSession();
+
     try {
       const list = await api.listVaultProfiles();
       if (list.lastUsedId) {

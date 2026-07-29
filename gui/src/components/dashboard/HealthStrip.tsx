@@ -30,9 +30,18 @@ export function HealthStrip({ sealed, server }: HealthStripProps) {
       )}
       {server && (
         <>
-          <Pill icon="🗄" text={server.storage_type || "storage"} />
-          <Pill icon="◴" text={`up ${formatUptime(server.uptime_seconds)}`} />
-          <Pill icon="" text={`v${server.version}`} />
+          {/* Version / storage / uptime belong to `/sys/info`'s
+              authenticated disclosure tier, so they arrive empty (and
+              uptime as 0) if the caller ever loses its token. Omit those
+              pills rather than rendering a bare "v" and "up —", which
+              reads as a broken server instead of a missing credential. */}
+          {server.storage_type && (
+            <Pill icon="🗄" text={server.storage_type} />
+          )}
+          {server.uptime_seconds > 0 && (
+            <Pill icon="◴" text={`up ${formatUptime(server.uptime_seconds)}`} />
+          )}
+          {server.version && <Pill icon="" text={`v${server.version}`} />}
           <Pill
             icon=""
             text={server.connection_kind === "remote" ? "remote" : "embedded"}

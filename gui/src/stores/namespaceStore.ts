@@ -5,8 +5,13 @@ import * as api from "../lib/api";
 // namespace for display continuity; `LIST_KEY` caches the last-known
 // namespace list so the sidebar switcher can paint instantly on a cold
 // webview reload before the async re-fetch resolves.
+//
+// `LIST_KEY` is versioned: the list now holds the *operable* namespaces of the
+// session token (including `""` for root) rather than the child paths under
+// root, so a pre-v2 cache would make the switcher silently drop the root option
+// until the live fetch resolved.
 const ACTIVE_KEY = "bv.activeNamespace";
-const LIST_KEY = "bv.namespaces";
+const LIST_KEY = "bv.namespaces.v2";
 
 function readCachedList(): string[] {
   try {
@@ -29,7 +34,24 @@ function readCachedActive(): string {
   }
 }
 
+function persist(namespaces: string[] | null, active: string | null) {
+  try {
+    if (namespaces) localStorage.setItem(LIST_KEY, JSON.stringify(namespaces));
+    if (active !== null) {
+      if (active) localStorage.setItem(ACTIVE_KEY, active);
+      else localStorage.removeItem(ACTIVE_KEY);
+    }
+  } catch {
+    /* storage unavailable — in-memory state still holds */
+  }
+}
+
 interface NamespaceState {
+  /**
+   * Namespaces the session token may operate in, sorted. The root namespace is
+   * the empty string, so `""` is present exactly when the caller may operate at
+   * root — a tenant-only principal gets a list without it.
+   */
   namespaces: string[];
   active: string;
   /** True once a live fetch has resolved at least once this session. */
@@ -43,6 +65,17 @@ interface NamespaceState {
   ensureLoaded: () => Promise<void>;
   /** Force a live re-fetch (e.g. after creating/deleting a namespace). */
   refresh: () => Promise<void>;
+  /**
+   * Run once per successful login: discover the namespaces this session may
+   * operate in and land it in the namespace its token is actually bound to.
+   *
+   * A principal restricted to a child namespace gets a token bound there, and
+   * such a token may not operate at root — so leaving the session's active
+   * namespace at the default would make every first data fetch 403 even though
+   * the login succeeded. Resolves silently to the previous (root) behaviour
+   * when namespace discovery is unavailable.
+   */
+  landSession: () => Promise<void>;
   /** Set the backend session's active namespace and mirror it locally. */
   setActive: (path: string) => Promise<void>;
   /**
@@ -74,8 +107,14 @@ export const useNamespaceStore = create<NamespaceState>((set, get) => ({
     // an *empty* list ([]) — the latter is a real "single-tenant, no child
     // namespaces" answer we cache, the former would wrongly wipe a good
     // cached list and hide the switcher until the next app restart.
+    //
+    // `namespaces-self` rather than `list_namespaces`: the latter walks the
+    // sudo-gated `sys/namespaces` CRUD surface, so it 403s for every non-admin
+    // and would leave a tenant user with no switcher at all. This one is
+    // filtered server-side to what the caller can actually reach, so admins
+    // still see the whole tree.
     const list = await api
-      .listNamespaces()
+      .namespacesSelf()
       .then((r) => r.namespaces)
       .catch(() => null);
     const current = await api.getActiveNamespace().catch(() => null);
@@ -86,15 +125,7 @@ export const useNamespaceStore = create<NamespaceState>((set, get) => ({
       loaded: true,
     }));
 
-    try {
-      if (list) localStorage.setItem(LIST_KEY, JSON.stringify(list));
-      if (current !== null) {
-        if (current) localStorage.setItem(ACTIVE_KEY, current);
-        else localStorage.removeItem(ACTIVE_KEY);
-      }
-    } catch {
-      /* storage unavailable — in-memory state still holds */
-    }
+    persist(list, current);
   },
 
   ensureLoaded: async () => {
@@ -102,15 +133,31 @@ export const useNamespaceStore = create<NamespaceState>((set, get) => ({
     await get().refresh();
   },
 
+  landSession: async () => {
+    const self = await api.namespacesSelf().catch(() => null);
+    if (!self) {
+      // No answer (older server, transient failure): keep the pre-existing
+      // behaviour of starting at root rather than guessing a namespace.
+      set({ namespaces: [], active: "", loaded: true });
+      persist([], "");
+      return;
+    }
+    const active = self.token_namespace;
+    // Mirror the token's binding onto the session so every subsequent request
+    // carries the matching `X-BastionVault-Namespace` header.
+    try {
+      await api.setActiveNamespace(active);
+    } catch {
+      /* the header stays at root; the switcher still shows what's reachable */
+    }
+    set({ namespaces: self.namespaces, active, loaded: true });
+    persist(self.namespaces, active);
+  },
+
   setActive: async (path: string) => {
     await api.setActiveNamespace(path);
     set({ active: path });
-    try {
-      if (path) localStorage.setItem(ACTIVE_KEY, path);
-      else localStorage.removeItem(ACTIVE_KEY);
-    } catch {
-      /* storage unavailable — in-memory state still holds */
-    }
+    persist(null, path);
   },
 
   reset: () => {

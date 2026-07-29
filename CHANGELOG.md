@@ -45,6 +45,102 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.38.2] - 2026-07-29
+
+### Added
+- **`GET /v2/sys/namespaces-self` -- which namespaces may this token use?**
+  (`src/modules/system/mod.rs::handle_namespaces_self`, `src/http/sys.rs`,
+  `gui/src-tauri/src/commands/namespaces.rs::namespaces_self`) -- returns
+  `{namespaces, token_namespace, root}`: the namespaces the *calling token* may
+  operate in, plus the one it is bound to. The `sys/namespaces` CRUD surface is
+  root/sudo gated, so a tenant principal had no way to enumerate even the
+  namespace it had just logged into, and the sidebar switcher (built on
+  `list_namespaces`) either showed nothing or offered tenants the caller would be
+  403'd in. Membership is decided by
+  `token_binding::token_operable_resolved` -- the exact verdict
+  `enforce_request_token_binding` applies per request -- so the list can never
+  advertise reach the caller does not have, while a root or child-visible token
+  correctly sees the whole subtree. The root namespace participates as the empty
+  string. Granted by the built-in `default` and `namespace-self` policies (it is
+  caller-filtered, so it is safe for any authenticated token; `default` is
+  force-reloaded at every unseal, so existing vaults pick the grant up on the
+  next boot). (Phase 5, `features/namespaces-multitenancy.md`)
+
+### Changed
+- **The namespace switcher lists only the namespaces the session can use**
+  (`gui/src/components/NamespaceSwitcher.tsx`,
+  `gui/src/stores/namespaceStore.ts`) -- options now come from
+  `sys/namespaces-self` rather than the admin-only namespace walk, root is
+  offered only when the session may actually operate there, and the picker hides
+  itself when there is a single namespace to choose from (a single-tenant vault,
+  or a principal restricted to exactly one tenant). The `localStorage` list cache
+  is versioned to `bv.namespaces.v2` because the cached shape changed (it now
+  carries `""` for root), so a stale v1 cache cannot make the switcher drop the
+  root option. Covered by `gui/src/test/stores.test.ts`.
+- **The File -> Backup menu is hidden from sessions without the `root` policy**
+  (`gui/src/components/Layout.tsx`, `gui/src/components/BackupModal.tsx`) --
+  full-vault export and restore are gated on the literal `root` policy inside
+  the Tauri commands (`commands/backup.rs::require_root`), and no auth backend
+  can mint a root token: the token store rejects it outright ("auth methods
+  cannot create root tokens"). So on any userpass / AppRole / FIDO2 session the
+  two menu items were guaranteed dead ends that only failed *after* the
+  operator typed a 16-character password twice, with a bare
+  ``backup operations require the `root` policy`` toast. `Layout` now withholds
+  the handlers unless the session carries `root`, which makes `AppMenu` drop
+  the whole Backup submenu. The command-side check remains the security
+  boundary -- this is UX only, and it leaks nothing: the caller's own policy
+  set is already client-side state. Covered by
+  `gui/src/test/backupMenuGate.test.tsx` (3 tests).
+
+### Fixed
+- **A user with no access to the root namespace can sign in again**
+  (`src/modules/namespace/ns_assignment.rs`,
+  `src/modules/namespace/token_binding.rs`, the three login backends) -- a
+  principal restricted via `sys/identity/ns-assignment` to a child namespace got
+  `HTTP 403: Permission denied` on a correct password, from any client without a
+  namespace picker. The GUI login page (and the CLI without `-namespace`) sends no
+  `X-BastionVault-Namespace` header, so the login resolved to root and
+  `enforce_login_assignment` -- correctly fail-closed -- refused it, leaving the
+  credential unable to authenticate *anywhere*. Login handlers now resolve the
+  namespace through `resolve_login_namespace_for_principal`, which distinguishes
+  "give me the default namespace" from "give me root": with no header the login
+  binds to the principal's **first assigned namespace**
+  (`default_login_namespace`; the record preserves the operator-authored order),
+  while a namespace named **explicitly** -- including root as `"/"` -- still fails
+  closed. This cannot widen access, since the chosen path always comes from the
+  principal's own assignment, so `enforce_login_assignment` still holds on it; the
+  redirection is logged to the `security` target. Applies to userpass password,
+  userpass-FIDO2, and AppRole logins. Covered logically by
+  `modules::namespace::tests::test_namespace_login_assignment_enforced` /
+  `…::test_namespaces_self_reports_only_operable_namespaces` and end-to-end over
+  HTTP by
+  `http::sys::namespace_route_tests::test_namespaces_self_over_http_for_a_tenant_user`.
+- **A tenant session starts in its own namespace instead of 403ing at root**
+  (`gui/src/stores/namespaceStore.ts::landSession`,
+  `gui/src/routes/LoginPage.tsx`, `gui/src/stores/authStore.ts`) -- a token bound
+  to a child namespace may not operate at root, so even after the login succeeded
+  every first data fetch failed while the session's active namespace sat at the
+  default. Each login (and each session restored after a vault switch) now lands
+  on the token's own `token_namespace` before the dashboard's fetches go out, and
+  falls back to root when namespace discovery is unavailable.
+- **Dashboard health strip shows uptime, version and storage again on a remote
+  connection** (`gui/src-tauri/src/commands/system.rs`) -- the badges rendered
+  `up --`, a bare `v` and a `storage` placeholder against a perfectly healthy
+  server. `get_server_info` called `/v1/sys/info` on the *unbound* `Client` the
+  connect flow stashes on `AppState`, so it landed in the anonymous disclosure
+  tier introduced in 0.37.6, where `version` / `started_at` /
+  `uptime_seconds` / `storage_type` are omitted from the response entirely. The
+  remote path now attaches the session token per-request via `with_token`, the
+  way the plugin commands already did. Embedded mode was never affected (it
+  reads the in-process `server_info` helpers). Regression-guarded by
+  `http::sys::sys_info_disclosure_tests::api_client_needs_a_bound_token_for_the_full_payload`,
+  which asserts both outcomes at the `api::Client` layer that broke.
+- **Health strip omits withheld badges instead of faking them**
+  (`gui/src/components/dashboard/HealthStrip.tsx`) -- the component documented
+  that it "quietly omits" what it lacks but rendered empty placeholders. A
+  token lost mid-session now drops those pills rather than making the server
+  look broken.
+
 ## [0.38.1] - 2026-07-29
 
 ### Security

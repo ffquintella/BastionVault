@@ -136,6 +136,16 @@ path "sys/capabilities-self" {
     capabilities = ["update"]
 }
 
+# Allow a token to discover which namespaces it may operate in. The handler
+# filters through the caller's own binding + assignment verdict, so it can
+# only ever return namespaces the caller already reaches — safe for every
+# authenticated token, and the only way a tenant principal (which has no
+# grant on the root/sudo-gated `sys/namespaces` CRUD surface) can learn the
+# namespace it just logged into.
+path "sys/namespaces-self" {
+    capabilities = ["read"]
+}
+
 # Allow a token to look up its own entity by id or name
 path "identity/entity/id/{{identity.entity.id}}" {
   capabilities = ["read"]
@@ -350,6 +360,9 @@ path "auth/token/audit-login" { capabilities = ["update"] }
 # --- Capability / ACL introspection ---
 path "sys/capabilities-self"          { capabilities = ["update"] }
 path "sys/internal/ui/resultant-acl"  { capabilities = ["read"] }
+
+# --- Which namespaces this token may operate in (caller-filtered) ---
+path "sys/namespaces-self"            { capabilities = ["read"] }
 
 # --- Caller-introspecting identity lookups (only ever return the caller) ---
 path "identity/entity/self"   { capabilities = ["read"] }

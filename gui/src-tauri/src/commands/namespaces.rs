@@ -46,6 +46,20 @@ pub struct NamespaceListResult {
     pub namespaces: Vec<String>,
 }
 
+/// The namespaces the *current session's token* may operate in, from the
+/// caller-introspecting `sys/namespaces-self` route.
+#[derive(Serialize)]
+pub struct NamespacesSelfResult {
+    /// Operable namespace paths, sorted. The root namespace is the empty string,
+    /// so it is present here exactly when the caller may operate at root.
+    pub namespaces: Vec<String>,
+    /// The namespace the token is bound to (`""` = root) — where a session
+    /// should start.
+    pub token_namespace: String,
+    /// True when the token carries the `root` policy (operable everywhere).
+    pub root: bool,
+}
+
 fn u64_at(data: Option<&Map<String, Value>>, key: &str) -> u64 {
     data.and_then(|d| d.get("quotas"))
         .and_then(|q| q.get(key))
@@ -135,6 +149,39 @@ pub async fn list_namespaces(state: State<'_, AppState>) -> CmdResult<NamespaceL
     }
     namespaces.sort();
     Ok(NamespaceListResult { namespaces })
+}
+
+/// The namespaces the session token may operate in. Unlike [`list_namespaces`]
+/// — which walks the root/sudo-gated `sys/namespaces` CRUD surface and therefore
+/// only works for an admin — this is granted to every authenticated token, so it
+/// is what the namespace switcher and the post-login landing logic use: a tenant
+/// principal gets exactly its own namespaces, an admin gets the whole tree.
+///
+/// Root-scoped on purpose: the answer is a property of the token, not of whatever
+/// namespace the switcher currently has selected.
+#[tauri::command]
+pub async fn namespaces_self(state: State<'_, AppState>) -> CmdResult<NamespacesSelfResult> {
+    let resp = make_request_root(&state, Operation::Read, "sys/namespaces-self".to_string(), None)
+        .await?;
+    let data = resp.and_then(|r| r.data);
+    let namespaces = data
+        .as_ref()
+        .and_then(|d| d.get("namespaces"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let token_namespace = data
+        .as_ref()
+        .and_then(|d| d.get("token_namespace"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let root = data
+        .as_ref()
+        .and_then(|d| d.get("root"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok(NamespacesSelfResult { namespaces, token_namespace, root })
 }
 
 #[tauri::command]

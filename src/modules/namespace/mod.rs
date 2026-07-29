@@ -998,8 +998,16 @@ mod tests {
             core.handle_request(&mut req).await
         }
 
-        // Returns Ok/Err so we can assert both success and denial.
+        // Returns Ok/Err so we can assert both success and denial. An empty `ns`
+        // sends **no** header — an unscoped login, i.e. "give me the default
+        // namespace" rather than "give me root". Pass "/" to name root
+        // explicitly.
         async fn try_login(core: &Arc<Core>, ns: &str) -> Result<(), RvError> {
+            login_ns(core, ns).await.map(|_| ())
+        }
+
+        /// The namespace the issued token ended up bound to.
+        async fn login_ns(core: &Arc<Core>, ns: &str) -> Result<String, RvError> {
             let mut req = Request::new("auth/userpass/login/alice");
             req.operation = Operation::Write;
             req.body = json!({ "password": "pw-123456" }).as_object().cloned();
@@ -1008,7 +1016,11 @@ mod tests {
                 h.insert("x-bastionvault-namespace".to_string(), ns.to_string());
             }
             req.headers = Some(h);
-            core.handle_request(&mut req).await.map(|_| ())
+            let resp = core.handle_request(&mut req).await?;
+            let auth = resp
+                .and_then(|r| r.auth)
+                .ok_or_else(|| crate::bv_error_string!("login returned no auth"))?;
+            Ok(crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata).0)
         }
 
         test_mount_auth_api(&core, &root, "userpass", "userpass").await;
@@ -1058,11 +1070,25 @@ mod tests {
         .unwrap();
         assert_eq!(read.data.unwrap()["namespaces"][0], "tenant-a");
 
-        // tenant-a and its descendant are allowed; tenant-b and root are denied.
+        // tenant-a and its descendant are allowed; tenant-b is denied, and so is
+        // root when it is named *explicitly* ("/" — an empty header is no header).
         try_login(&core, "tenant-a").await.unwrap();
         try_login(&core, "tenant-a/sub").await.unwrap();
         assert!(try_login(&core, "tenant-b").await.is_err(), "unassigned namespace must be denied");
-        assert!(try_login(&core, "").await.is_err(), "root must be denied once restricted");
+        assert!(
+            try_login(&core, "/").await.is_err(),
+            "root must be denied once restricted, when asked for explicitly"
+        );
+
+        // An *unscoped* login (no header) asks for the default namespace, not for
+        // root specifically. Denying it would leave alice unable to sign in from
+        // any client without a namespace picker, so it lands in her first
+        // assigned namespace instead.
+        assert_eq!(
+            login_ns(&core, "").await.unwrap(),
+            "tenant-a",
+            "an unscoped login must land in the principal's assigned namespace"
+        );
 
         // Clearing the restriction (empty list) restores unrestricted access.
         ns_req(
@@ -1076,7 +1102,81 @@ mod tests {
         .await
         .unwrap();
         try_login(&core, "tenant-b").await.unwrap();
-        try_login(&core, "").await.unwrap();
+        // Unrestricted again ⇒ an unscoped login is back to root.
+        assert_eq!(login_ns(&core, "").await.unwrap(), "");
+    }
+
+    /// `sys/namespaces-self` is the only namespace list a tenant principal can
+    /// read: the CRUD surface is root/sudo gated, so without it a restricted user
+    /// cannot even discover the namespace it just logged into, and a namespace
+    /// picker has nothing safe to show.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_namespaces_self_reports_only_operable_namespaces() {
+        use crate::logical::{Operation, Request};
+        use crate::test_utils::{test_mount_auth_api, test_write_api};
+        use std::collections::HashMap;
+
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_namespaces_self").await;
+
+        async fn self_list(core: &Arc<Core>, token: &str) -> Result<Vec<String>, RvError> {
+            let mut req = Request::new("sys/namespaces-self");
+            req.operation = Operation::Read;
+            req.client_token = token.to_string();
+            req.headers = Some(HashMap::new());
+            let resp = core.handle_request(&mut req).await?;
+            Ok(resp
+                .and_then(|r| r.data)
+                .and_then(|d| d.get("namespaces").cloned())
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect())
+        }
+
+        test_mount_auth_api(&core, &root, "userpass", "userpass").await;
+        test_write_api(
+            &core,
+            &root,
+            "auth/userpass/users/alice",
+            true,
+            json!({ "password": "pw-123456" }).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+
+        let store = store_of(&core);
+        store.create("tenant-a", NamespaceQuotas::default(), false).await.unwrap();
+        store.create("tenant-a/sub", NamespaceQuotas::default(), false).await.unwrap();
+        store.create("tenant-b", NamespaceQuotas::default(), false).await.unwrap();
+
+        // Root sees every namespace, root itself included as the empty string.
+        let all = self_list(&core, &root).await.unwrap();
+        assert_eq!(all, vec!["", "tenant-a", "tenant-a/sub", "tenant-b"]);
+
+        // Restrict alice to tenant-a, then sign her in without naming a
+        // namespace — she lands in tenant-a.
+        let assign = NsAssignmentStore::new(&core).unwrap();
+        assign
+            .set(&store, "userpass/", "alice", vec!["tenant-a".into()])
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mut req = Request::new("auth/userpass/login/alice");
+        req.operation = Operation::Write;
+        req.body = json!({ "password": "pw-123456" }).as_object().cloned();
+        req.headers = Some(HashMap::new());
+        let auth = core.handle_request(&mut req).await.unwrap().unwrap().auth.unwrap();
+        assert_eq!(
+            token_binding::binding_from_metadata(&auth.metadata).0,
+            "tenant-a"
+        );
+
+        // She sees her assigned namespace and its descendant (the assignment
+        // covers descendants) — never root, and never a sibling tenant.
+        let mine = self_list(&core, &auth.client_token).await.unwrap();
+        assert_eq!(mine, vec!["tenant-a", "tenant-a/sub"]);
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

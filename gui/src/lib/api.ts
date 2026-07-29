@@ -534,6 +534,24 @@ export const writePolicyTests = (name: string, cases: PolicyTestCase[]) =>
 // Namespaces (multi-tenancy)
 export const listNamespaces = () =>
   invoke<NamespaceListResult>("list_namespaces");
+
+/** The namespaces the *session token* may operate in.
+ *
+ *  `namespaces` is sorted and uses `""` for the root namespace, so root is
+ *  present exactly when the caller may operate there. `token_namespace` is the
+ *  namespace the token is bound to — where the session should start.
+ *
+ *  Unlike {@link listNamespaces} (which walks the sudo-gated `sys/namespaces`
+ *  CRUD surface and only works for an admin) this is granted to every
+ *  authenticated token, so it is the source of truth for the namespace switcher
+ *  and for post-login landing. */
+export interface NamespacesSelfResult {
+  namespaces: string[];
+  token_namespace: string;
+  root: boolean;
+}
+export const namespacesSelf = () =>
+  invoke<NamespacesSelfResult>("namespaces_self");
 export const readNamespace = (path: string) =>
   invoke<NamespaceInfo>("read_namespace", { path });
 export const writeNamespace = (

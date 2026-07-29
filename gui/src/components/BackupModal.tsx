@@ -21,11 +21,17 @@ interface BackupModalProps {
  *
  * Both flows enforce the same minimum password length (16 chars).
  * Confirm-password is required on Export; Restore only needs the
- * single password the file was created with. Root-policy gating is
- * a server-side check inside the Tauri command — we'd rather not
- * leak "you're not root" before the user types a password, so the
- * modal is openable for anyone and the toast surfaces the error if
- * the command rejects.
+ * single password the file was created with.
+ *
+ * Root-policy gating is enforced inside the Tauri command
+ * (`commands/backup.rs::require_root`) and that remains the security
+ * boundary. `Layout` additionally hides the Backup menu items from
+ * sessions whose policies lack `root`, so this modal is normally
+ * unreachable for them: no auth backend can mint a root token, which
+ * made the old "open it for everyone and let the toast explain"
+ * behaviour a guaranteed dead end after typing a 16-char password
+ * twice. Nothing here leaks that fact — the caller's own policy set
+ * is already client-side state.
  */
 export function BackupModal({ mode, onClose }: BackupModalProps) {
   const { toast } = useToast();

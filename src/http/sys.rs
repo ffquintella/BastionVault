@@ -381,6 +381,21 @@ async fn sys_namespace_list_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// GET `/sys/namespaces-self` — the namespaces the calling token may operate
+/// in. Caller-introspecting sibling of `/sys/namespaces`; needs its own shim for
+/// the same reason (the `/sys` scope would 404 it before the logical catch-all).
+/// No namespace header is forwarded: the answer is a property of the token, not
+/// of whichever tenant the client currently has selected.
+async fn sys_namespaces_self_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/namespaces-self".to_string();
+    r.operation = Operation::Read;
+    handle_request(core, &mut r).await
+}
+
 /// GET / POST|PUT / DELETE `/sys/namespaces/{path}` — read metadata + quotas,
 /// create-or-update, or delete a namespace by slash-delimited path. HTTP shim
 /// over the sys-backend logical route `namespaces/{path}`.
@@ -4134,6 +4149,13 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
                 .route(web::method(list_method()).to(sys_namespace_list_request_handler))
                 .route(web::get().to(sys_namespace_list_request_handler)),
         )
+        // Caller-introspecting namespace list. Distinct literal from
+        // `/namespaces/{path:.*}` (which cannot match `-self`), but registered
+        // first so the intent stays obvious.
+        .service(
+            web::resource("/namespaces-self")
+                .route(web::get().to(sys_namespaces_self_request_handler)),
+        )
         .service(
             web::resource("/namespaces/{path:.*}")
                 .route(web::get().to(sys_namespace_path_request_handler))
@@ -4404,6 +4426,47 @@ mod sys_info_disclosure_tests {
             "an unrecognised token must not unlock the build version: {resp:?}"
         );
     }
+
+    /// Regression guard for the GUI's health strip rendering "up —", an
+    /// empty version and a "storage" placeholder against a healthy remote
+    /// server: `Client::sys().info()` reaches the authenticated tier only
+    /// when the caller binds a token with `with_token`. The GUI's connect
+    /// flow stashes an unbound `Client`, so
+    /// `commands::system::get_server_info` must attach the session token
+    /// per-request — this asserts the two outcomes it picks between.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn api_client_needs_a_bound_token_for_the_full_payload() {
+        let mut server = TestHttpServer::new("test_sys_info_api_client_binding", true).await;
+        server.token = server.root_token.clone();
+
+        // Same handle shape the GUI stashes on connect, minus the token.
+        let unbound = crate::api::Client::new()
+            .with_addr(&format!("http://{}", server.listen_addr))
+            .build();
+
+        let anon = unbound.sys().info().unwrap();
+        let anon_body = anon.response_data.as_ref().unwrap();
+        assert_eq!(anon.response_status, 200, "{anon_body:?}");
+        assert!(
+            anon_body.get("uptime_seconds").is_none(),
+            "an unbound client must not see uptime — this is the state that rendered \"up —\": {anon_body:?}"
+        );
+
+        let bound = unbound.with_token(&server.root_token);
+        let auth = bound.sys().info().unwrap();
+        let auth_body = auth.response_data.as_ref().unwrap();
+        assert_eq!(auth.response_status, 200, "{auth_body:?}");
+        assert!(
+            auth_body["uptime_seconds"].as_i64().is_some(),
+            "binding the session token must surface uptime: {auth_body:?}"
+        );
+        assert_eq!(
+            auth_body["version"].as_str(),
+            Some(crate::server_info::version()),
+            "{auth_body:?}"
+        );
+        assert!(auth_body["storage_type"].as_str().is_some(), "{auth_body:?}");
+    }
 }
 
 #[cfg(test)]
@@ -4590,6 +4653,68 @@ mod namespace_route_tests {
         // to the logical namespace-list handler, which returns 200 with a
         // (possibly empty) `keys` list.
         assert_eq!(status, 200, "LIST /v1/sys/namespaces must reach the logical handler: {resp:?}");
+    }
+
+    /// A tenant-restricted user must be able to sign in with no namespace named
+    /// and then discover its own namespace over HTTP. Both halves used to fail:
+    /// the login 403'd at root, and `sys/namespaces` is sudo-gated so even a
+    /// successful tenant login could not enumerate anything.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_namespaces_self_over_http_for_a_tenant_user() {
+        let mut server = TestHttpServer::new("test_namespaces_self_http", true).await;
+        server.token = server.root_token.clone();
+        let root = server.root_token.clone();
+
+        // Admin setup: a tenant, an account, and a restriction to that tenant.
+        for path in ["sys/namespaces/tenant-a", "sys/namespaces/tenant-a/sub"] {
+            let (status, resp) = server
+                .request("POST", path, json!({}).as_object().cloned(), Some(&root), None)
+                .unwrap();
+            assert!(status == 200 || status == 204, "create {path} failed: {status} {resp:?}");
+        }
+        assert!(server.mount_auth("pass", "userpass").is_ok());
+        let (status, resp) = server
+            .write(
+                "auth/pass/users/tina",
+                json!({ "password": "tenant-pw-1", "policies": "standard-user" })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert!(status == 200 || status == 204, "create user failed: {status} {resp:?}");
+        let (status, resp) = server
+            .write(
+                "sys/identity/ns-assignment/userpass/tina",
+                json!({ "namespaces": ["tenant-a"] }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert!(status == 200 || status == 204, "assignment failed: {status} {resp:?}");
+
+        // Login with no `X-BastionVault-Namespace` header — exactly what the GUI
+        // login page sends. This used to come back 403 "permission denied".
+        let (status, resp) = server
+            .login(
+                "auth/pass/login/tina",
+                json!({ "password": "tenant-pw-1" }).as_object().cloned(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(status, 200, "an unscoped tenant login must succeed: {resp:?}");
+        let tina = resp["auth"]["client_token"].as_str().expect("client_token").to_string();
+
+        // …and the token can enumerate the namespaces it may operate in. v2-only
+        // shim, so point the client there.
+        server.url_prefix = server.url_prefix.replace("/v1", "/v2");
+        let (status, resp) = server.read("sys/namespaces-self", Some(&tina)).unwrap();
+        assert_eq!(status, 200, "namespaces-self must be granted to any token: {resp:?}");
+        let data = resp.get("data").cloned().unwrap_or(resp);
+        assert_eq!(data["token_namespace"].as_str(), Some("tenant-a"));
+        let seen: Vec<&str> =
+            data["namespaces"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        // Her tenant and its descendant — never root, which she cannot operate in.
+        assert_eq!(seen, vec!["tenant-a", "tenant-a/sub"]);
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

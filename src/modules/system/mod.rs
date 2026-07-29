@@ -158,6 +158,7 @@ impl SystemBackend {
         let sys_backend_sso_settings_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_sso_providers = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespace_list = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_namespaces_self = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespace_self_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespace_self_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespace_read = self.self_ptr.upgrade().unwrap().clone();
@@ -790,6 +791,24 @@ impl SystemBackend {
                         {op: Operation::Write, handler: sys_backend_namespace_self_write.handle_namespace_self_write}
                     ],
                     help: "List child namespaces, or read/update the caller's own (root when unscoped) namespace config."
+                },
+                {
+                    // Caller-introspecting namespace list: the namespaces the
+                    // calling token may actually operate in. Distinct route (not
+                    // `namespaces`) because the CRUD surface above is root/sudo
+                    // gated, which leaves a tenant principal unable to discover
+                    // even its own namespace. Safe for every authenticated token —
+                    // the handler filters through the same binding + assignment
+                    // verdict the request-time enforcer uses, so it can only ever
+                    // reveal namespaces the caller already reaches. Registered
+                    // before the `namespaces/(?P<path>.+)` catch-all for clarity;
+                    // the patterns cannot collide (`-self` is not under
+                    // `namespaces/`).
+                    pattern: "namespaces-self$",
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_namespaces_self.handle_namespaces_self}
+                    ],
+                    help: "List the namespaces the calling token may operate in."
                 },
                 {
                     // Read / create-or-update / delete a namespace by path.
@@ -3487,6 +3506,66 @@ impl SystemBackend {
         let parent = namespace_header_from_map(req.headers.as_ref()).unwrap_or_default();
         let children = store.list_children(&parent).await?;
         Ok(Some(Response::list_response(&children)))
+    }
+
+    /// `GET sys/namespaces-self` — the namespaces the **calling token** may
+    /// operate in, plus the namespace it is bound to.
+    ///
+    /// Caller-introspecting counterpart to the root/sudo-gated `sys/namespaces`
+    /// CRUD surface: a tenant principal has no grant there, so without this route
+    /// it cannot discover even the namespace it just logged into, and a namespace
+    /// picker either shows nothing or offers tenants the caller will be 403'd in.
+    ///
+    /// Membership is decided by
+    /// [`token_operable_resolved`](crate::modules::namespace::token_binding::token_operable_resolved)
+    /// — the exact verdict `enforce_request_token_binding` applies per request —
+    /// so the list can never advertise reach the caller does not have, and a root
+    /// or child-visible token correctly sees the whole subtree. The root namespace
+    /// participates as the empty string, so an operable root shows up as `""`.
+    ///
+    /// Response: `{ namespaces: [...], token_namespace: "...", root: bool }`.
+    pub async fn handle_namespaces_self(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        // A `Read` route is only reachable authenticated; treat a missing auth as
+        // deny rather than as "root namespace only".
+        let auth = req.auth.clone().ok_or(RvError::ErrPermissionDenied)?;
+        let (token_ns, _) =
+            crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata);
+        let is_root = auth.policies.iter().any(|p| p == "root");
+
+        // Non-namespace builds (module absent) have exactly one namespace: root.
+        // Degrade to that rather than erroring — the caller only wants to know
+        // what it can switch between.
+        let Ok(store) = self.resolve_namespace_store() else {
+            let data = json!({ "namespaces": [""], "token_namespace": "", "root": is_root })
+                .as_object()
+                .cloned();
+            return Ok(Some(Response::data_response(data)));
+        };
+
+        let mut namespaces: Vec<String> = Vec::new();
+        for ns in store.list_all().await? {
+            if crate::modules::namespace::token_binding::token_operable_resolved(
+                &self.core, &auth, &ns.path,
+            )
+            .await
+            {
+                namespaces.push(ns.path);
+            }
+        }
+        namespaces.sort();
+
+        let data = json!({
+            "namespaces": namespaces,
+            "token_namespace": token_ns,
+            "root": is_root,
+        })
+        .as_object()
+        .cloned();
+        Ok(Some(Response::data_response(data)))
     }
 
     /// Read the caller's *own* namespace config — the namespace named by the

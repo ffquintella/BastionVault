@@ -502,11 +502,26 @@ pub async fn get_server_info(state: State<'_, AppState>) -> CmdResult<ServerInfo
     // Remote mode: ask the server. `/v1/sys/info` is the
     // authoritative source — version is the server's, not the GUI
     // binary's, so a mixed-version operator setup shows the truth.
+    //
+    // The route splits its answer into two disclosure tiers (see
+    // `src/http/sys.rs::ServerInfoResponse`): `initialized` / `sealed`
+    // are anonymous, while `version` / `started_at` / `uptime_seconds` /
+    // `storage_type` are omitted entirely unless the caller presents a
+    // live token. The connect flow stashes an *unbound* `Client` on
+    // AppState, so we must attach the session token per-request the way
+    // the plugin commands do — otherwise the dialog and the dashboard
+    // health strip render an empty version and "up —" against a
+    // perfectly healthy server.
     {
-        let client_guard = state.remote_client.lock().await;
-        if let Some(client) = client_guard.as_ref() {
+        // Clone the handle out and release the lock before taking
+        // `state.token` — holding two AppState mutexes across an await is
+        // how lock-order deadlocks get introduced.
+        let maybe_client = state.remote_client.lock().await.clone();
+        if let Some(client) = maybe_client {
             let endpoint = client.address.clone();
-            let resp = client.sys().info().map_err(|e| {
+            let token = state.token.lock().await.clone().unwrap_or_default();
+            let bound = client.with_token(&token);
+            let resp = bound.sys().info().map_err(|e| {
                 CommandError::from(format!("sys/info failed: {e}"))
             })?;
             let body = resp

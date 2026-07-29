@@ -7,6 +7,10 @@ import { useNamespaceStore } from "../stores/namespaceStore";
  * request carries the `X-BastionVault-Namespace` header — then reloads so all
  * pages re-fetch their data under the new tenant.
  *
+ * The list is the session token's *operable* namespaces (`sys/namespaces-self`),
+ * so it never offers a tenant the caller would just be 403'd in, and it hides
+ * entirely when there is only one to choose from.
+ *
  * State lives in `useNamespaceStore`, a module-level cache seeded from
  * `localStorage`. Because each page mounts its own `<Layout>`, an in-component
  * fetch would re-run on every navigation and briefly render nothing — the
@@ -37,10 +41,11 @@ export function NamespaceSwitcher() {
     }
   }
 
-  // Nothing to switch between — don't clutter the sidebar on single-tenant
-  // deployments that never created a child namespace. Seeded from cache, so
-  // multi-tenant sessions render immediately without a load flicker.
-  if (namespaces.length === 0 && !active) return null;
+  // Nothing to switch between — don't clutter the sidebar when the session has
+  // a single reachable namespace: a single-tenant deployment that never created
+  // a child, or a principal restricted to exactly one tenant. Seeded from cache,
+  // so multi-tenant sessions render immediately without a load flicker.
+  if (namespaces.length <= 1) return null;
 
   return (
     <div className="mt-3">
@@ -53,10 +58,12 @@ export function NamespaceSwitcher() {
         disabled={busy}
         className="w-full text-sm rounded-md bg-[var(--color-bg)] border border-[var(--color-border)] px-2 py-1.5 min-w-0 truncate"
       >
-        <option value="">root</option>
+        {/* Options come from the session's *operable* namespaces, so root is
+            offered only when the caller may actually operate there — it arrives
+            as the empty string in the list rather than as a hardcoded entry. */}
         {namespaces.map((ns) => (
           <option key={ns} value={ns}>
-            {ns}
+            {ns === "" ? "root" : ns}
           </option>
         ))}
       </select>
