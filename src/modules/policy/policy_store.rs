@@ -146,6 +146,21 @@ path "sys/namespaces-self" {
     capabilities = ["read"]
 }
 
+# Allow a token to read the GUI Dashboard's operational snapshot. Every count in
+# the response (secret engines, auth methods, policies, entities) is built from
+# the caller's own ACL and active namespace, so it can only ever report what the
+# caller already reaches — the same reasoning that makes `sys/namespaces-self`
+# safe for any authenticated token. Without this grant the Dashboard is the
+# landing page for every non-root session and its only fetch always 403s.
+#
+# The deployment-wide audit counters in that response are NOT caller-filtered,
+# so `handle_dashboard_summary` omits them unless the caller can read
+# `sys/audit/events`. Keep the two in step: widening this grant must not start
+# handing global security telemetry to tenant tokens.
+path "sys/dashboard/summary" {
+    capabilities = ["read"]
+}
+
 # Allow a token to look up its own entity by id or name
 path "identity/entity/id/{{identity.entity.id}}" {
   capabilities = ["read"]

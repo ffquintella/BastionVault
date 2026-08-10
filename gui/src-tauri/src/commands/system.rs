@@ -997,10 +997,14 @@ pub struct DashboardSummary {
     pub namespace: String,
     pub seal: DashboardSeal,
     pub counts: DashboardCounts,
-    pub audit_24h_total: u64,
-    pub audit_24h_denied: u64,
-    pub audit_24h_write_failures: u64,
-    pub failed_logins_1h: u64,
+    /// Deployment-wide audit counters. `None` when the server omitted the
+    /// `audit_24h` / `attention` blocks because the caller cannot read
+    /// `sys/audit/events`. Kept optional rather than defaulted to 0 so the UI
+    /// renders "unavailable" instead of asserting that nothing failed.
+    pub audit_24h_total: Option<u64>,
+    pub audit_24h_denied: Option<u64>,
+    pub audit_24h_write_failures: Option<u64>,
+    pub failed_logins_1h: Option<u64>,
 }
 
 #[tauri::command]
@@ -1016,8 +1020,10 @@ pub async fn dashboard_summary(state: State<'_, AppState>) -> CmdResult<Dashboar
 
     let counts = data.get("counts").and_then(|v| v.as_object()).cloned().unwrap_or_default();
     let seal = data.get("seal").and_then(|v| v.as_object()).cloned().unwrap_or_default();
-    let audit = data.get("audit_24h").and_then(|v| v.as_object()).cloned().unwrap_or_default();
-    let attention = data.get("attention").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    // Absent (not empty) for a caller without audit visibility — see
+    // `DashboardSummary`. `None` here must stay distinct from `Some(0)`.
+    let audit = data.get("audit_24h").and_then(|v| v.as_object()).cloned();
+    let attention = data.get("attention").and_then(|v| v.as_object()).cloned();
     let u = |m: &serde_json::Map<String, Value>, k: &str| m.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
     let b = |m: &serde_json::Map<String, Value>, k: &str| m.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -1034,10 +1040,10 @@ pub async fn dashboard_summary(state: State<'_, AppState>) -> CmdResult<Dashboar
             policies: u(&counts, "policies"),
             entities: u(&counts, "entities"),
         },
-        audit_24h_total: u(&audit, "total"),
-        audit_24h_denied: u(&audit, "denied"),
-        audit_24h_write_failures: u(&audit, "write_failures"),
-        failed_logins_1h: u(&attention, "failed_logins_1h"),
+        audit_24h_total: audit.as_ref().map(|m| u(m, "total")),
+        audit_24h_denied: audit.as_ref().map(|m| u(m, "denied")),
+        audit_24h_write_failures: audit.as_ref().map(|m| u(m, "write_failures")),
+        failed_logins_1h: attention.as_ref().map(|m| u(m, "failed_logins_1h")),
     })
 }
 

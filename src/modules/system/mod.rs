@@ -3055,6 +3055,20 @@ impl SystemBackend {
         // the token may operate in the active namespace (or the request is
         // root-scoped), so the advertised capabilities are actionable.
         data.insert("namespace_operable".into(), Value::Bool(true));
+        // Report *which* namespaces those capabilities were resolved for, on this
+        // branch too. These used to be set only on the not-operable early return,
+        // so a successful call omitted them — and a client that defaults an absent
+        // string to `""` (the GUI's `capabilities_self` does) then reported a
+        // tenant session as sitting at root. Both fields carry the same meaning in
+        // both branches: `""` means the root namespace, and now says so because
+        // that is the answer, not because the key was missing.
+        let (token_ns, _) =
+            crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata);
+        data.insert("token_namespace".into(), Value::String(token_ns));
+        data.insert(
+            "active_namespace".into(),
+            Value::String(active_ns.unwrap_or_default()),
+        );
 
         Ok(Some(Response::data_response(Some(data))))
     }
@@ -3168,17 +3182,46 @@ impl SystemBackend {
             0
         };
 
-        // --- 24h audit-event total ------------------------------------
-        // Count change-history events from the last 24h. The bound is
-        // pushed into the collection: append-only stores range-scan only
-        // the recent tail and the small history sources are filtered by
-        // timestamp, so this no longer reads (and decrypts) all history
-        // just to produce a count.
+        // --- 24h audit counters (privileged) --------------------------
+        // Unlike the counts above, these are deployment-wide: they are not
+        // filtered by the caller's ACL and not scoped to `ns_path`. So they are
+        // only produced for a caller that can already read the audit trail
+        // itself. `default` grants `sys/dashboard/summary` to every
+        // authenticated token (the Dashboard is every session's landing page),
+        // and without this gate that grant would hand a tenant token the
+        // deployment's denial and failed-login rates — a recon signal the
+        // caller cannot otherwise obtain. Omitted, not zeroed: a zero is a
+        // factual claim ("nothing failed"), while an absent field lets the GUI
+        // distinguish "not visible to you" and hide the tiles.
+        // `ACL::capabilities` collapses a root token to the single capability
+        // `"root"` rather than enumerating grants, and `sys/audit/events` is
+        // sudo-gated via `root_paths` ("audit/*"), so an audit-capable operator
+        // presents `sudo`. Accept all three or the admin Dashboard loses the
+        // tiles it has always shown.
+        let audit_visible = acl
+            .as_ref()
+            .map(|a| {
+                a.capabilities("sys/audit/events")
+                    .iter()
+                    .any(|c| c == "root" || c == "sudo" || c == "read")
+            })
+            .unwrap_or(false);
+
         let now = chrono::Utc::now();
-        let audit_24h = self
-            .collect_audit_events_since(Some(now - chrono::Duration::hours(24)))
-            .await
-            .len();
+        let audit_counters = if audit_visible {
+            // Count change-history events from the last 24h. The bound is
+            // pushed into the collection: append-only stores range-scan only
+            // the recent tail and the small history sources are filtered by
+            // timestamp, so this no longer reads (and decrypts) all history
+            // just to produce a count.
+            let audit_24h = self
+                .collect_audit_events_since(Some(now - chrono::Duration::hours(24)))
+                .await
+                .len();
+            Some(audit_24h)
+        } else {
+            None
+        };
 
         // Request-level outcome counters. These are process-wide (not
         // per-namespace) — they describe the server's health, which is the
@@ -3189,12 +3232,10 @@ impl SystemBackend {
         // so a denial or failed login handled by another node would be
         // invisible to a summary served here. Audit-write failures have no
         // backing store yet, so they stay on the in-memory counter.
-        let denied_24h = self.count_denials_since(now - chrono::Duration::hours(24)).await;
-        let failed_logins_1h = self.count_failed_logins_since(now - chrono::Duration::hours(1)).await;
         let now_secs = now.timestamp();
         let stats = &self.core.stats;
 
-        let data = json!({
+        let mut data = json!({
             "version": "1",
             "seal": {
                 "sealed": self.core.sealed(),
@@ -3207,17 +3248,32 @@ impl SystemBackend {
                 "policies": policies,
                 "entities": entities,
             },
-            "audit_24h": {
-                "total": audit_24h,
-                "denied": denied_24h,
-                "write_failures": stats.audit_write_failures_24h(now_secs),
-            },
-            "attention": {
-                "failed_logins_1h": failed_logins_1h,
-            },
         })
         .as_object()
-        .cloned();
+        .cloned()
+        .unwrap_or_default();
+
+        // Privileged blocks are added only for an audit-capable caller, so the
+        // response shape itself carries the verdict (see `audit_visible`).
+        if let Some(audit_24h) = audit_counters {
+            let denied_24h = self.count_denials_since(now - chrono::Duration::hours(24)).await;
+            let failed_logins_1h =
+                self.count_failed_logins_since(now - chrono::Duration::hours(1)).await;
+            data.insert(
+                "audit_24h".to_string(),
+                json!({
+                    "total": audit_24h,
+                    "denied": denied_24h,
+                    "write_failures": stats.audit_write_failures_24h(now_secs),
+                }),
+            );
+            data.insert(
+                "attention".to_string(),
+                json!({ "failed_logins_1h": failed_logins_1h }),
+            );
+        }
+
+        let data = Some(data);
 
         Ok(Some(Response::data_response(data)))
     }
@@ -4919,6 +4975,40 @@ mod mod_system_tests {
             "root-scoped caps must surface: {at_root:?}"
         );
 
+        // Regression: the *operable* branch must report which namespaces the
+        // capabilities were resolved for. It used to set `namespace_operable`
+        // only, leaving both fields absent — and a client that defaults an
+        // absent string to `""` then rendered a tenant session as sitting at
+        // root. `""` must mean root because that is the answer, not because the
+        // key was missing, so assert presence explicitly and not just the value.
+        for k in ["token_namespace", "active_namespace"] {
+            assert!(
+                at_root.get(k).is_some(),
+                "{k} must be present on a successful capabilities-self: {at_root:?}"
+            );
+            assert_eq!(at_root[k], serde_json::json!(""), "{k} at root is the empty string");
+        }
+
+        // The tenant shape: a token minted *in* `nsa`, querying `nsa`, is
+        // operable and must name `nsa` on both fields rather than looking rootish.
+        let nsa_bound = login_ns(&server, Some("nsa"));
+        let in_nsa = caps_ns(&server, &nsa_bound, Some("nsa"));
+        assert_eq!(
+            in_nsa["namespace_operable"],
+            serde_json::json!(true),
+            "a token minted in nsa must be operable there: {in_nsa:?}"
+        );
+        assert_eq!(
+            in_nsa["token_namespace"],
+            serde_json::json!("nsa"),
+            "the token's own binding must be reported, not defaulted to root: {in_nsa:?}"
+        );
+        assert_eq!(
+            in_nsa["active_namespace"],
+            serde_json::json!("nsa"),
+            "the namespace the caps were resolved for must be reported: {in_nsa:?}"
+        );
+
         // child_visible_default honored at login: read the minted token's
         // binding straight from the login response's `auth.metadata` (no
         // follow-up call, which would need a per-namespace policy grant). A
@@ -5832,6 +5922,73 @@ mod mod_system_tests {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         assert!(audit_total >= 1, "the policy create should be in the 24h total: {ret:?}");
+    }
+
+    /// A plain authenticated principal (only the built-in `default` policy) can
+    /// read `sys/dashboard/summary` — the Dashboard is the landing page for every
+    /// session, so without the grant its single fetch always 403'd and the page
+    /// rendered nothing but "HTTP 403: Permission denied".
+    ///
+    /// The privileged half must stay privileged: the `audit_24h` / `attention`
+    /// blocks are deployment-wide (not ACL-filtered, not namespace-scoped), so
+    /// they are **omitted** for a caller that cannot read `sys/audit/events`.
+    /// Omitted rather than zeroed — a zero would assert "nothing failed" and
+    /// hand every tenant token the deployment's denial and failed-login rates.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_dashboard_summary_for_a_default_only_principal() {
+        let mut server =
+            TestHttpServer::new("test_dashboard_summary_default_only", true).await;
+        server.token = server.root_token.clone();
+        let root = server.root_token.clone();
+
+        let _ = server
+            .write("sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), None)
+            .unwrap();
+        let _ = server
+            .write(
+                "auth/pass/users/plainuser",
+                serde_json::json!({ "password": "dash-pw-plain-1", "token_policies": "default", "ttl": 0 })
+                    .as_object()
+                    .cloned(),
+                None,
+            )
+            .unwrap();
+        let token = server
+            .write(
+                "auth/pass/login/plainuser",
+                serde_json::json!({ "password": "dash-pw-plain-1" }).as_object().cloned(),
+                None,
+            )
+            .unwrap()
+            .1
+            .get("auth")
+            .and_then(|a| a.get("client_token"))
+            .and_then(|v| v.as_str())
+            .expect("client_token")
+            .to_string();
+
+        // The grant: this used to be a 403.
+        let (status, ret) = server.read("sys/dashboard/summary", Some(&token)).unwrap();
+        assert_eq!(status, 200, "`default` must be able to read the dashboard summary: {ret:?}");
+        assert!(ret.get("seal").is_some(), "seal block must be present: {ret:?}");
+        assert!(ret.get("counts").is_some(), "counts block must be present: {ret:?}");
+
+        // The gate: no audit visibility ⇒ no deployment-wide counters at all.
+        assert!(
+            ret.get("audit_24h").is_none(),
+            "a default-only caller must not receive deployment-wide audit counters: {ret:?}"
+        );
+        assert!(
+            ret.get("attention").is_none(),
+            "a default-only caller must not receive the failed-login rate: {ret:?}"
+        );
+
+        // Root still sees them, so the admin Dashboard is unchanged.
+        let root_ret = server.read("sys/dashboard/summary", Some(&root)).unwrap().1;
+        assert!(
+            root_ret.get("audit_24h").is_some() && root_ret.get("attention").is_some(),
+            "an audit-capable caller must still get both blocks: {root_ret:?}"
+        );
     }
 
     /// A permission-denied request and a failed login flow through the

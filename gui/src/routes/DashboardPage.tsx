@@ -244,7 +244,7 @@ export function DashboardPage() {
             label="Audit events 24h"
             value={audit24h}
             sub={
-              summary && summary.audit_24h_denied > 0
+              summary && summary.audit_24h_denied !== null && summary.audit_24h_denied > 0
                 ? `${summary.audit_24h_denied} denied`
                 : undefined
             }

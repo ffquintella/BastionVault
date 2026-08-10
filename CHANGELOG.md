@@ -45,6 +45,52 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.38.5] - 2026-08-10
+
+### Fixed
+- **`capabilities-self` says which namespace it answered for**
+  (`src/modules/system/mod.rs::handle_capabilities_self`) -- the handler set
+  `token_namespace` / `active_namespace` only on its *not-operable* early return.
+  A successful call omitted both, and `gui/src-tauri/src/commands/capabilities.rs`
+  defaults an absent string to `""` -- which is also the wire value for the root
+  namespace. So a healthy tenant session reported `token_namespace: ""`,
+  indistinguishable from "this token sits at root", and any consumer reasoning
+  about the caller's namespace from a successful response read it wrong. Both
+  fields are now populated on both branches, so `""` means root because that is
+  the answer rather than because the key was missing. No behaviour change to the
+  capability sets themselves. Covered by an extension to
+  `modules::system::mod_system_tests::test_capabilities_self_namespace_binding_aware`,
+  which asserts field *presence* (not just value) at root and asserts a token
+  minted in `nsa` reports `nsa` on both fields.
+
+### Fixed
+- **The Dashboard works for non-root sessions** (`src/modules/policy/policy_store.rs`,
+  `src/modules/system/mod.rs`, `gui/src-tauri/src/commands/system.rs`,
+  `gui/src/lib/api.ts`) -- `sys/dashboard/summary` was granted by **no policy at
+  all**, not even `administrator`, so only a `root` token (which bypasses ACL)
+  could read it. The Dashboard is every session's landing page and has no
+  navigation gate, so every non-root user landed on a page whose single fetch
+  403'd: a red `HTTP 403: Permission denied` banner over three `unavailable`
+  tiles. Invisible in admin testing, because root never hits it. The built-in
+  `default` policy now grants `read` on the path; `force_load_acl_policy`
+  rewrites `default` on every unseal, so existing vaults pick it up on the next
+  restart with no operator action.
+
+  The handler's counts (secret engines, auth methods, policies, entities) were
+  already built from the caller's own ACL and active namespace, so they were safe
+  to expose. Its `audit_24h` / `attention` counters were **not** -- they are
+  deployment-wide, neither ACL-filtered nor namespace-scoped -- so granting the
+  path to every authenticated token would have handed tenant principals the
+  deployment's denial and failed-login rates. Those two blocks are now emitted
+  only for a caller that can read `sys/audit/events` (accepting `read`, `sudo`,
+  or the collapsed `root` capability, so the admin Dashboard is unchanged).
+  **Omitted, not zeroed**: `DashboardSummary`'s four counters became `Option<u64>`
+  / `number | null` so the UI renders "unavailable" instead of asserting that
+  nothing failed. Covered by
+  `modules::system::mod_system_tests::test_dashboard_summary_for_a_default_only_principal`,
+  which asserts the 200, the absent privileged blocks, and that root still
+  receives both.
+
 ## [0.38.4] - 2026-07-29
 
 ### Fixed
