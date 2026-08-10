@@ -28,6 +28,11 @@ Cargo.lock
 # VIM temp file
 *.swp
 
+# npm dependencies and tool caches (the vitest run cache under
+# node_modules/.vite was tracked by accident and rewritten on every
+# `npx vitest run`; gui/.gitignore only covers gui/node_modules).
+node_modules/
+
 # Claude Code local settings (machine-local)
 .claude/
 .DS_Store
