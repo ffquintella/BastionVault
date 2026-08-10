@@ -45,6 +45,25 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Security
+- **Clear the two high-severity npm advisories in the GUI frontend**
+  (`gui/package-lock.json`) -- `npm audit` reports 0 vulnerabilities again.
+  Both were dev-only transitive dependencies and both fixes fell inside the
+  existing semver ranges, so this is a lockfile bump with no `package.json`
+  change.
+  - `nanoid` 3.3.16 -> 3.3.18 (GHSA-2v37-7h3g-55p8, CVSS 5.9): a custom
+    alphabet generator loops forever when asked for size zero (CWE-835).
+    Transitive via `vite` -> `postcss`, which calls it only to name build
+    artifacts with its own fixed non-zero size -- unreachable for us, and
+    build-time only in any case.
+  - `undici` 7.28.0 -> 7.29.0 (five advisories, worst GHSA-4cwx-7wf7-3272,
+    CVSS 7.4): cross-user disclosure and a parse-time crash via degenerate
+    private `Cache-Control` directives, plus response desynchronization in
+    the retry interceptor, CRLF injection through a blob body `type`, and
+    cookie attribute injection. All are HTTP-client bugs; `undici` reaches us
+    only as `jsdom`'s fetch implementation under `vitest`, so nothing shipped
+    to users was exposed.
+
 ## [0.38.7] - 2026-08-10
 
 ### Fixed
