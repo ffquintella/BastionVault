@@ -296,6 +296,38 @@ impl Server {
         }
         let trusted_proxies = web::Data::new(trusted_proxies);
 
+        // `/metrics` access policy. Every scrape that is not cluster-local
+        // or inside the configured allowlist must present a token with
+        // `read` on `sys/metrics`. A bad CIDR is dropped with a warning
+        // rather than aborting startup — dropping it fails closed (that
+        // source then needs a token), so the rolling-restart argument that
+        // applies to trusted proxies above applies here without weakening
+        // the gate.
+        let (metrics_access, bad_metrics_cidrs) = http::metrics::MetricsAccess::parse(
+            config.metrics.allow_cluster_local,
+            &config.metrics.allow_unauthenticated_cidrs,
+        );
+        for bad in &bad_metrics_cidrs {
+            log::warn!(
+                "metrics.allow_unauthenticated_cidrs: ignoring entry `{bad}` (not a valid CIDR); \
+                 scrapes from that source will still require a token"
+            );
+        }
+        if !config.metrics.allow_unauthenticated_cidrs.is_empty() {
+            log::warn!(
+                target: "security",
+                "metrics.allow_unauthenticated_cidrs is set — /metrics is served without a \
+                 token to the listed CIDRs"
+            );
+        }
+        log::info!(
+            "/metrics access: cluster_local={}, extra_cidrs={}, token path=`{}`",
+            config.metrics.allow_cluster_local,
+            config.metrics.allow_unauthenticated_cidrs.len(),
+            http::metrics::METRICS_ACL_PATH,
+        );
+        let metrics_access = web::Data::new(metrics_access);
+
         // Clone for the background DoS sweep task (see below); the original
         // `core` is moved into the per-worker `App` factory closure.
         let dos_sweep_core = core.clone();
@@ -313,6 +345,7 @@ impl Server {
                 .app_data(web::Data::new(core.clone()))
                 .app_data(web::Data::new(metrics_manager.clone()))
                 .app_data(trusted_proxies.clone())
+                .app_data(metrics_access.clone())
                 .configure(http::init_service)
                 .default_service(web::to(HttpResponse::NotFound))
         })

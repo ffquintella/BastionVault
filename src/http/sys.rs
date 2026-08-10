@@ -1464,7 +1464,7 @@ async fn authorize_sys_request(
 /// operators actually need — `bvault status` run on the server itself, with no
 /// token in the environment, is the standard way to check a node. Anything
 /// else must appear in the configured `nodes` list.
-fn ip_is_cluster_local(peer: IpAddr, cluster_peer_ips: &HashSet<IpAddr>) -> bool {
+pub(crate) fn ip_is_cluster_local(peer: IpAddr, cluster_peer_ips: &HashSet<IpAddr>) -> bool {
     peer.is_loopback() || cluster_peer_ips.contains(&peer)
 }
 
@@ -1482,7 +1482,7 @@ const PEER_IP_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// The IPs of every configured cluster node. Empty for non-clustered backends,
 /// which leaves loopback as the only cluster-local caller.
-fn cluster_peer_ips(core: &Core) -> Arc<HashSet<IpAddr>> {
+pub(crate) fn cluster_peer_ips(core: &Core) -> Arc<HashSet<IpAddr>> {
     let cache = PEER_IP_CACHE.get_or_init(|| std::sync::RwLock::new(None));
 
     if let Ok(guard) = cache.read() {
@@ -1493,6 +1493,8 @@ fn cluster_peer_ips(core: &Core) -> Arc<HashSet<IpAddr>> {
         }
     }
 
+    // Only the hiqlite build below writes to this, hence the allow.
+    #[allow(unused_mut)]
     let mut addrs: Vec<String> = Vec::new();
     #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
     {

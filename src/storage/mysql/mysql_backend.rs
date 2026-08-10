@@ -103,8 +103,21 @@ impl Backend for MysqlBackend {
             Ok(entries) => {
                 let mut keys: Vec<String> = Vec::new();
                 for entry in entries {
-                    let key = entry.vault_key.clone();
-                    let key = key.trim_start_matches(prefix);
+                    // Authoritative prefix test. The `LIKE` above narrows
+                    // the scan but does not decide membership: `_` is a
+                    // single-character wildcard, and vault keys contain
+                    // `_` routinely, so `secret/my_app/` also matches
+                    // `secret/myXapp/…`. `trim_start_matches` was a no-op
+                    // on such a row and returned the foreign key intact.
+                    // `strip_prefix` both filters and removes exactly one
+                    // prefix occurrence. The escaping fix is deliberately
+                    // not pushed into the SQL here: MySQL's LIKE escape
+                    // character depends on `NO_BACKSLASH_ESCAPES`, so an
+                    // escaped pattern could silently match nothing on some
+                    // servers. Filtering here is exact under either mode.
+                    let Some(key) = entry.vault_key.strip_prefix(prefix) else {
+                        continue;
+                    };
                     match key.find('/') {
                         Some(i) => {
                             let key = &key[0..i + 1];
@@ -201,7 +214,9 @@ mod test {
     use super::MysqlBackend;
 
     use crate::errors::RvError;
-    use crate::storage::test::{test_backend_curd, test_backend_list_prefix};
+    use crate::storage::test::{
+        test_backend_curd, test_backend_list_prefix, test_backend_list_prefix_is_literal,
+    };
     use crate::test_utils::test_multi_routine;
 
     fn mysql_table_clear(backend: &MysqlBackend) -> Result<(), RvError> {
@@ -231,6 +246,7 @@ mod test {
 
         test_backend_curd(&backend);
         test_backend_list_prefix(&backend);
+        test_backend_list_prefix_is_literal(&backend);
     }
 
     #[test]

@@ -1119,10 +1119,11 @@ pub struct PluginMetricsListResult {
 /// `bvault_plugin_invoke_duration_seconds`.
 ///
 /// Embedded mode reads the in-process registry directly. Remote mode
-/// has no JSON-shaped metrics endpoint — the server's `/sys/metrics`
-/// is Prometheus text — so this returns an empty list. The desktop
-/// metrics panel's empty state ("No invokes recorded since boot") is
-/// the right surfacing for that.
+/// has no JSON-shaped metrics endpoint — the server's `/metrics` is
+/// Prometheus text, and is token-gated behind `read` on `sys/metrics`
+/// — so this returns an empty list. The desktop metrics panel's empty
+/// state ("No invokes recorded since boot") is the right surfacing for
+/// that.
 #[tauri::command]
 pub async fn plugins_metrics(state: State<'_, AppState>) -> CmdResult<PluginMetricsListResult> {
     if is_remote(&state).await {

@@ -342,4 +342,49 @@ pub mod test {
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0], "goo".to_string());
     }
+
+    /// Cross-backend contract: a prefix is matched **literally**.
+    ///
+    /// SQL-backed backends translate the prefix into a `LIKE` pattern,
+    /// where `_` matches any single character and `%` any sequence —
+    /// and vault keys carry `_` routinely. A backend that leaks the
+    /// over-matched rows hands the caller keys from a sibling subtree,
+    /// so every backend must be held to the same literal-prefix rule.
+    #[maybe_async::maybe_async]
+    pub async fn test_backend_list_prefix_is_literal(backend: &dyn Backend) {
+        for key in [
+            "pfx/my_app/db",
+            "pfx/my_app/nested/token",
+            // Matches `pfx/my_app/%` only because `_` is a wildcard.
+            "pfx/myXapp/db",
+            // Same, for `%`.
+            "pfx/my%app/db",
+        ] {
+            let entry = BackendEntry { key: key.to_string(), value: b"v".to_vec() };
+            assert!(backend.put(&entry).await.is_ok());
+        }
+
+        let mut keys = backend.list("pfx/my_app/").await.unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["db".to_string(), "nested/".to_string()]);
+
+        let keys = backend.list("pfx/my%app/").await.unwrap();
+        assert_eq!(keys, vec!["db".to_string()]);
+
+        let mut keys = backend.list("pfx/").await.unwrap();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["my%app/".to_string(), "myXapp/".to_string(), "my_app/".to_string()]
+        );
+
+        // `scan` walks the same prefix and must agree with `list`.
+        let mut scanned: Vec<String> =
+            backend.scan("pfx/my_app/", None).await.unwrap().into_iter().map(|e| e.key).collect();
+        scanned.sort();
+        assert_eq!(
+            scanned,
+            vec!["pfx/my_app/db".to_string(), "pfx/my_app/nested/token".to_string()]
+        );
+    }
 }

@@ -1469,8 +1469,11 @@ function GrantsModal({
 // `bvault_plugin_invokes_total`, `bvault_plugin_fuel_consumed_total`,
 // `bvault_plugin_invoke_duration_seconds` from the host's Prometheus
 // registry) on a 5-second cadence. The full Prometheus surface stays
-// available at `/sys/metrics`; this panel is a quick at-a-glance
-// view for desktop operators who don't run a separate scrape.
+// available at the server's `/metrics` endpoint; this panel is a quick
+// at-a-glance view for desktop operators who don't run a separate
+// scrape. This panel never touches that endpoint — embedded mode reads
+// the in-process registry and remote mode returns an empty list — so
+// the scrape endpoint's token gate does not affect it.
 
 function PluginMetricsPanel() {
   const { toast } = useToast();
@@ -1554,8 +1557,10 @@ function PluginMetricsPanel() {
       )}
       <p className="text-xs text-[var(--color-text-muted)] mt-2">
         Refreshes every 5 seconds. The full Prometheus surface — including
-        latency-bucket histograms — is available at{" "}
-        <code className="font-mono">/sys/metrics</code>.
+        latency-bucket histograms — is available at the server's{" "}
+        <code className="font-mono">/metrics</code> endpoint, which requires a
+        token with <code className="font-mono">read</code> on{" "}
+        <code className="font-mono">sys/metrics</code>.
       </p>
     </Card>
   );

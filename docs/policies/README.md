@@ -1,4 +1,12 @@
-# Sample PKI policies
+# Sample policies
+
+## Operations
+
+| File | Role | Can do | Cannot do |
+|------|------|--------|-----------|
+| [`metrics-scraper.hcl`](metrics-scraper.hcl) | Prometheus scraper | Read `GET /metrics`. | Everything else — reads no secret, enumerates nothing. |
+
+## PKI
 
 Three example Vault-style policies for separating concerns on a PKI mount:
 

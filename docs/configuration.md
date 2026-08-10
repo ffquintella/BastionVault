@@ -205,6 +205,62 @@ hsm "yubihsm2" {
 > The mock backend has no hardware protection and refuses to start when
 > `BVAULT_ENV=production`. See the [HSM guide](hsm.md) for the full workflow.
 
+## Metrics Access (optional)
+
+`GET /metrics` is authorization-gated. A scrape is served when **any** of the
+following holds, checked in this order:
+
+1. The **socket peer is cluster-local** — loopback, or an IP in the configured
+   hiqlite `nodes` list. Same predicate as `sys/cluster-status`, judged on the
+   TCP peer so no header can forge it. On by default.
+2. The client IP is inside `allow_unauthenticated_cidrs`.
+3. The request carries a **token with `read` on `sys/metrics`**.
+
+Otherwise the endpoint returns `403`.
+
+```hcl
+metrics {
+  allow_cluster_local         = true          # default
+  allow_unauthenticated_cidrs = []            # e.g. ["10.20.0.0/16"]
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `allow_cluster_local` | `true` | Serve `/metrics` without a token to loopback and configured cluster nodes. Set `false` for strict token-only scraping. |
+| `allow_unauthenticated_cidrs` | `[]` | Extra CIDRs that may scrape without a token. Matched against the trusted-proxy-aware client IP (see `BASTIONVAULT_TRUSTED_PROXIES`), so an untrusted `X-Forwarded-For` cannot forge a source. Unparseable entries are logged and dropped, never treated as a wildcard. |
+
+A scraper on another host is expected to use a token. Create the policy and a
+long-lived token for it:
+
+```hcl
+# metrics-scraper.hcl
+path "sys/metrics" {
+  capabilities = ["read"]
+}
+```
+
+```bash
+bvault policy write metrics-scraper metrics-scraper.hcl
+```
+
+Then point Prometheus at it:
+
+```yaml
+scrape_configs:
+  - job_name: bastionvault
+    metrics_path: /metrics
+    authorization:
+      credentials_file: /etc/prometheus/bastionvault.token
+    static_configs:
+      - targets: ["vault.example.org:8200"]
+```
+
+> A **sealed** node cannot validate tokens — the barrier that holds the token
+> store is shut. Scraping a sealed node therefore only works over one of the IP
+> allowances. Leaving `allow_cluster_local = true` is what keeps a node-local
+> scrape working across a seal.
+
 ## Environment Variables
 
 Configuration can also be influenced by environment variables:

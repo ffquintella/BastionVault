@@ -120,6 +120,38 @@ pub struct Config {
     /// defaults ([`crate::dos::DosConfig::default`]).
     #[serde(default)]
     pub dos: Option<crate::dos::DosConfig>,
+    /// Optional `metrics { ... }` block controlling who may scrape the
+    /// Prometheus endpoint. Absent ⇒ every scrape must present a token
+    /// with `read` on `sys/metrics`.
+    #[serde(default)]
+    pub metrics: MetricsAccessConfig,
+}
+
+/// `metrics { ... }` — access control for the `/metrics` scrape endpoint.
+///
+/// The endpoint is token-authorized (ACL path `sys/metrics`) for every
+/// caller that is not covered by one of the two IP allowances below.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct MetricsAccessConfig {
+    /// Serve `/metrics` without a token to loopback and to the IPs of
+    /// the configured cluster `nodes` — the same predicate that gates
+    /// `sys/cluster-status`, judged on the socket peer so no header can
+    /// forge it. Defaults to `true`: it is what lets a node-local
+    /// scrape, and a scrape of a *sealed* node (no barrier ⇒ no token
+    /// validation), work without credential plumbing. Set `false` for
+    /// strict token-only scraping.
+    #[serde(default = "default_bool_true", deserialize_with = "parse_bool_string")]
+    #[default(true)]
+    pub allow_cluster_local: bool,
+    /// Additional CIDRs whose requests may scrape `/metrics` without a
+    /// token, e.g. `["10.20.0.0/16"]` for a monitoring subnet. Empty by
+    /// default. Matched against the trusted-proxy-aware client IP
+    /// (`BASTIONVAULT_TRUSTED_PROXIES`), so an untrusted
+    /// `X-Forwarded-For` cannot forge an allowlisted source.
+    /// Unparseable entries are logged and dropped — never treated as a
+    /// wildcard.
+    #[serde(default)]
+    pub allow_unauthenticated_cidrs: Vec<String>,
 }
 
 #[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -718,6 +750,52 @@ mod test {
         assert!(config.is_ok());
         let json_config = config.unwrap();
         assert_eq!(json_config.barrier_type, BarrierType::Chacha20Poly1305);
+    }
+
+    /// A config with no `metrics` block keeps the shipped default
+    /// (cluster-local waived, nothing else), and an explicit block is
+    /// parsed — including turning the cluster-local waiver off, which is
+    /// the strict token-only posture.
+    #[test]
+    fn test_load_config_metrics_block() {
+        let dir = env::temp_dir().join(*TEST_DIR).join("test_load_config_metrics");
+        let _ = fs::remove_dir_all(&dir);
+        assert!(fs::create_dir_all(&dir).is_ok());
+
+        let base = r#"
+            storage "file" {
+              path    = "./vault/data"
+            }
+
+            listener "tcp" {
+              address     = "127.0.0.1:8200"
+            }
+        "#;
+
+        let file_path = dir.join("default.hcl");
+        let path = file_path.to_str().unwrap();
+        assert!(write_file(path, base).is_ok());
+        let config = load_config(path).unwrap();
+        assert!(config.metrics.allow_cluster_local);
+        assert!(config.metrics.allow_unauthenticated_cidrs.is_empty());
+
+        let with_block = format!(
+            r#"{base}
+            metrics {{
+              allow_cluster_local = false
+              allow_unauthenticated_cidrs = ["10.20.0.0/16", "::1/128"]
+            }}
+        "#
+        );
+        let file_path = dir.join("explicit.hcl");
+        let path = file_path.to_str().unwrap();
+        assert!(write_file(path, &with_block).is_ok());
+        let config = load_config(path).unwrap();
+        assert!(!config.metrics.allow_cluster_local);
+        assert_eq!(
+            config.metrics.allow_unauthenticated_cidrs,
+            vec!["10.20.0.0/16".to_string(), "::1/128".to_string()]
+        );
     }
 
     #[test]

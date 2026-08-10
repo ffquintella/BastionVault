@@ -10,9 +10,9 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 |---|---|
 | Done | 53 |
 | Partial | 1 |
-| Todo | 9 |
+| Todo | 10 |
 | Removed | 1 |
-| **Total tracked features** | **63** |
+| **Total tracked features** | **64** |
 
 Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-and-distribution.md)) — sequenced into four release waves; Waves 1 + 2 shipped (with Linux GUI bundler caveat), Wave 3 next.
 
@@ -47,7 +47,8 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | `[x]` Done | Per-User Scoping (ownership + policy templating + sharing) | [spec](features/per-user-scoping.md) — 11 phases + migration backfill (Phase 11: self-service claim + list badge). |
 | `[x]` Done | Asset Groups (collections of resources + KV paths) | [spec](features/resource-groups.md) — 13 phases incl. ownership, sharing, member redaction. |
 | `[x]` Done | Audit Logging (tamper-evident, HMAC chain) | Phase 1 file device shipped; syslog / HTTP devices [deferred](#deferred-sub-initiatives). Request denials (403s) persisted + surfaced on the Audit page as op `denied`; FIDO2 `begin` failures audited (`stage=begin`). Dashboard `denied` / `failed_logins_1h` counters now range-scan the replicated `sys/denial-audit/` + `sys/login-audit/` stores instead of the per-node in-memory ring, so every HA node reports identical totals. **Successful requests now surface too** (op `read`/`write`/`list` under an `access` category), closing the "denied read shows but successful read doesn't" asymmetry: a per-node reconciler (`access_audit_reconciler`, 60s) tails each node's local `audit.log` and ingests successful non-`/login` lines into a replicated store (`sys/access-audit/`), keyed `(nanos, line-digest)` so ingest is idempotent and cluster-unique — the union of every node's ingest is what the page reads, no leader election needed. |
-| `[x]` Done | Metrics (Prometheus) | Standard `/metrics` endpoint. |
+| `[x]` Done | Metrics (Prometheus) | Standard `/metrics` endpoint. **v0.38.6** closes it: it was served to any caller that could reach the listener (no token, no ACL, no IP filter) — the registry of a secrets vault is free reconnaissance. Now served to a cluster-local socket peer (same predicate as `sys/cluster-status`), to a CIDR in the new `metrics { allow_unauthenticated_cidrs }` block, or to a token with `read` on `sys/metrics`; else 403. `allow_cluster_local` defaults on because it is the only path that survives a seal (no barrier ⇒ no token validation). GUI unaffected — its plugin-metrics panel never scrapes the endpoint. [config docs](docs/configuration.md#metrics-access-optional) |
+| `[ ]` Todo | Formal Verification & Type-Driven Security | [roadmap](roadmaps/formal-verification-and-type-driven-security.md) — four phases making three guarantees mechanical rather than conventional: an `Authorized<R>` witness extractor + route-table-as-data so no privileged route can be served without crossing `authorize_sys_request` (the v0.37.6 44-route bypass becomes a compile error, not a review finding); a zero-dep `bv-sql-guard` (`SqlIdent` allow-list + literal-only `Sql`) plus a Semgrep gate over every driver call site; and Kani model checking of an extracted, bounded `bv-policy-core` for eight ACL theorems (deny supremacy, fail-closed default, group/scope-gate soundness, specificity precedence, root isolation, parameter constraints), with production delegating to the verified core so the proofs describe shipped code. Scoping surfaced four defects to fix first (F2–F5); **all four shipped in v0.38.6** ahead of the phases, per `03` §10: `/metrics` is authorization-gated, `list`/`scan` escape the `LIKE` pattern and make `strip_prefix` the authoritative membership test (hiqlite + MySQL), and the storage table identifier is allow-listed at construction. The phases now own making those guarantees *structural* rather than hand-written. |
 
 ### Cryptography
 
@@ -63,9 +64,9 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | Status | Feature | Notes |
 |---|---|---|
 | `[x]` Done | Storage Backend: Encrypted File | Local file storage with barrier encryption. |
-| `[x]` Done | Storage Backend: MySQL | Diesel + r2d2 pool. |
+| `[x]` Done | Storage Backend: MySQL | Diesel + r2d2 pool. **v0.38.6** applies the same `strip_prefix` membership test to `list` (the `LIKE` `_`-wildcard over-return was identical here). |
 | `[~]` Removed | Storage Backend: SQLx | libsqlite3-sys conflict. |
-| `[x]` Done | Storage Backend: Hiqlite (embedded Raft SQLite, HA) | [roadmap](roadmaps/hiqlite-default-ha-storage.md) — default backend, 6 phases. |
+| `[x]` Done | Storage Backend: Hiqlite (embedded Raft SQLite, HA) | [roadmap](roadmaps/hiqlite-default-ha-storage.md) — default backend, 6 phases. **v0.38.6** fixes prefix handling: `list`/`scan` escaped the `LIKE` pattern (`_` is a wildcard and vault keys carry `_`, so `secret/my_app/` also matched `secret/myXapp/…`) and now make `strip_prefix` the authoritative membership test, so an over-matched row can no longer be returned past the ACL decision made for the requested prefix. The configured `table` name is allow-listed before it reaches any `format!`-built statement. |
 | `[x]` Done | Cloud targets for Encrypted File (S3 / OneDrive / Google Drive / Dropbox) | [spec](features/cloud-storage-backend.md) — 8 phases incl. cache decorator + key obfuscation. |
 | `[x]` Done | Operator Backup / Restore (BVBK) | [spec](features/import-export-backup-restore.md) — full-vault binary archive, HMAC-SHA256, for disaster recovery. |
 | `[x]` Done | User-facing Exchange Module (`.bvx`) | [spec](features/import-export-module.md) — password-encrypted JSON for "Alice shares N secrets with Bob"; built on top of BVBK but a different threat model. Argon2id + XChaCha20-Poly1305, two-step preview-then-apply import with `skip` / `overwrite` / `rename` conflict policies, full GUI with scope picker + entropy meter, and a **Full vault** export mode on the Export tab (password-encrypted `.bvx` only, confirm-gated). **v0.37.0** adds an **all-namespaces** scope (`scope.kind = "all_namespaces"`): every export used to resolve against the root mount index only, so a "full" export captured nothing from any child namespace; it now sweeps each namespace through that namespace's own router and packs each tenant into its own `items.namespaces[]` bundle (no cross-tenant mount-path collisions), with a namespace-aware importer that warns-and-skips bundles for namespaces missing on the destination. Whole-vault scopes (`full` / `all_namespaces`) also carry each namespace's **ACL policies** (`items.policies`, plus saved effectivity tests) and restore them into that namespace's own policy keyspace — a data-only restore left a vault nobody but root could use. Selective exports still carry no policies. |
@@ -163,6 +164,7 @@ Sequenced together under [`roadmaps/packaging-and-distribution.md`](roadmaps/pac
 
 Next-up `Todo` rows once Packaging & Distribution lands:
 
+- Formal Verification & Type-Driven Security ([roadmap](roadmaps/formal-verification-and-type-driven-security.md)) — its Phase 0 fix PRs (unauthenticated `/metrics`; `LIKE`-pattern over-return in `list()`; unvalidated storage table identifier) are authorization-affecting defects in shipped code and should not wait on the initiative
 - Identity Provider (workforce identity brokering — attributable, env-consistent UID, revocable admin access to Linux + FortiGate + SSO apps)
 - Dynamic Secrets framework + first engine plugins
 - Kubernetes Integration

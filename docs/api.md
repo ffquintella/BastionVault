@@ -690,6 +690,25 @@ Config fields: `enabled` (bool), `window_secs`, `max_requests`,
 `auth_max_requests`, `ban_secs`, `refresh_secs`. An optional startup
 `dos { ... }` config block seeds the initial values.
 
+### Metrics
+
+~~~
+GET /metrics                # Prometheus text exposition (not /v1-prefixed)
+~~~
+
+Authorization-gated. Served when the socket peer is cluster-local (loopback or
+a configured cluster node — the same predicate as `sys/cluster-status`), when
+the client IP is in `metrics { allow_unauthenticated_cidrs = [...] }`, or when
+the request carries a token with `read` on the ACL path `sys/metrics`.
+Otherwise `403`. A sealed node cannot validate tokens, so only the IP
+allowances work across a seal (`503` is returned to a token-bearing scrape in
+that state). See
+[Metrics Access](configuration.md#metrics-access-optional).
+
+~~~bash
+curl -H "X-Vault-Token: $TOKEN" https://127.0.0.1:8200/metrics
+~~~
+
 ## Secret Operations
 
 All secret operations go through logical paths mounted by secrets engines.

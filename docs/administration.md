@@ -380,13 +380,41 @@ bvault write auth/approle/login role_id=<role-id> secret_id=<secret-id>
 
 ## Monitoring
 
-BastionVault exposes Prometheus metrics. The collection interval is configurable:
+BastionVault exposes Prometheus metrics at `GET /metrics`. The collection
+interval is configurable:
 
 ~~~hcl
 collection_interval = 15  # seconds
 ~~~
 
 Metrics include system-level data (CPU, memory, disk) and HTTP request metrics.
+
+### Scrape authorization
+
+The endpoint is **not anonymous**. It is served to a cluster-local peer
+(loopback or a configured cluster node), to any CIDR in
+`metrics { allow_unauthenticated_cidrs = [...] }`, or to a request carrying a
+token with `read` on `sys/metrics`. Everything else gets `403`.
+
+A remote scraper needs a policy and a token:
+
+~~~bash
+cat > metrics-scraper.hcl <<'EOF'
+path "sys/metrics" {
+  capabilities = ["read"]
+}
+EOF
+
+bvault policy write metrics-scraper metrics-scraper.hcl
+bvault write auth/token/create policies=metrics-scraper period=768h
+~~~
+
+Pass the resulting token as `Authorization: Bearer <token>` (or
+`X-Vault-Token`). See [Metrics Access](configuration.md#metrics-access-optional)
+for the full option table and a Prometheus `scrape_config` example.
+
+> A sealed node cannot validate tokens, so scraping across a seal only works
+> over the IP allowances. That is why `allow_cluster_local` defaults to `true`.
 
 ## Storage Encryption
 
@@ -409,7 +437,7 @@ The encryption key is derived from the unseal keys during the unseal process. Wh
 - [ ] Use `chacha20-poly1305` barrier type (the default)
 - [ ] Run as a dedicated system user via daemon mode
 - [ ] Configure appropriate log level (`info` or `warn` for production)
-- [ ] Set up monitoring for the metrics endpoint
+- [ ] Set up monitoring for the metrics endpoint (scoped `metrics-scraper` token; keep `metrics { allow_cluster_local }` on only if node-local scraping is actually used)
 - [ ] Create scoped policies; avoid using the root token for regular operations
 - [ ] Use AppID or userpass for application authentication instead of static tokens
 - [ ] Back up the storage directory regularly

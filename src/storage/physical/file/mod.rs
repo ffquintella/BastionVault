@@ -308,7 +308,9 @@ impl Backend for FileBackend {
 #[cfg(test)]
 mod test {
     use super::*;
-    use super::super::super::test::{test_backend_curd, test_backend_list_prefix};
+    use super::super::super::test::{
+        test_backend_curd, test_backend_list_prefix, test_backend_list_prefix_is_literal,
+    };
     use crate::test_utils::{
         new_test_backend, new_test_file_backend, new_test_temp_dir, test_multi_routine,
     };
@@ -321,6 +323,7 @@ mod test {
 
         test_backend_curd(backend.as_ref()).await;
         test_backend_list_prefix(backend.as_ref()).await;
+        test_backend_list_prefix_is_literal(backend.as_ref()).await;
     }
 
     /// Drives a second vault process against the same backend via

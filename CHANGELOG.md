@@ -45,6 +45,89 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.38.6] - 2026-08-10
+
+### Security
+
+#### `/metrics` is no longer anonymous
+
+- **`GET /metrics` requires authorization** (`src/http/metrics.rs`,
+  `src/cli/config.rs`, `src/cli/command/server.rs`) -- the Prometheus registry
+  of a secrets vault (per-path request counters, auth-failure and denial counts,
+  cache hit rates, per-plugin invocation counts, FerroGate enrolment state, host
+  CPU/memory/disk) was served to **any** caller that could reach the listener:
+  no token, no ACL, no IP filter. It is now served only to a cluster-local
+  socket peer, to a configured CIDR, or to a token carrying `read` on the ACL
+  path `sys/metrics`; anything else gets `403`. Finding F2 of
+  [`roadmaps/formal-verification-and-type-driven-security.md`](roadmaps/formal-verification-and-type-driven-security.md),
+  and the `03` §8 rule that every endpoint is authenticated, read-only included.
+
+  **Operator action.** A scraper that is neither loopback nor one of the
+  configured cluster nodes now needs a token. Create one:
+
+  ```bash
+  bvault policy write metrics-scraper docs/policies/metrics-scraper.hcl
+  bvault write auth/token/create policies=metrics-scraper period=768h
+  ```
+
+  Or allowlist the scraper's network in the new `metrics { ... }` config block:
+
+  ```hcl
+  metrics {
+    allow_cluster_local         = true   # default: loopback + configured nodes
+    allow_unauthenticated_cidrs = ["10.20.0.0/16"]
+  }
+  ```
+
+  `allow_cluster_local` defaults to `true` deliberately: it is the same
+  socket-peer predicate that already gates `sys/cluster-status`, it keeps a
+  node-local scrape working with no credential plumbing, and it is the *only*
+  path that survives a seal -- a sealed node cannot validate a token because the
+  barrier holding the token store is shut (a token-bearing scrape of a sealed
+  node gets `503` with that explanation). Set it to `false` for strict
+  token-only scraping. The `default` policy does **not** grant `sys/metrics`;
+  deployment-wide telemetry is withheld from ordinary principals for the same
+  reason `sys/audit/events` is. The GUI is unaffected -- its per-plugin metrics
+  panel reads the in-process registry in embedded mode and returns an empty list
+  in remote mode; it never scrapes the endpoint.
+
+#### Storage prefix and identifier handling
+
+- **`list` / `scan` no longer return keys from a foreign subtree**
+  (`src/storage/hiqlite/mod.rs`, `src/storage/mysql/mysql_backend.rs`) -- both
+  backends turned a key prefix into a `LIKE` pattern. Binding the pattern stops
+  SQL *injection* but not its *semantics*: `_` matches any single character, and
+  vault keys carry `_` routinely, so listing `secret/my_app/` also matched
+  `secret/myXapp/…`. The over-matched rows were then not filtered out --
+  `trim_start_matches(prefix)` is a no-op on a key that does not start with the
+  prefix, so the foreign key was returned verbatim to the caller, past the ACL
+  decision that was made for the requested prefix. The prefix is now escaped
+  into the `LIKE` pattern (`ESCAPE '\'`, hiqlite) and, authoritatively, every
+  returned row must pass `strip_prefix` -- which also fixes
+  `trim_start_matches`'s repeated-prefix stripping (`secret/secret/x` no longer
+  collapses to `x`). Findings F3/F4 of the same roadmap. Regression cover:
+  `storage::hiqlite::test::test_hiqlite_list_does_not_leak_like_wildcard_matches`
+  (verified to fail against the previous code) plus a cross-backend contract
+  helper `test_backend_list_prefix_is_literal` now run by the file, hiqlite and
+  MySQL backend tests.
+- **The storage table name is validated before it reaches SQL**
+  (`src/storage/hiqlite/mod.rs`) -- `conf["table"]` was `format!`-interpolated
+  into every statement unvalidated, one of which is `client.batch(..)`, which
+  executes multiple `;`-separated statements. Operator-controlled, so not
+  remotely reachable -- but this deployment templates its config through
+  Puppet/quadlets and the shape is exactly a multi-statement injection. The
+  backend now refuses to start unless the name is a plain SQL identifier
+  (ASCII letters/digits/`_`, not leading with a digit, ≤64 chars). Finding F5.
+
+### Added
+
+- **`metrics { ... }` config block** (`src/cli/config.rs`) --
+  `allow_cluster_local` (default `true`) and `allow_unauthenticated_cidrs`
+  (default `[]`) control who may scrape `/metrics` without a token. Documented
+  in [Metrics Access](docs/configuration.md#metrics-access-optional).
+- **`docs/policies/metrics-scraper.hcl`** -- ready-made scraper policy granting
+  `read` on `sys/metrics` and nothing else.
+
 ## [0.38.5] - 2026-08-10
 
 ### Fixed

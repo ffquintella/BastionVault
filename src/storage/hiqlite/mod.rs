@@ -35,6 +35,69 @@ const MAX_PUT_VALUE_BYTES: usize = (HIQLITE_WAL_SIZE as usize) - 1024 * 1024;
 /// healthy cluster, tight enough to flag a partitioned leader quickly.
 const QUORUM_ACK_STALE_MS: u64 = 3_000;
 
+/// Escape a literal key prefix for use in a SQL `LIKE` pattern.
+///
+/// Binding the pattern as a parameter stops SQL *injection* but not
+/// pattern *widening*: `LIKE` reads `_` as "any one character" and `%`
+/// as "any sequence". Vault keys carry `_` routinely, so listing
+/// `secret/my_app/` would also match — and return — `secret/myXapp/…`,
+/// another subtree entirely. Escape both wildcards and the escape
+/// character itself; every call site pairs this with `ESCAPE '\'`.
+///
+/// This is a narrowing optimization, not the authorization boundary:
+/// SQLite's `LIKE` is also ASCII-case-insensitive by default, so the
+/// authoritative prefix test is the `strip_prefix` filter each caller
+/// applies to the returned rows.
+fn escape_like_prefix(prefix: &str) -> String {
+    let mut out = String::with_capacity(prefix.len());
+    for c in prefix.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// `LIKE` pattern matching every key under `prefix`, wildcards escaped.
+fn like_prefix_pattern(prefix: &str) -> String {
+    format!("{}%", escape_like_prefix(prefix))
+}
+
+/// Validate the operator-configured `table` name before it is ever
+/// interpolated into a statement.
+///
+/// Every statement in this backend builds its SQL with `format!`, and
+/// one of the sites is `client.batch(..)`, which executes multiple
+/// `;`-separated statements. The value comes from the server config, so
+/// it is not remotely reachable — but that config is templated by
+/// Puppet/quadlet, and "operator-supplied string spliced into SQL that
+/// accepts multiple statements" is precisely the shape of a
+/// multi-statement injection. Constrain it to a plain SQL identifier so
+/// the shape cannot exist, rather than relying on the templating layer
+/// to stay well-behaved.
+fn validate_table_name(table: &str) -> Result<(), RvError> {
+    const MAX_TABLE_NAME_LEN: usize = 64;
+
+    let valid = !table.is_empty()
+        && table.len() <= MAX_TABLE_NAME_LEN
+        && table
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+
+    if valid {
+        Ok(())
+    } else {
+        Err(RvError::ErrString(format!(
+            "hiqlite storage: invalid `table` name {table:?}; expected a plain SQL identifier \
+             (ASCII letters, digits and `_`, not starting with a digit, at most \
+             {MAX_TABLE_NAME_LEN} characters)"
+        )))
+    }
+}
+
 fn map_hiqlite_error(e: hiqlite::Error) -> RvError {
     match &e {
         hiqlite::Error::CheckIsLeaderError(_) => {
@@ -135,17 +198,27 @@ impl Backend for HiqliteBackend {
             .client
             .query_consistent_map(
                 Cow::Owned(format!(
-                    "SELECT vault_key, vault_value FROM {} WHERE vault_key LIKE ?",
+                    "SELECT vault_key, vault_value FROM {} WHERE vault_key LIKE ? ESCAPE '\\'",
                     self.table
                 )),
-                vec![Param::from(format!("{prefix}%"))],
+                vec![Param::from(like_prefix_pattern(prefix))],
             )
             .await
             .map_err(map_hiqlite_error)?;
 
         let mut keys: Vec<String> = Vec::new();
         for entry in rows.iter() {
-            let key = entry.vault_key.trim_start_matches(prefix);
+            // Authoritative prefix test. `LIKE` narrows the scan but is
+            // not exact (ASCII-case-insensitive, and historically
+            // wildcard-widened), so a row that does not genuinely start
+            // with `prefix` is dropped here rather than passed through
+            // whole: `trim_start_matches` used to be a no-op on such a
+            // row, returning a foreign key verbatim to the caller. It is
+            // also `strip_prefix`, not `trim_start_matches`, so a key
+            // whose remainder repeats the prefix keeps that remainder.
+            let Some(key) = entry.vault_key.strip_prefix(prefix) else {
+                continue;
+            };
             match key.find('/') {
                 Some(i) => {
                     let key = &key[0..i + 1];
@@ -178,10 +251,10 @@ impl Backend for HiqliteBackend {
                 self.client
                     .query_consistent_map(
                         Cow::Owned(format!(
-                            "SELECT vault_key, vault_value FROM {} WHERE vault_key LIKE ? AND vault_key >= ?",
+                            "SELECT vault_key, vault_value FROM {} WHERE vault_key LIKE ? ESCAPE '\\' AND vault_key >= ?",
                             self.table
                         )),
-                        vec![Param::from(format!("{prefix}%")), Param::from(start.to_string())],
+                        vec![Param::from(like_prefix_pattern(prefix)), Param::from(start.to_string())],
                     )
                     .await
                     .map_err(map_hiqlite_error)?
@@ -190,18 +263,23 @@ impl Backend for HiqliteBackend {
                 self.client
                     .query_consistent_map(
                         Cow::Owned(format!(
-                            "SELECT vault_key, vault_value FROM {} WHERE vault_key LIKE ?",
+                            "SELECT vault_key, vault_value FROM {} WHERE vault_key LIKE ? ESCAPE '\\'",
                             self.table
                         )),
-                        vec![Param::from(format!("{prefix}%"))],
+                        vec![Param::from(like_prefix_pattern(prefix))],
                     )
                     .await
                     .map_err(map_hiqlite_error)?
             }
         };
 
+        // Same authoritative prefix test as `list`: `LIKE` narrows the
+        // scan, `starts_with` decides. Without it a subtree read could
+        // hand the caller rows from a sibling subtree whose key merely
+        // matched the pattern.
         Ok(rows
             .into_iter()
+            .filter(|row| row.vault_key.starts_with(prefix))
             .map(|row| BackendEntry { key: row.vault_key, value: row.vault_value })
             .collect())
     }
@@ -375,6 +453,10 @@ impl HiqliteBackend {
             .and_then(|v| v.as_str())
             .unwrap_or("vault")
             .to_string();
+
+        // Reject anything that is not a plain identifier before it
+        // reaches a `format!`-built statement — see `validate_table_name`.
+        validate_table_name(&table)?;
 
         // hiqlite expects listen_addr to be host-only (e.g. "0.0.0.0");
         // it appends the port from the node's addr_raft/addr_api fields via build_listen_addr().
@@ -851,8 +933,11 @@ mod test {
     use serde_json::Value;
     use serial_test::serial;
 
-    use super::HiqliteBackend;
-    use crate::storage::test::{test_backend_curd, test_backend_list_prefix};
+    use super::{escape_like_prefix, like_prefix_pattern, validate_table_name, HiqliteBackend};
+    use crate::storage::test::{
+        test_backend_curd, test_backend_list_prefix, test_backend_list_prefix_is_literal,
+    };
+    use crate::storage::{Backend, BackendEntry};
     use crate::test_utils::TEST_DIR;
 
     /// Returns true if hiqlite integration tests should run.
@@ -915,6 +1000,106 @@ mod test {
             .await;
 
         test_backend_list_prefix(&backend).await;
+    }
+
+    /// Regression: `list`/`scan` must not leak a sibling subtree whose
+    /// key merely *matches* the `LIKE` pattern.
+    ///
+    /// `_` is a single-character `LIKE` wildcard, and vault keys carry
+    /// `_` routinely, so listing `secret/my_app/` used to also match
+    /// `secret/myXapp/…`. Worse, the excess rows were not filtered:
+    /// `trim_start_matches` is a no-op on a key that does not start with
+    /// the prefix, so the foreign key came back verbatim.
+    #[serial]
+    #[tokio::test]
+    async fn test_hiqlite_list_does_not_leak_like_wildcard_matches() {
+        if !should_run() {
+            eprintln!("Skipping hiqlite test (set CARGO_TEST_HIQLITE=1 to enable)");
+            return;
+        }
+        let conf = make_test_conf("test_hiqlite_like_wildcard");
+        let backend = HiqliteBackend::new(&conf).expect("backend creation failed");
+        let _ = backend
+            .client()
+            .batch(std::borrow::Cow::Borrowed("DELETE FROM vault_test"))
+            .await;
+
+        for key in [
+            "secret/my_app/db",
+            "secret/my_app/nested/token",
+            // The impostor: matches `secret/my_app/%` only because `_`
+            // is a wildcard.
+            "secret/myXapp/db",
+            // `%` is a wildcard too.
+            "secret/my%app/db",
+        ] {
+            backend
+                .put(&BackendEntry { key: key.to_string(), value: b"v".to_vec() })
+                .await
+                .unwrap();
+        }
+
+        // Cross-backend contract check on a clean table.
+        test_backend_list_prefix_is_literal(&backend).await;
+
+        let mut keys = backend.list("secret/my_app/").await.unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["db".to_string(), "nested/".to_string()]);
+
+        let mut scanned: Vec<String> = backend
+            .scan("secret/my_app/", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.key)
+            .collect();
+        scanned.sort();
+        assert_eq!(
+            scanned,
+            vec![
+                "secret/my_app/db".to_string(),
+                "secret/my_app/nested/token".to_string()
+            ]
+        );
+
+        // The `%`-bearing prefix is likewise treated literally, not as
+        // "every key under secret/my".
+        let keys = backend.list("secret/my%app/").await.unwrap();
+        assert_eq!(keys, vec!["db".to_string()]);
+    }
+
+    /// A configured table name is a plain SQL identifier or the backend
+    /// refuses to start. One of the interpolation sites is
+    /// `client.batch(..)`, which executes `;`-separated statements.
+    #[test]
+    fn test_validate_table_name_rejects_non_identifiers() {
+        for good in ["vault", "vault_test", "_v1", "Vault2"] {
+            assert!(validate_table_name(good).is_ok(), "{good} should be accepted");
+        }
+        for bad in [
+            "",
+            "1vault",
+            "vault; DROP TABLE vault",
+            "vault--",
+            "vault vault",
+            "vault\"",
+            "vault`",
+            "va ult",
+            "vaúlt",
+            &"v".repeat(65),
+        ] {
+            assert!(validate_table_name(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn test_escape_like_prefix_neutralizes_wildcards() {
+        assert_eq!(escape_like_prefix("secret/my_app/"), r"secret/my\_app/");
+        assert_eq!(escape_like_prefix("secret/my%app/"), r"secret/my\%app/");
+        assert_eq!(escape_like_prefix(r"secret/a\b"), r"secret/a\\b");
+        assert_eq!(escape_like_prefix("plain/"), "plain/");
+        assert_eq!(like_prefix_pattern("secret/my_app/"), r"secret/my\_app/%");
+        assert_eq!(like_prefix_pattern(""), "%");
     }
 
     #[serial]
