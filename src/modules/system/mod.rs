@@ -1722,7 +1722,14 @@ impl SystemBackend {
             bv_error_response_status!(500, "owner store not initialized")
         })?;
 
-        store.set_file_owner(&id, &new_owner).await?;
+        // Namespace-scope the key: the transfer must land on the caller's own
+        // namespace's file, never on a root file that happens to share the id.
+        let key = crate::modules::identity::owner_store::OwnerStore::scope_target_name(
+            &id,
+            req.namespace_path.as_deref(),
+        )
+        .ok_or_else(|| bv_error_response_status!(400, "invalid file id"))?;
+        store.set_file_owner(&key, &new_owner).await?;
 
         let mut data = Map::new();
         data.insert("id".into(), Value::String(id));
@@ -1760,7 +1767,12 @@ impl SystemBackend {
             bv_error_response_status!(500, "owner store not initialized")
         })?;
 
-        store.set_resource_owner(&resource, &new_owner).await?;
+        let key = crate::modules::identity::owner_store::OwnerStore::scope_target_name(
+            &resource,
+            req.namespace_path.as_deref(),
+        )
+        .ok_or_else(|| bv_error_response_status!(400, "invalid resource name"))?;
+        store.set_resource_owner(&key, &new_owner).await?;
 
         let mut data = Map::new();
         data.insert("resource".into(), Value::String(resource));
@@ -2612,20 +2624,25 @@ impl SystemBackend {
         let mut res_already = 0usize;
         let mut res_invalid: Vec<String> = Vec::new();
         for name in &resources {
-            // `record_resource_owner_if_absent` already rejects names
-            // containing `/` or empty strings — we mirror that as
-            // "invalid" in the response instead of letting the whole
-            // batch error out.
-            if name.contains('/') {
+            // Namespace-qualify each name the same way the kv_paths loop below
+            // qualifies its paths — the admin sends mount-relative names with
+            // the active namespace in the request header, and a bare key would
+            // stamp the *root* resource of that name. `scope_target_name`
+            // rejects names containing `/` or `..`; surface those as "invalid"
+            // in the response rather than failing the whole batch.
+            let Some(key) = crate::modules::identity::owner_store::OwnerStore::scope_target_name(
+                name,
+                req.namespace_path.as_deref(),
+            ) else {
                 res_invalid.push(name.clone());
                 continue;
-            }
-            match store.get_resource_owner(name).await? {
+            };
+            match store.get_resource_owner(&key).await? {
                 Some(_) => res_already += 1,
                 None => {
                     if !dry_run {
                         store
-                            .record_resource_owner_if_absent(name, &entity_id)
+                            .record_resource_owner_if_absent(&key, &entity_id)
                             .await?;
                     }
                     res_stamped += 1;
@@ -2685,15 +2702,18 @@ impl SystemBackend {
         let mut file_already = 0usize;
         let mut file_invalid: Vec<String> = Vec::new();
         for id in &file_ids {
-            if id.contains('/') {
+            let Some(key) = crate::modules::identity::owner_store::OwnerStore::scope_target_name(
+                id,
+                req.namespace_path.as_deref(),
+            ) else {
                 file_invalid.push(id.clone());
                 continue;
-            }
-            match store.get_file_owner(id).await? {
+            };
+            match store.get_file_owner(&key).await? {
                 Some(_) => file_already += 1,
                 None => {
                     if !dry_run {
-                        store.record_file_owner_if_absent(id, &entity_id).await?;
+                        store.record_file_owner_if_absent(&key, &entity_id).await?;
                     }
                     file_stamped += 1;
                 }
@@ -3359,7 +3379,18 @@ impl SystemBackend {
                     for (mount_path, logical_type, description) in
                         registry.list_mounts(&self.core, &uuid, &path).await?
                     {
-                        if acl.has_mount_access(&mount_path) {
+                        // The registry stores mount paths mount-relative
+                        // (`resources/`), but a namespaced request is rewritten to
+                        // `<ns>/<mount>/…` before the ACL ever sees it, and
+                        // `refuse_cross_namespace_paths` forces a tenant policy to
+                        // use that same `<ns>/`-prefixed form. Checking the bare
+                        // path here therefore missed every rule a tenant could
+                        // possibly hold, so the endpoint returned an empty mount
+                        // list for every non-root principal and the GUI's
+                        // mount-gated nav (Resources / Secrets / Files) collapsed
+                        // to nothing. Root never saw it: `ACL::has_mount_access`
+                        // short-circuits on the root policy.
+                        if acl.has_mount_access(&format!("{path}/{mount_path}")) {
                             secret_mounts.insert(
                                 mount_path,
                                 json!({ "type": logical_type, "description": description }),
@@ -6553,6 +6584,238 @@ mod mod_system_tests {
             !child_secret.contains_key("rustion/"),
             "child namespace must not report root-only mounts (no cross-namespace leak): {:?}",
             child_secret.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// `sys/internal/ui/mounts` must report the namespace's engines to a
+    /// *tenant* token, not just to root. Regression for the production report
+    /// "there is no Resources tab even though the namespace has the mount and
+    /// the user has resources shared with them": the endpoint returned an empty
+    /// secret-mount map for every namespace-bound principal, and the GUI hides
+    /// each mount-gated nav entry (Resources / Secrets / Files) when its mount
+    /// type is absent, so the sidebar collapsed to Dashboard + Sharing.
+    ///
+    /// Two independent defects produced that empty map, and this test covers
+    /// both — it fails if either regresses:
+    ///   1. the ACL gate checked the registry's mount-relative path
+    ///      (`resources/`) while a namespaced request authorizes against
+    ///      `<ns>/resources/…`, so no tenant rule could ever match;
+    ///   2. a namespace is seeded with mounts but no policies, so a tenant
+    ///      token carried no grant on its own namespace's mounts at all.
+    ///
+    /// The pre-existing sibling test uses the root token, which short-circuits
+    /// `has_mount_access` — that is exactly why neither defect was caught.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_internal_ui_mounts_visible_to_a_tenant_token() {
+        let mut server = TestHttpServer::new("test_ui_mounts_tenant", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        // Namespace (auto-seeded with the default engines) plus a userpass user
+        // whose only named policy lives at root — so the namespace keyspace is
+        // empty and the token carries nothing but the implicit policies. This
+        // is the shape every tenant login has today.
+        let (s, r) = server
+            .write("v1/sys/namespaces/nsui", serde_json::json!({}).as_object().cloned(), Some(&root))
+            .unwrap();
+        assert!((200..300).contains(&s), "ns create: {s} {r:?}");
+        server
+            .write(
+                "v1/sys/policies/acl/rootonly",
+                serde_json::json!({ "policy": "path \"secret/data/z\" { capabilities = [\"read\"] }" })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        server
+            .write("v1/sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
+            .unwrap();
+        server
+            .write(
+                "v1/auth/pass/users/tina",
+                serde_json::json!({ "password": "hunter22XX!", "token_policies": "rootonly", "ttl": 0 })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+
+        let (s, r) = server
+            .request_with_headers(
+                "POST",
+                "v1/auth/pass/login/tina",
+                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                None,
+                None,
+                &[("X-BastionVault-Namespace", "nsui")],
+            )
+            .unwrap();
+        assert_eq!(s, 200, "namespace login must succeed: {r:?}");
+        let tenant = r["auth"]["client_token"].as_str().unwrap().to_string();
+
+        let (s, r) = server
+            .request_with_headers(
+                "GET",
+                "v1/sys/internal/ui/mounts",
+                None,
+                Some(&tenant),
+                None,
+                &[("X-BastionVault-Namespace", "nsui")],
+            )
+            .unwrap();
+        assert_eq!(s, 200, "tenant ui/mounts must 200: {r:?}");
+        let secret = r.get("secret").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+        for engine in ["secret/", "resources/", "resource-group/"] {
+            assert!(
+                secret.contains_key(engine),
+                "tenant must see its namespace's {engine} mount (empty map = no Resources tab): {:?}",
+                secret.keys().collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            !secret.contains_key("rustion/"),
+            "tenant must not see root-only mounts: {:?}",
+            secret.keys().collect::<Vec<_>>()
+        );
+
+        // Visibility is not access. The implicit grant behind it is
+        // `scopes = ["shared"]`, so with no share in place the tenant must
+        // still be refused on the mount's contents — the nav entry appearing
+        // must never imply blanket access to the namespace's resources.
+        let (s, r) = server
+            .request_with_headers(
+                "GET",
+                "v1/resources/resources/not-shared-with-tina",
+                None,
+                Some(&tenant),
+                None,
+                &[("X-BastionVault-Namespace", "nsui")],
+            )
+            .unwrap();
+        assert_eq!(
+            s, 403,
+            "share-scoped grant must not read an unshared resource: {s} {r:?}"
+        );
+    }
+
+    /// End-to-end: a resource shared with a tenant inside a namespace must be
+    /// readable by that tenant, and a same-named resource at root must stay
+    /// out of reach.
+    ///
+    /// This is the whole reported scenario in one test — "there is no Resources
+    /// tab even though the namespace has the mount and the user has resources
+    /// shared with them". It covers the pieces that each failed on their own:
+    /// the tenant's implicit `namespace-shared` grant, the `<ns>/`-prefixed
+    /// mount-access check, the mount-relative path extraction in the ACL
+    /// resolution helpers, and the namespace-scoped owner/share keys.
+    ///
+    /// The root half is the security half: root and the tenant both own a
+    /// resource called `shared-db`, and the share is granted only on the
+    /// tenant's. Before the keys were namespace-scoped both resolved to one
+    /// share record, so this grant would also have opened root's.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_tenant_reads_a_resource_shared_inside_its_namespace() {
+        let mut server = TestHttpServer::new("test_tenant_shared_resource", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        let ns = "dti/esi";
+        let ns_header = [("X-BastionVault-Namespace", ns)];
+
+        // `dti` must exist before `dti/esi` (segment-wise creation).
+        for path in ["v1/sys/namespaces/dti", "v1/sys/namespaces/dti/esi"] {
+            let (s, r) = server
+                .write(path, serde_json::json!({}).as_object().cloned(), Some(&root))
+                .unwrap();
+            assert!((200..300).contains(&s), "ns create {path}: {s} {r:?}");
+        }
+
+        // A resource of the SAME NAME at root and in the namespace.
+        let (s, r) = server
+            .write(
+                "v1/resources/resources/shared-db",
+                serde_json::json!({ "type": "server" }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "root resource create: {s} {r:?}");
+        let (s, r) = server
+            .request_with_headers(
+                "POST",
+                "v1/resources/resources/shared-db",
+                serde_json::json!({ "type": "server" }).as_object().cloned(),
+                Some(&root),
+                None,
+                &ns_header,
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "tenant resource create: {s} {r:?}");
+
+        // A tenant principal, with no policy in the namespace keyspace.
+        server
+            .write("v1/sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
+            .unwrap();
+        server
+            .write(
+                "v1/auth/pass/users/tina",
+                serde_json::json!({ "password": "hunter22XX!", "ttl": 0 }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        let (s, r) = server
+            .request_with_headers(
+                "POST",
+                "v1/auth/pass/login/tina",
+                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                None,
+                None,
+                &ns_header,
+            )
+            .unwrap();
+        assert_eq!(s, 200, "tenant login: {r:?}");
+        let tenant = r["auth"]["client_token"].as_str().unwrap().to_string();
+        let tina_entity = r["auth"]["metadata"]["entity_id"].as_str().unwrap_or("").to_string();
+        assert!(!tina_entity.is_empty(), "login must provision an entity: {r:?}");
+
+        // Grant tina read on the *namespace's* shared-db. Root performs the
+        // grant with the namespace header, so it keys on `dti/esi/shared-db`.
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let target_b64 = URL_SAFE_NO_PAD.encode(b"shared-db");
+        let (s, r) = server
+            .request_with_headers(
+                "POST",
+                &format!("v2/identity/sharing/by-target/resource/{target_b64}/{tina_entity}"),
+                serde_json::json!({ "capabilities": ["read"] }).as_object().cloned(),
+                Some(&root),
+                None,
+                &ns_header,
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "share grant: {s} {r:?}");
+
+        // The tenant can now read the namespace's resource…
+        let (s, r) = server
+            .request_with_headers(
+                "GET",
+                "v1/resources/resources/shared-db",
+                None,
+                Some(&tenant),
+                None,
+                &ns_header,
+            )
+            .unwrap();
+        assert_eq!(s, 200, "tenant must read the resource shared with them: {s} {r:?}");
+
+        // …and the share must NOT reach root's same-named resource.
+        let (s, r) = server
+            .read("v1/resources/resources/shared-db", Some(&tenant))
+            .unwrap();
+        assert_eq!(
+            s, 403,
+            "a share granted in a namespace must not open root's same-named resource: {s} {r:?}"
         );
     }
 

@@ -892,6 +892,29 @@ impl Core {
         // (Re-root copy + activation already ran at the top of post_unseal, via
         // `resolve_root_activation`, before any view/mount-table was built.)
 
+        // One-shot datafix: re-key legacy bare resource owner/share records to
+        // their namespace-scoped form. Runs here because it needs both the
+        // identity stores (created in `module_manager.init` above) and the
+        // loaded root mount table. Marker-guarded, so it is a no-op on every
+        // boot after the first. Best-effort: a failure leaves the legacy keys
+        // in place, which denies access (fail-closed) rather than granting it,
+        // and must not stop the server from coming up — it retries next unseal.
+        if let Some(core_arc) = self.self_ptr.upgrade() {
+            match crate::modules::identity::ns_scope_migrate::run_if_needed(&core_arc).await {
+                Ok(report) if !report.skipped => {
+                    log::info!(
+                        target: "migration",
+                        "owner/share ns-scope datafix: {report:?}",
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!(
+                    target: "migration",
+                    "owner/share ns-scope datafix failed (will retry on next unseal): {e}",
+                ),
+            }
+        }
+
         // Load the restart-durable FerroGate machine-identity enforcement flag
         // into its in-memory mirror before serving requests. Best-effort: a
         // read failure leaves the safe default (false) rather than blocking

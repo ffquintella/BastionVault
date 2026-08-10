@@ -32,6 +32,14 @@ use crate::{
 const KV_OWNER_SUB_PATH: &str = "owner/kv/";
 const RESOURCE_OWNER_SUB_PATH: &str = "owner/resource/";
 const FILE_OWNER_SUB_PATH: &str = "owner/file/";
+/// Namespaced owner records live in their own sub-views, keyed by
+/// `b64url("<ns>/<name>")`. A separate keyspace (rather than a `<ns>/`-prefixed
+/// key in the legacy views) is deliberate: it leaves every existing root record
+/// byte-identical, and it makes a root name and a tenant name structurally
+/// incapable of colliding — a bare lowercase resource name and a base64url
+/// blob cannot be confused for one another when they never share a view.
+const NS_RESOURCE_OWNER_SUB_PATH: &str = "owner/ns-resource/";
+const NS_FILE_OWNER_SUB_PATH: &str = "owner/ns-file/";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OwnerRecord {
@@ -43,6 +51,8 @@ pub struct OwnerStore {
     kv_view: Arc<BarrierView>,
     resource_view: Arc<BarrierView>,
     file_view: Arc<BarrierView>,
+    ns_resource_view: Arc<BarrierView>,
+    ns_file_view: Arc<BarrierView>,
 }
 
 #[maybe_async::maybe_async]
@@ -55,8 +65,71 @@ impl OwnerStore {
         let kv_view = Arc::new(system_view.new_sub_view(KV_OWNER_SUB_PATH));
         let resource_view = Arc::new(system_view.new_sub_view(RESOURCE_OWNER_SUB_PATH));
         let file_view = Arc::new(system_view.new_sub_view(FILE_OWNER_SUB_PATH));
+        let ns_resource_view = Arc::new(system_view.new_sub_view(NS_RESOURCE_OWNER_SUB_PATH));
+        let ns_file_view = Arc::new(system_view.new_sub_view(NS_FILE_OWNER_SUB_PATH));
 
-        Ok(Arc::new(Self { kv_view, resource_view, file_view }))
+        Ok(Arc::new(Self { kv_view, resource_view, file_view, ns_resource_view, ns_file_view }))
+    }
+
+    /// Namespace-scope a resource name, file id, or asset-group name for owner
+    /// and share lookups: `Some("<ns>/<name>")` in a namespace, `Some(name)` at
+    /// root.
+    ///
+    /// The name-keyed analogue of [`canonicalize_kv_path_scoped`]. Resource,
+    /// file, and asset-group records live in a single global store keyed on the
+    /// bare name, so without this a resource called `db1` in namespace
+    /// `dti/esi` and one called `db1` at root share one owner record and one
+    /// set of shares — a share granted on either would unlock both. Root
+    /// (`ns_path` empty or `None`) returns the bare lowercased name, so every
+    /// pre-existing record and caller is unaffected.
+    ///
+    /// Returns `None` for a name that is empty, contains `/`, or contains `..`
+    /// — the same validation the store methods applied inline before, hoisted
+    /// here so a caller cannot smuggle a second path segment past the scoping
+    /// and land on another namespace's key.
+    ///
+    /// Accepts an already-scoped name idempotently: a value that starts with
+    /// `<ns>/` is returned unchanged, so passing a scoped key back through is
+    /// safe (mirrors `canonicalize_kv_path_scoped`).
+    ///
+    /// [`canonicalize_kv_path_scoped`]: Self::canonicalize_kv_path_scoped
+    pub fn scope_target_name(name: &str, ns_path: Option<&str>) -> Option<String> {
+        let ns = ns_path.map(|n| n.trim().trim_matches('/')).filter(|n| !n.is_empty());
+        let raw = name.trim().to_lowercase();
+        // Idempotence: already carries this namespace's prefix.
+        if let Some(n) = ns {
+            let prefix = format!("{}/", n.to_lowercase());
+            if let Some(rest) = raw.strip_prefix(&prefix) {
+                return Self::scope_target_name(rest, ns_path);
+            }
+        }
+        if raw.is_empty() || raw.contains('/') || raw.contains("..") {
+            return None;
+        }
+        Some(match ns {
+            Some(n) => format!("{}/{}", n.to_lowercase(), raw),
+            None => raw,
+        })
+    }
+
+    /// Split a (possibly namespace-scoped) target key into the view that holds
+    /// it and the key within that view. Root keys keep the legacy bare-name
+    /// layout; namespaced keys are base64url'd into the `ns-*` views so the
+    /// `/` separator never becomes a nested BarrierView path segment.
+    fn target_slot<'a>(
+        legacy: &'a Arc<BarrierView>,
+        scoped: &'a Arc<BarrierView>,
+        key: &str,
+    ) -> Option<(&'a Arc<BarrierView>, String)> {
+        let k = key.trim().to_lowercase();
+        if k.is_empty() || k.contains("..") {
+            return None;
+        }
+        if k.contains('/') {
+            Some((scoped, URL_SAFE_NO_PAD.encode(k.as_bytes())))
+        } else {
+            Some((legacy, k))
+        }
     }
 
     /// Canonicalize a KV secret path for owner lookup/storage. Matches
@@ -226,15 +299,21 @@ impl OwnerStore {
         self.kv_view.put(&StorageEntry { key, value }).await
     }
 
+    /// Resolve the (view, key) slot for a resource owner record. `resource` is
+    /// either a bare root name or a `<ns>/<name>` key from
+    /// [`scope_target_name`](Self::scope_target_name).
+    fn resource_slot(&self, resource: &str) -> Option<(&Arc<BarrierView>, String)> {
+        Self::target_slot(&self.resource_view, &self.ns_resource_view, resource)
+    }
+
     pub async fn get_resource_owner(
         &self,
         resource: &str,
     ) -> Result<Option<OwnerRecord>, RvError> {
-        let key = resource.trim().to_lowercase();
-        if key.is_empty() || key.contains('/') {
+        let Some((view, key)) = self.resource_slot(resource) else {
             return Ok(None);
-        }
-        let Some(raw) = self.resource_view.get(&key).await? else {
+        };
+        let Some(raw) = view.get(&key).await? else {
             return Ok(None);
         };
         let rec: OwnerRecord = serde_json::from_slice(&raw.value).unwrap_or_default();
@@ -249,11 +328,10 @@ impl OwnerStore {
         if entity_id.is_empty() {
             return Ok(());
         }
-        let key = resource.trim().to_lowercase();
-        if key.is_empty() || key.contains('/') {
+        let Some((view, key)) = self.resource_slot(resource) else {
             return Ok(());
-        }
-        if let Some(raw) = self.resource_view.get(&key).await? {
+        };
+        if let Some(raw) = view.get(&key).await? {
             let existing: OwnerRecord = serde_json::from_slice(&raw.value).unwrap_or_default();
             if !existing.entity_id.is_empty() {
                 return Ok(());
@@ -264,7 +342,7 @@ impl OwnerStore {
             created_at: Utc::now().to_rfc3339(),
         };
         let value = serde_json::to_vec(&rec)?;
-        self.resource_view.put(&StorageEntry { key, value }).await
+        view.put(&StorageEntry { key, value }).await
     }
 
     /// Unconditional overwrite of a resource owner record. Mirror of
@@ -274,10 +352,9 @@ impl OwnerStore {
         resource: &str,
         entity_id: &str,
     ) -> Result<(), RvError> {
-        let key = resource.trim().to_lowercase();
-        if key.is_empty() || key.contains('/') {
+        let Some((view, key)) = self.resource_slot(resource) else {
             return Err(crate::bv_error_string!("invalid resource name"));
-        }
+        };
         let entity_id = entity_id.trim();
         if entity_id.is_empty() {
             return Err(crate::bv_error_string!("entity_id is required"));
@@ -287,15 +364,14 @@ impl OwnerStore {
             created_at: Utc::now().to_rfc3339(),
         };
         let value = serde_json::to_vec(&rec)?;
-        self.resource_view.put(&StorageEntry { key, value }).await
+        view.put(&StorageEntry { key, value }).await
     }
 
     pub async fn forget_resource_owner(&self, resource: &str) -> Result<(), RvError> {
-        let key = resource.trim().to_lowercase();
-        if key.is_empty() || key.contains('/') {
+        let Some((view, key)) = self.resource_slot(resource) else {
             return Ok(());
-        }
-        self.resource_view.delete(&key).await
+        };
+        view.delete(&key).await
     }
 
     // ── File ownership (parallel to kv/resource) ──────────────────
@@ -303,19 +379,20 @@ impl OwnerStore {
     // File IDs are server-assigned UUIDs (see `src/modules/files/`);
     // they are never operator-supplied and always fit the `[^/]+`
     // shape already enforced by the route pattern. The owner key is
-    // therefore the id itself, no canonicalization needed.
+    // therefore the id itself at root, or `<ns>/<id>` in a namespace.
 
-    fn valid_file_id(id: &str) -> bool {
-        let t = id.trim();
-        !t.is_empty() && !t.contains('/')
+    /// Resolve the (view, key) slot for a file owner record. `id` is either a
+    /// bare root uuid or a `<ns>/<uuid>` key from
+    /// [`scope_target_name`](Self::scope_target_name).
+    fn file_slot(&self, id: &str) -> Option<(&Arc<BarrierView>, String)> {
+        Self::target_slot(&self.file_view, &self.ns_file_view, id)
     }
 
     pub async fn get_file_owner(&self, id: &str) -> Result<Option<OwnerRecord>, RvError> {
-        if !Self::valid_file_id(id) {
+        let Some((view, key)) = self.file_slot(id) else {
             return Ok(None);
-        }
-        let key = id.trim().to_string();
-        let Some(raw) = self.file_view.get(&key).await? else {
+        };
+        let Some(raw) = view.get(&key).await? else {
             return Ok(None);
         };
         let rec: OwnerRecord = serde_json::from_slice(&raw.value).unwrap_or_default();
@@ -327,11 +404,13 @@ impl OwnerStore {
         id: &str,
         entity_id: &str,
     ) -> Result<(), RvError> {
-        if entity_id.is_empty() || !Self::valid_file_id(id) {
+        if entity_id.is_empty() {
             return Ok(());
         }
-        let key = id.trim().to_string();
-        if let Some(raw) = self.file_view.get(&key).await? {
+        let Some((view, key)) = self.file_slot(id) else {
+            return Ok(());
+        };
+        if let Some(raw) = view.get(&key).await? {
             let existing: OwnerRecord = serde_json::from_slice(&raw.value).unwrap_or_default();
             if !existing.entity_id.is_empty() {
                 return Ok(());
@@ -342,31 +421,46 @@ impl OwnerStore {
             created_at: Utc::now().to_rfc3339(),
         };
         let value = serde_json::to_vec(&rec)?;
-        self.file_view.put(&StorageEntry { key, value }).await
+        view.put(&StorageEntry { key, value }).await
     }
 
     pub async fn set_file_owner(&self, id: &str, entity_id: &str) -> Result<(), RvError> {
-        if !Self::valid_file_id(id) {
+        let Some((view, key)) = self.file_slot(id) else {
             return Err(crate::bv_error_string!("invalid file id"));
-        }
+        };
         let entity_id = entity_id.trim();
         if entity_id.is_empty() {
             return Err(crate::bv_error_string!("entity_id is required"));
         }
-        let key = id.trim().to_string();
         let rec = OwnerRecord {
             entity_id: entity_id.to_string(),
             created_at: Utc::now().to_rfc3339(),
         };
         let value = serde_json::to_vec(&rec)?;
-        self.file_view.put(&StorageEntry { key, value }).await
+        view.put(&StorageEntry { key, value }).await
     }
 
     pub async fn forget_file_owner(&self, id: &str) -> Result<(), RvError> {
-        if !Self::valid_file_id(id) {
+        let Some((view, key)) = self.file_slot(id) else {
             return Ok(());
-        }
-        self.file_view.delete(id.trim()).await
+        };
+        view.delete(&key).await
+    }
+
+    /// Every bare (pre-namespace-scoping) resource owner key on disk.
+    ///
+    /// Migration support only — see `identity::ns_scope_migrate`. Reads the
+    /// *legacy* view, so it never returns a namespaced record (those live in
+    /// `ns_resource_view` under a base64url key).
+    pub async fn list_legacy_resource_owners(&self) -> Result<Vec<String>, RvError> {
+        Ok(self
+            .resource_view
+            .list("")
+            .await?
+            .into_iter()
+            .map(|k| k.trim_end_matches('/').to_string())
+            .filter(|k| !k.is_empty())
+            .collect())
     }
 }
 

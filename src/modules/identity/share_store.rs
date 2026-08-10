@@ -223,41 +223,39 @@ impl ShareStore {
     /// Canonicalize a share target's path. Uses the same rules as
     /// `OwnerStore::canonicalize_kv_path` for KV paths so the share on
     /// `secret/foo/bar` matches whether the grantee hits v1 or v2.
-    /// Resource names are lowercased and must not contain `/`.
+    ///
+    /// Name-keyed kinds (resource, asset group, file) are lowercased and
+    /// trimmed. They accept either a bare root name (`db1`) or the
+    /// namespace-scoped form `<ns>/<name>` produced by
+    /// `OwnerStore::scope_target_name` (`dti/esi/db1`) — without the latter a
+    /// tenant's `db1` and root's `db1` would resolve to one set of shares, so
+    /// a grant on either would unlock both. `target_hash` base64s the whole
+    /// canonical string, so the `/` never reaches a storage key segment and
+    /// `resource|db1` can never hash to the same slot as `resource|dti/esi/db1`.
+    ///
+    /// `..` and empty segments stay rejected: they are the only way a caller
+    /// could walk out of its own namespace's key space.
     pub fn canonicalize(kind: ShareTargetKind, raw: &str) -> Option<String> {
         match kind {
             ShareTargetKind::KvSecret => OwnerStore::canonicalize_kv_path(raw),
-            ShareTargetKind::Resource => {
-                let k = raw.trim().to_lowercase();
-                if k.is_empty() || k.contains('/') {
-                    None
-                } else {
-                    Some(k)
-                }
-            }
-            ShareTargetKind::AssetGroup => {
-                // Mirror ResourceGroupStore::sanitize_name: lowercase,
-                // trim, reject empties and `/` or `..`.
-                let k = raw.trim().to_lowercase();
-                if k.is_empty() || k.contains('/') || k.contains("..") {
-                    None
-                } else {
-                    Some(k)
-                }
-            }
-            ShareTargetKind::File => {
-                // File ids are server-assigned UUIDs; treat any
-                // non-empty, slash-free string as canonical so operator
-                // tooling that posts lower/upper-cased or dashless
-                // forms still matches stored records consistently.
-                let k = raw.trim().to_lowercase();
-                if k.is_empty() || k.contains('/') {
-                    None
-                } else {
-                    Some(k)
-                }
+            ShareTargetKind::Resource | ShareTargetKind::AssetGroup | ShareTargetKind::File => {
+                Self::canonicalize_name(raw)
             }
         }
+    }
+
+    /// Shared canonicalizer for the name-keyed target kinds. Permits the
+    /// `<ns>/<name>` scoping separator but nothing else that could redirect
+    /// the key: no `..`, no empty segment, no leading/trailing slash.
+    fn canonicalize_name(raw: &str) -> Option<String> {
+        let k = raw.trim().to_lowercase();
+        if k.is_empty() || k.starts_with('/') || k.ends_with('/') {
+            return None;
+        }
+        if k.split('/').any(|s| s.is_empty() || s == "..") {
+            return None;
+        }
+        Some(k)
     }
 
     /// Base64url(no-pad) of `<kind>|<canonical_path>`. Deterministic
@@ -606,6 +604,41 @@ impl ShareStore {
         }
 
         Ok(moved)
+    }
+
+    /// Every distinct canonical target path of `kind` that currently has at
+    /// least one share.
+    ///
+    /// Migration support only — see `identity::ns_scope_migrate`. Walks the
+    /// primary view (`<target_hash>/<grantee>`), decodes each `target_hash`
+    /// back to `<kind>|<canonical>`, and keeps the ones matching `kind`.
+    /// Undecodable or foreign-kind hashes are skipped rather than failing the
+    /// walk, so one corrupt key cannot block a migration pass.
+    pub async fn list_target_canonicals(
+        &self,
+        kind: ShareTargetKind,
+    ) -> Result<Vec<String>, RvError> {
+        let want = format!("{}|", kind.as_str());
+        let mut out: Vec<String> = Vec::new();
+        for key in self.primary_view.list("").await? {
+            let hash = key.trim_end_matches('/');
+            if hash.is_empty() {
+                continue;
+            }
+            let Ok(raw) = URL_SAFE_NO_PAD.decode(hash.as_bytes()) else {
+                continue;
+            };
+            let Ok(decoded) = String::from_utf8(raw) else {
+                continue;
+            };
+            let Some(canonical) = decoded.strip_prefix(&want) else {
+                continue;
+            };
+            if !canonical.is_empty() && !out.iter().any(|c| c == canonical) {
+                out.push(canonical.to_string());
+            }
+        }
+        Ok(out)
     }
 
     /// Return every target shared with `grantee` (entity grantee). The

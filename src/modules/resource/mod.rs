@@ -1134,12 +1134,19 @@ impl ResourceBackendInner {
             .get_module::<crate::modules::identity::IdentityModule>("identity")
         {
             let actor = crate::modules::identity::caller_audit_actor(req);
+            // Share and owner records are keyed `<ns>/<name>` inside a
+            // namespace, so the rename must move the namespace's own records
+            // and never touch a root resource that happens to share the name.
+            use crate::modules::identity::owner_store::OwnerStore;
+            let ns = req.namespace_path.as_deref();
+            let old_key = OwnerStore::scope_target_name(&old, ns).unwrap_or_else(|| old.clone());
+            let new_key = OwnerStore::scope_target_name(&new, ns).unwrap_or_else(|| new.clone());
             if let Some(share_store) = identity.share_store() {
                 if let Err(e) = share_store
                     .rename_target(
                         crate::modules::identity::share_store::ShareTargetKind::Resource,
-                        &old,
-                        &new,
+                        &old_key,
+                        &new_key,
                         &actor,
                     )
                     .await
@@ -1150,16 +1157,16 @@ impl ResourceBackendInner {
                 }
             }
             if let Some(owner_store) = identity.owner_store() {
-                match owner_store.get_resource_owner(&old).await {
+                match owner_store.get_resource_owner(&old_key).await {
                     Ok(Some(rec)) if !rec.entity_id.is_empty() => {
                         if let Err(e) =
-                            owner_store.set_resource_owner(&new, &rec.entity_id).await
+                            owner_store.set_resource_owner(&new_key, &rec.entity_id).await
                         {
                             log::warn!(
                                 "owner rename failed for resource '{old}' -> '{new}': {e}",
                             );
                         } else {
-                            let _ = owner_store.forget_resource_owner(&old).await;
+                            let _ = owner_store.forget_resource_owner(&old_key).await;
                         }
                     }
                     Ok(_) => {}

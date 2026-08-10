@@ -418,6 +418,81 @@ the GUI for sharing + owner transfer are all live.
 - **Sharing is live.** `scopes = ["shared"]` is wired end-to-end
   against the `ShareStore`; see `src/modules/identity/share_store.rs`
   and the `v2/identity/sharing/*` handlers.
+- **Tenants carry an implicit shared-target grant.** A namespace is
+  created with default mounts but no policies, and a namespace-bound
+  token resolves its named policies from that empty keyspace — so it
+  held no rule at all on its own namespace's `secret/`, `resources/`,
+  or `resource-group/` mounts. `new_acl_inner` now injects
+  `namespace-shared` (alongside the existing `namespace-self`) for any
+  non-root binding: the `{{namespace.path}}`-templated mirror of the
+  shared-target block in `default`. Templated rather than literal
+  because these mounts *are* path-rewritten —
+  `rewrite_request_for_namespace` turns `resources/resources/db1` into
+  `<ns>/resources/resources/db1` — so the rules resolve to the token's
+  own namespace and can never reach a sibling tenant. Same
+  `scopes = ["shared"]` discipline as `default`: no share, no access.
+
+### Per-user scoping inside a namespace
+
+Two layers had to change for `owner` / `shared` to work for a tenant.
+
+**Path shape.** `rewrite_request_for_namespace` prepends `<ns>/` to every
+non-header-scoped request, so the ACL sees
+`dti/esi/resources/resources/db1`. The shape helpers in
+`src/modules/policy/policy_store.rs` (`resource_name_from_path`,
+`file_id_from_path`, `asset_group_name_from_path`, `looks_like_kv_path`)
+matched root-relative paths only, so they extracted no target name and
+`resolve_target_shared_caps` / `resolve_asset_owner` /
+`resolve_asset_groups` / `filter_list_by_ownership` all returned empty —
+fail-closed, but it made sharing unusable for tenants. They now take the
+active namespace and strip it via `mount_relative_path` before matching.
+
+**Storage key.** Resource, file, and asset-group owner/share records were
+keyed on the bare name (`sys/owner/resource/<name>`, share target
+`resource|<name>`) while the objects live in namespace-isolated storage,
+so root's `db1` and a tenant's `db1` shared one owner record and one
+share set. Stripping the prefix alone would therefore have turned a
+fail-closed miss into a cross-namespace grant. Keys are now
+`<ns>/<name>` via `OwnerStore::scope_target_name`, the name-keyed
+analogue of `canonicalize_kv_path_scoped`. Root keeps the bare form
+byte-for-byte; namespaced owner records live in separate
+`owner/ns-resource/` and `owner/ns-file/` sub-views under a
+base64url'd key, so the two forms share no keyspace and cannot collide.
+Share targets need no keyspace split — `target_hash` already base64s
+`<kind>|<canonical>`, and `resource|db1` cannot hash to
+`resource|dti/esi/db1`.
+
+Scoping is applied at the *boundaries*, not inside the stores: the store
+methods still take one key string, and each caller scopes first
+(`scope_share_target` for the share endpoints, `scope_target_name` for
+owner read/transfer/backfill, resource rename, and file create). This
+matches how KV already worked and keeps the diff auditable.
+
+#### Migration
+
+`src/modules/identity/ns_scope_migrate.rs` re-keys pre-existing bare
+records once, on the first unseal after upgrade. Nothing in a legacy
+record names its namespace — that is the bug — so the owning namespace
+is inferred from where the object lives: each namespace's `resource`
+mounts are read from its own mount table and their `meta/<name>` keys
+listed. Root-held names are left bare (already correct, and root wins
+over any tenant of the same name); a name held by exactly one namespace
+is re-keyed; orphans and names held by two or more namespaces are left
+bare and logged, since guessing could transfer access between tenants.
+A version marker under the namespace registry makes it idempotent, and
+each record is written-new-then-deleted-old so an interrupted run leaves
+a resolvable duplicate rather than an orphan.
+
+#### Still open: the asset-group store
+
+`ResourceGroupStore` (group records, member index, secret index, file
+index) remains a single root-global keyspace keyed on the bare name, so
+asset groups are not yet per-namespace. Asset-group *share targets* are
+scoped by this release, which means a tenant's group-mediated access now
+fails closed instead of resolving against a root group of the same name.
+`PolicyStore::can_operate` is likewise namespace-blind — it is a
+cross-target preview that does not carry the triggering request's
+namespace, and a miss only narrows the preview.
 
 ### Integration tests
 

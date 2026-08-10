@@ -45,6 +45,77 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.39.1] - 2026-08-10
+
+### Fixed
+
+#### Tenant navigation: the Resources / Secrets tabs are back
+- **Report the namespace's own mounts to a tenant token**
+  (`src/modules/system/mod.rs`) -- `sys/internal/ui/mounts` gated each
+  namespaced mount on its mount-relative path (`resources/`), but a namespaced
+  request is rewritten to `<ns>/resources/…` before authorization and a tenant
+  policy is *required* to use that same prefixed form. No tenant rule could
+  ever match, so the endpoint returned an empty mount map for every non-root
+  principal and the GUI hid every mount-gated nav entry -- a tenant with a
+  resource shared with them saw only Dashboard and Sharing. Root was never
+  affected (the root policy short-circuits the mount check), which is why the
+  existing coverage missed it. (`features/per-user-scoping.md`)
+- **Grant namespace-bound tokens the shared-target baseline**
+  (`src/modules/policy/policy_store.rs`) -- a namespace is created with default
+  mounts but no policies, and a tenant token resolves its named policies from
+  that empty keyspace, so it carried no grant on its own namespace's
+  `secret/`, `resources/`, or `resource-group/` mounts. Tenants now implicitly
+  carry `namespace-shared`, the `{{namespace.path}}`-templated mirror of the
+  shared-target block in `default`. Every data rule is `scopes = ["shared"]`,
+  so it grants access only where an active `SecretShare` names the caller --
+  never blanket access to the namespace, and never into a sibling namespace.
+
+- **Resolve ownership and sharing for namespaced resources and files**
+  (`src/modules/policy/policy_store.rs`) -- the owner/share/asset-group lookup
+  helpers matched root-relative paths only, so a rewritten
+  `<ns>/resources/resources/<name>` extracted no target name and every
+  `scopes = ["owner"|"shared"]` rule was silently ungrantable inside a
+  namespace. The new `mount_relative_path` strips the namespace prefix before
+  the shape match. Also fixes a KV group-grantee share lookup that passed the
+  raw request path where every sibling lookup passes the canonical one (it
+  missed every namespaced share, and every v2 `data/`-infixed share at root).
+
+### Security
+- **Namespace-scope resource and file owner and share records**
+  (`src/modules/identity/owner_store.rs`, `share_store.rs`) -- these were keyed
+  on the bare name (`sys/owner/resource/db1`, share target `resource|db1`)
+  while the objects live in namespace-isolated storage, so a resource named
+  `db1` in a namespace and one at root shared a single owner record and a
+  single set of shares: a grant on either would unlock both. Keys are now
+  `<ns>/<name>` (`OwnerStore::scope_target_name`), mirroring what KV already
+  did via `canonicalize_kv_path_scoped`. Root keys are byte-identical to
+  before; namespaced records live in their own `owner/ns-resource/` and
+  `owner/ns-file/` sub-views so the two forms cannot collide. Every boundary
+  that reads or writes these keys -- the share endpoints, owner read and
+  transfer, the owner backfill, resource rename, and file create -- now scopes
+  through the active namespace.
+- **One-shot datafix re-keys legacy records on first unseal after upgrade**
+  (`src/modules/identity/ns_scope_migrate.rs`) -- records written by earlier
+  releases are bare, so a share created inside a namespace would stop
+  resolving. The datafix infers each record's owning namespace from where the
+  *object* actually lives (each namespace's `resource` mounts are enumerated
+  from its own mount table) and re-keys accordingly. Root-held names are left
+  untouched (their bare key is already correct and takes precedence); a name
+  held by exactly one namespace is re-keyed; orphans and names held by two or
+  more namespaces are left bare and reported in the log, because guessing
+  could transfer one tenant's access to another -- re-grant those by hand.
+  Guarded by a version marker in the namespace registry, so it runs once and
+  is a no-op on every later boot; a failure is logged and retried on the next
+  unseal rather than blocking startup.
+
+### Known limitations
+- Asset groups themselves (the `ResourceGroupStore` records and their
+  member/secret indexes) are still a single root-global keyspace keyed on the
+  bare name. Asset-group *share targets* are namespace-scoped by this release,
+  so a tenant's group-mediated access now fails closed rather than resolving
+  against a root group of the same name. Namespacing the group store is the
+  follow-up (`features/per-user-scoping.md`).
+
 ## [0.39.0] - 2026-08-10
 
 ### Added

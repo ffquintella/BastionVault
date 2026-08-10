@@ -1200,9 +1200,20 @@ impl FilesBackendInner {
                     .get_module::<crate::modules::identity::IdentityModule>("identity")
                 {
                     if let Some(owner_store) = identity.owner_store() {
-                        let _ = owner_store
-                            .record_file_owner_if_absent(&id, &audit_actor)
-                            .await;
+                        // Namespace-scope the key so a file created inside a
+                        // namespace does not stamp (or collide with) a root
+                        // owner record — matching what `post_route` and the
+                        // ACL resolution path look up.
+                        if let Some(key) =
+                            crate::modules::identity::owner_store::OwnerStore::scope_target_name(
+                                &id,
+                                req.namespace_path.as_deref(),
+                            )
+                        {
+                            let _ = owner_store
+                                .record_file_owner_if_absent(&key, &audit_actor)
+                                .await;
+                        }
                     }
                 }
             }
