@@ -37,8 +37,14 @@ The feature is **backend-first**: Phase 1 ships a single server-side aggregation
 - **Who may read the summary (two tiers).** The route is not sudo-gated, so it is
   a plain ACL decision — and for its first releases *no* policy granted it, not
   even `administrator`, so only a `root` token could read it and every non-root
-  session got a 403 banner on its landing page. The built-in `default` policy now
-  grants `read`, which is safe for the `counts` block precisely because those
+  session got a 403 banner on its landing page. The grant lives in **two** places
+  and both are required: the built-in `default` policy, and the implicit
+  `namespace-self` policy. A namespace-bound token resolves its named policies
+  from its own (initially empty) namespace keyspace and so never loads `default`
+  — `namespace-self` is its entire ACL. Granting only in `default` fixes a
+  non-root principal at root and leaves every tenant session on the same 403
+  (which is exactly what 0.38.5 shipped; 0.38.7 completed it). It is safe for the
+  `counts` block precisely because those
   counts are already resolved through the caller's own ACL and namespace. The
   `audit_24h` / `attention` blocks are a second tier: they are deployment-wide,
   neither ACL-filtered nor namespace-scoped, so `handle_dashboard_summary` emits
@@ -48,7 +54,7 @@ The feature is **backend-first**: Phase 1 ships a single server-side aggregation
   shows "unavailable" instead of claiming that nothing failed. Anyone widening
   the `default` grant must keep that gate in step.
 - **Health-strip badges are an authenticated read.** The strip's storage / uptime / version pills come from `get_server_info` → `/v1/sys/info`, whose payload has been split into disclosure tiers since v0.37.6: an unauthenticated caller gets only `initialized` / `sealed`. The remote path therefore binds the session token with `with_token` (the badges silently degraded to `up --` / `v` / `storage` for as long as it did not). Embedded mode reads the in-process `server_info` helpers and needs no token. The strip omits any pill whose field came back withheld rather than rendering a placeholder.
-- **Tests.** Backend `test_dashboard_summary_basic` (`src/modules/system/mod.rs`) asserts the response shape + ACL/audit counts; `test_dashboard_summary_for_a_default_only_principal` asserts the `default` grant (200, `seal` + `counts` present), that the privileged blocks are absent for that caller, and that root still receives both; the refactored `handle_audit_events` keeps its three existing tests green. GUI `gui/src/test/dashboard.test.tsx` covers `bucketByHour` (5 cases), `KpiTile` null/value states, and `AttentionPanel` severity rows (10 tests). Full suite: 130 vitest passing, `tsc` + `vite build` clean.
+- **Tests.** Backend `test_dashboard_summary_basic` (`src/modules/system/mod.rs`) asserts the response shape + ACL/audit counts; `test_dashboard_summary_for_a_default_only_principal` asserts the `default` grant (200, `seal` + `counts` present), that the privileged blocks are absent for that caller, and that root still receives both; `test_dashboard_summary_for_a_namespace_bound_principal` does the same for a token bound to a nested tenant (`dti/esi`), which is the case the `default`-only grant missed — it was verified to fail with 403 before the `namespace-self` grant landed; the refactored `handle_audit_events` keeps its three existing tests green. GUI `gui/src/test/dashboard.test.tsx` covers `bucketByHour` (5 cases), `KpiTile` null/value states, and `AttentionPanel` severity rows (10 tests). Full suite: 130 vitest passing, `tsc` + `vite build` clean.
 
 ### Request-level statistics aggregator
 

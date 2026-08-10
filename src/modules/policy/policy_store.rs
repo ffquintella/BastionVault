@@ -379,6 +379,18 @@ path "sys/internal/ui/resultant-acl"  { capabilities = ["read"] }
 # --- Which namespaces this token may operate in (caller-filtered) ---
 path "sys/namespaces-self"            { capabilities = ["read"] }
 
+# --- The Dashboard landing page's one aggregation call ---
+# Must be granted here as well as in `default`: a namespace-bound token resolves
+# its named policies from its own (initially empty) namespace keyspace, so it
+# never loads `default` at all — this policy is the entire ACL such a token
+# carries. Granting it only in `default` fixes a non-root principal at *root*
+# while leaving every tenant session staring at the same 403.
+# The counts in the response are resolved through the caller's own ACL and
+# namespace, and `handle_dashboard_summary` withholds the deployment-wide audit
+# counters from anyone who cannot read `sys/audit/events` — which no tenant token
+# can, so this grant exposes nothing beyond what the caller already reaches.
+path "sys/dashboard/summary"          { capabilities = ["read"] }
+
 # --- Caller-introspecting identity lookups (only ever return the caller) ---
 path "identity/entity/self"   { capabilities = ["read"] }
 path "identity/sharing/for-me" { capabilities = ["read", "list"] }

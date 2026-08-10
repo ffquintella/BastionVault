@@ -45,6 +45,33 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.38.7] - 2026-08-10
+
+### Fixed
+- **The Dashboard 403 is finally gone for *tenant* sessions**
+  (`src/modules/policy/policy_store.rs`) -- 0.38.5 granted
+  `sys/dashboard/summary` in the built-in `default` policy, which fixed a non-root
+  principal bound to the **root** namespace and did nothing at all for a principal
+  bound to a child namespace. `new_acl_inner` resolves a namespace-bound token's
+  named policies from that namespace's own (initially empty) keyspace, so such a
+  token never loads `default`: the implicit, never-stored `namespace-self` policy
+  injected for any non-root binding *is* the whole of its ACL. A `dti/esi`-bound
+  session therefore kept getting the identical `HTTP 403: Permission denied` on
+  0.38.6, with `sys/capabilities-self` reporting `["deny"]` on the path. The grant
+  is now in `namespace-self` as well. That policy is in-memory only, so it needs
+  no per-namespace seeding or backfill and takes effect on restart.
+
+  The withholding of the deployment-wide `audit_24h` / `attention` counters added
+  in 0.38.5 does the real work here: a tenant token cannot read
+  `sys/audit/events`, so it receives the namespace-scoped counts and seal state
+  and none of the global telemetry. Covered by
+  `modules::system::mod_system_tests::test_dashboard_summary_for_a_namespace_bound_principal`,
+  which builds the reported shape (nested `dti/esi`, `ns-assignment`, unscoped
+  login, active-namespace header) and asserts the 200, the namespace scoping, and
+  the absent privileged blocks. **This test was verified to fail with 403 before
+  the fix** — 0.38.5's own test only covered a root-namespace principal, which is
+  precisely why the bug shipped twice.
+
 ## [0.38.6] - 2026-08-10
 
 ### Security

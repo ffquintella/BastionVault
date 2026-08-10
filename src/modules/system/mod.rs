@@ -5991,6 +5991,102 @@ mod mod_system_tests {
         );
     }
 
+    /// The same grant, for a principal bound to a **child namespace** — the shape
+    /// that actually shipped broken.
+    ///
+    /// A namespace-bound token resolves its named policies from its own
+    /// (initially empty) namespace keyspace, so it never loads `default`; the
+    /// implicit `namespace-self` policy is the whole of its ACL. Granting
+    /// `sys/dashboard/summary` in `default` alone therefore fixed a non-root
+    /// principal at root while every tenant session kept getting the identical
+    /// 403 — which is exactly what happened between 0.38.5 and 0.38.6 in
+    /// production. Both policies must carry the grant.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_dashboard_summary_for_a_namespace_bound_principal() {
+        let mut server = TestHttpServer::new("test_dashboard_summary_tenant", true).await;
+        server.token = server.root_token.clone();
+        let root = server.root_token.clone();
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        // A nested tenant, mirroring the reported `dti/esi`.
+        for path in ["v1/sys/namespaces/dti", "v1/sys/namespaces/dti/esi"] {
+            let (s, r) = server
+                .write(path, serde_json::json!({}).as_object().cloned(), Some(&root))
+                .unwrap();
+            assert!((200..300).contains(&s), "ns create {path}: {s} {r:?}");
+        }
+        server
+            .write(
+                "v1/sys/auth/userpass",
+                serde_json::json!({ "type": "userpass" }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        server
+            .write(
+                "v1/auth/userpass/users/tenantuser",
+                serde_json::json!({ "password": "tenant-pw-dash-1", "token_policies": "default", "ttl": 0 })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        server
+            .write(
+                "v1/sys/identity/ns-assignment/userpass/tenantuser",
+                serde_json::json!({ "namespaces": ["dti/esi"] }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+
+        // Unscoped login → binds to the assigned namespace (0.38.2 behaviour).
+        let token = server
+            .request_with_headers(
+                "POST",
+                "v1/auth/userpass/login/tenantuser",
+                serde_json::json!({ "password": "tenant-pw-dash-1" }).as_object().cloned(),
+                None,
+                None,
+                &[],
+            )
+            .unwrap()
+            .1
+            .get("auth")
+            .and_then(|a| a.get("client_token"))
+            .and_then(|v| v.as_str())
+            .expect("client_token")
+            .to_string();
+
+        // Read the summary the way the GUI does: with the active-namespace header
+        // the session lands on after login.
+        let (status, ret) = server
+            .request_with_headers(
+                "GET",
+                "v1/sys/dashboard/summary",
+                None,
+                Some(&token),
+                None,
+                &[("X-BastionVault-Namespace", "dti/esi")],
+            )
+            .unwrap();
+        assert_eq!(
+            status, 200,
+            "a namespace-bound principal must be able to read the dashboard summary: {ret:?}"
+        );
+        assert_eq!(
+            ret.get("namespace").and_then(|v| v.as_str()),
+            Some("dti/esi"),
+            "the summary must be scoped to the caller's namespace: {ret:?}"
+        );
+
+        // And the privileged blocks stay withheld — a tenant cannot read
+        // `sys/audit/events`, so it must not receive deployment-wide telemetry.
+        assert!(
+            ret.get("audit_24h").is_none() && ret.get("attention").is_none(),
+            "a tenant must not receive deployment-wide audit counters: {ret:?}"
+        );
+    }
+
     /// A permission-denied request and a failed login flow through the
     /// request hot path into the in-memory stats aggregator, and show up
     /// in `sys/dashboard/summary` as `audit_24h.denied` and
