@@ -31,7 +31,7 @@ import {
   type SecretHistoryVersion,
   useToast,
 } from "../components/ui";
-import { Copy, ExternalLink, Pencil, Plug, Trash2 } from "lucide-react";
+import { Copy, ExternalLink, Pencil, Plug, Share2, Trash2 } from "lucide-react";
 import type {
   ResourceMetadata,
   ResourceTypeConfig,
@@ -66,6 +66,7 @@ import type { EffectiveLoginClass } from "../lib/types";
 import * as api from "../lib/api";
 import { useConnectMfa } from "../components/ConnectMfaPrompt";
 import { extractError } from "../lib/error";
+import { isAdminUser } from "../lib/access";
 import { useAuthStore } from "../stores/authStore";
 import { useNamespaceStore } from "../stores/namespaceStore";
 import { useAssetGroupMap } from "../hooks/useAssetGroupMap";
@@ -230,6 +231,10 @@ export function ResourcesPage() {
   const [detailTab, setDetailTab] = useState<
     "info" | "secrets" | "files" | "connection" | "sharing" | "history"
   >("info");
+  // Set by the detail header's Share button; the Sharing card consumes
+  // it once (and owns the permission check) then clears the request, so
+  // tabbing back into Sharing later doesn't re-open the Grant modal.
+  const [shareRequested, setShareRequested] = useState(false);
   const [filterType, setFilterType] = useState("");
   const [filterGroup, setFilterGroup] = useState("");
   const [search, setSearch] = useState("");
@@ -660,8 +665,21 @@ export function ResourcesPage() {
           <div className="flex items-center gap-3">
             <button onClick={() => { setSelected(null); setResourceInfo(null); }}
               className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]">&larr; Back</button>
-            <h1 className="text-2xl font-bold">{String(resourceInfo.name)}</h1>
+            <h1 className="min-w-0 truncate text-2xl font-bold">{String(resourceInfo.name)}</h1>
             <ResourceTypeIcon typeDef={typeDef} withLabel size={18} />
+            <div className="ml-auto shrink-0">
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => {
+                  setDetailTab("sharing");
+                  setShareRequested(true);
+                }}
+              >
+                <Share2 size={14} className="mr-1.5 inline" />
+                Share
+              </Button>
+            </div>
           </div>
 
           <CopyablePath
@@ -749,7 +767,12 @@ export function ResourcesPage() {
           )}
 
           {detailTab === "sharing" && (
-            <ResourceSharingCard resourceName={String(resourceInfo.name)} toast={toast} />
+            <ResourceSharingCard
+              resourceName={String(resourceInfo.name)}
+              toast={toast}
+              openGrant={shareRequested}
+              onGrantHandled={() => setShareRequested(false)}
+            />
           )}
 
           {detailTab === "history" && (
@@ -3347,13 +3370,23 @@ function ResourceFilesPanel({
 //
 // Displays the resource's owner record plus every active share and
 // offers Grant / Revoke controls. When the caller's token carries an
-// admin policy, also offers a Transfer-ownership form.
-function ResourceSharingCard({
+// admin policy, also offers Claim-ownership (transfer to self) and a
+// Transfer-ownership form.
+//
+// `openGrant` lets the detail header's Share button drive this card: it
+// opens the Grant modal (or explains why the caller can't grant), so the
+// permission model lives in one place, then calls `onGrantHandled` so the
+// request isn't replayed the next time the tab is opened.
+export function ResourceSharingCard({
   resourceName,
   toast,
+  openGrant = false,
+  onGrantHandled,
 }: {
   resourceName: string;
   toast: (type: "success" | "error" | "info", msg: string) => void;
+  openGrant?: boolean;
+  onGrantHandled?: () => void;
 }) {
   const [owner, setOwner] = useState<OwnerInfo | null>(null);
   const [shares, setShares] = useState<ShareEntry[]>([]);
@@ -3361,9 +3394,13 @@ function ResourceSharingCard({
 
   const policies = useAuthStore((s) => s.policies);
   const entityId = useAuthStore((s) => s.entityId);
-  const isAdmin = policies.some((p) => p === "root" || p === "admin");
+  // Same admin set the sidebar and dashboard use — a delegated admin
+  // policy (e.g. `super-admin`) must see the ownership controls too,
+  // not only a literal `root`/`admin` token.
+  const isAdmin = isAdminUser(policies);
   const isOwner =
     owner?.owned === true && owner.entity_id === entityId && entityId !== "";
+  const canGrant = isOwner || isAdmin;
 
   // Grant modal state
   const [showGrant, setShowGrant] = useState(false);
@@ -3379,6 +3416,19 @@ function ResourceSharingCard({
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resourceName]);
+
+  // Share button in the detail header. Waits for the owner lookup so a
+  // resource the caller owns doesn't get a spurious "not allowed".
+  useEffect(() => {
+    if (!openGrant || loading) return;
+    if (canGrant) {
+      setShowGrant(true);
+    } else {
+      toast("error", "Only the owner or an admin can share this resource.");
+    }
+    onGrantHandled?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openGrant, loading]);
 
   async function load() {
     setLoading(true);
@@ -3430,6 +3480,26 @@ function ResourceSharingCard({
     }
   }
 
+  // Claim = transfer the owner record to the caller's own entity. There
+  // is no `sys/resource-owner/claim` endpoint (unlike KV), so this rides
+  // the admin transfer endpoint and is offered to admins only.
+  async function handleClaim() {
+    if (!entityId) {
+      toast(
+        "error",
+        "Your token has no entity_id — use Assign owner to name one explicitly.",
+      );
+      return;
+    }
+    try {
+      await api.transferResourceOwner(resourceName, entityId);
+      toast("success", "Ownership claimed");
+      load();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
   function toggleCap(c: string) {
     setCaps((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]));
   }
@@ -3442,17 +3512,22 @@ function ResourceSharingCard({
     );
   }
 
-  const canGrant = isOwner || isAdmin;
-
   return (
     <>
       <Card
         title="Owner"
         actions={
           isAdmin ? (
-            <Button size="sm" variant="secondary" onClick={() => setShowTransfer(true)}>
-              Transfer
-            </Button>
+            <>
+              {!owner?.owned && (
+                <Button size="sm" variant="secondary" onClick={handleClaim}>
+                  Claim ownership
+                </Button>
+              )}
+              <Button size="sm" variant="ghost" onClick={() => setShowTransfer(true)}>
+                {owner?.owned ? "Transfer" : "Assign owner"}
+              </Button>
+            </>
           ) : null
         }
       >
@@ -3478,7 +3553,11 @@ function ResourceSharingCard({
         ) : (
           <EmptyState
             title="Unowned"
-            description="No entity has claimed this resource yet. The next write by an authenticated caller will capture ownership."
+            description={
+              isAdmin
+                ? "No entity has claimed this resource yet. Claim it for yourself, assign an owner, or let the next authenticated write capture it."
+                : "No entity has claimed this resource yet. The next write by an authenticated caller will capture ownership."
+            }
           />
         )}
       </Card>
@@ -3625,7 +3704,11 @@ function ResourceSharingCard({
       <Modal
         open={showTransfer}
         onClose={() => setShowTransfer(false)}
-        title={`Transfer ownership of ${resourceName}`}
+        title={
+          owner?.owned
+            ? `Transfer ownership of ${resourceName}`
+            : `Assign an owner for ${resourceName}`
+        }
         actions={
           <>
             <Button variant="ghost" onClick={() => setShowTransfer(false)}>

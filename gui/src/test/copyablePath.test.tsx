@@ -44,6 +44,33 @@ describe("CopyablePath", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps the hint out of the layout — it is the row's tooltip", () => {
+    const hint = "Full namespace-qualified path — paste into a policy path stanza.";
+    render(
+      <ToastProvider>
+        <CopyablePath path="dti/esi/resources/resources/db-01" hint={hint} />
+      </ToastProvider>,
+    );
+    // Rendering the hint as its own line is what made the control three
+    // rows tall; it must survive only as a title attribute.
+    expect(screen.queryByText(hint)).not.toBeInTheDocument();
+    expect(
+      screen.getByTitle(`dti/esi/resources/resources/db-01 — ${hint}`),
+    ).toBeInTheDocument();
+  });
+
+  it("truncates rather than wrapping a long path", () => {
+    const path = `dti/esi/resources/resources/${"a".repeat(200)}`;
+    const { container } = render(
+      <ToastProvider>
+        <CopyablePath path={path} />
+      </ToastProvider>,
+    );
+    const code = container.querySelector("code");
+    expect(code?.className).toContain("truncate");
+    expect(code?.className).not.toContain("break-all");
+  });
+
   it("supports a custom label", () => {
     render(
       <ToastProvider>

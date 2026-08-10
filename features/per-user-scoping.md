@@ -9,8 +9,13 @@ admin ownership-transfer endpoints exist at
 `POST /v2/sys/{kv,resource}-owner/transfer`; the GUI surfaces a
 `/sharing` page (Shared with me + Manage target tabs) plus a
 per-resource Sharing tab that shows owner info, an active-share
-table with Revoke, a Grant-access modal, and an admin-only
-Transfer-ownership modal. Share re-sharing (a sharee creating further
+table with Revoke, a Grant-access modal (also reachable from a Share
+button in the resource detail header), and an admin-only
+Transfer-ownership modal. On an *unowned* resource that modal is
+labelled "Assign owner" and is joined by a "Claim ownership" action —
+an admin-only transfer-to-self, since there is no
+`sys/resource-owner/claim` endpoint the way there is for KV.
+Share re-sharing (a sharee creating further
 shares) is intentionally not supported; doing so requires the caller
 to own the target or hold an admin capability.
 

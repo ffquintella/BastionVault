@@ -45,6 +45,30 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-08-10
+
+### Added
+- **Claim ownership and a Share button on the resource detail page**
+  (`gui/src/routes/ResourcesPage.tsx`) -- the Sharing tab now offers an admin
+  "Claim ownership" action on an unowned resource (it stamps the caller's own
+  `entity_id` through `sys/resource-owner/transfer`, mirroring the KV secret
+  panel), and the transfer control reads "Assign owner" until a record exists.
+  The detail header gained a Share button that jumps to the Sharing tab and
+  opens the Grant modal; the card keeps the owner-or-admin check in one place
+  and explains the refusal instead of silently doing nothing.
+  (`gui/src/test/resourceSharing.test.tsx`)
+
+### Changed
+- **The policy-path banner is a single row** (`gui/src/components/ui/CopyablePath.tsx`)
+  -- label, path, and Copy button now share one line, the path truncates instead
+  of wrapping, and the "paste into a policy path stanza" hint moved into the
+  row's tooltip. Applies to the resource, secret, and file detail pages.
+- **The resource Sharing tab recognizes delegated admin policies**
+  (`gui/src/routes/ResourcesPage.tsx`) -- it now uses the shared `isAdminUser`
+  helper (`gui/src/lib/access.ts`) instead of a literal `root`/`admin` string
+  test, so an operator with e.g. `super-admin` sees the same ownership controls
+  the sidebar already showed them.
+
 ## [0.38.8] - 2026-08-10
 
 ### Fixed
