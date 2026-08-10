@@ -88,6 +88,27 @@ impl NamespaceStore {
 
 /// Extract the namespace header value from a request's header map, if present.
 /// Header lookup is case-insensitive (HTTP header names are).
+/// Is `path` served by a deployment-level backend that scopes itself by the
+/// namespace *header* rather than by path rewriting?
+///
+/// These paths are deliberately left un-rewritten by
+/// [`rewrite_request_for_namespace`], so they never carry a namespace prefix and
+/// always resolve to the **root** namespace when read positionally. Every
+/// consumer that infers a target namespace from `req.path` must therefore treat
+/// them as header-scoped too — most importantly
+/// [`super::token_binding::enforce_request_token_binding`], which used to exempt
+/// only `sys/` and `auth/`. That mismatch refused every `identity/…` and
+/// `rustion/…` request from a namespace-bound token: the path resolved to root,
+/// the token was (correctly) not operable at root, and the caller got a 403 on a
+/// path its policy plainly granted. Keep the two in step by calling this rather
+/// than re-listing prefixes.
+pub fn is_header_scoped_path(path: &str) -> bool {
+    path.starts_with("sys/")
+        || path.starts_with("auth/")
+        || path.starts_with("identity/")
+        || path.starts_with("rustion/")
+}
+
 pub fn namespace_header_from_map(
     headers: Option<&std::collections::HashMap<String, String>>,
 ) -> Option<String> {
@@ -177,10 +198,7 @@ pub async fn rewrite_request_for_namespace(core: &Core, req: &mut Request) -> Re
     // namespace. Resolution is best-effort here — an unknown namespace header
     // on a header-scoped path is simply ignored (left root-scoped) rather than
     // hard-failing, preserving the previous early-return behavior.
-    let header_scoped = req.path.starts_with("sys/")
-        || req.path.starts_with("auth/")
-        || req.path.starts_with("identity/")
-        || req.path.starts_with("rustion/");
+    let header_scoped = is_header_scoped_path(&req.path);
     if header_scoped {
         if let Some(ns) = store.get_by_path(&ns_path).await? {
             if !ns.is_root() {

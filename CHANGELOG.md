@@ -45,6 +45,43 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.38.8] - 2026-08-10
+
+### Fixed
+- **A namespace-bound token can reach the header-scoped backends again**
+  (`src/modules/namespace/router.rs`, `src/modules/namespace/token_binding.rs`) --
+  two lists of "paths that carry no namespace prefix" had drifted apart.
+  `rewrite_request_for_namespace` deliberately leaves four prefixes un-rewritten
+  because their handlers scope themselves by the `X-BastionVault-Namespace` header
+  (`sys/`, `auth/`, `identity/`, `rustion/`), but `enforce_request_token_binding`
+  exempted only `sys/` and `auth/`. For the other two it resolved the target
+  namespace *positionally* from a path that never carries a prefix -- always
+  answering **root** -- then correctly found the namespace-bound token inoperable
+  at root and returned `permission_denied`. So every `identity/…` and `rustion/…`
+  request from a tenant session 403'd on paths its own policy plainly granted:
+  `sys/capabilities-self` reported `identity/sharing/for-me` as `["read","list"]`
+  while the actual LIST returned 403.
+
+  This is what really kept the tenant Dashboard showing `HTTP 403: Permission
+  denied`. The non-admin view is `UserDashboard`, whose only fetch is
+  `identity/sharing/for-me`. It also explains why the header never rendered
+  "Signed in as" (`identity/entity/self` failed the same way) and would have
+  broken every tenant bastion session (`rustion/…`).
+
+  The prefix set now lives in one place -- `router::is_header_scoped_path` -- and
+  both call sites use it, so the two cannot drift again. Regression-guarded inside
+  `modules::system::mod_system_tests::test_dashboard_summary_for_a_namespace_bound_principal`,
+  which now also asserts `LIST identity/sharing/for-me` and
+  `GET identity/entity/self` return 200 for a `dti/esi`-bound token; **verified to
+  fail with 403 against the old two-prefix exemption** before being kept.
+
+  On the two preceding releases: the `sys/dashboard/summary` grants added in
+  0.38.5 / 0.38.7 fixed a genuine denial (no policy granted that path, so any
+  non-root operator hit it) but were never the cause of *this* symptom -- a
+  non-admin session never calls `dashboard_summary` at all, because
+  `DashboardPage` routes `!isAdminUser(policies)` to `loadLite()`. Those grants
+  stand on their own; this is the fix for the reported banner.
+
 ### Security
 - **Clear the two high-severity npm advisories in the GUI frontend**
   (`gui/package-lock.json`) -- `npm audit` reports 0 vulnerabilities again.

@@ -6085,6 +6085,36 @@ mod mod_system_tests {
             ret.get("audit_24h").is_none() && ret.get("attention").is_none(),
             "a tenant must not receive deployment-wide audit counters: {ret:?}"
         );
+
+        // Header-scoped backends must be reachable too. `identity/…` is left
+        // un-rewritten by the namespace router (its handlers scope themselves by
+        // the header), so `enforce_request_token_binding` resolved it positionally
+        // to root and refused every namespace-bound token — a 403 on paths the
+        // implicit `namespace-self` policy plainly grants. This is what actually
+        // kept the tenant Dashboard showing "HTTP 403: Permission denied" after
+        // the dashboard-summary grant landed: `UserDashboard` fetches
+        // `identity/sharing/for-me`, and `identity/entity/self` failed the same
+        // way, which is why the header never rendered "Signed in as".
+        for (op, path) in [
+            ("LIST", "v1/identity/sharing/for-me"),
+            ("GET", "v1/identity/entity/self"),
+        ] {
+            let (s, r) = server
+                .request_with_headers(
+                    op,
+                    path,
+                    None,
+                    Some(&token),
+                    None,
+                    &[("X-BastionVault-Namespace", "dti/esi")],
+                )
+                .unwrap();
+            assert_eq!(
+                s, 200,
+                "{op} {path} must be reachable from a namespace-bound token \
+                 (header-scoped paths are not positionally root): {r:?}"
+            );
+        }
     }
 
     /// A permission-denied request and a failed login flow through the

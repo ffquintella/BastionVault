@@ -263,7 +263,12 @@ pub async fn enforce_request_token_binding(
 ) -> Result<(), crate::errors::RvError> {
     use super::{NamespaceModule, NAMESPACE_MODULE_NAME};
 
-    if req.path.starts_with("sys/") || req.path.starts_with("auth/") {
+    // Header-scoped paths carry no namespace prefix by design, so resolving a
+    // target namespace from the path below would always answer "root" and refuse
+    // every namespace-bound token — on paths whose own handlers do the
+    // per-namespace scoping. Exempt exactly the set the router leaves
+    // un-rewritten; the two must not drift apart (see `is_header_scoped_path`).
+    if super::router::is_header_scoped_path(&req.path) {
         return Ok(());
     }
     let Some(auth) = req.auth.as_ref() else {
