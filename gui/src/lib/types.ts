@@ -542,6 +542,33 @@ export type CredentialSource =
       mode?: "ca" | "otp" | "pqc";
     };
 
+/**
+ * The minimal per-profile facts needed to decide whether a one-click
+ * Connect can launch *anything* for the calling operator. Carried on the
+ * resource *card* projection so the list-level Connect button agrees with
+ * the Connection tab's own gating without shipping whole profiles (targets,
+ * host-key pins, RDP flags) in every search page.
+ *
+ * `ConnectionProfile` is structurally assignable to this, so
+ * `isLaunchableForCaller` accepts either shape.
+ */
+export interface ConnectProfileHint {
+  protocol: SessionProtocol;
+  /** Transport; absent means `direct` (see `ConnectionProfile.kind`). */
+  kind?: "direct" | "rustion";
+  credential_source: {
+    kind: CredentialSource["kind"];
+    mode?: "ca" | "otp" | "pqc";
+    /**
+     * Launchability reads only `kind` and `mode`. The remaining
+     * credential-source fields (mounts, roles, secret ids, TTLs) are
+     * accepted but ignored, so a full `CredentialSource` — including an
+     * inline literal — satisfies this shape without a cast.
+     */
+    [ignored: string]: unknown;
+  };
+}
+
 export interface ConnectionProfile {
   /** Stable per-resource id, generated client-side on create. */
   id: string;

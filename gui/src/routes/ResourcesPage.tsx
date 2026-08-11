@@ -51,11 +51,14 @@ import {
   blankProfile,
   defaultPort,
   detectSecretShape,
+  hasLaunchableProfile,
+  isLaunchableForCaller,
   isLaunchableProfile,
   loginClassGate,
   needsOperatorPrompt,
   normalizeProfileDefaults,
   pickDefaultProfile,
+  profileConnectHints,
   protocolForOsType,
   readProfiles,
   validateProfile,
@@ -104,6 +107,7 @@ function ResourceCard({
   meta,
   typeConfig,
   assetGroups,
+  connectOnly,
   onSelect,
   onConnect,
   onPickGroup,
@@ -112,6 +116,8 @@ function ResourceCard({
   meta: api.ResourceCardEntry;
   typeConfig: ResourceTypeConfig;
   assetGroups: string[];
+  /** Caller can't read this resource's credentials — see `useConnectOnlyMap`. */
+  connectOnly: boolean;
   onSelect: (name: string) => void;
   onConnect: (name: string) => void;
   onPickGroup: (group: string) => void;
@@ -128,6 +134,19 @@ function ResourceCard({
   // honours the per-type connect toggle.
   const canConnect =
     String(meta.type || "") === "server" && td.connect?.enabled !== false;
+  // …and agrees with the Connection tab on whether one click could launch
+  // anything. `connect_profiles` is absent only on a card built by a path
+  // that doesn't carry the hints — we can't prove Connect is useless there,
+  // so it stays live and the Connection tab does the explaining.
+  const hints = meta.connect_profiles;
+  const blocked =
+    hints !== undefined && !hasLaunchableProfile(hints, connectOnly);
+  const blockedTitle =
+    hints?.length === 0
+      ? "No connection profile on this resource yet — open it to add one."
+      : connectOnly
+        ? "You can't launch this resource's profiles: its stored credentials aren't visible to you, and none of its profiles are Rustion-brokered."
+        : "None of this resource's profiles can be launched by this client yet.";
   return (
     <button
       onClick={() => onSelect(meta.name)}
@@ -136,7 +155,18 @@ function ResourceCard({
     >
       <div className="flex items-center gap-2 mb-2">
         <span className="font-medium truncate flex-1 min-w-0">{meta.name}</span>
-        {canConnect && (
+        {canConnect && (blocked ? (
+          // Muted and inert. The click isn't swallowed, so it falls through
+          // to the card and opens the resource — where the Connection tab
+          // spells out why nothing here is launchable.
+          <span
+            aria-disabled="true"
+            className="px-2 py-0.5 bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] border border-[var(--color-border)] rounded text-xs shrink-0"
+            title={blockedTitle}
+          >
+            Connect
+          </span>
+        ) : (
           <span
             role="button"
             tabIndex={0}
@@ -156,7 +186,7 @@ function ResourceCard({
           >
             Connect
           </span>
-        )}
+        ))}
         <ResourceTypeIcon typeDef={td} />
       </div>
       {meta.hostname ? (
@@ -249,6 +279,18 @@ export function ResourcesPage() {
   const [recent, setRecent] = useState<string[]>(() => loadRecent());
   const [recentCards, setRecentCards] = useState<api.ResourceCardEntry[]>([]);
   const assetGroups = useAssetGroupMap();
+
+  // Connect-only status for every card on screen, resolved in one batched
+  // capabilities call. Feeds the card-level Connect gate so the list agrees
+  // with what the Connection tab will actually let the caller launch.
+  const visibleNames = useMemo(
+    () =>
+      Array.from(
+        new Set([...cards, ...recentCards].map((c) => c.name)),
+      ).sort(),
+    [cards, recentCards],
+  );
+  const connectOnlyByName = useConnectOnlyMap(visibleNames);
 
   // Each fetch run is tagged with a token. When the user changes a
   // filter while a fetch is in flight, we bump the token; the stale
@@ -351,7 +393,16 @@ export function ResourcesPage() {
           .toLowerCase();
         if (!hay.includes(q)) return;
       }
-      filtered.push({ name, type, hostname, ip_address, tags });
+      filtered.push({
+        name,
+        type,
+        hostname,
+        ip_address,
+        tags,
+        connect_profiles: profileConnectHints(
+          readProfiles(m as Record<string, unknown>),
+        ),
+      });
     });
 
     const page = filtered.slice(offset, offset + PAGE_SIZE);
@@ -396,6 +447,9 @@ export function ResourcesPage() {
               hostname: m.hostname ? String(m.hostname) : undefined,
               ip_address: m.ip_address ? String(m.ip_address) : undefined,
               tags: m.tags ? String(m.tags) : undefined,
+              connect_profiles: profileConnectHints(
+                readProfiles(m as Record<string, unknown>),
+              ),
             });
           });
           setCards(reset ? items : (prev) => [...prev, ...items]);
@@ -488,6 +542,9 @@ export function ResourcesPage() {
           hostname: m.hostname ? String(m.hostname) : undefined,
           ip_address: m.ip_address ? String(m.ip_address) : undefined,
           tags: m.tags ? String(m.tags) : undefined,
+          connect_profiles: profileConnectHints(
+            readProfiles(m as Record<string, unknown>),
+          ),
         });
       });
       setRecentCards(items);
@@ -525,7 +582,18 @@ export function ResourcesPage() {
       return;
     }
     const profiles = readProfiles(info as Record<string, unknown>);
-    const target = pickDefaultProfile(profiles);
+    // Authoritative connect-only check before we pick anything: the card's
+    // batched probe may be stale, in flight, or have failed. A connect-only
+    // caller must not one-click a `direct` profile — that would resolve the
+    // credential into this process. Fails closed: on a probe error we treat
+    // the caller as connect-only and route to the Connection tab.
+    const secretPath = `resources/secrets/${name}/`;
+    const caps = await api
+      .capabilitiesSelf([secretPath])
+      .then((r) => r.paths[secretPath] ?? [])
+      .catch(() => [] as string[]);
+    const connectOnly = !(caps.includes("read") || caps.includes("root"));
+    const target = pickDefaultProfile(profiles, connectOnly);
     // Ambiguous or nothing launchable, or needs a prompt → hand off to
     // the Connection tab where the full launcher lives.
     if (!target || needsOperatorPrompt(target)) {
@@ -864,6 +932,7 @@ export function ResourcesPage() {
                       meta={meta}
                       typeConfig={typeConfig}
                       assetGroups={assetGroups.map.byResource[meta.name] || []}
+                      connectOnly={connectOnlyByName[meta.name] === true}
                       onSelect={selectResource}
                       onConnect={connectResource}
                       onPickGroup={(g) => setFilterGroup((cur) => (cur === g ? "" : g))}
@@ -881,6 +950,7 @@ export function ResourcesPage() {
                   meta={meta}
                   typeConfig={typeConfig}
                   assetGroups={assetGroups.map.byResource[meta.name] || []}
+                  connectOnly={connectOnlyByName[meta.name] === true}
                   onSelect={selectResource}
                   onConnect={connectResource}
                   onPickGroup={(g) => setFilterGroup((cur) => (cur === g ? "" : g))}
@@ -905,8 +975,14 @@ export function ResourcesPage() {
         {cardMenu && (() => {
           const entry = cardMenu.entry;
           const td = getTypeDef(typeConfig, entry.type);
+          // Same gate as the card's own Connect chip: hide the item rather
+          // than offer a launch that resolves to "you can't".
+          const hints = entry.connect_profiles;
           const canConnect =
-            String(entry.type || "") === "server" && td.connect?.enabled !== false;
+            String(entry.type || "") === "server" &&
+            td.connect?.enabled !== false &&
+            (hints === undefined ||
+              hasLaunchableProfile(hints, connectOnlyByName[entry.name] === true));
           const items: ContextMenuItem[] = [
             {
               label: "Open",
@@ -1377,6 +1453,53 @@ function useCanReadSecrets(resourceName: string): boolean | null {
   return canRead;
 }
 
+/**
+ * Batched sibling of `useCanReadSecrets` for the resource *list*: resolves
+ * connect-only status for every visible card in a single capabilities-self
+ * call, so the card-level Connect button can honour the same boundary the
+ * Connection tab does without one request per card.
+ *
+ * Unlike the single-resource hook this does *not* fail closed on error, and
+ * a name missing from the map means "not known yet". Both resolve to "assume
+ * readable", which only ever leaves the button enabled — clicking it re-checks
+ * authoritatively (see `connectResource`) before anything is dialled, so an
+ * in-flight or failed probe can't turn into a credential leak. Failing closed
+ * here would instead grey out Connect across the whole list on one transient
+ * error.
+ */
+function useConnectOnlyMap(names: string[]): Record<string, boolean> {
+  const [map, setMap] = useState<Record<string, boolean>>({});
+  // Serialise to a primitive so the effect doesn't re-run on a fresh
+  // array with identical contents.
+  const key = JSON.stringify(names);
+  useEffect(() => {
+    const wanted: string[] = JSON.parse(key);
+    if (wanted.length === 0) return;
+    let cancelled = false;
+    const paths = wanted.map((n) => `resources/secrets/${n}/`);
+    api
+      .capabilitiesSelf(paths)
+      .then((res) => {
+        if (cancelled) return;
+        setMap((prev) => {
+          const next = { ...prev };
+          wanted.forEach((n, i) => {
+            const caps = res.paths[paths[i]] ?? [];
+            next[n] = !(caps.includes("read") || caps.includes("root"));
+          });
+          return next;
+        });
+      })
+      .catch(() => {
+        /* leave unknown — see the note above */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [key]);
+  return map;
+}
+
 function ConnectionProfilesPanel({
   resource,
   onUpdated,
@@ -1417,9 +1540,9 @@ function ConnectionProfilesPanel({
   const canWrite = useCanWriteResource(String(resource.name ?? ""));
   const readOnly = canWrite === false;
   const readOnlyTitle = "You don't have permission to modify this resource.";
-  const launchableProfiles = profiles
-    .filter(isLaunchableProfile)
-    .filter((p) => !connectOnly || p.kind === "rustion");
+  const launchableProfiles = profiles.filter((p) =>
+    isLaunchableForCaller(p, connectOnly),
+  );
 
   // LDAP operator-bind mode requires a credential prompt before
   // the open call. We surface it as a tiny inline modal; on
@@ -1550,11 +1673,29 @@ function ConnectionProfilesPanel({
           </Button>
         </div>
 
-        {readOnly && (
+        {/* One notice for both access gates — they very often apply
+            together (a share that grants connect but not write), and two
+            stacked boxes saying what you can't do buried the profile list
+            they were describing. */}
+        {(readOnly || connectOnly) && (
           <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] px-3 py-2 text-sm">
-            <strong className="text-[var(--color-text)]">Read-only access.</strong>{" "}
-            You can connect using existing profiles, but you don't have
-            permission to add, edit, or delete them.
+            <strong className="text-[var(--color-text)]">
+              {readOnly && connectOnly
+                ? "Limited access."
+                : readOnly
+                  ? "Read-only access."
+                  : "Connect-only access."}
+            </strong>{" "}
+            {readOnly && (
+              <>You can't add, edit, or delete profiles here.{connectOnly ? " " : ""}</>
+            )}
+            {connectOnly && (
+              <>
+                This resource's stored credentials aren't visible to you, so
+                only Rustion-brokered profiles can be launched — a direct dial
+                would resolve the credential onto this machine.
+              </>
+            )}
           </div>
         )}
 
@@ -1568,15 +1709,6 @@ function ConnectionProfilesPanel({
           <div className="rounded border border-yellow-700 bg-yellow-950/40 text-yellow-200 px-3 py-2 text-sm">
             <code>os_type = {osType}</code> — Connect is disabled for
             this OS type. Profiles can still be saved for future use.
-          </div>
-        )}
-
-        {connectOnly && (
-          <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] px-3 py-2 text-sm">
-            <strong className="text-[var(--color-text)]">Connect-only access.</strong>{" "}
-            You can open Rustion-brokered sessions to this resource, but its
-            stored credentials are not visible to you. Direct-dial profiles
-            are hidden because they would expose the credential locally.
           </div>
         )}
 
@@ -1635,7 +1767,14 @@ function ConnectionProfilesPanel({
                   <Button
                     size="sm"
                     disabled
-                    title="Connect for this combination ships in a later phase"
+                    title={
+                      // Distinguish "this client can't drive that combination
+                      // yet" from "your access won't allow this dial" — the
+                      // old blanket phase message misattributed the latter.
+                      connectOnly && isLaunchableProfile(p)
+                        ? "Direct-dial profile: launching it would resolve the credential onto this machine, which your connect-only access doesn't allow."
+                        : "Connect for this combination ships in a later phase"
+                    }
                   >
                     Connect
                   </Button>
@@ -1678,13 +1817,18 @@ function ConnectionProfilesPanel({
           ))}
         </div>
 
-        {launchableProfiles.length === 0 && profiles.length > 0 && (
-          <p className="text-xs text-[var(--color-text-muted)]">
-            Connect launches today for SSH+Secret and RDP+Secret
-            profiles. LDAP / SSH-engine / PKI credential sources
-            land in Phases 5–6.
-          </p>
-        )}
+        {launchableProfiles.length === 0 &&
+          profiles.length > 0 &&
+          // When connect-only is what's blocking every profile, the notice
+          // above already said so — repeating the phase roadmap here reads
+          // as the reason, and it isn't.
+          !(connectOnly && profiles.some(isLaunchableProfile)) && (
+            <p className="text-xs text-[var(--color-text-muted)]">
+              Connect launches today for SSH+Secret and RDP+Secret
+              profiles. LDAP / SSH-engine / PKI credential sources
+              land in Phases 5–6.
+            </p>
+          )}
 
         <RecentSessionsList resource={resource} />
 

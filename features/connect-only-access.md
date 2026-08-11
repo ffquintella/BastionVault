@@ -36,6 +36,8 @@ unaffected. `connect` alone grants neither read nor list of the credential.
 | Audit | The server-side read emits a `target: "security"` log line (`rustion-connect-resolve: user=… resource=… key=…`) attributed to the connecting operator. |
 | GUI capability lookup | `v2/sys/capabilities-self` (`handle_capabilities_self`, `src/modules/system/mod.rs`; HTTP shim `/v2/sys/capabilities-self`, v2-only) returns the caller's effective capabilities per path. Vault-compatible shape. |
 | GUI filtering | The Resources page queries capabilities for `resources/secrets/<name>/`; when the caller has `connect` but not `read`, it hides credential values (`ResourceSecretsPanel`) and restricts launchable connection profiles to `kind: "rustion"` (`ConnectionProfilesPanel`). |
+| One launchability predicate | `isLaunchableForCaller` (`gui/src/lib/connectionProfiles.ts`) is the single answer to "would Connect do anything?" — the phase matrix plus the connect-only transport filter. The Connection tab, the resource card, the card context menu, and `pickDefaultProfile`'s quick-Connect all call it, so the list can't offer a launch the detail view refuses. |
+| Card-level gate | `resources/search` projects `connect_profiles` (protocol, transport, credential-source `kind`/`mode`) onto each card, and the Resources page resolves connect-only status for the whole visible page in one batched `capabilities-self` call (`useConnectOnlyMap`). A card whose profiles are all unlaunchable for the caller renders Connect inert with the reason in its tooltip. The batched probe is advisory only — it never fails closed, because `connectResource` re-checks the capability authoritatively before dialling. |
 
 ## Phases
 
@@ -43,6 +45,7 @@ unaffected. `connect` alone grants neither read nor list of the credential.
 |-------|-------|--------|
 | 1 | `connect` capability; secondary connect gate + `rustion/v2/session/open` with server-side `secret`-kind resolution; `v2/sys/capabilities-self`. Unit + integration tests. | **Done** |
 | 2a | GUI: `capabilities_self` Tauri command + `api.capabilitiesSelf`; hide credentials + restrict to Rustion profiles for connect-only users; connect-only notices. | **Done** |
+| 2c | GUI: extend the connect-only gate to the *list* — card / context-menu / quick-Connect share `isLaunchableForCaller`, `connect_profiles` on the card projection, batched capability probe, and the read-only + connect-only notices collapsed into one. | **Done** |
 | 2b | GUI: the SSH Rustion connect path sends a credential reference to `rustion/v2/session/open` for `secret`-backed profiles (no client-side read). See below. | **Done** |
 | Deferred | RDP Rustion connect path (`session_open_rdp`) — same rewiring once the bastion supports rdp-password server-side resolution. Server-side resolution for `ldap` / `ssh-engine` / `pki` kinds (those use the operator's own typed creds or mint ephemeral certs — not the stored secret connect-only protects). | Not started |
 

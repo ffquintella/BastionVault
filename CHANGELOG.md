@@ -45,6 +45,43 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.39.3] - 2026-08-11
+
+### Fixed
+- **The Resources list stops offering a Connect it can't deliver**
+  (`gui/src/routes/ResourcesPage.tsx`, `gui/src/lib/connectionProfiles.ts`,
+  `src/modules/resource/mod.rs`) -- a connect-only caller (one holding
+  `connect` but not `read` on a resource's secrets) saw a live **Connect**
+  chip on the resource card, then landed on a Connection tab where every
+  profile's own Connect was disabled. The card was gating only on
+  `type == "server"` plus the per-type toggle; it never consulted the caller's
+  access or the resource's profiles, so one click on a direct-dial profile
+  fired a session open the server then refused. The card, its context menu,
+  and the quick-Connect path now share one predicate with the Connection tab
+  (`isLaunchableForCaller`): a connect-only caller counts only
+  Rustion-brokered profiles as launchable, because a `direct` dial resolves
+  the credential into the GUI process. `connectResource` re-checks the
+  capability authoritatively before dialling, so a stale or failed probe can
+  never turn into a launch. (`features/resource-connect.md`)
+
+### Added
+- **`connect_profiles` on the resource-search card projection**
+  (`src/modules/resource/mod.rs`) -- per-profile `protocol` / transport /
+  credential-source `kind` + `mode`, the inputs the GUI's launchability matrix
+  reads. The search handler already reads each metadata blob, so this costs no
+  extra storage work, and the card list stays free of targets, host-key pins
+  and transport options. Always serialised (empty array included) so the GUI
+  can tell "nothing here is launchable" from "this card carries no hints".
+
+### Changed
+- **One access notice on the Connection tab instead of two stacked ones**
+  (`gui/src/routes/ResourcesPage.tsx`) -- read-only and connect-only very often
+  apply together (a share granting connect but not write), and two boxes
+  explaining what you can't do pushed the profile list they described off the
+  fold. Also corrects two misleading strings: connect-only said direct-dial
+  profiles were "hidden" when they are listed but not launchable, and a
+  profile blocked by connect-only claimed Connect "ships in a later phase".
+
 ## [0.39.2] - 2026-08-11
 
 ### Fixed

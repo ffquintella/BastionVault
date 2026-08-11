@@ -3,10 +3,14 @@ import {
   blankProfile,
   defaultPort,
   detectSecretShape,
+  hasLaunchableProfile,
+  isLaunchableForCaller,
   isLaunchableProfile,
   loginClassGate,
   needsOperatorPrompt,
   newProfileId,
+  pickDefaultProfile,
+  profileConnectHints,
   profilesForOsType,
   protocolForOsType,
   readProfiles,
@@ -446,5 +450,96 @@ describe("require_mfa", () => {
     expect(parsed[0].require_mfa).toBe(true);
     expect(parsed[1].credential_source.kind).toBe("fido2");
     expect(parsed[1].require_mfa).toBeUndefined();
+  });
+});
+
+describe("connect-only launchability", () => {
+  const brokered = (): ConnectionProfile => ({
+    ...secretProfile(),
+    id: "p_brokered",
+    kind: "rustion",
+  });
+
+  it("lets a caller who can read credentials launch either transport", () => {
+    expect(isLaunchableForCaller(secretProfile(), false)).toBe(true);
+    expect(isLaunchableForCaller(brokered(), false)).toBe(true);
+  });
+
+  it("blocks direct dials for a connect-only caller, allows brokered ones", () => {
+    // A `direct` dial resolves the credential into the GUI process, which is
+    // exactly what connect-only access exists to prevent.
+    expect(isLaunchableForCaller(secretProfile(), true)).toBe(false);
+    expect(isLaunchableForCaller(brokered(), true)).toBe(true);
+  });
+
+  it("treats an absent transport as direct", () => {
+    const legacy = secretProfile();
+    expect(legacy.kind).toBeUndefined();
+    expect(isLaunchableForCaller(legacy, true)).toBe(false);
+  });
+
+  it("still applies the phase matrix on top of the access gate", () => {
+    // Brokered transport doesn't rescue a combination the client can't drive.
+    const pqc: ConnectionProfile = { ...sshEngineProfile("pqc"), kind: "rustion" };
+    expect(isLaunchableForCaller(pqc, true)).toBe(false);
+    expect(isLaunchableForCaller(pqc, false)).toBe(false);
+  });
+
+  it("hasLaunchableProfile answers the card-level question", () => {
+    expect(hasLaunchableProfile([], false)).toBe(false);
+    expect(hasLaunchableProfile([secretProfile()], true)).toBe(false);
+    expect(hasLaunchableProfile([secretProfile(), brokered()], true)).toBe(true);
+  });
+
+  it("pickDefaultProfile skips a direct default for a connect-only caller", () => {
+    const direct: ConnectionProfile = { ...secretProfile(), is_default: true };
+    const profiles = [direct, brokered()];
+    // With full access the flagged default wins…
+    expect(pickDefaultProfile(profiles, false)?.id).toBe("p_secret");
+    // …and connect-only falls through to the sole brokered profile rather
+    // than firing a dial the server would refuse.
+    expect(pickDefaultProfile(profiles, true)?.id).toBe("p_brokered");
+    expect(pickDefaultProfile([direct], true)).toBeNull();
+  });
+
+  it("defaults to full access when connectOnly is omitted", () => {
+    expect(pickDefaultProfile([secretProfile()])?.id).toBe("p_secret");
+  });
+});
+
+describe("profileConnectHints", () => {
+  it("keeps only the fields launchability reads", () => {
+    expect(profileConnectHints([sshEngineProfile("otp")])).toEqual([
+      {
+        protocol: "ssh",
+        kind: undefined,
+        credential_source: { kind: "ssh-engine", mode: "otp" },
+      },
+    ]);
+  });
+
+  it("carries the transport through", () => {
+    const hints = profileConnectHints([
+      { ...secretProfile(), kind: "rustion" },
+    ]);
+    expect(hints[0].kind).toBe("rustion");
+    expect(hints[0].credential_source.mode).toBeUndefined();
+  });
+
+  it("round-trips through the same verdict as the full profile", () => {
+    // The card gates on hints while the Connection tab gates on full
+    // profiles — they must never disagree.
+    const profiles: ConnectionProfile[] = [
+      secretProfile(),
+      { ...secretProfile(), id: "p_b", kind: "rustion" },
+      sshEngineProfile("pqc"),
+      fido2Profile("rdp"),
+    ];
+    for (const connectOnly of [false, true]) {
+      const hints = profileConnectHints(profiles);
+      expect(hints.map((h) => isLaunchableForCaller(h, connectOnly))).toEqual(
+        profiles.map((p) => isLaunchableForCaller(p, connectOnly)),
+      );
+    }
   });
 });

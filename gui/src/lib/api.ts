@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ConnectProfileHint,
   VaultMode,
   VaultStatus,
   UnsealOutcome,
@@ -758,6 +759,13 @@ export interface ResourceCardEntry {
   hostname?: string;
   ip_address?: string;
   tags?: string;
+  /**
+   * Card-level Connect gating inputs — see `ConnectProfileHint`. Absent on
+   * a resource with no profiles, and on cards built by paths that predate
+   * the field; a card without it can't prove Connect is useless, so the
+   * button stays enabled and the Connection tab does the explaining.
+   */
+  connect_profiles?: ConnectProfileHint[];
 }
 
 export interface ResourceSearchResult {

@@ -86,6 +86,40 @@ pub struct ResourceCardEntry {
     pub ip_address: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<String>,
+    /// Per-profile facts the GUI's card-level Connect button needs to decide
+    /// whether one click can launch anything for the calling operator. The
+    /// launchability matrix (which protocol × credential-source combinations
+    /// the in-app client can actually drive) lives client-side, so the card
+    /// carries the inputs rather than a precomputed verdict. Deliberately
+    /// omits targets, host-key pins and transport options — those stay on the
+    /// full `resources/resources/<name>` read.
+    ///
+    /// Always serialised, empty array included: the GUI distinguishes "this
+    /// resource has no launchable profile" (disable Connect) from "this card
+    /// came from a path that doesn't carry the hints" (leave it enabled), and
+    /// an omitted field would collapse the two.
+    pub connect_profiles: Vec<ConnectProfileHint>,
+}
+
+/// See `ResourceCardEntry::connect_profiles`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConnectProfileHint {
+    /// `ssh` | `rdp`.
+    pub protocol: String,
+    /// Transport: `direct` | `rustion`. Omitted when the profile predates
+    /// the field; the GUI reads an absent value as `direct`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub credential_source: ConnectProfileCredentialHint,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConnectProfileCredentialHint {
+    pub kind: String,
+    /// SSH-engine mint mode (`ca` | `otp` | `pqc`) where the source carries
+    /// one — `pqc` certs aren't launchable from the in-app client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 impl ResourceCardEntry {
@@ -102,7 +136,40 @@ impl ResourceCardEntry {
             hostname: str_field("hostname"),
             ip_address: str_field("ip_address"),
             tags: str_field("tags"),
+            connect_profiles: Self::profile_hints(data),
         }
+    }
+
+    /// Project `connection_profiles` down to the card hints. Tolerates the
+    /// field being absent or malformed (the profile array is opaque metadata
+    /// the host never validates) — an unparseable entry is skipped rather
+    /// than failing the whole search page.
+    fn profile_hints(data: &Map<String, Value>) -> Vec<ConnectProfileHint> {
+        let Some(Value::Array(profiles)) = data.get("connection_profiles") else {
+            return Vec::new();
+        };
+        let opt_str = |o: &Map<String, Value>, k: &str| -> Option<String> {
+            o.get(k)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .filter(|s| !s.is_empty())
+        };
+        profiles
+            .iter()
+            .filter_map(|p| {
+                let obj = p.as_object()?;
+                let protocol = opt_str(obj, "protocol")?;
+                let cred = obj.get("credential_source")?.as_object()?;
+                Some(ConnectProfileHint {
+                    protocol,
+                    kind: opt_str(obj, "kind"),
+                    credential_source: ConnectProfileCredentialHint {
+                        kind: opt_str(cred, "kind")?,
+                        mode: opt_str(cred, "mode"),
+                    },
+                })
+            })
+            .collect()
     }
 }
 
@@ -653,7 +720,8 @@ impl ResourceBackendInner {
     /// Response:
     ///   ```json
     ///   {
-    ///     "items":   [{ "name", "type", "hostname", "ip_address", "tags" }, …],
+    ///     "items":   [{ "name", "type", "hostname", "ip_address", "tags",
+    ///                   "connect_profiles" }, …],
     ///     "total":    <u64>,
     ///     "has_more": <bool>
     ///   }

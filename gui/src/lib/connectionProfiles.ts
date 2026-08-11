@@ -8,6 +8,7 @@
 
 import type {
   ConnectionProfile,
+  ConnectProfileHint,
   CredentialSource,
   ResourceSecretShape,
   SessionProtocol,
@@ -207,7 +208,7 @@ export function validateProfile(p: ConnectionProfile): string | null {
  * the Connection-tab editor enforces. Kept here so the resource-card
  * quick-Connect and the Connection-tab launcher agree on launchability.
  */
-export function isLaunchableProfile(p: ConnectionProfile): boolean {
+export function isLaunchableProfile(p: ConnectProfileHint): boolean {
   if (p.protocol !== "ssh" && p.protocol !== "rdp") return false;
   switch (p.credential_source.kind) {
     case "secret":
@@ -229,6 +230,54 @@ export function isLaunchableProfile(p: ConnectionProfile): boolean {
       if (p.protocol === "ssh") return p.credential_source.mode !== "pqc";
       return true;
   }
+}
+
+/**
+ * Launchable *for this caller*. On top of the phase matrix
+ * (`isLaunchableProfile`), a connect-only caller — one without `read` on the
+ * resource's secrets — may only open Rustion-brokered profiles: a `direct`
+ * dial would resolve the credential into the local GUI process, defeating
+ * the boundary. The server resolves the credential for `rustion` opens, so
+ * those stay safe.
+ *
+ * The single source of truth for "would Connect do anything?", shared by the
+ * Connection-tab launcher, the resource-card quick-Connect, and the ⌘K
+ * palette so all three agree on what is offered.
+ */
+export function isLaunchableForCaller(
+  p: ConnectProfileHint,
+  connectOnly: boolean,
+): boolean {
+  if (!isLaunchableProfile(p)) return false;
+  return !connectOnly || p.kind === "rustion";
+}
+
+/** True when at least one profile is launchable for this caller. */
+export function hasLaunchableProfile(
+  profiles: ConnectProfileHint[],
+  connectOnly: boolean,
+): boolean {
+  return profiles.some((p) => isLaunchableForCaller(p, connectOnly));
+}
+
+/**
+ * Project full profiles down to the card-level hints. Used by the card
+ * paths that already hold complete metadata (share fallback, group filter,
+ * recently-accessed) so they gate Connect the same way the server-projected
+ * search page does.
+ */
+export function profileConnectHints(
+  profiles: ConnectionProfile[],
+): ConnectProfileHint[] {
+  return profiles.map((p) => ({
+    protocol: p.protocol,
+    kind: p.kind,
+    credential_source: {
+      kind: p.credential_source.kind,
+      mode:
+        "mode" in p.credential_source ? p.credential_source.mode : undefined,
+    },
+  }));
 }
 
 /**
@@ -326,11 +375,19 @@ export function needsOperatorPrompt(p: ConnectionProfile): boolean {
  *   3. null — the caller should surface the picker (Connection tab)
  *      because there's genuine ambiguity (multiple profiles, none
  *      marked default) or nothing launchable at all.
+ *
+ * `connectOnly` mirrors the Connection tab's own filter: a caller who
+ * can't read the resource's credentials only counts Rustion-brokered
+ * profiles as launchable, so a quick-Connect never fires a direct dial
+ * the server would refuse.
  */
 export function pickDefaultProfile(
   profiles: ConnectionProfile[],
+  connectOnly = false,
 ): ConnectionProfile | null {
-  const launchable = profiles.filter(isLaunchableProfile);
+  const launchable = profiles.filter((p) =>
+    isLaunchableForCaller(p, connectOnly),
+  );
   if (launchable.length === 0) return null;
   const flagged = launchable.find((p) => p.is_default);
   if (flagged) return flagged;
