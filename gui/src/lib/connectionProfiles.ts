@@ -233,12 +233,41 @@ export function isLaunchableProfile(p: ConnectProfileHint): boolean {
 }
 
 /**
+ * Credential sources `rustion/v2/session/open` resolves server-side, so the
+ * material never reaches this process. `default-account` is an `ssh-engine`
+ * mint with the operator's own account as the principal; the connect path
+ * rewrites it to `ssh-engine` before it calls the server
+ * (`open_rustion_session_v2_ssh`). The remaining kinds (ldap / pki / fido2)
+ * still resolve client-side even under a brokered transport, so they can't
+ * satisfy a connect-only caller.
+ */
+const SERVER_RESOLVED_SOURCES: CredentialSource["kind"][] = [
+  "secret",
+  "ssh-engine",
+  "default-account",
+];
+
+/**
  * Launchable *for this caller*. On top of the phase matrix
  * (`isLaunchableProfile`), a connect-only caller — one without `read` on the
- * resource's secrets — may only open Rustion-brokered profiles: a `direct`
- * dial would resolve the credential into the local GUI process, defeating
- * the boundary. The server resolves the credential for `rustion` opens, so
- * those stay safe.
+ * resource's secrets — may only open sessions whose credential is resolved
+ * server-side: a `direct` dial would resolve it into the local GUI process,
+ * defeating the boundary.
+ *
+ * Two things can make a session brokered, and both count:
+ *   - the profile itself is `kind: "rustion"`, or
+ *   - `brokeredByPolicy` — the *effective transport tier* is
+ *     `rustion-required` (or `rustion-preferred` with a bastion), which
+ *     routes the session through a bastion regardless of what the profile
+ *     says. Reading only the profile's `kind` was a real bug: a resource
+ *     pinned to `rustion-required` by its policy tier, carrying a profile
+ *     minted before that field existed (so `kind` defaults to `direct`),
+ *     had its safest caller refused the one connection that never touches
+ *     their machine.
+ *
+ * The policy route only helps for the credential kinds the server can
+ * resolve, and only for SSH — brokered RDP still goes through v1
+ * `rustion/session/open` with a client-resolved credential.
  *
  * The single source of truth for "would Connect do anything?", shared by the
  * Connection-tab launcher, the resource-card quick-Connect, and the ⌘K
@@ -247,17 +276,27 @@ export function isLaunchableProfile(p: ConnectProfileHint): boolean {
 export function isLaunchableForCaller(
   p: ConnectProfileHint,
   connectOnly: boolean,
+  brokeredByPolicy = false,
 ): boolean {
   if (!isLaunchableProfile(p)) return false;
-  return !connectOnly || p.kind === "rustion";
+  if (!connectOnly) return true;
+  if (p.kind === "rustion") return true;
+  return (
+    brokeredByPolicy &&
+    p.protocol === "ssh" &&
+    SERVER_RESOLVED_SOURCES.includes(p.credential_source.kind)
+  );
 }
 
 /** True when at least one profile is launchable for this caller. */
 export function hasLaunchableProfile(
   profiles: ConnectProfileHint[],
   connectOnly: boolean,
+  brokeredByPolicy = false,
 ): boolean {
-  return profiles.some((p) => isLaunchableForCaller(p, connectOnly));
+  return profiles.some((p) =>
+    isLaunchableForCaller(p, connectOnly, brokeredByPolicy),
+  );
 }
 
 /**
@@ -376,17 +415,18 @@ export function needsOperatorPrompt(p: ConnectionProfile): boolean {
  *      because there's genuine ambiguity (multiple profiles, none
  *      marked default) or nothing launchable at all.
  *
- * `connectOnly` mirrors the Connection tab's own filter: a caller who
- * can't read the resource's credentials only counts Rustion-brokered
- * profiles as launchable, so a quick-Connect never fires a direct dial
- * the server would refuse.
+ * `connectOnly` / `brokeredByPolicy` mirror the Connection tab's own
+ * filter: a caller who can't read the resource's credentials only counts
+ * brokered profiles as launchable, so a quick-Connect never fires a direct
+ * dial the server would refuse.
  */
 export function pickDefaultProfile(
   profiles: ConnectionProfile[],
   connectOnly = false,
+  brokeredByPolicy = false,
 ): ConnectionProfile | null {
   const launchable = profiles.filter((p) =>
-    isLaunchableForCaller(p, connectOnly),
+    isLaunchableForCaller(p, connectOnly, brokeredByPolicy),
   );
   if (launchable.length === 0) return null;
   const flagged = launchable.find((p) => p.is_default);

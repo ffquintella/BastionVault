@@ -45,6 +45,126 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.39.5] - 2026-08-11
+
+### Security
+- **`rustion/session/open` (v1) is now authorized per resource**
+  (`src/modules/rustion/mod.rs`) -- v1 predates the connect gate and had none:
+  it authorized only the endpoint path, then brokered a session to a
+  caller-named `target_host` with caller-supplied credential material. Any
+  principal holding `update` on the path could use the bastion fleet as a
+  general-purpose proxy to anywhere. It now runs the same per-resource gate v2
+  does when `resource_id` is set (which every Resource Connect caller sends),
+  and its *unbound* shape -- no resource, arbitrary host, caller-supplied
+  credential, so nothing to authorize against -- requires `sudo` on the path
+  (root and `administrator` keep it). The shared brokering engine moved to
+  `brokered_session_open`, which performs no authorization of its own, so
+  neither entry point can reach it ungated and v2 doesn't double-check.
+- **The Rustion policy resolvers authorize the resource they are asked about**
+  (`src/modules/rustion/mod.rs`) -- `policy/effective` and `dispatcher/preview`
+  take a caller-supplied `resource_id` and gated nothing on it, so any holder of
+  the baseline grant could enumerate the transport tier and fronting bastions of
+  every resource in the deployment. Both now call `may_view_resource`, which is
+  deliberately *broader* than the connect gate: the inventory record via
+  `readable_targets` **or** the connect gate. Both halves are load-bearing --
+  checking only `resources/secrets/<name>/` would refuse a caller whose
+  credential comes from the SSH engine (that profile needs no grant there), and
+  using `explain_capability` instead of `readable_targets` would refuse every
+  share-grantee, whose Connect would then fail closed on the 403. Tier-only
+  resolution (`resource_type` / `asset_group_ids` with no `resource_id`) stays
+  ungated: no object to authorize, and the answer is the admin-authored tier
+  chain the caller's own sessions already obey.
+- **A caller who cannot read the Rustion transport policy no longer dials
+  direct** (`gui/src-tauri/src/commands/connect.rs`) -- `read_effective_policy`
+  treated a `403` from `rustion/policy/effective` as "no policy applies" and
+  returned the empty verdict, so both connect paths resolved
+  `ConnectRoute::Direct` and the credential was resolved onto the operator's
+  machine. The reasoning was that brokering is still enforced at
+  `rustion/v2/session/open` -- but that endpoint is never reached on the direct
+  route. Every namespace-bound operator was in exactly that position (see
+  below), so a resource pinned to `transport = rustion-required` was silently
+  reachable over a direct dial by any tenant holding `read` on its secret. The
+  resolver now fails closed with an actionable message naming the grant to add.
+
+### Added
+- **Namespace-bound tokens can see and use the Rustion transport**
+  (`src/modules/policy/policy_store.rs`) -- the implicit `namespace-self`
+  policy now grants the read-only resolvers (`rustion/policy/effective`,
+  `rustion/dispatcher/preview`), `read` on `rustion/targets/+` (the bastion's
+  transport pin, without which a tenant's brokered hop degrades to unpinned
+  TOFU), and the gated session lifecycle (`rustion/session/open`,
+  `rustion/v2/session/open`, `session/renew`, `session/kill`). `rustion/` is
+  root-owned and header-scoped, so a tenant-authored policy could never grant
+  these -- `refuse_cross_namespace_paths` rejects the rule at write time --
+  which left brokered Connect working for root-bound operators only
+  (`features/rustion-integration.md` Phase 7.4 follow-up). Granting v1 is what
+  closes brokered **RDP** and the client-resolved SSH credential kinds
+  (LDAP / PKI / FIDO2) inside a namespace: those still take the v1 route, so
+  they previously failed closed under `rustion-required`. It is safe to grant
+  only because v1 gained the per-resource gate above, and the grant confers no
+  `sudo`, so the unbound fleet-proxy shape stays out of reach. `default` picks
+  up the two read-only resolvers plus `targets/+` for the equivalent
+  root-namespace share-grantee case. Every grant here is endpoint-level only:
+  the resolvers and both open routes authorize the resource they are handed
+  (see Security above), so none of them widens what a caller can reach.
+- **`default-account` SSH profiles broker server-side**
+  (`gui/src-tauri/src/commands/connect.rs`) -- the source is an `ssh-engine`
+  mint whose principal is the connecting operator's own account, so
+  `open_rustion_session_v2_ssh` now resolves that account through the
+  self-service `sys/identity/default-account/self` and hands the server a plain
+  `ssh-engine` source. Previously the kind fell off the v2 list entirely and
+  resolved client-side, which a connect-only caller can't do.
+- **`rustionPolicyEffective` TS wrapper + `useEffectivePolicy` hook**
+  (`gui/src/lib/rustion.ts`, `gui/src/hooks/useEffectivePolicy.ts`) -- the
+  Tauri command existed with no frontend caller, so nothing in the GUI could
+  read the resolved transport.
+
+### Fixed
+- **The per-resource connect gate recognises ownership- and share-derived
+  access** (`src/modules/rustion/mod.rs`) -- the gate probed only with
+  `ACL::explain_capability`, whose identity-less dry-run makes scope-gated rules
+  contribute nothing. That is correct for "does an explicit ungated grant
+  exist?" and is what stops the baseline
+  `path "resources/*" { scopes = ["shared"] }` rule from reading as a blanket
+  grant -- but it was the *only* check, so every caller whose access to a
+  resource comes from owning it or from a share was refused: on a
+  `rustion-required` resource they could not connect at all, and on any other
+  they were pushed onto the direct dial the transport policy exists to forbid.
+  Practically that was most of a namespace tenant's inventory, and every
+  resource shared with anyone. The gate now falls back to
+  `PolicyStore::readable_targets`, which re-runs the real evaluator with the
+  owner / share / asset-group qualifiers hydrated. Such a caller can already
+  read the stored credential through the same grant, so routing them through
+  the bastion instead grants nothing new.
+- **Connect is offered on a resource whose *policy tier* brokers it**
+  (`gui/src/lib/connectionProfiles.ts`, `gui/src/routes/ResourcesPage.tsx`) --
+  `isLaunchableForCaller` gated a connect-only caller on the profile's stored
+  `kind` field, which defaults to `direct` for every profile minted before that
+  field landed. A resource pinned to `rustion-required` by a policy tier brokers
+  every session on it regardless of what the profile says, so the one caller the
+  brokered transport exists to protect was refused the one connection that never
+  touches their machine. The gate now takes a `brokeredByPolicy` argument fed by
+  the effective-transport resolver, honoured for the SSH credential kinds
+  `rustion/v2/session/open` can resolve (`secret`, `ssh-engine`,
+  `default-account`). The resource card no longer greys its Connect for a
+  connect-only caller either -- the card projection doesn't carry the transport,
+  so the click routes through `connectResource`, which resolves it
+  authoritatively.
+- **The Rustion policy card no longer reports a denied read as "not
+  configured"** (`gui/src/components/RustionPolicyTierEditor.tsx`) -- every
+  failure fell into a `catch` commented "404 -> not configured yet", which
+  cleared all four fields and set the neutral badge. A caller who simply
+  couldn't read the tier was told the opposite of the truth about a
+  `rustion-required` resource. Permission-denied is now distinguished from unset:
+  a `not visible to you` badge, an explanatory notice, and the form forced
+  read-only.
+- **The Connection tab states the effective transport**
+  (`gui/src/routes/ResourcesPage.tsx`) -- reading the per-resource tier alone
+  couldn't answer "does this session go through a bastion?", since the global,
+  type, or asset-group tier can supply it. The panel now shows the resolved
+  verdict and which tier it came from, and the connect-only notice says whether
+  the transport rescues the caller instead of asserting it doesn't.
+
 ## [0.39.4] - 2026-08-11
 
 ### Security

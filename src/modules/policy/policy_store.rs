@@ -337,6 +337,36 @@ path "resource-group/groups/+" {
     capabilities = ["read"]
     scopes       = ["shared"]
 }
+
+# --- Rustion transport visibility (read-only resolvers) --------------------
+#
+# Not share-scoped, because these are not per-target endpoints: they are pure
+# functions over admin-authored transport policy for a resource id the caller
+# names. They mint no credential, open no session, and reveal nothing about a
+# resource beyond "would a Connect to it route through a bastion, and which
+# one". Withheld, the GUI cannot tell that a resource is `rustion-required` --
+# and `read_effective_policy` (gui/src-tauri/src/commands/connect.rs) then
+# treats the 403 as "no policy", so the transport lock was invisible AND
+# unenforced for every share-grantee. The grant is what lets that path fail
+# closed instead.
+#
+# `targets/<id>` read supplies the *pin*: the brokered dial verifies the
+# bastion's SSH host-key fingerprint / RDP TLS leaf digest off the target
+# record, so without it a share-grantee's bastion hop degrades to unpinned
+# TOFU. Target records carry listener coordinates and public-key fingerprints
+# -- no secrets. LIST on `targets/` is deliberately withheld, so a caller can
+# only resolve bastions the dispatcher already named for them.
+#
+# The grant is endpoint-level only: both resolvers gate the caller-supplied
+# `resource_id` per object (`RustionModuleInner::may_view_resource`), so this
+# confers no ability to enumerate the transport tier or fronting bastions of
+# resources the caller cannot see. Tier-only resolution (`resource_type` /
+# `asset_group_ids` with no `resource_id`) is deliberately ungated -- there is no
+# object to authorize against, and the answer is the admin-authored tier chain
+# the caller's own sessions already obey.
+path "rustion/policy/effective"   { capabilities = ["update"] }
+path "rustion/dispatcher/preview" { capabilities = ["update"] }
+path "rustion/targets/+"          { capabilities = ["read"] }
 "#;
 
 // Implicit self-service policy for namespace-bound tokens.
@@ -352,14 +382,17 @@ path "resource-group/groups/+" {
 // left a namespace principal with no way to introspect its own token.
 //
 // The fix: every authenticated token bound to a non-root namespace implicitly
-// carries this policy in its ACL (injected in `new_acl_inner`). It grants ONLY
-// caller-introspecting / self-service endpoints — each acts solely on the
-// caller's own token, identity, capabilities, cubbyhole, or wrapping tokens, so
-// it is safe for any authenticated principal regardless of tenant. These paths
-// are `sys/` / `auth/` / `identity/` (global, never namespace-rewritten), so the
-// bare path rules match the un-rewritten request paths exactly. Root tokens are
-// unaffected: this is only added when the bound namespace path is non-empty, and
-// root already grants the same set via its own `default` policy.
+// carries this policy in its ACL (injected in `new_acl_inner`). Almost all of it
+// is caller-introspecting / self-service — each rule acts solely on the caller's
+// own token, identity, capabilities, cubbyhole, or wrapping tokens, so it is safe
+// for any authenticated principal regardless of tenant. The one exception is the
+// `rustion/` block at the end, which is not caller-scoped by shape: it is scoped
+// by the endpoints' own per-resource gates, and carries its rationale inline.
+// These paths are `sys/` / `auth/` / `identity/` / `rustion/` (global, never
+// namespace-rewritten — see `is_header_scoped_path`), so the bare path rules
+// match the un-rewritten request paths exactly. Root tokens are unaffected: this
+// is only added when the bound namespace path is non-empty, and root already
+// grants the equivalent set via its own `default` policy.
 //
 // It is never stored, never listed, and never assignable — it exists purely as
 // an in-memory ACL contribution, so no per-namespace seeding or backfill of
@@ -418,6 +451,54 @@ path "sys/wrapping/unwrap" { capabilities = ["update"] }
 # --- Stateless utility ---
 path "sys/tools/hash"   { capabilities = ["update"] }
 path "sys/tools/hash/*" { capabilities = ["update"] }
+
+# --- Brokered Connect through the deployment-global Rustion fleet ---
+# `rustion/` is root-owned and header-scoped -- `is_header_scoped_path` keeps it
+# out of the path-rewrite, because the fleet lives only in the root mount table
+# and `<ns>/rustion/...` would 404. A namespace policy therefore cannot grant
+# these paths at all: `refuse_cross_namespace_paths` rejects any rule naming
+# them, since their owner is root and the writer's namespace is not. Granting
+# them here is the only route, which is why the block lives in an implicit
+# policy rather than in tenant-authored HCL.
+#
+# Until this landed, a namespace-bound token could not see that a resource was
+# `rustion-required`: the resource Connection tab reported the policy as "not
+# configured", and the connect path read the 403 from `policy/effective` as "no
+# policy visible to me" and dialled *direct* -- resolving the target credential
+# onto the operator's machine in defiance of the transport lock. The transport
+# tier was invisible, and therefore unenforced, for every tenant.
+#
+# The two resolvers are read-only pure functions over admin-authored policy for
+# a resource id the caller names -- no credential, no session. `targets/<id>`
+# read supplies the bastion's transport pin (SSH host-key fingerprint / RDP TLS
+# leaf digest) that the brokered dial verifies; without it the tenant's bastion
+# hop degrades to unpinned TOFU. Target records carry listener coordinates and
+# public-key fingerprints, no secrets. LIST on `targets/` stays withheld, so a
+# tenant resolves only the bastions the dispatcher already named.
+path "rustion/policy/effective"   { capabilities = ["update"] }
+path "rustion/dispatcher/preview" { capabilities = ["update"] }
+path "rustion/targets/+"          { capabilities = ["read"] }
+
+# Session lifecycle. Both open endpoints run their OWN per-resource ACL check
+# (`RustionModuleInner::may_connect_resource`): the caller must hold `connect` /
+# `read` / `root` on `<ns>/resources/secrets/<name>/`, or reach the resource
+# through ownership or a share. So these grants reach no resource the caller
+# could not already reach -- they only let them reach it *through the bastion*,
+# which is the safer of the two routes and the one the policy demands.
+# `renew` / `kill` additionally require the `correlation_id` handed only to the
+# session's opener.
+#
+# v1 `session/open` gained that gate so it could be granted here: it is the
+# route the client-resolved credential kinds (LDAP / PKI / FIDO2) and every
+# brokered RDP session still take, so without it those combinations failed
+# closed inside a namespace whenever `rustion-required` was in force. Its
+# *unbound* shape -- no `resource_id`, arbitrary target host, caller-supplied
+# credential material -- is a fleet-level primitive with no object to authorize
+# against, so it requires `sudo` on the path, which this grant does not confer.
+path "rustion/session/open"    { capabilities = ["update"] }
+path "rustion/v2/session/open" { capabilities = ["update"] }
+path "rustion/session/renew"   { capabilities = ["update"] }
+path "rustion/session/kill"    { capabilities = ["update"] }
 
 # --- Private per-token workspace ---
 path "cubbyhole/*" {
@@ -3448,6 +3529,114 @@ async fn resolve_groups_for_any(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod implicit_rustion_grant_tests {
+    use super::super::policy::Capability;
+    use super::*;
+
+    fn rule<'a>(p: &'a Policy, path: &str) -> Option<&'a super::super::policy::PolicyPathRules> {
+        p.paths.iter().find(|r| r.path == path)
+    }
+
+    /// A namespace-bound token carries only the implicit policies, and
+    /// `rustion/` is root-owned — `refuse_cross_namespace_paths` rejects any
+    /// tenant-authored rule naming it. Without these grants such a token
+    /// cannot resolve the effective transport, and the connect path used to
+    /// read that 403 as "no policy" and dial direct: a `rustion-required`
+    /// resource was silently reachable over a direct dial.
+    #[test]
+    fn namespace_self_grants_the_rustion_transport_resolvers() {
+        let p = &*NAMESPACE_SELF_POLICY_PARSED;
+
+        for path in ["rustion/policy/effective", "rustion/dispatcher/preview"] {
+            let r = rule(p, path).unwrap_or_else(|| panic!("{path} must be granted"));
+            assert!(
+                r.capabilities.contains(&Capability::Update),
+                "{path} is a POST endpoint, so it needs `update`"
+            );
+        }
+
+        // The brokered dial verifies the bastion's transport pin off the
+        // target record; without `read` here the hop degrades to unpinned TOFU.
+        let r = rule(p, "rustion/targets/+").expect("rustion/targets/+ must be granted");
+        assert!(r.capabilities.contains(&Capability::Read));
+        assert!(r.has_segment_wildcards, "one segment only — never a prefix over the fleet");
+
+        // LIST over the fleet stays withheld: a tenant resolves only the
+        // bastions the dispatcher already named for them.
+        assert!(rule(p, "rustion/targets").is_none());
+        assert!(rule(p, "rustion/targets/").is_none());
+        assert!(rule(p, "rustion/targets/*").is_none());
+    }
+
+    #[test]
+    fn namespace_self_grants_the_gated_session_lifecycle() {
+        let p = &*NAMESPACE_SELF_POLICY_PARSED;
+
+        // Both open routes run their own per-resource `connect`/`read`/owner/
+        // share gate (`may_connect_resource`), so these reach no resource the
+        // caller couldn't already reach. v1 is granted because it is the route
+        // brokered RDP and the client-resolved SSH kinds still take; its
+        // unbound shape is separately gated on `sudo`, which is NOT granted
+        // here (see `namespace_self_grants_no_sudo_on_rustion`).
+        for path in [
+            "rustion/session/open",
+            "rustion/v2/session/open",
+            "rustion/session/renew",
+            "rustion/session/kill",
+        ] {
+            let r = rule(p, path).unwrap_or_else(|| panic!("{path} must be granted"));
+            assert!(r.capabilities.contains(&Capability::Update));
+        }
+
+        // No wildcard may widen the set beyond these named endpoints — a
+        // prefix rule would pull in `master/*`, `policy/global`, the target
+        // registry writes, and the recording store.
+        assert!(
+            !p.paths.iter().any(|r| r.path.starts_with("rustion") && r.is_prefix),
+            "no prefix rule over `rustion/` — every grant is a named endpoint"
+        );
+    }
+
+    /// The unbound `session/open` shape (no `resource_id`: arbitrary target
+    /// host, caller-supplied credential material) has no object to authorize
+    /// against, so the handler requires `sudo`. The tenant baseline must never
+    /// confer it, or the grant above would reopen the fleet-proxy hole.
+    #[test]
+    fn namespace_self_grants_no_sudo_on_rustion() {
+        for p in [&*NAMESPACE_SELF_POLICY_PARSED, &Policy::from_str(DEFAULT_POLICY).unwrap()] {
+            for r in p.paths.iter().filter(|r| r.path.starts_with("rustion")) {
+                assert!(
+                    !r.capabilities.contains(&Capability::Sudo),
+                    "{} must not carry sudo",
+                    r.path
+                );
+            }
+        }
+    }
+
+    /// The root-namespace equivalent: a share-grantee needs the resolvers for
+    /// the same reason, and `read_effective_policy` now fails closed when it
+    /// can't reach them.
+    #[test]
+    fn default_policy_grants_the_read_only_resolvers_only() {
+        let p = Policy::from_str(DEFAULT_POLICY).expect("built-in default policy must parse");
+
+        for path in ["rustion/policy/effective", "rustion/dispatcher/preview"] {
+            let r = rule(&p, path).unwrap_or_else(|| panic!("{path} must be granted"));
+            assert!(r.capabilities.contains(&Capability::Update));
+        }
+        assert!(rule(&p, "rustion/targets/+").is_some());
+
+        // Session endpoints are NOT in the root-namespace baseline: an operator
+        // there grants those explicitly (see features/connect-only-access.md).
+        // Only a namespace-bound token, which cannot be granted `rustion/*` by
+        // any policy it could author, gets them implicitly.
+        assert!(rule(&p, "rustion/v2/session/open").is_none());
+        assert!(rule(&p, "rustion/session/open").is_none());
+    }
 }
 
 #[cfg(test)]

@@ -16,7 +16,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { Badge, Button, Card, Input, Select, useToast } from "./ui";
 import { useCanWriteResource } from "../hooks/useCanWriteResource";
-import { extractError } from "../lib/error";
+import { extractError, isPermissionDenied } from "../lib/error";
 import {
   rustionPolicyAssetGroupRead,
   rustionPolicyAssetGroupWrite,
@@ -45,6 +45,12 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
   const toast = useToast();
   const [loading, setLoading] = useState(true);
   const [exists, setExists] = useState(false);
+  // A denied read is NOT an unset tier. Conflating the two made this card
+  // report "not configured" with every field blank to a caller who simply
+  // couldn't read the tier — the exact opposite of the truth for a resource
+  // pinned to `rustion-required`. Tracked separately so the badge and the
+  // notice can say which one it is.
+  const [denied, setDenied] = useState(false);
   const [transport, setTransport] = useState<Transport>("");
   const [bastionsList, setBastionsList] = useState("");
   const [bastionGroup, setBastionGroup] = useState("");
@@ -60,12 +66,28 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
   // admin / group-owner gating, so we skip the owner check there
   // (`enabled = false` → the hook returns `true`).
   const canWrite = useCanWriteResource(id, tier === "resource");
-  const readOnly = tier === "resource" && canWrite === false;
-  const readOnlyTitle = "You don't have permission to modify this resource.";
+  // A caller who can't read the tier certainly can't write it — and on the
+  // type / asset-group tiers the owner check above is skipped, so `denied`
+  // is the only signal there.
+  const readOnly = denied || (tier === "resource" && canWrite === false);
+  const readOnlyTitle = denied
+    ? "You don't have permission to read or modify this policy tier."
+    : "You don't have permission to modify this resource.";
 
   const reload = useCallback(async () => {
     setLoading(true);
+    // Clear-state form: what a 404 (tier not written yet) looks like.
+    const clear = () => {
+      setExists(false);
+      setTransport("");
+      setBastionsList("");
+      setBastionGroup("");
+      setRecording("");
+      setLock(false);
+      setPriority(0);
+    };
     try {
+      setDenied(false);
       if (tier === "type") {
         try {
           const p = await rustionPolicyTypeRead(id);
@@ -75,14 +97,9 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
           setBastionGroup(p.bastionGroup);
           setRecording(p.recording as Recording);
           setLock(p.lock);
-        } catch {
-          // 404 → not configured yet; clear-state form.
-          setExists(false);
-          setTransport("");
-          setBastionsList("");
-          setBastionGroup("");
-          setRecording("");
-          setLock(false);
+        } catch (e) {
+          clear();
+          setDenied(isPermissionDenied(e));
         }
       } else if (tier === "asset-group") {
         try {
@@ -94,14 +111,9 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
           setRecording(p.recording as Recording);
           setLock(p.lock);
           setPriority(p.priority);
-        } catch {
-          setExists(false);
-          setTransport("");
-          setBastionsList("");
-          setBastionGroup("");
-          setRecording("");
-          setLock(false);
-          setPriority(0);
+        } catch (e) {
+          clear();
+          setDenied(isPermissionDenied(e));
         }
       } else {
         try {
@@ -112,13 +124,9 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
           setBastionGroup(p.bastionGroup);
           setRecording(p.recording as Recording);
           setLock(false);
-        } catch {
-          setExists(false);
-          setTransport("");
-          setBastionsList("");
-          setBastionGroup("");
-          setRecording("");
-          setLock(false);
+        } catch (e) {
+          clear();
+          setDenied(isPermissionDenied(e));
         }
       }
     } finally {
@@ -200,7 +208,13 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
     <Card
       title={`Rustion policy (${tierLabel(tier)})`}
       actions={
-        exists ? <Badge variant="info" label="configured" /> : <Badge variant="neutral" label="not configured" />
+        denied ? (
+          <Badge variant="warning" label="not visible to you" />
+        ) : exists ? (
+          <Badge variant="info" label="configured" />
+        ) : (
+          <Badge variant="neutral" label="not configured" />
+        )
       }
     >
       {loading ? (
@@ -210,11 +224,23 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
           <p className="text-xs text-[var(--color-text-muted)]">
             {tierDescription(tier)}
           </p>
-          {readOnly && (
+          {denied ? (
             <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] px-3 py-2 text-sm">
-              <strong className="text-[var(--color-text)]">Read-only access.</strong>{" "}
-              You don't have permission to modify this resource's policy.
+              <strong className="text-[var(--color-text)]">
+                Not visible to you.
+              </strong>{" "}
+              Reading this policy tier was denied, so the fields below are
+              blank — they are <em>not</em> a statement that nothing is
+              configured. The effective transport still applies to your
+              sessions; the Connection panel above shows what it resolves to.
             </div>
+          ) : (
+            readOnly && (
+              <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] px-3 py-2 text-sm">
+                <strong className="text-[var(--color-text)]">Read-only access.</strong>{" "}
+                You don't have permission to modify this resource's policy.
+              </div>
+            )
           )}
           <div className="grid grid-cols-2 gap-3">
             <Select

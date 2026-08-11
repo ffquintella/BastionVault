@@ -74,6 +74,8 @@ import { useAuthStore } from "../stores/authStore";
 import { useNamespaceStore } from "../stores/namespaceStore";
 import { useAssetGroupMap } from "../hooks/useAssetGroupMap";
 import { useCanWriteResource } from "../hooks/useCanWriteResource";
+import { useEffectivePolicy } from "../hooks/useEffectivePolicy";
+import { brokersThroughBastion, rustionPolicyEffective } from "../lib/rustion";
 import { RustionPolicyTierEditor } from "../components/RustionPolicyTierEditor";
 import { RustionDispatcherPreview } from "../components/RustionDispatcherPreview";
 
@@ -138,15 +140,25 @@ function ResourceCard({
   // anything. `connect_profiles` is absent only on a card built by a path
   // that doesn't carry the hints — we can't prove Connect is useless there,
   // so it stays live and the Connection tab does the explaining.
+  //
+  // For a connect-only caller launchability also depends on the resource's
+  // effective transport tier, which the card projection doesn't carry: a
+  // `rustion-required` resource brokers every session through a bastion, so
+  // its profiles ARE launchable even though none of them is tagged
+  // `kind: "rustion"`. Greying the button off the hints alone refused exactly
+  // the callers the brokered transport exists to protect. So leave it live and
+  // let `connectResource` resolve the transport on click — it either launches
+  // the brokered profile or opens the Connection tab, and never fires a dial
+  // the server would refuse.
   const hints = meta.connect_profiles;
   const blocked =
-    hints !== undefined && !hasLaunchableProfile(hints, connectOnly);
+    hints !== undefined &&
+    (hints.length === 0 ||
+      (!connectOnly && !hasLaunchableProfile(hints, connectOnly)));
   const blockedTitle =
     hints?.length === 0
       ? "No connection profile on this resource yet — open it to add one."
-      : connectOnly
-        ? "You can't launch this resource's profiles: its stored credentials aren't visible to you, and none of its profiles are Rustion-brokered."
-        : "None of this resource's profiles can be launched by this client yet.";
+      : "None of this resource's profiles can be launched by this client yet.";
   return (
     <button
       onClick={() => onSelect(meta.name)}
@@ -593,7 +605,21 @@ export function ResourcesPage() {
       .then((r) => r.paths[secretPath] ?? [])
       .catch(() => [] as string[]);
     const connectOnly = !(caps.includes("read") || caps.includes("root"));
-    const target = pickDefaultProfile(profiles, connectOnly);
+    // A connect-only caller can still one-click a profile whose session the
+    // transport tier brokers through a bastion — the credential is resolved
+    // server-side and never reaches this process. Resolve it here so the
+    // quick-Connect agrees with the Connection tab's launcher; a failure
+    // resolves to "not brokered", which only ever routes to that tab.
+    const brokeredByPolicy = connectOnly
+      ? await rustionPolicyEffective({
+          resourceId: name,
+          resourceType: String(info.type ?? ""),
+          assetGroupIds: assetGroups.map.byResource[name] || [],
+        })
+          .then(brokersThroughBastion)
+          .catch(() => false)
+      : false;
+    const target = pickDefaultProfile(profiles, connectOnly, brokeredByPolicy);
     // Ambiguous or nothing launchable, or needs a prompt → hand off to
     // the Connection tab where the full launcher lives.
     if (!target || needsOperatorPrompt(target)) {
@@ -813,6 +839,9 @@ export function ResourcesPage() {
             <>
               <ConnectionProfilesPanel
                 resource={resourceInfo}
+                assetGroupIds={
+                  assetGroups.map.byResource[String(resourceInfo.name)] || []
+                }
                 onUpdated={() => selectResource(selected)}
                 toast={toast}
               />
@@ -1502,10 +1531,14 @@ function useConnectOnlyMap(names: string[]): Record<string, boolean> {
 
 function ConnectionProfilesPanel({
   resource,
+  assetGroupIds,
   onUpdated,
   toast,
 }: {
   resource: ResourceMetadata;
+  /** Asset groups this resource belongs to — a contributor to the
+   *  effective transport tier, so the resolver needs them. */
+  assetGroupIds: string[];
   onUpdated: () => void;
   toast: (type: "success" | "error" | "info", msg: string) => void;
 }) {
@@ -1527,11 +1560,23 @@ function ConnectionProfilesPanel({
   //   - SSH-engine: pending
   //
   // Connect-only callers (no `read` on the resource's secrets) may only
-  // launch Rustion-brokered profiles: a `direct` dial would resolve the
-  // credential into the local GUI process, defeating the boundary. The
-  // server resolves the credential for `rustion` opens, so those are safe.
+  // launch brokered profiles: a `direct` dial would resolve the credential
+  // into the local GUI process, defeating the boundary. The server resolves
+  // the credential when the session goes through a bastion, so those are safe.
   const canReadSecrets = useCanReadSecrets(String(resource.name ?? ""));
   const connectOnly = canReadSecrets === false;
+
+  // …and "goes through a bastion" is decided by the *effective transport*
+  // across all four policy tiers, not by the profile's own `kind` field. A
+  // resource pinned to `rustion-required` brokers every session on it, even
+  // for a profile minted before `kind` existed — so the launcher has to ask
+  // the resolver rather than read the profile. See `isLaunchableForCaller`.
+  const effective = useEffectivePolicy(
+    String(resource.name ?? ""),
+    String(resource.type ?? ""),
+    assetGroupIds,
+  );
+  const brokeredByPolicy = brokersThroughBastion(effective.policy);
 
   // Whether the caller may add/edit/delete profiles. While the check is
   // in flight (`null`) we leave controls enabled to avoid a flicker; the
@@ -1541,7 +1586,7 @@ function ConnectionProfilesPanel({
   const readOnly = canWrite === false;
   const readOnlyTitle = "You don't have permission to modify this resource.";
   const launchableProfiles = profiles.filter((p) =>
-    isLaunchableForCaller(p, connectOnly),
+    isLaunchableForCaller(p, connectOnly, brokeredByPolicy),
   );
 
   // LDAP operator-bind mode requires a credential prompt before
@@ -1673,6 +1718,43 @@ function ConnectionProfilesPanel({
           </Button>
         </div>
 
+        {/* Effective transport across all four policy tiers. Stated
+            unconditionally: it is the single fact that decides whether a
+            session on this resource touches the operator's machine at all,
+            and it used to be readable only from the per-resource tier — which
+            is blank whenever an upstream tier supplied it. */}
+        {!effective.loading && (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-muted)]">
+            <span className="text-[var(--color-text)]">Transport</span>
+            {effective.denied ? (
+              <Badge variant="warning" label="unknown — resolver denied" />
+            ) : brokeredByPolicy ? (
+              <>
+                <Badge
+                  variant="info"
+                  label={`brokered · ${effective.policy?.transport}`}
+                />
+                <span>
+                  every session routes through a bastion, so BastionVault
+                  resolves the credential server-side
+                  {effective.policy?.transportSource
+                    ? ` (from the ${effective.policy.transportSource} tier)`
+                    : ""}
+                  .
+                </span>
+              </>
+            ) : (
+              <>
+                <Badge variant="neutral" label="direct" />
+                <span>
+                  sessions dial the target from this machine, which resolves
+                  the credential here.
+                </span>
+              </>
+            )}
+          </div>
+        )}
+
         {/* One notice for both access gates — they very often apply
             together (a share that grants connect but not write), and two
             stacked boxes saying what you can't do buried the profile list
@@ -1689,11 +1771,20 @@ function ConnectionProfilesPanel({
             {readOnly && (
               <>You can't add, edit, or delete profiles here.{connectOnly ? " " : ""}</>
             )}
-            {connectOnly && (
+            {connectOnly && !brokeredByPolicy && (
               <>
-                This resource's stored credentials aren't visible to you, so
-                only Rustion-brokered profiles can be launched — a direct dial
-                would resolve the credential onto this machine.
+                This resource's stored credentials aren't visible to you, and
+                its transport doesn't route through a bastion, so nothing here
+                can be launched — a direct dial would resolve the credential
+                onto this machine.
+              </>
+            )}
+            {connectOnly && brokeredByPolicy && (
+              <>
+                This resource's stored credentials aren't visible to you, but
+                its transport brokers every session through a bastion, so
+                BastionVault resolves the credential server-side and you can
+                still connect.
               </>
             )}
           </div>
@@ -1772,7 +1863,9 @@ function ConnectionProfilesPanel({
                       // yet" from "your access won't allow this dial" — the
                       // old blanket phase message misattributed the latter.
                       connectOnly && isLaunchableProfile(p)
-                        ? "Direct-dial profile: launching it would resolve the credential onto this machine, which your connect-only access doesn't allow."
+                        ? brokeredByPolicy
+                          ? "This resource brokers through a bastion, but BastionVault can't resolve this credential source server-side (only stored secrets and SSH-engine mints, over SSH). Launching it would resolve the credential onto this machine, which your connect-only access doesn't allow."
+                          : "Direct-dial profile: launching it would resolve the credential onto this machine, which your connect-only access doesn't allow."
                         : "Connect for this combination ships in a later phase"
                     }
                   >

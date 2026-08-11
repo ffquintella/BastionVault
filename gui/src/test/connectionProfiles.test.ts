@@ -507,6 +507,87 @@ describe("connect-only launchability", () => {
   });
 });
 
+describe("connect-only launchability under a brokered transport tier", () => {
+  // The regression this covers: a resource pinned to `rustion-required` by a
+  // policy tier brokers every session on it through a bastion, so the
+  // credential is resolved server-side and never reaches this process. Gating
+  // on the profile's own `kind` field alone refused exactly the caller the
+  // brokered transport exists to protect — and `kind` defaults to `direct` on
+  // every profile minted before that field landed.
+  it("launches a server-resolvable SSH profile that the policy tier brokers", () => {
+    expect(isLaunchableForCaller(secretProfile(), true, true)).toBe(true);
+    expect(isLaunchableForCaller(sshEngineProfile("ca"), true, true)).toBe(true);
+    expect(isLaunchableForCaller(defaultAccountSshProfile(), true, true)).toBe(
+      true,
+    );
+  });
+
+  it("still refuses it when the tier does not broker", () => {
+    expect(isLaunchableForCaller(secretProfile(), true, false)).toBe(false);
+    expect(isLaunchableForCaller(defaultAccountSshProfile(), true, false)).toBe(
+      false,
+    );
+  });
+
+  it("refuses kinds the server cannot resolve, brokered tier or not", () => {
+    // LDAP / PKI / FIDO2 still resolve client-side even under a brokered
+    // transport, so the credential would land here anyway.
+    const ldap: ConnectionProfile = {
+      id: "p_ldap",
+      name: "ldap",
+      protocol: "ssh",
+      credential_source: {
+        kind: "ldap",
+        ldap_mount: "openldap",
+        bind_mode: "static_role",
+        static_role: "svc",
+      },
+    };
+    const pki: ConnectionProfile = {
+      id: "p_pki",
+      name: "pki",
+      protocol: "ssh",
+      username: "deploy",
+      credential_source: { kind: "pki", pki_mount: "pki", pki_role: "ops" },
+    };
+    for (const p of [ldap, pki, fido2Profile("ssh")]) {
+      expect(isLaunchableForCaller(p, true, true)).toBe(false);
+    }
+  });
+
+  it("does not extend the policy route to RDP", () => {
+    // Brokered RDP goes through v1 `rustion/session/open` with a
+    // client-resolved credential, so the tier can't rescue it.
+    const rdp: ConnectionProfile = {
+      ...secretProfile(),
+      id: "p_rdp",
+      protocol: "rdp",
+    };
+    expect(isLaunchableForCaller(rdp, true, true)).toBe(false);
+  });
+
+  it("changes nothing for a caller who can read the credentials", () => {
+    for (const brokeredTier of [false, true]) {
+      expect(isLaunchableForCaller(secretProfile(), false, brokeredTier)).toBe(
+        true,
+      );
+    }
+  });
+
+  it("threads through hasLaunchableProfile and pickDefaultProfile", () => {
+    const direct: ConnectionProfile = { ...secretProfile(), is_default: true };
+    expect(hasLaunchableProfile([direct], true, false)).toBe(false);
+    expect(hasLaunchableProfile([direct], true, true)).toBe(true);
+    expect(pickDefaultProfile([direct], true, false)).toBeNull();
+    expect(pickDefaultProfile([direct], true, true)?.id).toBe("p_secret");
+  });
+
+  it("defaults brokeredByPolicy to false so existing callers are unchanged", () => {
+    expect(isLaunchableForCaller(secretProfile(), true)).toBe(false);
+    expect(hasLaunchableProfile([secretProfile()], true)).toBe(false);
+  });
+});
+
 describe("profileConnectHints", () => {
   it("keeps only the fields launchability reads", () => {
     expect(profileConnectHints([sshEngineProfile("otp")])).toEqual([

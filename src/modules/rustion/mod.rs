@@ -1319,7 +1319,216 @@ impl RustionBackendInner {
         Ok(Some(master_config_response(&cfg)))
     }
 
-    pub async fn handle_session_open(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+    /// May this caller open a brokered session to `resource_name`?
+    ///
+    /// Two ways to qualify, and the split matters:
+    ///
+    /// 1. **An explicit, ungated grant** on `<ns>/resources/secrets/<name>/`
+    ///    carrying `connect` or `read` (or a root token). Probed with
+    ///    `explain_capability`, whose identity-less dry-run makes scope-gated
+    ///    rules contribute nothing — deliberately, because the baseline
+    ///    `default` / `namespace-shared` policies carry
+    ///    `path "resources/*" { capabilities = ["read", …]; scopes = ["shared"] }`,
+    ///    and an `Operation::List` probe would let that ungated-looking rule
+    ///    hand every authenticated token a phantom `read` here. This is the
+    ///    connect-only shape: `connect` without `read`.
+    ///
+    /// 2. **Ownership- or share-derived access**, via `readable_targets`,
+    ///    which re-runs the real evaluator against a synthesized per-object
+    ///    request carrying the three qualifier inputs `post_auth` resolves for
+    ///    a direct read (asset groups, owner entity, shared capabilities).
+    ///    Without this the gate saw only (1) and therefore refused every
+    ///    caller whose access to the resource comes from *owning* it or from a
+    ///    share — which is most of a namespace tenant's inventory, and exactly
+    ///    the access a share exists to convey. Such a caller can already read
+    ///    the stored credential through the same grant, so routing them
+    ///    through the bastion instead grants nothing new; refusing them just
+    ///    pushed them onto the direct dial.
+    ///
+    /// Fails closed on a missing `auth` or an unbuildable ACL.
+    async fn may_connect_resource(
+        &self,
+        req: &Request,
+        ns_prefix: &str,
+        resource_name: &str,
+    ) -> Result<bool, RvError> {
+        use crate::modules::policy::policy::Capability;
+
+        let auth = req.auth.clone().ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
+        let policy_module = self
+            .core
+            .module_manager
+            .get_module::<crate::modules::policy::PolicyModule>("policy")
+            .ok_or_else(|| bv_error_string!("policy module not registered"))?;
+        let store = policy_module.policy_store.load();
+
+        // Namespace-qualified: policies inside a namespace are authored with
+        // `<ns>/`-prefixed paths (`refuse_cross_namespace_paths` enforces
+        // that), and the request pipeline evaluates namespaced requests
+        // against the rewritten path. Probing the bare `resources/secrets/…`
+        // path would check the ROOT resource of the same name — denying the
+        // namespace's own owner while consulting a rule that belongs to a
+        // different tenant.
+        let secret_prefix = format!("{ns_prefix}resources/secrets/{resource_name}/");
+
+        let acl = store.new_acl_for_request(&auth.policies, None, &auth).await?;
+        let connect = acl.explain_capability(&secret_prefix, Capability::Connect);
+        if connect.allowed || connect.is_root || acl.explain_capability(&secret_prefix, Capability::Read).allowed {
+            return Ok(true);
+        }
+
+        let mut probe = Request::new(&secret_prefix);
+        probe.operation = Operation::Read;
+        probe.auth = Some(auth);
+        probe.api_version = req.api_version;
+        probe.namespace_path =
+            if ns_prefix.is_empty() { None } else { Some(ns_prefix.trim_end_matches('/').to_string()) };
+        Ok(store.readable_targets(&probe, &[secret_prefix]).await.first().copied().unwrap_or(false))
+    }
+
+    /// May this caller see *anything* about `resource_name`?
+    ///
+    /// The authorization for the read-only resolvers (`policy/effective`,
+    /// `dispatcher/preview`), which take a caller-supplied `resource_id` and
+    /// answer "would a Connect to it route through a bastion, and which one".
+    /// Ungated, that let any holder of the baseline grant enumerate the
+    /// transport tier and fronting bastions of every resource in the
+    /// deployment — fleet topology rather than credentials, but no reason to
+    /// hand it out.
+    ///
+    /// Deliberately *broader* than [`Self::may_connect_resource`], and the
+    /// difference is load-bearing in both directions:
+    ///
+    /// - It probes the **inventory record**, not the secret path, because a
+    ///   profile whose credential comes from the SSH engine (`ssh-engine` /
+    ///   `default-account`) needs no grant on `resources/secrets/<name>/` at
+    ///   all. Gating on the secret path alone would refuse a caller who can
+    ///   legitimately connect — and since `read_effective_policy` now fails
+    ///   closed, that would break their Connect outright rather than degrade
+    ///   it.
+    /// - It uses `readable_targets` (share/owner-aware) rather than
+    ///   `explain_capability`, for the same reason
+    ///   [`Self::may_connect_resource`] does: the identity-less dry-run
+    ///   reports "denied" for exactly the share-grantees who most need the
+    ///   transport verdict.
+    ///
+    /// The `may_connect_resource` arm is the converse case: a connect-only
+    /// caller whose grant is scoped to the secret path.
+    async fn may_view_resource(
+        &self,
+        req: &Request,
+        ns_prefix: &str,
+        resource_name: &str,
+    ) -> Result<bool, RvError> {
+        let policy_module = self
+            .core
+            .module_manager
+            .get_module::<crate::modules::policy::PolicyModule>("policy")
+            .ok_or_else(|| bv_error_string!("policy module not registered"))?;
+        let store = policy_module.policy_store.load();
+
+        let record = format!("{ns_prefix}resources/resources/{resource_name}");
+        let mut probe = Request::new(&record);
+        probe.operation = Operation::Read;
+        probe.auth = req.auth.clone();
+        probe.api_version = req.api_version;
+        probe.namespace_path =
+            if ns_prefix.is_empty() { None } else { Some(ns_prefix.trim_end_matches('/').to_string()) };
+        if store.readable_targets(&probe, &[record]).await.first().copied().unwrap_or(false) {
+            return Ok(true);
+        }
+        drop(store);
+
+        self.may_connect_resource(req, ns_prefix, resource_name).await
+    }
+
+    /// Refuse a resolver call that names a resource the caller cannot see.
+    /// Tier-only resolution (`resource_type` / `asset_group_ids` with no
+    /// `resource_id`) stays ungated — there is no object to authorize against,
+    /// and the answer is the admin-authored tier chain the caller's own
+    /// sessions are already subject to.
+    async fn gate_resolver_resource(&self, req: &Request, resource_id: &str) -> Result<(), RvError> {
+        if resource_id.is_empty() {
+            return Ok(());
+        }
+        let ns_prefix = self.namespace_sub_request_prefix(req).await?;
+        if self.may_view_resource(req, &ns_prefix, resource_id).await? {
+            return Ok(());
+        }
+        Err(bv_error_response_status!(
+            403,
+            &format!(
+                "no access to resource `{resource_id}`: its Rustion transport policy is not \
+                 yours to resolve. Omit `resource_id` to resolve the type / asset-group tiers \
+                 only."
+            )
+        ))
+    }
+
+    /// True when the caller holds `sudo` (or is root) on `path`.
+    async fn caller_has_sudo(&self, req: &Request, path: &str) -> Result<bool, RvError> {
+        use crate::modules::policy::policy::Capability;
+
+        let auth = req.auth.clone().ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
+        let policy_module = self
+            .core
+            .module_manager
+            .get_module::<crate::modules::policy::PolicyModule>("policy")
+            .ok_or_else(|| bv_error_string!("policy module not registered"))?;
+        let acl = policy_module.policy_store.load().new_acl_for_request(&auth.policies, None, &auth).await?;
+        let v = acl.explain_capability(path, Capability::Sudo);
+        Ok(v.allowed || v.is_root)
+    }
+
+    /// `POST rustion/session/open` — the v1 entry point, now per-resource
+    /// gated.
+    ///
+    /// v1 predates the connect gate and had none: it authorized only the
+    /// endpoint path, then brokered a session to a caller-named `target_host`
+    /// with caller-supplied credential material. Any principal holding
+    /// `update` on the path could therefore use the fleet as a general-purpose
+    /// proxy to anywhere, which is why the endpoint could not be granted to
+    /// tenants — and that in turn is why brokered RDP and the client-resolved
+    /// SSH credential kinds (LDAP / PKI / FIDO2) failed closed inside a
+    /// namespace while `rustion-required` was in force.
+    ///
+    /// Two shapes, authorized differently:
+    ///   - **Bound to a resource** (`resource_id` set, which is what every
+    ///     Resource Connect caller sends): same per-resource gate v2 runs.
+    ///   - **Raw** (no `resource_id`): arbitrary host + caller-supplied
+    ///     credential, with no object to authorize against. That is a
+    ///     fleet-level primitive, so it requires `sudo` on the endpoint —
+    ///     root and `administrator` keep it; the tenant baseline does not.
+    ///
+    /// `handle_session_open_v2` calls [`Self::brokered_session_open`]
+    /// directly, having run the gate itself, so nothing is checked twice.
+    pub async fn handle_session_open(&self, b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let ns_prefix = self.namespace_sub_request_prefix(req).await?;
+        let resource_id =
+            req.get_data("resource_id").ok().and_then(|v| v.as_str().map(|s| s.trim().to_string())).unwrap_or_default();
+
+        if resource_id.is_empty() {
+            if !self.caller_has_sudo(req, "rustion/session/open").await? {
+                return Err(bv_error_response_status!(
+                    403,
+                    "rustion/session/open without `resource_id` opens a session to an arbitrary \
+                     target host with caller-supplied credential material, so it requires `sudo` \
+                     on this path. Pass `resource_id` to open a session bound to a resource you \
+                     may connect to, or use `rustion/v2/session/open`."
+                ));
+            }
+        } else if !self.may_connect_resource(req, &ns_prefix, &resource_id).await? {
+            return Err(RvError::ErrPermissionDenied);
+        }
+
+        self.brokered_session_open(b, req).await
+    }
+
+    /// The shared brokering engine: resolve policy, run the dispatcher, build
+    /// and sign the BVRG-v1 envelope, POST it at the chosen bastion, and
+    /// return the ticket bundle. Runs **no** authorization of its own — both
+    /// entry points gate before they call it.
+    async fn brokered_session_open(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         use base64::{engine::general_purpose::STANDARD, Engine as _};
         let store = self.resolve_store()?;
         let master_store = self.resolve_master_store()?;
@@ -1701,44 +1910,15 @@ impl RustionBackendInner {
         // already ran on `rustion/v2/session/open` itself: that guards who
         // may call the endpoint; this guards who may connect to *this*
         // resource. `read`/`root` imply connect, so existing read+connect
-        // users keep working with no policy change.
-        let auth = req.auth.clone().ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
-        let policy_module = self
-            .core
-            .module_manager
-            .get_module::<crate::modules::policy::PolicyModule>("policy")
-            .ok_or_else(|| bv_error_string!("policy module not registered"))?;
-        let acl = policy_module.policy_store.load().new_acl_for_request(&auth.policies, None, &auth).await?;
-        // Namespace-qualified: policies inside a namespace are authored with
-        // `<ns>/`-prefixed paths (`refuse_cross_namespace_paths` enforces
-        // that), and the request pipeline evaluates namespaced requests
-        // against the rewritten path. Probing the bare `resources/secrets/…`
-        // path would check the ROOT resource of the same name — denying the
-        // namespace's own owner while consulting a rule that belongs to a
-        // different tenant.
-        let secret_prefix = format!("{ns_prefix}resources/secrets/{resource_name}/");
-        // Evaluate the connect/read grant with a non-LIST capability check.
-        // `acl.capabilities()` probes with an `Operation::List`, and the ACL
-        // matcher deliberately bypasses scope gates for LIST (deferring the
-        // per-object filter to post-route). That makes the ungated grant of a
-        // scope-gated rule leak through — e.g. the baseline `default` policy's
-        // `path "resources/*" { capabilities = ["read", ...]; scopes = ["shared"] }`
-        // would hand every authenticated token a phantom `read` on this
-        // resource's secret path, defeating the gate. `explain_capability`
-        // resolves with a `Read` op and an identity-less dry-run request, so a
-        // scope-gated rule contributes nothing (its `scope_passes` fails
-        // closed) while an explicit ungated `connect`/`read` grant — or a root
-        // token — still passes. Root is covered because `explain_capability`
-        // reports `allowed`/`is_root` on the root branch regardless of the
-        // capability probed.
-        use crate::modules::policy::policy::Capability;
-        let may_connect = {
-            let connect = acl.explain_capability(&secret_prefix, Capability::Connect);
-            connect.allowed || connect.is_root || acl.explain_capability(&secret_prefix, Capability::Read).allowed
-        };
-        if !may_connect {
+        // users keep working with no policy change — and see
+        // [`Self::may_connect_resource`] for why ownership- and share-derived
+        // access has to be probed separately from an explicit grant.
+        if !self.may_connect_resource(req, &ns_prefix, &resource_name).await? {
             return Err(RvError::ErrPermissionDenied);
         }
+        // Retained for the server-side credential resolver below, which
+        // attributes its privileged read to the connecting operator.
+        let auth = req.auth.clone().ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
 
         // (1b) Connect-time MFA gate. The `require_mfa` flag is read off the
         // *stored* connection profile, never from this request body, so a
@@ -1912,8 +2092,10 @@ impl RustionBackendInner {
             }
         }
 
-        // (3) Delegate to the shared brokering engine.
-        self.handle_session_open(b, req).await
+        // (3) Delegate to the shared brokering engine. Deliberately NOT
+        // `handle_session_open` — that is the v1 entry point's own gate, and
+        // the connect check above has already run.
+        self.brokered_session_open(b, req).await
     }
 
     /// True when *any* connection profile on this resource carries
@@ -2989,6 +3171,7 @@ impl RustionBackendInner {
         let resource_id = pick("resource_id");
         let resource_type = pick("resource_type");
         let asset_group_ids = read_string_list(req, "asset_group_ids");
+        self.gate_resolver_resource(req, &resource_id).await?;
 
         let pol = self.resolve_policy_store()?;
         let global = pol.get_global().await?;
@@ -3055,6 +3238,7 @@ impl RustionBackendInner {
         let resource_id = pick("resource_id");
         let resource_type = pick("resource_type");
         let asset_group_ids = read_string_list(req, "asset_group_ids");
+        self.gate_resolver_resource(req, &resource_id).await?;
 
         let pol = self.resolve_policy_store()?;
         let global = pol.get_global().await?;
@@ -3602,6 +3786,424 @@ mod connect_only_tests {
         // No-connect caller is denied at the gate before any resolution.
         let noconn_open = open_v2(&noconn);
         assert_eq!(noconn_open, 403, "no-connect must be denied at the connect gate");
+    }
+
+    /// v1 `session/open` had **no** per-resource gate: it authorized only the
+    /// endpoint path, then brokered a session to a caller-named `target_host`
+    /// with caller-supplied credential material. That is why it could not be
+    /// granted to a tenant — and therefore why brokered RDP and the
+    /// client-resolved SSH kinds (LDAP / PKI / FIDO2) failed closed inside a
+    /// namespace under `rustion-required`. Now:
+    ///   - bound to a resource the caller may connect to → passes, reaching
+    ///     dispatch (502/503, no bastion enrolled);
+    ///   - bound to a resource the caller cannot reach → 403 at the gate;
+    ///   - unbound (no `resource_id`, so no object to authorize against) →
+    ///     403 without `sudo`, allowed for root.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_session_open_v1_is_per_resource_gated() {
+        let mut server = TestHttpServer::new("test_session_open_v1_gate", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+
+        server
+            .write(
+                "resources/resources/db",
+                serde_json::json!({ "type": "server", "hostname": "db.example" }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+
+        for (name, body) in [
+            (
+                "v1-connect",
+                "path \"resources/secrets/db/*\" { capabilities = [\"connect\"] }\n\
+                 path \"rustion/*\" { capabilities = [\"create\", \"update\", \"read\"] }",
+            ),
+            ("v1-noconnect", "path \"rustion/*\" { capabilities = [\"create\", \"update\", \"read\"] }"),
+        ] {
+            server
+                .write(
+                    &format!("sys/policies/acl/{name}"),
+                    serde_json::json!({ "policy": body }).as_object().cloned(),
+                    Some(&root),
+                )
+                .unwrap();
+        }
+
+        server
+            .write("sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
+            .unwrap();
+        for (user, policy) in [("v1conn", "v1-connect"), ("v1noconn", "v1-noconnect")] {
+            server
+                .write(
+                    &format!("auth/pass/users/{user}"),
+                    serde_json::json!({ "password": "hunter22XX!", "token_policies": policy, "ttl": 0 })
+                        .as_object()
+                        .cloned(),
+                    Some(&root),
+                )
+                .unwrap();
+        }
+        let login = |user: &str| -> String {
+            server
+                .write(
+                    &format!("auth/pass/login/{user}"),
+                    serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                    None,
+                )
+                .unwrap()
+                .1
+                .get("auth")
+                .and_then(|a| a.get("client_token"))
+                .and_then(|v| v.as_str())
+                .unwrap()
+                .to_string()
+        };
+
+        // `bound = false` omits `resource_id` — the raw, fleet-level shape.
+        let open_v1 = |token: &str, bound: bool| -> u16 {
+            let mut body = serde_json::json!({
+                "target_host": "10.0.0.5",
+                "target_port": 22,
+                "target_protocol": "ssh",
+                "credential_kind": "ssh-password",
+                "credential_username": "deploy",
+                "credential_material": "aHVudGVyMg=="
+            });
+            if bound {
+                body.as_object_mut().unwrap().insert("resource_id".into(), serde_json::json!("db"));
+            }
+            server.write("rustion/session/open", body.as_object().cloned(), Some(token)).unwrap().0
+        };
+
+        let conn = login("v1conn");
+        let noconn = login("v1noconn");
+
+        let bound_conn = open_v1(&conn, true);
+        assert_ne!(bound_conn, 403, "a connect grant on the resource must pass the v1 gate");
+        assert!(
+            bound_conn == 502 || bound_conn == 503,
+            "should reach dispatch and fail on no-bastion (502/503), got {bound_conn}"
+        );
+
+        assert_eq!(
+            open_v1(&noconn, true),
+            403,
+            "endpoint access alone must not open a session to a resource the caller can't reach"
+        );
+
+        // The raw shape names an arbitrary host and carries its own
+        // credential, so there is nothing to authorize per-object: `sudo`.
+        assert_eq!(open_v1(&conn, false), 403, "unbound open must require sudo, not a per-resource connect grant");
+        assert_eq!(open_v1(&noconn, false), 403, "unbound open must require sudo");
+        let bound_root = open_v1(&root, false);
+        assert_ne!(bound_root, 403, "root holds sudo and keeps the raw open (the e2e harness uses it)");
+    }
+
+    /// The connect gate must recognise **share-derived** access, not only an
+    /// explicit ungated grant.
+    ///
+    /// `explain_capability` probes with an identity-less dry-run so that
+    /// scope-gated rules contribute nothing — correct for "does an explicit
+    /// grant exist?", and the reason a `scopes = ["shared"]` baseline rule
+    /// can't be mistaken for a blanket one. But it was the *only* check, so
+    /// every caller whose access comes from a share was refused at the gate:
+    /// on a `rustion-required` resource they could not connect at all, and on
+    /// any other they were pushed onto the direct dial. The gate now falls
+    /// back to `readable_targets`, which re-runs the real evaluator with the
+    /// owner / share / asset-group qualifiers hydrated.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_session_open_gate_accepts_a_share_grantee() {
+        let mut server = TestHttpServer::new("test_session_open_share_gate", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+
+        server
+            .write(
+                "resources/resources/db",
+                serde_json::json!({ "type": "server", "hostname": "db.example" }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        server
+            .write(
+                "resources/secrets/db/ssh",
+                serde_json::json!({ "password": "hunter2", "username": "deploy" }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+
+        // Mirrors the share-scoped rules the `default` / `namespace-shared`
+        // baselines carry: no ungated grant on the resource anywhere.
+        let sharee_policy = r#"
+path "resources/*" {
+    capabilities = ["read", "list"]
+    scopes       = ["shared"]
+}
+path "rustion/*" {
+    capabilities = ["create", "update", "read"]
+}
+"#;
+        let (policy_status, _) = server
+            .write(
+                "sys/policies/acl/sharee",
+                serde_json::json!({ "policy": sharee_policy }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert!(policy_status < 300, "fixture: sharee policy must save, got {policy_status}");
+        server
+            .write("sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
+            .unwrap();
+        server
+            .write(
+                "auth/pass/users/sharee",
+                serde_json::json!({ "password": "hunter22XX!", "token_policies": "sharee", "ttl": 0 })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        let token = server
+            .write(
+                "auth/pass/login/sharee",
+                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                None,
+            )
+            .unwrap()
+            .1
+            .get("auth")
+            .and_then(|a| a.get("client_token"))
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        let open = |token: &str| -> u16 {
+            server
+                .write(
+                    "rustion/v2/session/open",
+                    serde_json::json!({
+                        "resource_name": "db",
+                        "credential_source": { "kind": "secret", "secret_id": "ssh" },
+                        "target_host": "10.0.0.5",
+                        "target_port": 22,
+                        "target_protocol": "ssh"
+                    })
+                    .as_object()
+                    .cloned(),
+                    Some(token),
+                )
+                .unwrap()
+                .0
+        };
+
+        // No share yet: the share-scoped rule grants nothing, so the gate
+        // refuses. This is also the proof that the fallback probe is
+        // share-aware rather than simply permissive.
+        assert_eq!(open(&token), 403, "a share-scoped rule with no share must not pass the gate");
+
+        let entity_id = server
+            .request("GET", "identity/entity/self", None, Some(&token), None)
+            .unwrap()
+            .1
+            .get("data")
+            .and_then(|d| d.get("entity_id"))
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        let target_b64 = {
+            use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+            URL_SAFE_NO_PAD.encode("db")
+        };
+        server
+            .write(
+                &format!("identity/sharing/by-target/resource/{target_b64}/{entity_id}"),
+                serde_json::json!({ "target_kind": "resource", "target_path": "db", "capabilities": "read" })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+
+        // Sanity: the share really does convey access through the normal
+        // request pipeline. If this ever fails the fixture is wrong, not the
+        // gate.
+        let record = server.request("GET", "resources/resources/db", None, Some(&token), None).unwrap().0;
+        assert_eq!(record, 200, "fixture: the share must let the grantee read the resource record");
+        let secret = server.request("GET", "resources/secrets/db/ssh", None, Some(&token), None).unwrap().0;
+        assert_eq!(secret, 200, "fixture: the share covers the resource's secret path too");
+
+        let after = open(&token);
+        assert_ne!(after, 403, "a share granting read must pass the connect gate, got 403");
+        assert!(
+            after == 502 || after == 503,
+            "the share-grantee should reach dispatch and fail on no-bastion (502/503), got {after}"
+        );
+    }
+
+    /// The read-only resolvers (`policy/effective`, `dispatcher/preview`) take
+    /// a caller-supplied `resource_id`. Every authenticated principal can call
+    /// them — the connect path needs the transport verdict, and denying it made
+    /// `rustion-required` invisible *and* unenforced — but ungated that let any
+    /// baseline holder enumerate the transport tier and fronting bastions of
+    /// every resource in the deployment.
+    ///
+    /// The gate is deliberately broader than the connect gate: it probes the
+    /// inventory *record* (so an `ssh-engine` profile, which needs no grant on
+    /// the secret path, still resolves) and it is share/owner-aware (so the
+    /// share-grantees who most need the verdict aren't the ones refused).
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_policy_resolvers_are_gated_per_resource() {
+        let mut server = TestHttpServer::new("test_policy_resolver_gate", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+
+        for name in ["shown", "hidden"] {
+            server
+                .write(
+                    &format!("resources/resources/{name}"),
+                    serde_json::json!({ "type": "server", "hostname": format!("{name}.example") })
+                        .as_object()
+                        .cloned(),
+                    Some(&root),
+                )
+                .unwrap();
+        }
+
+        // `viewer` reaches resources only through shares (the baseline shape).
+        // `connector` has no grant on the record at all — only `connect` on one
+        // resource's secret path, the connect-only shape.
+        for (name, body) in [
+            (
+                "viewer",
+                "\npath \"resources/*\" {\n    capabilities = [\"read\", \"list\"]\n    scopes       = [\"shared\"]\n}\n\
+                 path \"rustion/*\" {\n    capabilities = [\"create\", \"update\", \"read\"]\n}\n",
+            ),
+            (
+                "connector",
+                "\npath \"resources/secrets/shown/*\" {\n    capabilities = [\"connect\"]\n}\n\
+                 path \"rustion/*\" {\n    capabilities = [\"create\", \"update\", \"read\"]\n}\n",
+            ),
+        ] {
+            let (st, _) = server
+                .write(
+                    &format!("sys/policies/acl/{name}"),
+                    serde_json::json!({ "policy": body }).as_object().cloned(),
+                    Some(&root),
+                )
+                .unwrap();
+            assert!(st < 300, "fixture: policy `{name}` must save, got {st}");
+        }
+
+        server
+            .write("sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
+            .unwrap();
+        for user in ["viewer", "connector"] {
+            server
+                .write(
+                    &format!("auth/pass/users/{user}"),
+                    serde_json::json!({ "password": "hunter22XX!", "token_policies": user, "ttl": 0 })
+                        .as_object()
+                        .cloned(),
+                    Some(&root),
+                )
+                .unwrap();
+        }
+        let login = |user: &str| -> String {
+            server
+                .write(
+                    &format!("auth/pass/login/{user}"),
+                    serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                    None,
+                )
+                .unwrap()
+                .1
+                .get("auth")
+                .and_then(|a| a.get("client_token"))
+                .and_then(|v| v.as_str())
+                .unwrap()
+                .to_string()
+        };
+        let viewer = login("viewer");
+        let connector = login("connector");
+
+        // `resource_id: None` asks for the tier-only chain.
+        let resolve = |route: &str, token: &str, resource_id: Option<&str>| -> u16 {
+            let mut body = serde_json::json!({ "resource_type": "server" });
+            if let Some(rid) = resource_id {
+                body.as_object_mut().unwrap().insert("resource_id".into(), serde_json::json!(rid));
+            }
+            server.write(route, body.as_object().cloned(), Some(token)).unwrap().0
+        };
+
+        for route in ["rustion/policy/effective", "rustion/dispatcher/preview"] {
+            // Root sees everything.
+            assert!(resolve(route, &root, Some("hidden")) < 300, "root must resolve any resource");
+
+            // A resource the viewer cannot see is refused...
+            assert_eq!(
+                resolve(route, &viewer, Some("hidden")),
+                403,
+                "{route} must not resolve a resource the caller cannot see"
+            );
+            // ...while the tier-only shape stays open: no object to authorize,
+            // and it is the same admin-authored chain the caller's own sessions
+            // already obey.
+            assert!(
+                resolve(route, &viewer, None) < 300,
+                "{route} tier-only resolution must stay ungated"
+            );
+
+            // The connect-only caller holds nothing on the record, only
+            // `connect` on the secret path — the second gate arm.
+            assert!(
+                resolve(route, &connector, Some("shown")) < 300,
+                "{route} must resolve for a connect-only grant on the secret path"
+            );
+            assert_eq!(
+                resolve(route, &connector, Some("hidden")),
+                403,
+                "{route} must still refuse a resource the connect-only caller has no grant on"
+            );
+        }
+
+        // Sharing `shown` with the viewer opens the resolver for it, and only
+        // for it — proof the gate reads the share rather than waving everyone
+        // through once any share exists.
+        let entity_id = server
+            .request("GET", "identity/entity/self", None, Some(&viewer), None)
+            .unwrap()
+            .1
+            .get("data")
+            .and_then(|d| d.get("entity_id"))
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        let target_b64 = {
+            use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+            URL_SAFE_NO_PAD.encode("shown")
+        };
+        server
+            .write(
+                &format!("identity/sharing/by-target/resource/{target_b64}/{entity_id}"),
+                serde_json::json!({ "target_kind": "resource", "target_path": "shown", "capabilities": "read" })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+
+        for route in ["rustion/policy/effective", "rustion/dispatcher/preview"] {
+            assert!(
+                resolve(route, &viewer, Some("shown")) < 300,
+                "{route} must resolve a resource shared with the caller"
+            );
+            assert_eq!(
+                resolve(route, &viewer, Some("hidden")),
+                403,
+                "{route} must still refuse the unshared resource"
+            );
+        }
     }
 }
 

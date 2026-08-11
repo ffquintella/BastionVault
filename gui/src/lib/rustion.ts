@@ -216,6 +216,14 @@ export interface RustionSessionOpenResult {
   correlation_id: string;
 }
 
+/** Raw v1 open: the caller supplies its own resolved credential material.
+ *
+ *  Pass `resourceId` whenever there is a resource behind the session — the
+ *  server authorizes the open against it (`connect`/`read`, ownership, or a
+ *  share on `resources/secrets/<id>/`), which is what makes the endpoint
+ *  usable by a non-admin. Omitting it asks for an *unbound* open to an
+ *  arbitrary host, which has no object to authorize against and therefore
+ *  requires `sudo` on `rustion/session/open` — root or `administrator` only. */
 export const rustionSessionOpen = (request: RustionSessionOpenRequest) =>
   invoke<RustionSessionOpenResult>("rustion_session_open", { request });
 
@@ -474,6 +482,65 @@ export const rustionPolicyForceRustion = (confirm: boolean) =>
   invoke<RustionForceRustionResult>("rustion_policy_force_rustion", {
     confirm,
   });
+
+// ─── Phase 7.4: effective-policy resolver ────────────────────────
+
+export interface RustionLockViolation {
+  lockingTier: string;
+  field: string;
+  detail: string;
+}
+
+/** The resolver's verdict across all four tiers, with the tier each
+ *  field came from. `transport` is what actually decides whether a
+ *  Connect routes through a bastion — the per-resource tier alone
+ *  doesn't, since a global / type / asset-group tier can supply it. */
+export interface RustionEffectivePolicy {
+  transport: Transport;
+  transportSource: string;
+  /** Bastion ids the resolver would pick, already expanded from
+   *  `bastionGroup`. */
+  bastions: string[];
+  bastionGroup: string;
+  bastionsSource: string;
+  recording: Recording;
+  recordingSource: string;
+  lockedBy: string[];
+  /** Set when a lower tier tried to weaken a locked higher tier;
+   *  session/open would refuse with 403. */
+  lockViolation: RustionLockViolation | null;
+}
+
+/** Resolve the effective Rustion policy for a resource without opening a
+ *  session. Every authenticated principal can call this — the implicit
+ *  `default` / `namespace-self` policies grant it — because a caller who
+ *  can't see the transport tier can't tell a brokered resource from a
+ *  direct-dial one, and the connect path has to know which it is. */
+export const rustionPolicyEffective = (request: {
+  resourceId?: string;
+  resourceType?: string;
+  assetGroupIds?: string[];
+}) =>
+  invoke<RustionEffectivePolicy>("rustion_policy_effective", {
+    request: {
+      resourceId: request.resourceId ?? "",
+      resourceType: request.resourceType ?? "",
+      assetGroupIds: request.assetGroupIds ?? [],
+    },
+  });
+
+/** True when this verdict routes the session through a bastion — i.e. the
+ *  credential is resolved server-side and never lands on the operator's
+ *  machine. Mirrors `prefer_rustion` in
+ *  `gui/src-tauri/src/commands/connect.rs`, which is the code that
+ *  actually makes the routing decision at connect time. */
+export function brokersThroughBastion(
+  p: Pick<RustionEffectivePolicy, "transport" | "bastions"> | null,
+): boolean {
+  if (!p) return false;
+  if (p.transport === "rustion-required") return true;
+  return p.transport === "rustion-preferred" && p.bastions.length > 0;
+}
 
 // ─── Phase 8.1: telemetry ────────────────────────────────────────
 

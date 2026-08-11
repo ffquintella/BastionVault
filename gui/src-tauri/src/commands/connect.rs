@@ -115,15 +115,19 @@ pub async fn session_open_ssh(
     let credential_source = profile.get("credential_source").cloned().unwrap_or(Value::Null);
     let credential_source_kind = credential_source.get("kind").and_then(|v| v.as_str()).unwrap_or("");
 
-    // `secret` and `ssh-engine` sources resolve server-side on the v2
-    // path: BastionVault either injects the stored secret (`secret`) or
-    // mints + signs an ephemeral cert (`ssh-engine`, brokered) and seals
-    // it into the envelope — the GUI never holds the credential. When the
-    // policy doesn't route through a bastion, `open_rustion_session_v2_ssh`
-    // returns `Direct` and we fall back to the client-side path below
-    // (which mints locally for a direct dial).
-    let v2_route: Option<ConnectRoute> = if credential_source_kind == "secret" || credential_source_kind == "ssh-engine"
-    {
+    // `secret`, `ssh-engine` and `default-account` sources resolve
+    // server-side on the v2 path: BastionVault either injects the stored
+    // secret (`secret`) or mints + signs an ephemeral cert (`ssh-engine` /
+    // `default-account`, brokered) and seals it into the envelope — the GUI
+    // never holds the credential. `default-account` is an `ssh-engine` mint
+    // whose principal is the connecting operator's own account, so
+    // `open_rustion_session_v2_ssh` resolves that account and rewrites the
+    // kind before it calls the server. When the policy doesn't route through
+    // a bastion, `open_rustion_session_v2_ssh` returns `Direct` and we fall
+    // back to the client-side path below (which mints locally for a direct
+    // dial).
+    let v2_resolvable = matches!(credential_source_kind, "secret" | "ssh-engine" | "default-account");
+    let v2_route: Option<ConnectRoute> = if v2_resolvable {
         let r = open_rustion_session_v2_ssh(
             &state,
             &request.resource_name,
@@ -1395,17 +1399,31 @@ async fn read_effective_policy(
     let resp = match make_request(state, Operation::Write, format!("{RUSTION_MOUNT}policy/effective"), Some(body)).await
     {
         Ok(resp) => resp,
-        // A caller who can reach the resource and read its secret but
-        // lacks read on the global `rustion/` policy surface — the common
-        // read-only share-grantee case — gets a 403 here. The effective
-        // policy is only a routing hint: the real boundaries are still
-        // enforced server-side (brokering on `rustion/v2/session/open`,
-        // the credential read on `resources/secrets/...`). So treat
-        // permission-denied as "no Rustion policy is visible to me" and
-        // fall through to a direct dial instead of aborting Connect.
-        // Other errors (network, 500, lock-violation payloads) still
-        // propagate.
-        Err(e) if is_permission_denied(&e) => return Ok(EffectivePolicyView::default()),
+        // Fail CLOSED on permission-denied. This used to return the empty
+        // view — "no Rustion policy is visible to me" — and fall through to
+        // a direct dial, on the reasoning that the real boundary is enforced
+        // server-side at `rustion/v2/session/open`. It isn't: that endpoint
+        // is never reached on the direct route, so a caller who held `read`
+        // on the resource's secret but no grant on `rustion/` dialled a
+        // `rustion-required` resource direct and resolved its credential
+        // onto their own machine. Every namespace-bound operator was in that
+        // position (`rustion/` is root-owned; a tenant policy cannot name
+        // it), which made the transport lock invisible and unenforced for a
+        // whole tenant.
+        //
+        // The implicit `default` / `namespace-self` policies now grant
+        // `rustion/policy/effective` to every authenticated principal, so a
+        // 403 here means an operator has narrowed the baseline — not a
+        // routine share. Refuse rather than guess at the transport.
+        Err(e) if is_permission_denied(&e) => {
+            return Err(CommandError::from(format!(
+                "cannot resolve the Rustion transport policy for this resource: {}. \
+                 Refusing to dial: a `rustion-required` policy would be bypassed by \
+                 guessing. Grant `update` on `rustion/policy/effective` to this \
+                 caller's policy.",
+                e.message
+            )))
+        }
         Err(e) => return Err(e),
     };
     let data = resp.and_then(|r| r.data).unwrap_or_default();
@@ -1728,6 +1746,36 @@ async fn open_rustion_session_v2_ssh(
         // credential client-side and dials direct.
         return Ok(ConnectRoute::Direct);
     }
+
+    // A `default-account` SSH source is an `ssh-engine` mint whose login
+    // principal is the connecting operator's own account instead of a profile
+    // username (`resolve_default_account_ssh` does the same substitution on the
+    // client-side path). Resolve the account through the self-service
+    // `sys/identity/default-account/self` — readable by every principal,
+    // including a namespace-bound one — and hand the server a plain
+    // `ssh-engine` source with that principal as `credential_username`.
+    //
+    // Done here rather than at the call site so a direct-dialling resource
+    // doesn't pay for the lookup: the early return above has already fired.
+    // Without this the profile fell off the v2 path entirely and resolved
+    // client-side, which needs the caller to reach the SSH engine's sign role
+    // itself — so a connect-only operator could never open it, even though a
+    // brokered open never lands a credential on their machine.
+    let (resolved_source, resolved_user) =
+        if credential_source.get("kind").and_then(|v| v.as_str()) == Some("default-account") {
+            let account = resolve_default_account(state, &resource_os_type(meta)).await?;
+            let mut cs = credential_source.clone();
+            // A non-object credential_source can't carry ssh_mount / ssh_role
+            // either; leave it alone and let the server's field validation say so.
+            if let Some(obj) = cs.as_object_mut() {
+                obj.insert("kind".to_string(), Value::String("ssh-engine".to_string()));
+            }
+            (cs, account)
+        } else {
+            (credential_source.clone(), target_user.to_string())
+        };
+    let credential_source = &resolved_source;
+    let target_user = resolved_user.as_str();
 
     let ttl_secs = profile.get("ttl_secs").and_then(|v| v.as_u64()).and_then(|n| u32::try_from(n).ok()).unwrap_or(3600);
     let max_renewals =
