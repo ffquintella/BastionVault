@@ -51,6 +51,47 @@ describe("Button", () => {
     render(<Button fullWidth>Full</Button>);
     expect(screen.getByRole("button").className).toContain("w-full");
   });
+
+  // Tailwind's bare `hover:` fires on disabled elements too, so every variant
+  // hover style has to be gated on `enabled:` — otherwise a disabled primary
+  // or danger button still lights up under the cursor.
+  it.each(["primary", "secondary", "danger", "ghost"] as const)(
+    "gates the %s variant's hover styles on :enabled",
+    (variant) => {
+      render(<Button variant={variant}>Hover</Button>);
+      const classes = screen.getByRole("button").className.split(/\s+/);
+      expect(classes.some((c) => c.startsWith("enabled:hover:"))).toBe(true);
+      expect(classes.filter((c) => c.startsWith("hover:"))).toEqual([]);
+    },
+  );
+
+  // Opacity alone left a 50%-opacity blue/red button reading as clickable.
+  it.each(["primary", "secondary", "danger"] as const)(
+    "neutralises the %s variant's colour when disabled",
+    (variant) => {
+      render(
+        <Button variant={variant} disabled>
+          Off
+        </Button>,
+      );
+      const cls = screen.getByRole("button").className;
+      expect(cls).toContain("disabled:bg-[var(--color-surface-hover)]");
+      expect(cls).toContain("disabled:text-[var(--color-text-muted)]");
+      expect(cls).toContain("disabled:saturate-50");
+      expect(cls).toContain("disabled:cursor-not-allowed");
+    },
+  );
+
+  it("keeps a disabled ghost button transparent rather than filling it", () => {
+    render(
+      <Button variant="ghost" disabled>
+        Off
+      </Button>,
+    );
+    const cls = screen.getByRole("button").className;
+    expect(cls).toContain("disabled:bg-transparent");
+    expect(cls).toContain("disabled:text-[var(--color-text-muted)]");
+  });
 });
 
 describe("Input", () => {

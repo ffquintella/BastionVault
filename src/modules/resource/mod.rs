@@ -64,6 +64,14 @@ fn static_ssh_credential_shape(body: &Map<String, Value>) -> bool {
     nonempty("private_key") || nonempty("password")
 }
 
+/// Full (non-mount-relative) request path of a single resource's metadata
+/// endpoint, minus the name: this engine is mounted at `resources/` and the
+/// route inside it is `resources/<name>`. Backend handlers see the
+/// mount-relative path, so anything that has to speak the ACL's language —
+/// which is always the full path — rebuilds it from here. Mirrors the same
+/// hardcoded convention in `policy_store::resource_name_from_path`.
+const RESOURCE_METADATA_PATH_PREFIX: &str = "resources/resources/";
+
 // Storage key prefixes within this mount's barrier view
 const META_PREFIX: &str = "meta/";
 const HIST_PREFIX: &str = "hist/";
@@ -820,6 +828,70 @@ impl ResourceBackendInner {
 
         // Stable sort by name so paging is deterministic across calls.
         matches.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Per-object visibility filter. `post_auth` authorized the *endpoint*
+        // path (`resources/resources/search`), not the resources in the
+        // response — so without this pass, anyone who may search learns every
+        // resource's name, hostname, IP, tags and connection-profile shape,
+        // including resources they cannot read. `readable_targets` re-runs the
+        // real evaluator against each candidate's own
+        // `resources/resources/<name>` path, honouring ungated grants,
+        // `groups = [...]`, `scopes = ["owner", "shared"]` and root exactly as
+        // a direct read would.
+        //
+        // Applied after the `q` / `type` match so the cost is bounded by the
+        // candidate set rather than the whole vault, and before `total` so the
+        // count and `has_more` describe what the caller can actually see.
+        //
+        // `req.auth == None` is the in-process server-authority path (a module
+        // dispatching through the router on the server's own behalf, not a
+        // caller's — the same convention the credential resolvers rely on);
+        // those are left unfiltered. Every token-bearing request is filtered.
+        //
+        // Cost: a caller holding an *ungated* grant (the admin case) is decided
+        // by `readable_targets`' first pass and adds no storage reads at all. A
+        // caller whose access is owner/share/group-scoped costs up to three
+        // extra reads per candidate, on top of the one metadata read the scan
+        // already does. If that shows up in profiling before the search index
+        // this comment block has long promised, the shape to build is the
+        // inverse query — enumerate what the caller owns and what is shared
+        // with them from the owner/share indexes, then intersect — rather than
+        // probing every candidate.
+        if req.auth.is_some() {
+            // ACLs are evaluated against the *full* request path, but a backend
+            // handler receives the mount-relative one (`resources/search`, not
+            // `resources/resources/search`), so rebuild the mount prefix here.
+            // In a child namespace the policy — and the rewritten path the
+            // pipeline would evaluate for a direct read — carries the `<ns>/`
+            // prefix, so it goes back on too; probing the bare path would
+            // consult the root namespace's same-named resource.
+            let ns_prefix = match req.namespace_path.as_deref() {
+                Some(ns) if !ns.trim().trim_matches('/').is_empty() => {
+                    format!("{}/", ns.trim().trim_matches('/'))
+                }
+                _ => String::new(),
+            };
+            let base = format!("{ns_prefix}{RESOURCE_METADATA_PATH_PREFIX}");
+            let targets: Vec<String> =
+                matches.iter().map(|(name, _)| format!("{base}{name}")).collect();
+            let policy_module = self
+                .core
+                .module_manager
+                .get_module::<crate::modules::policy::PolicyModule>("policy")
+                .ok_or_else(|| bv_error_string!("policy module not registered"))?;
+            let visible = policy_module
+                .policy_store
+                .load()
+                .readable_targets(req, &targets)
+                .await;
+            let mut kept = Vec::with_capacity(matches.len());
+            for (entry, ok) in matches.into_iter().zip(visible) {
+                if ok {
+                    kept.push(entry);
+                }
+            }
+            matches = kept;
+        }
 
         let total = matches.len();
         let page_end = (offset + limit).min(total);
@@ -2067,5 +2139,216 @@ mod rename_tests {
             json!({ "new_name": "  " }).as_object().cloned(),
         )
         .await;
+    }
+}
+
+/// The `resources/search` endpoint returns a *set* of objects, so the
+/// pre-route ACL check on the endpoint path is not the boundary — the
+/// per-candidate filter in `handle_resource_search` is. These tests pin
+/// that filter, in both directions: a resource the caller cannot read must
+/// not leak, and a resource the caller reaches only through a share must
+/// still appear.
+#[cfg(test)]
+mod search_visibility_tests {
+    use crate::logical::{Operation, Request};
+    use crate::test_utils::{new_unseal_test_bastion_vault, test_read_api, test_write_api};
+    use serde_json::json;
+
+    async fn login_pass(core: &crate::core::Core, user: &str) -> String {
+        let mut req = Request::new(&format!("auth/pass/login/{user}"));
+        req.operation = Operation::Write;
+        req.body = json!({ "password": "hunter22XX!" }).as_object().cloned();
+        let resp = core.handle_request(&mut req).await.unwrap().unwrap();
+        resp.auth.unwrap().client_token
+    }
+
+    /// Create a userpass user carrying `policy_hcl` and return its token.
+    async fn user_with_policy(
+        core: &crate::core::Core,
+        root: &str,
+        user: &str,
+        policy_hcl: &str,
+    ) -> String {
+        let policy_name = format!("p-{user}");
+        let _ = test_write_api(
+            core,
+            root,
+            &format!("sys/policy/{policy_name}"),
+            true,
+            json!({ "policy": policy_hcl }).as_object().cloned(),
+        )
+        .await;
+        let _ = test_write_api(
+            core,
+            root,
+            "sys/auth/pass",
+            true,
+            json!({ "type": "userpass" }).as_object().cloned(),
+        )
+        .await;
+        let _ = test_write_api(
+            core,
+            root,
+            &format!("auth/pass/users/{user}"),
+            true,
+            json!({
+                "password": "hunter22XX!",
+                "token_policies": policy_name,
+                "ttl": 0,
+            })
+            .as_object()
+            .cloned(),
+        )
+        .await;
+        login_pass(core, user).await
+    }
+
+    async fn search_names(core: &crate::core::Core, token: &str) -> (Vec<String>, u64) {
+        let resp = test_write_api(
+            core,
+            token,
+            "resources/resources/search",
+            true,
+            json!({ "limit": 50 }).as_object().cloned(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let data = resp.data.unwrap();
+        let names = data["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v["name"].as_str().map(str::to_string))
+            .collect();
+        (names, data["total"].as_u64().unwrap())
+    }
+
+    async fn create_resources(core: &crate::core::Core, root: &str, names: &[&str]) {
+        for n in names {
+            let _ = test_write_api(
+                core,
+                root,
+                &format!("resources/resources/{n}"),
+                true,
+                json!({ "type": "server", "hostname": format!("{n}.example") })
+                    .as_object()
+                    .cloned(),
+            )
+            .await;
+        }
+    }
+
+    /// A caller granted search plus `read` on exactly one resource sees
+    /// exactly that resource — not the names, hostnames, tags, or
+    /// connection-profile shapes of the others. `total` and `has_more`
+    /// describe the filtered set, so paging stays honest.
+    #[maybe_async::test(
+        feature = "sync_handler",
+        async(all(not(feature = "sync_handler")), tokio::test)
+    )]
+    async fn test_search_returns_only_readable_resources() {
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_search_returns_only_readable_resources").await;
+        create_resources(&core, &root, &["r-alpha", "r-beta", "r-gamma"]).await;
+
+        let alice = user_with_policy(
+            &core,
+            &root,
+            "alice",
+            r#"
+                path "resources/resources/search" {
+                    capabilities = ["create", "update"]
+                }
+                path "resources/resources/r-alpha" {
+                    capabilities = ["read"]
+                }
+            "#,
+        )
+        .await;
+
+        let (names, total) = search_names(&core, &alice).await;
+        assert_eq!(names, vec!["r-alpha".to_string()], "alice must see only r-alpha");
+        assert_eq!(total, 1, "total must count the filtered set, not the vault");
+
+        // Root's view is unchanged — the filter short-circuits on root privs.
+        let (names, total) = search_names(&core, &root).await;
+        assert_eq!(total, 3, "root must still see every resource: {names:?}");
+    }
+
+    /// The filter must resolve access that comes from a *share*, not just from
+    /// an ungated policy grant. This is the case that would silently break if
+    /// the check were built on `ACL::explain_capability`, which probes with an
+    /// identity-less request and so fails every `scopes`-gated rule closed.
+    #[maybe_async::test(
+        feature = "sync_handler",
+        async(all(not(feature = "sync_handler")), tokio::test)
+    )]
+    async fn test_search_surfaces_a_shared_resource() {
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_search_surfaces_a_shared_resource").await;
+        create_resources(&core, &root, &["r-private", "r-shared"]).await;
+
+        // Bob's only read grant on resources is gated on `shared`, so he sees
+        // nothing until a share exists.
+        let bob = user_with_policy(
+            &core,
+            &root,
+            "bob",
+            r#"
+                path "resources/resources/search" {
+                    capabilities = ["create", "update"]
+                }
+                path "resources/resources/*" {
+                    capabilities = ["read"]
+                    scopes = ["shared"]
+                }
+            "#,
+        )
+        .await;
+
+        let (names, total) = search_names(&core, &bob).await;
+        assert!(names.is_empty(), "bob must see nothing before the share: {names:?}");
+        assert_eq!(total, 0);
+
+        // Root shares r-shared with bob.
+        let self_rec = test_read_api(&core, &bob, "identity/entity/self", true)
+            .await
+            .unwrap()
+            .unwrap();
+        let bob_id = self_rec.data.unwrap()["entity_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!bob_id.is_empty(), "bob must have an entity_id to be a share grantee");
+        // The URL segment is base64url(canonical path) even though
+        // `target_path` in the body is authoritative — the route validates the
+        // segment before reading the body.
+        let target_b64 = {
+            use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+            URL_SAFE_NO_PAD.encode("r-shared")
+        };
+        let _ = test_write_api(
+            &core,
+            &root,
+            &format!("identity/sharing/by-target/resource/{target_b64}/{bob_id}"),
+            true,
+            json!({
+                "target_kind": "resource",
+                "target_path": "r-shared",
+                "capabilities": "read",
+            })
+            .as_object()
+            .cloned(),
+        )
+        .await;
+
+        let (names, total) = search_names(&core, &bob).await;
+        assert_eq!(
+            names,
+            vec!["r-shared".to_string()],
+            "the shared resource must appear once the share exists"
+        );
+        assert_eq!(total, 1, "r-private must stay hidden");
     }
 }

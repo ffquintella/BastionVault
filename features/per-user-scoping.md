@@ -360,6 +360,43 @@ without forcing a migration. Policy templating (Phase 2), the owner
 backfill admin endpoint (migration story from the *Testing Plan*), and
 the GUI for sharing + owner transfer are all live.
 
+### Per-object filtering of set-returning endpoints
+
+The design's step 4 ("for list operations, also filter the response keys by
+ownership/share") is implemented by `PolicyStore::post_route` for `LIST`, via
+`list_filter_scopes` / `list_filter_groups` stashed on the request by
+`post_auth`. That covers `LIST`, and only `LIST`.
+
+An endpoint that returns a *set* of objects under a different operation is not
+covered by it — `resources/resources/search` is an `Operation::Write` returning
+an `items` array, so neither the pre-route check (which authorizes the endpoint
+path, not the objects) nor the post-route key filter applied to it. It returned
+every resource's card projection to any caller who could search.
+
+Such endpoints now filter through **`PolicyStore::readable_targets`**, which
+answers "which of these target paths may this caller read?" by re-running
+`ACL::allow_operation` against a synthesized per-object request carrying the
+same three qualifier inputs `post_auth` resolves for a direct read
+(`asset_groups`, `asset_owner`, `target_shared_caps`). Notes for anyone adding
+another such endpoint:
+
+- **Do not build this on `ACL::explain_capability`.** That probes with an
+  identity-less dry-run request precisely so scope-gated rules contribute
+  nothing — correct for "does an explicit ungated grant exist?" (the
+  connect-only gate in the Rustion module wants exactly that), but here it
+  would hide every object the caller reaches through ownership or a share,
+  which is the access a filtered list exists to reveal.
+- **Paths must be full, not mount-relative.** A backend handler receives
+  `resources/search`; the ACL speaks `resources/resources/search`, and
+  `<ns>/resources/resources/…` inside a namespace. `readable_targets` takes
+  whatever it is given, so the caller rebuilds the prefix
+  (`RESOURCE_METADATA_PATH_PREFIX` plus the namespace).
+- **Qualifiers only ever gate.** `readable_targets` exploits this: it evaluates
+  once with the qualifiers empty and treats an allow as conclusive, so a caller
+  with an ungated grant (and root) costs no extra reads.
+- **`req.auth == None` is not filtered** — that is the in-process
+  server-authority path, the same convention the credential resolvers rely on.
+
 ### Implementation notes (deviations from the design doc)
 
 - **Unified OwnerStore rather than two parallel stores.** The design

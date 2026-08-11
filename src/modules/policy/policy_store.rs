@@ -1745,6 +1745,80 @@ impl PolicyStore {
             .await
     }
 
+    /// Which of `target_paths` may this caller actually *read*? Returns a
+    /// parallel `Vec<bool>`.
+    ///
+    /// An endpoint that returns a *set* of objects cannot be secured by the
+    /// pre-route check alone: `post_auth` authorizes the endpoint path (say
+    /// `resources/search`), not the individual objects in its response. This
+    /// re-runs the real evaluator once per candidate against a synthesized
+    /// per-object request carrying the same three qualifier inputs `post_auth`
+    /// resolves for a direct read — asset-group membership, owner entity, and
+    /// shared capabilities — so a `groups = [...]` or
+    /// `scopes = ["owner", "shared"]` rule decides exactly as it would had the
+    /// caller read the object itself. Root short-circuits inside
+    /// `allow_operation`, so a root token keeps its unfiltered view.
+    ///
+    /// Fails closed: an unbuildable ACL, a missing `auth`, or an evaluator
+    /// error marks the target not-readable.
+    ///
+    /// Prefer this over `ACL::explain_capability` for response filtering.
+    /// `explain_capability` deliberately probes with an identity-less dry-run
+    /// request so that scope-gated rules contribute nothing — right for
+    /// "does an explicit ungated grant exist?", wrong here: it would hide
+    /// every object whose access comes from ownership or a share, which is
+    /// precisely the access a filtered list exists to reveal.
+    ///
+    /// Cost is one ACL build plus, per candidate, up to three store lookups.
+    /// Callers filtering a large candidate set should narrow it first.
+    pub async fn readable_targets(
+        &self,
+        req: &Request,
+        target_paths: &[String],
+    ) -> Vec<bool> {
+        let mut out = vec![false; target_paths.len()];
+        let Some(auth) = req.auth.as_ref() else {
+            return out;
+        };
+        if auth.policies.is_empty() {
+            return out;
+        }
+        let Ok(acl) = self.new_acl_for_request(&auth.policies, None, auth).await else {
+            return out;
+        };
+        let ns = req.namespace_path.as_deref();
+        for (i, target) in target_paths.iter().enumerate() {
+            let mut probe = Request::new(target);
+            probe.operation = Operation::Read;
+            probe.auth = req.auth.clone();
+            probe.namespace_path = req.namespace_path.clone();
+            probe.api_version = req.api_version;
+
+            // First pass with the qualifiers left empty. A `groups` /
+            // `scopes` qualifier can only ever *gate* a rule — never grant
+            // beyond it — so an allow here (an ungated grant, or root) is
+            // already conclusive, and the three lookups below are skipped.
+            // That keeps the admin path at one ACL build and no extra reads.
+            let ungated = acl
+                .allow_operation(&probe, false)
+                .map(|r| r.allowed || r.root_privs)
+                .unwrap_or(false);
+            if ungated {
+                out[i] = true;
+                continue;
+            }
+
+            probe.asset_groups = resolve_asset_groups(&self.core, target, ns).await;
+            probe.asset_owner = resolve_asset_owner(&self.core, target, ns).await;
+            probe.target_shared_caps = resolve_target_shared_caps(&self.core, &probe).await;
+            out[i] = match acl.allow_operation(&probe, false) {
+                Ok(r) => r.allowed || r.root_privs,
+                Err(_) => false,
+            };
+        }
+        out
+    }
+
     async fn new_acl_inner(
         &self,
         policy_names: &[String],

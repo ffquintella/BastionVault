@@ -45,6 +45,42 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.39.4] - 2026-08-11
+
+### Security
+- **`resources/search` filters results to what the caller can actually read**
+  (`src/modules/resource/mod.rs`, `src/modules/policy/policy_store.rs`) -- the
+  endpoint scanned every resource's metadata and returned every match, with no
+  per-object authorization: the pre-route ACL check authorizes the *endpoint*
+  path (`resources/resources/search`), not the objects in its response. Any
+  caller holding search therefore learned the name, hostname, IP address, tags
+  and (as of 0.39.3) connection-profile shape of every resource in the
+  namespace, including ones they had no capability to read. The handler now
+  re-runs the real ACL evaluator against each candidate's own
+  `resources/resources/<name>` path via the new
+  `PolicyStore::readable_targets`, which resolves the same three qualifier
+  inputs `post_auth` resolves for a direct read -- asset-group membership,
+  owner entity, and shared capabilities -- so an ungated grant, a
+  `groups = [...]` rule, a `scopes = ["owner", "shared"]` rule, and root all
+  decide exactly as they would on a direct read. `total` and `has_more` count
+  the filtered set, so paging stays honest. Filtering happens after the `q` /
+  `type` match; a caller with an ungated grant is settled by a first pass that
+  costs no extra storage reads, so the admin path is unchanged.
+  (`features/per-user-scoping.md`)
+
+### Fixed
+- **A disabled button now reads as disabled** (`gui/src/components/ui/Button.tsx`)
+  -- the shared Button only dimmed to `opacity-50` when disabled, and its
+  per-variant `hover:` classes still applied, because Tailwind's bare `hover:`
+  is not blocked by `:disabled`. A half-opacity blue `primary` or red `danger`
+  still read as clickable and still changed colour under the cursor -- visible
+  on the resource Connection tab, where a read-only caller's **+ Add profile**
+  and **Delete** looked live while the `ghost` **Edit** beside them correctly
+  looked greyed out. Variant hover styles moved to `enabled:hover:`, and the
+  disabled state now replaces the variant's accent with a neutral
+  `--color-surface-hover` surface, muted text, and `saturate-50` (`ghost`
+  stays transparent), so all four variants are unambiguous in any palette.
+
 ## [0.39.3] - 2026-08-11
 
 ### Fixed
