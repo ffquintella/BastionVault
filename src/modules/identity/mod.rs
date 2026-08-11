@@ -628,6 +628,34 @@ fn extract_share_identifiers(
 /// through `scope_target_name`. Root (no namespace header) is a no-op for both,
 /// so existing root records and callers are unaffected. Idempotent: a target
 /// that already carries the namespace prefix is left as-is.
+/// Inverse of [`scope_share_target`]: render a stored canonical target back in
+/// the mount-relative form the caller supplied and expects to see.
+///
+/// Storage keys are namespace-scoped (`dti/esi/segdc1vds0005`,
+/// `dti/esi/secret/github`) so two namespaces cannot collide, but that key is
+/// an internal detail. Clients send — and render — mount-relative names: the
+/// GUI feeds `target_path` straight back into `readResource(name)` and prints
+/// it on the "Shared with me" card. Returning the raw key made every shared
+/// resource unreadable (there is no resource literally named
+/// `dti/esi/segdc1vds0005`) and printed the key in the UI.
+///
+/// Only a prefix matching the *active* namespace is stripped, so a record from
+/// another namespace is never silently rewritten into a local-looking name.
+fn display_share_target(target_path: &str, req: &Request) -> String {
+    let Some(ns) = req
+        .namespace_path
+        .as_deref()
+        .map(|n| n.trim().trim_matches('/'))
+        .filter(|n| !n.is_empty())
+    else {
+        return target_path.to_string();
+    };
+    target_path
+        .strip_prefix(&format!("{ns}/"))
+        .unwrap_or(target_path)
+        .to_string()
+}
+
 fn scope_share_target(kind: ShareTargetKind, target_path: String, req: &Request) -> String {
     let ns = req.namespace_path.as_deref();
     match kind {
@@ -669,10 +697,13 @@ fn owner_response(
 }
 
 /// Render a `SecretShare` into a JSON object for HTTP responses.
-fn share_to_value(share: &SecretShare) -> Value {
+fn share_to_value(share: &SecretShare, req: &Request) -> Value {
     let mut m = Map::new();
     m.insert("target_kind".into(), Value::String(share.target_kind.clone()));
-    m.insert("target_path".into(), Value::String(share.target_path.clone()));
+    m.insert(
+        "target_path".into(),
+        Value::String(display_share_target(&share.target_path, req)),
+    );
     m.insert(
         "grantee_kind".into(),
         Value::String(if share.grantee_kind.is_empty() {
@@ -1124,7 +1155,10 @@ impl IdentityBackendInner {
                     .map(|p| {
                         let mut m = Map::new();
                         m.insert("target_kind".into(), Value::String(p.target_kind.clone()));
-                        m.insert("target_path".into(), Value::String(p.target_path.clone()));
+                        m.insert(
+                            "target_path".into(),
+                            Value::String(display_share_target(&p.target_path, req)),
+                        );
                         m.insert(
                             "grantee_kind".into(),
                             Value::String(if p.grantee_kind.is_empty() {
@@ -1346,7 +1380,10 @@ impl IdentityBackendInner {
                     .map(|p| {
                         let mut m = Map::new();
                         m.insert("target_kind".into(), Value::String(p.target_kind.clone()));
-                        m.insert("target_path".into(), Value::String(p.target_path.clone()));
+                        m.insert(
+                            "target_path".into(),
+                            Value::String(display_share_target(&p.target_path, req)),
+                        );
                         m.insert(
                             "grantee_kind".into(),
                             Value::String(if p.grantee_kind.is_empty() {
@@ -1384,10 +1421,13 @@ impl IdentityBackendInner {
 
         let mut data = Map::new();
         data.insert("target_kind".into(), Value::String(kind_str));
-        data.insert("target_path".into(), Value::String(target_path));
+        data.insert(
+            "target_path".into(),
+            Value::String(display_share_target(&target_path, req)),
+        );
         data.insert(
             "entries".into(),
-            Value::Array(shares.iter().map(share_to_value).collect()),
+            Value::Array(shares.iter().map(|s| share_to_value(s, req)).collect()),
         );
         Ok(Some(Response::data_response(Some(data))))
     }
@@ -1404,7 +1444,7 @@ impl IdentityBackendInner {
 
         match store.get_share(kind, &target_path, &grantee).await? {
             Some(share) => Ok(Some(Response::data_response(Some(
-                share_to_value(&share).as_object().cloned().unwrap_or_default(),
+                share_to_value(&share, req).as_object().cloned().unwrap_or_default(),
             )))),
             None => Err(bv_error_response_status!(
                 404,
@@ -1492,7 +1532,7 @@ impl IdentityBackendInner {
 
         let stored = store.set_share(share).await?;
         Ok(Some(Response::data_response(Some(
-            share_to_value(&stored).as_object().cloned().unwrap_or_default(),
+            share_to_value(&stored, req).as_object().cloned().unwrap_or_default(),
         ))))
     }
 

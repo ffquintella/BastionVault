@@ -468,6 +468,18 @@ methods still take one key string, and each caller scopes first
 owner read/transfer/backfill, resource rename, and file create). This
 matches how KV already worked and keeps the diff auditable.
 
+The scoped key is an internal detail and must not escape in responses.
+`display_share_target` is the inverse of `scope_share_target` and runs on
+every `target_path` leaving the share endpoints, so a caller gets back
+the mount-relative name it supplied. This matters because clients treat
+`target_path` as the object's name — the GUI passes it to
+`readResource(name)` and renders it — so returning `dti/esi/db1` made
+shared resources unopenable and printed the key in the UI. Only the
+*active* namespace's prefix is stripped, so a record from another
+namespace is never rewritten into a local-looking name. The audit /
+sharing-history aggregator deliberately keeps the full scoped key, where
+being unambiguous matters more than being pretty.
+
 #### Migration
 
 `src/modules/identity/ns_scope_migrate.rs` re-keys pre-existing bare

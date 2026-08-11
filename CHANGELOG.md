@@ -45,6 +45,23 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.39.2] - 2026-08-11
+
+### Fixed
+- **Return share targets in the caller's own mount-relative form**
+  (`src/modules/identity/mod.rs`) -- 0.39.1 made share *storage* keys
+  namespace-scoped (`dti/esi/segdc1vds0005`) but returned that raw key as
+  `target_path` on `identity/sharing/for-me`, `.../by-grantee`, `.../by-target`,
+  and every single-share response. Clients treat `target_path` as the object's
+  name: the GUI feeds it straight into a resource read and prints it on the
+  "Shared with me" card. The result was a tenant whose Resources page listed
+  nothing (each read of the key-shaped name 404'd and was silently dropped) and
+  whose dashboard showed the internal key. Responses now strip the active
+  namespace prefix, so callers get back exactly the name they sent. Only the
+  active namespace's prefix is stripped, so a record belonging to another
+  namespace is never rewritten into a local-looking name. Storage keys are
+  unchanged -- this is purely the response boundary.
+
 ## [0.39.1] - 2026-08-10
 
 ### Fixed

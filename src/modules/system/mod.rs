@@ -6796,6 +6796,31 @@ mod mod_system_tests {
             .unwrap();
         assert!((200..300).contains(&s), "share grant: {s} {r:?}");
 
+        // The "Shared with me" feed must name the target the way the caller
+        // addresses it — mount-relative. The storage key is namespace-scoped
+        // (`dti/esi/shared-db`), but clients feed `target_path` straight back
+        // into a resource read and render it in the UI, so leaking the key
+        // makes every shared resource unopenable and prints the key on screen.
+        let (s, r) = server
+            .request_with_headers(
+                "LIST",
+                "v2/identity/sharing/for-me",
+                None,
+                Some(&tenant),
+                None,
+                &ns_header,
+            )
+            .unwrap();
+        assert_eq!(s, 200, "for-me feed: {s} {r:?}");
+        let entries = r["data"]["entries"].as_array().cloned().unwrap_or_default();
+        let targets: Vec<&str> =
+            entries.iter().filter_map(|e| e["target_path"].as_str()).collect();
+        assert_eq!(
+            targets,
+            vec!["shared-db"],
+            "for-me must return the mount-relative name, not the storage key: {r:?}"
+        );
+
         // The tenant can now read the namespace's resource…
         let (s, r) = server
             .request_with_headers(
