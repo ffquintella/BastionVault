@@ -190,7 +190,7 @@ SecretShare {
     grantee_kind:        "entity" | "group_user" | "group_app",  // default "entity"
     grantee_entity_id:   entity_id | group_name,
     granted_by_entity_id: entity_id,
-    capabilities:        Vec<String>,    // subset of read, list, update, delete, create
+    capabilities:        Vec<String>,    // subset of read, list, update, delete, create, connect
     granted_at:          RFC3339,
     expires_at:          String,         // RFC3339; "" when no expiry
 }
@@ -202,6 +202,17 @@ sys/sharing/by-grantee/g:user:<group>/<hash>     -> { ... }                     
 sys/sharing/by-grantee/g:app:<group>/<hash>      -> { ... }                                      (app group)
 sys/sharing/history/<20-nanos>                   -> ShareHistoryEntry                            (append-only audit trail)
 ```
+
+Each request `Operation` maps to one of those capability names, and a
+`scopes = ["shared"]` rule grants its capabilities only when the share carries
+the mapped one (`operation_share_capability`, `src/modules/policy/acl.rs`).
+`connect` is the exception: it authorizes opening a session against a
+resource's credential and has no `Operation` of its own, so the connect gates
+probe it with `Request::share_capability_override` (see
+`features/connect-only-access.md`). It is deliberately **not** implied by
+`read` on a share — a grantee who may see a credential has not thereby been
+granted sessions as it, and the reverse pairing (`connect` without `read`) is
+the one this makes possible.
 
 Group grantees are *visibility-only*: the share row surfaces the
 target on each group member's "Shared with me" feed when (and only

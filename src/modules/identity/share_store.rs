@@ -806,8 +806,17 @@ pub struct ShareByGranteePointer {
 /// Normalize a capabilities list: trim each entry, lowercase, drop
 /// empties, dedup, reject anything outside the allowed subset. Order
 /// is preserved on the first occurrence.
+///
+/// `connect` is the one entry with no matching `Operation`: it authorizes
+/// opening a session against a resource's credential, which the connect
+/// gates probe as a capability (`PolicyStore::may_connect_target`) rather
+/// than as a request op. It has to be grantable here, or a connect-only
+/// share is unexpressible and every grantee needs `read` — handing them the
+/// credential itself to let them use it. Until this landed the entry was
+/// silently dropped by the filter below, for API and CLI callers as much as
+/// for the GUI.
 fn normalize_capabilities(caps: Vec<String>) -> Vec<String> {
-    const ALLOWED: &[&str] = &["read", "list", "update", "delete", "create"];
+    const ALLOWED: &[&str] = &["read", "list", "update", "delete", "create", "connect"];
     let mut out: Vec<String> = Vec::new();
     for c in caps {
         let c = c.trim().to_lowercase();
@@ -819,4 +828,37 @@ fn normalize_capabilities(caps: Vec<String>) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod normalize_capability_tests {
+    use super::normalize_capabilities;
+
+    fn norm(caps: &[&str]) -> Vec<String> {
+        normalize_capabilities(caps.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// `connect` must survive normalization. It used to be silently dropped,
+    /// which made a connect-only share unexpressible through every entry
+    /// point — GUI, API and CLI alike — and forced grantors to hand out
+    /// `read` (the credential itself) just to let someone open a session.
+    #[test]
+    fn connect_is_grantable() {
+        assert_eq!(norm(&["connect"]), vec!["connect".to_string()]);
+        assert_eq!(
+            norm(&["read", "connect"]),
+            vec!["read".to_string(), "connect".to_string()]
+        );
+        assert_eq!(norm(&["CONNECT", " connect "]), vec!["connect".to_string()]);
+    }
+
+    /// The filter still rejects anything outside the vocabulary — `connect`
+    /// widened the set, it did not remove the guard.
+    #[test]
+    fn unknown_capabilities_are_still_dropped() {
+        assert!(norm(&["root"]).is_empty());
+        assert!(norm(&["sudo"]).is_empty());
+        assert!(norm(&["conect"]).is_empty());
+        assert_eq!(norm(&["read", "deny"]), vec!["read".to_string()]);
+    }
 }

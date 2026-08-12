@@ -689,6 +689,47 @@ impl ACL {
         CapabilityExplain { allowed, matched_path, match_kind, denied_by_deny, is_root: false }
     }
 
+    /// Identity-carrying counterpart to [`ACL::explain_capability`]: does
+    /// this ACL grant `capability` on `req.path` *for this caller*?
+    ///
+    /// Same matcher, same bitmap test — the difference is that the caller
+    /// supplies the request, so group- and scope-gated rules can actually
+    /// resolve. The caller is responsible for populating `asset_owner`,
+    /// `asset_groups` and `target_shared_caps` (as `readable_targets` and
+    /// `can_operate` do); the gates fail closed on whatever is left empty.
+    ///
+    /// Set `req.share_capability_override` when probing a capability no
+    /// `Operation` maps to — `connect` is the one that exists today, and
+    /// without the override a `scopes = ["shared"]` rule would consult the
+    /// share's `read` grant, since the probe rides on a Read op.
+    pub fn explain_capability_for_request(
+        &self,
+        req: &Request,
+        capability: Capability,
+    ) -> CapabilityExplain {
+        let path = ensure_no_leading_slash(&req.path);
+
+        let result = self.allow_operation(req, true).unwrap_or_default();
+
+        if result.is_root {
+            return CapabilityExplain {
+                allowed: true,
+                is_root: true,
+                matched_path: Some("*".to_string()),
+                match_kind: MatchKind::Prefix,
+                denied_by_deny: false,
+            };
+        }
+
+        let bitmap = result.capabilities_bitmap;
+        let denied_by_deny = bitmap & Capability::Deny.to_bits() != 0;
+        let allowed = !denied_by_deny && (bitmap & capability.to_bits() != 0);
+
+        let (matched_path, match_kind) = self.locate_match(&path);
+
+        CapabilityExplain { allowed, matched_path, match_kind, denied_by_deny, is_root: false }
+    }
+
     /// Parameter-aware stateless dry-run. Like [`ACL::explain_capability`],
     /// but the caller supplies request parameters (e.g. `env`) so the
     /// matcher evaluates the governing rule's `required_parameters` /
@@ -941,8 +982,11 @@ fn scoped_rule_matches(rule: &ScopedRule, path: &str) -> bool {
 ///     unusable for all-new deployments.
 ///   - "shared": grants the rule's capabilities iff an explicit
 ///     `SecretShare` exists for `(target, caller)` with the capability
-///     that corresponds to the current operation. Resolved once
-///     during `post_auth` and stashed on `req.target_shared_caps`.
+///     that corresponds to the current operation — or with
+///     `req.share_capability_override` when the caller set one, which
+///     is how `connect` (a capability with no operation of its own) is
+///     required explicitly rather than inferred from `read`. Resolved
+///     once during `post_auth` and stashed on `req.target_shared_caps`.
 ///     Expired shares are excluded at resolution time.
 ///
 /// Unknown scope values are ignored (treated as not matching) so a
@@ -977,7 +1021,14 @@ fn scope_passes(rule: &ScopedRule, req: &Request) -> bool {
                 if req.target_shared_caps.is_empty() {
                     continue;
                 }
-                if let Some(cap) = operation_share_capability(req.operation) {
+                // `share_capability_override` wins when the caller is
+                // probing a capability no operation maps to (`connect`);
+                // otherwise the operation decides, exactly as before.
+                let required = req
+                    .share_capability_override
+                    .as_deref()
+                    .or_else(|| operation_share_capability(req.operation));
+                if let Some(cap) = required {
                     if req.target_shared_caps.iter().any(|c| c == cap) {
                         return true;
                     }
@@ -2355,6 +2406,149 @@ path "kv/deny" {
         assert!(
             !res.allowed,
             "a list-only share must not grant Read (level of the share is honored)",
+        );
+    }
+
+    #[test]
+    fn test_shared_scope_requires_explicit_connect() {
+        // A share conveys `connect` only when it says `connect`. `read` must
+        // not stand in for it — that is the whole distinction between "may
+        // see this credential" and "may open sessions as it".
+        let policy = create_test_policy(
+            "shared-connect",
+            r#"
+            path "resources/*" {
+                capabilities = ["read", "list", "update", "connect"]
+                scopes       = ["shared"]
+            }
+            "#,
+        );
+        let acl = ACL::new(&[Arc::new(policy)]).unwrap();
+
+        let mut auth = Auth::default();
+        auth.metadata
+            .insert("entity_id".to_string(), "entity-felipe2".to_string());
+
+        let probe = |shared: Vec<String>| Request {
+            operation: Operation::Read,
+            path: "resources/secrets/segdc1vhm0004/".to_string(),
+            auth: Some(auth.clone()),
+            target_shared_caps: shared,
+            share_capability_override: Some("connect".to_string()),
+            ..Default::default()
+        };
+
+        // Read-only share: the rule lists `connect`, but the gate demands it
+        // on the share and does not find it.
+        let read_only = acl.explain_capability_for_request(
+            &probe(vec!["read".to_string()]),
+            Capability::Connect,
+        );
+        assert!(
+            !read_only.allowed,
+            "a read-only share must NOT convey connect",
+        );
+
+        // Share carrying connect: allowed.
+        let with_connect = acl.explain_capability_for_request(
+            &probe(vec!["connect".to_string()]),
+            Capability::Connect,
+        );
+        assert!(
+            with_connect.allowed,
+            "a share carrying `connect` must convey connect",
+        );
+
+        // No share at all: denied.
+        let none =
+            acl.explain_capability_for_request(&probe(Vec::new()), Capability::Connect);
+        assert!(!none.allowed, "no share must convey nothing");
+    }
+
+    #[test]
+    fn test_share_capability_override_leaves_other_ops_alone() {
+        // The override is opt-in: with `None`, the operation still decides,
+        // so no existing share evaluation changes shape.
+        let policy = create_test_policy(
+            "shared-default",
+            r#"
+            path "resources/*" {
+                capabilities = ["read", "list", "update", "connect"]
+                scopes       = ["shared"]
+            }
+            "#,
+        );
+        let acl = ACL::new(&[Arc::new(policy)]).unwrap();
+
+        let mut auth = Auth::default();
+        auth.metadata
+            .insert("entity_id".to_string(), "entity-felipe2".to_string());
+
+        let req = Request {
+            operation: Operation::Read,
+            path: "resources/resources/segdc1vhm0004".to_string(),
+            auth: Some(auth),
+            target_shared_caps: vec!["read".to_string()],
+            ..Default::default()
+        };
+        let res = acl.allow_operation(&req, false).unwrap();
+        assert!(res.allowed, "a read-share still authorizes a Read op");
+    }
+
+    #[test]
+    fn test_owner_scope_conveys_connect_without_a_share() {
+        // Ownership is not delegation: the owner of a resource connects to it
+        // without anyone sharing anything with them. Guards the regression
+        // risk in tightening the share arm.
+        let policy = create_test_policy(
+            "owner-connect",
+            r#"
+            path "resources/*" {
+                capabilities = ["create", "read", "list", "update", "connect"]
+                scopes       = ["owner", "shared"]
+            }
+            "#,
+        );
+        let acl = ACL::new(&[Arc::new(policy)]).unwrap();
+
+        let mut auth = Auth::default();
+        auth.metadata
+            .insert("entity_id".to_string(), "entity-owner".to_string());
+
+        let req = Request {
+            operation: Operation::Read,
+            path: "resources/secrets/segdc1vhm0004/".to_string(),
+            auth: Some(auth),
+            asset_owner: "entity-owner".to_string(),
+            share_capability_override: Some("connect".to_string()),
+            ..Default::default()
+        };
+        let verdict = acl.explain_capability_for_request(&req, Capability::Connect);
+        assert!(verdict.allowed, "the owner must connect with no share present");
+    }
+
+    #[test]
+    fn test_identity_less_probe_still_ignores_scoped_rules() {
+        // `explain_capability` keeps its stateless contract: scope-gated
+        // rules contribute nothing without a caller. This is what makes the
+        // first two arms of `may_connect_target` mean "ungated grant".
+        let policy = create_test_policy(
+            "shared-only",
+            r#"
+            path "resources/*" {
+                capabilities = ["read", "list", "update", "connect"]
+                scopes       = ["shared"]
+            }
+            "#,
+        );
+        let acl = ACL::new(&[Arc::new(policy)]).unwrap();
+
+        assert!(
+            !acl.explain_capability("resources/secrets/segdc1vhm0004/", Capability::Connect)
+                .allowed,
+        );
+        assert!(
+            !acl.explain_capability("resources/secrets/segdc1vhm0004/", Capability::Read).allowed,
         );
     }
 

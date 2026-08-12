@@ -412,7 +412,7 @@ impl IdentityBackend {
                         "capabilities": {
                             field_type: FieldType::CommaStringSlice,
                             required: false,
-                            description: "Capabilities the grantee is allowed: subset of read, list, update, delete, create."
+                            description: "Capabilities the grantee is allowed: subset of read, list, update, delete, create, connect. `connect` (resources only) authorizes opening a session against the resource's credential and is never implied by read."
                         },
                         "expires_at": {
                             field_type: FieldType::Str,

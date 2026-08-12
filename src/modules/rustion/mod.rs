@@ -1352,9 +1352,9 @@ impl RustionBackendInner {
         ns_prefix: &str,
         resource_name: &str,
     ) -> Result<bool, RvError> {
-        use crate::modules::policy::policy::Capability;
-
-        let auth = req.auth.clone().ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
+        if req.auth.is_none() {
+            return Err(bv_error_response_status!(401, "no authenticated caller"));
+        }
         let policy_module = self
             .core
             .module_manager
@@ -1371,19 +1371,20 @@ impl RustionBackendInner {
         // different tenant.
         let secret_prefix = format!("{ns_prefix}resources/secrets/{resource_name}/");
 
-        let acl = store.new_acl_for_request(&auth.policies, None, &auth).await?;
-        let connect = acl.explain_capability(&secret_prefix, Capability::Connect);
-        if connect.allowed || connect.is_root || acl.explain_capability(&secret_prefix, Capability::Read).allowed {
-            return Ok(true);
-        }
-
-        let mut probe = Request::new(&secret_prefix);
-        probe.operation = Operation::Read;
-        probe.auth = Some(auth);
-        probe.api_version = req.api_version;
+        // One shared implementation with the resource mount's
+        // `require_connect_grant` — see `PolicyStore::may_connect_target` for
+        // why these two must not be separate copies.
+        //
+        // The share arm this used to reach through `readable_targets` asked
+        // "may they *read* the target", so a read-only share implied a
+        // session. It now asks for `connect` explicitly. Owners are
+        // unaffected (the `owner` scope never consulted the share), but a
+        // share that predates this and carries only `read` no longer connects
+        // — the grantor re-grants with `connect` to restore it.
+        let mut probe = req.clone();
         probe.namespace_path =
             if ns_prefix.is_empty() { None } else { Some(ns_prefix.trim_end_matches('/').to_string()) };
-        Ok(store.readable_targets(&probe, &[secret_prefix]).await.first().copied().unwrap_or(false))
+        Ok(store.may_connect_target(&probe, &secret_prefix).await)
     }
 
     /// May this caller see *anything* about `resource_name`?
@@ -3901,7 +3902,8 @@ mod connect_only_tests {
     }
 
     /// The connect gate must recognise **share-derived** access, not only an
-    /// explicit ungated grant.
+    /// explicit ungated grant — and it must require the share to say
+    /// `connect`.
     ///
     /// `explain_capability` probes with an identity-less dry-run so that
     /// scope-gated rules contribute nothing — correct for "does an explicit
@@ -3909,11 +3911,19 @@ mod connect_only_tests {
     /// can't be mistaken for a blanket one. But it was the *only* check, so
     /// every caller whose access comes from a share was refused at the gate:
     /// on a `rustion-required` resource they could not connect at all, and on
-    /// any other they were pushed onto the direct dial. The gate now falls
-    /// back to `readable_targets`, which re-runs the real evaluator with the
-    /// owner / share / asset-group qualifiers hydrated.
+    /// any other they were pushed onto the direct dial. The gate now consults
+    /// `PolicyStore::may_connect_target`, which re-runs the real evaluator
+    /// with the owner / share / asset-group qualifiers hydrated.
+    ///
+    /// That probe asks for `connect`, not `read`. A share conveying only
+    /// `read` used to imply a session, which collapsed "may see this
+    /// credential" and "may open sessions as it" into one grant and made a
+    /// connect-only share impossible to express. Both halves are asserted
+    /// below, because the interesting property is the *gap* between them: the
+    /// same read-only share that opens the resource record and its secret
+    /// still cannot open a session.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_session_open_gate_accepts_a_share_grantee() {
+    async fn test_session_open_gate_requires_an_explicit_connect_share() {
         let mut server = TestHttpServer::new("test_session_open_share_gate", true).await;
         let root = server.root_token.clone();
         server.token = root.clone();
@@ -4033,11 +4043,165 @@ path "rustion/*" {
         let secret = server.request("GET", "resources/secrets/db/ssh", None, Some(&token), None).unwrap().0;
         assert_eq!(secret, 200, "fixture: the share covers the resource's secret path too");
 
+        // …and yet it conveys no session. `read` is not `connect`: the grantor
+        // shared visibility, not the right to open sessions as the credential.
+        assert_eq!(
+            open(&token),
+            403,
+            "a share granting only `read` must NOT pass the connect gate"
+        );
+
+        // Re-grant with `connect` and the same principal, same policy, same
+        // resource now reaches dispatch.
+        server
+            .write(
+                &format!("identity/sharing/by-target/resource/{target_b64}/{entity_id}"),
+                serde_json::json!({
+                    "target_kind": "resource",
+                    "target_path": "db",
+                    "capabilities": "read,connect"
+                })
+                .as_object()
+                .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+
         let after = open(&token);
-        assert_ne!(after, 403, "a share granting read must pass the connect gate, got 403");
+        assert_ne!(after, 403, "a share granting `connect` must pass the gate, got 403");
         assert!(
             after == 502 || after == 503,
             "the share-grantee should reach dispatch and fail on no-bastion (502/503), got {after}"
+        );
+    }
+
+    /// The connect-only shape the explicit `connect` share exists to make
+    /// possible: a grantee who may open a session but may **not** read the
+    /// credential behind it.
+    ///
+    /// This is the pairing the GUI hint in the resource grant modal describes,
+    /// and it only works because `connect` is granted on its own — with the
+    /// old read-implies-connect rule there was no way to express it.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_connect_only_share_grants_no_credential_read() {
+        let mut server = TestHttpServer::new("test_connect_only_share", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+
+        server
+            .write(
+                "resources/resources/db",
+                serde_json::json!({ "type": "server", "hostname": "db.example" }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        server
+            .write(
+                "resources/secrets/db/ssh",
+                serde_json::json!({ "password": "hunter2", "username": "deploy" }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+
+        let sharee_policy = r#"
+path "resources/*" {
+    capabilities = ["read", "list", "connect"]
+    scopes       = ["shared"]
+}
+path "rustion/*" {
+    capabilities = ["create", "update", "read"]
+}
+"#;
+        let (policy_status, _) = server
+            .write(
+                "sys/policies/acl/connector",
+                serde_json::json!({ "policy": sharee_policy }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert_eq!(policy_status, 204);
+
+        server
+            .write("sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
+            .unwrap();
+        server
+            .write(
+                "auth/pass/users/connector",
+                serde_json::json!({ "password": "hunter22XX!", "token_policies": "connector", "ttl": 0 })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        let token = server
+            .write(
+                "auth/pass/login/connector",
+                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                None,
+            )
+            .unwrap()
+            .1
+            .get("auth")
+            .and_then(|a| a.get("client_token"))
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        let entity_id = server
+            .request("GET", "identity/entity/self", None, Some(&token), None)
+            .unwrap()
+            .1
+            .get("data")
+            .and_then(|d| d.get("entity_id"))
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        let target_b64 = {
+            use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+            URL_SAFE_NO_PAD.encode("db")
+        };
+
+        // `connect` alone — deliberately no `read`.
+        server
+            .write(
+                &format!("identity/sharing/by-target/resource/{target_b64}/{entity_id}"),
+                serde_json::json!({
+                    "target_kind": "resource",
+                    "target_path": "db",
+                    "capabilities": "connect"
+                })
+                .as_object()
+                .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+
+        // The credential stays out of reach: the scope gate maps a Read op to
+        // the share's `read`, which this share does not carry.
+        let secret = server.request("GET", "resources/secrets/db/ssh", None, Some(&token), None).unwrap().0;
+        assert_eq!(secret, 403, "a connect-only share must not expose the credential");
+
+        // The session still opens (reaching dispatch, which has no bastion).
+        let opened = server
+            .write(
+                "rustion/v2/session/open",
+                serde_json::json!({
+                    "resource_name": "db",
+                    "credential_source": { "kind": "secret", "secret_id": "ssh" },
+                    "target_host": "10.0.0.5",
+                    "target_port": 22,
+                    "target_protocol": "ssh"
+                })
+                .as_object()
+                .cloned(),
+                Some(&token),
+            )
+            .unwrap()
+            .0;
+        assert_ne!(opened, 403, "a connect-only share must pass the connect gate");
+        assert!(
+            opened == 502 || opened == 503,
+            "expected to reach dispatch and fail on no-bastion (502/503), got {opened}"
         );
     }
 

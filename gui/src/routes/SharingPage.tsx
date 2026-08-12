@@ -302,7 +302,20 @@ export function SharingPage() {
                 Capabilities
               </label>
               <div className="flex flex-wrap gap-2">
-                {(["read", "list", "update", "delete", "create"] as const).map(
+                {/*
+                  `connect` (open a session against the target's credential)
+                  only means anything for a resource, so it is offered only
+                  there. It is never implied by `read` — see the resource
+                  grant modal in ResourcesPage.
+                */}
+                {([
+                  "read",
+                  "list",
+                  "update",
+                  "delete",
+                  "create",
+                  ...(manageKind === "resource" ? (["connect"] as const) : []),
+                ] as const).map(
                   (c) => {
                     const selected = newCaps.includes(c);
                     return (

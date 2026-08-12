@@ -171,6 +171,17 @@ check is independent of the storage TTL.
 `connect_ticket`. When the named profile carries `require_mfa`, both are mandatory
 and the ticket is consumed before the dispatcher runs.
 
+The three `resources/v2/connect/*` rows are granted `update` by the `default`
+and `namespace-shared` baselines (the tenant side `{{namespace.path}}`-
+templated, since `resources/` is namespace-rewritten). They have to be: the
+GUI calls `mfa/begin` before *every* connect, gated profile or not — the
+server decides, the host never inspects `require_mfa` itself — so without the
+grant Connect fails at its first call for every non-root principal, with a
+bare 403 and no indication that MFA was never the reason. Each handler
+re-authorizes the resource named in the body through the shared connect gate
+(`PolicyStore::may_connect_target`), so the endpoint-level grant reaches no
+resource the caller could not already reach.
+
 ### Why the gate cannot be bypassed — and where it stops
 
 The `require_mfa` flag lives on the resource record, which the caller can only

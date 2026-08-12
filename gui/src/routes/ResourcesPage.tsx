@@ -3909,7 +3909,14 @@ export function ResourceSharingCard({
               Capabilities
             </label>
             <div className="flex flex-wrap gap-2">
-              {(["read", "list", "update", "delete", "create"] as const).map((c) => {
+              {/*
+                `connect` is a resource-only capability and is never implied
+                by `read` — a grantee who should open sessions gets it
+                explicitly. Granting `connect` without `read` is the useful
+                shape: they can dial the target, but the credential itself
+                stays hidden.
+              */}
+              {(["read", "list", "update", "delete", "create", "connect"] as const).map((c) => {
                 const selected = caps.includes(c);
                 return (
                   <button
@@ -3927,6 +3934,12 @@ export function ResourceSharingCard({
                 );
               })}
             </div>
+            <p className="text-xs text-[var(--color-text-muted)] mt-1.5">
+              <code className="font-mono">connect</code> lets the grantee open
+              a session against this resource. It is not implied by{" "}
+              <code className="font-mono">read</code> — grant it on its own to
+              let them connect without exposing the credential.
+            </p>
           </div>
           <Input
             label="Expires at (optional)"

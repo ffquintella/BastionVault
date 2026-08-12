@@ -77,9 +77,26 @@ pub struct Request {
     /// without an async hop. Empty when no matching share exists, the
     /// share has expired, the target is not an ownership-tracked
     /// object, or the caller has no `entity_id`. Lower-case capability
-    /// names: `read`, `list`, `update`, `delete`, `create`.
+    /// names: `read`, `list`, `update`, `delete`, `create`, `connect`.
     #[default(Vec::new())]
     pub target_shared_caps: Vec<String>,
+    /// Which share capability a `scopes = ["shared"]` rule must find on
+    /// the target's `SecretShare`, overriding the one the request
+    /// `Operation` maps to.
+    ///
+    /// Exists for `connect`, which is a *capability* with no
+    /// corresponding `Operation` — the connect gates probe it with a
+    /// Read op (see `ACL::explain_capability`), so without this override
+    /// a scope-gated rule would consult the share's `read` grant and let
+    /// a read-only share connect. `connect` is deliberately not implied
+    /// by `read` on a share: sharing is user-authored delegation, and
+    /// "may open a session as this credential" is a decision the grantor
+    /// makes explicitly.
+    ///
+    /// `None` everywhere else, which leaves `operation_share_capability`
+    /// in charge exactly as before.
+    #[default(None)]
+    pub share_capability_override: Option<String>,
 }
 
 #[maybe_async::maybe_async]

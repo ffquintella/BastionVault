@@ -107,6 +107,16 @@ pub fn is_header_scoped_path(path: &str) -> bool {
         || path.starts_with("auth/")
         || path.starts_with("identity/")
         || path.starts_with("rustion/")
+        // `notifications/` is header-scoped by construction: the store keys
+        // every message, inbox, and config on the namespace it reads from the
+        // header (`ns_from_req` → `NotificationStore::*_view_for`), and the
+        // mount exists only in the root table — it is not in
+        // `DEFAULT_NAMESPACE_MOUNTS`. Rewriting a tenant's `notifications/…`
+        // into `<ns>/notifications/…` therefore aimed at a mount that does not
+        // exist, while `namespace-self`'s (bare) inbox rules stopped matching
+        // the rewritten path. Every namespace-bound principal got a 403 on
+        // their own inbox and an unread-count that never loaded.
+        || path.starts_with("notifications/")
 }
 
 pub fn namespace_header_from_map(
@@ -227,4 +237,44 @@ pub async fn rewrite_request_for_namespace(core: &Core, req: &mut Request) -> Re
         req.path = format!("{prefix}{}", req.path);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod header_scoped_path_tests {
+    use super::is_header_scoped_path;
+
+    #[test]
+    fn deployment_level_mounts_are_header_scoped() {
+        for p in [
+            "sys/capabilities-self",
+            "auth/userpass/login/felipe2",
+            "identity/entity/self",
+            "rustion/v2/session/open",
+            // `notifications/` joined the set because its store keys every
+            // record on the namespace from the header and its mount exists
+            // only in the root table. Rewriting aimed at a mount that does
+            // not exist, and the bare `namespace-self` inbox rules stopped
+            // matching — a tenant got 403 on their own inbox.
+            "notifications/inbox",
+            "notifications/inbox/unread-count",
+        ] {
+            assert!(is_header_scoped_path(p), "{p} must be header-scoped");
+        }
+    }
+
+    #[test]
+    fn per_namespace_mounts_are_rewritten() {
+        // These live in `DEFAULT_NAMESPACE_MOUNTS`, so the request path is
+        // rewritten to `<ns>/…` and policy rules naming them must be
+        // `{{namespace.path}}`-templated.
+        for p in [
+            "resources/resources/segdc1vhm0004",
+            "resources/v2/connect/mfa/begin",
+            "secret/data/app/config",
+            "resource-group/groups",
+            "files/abc-123",
+        ] {
+            assert!(!is_header_scoped_path(p), "{p} must be namespace-rewritten");
+        }
+    }
 }

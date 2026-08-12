@@ -317,12 +317,20 @@ path "secret/metadata/*" {
     scopes       = ["shared"]
 }
 
-# Resources shared with the caller. `read` = open/connect (the GUI reads the
-# resource record to dial it); `update` = the connect path's recent-session
-# stamp. Delete is intentionally withheld -- destructive inventory ops need a
-# privileged operator policy, matching `standard-user`.
+# Resources shared with the caller. `read` = see the resource record (the GUI
+# reads it to dial); `update` = the connect path's recent-session stamp;
+# `connect` = open a session against its credential. Delete is intentionally
+# withheld -- destructive inventory ops need a privileged operator policy,
+# matching `standard-user`.
+#
+# `connect` is listed but never inferred: the scope gate demands `connect` on
+# the share itself (`share_capability_override`, see
+# `PolicyStore::may_connect_target`), so a share granting only `read` conveys
+# no session. That is the whole point of a connect-only grant -- if `read`
+# implied it, "may open a session as this credential" and "may see this
+# credential" would collapse into one decision.
 path "resources/*" {
-    capabilities = ["read", "list", "update"]
+    capabilities = ["read", "list", "update", "connect"]
     scopes       = ["shared"]
 }
 
@@ -367,6 +375,29 @@ path "resource-group/groups/+" {
 path "rustion/policy/effective"   { capabilities = ["update"] }
 path "rustion/dispatcher/preview" { capabilities = ["update"] }
 path "rustion/targets/+"          { capabilities = ["read"] }
+
+# --- Connect-time gates (endpoint-level) -----------------------------------
+#
+# The pre-flight every Connect runs before a session exists. `mfa/begin` asks
+# whether the named profile is gated (the GUI calls it unconditionally --
+# `useConnectMfa.gateConnect` -- because the *server* decides, never the
+# host); `mfa/verify` proves a factor and mints the single-use ticket;
+# `authorize` redeems it on the direct path.
+#
+# Granted here for the same reason as `rustion/session/open` below: these are
+# fixed endpoint paths, not per-object ones, so the ACL check the request
+# pipeline runs guards *who may call them*, not *which resource they may name
+# in the body*. Each handler re-authorizes the named resource itself through
+# `PolicyStore::may_connect_target`, so this reaches no resource the caller
+# could not already reach.
+#
+# Withheld, Connect failed at the first call with a bare 403 for every
+# non-root principal -- including callers holding `connect` on the resource
+# and `update` on `rustion/v2/session/open`, i.e. everything needed to
+# actually open the session they were being refused.
+path "resources/v2/connect/mfa/begin"  { capabilities = ["update"] }
+path "resources/v2/connect/mfa/verify" { capabilities = ["update"] }
+path "resources/v2/connect/authorize"  { capabilities = ["update"] }
 "#;
 
 // Implicit self-service policy for namespace-bound tokens.
@@ -550,10 +581,12 @@ path "{{namespace.path}}/secret/metadata/*" {
     scopes       = ["shared"]
 }
 
-# Resources in this namespace shared with the caller. `read` = open/connect,
-# `update` = the connect path's recent-session stamp. Delete is withheld.
+# Resources in this namespace shared with the caller. `read` = see the record,
+# `update` = the connect path's recent-session stamp, `connect` = open a
+# session. Delete is withheld. As in `default`, `connect` is only ever
+# conveyed by a share that carries it explicitly.
 path "{{namespace.path}}/resources/*" {
-    capabilities = ["read", "list", "update"]
+    capabilities = ["read", "list", "update", "connect"]
     scopes       = ["shared"]
 }
 
@@ -566,6 +599,22 @@ path "{{namespace.path}}/resource-group/groups/+" {
     capabilities = ["read"]
     scopes       = ["shared"]
 }
+
+# Connect-time gates, tenant side. The mirror of the block at the end of
+# `default`, and the second ungated exception in this policy (the first being
+# the `resource-group/groups` list above): the rules are endpoint-level, so
+# scoping them to a share would be checking the wrong object -- there is no
+# per-target share on `.../connect/mfa/begin`. Each handler re-authorizes the
+# resource named in the body via `PolicyStore::may_connect_target`.
+#
+# Templated, unlike the `rustion/` grants in `namespace-self`: `rustion/` is
+# header-scoped and never rewritten (`is_header_scoped_path`), while
+# `resources/` IS -- `rewrite_request_for_namespace` turns a tenant's
+# `resources/v2/connect/mfa/begin` into `<ns>/resources/v2/connect/mfa/begin`
+# before authorization, so a bare rule would silently never match.
+path "{{namespace.path}}/resources/v2/connect/mfa/begin"  { capabilities = ["update"] }
+path "{{namespace.path}}/resources/v2/connect/mfa/verify" { capabilities = ["update"] }
+path "{{namespace.path}}/resources/v2/connect/authorize"  { capabilities = ["update"] }
 "#;
 
 // Administrator baseline. Full access to every path with every
@@ -700,8 +749,11 @@ path "sys/kv-owner/claim" {
 # Delete is intentionally not granted -- destructive operations on
 # the shared resource inventory should require a privileged operator
 # policy.
+#
+# `connect` reaches an owner unconditionally (the `owner` scope does not
+# consult the share) and a grantee only when their share carries it.
 path "resources/*" {
-    capabilities = ["create", "read", "list", "update"]
+    capabilities = ["create", "read", "list", "update", "connect"]
     scopes       = ["owner", "shared"]
 }
 
@@ -777,8 +829,13 @@ path "secret/metadata/*" {
 }
 
 # --- Resources (owner-scoped read) ---
+#
+# `connect` belongs here despite the policy's name: read-only describes the
+# inventory, not the session. Opening a session authors nothing, and the
+# grant still resolves per target -- ownership, or a share that says
+# `connect`.
 path "resources/*" {
-    capabilities = ["read", "list"]
+    capabilities = ["read", "list", "connect"]
     scopes       = ["owner", "shared"]
 }
 
@@ -837,7 +894,7 @@ path "sys/kv-owner/claim" {
 
 # --- Resources (full CRUD on authored/shared items) ---
 path "resources/*" {
-    capabilities = ["create", "read", "update", "delete", "list"]
+    capabilities = ["create", "read", "update", "delete", "list", "connect"]
     scopes       = ["owner", "shared"]
 }
 
@@ -1898,6 +1955,76 @@ impl PolicyStore {
             };
         }
         out
+    }
+
+    /// May this caller open a session against `secret_prefix`
+    /// (`<ns>/resources/secrets/<name>/`)?
+    ///
+    /// The single authority for "may connect", shared by every connect gate
+    /// — `rustion/v2/session/open`'s `may_connect_resource`, the resource
+    /// mount's `require_connect_grant`, and the direct-path
+    /// `resources/v2/connect/authorize`. It lives here rather than in either
+    /// module because it was duplicated once and the copies drifted: the
+    /// resource-mount copy claimed to be an "identical probe" while missing
+    /// the share/owner-aware arm, so every share-grantee was refused at
+    /// `connect/mfa/begin` while `session/open` let them through.
+    ///
+    /// Three arms, in cost order:
+    ///
+    /// 1. An ungated `connect` grant in admin-authored policy.
+    /// 2. An ungated `read` grant. A caller who may read the credential can
+    ///    already open the session by hand, so withholding `connect` from
+    ///    them would be theatre.
+    /// 3. Ownership, or a share that carries `connect` **explicitly**.
+    ///
+    /// Arms 1–2 use the identity-less dry-run, so scope-gated rules
+    /// contribute nothing there — they are answered by arm 3, which
+    /// populates the same qualifier inputs `post_auth` resolves for a real
+    /// request. `read` does *not* imply connect on that arm: a share is
+    /// user-authored delegation, and letting "see this secret" silently mean
+    /// "open sessions as it" would hand out the one capability a
+    /// connect-only grant exists to isolate. A grantor who wants both grants
+    /// both.
+    ///
+    /// Fails closed on a missing `auth` or an unbuildable ACL.
+    pub async fn may_connect_target(&self, req: &Request, secret_prefix: &str) -> bool {
+        use crate::modules::policy::policy::Capability;
+
+        let Some(auth) = req.auth.as_ref() else {
+            return false;
+        };
+        if auth.policies.is_empty() {
+            return false;
+        }
+        let Ok(acl) = self.new_acl_for_request(&auth.policies, None, auth).await else {
+            return false;
+        };
+
+        let connect = acl.explain_capability(secret_prefix, Capability::Connect);
+        if connect.allowed || connect.is_root {
+            return true;
+        }
+        if acl.explain_capability(secret_prefix, Capability::Read).allowed {
+            return true;
+        }
+
+        let ns = req.namespace_path.as_deref();
+        let mut probe = Request::new(secret_prefix);
+        probe.operation = Operation::Read;
+        probe.auth = req.auth.clone();
+        probe.namespace_path = req.namespace_path.clone();
+        probe.api_version = req.api_version;
+        probe.asset_groups = resolve_asset_groups(&self.core, secret_prefix, ns).await;
+        probe.asset_owner = resolve_asset_owner(&self.core, secret_prefix, ns).await;
+        probe.target_shared_caps = resolve_target_shared_caps(&self.core, &probe).await;
+        // Read op, `connect` capability: the probe rides on Read because
+        // that is how every non-LIST capability is matched, while the
+        // override makes a `scopes = ["shared"]` rule demand `connect` on
+        // the share rather than the `read` the operation would imply.
+        probe.share_capability_override = Some("connect".to_string());
+
+        let verdict = acl.explain_capability_for_request(&probe, Capability::Connect);
+        verdict.allowed || verdict.is_root
     }
 
     async fn new_acl_inner(
@@ -3644,6 +3771,69 @@ mod implicit_rustion_grant_tests {
         // any policy it could author, gets them implicitly.
         assert!(rule(&p, "rustion/v2/session/open").is_none());
         assert!(rule(&p, "rustion/session/open").is_none());
+    }
+
+    const CONNECT_ENDPOINTS: [&str; 3] = [
+        "resources/v2/connect/mfa/begin",
+        "resources/v2/connect/mfa/verify",
+        "resources/v2/connect/authorize",
+    ];
+
+    /// The GUI calls `connect/mfa/begin` on *every* Connect — the server, not
+    /// the host, decides whether a profile is gated. Ungranted, that first
+    /// call 403s and Connect dies before `session/open` is ever reached, for
+    /// every non-root principal including one holding `connect` on the
+    /// resource.
+    #[test]
+    fn both_baselines_grant_the_connect_endpoints() {
+        let default = Policy::from_str(DEFAULT_POLICY).expect("default policy must parse");
+        for path in CONNECT_ENDPOINTS {
+            let r = rule(&default, path).unwrap_or_else(|| panic!("{path} must be granted"));
+            assert!(
+                r.capabilities.contains(&Capability::Update),
+                "{path} is a POST endpoint, so it needs `update`"
+            );
+        }
+
+        // Tenant side must be TEMPLATED: `resources/` is namespace-rewritten
+        // (unlike `rustion/`), so a bare rule silently never matches.
+        let shared = &*NAMESPACE_SHARED_POLICY_PARSED;
+        for path in CONNECT_ENDPOINTS {
+            assert!(
+                rule(shared, path).is_none(),
+                "{path} must not be granted bare — the request arrives as `<ns>/{path}`"
+            );
+            let templated = format!("{{{{namespace.path}}}}/{path}");
+            let r = rule(shared, &templated)
+                .unwrap_or_else(|| panic!("{templated} must be granted"));
+            assert!(r.capabilities.contains(&Capability::Update));
+        }
+    }
+
+    /// Every baseline rule that reaches `resources/` must carry `connect`, or
+    /// the capability is unreachable through it — including for an owner,
+    /// whose access never involved a share at all.
+    #[test]
+    fn resource_baselines_carry_connect() {
+        let default = Policy::from_str(DEFAULT_POLICY).unwrap();
+        let standard = Policy::from_str(STANDARD_USER_POLICY).unwrap();
+        let readonly = Policy::from_str(STANDARD_USER_READONLY_POLICY).unwrap();
+
+        for (name, p, path) in [
+            ("default", &default, "resources/"),
+            ("standard-user", &standard, "resources/"),
+            ("standard-user-readonly", &readonly, "resources/"),
+        ] {
+            let r = rule(p, path).unwrap_or_else(|| panic!("{name} must rule on {path}"));
+            assert!(
+                r.capabilities.contains(&Capability::Connect),
+                "{name}'s `resources/*` rule must carry `connect`"
+            );
+        }
+
+        let shared = &*NAMESPACE_SHARED_POLICY_PARSED;
+        let r = rule(shared, "{{namespace.path}}/resources/").expect("tenant resources rule");
+        assert!(r.capabilities.contains(&Capability::Connect));
     }
 }
 

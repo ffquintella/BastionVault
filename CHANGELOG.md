@@ -45,6 +45,78 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.39.7] - 2026-08-12
+
+### Added
+
+#### Connect as an explicit share capability
+- **`connect` is grantable on a share** (`src/modules/identity/share_store.rs`,
+  `src/modules/identity/mod.rs`) -- added to the share capability vocabulary,
+  which previously accepted only `read`/`list`/`update`/`delete`/`create` and
+  silently dropped anything else. A connect-only share was therefore
+  unexpressible through every entry point (GUI, API, CLI), and a grantor who
+  wanted someone to open sessions had to give them `read` -- the credential
+  itself. The resource grant modal (`gui/src/routes/ResourcesPage.tsx`) and the
+  Sharing page's add-share modal (resources only) now offer the chip.
+- **`PolicyStore::may_connect_target`** (`src/modules/policy/policy_store.rs`)
+  -- one implementation of "may this caller open a session against this
+  resource", shared by `rustion/v2/session/open` and the resource mount's
+  connect gates. Three arms: an ungated `connect` grant, an ungated `read`
+  grant, then ownership or a share carrying `connect`.
+- **`ACL::explain_capability_for_request`** (`src/modules/policy/acl.rs`) --
+  identity-carrying counterpart to `explain_capability`, so group- and
+  scope-gated rules can resolve against a real caller. Paired with
+  `Request::share_capability_override`, which lets a probe demand a specific
+  share capability instead of the one the request `Operation` maps to --
+  necessary for `connect`, which has no operation of its own.
+
+### Changed
+
+- **A share granting `read` no longer implies `connect`.** The session-open
+  gate's share arm used to ask "may they read this target", so any read-share
+  conveyed a session. Sharing is user-authored delegation, and collapsing "may
+  see this credential" into "may open sessions as it" left no way to grant one
+  without the other. **Breaking for existing shares:** a share carrying only
+  `read` no longer opens sessions -- re-grant it with `connect` to restore
+  that access. Owners are unaffected (the `owner` scope never consulted the
+  share). The `resources/*` rules in the `default`, `namespace-shared`,
+  `standard-user`, and `standard-user-readonly` baselines carry `connect`
+  accordingly.
+
+### Fixed
+
+- **Connect no longer 403s for every non-root principal at the first call.**
+  The GUI calls `resources/v2/connect/mfa/begin` unconditionally before every
+  session open (`useConnectMfa.gateConnect` -- the server decides whether a
+  profile is gated, never the host), but no implicit policy granted `update` on
+  it. Connect died there with a bare "permission denied", including for callers
+  holding `connect` on the resource *and* `update` on
+  `rustion/v2/session/open` -- everything needed to open the session they were
+  being refused. `default` now grants the three connect endpoints
+  (`mfa/begin`, `mfa/verify`, `authorize`), and `namespace-shared` grants them
+  `{{namespace.path}}`-templated, since `resources/` is namespace-rewritten and
+  a bare rule would silently never match.
+- **The resource mount's connect gate is share-aware.**
+  `require_connect_grant` (`src/modules/resource/connect_mfa.rs`) documented
+  itself as an "identical probe" to the one `session/open` runs while missing
+  its owner/share arm, so it probed with the identity-less dry-run that no
+  share-grantee can pass. Every share-derived connect was refused at
+  `connect/mfa/begin` while `session/open` allowed it. Both now call the same
+  function.
+- **`sys/capabilities-self` no longer advertises unverified `connect`**
+  (`src/modules/system/mod.rs`). The pass that strips phantom scope-gated
+  capabilities covered read/list/update/create/delete but not `connect`, which
+  maps to no `Operation`. The GUI reads exactly that field to decide whether to
+  render the Connect button, so it offered a control the server then refused.
+- **A namespace-bound principal can read their own notification inbox**
+  (`src/modules/namespace/router.rs`). `notifications/` is header-scoped by
+  construction -- the store keys every record on the namespace from the header,
+  and the mount exists only in the root table -- but it was absent from
+  `is_header_scoped_path`, so a tenant's request was rewritten to
+  `<ns>/notifications/…`: a mount that does not exist, and a path the (bare)
+  `namespace-self` inbox rules no longer matched. The bell badge 403'd for
+  every tenant.
+
 ## [0.39.6] - 2026-08-12
 
 ### Added

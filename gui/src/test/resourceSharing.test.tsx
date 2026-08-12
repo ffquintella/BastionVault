@@ -152,3 +152,73 @@ describe("ResourceSharingCard share request from the detail header", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe("ResourceSharingCard connect capability", () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    mountUnowned();
+    // `mountUnowned` rejects anything it doesn't know; the grant path needs
+    // `put_share` to resolve.
+    const unowned = mockInvoke.getMockImplementation()!;
+    mockInvoke.mockImplementation((cmd: string, ...rest: unknown[]) =>
+      cmd === "put_share"
+        ? Promise.resolve({})
+        : unowned(cmd, ...rest),
+    );
+    useAuthStore.setState({
+      token: "t",
+      isAuthenticated: true,
+      policies: ["admin"],
+      entityId: "entity-1",
+    });
+  });
+
+  it("offers connect as a grantable capability", async () => {
+    await renderCard({ openGrant: true, onGrantHandled: vi.fn() });
+    await waitFor(() =>
+      expect(
+        screen.getByText(/grant access to segdc1vds0005/i),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "connect" })).toBeInTheDocument();
+  });
+
+  it("grants connect on its own, without read", async () => {
+    const user = userEvent.setup();
+    await renderCard({ openGrant: true, onGrantHandled: vi.fn() });
+    await waitFor(() =>
+      expect(
+        screen.getByText(/grant access to segdc1vds0005/i),
+      ).toBeInTheDocument(),
+    );
+
+    // `read` is the default selection; drop it so the share is connect-only —
+    // the grantee dials the target but never sees the credential.
+    await user.click(screen.getByRole("button", { name: "read" }));
+    await user.click(screen.getByRole("button", { name: "connect" }));
+
+    // EntityPicker's label is not bound to the input, so target the field by
+    // its placeholder. It only propagates a typed value when it looks like a
+    // full entity UUID — anything shorter waits for a dropdown selection.
+    const grantee = screen.getByPlaceholderText(/paste entity_id/i);
+    await user.type(grantee, "62859f4d-0925-4933-4890-0f84e55693bd");
+    await user.click(screen.getByRole("button", { name: /^grant$/i }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "put_share",
+        expect.objectContaining({ capabilities: ["connect"] }),
+      ),
+    );
+  });
+
+  it("says connect is not implied by read", async () => {
+    await renderCard({ openGrant: true, onGrantHandled: vi.fn() });
+    await waitFor(() =>
+      expect(
+        screen.getByText(/grant access to segdc1vds0005/i),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/is not implied by/i)).toBeInTheDocument();
+  });
+});

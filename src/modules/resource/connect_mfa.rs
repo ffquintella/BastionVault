@@ -454,37 +454,37 @@ impl super::ResourceBackendInner {
     /// Verify the caller may connect to this resource at all before telling
     /// them anything about its profiles.
     ///
-    /// Identical probe to the one `rustion/v2/session/open` runs, and for the
-    /// same reason: the ACL check the request pipeline already performed
-    /// guards *who may call this endpoint*, not *which resource they may name
-    /// in the body*. `explain_capability` is used rather than
-    /// `acl.capabilities()` because the latter probes with a LIST op, which
-    /// bypasses scope gates and would let the baseline `default` policy's
-    /// scope-gated `resources/*` read grant leak through as a phantom pass.
+    /// The same probe `rustion/v2/session/open` runs — now literally the same
+    /// code (`PolicyStore::may_connect_target`) rather than a second copy of
+    /// it — and for the same reason: the ACL check the request pipeline
+    /// already performed guards *who may call this endpoint*, not *which
+    /// resource they may name in the body*.
+    ///
+    /// The copy this replaced probed only with the identity-less
+    /// `explain_capability`, which no share-grantee can pass (scope-gated
+    /// rules see no caller, no owner, and no share on a `Request::default()`).
+    /// So every share-derived connect was refused here while `session/open`
+    /// allowed it — the two gates disagreeing about the same question.
     async fn require_connect_grant(&self, req: &Request, resource: &str) -> Result<(), RvError> {
-        use crate::modules::policy::policy::Capability;
-
-        let auth = req
-            .auth
-            .clone()
-            .ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
+        if req.auth.is_none() {
+            return Err(bv_error_response_status!(401, "no authenticated caller"));
+        }
         let policy_module = self
             .core
             .module_manager
             .get_module::<crate::modules::policy::PolicyModule>("policy")
             .ok_or_else(|| crate::bv_error_string!("policy module not registered"))?;
-        let acl =
-            policy_module.policy_store.load().new_acl_for_request(&auth.policies, None, &auth).await?;
 
         let ns = caller_namespace(&self.core, req).await?;
         let ns_prefix = if ns.is_empty() { String::new() } else { format!("{ns}/") };
         let secret_prefix = format!("{ns_prefix}resources/secrets/{resource}/");
 
-        let connect = acl.explain_capability(&secret_prefix, Capability::Connect);
-        let allowed = connect.allowed
-            || connect.is_root
-            || acl.explain_capability(&secret_prefix, Capability::Read).allowed;
-        if !allowed {
+        // The probe resolves owner / share qualifiers off the target, so it
+        // needs the namespace on the request, not just in the path.
+        let mut probe = req.clone();
+        probe.namespace_path = if ns.is_empty() { None } else { Some(ns.clone()) };
+
+        if !policy_module.policy_store.load().may_connect_target(&probe, &secret_prefix).await {
             return Err(RvError::ErrPermissionDenied);
         }
         Ok(())

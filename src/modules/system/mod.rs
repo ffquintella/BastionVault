@@ -3076,6 +3076,23 @@ impl SystemBackend {
                         caps.retain(|c| c != cap_name);
                     }
                 }
+
+                // `connect` needs its own pass: it maps to no `Operation`, so
+                // `can_operate` cannot express it, and left unverified it was
+                // the one capability that still leaked its scope-gated grant
+                // unchecked. The GUI reads exactly this field to decide
+                // whether to offer the Connect button, so an unverified
+                // `connect` renders a control the server then refuses.
+                if caps.iter().any(|c| c == "connect") {
+                    let mut probe_req = Request::new(&probe);
+                    probe_req.operation = Operation::Read;
+                    probe_req.auth = Some(auth.clone());
+                    probe_req.namespace_path =
+                        active_ns.as_deref().filter(|p| !p.is_empty()).map(String::from);
+                    if !policy_store.may_connect_target(&probe_req, &probe).await {
+                        caps.retain(|c| c != "connect");
+                    }
+                }
             }
 
             capabilities.insert(
@@ -4780,7 +4797,8 @@ fn sanitize_path(path: &str) -> String {
 /// Three cases pass through unchanged:
 ///   - **Root-scoped callers** (`ns_prefix` empty) — the pre-namespace hot path,
 ///     byte-for-byte.
-///   - **Header-scoped mounts** (`sys/`, `auth/`, `identity/`, `rustion/`) — the
+///   - **Header-scoped mounts** (`sys/`, `auth/`, `identity/`, `rustion/`,
+///     `notifications/`) — the
 ///     router exempts them from rewriting because they live only in the root
 ///     mount table, so raw *is* the authorized form. Sharing the predicate with
 ///     the router is deliberate: if one grows a mount the other must too.
