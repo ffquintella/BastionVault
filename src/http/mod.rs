@@ -108,7 +108,13 @@ pub fn init_service(cfg: &mut web::ServiceConfig) {
 impl ResponseError for RvError {
     // builds the actual response to send back when an error occurs
     fn error_response(&self) -> HttpResponse {
-        let mut status = self.response_status();
+        // `response_status()` returns a bare u16 so `errors.rs` stays free of any
+        // web framework (Tier 0 of the decomposition). Mapping it to actix's
+        // `StatusCode` is this layer's job. `from_u16` only rejects codes outside
+        // 100..600, which the table cannot produce, so the fallback is unreachable
+        // -- it is there so a future bad entry degrades to a 500 instead of panicking.
+        let mut status =
+            StatusCode::from_u16(self.response_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let text: String;
         if let RvError::ErrResponse(resp_text) = self {
             status = StatusCode::from_u16(400).unwrap();
@@ -125,9 +131,9 @@ impl ResponseError for RvError {
 
 pub fn get_token_from_req(req: &HttpRequest) -> Result<String, RvError> {
     if let Some(token) = req.headers().get(AUTH_HEADER_NAME) {
-        return Ok(token.to_str()?.to_string());
+        return Ok(token.to_str().map_err(|e| RvError::ErrHeaderValueNotUtf8(e.to_string()))?.to_string());
     } else if let Some(vault_token) = req.headers().get(VAULT_AUTH_HEADER_NAME) {
-        return Ok(vault_token.to_str()?.to_string());
+        return Ok(vault_token.to_str().map_err(|e| RvError::ErrHeaderValueNotUtf8(e.to_string()))?.to_string());
     } else if let Some(auth) = req.headers().get(header::AUTHORIZATION) {
         if let Ok(auth_str) = auth.to_str() {
             if auth_str.starts_with("Bearer ") {

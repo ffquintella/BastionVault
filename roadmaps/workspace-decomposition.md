@@ -1,6 +1,6 @@
 # Roadmap: Workspace Decomposition
 
-Status: **Phase 0 done (instrumentation + dependency triage). Phase 1 next.**
+Status: **Phase 0 done. Phase 1 started — the actix wart is cleared; the `bv-errors` extraction is blocked on a design call (see "`bv-errors` is not the cheap leaf this plan assumed").**
 
 ## Goal
 
@@ -113,7 +113,7 @@ Each is a handful of lines and each blocks a Tier-0 extraction:
 
 | Wart | Sites | Fix |
 |---|---|---|
-| `errors.rs` imports `actix_web::http::StatusCode` | 1 | Use `http::StatusCode` (already a direct dep); keep the actix mapping in the HTTP crate |
+| ~~`errors.rs` imports `actix_web::http::StatusCode`~~ | 2 | **Done.** `response_status()` returns `u16`; the actix `ResponseError` impl in `src/http/mod.rs` maps it. The header-decode variant no longer wraps an actix type. |
 | `src/audit` → `crate::modules` | 2 (`sys_emit.rs`, `entry.rs`) | Take the token store via trait; move `NS_PATH_META` to the shared contract crate |
 | `src/mount.rs` → `crate::plugins` | 2 | Invert: the plugin runtime registers its backend factory with the mount table |
 | `src/metrics` → `crate::plugins` | 1 | Invert: plugins register their collectors |
@@ -122,6 +122,49 @@ Each is a handful of lines and each blocks a Tier-0 extraction:
 Verified clean leaves, needing no inversion at all: `src/logical`,
 `src/utils`, `src/shamir.rs` reference **only** `crate::errors`;
 `src/cache` references only `crate::storage`.
+
+Note on the actix wart, since the original advice here was wrong: "use
+`http::StatusCode`, it's already a direct dep" would **not** have worked.
+actix-web 4 is built on `http 0.2` while this workspace also carries a direct
+`http 1` dep — both majors are in the graph — so `http::StatusCode` is a
+*different type* from the one `actix_web::http::StatusCode` aliases. Returning a
+plain `u16` from `response_status()` sidesteps the mismatch and is what landed.
+
+### `bv-errors` is not the cheap leaf this plan assumed
+
+Discovered while doing the extraction: `RvError` carries `#[from]` conversions for
+**19 external crates** — `bcrypt`, `chrono`, `diesel`, `hcl`, `hex`, `http`,
+`humantime`, `ipnetwork`, `lockfile`, `pem`, `r2d2`, `regex`, `rustls`,
+`serde_json`, `serde_yaml`, `tokio`, `ureq`, `url` (plus `std::io`).
+
+Since *every* crate in the target graph depends on the error type, a naive
+`bv-errors` would put `rustls`, `ureq`, `diesel`, and `tokio` at the bottom of the
+dependency graph and hand them to every leaf engine. That still buys a separate
+compilation unit for a file that rarely changes, but it does **not** shrink what
+a leaf crate has to build — which was half the point.
+
+So `bv-errors` needs its conversions **feature-gated**: `default-features = false`
+gives `std` + `thiserror` only, and each consumer opts into the `From` impls it
+actually needs (`features = ["rustls", "ureq"]`). Concretely that means a
+`#[cfg(feature = ...)]` on each of the 19 variants, and on the corresponding arms
+in `response_status()` and the hand-written `PartialEq`.
+
+That is a design decision with a real cost, and it should be made deliberately
+rather than discovered halfway through a mechanical file move — which is why the
+extraction stopped here. Alternatives worth weighing before committing to it:
+
+1. **Feature-gate all 19** (above). Most faithful to the goal; most churn, and
+   every consumer's `Cargo.toml` grows a feature list.
+2. **Drop the `#[from]` conversions** and make call sites map explicitly, as the
+   actix header variant now does. Smallest resulting graph and no features at
+   all, but it touches every `?` that relies on an implicit conversion — a much
+   wider diff than Phase 1 wants.
+3. **Accept the fat leaf for now.** Ship `bv-errors` with all 19 deps, take the
+   compile-unit win, and revisit once the engine crates exist and the cost is
+   measurable with `make bench-build` rather than argued.
+
+Option 3 is the cheapest way to keep Phase 1 moving and defers the decision to a
+point where it can be measured; option 1 is where it likely ends up.
 
 ## Target crate graph
 

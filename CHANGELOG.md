@@ -45,6 +45,22 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Changed
+
+#### Build and Test Tooling
+- **`RvError` no longer depends on actix-web** (`src/errors.rs`) -- Phase 1 of
+  [the decomposition](roadmaps/workspace-decomposition.md) needs the error type to
+  be a dependency-free leaf, and it was importing the HTTP server.
+  `RvError::response_status()` now returns a plain `u16`; the actix
+  `ResponseError` impl in `src/http/mod.rs` -- its only consumer -- maps that to a
+  `StatusCode`. The `ActixWebHttpHeaderError` variant, which wrapped
+  `actix_web::http::header::ToStrError`, becomes `ErrHeaderValueNotUtf8(String)`,
+  and the two header reads that relied on its `#[from]` map explicitly.
+  Worth recording because the obvious fix does not work: actix-web 4 is built on
+  `http 0.2` while this workspace also carries a direct `http 1` dep, so
+  "just use `http::StatusCode`" yields a *different type* than actix wants.
+  `src/errors.rs` now imports only `std` and `thiserror`.
+
 ### Added
 
 #### Build and Test Tooling

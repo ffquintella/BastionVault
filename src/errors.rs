@@ -8,7 +8,6 @@ use std::{
     sync::{PoisonError, RwLockReadGuard, RwLockWriteGuard},
 };
 
-use actix_web::http::StatusCode;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -329,11 +328,13 @@ pub enum RvError {
         source: ipnetwork::IpNetworkError,
     },
 
-    #[error("Some actix_web http header error happened, {:?}", .source)]
-    ActixWebHttpHeaderError {
-        #[from]
-        source: actix_web::http::header::ToStrError,
-    },
+    // Was `ActixWebHttpHeaderError`, wrapping `actix_web::http::header::ToStrError`.
+    // It now carries the message rather than the actix type: this enum is the
+    // substrate every crate depends on (see roadmaps/workspace-decomposition.md
+    // Tier 0), and it must not drag in the HTTP server. The two call sites that
+    // relied on `?` map explicitly -- see `src/http/mod.rs`.
+    #[error("An HTTP header value was not valid UTF-8, {0}")]
+    ErrHeaderValueNotUtf8(String),
 
     #[error("Some url error happened, {:?}", .source)]
     UrlError {
@@ -401,7 +402,7 @@ pub enum RvError {
 }
 
 impl RvError {
-    pub fn response_status(&self) -> StatusCode {
+    pub fn response_status(&self) -> u16 {
         match self {
             RvError::ErrRequestNoData
             | RvError::ErrBarrierAlreadyInit
@@ -427,20 +428,20 @@ impl RvError {
             | RvError::ErrPkiCertKeyMismatch
             | RvError::ErrPkiKeyTypeInvalid
             | RvError::ErrPkiCertIsNotCA
-            | RvError::ErrPkiCertChainIncorrect => StatusCode::BAD_REQUEST,
+            | RvError::ErrPkiCertChainIncorrect => 400,
             RvError::ErrModuleKvV2VersionDestroyed
-            | RvError::ErrModuleKvV2VersionNotFound => StatusCode::NOT_FOUND,
+            | RvError::ErrModuleKvV2VersionNotFound => 404,
             RvError::ErrBarrierSealed
             | RvError::ErrClusterNoLeader
             | RvError::ErrClusterQuorumLost
             | RvError::ErrClusterUnhealthy
-            | RvError::ErrHsmUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            RvError::ErrHsmAuthzInvalid => StatusCode::FORBIDDEN,
-            RvError::ErrHsmContextMismatch | RvError::ErrHsmBlobInvalid => StatusCode::BAD_REQUEST,
-            RvError::ErrPermissionDenied => StatusCode::FORBIDDEN,
-            RvError::ErrRouterMountNotFound => StatusCode::NOT_FOUND,
-            RvError::ErrApiVersionMismatch => StatusCode::BAD_REQUEST,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
+            | RvError::ErrHsmUnavailable => 503,
+            RvError::ErrHsmAuthzInvalid => 403,
+            RvError::ErrHsmContextMismatch | RvError::ErrHsmBlobInvalid => 400,
+            RvError::ErrPermissionDenied => 403,
+            RvError::ErrRouterMountNotFound => 404,
+            RvError::ErrApiVersionMismatch => 400,
+            _ => 500,
         }
     }
 }
