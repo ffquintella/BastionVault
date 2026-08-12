@@ -255,8 +255,19 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ steps.meta.outputs.version }}"
+          # `|| true` is load-bearing. `find` exits non-zero when any starting
+          # path is missing, and `gui/src-tauri/target` never exists here — the
+          # GUI is a workspace member, so its artefacts land in the root
+          # `target/` (the rust-cache step above says as much). Under
+          # `set -euo pipefail` that non-zero status propagated through the pipe
+          # and killed this step even though the bundle had been built perfectly
+          # well one step earlier. Worse, it made the guard on the next line
+          # unreachable, so the release failed with no ::error:: at all — just
+          # the echoed script. Releases 0.37.7 and 0.39.6 both died here, ~40
+          # minutes in, discarding a finished .app. Let `find` fail quietly and
+          # leave the reporting to the guard that exists for it.
           APP="$(find target gui/src-tauri/target -type d -name 'BastionVault.app' \
-                   -path '*/bundle/macos/*' 2>/dev/null | head -1)"
+                   -path '*/bundle/macos/*' 2>/dev/null | head -1 || true)"
           [ -n "$APP" ] || { echo "::error::BastionVault.app not found after the Tauri build"; exit 1; }
           echo "==> bundling $APP"
 
