@@ -89,6 +89,16 @@ jobs:
       - name: Show nextest version
         run: cargo nextest --version
 
+      # The cli::command::* unit tests spawn the real `bvault` executable
+      # (test_utils::get_project_binary_path() → target/debug/bvault) rather
+      # than calling the CLI in-process. Building the test harnesses does not
+      # produce that file, so without this step 19 tests fail with
+      # "Failed to execute command: No such file or directory (os error 2)".
+      # A developer's tree usually has a stale binary lying around, which is
+      # exactly why this prerequisite is easy to miss. Mirrors `make test-bin`.
+      - name: Build the bvault binary (the CLI tests spawn it)
+        run: cargo build --bin bvault
+
       # `--profile ci` selects the [profile.ci] block in .config/nextest.toml:
       # no retries (a flake is a bug report, not something to retry away) and
       # JUnit output for the artefact below.

@@ -97,7 +97,7 @@ $(FAST_BUILD_TARGETS): export RUSTFLAGS := $(strip $(RUSTFLAGS) -Z threads=$(RUS
 endif
 endif
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test test-integration test-doc test-cucumber test-hiqlite test-all docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-integration test-doc test-cucumber test-hiqlite test-all docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -227,7 +227,18 @@ require-nextest: ## Check cargo-nextest is installed; print install instructions
 	}
 	@cargo nextest --version
 
-test: require-nextest prune-stale ## Run the unit test suite (lib + bins) with nextest
+# The `cli::command::*` unit tests do not call the CLI in-process — they
+# spawn the real `bvault` executable, resolved by
+# `test_utils::get_project_binary_path()` as `target/<profile>/bvault`.
+# Building the lib/bin *test harnesses* does not produce that file, so on a
+# tree that has never run `cargo build`, 19 tests fail with
+# "Failed to execute command: No such file or directory (os error 2)".
+# It is easy to miss locally, where a stale binary from an earlier build is
+# usually lying around; CI has no such luck. Declare the dependency.
+test-bin: prune-stale ## Build the bvault executable that the cli::command::* tests spawn
+	cargo build --bin bvault
+
+test: require-nextest test-bin ## Run the unit test suite (lib + bins) with nextest
 	cargo nextest run --lib --bins
 
 test-integration: require-nextest prune-stale ## Run the tests/ integration suite with nextest (links ~30 binaries; slow)
