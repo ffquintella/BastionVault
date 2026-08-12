@@ -21,6 +21,9 @@
   - [Overview & tour](gui.md)
   - [Policy builder & validator](policy-builder-validator.md)
 
+- Contributing
+  - [Publishing crates](publishing-crates.md)
+
 - Architecture
   - [Design](design.md)
   - [Security structure](security-structure.md)

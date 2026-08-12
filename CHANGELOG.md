@@ -45,33 +45,80 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
-### Changed
+### Added
 
-#### FerroGate machine auth
-- **Vendored FerroGate SDK bumped 0.15.0 -> 0.21.3**
-  (`third_party/ferrogate-sdk-rust/`, sha256
-  `42231c10cf08d2cf1f56974396157884187f333aa0236776144ed80b957430d0`), with
-  `make vendor-ferrogate-sdk` to re-vendor at the newest release and
-  `make vendor-ferrogate-sdk-check` to report drift. The script resolves the
-  release, verifies the digest, and de-inherits each manifest from the SDK
-  workspace; it is deliberately not part of any build, because these three crates
-  are the trust root of the `auth/ferrogate/` backend and a build must not fetch
-  them from the network. **A silent auth regression was caught and neutralised in
-  the process:** 0.21.3 removes `ferro_child_verify::normalize_htu` and makes
-  `verify_bound`'s `htu` comparison byte-exact, where 0.15.0 normalized both
-  sides. Unhandled, that rejects a machine login whose DPoP `htu` differs from
-  the configured audience only by a trailing slash, host case, or an explicit
-  default `:443`/`:80` -- exactly the three equivalences this backend has tests
-  asserting it accepts, and a shape real clients emit. The normalization is now
-  owned by `src/modules/credential/ferrogate/verify.rs` (`normalize_origin`, a
-  verbatim port of the removed helper, which is where a relying-party policy call
-  belongs), and the `htu` handed to `verify_bound` is chosen to match, gated on
-  normalizing equal to the operator's configured audience -- so the accepted set
-  is byte-for-byte what it was on 0.15.0, and the proof's own `htu` can never
-  supply its own expectation. New tests cover the gate (non-default port,
-  differing path, default port on the wrong scheme) and `normalize_origin`
-  directly. Also corrected a stale `Cargo.toml` comment that still claimed the
-  vendored SDK was `releases/v0.13.2`.
+#### Build and Test Tooling
+- **The workspace's library crates can be published to the Cloudsmith Cargo
+  registry** (`uox/bastionvault`). `.cargo/config.toml` declares the registry
+  against Cloudsmith's *sparse* index (`sparse+https://cargo.cloudsmith.io/...`)
+  rather than the git index its web UI still shows -- cargo then fetches only
+  the index entries a resolve needs, over plain HTTPS, with no `git` binary
+  required (which matters for the container build and Windows CI).
+  `scripts/publish-crates.sh` publishes the seven library crates in topological
+  order behind `make crates-publish-dry` / `make crates-publish` /
+  `make crates-verify` / `make crates-login`. Dry run is the default, and a real
+  publish refuses a dirty tree so every artefact corresponds to a commit.
+  Each crate now carries `publish = ["uox-bastionvault"]`, so a bare
+  `cargo publish` fails instead of pushing an internal crate to crates.io;
+  `bastion-vault-gui` carries `publish = false`. Internal deps gained
+  `version` + `registry` alongside `path` -- without `registry` the *published*
+  manifest points at crates.io and the upload fails, and `path` still wins for
+  local builds so nothing about `cargo build` changes. Registry credentials are
+  gitignored (`.cargo/credentials*`) and documented as belonging in
+  `$CARGO_HOME/credentials.toml` or
+  `CARGO_REGISTRIES_UOX_BASTIONVAULT_TOKEN`, never in the tracked
+  `.cargo/config.toml`. See [docs/publishing-crates.md](docs/publishing-crates.md).
+- **Workspace-decomposition Phase 0 -- the build-cost instrument**
+  ([roadmaps/workspace-decomposition.md](roadmaps/workspace-decomposition.md)).
+  `make bench-build` measures four scenarios (no-op check, check after touching a
+  leaf engine, check after touching `core.rs`, and a test-binary rebuild that
+  includes the link `cargo check` never does) as the **median of 3 samples**, and
+  appends a row to [docs/build-timings/baseline.md](docs/build-timings/baseline.md).
+  Medians rather than single samples because the measured spread is ±13-16%: the
+  log states a **~25% noise floor**, so no later phase can claim a win from
+  noise. `make build-timings` writes the `--timings` HTML (archived
+  pre-decomposition artefact: the monolith compiles as **one unit in 25.94s**
+  with all deps cached). Baseline at `d04a72c`: no-op 0.48s, leaf 6.97s, core
+  7.65s, test+link 22.70s, 245 MB rlib, 1195 lock packages.
+  **The baseline confirms the premise of the whole roadmap:** touching a
+  self-contained 3,155-line secret engine and touching the 1,699-line object every
+  module depends on cost the *same* (6.97s vs 7.65s, overlapping sample ranges),
+  because they are one compilation unit.
+- **`make deps-unused` reports unused direct dependencies**
+  (`scripts/deps-unused.sh`, wrapping `cargo-machete`), scoped to the crates we
+  own -- the raw sweep also walks `IronRDP/`, `third_party/`, and `plugins-ext/`,
+  whose findings are printed as informational and never fail. Wired into
+  `tests.yml` as an **advisory** job that cannot block a merge, because a static
+  `use` scan has known blind spots.
+
+#### Documentation
+- **Workspace decomposition roadmap** ([roadmaps/workspace-decomposition.md](roadmaps/workspace-decomposition.md))
+  -- a measured plan to split the 173k-line, 245 MB-rlib `bastion_vault`
+  monolith into independently versioned crates. Records the baseline (one leaf
+  file touched rebuilds the test binary in ~36 s; 30 `tests/` binaries each
+  link the full rlib, which is why CI skips the suite entirely), identifies the
+  `Core` <-> `modules` cycle as the sole blocker, and sequences the split. The
+  high-value slice is breaking that cycle plus extracting PKI: 19 of the 30
+  integration-test binaries are PKI, and only 2 of its 39 files touch `Core`.
+
+### Removed
+
+#### Build and Test Tooling
+- **Five dead direct dependencies**, from the Phase 0 triage: `foreign-types`,
+  `glob`, and `serde_derive` from the root crate; `serde` from `bv-plugin-pack`
+  (only `serde_json` was ever used -- the manifest types live in
+  `bv_plugin_manifest`); `futures-util` and `ironrdp-pdu` from the GUI (the
+  umbrella `ironrdp` dep already enables its `pdu` feature). **This did not change
+  build time and was not expected to: `Cargo.lock` stayed at 1195 packages**,
+  since all five remain in the graph transitively. What it buys is a clean
+  `cargo machete` signal and no stale edge silently pinning a feature.
+  The dependencies that a static scan *wrongly* reports are now carried in
+  `[package.metadata.cargo-machete] ignored` lists with a stated reason, split
+  between name mismatches (`hcl-rs`->`hcl`, `smolder-smb-core`->`smolder_core`),
+  attribute-only use (`serde_bytes`), and -- the category that must not be
+  "cleaned up" -- deps declared to **pin a feature** rather than be imported:
+  `tower`'s `util`, `rusb`'s `vendored`, `webpki-roots`' defaults,
+  `rustls-pki-types`' major, and `bv-client`'s `rustls/aws_lc_rs`.
 
 ## [0.39.7] - 2026-08-12
 

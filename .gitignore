@@ -40,3 +40,31 @@ node_modules/
 # Local container-image push config (operator-specific; written by
 # `make container-repo-setup`, consumed by `make container-image-push`).
 .container-repo.env
+
+# ── Cargo registry credentials — NEVER commit these ────────────────
+#
+# The Cloudsmith API key for the `uox-bastionvault` registry is a
+# publish credential: leaking it lets anyone push a crate that this
+# workspace (and the container build) will then resolve and compile.
+#
+# The supported places for the token are BOTH outside the repo:
+#   * `$CARGO_HOME/credentials.toml` — written by
+#     `cargo login --registry uox-bastionvault` (see `make crates-login`)
+#   * `$CARGO_REGISTRIES_UOX_BASTIONVAULT_TOKEN` — for CI
+#
+# Cargo does not read a project-local `.cargo/credentials{,.toml}`, so
+# these two entries are belt-and-braces against a token pasted into the
+# repo by hand or by a copy of Cloudsmith's own instructions (which are
+# written for `~/.cargo/credentials`).
+.cargo/credentials
+.cargo/credentials.toml
+
+# Cargo DOES read the project-local `.cargo/config.toml`, and that file
+# is tracked — so a token pasted there gets committed. Cargo has no
+# `config.local.toml` override, so there is no in-repo escape hatch:
+# per-machine registry settings go in `$CARGO_HOME/config.toml` or in
+# `CARGO_*` env vars. The header comment in `.cargo/config.toml` says so
+# at the point of temptation.
+
+# `cargo package` / `cargo publish` staging output.
+/target/package

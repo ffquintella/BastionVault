@@ -118,6 +118,43 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: warn
 
+  # Advisory only. Phase 0 of roadmaps/workspace-decomposition.md added this to
+  # stop the dependency graph quietly re-growing the slack that pass removed
+  # (five dead direct deps across four manifests). It must never block a merge:
+  # cargo-machete is a static `use` scan with known blind spots (package name !=
+  # lib name, and deps that exist to pin a feature rather than be imported), so
+  # a finding is a prompt to triage, not proof of a defect. The wrapper filters
+  # out the submodule / vendored trees we do not own.
+  #
+  # No workflow expression is interpolated into any `run:` script in this job.
+  deps:
+    name: Unused dependencies (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ubuntu-deps
+          cache-on-failure: true
+
+      # Built from source to keep CI's trusted computing base to what the repo
+      # already trusts, matching how the rust job installs cargo-nextest.
+      - name: Install cargo-machete
+        run: cargo install --locked cargo-machete
+
+      # `--warn` always exits 0. Read the step's log, not its status.
+      - name: Report unused direct dependencies
+        run: make deps-unused-warn
+
   gui:
     name: GUI frontend tests (vitest)
     runs-on: ubuntu-latest

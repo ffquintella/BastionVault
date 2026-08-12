@@ -97,7 +97,7 @@ $(FAST_BUILD_TARGETS): export RUSTFLAGS := $(strip $(RUSTFLAGS) -Z threads=$(RUS
 endif
 endif
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-integration test-doc test-cucumber test-hiqlite test-all docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages vendor-ferrogate-sdk vendor-ferrogate-sdk-check
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-integration test-doc test-cucumber test-hiqlite test-all docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify vendor-ferrogate-sdk vendor-ferrogate-sdk-check bench-build bench-build-quick deps-unused deps-unused-warn build-timings
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -275,6 +275,36 @@ docs: ## Serve the Docsify-powered documentation site locally on http://localhos
 	@command -v docsify >/dev/null 2>&1 || npm i -g docsify-cli
 	docsify serve docs
 
+# ── Decomposition instrumentation (Phase 0) ───────────────────────
+#
+# See roadmaps/workspace-decomposition.md. `bench-build` is the instrument every
+# later phase reports its delta against; `deps-unused` keeps the dependency
+# graph from re-growing the slack Phase 0 removed.
+
+bench-build: require-nextest ## Measure incremental build cost (median of 3) and append a row to docs/build-timings/baseline.md
+	scripts/bench-build.sh
+
+bench-build-quick: require-nextest ## Same, single sample, nothing written to the log
+	scripts/bench-build.sh --repeat 1 --no-log
+
+deps-unused: ## Report unused direct dependencies in our crates (needs cargo-machete)
+	scripts/deps-unused.sh
+
+deps-unused-warn: ## Same, but never fails -- the shape CI uses
+	scripts/deps-unused.sh --warn
+
+build-timings: ## Write a cargo --timings HTML for a full lib rebuild (target/cargo-timings/)
+	@# Touching core.rs forces the monolith to rebuild as one unit, which is the
+	@# number the decomposition divides. Deps stay cached, so this shows the
+	@# crate's own cost rather than a cold graph -- the cold picture comes from
+	@# CI, where a cold build happens anyway.
+	touch src/core.rs
+	cargo build --lib --timings
+	@echo
+	@echo "==> open target/cargo-timings/cargo-timing.html"
+	@echo "    archive it as docs/build-timings/lib-selftime-<commit>.html when it"
+	@echo "    is a phase boundary worth keeping."
+
 # ── Vendored FerroGate SDK ────────────────────────────────────────
 #
 # NOT part of any build: `cargo build` must never reach the network for
@@ -288,6 +318,40 @@ vendor-ferrogate-sdk: ## Re-vendor the FerroGate Rust SDK at its newest release 
 vendor-ferrogate-sdk-check: ## Report whether the vendored FerroGate SDK is behind the newest release
 	scripts/vendor-ferrogate-sdk.sh --check
 
+# ── Cargo registry: Cloudsmith uox/bastionvault ───────────────────
+#
+# The registry itself is declared in `.cargo/config.toml`. The token is
+# never stored in the repo — see docs/publishing-crates.md.
+
+CARGO_REGISTRY ?= uox-bastionvault
+
+crates-login: ## Store a Cloudsmith Cargo API token in $CARGO_HOME (prompts; never touches the repo)
+	@echo "Get an API key: https://cloudsmith.io/user/settings/api/"
+	@echo "It is written to \$$CARGO_HOME/credentials.toml, outside this repo."
+	@echo "(The repo's .gitignore also blocks .cargo/credentials* as a backstop.)"
+	@echo
+	cargo login --registry $(CARGO_REGISTRY)
+
+crates-verify: ## Package the dependency-free crates from a staged tarball (no upload, no token)
+	@# Only the crates with no *workspace* dependencies can be packaged
+	@# before anything is on the registry: cargo resolves each dependency
+	@# in its published (registry) form before it will stage a tarball, so
+	@# a crate like bv_plugin_manifest cannot be verified until
+	@# bv_plugin_surface is actually live. `make crates-publish-dry`
+	@# reports those as "deferred".
+	cargo package -p bv_plugin_surface -p bv_crypto -p bastion-plugin-testkit --allow-dirty
+
+crates-publish-dry: ## Dry-run publish of all library crates in dependency order (uploads nothing)
+	scripts/publish-crates.sh --registry $(CARGO_REGISTRY)
+
+crates-publish: ## Publish all library crates to the Cloudsmith registry FOR REAL (irreversible; needs a clean tree)
+	@echo "This uploads crates to '$(CARGO_REGISTRY)'. A published version can"
+	@echo "never be replaced -- only yanked and superseded. Ctrl-C to abort."
+	@echo
+	@printf "Type the registry name to confirm: "; \
+	read -r confirm; \
+	if [ "$$confirm" != "$(CARGO_REGISTRY)" ]; then echo "aborted."; exit 1; fi
+	scripts/publish-crates.sh --registry $(CARGO_REGISTRY) --execute
 
 # `bump-*` targets bump the workspace version everywhere it lives:
 # - `Cargo.toml` (root crate)

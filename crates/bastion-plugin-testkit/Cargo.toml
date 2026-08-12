@@ -13,6 +13,10 @@ repository = "https://github.com/ffquintella/BastionVault"
 # (tests/test_plugin_testkit_parity.rs), which is what keeps this
 # crate honest against `src/plugins/runtime.rs`.
 
+# Pinned to the Cloudsmith registry so a bare `cargo publish` cannot
+# leak this crate to crates.io. See docs/publishing-crates.md.
+publish = ["uox-bastionvault"]
+
 [dependencies]
 # Same major as the host runtime (root Cargo.toml). `wat` is enabled so
 # fixtures can be authored as WebAssembly text and fed straight to

@@ -59,7 +59,6 @@ aes-gcm = "0.10"
 anyhow = { version = "^1.0" }
 thiserror = { version = "^2.0" }
 serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
-serde_derive = "^1.0"
 serde_json = "^1.0"
 serde_bytes = "0.11"
 serde_yaml = "0.9"
@@ -163,7 +162,6 @@ rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
 # unmaintained `rustls-pemfile` (RUSTSEC-2025-0134).
 rustls-pki-types = "1"
 webpki-roots = { version = "1.0", default-features = true }
-glob = "0.3"
 base64 = "0.22"
 ipnetwork = { version = "0.21", features = ["serde"] }
 blake2b_simd = "1.0"
@@ -517,11 +515,45 @@ hsm_yubihsm2 = ["dep:yubihsm", "dep:rusb"]
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"
 
-[dependencies.foreign-types]
-version = "0.5.0"
-
 [dependencies.libc]
 version = "0.2"
+
+# ── cargo-machete allowlist ────────────────────────────────────────
+#
+# `make deps-unused` (cargo-machete) flags a dependency when no `use` of it
+# appears in the sources. Every entry below is a dependency that IS needed but
+# that a static scan cannot see. Triaged once in Phase 0 of
+# roadmaps/workspace-decomposition.md; three genuinely dead deps
+# (`foreign-types`, `glob`, `serde_derive`) were dropped in the same pass.
+#
+# Do not add an entry here to silence the tool. Add it only with a reason that
+# says why the scan is wrong.
+[package.metadata.cargo-machete]
+ignored = [
+    # Package name != lib name: the crate is `hcl-rs`, the lib is `hcl`, and the
+    # config loader calls `hcl::from_str` / `from_body` / `from_reader`.
+    "hcl-rs",
+    # Used only through the `#[serde(with = "serde_bytes")]` attribute (see
+    # src/hsm/mock.rs), which is a string literal to a static scan.
+    "serde_bytes",
+    # Package name != lib name again: `smolder-smb-core` exposes `smolder_core`,
+    # used by src/modules/files/smb.rs behind the `files_smb` feature.
+    "smolder-smb-core",
+    # Declared *only* to force libusb's `vendored` feature so the official
+    # container image links libusb statically. Intentionally never imported —
+    # see the dependency's own comment above.
+    "rusb",
+    # The next three are direct deps that pin a FEATURE SET for the transitive
+    # graph rather than being imported. Removing them would silently change
+    # feature unification, not just the manifest:
+    #   * tower — `features = ["util"]` for the CMIS gRPC custom connector
+    #   * webpki-roots — `default-features = true` for the TLS root store
+    #   * rustls-pki-types — pins major 1; consumed via the `rustls::pki_types`
+    #     re-export, which is why no direct `use` exists
+    "tower",
+    "webpki-roots",
+    "rustls-pki-types",
+]
 
 [lints.clippy]
 result_large_err = "allow"

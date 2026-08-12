@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "BastionVault plugin surface manifest types — shared between server, bv-client, and the Tauri GUI"
 license = "MPL-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+# Pinned to the Cloudsmith registry so a bare `cargo publish` cannot
+# leak this crate to crates.io. See docs/publishing-crates.md.
+publish = ["uox-bastionvault"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

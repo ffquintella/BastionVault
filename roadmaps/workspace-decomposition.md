@@ -1,6 +1,6 @@
 # Roadmap: Workspace Decomposition
 
-Status: **Proposed — no phase started.**
+Status: **Phase 0 done (instrumentation + dependency triage). Phase 1 next.**
 
 ## Goal
 
@@ -24,7 +24,17 @@ Three concrete outcomes, in order of value:
 
 ## Measured baseline
 
-All figures measured on this tree at `7d886f1`, warm `target/`, macOS host.
+First-pass figures, measured by hand at `7d886f1` (warm `target/`, macOS host)
+while scoping this roadmap. They are kept because the *ratios* are what motivated
+the plan.
+
+> **For comparing phases, use the Phase 0 table below and
+> [docs/build-timings/baseline.md](../docs/build-timings/baseline.md), not this
+> one.** These were single samples taken before `make bench-build` existed, and
+> the measured noise floor is ~25% — so e.g. the 8.9s / 35.7s here and the
+> 6.97s / 22.70s medians in Phase 0 describe the same tree, not a change. `lock`
+> also reads 1202 here vs 1195 after the FerroGate SDK bump and the Phase 0
+> dependency triage.
 
 | Metric | Value |
 |---|---|
@@ -176,20 +186,75 @@ gate for each is: `make test-all` green, `make plugins-test` green,
 `bastion_vault::` paths the GUI consumes — the Tauri host is the
 compatibility canary.
 
-### Phase 0 — Instrument, before changing anything
+### Phase 0 — Instrument, before changing anything — **done**
 
-- Record `cargo build --timings` for `--lib`, `--bins`, `--tests` and
-  commit the HTML to `docs/build-timings/` as the before-picture.
-- Add a `make bench-build` target that reproduces the four measurements
-  in the baseline table above, so each phase can report its delta.
-- Add `cargo-machete` (or `cargo-udeps`) to CI as a **warning**, and
-  triage the 1202-package graph once. Dropping unused features from the
-  monolith is free speed available before any split.
-- Add `cargo-hakari` and generate a `workspace-hack` crate. Without it,
-  feature unification will make sibling crates invalidate each other and
-  swallow the wins from Phases 2–4.
+- **`make bench-build`** ([scripts/bench-build.sh](../scripts/bench-build.sh))
+  measures four scenarios — `check-noop`, `check-leaf`, `check-core`,
+  `test-build-leaf` — as the **median of 3 samples**, and appends a row to
+  [docs/build-timings/baseline.md](../docs/build-timings/baseline.md).
+  Median, not one sample, because the measured spread is ±13–16% per scenario;
+  **a phase must move a number by more than ~25% to be believed.**
+- **`make build-timings`** writes the `--timings` HTML; the pre-decomposition
+  artefact is archived at `docs/build-timings/lib-selftime-d04a72c.html`. It
+  shows the monolith compiling as **one unit in 25.94s** with all deps cached —
+  the number the split divides.
+- **`make deps-unused`** ([scripts/deps-unused.sh](../scripts/deps-unused.sh))
+  wraps `cargo-machete`, scoped to the crates we own (the raw sweep also walks
+  `IronRDP/`, `third_party/`, and `plugins-ext/`, which we don't). Wired into
+  [tests.yml](../.github/workflows/tests.yml) as an **advisory** job that cannot
+  block a merge.
 
-**Exit:** a reproducible number to beat, and a CI job that reports it.
+**Baseline** (`d04a72c`, 10 cores, warm target, medians):
+
+| scenario | value |
+|---|---|
+| `check-noop` | 0.48s |
+| `check-leaf` | 6.97s |
+| `check-core` | 7.65s |
+| `test-build-leaf` | 22.70s |
+| lib rlib (debug) | 245 MB |
+| lock packages | 1195 |
+
+#### Findings
+
+**`check-leaf` and `check-core` are the same number.** 6.97s vs 7.65s, with
+sample ranges that overlap almost entirely. Both files are in the same crate, so
+touching either invalidates the same compilation unit — the build system cannot
+tell a self-contained 3,155-line engine apart from the 1,699-line object every
+module depends on. Both columns stay in the table specifically to be watched
+**diverging** as Phases 2 and 3 land.
+
+**Dependency triage: 5 dead edges removed, 8 false positives documented.**
+Dropped `foreign-types`, `glob`, `serde_derive` (root), `serde`
+(`bv-plugin-pack`), `futures-util` and `ironrdp-pdu` (GUI — the umbrella
+`ironrdp` crate already enables the `pdu` feature). **`lock` did not move:
+1195 before and after** — every one of those crates is still in the graph
+transitively, so this bought a clean signal and no compile time. No speedup
+should be attributed to Phase 0.
+
+The remaining `cargo machete` hits are all blind spots of a static `use` scan,
+now carried in `[package.metadata.cargo-machete] ignored` lists *with reasons*:
+package name ≠ lib name (`hcl-rs`→`hcl`, `smolder-smb-core`→`smolder_core`),
+attribute-only use (`serde_bytes` via `#[serde(with = ...)]`), and — the category
+worth care — **dependencies declared to pin a feature rather than to be
+imported**: `tower`'s `util`, `rusb`'s `vendored`, `webpki-roots`'s defaults,
+`rustls-pki-types`'s major, and `bv-client`'s `rustls/aws_lc_rs`. Deleting one of
+those changes feature unification across the graph, not just a manifest line.
+
+**`cargo-hakari` deferred to the end of Phase 1, on evidence.** The problem it
+solves is not measurable here yet. Alternating `cargo check --workspace` with
+`cargo check -p <crate>` does **not** oscillate: after the first build of a given
+configuration (a one-time 15.94s for `-p bv_crypto`), every subsequent switch is
+a no-op (0.26–0.72s). With 12 members there is no churn to remove. Against that,
+adding it now has a concrete cost: hakari injects a `workspace-hack` dependency
+into every member, which collides with the `publish = ["uox-bastionvault"]` setup
+described under Phase 6 — a published crate would carry a dependency on a
+local-only crate, forcing `scripts/publish-crates.sh` onto `cargo hakari publish`.
+Revisit when the member count climbs in Phase 1 and re-run the oscillation test;
+adopt only if it oscillates.
+
+**Exit:** met — a reproducible number to beat, an archived timings artefact, and
+a CI job that reports dependency drift.
 
 ### Phase 1 — Tier 0 substrate
 
@@ -299,11 +364,37 @@ crates exist.
   `tests.yml` as exclusions are retired — that comment is currently the
   honest record of what CI does not cover, and it must stay honest.
 
-### Phase 6 — Independent versioning
+### Phase 6 — Independent versioning and publishing
+
+**The registry plumbing is already in place** (branch
+`feat/workspace-decomposition`), so every crate the earlier phases create
+has somewhere to go from day one:
+
+- `.cargo/config.toml` declares the `uox-bastionvault` Cloudsmith registry
+  (sparse index).
+- The seven existing library crates carry `publish = ["uox-bastionvault"]`,
+  a `repository`, and `version` + `registry` on their internal deps.
+- `scripts/publish-crates.sh` (+ `make crates-publish{,-dry}`,
+  `make crates-verify`, `make crates-login`) publishes in topological
+  order, dry-run by default, refusing a dirty tree.
+- Credential hygiene is documented and gitignored — see
+  [docs/publishing-crates.md](../docs/publishing-crates.md).
+
+Each new crate from Phases 1 and 3 must therefore land with: `version`,
+`license`, `description`, `repository`, `publish = ["uox-bastionvault"]`,
+`version` + `registry` on every internal dep, and an entry in the
+script's ordered `CRATES` list.
+
+Remaining Phase 6 work:
 
 - Move shared dependency versions to `[workspace.dependencies]`.
-- Internal path deps carry `version = "x.y"` alongside `path`, so the
-  crates are publishable.
+- Resolve the root crate's unpublishability — it path-depends on the
+  vendored, unpublished `ferro-*` crates in
+  `third_party/ferrogate-sdk-rust/`. Either publish those to the same
+  registry or keep the facade local. See
+  [docs/publishing-crates.md](../docs/publishing-crates.md)
+  § Known constraints.
+- Wire tag-triggered publishing into CI.
 - Adopt `release-plz` or `cargo-release` for per-crate semver from
   conventional commits.
 - Rework `make bump-*`: today `_bump-write` rewrites `Cargo.toml`,
