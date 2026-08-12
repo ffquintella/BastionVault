@@ -97,7 +97,7 @@ $(FAST_BUILD_TARGETS): export RUSTFLAGS := $(strip $(RUSTFLAGS) -Z threads=$(RUS
 endif
 endif
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-integration test-doc test-cucumber test-hiqlite test-all docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-integration test-doc test-cucumber test-hiqlite test-all docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages vendor-ferrogate-sdk vendor-ferrogate-sdk-check
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -274,6 +274,20 @@ test-all: test test-integration test-doc ## Run unit + integration + doctests (e
 docs: ## Serve the Docsify-powered documentation site locally on http://localhost:3000
 	@command -v docsify >/dev/null 2>&1 || npm i -g docsify-cli
 	docsify serve docs
+
+# ── Vendored FerroGate SDK ────────────────────────────────────────
+#
+# NOT part of any build: `cargo build` must never reach the network for
+# these crates. They verify FerroGate machine-identity tokens, so their
+# source is committed and a version bump is a reviewable commit. See
+# third_party/ferrogate-sdk-rust/PROVENANCE.md.
+
+vendor-ferrogate-sdk: ## Re-vendor the FerroGate Rust SDK at its newest release (review the diff before committing)
+	scripts/vendor-ferrogate-sdk.sh
+
+vendor-ferrogate-sdk-check: ## Report whether the vendored FerroGate SDK is behind the newest release
+	scripts/vendor-ferrogate-sdk.sh --check
+
 
 # `bump-*` targets bump the workspace version everywhere it lives:
 # - `Cargo.toml` (root crate)

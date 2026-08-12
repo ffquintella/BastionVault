@@ -6,7 +6,7 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use ferro_child_verify::{normalize_htu, verify_bound, DpopExpectation, JwkSet, Verified};
+use ferro_child_verify::{verify_bound, DpopExpectation, JwkSet, Verified};
 
 use super::FerroGateConfig;
 
@@ -42,6 +42,21 @@ pub fn token_kid(jws: &str) -> Option<String> {
     let bytes = URL_SAFE_NO_PAD.decode(seg).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     v.get("kid")?.as_str().map(str::to_string)
+}
+
+/// Peek the `htu` claim of a DPoP proof's payload without verifying it.
+///
+/// Used only to pick the spelling of the expected `htu` handed to
+/// `verify_bound`, and only when it is an RFC 3986 equivalent of the configured
+/// audience — see [`verify_child_token`]. The value is never otherwise trusted:
+/// the proof's signature, key-thumbprint binding, and freshness are still
+/// checked by the verifier crate.
+#[must_use]
+fn dpop_htu(proof: &str) -> Option<String> {
+    let seg = proof.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(seg).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    v.get("htu")?.as_str().map(str::to_string)
 }
 
 /// Whether a JWKS JSON document carries a key with the given `kid`. A
@@ -113,17 +128,42 @@ pub fn verify_child_token(
     // configured audience as the expected `htu` (FerroGate's child tokens carry
     // `aud == htu`); a later phase can derive the real request URL from the
     // connection instead.
-    let expect = DpopExpectation { htm: "POST", htu: &config.expected_audience, max_age_secs: DPOP_MAX_AGE_SECS };
+    //
+    // SDK 0.21.3 made `verify_bound`'s internal `htu` comparison BYTE-EXACT
+    // (0.15.0 normalized both sides via the since-removed `normalize_htu`). To
+    // keep accepting the same set of requests, we normalize here: if the proof's
+    // own `htu` is an RFC 3986 equivalent of the configured audience, hand that
+    // spelling to the verifier so its exact comparison succeeds; otherwise pass
+    // the configured value and let `verify_bound` reject it.
+    //
+    // This does NOT trust the proof. The peeked `htu` is only ever used when it
+    // normalizes equal to the operator's configured audience, so the accepted
+    // set is exactly what it was on 0.15.0 — and `verify_bound` still performs
+    // the full signature, thumbprint-binding, and freshness checks against
+    // whichever spelling it is given. Whether a benign `htu` variation is
+    // acceptable is a relying-party policy call, which this module owns.
+    let want_origin = normalize_origin(&config.expected_audience);
+    let proof_htu = dpop.and_then(dpop_htu).filter(|h| normalize_origin(h) == want_origin);
+    let expect_htu = proof_htu.as_deref().unwrap_or(&config.expected_audience);
+
+    let expect = DpopExpectation { htm: "POST", htu: expect_htu, max_age_secs: DPOP_MAX_AGE_SECS };
 
     let verified = verify_bound(token, &jwks, dpop, &expect, now, config.clock_leeway_secs)
         .map_err(|e| format!("token verification failed: {e}"))?;
 
     // Compare on the normalized origin so a trailing slash or case/default-port
     // difference between the client-echoed audience and the configured
-    // `expected_audience` is not a mismatch. This mirrors the `htu` check inside
-    // `verify_bound` (both derive from the same address) and is a normalization,
-    // not a loosening — scheme, host, port and path must still all be equal.
-    if normalize_htu(&verified.claims.aud) != normalize_htu(&config.expected_audience) {
+    // `expected_audience` is not a mismatch. This is a normalization, not a
+    // loosening — scheme, host, port and path must still all be equal.
+    //
+    // NOTE: this check used to call `ferro_child_verify::normalize_htu`, and the
+    // `htu` comparison inside `verify_bound` used to normalize the same way. SDK
+    // 0.21.3 removed that helper and made its own `htu` comparison BYTE-EXACT.
+    // Keeping the audience comparison normalized therefore preserves
+    // BastionVault's existing behaviour on the check we own, but the `htu`
+    // binding inside `verify_bound` is now stricter than it was on 0.15.0 and we
+    // cannot influence it from here. See `normalize_origin` below.
+    if normalize_origin(&verified.claims.aud) != normalize_origin(&config.expected_audience) {
         return Err(format!(
             "token audience '{}' does not match expected '{}'",
             verified.claims.aud, config.expected_audience
@@ -141,6 +181,97 @@ pub fn verify_child_token(
     }
 
     Ok(verified)
+}
+
+/// Normalize an origin-shaped URI for comparison, applying only well-defined
+/// RFC 3986 equivalences:
+///
+/// * the scheme is lower-cased (schemes are case-insensitive),
+/// * the authority's host is lower-cased (DNS names are case-insensitive),
+/// * an explicit default port — `:80` for `http`, `:443` for `https` — is
+///   dropped,
+/// * trailing `/` are stripped from an otherwise clean path.
+///
+/// Userinfo, query, and fragment are preserved verbatim; the path stays
+/// case-sensitive (only its trailing slash is trimmed). A value with no `://`
+/// separator is only trailing-slash-trimmed, since no host can be safely
+/// identified to case-fold.
+///
+/// This is a verbatim port of `ferro_child_verify::normalize_htu` as it stood in
+/// FerroGate SDK 0.15.0 (Apache-2.0, same upstream project as the vendored SDK
+/// under `third_party/ferrogate-sdk-rust/`). SDK 0.21.3 dropped the helper and
+/// switched its internal `htu` check to a byte-exact comparison. The audience
+/// check is a relying-party policy decision BastionVault owns — the module doc
+/// says as much — so it lives here now rather than being borrowed from the
+/// verifier crate, and it keeps working the way operators' configs expect.
+#[must_use]
+fn normalize_origin(uri: &str) -> String {
+    let uri = uri.trim();
+
+    // Without a scheme separator we cannot isolate a host to case-fold; limit
+    // ourselves to the unambiguous trailing-slash trim.
+    let Some((scheme, rest)) = uri.split_once("://") else {
+        return uri.trim_end_matches('/').to_string();
+    };
+    let scheme = scheme.to_ascii_lowercase();
+
+    // Split the authority from everything that follows it (path/query/fragment),
+    // which is left untouched apart from the path's trailing slash.
+    let (authority, tail) = match rest.find(['/', '?', '#']) {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, ""),
+    };
+
+    // authority = [ userinfo "@" ] host [ ":" port ]. Userinfo is rare and kept
+    // verbatim (it is case-sensitive).
+    let (userinfo, hostport) = match authority.rsplit_once('@') {
+        Some((u, hp)) => (Some(u), hp),
+        None => (None, authority),
+    };
+
+    // Separate host from port, honoring bracketed IPv6 literals (`[::1]:443`).
+    let (host, port) = if let Some(after_bracket) = hostport.strip_prefix('[') {
+        match after_bracket.split_once(']') {
+            Some((h, rest)) => (format!("[{}]", h.to_ascii_lowercase()), rest.strip_prefix(':')),
+            None => (hostport.to_ascii_lowercase(), None),
+        }
+    } else {
+        match hostport.rsplit_once(':') {
+            Some((h, p)) => (h.to_ascii_lowercase(), Some(p)),
+            None => (hostport.to_ascii_lowercase(), None),
+        }
+    };
+
+    // Drop an explicit default port; keep any other (including an empty one,
+    // which is malformed but preserved so it cannot silently match a real port).
+    let port = match port {
+        Some("443") if scheme == "https" => None,
+        Some("80") if scheme == "http" => None,
+        other => other,
+    };
+
+    // Trim trailing slash(es) only on a clean path (no query/fragment), so a
+    // bare `/` collapses to the empty path and `/a/` matches `/a`.
+    let tail = if tail.starts_with('/') && !tail.contains(['?', '#']) {
+        tail.trim_end_matches('/')
+    } else {
+        tail
+    };
+
+    let mut out = String::with_capacity(uri.len());
+    out.push_str(&scheme);
+    out.push_str("://");
+    if let Some(u) = userinfo {
+        out.push_str(u);
+        out.push('@');
+    }
+    out.push_str(&host);
+    if let Some(p) = port {
+        out.push(':');
+        out.push_str(p);
+    }
+    out.push_str(tail);
+    out
 }
 
 #[cfg(test)]
@@ -264,5 +395,53 @@ mod tests {
             .expect_err("a different origin must be rejected");
         // The DPoP htu binding trips first (htu == aud here), surfaced verbatim.
         assert!(err.contains("does not match"), "unexpected error: {err}");
+    }
+
+    /// Since SDK 0.21.3 the `htu` expectation handed to `verify_bound` may come
+    /// from the proof itself (see `verify_child_token`), gated on normalizing
+    /// equal to the configured audience. These guard that gate: a non-equivalent
+    /// `htu` must not be able to smuggle itself in as its own expectation.
+    #[test]
+    fn non_equivalent_htu_cannot_supply_its_own_expectation() {
+        // A non-default port is significant — only :80/:443 are droppable.
+        let err = verify_with("https://vault.example.com:4200", "https://vault.example.com:9999")
+            .expect_err("a different port must be rejected");
+        assert!(err.contains("does not match"), "unexpected error: {err}");
+
+        // The path stays case- and content-sensitive; only a trailing slash goes.
+        let err = verify_with("https://vault.example.com/a", "https://vault.example.com/b")
+            .expect_err("a different path must be rejected");
+        assert!(err.contains("does not match"), "unexpected error: {err}");
+
+        // A default port on the *wrong* scheme is not droppable either.
+        let err = verify_with("https://vault.example.com:80", "https://vault.example.com")
+            .expect_err("http's default port must not be dropped for https");
+        assert!(err.contains("does not match"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn normalize_origin_applies_only_rfc3986_equivalences() {
+        let n = super::normalize_origin;
+
+        // Scheme + host case-fold, default port drops, trailing slash trims.
+        assert_eq!(n("HTTPS://Vault.Example.com:443/"), "https://vault.example.com");
+        assert_eq!(n("http://Host:80/a/"), "http://host/a");
+        assert_eq!(n("https://h:4200/"), "https://h:4200");
+
+        // Non-default ports, mismatched scheme/port pairs, and paths survive.
+        assert_eq!(n("https://h:9999"), "https://h:9999");
+        assert_eq!(n("https://h:80"), "https://h:80");
+        assert_eq!(n("https://h/A"), "https://h/A");
+
+        // IPv6 literals keep their brackets; userinfo is left verbatim.
+        assert_eq!(n("https://[::1]:443/x/"), "https://[::1]/x");
+        assert_eq!(n("https://User@H/"), "https://User@h");
+
+        // Query/fragment suppress the trailing-slash trim (it is no longer a
+        // clean path), and are preserved byte-for-byte.
+        assert_eq!(n("https://H/a/?q=1"), "https://h/a/?q=1");
+
+        // No scheme separator: trailing-slash trim only, no case-folding.
+        assert_eq!(n("Vault.Example.com/"), "Vault.Example.com");
     }
 }

@@ -45,6 +45,34 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Changed
+
+#### FerroGate machine auth
+- **Vendored FerroGate SDK bumped 0.15.0 -> 0.21.3**
+  (`third_party/ferrogate-sdk-rust/`, sha256
+  `42231c10cf08d2cf1f56974396157884187f333aa0236776144ed80b957430d0`), with
+  `make vendor-ferrogate-sdk` to re-vendor at the newest release and
+  `make vendor-ferrogate-sdk-check` to report drift. The script resolves the
+  release, verifies the digest, and de-inherits each manifest from the SDK
+  workspace; it is deliberately not part of any build, because these three crates
+  are the trust root of the `auth/ferrogate/` backend and a build must not fetch
+  them from the network. **A silent auth regression was caught and neutralised in
+  the process:** 0.21.3 removes `ferro_child_verify::normalize_htu` and makes
+  `verify_bound`'s `htu` comparison byte-exact, where 0.15.0 normalized both
+  sides. Unhandled, that rejects a machine login whose DPoP `htu` differs from
+  the configured audience only by a trailing slash, host case, or an explicit
+  default `:443`/`:80` -- exactly the three equivalences this backend has tests
+  asserting it accepts, and a shape real clients emit. The normalization is now
+  owned by `src/modules/credential/ferrogate/verify.rs` (`normalize_origin`, a
+  verbatim port of the removed helper, which is where a relying-party policy call
+  belongs), and the `htu` handed to `verify_bound` is chosen to match, gated on
+  normalizing equal to the operator's configured audience -- so the accepted set
+  is byte-for-byte what it was on 0.15.0, and the proof's own `htu` can never
+  supply its own expectation. New tests cover the gate (non-default port,
+  differing path, default port on the wrong scheme) and `normalize_origin`
+  directly. Also corrected a stale `Cargo.toml` comment that still claimed the
+  vendored SDK was `releases/v0.13.2`.
+
 ## [0.39.7] - 2026-08-12
 
 ### Added
