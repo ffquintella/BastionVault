@@ -1,6 +1,6 @@
 # Roadmap: Workspace Decomposition
 
-Status: **Phase 0 done. Phase 1 started — the actix wart is cleared; the `bv-errors` extraction is blocked on a design call (see "`bv-errors` is not the cheap leaf this plan assumed").**
+Status: **Phase 0 done. Phase 1 started — the actix wart is cleared. `bv-errors` turned out to need a ~200-site `HttpError` newtype refactor in `src/http` (orphan rule), so it is deferred to its own PR; the clean leaves (`bv-logical`, `bv-utils`, `bv-shamir`) go first. See "The real blocker".**
 
 ## Goal
 
@@ -133,9 +133,11 @@ plain `u16` from `response_status()` sidesteps the mismatch and is what landed.
 ### `bv-errors` is not the cheap leaf this plan assumed
 
 Discovered while doing the extraction: `RvError` carries `#[from]` conversions for
-**19 external crates** — `bcrypt`, `chrono`, `diesel`, `hcl`, `hex`, `http`,
-`humantime`, `ipnetwork`, `lockfile`, `pem`, `r2d2`, `regex`, `rustls`,
-`serde_json`, `serde_yaml`, `tokio`, `ureq`, `url` (plus `std::io`).
+**20 external crates** — `anyhow`, `bcrypt`, `chrono`, `diesel`, `hcl`, `hex`,
+`http`, `humantime`, `ipnetwork`, `lockfile`, `pem`, `r2d2`, `regex`, `rustls`,
+`serde_json`, `serde_yaml`, `tokio`, `ureq`, `url` (plus `std::io`). `anyhow`
+hides in an inline `#[from]` rather than a `source:` field — worth knowing,
+because the first grep for these missed it and the build caught it.
 
 Since *every* crate in the target graph depends on the error type, a naive
 `bv-errors` would put `rustls`, `ureq`, `diesel`, and `tokio` at the bottom of the
@@ -146,25 +148,72 @@ a leaf crate has to build — which was half the point.
 So `bv-errors` needs its conversions **feature-gated**: `default-features = false`
 gives `std` + `thiserror` only, and each consumer opts into the `From` impls it
 actually needs (`features = ["rustls", "ureq"]`). Concretely that means a
-`#[cfg(feature = ...)]` on each of the 19 variants, and on the corresponding arms
+`#[cfg(feature = ...)]` on each of the 20 variants, and on the corresponding arms
 in `response_status()` and the hand-written `PartialEq`.
 
 That is a design decision with a real cost, and it should be made deliberately
 rather than discovered halfway through a mechanical file move — which is why the
 extraction stopped here. Alternatives worth weighing before committing to it:
 
-1. **Feature-gate all 19** (above). Most faithful to the goal; most churn, and
+1. **Feature-gate all 20** (above). Most faithful to the goal; most churn, and
    every consumer's `Cargo.toml` grows a feature list.
 2. **Drop the `#[from]` conversions** and make call sites map explicitly, as the
    actix header variant now does. Smallest resulting graph and no features at
    all, but it touches every `?` that relies on an implicit conversion — a much
    wider diff than Phase 1 wants.
-3. **Accept the fat leaf for now.** Ship `bv-errors` with all 19 deps, take the
+3. **Accept the fat leaf for now.** Ship `bv-errors` with all 20 deps, take the
    compile-unit win, and revisit once the engine crates exist and the cost is
    measurable with `make bench-build` rather than argued.
 
 Option 3 is the cheapest way to keep Phase 1 moving and defers the decision to a
 point where it can be measured; option 1 is where it likely ends up.
+
+**Decided: option 3.** The dependency count is not what blocks the extraction
+anyway — the orphan rule is.
+
+### The real blocker: the orphan rule on `impl ResponseError for RvError`
+
+Attempted, then reverted, so the cost is known rather than guessed. The move
+itself is trivial (`git mv src/errors.rs crates/bv-errors/src/lib.rs`, a manifest,
+`pub use bv_errors as errors;` plus a re-export of the three `#[macro_export]`
+macros so all ~200 `crate::bv_error_*!` call sites stay untouched). It compiles
+until this:
+
+```
+error[E0117]: only traits defined in the current crate can be implemented
+              for types defined outside of the crate
+   --> src/http/mod.rs:108:1
+    |
+108 | impl ResponseError for RvError {
+```
+
+Once `RvError` is foreign, so are both halves of that impl. Actix needs
+`ResponseError` on whatever a route handler returns, so the fix is a newtype in
+`src/http` — `struct HttpError(RvError)` with `ResponseError for HttpError` and
+`From<RvError> for HttpError`. Measured blast radius:
+
+| | count |
+|---|---|
+| handler signatures `Result<HttpResponse, RvError>` (105 of them in `sys.rs` alone) | **113** |
+| `Err(...)` sites needing an explicit `.into()` — `return Err(e)` does **not** apply `From`, only `?` does | **59** |
+| `RvError::` / `bv_error_*!` expressions in `src/http` to re-check | 64 |
+
+Feature-gating `ResponseError` inside `bv-errors` is **not** a way out: cargo
+unions features across the graph, so one consumer enabling `actix` gives every
+leaf engine actix-web again.
+
+So `bv-errors` is not a file move — it is a ~200-site mechanical refactor of the
+HTTP error surface, and HTTP status codes on a secrets server are security-
+relevant (they decide what a caller learns about why a request failed). It wants
+its own PR with the full suite plus a pass over `src/http/sys.rs`'s status
+assertions, not a tail-end change.
+
+**Recommended order for the rest of Phase 1:** do the genuinely clean leaves
+first, and come back to `bv-errors` with the `HttpError` newtype as its own
+change. `src/logical`, `src/utils`, and `src/shamir.rs` reference *only*
+`crate::errors` — so extracting them first means they depend on the root crate's
+`errors` module unchanged, and each is a real file move with no orphan-rule
+surprise. That reorders the phase but not its content.
 
 ## Target crate graph
 
