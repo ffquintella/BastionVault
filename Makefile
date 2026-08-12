@@ -238,17 +238,55 @@ require-nextest: ## Check cargo-nextest is installed; print install instructions
 test-bin: prune-stale ## Build the bvault executable that the cli::command::* tests spawn
 	cargo build --bin bvault
 
+# ── Test scope ────────────────────────────────────────────────────────
+#
+# This workspace has a ROOT package, so a bare `cargo nextest run` runs
+# only that package — not `crates/*`. That was invisible while all the code
+# lived in the root crate, and it became a coverage hole the moment
+# roadmaps/workspace-decomposition.md started moving code out: extracting
+# `src/shamir.rs` into `crates/bv-shamir` silently dropped its 21 tests
+# from `make test`, and every later extraction would do the same, quietly.
+#
+# A separate `test-crates` target was tried first, on the theory that mixing
+# the crates in destabilised the suite. That theory was wrong, and the
+# measurement is kept here so nobody re-derives it: three consecutive runs at
+# each scope failed 1/0/2 tests wide and 0/0/3 tests root-only. The suite has
+# a pre-existing family of flaky timing-dependent tests (`modules::auth::
+# expiration::*`, the 20s window in `metrics::system_metrics::test_sys_metrics`,
+# the AppRole tidy race) that fail at either scope, so there is nothing to
+# isolate — widening is simply the simpler correct thing. Those tests are
+# tracked separately; do NOT add nextest `retries` to paper over them
+# (.config/nextest.toml explains why).
+#
+# Excluded, and why:
+#   bastion-vault-gui  desktop app; drags in the whole Tauri toolchain.
+#                      Has its own checks (see `cd gui && npx vitest run`).
+#   ferro-*            vendored FerroGate SDK under
+#                      third_party/ferrogate-sdk-rust/. Sources are kept
+#                      verbatim, so their suite is upstream's business, not
+#                      a gate on our commits. (These are workspace members
+#                      despite the [workspace] `exclude` entry, because a
+#                      path dependency of a member is pulled in regardless.)
+#
+# Stated as exclusions, not an inclusion list, so a crate created by a
+# future phase is covered the day it exists with no Makefile edit to forget.
+TEST_SCOPE := --workspace \
+	--exclude bastion-vault-gui \
+	--exclude ferro-crypto \
+	--exclude ferro-child-verify \
+	--exclude ferro-svid-verify
+
 test: require-nextest test-bin ## Run the unit test suite (lib + bins) with nextest
-	cargo nextest run --lib --bins
+	cargo nextest run $(TEST_SCOPE) --lib --bins
 
 test-integration: require-nextest prune-stale ## Run the tests/ integration suite with nextest (links ~30 binaries; slow)
-	cargo nextest run --tests
+	cargo nextest run $(TEST_SCOPE) --tests
 
 # nextest cannot run doctests — it drives libtest binaries, and rustdoc's
 # test runner is a separate thing entirely. This stays on `cargo test`.
 # See https://nexte.st/docs/design/custom-test-harnesses/
 test-doc: prune-stale ## Run doctests (cargo test --doc; nextest cannot run these)
-	cargo test --doc
+	cargo test $(TEST_SCOPE) --doc
 
 # `harness = false`, so nextest cannot enumerate its cases. Binds fixed
 # ports 28100/28200 and shares one backend across all scenarios, so it

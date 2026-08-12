@@ -48,6 +48,40 @@ EXAMPLE ENTRY:
 ### Changed
 
 #### Build and Test Tooling
+- **`RvError` moved to its own crate** (`crates/bv-errors`) -- the first Tier 0
+  extraction of [the decomposition](roadmaps/workspace-decomposition.md).
+  Re-exported as `bastion_vault::errors`, so `crate::errors::RvError` and the
+  ~490 `bv_error_*!` call sites outside `src/http` are untouched. The three
+  `#[macro_export]` macros are re-exported from `src/lib.rs` as well, because
+  `#[macro_export]` places them at *bv-errors'* crate root and the bare
+  `bv_error_string!(...)` form resolves through the *defining* crate's root
+  macro namespace.
+  The orphan rule made this more than a file move: with `RvError` foreign,
+  `impl actix_web::ResponseError for RvError` is illegal, so `src/http` gained
+  an `HttpError(RvError)` newtype and handlers return
+  `Result<HttpResponse, HttpError>`. A blanket
+  `impl<E: Into<RvError>> From<E> for HttpError` keeps every `?` working, which
+  cut the predicted 59 explicit `.into()` sites to **7**; 149 handler
+  signatures were rewritten mechanically. `Debug` and `Display` both forward to
+  the wrapped error rather than being derived, so actix's error logs and the
+  `sys` audit records read exactly as before.
+  Status-code behaviour is unchanged and covered by the 68 status assertions in
+  the lib suite (200/204/400/403/404), which drive a real actix server through
+  `http::init_service`. All 20 `#[from]` conversions came along, with versions
+  and feature lists mirrored from the root manifest so extraction cannot shift
+  feature unification; `storage_mysql` forwards to `bv-errors/storage_mysql`.
+- **`shamir` and `context` moved to their own crates** (`crates/bv-shamir`,
+  `crates/bv-context`), re-exported as `bastion_vault::shamir` and
+  `bastion_vault::context`. These are the only two directories in the Tier 0
+  list that really reference nothing but `crate::errors` -- `context` was not in
+  the roadmap's list and was added to it. `bv-shamir` is licensed
+  `MIT AND Apache-2.0`: it is a modified derivative of MIT-licensed code
+  (© 2016 Chris MacNaughton), a nuance the file header carried on its own
+  inside the monolith but which a separately publishable crate must state in
+  its manifest.
+  The roadmap's other three "clean leaves" turned out not to be leaves; see the
+  corrected dependency table in the roadmap. `src/utils` and `src/logical` are
+  blocked, the latter on Phase 2.
 - **`RvError` no longer depends on actix-web** (`src/errors.rs`) -- Phase 1 of
   [the decomposition](roadmaps/workspace-decomposition.md) needs the error type to
   be a dependency-free leaf, and it was importing the HTTP server.
@@ -176,6 +210,25 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+- **The test suite only ever ran the root package.** `make test`,
+  `make test-integration`, `make test-doc` and the CI steps used a bare
+  `cargo nextest run` / `cargo test`, and because this workspace has a root
+  package that scopes the run to *that package alone* -- `crates/*` were never
+  tested here. Invisible while all the code lived in the root crate, and a live
+  coverage hole as soon as [the decomposition](roadmaps/workspace-decomposition.md)
+  started moving code out: extracting `src/shamir.rs` into `crates/bv-shamir`
+  silently dropped its 21 tests (1145 → 1124). Now scoped to `--workspace`
+  minus `bastion-vault-gui` (own Tauri/vitest checks) and the vendored
+  `ferro-*` SDK, written as exclusions so a crate added by a future phase is
+  covered the day it exists. This also picked up ~143 tests in the
+  *pre-existing* crates (`bv_crypto`, `bv-client`, the plugin crates) that had
+  never run: **1145 → 1288 unit tests, 15 → 17 doctests**.
+  Note for whoever sees a red run next: this surfaced a *pre-existing* family
+  of flaky timing-dependent tests (`modules::auth::expiration::*`, the 20s
+  window in `metrics::system_metrics::test_sys_metrics`, the AppRole tidy
+  race). Measured at both scopes -- three consecutive runs failed 1/0/2 tests
+  wide and 0/0/3 root-only -- so the wider scope does not cause them. They are
+  not to be papered over with nextest `retries`; see `.config/nextest.toml`.
 - **Connect no longer 403s for every non-root principal at the first call.**
   The GUI calls `resources/v2/connect/mfa/begin` unconditionally before every
   session open (`useConnectMfa.gateConnect` -- the server decides whether a

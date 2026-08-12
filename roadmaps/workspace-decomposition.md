@@ -1,6 +1,17 @@
 # Roadmap: Workspace Decomposition
 
-Status: **Phase 0 done. Phase 1 started — the actix wart is cleared. `bv-errors` turned out to need a ~200-site `HttpError` newtype refactor in `src/http` (orphan rule), so it is deferred to its own PR; the clean leaves (`bv-logical`, `bv-utils`, `bv-shamir`) go first. See "The real blocker".**
+Status: **Phase 0 done. Phase 1 partially done: `bv-errors`, `bv-shamir` and
+`bv-context` are extracted and green. The remaining five Tier 0 crates are
+*not* mechanical file moves — a re-measurement of the dependency graph (see
+"Verified clean leaves" below, which was wrong) shows `bv-utils` is Tier 1, and
+`bv-logical` and `bv-audit` are blocked on Phase 2 rather than the reverse.
+Moving to Phase 2 next, which unblocks them.**
+
+> **Read the two "re-measured" blocks below before planning against this
+> document.** Three of its load-bearing figures were derived from greps that
+> could not see brace-grouped `use crate::{...}` imports, and they are wrong in
+> ways that change the phase order: the "clean leaves" are not leaves, and
+> Phase 2 has ~101 cross-module call sites rather than 43.
 
 ## Goal
 
@@ -97,11 +108,47 @@ The encouraging part is how *thin* the cycle actually is:
   account for most uses: `handle_request` (89), `module_manager` (43),
   `state` (40), `barrier` (40), `router` (23), `get_system_view` (21),
   `add_logical_backend` / `delete_logical_backend` (33).
-- The 43 `module_manager.get_module::<T>()` cross-module lookups resolve
+- The `module_manager.get_module::<T>()` cross-module lookups resolve
   to **exactly five** targets — `AuthModule`, `IdentityModule`,
-  `PolicyModule`, `NamespaceModule`, `ResourceGroupModule` — plus a
-  handful of self-lookups (`AppRoleModule` fetching `AppRoleModule`) that
-  are just an awkward way to reach `&self` and delete outright.
+  `PolicyModule`, `NamespaceModule`, `ResourceGroupModule` — plus
+  self-lookups (`AppRoleModule` fetching `AppRoleModule`).
+
+  **Re-measured, with two corrections to the figures above.** The set of
+  five targets is confirmed. The *count* is not: "43" matches the call
+  sites written literally as `core.module_manager.get_module` (42 today),
+  but the rest arrive through `self.core.module_manager.` (9) or a local
+  binding. Production call sites in `src/modules`, excluding
+  `#[cfg(test)]`:
+
+  | target | prod sites |
+  |---|---|
+  | `IdentityModule` | 37 |
+  | `AuthModule` | 25 |
+  | `NamespaceModule` | 16 |
+  | `PolicyModule` | 14 |
+  | `ResourceGroupModule` | 9 |
+  | **kernel-five total** | **101** |
+
+  So Phase 2 has ~101 production call sites to route through traits, not
+  43 — a 2.4× sizing miss. A further 17 live in test modules.
+
+  The self-lookups are **11 production sites** (`RustionModule` ×9,
+  `NotificationsModule` ×1, `SshBrokerModule` ×1), which matches the
+  original "~12" estimate. But "just an awkward way to reach `&self` and
+  delete outright" is wrong for 9 of the 11: they sit inside **detached
+  `tokio::task::spawn` loops** (`rustion/poller.rs`, `telemetry.rs`,
+  `attest_timer.rs`, `probe.rs`), started from `Core::post_unseal`
+  (`src/core.rs:1025`) with an `Arc<Core>`. They re-resolve the module on
+  every tick *deliberately* — modules are registered after `Core` is
+  built, and a sealed vault has none — so there is no `&self` to thread.
+  The fix is to capture a `Weak<RustionModule>` at registration and
+  `upgrade()` per tick, which preserves the late binding without a
+  name-keyed `Arc::downcast`. The remaining 2 (`NotificationsModule`,
+  `SshBrokerModule`) are held by a struct that already owns a `core`
+  field and can hold the service handle instead.
+
+  All 7 `AppRoleModule` lookups are test-only, so they are test-fixture
+  cleanup rather than production coupling.
 
 So the graph is a **kernel of five tenancy/identity services** that
 everything else consumes through five narrow traits, and a **tier of leaf
@@ -119,9 +166,49 @@ Each is a handful of lines and each blocks a Tier-0 extraction:
 | `src/metrics` → `crate::plugins` | 1 | Invert: plugins register their collectors |
 | `src/storage` → `crate::http` | 1 | Doc comment only — no real coupling |
 
-Verified clean leaves, needing no inversion at all: `src/logical`,
+~~Verified clean leaves, needing no inversion at all: `src/logical`,
 `src/utils`, `src/shamir.rs` reference **only** `crate::errors`;
-`src/cache` references only `crate::storage`.
+`src/cache` references only `crate::storage`.~~
+
+**That claim was wrong, and it was wrong in a way worth recording.** It came
+from grepping `crate::[a-z_]+`, which cannot see a brace-grouped import: in
+`use crate::{ errors::RvError, storage::Storage };` the character after
+`crate::` is `{`, so the pattern matches nothing. Multi-line `use` blocks —
+the dominant style in this repo — were therefore invisible to the survey, and
+three of the four "clean leaves" are not leaves at all.
+
+Re-measured with a scanner that normalises `use` statements, expands one level
+of braces, and separates production code from `#[cfg(test)]` modules
+(the distinction matters: a test that needs the root crate's `test_utils`
+cannot travel into a new crate at all, because that would be a dependency
+cycle, whereas a production edge merely sets the tier):
+
+| module | production deps beyond `errors`/self | test-only deps |
+|---|---|---|
+| `src/shamir.rs` | **none** | none |
+| `src/context.rs` | **none** | none |
+| `src/metrics` | `plugins` | `test_utils` |
+| `src/cache` | `metrics`, `modules`, `storage` | `storage` |
+| `src/storage` | `cache`, `metrics`, `schema`, `http` (doc only) | `test_utils` ×6 |
+| `src/logical` | `context`, `handler`, `storage` | `storage`, `test_utils` |
+| `src/utils` | `logical`, `shamir`, `storage` | `logical`, `storage`, `test_utils` |
+| `src/audit` | `core`, `logical`, `modules`, `storage` | `logical`, `test_utils` |
+
+Consequences for the plan:
+
+- **Only `shamir` and `context` are true Tier 0 leaves.** `context` was not
+  even in the Tier 0 list; it belongs there, and `bv-logical` needs it.
+- **`src/utils` is Tier 1, not Tier 0.** `salt.rs` needs `crate::storage`,
+  `token_util.rs` needs `crate::logical`, `seal.rs` needs `crate::shamir`.
+  It can only be extracted after those.
+- **`src/cache` ↔ `src/storage` is mutual** (3 edges each way), which
+  independently confirms folding them into one crate.
+- **`bv-logical` and `bv-audit` are blocked on Phase 2, not on Phase 1.**
+  `Request` holds `pub handler: Option<Arc<dyn Handler>>`, and `Handler`
+  (`src/handler.rs`) takes `Arc<Core>` and `cli::config::Config`; `src/audit`
+  reaches `crate::core::Core` directly. Neither can move until the
+  `Core` ↔ `modules` cycle is cut. **The ordering rationale below therefore
+  has it backwards for these two: Phase 2 unlocks them, not the reverse.**
 
 Note on the actix wart, since the original advice here was wrong: "use
 `http::StatusCode`, it's already a direct dep" would **not** have worked.
@@ -350,17 +437,62 @@ a CI job that reports dependency drift.
 
 ### Phase 1 — Tier 0 substrate
 
-Extract, in this order, each as its own PR:
+The original plan was:
 
-1. `bv-errors` (fix the actix import first)
-2. `bv-utils`, `bv-shamir`
-3. `bv-logical`
-4. `bv-storage` (+ `bv-cache` folded in) — this is the phase that moves
-   `hiqlite`, `diesel`, and `rusty-s3` out of the monolith's compile unit
-5. `bv-audit`, `bv-metrics` (after their two inversions)
+> 1. `bv-errors` (fix the actix import first)
+> 2. `bv-utils`, `bv-shamir`
+> 3. `bv-logical`
+> 4. `bv-storage` (+ `bv-cache` folded in) — this is the phase that moves
+>    `hiqlite`, `diesel`, and `rusty-s3` out of the monolith's compile unit
+> 5. `bv-audit`, `bv-metrics` (after their two inversions)
 
-Re-export every moved path from `src/lib.rs` (`pub use bv_logical as logical;`)
+Steps 2–5 do not survive the corrected dependency table above. The revised
+order, with what each actually needs:
+
+| # | crate | status | gate |
+|---|---|---|---|
+| 1 | `bv-errors` | **done** | needed the `HttpError` newtype; 149 signatures, 7 `.into()` |
+| 2 | `bv-shamir` | **done** | true leaf |
+| 3 | `bv-context` | **done** | true leaf; added to Tier 0, was not in the plan |
+| 4 | `bv-metrics` | after inversion | `plugins` registers its own collectors |
+| 5 | `bv-storage` (+ `cache`) | after 4 | `cache` → `modules::auth::token_store::TokenEntry`; 6 tests need root `test_utils` |
+| 6 | `bv-logical` | **after Phase 2** | `Request.handler: Option<Arc<dyn Handler>>` → `Handler` → `Core` |
+| 7 | `bv-utils` | after 5 and 6 | Tier 1: `salt.rs`→storage, `token_util.rs`→logical, `seal.rs`→shamir |
+| 8 | `bv-audit` | **after Phase 2** | reaches `crate::core::Core` directly |
+
+`bv-errors` is a hard prerequisite for everything, not a deferrable
+tail-end change: a new crate cannot depend on the root crate, so no module
+that references `crate::errors` can leave until `RvError` has left.
+
+Re-export every moved path from `src/lib.rs` (`pub use bv_shamir as shamir;`)
 so no call site outside the moved directory changes in this phase.
+
+#### The test-scope hole this opened
+
+A bare `cargo nextest run` covers only the **root package**, because this
+workspace has one. That was invisible while all the code lived in the root
+crate; the moment `src/shamir.rs` became `crates/bv-shamir`, its 21 tests
+silently stopped running under `make test` (1145 → 1124). Every later
+extraction would have done the same, quietly trading coverage for
+modularity — the exact failure mode outcome #1 of this roadmap exists to
+prevent.
+
+Fixed by scoping `make test`, `make test-integration`, `make test-doc` and the
+CI steps to `--workspace` minus the GUI and the vendored `ferro-*` crates —
+stated as exclusions so a crate from a future phase is covered the day it
+exists. This also picked up ~143 tests in the *pre-existing* crates
+(`bv_crypto`, `bv-client`, the plugin crates) that had never run here either:
+1145 → 1288, and doctests 15 → 17.
+
+A separate `test-crates` target was tried first, on the theory that mixing the
+crates in destabilised the suite. **That theory was wrong** and the measurement
+is recorded here so it is not re-derived: three consecutive runs failed 1/0/2
+tests at the wide scope and 0/0/3 at the root-only scope. The repo has a
+pre-existing family of flaky timing-dependent tests
+(`modules::auth::expiration::*`, the 20s window in
+`metrics::system_metrics::test_sys_metrics`, the AppRole tidy race) that fail at
+either scope. They are tracked separately and must not be papered over with
+nextest `retries` — see `.config/nextest.toml`.
 
 **Expected:** the substrate stops recompiling on engine edits. Touching
 an engine no longer invalidates ~19k lines of storage/logical code.
@@ -370,8 +502,32 @@ Modest wall-clock win; the real value is that Phases 2–4 become possible.
 
 The crux. No files move; only the direction of dependency changes.
 
-1. Define `bv-kernel-api` with the traits the measurements above
-   identified:
+#### Do the inversion in-crate first; make it a crate second
+
+`bv-kernel-api` cannot be created at the *start* of this phase, and the plan
+below reads as though it can. The trait signatures name Tier 2 and Tier 0
+types that have not been extracted yet — `VaultCtx::system_view()` returns
+`Arc<BarrierView>` (`src/storage`), `router()` returns `Arc<Router>`
+(`src/router`), `mounts_router()` returns `Arc<MountsRouter>` (`src/mount`).
+A new crate holding those signatures would need all three as dependencies,
+and `src/router` / `src/mount` are Tier 2 by this roadmap's own graph.
+
+That is a sequencing problem, not a design problem, because **the crate is not
+what breaks the cycle — the abstraction is.** So:
+
+1. Define the traits in the monolith first (`src/kernel_api.rs`) and convert
+   modules to `Arc<dyn VaultCtx>` there. The `Core` ↔ `modules` cycle is cut
+   at that point, which is what unblocks Phase 3, `bv-logical` and `bv-audit`.
+2. Move `src/kernel_api.rs` into `bv-kernel-api` later, once `bv-storage`
+   exists and `router`/`mount` have moved into `bv-core`. That move is then a
+   mechanical file move of the kind Phase 1 step 2 was supposed to be.
+
+Doing it the other way round means blocking the whole phase on the extraction
+order it was meant to enable.
+
+Then, as originally planned:
+
+1. Define the traits the measurements above identified:
    - `VaultCtx` — `barrier()`, `system_view()`, `state()`, `router()`,
      `handle_request()`, `add_logical_backend()`,
      `delete_logical_backend()`, `add_handler()`

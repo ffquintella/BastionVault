@@ -58,7 +58,9 @@ pub mod plugins;
 pub mod scheduled_exports;
 pub mod cache;
 pub mod cli;
-pub mod context;
+/// Moved to the Tier 0 `bv-context` crate. Not in the roadmap's Tier 0 list,
+/// but it belongs there and `bv-logical` needs it.
+pub use bv_context as context;
 pub mod core;
 pub mod dos;
 /// `RvError` now lives in the Tier 0 `bv-errors` crate. Re-exported here so
@@ -85,7 +87,9 @@ pub mod router;
 pub mod schema;
 pub mod seal;
 pub mod server_info;
-pub mod shamir;
+/// Moved to the Tier 0 `bv-shamir` crate — the one directory in the original
+/// Phase 1 list that really did reference nothing but `crate::errors`.
+pub use bv_shamir as shamir;
 pub mod stats;
 pub mod storage;
 pub mod utils;

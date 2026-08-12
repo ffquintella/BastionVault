@@ -102,13 +102,33 @@ jobs:
       # `--profile ci` selects the [profile.ci] block in .config/nextest.toml:
       # no retries (a flake is a bug report, not something to retry away) and
       # JUnit output for the artefact below.
+      # Scoped to the workspace, not just the root package. This workspace has
+      # a root package, so a bare `cargo nextest run` covers only that — the
+      # crates/* members were never tested here, and the decomposition
+      # (roadmaps/workspace-decomposition.md) turns that into a live coverage
+      # hole: moving src/shamir.rs into crates/bv-shamir dropped its 21 tests
+      # from the run. Exclusions are the GUI (own Tauri/vitest checks) and the
+      # vendored ferro-* SDK. Mirrors `make test`; see the Makefile's
+      # "Test scope" block.
       - name: Run unit tests
-        run: cargo nextest run --profile ci --lib --bins
+        run: |
+          cargo nextest run --profile ci --lib --bins \
+            --workspace \
+            --exclude bastion-vault-gui \
+            --exclude ferro-crypto \
+            --exclude ferro-child-verify \
+            --exclude ferro-svid-verify
 
       # nextest cannot run doctests — rustdoc's test runner is not a libtest
       # binary. This is the only `cargo test` invocation left in CI.
       - name: Run doctests
-        run: cargo test --doc
+        run: |
+          cargo test --doc \
+            --workspace \
+            --exclude bastion-vault-gui \
+            --exclude ferro-crypto \
+            --exclude ferro-child-verify \
+            --exclude ferro-svid-verify
 
       - name: Upload test results
         if: always()
