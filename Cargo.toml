@@ -22,6 +22,7 @@ exclude = [
 [workspace]
 members = [
     ".",
+    "crates/bv-errors",
     "crates/bv_crypto",
     "crates/bastion-plugin-sdk",
     "crates/bastion-plugin-testkit",
@@ -46,6 +47,9 @@ resolver = "2"
 # Parsing the installed MIA's `mia.toml` to discover its configured helper
 # socket (FerroGate machine login). See cli::command::ferrogate_mia.
 toml = "1.1.2"
+# Tier 0 substrate: `RvError`, re-exported as `bastion_vault::errors`.
+# See roadmaps/workspace-decomposition.md § Phase 1.
+bv-errors = { path = "crates/bv-errors" }
 bv_crypto = { path = "crates/bv_crypto" }
 bv_plugin_surface = { path = "crates/bv_plugin_surface" }
 bv_plugin_manifest = { path = "crates/bv-plugin-manifest" }
@@ -407,7 +411,10 @@ bastion-plugin-testkit = { path = "crates/bastion-plugin-testkit" }
 # want to ship a smaller binary can override with `--no-default-features
 # --features storage_hiqlite` at their own workspace level.
 default = ["storage_hiqlite", "ssh_pqc"]
-storage_mysql = ["diesel", "r2d2"]
+# Forwards to `bv-errors/storage_mysql` so the two MySQL-only `RvError`
+# variants (`ErrConnectionPoolCreate`, `ErrDatabaseExecuteEntry`) are
+# compiled in exactly when the backend is.
+storage_mysql = ["diesel", "r2d2", "bv-errors/storage_mysql"]
 storage_hiqlite = ["hiqlite"]
 sync_handler = ["maybe-async/is_sync"]
 # Cloud Storage Targets for the Encrypted File backend.

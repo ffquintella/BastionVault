@@ -1,7 +1,16 @@
-//! The `bastion_vault::errors` module defines an enumeration of various error code, and implements
-//! neccessary traits against it.
+//! `bv-errors` defines `RvError`, the error enumeration used widely across
+//! BastionVault, and implements the necessary traits against it.
 //!
-//! The error code defined in this module are used widely in BastionVault.
+//! This crate is Tier 0 of the workspace decomposition
+//! (`roadmaps/workspace-decomposition.md`): every other crate depends on it, so
+//! it deliberately carries **no web framework**. In particular there is no
+//! `impl actix_web::ResponseError for RvError` here — actix would then be a
+//! dependency of every leaf engine, and cargo's feature unification means
+//! gating it would not help. `response_status()` returns a bare `u16` and the
+//! HTTP layer maps it; see `HttpError` in `src/http/mod.rs`.
+//!
+//! It is re-exported by the root crate as `bastion_vault::errors`, so
+//! `crate::errors::RvError` keeps resolving inside the server.
 
 use std::{
     io,

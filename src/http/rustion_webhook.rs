@@ -31,7 +31,7 @@ use crate::{
     bv_error_response_status,
     core::Core,
     errors::RvError,
-    http::response_json_ok,
+    http::{response_json_ok, HttpError},
     modules::rustion::{audit, recordings, store::RustionStore, webhook_verify},
 };
 
@@ -51,7 +51,7 @@ async fn recording_ready(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let sig = req
         .headers()
         .get(SIG_HEADER)
@@ -63,10 +63,11 @@ async fn recording_ready(
         return Err(bv_error_response_status!(
             400,
             "X-Rustion-Signature header is required"
-        ));
+        )
+        .into());
     }
     if body.is_empty() {
-        return Err(bv_error_response_status!(400, "empty request body"));
+        return Err(bv_error_response_status!(400, "empty request body").into());
     }
 
     // Optional bastion id hint from the query string.
@@ -135,7 +136,7 @@ async fn recording_ready(
 
     let recording_id = s("recording_id");
     if recording_id.is_empty() {
-        return Err(bv_error_response_status!(400, "sidecar missing recording_id"));
+        return Err(bv_error_response_status!(400, "sidecar missing recording_id").into());
     }
 
     let entry = recordings::RecordingEntry {

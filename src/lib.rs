@@ -61,7 +61,16 @@ pub mod cli;
 pub mod context;
 pub mod core;
 pub mod dos;
-pub mod errors;
+/// `RvError` now lives in the Tier 0 `bv-errors` crate. Re-exported here so
+/// `crate::errors::RvError` and `bastion_vault::errors::RvError` keep
+/// resolving unchanged. See roadmaps/workspace-decomposition.md § Phase 1.
+pub use bv_errors as errors;
+/// The three `RvError` constructor macros are `#[macro_export]`ed by
+/// `bv-errors`, which places them at *that* crate's root. Re-exporting them
+/// here restores the crate-root macro namespace the ~490 bare
+/// `bv_error_string!(...)` call sites resolve through, and keeps the
+/// `crate::bv_error_string!(...)` form working too.
+pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
 pub mod handler;
 pub mod hsm;
 pub mod http;

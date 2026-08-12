@@ -14,6 +14,7 @@ use crate::{
     core::Core,
     errors::RvError,
     http::{
+        HttpError,
         client_ip::{ClientIp, TrustedProxies},
         request_auth, response_error, response_json_ok, response_ok, Connection,
     },
@@ -45,7 +46,7 @@ async fn logical_request_handler_v1(
     path: web::Path<String>,
     core: web::Data<Arc<Core>>,
     trusted: web::Data<TrustedProxies>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     logical_request_handler_inner(req, body, method, path, core, trusted, 1).await
 }
 
@@ -56,7 +57,7 @@ async fn logical_request_handler_v2(
     path: web::Path<String>,
     core: web::Data<Arc<Core>>,
     trusted: web::Data<TrustedProxies>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     logical_request_handler_inner(req, body, method, path, core, trusted, 2).await
 }
 
@@ -68,9 +69,9 @@ async fn logical_request_handler_inner(
     core: web::Data<Arc<Core>>,
     trusted: web::Data<TrustedProxies>,
     api_version: u8,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let Some(conn) = req.conn_data::<Connection>() else {
-        return Err(RvError::ErrRequestInvalid);
+        return Err(RvError::ErrRequestInvalid.into());
     };
     log::debug!("logical request, connection info: {conn:?}, method: {method:?}, path: {path:?}, api_version: {api_version}");
 
@@ -161,7 +162,7 @@ async fn logical_request_handler_inner(
     }
 }
 
-fn response_logical(resp: &Response, path: &str) -> Result<HttpResponse, RvError> {
+fn response_logical(resp: &Response, path: &str) -> Result<HttpResponse, HttpError> {
     let mut logical_resp = LogicalResponse::default();
     let mut cookie: Option<Cookie> = None;
     let mut no_content = true;

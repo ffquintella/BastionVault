@@ -37,7 +37,7 @@ use crate::{
     cli::config::Config,
     core::Core,
     errors::RvError,
-    http::{request_auth, response_error},
+    http::{request_auth, response_error, HttpError},
     logical::{Operation, Request},
 };
 
@@ -127,7 +127,7 @@ async fn sys_batch_request_handler(
     batch: web::Json<BatchRequest>,
     core: web::Data<Arc<Core>>,
     api_version: u8,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let cfg = req.app_data::<web::Data<Arc<Config>>>().map(|d| d.get_ref().clone());
     let max_ops = max_operations(cfg.as_ref());
 
@@ -165,7 +165,7 @@ pub async fn sys_batch_v2_request_handler(
     req: HttpRequest,
     batch: web::Json<BatchRequest>,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     sys_batch_request_handler(req, batch, core, 2).await
 }
 

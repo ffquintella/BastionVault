@@ -105,25 +105,77 @@ pub fn init_service(cfg: &mut web::ServiceConfig) {
     metrics::init_metrics_service(cfg);
 }
 
-impl ResponseError for RvError {
+/// The HTTP layer's error type: a newtype around [`RvError`].
+///
+/// `RvError` lives in the `bv-errors` crate so that the Tier 0 substrate does
+/// not depend on a web framework, and `ResponseError` comes from `actix-web`.
+/// Both are therefore foreign to this crate, and the orphan rule forbids
+/// `impl ResponseError for RvError` here. Wrapping it locally is the standard
+/// way out, and it also confines actix to the assembly layer, which is where
+/// Phase 4 of the decomposition wants it.
+///
+/// Handlers return `Result<HttpResponse, HttpError>`. The `From<RvError>` impl
+/// below means `?` on any `RvError`-returning call still works untouched; only
+/// explicit `return Err(e)` sites need `.into()`, because `return` does not
+/// apply `From`.
+pub struct HttpError(pub RvError);
+
+impl std::fmt::Display for HttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+// Both formats forward to the wrapped error rather than being derived, so the
+// wrapper is invisible in output. `Debug` matters as much as `Display` here:
+// actix's error middleware logs the boxed `ResponseError` with `{:?}`, and a
+// derived impl would have rewritten every such log line from
+// `ErrPermissionDenied` to `HttpError(ErrPermissionDenied)`.
+impl std::fmt::Debug for HttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for HttpError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        std::error::Error::source(&self.0)
+    }
+}
+
+impl<E: Into<RvError>> From<E> for HttpError {
+    fn from(err: E) -> Self {
+        HttpError(err.into())
+    }
+}
+
+impl HttpError {
+    /// The wrapped error, for the handful of call sites that need to inspect or
+    /// re-wrap it rather than return it.
+    pub fn into_inner(self) -> RvError {
+        self.0
+    }
+}
+
+impl ResponseError for HttpError {
     // builds the actual response to send back when an error occurs
     fn error_response(&self) -> HttpResponse {
-        // `response_status()` returns a bare u16 so `errors.rs` stays free of any
+        // `response_status()` returns a bare u16 so `bv-errors` stays free of any
         // web framework (Tier 0 of the decomposition). Mapping it to actix's
         // `StatusCode` is this layer's job. `from_u16` only rejects codes outside
         // 100..600, which the table cannot produce, so the fallback is unreachable
         // -- it is there so a future bad entry degrades to a 500 instead of panicking.
         let mut status =
-            StatusCode::from_u16(self.response_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            StatusCode::from_u16(self.0.response_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let text: String;
-        if let RvError::ErrResponse(resp_text) = self {
+        if let RvError::ErrResponse(resp_text) = &self.0 {
             status = StatusCode::from_u16(400).unwrap();
             text = resp_text.clone();
-        } else if let RvError::ErrResponseStatus(status_code, resp_text) = self {
+        } else if let RvError::ErrResponseStatus(status_code, resp_text) = &self.0 {
             status = StatusCode::from_u16(*status_code).unwrap();
             text = resp_text.clone();
         } else {
-            text = self.to_string();
+            text = self.0.to_string();
         }
         HttpResponse::build(status).json(json!({ "error": text }))
     }
@@ -192,7 +244,7 @@ pub fn response_json_ok<T: Serialize>(cookie: Option<Cookie>, body: T) -> HttpRe
     response_json(StatusCode::OK, cookie, body)
 }
 
-pub async fn handle_request(core: web::Data<Arc<Core>>, req: &mut Request) -> Result<HttpResponse, RvError> {
+pub async fn handle_request(core: web::Data<Arc<Core>>, req: &mut Request) -> Result<HttpResponse, HttpError> {
     #[cfg(feature = "sync_handler")]
     let resp = core.handle_request(req)?;
     #[cfg(not(feature = "sync_handler"))]

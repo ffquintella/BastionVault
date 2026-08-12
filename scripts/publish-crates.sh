@@ -29,6 +29,7 @@ ONLY=""
 # depends on. A registry rejects a crate whose dependencies it cannot
 # resolve, so order is load-bearing, not cosmetic.
 #
+#   bv-errors           — no workspace deps (Tier 0 substrate: RvError)
 #   bv_plugin_surface   — no workspace deps
 #   bv_crypto           — no workspace deps
 #   bv_plugin_manifest  -> bv_plugin_surface
@@ -41,6 +42,7 @@ ONLY=""
 #   bastion_vault       — root crate; see docs/publishing-crates.md
 #   bastion-vault-gui   — desktop app, publish = false
 CRATES=(
+  bv-errors
   bv_plugin_surface
   bv_crypto
   bv_plugin_manifest

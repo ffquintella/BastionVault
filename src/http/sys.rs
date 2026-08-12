@@ -14,6 +14,7 @@ use crate::{
     core::{Core, SealConfig},
     errors::RvError,
     http::{
+        HttpError,
         //Connection,
         handle_request,
         request_auth,
@@ -100,7 +101,7 @@ struct PolicyRequest {
 }
 
 #[maybe_async::maybe_async]
-async fn response_seal_status(core: web::Data<Arc<Core>>) -> Result<HttpResponse, RvError> {
+async fn response_seal_status(core: web::Data<Arc<Core>>) -> Result<HttpResponse, HttpError> {
     let progress = core.unseal_progress();
     let sealed = core.sealed();
     let seal_config = core.seal_config().await?;
@@ -110,7 +111,7 @@ async fn response_seal_status(core: web::Data<Arc<Core>>) -> Result<HttpResponse
     Ok(response_json_ok(None, resp))
 }
 
-async fn sys_init_get_request_handler(_req: HttpRequest, core: web::Data<Arc<Core>>) -> Result<HttpResponse, RvError> {
+async fn sys_init_get_request_handler(_req: HttpRequest, core: web::Data<Arc<Core>>) -> Result<HttpResponse, HttpError> {
     #[cfg(not(feature = "sync_handler"))]
     let inited = core.inited().await?;
     #[cfg(feature = "sync_handler")]
@@ -131,7 +132,7 @@ async fn sys_init_put_request_handler(
     _req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let payload = serde_json::from_slice::<InitRequest>(&body)?;
     body.clear();
 
@@ -172,7 +173,7 @@ async fn sys_init_put_request_handler(
 async fn sys_seal_status_request_handler(
     _req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     #[cfg(not(feature = "sync_handler"))]
     {
         response_seal_status(core).await
@@ -189,7 +190,7 @@ async fn sys_seal_status_request_handler(
 /// demands a sudo-capable token. It previously ran for any caller who could
 /// reach the listener, which made a one-line unauthenticated request a complete
 /// outage.
-async fn sys_seal_request_handler(_req: HttpRequest, core: web::Data<Arc<Core>>) -> Result<HttpResponse, RvError> {
+async fn sys_seal_request_handler(_req: HttpRequest, core: web::Data<Arc<Core>>) -> Result<HttpResponse, HttpError> {
     authorize_sys_request(&core, &_req, "sys/seal", Operation::Write).await?;
 
     #[cfg(not(feature = "sync_handler"))]
@@ -203,7 +204,7 @@ async fn sys_unseal_request_handler(
     _req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     // TODO
     let payload = serde_json::from_slice::<UnsealRequest>(&body)?;
     body.clear();
@@ -217,7 +218,7 @@ async fn sys_unseal_request_handler(
     {
         match core.unseal(&key).await {
             Ok(_) | Err(RvError::ErrBarrierUnsealed) => {}
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         }
         response_seal_status(core).await
     }
@@ -226,7 +227,7 @@ async fn sys_unseal_request_handler(
     {
         match core.unseal(&key) {
             Ok(_) | Err(RvError::ErrBarrierUnsealed) => {}
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         }
         response_seal_status(core)
     }
@@ -235,7 +236,7 @@ async fn sys_unseal_request_handler(
 async fn sys_list_mounts_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/mounts".to_string();
     r.operation = Operation::Read;
@@ -249,7 +250,7 @@ async fn sys_list_mounts_request_handler(
 async fn sys_dashboard_summary_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/dashboard/summary".to_string();
     r.operation = Operation::Read;
@@ -262,7 +263,7 @@ async fn sys_dashboard_summary_request_handler(
 async fn sys_audit_list_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/audit".to_string();
     r.operation = Operation::Read;
@@ -273,7 +274,7 @@ async fn sys_audit_list_request_handler(
 async fn sys_hsm_status_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/hsm/status".to_string();
     r.operation = Operation::Read;
@@ -286,7 +287,7 @@ async fn sys_audit_enable_request_handler(
     path: web::Path<String>,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let device_path = path.into_inner();
     if device_path.is_empty() {
         return Ok(response_error(StatusCode::NOT_FOUND, ""));
@@ -311,7 +312,7 @@ async fn sys_audit_enable_request_handler(
 async fn sys_cache_flush_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/cache/flush".to_string();
     r.operation = Operation::Write;
@@ -325,7 +326,7 @@ async fn sys_owner_backfill_request_handler(
     req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
         serde_json::Map::new()
     } else {
@@ -373,7 +374,7 @@ fn copy_namespace_header(req: &HttpRequest, r: &mut Request) {
 async fn sys_namespace_list_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/namespaces".to_string();
     r.operation = Operation::List;
@@ -389,7 +390,7 @@ async fn sys_namespace_list_request_handler(
 async fn sys_namespaces_self_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/namespaces-self".to_string();
     r.operation = Operation::Read;
@@ -404,7 +405,7 @@ async fn sys_namespace_path_request_handler(
     mut body: web::Bytes,
     path: web::Path<String>,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = format!("sys/namespaces/{}", path.into_inner());
     copy_namespace_header(&req, &mut r);
@@ -429,7 +430,7 @@ async fn sys_namespace_links_request_handler(
     req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/namespace-links".to_string();
     copy_namespace_header(&req, &mut r);
@@ -452,7 +453,7 @@ async fn sys_namespace_link_path_request_handler(
     req: HttpRequest,
     path: web::Path<String>,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = format!("sys/namespace-links/{}", path.into_inner());
     copy_namespace_header(&req, &mut r);
@@ -471,7 +472,7 @@ async fn sys_namespace_link_path_request_handler(
 async fn sys_ns_assignment_list_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/identity/ns-assignment".to_string();
     r.operation = Operation::List;
@@ -487,7 +488,7 @@ async fn sys_ns_assignment_path_request_handler(
     mut body: web::Bytes,
     path: web::Path<String>,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = format!("sys/identity/ns-assignment/{}", path.into_inner());
     copy_namespace_header(&req, &mut r);
@@ -512,7 +513,7 @@ async fn sys_dos_config_request_handler(
     req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/dos/config".to_string();
     copy_namespace_header(&req, &mut r);
@@ -534,7 +535,7 @@ async fn sys_dos_config_request_handler(
 async fn sys_dos_stats_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/dos/stats".to_string();
     r.operation = Operation::Read;
@@ -549,7 +550,7 @@ async fn sys_dos_ban_request_handler(
     mut body: web::Bytes,
     path: web::Path<String>,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = format!("sys/dos/bans/{}", path.into_inner());
     copy_namespace_header(&req, &mut r);
@@ -572,7 +573,7 @@ async fn sys_dos_ban_request_handler(
 async fn sys_default_account_list_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/identity/default-account".to_string();
     r.operation = Operation::List;
@@ -589,7 +590,7 @@ async fn sys_default_account_self_request_handler(
     req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/identity/default-account/self".to_string();
     copy_namespace_header(&req, &mut r);
@@ -613,7 +614,7 @@ async fn sys_default_account_self_request_handler(
 async fn sys_profile_self_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/identity/profile/self".to_string();
     r.operation = Operation::Read;
@@ -627,7 +628,7 @@ async fn sys_profile_self_password_request_handler(
     req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/identity/profile/self/password".to_string();
     r.operation = Operation::Write;
@@ -645,7 +646,7 @@ async fn sys_profile_self_contact_request_handler(
     req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/identity/profile/self/contact".to_string();
     r.operation = Operation::Write;
@@ -665,7 +666,7 @@ async fn sys_default_account_path_request_handler(
     mut body: web::Bytes,
     path: web::Path<String>,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = format!("sys/identity/default-account/{}", path.into_inner());
     copy_namespace_header(&req, &mut r);
@@ -690,7 +691,7 @@ async fn sys_default_account_path_request_handler(
 async fn sys_ssh_security_key_list_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/identity/ssh-security-key".to_string();
     r.operation = Operation::List;
@@ -706,7 +707,7 @@ async fn sys_ssh_security_key_self_request_handler(
     req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/identity/ssh-security-key/self".to_string();
     copy_namespace_header(&req, &mut r);
@@ -731,7 +732,7 @@ async fn sys_ssh_security_key_path_request_handler(
     mut body: web::Bytes,
     path: web::Path<String>,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = format!("sys/identity/ssh-security-key/{}", path.into_inner());
     copy_namespace_header(&req, &mut r);
@@ -757,7 +758,7 @@ async fn sys_kv_owner_transfer_request_handler(
     req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
         serde_json::Map::new()
     } else {
@@ -785,7 +786,7 @@ async fn sys_kv_owner_claim_request_handler(
     req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
         serde_json::Map::new()
     } else {
@@ -812,7 +813,7 @@ async fn sys_resource_owner_transfer_request_handler(
     req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
         serde_json::Map::new()
     } else {
@@ -833,7 +834,7 @@ async fn sys_asset_group_owner_transfer_request_handler(
     req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
         serde_json::Map::new()
     } else {
@@ -854,7 +855,7 @@ async fn sys_file_owner_transfer_request_handler(
     req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
         serde_json::Map::new()
     } else {
@@ -874,7 +875,7 @@ async fn sys_audit_disable_request_handler(
     req: HttpRequest,
     path: web::Path<String>,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let device_path = path.into_inner();
     if device_path.is_empty() {
         return Ok(response_error(StatusCode::NOT_FOUND, ""));
@@ -893,7 +894,7 @@ async fn sys_audit_events_request_handler(
     req: HttpRequest,
     payload: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/audit/events".to_string();
     r.operation = Operation::Read;
@@ -942,7 +943,7 @@ async fn sys_mount_request_handler(
     path: web::Path<String>,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let _test = serde_json::from_slice::<MountRequest>(&body)?;
     let payload = serde_json::from_slice(&body)?;
     body.clear();
@@ -967,7 +968,7 @@ async fn sys_unmount_request_handler(
     req: HttpRequest,
     path: web::Path<String>,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mount_path = path.into_inner();
     if mount_path.is_empty() {
         return Ok(response_error(StatusCode::NOT_FOUND, ""));
@@ -987,7 +988,7 @@ async fn sys_remount_request_handler(
     req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let _test = serde_json::from_slice::<RemountRequest>(&body)?;
     let payload = serde_json::from_slice(&body)?;
     body.clear();
@@ -1003,7 +1004,7 @@ async fn sys_remount_request_handler(
 async fn sys_list_auth_mounts_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/auth".to_string();
     r.operation = Operation::Read;
@@ -1016,7 +1017,7 @@ async fn sys_auth_enable_request_handler(
     path: web::Path<String>,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let _test = serde_json::from_slice::<MountRequest>(&body)?;
     let payload = serde_json::from_slice(&body)?;
     body.clear();
@@ -1037,7 +1038,7 @@ async fn sys_auth_disable_request_handler(
     req: HttpRequest,
     path: web::Path<String>,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mount_path = path.into_inner();
     if mount_path.is_empty() {
         return Ok(response_error(StatusCode::NOT_FOUND, ""));
@@ -1053,7 +1054,7 @@ async fn sys_auth_disable_request_handler(
 async fn sys_list_policy_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/policy".to_string();
     r.operation = Operation::List;
@@ -1068,7 +1069,7 @@ async fn sys_read_policy_request_handler(
     req: HttpRequest,
     name: web::Path<String>,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let policy_name = name.into_inner();
 
     let mut r = request_auth(&req);
@@ -1088,7 +1089,7 @@ async fn sys_write_policy_request_handler(
     name: web::Path<String>,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let _test = serde_json::from_slice::<PolicyRequest>(&body)?;
     let payload = serde_json::from_slice(&body)?;
     body.clear();
@@ -1110,7 +1111,7 @@ async fn sys_delete_policy_request_handler(
     req: HttpRequest,
     name: web::Path<String>,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let policy_name = name.into_inner();
     if policy_name.is_empty() {
         return Ok(response_error(StatusCode::NOT_FOUND, ""));
@@ -1127,7 +1128,7 @@ async fn sys_delete_policy_request_handler(
 async fn sys_list_policies_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/policies/acl".to_string();
     r.operation = Operation::List;
@@ -1140,7 +1141,7 @@ async fn sys_read_policies_request_handler(
     req: HttpRequest,
     name: web::Path<String>,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let policy_name = name.into_inner();
 
     let mut r = request_auth(&req);
@@ -1160,7 +1161,7 @@ async fn sys_write_policies_request_handler(
     name: web::Path<String>,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let _test = serde_json::from_slice::<PolicyRequest>(&body)?;
     let payload = serde_json::from_slice(&body)?;
     body.clear();
@@ -1182,7 +1183,7 @@ async fn sys_delete_policies_request_handler(
     req: HttpRequest,
     name: web::Path<String>,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let policy_name = name.into_inner();
     if policy_name.is_empty() {
         return Ok(response_error(StatusCode::NOT_FOUND, ""));
@@ -1199,7 +1200,7 @@ async fn sys_delete_policies_request_handler(
 async fn sys_get_internal_ui_mounts_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/internal/ui/mounts".to_string();
     r.operation = Operation::Read;
@@ -1217,7 +1218,7 @@ async fn sys_capabilities_self_request_handler(
     req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
         serde_json::Map::new()
     } else {
@@ -1247,7 +1248,7 @@ async fn sys_policy_tests_read_request_handler(
     req: HttpRequest,
     name: web::Path<String>,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let policy_name = name.into_inner();
     if policy_name.is_empty() {
         return Ok(response_error(StatusCode::NOT_FOUND, ""));
@@ -1268,7 +1269,7 @@ async fn sys_policy_tests_write_request_handler(
     name: web::Path<String>,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
         serde_json::Map::new()
     } else {
@@ -1294,7 +1295,7 @@ async fn sys_get_internal_ui_mount_request_handler(
     req: HttpRequest,
     name: web::Path<String>,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = "sys/internal/ui/mounts/".to_owned() + name.into_inner().as_str();
     r.operation = Operation::Read;
@@ -1306,7 +1307,7 @@ async fn sys_get_internal_ui_mount_request_handler(
 async fn sys_health_request_handler(
     _req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     #[cfg(not(feature = "sync_handler"))]
     let initialized = core.inited().await.unwrap_or(false);
     #[cfg(feature = "sync_handler")]
@@ -1544,7 +1545,7 @@ async fn caller_may_see_cluster_topology(core: &Core, req: &HttpRequest) -> bool
 async fn sys_info_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     #[cfg(not(feature = "sync_handler"))]
     let initialized = core.inited().await.unwrap_or(false);
     #[cfg(feature = "sync_handler")]
@@ -1600,7 +1601,7 @@ async fn sys_info_request_handler(
 async fn sys_cluster_status_request_handler(
     req: HttpRequest,
     _core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     if !caller_may_see_cluster_topology(&_core, &req).await {
         return Ok(response_error(
             StatusCode::FORBIDDEN,
@@ -1642,7 +1643,7 @@ async fn sys_cluster_remove_node_request_handler(
     req: HttpRequest,
     mut body: web::Bytes,
     _core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     authorize_sys_request(&_core, &req, "sys/cluster/remove-node", Operation::Write).await?;
 
     #[derive(Deserialize)]
@@ -1673,7 +1674,7 @@ async fn sys_cluster_remove_node_request_handler(
 async fn sys_cluster_leave_request_handler(
     req: HttpRequest,
     _core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     authorize_sys_request(&_core, &req, "sys/cluster/leave", Operation::Write).await?;
 
     #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
@@ -1692,7 +1693,7 @@ async fn sys_cluster_leave_request_handler(
 async fn sys_cluster_failover_request_handler(
     req: HttpRequest,
     _core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     authorize_sys_request(&_core, &req, "sys/cluster/failover", Operation::Write).await?;
 
     #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
@@ -1711,7 +1712,7 @@ async fn sys_cluster_failover_request_handler(
 async fn sys_backup_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     authorize_sys_request(&core, &req, "sys/backup", Operation::Write).await?;
 
     let hmac_key = core.barrier.derive_hmac_key()?;
@@ -1735,7 +1736,7 @@ async fn sys_restore_request_handler(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     authorize_sys_request(&core, &req, "sys/restore", Operation::Write).await?;
 
     let hmac_key = core.barrier.derive_hmac_key()?;
@@ -1754,7 +1755,7 @@ async fn sys_restore_request_handler(
 async fn sys_export_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let path = req.match_info().get("path").unwrap_or("");
     authorize_sys_request(&core, &req, &format!("sys/export/{path}"), Operation::Read).await?;
 
@@ -1841,7 +1842,7 @@ impl SysAuditCtx {
 
     async fn finish(
         self,
-        result: &Result<HttpResponse, RvError>,
+        result: &Result<HttpResponse, HttpError>,
         path: &str,
         op: Operation,
     ) {
@@ -1852,7 +1853,7 @@ impl SysAuditCtx {
     /// the handler body (which owns the ctx) ever runs.
     async fn emit(
         &self,
-        result: &Result<HttpResponse, RvError>,
+        result: &Result<HttpResponse, HttpError>,
         path: &str,
         op: Operation,
     ) {
@@ -1880,11 +1881,11 @@ impl SysAuditCtx {
         req: &HttpRequest,
         path: &str,
         op: Operation,
-    ) -> Result<(), RvError> {
+    ) -> Result<(), HttpError> {
         match authorize_sys_request(core, req, path, op).await {
             Ok(()) => Ok(()),
             Err(e) => {
-                let denied: Result<HttpResponse, RvError> = Err(e);
+                let denied: Result<HttpResponse, HttpError> = Err(e.into());
                 self.emit(&denied, path, op).await;
                 denied.map(|_| ())
             }
@@ -1896,12 +1897,12 @@ async fn sys_exchange_export_request_handler(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
 
     audit.authorize(&core, &req, "sys/exchange/export", Operation::Write).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         // Surface the parse error instead of collapsing it to a generic
         // "Request is invalid." A newer client asking for a scope this
         // build does not know (`kind: "all_namespaces"` against a server
@@ -2053,7 +2054,7 @@ async fn sys_exchange_import_preview_handler(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
     // Owner header is needed inside the work block but `req` is not moved
     // into the closure (we only own a few captures), so resolve it now.
@@ -2066,7 +2067,7 @@ async fn sys_exchange_import_preview_handler(
 
     audit.authorize(&core, &req, "sys/exchange/import/preview", Operation::Write).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let mut payload: ExchangeImportRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
 
@@ -2140,7 +2141,7 @@ async fn sys_exchange_import_apply_handler(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
     let owner_header = req
         .headers()
@@ -2151,7 +2152,7 @@ async fn sys_exchange_import_apply_handler(
 
     audit.authorize(&core, &req, "sys/exchange/import/apply", Operation::Write).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let payload: ExchangeApplyRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
 
@@ -2220,11 +2221,11 @@ struct PluginRegisterAsset {
 async fn sys_plugins_list_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     audit.authorize(&core, &req, "sys/plugins", Operation::List).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         let manifests = catalog.list(core.barrier.as_storage()).await?;
         Ok(response_json_ok(None, json!({ "plugins": manifests })))
@@ -2238,11 +2239,11 @@ async fn sys_plugins_register_handler(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
     audit.authorize(&core, &req, "sys/plugins/register", Operation::Write).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         use base64::Engine;
         let payload: PluginRegisterRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
@@ -2277,7 +2278,8 @@ async fn sys_plugins_register_handler(
         } else if surface_present {
             return Err(RvError::ErrString(
                 "manifest declares a surface but request omitted `surface_b64`".into(),
-            ));
+            )
+            .into());
         }
         // Cross-check declared assets against uploaded ones.
         let declared: std::collections::BTreeMap<&str, &crate::plugins::manifest::ClientAssetRef> =
@@ -2296,7 +2298,8 @@ async fn sys_plugins_register_handler(
             if !uploaded.contains_key(n) {
                 return Err(RvError::ErrString(format!(
                     "manifest declares client asset `{n}` but no matching upload was provided"
-                )));
+                ))
+                .into());
             }
         }
         for (n, b64) in &uploaded {
@@ -2311,7 +2314,8 @@ async fn sys_plugins_register_handler(
                     "asset `{n}` size {} does not match declared {}",
                     bytes.len(),
                     aref.size
-                )));
+                ))
+                .into());
             }
             catalog
                 .put_asset(
@@ -2334,13 +2338,13 @@ async fn sys_plugins_register_handler(
 async fn sys_plugins_get_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}");
     audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         match catalog.get_manifest(core.barrier.as_storage(), &name).await? {
             Some(m) => Ok(response_json_ok(None, json!({ "manifest": m }))),
@@ -2355,13 +2359,13 @@ async fn sys_plugins_get_handler(
 async fn sys_plugins_delete_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}");
     audit.authorize(&core, &req, &audit_path, Operation::Delete).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         catalog.delete(core.barrier.as_storage(), &name).await?;
         Ok(response_ok(None, None))
@@ -2386,13 +2390,13 @@ struct PluginInvokeRequest {
 async fn sys_plugins_versions_list_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/versions");
     audit.authorize(&core, &req, &audit_path, Operation::List).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         let versions = catalog.list_versions(core.barrier.as_storage(), &name).await?;
         let active = catalog
@@ -2411,14 +2415,14 @@ async fn sys_plugins_versions_list_handler(
 async fn sys_plugins_versions_activate_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let version = req.match_info().get("version").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/versions/{version}/activate");
     audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         catalog
             .set_active(core.barrier.as_storage(), &name, &version)
@@ -2441,14 +2445,14 @@ async fn sys_plugins_versions_activate_handler(
 async fn sys_plugins_versions_delete_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let version = req.match_info().get("version").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/versions/{version}");
     audit.authorize(&core, &req, &audit_path, Operation::Delete).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         catalog
             .delete_version(core.barrier.as_storage(), &name, &version)
@@ -2463,13 +2467,13 @@ async fn sys_plugins_versions_delete_handler(
 async fn sys_plugins_reload_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/reload");
     audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         // Phase 5.6: drain-and-swap. Acquire the per-plugin reload
         // gate's *write* side, which blocks on every in-flight
         // invocation completing. Default drain timeout: 10s.
@@ -2520,13 +2524,13 @@ async fn sys_plugins_reload_handler(
 async fn sys_plugins_config_get_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/config");
     audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         let manifest = match catalog
             .get_manifest(core.barrier.as_storage(), &name)
@@ -2561,13 +2565,13 @@ async fn sys_plugins_config_put_handler(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/config");
     audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let payload: PluginConfigPutRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
         let catalog = crate::plugins::PluginCatalog::new();
@@ -2646,13 +2650,13 @@ async fn resolve_actor_entity_id(core: &Core, token: &str) -> String {
 async fn sys_plugins_grants_get_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/grants");
     audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         let manifest = match catalog
             .get_manifest(core.barrier.as_storage(), &name)
@@ -2698,14 +2702,14 @@ async fn sys_plugins_grants_put_handler(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let token = request_auth(&req).client_token;
     let audit_path = format!("sys/plugins/{name}/grants");
     audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let payload: GrantsPutRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
         let Some(net) = payload.net else {
@@ -2739,7 +2743,7 @@ async fn sys_plugins_grants_put_handler(
             Err(RvError::ErrString(msg)) => {
                 return Ok(response_error(StatusCode::BAD_REQUEST, &msg))
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         };
         Ok(response_json_ok(None, json!({ "net": grant })))
     })
@@ -2751,13 +2755,13 @@ async fn sys_plugins_grants_put_handler(
 async fn sys_plugins_grants_delete_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/grants");
     audit.authorize(&core, &req, &audit_path, Operation::Delete).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         crate::plugins::grants::delete(core.barrier.as_storage(), &name).await?;
         Ok(response_ok(None, None))
     })
@@ -2777,12 +2781,12 @@ struct PublishersPutRequest {
 async fn sys_plugins_publishers_get_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let audit_path = "sys/plugins/publishers".to_string();
     audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let allow =
             crate::plugins::verifier::PublisherAllowlist::load(core.barrier.as_storage()).await?;
         let unsigned =
@@ -2804,12 +2808,12 @@ async fn sys_plugins_publishers_put_handler(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
     let audit_path = "sys/plugins/publishers".to_string();
     audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let payload: PublishersPutRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
         let allow = crate::plugins::verifier::PublisherAllowlist {
@@ -2832,12 +2836,12 @@ async fn sys_plugins_accept_unsigned_put_handler(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
     let audit_path = "sys/plugins/accept_unsigned".to_string();
     audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let payload: AcceptUnsignedPutRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
         crate::plugins::verifier::write_accept_unsigned(
@@ -2865,7 +2869,7 @@ async fn sys_plugins_accept_unsigned_put_handler(
 async fn sys_plugins_surface_get_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/surface");
@@ -2876,7 +2880,7 @@ async fn sys_plugins_surface_get_handler(
         .map(|s| s.trim_matches('"').to_string());
     audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         match catalog.read_active_surface(core.barrier.as_storage(), &name).await? {
             None => Ok(response_error(StatusCode::NOT_FOUND, "no surface for this plugin")),
@@ -2918,7 +2922,7 @@ async fn sys_plugins_surface_get_handler(
 async fn sys_plugins_active_surfaces_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let audit_path = "sys/plugins/active-surfaces".to_string();
     let if_none_match = req
@@ -2940,7 +2944,7 @@ async fn sys_plugins_active_surfaces_handler(
 
     audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         // Mount lookup is wired in Phase 1 with a placeholder (empty
         // string) — the GUI tolerates an empty mount because it only
@@ -2990,7 +2994,7 @@ async fn sys_plugins_active_surfaces_handler(
 async fn sys_plugins_asset_get_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let version = req.match_info().get("version").unwrap_or("").to_string();
@@ -3003,7 +3007,7 @@ async fn sys_plugins_asset_get_handler(
         sha256.len() == 64 && sha256.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
     audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         if !valid_hash {
             return Ok(response_error(StatusCode::BAD_REQUEST, "asset sha256 must be 64 lowercase hex chars"));
         }
@@ -3030,12 +3034,12 @@ async fn sys_plugins_asset_get_handler(
 async fn sys_plugins_quarantine_list_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let audit_path = "sys/plugins/quarantine".to_string();
     audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let names = crate::plugins::quarantine::list(core.barrier.as_storage()).await?;
         let mut entries = serde_json::Map::new();
         for name in names {
@@ -3056,14 +3060,14 @@ async fn sys_plugins_invoke_handler(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/invoke");
 
     audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
     use base64::Engine;
     let payload: PluginInvokeRequest = if body.is_empty() {
         PluginInvokeRequest { input_b64: String::new(), fuel: None }
@@ -3173,11 +3177,11 @@ async fn sys_plugins_invoke_handler(
 async fn sys_scheduled_exports_list_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     audit.authorize(&core, &req, "sys/scheduled-exports", Operation::List).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
         let list = store.list(core.barrier.as_storage()).await?;
         Ok(response_json_ok(None, json!({ "schedules": list })))
@@ -3191,11 +3195,11 @@ async fn sys_scheduled_exports_create_handler(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
     audit.authorize(&core, &req, "sys/scheduled-exports/create", Operation::Write).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let input: crate::scheduled_exports::ScheduleInput =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
 
@@ -3233,13 +3237,13 @@ async fn sys_scheduled_exports_create_handler(
 async fn sys_scheduled_exports_get_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
     let audit_path = format!("sys/scheduled-exports/{id}");
     audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
         let sched = store.get(core.barrier.as_storage(), &id).await?;
         match sched {
@@ -3256,13 +3260,13 @@ async fn sys_scheduled_exports_update_handler(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
     let audit_path = format!("sys/scheduled-exports/{id}");
     audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let input: crate::scheduled_exports::ScheduleInput =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
 
@@ -3303,13 +3307,13 @@ async fn sys_scheduled_exports_update_handler(
 async fn sys_scheduled_exports_delete_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
     let audit_path = format!("sys/scheduled-exports/{id}");
     audit.authorize(&core, &req, &audit_path, Operation::Delete).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
         store.delete(core.barrier.as_storage(), &id).await?;
         Ok(response_ok(None, None))
@@ -3322,13 +3326,13 @@ async fn sys_scheduled_exports_delete_handler(
 async fn sys_scheduled_exports_runs_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
     let audit_path = format!("sys/scheduled-exports/{id}/runs");
     audit.authorize(&core, &req, &audit_path, Operation::List).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
         let runs = store.list_runs(core.barrier.as_storage(), &id).await?;
         Ok(response_json_ok(None, json!({ "runs": runs })))
@@ -3343,13 +3347,13 @@ async fn sys_scheduled_exports_runs_handler(
 async fn sys_scheduled_exports_run_now_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
     let audit_path = format!("sys/scheduled-exports/{id}/run-now");
     audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
         let sched = store.get(core.barrier.as_storage(), &id).await?
             .ok_or_else(|| RvError::ErrRequestInvalid)?;
@@ -3524,13 +3528,13 @@ fn valid_backup_filename(name: &str) -> bool {
 async fn sys_scheduled_exports_backups_list_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
     let audit_path = format!("sys/scheduled-exports/{id}/backups");
     audit.authorize(&core, &req, &audit_path, Operation::List).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
         let sched = match store.get(core.barrier.as_storage(), &id).await? {
             Some(s) => s,
@@ -3566,14 +3570,14 @@ async fn sys_scheduled_exports_backups_list_handler(
 async fn sys_scheduled_exports_backup_fetch_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
     let filename = req.match_info().get("filename").unwrap_or("").to_string();
     let audit_path = format!("sys/scheduled-exports/{id}/backups/{filename}/fetch");
     audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         if !valid_backup_filename(&filename) {
             return Ok(response_error(StatusCode::BAD_REQUEST, "invalid backup file name"));
         }
@@ -3650,7 +3654,7 @@ async fn sys_scheduled_exports_restore_handler(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
     let audit_path = format!("sys/scheduled-exports/{id}/restore");
@@ -3659,7 +3663,7 @@ async fn sys_scheduled_exports_restore_handler(
     let caller_token = crate::http::get_token_from_req(&req).unwrap_or_default();
     audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let mut payload: ScheduledExportRestoreRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
 
@@ -3815,12 +3819,12 @@ async fn sys_exchange_import_request_handler(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
 
     audit.authorize(&core, &req, "sys/exchange/import", Operation::Write).await?;
 
-    let result: Result<HttpResponse, RvError> = (async move {
+    let result: Result<HttpResponse, HttpError> = (async move {
         let mut payload: ExchangeImportRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
 
@@ -3882,7 +3886,7 @@ async fn sys_import_request_handler(
     req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, RvError> {
+) -> Result<HttpResponse, HttpError> {
     let mount = req.match_info().get("mount").unwrap_or("").to_string();
     authorize_sys_request(&core, &req, &format!("sys/import/{mount}"), Operation::Write).await?;
     let mount = if mount.ends_with('/') { mount } else { format!("{mount}/") };
