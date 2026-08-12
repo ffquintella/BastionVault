@@ -1,0 +1,95 @@
+# cargo-nextest configuration.
+#
+# Requires cargo-nextest >= 0.9.84 (`default-filter` landed there).
+# Install with `cargo install --locked cargo-nextest`; `make test` checks
+# for it and prints install instructions if it is missing.
+#
+# ── Why this file is not empty ─────────────────────────────────────
+#
+# `cargo test` runs every test in ONE process, N threads wide. nextest
+# runs every test in its OWN process. That is what makes it fast and
+# what makes a panicking test unable to poison its siblings — but it
+# also means anything this suite was serialising with a *process-global*
+# primitive is no longer serialised at all:
+#
+#   * `#[serial_test::serial]` takes an in-process `Mutex`. Across
+#     nextest's separate processes that mutex is a no-op.
+#   * A `static AtomicU16` port allocator restarts at zero in every
+#     process, so tests that relied on it for disjoint ports collide.
+#
+# So each affected group below is either pinned to a single-threaded
+# test group (semantics preserved) or excluded from nextest entirely and
+# run under plain `cargo test` by a dedicated `make` target. Nothing is
+# silently left to race.
+
+[profile.default]
+# Surface the whole picture in one run rather than stopping at the first
+# failure — this suite is long enough that a second full run to find the
+# next failure is expensive.
+fail-fast = false
+
+# `tests/` and the storage tests contain deliberate multi-second waits
+# (detached hiqlite shutdown, subprocess plugin round-trips). Warn well
+# above those so a genuine hang is still obvious. No `terminate-after`,
+# so a slow test is reported and left to finish rather than killed — a
+# truncated security test is worse than a slow one.
+slow-timeout = "60s"
+
+status-level = "fail"
+final-status-level = "slow"
+
+# Two kinds of test are excluded from every nextest run and covered by
+# their own `make` targets instead. Neither exclusion is about speed.
+#
+#   * `cucumber_hiqlite` is declared `harness = false` in Cargo.toml. It
+#     is a plain `main()`, not a libtest binary, so nextest cannot
+#     enumerate its cases. Run it with `make test-cucumber`.
+#
+#   * The hiqlite storage tests and the HA fault-injection suite hand
+#     themselves disjoint TCP ports from a `static AtomicU16` counter
+#     (`NEXT_PORT_OFFSET` in src/storage/hiqlite/mod.rs, `NEXT_PORT_BLOCK`
+#     in tests/hiqlite_ha_fault_injection.rs). Both files document that a
+#     dropped backend releases its listeners asynchronously, so reusing a
+#     port fails with "Address already in use". Under process-per-test
+#     every process would start that counter at 0 and every test would
+#     ask for the same port pair. They stay on `cargo test`, one process,
+#     via `make test-hiqlite`. (They are inert without
+#     CARGO_TEST_HIQLITE=1, so a default nextest run would pass either
+#     way — this exclusion keeps that from being luck.)
+default-filter = 'not (binary(cucumber_hiqlite) | binary(hiqlite_ha_fault_injection) | test(/^storage::hiqlite::test::/))'
+
+# `src/plugins/process_runtime.rs` tests copy the *entire test binary*
+# into a temp dir per invocation (`current_exe_bytes()` → `Vec<u8>`).
+# That binary is ~210 MB today, so the seven of them running concurrently
+# would hold well over a gigabyte of heap and write as much to disk. They
+# carry `#[serial_test::serial]` for exactly this reason; the in-process
+# mutex stops working under nextest, so pin them to one at a time here.
+[test-groups.exe-copy]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'test(/^plugins::process_runtime::tests::/)'
+test-group = 'exe-copy'
+
+# CI profile: machine-readable results, and no retries. Retrying a failed
+# security test until it passes is how a real race gets shipped — a flake
+# here is a bug report, not something to paper over.
+#
+# Plain keys (`default-filter`, `slow-timeout`) are inherited from
+# profile.default. The `exe-copy` override is repeated below rather than
+# assumed: `cargo nextest show-config test-groups --profile ci` reports it
+# as belonging to the *default* profile, and if it silently did not apply
+# here, seven tests would each load a ~210 MB binary into memory at once
+# on a 16 GB shared runner. Not worth inferring.
+[profile.ci]
+fail-fast = false
+retries = 0
+status-level = "all"
+final-status-level = "slow"
+
+[[profile.ci.overrides]]
+filter = 'test(/^plugins::process_runtime::tests::/)'
+test-group = 'exe-copy'
+
+[profile.ci.junit]
+path = "junit.xml"

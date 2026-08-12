@@ -3301,25 +3301,33 @@ impl PolicyStore {
         auth: &crate::logical::Auth,
         path: &str,
         op: Operation,
+        ns_path: Option<&str>,
     ) -> bool {
         if auth.policies.is_empty() {
             return false;
         }
 
-        let asset_groups = resolve_asset_groups(&self.core, path, None).await;
-        // `can_operate` is a cross-target authorization *preview* (e.g.
-        // asset-group member redaction) and does not carry the triggering
-        // request's namespace header, so owner resolution here is
-        // namespace-blind (root-scoped). For a child-namespace KV target this
-        // can only fail to resolve an owner, which fail-closes (narrows) the
-        // preview — never widens it. Namespace-aware previews are tracked as
-        // the asset-group follow-up.
-        let asset_owner = resolve_asset_owner(&self.core, path, None).await;
+        // `ns_path` is the namespace `path` belongs to, when the caller knows
+        // it. The owner / asset-group / share lookups key on the target's
+        // *mount-relative* name, so they cannot strip a `<ns>/` prefix they
+        // were never told about: passing `None` for a namespaced target
+        // resolves no owner and no shares, which fail-closes every scope-gated
+        // rule and silently strips capabilities the caller genuinely holds.
+        // That is exactly how `capabilities-self` came to under-report
+        // share-derived `update` for tenants.
+        //
+        // `None` remains correct for a root-scoped target, and for the
+        // asset-group member-redaction previews that pass mount-relative paths
+        // — those stay namespace-blind, which can only narrow a preview, never
+        // widen it (tracked as the asset-group follow-up).
+        let asset_groups = resolve_asset_groups(&self.core, path, ns_path).await;
+        let asset_owner = resolve_asset_owner(&self.core, path, ns_path).await;
 
         let mut req = Request::default();
         req.path = path.to_string();
         req.operation = op;
         req.auth = Some(auth.clone());
+        req.namespace_path = ns_path.filter(|p| !p.is_empty()).map(|p| p.to_string());
         req.asset_groups = asset_groups;
         req.asset_owner = asset_owner;
         req.target_shared_caps = resolve_target_shared_caps(&self.core, &req).await;

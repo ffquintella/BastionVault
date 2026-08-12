@@ -45,6 +45,88 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.39.6] - 2026-08-12
+
+### Added
+
+#### Build and Test Tooling
+- **CI runs the unit suites on push and pull request**
+  (`.github/workflows/tests.yml`) -- installs `cargo-nextest`, runs
+  `cargo nextest run --profile ci --lib --bins` plus doctests, and runs the GUI
+  type-check and vitest suite. The `ci` nextest profile takes no retries (a
+  flake is a bug report, not something to retry away) and emits JUnit XML as a
+  build artefact. Integration, hiqlite, and cucumber suites stay local -- see
+  the workflow header for why.
+
+### Changed
+
+#### Build and Test Tooling
+- **Run the test suites under `cargo-nextest`** -- `make test` (unit),
+  `make test-integration`, and `make plugins-test` now drive `cargo nextest run`
+  instead of `cargo test`. nextest runs each test in its own process, so a
+  panicking or aborting test can no longer take its siblings down with it, and
+  test binaries run concurrently instead of one after another. `make test`
+  covers 1,132 unit tests. New `make test-all` chains unit + integration +
+  doctests.
+- **`make` checks for `cargo-nextest` and explains how to install it** -- every
+  test target depends on `require-nextest`, which fails with the install command
+  (`cargo install --locked cargo-nextest`, or Homebrew) and a plain-`cargo`
+  fallback rather than a bare "no such subcommand" from cargo. `make bootstrap`
+  installs it if it is absent, and skips the rebuild if it is not.
+- **Three suites stay on plain `cargo test`, each with its own target** -- these
+  are not speed decisions; they are suites that process-per-test would silently
+  break, so they are excluded from nextest by `default-filter` in
+  `.config/nextest.toml` rather than left to race:
+  - `make test-hiqlite` -- the hiqlite storage and HA fault-injection suites
+    hand themselves disjoint TCP ports from a process-global atomic counter, and
+    a dropped backend releases its listeners asynchronously. One process per
+    test restarts that counter at zero, so every test would ask for the same
+    port pair and fail with "Address already in use".
+  - `make test-cucumber` -- `harness = false`, so nextest cannot enumerate its
+    scenarios.
+  - `make test-doc` -- nextest cannot run doctests at all (rustdoc's runner is
+    not a libtest binary).
+- **Pin the `plugins::process_runtime` tests to one at a time** -- they copy the
+  entire test binary (~210 MB) into a temp dir per invocation and carried
+  `#[serial_test::serial]` for that reason. That attribute takes an in-process
+  mutex, which is a no-op across nextest's separate processes, so they are now
+  held serial by a nextest test group instead.
+- **Type-check the GUI incrementally** -- `gui/tsconfig.json` enables
+  `incremental` with its build info under `gui/node_modules/.cache/`. A repeat
+  `tsc` run on an unchanged tree drops from 6.0s to 1.0s; `make gui-clean`
+  clears the cache with the rest of the frontend artefacts.
+
+### Fixed
+- **`sys/capabilities-self` answers for the path the router authorizes**
+  (`src/modules/system/mod.rs`) -- it probed the caller's path verbatim, but a
+  namespace-bound token's policy rules are `<ns>/`-prefixed (a tenant cannot
+  author anything else -- `refuse_cross_namespace_paths`) and the pipeline
+  rewrites `resources/secrets/db/` to `<ns>/resources/secrets/db/` before the
+  ACL sees it. So the endpoint contradicted the very pipeline it exists to
+  predict, reporting `deny` for grants tenants genuinely hold. Probes are now
+  namespace-qualified via the new `qualify_capability_path`, which reuses the
+  router's own `is_header_scoped_path` so `sys/` `auth/` `identity/` `rustion/`
+  stay untouched, skips already-qualified paths the way the router does, and is
+  a no-op for root-scoped callers. Responses stay keyed by the caller's original
+  path, so no client changes.
+
+  Observed live against a tenant token: `resources/resources/<name>` returned
+  `deny` while `dti/esi/resources/resources/<name>` returned `read, list` --
+  same token, same instant. The GUI reads these verdicts for credential
+  visibility, profile editing, and (through `connectOnly`) which profiles may
+  launch, so every namespace user was told their own resources were unreadable,
+  read-only, and -- on any resource not pinned to a bastion -- unconnectable.
+- **The scope re-verify can see namespaced shares**
+  (`src/modules/policy/policy_store.rs`) -- `can_operate` resolved the target's
+  owner / asset-groups / shares namespace-blind, and those lookups key on the
+  target's mount-relative name, so they could not strip a `<ns>/` prefix they
+  were never given. Every scope-gated rule therefore fail-closed for a
+  namespaced target and capabilities-self stripped caps it had just correctly
+  matched -- under-reporting precisely the share-derived access
+  `namespace-shared` exists to convey. It now takes an explicit `ns_path`;
+  `None` keeps today's behaviour for root-scoped targets and for the
+  asset-group member-redaction previews, which stay namespace-blind by design.
+
 ## [0.39.5] - 2026-08-11
 
 ### Security

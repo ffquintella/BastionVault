@@ -34,20 +34,32 @@ After completing any feature, phase, or roadmap stage:
 ```bash
 # Rust
 cargo check                        # Quick compile check
-cargo check --workspace            # Full workspace (includes GUI)
-cargo test --lib                   # Run library tests
+cargo check --workspace            # Full workspace (includes GUI) -- slow, drags in Tauri
 cargo clippy --lib                 # Lint
+
+# Tests -- all run via make, which checks for cargo-nextest first.
+# Install the runner once: cargo install --locked cargo-nextest
+make test                          # Unit suite, 1132 tests (cargo nextest, lib + bins)
+make test-integration              # tests/ suite (~30 binaries, slow to link)
+make test-doc                      # Doctests (nextest cannot run these)
+make test-all                      # Unit + integration + doctests
+make plugins-test                  # Plugin testkit, ABI parity, plugin substrate
 
 # GUI (from gui/ directory)
 cd gui && npm install              # Install frontend deps
-npx tsc --noEmit                   # TypeScript check
+npx tsc --noEmit                   # TypeScript check (incremental; ~1s warm, 6s cold)
 npx vite build                     # Build frontend
-npx vitest run                     # Run UI tests (42 tests)
+npx vitest run                     # Run UI tests (317 tests across 28 files)
 cargo check -p bastion-vault-gui   # Check Tauri backend
 
-# HA tests (requires free ports)
-CARGO_TEST_HIQLITE=1 cargo test --test hiqlite_ha_fault_injection
+# Port-bound suites: these need a single process (a process-global atomic hands
+# out disjoint ports), so they stay on cargo test rather than nextest.
+make test-hiqlite                  # hiqlite storage + HA fault injection
+make test-cucumber                 # cucumber features (harness = false)
 ```
+
+Test runner details -- which suites are excluded from nextest and why -- are in
+`.config/nextest.toml`.
 
 ## GUI Development Rules
 

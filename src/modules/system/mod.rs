@@ -2956,6 +2956,11 @@ impl SystemBackend {
     /// that index by path directly. The GUI uses this to decide, for a
     /// resource's secret path, whether to show credential values (`read`
     /// present) or only a brokered "Connect" button (`connect` only).
+    ///
+    /// Probes are namespace-qualified before evaluation — see
+    /// [`qualify_capability_path`]. The endpoint's whole purpose is to predict
+    /// what the request pipeline will decide, so it has to evaluate the same
+    /// string the pipeline will.
     pub async fn handle_capabilities_self(
         &self,
         _backend: &dyn Backend,
@@ -3029,9 +3034,19 @@ impl SystemBackend {
             .new_acl_for_request(&auth.policies, None, &auth)
             .await?;
 
+        // Probe the path the *router* would authorize, not the one the client
+        // typed. See `qualify_capability_path`: without this every mount-backed
+        // probe from a namespace-bound caller reported `deny` for grants they
+        // actually hold, because their policy rules are `<ns>/`-prefixed.
+        let ns_prefix = match active_ns.as_deref() {
+            Some(p) if !p.is_empty() => format!("{}/", p.trim_end_matches('/')),
+            _ => String::new(),
+        };
+
         let mut capabilities = Map::new();
         for path in &paths {
-            let mut caps = acl.capabilities(path.clone());
+            let probe = qualify_capability_path(&ns_prefix, path);
+            let mut caps = acl.capabilities(probe.clone());
 
             // `acl.capabilities` runs an `Operation::List` dry-run, and the
             // `is_list` short-circuit in `allow_operation` defers scope
@@ -3054,7 +3069,9 @@ impl SystemBackend {
                     ("delete", Operation::Delete),
                 ] {
                     if caps.iter().any(|c| c == cap_name)
-                        && !policy_store.can_operate(&auth, path, op).await
+                        && !policy_store
+                            .can_operate(&auth, &probe, op, active_ns.as_deref())
+                            .await
                     {
                         caps.retain(|c| c != cap_name);
                     }
@@ -4742,6 +4759,42 @@ fn sanitize_path(path: &str) -> String {
     new_path
 }
 
+/// Rewrite a `sys/capabilities-self` probe into the path the request router
+/// would actually authorize.
+///
+/// `rewrite_request_for_namespace` turns a namespaced request's
+/// `resources/secrets/db/` into `<ns>/resources/secrets/db/` *before* the ACL
+/// sees it, and a namespace policy's rules are authored against that rewritten
+/// form — `refuse_cross_namespace_paths` refuses to let a tenant author
+/// anything else, and `NAMESPACE_SHARED_POLICY` templates `{{namespace.path}}/`
+/// onto its own rules for the same reason. Probing the caller's raw path
+/// therefore matched no rule at all and reported `deny` for grants the caller
+/// genuinely holds: capabilities-self contradicting the very pipeline it exists
+/// to predict, for every namespace-bound principal.
+///
+/// The GUI reads those verdicts to decide whether a resource's credentials are
+/// visible, whether profile editing is offered, and — via `connectOnly` — which
+/// connection profiles may launch at all, so the false negative surfaced as a
+/// tenant being told their own resources were read-only and unlaunchable.
+///
+/// Three cases pass through unchanged:
+///   - **Root-scoped callers** (`ns_prefix` empty) — the pre-namespace hot path,
+///     byte-for-byte.
+///   - **Header-scoped mounts** (`sys/`, `auth/`, `identity/`, `rustion/`) — the
+///     router exempts them from rewriting because they live only in the root
+///     mount table, so raw *is* the authorized form. Sharing the predicate with
+///     the router is deliberate: if one grows a mount the other must too.
+///   - **Already-qualified paths** — a caller that passed `<ns>/…` itself, which
+///     the router also leaves alone rather than double-prefixing.
+fn qualify_capability_path(ns_prefix: &str, path: &str) -> String {
+    use crate::modules::namespace::router::is_header_scoped_path;
+
+    if ns_prefix.is_empty() || is_header_scoped_path(path) || path.starts_with(ns_prefix) {
+        return path.to_string();
+    }
+    format!("{ns_prefix}{path}")
+}
+
 #[cfg(test)]
 mod mod_system_tests {
     use super::*;
@@ -5160,6 +5213,345 @@ mod mod_system_tests {
             serde_json::json!("nsx"),
             "lookup-self must return the caller's own record: {r:?}"
         );
+    }
+
+    #[test]
+    fn test_qualify_capability_path() {
+        // Root-scoped callers: the pre-namespace hot path, untouched.
+        assert_eq!(qualify_capability_path("", "resources/secrets/db/"), "resources/secrets/db/");
+
+        // The regression: a mount-backed probe from a namespace-bound caller
+        // has to become the string the router will authorize.
+        assert_eq!(
+            qualify_capability_path("dti/esi/", "resources/secrets/db/"),
+            "dti/esi/resources/secrets/db/"
+        );
+        assert_eq!(qualify_capability_path("dti/esi/", "ssh/sign/admins"), "dti/esi/ssh/sign/admins");
+
+        // Header-scoped mounts live only in the root mount table, so the router
+        // never rewrites them and neither may we. This is why `rustion/*` and
+        // `sys/*` reported correctly while `resources/*` did not.
+        for p in [
+            "sys/capabilities-self",
+            "auth/token/lookup-self",
+            "identity/entity/self",
+            "rustion/policy/effective",
+        ] {
+            assert_eq!(qualify_capability_path("dti/esi/", p), p, "{p} is header-scoped");
+        }
+
+        // A caller that already qualified its own path must not be
+        // double-prefixed — same guard the router applies.
+        assert_eq!(
+            qualify_capability_path("dti/esi/", "dti/esi/resources/secrets/db/"),
+            "dti/esi/resources/secrets/db/"
+        );
+
+        // A sibling namespace's path is left alone: it is not this caller's
+        // prefix, and prefixing would silently rewrite one tenant's probe into
+        // another's path space.
+        assert_eq!(
+            qualify_capability_path("dti/esi/", "dti/other/resources/x"),
+            "dti/esi/dti/other/resources/x"
+        );
+    }
+
+    /// capabilities-self must answer for the path the *router* authorizes.
+    ///
+    /// A namespace-bound token's policy rules are `<ns>/`-prefixed — a tenant
+    /// cannot author anything else (`refuse_cross_namespace_paths`) — and the
+    /// pipeline rewrites `secret/data/x` to `<ns>/secret/data/x` before the ACL
+    /// sees it. Probing the raw path matched no rule and reported `deny` for
+    /// grants the caller genuinely holds, so the GUI told tenants their own
+    /// resources were unreadable, unlaunchable and read-only.
+    ///
+    /// The assertion that matters is *agreement*: the advertised verdict and a
+    /// real request against the same path must not disagree.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_capabilities_self_namespace_qualifies_mount_paths() {
+        let mut server = TestHttpServer::new("test_caps_self_ns_qualify", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        let ns_hdr: Vec<(&str, &str)> = vec![("X-BastionVault-Namespace", "tns")];
+
+        let (s, r) = server
+            .write("v1/sys/namespaces/tns", serde_json::json!({}).as_object().cloned(), Some(&root))
+            .unwrap();
+        assert!((200..300).contains(&s), "ns create: {s} {r:?}");
+
+        // Authored *in* the namespace, so every rule must be `tns/`-prefixed —
+        // exactly the shape a real tenant policy is forced into.
+        let (s, r) = server
+            .request_with_headers(
+                "POST",
+                "v1/sys/policies/acl/tenant-x",
+                serde_json::json!({
+                    "policy": "path \"tns/secret/data/x\" { capabilities = [\"read\", \"update\"] }"
+                })
+                .as_object()
+                .cloned(),
+                Some(&root),
+                None,
+                &ns_hdr,
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "tenant policy write: {s} {r:?}");
+
+        // Both secrets exist so a refusal is a real 403 rather than a 404 —
+        // otherwise the "agreement" assertions below could pass on a missing
+        // object instead of on the ACL.
+        for name in ["x", "other"] {
+            let (s, r) = server
+                .request_with_headers(
+                    "POST",
+                    &format!("v1/secret/data/{name}"),
+                    serde_json::json!({ "data": { "k": "v" } }).as_object().cloned(),
+                    Some(&root),
+                    None,
+                    &ns_hdr,
+                )
+                .unwrap();
+            assert!((200..300).contains(&s), "seed secret/{name} in tns: {s} {r:?}");
+        }
+
+        server
+            .write("v1/sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
+            .unwrap();
+        server
+            .write(
+                "v1/auth/pass/users/tina",
+                serde_json::json!({ "password": "hunter22XX!", "token_policies": "tenant-x", "ttl": 0 })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+
+        // Logging in under the header binds the token to `tns`, so its named
+        // policy resolves from that namespace's keyspace.
+        let token = server
+            .request_with_headers(
+                "POST",
+                "v1/auth/pass/login/tina",
+                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                None,
+                None,
+                &ns_hdr,
+            )
+            .unwrap()
+            .1
+            .get("auth")
+            .and_then(|a| a.get("client_token"))
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        let caps = |paths: serde_json::Value| -> Value {
+            let (s, r) = server
+                .request_with_headers(
+                    "POST",
+                    "v2/sys/capabilities-self",
+                    serde_json::json!({ "paths": paths }).as_object().cloned(),
+                    Some(&token),
+                    None,
+                    &ns_hdr,
+                )
+                .unwrap();
+            assert_eq!(s, 200, "capabilities-self must 200: {r:?}");
+            r
+        };
+
+        // The regression. Pre-fix this was `["deny"]`.
+        let mount_relative = caps(serde_json::json!(["secret/data/x"]));
+        let got = mount_relative["capabilities"]["secret/data/x"].as_array().cloned().unwrap_or_default();
+        assert!(
+            got.contains(&serde_json::json!("read")),
+            "a mount-relative probe must resolve against the caller's namespace: {mount_relative:?}"
+        );
+
+        // Response keys stay exactly what the caller asked for, so no client
+        // has to learn about the rewrite.
+        assert!(
+            mount_relative["capabilities"].get("secret/data/x").is_some(),
+            "the response must be keyed by the caller's own path: {mount_relative:?}"
+        );
+
+        // Agreement with the pipeline, in both directions.
+        let (read_status, _) = server
+            .request_with_headers("GET", "v1/secret/data/x", None, Some(&token), None, &ns_hdr)
+            .unwrap();
+        assert_ne!(read_status, 403, "advertised `read` must not be refused by the router");
+
+        let ungranted = caps(serde_json::json!(["secret/data/other"]));
+        let none = ungranted["capabilities"]["secret/data/other"].as_array().cloned().unwrap_or_default();
+        assert!(
+            !none.contains(&serde_json::json!("read")),
+            "qualification must not turn into a blanket grant: {ungranted:?}"
+        );
+        let (denied_status, _) = server
+            .request_with_headers("GET", "v1/secret/data/other", None, Some(&token), None, &ns_hdr)
+            .unwrap();
+        assert_eq!(denied_status, 403, "an unadvertised path must really be refused");
+
+        // Passing the already-qualified form keeps working — the guard against
+        // double-prefixing, exercised end to end.
+        let qualified = caps(serde_json::json!(["tns/secret/data/x"]));
+        let q = qualified["capabilities"]["tns/secret/data/x"].as_array().cloned().unwrap_or_default();
+        assert!(
+            q.contains(&serde_json::json!("read")),
+            "an already-qualified probe must not be double-prefixed: {qualified:?}"
+        );
+    }
+
+    /// The other half of the namespace blind spot: qualifying the probe is not
+    /// enough if the scope re-verify can't see the share.
+    ///
+    /// `can_operate` resolves the target's owner / groups / shares from the
+    /// target's *mount-relative* name, so it cannot strip a `<ns>/` prefix it
+    /// was never told about. Left namespace-blind it resolved no share at all,
+    /// every scope-gated rule fail-closed, and capabilities-self stripped the
+    /// caps it had just correctly matched — under-reporting exactly the
+    /// share-derived access that `namespace-shared` exists to convey.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_capabilities_self_namespace_share_survives_scope_recheck() {
+        let mut server = TestHttpServer::new("test_caps_self_ns_share", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        let ns_hdr: Vec<(&str, &str)> = vec![("X-BastionVault-Namespace", "sns")];
+
+        let (s, r) = server
+            .write("v1/sys/namespaces/sns", serde_json::json!({}).as_object().cloned(), Some(&root))
+            .unwrap();
+        assert!((200..300).contains(&s), "ns create: {s} {r:?}");
+
+        let (s, r) = server
+            .request_with_headers(
+                "POST",
+                "v1/resources/resources/r1",
+                serde_json::json!({ "type": "server", "hostname": "r1.example" }).as_object().cloned(),
+                Some(&root),
+                None,
+                &ns_hdr,
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "seed resource in sns: {s} {r:?}");
+
+        // The tenant's ONLY grant is scope-gated — the same shape
+        // `NAMESPACE_SHARED_POLICY` carries. Without a share it grants nothing;
+        // with one it must grant exactly the share's capabilities.
+        let (s, r) = server
+            .request_with_headers(
+                "POST",
+                "v1/sys/policies/acl/tenant-shared",
+                serde_json::json!({
+                    "policy": "path \"sns/resources/*\" {\n  capabilities = [\"read\", \"list\", \"update\"]\n  scopes = [\"shared\"]\n}"
+                })
+                .as_object()
+                .cloned(),
+                Some(&root),
+                None,
+                &ns_hdr,
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "tenant policy write: {s} {r:?}");
+
+        server
+            .write("v1/sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
+            .unwrap();
+        server
+            .write(
+                "v1/auth/pass/users/tess",
+                serde_json::json!({ "password": "hunter22XX!", "token_policies": "tenant-shared", "ttl": 0 })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        let token = server
+            .request_with_headers(
+                "POST",
+                "v1/auth/pass/login/tess",
+                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                None,
+                None,
+                &ns_hdr,
+            )
+            .unwrap()
+            .1
+            .get("auth")
+            .and_then(|a| a.get("client_token"))
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        let caps = || -> Vec<Value> {
+            let (s, r) = server
+                .request_with_headers(
+                    "POST",
+                    "v2/sys/capabilities-self",
+                    serde_json::json!({ "paths": ["resources/resources/r1"] }).as_object().cloned(),
+                    Some(&token),
+                    None,
+                    &ns_hdr,
+                )
+                .unwrap();
+            assert_eq!(s, 200, "capabilities-self must 200: {r:?}");
+            r["capabilities"]["resources/resources/r1"].as_array().cloned().unwrap_or_default()
+        };
+
+        // No share yet: the scope-gated rule must contribute nothing. This is
+        // also the proof that the recheck still gates rather than waving
+        // everything through once the namespace is known.
+        let before = caps();
+        assert!(
+            !before.contains(&serde_json::json!("read")),
+            "a scope-gated rule with no share must grant nothing: {before:?}"
+        );
+
+        let entity_id = server
+            .request_with_headers("GET", "v1/identity/entity/self", None, Some(&token), None, &ns_hdr)
+            .unwrap()
+            .1["data"]["entity_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let target_b64 = {
+            use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+            URL_SAFE_NO_PAD.encode("r1")
+        };
+        let (s, r) = server
+            .request_with_headers(
+                "POST",
+                &format!("v1/identity/sharing/by-target/resource/{target_b64}/{entity_id}"),
+                serde_json::json!({ "target_kind": "resource", "target_path": "r1", "capabilities": "read,update" })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+                None,
+                &ns_hdr,
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "share grant: {s} {r:?}");
+
+        // The regression: pre-fix the recheck could not see the share, so these
+        // came back stripped even though the router honours them.
+        let after = caps();
+        for want in ["read", "update"] {
+            assert!(
+                after.contains(&serde_json::json!(want)),
+                "share-derived `{want}` must survive the scope recheck: {after:?}"
+            );
+        }
+
+        // …and the router agrees.
+        let (read_status, _) = server
+            .request_with_headers("GET", "v1/resources/resources/r1", None, Some(&token), None, &ns_hdr)
+            .unwrap();
+        assert_eq!(read_status, 200, "advertised `read` must actually work");
     }
 
     /// Regression: `capabilities-self` must not advertise scope-gated

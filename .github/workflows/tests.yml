@@ -1,0 +1,137 @@
+name: Tests
+
+# Runs the Rust unit suite and the GUI frontend suite under cargo-nextest /
+# vitest.
+#
+# NOTE ON SCOPE: this workflow only runs the fast, hermetic suites —
+# `--lib --bins` plus doctests, and the GUI's vitest run. It deliberately
+# does NOT run:
+#
+#   * `tests/` integration suites — ~30 test binaries, each linking the full
+#     1200-crate dependency graph plus a ~315 MB rlib. Thirty full links per
+#     run is not a sensible CI shape; run them locally with
+#     `make test-integration`.
+#   * the hiqlite storage / HA fault-injection suites — they bind fixed TCP
+#     port ranges and depend on all tests sharing one process. They are
+#     opt-in behind CARGO_TEST_HIQLITE=1 and covered by `make test-hiqlite`.
+#   * the cucumber suite — `harness = false`, so nextest cannot enumerate it;
+#     `make test-cucumber`.
+#
+# See .config/nextest.toml for the full reasoning behind each exclusion.
+#
+# No workflow expression here is interpolated into a `run:` script. The only
+# one used at all is `github.ref` (a ref name) in the concurrency group.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+# A superseded run of an in-flight branch tells us nothing useful, and a full
+# build of this tree is expensive.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Nothing reuses these artefacts across runs, so the incremental cache is
+  # pure cost here (both in build time and in what rust-cache has to upload).
+  CARGO_INCREMENTAL: 0
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust unit tests (nextest)
+    runs-on: ubuntu-latest
+    # A cold build of this tree — aws-lc-rs, vendored openssl, russh, hiqlite —
+    # is slow enough that the default 360-minute ceiling is meaningless, but a
+    # genuine hang should still be cut off.
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+        # plugins-ext / third_party are not needed: plugins-ext is excluded
+        # from the workspace, and the hiqlite fork is consumed as a [patch]
+        # git dependency, which cargo fetches itself.
+        with:
+          submodules: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Mirrors rust-toolchain.toml.
+          components: rustfmt
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ubuntu-tests
+          cache-on-failure: true
+
+      # Built from crates.io source rather than fetched as a prebuilt binary
+      # or via a third-party action, to keep CI's trusted computing base to
+      # what the repo already trusts (this mirrors how rust.yml installs
+      # cargo-audit). It costs a couple of minutes on a cold cache; swap in
+      # `taiki-e/install-action@nextest` or the official prebuilt tarball from
+      # https://get.nexte.st if that trade looks different later.
+      #
+      # `.config/nextest.toml` uses `default-filter`, so nextest must be
+      # >= 0.9.84. Unpinned `cargo install` always satisfies that; pin a
+      # `--version` here if reproducibility matters more than currency.
+      - name: Install cargo-nextest
+        run: cargo install --locked cargo-nextest
+
+      - name: Show nextest version
+        run: cargo nextest --version
+
+      # `--profile ci` selects the [profile.ci] block in .config/nextest.toml:
+      # no retries (a flake is a bug report, not something to retry away) and
+      # JUnit output for the artefact below.
+      - name: Run unit tests
+        run: cargo nextest run --profile ci --lib --bins
+
+      # nextest cannot run doctests — rustdoc's test runner is not a libtest
+      # binary. This is the only `cargo test` invocation left in CI.
+      - name: Run doctests
+        run: cargo test --doc
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
+  gui:
+    name: GUI frontend tests (vitest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+
+      - name: Install GUI dependencies
+        run: cd gui && npm ci
+
+      # Type-check only; no Tauri host build here, so no webkit2gtk system
+      # dependencies are needed. tsconfig.json enables `incremental`, which is
+      # a no-op on a cold CI checkout but keeps this identical to the local
+      # `make gui-check` invocation.
+      - name: Type-check
+        run: cd gui && npx tsc --noEmit
+
+      - name: Run tests
+        run: cd gui && npx vitest run

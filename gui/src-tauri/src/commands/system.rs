@@ -161,8 +161,10 @@ pub async fn seal_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Cm
                 .ok_or("policy module unavailable")?;
             let policy_store = policy_module.policy_store.load();
 
+            // `sys/` is root-owned and never namespace-rewritten, so there is
+            // no namespace to qualify this probe with.
             if !policy_store
-                .can_operate(&auth, "sys/seal", ServerOp::Write)
+                .can_operate(&auth, "sys/seal", ServerOp::Write, None)
                 .await
             {
                 return Err("Permission denied: caller lacks `update` on sys/seal".into());

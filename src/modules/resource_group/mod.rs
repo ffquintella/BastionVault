@@ -244,7 +244,7 @@ async fn redact_inaccessible_members(
             continue;
         }
         let path = format!("resources/resources/{m}");
-        if !store.can_operate(auth, &path, Operation::Read).await {
+        if !store.can_operate(auth, &path, Operation::Read, None).await {
             *m = REDACTED_MEMBER.to_string();
         }
     }
@@ -259,9 +259,9 @@ async fn redact_inaccessible_members(
         if s == REDACTED_MEMBER {
             continue;
         }
-        let allowed = store.can_operate(auth, s, Operation::Read).await
+        let allowed = store.can_operate(auth, s, Operation::Read, None).await
             || store
-                .can_operate(auth, &kv_v2_data_form(s), Operation::Read)
+                .can_operate(auth, &kv_v2_data_form(s), Operation::Read, None)
                 .await;
         if !allowed {
             *s = REDACTED_MEMBER.to_string();

@@ -97,7 +97,7 @@ $(FAST_BUILD_TARGETS): export RUSTFLAGS := $(strip $(RUSTFLAGS) -Z threads=$(RUS
 endif
 endif
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test test-integration test-doc test-cucumber test-hiqlite test-all docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -127,6 +127,30 @@ GUI_TSC := npx tsc
 GUI_VITE := npx vite
 GUI_VITEST := npx vitest
 endif
+
+# ── Test runner: cargo-nextest ────────────────────────────────────
+#
+# The test suite runs under `cargo nextest` rather than `cargo test`.
+# It is a separate binary (`cargo install --locked cargo-nextest`), so
+# every test target depends on `require-nextest`, which fails with
+# install instructions rather than a bare "no such subcommand".
+#
+# Minimum version 0.9.84 — `.config/nextest.toml` uses `default-filter`,
+# which landed in that release. An older nextest rejects the key with a
+# config error rather than silently ignoring it.
+#
+# Two suites deliberately stay on plain `cargo test`; see the comments
+# in `.config/nextest.toml` for why (a `harness = false` binary nextest
+# cannot enumerate, and port allocators that depend on all tests sharing
+# one process). `test-cucumber` and `test-hiqlite` cover them.
+NEXTEST_MIN_VERSION := 0.9.84
+
+# Deliberately NOT added to FAST_BUILD_TARGETS: the `-Z threads` RUSTFLAGS
+# those targets export key a *separate* set of build artefacts. `make test`
+# is meant to reuse whatever a bare `cargo check`/`cargo clippy` in the
+# same tree already built, and target/ is large enough without a second
+# flag-variant of the dependency graph. Run `make test RUSTFLAGS=...` if
+# you want the parallel front-end for a one-off test compile.
 
 help: ## List available commands
 	@echo "BastionVault v$(VERSION)"
@@ -179,6 +203,62 @@ gui-test: gui-deps ## Run GUI frontend tests (Vitest)
 
 gui-check: gui-deps ## Type-check and lint the GUI frontend
 	cd gui && $(GUI_TSC) --noEmit && $(GUI_VITE) build
+
+# ── Tests ─────────────────────────────────────────────────────────
+
+require-nextest: ## Check cargo-nextest is installed; print install instructions if not
+	@command -v cargo-nextest >/dev/null 2>&1 || { \
+		echo ""; \
+		echo "  error: cargo-nextest is not installed."; \
+		echo ""; \
+		echo "  This project's test targets run under nextest (process-per-test,"; \
+		echo "  real cross-binary parallelism, per-test isolation). Install it with:"; \
+		echo ""; \
+		echo "      cargo install --locked cargo-nextest"; \
+		echo "      brew install cargo-nextest              # macOS / Linuxbrew"; \
+		echo ""; \
+		echo "  Requires >= $(NEXTEST_MIN_VERSION). Prebuilt binaries (much faster than"; \
+		echo "  building from source) are at https://nexte.st/docs/installation/pre-built-binaries/"; \
+		echo ""; \
+		echo "  To run a suite without nextest, fall back to plain cargo:"; \
+		echo "      cargo test --lib"; \
+		echo ""; \
+		exit 1; \
+	}
+	@cargo nextest --version
+
+test: require-nextest prune-stale ## Run the unit test suite (lib + bins) with nextest
+	cargo nextest run --lib --bins
+
+test-integration: require-nextest prune-stale ## Run the tests/ integration suite with nextest (links ~30 binaries; slow)
+	cargo nextest run --tests
+
+# nextest cannot run doctests — it drives libtest binaries, and rustdoc's
+# test runner is a separate thing entirely. This stays on `cargo test`.
+# See https://nexte.st/docs/design/custom-test-harnesses/
+test-doc: prune-stale ## Run doctests (cargo test --doc; nextest cannot run these)
+	cargo test --doc
+
+# `harness = false`, so nextest cannot enumerate its cases. Binds fixed
+# ports 28100/28200 and shares one backend across all scenarios, so it
+# also cannot overlap with another run of itself.
+test-cucumber: prune-stale ## Run the cucumber feature suite (harness = false, so plain cargo test)
+	cargo test --test cucumber_hiqlite
+
+# These MUST share one process: both suites hand themselves disjoint TCP
+# ports from a process-global atomic counter, and a dropped hiqlite
+# backend releases its listeners asynchronously. One process per test
+# would restart the counter at zero every time and collide on ports.
+# `--test-threads=1` on top of the in-crate `#[serial]` markers.
+test-hiqlite: prune-stale ## Run the hiqlite storage + HA fault-injection suites (plain cargo test, single process)
+	CARGO_TEST_HIQLITE=1 cargo test --lib storage::hiqlite:: -- --test-threads=1
+	CARGO_TEST_HIQLITE=1 cargo test --test hiqlite_ha_fault_injection -- --test-threads=1
+
+test-all: test test-integration test-doc ## Run unit + integration + doctests (excludes the port-bound hiqlite suites; see test-hiqlite)
+	@echo ""
+	@echo "==> test-all complete. Port-bound suites are not included here:"
+	@echo "    make test-hiqlite   # hiqlite storage + HA fault injection"
+	@echo "    make test-cucumber  # cucumber feature files"
 
 docs: ## Serve the Docsify-powered documentation site locally on http://localhost:3000
 	@command -v docsify >/dev/null 2>&1 || npm i -g docsify-cli
@@ -1044,9 +1124,15 @@ prune: ## Drop rustc incremental caches (saves GBs; next rebuild is slower but c
 	@echo "    then: cargo sweep --time 7 --recursive"
 	@echo "prune complete."
 
+# The cargo-nextest step is the test runner every `make test*` target needs.
+# Guarded on presence because `cargo install` would otherwise rebuild it from
+# source on every bootstrap.
 bootstrap: ## Install dependencies and set up the development environment
 	rustup update stable
 	cargo fetch
+	@command -v cargo-nextest >/dev/null 2>&1 \
+		&& echo "==> cargo-nextest already installed: $$(cargo nextest --version)" \
+		|| cargo install --locked cargo-nextest
 	cargo check
 	@echo "Bootstrap complete."
 
@@ -1413,12 +1499,12 @@ plugins-clean: ## Remove plugins-ext build artefacts
 #                             from src/plugins/runtime.rs
 #   3. host substrate tests — the in-crate `plugins::` module tests
 #                             (runtime, catalog, manifest, verifier…)
-plugins-test: ## Run plugin unit tests: testkit, host ABI parity, plugin substrate
+plugins-test: require-nextest ## Run plugin unit tests: testkit, host ABI parity, plugin substrate
 	@echo "==> bastion-plugin-testkit unit tests"
-	cargo test -p bastion-plugin-testkit
+	cargo nextest run -p bastion-plugin-testkit
 	@echo "==> ABI parity: testkit vs src/plugins/runtime.rs"
-	cargo test --test test_plugin_testkit_parity
+	cargo nextest run --test test_plugin_testkit_parity
 	@echo "==> host plugin substrate unit tests (src/plugins/*)"
-	cargo test --lib plugins::
+	cargo nextest run --lib -E 'test(/^plugins::/)'
 	@echo ""
 	@echo "==> plugins-test complete."

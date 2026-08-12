@@ -10,6 +10,14 @@
     "isolatedModules": true,
     "moduleDetection": "force",
     "noEmit": true,
+
+    /* Incremental type-checking. `tsc` runs on every `npm run build`,
+       `make gui-check`, and `make gui-build`; without this it re-checks
+       the whole project from scratch each time. The build info lives
+       under node_modules/ so it is already gitignored and is cleared by
+       `make gui-clean` along with the rest of the frontend cache. */
+    "incremental": true,
+    "tsBuildInfoFile": "./node_modules/.cache/tsconfig.tsbuildinfo",
     "jsx": "react-jsx",
     "strict": true,
     "noUnusedLocals": true,
