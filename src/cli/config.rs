@@ -504,7 +504,7 @@ mod test {
 
     #[test]
     fn test_load_config() {
-        let dir = env::temp_dir().join(*TEST_DIR).join("test_load_config");
+        let dir = env::temp_dir().join(TEST_DIR).join("test_load_config");
         let _ = fs::remove_dir_all(&dir);
         assert!(fs::create_dir_all(&dir).is_ok());
 
@@ -595,7 +595,7 @@ mod test {
 
     #[test]
     fn test_load_config_dir() {
-        let dir = env::temp_dir().join(*TEST_DIR).join("test_load_config_dir");
+        let dir = env::temp_dir().join(TEST_DIR).join("test_load_config_dir");
         let _ = fs::remove_dir_all(&dir);
         assert!(fs::create_dir_all(&dir).is_ok());
 
@@ -654,7 +654,7 @@ mod test {
 
     #[test]
     fn test_load_config_tls() {
-        let dir = env::temp_dir().join(*TEST_DIR).join("test_load_config_tls");
+        let dir = env::temp_dir().join(TEST_DIR).join("test_load_config_tls");
         let _ = fs::remove_dir_all(&dir);
         assert!(fs::create_dir_all(&dir).is_ok());
 
@@ -723,7 +723,7 @@ mod test {
 
     #[test]
     fn test_load_config_with_chacha_barrier_type() {
-        let dir = env::temp_dir().join(*TEST_DIR).join("test_load_config_with_chacha_barrier_type");
+        let dir = env::temp_dir().join(TEST_DIR).join("test_load_config_with_chacha_barrier_type");
         let _ = fs::remove_dir_all(&dir);
         assert!(fs::create_dir_all(&dir).is_ok());
 
@@ -758,7 +758,7 @@ mod test {
     /// the strict token-only posture.
     #[test]
     fn test_load_config_metrics_block() {
-        let dir = env::temp_dir().join(*TEST_DIR).join("test_load_config_metrics");
+        let dir = env::temp_dir().join(TEST_DIR).join("test_load_config_metrics");
         let _ = fs::remove_dir_all(&dir);
         assert!(fs::create_dir_all(&dir).is_ok());
 
@@ -800,7 +800,7 @@ mod test {
 
     #[test]
     fn test_load_config_hiqlite() {
-        let dir = env::temp_dir().join(*TEST_DIR).join("test_load_config_hiqlite");
+        let dir = env::temp_dir().join(TEST_DIR).join("test_load_config_hiqlite");
         let _ = fs::remove_dir_all(&dir);
         assert!(fs::create_dir_all(&dir).is_ok());
 

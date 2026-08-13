@@ -26,6 +26,7 @@ members = [
     "crates/bv-shamir",
     "crates/bv-context",
     "crates/bv-metrics",
+    "crates/bv-storage",
     "crates/bv_crypto",
     "crates/bastion-plugin-sdk",
     "crates/bastion-plugin-testkit",
@@ -60,6 +61,12 @@ bv-context = { path = "crates/bv-context" }
 # Tier 0 leaf: Prometheus families + registry, re-exported as
 # `bastion_vault::metrics`. The actix middleware stays in `src/metrics`.
 bv-metrics = { path = "crates/bv-metrics" }
+# Tier 0: barriers, physical backends and the read caches. Re-exported as
+# `bastion_vault::{storage, cache, schema}`. It owns the backend-specific
+# optional deps (diesel, hiqlite, rusty-s3, keyring); the root features of
+# the same names below forward to its features, so operators' choices are
+# unchanged.
+bv-storage = { path = "crates/bv-storage" }
 bv_crypto = { path = "crates/bv_crypto" }
 bv_plugin_surface = { path = "crates/bv_plugin_surface" }
 bv_plugin_manifest = { path = "crates/bv-plugin-manifest" }
@@ -99,46 +106,21 @@ as-any = "0.3.2"
 pem = "3.0"
 chrono = "0.4"
 zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
-diesel = { version = "2.3.8", features = ["mysql", "r2d2"], optional = true }
-r2d2 = { version = "0.8.10", optional = true }
-# Pinned to our fork submodule (`third_party/hiqlite`, branch
-# `main-local`): upstream v0.14.0 stable plus the raft-client
-# socket-leak fix (AbortOnDrop), which is still not upstreamed as of
-# 2026-07. See the `[patch.crates-io]` entry below.
-# `default-features = false` drops hiqlite's `backup` feature, which is
-# what pulled `cryptr/s3` -> `s3-simple` -> `quick-xml 0.39` into the tree
-# (RUSTSEC-2026-0194 / RUSTSEC-2026-0195, both DoS in XML parsing, no
-# 0.39 patch release). We never call hiqlite's backup API — vault backups
-# use our own BVBK format in `crate::backup` — so the feature was dead
-# weight. The rest of hiqlite's defaults (`auto-heal`, `sqlite`, `toml`)
-# are re-listed explicitly so behaviour is unchanged.
-hiqlite = { version = "=0.14.0", optional = true, default-features = false, features = [
-    "auto-heal",
-    "sqlite",
-    "toml",
-    "dlock",
-] }
-# cryptr was only ever used to build `NodeConfig::enc_keys` for hiqlite's
-# S3-backup/dashboard features, both of which we now build without.
-# Cloud Storage Targets — Phase 2b: S3 via rusty-s3 (URL signing +
-# XML parsing only, ~15 transitive deps). HTTP is handled by the
-# existing `ureq` dep, so enabling `cloud_s3` does not pull in
-# reqwest / hyper / aws-sdk-*. See `features/cloud-storage-backend.md`.
-rusty-s3 = { version = "0.10", optional = true }
-# Now non-optional: SAML Phase 3 (`src/modules/credential/saml/`) uses
-# it to parse IdP responses. `cloud_s3` also consumes it, but gating
-# it on that feature would force a feature-flag dance for the SAML
-# code path — keeping it always-on is simpler and the transitive
-# footprint is small (~3 crates).
+# `hiqlite`, `diesel` + `r2d2`, `rusty-s3` and `keyring` used to be declared
+# here. They are storage-backend dependencies and now live in
+# `crates/bv-storage/Cargo.toml`, reached through the feature forwards
+# below — no source file outside that crate ever named them. Moving them is
+# most of the point of Phase 1: the server, CLI and engines no longer carry
+# a Raft/SQLite engine, a MySQL client and an S3 signer in their dependency
+# list. The `[patch.crates-io]` pin on our hiqlite fork stays at the bottom
+# of this file, where it applies workspace-wide.
+#
+# Non-optional: SAML Phase 3 (`src/modules/credential/saml/`) uses it to
+# parse IdP responses. `bv-storage`'s `cloud_s3` also consumes it, but
+# gating it on that feature would force a feature-flag dance for the SAML
+# code path — keeping it always-on is simpler and the transitive footprint
+# is small (~3 crates).
 quick-xml = { version = "0.41" }
-# OS keychain writer for `credentials_ref = "keychain:..."`. Uses the
-# platform-native secret store on macOS (Keychain) / Windows
-# (Credential Vault) / Linux (Secret Service). v4's default `v1`
-# feature auto-selects the platform store (zbus-based Secret Service
-# on Linux — pure Rust, no dbus C dep). Feature-gated so server-only
-# operators who never use `keychain:` refs don't carry the extra
-# transitive deps.
-keyring = { version = "4", optional = true }
 bcrypt = "0.19"
 url = "2.5"
 ureq = { version = "3.3", features = ["json", "socks-proxy", "win-system-proxy"] }
@@ -185,7 +167,6 @@ tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "process", 
 ctor = "1.0"
 better_default = "1.0.5"
 prometheus-client = "0.25"
-sysinfo = "0.39"
 prettytable = "0.10"
 rpassword = "7.4"
 async-trait = "0.1"
@@ -193,7 +174,6 @@ stretto = "0.9"
 priority-queue = "2.7"
 crossbeam-channel = "0.5"
 maybe-async = { version = "0.2", optional = false }
-lockfile = "0.4.0"
 arc-swap = "1"
 blake3 = "1.8"
 hmac = "0.13"
@@ -389,6 +369,12 @@ rusb = { version = "0.9", optional = true, features = ["vendored"] }
 toml = "1.1.2"
 
 [dev-dependencies]
+# Same crate as the normal dependency above; the extra feature exposes
+# `bv_storage::{test_support, test}` — the backend fixtures that
+# `test_utils` re-exports, and the backend conformance suite that this
+# crate's two multi-process backend tests run. Declared here rather than
+# in `[dependencies]` so a release build never compiles them.
+bv-storage = { path = "crates/bv-storage", features = ["test-support"] }
 serial_test = "3.4"
 cucumber = "0.23"
 # `ferro-crypto` is a normal dependency (PQ-TLS transport for cmis_grpc); the
@@ -424,25 +410,25 @@ default = ["storage_hiqlite", "ssh_pqc"]
 # Forwards to `bv-errors/storage_mysql` so the two MySQL-only `RvError`
 # variants (`ErrConnectionPoolCreate`, `ErrDatabaseExecuteEntry`) are
 # compiled in exactly when the backend is.
-storage_mysql = ["diesel", "r2d2", "bv-errors/storage_mysql"]
-storage_hiqlite = ["hiqlite"]
-sync_handler = ["maybe-async/is_sync"]
+storage_mysql = ["bv-errors/storage_mysql", "bv-storage/storage_mysql"]
+storage_hiqlite = ["bv-storage/storage_hiqlite"]
+sync_handler = ["maybe-async/is_sync", "bv-storage/sync_handler"]
 # Cloud Storage Targets for the Encrypted File backend.
 # See `features/cloud-storage-backend.md`. Default build stays lean —
 # operators who don't need cloud targets pay no compile / binary cost.
-cloud_s3 = ["rusty-s3"]
+cloud_s3 = ["bv-storage/cloud_s3"]
 # OneDrive target pulls no new external deps — reuses `ureq` for HTTP,
 # `serde_json` for Graph API JSON, and the shared OAuth infra from
 # `file/oauth.rs`. The feature flag still exists so operators who
 # don't need OneDrive can opt out of compiling the module + its tests.
-cloud_onedrive = []
+cloud_onedrive = ["bv-storage/cloud_onedrive"]
 # Google Drive target. Like OneDrive, pulls no new external deps —
 # reuses `ureq` + `serde_json` + the shared OAuth infra.
-cloud_gdrive = []
+cloud_gdrive = ["bv-storage/cloud_gdrive"]
 # Dropbox target. Zero new external deps — reuses `ureq` +
 # `serde_json` + the shared OAuth infra.
-cloud_dropbox = []
-cloud_keychain = ["keyring"]
+cloud_dropbox = ["bv-storage/cloud_dropbox"]
+cloud_keychain = ["bv-storage/cloud_keychain"]
 cloud_targets = ["cloud_s3", "cloud_onedrive", "cloud_gdrive", "cloud_dropbox", "cloud_keychain"]
 # PKI Phase 3 — composite / hybrid signatures (ECDSA-P256 + ML-DSA-65).
 # Off by default. The IETF draft `draft-ietf-lamps-pq-composite-sigs`
@@ -532,8 +518,6 @@ hsm_yubihsm2 = ["dep:yubihsm", "dep:rusb"]
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"
 
-[dependencies.libc]
-version = "0.2"
 
 # ── cargo-machete allowlist ────────────────────────────────────────
 #

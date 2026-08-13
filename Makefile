@@ -300,7 +300,7 @@ test-cucumber: prune-stale ## Run the cucumber feature suite (harness = false, s
 # would restart the counter at zero every time and collide on ports.
 # `--test-threads=1` on top of the in-crate `#[serial]` markers.
 test-hiqlite: prune-stale ## Run the hiqlite storage + HA fault-injection suites (plain cargo test, single process)
-	CARGO_TEST_HIQLITE=1 cargo test --lib storage::hiqlite:: -- --test-threads=1
+	CARGO_TEST_HIQLITE=1 cargo test -p bv-storage --lib --features storage_hiqlite hiqlite::test:: -- --test-threads=1
 	CARGO_TEST_HIQLITE=1 cargo test --test hiqlite_ha_fault_injection -- --test-threads=1
 
 test-all: test test-integration test-doc ## Run unit + integration + doctests (excludes the port-bound hiqlite suites; see test-hiqlite)

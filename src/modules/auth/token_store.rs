@@ -1323,7 +1323,7 @@ mod mod_token_store_tests {
         // Stretto populates its admission window asynchronously; wait a
         // beat so the insert becomes visible before we probe.
         std::thread::sleep(std::time::Duration::from_millis(100));
-        let cached = token_store
+        let cached: TokenEntry = token_store
             .token_cache
             .as_ref()
             .unwrap()
@@ -1350,13 +1350,13 @@ mod mod_token_store_tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         let salted = token_store.salt_id(&entry.id);
-        assert!(token_store.token_cache.as_ref().unwrap().lookup(&salted).is_some());
+        assert!(token_store.token_cache.as_ref().unwrap().lookup::<TokenEntry>(&salted).is_some());
 
         token_store.revoke(&entry.id).await.unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         assert!(
-            token_store.token_cache.as_ref().unwrap().lookup(&salted).is_none(),
+            token_store.token_cache.as_ref().unwrap().lookup::<TokenEntry>(&salted).is_none(),
             "revoke must evict cache entry"
         );
         assert!(

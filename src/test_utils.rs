@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     default::Default,
     env, fs,
     io::prelude::*,
@@ -8,7 +7,7 @@ use std::{
     str::FromStr,
     sync::{Arc, Barrier, RwLock},
     thread::{self, sleep},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use actix_web::{
@@ -16,7 +15,6 @@ use actix_web::{
     middleware::{self, from_fn},
     web, App, HttpResponse, HttpServer,
 };
-use lazy_static::lazy_static;
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use serde_json::{json, Map, Value};
 use tokio::sync::oneshot;
@@ -32,14 +30,16 @@ use crate::{
     logical::{self, Operation, Request, Response},
     metrics::{manager::MetricsManager, middleware::metrics_midleware, system_metrics::SystemMetrics},
     bv_error_response, bv_error_string,
-    storage::{self, Backend},
+    storage::Backend,
     utils::rustls::OptionalClientAuthVerifier,
     BastionVault,
 };
 
-lazy_static! {
-    pub static ref TEST_DIR: &'static str = "bastion_vault_test";
-}
+/// The backend fixtures now live in `bv-storage`, next to the barrier and
+/// backend tests that use them; a test in that crate cannot import from this
+/// one. Re-exported under their original names so every call site here and in
+/// `tests/` is unchanged. See roadmaps/workspace-decomposition.md § Phase 1.
+pub use bv_storage::test_support::{new_test_backend, new_test_file_backend, new_test_temp_dir, TEST_DIR};
 
 #[derive(Debug, Clone)]
 pub struct TestTlsConfig {
@@ -607,7 +607,7 @@ mod tests {
 
     #[ctor::ctor(unsafe)]
     fn init() {
-        let dir = env::temp_dir().join(*TEST_DIR);
+        let dir = env::temp_dir().join(TEST_DIR);
         let _ = rustls::crypto::ring::default_provider().install_default();
         assert!(fs::create_dir_all(&dir).is_ok());
     }
@@ -663,31 +663,6 @@ pub fn cert_to_x509(
 /// is retained solely so existing call sites continue to type-check.
 pub unsafe fn new_test_crl(_revoked_cert_pem: &str, _ca_cert_pem: &str, _ca_key_pem: &str) -> Result<String, RvError> {
     Err(bv_error_string!("OpenSSL-based test CRL generation has been removed"))
-}
-
-pub fn new_test_temp_dir(name: &str) -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let test_dir = env::temp_dir().join(format!("{}/{}-{}", *TEST_DIR, name, now).as_str());
-    let dir = test_dir.to_string_lossy().into_owned();
-    assert!(fs::create_dir_all(&test_dir).is_ok());
-    println!("new_test_temp_dir: {}", dir);
-    dir
-}
-
-pub fn new_test_backend(name: &str) -> Arc<dyn Backend> {
-    let dir = new_test_temp_dir(name);
-    println!("new_test_backend, dir: {}", dir);
-    new_test_file_backend(&dir)
-}
-
-pub fn new_test_file_backend(path: &str) -> Arc<dyn Backend> {
-    let mut conf: HashMap<String, Value> = HashMap::new();
-    conf.insert("path".to_string(), Value::String(path.to_string()));
-
-    let backend = storage::new_backend("file", &conf);
-    assert!(backend.is_ok());
-
-    backend.unwrap()
 }
 
 pub fn new_test_bastion_vault(name: &str) -> BastionVault {

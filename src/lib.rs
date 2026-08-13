@@ -48,16 +48,16 @@ use crate::{
     storage::{Backend, BarrierType},
 };
 
-#[cfg(feature = "storage_mysql")]
-extern crate diesel;
-
 pub mod api;
 pub mod audit;
 pub mod backup;
 pub mod exchange;
 pub mod plugins;
 pub mod scheduled_exports;
-pub mod cache;
+/// The read caches, now a module of the Tier 0 `bv-storage` crate — they and
+/// `storage` reference each other, so they are one compilation unit either
+/// way. Re-exported here so `bastion_vault::cache::*` paths are unchanged.
+pub use bv_storage::cache;
 pub mod cli;
 /// Moved to the Tier 0 `bv-context` crate. Not in the roadmap's Tier 0 list,
 /// but it belongs there and `bv-logical` needs it.
@@ -88,19 +88,29 @@ pub mod module_manager;
 pub mod modules;
 pub mod mount;
 pub mod router;
+/// Diesel's generated table definition, moved into `bv-storage` alongside its
+/// only reader (the MySQL backend).
 #[cfg(feature = "storage_mysql")]
-pub mod schema;
+pub use bv_storage::schema;
 pub mod seal;
 pub mod server_info;
 /// Moved to the Tier 0 `bv-shamir` crate — the one directory in the original
 /// Phase 1 list that really did reference nothing but `crate::errors`.
 pub use bv_shamir as shamir;
 pub mod stats;
-pub mod storage;
+/// Barriers, physical backends and the read caches — the Tier 0 `bv-storage`
+/// crate, and the extraction that takes hiqlite, diesel and rusty-s3 out of
+/// the monolith's compilation unit.
+pub use bv_storage as storage;
 pub mod utils;
 
 #[cfg(test)]
 pub mod test_utils;
+
+/// The two backend tests that need a second vault process; see the module
+/// docs for why they are not next to the backends in `bv-storage`.
+#[cfg(test)]
+mod storage_backend_tests;
 
 /// When the test binary is spawned as a plugin subprocess (the
 /// `ProcessRuntime` does this — same exe acts as runner *and* plugin

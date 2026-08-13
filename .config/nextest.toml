@@ -47,8 +47,9 @@ final-status-level = "slow"
 #
 #   * The hiqlite storage tests and the HA fault-injection suite hand
 #     themselves disjoint TCP ports from a `static AtomicU16` counter
-#     (`NEXT_PORT_OFFSET` in src/storage/hiqlite/mod.rs, `NEXT_PORT_BLOCK`
-#     in tests/hiqlite_ha_fault_injection.rs). Both files document that a
+#     (`NEXT_PORT_OFFSET` in crates/bv-storage/src/hiqlite/mod.rs,
+#     `NEXT_PORT_BLOCK` in tests/hiqlite_ha_fault_injection.rs). Both files
+#     document that a
 #     dropped backend releases its listeners asynchronously, so reusing a
 #     port fails with "Address already in use". Under process-per-test
 #     every process would start that counter at 0 and every test would
@@ -56,7 +57,11 @@ final-status-level = "slow"
 #     via `make test-hiqlite`. (They are inert without
 #     CARGO_TEST_HIQLITE=1, so a default nextest run would pass either
 #     way — this exclusion keeps that from being luck.)
-default-filter = 'not (binary(cucumber_hiqlite) | binary(hiqlite_ha_fault_injection) | test(/^storage::hiqlite::test::/))'
+#     The `storage::` prefix is optional in the pattern because these tests
+#     moved into the `bv-storage` crate in Phase 1 of
+#     roadmaps/workspace-decomposition.md, where their path lost it. Both
+#     spellings are matched so the exclusion cannot silently lapse again.
+default-filter = 'not (binary(cucumber_hiqlite) | binary(hiqlite_ha_fault_injection) | test(/^(storage::)?hiqlite::test::/))'
 
 # `src/plugins/process_runtime.rs` tests copy the *entire test binary*
 # into a temp dir per invocation (`current_exe_bytes()` → `Vec<u8>`).

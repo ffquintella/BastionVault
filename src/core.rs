@@ -1357,7 +1357,7 @@ mod test {
         std::thread::sleep(std::time::Duration::from_millis(100));
         let salted = token_store.salt_id(&root_token);
         assert!(
-            token_store.token_cache.as_ref().unwrap().lookup(&salted).is_some(),
+            token_store.token_cache.as_ref().unwrap().lookup::<TokenEntry>(&salted).is_some(),
             "precondition: cache must be populated before flush"
         );
 
@@ -1373,17 +1373,17 @@ mod test {
         token_store.lookup(&entry.id).await.unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
         let salted_probe = token_store.salt_id(&entry.id);
-        assert!(token_store.token_cache.as_ref().unwrap().lookup(&salted_probe).is_some());
+        assert!(token_store.token_cache.as_ref().unwrap().lookup::<TokenEntry>(&salted_probe).is_some());
 
         core.flush_caches();
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         assert!(
-            token_store.token_cache.as_ref().unwrap().lookup(&salted).is_none(),
+            token_store.token_cache.as_ref().unwrap().lookup::<TokenEntry>(&salted).is_none(),
             "flush_caches must drop the root-token entry"
         );
         assert!(
-            token_store.token_cache.as_ref().unwrap().lookup(&salted_probe).is_none(),
+            token_store.token_cache.as_ref().unwrap().lookup::<TokenEntry>(&salted_probe).is_none(),
             "flush_caches must drop every token cache entry"
         );
     }
