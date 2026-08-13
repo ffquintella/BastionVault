@@ -583,12 +583,15 @@ field_reassign_with_default = "allow"
 # wants the same lock deadlocks — and on the current-thread `actix_rt` runtimes
 # this codebase spawns for its sweepers, nothing else can make progress either.
 #
-# Set to "warn", not "allow", so the class stays visible. Two sites are known
-# open and deliberately left warning rather than silenced:
-#   * src/modules/auth/expiration.rs — holds the lease-queue write guard across
-#     `revoke_lease_id(..).await`. Prime suspect for the intermittent failures
-#     in `mod_expiration_tests::*`, and for leases not being revoked on time.
-#   * src/mount.rs — holds the mount-table read guard across `table.load(..)`.
+# Set to "warn", not "allow", so the class stays visible. The two sites this
+# flagged when it was turned on are both fixed — they now drain what they need,
+# drop the guard, and only then await:
+#   * src/modules/auth/expiration.rs — held the lease-queue write guard across
+#     `revoke_lease_id(..).await`, which re-enters that same lock. This was the
+#     cause of the intermittent `mod_expiration_tests::*` failures, and of
+#     leases not being revoked on schedule.
+#   * src/mount.rs — held the mount-table read guard across `table.load(..)`.
+# Fix the site rather than silencing it; do not add a local `#[allow]`.
 # Not "deny": CI runs no clippy job, so denying would only bite locally.
 await_holding_lock = "warn"
 too_many_arguments = "allow"

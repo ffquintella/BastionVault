@@ -171,26 +171,40 @@ EXAMPLE ENTRY:
 
 ### Security
 
-- **Two lock-across-await deadlocks made visible, one fixed.**
+- **Three lock-across-await deadlocks made visible and fixed.**
   `[lints.clippy] await_holding_lock` was `"allow"` repo-wide, which was hiding
   a bug class rather than a style nit: a `std::sync` guard is not re-entrant and
   an awaiting task cannot release it, and every site here sits on a
   current-thread `actix_rt` runtime where nothing else can progress meanwhile.
-  Now `"warn"`.
-  Fixed: `Context::wait_task_finish` (`crates/bv-context`) held its `MutexGuard`
+  Now `"warn"`, with all three sites fixed rather than silenced -- each drains
+  what it needs, drops the guard, and only then awaits.
+  `Context::wait_task_finish` (`crates/bv-context`) held its `MutexGuard`
   across the `.await` of each task -- and the AppRole secret-id tidy path
   registers its sweep task with `req.ctx.add_task(...)`, so an awaited task
   calling `add_task`/`clear_task` would block forever on a mutex its awaiter
   would not release. Handles are now drained under the lock and awaited outside
   it. Found only because the code moved into a crate that does not inherit the
   root's allow list.
-  Still open, deliberately left warning rather than silenced:
-  `src/modules/auth/expiration.rs` holds the lease-queue **write** guard across
-  `revoke_lease_id(..).await`, whose call path can re-enter the same `RwLock` --
-  the consequence is leases not being revoked on schedule, which is a security
-  property, not just availability. It is also the prime suspect for the
-  intermittent `mod_expiration_tests::*` failures. `src/mount.rs` holds the
-  mount-table read guard across `table.load(..)`.
+  **`src/modules/auth/expiration.rs` was the one that mattered**: the lease
+  sweeper held the lease-queue **write** guard across `revoke_lease_id(..).await`,
+  whose call path re-enters that same `RwLock`. The consequence is leases not
+  being revoked on schedule, which is a security property, not just
+  availability. Due leases are now drained under the guard and revoked after it
+  is dropped. Because that window lets a lease be renewed before it is revoked,
+  each one is re-checked against storage first -- the renew paths persist the new
+  `expire_time` *before* re-registering the queue entry, so a lease whose
+  persisted expiry has moved into the future is re-queued instead of revoked. A
+  lease whose revocation fails is re-queued too, which the pre-drain code got
+  for free by not popping on error. This was the cause of the intermittent
+  `mod_expiration_tests::*` failures (`test_secret_expiration`,
+  `test_expiration_renew_token_period_backend`,
+  `test_expiration_register_and_restore_benchmark`); the unit suite passed
+  1143/1143 across four consecutive runs afterwards.
+  `src/mount.rs` held the mount-table read guard across `table.load(..)`.
+  Read-read does not self-block, but `std::sync::RwLock` is not guaranteed
+  fair, so a writer arriving mid-await can block later readers and wedge the
+  monitor; the routers are now snapshotted (one `Arc` clone each) before the
+  await.
 
 ### Removed
 
