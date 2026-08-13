@@ -137,6 +137,57 @@ pub const BUILD_TIME: &str = build_time::build_time_utc!();
 /// bastion_vault version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The module set a default BastionVault server mounts.
+///
+/// This list lives here, at the assembly point, and not in
+/// `module_manager.rs`: naming the 17 concrete engine types is exactly the
+/// dependency that would stop `bv-core` from being a crate independent of the
+/// engines. See roadmaps/workspace-decomposition.md Phase 2 step 4.
+///
+/// **Order is load-bearing.** The namespace module is the multi-tenancy
+/// registry and must initialise before the system module's request handlers
+/// reference its store.
+pub fn default_modules() -> Vec<Box<dyn crate::module_manager::ModuleFactory>> {
+    use crate::modules::{
+        cert_lifecycle::CertLifecycleModule, files::FilesModule, identity::IdentityModule,
+        kv::KvModule, kv_v2::KvV2Module, ldap::LdapModule, namespace::NamespaceModule,
+        notifications::NotificationsModule, pki::PkiModule, resource::ResourceModule,
+        resource_group::ResourceGroupModule, rustion::RustionModule, ssh::SshModule,
+        ssh_broker::SshBrokerModule, system::SystemModule, totp::TotpModule,
+        transit::TransitModule, Module,
+    };
+
+    // One `Box::new(...)` per engine. The closure shape is what the blanket
+    // `ModuleFactory` impl accepts.
+    macro_rules! factory {
+        ($ty:ident) => {
+            Box::new(|c: Arc<Core>| Arc::new($ty::new(c)) as Arc<dyn Module>)
+                as Box<dyn crate::module_manager::ModuleFactory>
+        };
+    }
+
+    vec![
+        factory!(KvModule),
+        factory!(KvV2Module),
+        factory!(PkiModule),
+        factory!(ResourceModule),
+        factory!(FilesModule),
+        factory!(IdentityModule),
+        factory!(NotificationsModule),
+        factory!(ResourceGroupModule),
+        factory!(RustionModule),
+        factory!(SshModule),
+        factory!(SshBrokerModule),
+        factory!(TotpModule),
+        factory!(TransitModule),
+        factory!(LdapModule),
+        factory!(CertLifecycleModule),
+        // Namespace before system: see the note above.
+        factory!(NamespaceModule),
+        factory!(SystemModule),
+    ]
+}
+
 pub struct BastionVault {
     pub core: ArcSwap<Core>,
     pub token: ArcSwap<String>,
@@ -175,7 +226,7 @@ impl BastionVault {
             core.mounts_monitor.store(Some(Arc::new(MountsMonitor::new(core.clone(), core.mounts_monitor_interval))));
         }
 
-        core.module_manager().set_default_modules(core.clone())?;
+        core.module_manager().set_modules(default_modules(), core.clone())?;
 
         // add auth_module
         let auth_module = AuthModule::new(core.clone())?;

@@ -13,18 +13,28 @@ use std::{any::Any, sync::Arc};
 use arc_swap::ArcSwap;
 
 use crate::kernel_api::VaultCtx;
-use crate::{
-    core::Core,
-    errors::RvError,
-    modules::{
-        cert_lifecycle::CertLifecycleModule, files::FilesModule, identity::IdentityModule,
-        kv::KvModule, kv_v2::KvV2Module, ldap::LdapModule, namespace::NamespaceModule,
-        notifications::NotificationsModule, pki::PkiModule, resource::ResourceModule,
-        resource_group::ResourceGroupModule, rustion::RustionModule, ssh::SshModule,
-        ssh_broker::SshBrokerModule, system::SystemModule, totp::TotpModule,
-        transit::TransitModule, Module,
-    },
-};
+use crate::{core::Core, errors::RvError, modules::Module};
+
+/// Builds one module, given the kernel handle.
+///
+/// A boxed closure would do for the current call site, but a trait keeps the
+/// door open for what Phase 4 wants: a registration list a plugin or an
+/// embedder can extend, rather than a `vec![]` literal compiled into the
+/// kernel.
+pub trait ModuleFactory: Send + Sync {
+    fn build(&self, core: Arc<Core>) -> Arc<dyn Module>;
+}
+
+/// Blanket impl so a plain closure is a factory:
+/// `Box::new(|c| Arc::new(PkiModule::new(c)) as Arc<dyn Module>)`.
+impl<F> ModuleFactory for F
+where
+    F: Fn(Arc<Core>) -> Arc<dyn Module> + Send + Sync,
+{
+    fn build(&self, core: Arc<Core>) -> Arc<dyn Module> {
+        self(core)
+    }
+}
 
 pub struct ModuleManager {
     pub modules: ArcSwap<Vec<Arc<dyn Module>>>,
@@ -36,28 +46,19 @@ impl ModuleManager {
         Self { modules: ArcSwap::from_pointee(Vec::new()) }
     }
 
-    pub fn set_default_modules(&self, core: Arc<Core>) -> Result<(), RvError> {
-        let modules: Vec<Arc<dyn Module>> = vec![
-            Arc::new(KvModule::new(core.clone())),
-            Arc::new(KvV2Module::new(core.clone())),
-            Arc::new(PkiModule::new(core.clone())),
-            Arc::new(ResourceModule::new(core.clone())),
-            Arc::new(FilesModule::new(core.clone())),
-            Arc::new(IdentityModule::new(core.clone())),
-            Arc::new(NotificationsModule::new(core.clone())),
-            Arc::new(ResourceGroupModule::new(core.clone())),
-            Arc::new(RustionModule::new(core.clone())),
-            Arc::new(SshModule::new(core.clone())),
-            Arc::new(SshBrokerModule::new(core.clone())),
-            Arc::new(TotpModule::new(core.clone())),
-            Arc::new(TransitModule::new(core.clone())),
-            Arc::new(LdapModule::new(core.clone())),
-            Arc::new(CertLifecycleModule::new(core.clone())),
-            // Namespace module must init before the system module's request
-            // handlers reference its store; it is the multi-tenancy registry.
-            Arc::new(NamespaceModule::new(core.clone())),
-            Arc::new(SystemModule::new(core)),
-        ];
+    /// Install the module set for this vault.
+    ///
+    /// The manager deliberately does **not** name the 17 concrete engine types
+    /// any more. It takes factories and calls them, so `bv-core` can be a crate
+    /// that knows nothing about `bv-engine-pki` and friends; the assembly point
+    /// (`src/lib.rs`, later the `bastion_vault` facade) is what knows the list.
+    /// See roadmaps/workspace-decomposition.md Phase 2 step 4.
+    ///
+    /// Order is load-bearing and preserved by the caller's `Vec`: the namespace
+    /// module must initialise before the system module's request handlers
+    /// reference its store.
+    pub fn set_modules(&self, factories: Vec<Box<dyn ModuleFactory>>, core: Arc<Core>) -> Result<(), RvError> {
+        let modules: Vec<Arc<dyn Module>> = factories.into_iter().map(|f| f.build(core.clone())).collect();
         self.modules.store(Arc::new(modules));
         Ok(())
     }
