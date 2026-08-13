@@ -576,7 +576,15 @@ impl MountsMonitor {
                     select! {
                         recv(ticker) -> _ => {
                             let mut changed = false;
-                            let tables = mount_tables.read().unwrap();
+
+                            // Snapshot the routers and release the guard before the
+                            // awaits below. `std::sync::RwLock` is not guaranteed fair:
+                            // a writer arriving while this future is parked on
+                            // `table.load` can block every subsequent reader, wedging
+                            // the monitor on a current-thread runtime. The elements are
+                            // `Arc`s, so cloning the vec is just refcount bumps.
+                            let tables: Vec<Arc<MountsRouter>> = mount_tables.read().unwrap().clone();
+
                             for table in tables.iter() {
                                 #[cfg(not(feature = "sync_handler"))]
                                 match table.load(core.barrier.as_storage(), Some(&core.state.load().hmac_key), core.mount_entry_hmac_level).await {

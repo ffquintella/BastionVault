@@ -49,9 +49,25 @@ impl Context {
         tasks.clear()
     }
 
+    /// Awaits every task registered with [`Context::add_task`].
+    ///
+    /// The handles are moved out of the vec under the mutex and awaited only
+    /// after the guard is dropped. A `std::sync::MutexGuard` held across an
+    /// `.await` cannot be released by the task that is parked on that await, so
+    /// anything else touching `tasks` — `add_task`, `clear_task`, a second
+    /// waiter — blocks until the await completes, and deadlocks outright if the
+    /// awaited task is what would have unblocked it.
+    ///
+    /// Draining also makes repeat calls safe: a `JoinHandle` polled again after
+    /// it has already completed panics, which the previous `iter_mut` version
+    /// left exposed.
     pub async fn wait_task_finish(&self) -> Result<(), RvError> {
-        let mut tasks = self.tasks.lock().unwrap();
-        for task in tasks.iter_mut() {
+        let tasks: Vec<JoinHandle<()>> = {
+            let mut tasks_locked = self.tasks.lock().unwrap();
+            tasks_locked.drain(..).collect()
+        };
+
+        for task in tasks {
             task.await?;
         }
 

@@ -45,6 +45,42 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+- **Lease expiration sweeper could wedge and stop revoking leases**
+  (`src/modules/auth/expiration.rs`) -- the sweep loop held a
+  `std::sync::RwLock` write guard across the `.await` on
+  `revoke_lease_id`, which re-enters the same lock via the revoke request
+  path. A `std::sync` guard is not re-entrant and cannot be released by
+  the task awaiting it, so the sweeper deadlocked and expired leases
+  stopped being revoked on schedule. Due leases are now drained under the
+  guard and revoked after it is dropped. Because a lease can be renewed
+  once the lock is released, each one is re-checked against storage
+  before revocation and re-queued instead of revoked if its persisted
+  expiry has moved into the future. Fixes the intermittent failures in
+  `mod_expiration_tests::test_secret_expiration`,
+  `::test_expiration_renew_token_period_backend` and
+  `::test_expiration_register_and_restore_benchmark`.
+- **Mounts monitor could wedge behind a queued writer** (`src/mount.rs`)
+  -- the monitor tick held a `tables` read guard across
+  `MountsRouter::load`. `std::sync::RwLock` is not guaranteed fair, so a
+  writer arriving mid-await can block subsequent readers. The routers are
+  now snapshotted (an `Arc` clone per entry) and the guard released
+  before the await.
+- **`Context::wait_task_finish` held a mutex across `.await`**
+  (`src/context.rs`) -- blocked `add_task`/`clear_task` for the duration
+  of the await and panicked if called twice, since a completed
+  `JoinHandle` cannot be polled again. Handles are now drained under the
+  guard and awaited after it is dropped.
+
+### Changed
+
+- **`clippy::await_holding_lock` is now `warn` rather than `allow`**
+  (`Cargo.toml`) -- in this codebase the lint marks real deadlocks, not
+  style nits: the background sweepers run on current-thread `actix_rt`
+  runtimes, where a future parked holding a guard stalls every other task
+  on that runtime. `cargo clippy --lib` is clean under the new setting.
+
 ## [0.39.7] - 2026-08-12
 
 ### Added

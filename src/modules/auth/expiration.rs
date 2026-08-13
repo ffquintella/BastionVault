@@ -487,6 +487,30 @@ impl ExpirationManager {
         self.queue.read().map(|queue| queue.len()).unwrap_or(0)
     }
 
+    /// Revokes one lease that the expiration sweeper has already removed from
+    /// the queue.
+    ///
+    /// The sweeper drops its queue guard before calling this, so the lease may
+    /// have been renewed in the window between being drained and being revoked.
+    /// Storage is the source of truth for that: the renew paths persist the new
+    /// `expire_time` *before* they re-register the queue entry, so a lease whose
+    /// persisted expiry has moved into the future has been renewed and must be
+    /// put back on the queue instead of revoked. Revoking it here would kill a
+    /// live lease.
+    #[maybe_async::maybe_async]
+    async fn revoke_swept_lease_entry(&self, lease_id: &str) -> Result<(), RvError> {
+        let Some(current) = self.load_lease_entry(lease_id).await? else {
+            // Already gone from storage — nothing left to revoke.
+            return Ok(());
+        };
+
+        if current.expire_time > SystemTime::now() {
+            return self.register_lease_entry(Arc::new(current));
+        }
+
+        self.revoke_lease_id(lease_id, false).await
+    }
+
     /// Starts a background task to check for and handle expired lease entries.
     pub fn start_check_expired_lease_entries(&self) {
         let queue = self.queue.clone();
@@ -511,47 +535,73 @@ impl ExpirationManager {
                                 continue;
                             }
 
-                            let mut queue_write_locked = queue_cloned.write().unwrap();
-                            loop {
-                                let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|t| t.as_millis()).unwrap_or(0);
-                                if let Some((le, Reverse(priority))) = queue_write_locked.peek() {
+                            // Drain every due lease under the guard, then release it
+                            // before revoking anything. Revocation re-enters this same
+                            // `RwLock` (`revoke_lease_id` -> `revoke_lease_entry` -> the
+                            // revoke request path), and a `std::sync` guard is neither
+                            // re-entrant nor releasable by the task awaiting it — so
+                            // awaiting a revoke while holding this write guard wedges the
+                            // sweeper permanently, and with it every lease still queued.
+                            // This runtime is current-thread, so nothing else on it
+                            // progresses either.
+                            let mut due: Vec<Arc<LeaseEntry>> = Vec::new();
+                            {
+                                let mut queue_write_locked = queue_cloned.write().unwrap();
+                                loop {
+                                    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|t| t.as_millis()).unwrap_or(0);
+                                    let Some((_le, Reverse(priority))) = queue_write_locked.peek() else {
+                                        break;
+                                    };
+
                                     if *priority > now {
                                         break;
                                     }
 
-                                    if *priority != 0 {
-                                        #[cfg(not(feature = "sync_handler"))]
-                                        if let Err(e) = expiration_cloned.revoke_lease_id(&le.lease_id, false).await {
-                                            log::warn!(
-                                                "check_expired_lease_entries call revoke_lease_id err: {:?}, lease_id: {}, now: \
-                                                {}, priority: {}, expire_time: {:?}",
-                                                e,
-                                                le.lease_id,
-                                                now,
-                                                *priority,
-                                                le.expire_time
-                                            );
-                                            break;
-                                        }
-                                        #[cfg(feature = "sync_handler")]
-                                        if let Err(e) = expiration_cloned.revoke_lease_id(&le.lease_id, false) {
-                                            log::warn!(
-                                                "check_expired_lease_entries call revoke_lease_id err: {:?}, lease_id: {}, now: \
-                                                {}, priority: {}, expire_time: {:?}",
-                                                e,
-                                                le.lease_id,
-                                                now,
-                                                *priority,
-                                                le.expire_time
-                                            );
-                                            break;
-                                        }
-                                    }
-                                } else {
-                                    break;
-                                }
+                                    // Priority 0 marks an entry that was already revoked
+                                    // and re-registered as a tombstone: drop it without
+                                    // revoking it a second time.
+                                    let needs_revoke = *priority != 0;
 
-                                let _le = queue_write_locked.pop();
+                                    let Some((le, _)) = queue_write_locked.pop() else {
+                                        break;
+                                    };
+
+                                    if needs_revoke {
+                                        due.push(le);
+                                    }
+                                }
+                            }
+
+                            for le in due {
+                                #[cfg(not(feature = "sync_handler"))]
+                                let result = expiration_cloned.revoke_swept_lease_entry(&le.lease_id).await;
+                                #[cfg(feature = "sync_handler")]
+                                let result = expiration_cloned.revoke_swept_lease_entry(&le.lease_id);
+
+                                if let Err(e) = result {
+                                    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|t| t.as_millis()).unwrap_or(0);
+                                    log::warn!(
+                                        "check_expired_lease_entries call revoke_lease_id err: {:?}, lease_id: {}, now: \
+                                        {}, expire_time: {:?}",
+                                        e,
+                                        le.lease_id,
+                                        now,
+                                        le.expire_time
+                                    );
+
+                                    // The entry was popped before the guard was released,
+                                    // so put it back: leaving a lease live and untracked
+                                    // is worse than retrying it on a later tick, which is
+                                    // what the pre-drain code did by not popping on error.
+                                    if let Err(err) = expiration_cloned.register_lease_entry(le.clone()) {
+                                        log::warn!(
+                                            "check_expired_lease_entries failed to requeue lease after revoke err: \
+                                            {:?}, lease_id: {}",
+                                            err,
+                                            le.lease_id
+                                        );
+                                    }
+                                }
                             }
                         }
                     }

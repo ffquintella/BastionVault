@@ -530,7 +530,14 @@ let_and_return = "allow"
 should_implement_trait = "allow"
 new_without_default = "allow"
 field_reassign_with_default = "allow"
-await_holding_lock = "allow"
+# Holding a `std::sync` guard across an `.await` is a deadlock in this
+# codebase, not a style nit: those guards are not re-entrant and an awaiting
+# task cannot release one. The background sweepers (lease expiration, mounts
+# monitor) run on a *current-thread* `actix_rt` runtime, so a future parked
+# holding a guard stops every other task on that runtime too. Keep this at
+# `warn` and fix the site — drain what you need, drop the guard, then await.
+# Do not silence individual sites with `#[allow]`.
+await_holding_lock = "warn"
 too_many_arguments = "allow"
 unnecessary_unwrap = "allow"
 collapsible_match = "allow"
