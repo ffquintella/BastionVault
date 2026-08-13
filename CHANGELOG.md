@@ -115,6 +115,21 @@ EXAMPLE ENTRY:
   `SecurityBarrier` are Tier 0, `Router` / `MountsRouter` are Tier 2). The
   crate is not what cuts the cycle -- the abstraction is -- so the trait lands
   first and the file moves later.
+- **The `Core` <-> `modules` cycle is cut.** `Module::init`/`setup`/`cleanup`
+  and `LogicalBackendNewFunc` (the alias in every engine's mount path) now take
+  `dyn VaultCtx`, and `ModuleManager::set_modules` consumes
+  `Vec<Box<dyn ModuleFactory>>` supplied by `default_modules()` in `src/lib.rs`
+  instead of naming 17 concrete engine types.
+  Result: all 14 Tier 3 engine directories -- transit, totp, ldap, pki, files,
+  kv, kv_v2, ssh, ssh_broker, cert_lifecycle, resource, notifications, rustion,
+  credential -- plus the plugin runtime and the sys audit emitter contain
+  **zero** code references to `Core`. Files in `src/modules` naming it: 86 ->
+  33, and all 33 are the six kernel modules (`auth`, `policy`, `identity`,
+  `namespace`, `resource_group`, `system`), which keep it deliberately: they
+  *are* the kernel and ship with it.
+  An engine crate can now compile against the trait without `bv-core` in its
+  dependency graph. Behaviour is unchanged -- module init order was diffed
+  against the old `vec![]` to confirm it is identical in sequence.
 
 - **The workspace's library crates can be published to the Cloudsmith Cargo
   registry** (`uox/bastionvault`). `.cargo/config.toml` declares the registry

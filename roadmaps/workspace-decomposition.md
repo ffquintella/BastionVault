@@ -5,10 +5,12 @@ Status: **Phase 0 done. Phase 1 partially done: `bv-errors`, `bv-shamir` and
 *not* mechanical file moves — a re-measurement of the dependency graph (see
 "Verified clean leaves" below, which was wrong) shows `bv-utils` is Tier 1, and
 `bv-logical` and `bv-audit` are blocked on Phase 2 rather than the reverse.
-Phase 2 started: `VaultCtx` + `impl VaultCtx for Core` are landed and additive
-(`src/kernel_api.rs`). The conversion onto it was attempted and reverted, and
-the measured cost is in "Step 3 is not step-shaped" below — it is one atomic
-~353-site change, not the per-engine sequence this plan describes.**
+**Phase 2 is done for its core objective: the `Core` ↔ `modules` cycle is
+cut.** All 14 Tier 3 engine directories, the plugin runtime and the sys audit
+emitter contain zero code references to `Core`; `module_manager.rs` no longer
+names an engine type. Files in `src/modules` mentioning `Core` went 86 → 33,
+and all 33 are the six kernel modules, which keep it by design. What remains of
+the phase is the typed kernel accessors (step 1) — see "What is left, measured".
 
 > **Read the two "re-measured" blocks below before planning against this
 > document.** Three of its load-bearing figures were derived from greps that
@@ -617,6 +619,53 @@ Two smaller corrections to the numbers above while re-measuring:
   targets, and the three extra ones are these.
 - The `get_module` work is **~101** production call sites, not 43. The 43
   counted only those spelled literally as `core.module_manager.get_module`.
+
+#### What is left of Phase 2, measured
+
+Steps 3 and 4 are done. Step 1's `VaultCtx` is done; its five store traits and
+`ModuleRegistry` are not, and step 2 turns out not to exist.
+
+**Step 2, refined once more.** The "Re-measured" block above already corrects
+"delete outright" and explains the 9 detached-`tokio::task` sites. One detail it
+gets slightly wrong: the non-tick sites are not "held by a struct that already
+owns a `core` field" in the sense of being trivially replaceable. Walking back
+to the enclosing `impl` shows `self` there is the **backend**
+(`RustionBackend`, `NotificationsBackend`, `SshBrokerBackend`), not the module,
+so `get_module` is a genuine registry lookup rather than a roundabout `&self` —
+and it is late on purpose, because the store does not exist until
+`Module::init` runs, which is after the backend is built. Giving each backend a
+direct store handle is a per-engine design change. Not attempted here.
+
+**Step 1's remaining half is 175 call sites.** `get_module::<T>` still appears
+175 times, and it is what keeps engines naming each other's concrete types.
+That is the blocker for Phase 3, not `Core`:
+
+| engine | still names |
+|---|---|
+| `credential` | auth, identity, namespace, resource, totp |
+| `resource` | credential, identity, namespace, policy, ssh_broker |
+| `rustion` | namespace, policy, resource |
+| `totp` | credential |
+| `files` | identity |
+| `ssh_broker` | rustion |
+| `notifications` | namespace |
+
+**And the Tier 3 engines are not leaves.** The plan has "Tier 3 — engines and
+auth backends (each: Tier 0 + `bv-kernel-api` only)". They reference each
+other, with cycles:
+
+```
+totp     <-> credential
+resource <-> credential
+resource  -> ssh_broker -> rustion -> resource
+```
+
+So `bv-engine-totp` and `bv-auth-*` cannot both be crates while that edge is a
+concrete type reference, and the three-cycle has no valid extraction order at
+all. Each needs a trait at the boundary — the same treatment `VaultCtx` gave
+`Core` — or the participants have to be merged into one crate. This wants
+deciding before Phase 3 picks an extraction order, because the order the plan
+proposes (`rustion` second, `resource` late) does not resolve it.
 
 ### Phase 3 — Engines out, starting with PKI
 
