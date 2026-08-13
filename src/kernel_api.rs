@@ -79,13 +79,14 @@ use std::sync::Arc;
 
 use crate::{
     audit::AuditBroker,
+    cli::config::MountEntryHMACLevel,
     core::{Core, LogicalBackendNewFunc},
     dos::DosGuard,
     errors::RvError,
-    handler::Handler,
+    handler::{AuthHandler, Handler},
     logical::{Request, Response},
     module_manager::ModuleManager,
-    mount::MountsRouter,
+    mount::{MountsMonitor, MountsRouter},
     router::Router,
     stats::DashboardStats,
     storage::{barrier::SecurityBarrier, barrier_view::BarrierView},
@@ -141,6 +142,19 @@ pub trait VaultCtx: Send + Sync {
     fn add_handler(&self, handler: Arc<dyn Handler>) -> Result<(), RvError>;
 
     fn delete_handler(&self, handler: Arc<dyn Handler>) -> Result<(), RvError>;
+
+    fn add_auth_handler(&self, handler: Arc<dyn AuthHandler>) -> Result<(), RvError>;
+
+    fn delete_auth_handler(&self, handler: Arc<dyn AuthHandler>) -> Result<(), RvError>;
+
+    // ── mount table plumbing ───────────────────────────────────────────
+    /// How much of a mount-table entry its HMAC covers. The auth module needs
+    /// it to load and persist the auth mount table.
+    fn mount_entry_hmac_level(&self) -> MountEntryHMACLevel;
+
+    /// The mount-table change monitor, or `None` when polling is disabled.
+    /// A module owning a `MountsRouter` registers it here so re-mounts reach it.
+    fn mounts_monitor(&self) -> Option<Arc<MountsMonitor>>;
 
     // ── ancillary subsystems ───────────────────────────────────────────
     /// Sibling-module lookup.
@@ -215,6 +229,22 @@ impl VaultCtx for Core {
 
     fn delete_handler(&self, handler: Arc<dyn Handler>) -> Result<(), RvError> {
         Core::delete_handler(self, handler)
+    }
+
+    fn add_auth_handler(&self, handler: Arc<dyn AuthHandler>) -> Result<(), RvError> {
+        Core::add_auth_handler(self, handler)
+    }
+
+    fn delete_auth_handler(&self, handler: Arc<dyn AuthHandler>) -> Result<(), RvError> {
+        Core::delete_auth_handler(self, handler)
+    }
+
+    fn mount_entry_hmac_level(&self) -> MountEntryHMACLevel {
+        self.mount_entry_hmac_level
+    }
+
+    fn mounts_monitor(&self) -> Option<Arc<MountsMonitor>> {
+        self.mounts_monitor.load_full()
     }
 
     fn module_manager(&self) -> &ModuleManager {

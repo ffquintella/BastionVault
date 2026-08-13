@@ -19,6 +19,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::Module;
+use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_string,
     context::Context,
@@ -218,7 +219,7 @@ fn ns_from_req(req: &Request) -> String {
 impl NotificationsBackendInner {
     fn resolve_service(&self) -> Result<Arc<NotificationService>, RvError> {
         self.core
-            .module_manager
+            .module_manager()
             .get_module::<NotificationsModule>("notifications")
             .and_then(|m| m.service())
             .ok_or_else(|| bv_error_string!("notification service unavailable"))
@@ -447,7 +448,7 @@ impl Module for NotificationsModule {
         self
     }
 
-    fn setup(&self, core: &Core) -> Result<(), RvError> {
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let backend_new_func = move |c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
             let mut b = NotificationsBackend::new(c).new_backend();
             b.init()?;
@@ -456,14 +457,14 @@ impl Module for NotificationsModule {
         core.add_logical_backend("notifications", Arc::new(backend_new_func))
     }
 
-    async fn init(&self, core: &Core) -> Result<(), RvError> {
-        let store = NotificationStore::new(core).await?;
+    async fn init(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
+        let store = NotificationStore::new(&self.core).await?;
         let service = NotificationService::new(self.core.clone(), store);
         self.service.store(Arc::new(Some(service)));
         Ok(())
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         self.service.store(Arc::new(None));
         core.delete_logical_backend("notifications")
     }

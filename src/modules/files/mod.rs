@@ -41,6 +41,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_string,
     context::Context,
@@ -1196,7 +1197,7 @@ impl FilesBackendInner {
         if !audit_actor.is_empty() {
             if let Some(core) = self.core.self_ptr.upgrade() {
                 if let Some(identity) = core
-                    .module_manager
+                    .module_manager()
                     .get_module::<crate::modules::identity::IdentityModule>("identity")
                 {
                     if let Some(owner_store) = identity.owner_store() {
@@ -2274,7 +2275,7 @@ impl Module for FilesModule {
         self
     }
 
-    fn setup(&self, core: &Core) -> Result<(), RvError> {
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let backend = self.backend.clone();
         let backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
             let mut b = backend.new_backend();
@@ -2284,7 +2285,7 @@ impl Module for FilesModule {
         core.add_logical_backend("files", Arc::new(backend_new_func))
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         core.delete_logical_backend("files")
     }
 }

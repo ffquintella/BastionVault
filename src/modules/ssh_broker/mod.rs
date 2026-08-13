@@ -16,6 +16,7 @@ use derive_more::Deref;
 use serde_json::{Map, Value};
 
 use super::Module;
+use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_response_status, bv_error_string,
     context::Context,
@@ -254,7 +255,7 @@ impl SshBrokerBackendInner {
     fn resolve_policy_store(&self) -> Result<Arc<policy::PolicyStore>, RvError> {
         let module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<SshBrokerModule>("ssh-broker")
             .ok_or_else(|| bv_error_string!("ssh-broker module not registered"))?;
         module
@@ -616,7 +617,7 @@ impl Module for SshBrokerModule {
         self
     }
 
-    fn setup(&self, core: &Core) -> Result<(), RvError> {
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let backend_new_func = move |c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
             let mut b = SshBrokerBackend::new(c).new_backend();
             b.init()?;
@@ -625,13 +626,13 @@ impl Module for SshBrokerModule {
         core.add_logical_backend("ssh-broker", Arc::new(backend_new_func))
     }
 
-    async fn init(&self, core: &Core) -> Result<(), RvError> {
-        let pol = policy::PolicyStore::new(core).await?;
+    async fn init(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
+        let pol = policy::PolicyStore::new(&self.core).await?;
         self.policy_store.store(Arc::new(Some(pol)));
         Ok(())
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         self.policy_store.store(Arc::new(None));
         core.delete_logical_backend("ssh-broker")
     }

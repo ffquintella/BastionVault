@@ -17,6 +17,7 @@ use serde_json::{Map, Value};
 use chrono::Utc;
 
 use super::Module;
+use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
     core::Core,
@@ -757,7 +758,7 @@ fn value_to_string_vec(v: &Value) -> Vec<String> {
 impl IdentityBackendInner {
     fn resolve_store(&self) -> Result<Arc<GroupStore>, RvError> {
         self.core
-            .module_manager
+            .module_manager()
             .get_module::<IdentityModule>("identity")
             .and_then(|m| m.group_store())
             .ok_or_else(|| bv_error_string!("identity group store unavailable"))
@@ -1003,7 +1004,7 @@ impl IdentityBackendInner {
 
     fn resolve_share_store(&self) -> Result<Arc<ShareStore>, RvError> {
         self.core
-            .module_manager
+            .module_manager()
             .get_module::<IdentityModule>("identity")
             .and_then(|m| m.share_store())
             .ok_or_else(|| bv_error_string!("share store unavailable"))
@@ -1054,7 +1055,7 @@ impl IdentityBackendInner {
                 if !alias_name.is_empty() {
                     if let Some(module) = self
                         .core
-                        .module_manager
+                        .module_manager()
                         .get_module::<IdentityModule>("identity")
                     {
                         if let Some(es) = module.entity_store() {
@@ -1079,7 +1080,7 @@ impl IdentityBackendInner {
 
         let module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<IdentityModule>("identity")
             .ok_or_else(|| bv_error_string!("identity module unavailable"))?;
         let owner_store = module
@@ -1093,7 +1094,7 @@ impl IdentityBackendInner {
             ShareTargetKind::AssetGroup => {
                 let rg_module = self
                     .core
-                    .module_manager
+                    .module_manager()
                     .get_module::<crate::modules::resource_group::ResourceGroupModule>(
                         "resource-group",
                     )
@@ -1224,7 +1225,7 @@ impl IdentityBackendInner {
             if !alias_name.is_empty() {
                 if let Some(module) = self
                     .core
-                    .module_manager
+                    .module_manager()
                     .get_module::<IdentityModule>("identity")
                 {
                     if let Some(es) = module.entity_store() {
@@ -1243,7 +1244,7 @@ impl IdentityBackendInner {
         let mut group_shared_enabled = false;
         if let Some(pmodule) = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<crate::modules::policy::PolicyModule>("policy")
         {
             let pstore = pmodule.policy_store.load();
@@ -1276,7 +1277,7 @@ impl IdentityBackendInner {
         if group_shared_enabled {
             if let Some(imodule) = self
                 .core
-                .module_manager
+                .module_manager()
                 .get_module::<IdentityModule>("identity")
             {
                 if let Some(gs) = imodule.group_store() {
@@ -1325,7 +1326,7 @@ impl IdentityBackendInner {
         if ptrs.iter().any(|p| p.target_kind == "asset-group") {
             if let Some(rg_module) = self
                 .core
-                .module_manager
+                .module_manager()
                 .get_module::<crate::modules::resource_group::ResourceGroupModule>(
                     "resource-group",
                 )
@@ -1601,7 +1602,7 @@ impl IdentityBackendInner {
             if !alias_name.is_empty() {
                 if let Some(module) = self
                     .core
-                    .module_manager
+                    .module_manager()
                     .get_module::<IdentityModule>("identity")
                 {
                     if let Some(store) = module.entity_store() {
@@ -1626,7 +1627,7 @@ impl IdentityBackendInner {
         if !entity_id.is_empty() {
             if let Some(module) = self
                 .core
-                .module_manager
+                .module_manager()
                 .get_module::<IdentityModule>("identity")
             {
                 if let Some(store) = module.entity_store() {
@@ -1679,7 +1680,7 @@ impl IdentityBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<IdentityModule>("identity")
             .ok_or_else(|| bv_error_string!("identity module unavailable"))?;
         let store = module
@@ -1716,7 +1717,7 @@ impl IdentityBackendInner {
 
         let module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<IdentityModule>("identity")
             .ok_or_else(|| bv_error_string!("identity module unavailable"))?;
         let store = module
@@ -1750,7 +1751,7 @@ impl IdentityBackendInner {
 
         let module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<IdentityModule>("identity")
             .ok_or_else(|| bv_error_string!("identity module unavailable"))?;
         let store = module
@@ -1778,7 +1779,7 @@ impl IdentityBackendInner {
 
         let module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<IdentityModule>("identity")
             .ok_or_else(|| bv_error_string!("identity module unavailable"))?;
         let store = module
@@ -1846,7 +1847,7 @@ impl Module for IdentityModule {
         self
     }
 
-    fn setup(&self, core: &Core) -> Result<(), RvError> {
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         // Register the logical backend factory so the `identity/` mount can
         // bind on first unseal, before the per-module `init` runs. The backend
         // resolves the group store lazily via the module manager.
@@ -1858,21 +1859,21 @@ impl Module for IdentityModule {
         core.add_logical_backend("identity", Arc::new(backend_new_func))
     }
 
-    async fn init(&self, core: &Core) -> Result<(), RvError> {
-        let gs = GroupStore::new(core).await?;
+    async fn init(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
+        let gs = GroupStore::new(&self.core).await?;
         self.group_store.store(Arc::new(Some(gs)));
-        let es = EntityStore::new(core).await?;
+        let es = EntityStore::new(&self.core).await?;
         self.entity_store.store(Arc::new(Some(es)));
-        let os = OwnerStore::new(core).await?;
+        let os = OwnerStore::new(&self.core).await?;
         self.owner_store.store(Arc::new(Some(os)));
-        let ss = ShareStore::new(core).await?;
+        let ss = ShareStore::new(&self.core).await?;
         self.share_store.store(Arc::new(Some(ss)));
-        let uas = UserAuditStore::new(core).await?;
+        let uas = UserAuditStore::new(&self.core).await?;
         self.user_audit_store.store(Arc::new(Some(uas)));
         Ok(())
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         self.group_store.store(Arc::new(None));
         self.entity_store.store(Arc::new(None));
         self.owner_store.store(Arc::new(None));
@@ -2598,7 +2599,7 @@ mod identity_tests {
         // Owner record must now be present and point at `"root"` (the
         // root token's display_name, surfaced via `caller_audit_actor`).
         let module = core
-            .module_manager
+            .module_manager()
             .get_module::<IdentityModule>("identity")
             .expect("identity module");
         let store = module.owner_store().expect("owner store");
@@ -2641,7 +2642,7 @@ mod identity_tests {
             new_unseal_test_bastion_vault("test_kv_ghost_record_overwritten").await;
 
         let module = core
-            .module_manager
+            .module_manager()
             .get_module::<IdentityModule>("identity")
             .expect("identity module");
         let store = module.owner_store().expect("owner store");
@@ -2683,7 +2684,7 @@ mod identity_tests {
             new_unseal_test_bastion_vault("test_owner_backfill").await;
 
         let module = core
-            .module_manager
+            .module_manager()
             .get_module::<IdentityModule>("identity")
             .expect("identity module");
         let store = module.owner_store().expect("owner store");
@@ -2792,7 +2793,7 @@ mod identity_tests {
         let (_bvault, core, root_token) =
             new_unseal_test_bastion_vault("test_owner_backfill_dry_run").await;
         let module = core
-            .module_manager
+            .module_manager()
             .get_module::<IdentityModule>("identity")
             .expect("identity module");
         let store = module.owner_store().expect("owner store");

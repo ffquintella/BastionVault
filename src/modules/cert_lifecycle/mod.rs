@@ -24,6 +24,7 @@ use std::{any::Any, collections::HashMap, sync::Arc};
 use derive_more::Deref;
 use serde_json::{json, Map, Value};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
     core::Core,
@@ -139,7 +140,7 @@ impl Module for CertLifecycleModule {
         self
     }
 
-    fn setup(&self, core: &Core) -> Result<(), RvError> {
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let backend = self.backend.clone();
         let new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
             let mut b = backend.new_backend();
@@ -149,7 +150,7 @@ impl Module for CertLifecycleModule {
         core.add_logical_backend("cert-lifecycle", Arc::new(new_func))
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         core.delete_logical_backend("cert-lifecycle")
     }
 }

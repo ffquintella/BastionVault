@@ -14,6 +14,7 @@ use std::{
 
 use serde_json::{from_value, json, Map, Value};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
     core::Core,
@@ -3556,7 +3557,7 @@ impl SystemBackend {
 
     fn resolve_namespace_store(&self) -> Result<Arc<NamespaceStore>, RvError> {
         self.core
-            .module_manager
+            .module_manager()
             .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
             .and_then(|m| m.store())
             .ok_or_else(|| bv_error_string!("namespace store unavailable"))
@@ -3566,7 +3567,7 @@ impl SystemBackend {
         &self,
     ) -> Result<Arc<crate::modules::namespace::NamespaceMountRegistry>, RvError> {
         self.core
-            .module_manager
+            .module_manager()
             .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
             .map(|m| m.registry.clone())
             .ok_or_else(|| bv_error_string!("namespace registry unavailable"))
@@ -3889,7 +3890,7 @@ impl SystemBackend {
         &self,
     ) -> Result<Arc<crate::modules::namespace::IdentityLinkStore>, RvError> {
         self.core
-            .module_manager
+            .module_manager()
             .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
             .and_then(|m| m.link_store())
             .ok_or_else(|| bv_error_string!("namespace identity-link store unavailable"))
@@ -4750,7 +4751,7 @@ impl Module for SystemModule {
         self
     }
 
-    fn setup(&self, core: &Core) -> Result<(), RvError> {
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let sys = self.backend.clone();
         let sys_backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
             let mut sys_backend = sys.new_backend();
@@ -4760,7 +4761,7 @@ impl Module for SystemModule {
         core.add_logical_backend("system", Arc::new(sys_backend_new_func))
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         core.delete_logical_backend("system")
     }
 }

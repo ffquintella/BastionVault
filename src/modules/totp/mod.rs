@@ -18,6 +18,7 @@ use std::{any::Any, sync::Arc};
 
 use derive_more::Deref;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     core::Core,
     errors::RvError,
@@ -104,7 +105,7 @@ impl Module for TotpModule {
         self
     }
 
-    fn setup(&self, core: &Core) -> Result<(), RvError> {
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let backend = self.backend.clone();
         let new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
             let mut b = backend.new_backend();
@@ -114,7 +115,7 @@ impl Module for TotpModule {
         core.add_logical_backend("totp", Arc::new(new_func))
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         core.delete_logical_backend("totp")
     }
 }

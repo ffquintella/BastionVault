@@ -36,6 +36,7 @@ use std::{any::Any, sync::Arc};
 
 use derive_more::Deref;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     core::Core,
     errors::RvError,
@@ -128,7 +129,7 @@ impl Module for OidcModule {
         self
     }
 
-    fn setup(&self, core: &Core) -> Result<(), RvError> {
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let oidc = self.backend.clone();
         let oidc_backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
             let mut b = oidc.new_backend();
@@ -137,7 +138,7 @@ impl Module for OidcModule {
         };
 
         if let Some(auth_module) = core
-            .module_manager
+            .module_manager()
             .get_module::<AuthModule>("auth")
         {
             return auth_module.add_auth_backend("oidc", Arc::new(oidc_backend_new_func));
@@ -146,9 +147,9 @@ impl Module for OidcModule {
         Ok(())
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         if let Some(auth_module) = core
-            .module_manager
+            .module_manager()
             .get_module::<AuthModule>("auth")
         {
             return auth_module.delete_auth_backend("oidc");

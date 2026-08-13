@@ -6,6 +6,7 @@ use better_default::Default;
 use serde_json::{Map, Value};
 
 use super::{resource_group::ResourceGroupModule, Module};
+use crate::kernel_api::VaultCtx;
 use crate::{
     core::Core,
     errors::RvError,
@@ -214,7 +215,7 @@ impl PolicyModule {
     async fn known_asset_groups(&self) -> Option<Vec<String>> {
         let module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<ResourceGroupModule>("resource-group")?;
         let store = module.store()?;
         store.list_groups().await.ok()
@@ -523,12 +524,12 @@ impl Module for PolicyModule {
         self
     }
 
-    fn setup(&self, _core: &Core) -> Result<(), RvError> {
+    fn setup(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
         Ok(())
     }
 
-    async fn init(&self, core: &Core) -> Result<(), RvError> {
-        let policy_store = PolicyStore::new(core).await?;
+    async fn init(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
+        let policy_store = PolicyStore::new(&self.core).await?;
         self.policy_store.store(policy_store.clone());
 
         self.setup_policy().await?;
@@ -543,7 +544,7 @@ impl Module for PolicyModule {
         Ok(())
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         core.delete_auth_handler(self.policy_store.load().clone() as Arc<dyn AuthHandler>)?;
         core.delete_handler(self.policy_store.load().clone() as Arc<dyn Handler>)?;
         let policy_store = Arc::new(PolicyStore::default());

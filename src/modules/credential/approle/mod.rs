@@ -50,6 +50,7 @@ use std::{
 use arc_swap::ArcSwapOption;
 use derive_more::Deref;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
     core::Core,
@@ -182,7 +183,7 @@ impl Module for AppRoleModule {
         self
     }
 
-    fn setup(&self, core: &Core) -> Result<(), RvError> {
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let approle = self.backend.clone();
         let approle_backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
             let mut approle_backend = approle.new_backend();
@@ -190,7 +191,7 @@ impl Module for AppRoleModule {
             Ok(Arc::new(approle_backend))
         };
 
-        if let Some(auth_module) = core.module_manager.get_module::<AuthModule>("auth") {
+        if let Some(auth_module) = core.module_manager().get_module::<AuthModule>("auth") {
             return auth_module.add_auth_backend("approle", Arc::new(approle_backend_new_func));
         } else {
             log::error!("get auth module failed!");
@@ -199,12 +200,12 @@ impl Module for AppRoleModule {
         Ok(())
     }
 
-    async fn init(&self, core: &Core) -> Result<(), RvError> {
-        if core.get_system_view().is_none() {
+    async fn init(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
+        if core.system_view().is_none() {
             return Err(RvError::ErrBarrierSealed);
         }
 
-        let system_view = core.get_system_view().unwrap();
+        let system_view = core.system_view().unwrap();
         let salt = Salt::new(Some(system_view.as_storage()), None).await?;
 
         self.backend.inner.salt.store(Some(Arc::new(salt)));
@@ -212,8 +213,8 @@ impl Module for AppRoleModule {
         Ok(())
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
-        if let Some(auth_module) = core.module_manager.get_module::<AuthModule>("auth") {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
+        if let Some(auth_module) = core.module_manager().get_module::<AuthModule>("auth") {
             return auth_module.delete_auth_backend("approle");
         } else {
             log::error!("get auth module failed!");

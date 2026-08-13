@@ -10,6 +10,7 @@ use std::{
 use arc_swap::ArcSwapOption;
 use lazy_static::lazy_static;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     cli::config::MountEntryHMACLevel,
     core::{Core, LogicalBackendNewFunc},
@@ -62,11 +63,11 @@ impl AuthModule {
         Ok(Self {
             name: "auth".to_string(),
             core: core.clone(),
-            barrier: core.barrier.clone(),
+            barrier: core.barrier(),
             mounts_router: Arc::new(MountsRouter::new(
                 Arc::new(MountTable::new(AUTH_CONFIG_PATH)),
-                core.router.clone(),
-                core.barrier.clone(),
+                core.router(),
+                core.barrier(),
                 AUTH_BARRIER_PREFIX,
                 AUTH_ROUTER_PREFIX,
             )),
@@ -321,9 +322,9 @@ impl Module for AuthModule {
         self
     }
 
-    async fn init(&self, core: &Core) -> Result<(), RvError> {
-        let expiration = ExpirationManager::new(core)?.wrap();
-        let token_store = TokenStore::new(core, expiration.clone()).await?.wrap();
+    async fn init(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
+        let expiration = ExpirationManager::new(&self.core)?.wrap();
+        let token_store = TokenStore::new(&self.core, expiration.clone()).await?.wrap();
 
         expiration.set_token_store(&token_store)?;
 
@@ -339,10 +340,10 @@ impl Module for AuthModule {
         };
 
         self.add_auth_backend("token", Arc::new(token_backend_new_func))?;
-        self.load_auth(Some(&core.state.load().hmac_key), core.mount_entry_hmac_level).await?;
+        self.load_auth(Some(&core.hmac_key()), core.mount_entry_hmac_level()).await?;
         self.setup_auth()?;
 
-        if let Some(mounts_monitor) = core.mounts_monitor.load().as_ref() {
+        if let Some(mounts_monitor) = core.mounts_monitor().as_ref() {
             mounts_monitor.add_mounts_router(self.mounts_router.clone());
         }
 
@@ -354,8 +355,8 @@ impl Module for AuthModule {
         Ok(())
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
-        if let Some(mounts_monitor) = core.mounts_monitor.load().as_ref() {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
+        if let Some(mounts_monitor) = core.mounts_monitor().as_ref() {
             mounts_monitor.remove_mounts_router(self.mounts_router.clone());
         }
         core.delete_handler(self.token_store.load().as_ref().unwrap().clone() as Arc<dyn Handler>)?;

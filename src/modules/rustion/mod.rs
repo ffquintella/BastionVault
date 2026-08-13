@@ -19,6 +19,7 @@ use derive_more::Deref;
 use serde_json::{Map, Value};
 
 use super::Module;
+use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_response_status, bv_error_string,
     context::Context,
@@ -861,7 +862,7 @@ impl RustionBackendInner {
     fn resolve_store(&self) -> Result<Arc<RustionStore>, RvError> {
         let module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<RustionModule>("rustion")
             .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
         let store = module.store();
@@ -871,7 +872,7 @@ impl RustionBackendInner {
     fn resolve_master_store(&self) -> Result<Arc<MasterStore>, RvError> {
         let module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<RustionModule>("rustion")
             .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
         let master = module.master_store();
@@ -908,7 +909,7 @@ impl RustionBackendInner {
     fn resolve_recordings_store(&self) -> Result<Arc<recordings::RecordingsStore>, RvError> {
         let module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<RustionModule>("rustion")
             .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
         let recs = module.recordings_store();
@@ -918,7 +919,7 @@ impl RustionBackendInner {
     fn resolve_policy_store(&self) -> Result<Arc<policy::PolicyStore>, RvError> {
         let module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<RustionModule>("rustion")
             .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
         let pol = module.policy_store();
@@ -1357,7 +1358,7 @@ impl RustionBackendInner {
         }
         let policy_module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<crate::modules::policy::PolicyModule>("policy")
             .ok_or_else(|| bv_error_string!("policy module not registered"))?;
         let store = policy_module.policy_store.load();
@@ -1423,7 +1424,7 @@ impl RustionBackendInner {
     ) -> Result<bool, RvError> {
         let policy_module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<crate::modules::policy::PolicyModule>("policy")
             .ok_or_else(|| bv_error_string!("policy module not registered"))?;
         let store = policy_module.policy_store.load();
@@ -1473,7 +1474,7 @@ impl RustionBackendInner {
         let auth = req.auth.clone().ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
         let policy_module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<crate::modules::policy::PolicyModule>("policy")
             .ok_or_else(|| bv_error_string!("policy module not registered"))?;
         let acl = policy_module.policy_store.load().new_acl_for_request(&auth.policies, None, &auth).await?;
@@ -3344,7 +3345,7 @@ impl RustionBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<RustionModule>("rustion")
             .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
         let cache = module.telemetry_cache().ok_or_else(|| bv_error_string!("telemetry cache not initialized"))?;
@@ -3603,7 +3604,7 @@ impl Module for RustionModule {
         self
     }
 
-    fn setup(&self, core: &Core) -> Result<(), RvError> {
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let backend_new_func = move |c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
             let mut b = RustionBackend::new(c).new_backend();
             b.init()?;
@@ -3612,21 +3613,21 @@ impl Module for RustionModule {
         core.add_logical_backend("rustion", Arc::new(backend_new_func))
     }
 
-    async fn init(&self, core: &Core) -> Result<(), RvError> {
-        let store = RustionStore::new(core).await?;
+    async fn init(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
+        let store = RustionStore::new(&self.core).await?;
         self.store.store(Arc::new(Some(store)));
-        let master = MasterStore::new(core).await?;
+        let master = MasterStore::new(&self.core).await?;
         self.master_store.store(Arc::new(Some(master)));
-        let recs = recordings::RecordingsStore::new(core).await?;
+        let recs = recordings::RecordingsStore::new(&self.core).await?;
         self.recordings_store.store(Arc::new(Some(recs)));
-        let pol = policy::PolicyStore::new(core).await?;
+        let pol = policy::PolicyStore::new(&self.core).await?;
         self.policy_store.store(Arc::new(Some(pol)));
         let tel = std::sync::Arc::new(telemetry::TelemetryCache::new());
         self.telemetry_cache.store(Arc::new(Some(tel)));
         Ok(())
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         self.store.store(Arc::new(None));
         self.master_store.store(Arc::new(None));
         self.recordings_store.store(Arc::new(None));

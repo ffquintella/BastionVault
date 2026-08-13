@@ -7,7 +7,7 @@
 
 use std::{any::Any, sync::Arc};
 
-use crate::{core::Core, errors::RvError};
+use crate::{errors::RvError, kernel_api::VaultCtx};
 
 pub mod auth;
 pub mod cert_lifecycle;
@@ -38,15 +38,27 @@ pub trait Module: Any + Send + Sync {
 
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
 
-    async fn init(&self, _core: &Core) -> Result<(), RvError> {
+    // `&dyn VaultCtx`, not `&Core`. This is the cut: an engine's lifecycle
+    // hooks can no longer name the kernel's concrete type, so `Core` leaves
+    // the engine's compile unit. `&Core` still coerces at every `ModuleManager`
+    // call site, so the calling side is untouched.
+    //
+    // Kernel-tier modules (auth, policy, identity, namespace, resource_group,
+    // system) legitimately still need `&Core` — they *are* the kernel, and
+    // stay with it in `bv-core` / `bv-kernel`. They get it from their own
+    // `self.core` field, set at construction, rather than from this parameter.
+    // That is what keeps this change from cascading into the ~350
+    // `Arc<Core>` / `Weak<Core>` sites their stores hold: see
+    // roadmaps/workspace-decomposition.md § "Step 3 is not step-shaped".
+    async fn init(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
         Ok(())
     }
 
-    fn setup(&self, _core: &Core) -> Result<(), RvError> {
+    fn setup(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
         Ok(())
     }
 
-    fn cleanup(&self, _core: &Core) -> Result<(), RvError> {
+    fn cleanup(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
         Ok(())
     }
 }

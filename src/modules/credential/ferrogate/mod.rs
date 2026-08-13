@@ -27,6 +27,7 @@ use arc_swap::ArcSwapOption;
 use derive_more::Deref;
 use serde::{Deserialize, Serialize};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     core::Core,
     errors::RvError,
@@ -405,7 +406,7 @@ impl Module for FerroGateModule {
         self
     }
 
-    fn setup(&self, core: &Core) -> Result<(), RvError> {
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let ferrogate = self.backend.clone();
         let ferrogate_backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
             let mut ferrogate_backend = ferrogate.new_backend();
@@ -413,7 +414,7 @@ impl Module for FerroGateModule {
             Ok(Arc::new(ferrogate_backend))
         };
 
-        if let Some(auth_module) = core.module_manager.get_module::<AuthModule>("auth") {
+        if let Some(auth_module) = core.module_manager().get_module::<AuthModule>("auth") {
             return auth_module.add_auth_backend("ferrogate", Arc::new(ferrogate_backend_new_func));
         }
 
@@ -421,8 +422,8 @@ impl Module for FerroGateModule {
         Ok(())
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
-        if let Some(auth_module) = core.module_manager.get_module::<AuthModule>("auth") {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
+        if let Some(auth_module) = core.module_manager().get_module::<AuthModule>("auth") {
             return auth_module.delete_auth_backend("ferrogate");
         }
 

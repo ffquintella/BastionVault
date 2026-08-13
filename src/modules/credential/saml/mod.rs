@@ -27,6 +27,7 @@ use std::{any::Any, sync::Arc};
 
 use derive_more::Deref;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     core::Core,
     errors::RvError,
@@ -118,7 +119,7 @@ impl Module for SamlModule {
         self
     }
 
-    fn setup(&self, core: &Core) -> Result<(), RvError> {
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let saml = self.backend.clone();
         let saml_backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
             let mut b = saml.new_backend();
@@ -127,7 +128,7 @@ impl Module for SamlModule {
         };
 
         if let Some(auth_module) = core
-            .module_manager
+            .module_manager()
             .get_module::<AuthModule>("auth")
         {
             return auth_module.add_auth_backend("saml", Arc::new(saml_backend_new_func));
@@ -136,9 +137,9 @@ impl Module for SamlModule {
         Ok(())
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         if let Some(auth_module) = core
-            .module_manager
+            .module_manager()
             .get_module::<AuthModule>("auth")
         {
             return auth_module.delete_auth_backend("saml");

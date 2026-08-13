@@ -25,6 +25,7 @@ use std::{any::Any, sync::Arc};
 use arc_swap::ArcSwap;
 
 use super::Module;
+use crate::kernel_api::VaultCtx;
 use crate::{core::Core, errors::RvError};
 
 pub mod identity_link;
@@ -92,19 +93,19 @@ impl Module for NamespaceModule {
         self
     }
 
-    async fn init(&self, core: &Core) -> Result<(), RvError> {
-        let store = Arc::new(NamespaceStore::new(core)?);
+    async fn init(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
+        let store = Arc::new(NamespaceStore::new(&self.core)?);
         // Mint (or read back) the implicit root namespace. This is the anchor
         // the re-rooting migration and the per-namespace router registry both
         // depend on, so it must succeed before either runs.
         store.ensure_root().await?;
         self.store.store(Arc::new(Some(store)));
-        let link_store = Arc::new(IdentityLinkStore::new(core)?);
+        let link_store = Arc::new(IdentityLinkStore::new(&self.core)?);
         self.link_store.store(Arc::new(Some(link_store)));
         Ok(())
     }
 
-    fn cleanup(&self, _core: &Core) -> Result<(), RvError> {
+    fn cleanup(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
         self.store.store(Arc::new(None));
         self.link_store.store(Arc::new(None));
         Ok(())
@@ -375,7 +376,7 @@ mod tests {
 
         // The namespace mount table lists cubby/ for tenant-a, nothing for b.
         let registry = core
-            .module_manager
+            .module_manager()
             .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
             .unwrap()
             .registry
@@ -447,7 +448,7 @@ mod tests {
         .unwrap();
 
         let registry = core
-            .module_manager
+            .module_manager()
             .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
             .unwrap()
             .registry

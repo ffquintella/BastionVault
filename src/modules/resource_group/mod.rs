@@ -24,6 +24,7 @@ use serde_json::{Map, Value};
 use chrono::Utc;
 
 use super::Module;
+use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
     core::Core,
@@ -233,7 +234,7 @@ async fn redact_inaccessible_members(
 ) {
     use crate::modules::policy::PolicyModule;
 
-    let Some(policy_module) = core.module_manager.get_module::<PolicyModule>("policy") else {
+    let Some(policy_module) = core.module_manager().get_module::<PolicyModule>("policy") else {
         return;
     };
     let store = policy_module.policy_store.load();
@@ -440,7 +441,7 @@ fn value_to_string_vec(v: &Value) -> Vec<String> {
 impl ResourceGroupBackendInner {
     fn resolve_store(&self) -> Result<Arc<ResourceGroupStore>, RvError> {
         self.core
-            .module_manager
+            .module_manager()
             .get_module::<ResourceGroupModule>("resource-group")
             .and_then(|m| m.store())
             .ok_or_else(|| bv_error_string!("resource-group store unavailable"))
@@ -478,7 +479,7 @@ impl ResourceGroupBackendInner {
 
         let id_module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<crate::modules::identity::IdentityModule>("identity");
         let share_store = id_module.as_ref().and_then(|m| m.share_store());
         let group_store = id_module.as_ref().and_then(|m| m.group_store());
@@ -829,7 +830,7 @@ impl Module for ResourceGroupModule {
         self
     }
 
-    fn setup(&self, core: &Core) -> Result<(), RvError> {
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         // Register the logical backend factory so the mount can bind on
         // first unseal, before per-module `init` runs. The backend
         // resolves the store lazily via the module manager.
@@ -841,13 +842,13 @@ impl Module for ResourceGroupModule {
         core.add_logical_backend("resource-group", Arc::new(backend_new_func))
     }
 
-    async fn init(&self, core: &Core) -> Result<(), RvError> {
-        let store = ResourceGroupStore::new(core).await?;
+    async fn init(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
+        let store = ResourceGroupStore::new(&self.core).await?;
         self.store.store(Arc::new(Some(store)));
         Ok(())
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         self.store.store(Arc::new(None));
         core.delete_logical_backend("resource-group")
     }
@@ -1210,7 +1211,7 @@ mod resource_group_tests {
         let _ = test_write_api(&core, &root_token, "resource-group/groups/beta", true, b).await;
 
         let store = core
-            .module_manager
+            .module_manager()
             .get_module::<ResourceGroupModule>("resource-group")
             .and_then(|m| m.store())
             .expect("resource-group store");

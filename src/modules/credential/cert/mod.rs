@@ -7,6 +7,7 @@
 
 use std::{any::Any, sync::Arc};
 
+use crate::kernel_api::VaultCtx;
 use crate::{core::Core, errors::RvError, modules::Module};
 
 pub mod cli {
@@ -53,7 +54,7 @@ impl Module for CertModule {
         self
     }
 
-    fn setup(&self, _core: &Core) -> Result<(), RvError> {
+    fn setup(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
         log::warn!("legacy cert auth module is disabled in the OpenSSL-free build");
         Ok(())
     }

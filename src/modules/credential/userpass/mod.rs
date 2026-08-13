@@ -2,6 +2,7 @@ use std::{any::Any, sync::Arc};
 
 use derive_more::Deref;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     core::Core,
     errors::RvError,
@@ -100,7 +101,7 @@ impl Module for UserPassModule {
         self
     }
 
-    fn setup(&self, core: &Core) -> Result<(), RvError> {
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let userpass = self.backend.clone();
         let userpass_backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
             let mut userpass_backend = userpass.new_backend();
@@ -108,7 +109,7 @@ impl Module for UserPassModule {
             Ok(Arc::new(userpass_backend))
         };
 
-        if let Some(auth_module) = core.module_manager.get_module::<AuthModule>("auth") {
+        if let Some(auth_module) = core.module_manager().get_module::<AuthModule>("auth") {
             return auth_module.add_auth_backend("userpass", Arc::new(userpass_backend_new_func));
         } else {
             log::error!("get auth module failed!");
@@ -117,8 +118,8 @@ impl Module for UserPassModule {
         Ok(())
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
-        if let Some(auth_module) = core.module_manager.get_module::<AuthModule>("auth") {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
+        if let Some(auth_module) = core.module_manager().get_module::<AuthModule>("auth") {
             return auth_module.delete_auth_backend("userpass");
         } else {
             log::error!("get auth module failed!");

@@ -14,6 +14,7 @@ use chrono::Utc;
 use derive_more::Deref;
 use serde_json::{json, Map, Value};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
     core::Core,
@@ -930,7 +931,7 @@ impl Module for KvV2Module {
         self
     }
 
-    fn setup(&self, core: &Core) -> Result<(), RvError> {
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let kv = self.backend.clone();
         let kv_backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
             let mut kv_backend = kv.new_backend();
@@ -940,7 +941,7 @@ impl Module for KvV2Module {
         core.add_logical_backend("kv-v2", Arc::new(kv_backend_new_func))
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         core.delete_logical_backend("kv-v2")
     }
 }

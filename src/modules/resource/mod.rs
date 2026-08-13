@@ -22,6 +22,7 @@ use derive_more::Deref;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_response_status, bv_error_string,
     context::Context,
@@ -876,7 +877,7 @@ impl ResourceBackendInner {
                 matches.iter().map(|(name, _)| format!("{base}{name}")).collect();
             let policy_module = self
                 .core
-                .module_manager
+                .module_manager()
                 .get_module::<crate::modules::policy::PolicyModule>("policy")
                 .ok_or_else(|| bv_error_string!("policy module not registered"))?;
             let visible = policy_module
@@ -1040,7 +1041,7 @@ impl ResourceBackendInner {
         // the `resource-group/reindex` endpoint.
         if let Some(rg_module) = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<ResourceGroupModule>("resource-group")
         {
             if let Some(rg_store) = rg_module.store() {
@@ -1254,7 +1255,7 @@ impl ResourceBackendInner {
         // Asset-group membership + reverse index.
         if let Some(rg_module) = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<ResourceGroupModule>("resource-group")
         {
             if let Some(rg_store) = rg_module.store() {
@@ -1270,7 +1271,7 @@ impl ResourceBackendInner {
         // Shares + ownership (identity module, system view stores).
         if let Some(identity) = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<crate::modules::identity::IdentityModule>("identity")
         {
             let actor = crate::modules::identity::caller_audit_actor(req);
@@ -1445,7 +1446,7 @@ impl ResourceBackendInner {
 
         let Some(sb) = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<crate::modules::ssh_broker::SshBrokerModule>("ssh-broker")
         else {
             return Ok(default());
@@ -1466,7 +1467,7 @@ impl ResourceBackendInner {
         // Asset-group memberships from the resource-group reverse index.
         let asset_groups = match self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<crate::modules::resource_group::ResourceGroupModule>("resource-group")
             .and_then(|m| m.store())
         {
@@ -1712,7 +1713,7 @@ impl Module for ResourceModule {
         self
     }
 
-    fn setup(&self, core: &Core) -> Result<(), RvError> {
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let backend = self.backend.clone();
         let backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
             let mut b = backend.new_backend();
@@ -1722,7 +1723,7 @@ impl Module for ResourceModule {
         core.add_logical_backend("resource", Arc::new(backend_new_func))
     }
 
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         core.delete_logical_backend("resource")
     }
 }
