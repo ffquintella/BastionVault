@@ -12,10 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::Sha256;
 
-use crate::{
-    errors::RvError,
-    logical::{Operation, Request, Response},
-};
+use bv_errors::RvError;
+use bv_logical::{Operation, Request, Response};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AuditEntry {
@@ -163,7 +161,7 @@ impl AuditEntry {
             .as_ref()
             .and_then(|a| {
                 a.metadata
-                    .get(crate::modules::namespace::token_binding::NS_PATH_META)
+                    .get(bv_logical::NS_PATH_META)
                     .cloned()
             })
             .unwrap_or_default();
@@ -344,7 +342,7 @@ mod tests {
 
     #[test]
     fn entry_carries_peer_addr_from_connection() {
-        use crate::logical::{Connection, Operation, Request};
+        use bv_logical::{Connection, Operation, Request};
         let mut req = Request::new("secret/foo");
         req.operation = Operation::Read;
         let mut conn = Connection::default();
@@ -362,7 +360,7 @@ mod tests {
 
     #[test]
     fn entry_distinguishes_socket_and_derived_when_proxied() {
-        use crate::logical::{Connection, Operation, Request};
+        use bv_logical::{Connection, Operation, Request};
         let mut req = Request::new("secret/foo");
         req.operation = Operation::Read;
         let mut conn = Connection::default();
@@ -384,7 +382,7 @@ mod tests {
 
     #[test]
     fn entry_remote_address_empty_when_no_connection() {
-        use crate::logical::{Operation, Request};
+        use bv_logical::{Operation, Request};
         let mut req = Request::new("secret/foo");
         req.operation = Operation::Read;
         // req.connection stays None — e.g. internal/synthetic call.

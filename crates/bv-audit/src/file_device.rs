@@ -28,7 +28,7 @@ use super::{
     entry::{serialize_line, AuditEntry},
     AuditDevice,
 };
-use crate::{bv_error_string, errors::RvError};
+use bv_errors::{bv_error_string, RvError};
 
 pub struct FileAuditDevice {
     path: PathBuf,

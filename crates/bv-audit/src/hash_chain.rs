@@ -14,7 +14,7 @@
 use sha2::{Digest, Sha256};
 
 use super::entry::{serialize_line, AuditEntry};
-use crate::errors::RvError;
+use bv_errors::RvError;
 
 /// Genesis hash: what `prev_hash` reads for the first entry in the
 /// chain. A 32-byte zero SHA-256 digest, prefixed with `"sha256:"`

@@ -6,6 +6,23 @@ use serde::{Deserialize, Serialize};
 
 use super::lease::Lease;
 
+/// Token metadata key holding the namespace path the token is bound to.
+///
+/// This and its two siblings key the [`Auth::metadata`] map, which is why
+/// they live here and not with the namespace registry that writes them.
+/// `kernel_api::namespace` re-exports all three, so the call sites that
+/// reach for them through that path are unchanged — but the audit subsystem
+/// reads the namespace path off an entry and must not have to name the
+/// namespace *engine* to do it. See
+/// roadmaps/workspace-decomposition.md § Phase 1.
+pub const NS_PATH_META: &str = "namespace_path";
+
+/// Token metadata key holding the namespace uuid the token is bound to.
+pub const NS_ID_META: &str = "namespace_id";
+
+/// Token metadata key: may this token see into child namespaces?
+pub const CHILD_VISIBLE_META: &str = "child_visible";
+
 #[derive(Debug, Clone, Eq, Default, PartialEq, Serialize, Deserialize, Deref, DerefMut)]
 pub struct Auth {
     #[deref]

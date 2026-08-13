@@ -1,0 +1,55 @@
+[package]
+name = "bv-audit"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's audit entries, hash chain, file device and broker fan-out"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 0 of the workspace decomposition
+# (roadmaps/workspace-decomposition.md § Phase 1).
+#
+# It only became extractable once two edges pointed the other way: the
+# broker now takes a `BarrierView` rather than a kernel handle, and the
+# `sys_emit` helpers (which resolve tokens through the kernel and fetch the
+# broker off `VaultCtx`) stayed in the root crate. Without both, this crate
+# and `kernel_api` would depend on each other — `VaultCtx::audit_broker`
+# returns an `AuditBroker`.
+
+[dependencies]
+bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
+
+async-trait = "0.1"
+base64 = "0.22"
+chrono = "0.4"
+hex = "0.4"
+hmac = "0.13"
+log = "0.4"
+maybe-async = "0.2"
+serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
+serde_json = "^1.0"
+sha2 = "0.11"
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
+
+[features]
+default = []
+sync_handler = ["maybe-async/is_sync", "bv-storage/sync_handler", "bv-logical/sync_handler"]
+
+# The two lints this crate's code trips, both already allowed by the root
+# crate's `[lints.clippy]`. Stated per-crate for the reason recorded in
+# `bv-logical`'s manifest: an extracted crate starts from clippy's defaults,
+# and `await_holding_lock` stays there.
+[lints.clippy]
+field_reassign_with_default = "allow"
+ptr_arg = "allow"
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Pulled in by the `#[maybe_async::maybe_async]` attribute's async
+    # expansion, which is a token stream to a static `use` scan.
+    "async-trait",
+]

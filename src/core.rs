@@ -974,7 +974,10 @@ impl Core {
         // operators require it via the fail-closed policy.
         let hmac_key = self.state.load().hmac_key.clone();
         if !hmac_key.is_empty() {
-            match crate::audit::AuditBroker::new(self, hmac_key).await {
+            let Some(system_view) = self.system_view() else {
+                return Err(RvError::ErrBarrierSealed);
+            };
+            match crate::audit::AuditBroker::new(system_view, hmac_key).await {
                 Ok(broker) => {
                     // First-boot convenience: if the operator pointed
                     // `log_dir` at a directory but never enabled any

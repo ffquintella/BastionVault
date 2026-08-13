@@ -33,14 +33,12 @@ use super::VaultCtx;
 /// compare case-insensitively.
 pub const NAMESPACE_HEADER: &str = "x-bastionvault-namespace";
 
-/// Token metadata key holding the namespace path the token is bound to.
-pub const NS_PATH_META: &str = "namespace_path";
-
-/// Token metadata key holding the namespace uuid the token is bound to.
-pub const NS_ID_META: &str = "namespace_id";
-
-/// Token metadata key: may this token see into child namespaces?
-pub const CHILD_VISIBLE_META: &str = "child_visible";
+/// The three token-metadata keys that carry a namespace binding. They key
+/// `Auth::metadata`, so they are defined next to `Auth` in `bv-logical` and
+/// re-exported here — every call site that reaches for them through
+/// `kernel_api::namespace` (and, in turn, through
+/// `modules::namespace::token_binding`) is unchanged.
+pub use crate::logical::{CHILD_VISIBLE_META, NS_ID_META, NS_PATH_META};
 
 /// The namespace header value on a request, if present. Case-insensitive.
 pub fn namespace_header_from_map(headers: Option<&HashMap<String, String>>) -> Option<String> {

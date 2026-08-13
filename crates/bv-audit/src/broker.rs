@@ -27,12 +27,8 @@ use super::{
     hash_chain::{digest, genesis},
     AuditDevice, DeviceEntry,
 };
-use crate::kernel_api::VaultCtx;
-use crate::{
-    bv_error_string,
-    errors::RvError,
-    storage::{barrier_view::BarrierView, Storage, StorageEntry},
-};
+use bv_errors::{bv_error_string, RvError};
+use bv_storage::{barrier_view::BarrierView, Storage, StorageEntry};
 
 const AUDIT_DEVICES_SUB_PATH: &str = "audit-devices/";
 
@@ -97,10 +93,11 @@ impl AuditBroker {
     /// and re-enabling them. Failures to re-enable a single device
     /// are logged and that device is skipped; the broker still
     /// comes up. New enable calls go through `enable_device`.
-    pub async fn new(core: &dyn VaultCtx, hmac_key: Vec<u8>) -> Result<Arc<Self>, RvError> {
-        let Some(system_view) = core.system_view() else {
-            return Err(RvError::ErrBarrierSealed);
-        };
+    /// Takes the root system view directly rather than a kernel handle: the
+    /// broker is below the kernel in the dependency graph, and a handle would
+    /// point it back up at the crate that owns it. The caller (`post_unseal`)
+    /// is the one that knows whether the vault is sealed.
+    pub async fn new(system_view: Arc<BarrierView>, hmac_key: Vec<u8>) -> Result<Arc<Self>, RvError> {
         let config_view = Arc::new(system_view.new_sub_view(AUDIT_DEVICES_SUB_PATH));
 
         let broker = Arc::new(Self {
