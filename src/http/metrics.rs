@@ -52,7 +52,6 @@ use actix_web::{http::StatusCode, web, HttpRequest, HttpResponse};
 use ipnetwork::IpNetwork;
 use prometheus_client::encoding::text::encode;
 
-use crate::kernel_api::VaultCtx;
 use crate::{
     core::Core,
     errors::RvError,

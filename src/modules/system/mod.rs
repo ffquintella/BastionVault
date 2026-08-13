@@ -4751,6 +4751,21 @@ impl Module for SystemModule {
         self
     }
 
+    /// Boot the access-audit reconciler. Each node tails its own local
+    /// `audit.log` and ingests successful requests into the replicated access
+    /// store, so a successful `secret/…` read shows on the unified Audit page
+    /// (previously only *denied* requests did). Cluster-safe by construction:
+    /// per-node local tailing plus idempotent digest-keyed writes, so the
+    /// union of every node's ingest is what the page reads and re-scans never
+    /// duplicate.
+    fn start_background(&self, _core: Arc<dyn VaultCtx>) {
+        // Kernel tier: the system module holds the concrete `Core` the
+        // reconciler still takes, so it uses its own rather than the
+        // trait-object parameter.
+        // Detached on purpose: dropping the handle does not stop the task.
+        drop(access_audit_reconciler::start_access_audit_reconciler(self.backend.core.clone()));
+    }
+
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let sys = self.backend.clone();
         let sys_backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {

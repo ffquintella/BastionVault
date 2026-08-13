@@ -25,6 +25,7 @@ use crate::{
 };
 
 pub mod expiration;
+pub mod kernel_service;
 pub mod token_store;
 pub use expiration::ExpirationManager;
 pub use token_store::TokenStore;
@@ -320,6 +321,16 @@ impl Module for AuthModule {
 
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
         self
+    }
+
+    fn register(self: Arc<Self>, services: &crate::kernel_api::KernelServices) {
+        kernel_service::register(self, services);
+    }
+
+    fn flush_caches(&self) {
+        if let Some(token_store) = self.token_store.load_full() {
+            token_store.flush_cache();
+        }
     }
 
     async fn init(&self, core: &dyn VaultCtx) -> Result<(), RvError> {

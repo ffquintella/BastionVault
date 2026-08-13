@@ -272,8 +272,6 @@ impl UserPassBackendInner {
     /// an operator gate a single high-value profile without turning on
     /// mandatory TOTP for every login in the deployment.
     async fn step_up_verify_totp(&self, req: &mut Request, username: &str) -> Result<(), RvError> {
-        use crate::modules::totp::mfa;
-
         let code = req.get_data("totp_code").ok().and_then(|v| v.as_str().map(|s| s.to_string()));
         let code = code.unwrap_or_default();
         if code.trim().is_empty() {
@@ -295,16 +293,19 @@ impl UserPassBackendInner {
             ));
         }
 
-        let mount = match mfa::normalize_mount(&user.totp_mount) {
+        let totp = self.core.totp_mfa().ok_or_else(|| {
+            RvError::ErrResponse("the TOTP engine is not loaded".into())
+        })?;
+        let mount = match totp.normalize_mount(&user.totp_mount) {
             m if m.is_empty() => {
                 let cfg = self.get_mfa_config(req).await?;
-                mfa::normalize_mount(&cfg.default_mount)
+                totp.normalize_mount(&cfg.default_mount)
             }
             m => m,
         };
 
         let now = super::path_users::now_secs().max(0) as u64;
-        if !mfa::verify_code(&self.core, &mount, &user.totp_key, &code, now).await? {
+        if !totp.verify_code(&mount, &user.totp_key, &code, now).await? {
             return Err(RvError::ErrResponse("invalid TOTP code".into()));
         }
         Ok(())

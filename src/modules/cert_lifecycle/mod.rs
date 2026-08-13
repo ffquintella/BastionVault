@@ -139,6 +139,16 @@ impl Module for CertLifecycleModule {
         self
     }
 
+    /// Boot the renewal scheduler (Phase L6). Each mount opts in via
+    /// `cert-lifecycle/scheduler/config`; un-configured mounts are skipped on
+    /// every tick. The renewal goes through the request pipeline with the
+    /// operator-supplied `client_token`, so the PKI ACL boundary still
+    /// applies.
+    fn start_background(&self, core: Arc<dyn VaultCtx>) {
+        // Detached on purpose: dropping the handle does not stop the task.
+        drop(scheduler::start_cert_lifecycle_scheduler(core));
+    }
+
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let backend = self.backend.clone();
         let new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {

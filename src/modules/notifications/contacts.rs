@@ -16,13 +16,9 @@
 
 use serde_json::Value;
 
-use crate::kernel_api::VaultCtx;
+use crate::kernel_api::{identity::GroupKind, VaultCtx};
 use crate::{
     errors::RvError,
-    modules::{
-        auth::AuthModule,
-        identity::{GroupKind, IdentityModule},
-    },
     storage::{barrier_view::BarrierView, Storage},
 };
 
@@ -41,9 +37,17 @@ pub async fn resolve_target_entities(
     target: &NotificationTarget,
     ns_path: &str,
 ) -> Result<Vec<String>, RvError> {
-    let identity = core.module_manager().get_module::<IdentityModule>("identity");
-    let entity_store = identity.as_ref().and_then(|m| m.entity_store());
-    let group_store = identity.as_ref().and_then(|m| m.group_store());
+    let Some(identity) = core.identity() else {
+        // No identity module. A target that is already an entity id still
+        // resolves — it needs no lookup — and every other kind is a name with
+        // nothing to resolve it against.
+        return Ok(match target {
+            NotificationTarget::User { entity_id } if !entity_id.trim().is_empty() => {
+                vec![entity_id.clone()]
+            }
+            _ => vec![],
+        });
+    };
 
     match target {
         NotificationTarget::User { entity_id } => {
@@ -52,43 +56,25 @@ pub async fn resolve_target_entities(
             }
             Ok(vec![entity_id.clone()])
         }
-        NotificationTarget::Username { name } => {
-            let Some(es) = entity_store else {
-                return Ok(vec![]);
-            };
-            match es
-                .get_by_alias_ns(USERPASS_ALIAS_MOUNT, &name.to_lowercase(), ns_path)
-                .await?
-            {
-                Some(entity) => Ok(vec![entity.id]),
-                None => Ok(vec![]),
-            }
-        }
+        NotificationTarget::Username { name } => Ok(identity
+            .entity_id_for_alias(USERPASS_ALIAS_MOUNT, &name.to_lowercase(), ns_path)
+            .await?
+            .into_iter()
+            .collect()),
         NotificationTarget::Group { group_kind, name } => {
-            let (Some(gs), Some(es)) = (group_store, entity_store) else {
-                return Ok(vec![]);
-            };
             let gkind = GroupKind::parse(group_kind)?;
-            let Some(group) = gs.get_group_ns(gkind, name, ns_path).await? else {
-                return Ok(vec![]);
-            };
             let mut seen = std::collections::BTreeSet::new();
-            for member in &group.members {
-                if let Some(entity) = es
-                    .get_by_alias_ns(USERPASS_ALIAS_MOUNT, &member.to_lowercase(), ns_path)
+            for member in identity.group_members(gkind, name, ns_path).await? {
+                if let Some(id) = identity
+                    .entity_id_for_alias(USERPASS_ALIAS_MOUNT, &member.to_lowercase(), ns_path)
                     .await?
                 {
-                    seen.insert(entity.id);
+                    seen.insert(id);
                 }
             }
             Ok(seen.into_iter().collect())
         }
-        NotificationTarget::AllUsers => {
-            let Some(es) = entity_store else {
-                return Ok(vec![]);
-            };
-            es.list_entities_ns(ns_path).await
-        }
+        NotificationTarget::AllUsers => identity.list_entity_ids(ns_path).await,
     }
 }
 
@@ -100,10 +86,7 @@ pub async fn resolve_recipients(
     entity_ids: &[String],
     _ns_path: &str,
 ) -> Result<Vec<Recipient>, RvError> {
-    let entity_store = core
-        .module_manager()
-        .get_module::<IdentityModule>("identity")
-        .and_then(|m| m.entity_store());
+    let identity = core.identity();
 
     let userpass_views = collect_userpass_views(core)?;
 
@@ -116,18 +99,12 @@ pub async fn resolve_recipients(
             phone: String::new(),
         };
 
-        if let Some(es) = &entity_store {
-            if let Some(entity) = es.get_entity(id).await? {
+        if let Some(identity) = &identity {
+            if let Some(entity) = identity.entity_profile(id).await? {
                 recipient.display_name = entity.primary_name.clone();
 
                 // Prefer the userpass alias name; fall back to primary.
-                let username = entity
-                    .aliases
-                    .iter()
-                    .find(|a| a.mount == USERPASS_ALIAS_MOUNT)
-                    .map(|a| a.name.clone())
-                    .unwrap_or_else(|| entity.primary_name.clone())
-                    .to_lowercase();
+                let username = entity.name_on_mount(USERPASS_ALIAS_MOUNT).to_lowercase();
 
                 if !username.is_empty() {
                     let key = format!("user/{username}");
@@ -170,17 +147,9 @@ pub async fn resolve_recipients(
 /// can read `user/<name>` records for contact addresses.
 fn collect_userpass_views(core: &dyn VaultCtx) -> Result<Vec<BarrierView>, RvError> {
     let mut views = Vec::new();
-    let Some(auth) = core.module_manager().get_module::<AuthModule>("auth") else {
+    let Some(auth_mounts) = core.auth_mounts() else {
         return Ok(views);
     };
-    let entries = auth.mounts_router.entries.read()?;
-    for mount_entry in entries.values() {
-        let entry = mount_entry.read()?;
-        if entry.logical_type != USERPASS_LOGICAL_TYPE {
-            continue;
-        }
-        let barrier_path = format!("{}{}/", auth.mounts_router.barrier_prefix, entry.uuid);
-        views.push(BarrierView::new(auth.mounts_router.barrier.clone(), &barrier_path));
-    }
+    views = auth_mounts.auth_mount_views(USERPASS_LOGICAL_TYPE)?;
     Ok(views)
 }

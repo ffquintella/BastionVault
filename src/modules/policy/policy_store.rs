@@ -2810,7 +2810,7 @@ async fn resolve_target_shared_caps(
 /// caller. Silent on any policy-store failure (returns `false`,
 /// fail-closed — the absence of group-share resolution just narrows
 /// access rather than widening it).
-async fn caller_policies_opt_in_group_shared(core: &dyn VaultCtx, req: &Request) -> bool {
+async fn caller_policies_opt_in_group_shared(core: &crate::core::Core, req: &Request) -> bool {
     let Some(auth) = req.auth.as_ref() else {
         return false;
     };

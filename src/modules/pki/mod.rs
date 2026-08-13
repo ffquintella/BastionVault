@@ -174,6 +174,14 @@ impl Module for PkiModule {
         self
     }
 
+    /// Boot the auto-tidy sweep (Phase 4.1). Ticks every 30s; per-mount
+    /// cadence comes from each mount's persisted `pki/config/auto-tidy`, so a
+    /// deployment that configures none is a no-op.
+    fn start_background(&self, core: Arc<dyn VaultCtx>) {
+        // Detached on purpose: dropping the handle does not stop the task.
+        drop(scheduler::start_pki_tidy_scheduler(core));
+    }
+
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let backend = self.backend.clone();
         let new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {

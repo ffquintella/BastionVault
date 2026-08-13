@@ -29,6 +29,7 @@ use crate::kernel_api::VaultCtx;
 use crate::{core::Core, errors::RvError};
 
 pub mod identity_link;
+pub mod kernel_service;
 pub mod migrate;
 pub mod mount_registry;
 pub mod ns_assignment;
@@ -93,6 +94,10 @@ impl Module for NamespaceModule {
         self
     }
 
+    fn register(self: Arc<Self>, services: &crate::kernel_api::KernelServices) {
+        kernel_service::register(self, services);
+    }
+
     async fn init(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
         let store = Arc::new(NamespaceStore::new(&self.core)?);
         // Mint (or read back) the implicit root namespace. This is the anchor
@@ -121,7 +126,7 @@ mod tests {
     };
     use serde_json::json;
 
-    fn store_of(core: &dyn VaultCtx) -> Arc<NamespaceStore> {
+    fn store_of(core: &Core) -> Arc<NamespaceStore> {
         core.module_manager()
             .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
             .and_then(|m| m.store())

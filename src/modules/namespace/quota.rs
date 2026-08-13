@@ -132,7 +132,7 @@ impl RateLimiter {
 /// namespaces and when the namespace module is unavailable.
 #[maybe_async::maybe_async]
 pub async fn enforce_request_rate(
-    core: &dyn VaultCtx,
+    core: &crate::core::Core,
     req: &crate::logical::Request,
 ) -> Result<(), RvError> {
     use super::{NamespaceModule, NAMESPACE_MODULE_NAME};
@@ -194,7 +194,7 @@ async fn namespace_storage_bytes(
 /// when the namespace is root, or when the cap is unset.
 #[maybe_async::maybe_async]
 pub async fn check_entity_create(
-    core: &dyn VaultCtx,
+    core: &crate::core::Core,
     mount: &str,
     name: &str,
     ns_path: &str,
@@ -242,7 +242,7 @@ pub async fn check_entity_create(
 /// the root namespace, or an unset cap.
 #[maybe_async::maybe_async]
 pub async fn enforce_write_storage_quota(
-    core: &dyn VaultCtx,
+    core: &crate::core::Core,
     req: &crate::logical::Request,
 ) -> Result<(), RvError> {
     use super::{NamespaceModule, NAMESPACE_MODULE_NAME};

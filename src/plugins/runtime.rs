@@ -1098,33 +1098,39 @@ async fn audit_emit_impl(
 
 /// Input shape for `bv.notify_send` — a subset of a full `Notification`
 /// (the host stamps id / created_at / source / namespace).
-#[derive(serde::Deserialize)]
+///
+/// `target` stays a raw `Value`: its shape belongs to the notifications
+/// engine, and naming `NotificationTarget` here would put a Tier 3 type in the
+/// plugin substrate. The sink validates it. Declaring the other fields is
+/// still worth it — it is what rejects a plugin trying to set `source`.
+#[derive(serde::Deserialize, serde::Serialize)]
 struct PluginNotifyInput {
     title: String,
     #[serde(default)]
     body: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     severity: Option<String>,
-    target: crate::modules::notifications::NotificationTarget,
+    target: serde_json::Value,
     #[serde(default)]
     channels: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     action_url: Option<String>,
     #[serde(default)]
     metadata: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Resolve the live notification service + the calling plugin's name.
-/// Returns `None` when the service is unavailable (sealed / not wired).
+/// Resolve the live notification sink + the calling plugin's name.
+/// Returns `None` when no notifications engine is wired in.
+///
+/// A trait object, not `NotificationService`: the plugin substrate is Tier 0
+/// and must not name a Tier 3 engine's concrete type. See
+/// `kernel_api::engines`.
 fn plugin_notify_service(
     caller: &Caller<'_, PluginCtx>,
-) -> Option<(Arc<crate::modules::notifications::NotificationService>, String)> {
+) -> Option<(Arc<dyn crate::kernel_api::engines::NotificationSink>, String)> {
     let core = caller.data().core.clone()?;
-    let service = core
-        .module_manager()
-        .get_module::<crate::modules::notifications::NotificationsModule>("notifications")
-        .and_then(|m| m.service())?;
-    Some((service, caller.data().plugin_name.clone()))
+    let sink = core.notifications()?;
+    Some((sink, caller.data().plugin_name.clone()))
 }
 
 async fn notify_send_impl(
@@ -1149,31 +1155,18 @@ async fn notify_send_impl(
         return STORAGE_FORBIDDEN;
     };
 
-    use crate::modules::notifications::{Notification, Severity};
-    let notif = Notification {
-        id: String::new(),
-        title: input.title,
-        body: input.body,
-        severity: input.severity.as_deref().map(Severity::parse).unwrap_or_default(),
-        // Overwritten by the service to `plugin:<name>` — a plugin can
-        // never forge a system/admin source.
-        source: String::new(),
-        target: input.target,
-        channels: input.channels,
-        action_url: input.action_url,
-        created_at: String::new(),
-        namespace: String::new(),
-        metadata: input.metadata,
-        recipient_count: 0,
+    // Hand the sink the plugin's own request body. `source` is deliberately
+    // absent: the service stamps `plugin:<name>`, so a plugin can never forge
+    // a system/admin origin, and re-encoding the notification here would be a
+    // second copy of its schema to keep in sync.
+    let notif = match serde_json::to_value(&input) {
+        Ok(v) => v,
+        Err(_) => return STORAGE_INTERNAL_ERROR,
     };
 
     match service.send_from_plugin(&plugin_name, notif, "").await {
         Ok(outcome) => {
-            let body = serde_json::json!({
-                "id": outcome.id,
-                "recipient_count": outcome.recipient_count,
-            });
-            let bytes = serde_json::to_vec(&body).unwrap_or_default();
+            let bytes = serde_json::to_vec(&outcome).unwrap_or_default();
             write_to_buffer(caller, &bytes, out_ptr, out_max)
         }
         Err(_) => STORAGE_INTERNAL_ERROR,

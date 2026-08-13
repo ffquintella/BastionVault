@@ -10,7 +10,7 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response},
-    modules::identity::GroupKind,
+    kernel_api::identity::GroupKind,
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
 };
@@ -240,7 +240,7 @@ impl UserPassBackendInner {
         // request header — or, unscoped, to the principal's first assigned
         // namespace — exactly as the password-login path does.
         let (ns_path, ns_uuid) =
-            crate::modules::namespace::token_binding::resolve_login_namespace_for_principal(
+            crate::kernel_api::namespace::login_namespace_for_principal(
                 &self.core,
                 req,
                 "userpass/",
@@ -251,7 +251,7 @@ impl UserPassBackendInner {
         // Multi-tenancy: refuse the login if this principal's namespace
         // assignment does not include the login namespace (no record ⇒
         // unrestricted; fails closed on a non-matching record).
-        crate::modules::namespace::ns_assignment::enforce_login_assignment(
+        crate::kernel_api::namespace::enforce_login_assignment(
             &self.core,
             "userpass/",
             &username,
@@ -297,9 +297,9 @@ impl UserPassBackendInner {
         // child_visible follows the login namespace's `child_visible_default`
         // flag (see `path_login` for the rationale); default false.
         let child_visible =
-            crate::modules::namespace::token_binding::login_child_visible(&self.core, &ns_path)
+            crate::kernel_api::namespace::login_child_visible(&self.core, &ns_path)
                 .await;
-        crate::modules::namespace::token_binding::stamp_binding(
+        crate::kernel_api::namespace::stamp_binding(
             &mut auth.metadata,
             &ns_path,
             &ns_uuid,

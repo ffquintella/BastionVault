@@ -32,7 +32,6 @@ use crate::{
         field::FieldTrait, Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response,
     },
     metrics::ferrogate_metrics::{ferrogate_metrics, DenyReason},
-    modules::auth::AuthModule,
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
 };
@@ -563,14 +562,10 @@ impl FerroGateBackendInner {
         if req.client_token.is_empty() {
             return false;
         }
-        let Some(auth_module) = self.core.module_manager().get_module::<AuthModule>("auth") else {
+        let Some(tokens) = self.core.tokens() else {
             return false;
         };
-        let guard = auth_module.token_store.load();
-        let Some(token_store) = guard.as_ref() else {
-            return false;
-        };
-        matches!(token_store.lookup(&req.client_token).await, Ok(Some(te)) if te.policies.iter().any(|p| p == "root"))
+        matches!(tokens.lookup(&req.client_token).await, Ok(Some(te)) if te.is_root())
     }
 
     /// Bind an already-authenticated user token to this machine login.
@@ -600,21 +595,16 @@ impl FerroGateBackendInner {
             return Ok(None);
         };
 
-        let auth_module = self
+        let tokens = self
             .core
-            .module_manager()
-            .get_module::<AuthModule>("auth")
+            .tokens()
             .ok_or_else(|| "user_binding_unavailable: auth module not loaded".to_string())?;
-        let guard = auth_module.token_store.load();
-        let token_store = guard
-            .as_ref()
-            .ok_or_else(|| "user_binding_unavailable: token store not initialised".to_string())?;
 
-        let te = match token_store.lookup(&user_token).await {
+        let te = match tokens.lookup(&user_token).await {
             Ok(Some(te)) => te,
             _ => return Err("invalid_user_token: the supplied user token is not valid".to_string()),
         };
-        if te.policies.iter().any(|p| p == "root") {
+        if te.is_root() {
             return Err("invalid_user_token: root tokens cannot be bound to a machine login".to_string());
         }
 
@@ -628,13 +618,13 @@ impl FerroGateBackendInner {
             .cloned()
             .collect();
 
-        let entity_id = te.meta.get("entity_id").cloned().unwrap_or_default();
-        let username = te.meta.get("username").cloned().unwrap_or_default();
+        let entity_id = te.meta_or_empty("entity_id");
+        let username = te.meta_or_empty("username");
 
         // Drop the broader intermediate token — only the combined token should
         // remain usable. Best-effort: a revoke failure must not block the login
         // (the combined token is still the narrower of the two).
-        if let Err(e) = token_store.revoke(&user_token).await {
+        if let Err(e) = tokens.revoke(&user_token).await {
             log::warn!(target: "security", "ferrogate: failed to revoke bound user token: {e}");
         }
 

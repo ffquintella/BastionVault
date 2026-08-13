@@ -35,7 +35,7 @@ use super::{
     audit, apply_probe,
     config::RustionTarget,
     health::ProbeOutcome,
-    RustionModule, RustionStore,
+    RustionStore,
 };
 
 /// Default tick. Surfaced as a constant so a test can drive the
@@ -57,7 +57,10 @@ pub const PROBE_AUTHORITY: &str = "bastion-vault";
 /// can hold it; dropping the handle does not stop the task (tokio
 /// detaches when the parent crate-level futures terminate). Mirrors
 /// `pki::scheduler::start_pki_tidy_scheduler`.
-pub fn start_pinger(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
+pub fn start_pinger(
+    core: Arc<dyn VaultCtx>,
+    stores: Arc<super::RustionStores>,
+) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         log::info!(
             "rustion/pinger: started (tick every {}s, probe timeout {}s)",
@@ -73,7 +76,7 @@ pub fn start_pinger(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
             if core.sealed() {
                 continue;
             }
-            if let Err(e) = tick(&core).await {
+            if let Err(e) = tick(&stores).await {
                 log::warn!("rustion/pinger: tick failed: {e}");
             }
         }
@@ -83,8 +86,8 @@ pub fn start_pinger(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
 /// Run a single probe round. Exposed so an integration test (or a
 /// future admin endpoint) can force a sweep without waiting for the
 /// background interval.
-pub async fn run_probe_pass(core: &dyn VaultCtx) -> Result<(), RvError> {
-    tick(core).await
+pub async fn run_probe_pass(stores: &super::RustionStores) -> Result<(), RvError> {
+    tick(stores).await
 }
 
 /// Probe one specific target and persist the fresh health record.
@@ -101,14 +104,8 @@ pub async fn probe_target_now(store: &Arc<RustionStore>, target: &RustionTarget)
     probe_one(&client, store, target).await;
 }
 
-async fn tick(core: &dyn VaultCtx) -> Result<(), RvError> {
-    let Some(module) = core
-        .module_manager()
-        .get_module::<RustionModule>("rustion")
-    else {
-        return Ok(());
-    };
-    let Some(store) = module.store() else {
+async fn tick(stores: &super::RustionStores) -> Result<(), RvError> {
+    let Some(store) = stores.store() else {
         return Ok(());
     };
 

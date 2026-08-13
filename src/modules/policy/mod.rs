@@ -20,6 +20,7 @@ pub mod policy;
 pub use policy::{Permissions, Policy, PolicyPathRules, PolicyType};
 
 pub mod policy_store;
+pub mod kernel_service;
 pub use policy_store::{PolicyHistoryEntry, PolicyStore};
 
 pub mod acl;
@@ -522,6 +523,14 @@ impl Module for PolicyModule {
 
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
         self
+    }
+
+    fn register(self: Arc<Self>, services: &crate::kernel_api::KernelServices) {
+        kernel_service::register(self, services);
+    }
+
+    fn flush_caches(&self) {
+        self.policy_store.load().flush_caches();
     }
 
     fn setup(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {

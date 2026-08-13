@@ -130,6 +130,14 @@ impl Module for LdapModule {
         self
     }
 
+    /// Boot the OpenLDAP / AD static-role auto-rotation sweep (Phase 3).
+    /// Ticks every 60s; per-role cadence comes from each role's persisted
+    /// `rotation_period`, and roles with `rotation_period = 0` are skipped.
+    fn start_background(&self, core: Arc<dyn VaultCtx>) {
+        // Detached on purpose: dropping the handle does not stop the task.
+        drop(scheduler::start_ldap_rotation_scheduler(core));
+    }
+
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let backend = self.backend.clone();
         let new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {

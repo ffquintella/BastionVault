@@ -127,18 +127,68 @@ this registry to mediate SSH / RDP sessions through one or more PQC
 bastions instead of opening direct connections from the GUI host.
 "#;
 
+/// The engine's five late-bound stores, in one shareable handle.
+///
+/// Created empty at module construction and filled in `Module::init`, at
+/// unseal. Everything that needs them holds an `Arc<RustionStores>`: the
+/// module, the logical backend (built before the stores exist), and the four
+/// detached background tasks.
+///
+/// This replaced ten `get_module::<RustionModule>("rustion")` lookups — the
+/// engine asking the module manager for *itself*, by name, then downcasting,
+/// on every request handler and every poller tick. The lookup was never about
+/// finding the module; it was about the handle having to be late. Sharing the
+/// slots keeps the lateness and drops the lookup, the downcast, and the
+/// engine's dependency on `ModuleManager`.
+#[derive(Default)]
+pub struct RustionStores {
+    pub store: ArcSwap<Option<Arc<RustionStore>>>,
+    pub master: ArcSwap<Option<Arc<MasterStore>>>,
+    pub recordings: ArcSwap<Option<Arc<recordings::RecordingsStore>>>,
+    pub policy: ArcSwap<Option<Arc<policy::PolicyStore>>>,
+    pub telemetry: ArcSwap<Option<Arc<telemetry::TelemetryCache>>>,
+}
+
+impl RustionStores {
+    pub fn store(&self) -> Option<Arc<RustionStore>> {
+        self.store.load().as_ref().clone()
+    }
+
+    pub fn master(&self) -> Option<Arc<MasterStore>> {
+        self.master.load().as_ref().clone()
+    }
+
+    pub fn recordings(&self) -> Option<Arc<recordings::RecordingsStore>> {
+        self.recordings.load().as_ref().clone()
+    }
+
+    pub fn policy(&self) -> Option<Arc<policy::PolicyStore>> {
+        self.policy.load().as_ref().clone()
+    }
+
+    pub fn telemetry(&self) -> Option<Arc<telemetry::TelemetryCache>> {
+        self.telemetry.load().as_ref().clone()
+    }
+
+    /// Drop every store. Called on seal.
+    pub fn clear(&self) {
+        self.store.store(Arc::new(None));
+        self.master.store(Arc::new(None));
+        self.recordings.store(Arc::new(None));
+        self.policy.store(Arc::new(None));
+        self.telemetry.store(Arc::new(None));
+    }
+}
+
 pub struct RustionModule {
     pub name: String,
     pub core: Arc<dyn VaultCtx>,
-    pub store: ArcSwap<Option<Arc<RustionStore>>>,
-    pub master_store: ArcSwap<Option<Arc<MasterStore>>>,
-    pub recordings_store: ArcSwap<Option<Arc<recordings::RecordingsStore>>>,
-    pub policy_store: ArcSwap<Option<Arc<policy::PolicyStore>>>,
-    pub telemetry_cache: ArcSwap<Option<Arc<telemetry::TelemetryCache>>>,
+    pub stores: Arc<RustionStores>,
 }
 
 pub struct RustionBackendInner {
     pub core: Arc<dyn VaultCtx>,
+    pub stores: Arc<RustionStores>,
 }
 
 /// Output of [`RustionBackendInner::mint_brokered_ssh_cert`]: the
@@ -160,8 +210,8 @@ pub struct RustionBackend {
 }
 
 impl RustionBackend {
-    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
-        Self { inner: Arc::new(RustionBackendInner { core }) }
+    pub fn new(core: Arc<dyn VaultCtx>, stores: Arc<RustionStores>) -> Self {
+        Self { inner: Arc::new(RustionBackendInner { core, stores }) }
     }
 
     pub fn new_backend(&self) -> LogicalBackend {
@@ -858,23 +908,11 @@ impl RustionBackend {
 #[maybe_async::maybe_async]
 impl RustionBackendInner {
     fn resolve_store(&self) -> Result<Arc<RustionStore>, RvError> {
-        let module = self
-            .core
-            .module_manager()
-            .get_module::<RustionModule>("rustion")
-            .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
-        let store = module.store();
-        store.ok_or_else(|| bv_error_string!("rustion store not initialized"))
+        self.stores.store().ok_or_else(|| bv_error_string!("rustion store not initialized"))
     }
 
     fn resolve_master_store(&self) -> Result<Arc<MasterStore>, RvError> {
-        let module = self
-            .core
-            .module_manager()
-            .get_module::<RustionModule>("rustion")
-            .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
-        let master = module.master_store();
-        master.ok_or_else(|| bv_error_string!("rustion master store not initialized"))
+        self.stores.master().ok_or_else(|| bv_error_string!("rustion master store not initialized"))
     }
 
     /// Append the master-identity explanation to a `bastion_rejected: …`
@@ -905,23 +943,13 @@ impl RustionBackendInner {
     }
 
     fn resolve_recordings_store(&self) -> Result<Arc<recordings::RecordingsStore>, RvError> {
-        let module = self
-            .core
-            .module_manager()
-            .get_module::<RustionModule>("rustion")
-            .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
-        let recs = module.recordings_store();
-        recs.ok_or_else(|| bv_error_string!("rustion recordings store not initialized"))
+        self.stores
+            .recordings()
+            .ok_or_else(|| bv_error_string!("rustion recordings store not initialized"))
     }
 
     fn resolve_policy_store(&self) -> Result<Arc<policy::PolicyStore>, RvError> {
-        let module = self
-            .core
-            .module_manager()
-            .get_module::<RustionModule>("rustion")
-            .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
-        let pol = module.policy_store();
-        pol.ok_or_else(|| bv_error_string!("rustion policy store not initialized"))
+        self.stores.policy().ok_or_else(|| bv_error_string!("rustion policy store not initialized"))
     }
 
     fn input_from_req(req: &Request, fallback_name: &str) -> Result<RustionTargetInput, RvError> {
@@ -1224,8 +1252,7 @@ impl RustionBackendInner {
     // ─── Probe (manual trigger) ────────────────────────────────────
 
     pub async fn handle_probe_all(&self, _b: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
-        let core = self.core.clone();
-        probe::run_probe_pass(&core).await?;
+        probe::run_probe_pass(&self.stores).await?;
         // Surface the freshened cache straight back so the caller
         // doesn't need a follow-up read.
         self.handle_health_all(_b, _req).await
@@ -1354,12 +1381,10 @@ impl RustionBackendInner {
         if req.auth.is_none() {
             return Err(bv_error_response_status!(401, "no authenticated caller"));
         }
-        let policy_module = self
+        let policy = self
             .core
-            .module_manager()
-            .get_module::<crate::modules::policy::PolicyModule>("policy")
+            .policy()
             .ok_or_else(|| bv_error_string!("policy module not registered"))?;
-        let store = policy_module.policy_store.load();
 
         // Namespace-qualified: policies inside a namespace are authored with
         // `<ns>/`-prefixed paths (`refuse_cross_namespace_paths` enforces
@@ -1383,7 +1408,7 @@ impl RustionBackendInner {
         let mut probe = req.clone();
         probe.namespace_path =
             if ns_prefix.is_empty() { None } else { Some(ns_prefix.trim_end_matches('/').to_string()) };
-        Ok(store.may_connect_target(&probe, &secret_prefix).await)
+        Ok(policy.may_connect_target(&probe, &secret_prefix).await)
     }
 
     /// May this caller see *anything* about `resource_name`?
@@ -1420,12 +1445,10 @@ impl RustionBackendInner {
         ns_prefix: &str,
         resource_name: &str,
     ) -> Result<bool, RvError> {
-        let policy_module = self
+        let policy = self
             .core
-            .module_manager()
-            .get_module::<crate::modules::policy::PolicyModule>("policy")
+            .policy()
             .ok_or_else(|| bv_error_string!("policy module not registered"))?;
-        let store = policy_module.policy_store.load();
 
         let record = format!("{ns_prefix}resources/resources/{resource_name}");
         let mut probe = Request::new(&record);
@@ -1434,10 +1457,9 @@ impl RustionBackendInner {
         probe.api_version = req.api_version;
         probe.namespace_path =
             if ns_prefix.is_empty() { None } else { Some(ns_prefix.trim_end_matches('/').to_string()) };
-        if store.readable_targets(&probe, &[record]).await.first().copied().unwrap_or(false) {
+        if policy.readable_targets(&probe, &[record]).await.first().copied().unwrap_or(false) {
             return Ok(true);
         }
-        drop(store);
 
         self.may_connect_resource(req, ns_prefix, resource_name).await
     }
@@ -1467,17 +1489,16 @@ impl RustionBackendInner {
 
     /// True when the caller holds `sudo` (or is root) on `path`.
     async fn caller_has_sudo(&self, req: &Request, path: &str) -> Result<bool, RvError> {
-        use crate::modules::policy::policy::Capability;
-
-        let auth = req.auth.clone().ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
-        let policy_module = self
+        // Unauthenticated first, so an anonymous caller gets the 401 it earned
+        // rather than a report about the server's module wiring.
+        if req.auth.is_none() {
+            return Err(bv_error_response_status!(401, "no authenticated caller"));
+        }
+        let policy = self
             .core
-            .module_manager()
-            .get_module::<crate::modules::policy::PolicyModule>("policy")
+            .policy()
             .ok_or_else(|| bv_error_string!("policy module not registered"))?;
-        let acl = policy_module.policy_store.load().new_acl_for_request(&auth.policies, None, &auth).await?;
-        let v = acl.explain_capability(path, Capability::Sudo);
-        Ok(v.allowed || v.is_root)
+        policy.caller_has_sudo(req, path).await
     }
 
     /// `POST rustion/session/open` — the v1 entry point, now per-resource
@@ -1930,8 +1951,6 @@ impl RustionBackendInner {
         // `enforce` cannot find the profile, so the caller gets the explicit
         // "profile_id is required" refusal below rather than a silent pass.
         {
-            use crate::modules::resource::connect_mfa;
-
             let profile_id = req
                 .get_data("profile_id")
                 .ok()
@@ -1943,31 +1962,36 @@ impl RustionBackendInner {
                 .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
                 .unwrap_or_default();
 
-            if profile_id.is_empty() {
-                // No profile named: verify that *no* profile on this resource
-                // is gated before letting an unattributed open through. A
-                // caller that omits `profile_id` on a resource carrying any
-                // gated profile is refused rather than routed around the gate.
-                if self.resource_has_gated_profile(&ns_prefix, &resource_name).await? {
-                    return Err(bv_error_response_status!(
-                        400,
-                        "mfa_required: this resource has a connection profile that requires \
-                         MFA re-validation. Pass `profile_id` (and `connect_ticket` when the \
-                         named profile is gated) so the server can evaluate the gate."
-                    ));
-                }
-            } else {
-                let ticket_opt = if ticket.is_empty() { None } else { Some(ticket.as_str()) };
-                if let Some(record) =
-                    connect_mfa::enforce(&self.core, req, &ns_prefix, &resource_name, &profile_id, ticket_opt)
+            // No gate service means no gated profiles anywhere, so there is
+            // nothing to enforce and nothing to fail closed against.
+            if let Some(gate) = self.core.connect_mfa() {
+                if profile_id.is_empty() {
+                    // No profile named: verify that *no* profile on this
+                    // resource is gated before letting an unattributed open
+                    // through. A caller that omits `profile_id` on a resource
+                    // carrying any gated profile is refused rather than routed
+                    // around the gate.
+                    if gate.resource_has_gated_profile(&ns_prefix, &resource_name).await? {
+                        return Err(bv_error_response_status!(
+                            400,
+                            "mfa_required: this resource has a connection profile that requires \
+                             MFA re-validation. Pass `profile_id` (and `connect_ticket` when the \
+                             named profile is gated) so the server can evaluate the gate."
+                        ));
+                    }
+                } else {
+                    let ticket_opt = if ticket.is_empty() { None } else { Some(ticket.as_str()) };
+                    if let Some(record) = gate
+                        .enforce(req, &ns_prefix, &resource_name, &profile_id, ticket_opt)
                         .await?
-                {
-                    log::info!(
-                        "connect.mfa.authorized transport=rustion resource={resource_name} \
-                         profile={profile_id} principal={} method={}",
-                        record.principal,
-                        record.method
-                    );
+                    {
+                        log::info!(
+                            "connect.mfa.authorized transport=rustion resource={resource_name} \
+                             profile={profile_id} principal={} method={}",
+                            record.principal,
+                            record.method
+                        );
+                    }
                 }
             }
         }
@@ -2096,36 +2120,6 @@ impl RustionBackendInner {
         // `handle_session_open` — that is the v1 entry point's own gate, and
         // the connect check above has already run.
         self.brokered_session_open(b, req).await
-    }
-
-    /// True when *any* connection profile on this resource carries
-    /// `require_mfa`.
-    ///
-    /// Used only for the fail-closed branch when a caller opens a brokered
-    /// session without naming a profile: the gate cannot be evaluated
-    /// without a profile id, so an un-attributed open against a resource that
-    /// has any gated profile is refused rather than allowed through. A
-    /// resource with no gated profiles is unaffected, which keeps every
-    /// pre-existing caller working unchanged.
-    async fn resource_has_gated_profile(
-        &self,
-        ns_prefix: &str,
-        resource_name: &str,
-    ) -> Result<bool, RvError> {
-        use crate::modules::resource::connect_mfa::profile_gate_flag;
-
-        let path = format!("{ns_prefix}resources/resources/{resource_name}");
-        let mut sub = Request::new(&path);
-        sub.operation = Operation::Read;
-        let Some(resp) = self.core.router().handle_request(&mut sub).await? else {
-            return Ok(false);
-        };
-        let data = resp.data.unwrap_or_default();
-        Ok(data
-            .get("connection_profiles")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().any(profile_gate_flag))
-            .unwrap_or(false))
     }
 
     /// Resolve a resource-stored secret to base64-encoded ssh-password
@@ -2506,41 +2500,7 @@ impl RustionBackendInner {
     /// An unknown / unresolvable namespace yields `""` (root), matching the
     /// best-effort behaviour of the header-scoped branch in the router.
     async fn namespace_sub_request_prefix(&self, req: &Request) -> Result<String, RvError> {
-        use crate::modules::namespace::router::namespace_header_from_map;
-        use crate::modules::namespace::{NamespaceModule, NAMESPACE_MODULE_NAME};
-
-        // `namespace_path` is stamped by the header-scoped branch of
-        // `rewrite_request_for_namespace`; fall back to the raw header for
-        // callers that dispatch straight into the backend (tests, in-process
-        // embedded callers).
-        let raw = req
-            .namespace_path
-            .clone()
-            .or_else(|| namespace_header_from_map(req.headers.as_ref()))
-            .unwrap_or_default();
-        let raw = raw.trim().to_string();
-        if raw.is_empty() {
-            return Ok(String::new());
-        }
-
-        let Some(ns_module) = self.core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME) else {
-            return Ok(String::new());
-        };
-        let Some(store) = ns_module.store() else {
-            return Ok(String::new());
-        };
-        let Some(ns) = store.get_by_path(&raw).await? else {
-            return Ok(String::new());
-        };
-        if ns.is_root() {
-            return Ok(String::new());
-        }
-
-        // Header-scoped path: the namespace's mounts are not in the shared
-        // router trie yet unless some earlier request happened to wire them.
-        ns_module.registry.ensure_router(self.core.clone(), &ns.uuid, &ns.path).await?;
-
-        Ok(format!("{}/", ns.path.trim_end_matches('/')))
+        crate::kernel_api::namespace::caller_namespace_prefix(&self.core, req).await
     }
 
     pub async fn handle_recordings_list(
@@ -2595,8 +2555,7 @@ impl RustionBackendInner {
         &self,
         req: &Request,
     ) -> Result<Option<std::collections::HashSet<String>>, RvError> {
-        use crate::modules::namespace::router::{namespace_header_from_map, namespace_logical_prefix};
-        use crate::modules::namespace::{NamespaceModule, NAMESPACE_MODULE_NAME};
+        use crate::kernel_api::namespace::{namespace_header_from_map, namespace_logical_prefix};
 
         let Some(raw) = namespace_header_from_map(req.headers.as_ref()) else {
             return Ok(None);
@@ -2606,15 +2565,10 @@ impl RustionBackendInner {
             return Ok(None);
         }
 
-        let Some(ns_module) =
-            self.core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
-        else {
+        let Some(namespaces) = self.core.namespaces() else {
             return Ok(None);
         };
-        let Some(store) = ns_module.store() else {
-            return Ok(None);
-        };
-        let Some(ns) = store.get_by_path(raw).await? else {
+        let Some(ns) = namespaces.resolve(raw).await? else {
             // Unknown namespace header → it can own no resources.
             return Ok(Some(std::collections::HashSet::new()));
         };
@@ -2625,7 +2579,7 @@ impl RustionBackendInner {
         // `rustion/` is header-scoped, so the request pipeline did NOT wire the
         // namespace's mount router for us — ensure it, then find its resources
         // mount and read the resource metadata directly from that mount's view.
-        let router = ns_module.registry.ensure_router(self.core.clone(), &ns.uuid, &ns.path).await?;
+        let router = namespaces.ensure_router(&ns.uuid, &ns.path).await?;
         let mount_uuid = {
             let entries = router.mounts.entries.read()?;
             match entries.get("resources/") {
@@ -3341,12 +3295,10 @@ impl RustionBackendInner {
         _b: &dyn Backend,
         _req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let module = self
-            .core
-            .module_manager()
-            .get_module::<RustionModule>("rustion")
-            .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
-        let cache = module.telemetry_cache().ok_or_else(|| bv_error_string!("telemetry cache not initialized"))?;
+        let cache = self
+            .stores
+            .telemetry()
+            .ok_or_else(|| bv_error_string!("telemetry cache not initialized"))?;
         let snaps = cache.list_snapshots().await;
         let mut data = Map::new();
         let json = serde_json::to_value(&snaps).map_err(|e| bv_error_string!(&format!("encode telemetry: {e}")))?;
@@ -3360,7 +3312,7 @@ impl RustionBackendInner {
         _req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let core = self.core.clone();
-        telemetry::run_pass(&core).await?;
+        telemetry::run_pass(&core, &self.stores).await?;
         self.handle_telemetry_all(_b, _req).await
     }
 
@@ -3560,35 +3512,27 @@ fn master_config_response(cfg: &MasterConfig) -> Response {
 
 impl RustionModule {
     pub fn new(core: Arc<dyn VaultCtx>) -> Self {
-        Self {
-            name: "rustion".to_string(),
-            core,
-            store: ArcSwap::new(Arc::new(None)),
-            master_store: ArcSwap::new(Arc::new(None)),
-            recordings_store: ArcSwap::new(Arc::new(None)),
-            policy_store: ArcSwap::new(Arc::new(None)),
-            telemetry_cache: ArcSwap::new(Arc::new(None)),
-        }
+        Self { name: "rustion".to_string(), core, stores: Arc::new(RustionStores::default()) }
     }
 
     pub fn store(&self) -> Option<Arc<RustionStore>> {
-        self.store.load().as_ref().clone()
+        self.stores.store()
     }
 
     pub fn master_store(&self) -> Option<Arc<MasterStore>> {
-        self.master_store.load().as_ref().clone()
+        self.stores.master()
     }
 
     pub fn recordings_store(&self) -> Option<Arc<recordings::RecordingsStore>> {
-        self.recordings_store.load().as_ref().clone()
+        self.stores.recordings()
     }
 
     pub fn policy_store(&self) -> Option<Arc<policy::PolicyStore>> {
-        self.policy_store.load().as_ref().clone()
+        self.stores.policy()
     }
 
     pub fn telemetry_cache(&self) -> Option<Arc<telemetry::TelemetryCache>> {
-        self.telemetry_cache.load().as_ref().clone()
+        self.stores.telemetry()
     }
 }
 
@@ -3604,12 +3548,10 @@ impl Module for RustionModule {
 
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let core_for_backend = self.core.clone();
+        let stores = self.stores.clone();
         let backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
-            // This backend is not on `VaultCtx` yet, so it needs the concrete
-            // `Core`. Captured from the module rather than taken from the
-            // parameter: there is exactly one `Core` per server, so it is the
-            // same value, and this keeps the retype from cascading.
-            let mut b = RustionBackend::new(core_for_backend.clone()).new_backend();
+            let mut b =
+                RustionBackend::new(core_for_backend.clone(), stores.clone()).new_backend();
             b.init()?;
             Ok(Arc::new(b))
         };
@@ -3618,24 +3560,36 @@ impl Module for RustionModule {
 
     async fn init(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
         let store = RustionStore::new(&self.core).await?;
-        self.store.store(Arc::new(Some(store)));
+        self.stores.store.store(Arc::new(Some(store)));
         let master = MasterStore::new(&self.core).await?;
-        self.master_store.store(Arc::new(Some(master)));
+        self.stores.master.store(Arc::new(Some(master)));
         let recs = recordings::RecordingsStore::new(&self.core).await?;
-        self.recordings_store.store(Arc::new(Some(recs)));
+        self.stores.recordings.store(Arc::new(Some(recs)));
         let pol = policy::PolicyStore::new(&self.core).await?;
-        self.policy_store.store(Arc::new(Some(pol)));
+        self.stores.policy.store(Arc::new(Some(pol)));
         let tel = std::sync::Arc::new(telemetry::TelemetryCache::new());
-        self.telemetry_cache.store(Arc::new(Some(tel)));
+        self.stores.telemetry.store(Arc::new(Some(tel)));
         Ok(())
     }
 
+    /// Boot the four detached loops this engine owns: the 30s target-health
+    /// pinger, the hourly recording-fallback poller, the 60s telemetry pull,
+    /// and the weekly re-attestation sweep.
+    ///
+    /// These were started from `Core::post_unseal`, which meant the kernel
+    /// named four rustion entry points by path. Each loop self-skips while
+    /// sealed and no-ops on an empty target registry, so starting them
+    /// unconditionally is safe.
+    fn start_background(&self, core: Arc<dyn VaultCtx>) {
+        // Detached on purpose: dropping the handles does not stop the tasks.
+        drop(probe::start_pinger(core.clone(), self.stores.clone()));
+        drop(poller::start_poller(core.clone(), self.stores.clone()));
+        drop(telemetry::start_poller(core.clone(), self.stores.clone()));
+        drop(attest_timer::start_attest_timer(core, self.stores.clone()));
+    }
+
     fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
-        self.store.store(Arc::new(None));
-        self.master_store.store(Arc::new(None));
-        self.recordings_store.store(Arc::new(None));
-        self.policy_store.store(Arc::new(None));
-        self.telemetry_cache.store(Arc::new(None));
+        self.stores.clear();
         core.delete_logical_backend("rustion")
     }
 }
@@ -3657,7 +3611,8 @@ mod connect_only_tests {
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_session_open_routes_declare_credential_cert_field() {
         let server = TestHttpServer::new("test_session_open_cert_field", true).await;
-        let mut backend = super::RustionBackend::new(server.core.clone()).new_backend();
+        let mut backend =
+            super::RustionBackend::new(server.core.clone(), Default::default()).new_backend();
         backend.init().expect("backend init compiles route regexes");
         for pat in ["session/open", "v2/session/open"] {
             let (path, _) = backend.match_path(pat).unwrap_or_else(|| panic!("route `{pat}` should match"));
@@ -4628,7 +4583,7 @@ mod namespace_credential_scope_tests {
         create.body = json!({}).as_object().cloned();
         core.handle_request(&mut create).await.expect("create namespace");
 
-        let inner = RustionBackendInner { core: core.clone() };
+        let inner = RustionBackendInner { core: core.clone(), stores: Default::default() };
 
         let with_ns = |ns: Option<&str>| {
             let mut req = Request::new("rustion/v2/session/open");

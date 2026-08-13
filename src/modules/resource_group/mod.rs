@@ -39,6 +39,7 @@ use crate::{
 };
 
 pub mod group_store;
+pub mod kernel_service;
 pub use group_store::{ResourceGroupEntry, ResourceGroupHistoryEntry, ResourceGroupStore};
 
 /// Sentinel returned in the `members` / `secrets` list when the caller
@@ -828,6 +829,10 @@ impl Module for ResourceGroupModule {
 
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
         self
+    }
+
+    fn register(self: Arc<Self>, services: &crate::kernel_api::KernelServices) {
+        kernel_service::register(self, services);
     }
 
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {

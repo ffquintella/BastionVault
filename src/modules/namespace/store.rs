@@ -97,46 +97,10 @@ impl Namespace {
     }
 }
 
-/// Validate a single namespace path segment. Rejects empty segments and any
-/// segment containing a path separator, parent-traversal, or wildcard. These
-/// are the characters that would let a namespace name escape its registry key
-/// or alias another namespace's storage prefix.
-pub fn validate_segment(segment: &str) -> Result<(), RvError> {
-    if segment.is_empty() {
-        return Err(bv_error_string!("namespace segment must not be empty"));
-    }
-    if segment.contains('/') || segment.contains("..") || segment.contains('*') {
-        return Err(bv_error_string!(format!(
-            "invalid namespace segment {segment:?}: must not contain '/', '..', or '*'"
-        )));
-    }
-    // Defense in depth: the segment becomes part of a storage key, so refuse
-    // control characters and leading/trailing whitespace that could confuse
-    // path comparisons.
-    if segment.trim() != segment || segment.chars().any(|c| c.is_control()) {
-        return Err(bv_error_string!(format!(
-            "invalid namespace segment {segment:?}: surrounding whitespace or control characters"
-        )));
-    }
-    Ok(())
-}
-
-/// Normalize a caller-supplied namespace path: strip surrounding slashes and
-/// whitespace, reject empties, and validate every segment. Returns the
-/// canonical form (no leading/trailing slash). The empty string maps to the
-/// root namespace.
-pub fn normalize_path(raw: &str) -> Result<String, RvError> {
-    let trimmed = raw.trim().trim_matches('/');
-    if trimmed.is_empty() {
-        return Ok(String::new());
-    }
-    let mut segments = Vec::new();
-    for seg in trimmed.split('/') {
-        validate_segment(seg)?;
-        segments.push(seg);
-    }
-    Ok(segments.join("/"))
-}
+/// Namespace-path grammar. Re-exported from `kernel_api::namespace`, where it
+/// has to live: it is pure string validation with no store behind it, and
+/// every module that reads a namespace header needs it.
+pub use crate::kernel_api::namespace::{normalize_path, validate_segment};
 
 /// Split a canonical path into `(parent_path, leaf_name)`. Root has no parent.
 fn split_parent(path: &str) -> Option<(String, String)> {

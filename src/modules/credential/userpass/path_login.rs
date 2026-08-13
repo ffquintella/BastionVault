@@ -10,7 +10,7 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response},
-    modules::identity::{GroupKind, IdentityModule},
+    kernel_api::identity::GroupKind,
     new_fields, new_fields_internal, new_path, new_path_internal, bv_error_string,
     utils::policy::equivalent_policies,
 };
@@ -27,10 +27,7 @@ pub(crate) async fn resolve_entity_id(
     name: &str,
     ns_path: &str,
 ) -> Option<String> {
-    let Some(module) = core
-        .module_manager()
-        .get_module::<IdentityModule>("identity")
-    else {
+    let Some(identity) = core.identity() else {
         // No identity module wired in — common in minimal builds.
         // Log once at WARN so operators noticing missing `entity_id`
         // on tokens have a breadcrumb to follow rather than a
@@ -41,15 +38,8 @@ pub(crate) async fn resolve_entity_id(
         );
         return None;
     };
-    let Some(store) = module.entity_store() else {
-        log::warn!(
-            "identity entity_store not initialised — login for {mount}{name} \
-             will issue a token without entity_id"
-        );
-        return None;
-    };
-    match store.get_or_create_entity_ns(mount, name, ns_path).await {
-        Ok(entity) => Some(entity.id),
+    match identity.ensure_entity_id(mount, name, ns_path).await {
+        Ok(id) => Some(id),
         Err(e) => {
             log::warn!(
                 "entity store get_or_create failed for {mount}{name}: {e}. \
@@ -106,13 +96,10 @@ impl UserPassBackendInner {
         direct: &[String],
         ns_path: &str,
     ) -> Vec<String> {
-        let Some(module) = self.core.module_manager().get_module::<IdentityModule>("identity") else {
+        let Some(identity) = self.core.identity() else {
             return direct.to_vec();
         };
-        let Some(store) = module.group_store() else {
-            return direct.to_vec();
-        };
-        match store.expand_policies_ns(kind, member, direct, ns_path).await {
+        match identity.expand_group_policies(kind, member, direct, ns_path).await {
             Ok(v) => v,
             Err(e) => {
                 log::warn!(
@@ -249,7 +236,7 @@ impl UserPassBackendInner {
         // a client without a namespace picker can still sign a tenant-only user
         // in instead of dead-ending on the root denial below.
         let (ns_path, ns_uuid) =
-            crate::modules::namespace::token_binding::resolve_login_namespace_for_principal(
+            crate::kernel_api::namespace::login_namespace_for_principal(
                 &self.core,
                 req,
                 "userpass/",
@@ -260,7 +247,7 @@ impl UserPassBackendInner {
         // Multi-tenancy: refuse the login if this principal is assigned to a set
         // of namespaces that does not include the login namespace. No assignment
         // record ⇒ unrestricted (fails closed on a non-matching record).
-        crate::modules::namespace::ns_assignment::enforce_login_assignment(
+        crate::kernel_api::namespace::enforce_login_assignment(
             &self.core,
             "userpass/",
             &username,
@@ -296,7 +283,7 @@ impl UserPassBackendInner {
         // blocking login.
         // Quota: refuse a login that would create a *new* entity beyond the
         // namespace's max_entities cap (existing principals are unaffected).
-        crate::modules::namespace::quota::check_entity_create(
+        crate::kernel_api::namespace::check_entity_create(
             &self.core,
             "userpass/",
             &username,
@@ -313,9 +300,9 @@ impl UserPassBackendInner {
         // also reach descendant namespaces without a separate per-namespace
         // login. Default stays false, preserving the strict-isolation baseline.
         let child_visible =
-            crate::modules::namespace::token_binding::login_child_visible(&self.core, &ns_path)
+            crate::kernel_api::namespace::login_child_visible(&self.core, &ns_path)
                 .await;
-        crate::modules::namespace::token_binding::stamp_binding(
+        crate::kernel_api::namespace::stamp_binding(
             &mut auth.metadata,
             &ns_path,
             &ns_uuid,
@@ -392,20 +379,24 @@ impl UserPassBackendInner {
         mfa: &TotpMfaConfig,
         code: &str,
     ) -> Result<bool, RvError> {
-        use crate::modules::totp::mfa;
-
         if user.totp_key.trim().is_empty() {
             return Err(RvError::ErrResponse(
                 "TOTP MFA is enabled for this account but no TOTP key is bound".to_string(),
             ));
         }
-        let mount = match mfa::normalize_mount(&user.totp_mount) {
-            m if m.is_empty() => mfa::normalize_mount(&mfa.default_mount),
+        let totp = self.core.totp_mfa().ok_or_else(|| {
+            RvError::ErrResponse(
+                "TOTP MFA is enabled for this account but the TOTP engine is not loaded"
+                    .to_string(),
+            )
+        })?;
+        let mount = match totp.normalize_mount(&user.totp_mount) {
+            m if m.is_empty() => totp.normalize_mount(&mfa.default_mount),
             m => m,
         };
 
         let now = super::path_users::now_secs().max(0) as u64;
-        Ok(mfa::verify_code(&self.core, &mount, &user.totp_key, code, now).await?)
+        totp.verify_code(&mount, &user.totp_key, code, now).await
     }
 
     pub async fn login_renew(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
@@ -430,7 +421,7 @@ impl UserPassBackendInner {
         // policies (scoped to the token's bound namespace), since the login
         // path grants this union.
         let (ns_path, _) =
-            crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata);
+            crate::kernel_api::namespace::binding_from_metadata(&auth.metadata);
         let effective = self
             .expand_identity_group_policies(GroupKind::User, username, &user.policies, &ns_path)
             .await;

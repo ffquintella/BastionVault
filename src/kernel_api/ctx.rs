@@ -1,26 +1,13 @@
-//! The kernel contract: what a module is allowed to know about the vault.
+//! [`VaultCtx`]: the vault kernel, as an engine sees it.
 //!
-//! This is Phase 2 of [the decomposition](../roadmaps/workspace-decomposition.md)
-//! — the one that cuts the `Core` ↔ `modules` cycle. Today every module holds
-//! an `Arc<Core>` and `Core` imports `modules::auth::AuthModule` and
-//! `modules::policy::PolicyModule`, so neither side can become a crate.
-//! [`VaultCtx`] is the seam: modules depend on the trait, `Core` implements it,
-//! and the concrete type stops being part of an engine's compile unit.
+//! The seam that cuts the `Core` ↔ `modules` cycle. Every module used to hold
+//! an `Arc<Core>` while `Core` imported `modules::auth::AuthModule` and
+//! `modules::policy::PolicyModule`, so neither side could become a crate.
+//! Modules now depend on this trait, `Core` implements it, and the concrete
+//! kernel type is no longer part of an engine's compile unit.
 //!
-//! ## Why this lives in the monolith and not in `bv-kernel-api`
-//!
-//! The roadmap has Phase 2 opening with "define `bv-kernel-api`". It cannot,
-//! yet: these signatures name types that have not been extracted —
-//! [`BarrierView`] and [`SecurityBarrier`] are `src/storage` (Tier 0, not done),
-//! [`Router`] is `src/router` and [`MountsRouter`] is `src/mount` (both Tier 2).
-//! A crate holding this trait would need all of them as dependencies.
-//!
-//! That is a sequencing problem, not a design problem, because **the crate is
-//! not what breaks the cycle — the abstraction is.** So the trait starts here,
-//! the modules move onto it, and the file becomes `bv-kernel-api` later, once
-//! `bv-storage` exists and `router`/`mount` have moved into `bv-core`. Doing it
-//! the other way round would block the phase on the extraction order it is
-//! meant to enable.
+//! See [the module docs](super) for how this fits with the service registry,
+//! and for why the whole directory is still inside the monolith.
 //!
 //! ## Shape of the surface
 //!
@@ -31,7 +18,7 @@
 //! | reached as | sites | exposed here as |
 //! |---|---|---|
 //! | `core.handle_request(..)` | 87 | [`VaultCtx::handle_request`] |
-//! | `core.module_manager().*` | 42 | [`VaultCtx::module_manager`] |
+//! | `core.module_manager().*` | 42 | [`VaultCtx::kernel`] + the accessors on it |
 //! | `core.state.load().system_view` | 24 | [`VaultCtx::system_view`] |
 //! | `core.barrier().*` | 39 | [`VaultCtx::barrier`] |
 //! | `core.router().*` | 23 | [`VaultCtx::router`] |
@@ -68,11 +55,13 @@
 //! * **Tier 3 engines** — everything else. All 14 directories (`transit`,
 //!   `totp`, `ldap`, `pki`, `files`, `kv`, `kv_v2`, `ssh`, `ssh_broker`,
 //!   `cert_lifecycle`, `resource`, `notifications`, `rustion`, `credential`)
-//!   now contain **zero** code references to `Core` — only prose in doc
-//!   comments. So does the plugin runtime, and `src/audit`'s sys emitter.
+//!   contain **zero** code references to `Core` — only prose in doc comments.
+//!   So does the plugin runtime, and `src/audit`'s sys emitter. They also name
+//!   no *sibling* module's concrete type: siblings are reached through
+//!   [`VaultCtx::kernel`] and the [service registry](super::services).
 //!
 //! That is the Phase 2 objective: an engine crate can compile against this
-//! trait without `bv-core` in its dependency graph.
+//! trait without `bv-core` or `bv-kernel` in its dependency graph.
 //!
 //! ## Two things that bite when extending this
 //!
@@ -91,6 +80,15 @@
 
 use std::sync::{atomic::AtomicBool, Arc, Weak};
 
+use super::{
+    auth::{AuthMountRegistry, TokenService},
+    engines::{ConnectMfaGate, LoginClassPolicy, NotificationSink, TotpMfa},
+    identity::IdentityService,
+    namespace::NamespaceRegistry,
+    policy::PolicyGate,
+    resource_group::ResourceGroupIndex,
+    services::KernelServices,
+};
 use crate::{
     audit::AuditBroker,
     cache::CacheConfig,
@@ -100,7 +98,6 @@ use crate::{
     errors::RvError,
     handler::{AuthHandler, Handler},
     logical::{Request, Response},
-    module_manager::ModuleManager,
     mount::{MountsMonitor, MountsRouter},
     router::Router,
     stats::DashboardStats,
@@ -171,16 +168,69 @@ pub trait VaultCtx: Send + Sync {
     /// A module owning a `MountsRouter` registers it here so re-mounts reach it.
     fn mounts_monitor(&self) -> Option<Arc<MountsMonitor>>;
 
-    // ── ancillary subsystems ───────────────────────────────────────────
-    /// Sibling-module lookup.
+    // ── sibling capabilities ───────────────────────────────────────────
+    /// The capabilities the vault's modules publish to each other.
     ///
-    /// Deliberately still the concrete `ModuleManager`. Replacing it with
-    /// typed accessors (`TokenStore`, `IdentityStore`, `PolicyStore`,
-    /// `NamespaceRegistry`, `ResourceGroupStore`) is the larger half of Phase
-    /// 2 — ~101 production call sites — and wants its own change. Exposing it
-    /// here keeps this commit additive rather than forcing both at once.
-    fn module_manager(&self) -> &ModuleManager;
+    /// This replaced `module_manager()`, which handed out the concrete
+    /// `ModuleManager` so callers could `get_module::<T>()` a sibling by name
+    /// and downcast it. That worked, and it was the last edge pinning the
+    /// engines together: to reach identity you had to *name* `IdentityModule`.
+    ///
+    /// The convenience accessors below are what call sites use; this method is
+    /// the one an implementor writes.
+    fn kernel(&self) -> &KernelServices;
 
+    /// Entities, group policy expansion, ownership, user audit.
+    fn identity(&self) -> Option<Arc<dyn IdentityService>> {
+        self.kernel().identity()
+    }
+
+    /// Token lookup and revocation.
+    fn tokens(&self) -> Option<Arc<dyn TokenService>> {
+        self.kernel().tokens()
+    }
+
+    /// Registration and inspection of `auth/` mounts.
+    fn auth_mounts(&self) -> Option<Arc<dyn AuthMountRegistry>> {
+        self.kernel().auth_mounts()
+    }
+
+    /// The authorization questions an engine may ask.
+    fn policy(&self) -> Option<Arc<dyn PolicyGate>> {
+        self.kernel().policy()
+    }
+
+    /// Namespace resolution and the login-time namespace binding.
+    fn namespaces(&self) -> Option<Arc<dyn NamespaceRegistry>> {
+        self.kernel().namespaces()
+    }
+
+    /// The asset-group reverse index.
+    fn resource_groups(&self) -> Option<Arc<dyn ResourceGroupIndex>> {
+        self.kernel().resource_groups()
+    }
+
+    /// Notification delivery, for plugins and engines that raise alerts.
+    fn notifications(&self) -> Option<Arc<dyn NotificationSink>> {
+        self.kernel().notifications()
+    }
+
+    /// The SSH brokering tier resolver.
+    fn login_class(&self) -> Option<Arc<dyn LoginClassPolicy>> {
+        self.kernel().login_class()
+    }
+
+    /// The per-profile connect-MFA gate.
+    fn connect_mfa(&self) -> Option<Arc<dyn ConnectMfaGate>> {
+        self.kernel().connect_mfa()
+    }
+
+    /// TOTP second-factor verification.
+    fn totp_mfa(&self) -> Option<Arc<dyn TotpMfa>> {
+        self.kernel().totp_mfa()
+    }
+
+    // ── ancillary subsystems ───────────────────────────────────────────
     fn stats(&self) -> Arc<DashboardStats>;
 
     /// The audit broker, or `None` before `post_unseal` installs it.
@@ -301,8 +351,8 @@ impl VaultCtx for Core {
         self.mounts_monitor.load_full()
     }
 
-    fn module_manager(&self) -> &ModuleManager {
-        &self.module_manager
+    fn kernel(&self) -> &KernelServices {
+        &self.kernel_services
     }
 
     fn stats(&self) -> Arc<DashboardStats> {
@@ -416,8 +466,8 @@ impl<T: VaultCtx + ?Sized> VaultCtx for Arc<T> {
     fn mounts_monitor(&self) -> Option<Arc<MountsMonitor>> {
         (**self).mounts_monitor()
     }
-    fn module_manager(&self) -> &ModuleManager {
-        (**self).module_manager()
+    fn kernel(&self) -> &KernelServices {
+        (**self).kernel()
     }
     fn stats(&self) -> Arc<DashboardStats> {
         (**self).stats()

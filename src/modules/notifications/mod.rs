@@ -25,13 +25,14 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation, Request, Response},
-    modules::identity::caller_audit_actor,
+    kernel_api::identity::caller_audit_actor,
     new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
     new_path_internal,
 };
 
 pub mod channel;
 pub mod contacts;
+pub mod kernel_service;
 pub mod service;
 pub mod store;
 pub mod types;
@@ -50,14 +51,24 @@ groups, or everyone, and fans them out to plugin-provided channels
 compose and broadcast, manage channels, and tune retention.
 "#;
 
+/// Late-bound handle to the notification service.
+///
+/// The service is created at unseal (`Module::init`), but the logical backend
+/// is built before that — so the backend cannot own the service, and used to
+/// re-find it on every request by asking the module manager for its own module
+/// by name. Sharing the slot instead gives the backend the same late binding
+/// with no lookup and no self-reference.
+pub type ServiceSlot = ArcSwap<Option<Arc<NotificationService>>>;
+
 pub struct NotificationsModule {
     pub name: String,
     pub core: Arc<dyn VaultCtx>,
-    pub service: ArcSwap<Option<Arc<NotificationService>>>,
+    pub service: Arc<ServiceSlot>,
 }
 
 pub struct NotificationsBackendInner {
     pub core: Arc<dyn VaultCtx>,
+    pub service: Arc<ServiceSlot>,
 }
 
 #[derive(Deref)]
@@ -67,8 +78,8 @@ pub struct NotificationsBackend {
 }
 
 impl NotificationsBackend {
-    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
-        Self { inner: Arc::new(NotificationsBackendInner { core }) }
+    pub fn new(core: Arc<dyn VaultCtx>, service: Arc<ServiceSlot>) -> Self {
+        Self { inner: Arc::new(NotificationsBackendInner { core, service }) }
     }
 
     pub fn new_backend(&self) -> LogicalBackend {
@@ -210,16 +221,16 @@ struct SendPayload {
 }
 
 fn ns_from_req(req: &Request) -> String {
-    crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref())
+    crate::kernel_api::namespace::writer_namespace_path(req.headers.as_ref())
 }
 
 #[maybe_async::maybe_async]
 impl NotificationsBackendInner {
     fn resolve_service(&self) -> Result<Arc<NotificationService>, RvError> {
-        self.core
-            .module_manager()
-            .get_module::<NotificationsModule>("notifications")
-            .and_then(|m| m.service())
+        self.service
+            .load()
+            .as_ref()
+            .clone()
             .ok_or_else(|| bv_error_string!("notification service unavailable"))
     }
 
@@ -427,7 +438,7 @@ impl NotificationsModule {
         Self {
             name: "notifications".to_string(),
             core,
-            service: ArcSwap::new(Arc::new(None)),
+            service: Arc::new(ArcSwap::new(Arc::new(None))),
         }
     }
 
@@ -446,14 +457,18 @@ impl Module for NotificationsModule {
         self
     }
 
+    fn register(self: Arc<Self>, services: &crate::kernel_api::KernelServices) {
+        kernel_service::register(self, services);
+    }
+
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let core_for_backend = self.core.clone();
+        // The backend shares the module's service slot, so it sees the service
+        // the moment `init` installs it — and never has to look the module up.
+        let service = self.service.clone();
         let backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
-            // This backend is not on `VaultCtx` yet, so it needs the concrete
-            // `Core`. Captured from the module rather than taken from the
-            // parameter: there is exactly one `Core` per server, so it is the
-            // same value, and this keeps the retype from cascading.
-            let mut b = NotificationsBackend::new(core_for_backend.clone()).new_backend();
+            let mut b =
+                NotificationsBackend::new(core_for_backend.clone(), service.clone()).new_backend();
             b.init()?;
             Ok(Arc::new(b))
         };

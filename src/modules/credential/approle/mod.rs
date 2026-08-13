@@ -55,7 +55,7 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation},
-    modules::{auth::AuthModule, Module},
+    modules::Module,
     new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
     utils::{locks::Locks, salt::Salt},
 };
@@ -190,8 +190,8 @@ impl Module for AppRoleModule {
             Ok(Arc::new(approle_backend))
         };
 
-        if let Some(auth_module) = core.module_manager().get_module::<AuthModule>("auth") {
-            return auth_module.add_auth_backend("approle", Arc::new(approle_backend_new_func));
+        if let Some(auth_mounts) = core.auth_mounts() {
+            return auth_mounts.add_auth_backend("approle", Arc::new(approle_backend_new_func));
         } else {
             log::error!("get auth module failed!");
         }
@@ -213,8 +213,8 @@ impl Module for AppRoleModule {
     }
 
     fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
-        if let Some(auth_module) = core.module_manager().get_module::<AuthModule>("auth") {
-            return auth_module.delete_auth_backend("approle");
+        if let Some(auth_mounts) = core.auth_mounts() {
+            return auth_mounts.delete_auth_backend("approle");
         } else {
             log::error!("get auth module failed!");
         }

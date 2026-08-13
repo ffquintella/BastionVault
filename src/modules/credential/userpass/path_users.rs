@@ -484,14 +484,8 @@ impl UserPassBackendInner {
         // history isn't vaporised — only the `mount:name` lookup index
         // is removed. Admins can recover by using the admin
         // ownership-transfer endpoints. Silent on failure.
-        if let Some(module) = self
-            .core
-            .module_manager()
-            .get_module::<crate::modules::identity::IdentityModule>("identity")
-        {
-            if let Some(store) = module.entity_store() {
-                let _ = store.forget_alias("userpass/", &lc).await;
-            }
+        if let Some(identity) = self.core.identity() {
+            let _ = identity.forget_alias("userpass/", &lc).await;
         }
 
         // Audit.
@@ -592,29 +586,21 @@ async fn record_user_audit(
     target: &str,
     details: &str,
 ) {
-    use crate::modules::identity::{caller_audit_actor, IdentityModule, UserAuditEntry};
+    use crate::kernel_api::identity::{caller_audit_actor, UserAuditRecord};
 
-    let Some(module) = core
-        .module_manager()
-        .get_module::<IdentityModule>("identity")
-    else {
+    let Some(identity) = core.identity() else {
         return;
     };
-    let Some(store) = module.user_audit_store() else {
-        return;
-    };
-
-    let actor = caller_audit_actor(req);
-
-    let entry = UserAuditEntry {
-        ts: String::new(),
-        actor_entity_id: actor,
-        op: op.to_string(),
-        mount: "userpass/".to_string(),
-        target: target.to_string(),
-        details: details.to_string(),
-    };
-    let _ = store.append(entry).await;
+    let _ = identity
+        .record_user_audit(UserAuditRecord {
+            ts: String::new(),
+            actor_entity_id: caller_audit_actor(req),
+            op: op.to_string(),
+            mount: "userpass/".to_string(),
+            target: target.to_string(),
+            details: details.to_string(),
+        })
+        .await;
 }
 
 /// Permissive contact-email sanity check: exactly one `@`, a non-empty local

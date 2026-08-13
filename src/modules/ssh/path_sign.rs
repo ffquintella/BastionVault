@@ -52,7 +52,7 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
-    modules::identity::caller_audit_actor,
+    kernel_api::identity::caller_audit_actor,
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
 

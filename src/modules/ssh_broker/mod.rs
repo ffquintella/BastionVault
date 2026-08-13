@@ -30,6 +30,7 @@ use crate::{
 };
 
 pub mod audit;
+pub mod kernel_service;
 pub mod policy;
 
 static SSH_BROKER_BACKEND_HELP: &str = r#"
@@ -129,14 +130,22 @@ fn effective_to_map(e: &policy::EffectiveLoginClass) -> Map<String, Value> {
 
 // ─── Module ─────────────────────────────────────────────────────────
 
+/// Late-bound handle to the brokering policy store.
+///
+/// Shared between the module (which creates the store at unseal) and the
+/// logical backend (which is built before it exists). The backend used to
+/// re-find it on every request by looking its own module up by name.
+pub type PolicyStoreSlot = arc_swap::ArcSwap<Option<Arc<policy::PolicyStore>>>;
+
 pub struct SshBrokerModule {
     pub name: String,
     pub core: Arc<dyn VaultCtx>,
-    pub policy_store: arc_swap::ArcSwap<Option<Arc<policy::PolicyStore>>>,
+    pub policy_store: Arc<PolicyStoreSlot>,
 }
 
 pub struct SshBrokerBackendInner {
     pub core: Arc<dyn VaultCtx>,
+    pub policy_store: Arc<PolicyStoreSlot>,
 }
 
 #[derive(Deref)]
@@ -146,9 +155,9 @@ pub struct SshBrokerBackend {
 }
 
 impl SshBrokerBackend {
-    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>, policy_store: Arc<PolicyStoreSlot>) -> Self {
         Self {
-            inner: Arc::new(SshBrokerBackendInner { core }),
+            inner: Arc::new(SshBrokerBackendInner { core, policy_store }),
         }
     }
 
@@ -251,13 +260,10 @@ impl SshBrokerBackend {
 #[maybe_async::maybe_async]
 impl SshBrokerBackendInner {
     fn resolve_policy_store(&self) -> Result<Arc<policy::PolicyStore>, RvError> {
-        let module = self
-            .core
-            .module_manager()
-            .get_module::<SshBrokerModule>("ssh-broker")
-            .ok_or_else(|| bv_error_string!("ssh-broker module not registered"))?;
-        module
-            .policy_store()
+        self.policy_store
+            .load()
+            .as_ref()
+            .clone()
             .ok_or_else(|| bv_error_string!("ssh-broker policy store not initialized"))
     }
 
@@ -596,7 +602,7 @@ impl SshBrokerModule {
         Self {
             name: "ssh-broker".to_string(),
             core,
-            policy_store: arc_swap::ArcSwap::new(Arc::new(None)),
+            policy_store: Arc::new(arc_swap::ArcSwap::new(Arc::new(None))),
         }
     }
 
@@ -615,14 +621,16 @@ impl Module for SshBrokerModule {
         self
     }
 
+    fn register(self: Arc<Self>, services: &crate::kernel_api::KernelServices) {
+        kernel_service::register(self, services);
+    }
+
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let core_for_backend = self.core.clone();
+        let policy_store = self.policy_store.clone();
         let backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
-            // This backend is not on `VaultCtx` yet, so it needs the concrete
-            // `Core`. Captured from the module rather than taken from the
-            // parameter: there is exactly one `Core` per server, so it is the
-            // same value, and this keeps the retype from cascading.
-            let mut b = SshBrokerBackend::new(core_for_backend.clone()).new_backend();
+            let mut b = SshBrokerBackend::new(core_for_backend.clone(), policy_store.clone())
+                .new_backend();
             b.init()?;
             Ok(Arc::new(b))
         };

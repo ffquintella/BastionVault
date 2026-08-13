@@ -28,6 +28,7 @@ use crate::{
 pub mod backend;
 pub mod barcode;
 pub mod crypto;
+pub mod kernel_service;
 pub mod mfa;
 pub mod path_code;
 pub mod path_keys;
@@ -102,6 +103,10 @@ impl Module for TotpModule {
 
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
         self
+    }
+
+    fn register(self: Arc<Self>, services: &crate::kernel_api::KernelServices) {
+        kernel_service::register(self, services);
     }
 
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {

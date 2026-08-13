@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::kernel_api::VaultCtx;
+use crate::kernel_api::{identity::ObjectKind, VaultCtx};
 use crate::{
     bv_error_string,
     context::Context,
@@ -1108,7 +1108,7 @@ impl FilesBackendInner {
             // Resolve the audit actor once — the admin file audit log
             // records who re-pointed each file (parallel to create /
             // update / delete / restore).
-            let audit_actor = crate::modules::identity::caller_audit_actor(req);
+            let audit_actor = crate::kernel_api::identity::caller_audit_actor(req);
             let ids = req.storage_list(META_PREFIX).await?;
             for id in ids {
                 let Some(mut entry) = self.load_entry(req, &id).await? else {
@@ -1192,31 +1192,20 @@ impl FilesBackendInner {
         // id is only known here. Uses the same caller_audit_actor
         // fallback as KV / resource owners so root-token writes stamp
         // `"root"` rather than orphan the record.
-        let audit_actor = crate::modules::identity::caller_audit_actor(req);
-        if !audit_actor.is_empty() {
-            if let Some(core) = Some(self.core.clone()) {
-                if let Some(identity) = core
-                    .module_manager()
-                    .get_module::<crate::modules::identity::IdentityModule>("identity")
-                {
-                    if let Some(owner_store) = identity.owner_store() {
-                        // Namespace-scope the key so a file created inside a
-                        // namespace does not stamp (or collide with) a root
-                        // owner record — matching what `post_route` and the
-                        // ACL resolution path look up.
-                        if let Some(key) =
-                            crate::modules::identity::owner_store::OwnerStore::scope_target_name(
-                                &id,
-                                req.namespace_path.as_deref(),
-                            )
-                        {
-                            let _ = owner_store
-                                .record_file_owner_if_absent(&key, &audit_actor)
-                                .await;
-                        }
-                    }
-                }
-            }
+        // The namespace scoping of the owner-record key happens inside the
+        // identity service: a file created inside a namespace must not stamp
+        // (or collide with) a root owner record, and that keying is the
+        // identity module's to know.
+        let audit_actor = crate::kernel_api::identity::caller_audit_actor(req);
+        if let Some(identity) = self.core.identity() {
+            let _ = identity
+                .record_owner_if_absent(
+                    ObjectKind::File,
+                    &id,
+                    req.namespace_path.as_deref(),
+                    &audit_actor,
+                )
+                .await;
         }
 
         // Admin audit log — parallel to the per-file history write
@@ -1367,7 +1356,7 @@ impl FilesBackendInner {
         // the hash moved. Record nothing on a no-op write (same
         // fields, same SHA) so the audit page stays signal-heavy.
         if let Some(core) = Some(self.core.clone()) {
-            let actor = crate::modules::identity::caller_audit_actor(req);
+            let actor = crate::kernel_api::identity::caller_audit_actor(req);
             let mut changed = diff_field_names(previous.as_ref(), &entry);
             let content_changed = previous
                 .as_ref()
@@ -1533,7 +1522,7 @@ impl FilesBackendInner {
 
         // Admin audit.
         if let Some(core) = Some(self.core.clone()) {
-            let actor = crate::modules::identity::caller_audit_actor(req);
+            let actor = crate::kernel_api::identity::caller_audit_actor(req);
             record_file_audit(&core, &actor, "delete", &id, &name_snapshot, "").await;
         }
 
@@ -2063,7 +2052,7 @@ impl FilesBackendInner {
         // Admin audit — include the version number so the operator
         // can see which snapshot was promoted.
         if let Some(core) = Some(self.core.clone()) {
-            let actor = crate::modules::identity::caller_audit_actor(req);
+            let actor = crate::kernel_api::identity::caller_audit_actor(req);
             let details = format!("version=v{version}");
             record_file_audit(&core, &actor, "restore", &id, &restored.name, &details).await;
         }
@@ -2272,6 +2261,14 @@ impl Module for FilesModule {
 
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
         self
+    }
+
+    /// Boot the periodic sync sweep. Single-process posture: every node in a
+    /// Hiqlite cluster runs its own, and the sync push is idempotent
+    /// (tmp+rename), so a double-push is wasteful but not incorrect.
+    fn start_background(&self, core: Arc<dyn VaultCtx>) {
+        // Detached on purpose: dropping the handle does not stop the task.
+        drop(scheduler::start_files_sync_scheduler(core));
     }
 
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {

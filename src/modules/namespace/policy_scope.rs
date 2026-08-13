@@ -25,10 +25,9 @@
 //! file.)
 
 
-use crate::kernel_api::VaultCtx;
 use crate::{bv_error_response_status, errors::RvError};
 
-use super::{store::normalize_path, NamespaceModule, NAMESPACE_MODULE_NAME};
+use super::{NamespaceModule, NAMESPACE_MODULE_NAME};
 
 /// The namespace path that owns `policy_path`: the longest segment-aligned
 /// prefix of `policy_path` that is present in `namespaces` (root `""` if none).
@@ -52,7 +51,7 @@ pub fn namespace_owner_of_path(policy_path: &str, namespaces: &[String]) -> Stri
 /// a 403-style error naming the offending path and the namespace it belongs to.
 #[maybe_async::maybe_async]
 pub async fn refuse_cross_namespace_paths(
-    core: &dyn VaultCtx,
+    core: &crate::core::Core,
     writer_ns_path: &str,
     paths: &[String],
 ) -> Result<(), RvError> {
@@ -97,13 +96,7 @@ pub async fn refuse_cross_namespace_paths(
 
 /// Resolve the writer's namespace path from a request's namespace header
 /// (canonicalised; empty = root). Used at policy-write time.
-pub fn writer_namespace_path(
-    headers: Option<&std::collections::HashMap<String, String>>,
-) -> String {
-    super::router::namespace_header_from_map(headers)
-        .and_then(|h| normalize_path(&h).ok())
-        .unwrap_or_default()
-}
+pub use crate::kernel_api::namespace::writer_namespace_path;
 
 #[cfg(test)]
 mod tests {

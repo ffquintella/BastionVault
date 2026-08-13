@@ -95,14 +95,14 @@ fn marker_key() -> String {
     format!("{NAMESPACE_REGISTRY_PREFIX}{MARKER_KEY}")
 }
 
-async fn read_marker(core: &dyn VaultCtx) -> Result<u32, RvError> {
+async fn read_marker(core: &crate::core::Core) -> Result<u32, RvError> {
     let Some(e) = core.barrier().as_storage().get(&marker_key()).await? else {
         return Ok(0);
     };
     Ok(serde_json::from_slice::<u32>(&e.value).unwrap_or(0))
 }
 
-async fn write_marker(core: &dyn VaultCtx, version: u32) -> Result<(), RvError> {
+async fn write_marker(core: &crate::core::Core, version: u32) -> Result<(), RvError> {
     core.barrier()
         .as_storage()
         .put(&StorageEntry { key: marker_key(), value: serde_json::to_vec(&version)? })
@@ -114,7 +114,7 @@ async fn write_marker(core: &dyn VaultCtx, version: u32) -> Result<(), RvError> 
 /// table + logical storage, so it reflects the objects rather than the records
 /// we are trying to repair.
 async fn resource_locations(
-    core: &dyn VaultCtx,
+    core: &crate::core::Core,
     ns_store: &NamespaceStore,
 ) -> Result<HashMap<String, Vec<String>>, RvError> {
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
@@ -212,7 +212,7 @@ fn destination_for(
 /// Called from `Core::post_unseal` after module init (the identity stores must
 /// exist). Errors propagate to the caller, which logs and continues — see the
 /// safety notes in the module docs.
-pub async fn run_if_needed(core: &dyn VaultCtx) -> Result<NsScopeReport, RvError> {
+pub async fn run_if_needed(core: &crate::core::Core) -> Result<NsScopeReport, RvError> {
     let mut report = NsScopeReport::default();
 
     if read_marker(core).await? >= OWNER_SHARE_NS_SCOPE_VERSION {

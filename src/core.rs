@@ -20,7 +20,7 @@ use go_defer::defer;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::kernel_api::VaultCtx;
+use crate::kernel_api::{KernelServices, VaultCtx};
 use crate::{
     cache::CacheConfig,
     cli::config::MountEntryHMACLevel,
@@ -111,6 +111,15 @@ pub struct Core {
     pub handlers: ArcSwap<Vec<Arc<dyn Handler>>>,
     pub auth_handlers: ArcSwap<Vec<Arc<dyn AuthHandler>>>,
     pub module_manager: ModuleManager,
+    /// Capabilities the installed modules publish to each other — identity,
+    /// tokens, policy, namespaces, and the engine-to-engine contracts.
+    ///
+    /// Populated by [`ModuleManager::set_modules`] / `add_module` as each
+    /// module registers itself. This is what a module reaches a sibling
+    /// through; the old route was `module_manager.get_module::<T>()`, which
+    /// required naming the sibling's concrete type. See
+    /// [`crate::kernel_api::services`].
+    pub kernel_services: KernelServices,
     pub mount_entry_hmac_level: MountEntryHMACLevel,
     pub mounts_monitor: ArcSwapOption<MountsMonitor>,
     pub mounts_monitor_interval: u64,
@@ -191,6 +200,7 @@ impl Default for Core {
             handlers: ArcSwap::from_pointee(vec![router]),
             auth_handlers: ArcSwap::from_pointee(Vec::new()),
             module_manager: ModuleManager::new(),
+            kernel_services: KernelServices::new(),
             mount_entry_hmac_level: MountEntryHMACLevel::None,
             mounts_monitor: ArcSwapOption::empty(),
             mounts_monitor_interval: 0,
@@ -250,6 +260,17 @@ impl Core {
     /// activation, so a held handle stays consistent for the call.
     pub fn mounts_router(&self) -> Arc<MountsRouter> {
         self.mounts_router_swap.load_full()
+    }
+
+    /// The installed module set.
+    ///
+    /// Inherent, and deliberately *not* on [`VaultCtx`]: the kernel owns the
+    /// module set and may enumerate it, but an engine reaching a sibling this
+    /// way had to name the sibling's concrete type, which is the edge Phase 2
+    /// removes. Engines use [`VaultCtx::kernel`] and the service accessors on
+    /// it instead. See `roadmaps/workspace-decomposition.md` Phase 2.
+    pub fn module_manager(&self) -> &ModuleManager {
+        &self.module_manager
     }
 
     /// Barrier prefix for the root tenant's logical mounts — `logical/` by
@@ -1009,82 +1030,18 @@ impl Core {
             let _ = crate::scheduled_exports::start_scheduler(core_arc);
         }
 
-        // Boot the PKI auto-tidy scheduler (Phase 4.1). Same lifecycle
-        // pattern as scheduled-exports above — detached task, self-skip
-        // when sealed, single-process scheduler, HA leader gating
-        // deferred. Tick fires every 30s; per-mount cadence comes from
-        // each mount's persisted `pki/config/auto-tidy`.
+        // Boot every module's own background loops — the PKI auto-tidy
+        // sweep, the four Rustion loops, LDAP rotation, the File Resources
+        // sync, the access-audit reconciler, the cert-lifecycle renewal
+        // scheduler. Each is a detached task that self-skips while sealed.
+        //
+        // This block used to name six engines' entry points by path, which
+        // made `Core` depend on the engines it is supposed to be independent
+        // of — the same edge `VaultCtx` removed in the other direction. The
+        // kernel now asks the module set; what is in it is the assembly
+        // point's business. See roadmaps/workspace-decomposition.md Phase 2.
         if let Some(core_arc) = self.self_ptr.upgrade() {
-            let _ = crate::modules::pki::scheduler::start_pki_tidy_scheduler(core_arc);
-        }
-
-        // Boot the Rustion target-health pinger. Same lifecycle
-        // pattern as the schedulers above. Ticks every 30s; an empty
-        // target registry is a no-op so it's safe to start
-        // unconditionally before any operator enrols a bastion.
-        if let Some(core_arc) = self.self_ptr.upgrade() {
-            let _ = crate::modules::rustion::probe::start_pinger(core_arc.clone());
-            // Phase 6.4: 24h recording-fallback poller. Same lifecycle
-            // pattern; ticks every hour, falls back to GET
-            // /v1/sessions/{sid}/recording for sessions whose
-            // recording.ready webhook didn't land.
-            let _ = crate::modules::rustion::poller::start_poller(core_arc.clone());
-            // Phase 8.1: 60s telemetry poller pulling
-            // /v1/sessions/{active,history} + /v1/stats from every
-            // enabled bastion into the in-memory cache the GUI reads.
-            let _ = crate::modules::rustion::telemetry::start_poller(core_arc.clone());
-            // Phase 9.2: weekly re-attestation sweep. Walks every
-            // enrolled bastion and sends a signed `attest` envelope
-            // so Rustion can bump the authority record's
-            // attestation_renew_at deadline.
-            let _ = crate::modules::rustion::attest_timer::start_attest_timer(core_arc);
-        }
-
-        // Boot the OpenLDAP / AD static-role auto-rotation scheduler
-        // (Phase 3). Same lifecycle pattern: detached task, self-skip
-        // when sealed, single-process scheduler. Tick fires every 60s;
-        // per-role cadence comes from each role's persisted
-        // `rotation_period`. Roles with `rotation_period = 0` are
-        // skipped (manual rotation only).
-        if let Some(core_arc) = self.self_ptr.upgrade() {
-            let _ = crate::modules::ldap::scheduler::start_ldap_rotation_scheduler(core_arc);
-        }
-
-        // Boot the File Resources periodic sync scheduler. Same
-        // single-process posture as the LDAP / PKI schedulers — every
-        // node in a Hiqlite cluster runs its own; the sync push
-        // itself is idempotent (tmp+rename), so a double-push is
-        // wasteful but not incorrect. Per-mount config can disable
-        // the sweep so an operator who prefers external scheduling
-        // can drive `POST /v1/<mount>/sync-tick` from cron instead.
-        if let Some(core_arc) = self.self_ptr.upgrade() {
-            let _ = crate::modules::files::scheduler::start_files_sync_scheduler(core_arc);
-        }
-
-        // Boot the access-audit reconciler. Each node tails its own
-        // local `audit.log` and ingests successful requests into the
-        // replicated access store, so a successful `secret/…` read shows
-        // on the unified Audit page (previously only *denied* requests
-        // did). Cluster-safe by construction: per-node local tailing +
-        // idempotent digest-keyed writes into the replicated store, so
-        // the union of every node's ingest is what the page reads and
-        // re-scans never duplicate. Ticks every 60s; self-skips when
-        // sealed or when an operator disables it via config.
-        if let Some(core_arc) = self.self_ptr.upgrade() {
-            let _ = crate::modules::system::access_audit_reconciler::start_access_audit_reconciler(
-                core_arc,
-            );
-        }
-
-        // Boot the cert-lifecycle renewal scheduler (Phase L6). Same
-        // single-process posture as the schedulers above. Each
-        // cert-lifecycle mount opts in via
-        // `cert-lifecycle/scheduler/config`; un-configured mounts get
-        // skipped on every tick. The renewal call goes through
-        // `Core::handle_request` with the operator-supplied
-        // `client_token` so the existing PKI ACL boundary applies.
-        if let Some(core_arc) = self.self_ptr.upgrade() {
-            let _ = crate::modules::cert_lifecycle::scheduler::start_cert_lifecycle_scheduler(core_arc);
+            self.module_manager.start_background(core_arc);
         }
 
         Ok(())
@@ -1097,21 +1054,10 @@ impl Core {
     /// still get flushed, because half-flushed is worse than
     /// best-effort-flushed on a seal hot path.
     pub fn flush_caches(&self) {
-        // Policy cache
-        if let Some(policy_module) =
-            self.module_manager.get_module::<crate::modules::policy::PolicyModule>("policy")
-        {
-            policy_module.policy_store.load().flush_caches();
-        }
-
-        // Token cache
-        if let Some(auth_module) =
-            self.module_manager.get_module::<crate::modules::auth::AuthModule>("auth")
-        {
-            if let Some(token_store) = auth_module.token_store.load_full() {
-                token_store.flush_cache();
-            }
-        }
+        // Per-module caches — the policy ACL cache and the token cache today.
+        // Asked of the module set rather than of two named modules, so the
+        // kernel does not have to know which of them hold a cache.
+        self.module_manager.flush_caches();
 
         // Secret read cache (ciphertext-only `CachingBackend` decorator).
         // `Backend: Any` gives us a runtime downcast without wiring a

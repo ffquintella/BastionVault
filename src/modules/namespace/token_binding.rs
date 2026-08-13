@@ -18,17 +18,17 @@
 
 use std::collections::HashMap;
 
-use crate::kernel_api::VaultCtx;
 use crate::errors::RvError;
 
-/// Metadata key holding the token's issuing-namespace path (canonical, no
-/// trailing slash; `""` = root). Absent ⇒ root.
-pub const NS_PATH_META: &str = "namespace_path";
-/// Metadata key holding the token's issuing-namespace UUID. Informational;
-/// enforcement keys off the path so descendant checks are cheap.
-pub const NS_ID_META: &str = "namespace_id";
-/// Metadata key holding the child-visible flag (`"true"`/`"false"`).
-pub const CHILD_VISIBLE_META: &str = "child_visible";
+/// Token metadata keys carrying a token's namespace binding: the issuing
+/// namespace path (canonical, no trailing slash; `""` = root; absent ⇒ root),
+/// its UUID (informational — enforcement keys off the path so descendant
+/// checks are cheap), and the child-visible flag.
+///
+/// Re-exported from `kernel_api::namespace`, where they moved so `src/audit`
+/// can read a token's namespace without reaching into `crate::modules` for one
+/// constant — a cross-layer wart the decomposition roadmap tracked separately.
+pub use crate::kernel_api::namespace::{CHILD_VISIBLE_META, NS_ID_META, NS_PATH_META};
 
 /// True if `descendant` is a strict descendant of `ancestor` in the namespace
 /// tree. The root (`""`) is an ancestor of every non-root namespace.
@@ -105,7 +105,7 @@ fn assignment_principal(meta: &HashMap<String, String>) -> Option<(String, Strin
 /// and it **fails closed** on any store error.
 #[maybe_async::maybe_async]
 pub async fn token_operable_resolved(
-    core: &dyn VaultCtx,
+    core: &crate::core::Core,
     auth: &crate::logical::Auth,
     request_ns_path: &str,
 ) -> bool {
@@ -160,7 +160,7 @@ pub fn stamp_binding(
 /// the header is read directly here.
 #[maybe_async::maybe_async]
 pub async fn resolve_login_namespace(
-    core: &dyn VaultCtx,
+    core: &crate::core::Core,
     req: &crate::logical::Request,
 ) -> Result<(String, String), crate::errors::RvError> {
     use super::router::namespace_header_from_map;
@@ -180,7 +180,7 @@ pub async fn resolve_login_namespace(
 /// caller can silently fall back to root after asking for a tenant.
 #[maybe_async::maybe_async]
 async fn resolve_namespace_by_path(
-    core: &dyn VaultCtx,
+    core: &crate::core::Core,
     raw: &str,
 ) -> Result<(String, String), crate::errors::RvError> {
     use super::{NamespaceModule, NAMESPACE_MODULE_NAME};
@@ -220,7 +220,7 @@ async fn resolve_namespace_by_path(
 /// excludes it.
 #[maybe_async::maybe_async]
 pub async fn resolve_login_namespace_for_principal(
-    core: &dyn VaultCtx,
+    core: &crate::core::Core,
     req: &crate::logical::Request,
     mount: &str,
     name: &str,
@@ -259,7 +259,7 @@ pub async fn resolve_login_namespace_for_principal(
 /// no-op for non-multi-tenant deployments.
 #[maybe_async::maybe_async]
 pub async fn enforce_request_token_binding(
-    core: &dyn VaultCtx,
+    core: &crate::core::Core,
     req: &crate::logical::Request,
 ) -> Result<(), crate::errors::RvError> {
     use super::{NamespaceModule, NAMESPACE_MODULE_NAME};
@@ -306,7 +306,7 @@ pub async fn enforce_request_token_binding(
 /// the root namespace (`""`) transparently — it has a stored record too (minted
 /// by `NamespaceStore::ensure_root`).
 #[maybe_async::maybe_async]
-pub async fn login_child_visible(core: &dyn VaultCtx, ns_path: &str) -> bool {
+pub async fn login_child_visible(core: &crate::core::Core, ns_path: &str) -> bool {
     use super::{NamespaceModule, NAMESPACE_MODULE_NAME};
 
     let Some(module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)

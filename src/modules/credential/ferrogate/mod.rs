@@ -31,7 +31,7 @@ use crate::kernel_api::VaultCtx;
 use crate::{
     errors::RvError,
     logical::{Backend, LogicalBackend},
-    modules::{auth::AuthModule, Module},
+    modules::Module,
     new_logical_backend, new_logical_backend_internal,
 };
 
@@ -413,8 +413,8 @@ impl Module for FerroGateModule {
             Ok(Arc::new(ferrogate_backend))
         };
 
-        if let Some(auth_module) = core.module_manager().get_module::<AuthModule>("auth") {
-            return auth_module.add_auth_backend("ferrogate", Arc::new(ferrogate_backend_new_func));
+        if let Some(auth_mounts) = core.auth_mounts() {
+            return auth_mounts.add_auth_backend("ferrogate", Arc::new(ferrogate_backend_new_func));
         }
 
         log::error!("get auth module failed!");
@@ -422,8 +422,8 @@ impl Module for FerroGateModule {
     }
 
     fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
-        if let Some(auth_module) = core.module_manager().get_module::<AuthModule>("auth") {
-            return auth_module.delete_auth_backend("ferrogate");
+        if let Some(auth_mounts) = core.auth_mounts() {
+            return auth_mounts.delete_auth_backend("ferrogate");
         }
 
         log::error!("get auth module failed!");

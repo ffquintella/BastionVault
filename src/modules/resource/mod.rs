@@ -14,6 +14,7 @@
 //!   sver/<resource>/<key>/<version>     -> ResourceSecretVersion JSON (old values)
 
 pub mod connect_mfa;
+pub mod kernel_service;
 
 use std::{any::Any, collections::HashMap, sync::Arc, time::Duration};
 
@@ -22,7 +23,11 @@ use derive_more::Deref;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::kernel_api::VaultCtx;
+use crate::kernel_api::{
+    engines::LoginClassVerdict,
+    identity::{caller_audit_actor, ObjectKind},
+    VaultCtx,
+};
 use crate::{
     bv_error_response_status, bv_error_string,
     context::Context,
@@ -31,7 +36,7 @@ use crate::{
         secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation,
         Request, Response,
     },
-    modules::{resource_group::ResourceGroupModule, Module},
+    modules::Module,
     new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
     new_path_internal, new_secret, new_secret_internal,
     storage::StorageEntry,
@@ -874,16 +879,11 @@ impl ResourceBackendInner {
             let base = format!("{ns_prefix}{RESOURCE_METADATA_PATH_PREFIX}");
             let targets: Vec<String> =
                 matches.iter().map(|(name, _)| format!("{base}{name}")).collect();
-            let policy_module = self
+            let policy = self
                 .core
-                .module_manager()
-                .get_module::<crate::modules::policy::PolicyModule>("policy")
+                .policy()
                 .ok_or_else(|| bv_error_string!("policy module not registered"))?;
-            let visible = policy_module
-                .policy_store
-                .load()
-                .readable_targets(req, &targets)
-                .await;
+            let visible = policy.readable_targets(req, &targets).await;
             let mut kept = Vec::with_capacity(matches.len());
             for (entry, ok) in matches.into_iter().zip(visible) {
                 if ok {
@@ -1038,18 +1038,12 @@ impl ResourceBackendInner {
         // Failures are logged but do not block resource deletion: a stale
         // group member will be cleaned up on the next group write or by
         // the `resource-group/reindex` endpoint.
-        if let Some(rg_module) = self
-            .core
-            .module_manager()
-            .get_module::<ResourceGroupModule>("resource-group")
-        {
-            if let Some(rg_store) = rg_module.store() {
-                if let Err(e) = rg_store.prune_resource(&name).await {
-                    log::warn!(
-                        "resource-group prune failed for deleted resource '{name}': {e}. \
-                         Use the resource-group/reindex endpoint to clean up.",
-                    );
-                }
+        if let Some(groups) = self.core.resource_groups() {
+            if let Err(e) = groups.prune_resource(&name).await {
+                log::warn!(
+                    "resource-group prune failed for deleted resource '{name}': {e}. \
+                     Use the resource-group/reindex endpoint to clean up.",
+                );
             }
         }
 
@@ -1252,69 +1246,29 @@ impl ResourceBackendInner {
 
         // ── 4. Cross-module references (best-effort, like delete) ──────
         // Asset-group membership + reverse index.
-        if let Some(rg_module) = self
-            .core
-            .module_manager()
-            .get_module::<ResourceGroupModule>("resource-group")
-        {
-            if let Some(rg_store) = rg_module.store() {
-                if let Err(e) = rg_store.rename_resource(&old, &new).await {
-                    log::warn!(
-                        "resource-group rename failed for '{old}' -> '{new}': {e}. \
-                         Use the resource-group/reindex endpoint to clean up.",
-                    );
-                }
+        if let Some(groups) = self.core.resource_groups() {
+            if let Err(e) = groups.rename_resource(&old, &new).await {
+                log::warn!(
+                    "resource-group rename failed for '{old}' -> '{new}': {e}. \
+                     Use the resource-group/reindex endpoint to clean up.",
+                );
             }
         }
 
-        // Shares + ownership (identity module, system view stores).
-        if let Some(identity) = self
-            .core
-            .module_manager()
-            .get_module::<crate::modules::identity::IdentityModule>("identity")
-        {
-            let actor = crate::modules::identity::caller_audit_actor(req);
-            // Share and owner records are keyed `<ns>/<name>` inside a
-            // namespace, so the rename must move the namespace's own records
-            // and never touch a root resource that happens to share the name.
-            use crate::modules::identity::owner_store::OwnerStore;
-            let ns = req.namespace_path.as_deref();
-            let old_key = OwnerStore::scope_target_name(&old, ns).unwrap_or_else(|| old.clone());
-            let new_key = OwnerStore::scope_target_name(&new, ns).unwrap_or_else(|| new.clone());
-            if let Some(share_store) = identity.share_store() {
-                if let Err(e) = share_store
-                    .rename_target(
-                        crate::modules::identity::share_store::ShareTargetKind::Resource,
-                        &old_key,
-                        &new_key,
-                        &actor,
-                    )
-                    .await
-                {
-                    log::warn!(
-                        "share rename failed for resource '{old}' -> '{new}': {e}",
-                    );
-                }
-            }
-            if let Some(owner_store) = identity.owner_store() {
-                match owner_store.get_resource_owner(&old_key).await {
-                    Ok(Some(rec)) if !rec.entity_id.is_empty() => {
-                        if let Err(e) =
-                            owner_store.set_resource_owner(&new_key, &rec.entity_id).await
-                        {
-                            log::warn!(
-                                "owner rename failed for resource '{old}' -> '{new}': {e}",
-                            );
-                        } else {
-                            let _ = owner_store.forget_resource_owner(&old_key).await;
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => log::warn!(
-                        "owner lookup failed for resource '{old}' during rename: {e}",
-                    ),
-                }
-            }
+        // Shares + ownership. The namespace-scoped keying of owner and share
+        // records is the identity module's, so the whole move is one call:
+        // this engine should not know that a resource inside a namespace is
+        // keyed `<ns>/<name>`.
+        if let Some(identity) = self.core.identity() {
+            identity
+                .rename_object(
+                    ObjectKind::Resource,
+                    &old,
+                    &new,
+                    req.namespace_path.as_deref(),
+                    &caller_audit_actor(req),
+                )
+                .await;
         }
 
         // ── 5. Delete the old resource-mount keys (identity now moved) ──
@@ -1431,27 +1385,9 @@ impl ResourceBackendInner {
         &self,
         req: &Request,
         resource: &str,
-    ) -> Result<crate::modules::ssh_broker::policy::EffectiveLoginClass, RvError> {
-        use crate::modules::ssh_broker::policy::{EffectiveLoginClass, LoginClass};
-
-        let default = || EffectiveLoginClass {
-            login_class: LoginClass::SharedCredential,
-            login_class_source: "default",
-            locked_by: Vec::new(),
-            locked_at_tier: None,
-            chain: Vec::new(),
-            lock_violation: None,
-        };
-
-        let Some(sb) = self
-            .core
-            .module_manager()
-            .get_module::<crate::modules::ssh_broker::SshBrokerModule>("ssh-broker")
-        else {
-            return Ok(default());
-        };
-        let Some(pol) = sb.policy_store() else {
-            return Ok(default());
+    ) -> Result<LoginClassVerdict, RvError> {
+        let Some(policy) = self.core.login_class() else {
+            return Ok(LoginClassVerdict::default());
         };
 
         // Resource type from the metadata record.
@@ -1464,17 +1400,12 @@ impl ResourceBackendInner {
         };
 
         // Asset-group memberships from the resource-group reverse index.
-        let asset_groups = match self
-            .core
-            .module_manager()
-            .get_module::<crate::modules::resource_group::ResourceGroupModule>("resource-group")
-            .and_then(|m| m.store())
-        {
-            Some(store) => store.groups_for_resource(resource).await.unwrap_or_default(),
+        let asset_groups = match self.core.resource_groups() {
+            Some(groups) => groups.groups_for_resource(resource).await.unwrap_or_default(),
             None => Vec::new(),
         };
 
-        pol.resolve_for(&resource_type, &asset_groups, resource).await
+        policy.resolve_for(&resource_type, &asset_groups, resource).await
     }
 
     pub async fn handle_secret_write(
@@ -1496,7 +1427,7 @@ impl ResourceBackendInner {
         // every login must be minted per-connect from the SSH engine.
         if static_ssh_credential_shape(&body) {
             let eff = self.resolve_login_class(req, &resource).await?;
-            if eff.login_class == crate::modules::ssh_broker::policy::LoginClass::Brokered {
+            if eff.brokered {
                 return Err(bv_error_response_status!(
                     409,
                     &format!(
@@ -1504,7 +1435,7 @@ impl ResourceBackendInner {
                          brokered (login_class via tier `{}`); a static SSH credential may \
                          not be attached — every SSH login is minted per-connect from the \
                          SSH engine. Bind an `ssh-engine` credential source instead.",
-                        eff.login_class_source
+                        eff.source
                     )
                 ));
             }
@@ -1710,6 +1641,10 @@ impl Module for ResourceModule {
 
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
         self
+    }
+
+    fn register(self: Arc<Self>, services: &crate::kernel_api::KernelServices) {
+        kernel_service::register(self, services);
     }
 
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {

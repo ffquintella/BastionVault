@@ -25,7 +25,6 @@ use tokio::sync::RwLock;
 use crate::kernel_api::VaultCtx;
 use crate::errors::RvError;
 use crate::storage::{barrier_view::BarrierView, Storage, StorageEntry};
-use crate::modules::rustion::RustionModule;
 use crate::bv_error_string;
 
 pub const TICK_INTERVAL: Duration = Duration::from_secs(60);
@@ -178,7 +177,10 @@ pub async fn write_cursor(
 
 /// Spawn the polling task. Mirrors `probe::start_pinger`. The cache
 /// is held inside the module's `telemetry_cache` field.
-pub fn start_poller(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
+pub fn start_poller(
+    core: Arc<dyn VaultCtx>,
+    stores: Arc<super::RustionStores>,
+) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         log::info!(
             "rustion/telemetry: started (tick every {}s)",
@@ -191,7 +193,7 @@ pub fn start_poller(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
             if core.sealed() {
                 continue;
             }
-            if let Err(e) = tick(&core).await {
+            if let Err(e) = tick(&core, &stores).await {
                 log::warn!("rustion/telemetry: tick failed: {e}");
             }
         }
@@ -199,19 +201,18 @@ pub fn start_poller(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
 }
 
 /// Run one polling pass. Exposed for tests / admin endpoints.
-pub async fn run_pass(core: &dyn VaultCtx) -> Result<(), RvError> {
-    tick(core).await
+pub async fn run_pass(
+    core: &dyn VaultCtx,
+    stores: &super::RustionStores,
+) -> Result<(), RvError> {
+    tick(core, stores).await
 }
 
-async fn tick(core: &dyn VaultCtx) -> Result<(), RvError> {
-    let module = core
-        .module_manager()
-        .get_module::<RustionModule>("rustion")
-        .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
-    let Some(store) = module.store() else {
+async fn tick(core: &dyn VaultCtx, stores: &super::RustionStores) -> Result<(), RvError> {
+    let Some(store) = stores.store() else {
         return Ok(());
     };
-    let Some(cache) = module.telemetry_cache() else {
+    let Some(cache) = stores.telemetry() else {
         return Ok(());
     };
 

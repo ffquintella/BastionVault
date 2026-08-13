@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use crate::kernel_api::VaultCtx;
 use crate::errors::RvError;
-use crate::modules::rustion::{enrolment, RustionModule};
+use crate::modules::rustion::enrolment;
 
 /// How often the attestation sweep runs. The spec calls for "weekly";
 /// 6 days gives a safety margin against the Rustion-side renew window
@@ -29,7 +29,10 @@ pub const TICK_INTERVAL: Duration = Duration::from_secs(60 * 60 * 24 * 6);
 /// Spawn the background attest-timer. Same shape as
 /// `rustion::poller::start_poller` — fire-and-forget; tokio detaches
 /// when the parent terminates.
-pub fn start_attest_timer(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
+pub fn start_attest_timer(
+    core: Arc<dyn VaultCtx>,
+    stores: Arc<super::RustionStores>,
+) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         log::info!(
             "rustion/attest: started (tick every {}d)",
@@ -42,7 +45,7 @@ pub fn start_attest_timer(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()
             if core.sealed() {
                 continue;
             }
-            if let Err(e) = tick(&core).await {
+            if let Err(e) = tick(&stores).await {
                 log::warn!("rustion/attest: tick failed: {e}");
             }
         }
@@ -51,16 +54,14 @@ pub fn start_attest_timer(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()
 
 /// Run one attestation sweep. Exposed for the manual-trigger Tauri
 /// command + tests.
-pub async fn run_attest_pass(core: &dyn VaultCtx) -> Result<enrolment::AttestAllResult, RvError> {
-    tick(core).await
+pub async fn run_attest_pass(
+    stores: &super::RustionStores,
+) -> Result<enrolment::AttestAllResult, RvError> {
+    tick(stores).await
 }
 
-async fn tick(core: &dyn VaultCtx) -> Result<enrolment::AttestAllResult, RvError> {
-    let module = core
-        .module_manager()
-        .get_module::<RustionModule>("rustion")
-        .ok_or_else(|| crate::bv_error_string!("rustion module not registered"))?;
-    let Some(store) = module.store() else {
+async fn tick(stores: &super::RustionStores) -> Result<enrolment::AttestAllResult, RvError> {
+    let Some(store) = stores.store() else {
         return Ok(enrolment::AttestAllResult {
             attempted: 0,
             succeeded: 0,
@@ -68,7 +69,7 @@ async fn tick(core: &dyn VaultCtx) -> Result<enrolment::AttestAllResult, RvError
             results: Vec::new(),
         });
     };
-    let Some(master_store) = module.master_store() else {
+    let Some(master_store) = stores.master() else {
         return Ok(enrolment::AttestAllResult {
             attempted: 0,
             succeeded: 0,

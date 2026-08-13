@@ -11,7 +11,7 @@ use crate::{
     errors::RvError,
     logical::{Auth, Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     modules::credential::ferrogate::{machine_id as ferrogate_machine_id, status as ferrogate_status},
-    modules::identity::{GroupKind, IdentityModule},
+    kernel_api::identity::GroupKind,
     new_fields, new_fields_internal, new_path, new_path_internal, bv_error_response, bv_error_string,
     storage::StorageEntry,
     utils::cidr,
@@ -27,12 +27,9 @@ pub(crate) async fn resolve_approle_entity_id(
     role_name: &str,
     ns_path: &str,
 ) -> Option<String> {
-    let module = core
-        .module_manager()
-        .get_module::<IdentityModule>("identity")?;
-    let store = module.entity_store()?;
-    match store.get_or_create_entity_ns("approle/", role_name, ns_path).await {
-        Ok(entity) => Some(entity.id),
+    let identity = core.identity()?;
+    match identity.ensure_entity_id("approle/", role_name, ns_path).await {
+        Ok(id) => Some(id),
         Err(e) => {
             log::warn!(
                 "entity store unavailable for approle/{role_name}: {e}. \
@@ -96,13 +93,10 @@ impl AppRoleBackendInner {
         direct: &[String],
         ns_path: &str,
     ) -> Vec<String> {
-        let Some(module) = self.core.module_manager().get_module::<IdentityModule>("identity") else {
+        let Some(identity) = self.core.identity() else {
             return direct.to_vec();
         };
-        let Some(store) = module.group_store() else {
-            return direct.to_vec();
-        };
-        match store.expand_policies_ns(kind, member, direct, ns_path).await {
+        match identity.expand_group_policies(kind, member, direct, ns_path).await {
             Ok(v) => v,
             Err(e) => {
                 log::warn!(
@@ -336,20 +330,16 @@ impl AppRoleBackendInner {
                     )
                 })?;
 
-            let auth_module = self
+            let tokens = self
                 .core
-                .module_manager()
-                .get_module::<crate::modules::auth::AuthModule>("auth")
+                .tokens()
                 .ok_or_else(|| RvError::ErrResponse("auth module not loaded".to_string()))?;
-            let guard = auth_module.token_store.load();
-            let token_store =
-                guard.as_ref().ok_or_else(|| RvError::ErrResponse("token store not initialised".to_string()))?;
 
-            let te = match token_store.lookup(&machine_token).await {
+            let te = match tokens.lookup(&machine_token).await {
                 Ok(Some(te)) => te,
                 _ => return Err(RvError::ErrResponse("invalid machine_token".to_string())),
             };
-            if te.policies.iter().any(|p| p == "root") {
+            if te.is_root() {
                 return Err(RvError::ErrResponse("machine_token cannot be a root token".to_string()));
             }
             if te.meta.get("mount_path").map(String::as_str) != Some("ferrogate/") {
@@ -408,7 +398,7 @@ impl AppRoleBackendInner {
         // header, or — unscoped — to this role's first assigned namespace. Fails
         // closed on an unknown namespace.
         let (ns_path, ns_uuid) =
-            crate::modules::namespace::token_binding::resolve_login_namespace_for_principal(
+            crate::kernel_api::namespace::login_namespace_for_principal(
                 &self.core,
                 req,
                 "approle/",
@@ -419,7 +409,7 @@ impl AppRoleBackendInner {
         // Multi-tenancy: refuse the login if this role's namespace assignment
         // does not include the login namespace (no record ⇒ unrestricted; fails
         // closed on a non-matching record).
-        crate::modules::namespace::ns_assignment::enforce_login_assignment(
+        crate::kernel_api::namespace::enforce_login_assignment(
             &self.core,
             "approle/",
             &role_entry.name,
@@ -432,7 +422,7 @@ impl AppRoleBackendInner {
         // in tenant-a is distinct from the same role in tenant-b.
         // Quota: refuse a login that would create a *new* entity beyond the
         // namespace's max_entities cap (existing roles are unaffected).
-        crate::modules::namespace::quota::check_entity_create(
+        crate::kernel_api::namespace::check_entity_create(
             &self.core,
             "approle/",
             &role_entry.name,
@@ -450,9 +440,9 @@ impl AppRoleBackendInner {
         // child_visible follows the login namespace's `child_visible_default`
         // flag (see the userpass login for the rationale); default false.
         let child_visible =
-            crate::modules::namespace::token_binding::login_child_visible(&self.core, &ns_path)
+            crate::kernel_api::namespace::login_child_visible(&self.core, &ns_path)
                 .await;
-        crate::modules::namespace::token_binding::stamp_binding(
+        crate::kernel_api::namespace::stamp_binding(
             &mut auth.metadata,
             &ns_path,
             &ns_uuid,

@@ -11,7 +11,7 @@ use crate::kernel_api::VaultCtx;
 use crate::{
     errors::RvError,
     logical::{Backend, LogicalBackend},
-    modules::{auth::AuthModule, Module},
+    modules::Module,
     new_logical_backend, new_logical_backend_internal,
 };
 
@@ -98,8 +98,8 @@ impl Module for Fido2Module {
             Ok(Arc::new(fido2_backend))
         };
 
-        if let Some(auth_module) = core.module_manager().get_module::<AuthModule>("auth") {
-            return auth_module.add_auth_backend("fido2", Arc::new(fido2_backend_new_func));
+        if let Some(auth_mounts) = core.auth_mounts() {
+            return auth_mounts.add_auth_backend("fido2", Arc::new(fido2_backend_new_func));
         } else {
             log::error!("get auth module failed!");
         }
@@ -108,8 +108,8 @@ impl Module for Fido2Module {
     }
 
     fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
-        if let Some(auth_module) = core.module_manager().get_module::<AuthModule>("auth") {
-            return auth_module.delete_auth_backend("fido2");
+        if let Some(auth_mounts) = core.auth_mounts() {
+            return auth_mounts.delete_auth_backend("fido2");
         } else {
             log::error!("get auth module failed!");
         }

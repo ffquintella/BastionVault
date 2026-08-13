@@ -170,7 +170,10 @@ pub fn arc_namespace(ns: Namespace) -> Arc<Namespace> {
 /// `sys/` and `auth/` paths stay root-scoped (per-namespace sys/auth is
 /// Phase 2), so they are left unrewritten.
 #[maybe_async::maybe_async]
-pub async fn rewrite_request_for_namespace(core: &dyn VaultCtx, req: &mut Request) -> Result<(), RvError> {
+pub async fn rewrite_request_for_namespace(
+    core: &crate::core::Core,
+    req: &mut Request,
+) -> Result<(), RvError> {
     let Some(raw) = namespace_header_from_map(req.headers.as_ref()) else {
         return Ok(());
     };

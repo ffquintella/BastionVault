@@ -1391,14 +1391,8 @@ impl AppRoleBackendInner {
             // hook in userpass. Entity record itself stays so audit
             // history survives; only the (mount, name) lookup index
             // is removed.
-            if let Some(module) = self
-                .core
-                .module_manager()
-                .get_module::<crate::modules::identity::IdentityModule>("identity")
-            {
-                if let Some(store) = module.entity_store() {
-                    let _ = store.forget_alias("approle/", &entry.name).await;
-                }
+            if let Some(identity) = self.core.identity() {
+                let _ = identity.forget_alias("approle/", &entry.name).await;
             }
 
             record_approle_audit(&self.core, req, "delete", &entry.name, "").await;
@@ -2569,29 +2563,21 @@ async fn record_approle_audit(
     target: &str,
     details: &str,
 ) {
-    use crate::modules::identity::{caller_audit_actor, IdentityModule, UserAuditEntry};
+    use crate::kernel_api::identity::{caller_audit_actor, UserAuditRecord};
 
-    let Some(module) = core
-        .module_manager()
-        .get_module::<IdentityModule>("identity")
-    else {
+    let Some(identity) = core.identity() else {
         return;
     };
-    let Some(store) = module.user_audit_store() else {
-        return;
-    };
-
-    let actor = caller_audit_actor(req);
-
-    let entry = UserAuditEntry {
-        ts: String::new(),
-        actor_entity_id: actor,
-        op: op.to_string(),
-        mount: "approle/".to_string(),
-        target: target.to_string(),
-        details: details.to_string(),
-    };
-    let _ = store.append(entry).await;
+    let _ = identity
+        .record_user_audit(UserAuditRecord {
+            ts: String::new(),
+            actor_entity_id: caller_audit_actor(req),
+            op: op.to_string(),
+            mount: "approle/".to_string(),
+            target: target.to_string(),
+            details: details.to_string(),
+        })
+        .await;
 }
 
 #[cfg(test)]
@@ -2609,7 +2595,7 @@ mod test {
     };
     use crate::{
         logical::{Operation, Request},
-        modules::auth::expiration::MAX_LEASE_DURATION_SECS,
+        kernel_api::auth::MAX_LEASE_DURATION_SECS,
         storage::Storage,
         test_utils::{
             new_unseal_test_bastion_vault, test_delete_api, test_list_api, test_mount_auth_api, test_read_api,

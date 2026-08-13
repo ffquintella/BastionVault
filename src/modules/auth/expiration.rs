@@ -38,8 +38,7 @@ pub const TOKEN_VIEW_PREFIX: &str = "token/";
 pub const MAX_REVOKE_ATTEMPTS: u32 = 6;
 pub const REVOKE_RETRY_SECS: Duration = Duration::from_secs(10);
 pub const MIN_REVOKE_DELAY_SECS: Duration = Duration::from_secs(5);
-pub const MAX_LEASE_DURATION_SECS: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-pub const DEFAULT_LEASE_DURATION_SECS: Duration = Duration::from_secs(24 * 60 * 60);
+pub use crate::kernel_api::auth::{DEFAULT_LEASE_DURATION_SECS, MAX_LEASE_DURATION_SECS};
 
 /// Represents an old lease entry that may need to be converted to the new format.
 #[derive(Eq, Debug, Default, PartialEq, Clone, Serialize, Deserialize)]
@@ -322,24 +321,14 @@ impl ExpirationManager {
         let Some(core) = self.core.upgrade() else {
             return Ok(());
         };
-        let Some(ns_module) = core
-            .module_manager()
-            .get_module::<crate::modules::namespace::NamespaceModule>(
-                crate::modules::namespace::NAMESPACE_MODULE_NAME,
-            )
-        else {
+        let Some(namespaces) = core.namespaces() else {
             return Ok(());
         };
-        let Some(store) = ns_module.store() else {
+        let Some((ns_path, limit)) = namespaces.lease_quota_for_path(&req.path).await? else {
             return Ok(());
         };
-        let resolved = store.resolve_request(None, &req.path).await?;
-        if resolved.namespace.is_root() {
-            return Ok(());
-        }
-        let limit = resolved.namespace.quotas.max_leases;
-        let current = self.count_leases_for_namespace(&resolved.namespace.path) as u64;
-        crate::modules::namespace::quota::check_lease_quota(&resolved.namespace.path, current, limit)
+        let current = self.count_leases_for_namespace(&ns_path) as u64;
+        crate::modules::namespace::quota::check_lease_quota(&ns_path, current, limit)
     }
 
     pub async fn register_secret(&self, req: &mut Request, resp: &mut Response) -> Result<String, RvError> {

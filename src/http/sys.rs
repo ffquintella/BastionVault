@@ -1392,16 +1392,10 @@ async fn caller_has_live_token(core: &dyn VaultCtx, req: &HttpRequest) -> bool {
     if token.is_empty() {
         return false;
     }
-    let Some(auth_module) = core
-        .module_manager()
-        .get_module::<crate::modules::auth::AuthModule>("auth")
-    else {
+    let Some(tokens) = core.tokens() else {
         return false;
     };
-    let Some(token_store) = auth_module.token_store.load_full() else {
-        return false;
-    };
-    matches!(token_store.lookup(&token).await, Ok(Some(_)))
+    matches!(tokens.lookup(&token).await, Ok(Some(_)))
 }
 
 /// Run the real authentication + ACL gate for `path` / `operation` without
@@ -2631,22 +2625,18 @@ async fn resolve_actor_entity_id(core: &dyn VaultCtx, token: &str) -> String {
     if token.is_empty() {
         return String::new();
     }
-    let Some(auth_module) = core
-        .module_manager()
-        .get_module::<crate::modules::auth::AuthModule>("auth")
-    else {
+    let Some(tokens) = core.tokens() else {
         return String::new();
     };
-    let Some(token_store) = auth_module.token_store.load_full() else {
-        return String::new();
-    };
-    match token_store.lookup(token).await {
-        Ok(Some(te)) => te
-            .meta
-            .get("entity_id")
-            .cloned()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(te.display_name),
+    match tokens.lookup(token).await {
+        Ok(Some(te)) => {
+            let entity_id = te.meta_or_empty("entity_id");
+            if entity_id.is_empty() {
+                te.display_name
+            } else {
+                entity_id
+            }
+        }
         _ => String::new(),
     }
 }

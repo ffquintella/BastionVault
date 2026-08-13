@@ -11,7 +11,7 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response},
-    modules::identity::{GroupKind, IdentityModule},
+    kernel_api::identity::GroupKind,
     new_fields, new_fields_internal, new_path, new_path_internal, bv_error_string,
     storage::StorageEntry,
     utils::policy::equivalent_policies,
@@ -81,13 +81,10 @@ impl Fido2BackendInner {
         member: &str,
         direct: &[String],
     ) -> Vec<String> {
-        let Some(module) = self.core.module_manager().get_module::<IdentityModule>("identity") else {
+        let Some(identity) = self.core.identity() else {
             return direct.to_vec();
         };
-        let Some(store) = module.group_store() else {
-            return direct.to_vec();
-        };
-        match store.expand_policies(GroupKind::User, member, direct).await {
+        match identity.expand_group_policies(GroupKind::User, member, direct, "").await {
             Ok(v) => v,
             Err(e) => {
                 log::warn!(

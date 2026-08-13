@@ -27,7 +27,7 @@ use chrono::Utc;
 
 use crate::kernel_api::VaultCtx;
 use crate::errors::RvError;
-use crate::modules::rustion::{recordings, RustionModule};
+use crate::modules::rustion::recordings;
 
 /// How often the poller ticks. 1 h by default — much slower than the
 /// 30 s probe pinger because the failure mode this guards against
@@ -44,7 +44,10 @@ pub const MAX_RETENTION: chrono::Duration = chrono::Duration::hours(24);
 /// can hold it; dropping the handle does not stop the task (tokio
 /// detaches when the parent crate-level futures terminate). Same
 /// shape as `rustion::probe::start_pinger`.
-pub fn start_poller(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
+pub fn start_poller(
+    core: Arc<dyn VaultCtx>,
+    stores: Arc<super::RustionStores>,
+) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         log::info!(
             "rustion/poller: started (tick every {}s, max retention {}h)",
@@ -58,7 +61,7 @@ pub fn start_poller(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
             if core.sealed() {
                 continue;
             }
-            if let Err(e) = tick(&core).await {
+            if let Err(e) = tick(&stores).await {
                 log::warn!("rustion/poller: tick failed: {e}");
             }
         }
@@ -67,19 +70,15 @@ pub fn start_poller(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
 
 /// Run one polling pass. Exposed so tests + admin endpoints can
 /// trigger a sweep without waiting for the interval.
-pub async fn run_poll_pass(core: &dyn VaultCtx) -> Result<(), RvError> {
-    tick(core).await
+pub async fn run_poll_pass(stores: &super::RustionStores) -> Result<(), RvError> {
+    tick(stores).await
 }
 
-async fn tick(core: &dyn VaultCtx) -> Result<(), RvError> {
-    let module = core
-        .module_manager()
-        .get_module::<RustionModule>("rustion")
-        .ok_or_else(|| crate::bv_error_string!("rustion module not registered"))?;
-    let Some(store) = module.store() else {
+async fn tick(stores: &super::RustionStores) -> Result<(), RvError> {
+    let Some(store) = stores.store() else {
         return Ok(());
     };
-    let Some(recs) = module.recordings_store() else {
+    let Some(recs) = stores.recordings() else {
         return Ok(());
     };
 

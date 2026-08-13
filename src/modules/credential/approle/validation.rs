@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::{AppRoleBackendInner, SECRET_ID_ACCESSOR_LOCAL_PREFIX, SECRET_ID_ACCESSOR_PREFIX, SECRET_ID_LOCAL_PREFIX};
 use crate::{
     errors::RvError,
-    modules::auth::expiration::MAX_LEASE_DURATION_SECS,
+    kernel_api::auth::MAX_LEASE_DURATION_SECS,
     storage::{Storage, StorageEntry},
     utils::{
         self, deserialize_duration, deserialize_system_time, hmac_sha256_hex, serialize_duration,

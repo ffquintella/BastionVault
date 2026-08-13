@@ -32,16 +32,10 @@ async fn resolve_auth(core: &dyn VaultCtx, token: &str) -> Auth {
     if token.is_empty() {
         return Auth::default();
     }
-    let Some(auth_module) = core
-        .module_manager()
-        .get_module::<crate::modules::auth::AuthModule>("auth")
-    else {
+    let Some(tokens) = core.tokens() else {
         return Auth::default();
     };
-    let Some(token_store) = auth_module.token_store.load_full() else {
-        return Auth::default();
-    };
-    match token_store.lookup(token).await {
+    match tokens.lookup(token).await {
         Ok(Some(te)) => Auth {
             client_token: token.to_string(),
             display_name: te.display_name,

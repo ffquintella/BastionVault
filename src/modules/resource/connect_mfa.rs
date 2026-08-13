@@ -303,34 +303,7 @@ pub fn caller_principal(req: &Request) -> Result<(String, String), RvError> {
 /// Mirrors `RustionBackendInner::namespace_sub_request_prefix` but returns
 /// the bare path (no trailing slash) so it is a stable comparison key rather
 /// than a request prefix.
-pub async fn caller_namespace(core: &dyn VaultCtx, req: &Request) -> Result<String, RvError> {
-    use crate::modules::namespace::router::namespace_header_from_map;
-    use crate::modules::namespace::{NamespaceModule, NAMESPACE_MODULE_NAME};
-
-    let raw = req
-        .namespace_path
-        .clone()
-        .or_else(|| namespace_header_from_map(req.headers.as_ref()))
-        .unwrap_or_default();
-    let raw = raw.trim().to_string();
-    if raw.is_empty() {
-        return Ok(String::new());
-    }
-    let Some(ns_module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
-    else {
-        return Ok(String::new());
-    };
-    let Some(store) = ns_module.store() else {
-        return Ok(String::new());
-    };
-    let Some(ns) = store.get_by_path(&raw).await? else {
-        return Ok(String::new());
-    };
-    if ns.is_root() {
-        return Ok(String::new());
-    }
-    Ok(ns.path.trim_end_matches('/').to_string())
-}
+pub use crate::kernel_api::namespace::caller_namespace;
 
 /// Read one connection profile off a resource record.
 ///
@@ -368,8 +341,39 @@ pub fn find_profile(meta: &Map<String, Value>, profile_id: &str) -> Option<Value
 
 /// Whether a profile value carries the gate. Absent / non-boolean ⇒ false,
 /// so every profile written before this feature keeps its old behaviour.
-pub fn profile_gate_flag(profile: &Value) -> bool {
-    profile.get("require_mfa").and_then(|v| v.as_bool()).unwrap_or(false)
+///
+/// Re-exported from `kernel_api::engines`, where it has to live so a transport
+/// engine can read the same flag without naming this module.
+pub use crate::kernel_api::engines::profile_gate_flag;
+
+/// Whether *any* connection profile on `resource` carries the gate.
+///
+/// The fail-closed branch for a caller that opens a session without naming a
+/// profile: the gate cannot be evaluated without a profile id, so an
+/// un-attributed open against a resource that has any gated profile is refused
+/// rather than allowed through. A resource with no gated profiles is
+/// unaffected, which keeps every pre-existing caller working unchanged.
+///
+/// Moved here from the Rustion transport, which is where it was written and
+/// where it did not belong: the gate is the resource engine's, and the second
+/// transport to need it would otherwise have copied the check.
+pub async fn resource_has_gated_profile(
+    core: &dyn VaultCtx,
+    ns_prefix: &str,
+    resource: &str,
+) -> Result<bool, RvError> {
+    let path = format!("{ns_prefix}resources/resources/{resource}");
+    let mut sub = Request::new(&path);
+    sub.operation = crate::logical::Operation::Read;
+    let Some(resp) = core.router().handle_request(&mut sub).await? else {
+        return Ok(false);
+    };
+    let data = resp.data.unwrap_or_default();
+    Ok(data
+        .get("connection_profiles")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().any(profile_gate_flag))
+        .unwrap_or(false))
 }
 
 /// Whether the named profile on the named resource requires MFA.
@@ -469,10 +473,9 @@ impl super::ResourceBackendInner {
         if req.auth.is_none() {
             return Err(bv_error_response_status!(401, "no authenticated caller"));
         }
-        let policy_module = self
+        let policy = self
             .core
-            .module_manager()
-            .get_module::<crate::modules::policy::PolicyModule>("policy")
+            .policy()
             .ok_or_else(|| crate::bv_error_string!("policy module not registered"))?;
 
         let ns = caller_namespace(&self.core, req).await?;
@@ -484,7 +487,7 @@ impl super::ResourceBackendInner {
         let mut probe = req.clone();
         probe.namespace_path = if ns.is_empty() { None } else { Some(ns.clone()) };
 
-        if !policy_module.policy_store.load().may_connect_target(&probe, &secret_prefix).await {
+        if !policy.may_connect_target(&probe, &secret_prefix).await {
             return Err(RvError::ErrPermissionDenied);
         }
         Ok(())

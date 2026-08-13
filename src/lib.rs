@@ -230,35 +230,35 @@ impl BastionVault {
 
         // add auth_module
         let auth_module = AuthModule::new(core.clone())?;
-        core.module_manager().add_module(Arc::new(auth_module))?;
+        core.module_manager().add_module(Arc::new(auth_module), &core.kernel_services)?;
 
         // add policy_module
         let policy_module = PolicyModule::new(core.clone());
-        core.module_manager().add_module(Arc::new(policy_module))?;
+        core.module_manager().add_module(Arc::new(policy_module), &core.kernel_services)?;
 
         // add credential module: userpass
         let userpass_module = UserPassModule::new(core.clone());
-        core.module_manager().add_module(Arc::new(userpass_module))?;
+        core.module_manager().add_module(Arc::new(userpass_module), &core.kernel_services)?;
 
         // add credential module: approle
         let approle_module = AppRoleModule::new(core.clone());
-        core.module_manager().add_module(Arc::new(approle_module))?;
+        core.module_manager().add_module(Arc::new(approle_module), &core.kernel_services)?;
 
         // add credential module: fido2
         let fido2_module = modules::credential::fido2::Fido2Module::new(core.clone());
-        core.module_manager().add_module(Arc::new(fido2_module))?;
+        core.module_manager().add_module(Arc::new(fido2_module), &core.kernel_services)?;
 
         // add credential module: oidc
         let oidc_module = OidcModule::new(core.clone());
-        core.module_manager().add_module(Arc::new(oidc_module))?;
+        core.module_manager().add_module(Arc::new(oidc_module), &core.kernel_services)?;
 
         // add credential module: saml (Phase 1+2 — config + roles only)
         let saml_module = SamlModule::new(core.clone());
-        core.module_manager().add_module(Arc::new(saml_module))?;
+        core.module_manager().add_module(Arc::new(saml_module), &core.kernel_services)?;
 
         // add credential module: ferrogate (Phase 1 — config + admin lifecycle; login stubbed)
         let ferrogate_module = FerroGateModule::new(core.clone());
-        core.module_manager().add_module(Arc::new(ferrogate_module))?;
+        core.module_manager().add_module(Arc::new(ferrogate_module), &core.kernel_services)?;
 
         let handlers = core.handlers.load().clone();
         for handler in handlers.iter() {

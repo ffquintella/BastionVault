@@ -12,7 +12,7 @@ use std::{any::Any, sync::Arc};
 
 use arc_swap::ArcSwap;
 
-use crate::kernel_api::VaultCtx;
+use crate::kernel_api::{KernelServices, VaultCtx};
 use crate::{core::Core, errors::RvError, modules::Module};
 
 /// Builds one module, given the kernel handle.
@@ -59,8 +59,23 @@ impl ModuleManager {
     /// reference its store.
     pub fn set_modules(&self, factories: Vec<Box<dyn ModuleFactory>>, core: Arc<Core>) -> Result<(), RvError> {
         let modules: Vec<Arc<dyn Module>> = factories.into_iter().map(|f| f.build(core.clone())).collect();
+        for module in &modules {
+            module.clone().register(&core.kernel_services);
+        }
         self.modules.store(Arc::new(modules));
         Ok(())
+    }
+
+    /// Start every module's detached background tasks.
+    ///
+    /// Called once per unseal from `Core::post_unseal`, after `init`. Replaces
+    /// the block there that named six engines' scheduler entry points.
+    pub fn start_background(&self, core: Arc<Core>) {
+        let ctx: Arc<dyn VaultCtx> = core;
+        let modules = self.modules.load().clone();
+        for module in modules.iter() {
+            module.start_background(ctx.clone());
+        }
     }
 
     #[inline]
@@ -76,8 +91,13 @@ impl ModuleManager {
         None
     }
 
+    /// Install one more module after [`Self::set_modules`].
+    ///
+    /// Takes the registry so the module can publish its capabilities on the
+    /// same terms as the ones installed in bulk — the auth and policy modules
+    /// arrive this way, and both are kernel services every engine resolves.
     #[inline]
-    pub fn add_module(&self, module: Arc<dyn Module>) -> Result<(), RvError> {
+    pub fn add_module(&self, module: Arc<dyn Module>, services: &KernelServices) -> Result<(), RvError> {
         let modules = self.modules.load();
         for m in modules.iter() {
             if m.name().as_str() == module.name().as_str() {
@@ -87,6 +107,7 @@ impl ModuleManager {
 
         let old_modules = self.modules.load_full();
         let mut modules = (*old_modules).clone();
+        module.clone().register(services);
         modules.push(module);
 
         let modules = Arc::new(modules);
@@ -132,6 +153,15 @@ impl ModuleManager {
         }
 
         Ok(())
+    }
+
+    /// Flush every module's caches. Best-effort by contract; see
+    /// [`Module::flush_caches`].
+    pub fn flush_caches(&self) {
+        let modules = self.modules.load().clone();
+        for module in modules.iter() {
+            module.flush_caches();
+        }
     }
 
     pub fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {

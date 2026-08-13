@@ -34,6 +34,7 @@ use crate::{
 pub mod default_account;
 pub mod entity_store;
 pub mod group_store;
+pub mod kernel_service;
 pub mod ns_scope_migrate;
 pub mod owner_store;
 pub mod share_store;
@@ -51,32 +52,10 @@ pub use user_audit_store::{UserAuditEntry, UserAuditStore};
 
 /// Best-effort caller identity for audit rows.
 ///
-/// Order of preference:
-///   1. `auth.metadata["entity_id"]` — the stable UUID
-///      (`EntityStore`) for userpass/approle/FIDO2 logins.
-///   2. `auth.display_name` — populated for root (`"root"`) and by
-///      login handlers as a human label.
-///   3. Empty string — no `auth` at all.
-///
-/// Without this fallback, root-token operations show up as
-/// "(unknown)" in the Admin → Audit page because root has no
-/// entity_id. The GUI treats a non-UUID value as a literal
-/// username and renders it verbatim, so returning `"root"` here is
-/// enough to surface the correct actor without schema changes.
-pub fn caller_audit_actor(req: &Request) -> String {
-    let Some(auth) = req.auth.as_ref() else {
-        return String::new();
-    };
-    if let Some(id) = auth.metadata.get("entity_id") {
-        if !id.is_empty() {
-            return id.clone();
-        }
-    }
-    if !auth.display_name.is_empty() {
-        return auth.display_name.clone();
-    }
-    String::new()
-}
+/// Re-exported from `kernel_api::identity`, where it has to live so an engine
+/// can stamp an audit actor without naming this module. Every engine that
+/// writes an owner record or an audit row calls it.
+pub use crate::kernel_api::identity::caller_audit_actor;
 
 static IDENTITY_BACKEND_HELP: &str = r#"
 The identity backend manages user groups and application groups. Each group
@@ -1845,6 +1824,10 @@ impl Module for IdentityModule {
 
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
         self
+    }
+
+    fn register(self: Arc<Self>, services: &crate::kernel_api::KernelServices) {
+        kernel_service::register(self, services);
     }
 
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
