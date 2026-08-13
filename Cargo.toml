@@ -28,6 +28,7 @@ members = [
     "crates/bv-metrics",
     "crates/bv-storage",
     "crates/bv-logical",
+    "crates/bv-utils",
     "crates/bv_crypto",
     "crates/bastion-plugin-sdk",
     "crates/bastion-plugin-testkit",
@@ -71,6 +72,9 @@ bv-storage = { path = "crates/bv-storage" }
 # Tier 0: Request/Response/Backend/Path/Field plus the `Handler` trait they
 # carry. Re-exported as `bastion_vault::{logical, handler}`.
 bv-logical = { path = "crates/bv-logical" }
+# Tier 1: shared helpers (salts, seal boxes, socket addresses, TLS and cert
+# utilities). Re-exported as `bastion_vault::utils`.
+bv-utils = { path = "crates/bv-utils" }
 bv_crypto = { path = "crates/bv_crypto" }
 bv_plugin_surface = { path = "crates/bv_plugin_surface" }
 bv_plugin_manifest = { path = "crates/bv-plugin-manifest" }
@@ -105,7 +109,6 @@ log = "0.4"
 env_logger = "0.11"
 hex = "0.4"
 humantime = "2.3"
-as-any = "0.3.2"
 pem = "3.0"
 chrono = "0.4"
 zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
@@ -163,7 +166,6 @@ rustls-pki-types = "1"
 webpki-roots = { version = "1.0", default-features = true }
 base64 = "0.22"
 ipnetwork = { version = "0.21", features = ["serde"] }
-blake2b_simd = "1.0"
 derive_more = "2.1.1"
 dashmap = "6.1"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }
@@ -415,7 +417,7 @@ default = ["storage_hiqlite", "ssh_pqc"]
 # compiled in exactly when the backend is.
 storage_mysql = ["bv-errors/storage_mysql", "bv-storage/storage_mysql"]
 storage_hiqlite = ["bv-storage/storage_hiqlite"]
-sync_handler = ["maybe-async/is_sync", "bv-storage/sync_handler", "bv-logical/sync_handler"]
+sync_handler = ["maybe-async/is_sync", "bv-storage/sync_handler", "bv-logical/sync_handler", "bv-utils/sync_handler"]
 # Cloud Storage Targets for the Encrypted File backend.
 # See `features/cloud-storage-backend.md`. Default build stays lean —
 # operators who don't need cloud targets pay no compile / binary cost.

@@ -1,0 +1,60 @@
+[package]
+name = "bv-utils"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's shared helpers: salts, seal boxes, socket addresses, TLS and cert utilities"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 1, not Tier 0, whatever the roadmap's original list said: `salt.rs`
+# needs `bv-storage`, `token_util.rs` needs `bv-logical`, and `seal.rs` needs
+# `bv-shamir`. It therefore had to come last of the Phase 1 extractions.
+# See roadmaps/workspace-decomposition.md § Phase 1.
+
+[dependencies]
+bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
+bv-shamir = { path = "../bv-shamir", version = "0.1.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
+bv_crypto = { path = "../bv_crypto", version = "0.1.0", registry = "uox-bastionvault" }
+
+as-any = "0.3.2"
+better_default = "1.0.5"
+blake2b_simd = "1.0"
+blake3 = "1.8"
+chrono = "0.4"
+hex = "0.4"
+hmac = "0.13"
+humantime = "2.3"
+ipnetwork = { version = "0.21", features = ["serde"] }
+maybe-async = "0.2"
+rand = "^0.10"
+rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
+serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
+serde_json = "^1.0"
+sha1 = "0.11"
+sha2 = "0.11"
+thiserror = { version = "^2.0" }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync"] }
+url = "2.5"
+zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
+
+[dev-dependencies]
+# `salt.rs` and `token_util.rs` build a real barrier over a file backend.
+bv-storage = { path = "../bv-storage", features = ["test-support"] }
+
+[features]
+default = []
+sync_handler = ["maybe-async/is_sync", "bv-storage/sync_handler", "bv-logical/sync_handler"]
+
+# Exactly the three lints this crate's code trips, each already allowed by
+# the root crate's `[lints.clippy]`. Stated per-crate rather than inherited
+# from a workspace block, for the reason recorded in `bv-logical`'s manifest:
+# an extracted crate starting from clippy's defaults is what surfaced the
+# `await_holding_lock` deadlock, and that lint stays at its default here.
+[lints.clippy]
+new_without_default = "allow"
+ptr_arg = "allow"
+should_implement_trait = "allow"

@@ -115,7 +115,8 @@ pub mod stats;
 /// crate, and the extraction that takes hiqlite, diesel and rusty-s3 out of
 /// the monolith's compilation unit.
 pub use bv_storage as storage;
-pub mod utils;
+/// Shared helpers — the Tier 1 `bv-utils` crate.
+pub use bv_utils as utils;
 
 #[cfg(test)]
 pub mod test_utils;

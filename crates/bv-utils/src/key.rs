@@ -5,7 +5,9 @@ use bv_crypto::{
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::{errors::RvError, utils::generate_uuid};
+use bv_errors::RvError;
+
+use crate::generate_uuid;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct KeyBundle {

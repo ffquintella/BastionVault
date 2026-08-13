@@ -6,7 +6,7 @@ use rustls::{
     DigitallySignedStruct, SignatureScheme,
 };
 
-use crate::errors::RvError;
+use bv_errors::RvError;
 
 #[derive(Debug, Clone, Default)]
 pub struct CertBundle {

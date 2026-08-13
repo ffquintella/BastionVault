@@ -3,12 +3,10 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use crate::{
-    errors::RvError,
-    logical::{field::FieldTrait, Auth, Field, FieldType, Request},
-    new_fields, new_fields_internal,
-    utils::{deserialize_duration, serialize_duration, sock_addr::SockAddrMarshaler},
-};
+use bv_errors::RvError;
+use bv_logical::{field::FieldTrait, new_fields, new_fields_internal, Auth, Field, FieldType, Request};
+
+use crate::{deserialize_duration, serialize_duration, sock_addr::SockAddrMarshaler};
 
 // 24h
 pub const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(24 * 60 * 60_u64);
@@ -211,11 +209,8 @@ mod test {
     use serde_json::json;
 
     use super::*;
-    use crate::{
-        logical::{Operation, Path},
-        storage::barrier_aes_gcm::AESGCMBarrier,
-        test_utils::new_test_backend,
-    };
+    use bv_logical::{Operation, Path};
+    use bv_storage::{barrier_aes_gcm::AESGCMBarrier, test_support::new_test_backend};
 
     #[test]
     fn test_token_util() {

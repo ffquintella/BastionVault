@@ -1,7 +1,7 @@
 use std::path::Path;
 use url::Url;
 
-use crate::errors::RvError;
+use bv_errors::RvError;
 
 #[derive(Debug)]
 pub enum DatabaseName {

@@ -58,13 +58,13 @@ pub enum CryptoError {
 
     /// An error that occurred in the BastionVault core system.
     ///
-    /// This error is automatically converted from `crate::errors::RvError`
+    /// This error is automatically converted from `bv_errors::RvError`
     /// and typically occurs when the cryptographic operation interacts
     /// with other parts of the BastionVault system.
     #[error("Some bastion_vault error happened, {:?}", .source)]
     RvError {
         #[from]
-        source: crate::errors::RvError,
+        source: bv_errors::RvError,
     },
 }
 

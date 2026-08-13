@@ -28,7 +28,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{shamir::ShamirSecret, utils::BHashSet};
+use bv_shamir::ShamirSecret;
+
+use crate::BHashSet;
 
 /// Error types that can occur during SealBox operations.
 ///

@@ -1,9 +1,15 @@
 //! Miscellaneous public handy functions are collected here, such as cryptography tools,
 //! uuid generator, etc.
+//!
+//! Tier 1 of the workspace decomposition
+//! (`roadmaps/workspace-decomposition.md` § Phase 1) — not Tier 0, whatever
+//! the roadmap's original list said. [`salt`] reads and writes through
+//! `bv-storage`, [`token_util`] builds `bv-logical` field schemas, and
+//! [`seal`] splits secrets with `bv-shamir`. Re-exported by the root crate
+//! as `bastion_vault::utils`.
 
 use std::time::{Duration, SystemTime};
 
-use blake3;
 use chrono::prelude::*;
 use hmac::{Hmac, KeyInit, Mac};
 use humantime::{format_rfc3339, parse_duration, parse_rfc3339};
@@ -13,7 +19,7 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
-use crate::errors::RvError;
+use bv_errors::RvError;
 
 pub mod cert;
 pub mod cidr;

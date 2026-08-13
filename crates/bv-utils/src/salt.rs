@@ -6,10 +6,8 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
 use super::generate_uuid;
-use crate::{
-    errors::RvError,
-    storage::{Storage, StorageEntry},
-};
+use bv_errors::RvError;
+use bv_storage::{Storage, StorageEntry};
 
 static DEFAULT_LOCATION: &str = "salt";
 
@@ -156,9 +154,8 @@ mod test {
     use rand::Rng;
 
     use super::*;
-    use crate::{
-        storage::{barrier::SecurityBarrier, barrier_aes_gcm, barrier_view},
-        test_utils::new_test_backend,
+    use bv_storage::{
+        barrier::SecurityBarrier, barrier_aes_gcm, barrier_view, test_support::new_test_backend,
     };
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
