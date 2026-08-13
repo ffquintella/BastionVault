@@ -1,22 +1,36 @@
 # Roadmap: Workspace Decomposition
 
-Status: **Phase 0 done. Phase 1 partially done: `bv-errors`, `bv-shamir` and
-`bv-context` are extracted and green. The remaining five Tier 0 crates are
-*not* mechanical file moves — a re-measurement of the dependency graph (see
-"Verified clean leaves" below, which was wrong) shows `bv-utils` is Tier 1, and
-`bv-logical` and `bv-audit` are blocked on Phase 2 rather than the reverse.
-**Phase 2 is done for its core objective: the `Core` ↔ `modules` cycle is
-cut.** All 14 Tier 3 engine directories, the plugin runtime and the sys audit
-emitter contain zero code references to `Core`; `module_manager.rs` no longer
-names an engine type. Files in `src/modules` mentioning `Core` went 86 → 33,
-and all 33 are the six kernel modules, which keep it by design. What remains of
-the phase is the typed kernel accessors (step 1) — see "What is left, measured".
+Status: **Phase 0 done. Phase 2 done.** Phase 1 partially done: `bv-errors`,
+`bv-shamir` and `bv-context` are extracted and green. The remaining five Tier 0
+crates are *not* mechanical file moves — a re-measurement of the dependency
+graph (see "Verified clean leaves" below, which was wrong) shows `bv-utils` is
+Tier 1, and `bv-logical` and `bv-audit` were blocked on Phase 2 rather than the
+reverse. **Phase 2 is now complete on both halves**: the `Core` ↔ `modules`
+cycle is cut *and* the sibling cycle is cut. Measured at the end of the phase:
 
-> **Read the two "re-measured" blocks below before planning against this
-> document.** Three of its load-bearing figures were derived from greps that
-> could not see brace-grouped `use crate::{...}` imports, and they are wrong in
-> ways that change the phase order: the "clean leaves" are not leaves, and
-> Phase 2 has ~101 cross-module call sites rather than 43.
+| measured on production code (`#[cfg(test)]` excluded) | phase start | after 2a | **after 2b** |
+|---|---|---|---|
+| `Core` references in the 14 Tier 3 engine directories | 86 files | 0 | **0** |
+| `get_module::<T>()` in Tier 3 + `src/audit` + `src/plugins` | ~40 | ~40 | **0** |
+| Tier 3 references to *any other* module directory | 12 | 12 | **0** |
+| Engine entry points named by `Core::post_unseal` | 6 | 6 | **0** |
+| Modules named by `Core::flush_caches` | 2 | 2 | **0** |
+| `src/audit` → `crate::modules` | 2 | 1 | **0** |
+| `VaultCtx::module_manager()` | — | present | **removed** |
+
+`get_module::<T>()` survives in 79 production sites, all inside the kernel tier
+(`auth`, `identity`, `policy`, `namespace`, `resource_group`, `system`), plus 10
+in the assembly layer (`core.rs`, `src/http`). Both are by design — see
+"Tiering" below. The 12 remaining Tier 3 sites are all `#[cfg(test)]`, and all
+of them also use `crate::test_utils`, so they cannot travel into an engine
+crate regardless; they become `tests/` binaries in Phase 3.
+
+> **Read the "re-measured" blocks below before planning against this
+> document.** Several of its load-bearing figures were derived from greps that
+> could not see brace-grouped `use crate::{...}` imports or that counted doc
+> comments, and they were wrong in ways that changed the plan: the "clean
+> leaves" are not leaves, Phase 2 had ~101 cross-module call sites rather than
+> 43, and three of the five Tier 3 ↔ Tier 3 "cycles" were prose.
 
 ## Goal
 
@@ -166,7 +180,7 @@ Each is a handful of lines and each blocks a Tier-0 extraction:
 | Wart | Sites | Fix |
 |---|---|---|
 | ~~`errors.rs` imports `actix_web::http::StatusCode`~~ | 2 | **Done.** `response_status()` returns `u16`; the actix `ResponseError` impl in `src/http/mod.rs` maps it. The header-decode variant no longer wraps an actix type. |
-| `src/audit` → `crate::modules` | 2 (`sys_emit.rs`, `entry.rs`) | Take the token store via trait; move `NS_PATH_META` to the shared contract crate |
+| ~~`src/audit` → `crate::modules`~~ | 2 (`sys_emit.rs`, `entry.rs`) | **Done** (Phase 2). `sys_emit.rs` takes the token store through `kernel_api::auth::TokenService`; `NS_PATH_META` and its two siblings moved to `kernel_api::namespace`, re-exported from `token_binding`. |
 | `src/mount.rs` → `crate::plugins` | 2 | Invert: the plugin runtime registers its backend factory with the mount table |
 | `src/metrics` → `crate::plugins` | 1 | Invert: plugins register their collectors |
 | `src/storage` → `crate::http` | 1 | Doc comment only — no real coupling |
@@ -461,9 +475,9 @@ order, with what each actually needs:
 | 3 | `bv-context` | **done** | true leaf; added to Tier 0, was not in the plan |
 | 4 | `bv-metrics` | after inversion | `plugins` registers its own collectors |
 | 5 | `bv-storage` (+ `cache`) | after 4 | `cache` → `modules::auth::token_store::TokenEntry`; 6 tests need root `test_utils` |
-| 6 | `bv-logical` | **after Phase 2** | `Request.handler: Option<Arc<dyn Handler>>` → `Handler` → `Core` |
+| 6 | `bv-logical` | **unblocked** (Phase 2 done) | `Request.handler: Option<Arc<dyn Handler>>` → `Handler` → `Core` |
 | 7 | `bv-utils` | after 5 and 6 | Tier 1: `salt.rs`→storage, `token_util.rs`→logical, `seal.rs`→shamir |
-| 8 | `bv-audit` | **after Phase 2** | reaches `crate::core::Core` directly |
+| 8 | `bv-audit` | **unblocked** (Phase 2 done) | reached `crate::core::Core` directly; now goes through `VaultCtx` |
 
 `bv-errors` is a hard prerequisite for everything, not a deferrable
 tail-end change: a new crate cannot depend on the root crate, so no module
@@ -503,9 +517,13 @@ nextest `retries` — see `.config/nextest.toml`.
 an engine no longer invalidates ~19k lines of storage/logical code.
 Modest wall-clock win; the real value is that Phases 2–4 become possible.
 
-### Phase 2 — Break the `Core` ↔ `modules` cycle
+### Phase 2 — Break the `Core` ↔ `modules` cycle — **done**
 
 The crux. No files move; only the direction of dependency changes.
+
+The plan below is kept as written, because the record of where it was wrong is
+the useful part. What actually landed, and the four assumptions that did not
+survive, are under "How the second half landed" onwards.
 
 #### Do the inversion in-crate first; make it a crate second
 
@@ -620,61 +638,169 @@ Two smaller corrections to the numbers above while re-measuring:
 - The `get_module` work is **~101** production call sites, not 43. The 43
   counted only those spelled literally as `core.module_manager.get_module`.
 
-#### What is left of Phase 2, measured
+#### How the second half landed
 
-Steps 3 and 4 are done. Step 1's `VaultCtx` is done; its five store traits and
-`ModuleRegistry` are not, and step 2 turns out not to exist.
+Steps 3 and 4 were done first (see above). This section records the rest —
+step 1's five store traits and the `ModuleRegistry` — as it actually shipped,
+because three of the plan's assumptions did not survive contact.
 
-**Step 2, refined once more.** The "Re-measured" block above already corrects
-"delete outright" and explains the 9 detached-`tokio::task` sites. One detail it
-gets slightly wrong: the non-tick sites are not "held by a struct that already
-owns a `core` field" in the sense of being trivially replaceable. Walking back
-to the enclosing `impl` shows `self` there is the **backend**
-(`RustionBackend`, `NotificationsBackend`, `SshBrokerBackend`), not the module,
-so `get_module` is a genuine registry lookup rather than a roundabout `&self` —
-and it is late on purpose, because the store does not exist until
-`Module::init` runs, which is after the backend is built. Giving each backend a
-direct store handle is a per-engine design change. Not attempted here.
+**The registry is not a registry of modules; it is a registry of
+capabilities.** The plan has `ModuleRegistry` "replacing
+`ModuleManager::get_module`'s `Arc::downcast` with typed accessors", which
+reads as `registry.identity() -> Arc<IdentityModule>`. That would have kept
+every engine naming `IdentityModule`, which is the whole problem. What landed
+instead is [`KernelServices`](../src/kernel_api/services.rs): each provider
+registers *itself as a trait object* at module installation, and consumers ask
+[`VaultCtx`](../src/kernel_api/ctx.rs) for the capability. No name, no
+downcast, no concrete type. `Module` grew one hook, `register(self: Arc<Self>,
+&KernelServices)`, because publishing a trait object needs an `Arc<Self>` and
+neither `init` nor `setup` has one.
 
-**Step 1's remaining half is 175 call sites.** `get_module::<T>` still appears
-175 times, and it is what keeps engines naming each other's concrete types.
-That is the blocker for Phase 3, not `Core`:
+**Ten slots, not five.** The plan's five (`TokenStore`, `IdentityStore`,
+`PolicyStore`, `NamespaceRegistry`, `ResourceGroupStore`) are there, split
+slightly differently:
 
-| engine | still names |
-|---|---|
-| `credential` | auth, identity, namespace, resource, totp |
-| `resource` | credential, identity, namespace, policy, ssh_broker |
-| `rustion` | namespace, policy, resource |
-| `totp` | credential |
-| `files` | identity |
-| `ssh_broker` | rustion |
-| `notifications` | namespace |
+| slot | file | why |
+|---|---|---|
+| `IdentityService` | `kernel_api/identity.rs` | entities, group policy expansion, ownership, user audit |
+| `TokenService` | `kernel_api/auth.rs` | token lookup + revoke |
+| `AuthMountRegistry` | `kernel_api/auth.rs` | separate from tokens: a credential backend must be able to mount itself without being able to resolve other people's tokens |
+| `PolicyGate` | `kernel_api/policy.rs` | the three authorization *questions*, never an `ACL` |
+| `NamespaceRegistry` | `kernel_api/namespace.rs` | resolution, login binding, per-namespace routers, quotas |
+| `ResourceGroupIndex` | `kernel_api/resource_group.rs` | the asset-group reverse index |
 
-**And the Tier 3 engines are not leaves.** The plan has "Tier 3 — engines and
-auth backends (each: Tier 0 + `bv-kernel-api` only)". They reference each
-other, with cycles:
+plus four in [`kernel_api/engines.rs`](../src/kernel_api/engines.rs) for the
+Tier 3 ↔ Tier 3 edges below: `LoginClassPolicy`, `ConnectMfaGate`, `TotpMfa`,
+`NotificationSink`. Those are **engine** contracts, not kernel contracts, and
+they live in their own file so they can move to a `bv-engine-api` crate as a
+file move rather than a rewrite.
+
+**The traits carry operations, not store handles.** `IdentityService` does not
+return `Arc<OwnerStore>`; it has `rename_object(kind, old, new, ns, actor)`.
+That is what makes the boundary real: `bv-kernel-api` cannot depend on
+`bv-kernel`, so anything crossing has to be owned data or a narrow answer. It
+also deleted code — the resource engine's rename used to inline twenty lines of
+namespace-key scoping and share/owner moving, all of which required it to know
+how owner records are keyed.
+
+#### Step 2 (the self-lookups): shared slots, not `Weak<Self>`
+
+The "Re-measured" block above proposed `Weak<RustionModule>` captured at
+registration. The shipped fix is narrower and needs no self-reference at all:
+the engine's late-bound *stores* move into one `Arc<RustionStores>` shared
+between the module, the logical backend, and the four background tasks. Same
+for `notifications::ServiceSlot` and `ssh_broker::PolicyStoreSlot`.
+
+The block was right that the lookup exists because the handle must be **late**
+(the stores are created in `Module::init`, at unseal, and a sealed vault has
+none) and wrong that this needs a handle to the *module*. It never did — it
+needed a handle to the slot.
+
+Every **production** self-lookup is gone: Rustion 9, notifications 1,
+ssh-broker 1. The 7 `AppRoleModule` ones the block already identified as
+test-only stay with their tests, alongside 4 in `files` and 1 in `rustion` —
+12 in total, and all 12 are in `#[cfg(test)]` modules that use
+`crate::test_utils`, which is what actually pins them to the root crate. A
+`SelfRef<T>` helper was written for the `Weak` approach and deleted unused.
+
+#### Tier 3 ↔ Tier 3: three real edges, not a three-cycle
+
+The "engines are not leaves" block above lists five cross-engine edges and two
+cycles. Re-measured with comments stripped, **three of the five were doc
+comments only** (`totp -> credential`, `ssh_broker -> rustion`, and the
+`credential -> resource` half). The real graph was a DAG:
 
 ```
-totp     <-> credential
-resource <-> credential
-resource  -> ssh_broker -> rustion -> resource
+credential -> totp          (mfa::verify_code, mfa::normalize_mount)
+resource   -> ssh_broker    (EffectiveLoginClass, LoginClass)
+rustion    -> resource      (connect_mfa::enforce)
+plugins    -> notifications (NotificationService)
 ```
 
-So `bv-engine-totp` and `bv-auth-*` cannot both be crates while that edge is a
-concrete type reference, and the three-cycle has no valid extraction order at
-all. Each needs a trait at the boundary — the same treatment `VaultCtx` gave
-`Core` — or the participants have to be merged into one crate. This wants
-deciding before Phase 3 picks an extraction order, because the order the plan
-proposes (`rustion` second, `resource` late) does not resolve it.
+So there was no unresolvable cycle — but each edge still pinned two engines
+into one compile unit, so each got a trait at the boundary anyway. Two of them
+shrank on the way across: the resource engine reads two of `EffectiveLoginClass`'s
+six fields, so `LoginClassVerdict` carries two; the notification sink speaks
+JSON, which the plugin ABI already was on both sides.
+
+`resource::connect_mfa::resource_has_gated_profile` moved out of the Rustion
+transport, where it had been written and did not belong — the gate is the
+resource engine's, and the second transport to need it would have copied it.
+
+#### Also inverted, because the same edge pointed the other way
+
+Three places had `Core` naming its modules rather than the reverse. They are
+the same dependency and they had to go too:
+
+- **`Core::post_unseal` named six engines' schedulers** by path
+  (`pki::scheduler`, `rustion::{probe,poller,telemetry,attest_timer}`,
+  `ldap::scheduler`, `files::scheduler`, plus the system reconciler and the
+  cert-lifecycle scheduler). Replaced by `Module::start_background`, which the
+  module manager calls on the whole set.
+- **`Core::flush_caches` named the policy and auth modules.** Replaced by
+  `Module::flush_caches`.
+- **`src/audit/entry.rs` reached into `crate::modules` for one constant**
+  (`NS_PATH_META`) — a cross-layer wart this roadmap tracked separately, in the
+  table under "Cross-layer warts to fix first". The namespace token-metadata
+  keys and the pure namespace-path helpers (`namespace_header_from_map`,
+  `normalize_path`, `validate_segment`, `stamp_binding`,
+  `binding_from_metadata`, `writer_namespace_path`) moved to
+  `kernel_api::namespace` and are re-exported from their old homes, so no call
+  site outside those files changed. `MAX_LEASE_DURATION_SECS` and
+  `caller_audit_actor` moved for the same reason.
+
+#### Tiering: what still names what, and why that is the end state
+
+`VaultCtx::module_manager()` is **gone**. The module set is reachable only
+through `Core::module_manager()`, an inherent method — so the type system now
+enforces the split rather than a convention:
+
+| tier | may name | count |
+|---|---|---|
+| Tier 3 engines, `src/audit`, `src/plugins` | Tier 0 + `kernel_api` | **0** `get_module`, **0** `Core` |
+| Kernel tier (`auth`, `identity`, `policy`, `namespace`, `resource_group`, `system`) | each other + `Core` | 79 `get_module` |
+| Assembly (`core.rs`, `src/http`) | everything | 10 `get_module` |
+
+The kernel tier's 79 are not debt: those six modules ship together as
+`bv-kernel` by this roadmap's own graph, and they *are* the kernel. The
+remaining `core.rs` → `crate::modules` edges (namespace ×5, identity, system,
+auth) are the `bv-core` ↔ `bv-kernel` entanglement the target graph already
+predicts — the request pipeline calls into namespace rewriting, token binding
+and quota enforcement on every request. Resolving that is a Tier 2 question for
+whichever phase extracts those two crates, not a Phase 2 one.
+
+#### What Phase 2 did not move
+
+- **Build time.** No crate was created, so nothing was expected to move, and
+  nothing did — see the row appended to
+  [docs/build-timings/baseline.md](../docs/build-timings/baseline.md). Phase 2
+  buys the *ability* to split, which is Phase 3's payoff. Attributing any
+  speedup to this phase would be wrong.
+- **Behaviour.** `make test-all`, `make plugins-test`, `make test-cucumber` and
+  `make test-hiqlite` are green with zero changed test outcomes (1289 unit,
+  1358 integration, 8 hiqlite, 8 cucumber scenarios). That was the phase's own
+  gate: "this phase should land with **zero** change in test outcomes; if any
+  test changes, the abstraction is wrong."
+- **12 test-only `get_module` sites in Tier 3** (`approle` ×7, `files` ×4,
+  `rustion` ×1). Left deliberately: every one of them also calls
+  `crate::test_utils::new_unseal_test_bastion_vault`, so they cannot travel
+  into an engine crate regardless — they have to become `tests/` binaries,
+  which is Phase 3 work and is exactly what Phase 3 does with the PKI suite.
 
 ### Phase 3 — Engines out, starting with PKI
+
+**Now unblocked, and the extraction order is free.** Phase 2 left every Tier 3
+engine with zero production references to `Core` and zero to any sibling
+module, so the engines form no graph among themselves: any order works, and
+each extraction is a file move plus a manifest. The order below is therefore a
+value judgement, not a constraint.
 
 Order by (churn × size) ÷ coupling. PKI first, and not narrowly:
 
 - 15,127 lines, 96 of the last 300 commits
 - **19 of the 30 `tests/` binaries** are PKI (`test_pki_*.rs`,
   `test_cert_lifecycle_*.rs`, `test_rustion_master_pki_issue.rs`)
-- only 2 of its 39 files touch `Core`
+- 0 of its 39 files touch `Core`
 
 Move `tests/test_pki_*.rs` into `crates/bv-engine-pki/tests/`. Those 19
 binaries then link the PKI crate plus substrate instead of the 245 MB
@@ -687,9 +813,12 @@ Then, in descending order: `rustion`, `files`, `transit`, `ssh` +
 `kv_v2`, `resource` + `resource_group`.
 
 Finally split `credential/` (22,139 lines, 58 files, the single largest
-directory and highest-churn area) into one crate per backend. Do it last:
-it is the most `Core`-entangled tier-3 code (12 of 58 files) and benefits
-most from Phase 2 having settled.
+directory and highest-churn area) into one crate per backend. Do it last: it
+was the most entangled tier-3 code — auth, identity, namespace and totp all
+reached through concrete types — and it benefits most from Phase 2 having
+settled. Those edges are now `kernel_api` traits, so the split is mechanical;
+what remains is the test scope, since its `#[cfg(test)]` modules use
+`crate::test_utils` and have to become `tests/` binaries first.
 
 **Expected:** a PKI-only change compiles PKI plus the facade, not 173k
 lines. Target: the 35.7 s test-binary rebuild drops to single digits for
@@ -797,3 +926,5 @@ Update on each phase completion:
 - `CHANGELOG.md` under `[Unreleased]` → **Changed**
 - `roadmap.md` — one row, `Workspace Decomposition`, Todo → In Progress → Done
 - this file — phase status and the measured delta against the baseline table
+
+Done so far: Phase 0, Phase 2, and steps 1–3 of Phase 1.

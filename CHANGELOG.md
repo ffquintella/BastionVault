@@ -130,6 +130,54 @@ EXAMPLE ENTRY:
   An engine crate can now compile against the trait without `bv-core` in its
   dependency graph. Behaviour is unchanged -- module init order was diffed
   against the old `vec![]` to confirm it is identical in sequence.
+- **The sibling cycle is cut too -- Phase 2 complete.** `VaultCtx` stopped an
+  engine naming `Core`; this stops it naming *other engines*, which was the
+  actual blocker for Phase 3. `src/kernel_api.rs` became `src/kernel_api/`, and
+  `VaultCtx::module_manager()` is **gone**: the module set is reachable only
+  through the inherent `Core::module_manager()`, so the split is enforced by
+  the type system rather than by convention.
+  In its place, [`KernelServices`](src/kernel_api/services.rs) -- a registry of
+  *capabilities*, not of modules. Each provider publishes itself as a trait
+  object at installation (a new `Module::register` hook, which needs an
+  `Arc<Self>` that `init`/`setup` do not have), and a consumer asks `VaultCtx`
+  for the capability: `core.identity()`, `core.tokens()`, `core.policy()`,
+  `core.namespaces()`, `core.resource_groups()`. No name, no `Arc::downcast`,
+  no concrete type. Six kernel traits (`IdentityService`, `TokenService`,
+  `AuthMountRegistry`, `PolicyGate`, `NamespaceRegistry`, `ResourceGroupIndex`)
+  plus four engine-to-engine ones (`LoginClassPolicy`, `ConnectMfaGate`,
+  `TotpMfa`, `NotificationSink`) kept in their own file, since those are engine
+  contracts and belong in a future `bv-engine-api` rather than in the kernel's.
+  The traits carry **operations, not store handles** -- `IdentityService` has
+  `rename_object(kind, old, new, ns, actor)`, not `Arc<OwnerStore>`. That is
+  what makes the boundary real (a kernel-API crate cannot depend on the kernel,
+  so only owned data may cross) and it deleted code: the resource engine's
+  rename used to inline twenty lines of namespace-key scoping and share/owner
+  moving, which required it to know how owner records are keyed.
+  Measured across the 14 Tier 3 engine directories plus `src/audit` and
+  `src/plugins`: `get_module::<T>()` production sites **~40 -> 0**, references
+  to any sibling module directory **12 -> 0**, references to `Core` **0**
+  (already). What remains is 79 sites inside the kernel tier and 10 in the
+  assembly layer, both by design.
+  Also inverted, because it is the same edge pointing the other way:
+  `Core::post_unseal` no longer names six engines' schedulers (new
+  `Module::start_background`), `Core::flush_caches` no longer names the policy
+  and auth modules (new `Module::flush_caches`), and `src/audit/entry.rs` no
+  longer reaches into `crate::modules` for one constant -- the namespace
+  token-metadata keys and the pure namespace-path helpers moved to
+  `kernel_api::namespace` and are re-exported from their old homes, so no call
+  site outside those files changed.
+  The 20 module self-lookups (`get_module::<RustionModule>("rustion")` from
+  inside Rustion, ×10) are gone as well: the engines' late-bound stores now sit
+  in one shared slot (`RustionStores`, `ServiceSlot`, `PolicyStoreSlot`) that
+  the module, its logical backend and its background tasks all hold. The lookup
+  only ever existed because the *handle* had to be late -- the stores are built
+  at unseal -- and it never needed the module to get there.
+  **Zero change in test outcomes**, which was this phase's own gate: 1289 unit,
+  1358 integration, 17 doctests, 109 plugin-substrate, 8 hiqlite, 8 cucumber
+  scenarios, all green. No dependency was added and no crate was created, so no
+  build-time movement was expected or observed -- see
+  [docs/build-timings/baseline.md](docs/build-timings/baseline.md). Phase 2
+  buys the ability to split; Phase 3 is where the numbers move.
 
 - **The workspace's library crates can be published to the Cloudsmith Cargo
   registry** (`uox/bastionvault`). `.cargo/config.toml` declares the registry
