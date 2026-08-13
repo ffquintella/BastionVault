@@ -6,13 +6,9 @@
 //! The `Handler` trait should be implemented in other module, such as the `bastion_vault::router`
 //! for instance.
 
-use std::sync::Arc;
-
 use derive_more::Display;
 
 use crate::{
-    cli::config::Config,
-    core::Core,
     errors::RvError,
     logical::{request::Request, response::Response, Auth},
 };
@@ -20,10 +16,6 @@ use crate::{
 #[maybe_async::maybe_async]
 pub trait Handler: Send + Sync {
     fn name(&self) -> String;
-
-    fn post_config(&self, _core: Arc<Core>, _config: Option<&Config>) -> Result<(), RvError> {
-        Err(RvError::ErrHandlerDefault)
-    }
 
     async fn pre_route(&self, _req: &mut Request) -> Result<Option<Response>, RvError> {
         Err(RvError::ErrHandlerDefault)

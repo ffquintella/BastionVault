@@ -260,20 +260,6 @@ impl BastionVault {
         let ferrogate_module = FerroGateModule::new(core.clone());
         core.module_manager().add_module(Arc::new(ferrogate_module), &core.kernel_services)?;
 
-        let handlers = core.handlers.load().clone();
-        for handler in handlers.iter() {
-            match handler.post_config(core.clone(), config) {
-                Ok(_) => {
-                    continue;
-                }
-                Err(error) => {
-                    if error != RvError::ErrHandlerDefault {
-                        return Err(error);
-                    }
-                }
-            }
-        }
-
         Ok(Self { core: ArcSwap::new(core), token: ArcSwap::new(Arc::new(String::new())) })
     }
 
