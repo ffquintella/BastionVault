@@ -74,7 +74,9 @@ pub use bv_errors as errors;
 /// `bv_error_string!(...)` call sites resolve through, and keeps the
 /// `crate::bv_error_string!(...)` form working too.
 pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
-pub mod handler;
+/// The request-pipeline hook traits, now in `bv-logical` alongside the
+/// `Request` that carries an `Arc<dyn Handler>`.
+pub use bv_logical::handler;
 pub mod hsm;
 /// The kernel contract modules depend on instead of `Core` — Phase 2 of the
 /// decomposition. Becomes the `bv-kernel-api` crate once `bv-storage` exists
@@ -82,7 +84,18 @@ pub mod hsm;
 pub mod kernel_api;
 pub mod http;
 pub mod logging;
-pub mod logical;
+/// Request/Response/Backend/Path/Field — the Tier 0 `bv-logical` crate.
+pub use bv_logical as logical;
+/// The eight backend-definition macros are `#[macro_export]`ed by
+/// `bv-logical`, which places them at *that* crate's root. Re-exporting them
+/// here restores the crate-root macro namespace every engine's
+/// `new_logical_backend!` / `new_path!` call site resolves through. Same
+/// arrangement as `bv_error_string!` above; the `_internal` halves are the
+/// recursive arms the public macros expand into and must travel with them.
+pub use bv_logical::{
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
+    new_path_internal, new_secret, new_secret_internal,
+};
 pub mod metrics;
 pub mod module_manager;
 pub mod modules;

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::{lease::Lease, Backend, Request, Response};
-use crate::errors::RvError;
+use bv_errors::RvError;
 
 #[cfg(not(feature = "sync_handler"))]
 type SecretOperationHandler = dyn for<'a> Fn(

@@ -6,7 +6,8 @@ use regex::Regex;
 use serde_json::{Map, Value};
 
 use super::{path::Path, request::Request, response::Response, secret::Secret, Backend, FieldType, Operation};
-use crate::{context::Context, errors::RvError};
+use bv_context::Context;
+use bv_errors::RvError;
 
 #[cfg(not(feature = "sync_handler"))]
 type BackendOperationHandler = dyn for<'a> Fn(
@@ -283,10 +284,11 @@ mod test {
     use serde_json::json;
 
     use super::*;
+    use bv_storage::{self as storage, test_support::new_test_backend};
+
     use crate::{
-        logical::{field::FieldTrait, Field, FieldType, PathOperation},
-        new_fields, new_fields_internal, new_path, new_path_internal, new_secret, new_secret_internal, storage,
-        test_utils::new_test_backend,
+        field::FieldTrait, new_fields, new_fields_internal, new_path, new_path_internal, new_secret,
+        new_secret_internal, Field, FieldType, PathOperation,
     };
 
     struct MyTest;

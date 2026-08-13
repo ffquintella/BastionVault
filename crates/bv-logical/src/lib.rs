@@ -1,4 +1,4 @@
-//! The `bastion_vault::logical` is a low level module that defines 'backend' and relevant data
+//! `bastion_vault::logical` is a low level crate that defines 'backend' and relevant data
 //! structures such as `Path`, `Request`, etc and traits.
 //!
 //! The term 'backend' is generic in BastionVault. It represents for a module that provides real
@@ -10,6 +10,15 @@
 //! also defined in this module. Other BastionVault modules can instantiate a `LogicalBackend`
 //! object and implement `bastion_vault::logical::Backend` trait for it. Thus, this module can be
 //! included in the API routing process.
+//!
+//! Tier 0 of the workspace decomposition
+//! (`roadmaps/workspace-decomposition.md` § Phase 1). Re-exported by the root
+//! crate as `bastion_vault::logical`, with [`handler`] as
+//! `bastion_vault::handler`, so no call site outside these files changed.
+//!
+//! [`handler`] lives here rather than in the kernel because
+//! [`request::Request`] holds an `Arc<dyn Handler>` — the two are one
+//! compilation unit whatever directory they sit in.
 
 use std::sync::Arc;
 
@@ -17,10 +26,12 @@ use enum_map::Enum;
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 
-use crate::{context::Context, errors::RvError};
+use bv_context::Context;
+use bv_errors::RvError;
 
 pub mod auth;
 pub mod backend;
+pub mod handler;
 pub mod connection;
 pub mod field;
 pub mod lease;

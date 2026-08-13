@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use better_default::Default;
 use serde::{Deserialize, Serialize};
 
-use crate::{errors::RvError, bv_error_string};
+use bv_errors::{bv_error_string, RvError};
 
 #[derive(Debug, Clone, Eq, Default, PartialEq, Serialize, Deserialize)]
 pub struct Lease {

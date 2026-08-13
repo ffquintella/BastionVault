@@ -8,10 +8,9 @@
 
 use derive_more::Display;
 
-use crate::{
-    errors::RvError,
-    logical::{request::Request, response::Response, Auth},
-};
+use bv_errors::RvError;
+
+use crate::{request::Request, response::Response, Auth};
 
 #[maybe_async::maybe_async]
 pub trait Handler: Send + Sync {

@@ -5,10 +5,9 @@ use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use crate::{
-    errors::RvError,
-    logical::{secret::SecretData, Auth},
-};
+use bv_errors::RvError;
+
+use crate::{secret::SecretData, Auth};
 
 lazy_static! {
     static ref HTTP_RAW_BODY: &'static str = "http_raw_body";

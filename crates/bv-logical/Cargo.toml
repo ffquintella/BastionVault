@@ -1,0 +1,77 @@
+[package]
+name = "bv-logical"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's request/response types, field schema and backend traits"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 0 of the workspace decomposition
+# (roadmaps/workspace-decomposition.md § Phase 1).
+#
+# `src/handler.rs` moves in with it: `Request` holds an `Arc<dyn Handler>`,
+# so the two cannot be separated. That was only possible after the dead
+# `Handler::post_config` hook — the sole reason `Handler` named `Core` and
+# the CLI's config parser — was removed.
+#
+# Depends on `bv-storage` because `Request` carries the `Storage` handle a
+# backend reads through. The roadmap listed this as a leaf; it is not.
+
+[dependencies]
+bv-context = { path = "../bv-context", version = "0.1.0", registry = "uox-bastionvault" }
+bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
+
+async-trait = "0.1"
+better_default = "1.0.5"
+# Explicit derive list: `derive_more` fails to build with no features, and
+# the root crate only gets away with a bare version because something else
+# in its graph turns them on. A Tier 0 crate has to stand alone.
+derive_more = { version = "2.1.1", features = ["display", "deref", "deref_mut"] }
+enum-map = "2.7.3"
+humantime = "2.3"
+lazy_static = "1.5.0"
+log = "0.4"
+maybe-async = "0.2"
+regex = "1.12"
+rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
+serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
+serde_json = "^1.0"
+strum = { version = "0.28", features = ["derive"] }
+
+[dev-dependencies]
+# Two backend tests are `#[actix_rt::test]`. Kept as-is rather than switched
+# to `#[tokio::test]`: actix-rt runs them on a current-thread runtime with a
+# LocalSet, and changing that changes what the test proves. Dev-only, so
+# actix does not reach any crate that depends on this one.
+actix-rt = "2.11"
+# The backend tests build a real file backend through `bv-storage`'s
+# fixtures; see that crate's `test-support` feature.
+bv-storage = { path = "../bv-storage", features = ["test-support"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
+
+[features]
+default = []
+sync_handler = ["maybe-async/is_sync", "bv-storage/sync_handler"]
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Pulled in by the `#[maybe_async::maybe_async]` attribute's async
+    # expansion, which is a token stream to a static `use` scan.
+    "async-trait",
+]
+
+# Exactly the five lints this crate's code trips, each already allowed by
+# the root crate's `[lints.clippy]`. Listed here rather than inherited from
+# a workspace block on purpose: an extracted crate starting from clippy's
+# defaults is what surfaced the `await_holding_lock` deadlock when
+# `bv-context` was split out. Anything not named here stays at its default,
+# `await_holding_lock` included.
+[lints.clippy]
+collapsible_match = "allow"
+field_reassign_with_default = "allow"
+new_without_default = "allow"
+too_many_arguments = "allow"
+unnecessary_unwrap = "allow"

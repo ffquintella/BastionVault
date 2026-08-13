@@ -27,6 +27,7 @@ members = [
     "crates/bv-context",
     "crates/bv-metrics",
     "crates/bv-storage",
+    "crates/bv-logical",
     "crates/bv_crypto",
     "crates/bastion-plugin-sdk",
     "crates/bastion-plugin-testkit",
@@ -67,6 +68,9 @@ bv-metrics = { path = "crates/bv-metrics" }
 # the same names below forward to its features, so operators' choices are
 # unchanged.
 bv-storage = { path = "crates/bv-storage" }
+# Tier 0: Request/Response/Backend/Path/Field plus the `Handler` trait they
+# carry. Re-exported as `bastion_vault::{logical, handler}`.
+bv-logical = { path = "crates/bv-logical" }
 bv_crypto = { path = "crates/bv_crypto" }
 bv_plugin_surface = { path = "crates/bv_plugin_surface" }
 bv_plugin_manifest = { path = "crates/bv-plugin-manifest" }
@@ -85,7 +89,6 @@ serde_bytes = "0.11"
 serde_yaml = "0.9"
 go-defer = "^0.1"
 rand = "^0.10"
-enum-map = "2.7.3"
 strum = { version = "0.28", features = ["derive"] }
 strum_macros = "0.28"
 radix_trie = "0.3.0"
@@ -412,7 +415,7 @@ default = ["storage_hiqlite", "ssh_pqc"]
 # compiled in exactly when the backend is.
 storage_mysql = ["bv-errors/storage_mysql", "bv-storage/storage_mysql"]
 storage_hiqlite = ["bv-storage/storage_hiqlite"]
-sync_handler = ["maybe-async/is_sync", "bv-storage/sync_handler"]
+sync_handler = ["maybe-async/is_sync", "bv-storage/sync_handler", "bv-logical/sync_handler"]
 # Cloud Storage Targets for the Encrypted File backend.
 # See `features/cloud-storage-backend.md`. Default build stays lean —
 # operators who don't need cloud targets pay no compile / binary cost.

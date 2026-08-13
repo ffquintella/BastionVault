@@ -49,6 +49,7 @@ CRATES=(
   bv-context
   bv-metrics
   bv-storage
+  bv-logical
   bv_plugin_surface
   bv_crypto
   bv_plugin_manifest

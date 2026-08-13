@@ -4,12 +4,15 @@ use better_default::Default;
 use serde_json::{Map, Value};
 
 use super::{Operation, Path};
+use bv_context::Context;
+use bv_errors::RvError;
+use bv_storage::{Storage, StorageEntry};
+
 use crate::{
-    context::Context,
-    errors::RvError,
+    auth::Auth,
+    connection::Connection,
     handler::{HandlePhase, Handler},
-    logical::{auth::Auth, connection::Connection, secret::SecretData},
-    storage::{Storage, StorageEntry},
+    secret::SecretData,
 };
 
 #[derive(Default, Clone)]
