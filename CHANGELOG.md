@@ -98,6 +98,24 @@ EXAMPLE ENTRY:
 ### Added
 
 #### Build and Test Tooling
+- **`VaultCtx` -- the kernel contract that breaks the `Core` ↔ `modules` cycle**
+  (`src/kernel_api.rs`), Phase 2 of
+  [the decomposition](roadmaps/workspace-decomposition.md). Modules hold an
+  `Arc<Core>` and `Core` imports `AuthModule` + `PolicyModule`, so neither side
+  can become a crate. `VaultCtx` is the seam; `Core` implements it by
+  delegating, so this step is additive and behaviour is byte-identical -- no
+  call site changes yet. The surface was chosen by counting what `src/modules`
+  actually reaches for (`handle_request` ×87, `module_manager` ×42,
+  `system_view` ×24, `barrier` ×39, `router` ×23, …) rather than by mirroring
+  `Core`'s ~30 public fields; `self_ptr`, `physical`, `seal_provider_swap` and
+  `exchange_preview_store` are deliberately absent, so an engine cannot grow a
+  dependency on them.
+  It lives in the monolith rather than in a `bv-kernel-api` crate because the
+  signatures name types that are not extracted yet (`BarrierView` /
+  `SecurityBarrier` are Tier 0, `Router` / `MountsRouter` are Tier 2). The
+  crate is not what cuts the cycle -- the abstraction is -- so the trait lands
+  first and the file moves later.
+
 - **The workspace's library crates can be published to the Cloudsmith Cargo
   registry** (`uox/bastionvault`). `.cargo/config.toml` declares the registry
   against Cloudsmith's *sparse* index (`sparse+https://cargo.cloudsmith.io/...`)
@@ -150,6 +168,29 @@ EXAMPLE ENTRY:
   `Core` <-> `modules` cycle as the sole blocker, and sequences the split. The
   high-value slice is breaking that cycle plus extracting PKI: 19 of the 30
   integration-test binaries are PKI, and only 2 of its 39 files touch `Core`.
+
+### Security
+
+- **Two lock-across-await deadlocks made visible, one fixed.**
+  `[lints.clippy] await_holding_lock` was `"allow"` repo-wide, which was hiding
+  a bug class rather than a style nit: a `std::sync` guard is not re-entrant and
+  an awaiting task cannot release it, and every site here sits on a
+  current-thread `actix_rt` runtime where nothing else can progress meanwhile.
+  Now `"warn"`.
+  Fixed: `Context::wait_task_finish` (`crates/bv-context`) held its `MutexGuard`
+  across the `.await` of each task -- and the AppRole secret-id tidy path
+  registers its sweep task with `req.ctx.add_task(...)`, so an awaited task
+  calling `add_task`/`clear_task` would block forever on a mutex its awaiter
+  would not release. Handles are now drained under the lock and awaited outside
+  it. Found only because the code moved into a crate that does not inherit the
+  root's allow list.
+  Still open, deliberately left warning rather than silenced:
+  `src/modules/auth/expiration.rs` holds the lease-queue **write** guard across
+  `revoke_lease_id(..).await`, whose call path can re-enter the same `RwLock` --
+  the consequence is leases not being revoked on schedule, which is a security
+  property, not just availability. It is also the prime suspect for the
+  intermittent `mod_expiration_tests::*` failures. `src/mount.rs` holds the
+  mount-table read guard across `table.load(..)`.
 
 ### Removed
 

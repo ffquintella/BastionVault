@@ -75,6 +75,10 @@ pub use bv_errors as errors;
 pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
 pub mod handler;
 pub mod hsm;
+/// The kernel contract modules depend on instead of `Core` — Phase 2 of the
+/// decomposition. Becomes the `bv-kernel-api` crate once `bv-storage` exists
+/// and `router`/`mount` have moved into `bv-core`.
+pub mod kernel_api;
 pub mod http;
 pub mod logging;
 pub mod logical;

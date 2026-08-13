@@ -575,7 +575,22 @@ let_and_return = "allow"
 should_implement_trait = "allow"
 new_without_default = "allow"
 field_reassign_with_default = "allow"
-await_holding_lock = "allow"
+# Was "allow", which hid a real deadlock rather than a style nit: it caught
+# `Context::wait_task_finish` holding a `MutexGuard` across an `.await` only
+# once that code moved into `crates/bv-context`, which does not inherit this
+# list. A `std::sync` guard held across an await is not re-entrant and the
+# awaiting task cannot release it, so anything the awaited future touches that
+# wants the same lock deadlocks — and on the current-thread `actix_rt` runtimes
+# this codebase spawns for its sweepers, nothing else can make progress either.
+#
+# Set to "warn", not "allow", so the class stays visible. Two sites are known
+# open and deliberately left warning rather than silenced:
+#   * src/modules/auth/expiration.rs — holds the lease-queue write guard across
+#     `revoke_lease_id(..).await`. Prime suspect for the intermittent failures
+#     in `mod_expiration_tests::*`, and for leases not being revoked on time.
+#   * src/mount.rs — holds the mount-table read guard across `table.load(..)`.
+# Not "deny": CI runs no clippy job, so denying would only bite locally.
+await_holding_lock = "warn"
 too_many_arguments = "allow"
 unnecessary_unwrap = "allow"
 collapsible_match = "allow"
