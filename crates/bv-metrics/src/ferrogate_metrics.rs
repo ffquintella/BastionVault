@@ -1,8 +1,8 @@
 //! Prometheus counters for the FerroGate machine-auth backend.
 //!
 //! Process-wide singleton in the [`GLOBAL`] `OnceLock`, mirroring
-//! [`crate::metrics::cache_metrics`]: the backend increments counters through
-//! [`ferrogate_metrics`], and [`MetricsManager`](crate::metrics::manager) calls
+//! [`crate::cache_metrics`]: the backend increments counters through
+//! [`ferrogate_metrics`], and [`MetricsManager`](crate::manager) calls
 //! [`FerroGateMetrics::register`] so scrapes see them. Counters are unlabelled
 //! except `login_denied`, which carries a `reason` label.
 

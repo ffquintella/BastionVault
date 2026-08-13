@@ -25,6 +25,7 @@ members = [
     "crates/bv-errors",
     "crates/bv-shamir",
     "crates/bv-context",
+    "crates/bv-metrics",
     "crates/bv_crypto",
     "crates/bastion-plugin-sdk",
     "crates/bastion-plugin-testkit",
@@ -56,6 +57,9 @@ bv-errors = { path = "crates/bv-errors" }
 bv-shamir = { path = "crates/bv-shamir" }
 # Tier 0 leaf: re-exported as `bastion_vault::context`.
 bv-context = { path = "crates/bv-context" }
+# Tier 0 leaf: Prometheus families + registry, re-exported as
+# `bastion_vault::metrics`. The actix middleware stays in `src/metrics`.
+bv-metrics = { path = "crates/bv-metrics" }
 bv_crypto = { path = "crates/bv_crypto" }
 bv_plugin_surface = { path = "crates/bv_plugin_surface" }
 bv_plugin_manifest = { path = "crates/bv-plugin-manifest" }

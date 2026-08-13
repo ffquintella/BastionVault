@@ -213,7 +213,11 @@ impl TestHttpServer {
         let _ = tls_enable;
 
         let collection_interval: u64 = 15;
-        let metrics_manager = Arc::new(RwLock::new(MetricsManager::new(collection_interval)));
+        let metrics_manager = MetricsManager::new(collection_interval);
+        // Per-plugin counters live above the metrics substrate, so the
+        // assembly point registers them. See `bv_metrics::manager`.
+        metrics_manager.register_collector(crate::plugins::metrics::register);
+        let metrics_manager = Arc::new(RwLock::new(metrics_manager));
         let system_metrics = metrics_manager.read().unwrap().system_metrics.clone();
 
         let (server, listen_addr) =

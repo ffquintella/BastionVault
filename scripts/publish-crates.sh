@@ -47,6 +47,7 @@ CRATES=(
   bv-errors
   bv-shamir
   bv-context
+  bv-metrics
   bv_plugin_surface
   bv_crypto
   bv_plugin_manifest
