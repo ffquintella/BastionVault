@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 
-use crate::core::Core;
+use crate::kernel_api::VaultCtx;
 use crate::errors::RvError;
 use crate::modules::rustion::{recordings, RustionModule};
 
@@ -44,7 +44,7 @@ pub const MAX_RETENTION: chrono::Duration = chrono::Duration::hours(24);
 /// can hold it; dropping the handle does not stop the task (tokio
 /// detaches when the parent crate-level futures terminate). Same
 /// shape as `rustion::probe::start_pinger`.
-pub fn start_poller(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
+pub fn start_poller(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         log::info!(
             "rustion/poller: started (tick every {}s, max retention {}h)",
@@ -55,7 +55,7 @@ pub fn start_poller(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
         interval.tick().await; // skip immediate first tick
         loop {
             interval.tick().await;
-            if core.state.load().sealed {
+            if core.sealed() {
                 continue;
             }
             if let Err(e) = tick(&core).await {
@@ -67,13 +67,13 @@ pub fn start_poller(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
 
 /// Run one polling pass. Exposed so tests + admin endpoints can
 /// trigger a sweep without waiting for the interval.
-pub async fn run_poll_pass(core: &Arc<Core>) -> Result<(), RvError> {
+pub async fn run_poll_pass(core: &dyn VaultCtx) -> Result<(), RvError> {
     tick(core).await
 }
 
-async fn tick(core: &Arc<Core>) -> Result<(), RvError> {
+async fn tick(core: &dyn VaultCtx) -> Result<(), RvError> {
     let module = core
-        .module_manager
+        .module_manager()
         .get_module::<RustionModule>("rustion")
         .ok_or_else(|| crate::bv_error_string!("rustion module not registered"))?;
     let Some(store) = module.store() else {

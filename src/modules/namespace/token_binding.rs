@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 
+use crate::kernel_api::VaultCtx;
 use crate::errors::RvError;
 
 /// Metadata key holding the token's issuing-namespace path (canonical, no
@@ -104,7 +105,7 @@ fn assignment_principal(meta: &HashMap<String, String>) -> Option<(String, Strin
 /// and it **fails closed** on any store error.
 #[maybe_async::maybe_async]
 pub async fn token_operable_resolved(
-    core: &crate::core::Core,
+    core: &dyn VaultCtx,
     auth: &crate::logical::Auth,
     request_ns_path: &str,
 ) -> bool {
@@ -159,7 +160,7 @@ pub fn stamp_binding(
 /// the header is read directly here.
 #[maybe_async::maybe_async]
 pub async fn resolve_login_namespace(
-    core: &crate::core::Core,
+    core: &dyn VaultCtx,
     req: &crate::logical::Request,
 ) -> Result<(String, String), crate::errors::RvError> {
     use super::router::namespace_header_from_map;
@@ -179,13 +180,13 @@ pub async fn resolve_login_namespace(
 /// caller can silently fall back to root after asking for a tenant.
 #[maybe_async::maybe_async]
 async fn resolve_namespace_by_path(
-    core: &crate::core::Core,
+    core: &dyn VaultCtx,
     raw: &str,
 ) -> Result<(String, String), crate::errors::RvError> {
     use super::{NamespaceModule, NAMESPACE_MODULE_NAME};
 
     let module = core
-        .module_manager
+        .module_manager()
         .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
         .ok_or_else(|| {
             crate::bv_error_string!("namespace header set but the namespace module is unavailable")
@@ -219,7 +220,7 @@ async fn resolve_namespace_by_path(
 /// excludes it.
 #[maybe_async::maybe_async]
 pub async fn resolve_login_namespace_for_principal(
-    core: &crate::core::Core,
+    core: &dyn VaultCtx,
     req: &crate::logical::Request,
     mount: &str,
     name: &str,
@@ -258,7 +259,7 @@ pub async fn resolve_login_namespace_for_principal(
 /// no-op for non-multi-tenant deployments.
 #[maybe_async::maybe_async]
 pub async fn enforce_request_token_binding(
-    core: &crate::core::Core,
+    core: &dyn VaultCtx,
     req: &crate::logical::Request,
 ) -> Result<(), crate::errors::RvError> {
     use super::{NamespaceModule, NAMESPACE_MODULE_NAME};
@@ -279,7 +280,7 @@ pub async fn enforce_request_token_binding(
         return Ok(());
     }
 
-    let Some(module) = core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+    let Some(module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
     else {
         return Ok(());
     };
@@ -305,10 +306,10 @@ pub async fn enforce_request_token_binding(
 /// the root namespace (`""`) transparently — it has a stored record too (minted
 /// by `NamespaceStore::ensure_root`).
 #[maybe_async::maybe_async]
-pub async fn login_child_visible(core: &crate::core::Core, ns_path: &str) -> bool {
+pub async fn login_child_visible(core: &dyn VaultCtx, ns_path: &str) -> bool {
     use super::{NamespaceModule, NAMESPACE_MODULE_NAME};
 
-    let Some(module) = core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+    let Some(module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
     else {
         return false;
     };
@@ -411,7 +412,7 @@ mod tests {
         let (_bvault, core, _root) =
             new_unseal_test_bastion_vault("test_token_operable_resolved").await;
         let ns_store = core
-            .module_manager
+            .module_manager()
             .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
             .and_then(|m| m.store())
             .unwrap();

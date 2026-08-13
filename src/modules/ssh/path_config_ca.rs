@@ -34,9 +34,9 @@ use super::{
     ssh_ca_audit_store::{SshCaAuditEntry, SshCaAuditStore},
     SshBackend, SshBackendInner,
 };
+use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
-    core::Core,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     modules::identity::caller_audit_actor,
@@ -47,7 +47,7 @@ use crate::{
 /// Append an SSH CA lifecycle event to the system-view audit store.
 /// Fail-soft: a failure to record never blocks or fails the CA
 /// operation itself — matches the file / login audit pattern.
-async fn record_ssh_ca_audit(core: &Core, actor: &str, op: &str, algorithm: &str) {
+async fn record_ssh_ca_audit(core: &dyn VaultCtx, actor: &str, op: &str, algorithm: &str) {
     let store = match SshCaAuditStore::from_core(core) {
         Ok(s) => s,
         Err(e) => {

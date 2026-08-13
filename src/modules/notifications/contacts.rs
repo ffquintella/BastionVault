@@ -13,12 +13,11 @@
 //! address are still returned — the in-app channel needs only the entity
 //! id, and address-based channels skip them and report them as failed.
 
-use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     modules::{
         auth::AuthModule,
@@ -38,11 +37,11 @@ const USERPASS_LOGICAL_TYPE: &str = "userpass";
 /// notification within `ns_path`. Unresolvable members are skipped
 /// rather than failing the whole send.
 pub async fn resolve_target_entities(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     target: &NotificationTarget,
     ns_path: &str,
 ) -> Result<Vec<String>, RvError> {
-    let identity = core.module_manager.get_module::<IdentityModule>("identity");
+    let identity = core.module_manager().get_module::<IdentityModule>("identity");
     let entity_store = identity.as_ref().and_then(|m| m.entity_store());
     let group_store = identity.as_ref().and_then(|m| m.group_store());
 
@@ -97,12 +96,12 @@ pub async fn resolve_target_entities(
 /// for channel delivery. Best-effort: a missing entity or address leaves
 /// the corresponding field empty.
 pub async fn resolve_recipients(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     entity_ids: &[String],
     _ns_path: &str,
 ) -> Result<Vec<Recipient>, RvError> {
     let entity_store = core
-        .module_manager
+        .module_manager()
         .get_module::<IdentityModule>("identity")
         .and_then(|m| m.entity_store());
 
@@ -169,9 +168,9 @@ pub async fn resolve_recipients(
 
 /// Build a barrier view over every userpass auth mount's storage so we
 /// can read `user/<name>` records for contact addresses.
-fn collect_userpass_views(core: &Arc<Core>) -> Result<Vec<BarrierView>, RvError> {
+fn collect_userpass_views(core: &dyn VaultCtx) -> Result<Vec<BarrierView>, RvError> {
     let mut views = Vec::new();
-    let Some(auth) = core.module_manager.get_module::<AuthModule>("auth") else {
+    let Some(auth) = core.module_manager().get_module::<AuthModule>("auth") else {
         return Ok(views);
     };
     let entries = auth.mounts_router.entries.read()?;

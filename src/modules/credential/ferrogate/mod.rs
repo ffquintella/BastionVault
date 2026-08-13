@@ -29,7 +29,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     logical::{Backend, LogicalBackend},
     modules::{auth::AuthModule, Module},
@@ -335,7 +334,7 @@ fn now_unix() -> i64 {
 }
 
 pub struct FerroGateBackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
     /// Last JWKS fetched from CMIS (`cmis_grpc` source). Singleton per mount.
     pub jwks_cache: ArcSwapOption<CachedJwks>,
     /// Per-source-IP login counters keyed by `ip` → `(minute_window, count)`.
@@ -352,7 +351,7 @@ pub struct FerroGateBackend {
 }
 
 impl FerroGateBackend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             inner: Arc::new(FerroGateBackendInner {
                 core,
@@ -392,7 +391,7 @@ pub struct FerroGateModule {
 }
 
 impl FerroGateModule {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self { name: "ferrogate".to_string(), backend: Arc::new(FerroGateBackend::new(core)) }
     }
 }
@@ -434,6 +433,7 @@ impl Module for FerroGateModule {
 
 #[cfg(test)]
 mod test {
+    use crate::kernel_api::VaultCtx;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use ed25519_dalek::{Signer, SigningKey};
     use ferro_child_verify::{jwk_thumbprint_ed25519, CHILD_ALG, CHILD_SIGNING_CONTEXT, CHILD_TYP};
@@ -441,7 +441,6 @@ mod test {
     use serde_json::json;
 
     use crate::{
-        core::Core,
         logical::{Operation, Request, Response},
         modules::credential::ferrogate::{machine_id, status},
         test_utils::{new_unseal_test_bastion_vault, test_mount_auth_api, test_read_api, test_write_api},
@@ -505,12 +504,12 @@ mod test {
     }
 
     #[maybe_async::maybe_async]
-    async fn do_login(core: &Core, token: &str, dpop: Option<&str>) -> Option<Response> {
+    async fn do_login(core: &dyn VaultCtx, token: &str, dpop: Option<&str>) -> Option<Response> {
         do_request(core, "auth/ferrogate/login", token, dpop, "").await
     }
 
     #[maybe_async::maybe_async]
-    async fn do_request(core: &Core, path: &str, token: &str, dpop: Option<&str>, client_token: &str) -> Option<Response> {
+    async fn do_request(core: &dyn VaultCtx, path: &str, token: &str, dpop: Option<&str>, client_token: &str) -> Option<Response> {
         let mut req = Request::new(path);
         req.operation = Operation::Write;
         if !client_token.is_empty() {
@@ -595,7 +594,7 @@ mod test {
 
     /// Mint a userpass user with `policies` and log in, returning its token.
     #[maybe_async::maybe_async]
-    async fn make_user_token(core: &Core, root_token: &str, user: &str, policies: &str) -> String {
+    async fn make_user_token(core: &dyn VaultCtx, root_token: &str, user: &str, policies: &str) -> String {
         let body = json!({ "password": "pw", "policies": policies }).as_object().cloned();
         test_write_api(core, root_token, &format!("auth/userpass/users/{user}"), true, body)
             .await
@@ -1044,7 +1043,7 @@ mod test {
 
     /// POST an unauthenticated self-enrolment request from source `ip`.
     #[maybe_async::maybe_async]
-    async fn do_enroll(core: &Core, spiffe_id: &str, ip: &str) -> Response {
+    async fn do_enroll(core: &dyn VaultCtx, spiffe_id: &str, ip: &str) -> Response {
         let mut req = Request::new("auth/ferrogate/enroll");
         req.operation = Operation::Write;
         let mut body = serde_json::Map::new();

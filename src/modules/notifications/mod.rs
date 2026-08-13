@@ -23,7 +23,6 @@ use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_string,
     context::Context,
-    core::Core,
     errors::RvError,
     logical::{Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation, Request, Response},
     modules::identity::caller_audit_actor,
@@ -51,15 +50,14 @@ groups, or everyone, and fans them out to plugin-provided channels
 compose and broadcast, manage channels, and tune retention.
 "#;
 
-#[derive(Default)]
 pub struct NotificationsModule {
     pub name: String,
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
     pub service: ArcSwap<Option<Arc<NotificationService>>>,
 }
 
 pub struct NotificationsBackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
 }
 
 #[derive(Deref)]
@@ -69,7 +67,7 @@ pub struct NotificationsBackend {
 }
 
 impl NotificationsBackend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self { inner: Arc::new(NotificationsBackendInner { core }) }
     }
 
@@ -425,7 +423,7 @@ impl NotificationsBackendInner {
 }
 
 impl NotificationsModule {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             name: "notifications".to_string(),
             core,
@@ -477,6 +475,7 @@ impl Module for NotificationsModule {
 
 #[cfg(test)]
 mod notifications_tests {
+    use crate::kernel_api::VaultCtx;
     use serde_json::{json, Map};
 
     use crate::test_utils::{
@@ -713,7 +712,7 @@ mod notifications_tests {
     /// Helper: issue a DELETE against the inbox dismiss route (the
     /// generic test helpers only cover read/write/list).
     async fn dismiss(
-        core: &crate::core::Core,
+        core: &dyn VaultCtx,
         token: &str,
         id: &str,
     ) -> Result<Option<crate::logical::Response>, crate::errors::RvError> {

@@ -29,11 +29,10 @@
 //! still "restore the pre-migration BVBK backup" (the legacy keys also remain in
 //! place on disk after activation, unused).
 
-use std::sync::Arc;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_string,
-    core::Core,
     errors::RvError,
     storage::{Storage, StorageEntry},
 };
@@ -95,10 +94,11 @@ async fn set_activation_active(barrier: &dyn Storage) -> Result<(), RvError> {
 ///   rather than block unseal or point at unverified data.
 #[maybe_async::maybe_async]
 pub async fn resolve_root_activation(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     store: &NamespaceStore,
 ) -> Result<Option<String>, RvError> {
-    let barrier = core.barrier.as_storage();
+    let __barrier = core.barrier();
+    let barrier = __barrier.as_storage();
     let root_uuid = store.root_uuid()?;
 
     if activation_active(barrier).await? {
@@ -219,10 +219,11 @@ fn reroot_destination(root_uuid: &str, key: &str) -> Option<String> {
 /// present. Must be called after the namespace store's root has been minted.
 #[maybe_async::maybe_async]
 pub async fn migrate_root_copy(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     store: &NamespaceStore,
 ) -> Result<MigrationReport, RvError> {
-    let barrier = core.barrier.as_storage();
+    let __barrier = core.barrier();
+    let barrier = __barrier.as_storage();
 
     if let Some(v) = read_migration_version(barrier).await? {
         if v >= REROOT_MIGRATION_VERSION {
@@ -288,13 +289,14 @@ mod tests {
     async fn test_reroot_activated_by_default_on_new_install() {
         let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_ns_reroot_activation").await;
         let store = core
-            .module_manager
+            .module_manager()
             .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
             .and_then(|m| m.store())
             .unwrap();
-        let core_arc = core.self_ptr.upgrade().unwrap();
+        let core_arc = core.weak_ctx().upgrade().unwrap();
         let root_uuid = store.root_uuid().unwrap();
-        let barrier = core.barrier.as_storage();
+        let __barrier = core.barrier();
+        let barrier = __barrier.as_storage();
 
         // New installs activate re-rooting by default: the root tenant's mount
         // table lives under `namespaces/<root_uuid>/`, the legacy location is
@@ -321,12 +323,13 @@ mod tests {
     async fn test_reroot_activates_existing_install_by_default() {
         let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_ns_reroot_existing").await;
         let store = core
-            .module_manager
+            .module_manager()
             .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
             .and_then(|m| m.store())
             .unwrap();
-        let core_arc = core.self_ptr.upgrade().unwrap();
-        let barrier = core.barrier.as_storage();
+        let core_arc = core.weak_ctx().upgrade().unwrap();
+        let __barrier = core.barrier();
+        let barrier = __barrier.as_storage();
 
         // Simulate a pre-namespace existing install: a legacy root mount table
         // + a legacy logical secret present, and the activation/version markers

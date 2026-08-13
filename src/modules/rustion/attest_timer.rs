@@ -17,7 +17,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::core::Core;
+use crate::kernel_api::VaultCtx;
 use crate::errors::RvError;
 use crate::modules::rustion::{enrolment, RustionModule};
 
@@ -29,7 +29,7 @@ pub const TICK_INTERVAL: Duration = Duration::from_secs(60 * 60 * 24 * 6);
 /// Spawn the background attest-timer. Same shape as
 /// `rustion::poller::start_poller` — fire-and-forget; tokio detaches
 /// when the parent terminates.
-pub fn start_attest_timer(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
+pub fn start_attest_timer(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         log::info!(
             "rustion/attest: started (tick every {}d)",
@@ -39,7 +39,7 @@ pub fn start_attest_timer(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
         interval.tick().await; // skip immediate first tick
         loop {
             interval.tick().await;
-            if core.state.load().sealed {
+            if core.sealed() {
                 continue;
             }
             if let Err(e) = tick(&core).await {
@@ -51,13 +51,13 @@ pub fn start_attest_timer(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
 
 /// Run one attestation sweep. Exposed for the manual-trigger Tauri
 /// command + tests.
-pub async fn run_attest_pass(core: &Arc<Core>) -> Result<enrolment::AttestAllResult, RvError> {
+pub async fn run_attest_pass(core: &dyn VaultCtx) -> Result<enrolment::AttestAllResult, RvError> {
     tick(core).await
 }
 
-async fn tick(core: &Arc<Core>) -> Result<enrolment::AttestAllResult, RvError> {
+async fn tick(core: &dyn VaultCtx) -> Result<enrolment::AttestAllResult, RvError> {
     let module = core
-        .module_manager
+        .module_manager()
         .get_module::<RustionModule>("rustion")
         .ok_or_else(|| crate::bv_error_string!("rustion module not registered"))?;
     let Some(store) = module.store() else {

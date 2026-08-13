@@ -1375,6 +1375,7 @@ impl Core {
 
 #[cfg(test)]
 mod test {
+    use crate::kernel_api::VaultCtx;
     use crate::{errors::RvError, test_utils::new_unseal_test_bastion_vault};
 
     #[test]
@@ -1455,7 +1456,7 @@ mod test {
 
         // Each key should have the expected length (key bytes + 1 byte Shamir overhead)
         // ChaCha20Poly1305 barrier uses 64-byte ML-KEM-768 seeds, AES-GCM uses 32-byte keys
-        let (min_key_len, _) = core.barrier.key_length_range();
+        let (min_key_len, _) = core.barrier().key_length_range();
         let expected_key_len = min_key_len + crate::shamir::SHAMIR_OVERHEAD;
         for key in keys.iter() {
             assert_eq!(key.len(), expected_key_len);

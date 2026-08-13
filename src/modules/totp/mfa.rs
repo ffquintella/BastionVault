@@ -17,7 +17,8 @@
 //! storage layouts. A code is single-use within its period by construction,
 //! so the residual replay window is one validity period.
 
-use crate::{core::Core, errors::RvError, storage::Storage};
+use crate::kernel_api::VaultCtx;
+use crate::{errors::RvError, storage::Storage};
 
 use super::{
     crypto::{ct_eq, hotp, step_for},
@@ -79,7 +80,7 @@ pub fn normalize_mount(mount: &str) -> String {
 /// `Err(_)` = the check could not run (no mount, no key, storage failure) —
 /// never treat this as a pass.
 pub async fn verify_code(
-    core: &Core,
+    core: &dyn VaultCtx,
     mount: &str,
     key_name: &str,
     code: &str,
@@ -87,7 +88,7 @@ pub async fn verify_code(
 ) -> Result<bool, TotpMfaError> {
     let mount = normalize_mount(mount);
     let view = core
-        .router
+        .router()
         .matching_view(&mount)
         .map_err(TotpMfaError::Storage)?
         .ok_or_else(|| TotpMfaError::NoMount(mount.clone()))?;

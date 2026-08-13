@@ -4,7 +4,6 @@ use derive_more::Deref;
 
 use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     logical::{Backend, LogicalBackend},
     modules::{auth::AuthModule, Module},
@@ -40,7 +39,7 @@ pub struct UserPassModule {
 }
 
 pub struct UserPassBackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
 }
 
 #[derive(Deref)]
@@ -50,7 +49,7 @@ pub struct UserPassBackend {
 }
 
 impl UserPassBackend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self { inner: Arc::new(UserPassBackendInner { core }) }
     }
 
@@ -87,7 +86,7 @@ impl UserPassBackend {
 }
 
 impl UserPassModule {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self { name: "userpass".to_string(), backend: Arc::new(UserPassBackend::new(core)) }
     }
 }
@@ -137,7 +136,6 @@ mod test {
 
     use super::*;
     use crate::{
-        core::Core,
         logical::{Operation, Request, Response},
         test_utils::{
             new_unseal_test_bastion_vault, test_delete_api, test_mount_api, test_mount_auth_api, test_read_api,
@@ -146,7 +144,7 @@ mod test {
     };
 
     #[maybe_async::maybe_async]
-    async fn test_write_user(core: &Core, token: &str, path: &str, username: &str, password: &str, ttl: i32) {
+    async fn test_write_user(core: &dyn VaultCtx, token: &str, path: &str, username: &str, password: &str, ttl: i32) {
         let user_data = json!({
             "password": password,
             "ttl": ttl,
@@ -160,21 +158,21 @@ mod test {
     }
 
     #[maybe_async::maybe_async]
-    async fn test_read_user(core: &Core, token: &str, username: &str) -> Result<Option<Response>, RvError> {
+    async fn test_read_user(core: &dyn VaultCtx, token: &str, username: &str) -> Result<Option<Response>, RvError> {
         let resp = test_read_api(core, token, format!("auth/pass/users/{}", username).as_str(), true).await;
         assert!(resp.is_ok());
         resp
     }
 
     #[maybe_async::maybe_async]
-    async fn test_delete_user(core: &Core, token: &str, username: &str) {
+    async fn test_delete_user(core: &dyn VaultCtx, token: &str, username: &str) {
         let resp = test_delete_api(core, token, format!("auth/pass/users/{}", username).as_str(), true, None).await;
         assert!(resp.is_ok());
     }
 
     #[maybe_async::maybe_async]
     async fn test_login(
-        core: &Core,
+        core: &dyn VaultCtx,
         path: &str,
         username: &str,
         password: &str,
@@ -258,7 +256,7 @@ mod test {
     }
 
     #[maybe_async::maybe_async]
-    async fn login_error(core: &Core, path: &str, username: &str, password: &str) -> Option<String> {
+    async fn login_error(core: &dyn VaultCtx, path: &str, username: &str, password: &str) -> Option<String> {
         let mut req = Request::new(format!("auth/{path}/login/{username}").as_str());
         req.operation = Operation::Write;
         req.body = json!({ "password": password }).as_object().cloned();

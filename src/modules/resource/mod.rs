@@ -26,7 +26,6 @@ use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_response_status, bv_error_string,
     context::Context,
-    core::Core,
     errors::RvError,
     logical::{
         secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation,
@@ -263,7 +262,7 @@ pub struct ResourceModule {
 }
 
 pub struct ResourceBackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
 }
 
 #[derive(Deref)]
@@ -273,7 +272,7 @@ pub struct ResourceBackend {
 }
 
 impl ResourceBackend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             inner: Arc::new(ResourceBackendInner { core }),
         }
@@ -1696,7 +1695,7 @@ impl ResourceBackendInner {
 // ── Module registration ────────────────────────────────────────────
 
 impl ResourceModule {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             name: "resource".to_string(),
             backend: Arc::new(ResourceBackend::new(core)),
@@ -2151,11 +2150,12 @@ mod rename_tests {
 /// still appear.
 #[cfg(test)]
 mod search_visibility_tests {
+    use crate::kernel_api::VaultCtx;
     use crate::logical::{Operation, Request};
     use crate::test_utils::{new_unseal_test_bastion_vault, test_read_api, test_write_api};
     use serde_json::json;
 
-    async fn login_pass(core: &crate::core::Core, user: &str) -> String {
+    async fn login_pass(core: &dyn VaultCtx, user: &str) -> String {
         let mut req = Request::new(&format!("auth/pass/login/{user}"));
         req.operation = Operation::Write;
         req.body = json!({ "password": "hunter22XX!" }).as_object().cloned();
@@ -2165,7 +2165,7 @@ mod search_visibility_tests {
 
     /// Create a userpass user carrying `policy_hcl` and return its token.
     async fn user_with_policy(
-        core: &crate::core::Core,
+        core: &dyn VaultCtx,
         root: &str,
         user: &str,
         policy_hcl: &str,
@@ -2204,7 +2204,7 @@ mod search_visibility_tests {
         login_pass(core, user).await
     }
 
-    async fn search_names(core: &crate::core::Core, token: &str) -> (Vec<String>, u64) {
+    async fn search_names(core: &dyn VaultCtx, token: &str) -> (Vec<String>, u64) {
         let resp = test_write_api(
             core,
             token,
@@ -2225,7 +2225,7 @@ mod search_visibility_tests {
         (names, data["total"].as_u64().unwrap())
     }
 
-    async fn create_resources(core: &crate::core::Core, root: &str, names: &[&str]) {
+    async fn create_resources(core: &dyn VaultCtx, root: &str, names: &[&str]) {
         for n in names {
             let _ = test_write_api(
                 core,

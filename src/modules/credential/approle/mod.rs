@@ -53,7 +53,6 @@ use derive_more::Deref;
 use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
-    core::Core,
     errors::RvError,
     logical::{Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation},
     modules::{auth::AuthModule, Module},
@@ -92,7 +91,7 @@ pub struct AppRoleModule {
 }
 
 pub struct AppRoleBackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
     pub salt: ArcSwapOption<Salt>,
     pub role_locks: Locks,
     pub role_id_locks: Locks,
@@ -108,7 +107,7 @@ pub struct AppRoleBackend {
 }
 
 impl AppRoleBackend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self { inner: Arc::new(AppRoleBackendInner::new(core)) }
     }
 
@@ -155,7 +154,7 @@ impl AppRoleBackend {
 }
 
 impl AppRoleBackendInner {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             core,
             salt: ArcSwapOption::new(None),
@@ -169,7 +168,7 @@ impl AppRoleBackendInner {
 }
 
 impl AppRoleModule {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self { name: "approle".to_string(), backend: Arc::new(AppRoleBackend::new(core)) }
     }
 }
@@ -230,7 +229,6 @@ mod test {
 
     use super::*;
     use crate::{
-        core::Core,
         logical::{field::FieldTrait, Operation, Request, Response},
         test_utils::{
             new_unseal_test_bastion_vault, test_delete_api, test_mount_auth_api, test_read_api, test_write_api,
@@ -239,7 +237,7 @@ mod test {
 
     #[maybe_async::maybe_async]
     pub async fn test_read_role(
-        core: &Core,
+        core: &dyn VaultCtx,
         token: &str,
         path: &str,
         role_name: &str,
@@ -251,7 +249,7 @@ mod test {
 
     #[maybe_async::maybe_async]
     pub async fn test_write_role(
-        core: &Core,
+        core: &dyn VaultCtx,
         token: &str,
         path: &str,
         role_name: &str,
@@ -281,13 +279,13 @@ mod test {
     }
 
     #[maybe_async::maybe_async]
-    pub async fn test_delete_role(core: &Core, token: &str, path: &str, role_name: &str) {
+    pub async fn test_delete_role(core: &dyn VaultCtx, token: &str, path: &str, role_name: &str) {
         let resp = test_delete_api(core, token, format!("auth/{}/role/{}", path, role_name).as_str(), true, None).await;
         assert!(resp.is_ok());
     }
 
     #[maybe_async::maybe_async]
-    pub async fn generate_secret_id(core: &Core, token: &str, path: &str, role_name: &str) -> (String, String) {
+    pub async fn generate_secret_id(core: &dyn VaultCtx, token: &str, path: &str, role_name: &str) -> (String, String) {
         let resp =
             test_write_api(core, token, format!("auth/{}/role/{}/secret-id", path, role_name).as_str(), true, None)
                 .await;
@@ -301,7 +299,7 @@ mod test {
 
     #[maybe_async::maybe_async]
     pub async fn test_login(
-        core: &Core,
+        core: &dyn VaultCtx,
         path: &str,
         role_id: &str,
         secret_id: &str,
@@ -310,7 +308,7 @@ mod test {
         // These legacy login tests predate mandatory machine binding. Disable
         // the server gate so they exercise the role_id + secret_id flow;
         // dedicated tests cover the machine-mandatory path.
-        core.approle_require_machine.store(false, std::sync::atomic::Ordering::Relaxed);
+        core.approle_require_machine().store(false, std::sync::atomic::Ordering::Relaxed);
 
         let data = json!({
             "role_id": role_id,
@@ -338,7 +336,7 @@ mod test {
     }
 
     #[maybe_async::maybe_async]
-    async fn test_approle(core: &Core, token: &str, path: &str, role_name: &str) {
+    async fn test_approle(core: &dyn VaultCtx, token: &str, path: &str, role_name: &str) {
         // Create a role
         let resp = test_write_api(core, token, format!("auth/{}/role/{}", path, role_name).as_str(), true, None).await;
         assert!(resp.is_ok());
@@ -486,7 +484,7 @@ mod test {
     }
 
     #[maybe_async::maybe_async]
-    async fn test_approle_role_service(core: &Core, token: &str, path: &str, role_name: &str) {
+    async fn test_approle_role_service(core: &dyn VaultCtx, token: &str, path: &str, role_name: &str) {
         // Create a role
         let mut data = json!({
             "bind_secret_id":       true,

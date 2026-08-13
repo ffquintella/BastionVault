@@ -6,6 +6,7 @@ use super::rp::{
     AuthenticationState, PublicKeyCredentialAssertion, RelyingParty,
 };
 use super::{Fido2Backend, Fido2BackendInner};
+use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
     errors::RvError,
@@ -80,7 +81,7 @@ impl Fido2BackendInner {
         member: &str,
         direct: &[String],
     ) -> Vec<String> {
-        let Some(module) = self.core.module_manager.get_module::<IdentityModule>("identity") else {
+        let Some(module) = self.core.module_manager().get_module::<IdentityModule>("identity") else {
             return direct.to_vec();
         };
         let Some(store) = module.group_store() else {

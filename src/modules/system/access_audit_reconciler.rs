@@ -43,6 +43,7 @@ use tokio::{
 };
 
 use super::access_audit_store::{AccessAuditEntry, AccessAuditStore};
+use crate::kernel_api::VaultCtx;
 use crate::{
     audit::AuditEntry,
     core::Core,
@@ -78,8 +79,8 @@ impl Default for AccessAuditConfig {
 }
 
 impl AccessAuditConfig {
-    async fn load(core: &Core) -> Self {
-        let Some(system_view) = core.state.load().system_view.as_ref().cloned() else {
+    async fn load(core: &dyn VaultCtx) -> Self {
+        let Some(system_view) = core.system_view() else {
             return Self::default();
         };
         let view = system_view.new_sub_view(CONFIG_SUB_PATH);
@@ -147,7 +148,7 @@ pub fn start_access_audit_reconciler(core: Arc<Core>) -> tokio::task::JoinHandle
         let mut interval = tokio::time::interval(TICK_INTERVAL);
         loop {
             interval.tick().await;
-            if core.state.load().sealed {
+            if core.sealed() {
                 continue;
             }
             // Serialize overlapping ticks (a very large first scan can
@@ -333,8 +334,8 @@ fn parse_ingestable(line: &str) -> Option<AccessAuditEntry> {
 /// Persist the reconciler enable flag (replicated). Exposed for a future
 /// admin toggle; unused wiring is intentional.
 #[allow(dead_code)]
-pub async fn set_config(core: &Core, cfg: &AccessAuditConfig) -> Result<(), RvError> {
-    let Some(system_view) = core.state.load().system_view.as_ref().cloned() else {
+pub async fn set_config(core: &dyn VaultCtx, cfg: &AccessAuditConfig) -> Result<(), RvError> {
+    let Some(system_view) = core.system_view() else {
         return Err(RvError::ErrBarrierSealed);
     };
     let view: Arc<BarrierView> = Arc::new(system_view.new_sub_view(CONFIG_SUB_PATH));

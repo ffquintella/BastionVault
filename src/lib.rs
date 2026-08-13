@@ -30,6 +30,7 @@ use arc_swap::ArcSwap;
 use serde_json::{Map, Value};
 use zeroize::Zeroizing;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     cli::config::Config,
     core::Core,
@@ -174,39 +175,39 @@ impl BastionVault {
             core.mounts_monitor.store(Some(Arc::new(MountsMonitor::new(core.clone(), core.mounts_monitor_interval))));
         }
 
-        core.module_manager.set_default_modules(core.clone())?;
+        core.module_manager().set_default_modules(core.clone())?;
 
         // add auth_module
         let auth_module = AuthModule::new(core.clone())?;
-        core.module_manager.add_module(Arc::new(auth_module))?;
+        core.module_manager().add_module(Arc::new(auth_module))?;
 
         // add policy_module
         let policy_module = PolicyModule::new(core.clone());
-        core.module_manager.add_module(Arc::new(policy_module))?;
+        core.module_manager().add_module(Arc::new(policy_module))?;
 
         // add credential module: userpass
         let userpass_module = UserPassModule::new(core.clone());
-        core.module_manager.add_module(Arc::new(userpass_module))?;
+        core.module_manager().add_module(Arc::new(userpass_module))?;
 
         // add credential module: approle
         let approle_module = AppRoleModule::new(core.clone());
-        core.module_manager.add_module(Arc::new(approle_module))?;
+        core.module_manager().add_module(Arc::new(approle_module))?;
 
         // add credential module: fido2
         let fido2_module = modules::credential::fido2::Fido2Module::new(core.clone());
-        core.module_manager.add_module(Arc::new(fido2_module))?;
+        core.module_manager().add_module(Arc::new(fido2_module))?;
 
         // add credential module: oidc
         let oidc_module = OidcModule::new(core.clone());
-        core.module_manager.add_module(Arc::new(oidc_module))?;
+        core.module_manager().add_module(Arc::new(oidc_module))?;
 
         // add credential module: saml (Phase 1+2 — config + roles only)
         let saml_module = SamlModule::new(core.clone());
-        core.module_manager.add_module(Arc::new(saml_module))?;
+        core.module_manager().add_module(Arc::new(saml_module))?;
 
         // add credential module: ferrogate (Phase 1 — config + admin lifecycle; login stubbed)
         let ferrogate_module = FerroGateModule::new(core.clone());
-        core.module_manager.add_module(Arc::new(ferrogate_module))?;
+        core.module_manager().add_module(Arc::new(ferrogate_module))?;
 
         let handlers = core.handlers.load().clone();
         for handler in handlers.iter() {

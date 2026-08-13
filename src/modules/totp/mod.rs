@@ -20,7 +20,6 @@ use derive_more::Deref;
 
 use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     logical::{Backend, LogicalBackend, Path},
     modules::Module,
@@ -51,7 +50,7 @@ by default; flip `replay_check=false` for strict HashiCorp Vault parity.
 "#;
 
 pub struct TotpBackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
 }
 
 #[derive(Deref)]
@@ -61,7 +60,7 @@ pub struct TotpBackend {
 }
 
 impl TotpBackend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             inner: Arc::new(TotpBackendInner { core }),
         }
@@ -88,7 +87,7 @@ pub struct TotpModule {
 }
 
 impl TotpModule {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             name: "totp".to_string(),
             backend: Arc::new(TotpBackend::new(core)),

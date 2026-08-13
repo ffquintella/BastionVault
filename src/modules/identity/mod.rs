@@ -2850,7 +2850,7 @@ mod identity_tests {
     /// Helper: login via userpass with the shared password used
     /// across per-user-scoping tests.
     #[cfg(test)]
-    async fn login_pass(core: &Core, username: &str) -> String {
+    async fn login_pass(core: &dyn VaultCtx, username: &str) -> String {
         let mut login_req = Request::new(format!("auth/pass/login/{username}"));
         login_req.operation = Operation::Write;
         login_req.body = json!({ "password": "hunter22XX!" }).as_object().cloned();

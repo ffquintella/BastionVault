@@ -45,7 +45,6 @@ use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_string,
     context::Context,
-    core::Core,
     errors::RvError,
     logical::{
         secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation,
@@ -307,7 +306,7 @@ pub struct FilesModule {
 }
 
 pub struct FilesBackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
 }
 
 #[derive(Deref)]
@@ -317,7 +316,7 @@ pub struct FilesBackend {
 }
 
 impl FilesBackend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self { inner: Arc::new(FilesBackendInner { core }) }
     }
 
@@ -716,7 +715,7 @@ fn hist_seq() -> String {
 /// timeline. Matches the fail-soft pattern used for `UserAuditStore`
 /// writes in `path_users.rs` / `path_role.rs`.
 async fn record_file_audit(
-    core: &Core,
+    core: &dyn VaultCtx,
     actor: &str,
     op: &str,
     file_id: &str,
@@ -1143,7 +1142,7 @@ impl FilesBackendInner {
 
                 // Admin audit log — who moved the file, when, and the
                 // old → new resource it moved between.
-                if let Some(core) = self.core.self_ptr.upgrade() {
+                if let Some(core) = Some(self.core.clone()) {
                     record_file_audit(
                         &core,
                         &audit_actor,
@@ -1195,7 +1194,7 @@ impl FilesBackendInner {
         // `"root"` rather than orphan the record.
         let audit_actor = crate::modules::identity::caller_audit_actor(req);
         if !audit_actor.is_empty() {
-            if let Some(core) = self.core.self_ptr.upgrade() {
+            if let Some(core) = Some(self.core.clone()) {
                 if let Some(identity) = core
                     .module_manager()
                     .get_module::<crate::modules::identity::IdentityModule>("identity")
@@ -1223,7 +1222,7 @@ impl FilesBackendInner {
         // Admin audit log — parallel to the per-file history write
         // in `write_entry_and_blob`. Uses the same caller_audit_actor
         // fallback so root-token writes show up as `"root"`.
-        if let Some(core) = self.core.self_ptr.upgrade() {
+        if let Some(core) = Some(self.core.clone()) {
             record_file_audit(&core, &audit_actor, "create", &id, &entry.name, "").await;
         }
 
@@ -1367,7 +1366,7 @@ impl FilesBackendInner {
         // per-file history does: metadata field names + "content" when
         // the hash moved. Record nothing on a no-op write (same
         // fields, same SHA) so the audit page stays signal-heavy.
-        if let Some(core) = self.core.self_ptr.upgrade() {
+        if let Some(core) = Some(self.core.clone()) {
             let actor = crate::modules::identity::caller_audit_actor(req);
             let mut changed = diff_field_names(previous.as_ref(), &entry);
             let content_changed = previous
@@ -1533,7 +1532,7 @@ impl FilesBackendInner {
         }
 
         // Admin audit.
-        if let Some(core) = self.core.self_ptr.upgrade() {
+        if let Some(core) = Some(self.core.clone()) {
             let actor = crate::modules::identity::caller_audit_actor(req);
             record_file_audit(&core, &actor, "delete", &id, &name_snapshot, "").await;
         }
@@ -2063,7 +2062,7 @@ impl FilesBackendInner {
 
         // Admin audit — include the version number so the operator
         // can see which snapshot was promoted.
-        if let Some(core) = self.core.self_ptr.upgrade() {
+        if let Some(core) = Some(self.core.clone()) {
             let actor = crate::modules::identity::caller_audit_actor(req);
             let details = format!("version=v{version}");
             record_file_audit(&core, &actor, "restore", &id, &restored.name, &details).await;
@@ -2261,7 +2260,7 @@ impl FilesBackendInner {
 // ── Module registration ────────────────────────────────────────────
 
 impl FilesModule {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self { name: "files".to_string(), backend: Arc::new(FilesBackend::new(core)) }
     }
 }
@@ -2413,6 +2412,8 @@ mod integration_tests {
     //! Exercise the real logical-backend pipeline (auth → routing →
     //! handler → storage) and the public response shape — not just
     //! individual helpers in isolation.
+
+    use crate::kernel_api::VaultCtx;
 
     use serde_json::json;
 
@@ -2729,7 +2730,7 @@ mod integration_tests {
             .to_string();
 
         let identity = core
-            .module_manager
+            .module_manager()
             .get_module::<IdentityModule>("identity")
             .expect("identity module");
         let owner_store = identity.owner_store().expect("owner store");
@@ -2767,7 +2768,7 @@ mod integration_tests {
             .to_string();
 
         let identity = core
-            .module_manager
+            .module_manager()
             .get_module::<IdentityModule>("identity")
             .expect("identity module");
         let owner_store = identity.owner_store().expect("owner store");
@@ -2848,7 +2849,7 @@ mod integration_tests {
 
         // The stamped records should now exist.
         let identity = core
-            .module_manager
+            .module_manager()
             .get_module::<IdentityModule>("identity")
             .expect("identity module");
         let owner_store = identity.owner_store().expect("owner store");
@@ -2887,7 +2888,7 @@ mod integration_tests {
             .to_string();
 
         let identity = core
-            .module_manager
+            .module_manager()
             .get_module::<IdentityModule>("identity")
             .expect("identity module");
         let owner_store = identity.owner_store().expect("owner store");

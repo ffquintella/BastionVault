@@ -1291,7 +1291,7 @@ impl SystemBackend {
         if let Some((uuid, path)) = self.resolve_request_namespace(_req).await? {
             let registry = self.namespace_registry()?;
             for (mount_path, logical_type, description) in
-                registry.list_mounts(&self.core, &uuid, &path).await?
+                registry.list_mounts(self.core.clone(), &uuid, &path).await?
             {
                 data.insert(mount_path, json!({ "type": logical_type, "description": description }));
             }
@@ -1342,7 +1342,7 @@ impl SystemBackend {
                         ns.quotas.max_mounts,
                     )?;
                 }
-                self.namespace_registry()?.mount(&self.core, &uuid, &ns_path, &me).await?;
+                self.namespace_registry()?.mount(self.core.clone(), &uuid, &ns_path, &me).await?;
             }
             None => self.core.mount(&me).await?,
         }
@@ -1357,7 +1357,7 @@ impl SystemBackend {
 
         match self.resolve_request_namespace(req).await? {
             Some((uuid, ns_path)) => {
-                self.namespace_registry()?.unmount(&self.core, &uuid, &ns_path, &suffix).await?;
+                self.namespace_registry()?.unmount(self.core.clone(), &uuid, &ns_path, &suffix).await?;
             }
             None => self.core.unmount(&suffix).await?,
         }
@@ -1377,12 +1377,12 @@ impl SystemBackend {
         let from_path = sanitize_path(from);
         let to_path = sanitize_path(to);
 
-        if let Some(me) = self.core.router.matching_mount_entry(&from_path)? {
+        if let Some(me) = self.core.router().matching_mount_entry(&from_path)? {
             let mount_entry_table_type;
             {
                 let mount_entry = me.read()?;
 
-                let dst_path_match = self.core.router.matching_mount(to)?;
+                let dst_path_match = self.core.router().matching_mount(to)?;
                 if !dst_path_match.is_empty() {
                     return Err(bv_error_response_status!(409, &format!("path already in use at {dst_path_match}")));
                 }
@@ -2778,7 +2778,7 @@ impl SystemBackend {
 
         let path = path.as_str().unwrap();
 
-        let entry = self.core.barrier.get(path).await?;
+        let entry = self.core.barrier().get(path).await?;
         if entry.is_none() {
             return Ok(None);
         }
@@ -2805,7 +2805,7 @@ impl SystemBackend {
 
         let entry = StorageEntry { key: path.to_string(), value: value.as_bytes().to_vec() };
 
-        self.core.barrier.put(&entry).await?;
+        self.core.barrier().put(&entry).await?;
 
         Ok(None)
     }
@@ -2861,7 +2861,7 @@ impl SystemBackend {
             key: Self::SSO_SETTINGS_KEY.to_string(),
             value: serde_json::to_vec(&payload)?,
         };
-        self.core.barrier.put(&entry).await?;
+        self.core.barrier().put(&entry).await?;
         Ok(None)
     }
 
@@ -2925,7 +2925,7 @@ impl SystemBackend {
     }
 
     async fn load_sso_enabled(&self) -> Result<bool, RvError> {
-        let Some(entry) = self.core.barrier.get(Self::SSO_SETTINGS_KEY).await? else {
+        let Some(entry) = self.core.barrier().get(Self::SSO_SETTINGS_KEY).await? else {
             return Ok(false);
         };
         let parsed: Value = serde_json::from_slice(&entry.value).unwrap_or(Value::Null);
@@ -2944,7 +2944,7 @@ impl SystemBackend {
 
         let path = path.as_str().unwrap();
 
-        self.core.barrier.delete(path).await?;
+        self.core.barrier().delete(path).await?;
 
         Ok(None)
     }
@@ -3174,7 +3174,7 @@ impl SystemBackend {
         let (mut secret_mounts, mut auth_mounts) = (0usize, 0usize);
         if let Some((uuid, path)) = ns.as_ref() {
             if let Ok(registry) = self.namespace_registry() {
-                if let Ok(mounts) = registry.list_mounts(&self.core, uuid, path).await {
+                if let Ok(mounts) = registry.list_mounts(self.core.clone(), uuid, path).await {
                     for (_p, logical_type, _desc) in mounts {
                         if logical_type != "system" {
                             secret_mounts += 1;
@@ -3412,7 +3412,7 @@ impl SystemBackend {
                 if let Some(acl) = acl.as_ref().filter(|_| is_authed) {
                     let registry = self.namespace_registry()?;
                     for (mount_path, logical_type, description) in
-                        registry.list_mounts(&self.core, &uuid, &path).await?
+                        registry.list_mounts(self.core.clone(), &uuid, &path).await?
                     {
                         // The registry stores mount paths mount-relative
                         // (`resources/`), but a namespaced request is rewritten to
@@ -3534,7 +3534,7 @@ impl SystemBackend {
     }
 
     fn get_module<T: Any + Send + Sync>(&self, name: &str) -> Result<Arc<T>, RvError> {
-        if let Some(module) = self.core.module_manager.get_module::<T>(name) {
+        if let Some(module) = self.core.module_manager().get_module::<T>(name) {
             return Ok(module);
         }
 
@@ -3817,7 +3817,7 @@ impl SystemBackend {
     /// mount the remainder manually.
     async fn seed_default_namespace_mounts(&self, ns_uuid: &str, ns_path: &str) {
         let Some(module) =
-            self.core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+            self.core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
         else {
             log::warn!(target: "namespace", "cannot seed default mounts: namespace module unavailable");
             return;
@@ -3832,7 +3832,7 @@ impl SystemBackend {
                 description: description.to_string(),
                 ..Default::default()
             };
-            if let Err(e) = module.registry.mount(&self.core, ns_uuid, ns_path, &me).await {
+            if let Err(e) = module.registry.mount(self.core.clone(), ns_uuid, ns_path, &me).await {
                 log::warn!(
                     target: "namespace",
                     "seeding default mount {path} in namespace {ns_path:?} failed: {e}"
@@ -3858,16 +3858,16 @@ impl SystemBackend {
         // namespace held — deleting a tenant removes the tenant's data.
         if let Some(ns) = store.get_by_path(&path).await? {
             if let Some(module) =
-                self.core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+                self.core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
             {
                 let mounts = module
                     .registry
-                    .list_mounts(&self.core, &ns.uuid, &ns.path)
+                    .list_mounts(self.core.clone(), &ns.uuid, &ns.path)
                     .await
                     .unwrap_or_default();
                 for (mount_path, _type, _desc) in mounts {
                     if let Err(e) =
-                        module.registry.unmount(&self.core, &ns.uuid, &ns.path, &mount_path).await
+                        module.registry.unmount(self.core.clone(), &ns.uuid, &ns.path, &mount_path).await
                     {
                         log::warn!(
                             target: "namespace",

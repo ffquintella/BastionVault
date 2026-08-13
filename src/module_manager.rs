@@ -12,6 +12,7 @@ use std::{any::Any, sync::Arc};
 
 use arc_swap::ArcSwap;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     core::Core,
     errors::RvError,
@@ -114,7 +115,7 @@ impl ModuleManager {
         Ok(())
     }
 
-    pub fn setup(&self, core: &Core) -> Result<(), RvError> {
+    pub fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let modules = self.modules.load().clone();
         for module in modules.iter() {
             module.setup(core)?;
@@ -123,7 +124,7 @@ impl ModuleManager {
         Ok(())
     }
 
-    pub async fn init(&self, core: &Core) -> Result<(), RvError> {
+    pub async fn init(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let modules = self.modules.load().clone();
         for module in modules.iter() {
             module.init(core).await?;
@@ -132,7 +133,7 @@ impl ModuleManager {
         Ok(())
     }
 
-    pub fn cleanup(&self, core: &Core) -> Result<(), RvError> {
+    pub fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let modules = self.modules.load().clone();
         for module in modules.iter() {
             module.cleanup(core)?;

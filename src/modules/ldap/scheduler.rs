@@ -20,7 +20,7 @@
 //!   scheduler crashes between the two writes, the next tick (or a
 //!   manual `rotate-role`) detects the divergence on the next bind
 //!   probe — see `features/ldap-secret-engine.md` § Rotation Atomicity.
-//! - **Self-skip when sealed.** `core.state.load().sealed` is checked
+//! - **Self-skip when sealed.** `core.sealed()` is checked
 //!   every tick. The storage reads inside the rotation logic would
 //!   fail anyway; skipping early keeps the log clean right after a
 //!   seal.
@@ -49,8 +49,8 @@ use super::{
     password,
     policy::{StaticCred, StaticRole, STATIC_CRED_PREFIX, STATIC_ROLE_PREFIX},
 };
+use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     logical::{Operation, Request},
     storage::{Storage, StorageEntry},
@@ -61,7 +61,7 @@ const TICK_INTERVAL: Duration = Duration::from_secs(60);
 /// Spawn the LDAP rotation scheduler. Detached task; the returned
 /// `JoinHandle` is dropped intentionally so the loop runs until the
 /// process exits. The loop self-skips when sealed.
-pub fn start_ldap_rotation_scheduler(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
+pub fn start_ldap_rotation_scheduler(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         let last_fired: Arc<Mutex<HashMap<String, Instant>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -73,7 +73,7 @@ pub fn start_ldap_rotation_scheduler(core: Arc<Core>) -> tokio::task::JoinHandle
         let mut interval = tokio::time::interval(TICK_INTERVAL);
         loop {
             interval.tick().await;
-            if core.state.load().sealed {
+            if core.sealed() {
                 continue;
             }
             if let Err(e) = tick(&core, last_fired.clone()).await {
@@ -90,7 +90,7 @@ pub fn start_ldap_rotation_scheduler(core: Arc<Core>) -> tokio::task::JoinHandle
 /// same sweep on demand.
 #[maybe_async::maybe_async]
 pub async fn run_rotation_pass(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     last_fired: Option<Arc<Mutex<HashMap<String, Instant>>>>,
 ) -> Result<(), RvError> {
     let map = last_fired.unwrap_or_else(|| Arc::new(Mutex::new(HashMap::new())));
@@ -99,7 +99,7 @@ pub async fn run_rotation_pass(
 
 #[maybe_async::maybe_async]
 async fn tick(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     _last_fired: Arc<Mutex<HashMap<String, Instant>>>,
 ) -> Result<(), RvError> {
     // Snapshot the mount table; release the read lock before any awaits.
@@ -135,11 +135,11 @@ async fn tick(
 
 #[maybe_async::maybe_async]
 async fn run_one(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     _mount_uuid: &str,
     mount_path: &str,
 ) -> Result<(), RvError> {
-    let view = match core.router.matching_view(mount_path)? {
+    let view = match core.router().matching_view(mount_path)? {
         Some(v) => v,
         None => return Ok(()),
     };

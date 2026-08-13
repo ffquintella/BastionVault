@@ -23,7 +23,6 @@ use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_response_status, bv_error_string,
     context::Context,
-    core::Core,
     errors::RvError,
     logical::{
         secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation, Request, Response,
@@ -128,10 +127,9 @@ this registry to mediate SSH / RDP sessions through one or more PQC
 bastions instead of opening direct connections from the GUI host.
 "#;
 
-#[derive(Default)]
 pub struct RustionModule {
     pub name: String,
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
     pub store: ArcSwap<Option<Arc<RustionStore>>>,
     pub master_store: ArcSwap<Option<Arc<MasterStore>>>,
     pub recordings_store: ArcSwap<Option<Arc<recordings::RecordingsStore>>>,
@@ -140,7 +138,7 @@ pub struct RustionModule {
 }
 
 pub struct RustionBackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
 }
 
 /// Output of [`RustionBackendInner::mint_brokered_ssh_cert`]: the
@@ -162,7 +160,7 @@ pub struct RustionBackend {
 }
 
 impl RustionBackend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self { inner: Arc::new(RustionBackendInner { core }) }
     }
 
@@ -2119,7 +2117,7 @@ impl RustionBackendInner {
         let path = format!("{ns_prefix}resources/resources/{resource_name}");
         let mut sub = Request::new(&path);
         sub.operation = Operation::Read;
-        let Some(resp) = self.core.router.handle_request(&mut sub).await? else {
+        let Some(resp) = self.core.router().handle_request(&mut sub).await? else {
             return Ok(false);
         };
         let data = resp.data.unwrap_or_default();
@@ -2158,7 +2156,7 @@ impl RustionBackendInner {
         let path = format!("{ns_prefix}resources/secrets/{resource_name}/{secret_id}");
         let mut sub = Request::new(&path);
         sub.operation = Operation::Read;
-        let resp = self.core.router.handle_request(&mut sub).await?.ok_or_else(|| {
+        let resp = self.core.router().handle_request(&mut sub).await?.ok_or_else(|| {
             bv_error_response_status!(404, &format!("resource secret `{secret_id}` not found for `{resource_name}`"))
         })?;
         let data = resp.data.unwrap_or_default();
@@ -2245,7 +2243,7 @@ impl RustionBackendInner {
         let path = format!("{ns_prefix}{ssh_mount}/sign/{ssh_role}");
         let mut sub = Request::new_write_request(&path, Some(body));
         sub.operation = Operation::Write;
-        let resp = self.core.router.handle_request(&mut sub).await?.ok_or_else(|| {
+        let resp = self.core.router().handle_request(&mut sub).await?.ok_or_else(|| {
             bv_error_response_status!(
                 502,
                 &format!("ssh engine `{path}` returned no response while minting brokered cert")
@@ -2525,7 +2523,7 @@ impl RustionBackendInner {
             return Ok(String::new());
         }
 
-        let Some(ns_module) = self.core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME) else {
+        let Some(ns_module) = self.core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME) else {
             return Ok(String::new());
         };
         let Some(store) = ns_module.store() else {
@@ -2540,7 +2538,7 @@ impl RustionBackendInner {
 
         // Header-scoped path: the namespace's mounts are not in the shared
         // router trie yet unless some earlier request happened to wire them.
-        ns_module.registry.ensure_router(&self.core, &ns.uuid, &ns.path).await?;
+        ns_module.registry.ensure_router(self.core.clone(), &ns.uuid, &ns.path).await?;
 
         Ok(format!("{}/", ns.path.trim_end_matches('/')))
     }
@@ -2609,7 +2607,7 @@ impl RustionBackendInner {
         }
 
         let Some(ns_module) =
-            self.core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+            self.core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
         else {
             return Ok(None);
         };
@@ -2627,7 +2625,7 @@ impl RustionBackendInner {
         // `rustion/` is header-scoped, so the request pipeline did NOT wire the
         // namespace's mount router for us — ensure it, then find its resources
         // mount and read the resource metadata directly from that mount's view.
-        let router = ns_module.registry.ensure_router(&self.core, &ns.uuid, &ns.path).await?;
+        let router = ns_module.registry.ensure_router(self.core.clone(), &ns.uuid, &ns.path).await?;
         let mount_uuid = {
             let entries = router.mounts.entries.read()?;
             match entries.get("resources/") {
@@ -2645,7 +2643,7 @@ impl RustionBackendInner {
         // `ResourceEntry` — the persisted metadata omits absent fields (e.g.
         // `name`, which is carried by the key), so a strict struct decode fails.
         let prefix = format!("{}{}/", namespace_logical_prefix(&ns.uuid), mount_uuid);
-        let view = crate::storage::barrier_view::BarrierView::new(self.core.barrier.clone(), &prefix);
+        let view = crate::storage::barrier_view::BarrierView::new(self.core.barrier().clone(), &prefix);
 
         let mut hosts = std::collections::HashSet::new();
         for entry in view.get_entries("meta/").await? {
@@ -3561,7 +3559,7 @@ fn master_config_response(cfg: &MasterConfig) -> Response {
 }
 
 impl RustionModule {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             name: "rustion".to_string(),
             core,
@@ -4379,6 +4377,7 @@ path "rustion/*" {
 
 #[cfg(test)]
 mod recordings_namespace_scope_tests {
+    use crate::kernel_api::VaultCtx;
     use std::collections::HashMap;
 
     use serde_json::json;
@@ -4469,7 +4468,7 @@ mod recordings_namespace_scope_tests {
 
         // Seed the global recordings index: two hosts belong to team-alpha's
         // resource (by hostname and by IP), one belongs to no namespace resource.
-        let module = core.module_manager.get_module::<RustionModule>("rustion").unwrap();
+        let module = core.module_manager().get_module::<RustionModule>("rustion").unwrap();
         let store = module.recordings_store().expect("recordings store initialized");
         store.put(&rec("rec_host", "web01.corp")).await.unwrap();
         store.put(&rec("rec_ip", "10.1.2.3")).await.unwrap();

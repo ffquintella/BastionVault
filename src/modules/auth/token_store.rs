@@ -29,10 +29,10 @@ use super::{
     expiration::{ExpirationManager, DEFAULT_LEASE_DURATION_SECS, MAX_LEASE_DURATION_SECS},
     AUTH_ROUTER_PREFIX,
 };
+use crate::kernel_api::VaultCtx;
 use crate::{
     cache::TokenCache,
     context::Context,
-    core::Core,
     errors::RvError,
     handler::{AuthHandler, HandlePhase, Handler},
     logical::{
@@ -161,8 +161,8 @@ impl TokenStore {
     }
 
     /// Creates a new `TokenStore` and initializes it with the necessary components.
-    pub async fn new(core: &Core, expiration: Arc<ExpirationManager>) -> Result<TokenStore, RvError> {
-        let Some(system_view) = core.state.load().system_view.as_ref().cloned() else {
+    pub async fn new(core: &dyn VaultCtx, expiration: Arc<ExpirationManager>) -> Result<TokenStore, RvError> {
+        let Some(system_view) = core.system_view() else {
             return Err(RvError::ErrBarrierSealed);
         };
 
@@ -170,20 +170,20 @@ impl TokenStore {
         let salt = view.get(TOKEN_SALT_LOCATION).await?;
 
         let token_cache = TokenCache::new(
-            core.cache_config.token_cache_size,
-            core.cache_config.token_cache_ttl_secs,
+            core.cache_config().token_cache_size,
+            core.cache_config().token_cache_ttl_secs,
         )?
         .map(Arc::new);
 
         let mut token_store = TokenStore {
             self_ptr: Weak::new(),
-            router: core.router.clone(),
+            router: core.router().clone(),
             view: None,
             salt: String::new(),
-            auth_handlers: ArcSwap::new(core.auth_handlers.load().clone()),
+            auth_handlers: ArcSwap::new(core.auth_handlers()),
             expiration,
             token_cache,
-            require_machine_identity: core.require_machine_identity.clone(),
+            require_machine_identity: core.require_machine_identity(),
             system_view: Some(system_view.clone()),
         };
 

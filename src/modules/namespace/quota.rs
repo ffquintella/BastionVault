@@ -35,6 +35,7 @@ use std::{
     time::Instant,
 };
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_response_status,
     errors::RvError,
@@ -131,14 +132,14 @@ impl RateLimiter {
 /// namespaces and when the namespace module is unavailable.
 #[maybe_async::maybe_async]
 pub async fn enforce_request_rate(
-    core: &crate::core::Core,
+    core: &dyn VaultCtx,
     req: &crate::logical::Request,
 ) -> Result<(), RvError> {
     use super::{NamespaceModule, NAMESPACE_MODULE_NAME};
 
     // sys/auth/identity are header-scoped, not path-rewritten; rate-limit them
     // under the root bucket along with every other root request.
-    let Some(module) = core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+    let Some(module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
     else {
         return Ok(());
     };
@@ -193,7 +194,7 @@ async fn namespace_storage_bytes(
 /// when the namespace is root, or when the cap is unset.
 #[maybe_async::maybe_async]
 pub async fn check_entity_create(
-    core: &crate::core::Core,
+    core: &dyn VaultCtx,
     mount: &str,
     name: &str,
     ns_path: &str,
@@ -202,7 +203,7 @@ pub async fn check_entity_create(
     if ns_path.is_empty() {
         return Ok(());
     }
-    let Some(ns_module) = core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+    let Some(ns_module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
     else {
         return Ok(());
     };
@@ -217,7 +218,7 @@ pub async fn check_entity_create(
         return Ok(());
     }
     let Some(id_module) =
-        core.module_manager.get_module::<crate::modules::identity::IdentityModule>("identity")
+        core.module_manager().get_module::<crate::modules::identity::IdentityModule>("identity")
     else {
         return Ok(());
     };
@@ -241,14 +242,14 @@ pub async fn check_entity_create(
 /// the root namespace, or an unset cap.
 #[maybe_async::maybe_async]
 pub async fn enforce_write_storage_quota(
-    core: &crate::core::Core,
+    core: &dyn VaultCtx,
     req: &crate::logical::Request,
 ) -> Result<(), RvError> {
     use super::{NamespaceModule, NAMESPACE_MODULE_NAME};
     if req.operation != Operation::Write {
         return Ok(());
     }
-    let Some(ns_module) = core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+    let Some(ns_module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
     else {
         return Ok(());
     };
@@ -269,7 +270,7 @@ pub async fn enforce_write_storage_quota(
         .and_then(|b| serde_json::to_vec(b).ok())
         .map(|v| v.len() as u64)
         .unwrap_or(0);
-    let current = namespace_storage_bytes(core.barrier.as_storage(), &resolved.namespace.uuid).await?;
+    let current = namespace_storage_bytes(core.barrier().as_storage(), &resolved.namespace.uuid).await?;
     if current.saturating_add(incoming) > limit {
         return Err(accounting_exceeded("storage bytes", current, limit));
     }

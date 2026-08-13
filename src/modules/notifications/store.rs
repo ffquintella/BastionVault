@@ -22,9 +22,9 @@ use std::sync::Arc;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_string,
-    core::Core,
     errors::RvError,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
 };
@@ -44,8 +44,8 @@ pub struct NotificationStore {
 
 #[maybe_async::maybe_async]
 impl NotificationStore {
-    pub async fn new(core: &Core) -> Result<Arc<Self>, RvError> {
-        let Some(system_view) = core.state.load().system_view.as_ref().cloned() else {
+    pub async fn new(core: &dyn VaultCtx) -> Result<Arc<Self>, RvError> {
+        let Some(system_view) = core.system_view() else {
             return Err(RvError::ErrBarrierSealed);
         };
         let messages_view = Arc::new(system_view.new_sub_view(MESSAGES_SUB_PATH));

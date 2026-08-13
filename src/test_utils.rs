@@ -22,6 +22,7 @@ use serde_json::{json, Map, Value};
 use tokio::sync::oneshot;
 use ureq::tls::{Certificate, ClientCert, PrivateKey, RootCerts, TlsConfig};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     api::{client::TLSConfigBuilder, Client},
     cli::config::Config,
@@ -904,7 +905,7 @@ pub fn start_test_http_server_with_prometheus(
 }
 
 #[maybe_async::maybe_async]
-pub async fn test_list_api(core: &Core, token: &str, path: &str, is_ok: bool) -> Result<Option<Response>, RvError> {
+pub async fn test_list_api(core: &dyn VaultCtx, token: &str, path: &str, is_ok: bool) -> Result<Option<Response>, RvError> {
     let mut req = Request::new(path);
     req.operation = Operation::List;
     req.client_token = token.to_string();
@@ -996,7 +997,7 @@ pub fn test_multi_routine(backend: Arc<dyn Backend>) {
 }
 
 #[maybe_async::maybe_async]
-pub async fn test_read_api(core: &Core, token: &str, path: &str, is_ok: bool) -> Result<Option<Response>, RvError> {
+pub async fn test_read_api(core: &dyn VaultCtx, token: &str, path: &str, is_ok: bool) -> Result<Option<Response>, RvError> {
     let mut req = Request::new(path);
     req.operation = Operation::Read;
     req.client_token = token.to_string();
@@ -1008,7 +1009,7 @@ pub async fn test_read_api(core: &Core, token: &str, path: &str, is_ok: bool) ->
 
 #[maybe_async::maybe_async]
 pub async fn test_write_api(
-    core: &Core,
+    core: &dyn VaultCtx,
     token: &str,
     path: &str,
     is_ok: bool,
@@ -1027,7 +1028,7 @@ pub async fn test_write_api(
 
 #[maybe_async::maybe_async]
 pub async fn test_delete_api(
-    core: &Core,
+    core: &dyn VaultCtx,
     token: &str,
     path: &str,
     is_ok: bool,
@@ -1044,7 +1045,7 @@ pub async fn test_delete_api(
 }
 
 #[maybe_async::maybe_async]
-pub async fn test_mount_api(core: &Core, token: &str, mtype: &str, path: &str) {
+pub async fn test_mount_api(core: &dyn VaultCtx, token: &str, mtype: &str, path: &str) {
     let data = json!({
         "type": mtype,
     })
@@ -1056,7 +1057,7 @@ pub async fn test_mount_api(core: &Core, token: &str, mtype: &str, path: &str) {
 }
 
 #[maybe_async::maybe_async]
-pub async fn test_mount_auth_api(core: &Core, token: &str, atype: &str, path: &str) {
+pub async fn test_mount_auth_api(core: &dyn VaultCtx, token: &str, atype: &str, path: &str) {
     let auth_data = json!({
         "type": atype,
     })

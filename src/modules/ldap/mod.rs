@@ -36,7 +36,6 @@ use derive_more::Deref;
 
 use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     logical::{Backend, LogicalBackend, Path},
     modules::Module,
@@ -68,7 +67,7 @@ paths to short-lived, narrowly-scoped tokens.
 "#;
 
 pub struct LdapBackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
 }
 
 #[derive(Deref)]
@@ -78,7 +77,7 @@ pub struct LdapBackend {
 }
 
 impl LdapBackend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             inner: Arc::new(LdapBackendInner { core }),
         }
@@ -114,7 +113,7 @@ pub struct LdapModule {
 }
 
 impl LdapModule {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             name: "openldap".to_string(),
             backend: Arc::new(LdapBackend::new(core)),

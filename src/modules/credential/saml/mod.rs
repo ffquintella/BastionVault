@@ -29,7 +29,6 @@ use derive_more::Deref;
 
 use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     logical::{Backend, LogicalBackend},
     modules::{auth::AuthModule, Module},
@@ -64,7 +63,7 @@ pub struct SamlModule {
 }
 
 pub struct SamlBackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
 }
 
 #[derive(Deref)]
@@ -74,7 +73,7 @@ pub struct SamlBackend {
 }
 
 impl SamlBackend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             inner: Arc::new(SamlBackendInner { core }),
         }
@@ -102,7 +101,7 @@ impl SamlBackend {
 }
 
 impl SamlModule {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             name: "saml".to_string(),
             backend: Arc::new(SamlBackend::new(core)),

@@ -17,9 +17,9 @@ use std::sync::Arc;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_string,
-    core::Core,
     errors::RvError,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
 };
@@ -36,8 +36,8 @@ pub struct RustionStore {
 
 #[maybe_async::maybe_async]
 impl RustionStore {
-    pub async fn new(core: &Core) -> Result<Arc<Self>, RvError> {
-        let Some(system_view) = core.state.load().system_view.as_ref().cloned() else {
+    pub async fn new(core: &dyn VaultCtx) -> Result<Arc<Self>, RvError> {
+        let Some(system_view) = core.system_view() else {
             return Err(RvError::ErrBarrierSealed);
         };
         let targets_view = Arc::new(system_view.new_sub_view(TARGET_SUB_PATH));

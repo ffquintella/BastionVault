@@ -20,6 +20,7 @@ use derive_more::Deref;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     cli::config::MountEntryHMACLevel,
     core::{Core, LogicalBackendNewFunc},
@@ -122,7 +123,7 @@ lazy_static! {
 }
 
 pub struct MountsMonitor {
-    core: Arc<Core>,
+    core: Arc<dyn VaultCtx>,
     interval: u64,
     tables: Arc<RwLock<Vec<Arc<MountsRouter>>>>,
     running: Arc<AtomicBool>,
@@ -182,7 +183,7 @@ impl MountsRouter {
         }
     }
 
-    pub fn setup(&self, core: Arc<Core>) -> Result<(), RvError> {
+    pub fn setup(&self, core: Arc<dyn VaultCtx>) -> Result<(), RvError> {
         let mounts = self.mounts.entries.read()?;
 
         for mount_entry in mounts.values() {
@@ -255,7 +256,7 @@ impl MountsRouter {
     /// namespaces/<uuid>/logical/` and `router_prefix = <ns_path>/`, so the
     /// same logic yields a mount that is storage-isolated under the namespace
     /// and addressable at `<ns_path>/<mount>` in the shared router trie.
-    pub async fn mount_one(&self, core: Arc<Core>, me: &MountEntry, hmac_key: &[u8]) -> Result<(), RvError> {
+    pub async fn mount_one(&self, core: Arc<dyn VaultCtx>, me: &MountEntry, hmac_key: &[u8]) -> Result<(), RvError> {
         let mut entry = me.clone();
         if !entry.path.ends_with('/') {
             entry.path += "/";
@@ -535,7 +536,7 @@ impl MountTable {
 }
 
 impl MountsMonitor {
-    pub fn new(core: Arc<Core>, interval: u64) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>, interval: u64) -> Self {
         Self {
             core,
             interval,
@@ -587,19 +588,19 @@ impl MountsMonitor {
 
                             for table in tables.iter() {
                                 #[cfg(not(feature = "sync_handler"))]
-                                match table.load(core.barrier.as_storage(), Some(&core.state.load().hmac_key), core.mount_entry_hmac_level).await {
+                                match table.load(core.barrier().as_storage(), Some(&core.hmac_key()), core.mount_entry_hmac_level()).await {
                                     Ok(Some(())) => changed = true,
                                     _ => continue,
                                 }
                                 #[cfg(feature = "sync_handler")]
-                                match table.load(core.barrier.as_storage(), Some(&core.state.load().hmac_key), core.mount_entry_hmac_level) {
+                                match table.load(core.barrier().as_storage(), Some(&core.hmac_key()), core.mount_entry_hmac_level()) {
                                     Ok(Some(())) => changed = true,
                                     _ => continue,
                                 }
                             }
 
                             if changed {
-                                let _ = core.router.clear();
+                                let _ = core.router().clear();
 
                                 for table in tables.iter() {
                                     if let Err(err) = table.setup(core.clone()) {

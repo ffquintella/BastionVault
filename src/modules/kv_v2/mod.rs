@@ -17,7 +17,6 @@ use serde_json::{json, Map, Value};
 use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
-    core::Core,
     errors::RvError,
     logical::{
         secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation, Request, Response,
@@ -46,7 +45,7 @@ pub struct KvV2Module {
 }
 
 pub struct KvV2BackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
 }
 
 #[derive(Deref)]
@@ -56,7 +55,7 @@ pub struct KvV2Backend {
 }
 
 impl KvV2Backend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self { inner: Arc::new(KvV2BackendInner { core }) }
     }
 
@@ -914,7 +913,7 @@ impl KvV2BackendInner {
 }
 
 impl KvV2Module {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             name: "kv-v2".to_string(),
             backend: Arc::new(KvV2Backend::new(core)),

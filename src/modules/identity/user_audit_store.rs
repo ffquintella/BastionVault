@@ -18,8 +18,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
 };
@@ -51,8 +51,8 @@ pub struct UserAuditStore {
 
 #[maybe_async::maybe_async]
 impl UserAuditStore {
-    pub async fn new(core: &Core) -> Result<Arc<Self>, RvError> {
-        let Some(system_view) = core.state.load().system_view.as_ref().cloned() else {
+    pub async fn new(core: &dyn VaultCtx) -> Result<Arc<Self>, RvError> {
+        let Some(system_view) = core.system_view() else {
             return Err(RvError::ErrBarrierSealed);
         };
         let view = Arc::new(system_view.new_sub_view(USER_AUDIT_SUB_PATH));

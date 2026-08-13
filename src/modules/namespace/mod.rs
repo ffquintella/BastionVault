@@ -114,14 +114,15 @@ impl Module for NamespaceModule {
 
 #[cfg(test)]
 mod tests {
+    use crate::kernel_api::VaultCtx;
     use super::*;
     use crate::test_utils::{
         new_unseal_test_bastion_vault, test_delete_api, test_list_api, test_read_api, test_write_api,
     };
     use serde_json::json;
 
-    fn store_of(core: &Arc<Core>) -> Arc<NamespaceStore> {
-        core.module_manager
+    fn store_of(core: &dyn VaultCtx) -> Arc<NamespaceStore> {
+        core.module_manager()
             .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
             .and_then(|m| m.store())
             .expect("namespace store must be installed after unseal")
@@ -319,7 +320,7 @@ mod tests {
 
         // Helper: issue a request scoped to a namespace via the header form.
         async fn ns_req(
-            core: &Arc<Core>,
+            core: &dyn VaultCtx,
             token: &str,
             op: Operation,
             path: &str,
@@ -383,9 +384,9 @@ mod tests {
             .clone();
         let a_uuid = store.get_by_path("tenant-a").await.unwrap().unwrap().uuid;
         let b_uuid = store.get_by_path("tenant-b").await.unwrap().unwrap().uuid;
-        let a_mounts = registry.list_mounts(&core, &a_uuid, "tenant-a").await.unwrap();
+        let a_mounts = registry.list_mounts(core.clone(), &a_uuid, "tenant-a").await.unwrap();
         assert!(a_mounts.iter().any(|(p, _, _)| p == "cubby/"));
-        let b_mounts = registry.list_mounts(&core, &b_uuid, "tenant-b").await.unwrap();
+        let b_mounts = registry.list_mounts(core.clone(), &b_uuid, "tenant-b").await.unwrap();
         assert!(b_mounts.is_empty());
 
         // Deleting tenant-a is refused while it holds the cubby mount.
@@ -414,7 +415,7 @@ mod tests {
             new_unseal_test_bastion_vault("test_ns_ensure_router_idempotent").await;
 
         async fn ns_req(
-            core: &Arc<Core>,
+            core: &dyn VaultCtx,
             token: &str,
             op: Operation,
             path: &str,
@@ -463,7 +464,7 @@ mod tests {
         // already-mounted `tenant-x/secret/`. Pre-fix this returned
         // `ErrRouterMountConflict`; it must now succeed and still see the mount.
         let mounts = registry
-            .list_mounts(&core, &uuid, "tenant-x")
+            .list_mounts(core.clone(), &uuid, "tenant-x")
             .await
             .expect("re-setup over a populated trie must not conflict");
         assert!(
@@ -503,7 +504,7 @@ mod tests {
             new_unseal_test_bastion_vault("test_ns_kv_owner_scoped").await;
 
         async fn ns_req(
-            core: &Arc<Core>,
+            core: &dyn VaultCtx,
             token: &str,
             op: Operation,
             path: &str,
@@ -603,7 +604,7 @@ mod tests {
             new_unseal_test_bastion_vault("test_ns_token_binding").await;
 
         async fn ns_req(
-            core: &Arc<Core>,
+            core: &dyn VaultCtx,
             token: &str,
             op: Operation,
             path: &str,
@@ -684,7 +685,7 @@ mod tests {
             new_unseal_test_bastion_vault("test_ns_policy_refusal").await;
 
         async fn write_policy_in_ns(
-            core: &Arc<Core>,
+            core: &dyn VaultCtx,
             token: &str,
             name: &str,
             hcl: &str,
@@ -762,7 +763,7 @@ mod tests {
 
         // Issue a request scoped to a namespace via the header form.
         async fn ns_req(
-            core: &Arc<Core>,
+            core: &dyn VaultCtx,
             token: &str,
             op: Operation,
             path: &str,
@@ -868,7 +869,7 @@ mod tests {
             new_unseal_test_bastion_vault("test_ns_identity_login").await;
 
         async fn ns_req(
-            core: &Arc<Core>,
+            core: &dyn VaultCtx,
             token: &str,
             op: Operation,
             path: &str,
@@ -931,7 +932,7 @@ mod tests {
         ns_req(&core, &root, Operation::Write, "cubby/foo", "tenant-a", json!({"v":"hi-a"}).as_object().cloned()).await.unwrap();
 
         // Login helper.
-        async fn login(core: &Arc<Core>, ns: &str) -> crate::logical::Auth {
+        async fn login(core: &dyn VaultCtx, ns: &str) -> crate::logical::Auth {
             let mut req = Request::new("auth/userpass/login/alice");
             req.operation = Operation::Write;
             req.body = json!({ "password": "pw-123456" }).as_object().cloned();
@@ -980,7 +981,7 @@ mod tests {
 
         // Root-token sys request scoped to a namespace header.
         async fn ns_req(
-            core: &Arc<Core>,
+            core: &dyn VaultCtx,
             token: &str,
             op: Operation,
             path: &str,
@@ -1003,12 +1004,12 @@ mod tests {
         // sends **no** header — an unscoped login, i.e. "give me the default
         // namespace" rather than "give me root". Pass "/" to name root
         // explicitly.
-        async fn try_login(core: &Arc<Core>, ns: &str) -> Result<(), RvError> {
+        async fn try_login(core: &dyn VaultCtx, ns: &str) -> Result<(), RvError> {
             login_ns(core, ns).await.map(|_| ())
         }
 
         /// The namespace the issued token ended up bound to.
-        async fn login_ns(core: &Arc<Core>, ns: &str) -> Result<String, RvError> {
+        async fn login_ns(core: &dyn VaultCtx, ns: &str) -> Result<String, RvError> {
             let mut req = Request::new("auth/userpass/login/alice");
             req.operation = Operation::Write;
             req.body = json!({ "password": "pw-123456" }).as_object().cloned();
@@ -1119,7 +1120,7 @@ mod tests {
 
         let (_bvault, core, root) = new_unseal_test_bastion_vault("test_namespaces_self").await;
 
-        async fn self_list(core: &Arc<Core>, token: &str) -> Result<Vec<String>, RvError> {
+        async fn self_list(core: &dyn VaultCtx, token: &str) -> Result<Vec<String>, RvError> {
             let mut req = Request::new("sys/namespaces-self");
             req.operation = Operation::Read;
             req.client_token = token.to_string();
@@ -1189,7 +1190,7 @@ mod tests {
             new_unseal_test_bastion_vault("test_ns_quota").await;
 
         async fn ns_req(
-            core: &Arc<Core>,
+            core: &dyn VaultCtx,
             token: &str,
             op: Operation,
             path: &str,
@@ -1239,7 +1240,7 @@ mod tests {
             new_unseal_test_bastion_vault("test_ns_acct_quota").await;
 
         async fn ns_req(
-            core: &Arc<Core>,
+            core: &dyn VaultCtx,
             token: &str,
             op: Operation,
             path: &str,
@@ -1258,7 +1259,7 @@ mod tests {
             core.handle_request(&mut req).await
         }
 
-        async fn login(core: &Arc<Core>, user: &str, ns: &str) -> Result<Option<crate::logical::Response>, RvError> {
+        async fn login(core: &dyn VaultCtx, user: &str, ns: &str) -> Result<Option<crate::logical::Response>, RvError> {
             let mut req = Request::new(format!("auth/userpass/login/{user}").as_str());
             req.operation = Operation::Write;
             req.body = json!({ "password": "pw-123456" }).as_object().cloned();

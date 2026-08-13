@@ -54,8 +54,8 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
 };
@@ -136,8 +136,8 @@ pub struct NsAssignmentStore {
 
 #[maybe_async::maybe_async]
 impl NsAssignmentStore {
-    pub fn new(core: &Core) -> Result<Self, RvError> {
-        let view = Arc::new(BarrierView::new(core.barrier.clone(), NS_ASSIGNMENT_PREFIX));
+    pub fn new(core: &dyn VaultCtx) -> Result<Self, RvError> {
+        let view = Arc::new(BarrierView::new(core.barrier().clone(), NS_ASSIGNMENT_PREFIX));
         Ok(Self { view })
     }
 
@@ -224,7 +224,7 @@ impl NsAssignmentStore {
 /// `permission_denied`. Fails closed: there is no silent fallback to root.
 #[maybe_async::maybe_async]
 pub async fn enforce_login_assignment(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     mount: &str,
     name: &str,
     ns_path: &str,
@@ -250,7 +250,7 @@ pub async fn enforce_login_assignment(
 /// silently promotes the login into a namespace the assignment excludes.
 #[maybe_async::maybe_async]
 pub async fn default_login_namespace_for(
-    core: &Core,
+    core: &dyn VaultCtx,
     mount: &str,
     name: &str,
 ) -> Result<Option<String>, RvError> {
@@ -321,7 +321,7 @@ mod tests {
     async fn test_ns_assignment_store_roundtrip() {
         let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_ns_assignment_store").await;
         let ns_store = core
-            .module_manager
+            .module_manager()
             .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
             .and_then(|m| m.store())
             .unwrap();

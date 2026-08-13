@@ -24,8 +24,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     logical::Response,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
@@ -73,8 +73,8 @@ pub struct LoginAuditStore {
 
 #[maybe_async::maybe_async]
 impl LoginAuditStore {
-    pub fn from_core(core: &Core) -> Result<Arc<Self>, RvError> {
-        let Some(system_view) = core.state.load().system_view.as_ref().cloned() else {
+    pub fn from_core(core: &dyn VaultCtx) -> Result<Arc<Self>, RvError> {
+        let Some(system_view) = core.system_view() else {
             return Err(RvError::ErrBarrierSealed);
         };
         Ok(Self::from_system_view(&system_view))
@@ -127,7 +127,7 @@ impl LoginAuditStore {
 /// authentication is never blocked by the audit side-channel.
 #[maybe_async::maybe_async]
 pub async fn record_login(
-    core: &Core,
+    core: &dyn VaultCtx,
     mount: &str,
     username: &str,
     success: bool,

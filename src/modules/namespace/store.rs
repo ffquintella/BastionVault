@@ -36,9 +36,9 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_response_status, bv_error_string,
-    core::Core,
     errors::RvError,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
     utils::generate_uuid,
@@ -167,8 +167,8 @@ pub struct NamespaceStore {
 
 #[maybe_async::maybe_async]
 impl NamespaceStore {
-    pub fn new(core: &Core) -> Result<Self, RvError> {
-        let barrier = core.barrier.clone();
+    pub fn new(core: &dyn VaultCtx) -> Result<Self, RvError> {
+        let barrier = core.barrier().clone();
         let view = Arc::new(BarrierView::new(barrier, NAMESPACE_REGISTRY_PREFIX));
         Ok(Self {
             view,

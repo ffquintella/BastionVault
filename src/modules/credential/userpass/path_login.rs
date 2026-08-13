@@ -5,9 +5,9 @@ use super::{
     path_users::UserEntry,
     UserPassBackend, UserPassBackendInner,
 };
+use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
-    core::Core,
     errors::RvError,
     logical::{Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response},
     modules::identity::{GroupKind, IdentityModule},
@@ -22,13 +22,13 @@ use crate::{
 /// `entity_id` metadata (and therefore fails any `scopes = ["owner"]`
 /// check, as it should).
 pub(crate) async fn resolve_entity_id(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     mount: &str,
     name: &str,
     ns_path: &str,
 ) -> Option<String> {
     let Some(module) = core
-        .module_manager
+        .module_manager()
         .get_module::<IdentityModule>("identity")
     else {
         // No identity module wired in — common in minimal builds.
@@ -106,7 +106,7 @@ impl UserPassBackendInner {
         direct: &[String],
         ns_path: &str,
     ) -> Vec<String> {
-        let Some(module) = self.core.module_manager.get_module::<IdentityModule>("identity") else {
+        let Some(module) = self.core.module_manager().get_module::<IdentityModule>("identity") else {
             return direct.to_vec();
         };
         let Some(store) = module.group_store() else {

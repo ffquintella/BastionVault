@@ -399,6 +399,7 @@ impl AppRoleBackendInner {
 
 #[cfg(test)]
 mod test {
+    use crate::kernel_api::VaultCtx;
     use std::{
         default::Default,
         sync::{Arc, Mutex},
@@ -430,7 +431,7 @@ mod test {
         #[cfg(not(feature = "sync_handler"))]
         test_mount_auth_api(&core, &root_token, "approle", "approle/").await;
 
-        let approle_module = core.module_manager.get_module::<AppRoleModule>("approle").unwrap();
+        let approle_module = core.module_manager().get_module::<AppRoleModule>("approle").unwrap();
 
         // Create a role
         let mut req = Request::new("/auth/approle/role1");
@@ -545,7 +546,7 @@ mod test {
         #[cfg(not(feature = "sync_handler"))]
         test_mount_auth_api(&core, &root_token, "approle", "approle/").await;
 
-        let approle_module = core.module_manager.get_module::<AppRoleModule>("approle").unwrap();
+        let approle_module = core.module_manager().get_module::<AppRoleModule>("approle").unwrap();
 
         let mut mock_backend = approle_module.new_backend();
         assert!(mock_backend.init().is_ok());
@@ -608,7 +609,7 @@ mod test {
 
             actix_rt::spawn(async move {
                 let core = core_cloned2.clone();
-                let approle_module = core.module_manager.get_module::<AppRoleModule>("approle").unwrap();
+                let approle_module = core.module_manager().get_module::<AppRoleModule>("approle").unwrap();
                 let mut req = Request::new("auth/approle/role/role1/secret-id");
                 req.operation = Operation::Write;
                 req.client_token = token.clone();

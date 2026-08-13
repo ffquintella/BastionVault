@@ -24,9 +24,9 @@
 //! namespace — is a larger, separately-reviewed change tracked in the feature
 //! file.)
 
-use std::sync::Arc;
 
-use crate::{bv_error_response_status, core::Core, errors::RvError};
+use crate::kernel_api::VaultCtx;
+use crate::{bv_error_response_status, errors::RvError};
 
 use super::{store::normalize_path, NamespaceModule, NAMESPACE_MODULE_NAME};
 
@@ -52,7 +52,7 @@ pub fn namespace_owner_of_path(policy_path: &str, namespaces: &[String]) -> Stri
 /// a 403-style error naming the offending path and the namespace it belongs to.
 #[maybe_async::maybe_async]
 pub async fn refuse_cross_namespace_paths(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     writer_ns_path: &str,
     paths: &[String],
 ) -> Result<(), RvError> {
@@ -61,7 +61,7 @@ pub async fn refuse_cross_namespace_paths(
         return Ok(());
     }
 
-    let Some(module) = core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+    let Some(module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
     else {
         return Ok(());
     };

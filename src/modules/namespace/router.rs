@@ -16,7 +16,8 @@
 
 use std::sync::Arc;
 
-use crate::{bv_error_string, core::Core, errors::RvError, logical::Request};
+use crate::kernel_api::VaultCtx;
+use crate::{bv_error_string, errors::RvError, logical::Request};
 
 use super::store::{normalize_path, Namespace, NamespaceStore};
 use super::{NamespaceModule, NAMESPACE_MODULE_NAME};
@@ -169,7 +170,7 @@ pub fn arc_namespace(ns: Namespace) -> Arc<Namespace> {
 /// `sys/` and `auth/` paths stay root-scoped (per-namespace sys/auth is
 /// Phase 2), so they are left unrewritten.
 #[maybe_async::maybe_async]
-pub async fn rewrite_request_for_namespace(core: &Core, req: &mut Request) -> Result<(), RvError> {
+pub async fn rewrite_request_for_namespace(core: &dyn VaultCtx, req: &mut Request) -> Result<(), RvError> {
     let Some(raw) = namespace_header_from_map(req.headers.as_ref()) else {
         return Ok(());
     };
@@ -182,7 +183,7 @@ pub async fn rewrite_request_for_namespace(core: &Core, req: &mut Request) -> Re
         return Ok(());
     }
 
-    let Some(module) = core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME) else {
+    let Some(module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME) else {
         return Ok(());
     };
     let Some(store) = module.store() else {
@@ -228,8 +229,8 @@ pub async fn rewrite_request_for_namespace(core: &Core, req: &mut Request) -> Re
 
     // Make sure the namespace's mounts are wired into the shared router before
     // we route into them.
-    if let Some(core_arc) = core.self_ptr.upgrade() {
-        module.registry.ensure_router(&core_arc, &ns.uuid, &ns.path).await?;
+    if let Some(core_arc) = core.weak_ctx().upgrade() {
+        module.registry.ensure_router(core_arc.clone(), &ns.uuid, &ns.path).await?;
     }
 
     let prefix = format!("{}/", ns.path);

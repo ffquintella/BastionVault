@@ -1,8 +1,8 @@
 //! The notification service — the orchestrator that ties targeting,
 //! storage, the in-app inbox, and plugin channel delivery together.
 //!
-//! Reachable from anywhere with an `Arc<Core>` via
-//! `core.module_manager.get_module::<NotificationsModule>("notifications")
+//! Reachable from anywhere with an `Arc<dyn VaultCtx>` via
+//! `core.module_manager().get_module::<NotificationsModule>("notifications")
 //! .service()`. The logical backend handlers call it for the HTTP
 //! surface; the plugin runtime host imports (`bv.notify_*`) call the
 //! plugin-scoped helpers.
@@ -16,7 +16,8 @@ use std::{
 use chrono::Utc;
 use serde_json::{json, Value};
 
-use crate::{bv_error_string, core::Core, errors::RvError, utils::generate_uuid};
+use crate::kernel_api::VaultCtx;
+use crate::{bv_error_string, errors::RvError, utils::generate_uuid};
 
 use super::channel;
 use super::contacts;
@@ -33,7 +34,7 @@ struct RateWindow {
 }
 
 pub struct NotificationService {
-    core: Arc<Core>,
+    core: Arc<dyn VaultCtx>,
     store: Arc<NotificationStore>,
     plugin_rate: Mutex<HashMap<String, RateWindow>>,
 }
@@ -43,7 +44,7 @@ fn now_iso() -> String {
 }
 
 impl NotificationService {
-    pub fn new(core: Arc<Core>, store: Arc<NotificationStore>) -> Arc<Self> {
+    pub fn new(core: Arc<dyn VaultCtx>, store: Arc<NotificationStore>) -> Arc<Self> {
         Arc::new(Self {
             core,
             store,
@@ -106,7 +107,7 @@ impl NotificationService {
                     .await
                     .unwrap_or_default();
             for ch in external {
-                let res = channel::deliver_to_channel(&self.core, &ch, &notif, &recipients).await;
+                let res = channel::deliver_to_channel(self.core.clone(), &ch, &notif, &recipients).await;
                 if let Some(err) = &res.error {
                     log::warn!(
                         "notification {} channel `{}` delivery error: {}",
@@ -250,7 +251,7 @@ impl NotificationService {
     // ---- channels + admin ---------------------------------------------------
 
     pub async fn list_channels(&self) -> Result<Vec<ChannelInfo>, RvError> {
-        channel::list_channels(&self.core).await
+        channel::list_channels(self.core.clone()).await
     }
 
     pub async fn test_channel(
@@ -261,7 +262,7 @@ impl NotificationService {
         if to_email.trim().is_empty() {
             return Err(bv_error_string!("a destination address is required for a test"));
         }
-        Ok(channel::test_channel(&self.core, channel_id, to_email, &now_iso()).await)
+        Ok(channel::test_channel(self.core.clone(), channel_id, to_email, &now_iso()).await)
     }
 
     /// Every notification sent in the namespace (admin audit view).

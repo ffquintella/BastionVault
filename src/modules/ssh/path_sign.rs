@@ -46,10 +46,10 @@ use super::{
     ssh_sign_audit_store::{SshSignAuditEntry, SshSignAuditStore},
     SshBackend, SshBackendInner,
 };
+use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_response_status,
     context::Context,
-    core::Core,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     modules::identity::caller_audit_actor,
@@ -67,7 +67,7 @@ the named role. Returns `signed_key` (single-line OpenSSH cert) and
 /// itself — matches the CA / file / login audit pattern.
 #[allow(clippy::too_many_arguments)]
 async fn record_ssh_sign_audit(
-    core: &Core,
+    core: &dyn VaultCtx,
     actor: &str,
     role: &str,
     principals: &[String],

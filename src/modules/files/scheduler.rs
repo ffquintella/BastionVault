@@ -37,8 +37,8 @@ use tokio::sync::Mutex;
 use super::{run_sync_tick_for_storage, FilesBackendInner};
 #[cfg(test)]
 use super::{sync_target_due, FileSyncState};
+use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     logical::{Operation, Request},
     storage::Storage,
@@ -86,7 +86,7 @@ impl Default for FilesSyncConfig {
 
 /// Spawn the files-sync scheduler. Detached task; the loop runs
 /// until the process exits and self-skips when sealed.
-pub fn start_files_sync_scheduler(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
+pub fn start_files_sync_scheduler(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         let last_fired: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
         log::info!(
@@ -97,7 +97,7 @@ pub fn start_files_sync_scheduler(core: Arc<Core>) -> tokio::task::JoinHandle<()
         let mut interval = tokio::time::interval(TICK_INTERVAL);
         loop {
             interval.tick().await;
-            if core.state.load().sealed {
+            if core.sealed() {
                 continue;
             }
             // Best-effort serialise overlapping ticks (a slow target
@@ -106,7 +106,7 @@ pub fn start_files_sync_scheduler(core: Arc<Core>) -> tokio::task::JoinHandle<()
             // tracked alongside the existing PKI / LDAP schedulers.
             let _guard = last_fired.lock().await;
             let started = Instant::now();
-            if let Err(e) = run_tick(&core).await {
+            if let Err(e) = run_tick(core.clone()).await {
                 log::warn!("files/sync: tick failed: {e}");
             } else {
                 log::debug!(
@@ -122,7 +122,7 @@ pub fn start_files_sync_scheduler(core: Arc<Core>) -> tokio::task::JoinHandle<()
 /// `POST /v1/<mount>/sync-tick` admin endpoint and integration tests
 /// can drive the same logic without waiting 60 s for the scheduler.
 #[maybe_async::maybe_async]
-pub async fn run_tick(core: &Arc<Core>) -> Result<(), RvError> {
+pub async fn run_tick(core: Arc<dyn VaultCtx>) -> Result<(), RvError> {
     let mounts: Vec<(String, String)> = {
         let mounts_router = core.mounts_router();
         let entries = mounts_router.entries.read()?;
@@ -139,7 +139,7 @@ pub async fn run_tick(core: &Arc<Core>) -> Result<(), RvError> {
             .collect()
     };
     for (uuid, path) in mounts {
-        if let Err(e) = run_one_mount(core, &uuid, &path).await {
+        if let Err(e) = run_one_mount(core.clone(), &uuid, &path).await {
             log::warn!("files/sync: mount {path} (uuid {uuid}): tick error: {e}");
         }
     }
@@ -148,11 +148,11 @@ pub async fn run_tick(core: &Arc<Core>) -> Result<(), RvError> {
 
 #[maybe_async::maybe_async]
 async fn run_one_mount(
-    core: &Arc<Core>,
+    core: Arc<dyn VaultCtx>,
     _uuid: &str,
     mount_path: &str,
 ) -> Result<(), RvError> {
-    let view = match core.router.matching_view(mount_path)? {
+    let view = match core.router().matching_view(mount_path)? {
         Some(v) => v,
         None => return Ok(()),
     };

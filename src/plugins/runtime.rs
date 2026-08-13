@@ -915,7 +915,7 @@ async fn crypto_op_impl(
 /// data map out. Tagged `Result<_, ()>` because the plugin only sees
 /// a single error code; any logging happens host-side.
 async fn transit_call(
-    core: &Arc<dyn VaultCtx>,
+    core: &dyn VaultCtx,
     path: &str,
     body: serde_json::Value,
 ) -> Result<serde_json::Map<String, serde_json::Value>, ()> {

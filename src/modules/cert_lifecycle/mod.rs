@@ -27,7 +27,6 @@ use serde_json::{json, Map, Value};
 use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
-    core::Core,
     errors::RvError,
     logical::{Backend, LogicalBackend, Operation, Path, PathOperation, Request, Response},
     modules::Module,
@@ -51,7 +50,7 @@ land in follow-ups.
 "#;
 
 pub struct CertLifecycleBackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
     /// Phase L7: lookup table for [`delivery::CertDeliveryPlugin`]
     /// implementations keyed by [`storage::TargetKind::as_str`].
     /// Built once at module construction with the engine's built-in
@@ -67,7 +66,7 @@ pub struct CertLifecycleBackend {
 }
 
 impl CertLifecycleBackend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             inner: Arc::new(CertLifecycleBackendInner {
                 core,
@@ -123,7 +122,7 @@ pub struct CertLifecycleModule {
 }
 
 impl CertLifecycleModule {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             name: "cert-lifecycle".to_string(),
             backend: Arc::new(CertLifecycleBackend::new(core)),

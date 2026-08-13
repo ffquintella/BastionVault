@@ -4,6 +4,7 @@ use derive_more::{Deref, DerefMut};
 use serde::{Deserialize, Serialize};
 
 use super::{UserPassBackend, UserPassBackendInner};
+use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
     errors::RvError,
@@ -485,7 +486,7 @@ impl UserPassBackendInner {
         // ownership-transfer endpoints. Silent on failure.
         if let Some(module) = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<crate::modules::identity::IdentityModule>("identity")
         {
             if let Some(store) = module.entity_store() {
@@ -585,7 +586,7 @@ pub(crate) fn now_secs() -> i64 {
 /// a convenience log for the Admin → Audit GUI, not a block on the
 /// underlying operation.
 async fn record_user_audit(
-    core: &std::sync::Arc<crate::core::Core>,
+    core: &dyn VaultCtx,
     req: &crate::logical::Request,
     op: &str,
     target: &str,
@@ -594,7 +595,7 @@ async fn record_user_audit(
     use crate::modules::identity::{caller_audit_actor, IdentityModule, UserAuditEntry};
 
     let Some(module) = core
-        .module_manager
+        .module_manager()
         .get_module::<IdentityModule>("identity")
     else {
         return;

@@ -568,7 +568,7 @@ mod mod_policy_tests {
     };
 
     #[maybe_async::maybe_async]
-    async fn test_write_policy(core: &Core, token: &str, name: &str, policy: &str) {
+    async fn test_write_policy(core: &dyn VaultCtx, token: &str, name: &str, policy: &str) {
         let data = json!({
             "policy": policy,
         })
@@ -580,21 +580,21 @@ mod mod_policy_tests {
     }
 
     #[maybe_async::maybe_async]
-    async fn test_read_policy(core: &Core, token: &str, name: &str) -> Result<Option<Response>, RvError> {
+    async fn test_read_policy(core: &dyn VaultCtx, token: &str, name: &str) -> Result<Option<Response>, RvError> {
         let resp = test_read_api(core, token, format!("sys/policy/{}", name).as_str(), true).await;
         assert!(resp.is_ok());
         resp
     }
 
     #[maybe_async::maybe_async]
-    async fn test_delete_policy(core: &Core, token: &str, name: &str) {
+    async fn test_delete_policy(core: &dyn VaultCtx, token: &str, name: &str) {
         let resp = test_delete_api(core, token, format!("sys/policy/{}", name).as_str(), true, None).await;
         assert!(resp.is_ok());
     }
 
     #[maybe_async::maybe_async]
     async fn test_write_user(
-        core: &Core,
+        core: &dyn VaultCtx,
         token: &str,
         path: &str,
         username: &str,
@@ -617,7 +617,7 @@ mod mod_policy_tests {
 
     #[maybe_async::maybe_async]
     async fn test_user_login(
-        core: &Core,
+        core: &dyn VaultCtx,
         path: &str,
         username: &str,
         password: &str,

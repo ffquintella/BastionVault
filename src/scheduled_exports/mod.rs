@@ -28,6 +28,8 @@ pub use runner::start_scheduler;
 pub use schedule::{
     DestinationKind, ExportFormat, PasswordRefKind, RunRecord, RunStatus, Schedule, ScheduleInput,
 };
+
+use crate::kernel_api::VaultCtx;
 pub use store::{ScheduleStore, STORE_PREFIX};
 
 /// Identity of the node this process is: Raft node id (when the storage
@@ -36,13 +38,14 @@ pub use store::{ScheduleStore, STORE_PREFIX};
 ///
 /// Used to stamp catalog records at write time and to decide, at read time,
 /// whether a recorded backup lives on *this* node's filesystem.
-pub fn local_node(core: &crate::core::Core) -> NodeRef {
+pub fn local_node(core: &dyn VaultCtx) -> NodeRef {
     #[allow(unused_mut)]
     let mut node_id = None;
     #[cfg(feature = "storage_hiqlite")]
     {
         use crate::storage::hiqlite::HiqliteBackend;
-        let backend_any = core.physical.as_ref() as &dyn std::any::Any;
+        let physical = core.physical();
+    let backend_any = physical.as_ref() as &dyn std::any::Any;
         if let Some(hiqlite) = backend_any.downcast_ref::<HiqliteBackend>() {
             node_id = Some(hiqlite.node_id());
         }

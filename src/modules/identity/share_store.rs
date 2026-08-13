@@ -25,9 +25,9 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_string,
-    core::Core,
     errors::RvError,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
 };
@@ -204,8 +204,8 @@ pub struct ShareStore {
 
 #[maybe_async::maybe_async]
 impl ShareStore {
-    pub async fn new(core: &Core) -> Result<Arc<Self>, RvError> {
-        let Some(system_view) = core.state.load().system_view.as_ref().cloned() else {
+    pub async fn new(core: &dyn VaultCtx) -> Result<Arc<Self>, RvError> {
+        let Some(system_view) = core.system_view() else {
             return Err(RvError::ErrBarrierSealed);
         };
 

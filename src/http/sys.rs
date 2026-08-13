@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     core::{Core, SealConfig},
     errors::RvError,
@@ -1318,7 +1319,8 @@ async fn sys_health_request_handler(
     #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
     let (standby, cluster_healthy) = {
         use crate::storage::hiqlite::HiqliteBackend;
-        let backend_any = core.physical.as_ref() as &dyn std::any::Any;
+        let physical = core.physical();
+        let backend_any = physical.as_ref() as &dyn std::any::Any;
         if let Some(hiqlite_backend) = backend_any.downcast_ref::<HiqliteBackend>() {
             (!hiqlite_backend.is_leader().await, hiqlite_backend.is_healthy().await)
         } else {
@@ -1385,13 +1387,13 @@ struct ServerInfoResponse {
 /// would burn a use off a `num_uses`-limited token just for reading an
 /// info page. Expired and revoked tokens no longer have a lookup entry,
 /// so a `Some` here means live.
-async fn caller_has_live_token(core: &Core, req: &HttpRequest) -> bool {
+async fn caller_has_live_token(core: &dyn VaultCtx, req: &HttpRequest) -> bool {
     let token = request_auth(req).client_token;
     if token.is_empty() {
         return false;
     }
     let Some(auth_module) = core
-        .module_manager
+        .module_manager()
         .get_module::<crate::modules::auth::AuthModule>("auth")
     else {
         return false;
@@ -1433,7 +1435,7 @@ async fn authorize_sys_request(
     copy_namespace_header(req, &mut r);
 
     let auth_module = core
-        .module_manager
+        .module_manager()
         .get_module::<crate::modules::auth::AuthModule>("auth")
         .ok_or(RvError::ErrPermissionDenied)?;
     let token_store = auth_module
@@ -1483,7 +1485,7 @@ const PEER_IP_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// The IPs of every configured cluster node. Empty for non-clustered backends,
 /// which leaves loopback as the only cluster-local caller.
-pub(crate) fn cluster_peer_ips(core: &Core) -> Arc<HashSet<IpAddr>> {
+pub(crate) fn cluster_peer_ips(core: &dyn VaultCtx) -> Arc<HashSet<IpAddr>> {
     let cache = PEER_IP_CACHE.get_or_init(|| std::sync::RwLock::new(None));
 
     if let Ok(guard) = cache.read() {
@@ -1500,7 +1502,8 @@ pub(crate) fn cluster_peer_ips(core: &Core) -> Arc<HashSet<IpAddr>> {
     #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
     {
         use crate::storage::hiqlite::HiqliteBackend;
-        let backend_any = core.physical.as_ref() as &dyn std::any::Any;
+        let physical = core.physical();
+        let backend_any = physical.as_ref() as &dyn std::any::Any;
         if let Some(hiqlite_backend) = backend_any.downcast_ref::<HiqliteBackend>() {
             addrs = hiqlite_backend.peer_addrs().to_vec();
         }
@@ -1527,7 +1530,7 @@ pub(crate) fn cluster_peer_ips(core: &Core) -> Arc<HashSet<IpAddr>> {
 ///
 /// Either it holds a live token, or it is one of the cluster's own machines
 /// (see [`ip_is_cluster_local`]).
-async fn caller_may_see_cluster_topology(core: &Core, req: &HttpRequest) -> bool {
+async fn caller_may_see_cluster_topology(core: &dyn VaultCtx, req: &HttpRequest) -> bool {
     let socket_peer = req
         .conn_data::<crate::http::Connection>()
         .map(|c| c.peer)
@@ -1560,11 +1563,12 @@ async fn sys_info_request_handler(
         storage_type: None,
     };
 
-    if caller_has_live_token(&core, &req).await {
+    if caller_has_live_token(core.as_ref(), &req).await {
         #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
         let storage_type = {
             use crate::storage::hiqlite::HiqliteBackend;
-            let backend_any = core.physical.as_ref() as &dyn std::any::Any;
+            let physical = core.physical();
+        let backend_any = physical.as_ref() as &dyn std::any::Any;
             if backend_any.downcast_ref::<HiqliteBackend>().is_some() {
                 "hiqlite"
             } else {
@@ -1602,7 +1606,7 @@ async fn sys_cluster_status_request_handler(
     req: HttpRequest,
     _core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    if !caller_may_see_cluster_topology(&_core, &req).await {
+    if !caller_may_see_cluster_topology(_core.as_ref(), &req).await {
         return Ok(response_error(
             StatusCode::FORBIDDEN,
             "cluster status requires a valid token, or a request from a cluster node",
@@ -1715,11 +1719,11 @@ async fn sys_backup_request_handler(
 ) -> Result<HttpResponse, HttpError> {
     authorize_sys_request(&core, &req, "sys/backup", Operation::Write).await?;
 
-    let hmac_key = core.barrier.derive_hmac_key()?;
+    let hmac_key = core.barrier().derive_hmac_key()?;
     let mut buf = Vec::new();
 
     crate::backup::create::create_backup(
-        core.physical.as_ref(),
+        core.physical().as_ref(),
         &hmac_key,
         &mut buf,
         false,
@@ -1739,11 +1743,11 @@ async fn sys_restore_request_handler(
 ) -> Result<HttpResponse, HttpError> {
     authorize_sys_request(&core, &req, "sys/restore", Operation::Write).await?;
 
-    let hmac_key = core.barrier.derive_hmac_key()?;
+    let hmac_key = core.barrier().derive_hmac_key()?;
     let mut reader = std::io::Cursor::new(body.as_ref());
 
     let count = crate::backup::restore::restore_backup(
-        core.physical.as_ref(),
+        core.physical().as_ref(),
         &hmac_key,
         &mut reader,
     )
@@ -1768,7 +1772,7 @@ async fn sys_export_request_handler(
     };
 
     let export_data = crate::backup::export::export_secrets(
-        core.barrier.as_storage(),
+        core.barrier().as_storage(),
         &mount,
         &prefix,
     )
@@ -1929,7 +1933,7 @@ async fn sys_exchange_export_request_handler(
     } else {
         let mounts = crate::exchange::scope::MountIndex::from_core(&core_arc)?;
         crate::exchange::scope::export_to_document(
-            core.barrier.as_storage(),
+            core.barrier().as_storage(),
             &mounts,
             exporter,
             payload.scope.clone(),
@@ -2227,7 +2231,7 @@ async fn sys_plugins_list_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
-        let manifests = catalog.list(core.barrier.as_storage()).await?;
+        let manifests = catalog.list(core.barrier().as_storage()).await?;
         Ok(response_json_ok(None, json!({ "plugins": manifests })))
     })
     .await;
@@ -2252,7 +2256,7 @@ async fn sys_plugins_register_handler(
             .map_err(|_| RvError::ErrRequestInvalid)?;
 
         let catalog = crate::plugins::PluginCatalog::new();
-        catalog.put(core.barrier.as_storage(), &payload.manifest, &binary).await?;
+        catalog.put(core.barrier().as_storage(), &payload.manifest, &binary).await?;
 
         // Plugin Extensibility v1: persist surface + assets when the
         // operator uploaded them. The catalog re-verifies hashes
@@ -2268,7 +2272,7 @@ async fn sys_plugins_register_handler(
                 .map_err(|_| RvError::ErrRequestInvalid)?;
             catalog
                 .put_surface(
-                    core.barrier.as_storage(),
+                    core.barrier().as_storage(),
                     &payload.manifest.name,
                     &payload.manifest.version,
                     &surface_bytes,
@@ -2319,7 +2323,7 @@ async fn sys_plugins_register_handler(
             }
             catalog
                 .put_asset(
-                    core.barrier.as_storage(),
+                    core.barrier().as_storage(),
                     &payload.manifest.name,
                     &payload.manifest.version,
                     &bytes,
@@ -2346,7 +2350,7 @@ async fn sys_plugins_get_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
-        match catalog.get_manifest(core.barrier.as_storage(), &name).await? {
+        match catalog.get_manifest(core.barrier().as_storage(), &name).await? {
             Some(m) => Ok(response_json_ok(None, json!({ "manifest": m }))),
             None => Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
         }
@@ -2367,7 +2371,7 @@ async fn sys_plugins_delete_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
-        catalog.delete(core.barrier.as_storage(), &name).await?;
+        catalog.delete(core.barrier().as_storage(), &name).await?;
         Ok(response_ok(None, None))
     })
     .await;
@@ -2398,9 +2402,9 @@ async fn sys_plugins_versions_list_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
-        let versions = catalog.list_versions(core.barrier.as_storage(), &name).await?;
+        let versions = catalog.list_versions(core.barrier().as_storage(), &name).await?;
         let active = catalog
-            .get_active_version(core.barrier.as_storage(), &name)
+            .get_active_version(core.barrier().as_storage(), &name)
             .await?;
         Ok(response_json_ok(
             None,
@@ -2425,7 +2429,7 @@ async fn sys_plugins_versions_activate_handler(
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         catalog
-            .set_active(core.barrier.as_storage(), &name, &version)
+            .set_active(core.barrier().as_storage(), &name, &version)
             .await?;
         // Activating a different version means the cached compiled
         // module for the previous binary is no longer the right thing
@@ -2455,7 +2459,7 @@ async fn sys_plugins_versions_delete_handler(
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         catalog
-            .delete_version(core.barrier.as_storage(), &name, &version)
+            .delete_version(core.barrier().as_storage(), &name, &version)
             .await?;
         Ok(response_ok(None, None))
     })
@@ -2493,7 +2497,7 @@ async fn sys_plugins_reload_handler(
         // the next invocation. After verification we drop the cached
         // compiled module so the next invoke recompiles fresh.
         let catalog = crate::plugins::PluginCatalog::new();
-        let record = match catalog.get(core.barrier.as_storage(), &name).await? {
+        let record = match catalog.get(core.barrier().as_storage(), &name).await? {
             Some(r) => r,
             None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
         };
@@ -2533,7 +2537,7 @@ async fn sys_plugins_config_get_handler(
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         let manifest = match catalog
-            .get_manifest(core.barrier.as_storage(), &name)
+            .get_manifest(core.barrier().as_storage(), &name)
             .await?
         {
             Some(m) => m,
@@ -2541,7 +2545,7 @@ async fn sys_plugins_config_get_handler(
         };
         let store = crate::plugins::ConfigStore::new();
         let values = store
-            .get_redacted(core.barrier.as_storage(), &manifest)
+            .get_redacted(core.barrier().as_storage(), &manifest)
             .await?;
         Ok(response_json_ok(
             None,
@@ -2576,7 +2580,7 @@ async fn sys_plugins_config_put_handler(
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
         let catalog = crate::plugins::PluginCatalog::new();
         let manifest = match catalog
-            .get_manifest(core.barrier.as_storage(), &name)
+            .get_manifest(core.barrier().as_storage(), &name)
             .await?
         {
             Some(m) => m,
@@ -2584,7 +2588,7 @@ async fn sys_plugins_config_put_handler(
         };
         let store = crate::plugins::ConfigStore::new();
         store
-            .put(core.barrier.as_storage(), &manifest, payload.values)
+            .put(core.barrier().as_storage(), &manifest, payload.values)
             .await?;
         Ok(response_ok(None, None))
     })
@@ -2623,12 +2627,12 @@ struct GrantsNetPut {
 /// entity id lives in the token entry's `meta` map. Falls back to the
 /// token's display name, then empty — the authoritative actor record is
 /// the audit event emitted alongside, not this convenience field.
-async fn resolve_actor_entity_id(core: &Core, token: &str) -> String {
+async fn resolve_actor_entity_id(core: &dyn VaultCtx, token: &str) -> String {
     if token.is_empty() {
         return String::new();
     }
     let Some(auth_module) = core
-        .module_manager
+        .module_manager()
         .get_module::<crate::modules::auth::AuthModule>("auth")
     else {
         return String::new();
@@ -2659,17 +2663,17 @@ async fn sys_plugins_grants_get_handler(
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         let manifest = match catalog
-            .get_manifest(core.barrier.as_storage(), &name)
+            .get_manifest(core.barrier().as_storage(), &name)
             .await?
         {
             Some(m) => m,
             None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
         };
-        let record = crate::plugins::grants::get(core.barrier.as_storage(), &name).await?;
+        let record = crate::plugins::grants::get(core.barrier().as_storage(), &name).await?;
         // Whether the stored grant is *live* against the active
         // manifest's current net request (a changed request voids it).
         let live = crate::plugins::grants::active_net_hosts(
-            core.barrier.as_storage(),
+            core.barrier().as_storage(),
             &name,
             &manifest,
         )
@@ -2720,16 +2724,16 @@ async fn sys_plugins_grants_put_handler(
         };
         let catalog = crate::plugins::PluginCatalog::new();
         let manifest = match catalog
-            .get_manifest(core.barrier.as_storage(), &name)
+            .get_manifest(core.barrier().as_storage(), &name)
             .await?
         {
             Some(m) => m,
             None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
         };
-        let actor = resolve_actor_entity_id(&core, &token).await;
+        let actor = resolve_actor_entity_id(core.as_ref(), &token).await;
         let granted_at = chrono::Utc::now().to_rfc3339();
         let grant = match crate::plugins::grants::put_net(
-            core.barrier.as_storage(),
+            core.barrier().as_storage(),
             &name,
             &manifest,
             net.hosts,
@@ -2762,7 +2766,7 @@ async fn sys_plugins_grants_delete_handler(
     audit.authorize(&core, &req, &audit_path, Operation::Delete).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
-        crate::plugins::grants::delete(core.barrier.as_storage(), &name).await?;
+        crate::plugins::grants::delete(core.barrier().as_storage(), &name).await?;
         Ok(response_ok(None, None))
     })
     .await;
@@ -2788,9 +2792,9 @@ async fn sys_plugins_publishers_get_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let allow =
-            crate::plugins::verifier::PublisherAllowlist::load(core.barrier.as_storage()).await?;
+            crate::plugins::verifier::PublisherAllowlist::load(core.barrier().as_storage()).await?;
         let unsigned =
-            crate::plugins::verifier::read_accept_unsigned(core.barrier.as_storage()).await?;
+            crate::plugins::verifier::read_accept_unsigned(core.barrier().as_storage()).await?;
         Ok(response_json_ok(
             None,
             json!({
@@ -2819,7 +2823,7 @@ async fn sys_plugins_publishers_put_handler(
         let allow = crate::plugins::verifier::PublisherAllowlist {
             keys: payload.keys,
         };
-        allow.save(core.barrier.as_storage()).await?;
+        allow.save(core.barrier().as_storage()).await?;
         Ok(response_json_ok(None, json!({ "ok": true })))
     })
     .await;
@@ -2845,7 +2849,7 @@ async fn sys_plugins_accept_unsigned_put_handler(
         let payload: AcceptUnsignedPutRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
         crate::plugins::verifier::write_accept_unsigned(
-            core.barrier.as_storage(),
+            core.barrier().as_storage(),
             payload.accept_unsigned,
         )
         .await?;
@@ -2882,7 +2886,7 @@ async fn sys_plugins_surface_get_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
-        match catalog.read_active_surface(core.barrier.as_storage(), &name).await? {
+        match catalog.read_active_surface(core.barrier().as_storage(), &name).await? {
             None => Ok(response_error(StatusCode::NOT_FOUND, "no surface for this plugin")),
             Some((manifest, bytes)) => {
                 // Hash is already verified by `read_active_surface`;
@@ -2951,7 +2955,7 @@ async fn sys_plugins_active_surfaces_handler(
         // resolves bindings client-side. A future Phase 1 follow-up
         // will inject the actual mount registry here.
         let mut bundle = catalog
-            .aggregated_active_surfaces(core.barrier.as_storage(), |_| None)
+            .aggregated_active_surfaces(core.barrier().as_storage(), |_| None)
             .await?;
 
         if watch_requested && if_none_match.as_deref() == Some(bundle.etag.as_str()) {
@@ -2967,7 +2971,7 @@ async fn sys_plugins_active_surfaces_handler(
             while started.elapsed() < max_wait {
                 tokio::time::sleep(poll_interval).await;
                 let next = catalog
-                    .aggregated_active_surfaces(core.barrier.as_storage(), |_| None)
+                    .aggregated_active_surfaces(core.barrier().as_storage(), |_| None)
                     .await?;
                 if next.etag != bundle.etag {
                     bundle = next;
@@ -3013,7 +3017,7 @@ async fn sys_plugins_asset_get_handler(
         }
         let catalog = crate::plugins::PluginCatalog::new();
         match catalog
-            .read_asset(core.barrier.as_storage(), &name, &version, &sha256)
+            .read_asset(core.barrier().as_storage(), &name, &version, &sha256)
             .await?
         {
             None => Ok(response_error(StatusCode::NOT_FOUND, "asset not found")),
@@ -3040,11 +3044,11 @@ async fn sys_plugins_quarantine_list_handler(
     audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
-        let names = crate::plugins::quarantine::list(core.barrier.as_storage()).await?;
+        let names = crate::plugins::quarantine::list(core.barrier().as_storage()).await?;
         let mut entries = serde_json::Map::new();
         for name in names {
             if let Some(rec) =
-                crate::plugins::quarantine::lookup(core.barrier.as_storage(), &name).await?
+                crate::plugins::quarantine::lookup(core.barrier().as_storage(), &name).await?
             {
                 entries.insert(name, serde_json::to_value(rec).unwrap_or(serde_json::Value::Null));
             }
@@ -3079,7 +3083,7 @@ async fn sys_plugins_invoke_handler(
         .map_err(|_| RvError::ErrRequestInvalid)?;
 
     let catalog = crate::plugins::PluginCatalog::new();
-    let record = match catalog.get(core.barrier.as_storage(), &name).await? {
+    let record = match catalog.get(core.barrier().as_storage(), &name).await? {
         Some(r) => r,
         None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
     };
@@ -3183,7 +3187,7 @@ async fn sys_scheduled_exports_list_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
-        let list = store.list(core.barrier.as_storage()).await?;
+        let list = store.list(core.barrier().as_storage()).await?;
         Ok(response_json_ok(None, json!({ "schedules": list })))
     })
     .await;
@@ -3226,7 +3230,7 @@ async fn sys_scheduled_exports_create_handler(
             enabled: input.enabled,
         };
         let store = crate::scheduled_exports::ScheduleStore::new();
-        store.put(core.barrier.as_storage(), &sched).await?;
+        store.put(core.barrier().as_storage(), &sched).await?;
         Ok(response_json_ok(None, json!({ "schedule": sched })))
     })
     .await;
@@ -3245,7 +3249,7 @@ async fn sys_scheduled_exports_get_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
-        let sched = store.get(core.barrier.as_storage(), &id).await?;
+        let sched = store.get(core.barrier().as_storage(), &id).await?;
         match sched {
             Some(s) => Ok(response_json_ok(None, json!({ "schedule": s }))),
             None => Ok(response_error(StatusCode::NOT_FOUND, "schedule not found")),
@@ -3277,7 +3281,7 @@ async fn sys_scheduled_exports_update_handler(
         }
 
         let store = crate::scheduled_exports::ScheduleStore::new();
-        let existing = store.get(core.barrier.as_storage(), &id).await?;
+        let existing = store.get(core.barrier().as_storage(), &id).await?;
         let existing = match existing {
             Some(s) => s,
             None => return Ok(response_error(StatusCode::NOT_FOUND, "schedule not found")),
@@ -3296,7 +3300,7 @@ async fn sys_scheduled_exports_update_handler(
             updated_at: chrono::Utc::now().to_rfc3339(),
             enabled: input.enabled,
         };
-        store.put(core.barrier.as_storage(), &sched).await?;
+        store.put(core.barrier().as_storage(), &sched).await?;
         Ok(response_json_ok(None, json!({ "schedule": sched })))
     })
     .await;
@@ -3315,7 +3319,7 @@ async fn sys_scheduled_exports_delete_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
-        store.delete(core.barrier.as_storage(), &id).await?;
+        store.delete(core.barrier().as_storage(), &id).await?;
         Ok(response_ok(None, None))
     })
     .await;
@@ -3334,7 +3338,7 @@ async fn sys_scheduled_exports_runs_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
-        let runs = store.list_runs(core.barrier.as_storage(), &id).await?;
+        let runs = store.list_runs(core.barrier().as_storage(), &id).await?;
         Ok(response_json_ok(None, json!({ "runs": runs })))
     })
     .await;
@@ -3355,7 +3359,7 @@ async fn sys_scheduled_exports_run_now_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
-        let sched = store.get(core.barrier.as_storage(), &id).await?
+        let sched = store.get(core.barrier().as_storage(), &id).await?
             .ok_or_else(|| RvError::ErrRequestInvalid)?;
 
     let core_arc = core.get_ref().clone();
@@ -3378,7 +3382,7 @@ async fn sys_scheduled_exports_run_now_handler(
             error: Some(format!("{e}")),
         },
     };
-    let _ = store.append_run(core.barrier.as_storage(), &record).await;
+    let _ = store.append_run(core.barrier().as_storage(), &record).await;
     Ok(response_json_ok(None, json!({ "run": record })))
     })
     .await;
@@ -3536,14 +3540,14 @@ async fn sys_scheduled_exports_backups_list_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
-        let sched = match store.get(core.barrier.as_storage(), &id).await? {
+        let sched = match store.get(core.barrier().as_storage(), &id).await? {
             Some(s) => s,
             None => return Ok(response_error(StatusCode::NOT_FOUND, "schedule not found")),
         };
 
         let local_node = crate::scheduled_exports::local_node(core.get_ref());
         let (dir, files) = crate::scheduled_exports::list_backups(
-            core.barrier.as_storage(),
+            core.barrier().as_storage(),
             &sched,
             &local_node,
         )
@@ -3589,7 +3593,7 @@ async fn sys_scheduled_exports_backup_fetch_handler(
         }
 
         let store = crate::scheduled_exports::ScheduleStore::new();
-        let sched = match store.get(core.barrier.as_storage(), &id).await? {
+        let sched = match store.get(core.barrier().as_storage(), &id).await? {
             Some(s) => s,
             None => return Ok(response_error(StatusCode::NOT_FOUND, "schedule not found")),
         };
@@ -3676,7 +3680,7 @@ async fn sys_scheduled_exports_restore_handler(
         };
 
         let store = crate::scheduled_exports::ScheduleStore::new();
-        let sched = match store.get(core.barrier.as_storage(), &id).await? {
+        let sched = match store.get(core.barrier().as_storage(), &id).await? {
             Some(s) => s,
             None => return Ok(response_error(StatusCode::NOT_FOUND, "schedule not found")),
         };
@@ -3692,7 +3696,7 @@ async fn sys_scheduled_exports_restore_handler(
             // failing the restore.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let record = crate::scheduled_exports::BackupCatalog::new()
-                    .get(core.barrier.as_storage(), &id, &payload.filename)
+                    .get(core.barrier().as_storage(), &id, &payload.filename)
                     .await?;
                 let Some(record) = record else {
                     return Ok(response_error(
@@ -3913,7 +3917,7 @@ async fn sys_import_request_handler(
     };
 
     let result = crate::backup::import::import_secrets(
-        core.barrier.as_storage(),
+        core.barrier().as_storage(),
         &mount,
         &export_data,
         payload.force,

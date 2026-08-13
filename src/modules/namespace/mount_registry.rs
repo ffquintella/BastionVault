@@ -32,8 +32,8 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     mount::{MountTable, MountsRouter},
 };
@@ -74,7 +74,7 @@ impl NamespaceMountRegistry {
     /// `ns_uuid` selects the barrier storage prefix.
     pub async fn ensure_router(
         &self,
-        core: &Arc<Core>,
+        core: Arc<dyn VaultCtx>,
         ns_uuid: &str,
         ns_path: &str,
     ) -> Result<Arc<MountsRouter>, RvError> {
@@ -89,8 +89,8 @@ impl NamespaceMountRegistry {
         let router_prefix = format!("{}/", ns_path.trim_end_matches('/'));
         let mounts_router = Arc::new(MountsRouter::new(
             mount_table,
-            core.router.clone(),
-            core.barrier.clone(),
+            core.router().clone(),
+            core.barrier().clone(),
             &namespace_logical_prefix(ns_uuid),
             &router_prefix,
         ));
@@ -106,10 +106,10 @@ impl NamespaceMountRegistry {
         // Load the persisted table; an absent table means a brand-new (empty)
         // namespace — create and persist an empty one rather than seeding the
         // default core mounts (child namespaces start functionally empty).
-        match mount_table_load(&mounts_router, core).await {
+        match mount_table_load(&mounts_router, core.clone()).await {
             Ok(()) => {}
             Err(RvError::ErrConfigLoadFailed) => {
-                mounts_router.mounts.persist(core.barrier.as_storage()).await?;
+                mounts_router.mounts.persist(core.barrier().as_storage()).await?;
             }
             Err(e) => return Err(e),
         }
@@ -135,20 +135,20 @@ impl NamespaceMountRegistry {
     /// isolated under `namespaces/<uuid>/logical/`.
     pub async fn mount(
         &self,
-        core: &Arc<Core>,
+        core: Arc<dyn VaultCtx>,
         ns_uuid: &str,
         ns_path: &str,
         me: &crate::mount::MountEntry,
     ) -> Result<(), RvError> {
-        let router = self.ensure_router(core, ns_uuid, ns_path).await?;
-        let hmac_key = core.state.load().hmac_key.clone();
+        let router = self.ensure_router(core.clone(), ns_uuid, ns_path).await?;
+        let hmac_key = core.hmac_key().clone();
         router.mount_one(core.clone(), me, &hmac_key).await
     }
 
     /// Unmount a backend inside a namespace.
     pub async fn unmount(
         &self,
-        core: &Arc<Core>,
+        core: Arc<dyn VaultCtx>,
         ns_uuid: &str,
         ns_path: &str,
         path: &str,
@@ -160,7 +160,7 @@ impl NamespaceMountRegistry {
     /// List the mount paths registered in a namespace (`secret/`, ...).
     pub async fn list_mounts(
         &self,
-        core: &Arc<Core>,
+        core: Arc<dyn VaultCtx>,
         ns_uuid: &str,
         ns_path: &str,
     ) -> Result<Vec<(String, String, String)>, RvError> {
@@ -184,10 +184,10 @@ impl NamespaceMountRegistry {
 }
 
 #[maybe_async::maybe_async]
-async fn mount_table_load(router: &Arc<MountsRouter>, core: &Arc<Core>) -> Result<(), RvError> {
+async fn mount_table_load(router: &Arc<MountsRouter>, core: Arc<dyn VaultCtx>) -> Result<(), RvError> {
     router
         .mounts
-        .load(core.barrier.as_storage(), Some(&core.state.load().hmac_key), core.mount_entry_hmac_level)
+        .load(core.barrier().as_storage(), Some(&core.hmac_key()), core.mount_entry_hmac_level())
         .await
         .map(|_| ())
 }

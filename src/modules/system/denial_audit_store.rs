@@ -25,8 +25,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     logical::Request,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
@@ -69,14 +69,14 @@ pub struct DenialAuditEntry {
 /// — a wrong namespace assignment, a disabled account, a machine-identity or
 /// binding check. Labelling those `invalid-token` sent operators hunting for a
 /// bad token when the credential was fine and the *namespace* was the problem.
-fn denial_reason(core: &Core, req: &Request) -> &'static str {
+fn denial_reason(core: &dyn VaultCtx, req: &Request) -> &'static str {
     if req.auth.is_some() {
         return "policy";
     }
     // `is_unauth_path` needs the full, mount-qualified path — which the router
     // restores before this runs. A lookup failure (sealed router) falls back to
     // the conservative token verdict rather than guessing.
-    match core.router.is_unauth_path(&req.path) {
+    match core.router().is_unauth_path(&req.path) {
         Ok(true) => "credential-refused",
         _ => "invalid-token",
     }
@@ -88,8 +88,8 @@ pub struct DenialAuditStore {
 
 #[maybe_async::maybe_async]
 impl DenialAuditStore {
-    pub fn from_core(core: &Core) -> Result<Arc<Self>, RvError> {
-        let Some(system_view) = core.state.load().system_view.as_ref().cloned() else {
+    pub fn from_core(core: &dyn VaultCtx) -> Result<Arc<Self>, RvError> {
+        let Some(system_view) = core.system_view() else {
             return Err(RvError::ErrBarrierSealed);
         };
         let view = Arc::new(system_view.new_sub_view(DENIAL_AUDIT_SUB_PATH));
@@ -134,7 +134,7 @@ impl DenialAuditStore {
 /// sealed barrier or storage error is logged at WARN and swallowed, so
 /// the caller's 403 is returned unchanged either way.
 #[maybe_async::maybe_async]
-pub async fn record_denial(core: &Core, req: &Request) {
+pub async fn record_denial(core: &dyn VaultCtx, req: &Request) {
     let store = match DenialAuditStore::from_core(core) {
         Ok(s) => s,
         Err(e) => {

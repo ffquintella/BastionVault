@@ -9,7 +9,6 @@ use derive_more::Deref;
 
 use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     logical::{Backend, LogicalBackend},
     modules::{auth::AuthModule, Module},
@@ -38,7 +37,7 @@ pub struct Fido2Module {
 }
 
 pub struct Fido2BackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
 }
 
 #[derive(Deref)]
@@ -48,7 +47,7 @@ pub struct Fido2Backend {
 }
 
 impl Fido2Backend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self { inner: Arc::new(Fido2BackendInner { core }) }
     }
 
@@ -74,7 +73,7 @@ impl Fido2Backend {
 }
 
 impl Fido2Module {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             name: "fido2".to_string(),
             backend: Arc::new(Fido2Backend::new(core)),

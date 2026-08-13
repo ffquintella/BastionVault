@@ -27,9 +27,9 @@ use super::{
     hash_chain::{digest, genesis},
     AuditDevice, DeviceEntry,
 };
+use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_string,
-    core::Core,
     errors::RvError,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
 };
@@ -97,8 +97,8 @@ impl AuditBroker {
     /// and re-enabling them. Failures to re-enable a single device
     /// are logged and that device is skipped; the broker still
     /// comes up. New enable calls go through `enable_device`.
-    pub async fn new(core: &Core, hmac_key: Vec<u8>) -> Result<Arc<Self>, RvError> {
-        let Some(system_view) = core.state.load().system_view.as_ref().cloned() else {
+    pub async fn new(core: &dyn VaultCtx, hmac_key: Vec<u8>) -> Result<Arc<Self>, RvError> {
+        let Some(system_view) = core.system_view() else {
             return Err(RvError::ErrBarrierSealed);
         };
         let config_view = Arc::new(system_view.new_sub_view(AUDIT_DEVICES_SUB_PATH));

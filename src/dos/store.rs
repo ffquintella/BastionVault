@@ -16,8 +16,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::kernel_api::VaultCtx;
 use crate::bv_error_string;
-use crate::core::Core;
 use crate::errors::RvError;
 use crate::storage::{barrier_view::BarrierView, Storage, StorageEntry};
 
@@ -48,8 +48,8 @@ pub struct DosStore {
 impl DosStore {
     /// Build a store bound to the core's system view. Errors when the vault is
     /// sealed (no system view available).
-    pub fn new(core: &Core) -> Result<Arc<Self>, RvError> {
-        let Some(system_view) = core.state.load().system_view.as_ref().cloned() else {
+    pub fn new(core: &dyn VaultCtx) -> Result<Arc<Self>, RvError> {
+        let Some(system_view) = core.system_view() else {
             return Err(RvError::ErrBarrierSealed);
         };
         Ok(Arc::new(Self { view: system_view }))

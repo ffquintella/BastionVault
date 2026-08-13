@@ -33,7 +33,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::core::Core;
+use crate::kernel_api::VaultCtx;
 use crate::errors::RvError;
 use crate::storage::{barrier_view::BarrierView, Storage, StorageEntry};
 use crate::bv_error_string;
@@ -390,8 +390,8 @@ pub struct PolicyStore {
 
 #[maybe_async::maybe_async]
 impl PolicyStore {
-    pub async fn new(core: &Core) -> Result<Arc<Self>, RvError> {
-        let Some(system_view) = core.state.load().system_view.as_ref().cloned() else {
+    pub async fn new(core: &dyn VaultCtx) -> Result<Arc<Self>, RvError> {
+        let Some(system_view) = core.system_view() else {
             return Err(RvError::ErrBarrierSealed);
         };
         let bastion_groups_view = Arc::new(system_view.new_sub_view(BASTION_GROUPS_SUB_PATH));

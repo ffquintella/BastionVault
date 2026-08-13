@@ -34,6 +34,7 @@ use super::{
     policy::SentinelPolicy,
     Policy, PolicyType,
 };
+use crate::kernel_api::VaultCtx;
 use crate::{
     core::Core,
     errors::RvError,
@@ -1326,7 +1327,7 @@ impl PolicyStore {
     ///
     /// * `Result<Arc<PolicyStore>, RvError>` - An Arc-wrapped `PolicyStore` instance or an error.
     pub async fn new(core: &Core) -> Result<Arc<PolicyStore>, RvError> {
-        let Some(system_view) = core.state.load().system_view.as_ref().cloned() else {
+        let Some(system_view) = core.system_view() else {
             return Err(RvError::ErrBarrierSealed);
         };
 
@@ -1339,7 +1340,7 @@ impl PolicyStore {
         let keys = acl_view.get_keys().await?;
 
         let mut policy_store = PolicyStore {
-            router: core.router.clone(),
+            router: core.router().clone(),
             core: core.self_ptr.clone(),
             acl_view: Some(Arc::new(acl_view)),
             rgp_view: Some(Arc::new(rgp_view)),
@@ -1351,7 +1352,7 @@ impl PolicyStore {
             ..Default::default()
         };
 
-        let policy_cache_size = core.cache_config.policy_cache_size.max(1);
+        let policy_cache_size = core.cache_config().policy_cache_size.max(1);
         policy_store.token_policies_lru = Some(
             Cache::builder(policy_cache_size * 10, policy_cache_size as i64)
                 .set_ignore_internal_cost(true)
@@ -2528,7 +2529,7 @@ async fn resolve_asset_owner(core: &Weak<Core>, req_path: &str, ns_path: Option<
     let Some(core) = core.upgrade() else {
         return String::new();
     };
-    let Some(module) = core.module_manager.get_module::<IdentityModule>("identity") else {
+    let Some(module) = core.module_manager().get_module::<IdentityModule>("identity") else {
         return String::new();
     };
     let Some(store) = module.owner_store() else {
@@ -2565,7 +2566,7 @@ async fn resolve_asset_owner(core: &Weak<Core>, req_path: &str, ns_path: Option<
     // of the same name. Namespacing `ResourceGroupStore` is the follow-up.
     if let Some(name) = asset_group_name_from_path(req_path, ns_path) {
         if let Some(rg_module) = core
-            .module_manager
+            .module_manager()
             .get_module::<ResourceGroupModule>("resource-group")
         {
             if let Some(rg_store) = rg_module.store() {
@@ -2602,7 +2603,7 @@ async fn resolve_target_shared_caps(
     let Some(core) = core.upgrade() else {
         return Vec::new();
     };
-    let Some(module) = core.module_manager.get_module::<IdentityModule>("identity") else {
+    let Some(module) = core.module_manager().get_module::<IdentityModule>("identity") else {
         return Vec::new();
     };
     let Some(store) = module.share_store() else {
@@ -2809,7 +2810,7 @@ async fn resolve_target_shared_caps(
 /// caller. Silent on any policy-store failure (returns `false`,
 /// fail-closed — the absence of group-share resolution just narrows
 /// access rather than widening it).
-async fn caller_policies_opt_in_group_shared(core: &Arc<Core>, req: &Request) -> bool {
+async fn caller_policies_opt_in_group_shared(core: &dyn VaultCtx, req: &Request) -> bool {
     let Some(auth) = req.auth.as_ref() else {
         return false;
     };
@@ -2817,7 +2818,7 @@ async fn caller_policies_opt_in_group_shared(core: &Arc<Core>, req: &Request) ->
         return false;
     }
     let Some(pmodule) = core
-        .module_manager
+        .module_manager()
         .get_module::<crate::modules::policy::PolicyModule>("policy")
     else {
         return false;
@@ -2860,7 +2861,7 @@ async fn resolve_asset_groups(
     let Some(core) = core.upgrade() else {
         return Vec::new();
     };
-    let Some(module) = core.module_manager.get_module::<ResourceGroupModule>("resource-group") else {
+    let Some(module) = core.module_manager().get_module::<ResourceGroupModule>("resource-group") else {
         return Vec::new();
     };
     let Some(store) = module.store() else {
@@ -3394,7 +3395,7 @@ impl PolicyStore {
     fn resource_group_store(&self) -> Option<Arc<ResourceGroupStore>> {
         let core = self.core.upgrade()?;
         let module = core
-            .module_manager
+            .module_manager()
             .get_module::<ResourceGroupModule>("resource-group")?;
         module.store()
     }
@@ -3405,7 +3406,7 @@ impl PolicyStore {
     fn owner_store(&self) -> Option<Arc<OwnerStore>> {
         let core = self.core.upgrade()?;
         let module = core
-            .module_manager
+            .module_manager()
             .get_module::<IdentityModule>("identity")?;
         module.owner_store()
     }
@@ -3478,7 +3479,7 @@ impl PolicyStore {
     fn share_store(&self) -> Option<Arc<ShareStore>> {
         let core = self.core.upgrade()?;
         let module = core
-            .module_manager
+            .module_manager()
             .get_module::<IdentityModule>("identity")?;
         module.share_store()
     }

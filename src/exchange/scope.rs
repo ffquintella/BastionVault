@@ -6,7 +6,7 @@
 //!
 //! All storage I/O goes through the barrier-decrypted view (`&dyn Storage`)
 //! the same way the existing `crate::backup::export` module does. The caller
-//! is responsible for handing in a barrier view from `core.barrier.as_storage()`.
+//! is responsible for handing in a barrier view from `core.barrier().as_storage()`.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     core::Core,
     errors::RvError,
@@ -34,7 +35,7 @@ use crate::{
 /// does. Re-root activation is the default for every install, so in
 /// production these are `namespaces/<root_uuid>/logical/` and
 /// `namespaces/<root_uuid>/sys/` — not the bare `logical/` / `sys/`. The
-/// resolver reads through the raw barrier (`core.barrier.as_storage()`), so it
+/// resolver reads through the raw barrier (`core.barrier().as_storage()`), so it
 /// MUST prepend these prefixes or every list/get misses and the export comes
 /// out empty (see `Core::root_logical_prefix`).
 #[derive(Clone)]

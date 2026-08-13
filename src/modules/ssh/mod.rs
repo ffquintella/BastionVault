@@ -21,7 +21,6 @@ use derive_more::Deref;
 
 use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     logical::{Backend, LogicalBackend, Path},
     modules::Module,
@@ -54,7 +53,7 @@ The SSH engine issues short-lived SSH credentials in two modes:
 "#;
 
 pub struct SshBackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
 }
 
 #[derive(Deref)]
@@ -64,7 +63,7 @@ pub struct SshBackend {
 }
 
 impl SshBackend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             inner: Arc::new(SshBackendInner { core }),
         }
@@ -96,7 +95,7 @@ pub struct SshModule {
 }
 
 impl SshModule {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             name: "ssh".to_string(),
             backend: Arc::new(SshBackend::new(core)),

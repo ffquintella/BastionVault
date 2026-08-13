@@ -49,10 +49,9 @@
 //!   must not be allowed to block the server from starting.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     modules::identity::{owner_store::OwnerStore, share_store::ShareTargetKind, IdentityModule},
     modules::namespace::{
@@ -96,15 +95,15 @@ fn marker_key() -> String {
     format!("{NAMESPACE_REGISTRY_PREFIX}{MARKER_KEY}")
 }
 
-async fn read_marker(core: &Arc<Core>) -> Result<u32, RvError> {
-    let Some(e) = core.barrier.as_storage().get(&marker_key()).await? else {
+async fn read_marker(core: &dyn VaultCtx) -> Result<u32, RvError> {
+    let Some(e) = core.barrier().as_storage().get(&marker_key()).await? else {
         return Ok(0);
     };
     Ok(serde_json::from_slice::<u32>(&e.value).unwrap_or(0))
 }
 
-async fn write_marker(core: &Arc<Core>, version: u32) -> Result<(), RvError> {
-    core.barrier
+async fn write_marker(core: &dyn VaultCtx, version: u32) -> Result<(), RvError> {
+    core.barrier()
         .as_storage()
         .put(&StorageEntry { key: marker_key(), value: serde_json::to_vec(&version)? })
         .await
@@ -115,12 +114,13 @@ async fn write_marker(core: &Arc<Core>, version: u32) -> Result<(), RvError> {
 /// table + logical storage, so it reflects the objects rather than the records
 /// we are trying to repair.
 async fn resource_locations(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     ns_store: &NamespaceStore,
 ) -> Result<HashMap<String, Vec<String>>, RvError> {
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
-    let storage = core.barrier.as_storage();
-    let hmac_key = core.state.load().hmac_key.clone();
+    let __barrier = core.barrier();
+    let storage = __barrier.as_storage();
+    let hmac_key = core.hmac_key().clone();
 
     for ns in ns_store.list_all().await? {
         // Root's mounts live in the core mount table at the active root prefix;
@@ -134,7 +134,7 @@ async fn resource_locations(
         let table = MountTable::new(&config_path);
         // An absent table means the namespace has no mounts yet — skip it
         // rather than failing the whole pass.
-        if table.load(storage, Some(&hmac_key), core.mount_entry_hmac_level).await.is_err() {
+        if table.load(storage, Some(&hmac_key), core.mount_entry_hmac_level()).await.is_err() {
             continue;
         }
 
@@ -212,7 +212,7 @@ fn destination_for(
 /// Called from `Core::post_unseal` after module init (the identity stores must
 /// exist). Errors propagate to the caller, which logs and continues — see the
 /// safety notes in the module docs.
-pub async fn run_if_needed(core: &Arc<Core>) -> Result<NsScopeReport, RvError> {
+pub async fn run_if_needed(core: &dyn VaultCtx) -> Result<NsScopeReport, RvError> {
     let mut report = NsScopeReport::default();
 
     if read_marker(core).await? >= OWNER_SHARE_NS_SCOPE_VERSION {
@@ -220,7 +220,7 @@ pub async fn run_if_needed(core: &Arc<Core>) -> Result<NsScopeReport, RvError> {
         return Ok(report);
     }
 
-    let Some(identity) = core.module_manager.get_module::<IdentityModule>("identity") else {
+    let Some(identity) = core.module_manager().get_module::<IdentityModule>("identity") else {
         return Err(crate::bv_error_string!(
             "owner/share ns-scope datafix: identity module unavailable"
         ));

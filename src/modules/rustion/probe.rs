@@ -28,7 +28,8 @@ use chrono::Utc;
 use rand::Rng;
 use serde::Deserialize;
 
-use crate::{core::Core, errors::RvError};
+use crate::kernel_api::VaultCtx;
+use crate::errors::RvError;
 
 use super::{
     audit, apply_probe,
@@ -56,7 +57,7 @@ pub const PROBE_AUTHORITY: &str = "bastion-vault";
 /// can hold it; dropping the handle does not stop the task (tokio
 /// detaches when the parent crate-level futures terminate). Mirrors
 /// `pki::scheduler::start_pki_tidy_scheduler`.
-pub fn start_pinger(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
+pub fn start_pinger(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         log::info!(
             "rustion/pinger: started (tick every {}s, probe timeout {}s)",
@@ -69,7 +70,7 @@ pub fn start_pinger(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
         interval.tick().await;
         loop {
             interval.tick().await;
-            if core.state.load().sealed {
+            if core.sealed() {
                 continue;
             }
             if let Err(e) = tick(&core).await {
@@ -82,7 +83,7 @@ pub fn start_pinger(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
 /// Run a single probe round. Exposed so an integration test (or a
 /// future admin endpoint) can force a sweep without waiting for the
 /// background interval.
-pub async fn run_probe_pass(core: &Arc<Core>) -> Result<(), RvError> {
+pub async fn run_probe_pass(core: &dyn VaultCtx) -> Result<(), RvError> {
     tick(core).await
 }
 
@@ -100,9 +101,9 @@ pub async fn probe_target_now(store: &Arc<RustionStore>, target: &RustionTarget)
     probe_one(&client, store, target).await;
 }
 
-async fn tick(core: &Arc<Core>) -> Result<(), RvError> {
+async fn tick(core: &dyn VaultCtx) -> Result<(), RvError> {
     let Some(module) = core
-        .module_manager
+        .module_manager()
         .get_module::<RustionModule>("rustion")
     else {
         return Ok(());

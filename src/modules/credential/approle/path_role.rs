@@ -9,6 +9,7 @@ use super::{
     validation::{create_hmac, verify_cidr_role_secret_id_subset, SecretIdStorageEntry},
     AppRoleBackend, AppRoleBackendInner, HMAC_INPUT_LEN_MAX, SECRET_ID_LOCAL_PREFIX, SECRET_ID_PREFIX,
 };
+use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
     errors::RvError,
@@ -1392,7 +1393,7 @@ impl AppRoleBackendInner {
             // is removed.
             if let Some(module) = self
                 .core
-                .module_manager
+                .module_manager()
                 .get_module::<crate::modules::identity::IdentityModule>("identity")
             {
                 if let Some(store) = module.entity_store() {
@@ -1408,7 +1409,7 @@ impl AppRoleBackendInner {
 
     pub async fn read_config(&self, _backend: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
         let require_machine =
-            self.core.approle_require_machine.load(std::sync::atomic::Ordering::Relaxed);
+            self.core.approle_require_machine().load(std::sync::atomic::Ordering::Relaxed);
         let data = json!({ "require_machine": require_machine });
         Ok(Some(Response::data_response(data.as_object().cloned())))
     }
@@ -1425,7 +1426,7 @@ impl AppRoleBackendInner {
     // `Ok(None)` when the ferrogate mount is not present at the expected path
     // (so callers can fall back to token-only trust) or the machine is unknown.
     pub async fn lookup_ferrogate_machine(&self, id: &str) -> Result<Option<MachineEntry>, RvError> {
-        let Some(view) = self.core.router.matching_view("auth/ferrogate/")? else {
+        let Some(view) = self.core.router().matching_view("auth/ferrogate/")? else {
             return Ok(None);
         };
         match view.get(&format!("machine/{id}")).await? {
@@ -2562,7 +2563,7 @@ impl AppRoleBackendInner {
 /// lifecycle too — same store, `mount="approle/"`). Silent on
 /// subsystem absence.
 async fn record_approle_audit(
-    core: &std::sync::Arc<crate::core::Core>,
+    core: &dyn VaultCtx,
     req: &crate::logical::Request,
     op: &str,
     target: &str,
@@ -2571,7 +2572,7 @@ async fn record_approle_audit(
     use crate::modules::identity::{caller_audit_actor, IdentityModule, UserAuditEntry};
 
     let Some(module) = core
-        .module_manager
+        .module_manager()
         .get_module::<IdentityModule>("identity")
     else {
         return;
@@ -2702,7 +2703,7 @@ mod test {
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
 
-        let approle_module = core.module_manager.get_module::<AppRoleModule>("approle").unwrap();
+        let approle_module = core.module_manager().get_module::<AppRoleModule>("approle").unwrap();
 
         let mut req = Request::new("/auth/approle/testrole");
         req.operation = Operation::Write;
@@ -2789,7 +2790,7 @@ mod test {
             data["bound_cidr_list"].as_comma_string_slice().unwrap().iter().map(|s| Value::String(s.clone())).collect();
         assert_eq!(resp_data["secret_id_bound_cidrs"].as_array().unwrap().clone(), expected);
 
-        let approle_module = core.module_manager.get_module::<AppRoleModule>("approle").unwrap();
+        let approle_module = core.module_manager().get_module::<AppRoleModule>("approle").unwrap();
 
         let mut req = Request::new("/auth/approle/testrole");
         req.operation = Operation::Write;
@@ -2835,12 +2836,12 @@ mod test {
 
         // This test predates mandatory machine binding and logs in with only
         // role_id + secret_id; disable the server gate for the legacy flow.
-        core.approle_require_machine.store(false, std::sync::atomic::Ordering::Relaxed);
+        core.approle_require_machine().store(false, std::sync::atomic::Ordering::Relaxed);
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
 
-        let approle_module = core.module_manager.get_module::<AppRoleModule>("approle").unwrap();
+        let approle_module = core.module_manager().get_module::<AppRoleModule>("approle").unwrap();
 
         let mut req = Request::new("/auth/approle/testrole");
         req.operation = Operation::Write;
@@ -2971,7 +2972,7 @@ mod test {
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
 
-        let approle_module = core.module_manager.get_module::<AppRoleModule>("approle").unwrap();
+        let approle_module = core.module_manager().get_module::<AppRoleModule>("approle").unwrap();
         let mock_backend = approle_module.new_backend();
 
         // Create a role

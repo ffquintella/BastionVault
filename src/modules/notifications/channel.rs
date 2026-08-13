@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     plugins::{invoke_active_plugin, InvokeOutcome, PluginCatalog},
 };
@@ -43,7 +43,7 @@ fn channel_kind_str(kind: ChannelKind) -> String {
 /// List all delivery channels the server offers. The built-in in-app
 /// channel is always present; plugin channels come from the active
 /// version of every registered plugin declaring `notification_channels`.
-pub async fn list_channels(core: &Arc<Core>) -> Result<Vec<ChannelInfo>, RvError> {
+pub async fn list_channels(core: Arc<dyn VaultCtx>) -> Result<Vec<ChannelInfo>, RvError> {
     let mut out = vec![ChannelInfo {
         id: IN_APP_CHANNEL_ID.to_string(),
         name: "In-app".to_string(),
@@ -53,7 +53,8 @@ pub async fn list_channels(core: &Arc<Core>) -> Result<Vec<ChannelInfo>, RvError
         enabled: true,
     }];
 
-    let storage = core.barrier.as_storage();
+    let barrier = core.barrier();
+    let storage = barrier.as_storage();
     let manifests = PluginCatalog::new().list(storage).await.unwrap_or_default();
     for m in manifests {
         for ch in &m.capabilities.notification_channels {
@@ -75,7 +76,7 @@ pub async fn list_channels(core: &Arc<Core>) -> Result<Vec<ChannelInfo>, RvError
 /// Never returns `Err`: a delivery failure is captured in the result's
 /// `failed` count + `error` so one bad channel can't fail the send.
 pub async fn deliver_to_channel(
-    core: &Arc<Core>,
+    core: Arc<dyn VaultCtx>,
     channel_id: &str,
     notif: &Notification,
     recipients: &[Recipient],
@@ -114,7 +115,7 @@ pub async fn deliver_to_channel(
 /// address (admin-only). Reuses the `notify_deliver` path with a single
 /// synthetic recipient so plugins need no separate test op.
 pub async fn test_channel(
-    core: &Arc<Core>,
+    core: Arc<dyn VaultCtx>,
     channel_id: &str,
     to_email: &str,
     now_iso: &str,

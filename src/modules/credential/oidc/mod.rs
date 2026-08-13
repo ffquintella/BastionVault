@@ -38,7 +38,6 @@ use derive_more::Deref;
 
 use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     logical::{Backend, LogicalBackend},
     modules::{auth::AuthModule, Module},
@@ -71,7 +70,7 @@ pub struct OidcModule {
 }
 
 pub struct OidcBackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
 }
 
 #[derive(Deref)]
@@ -81,7 +80,7 @@ pub struct OidcBackend {
 }
 
 impl OidcBackend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             inner: Arc::new(OidcBackendInner { core }),
         }
@@ -112,7 +111,7 @@ impl OidcBackend {
 }
 
 impl OidcModule {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             name: "oidc".to_string(),
             backend: Arc::new(OidcBackend::new(core)),
@@ -160,10 +159,10 @@ impl Module for OidcModule {
 
 #[cfg(test)]
 mod integration_tests {
+    use crate::kernel_api::VaultCtx;
     use serde_json::json;
 
     use crate::{
-        core::Core,
         logical::{Operation, Request},
         test_utils::{
             new_unseal_test_bastion_vault, test_delete_api, test_mount_auth_api, test_read_api,
@@ -338,5 +337,5 @@ mod integration_tests {
     // everything compiles but tokio::test isn't picked up in sync
     // builds.
     #[allow(dead_code)]
-    fn _silence_unused_core(_c: &Core) {}
+    fn _silence_unused_core(_c: &dyn VaultCtx) {}
 }

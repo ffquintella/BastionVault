@@ -20,7 +20,6 @@ use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_response_status, bv_error_string,
     context::Context,
-    core::Core,
     errors::RvError,
     logical::{
         Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation, Request,
@@ -130,15 +129,14 @@ fn effective_to_map(e: &policy::EffectiveLoginClass) -> Map<String, Value> {
 
 // ─── Module ─────────────────────────────────────────────────────────
 
-#[derive(Default)]
 pub struct SshBrokerModule {
     pub name: String,
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
     pub policy_store: arc_swap::ArcSwap<Option<Arc<policy::PolicyStore>>>,
 }
 
 pub struct SshBrokerBackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
 }
 
 #[derive(Deref)]
@@ -148,7 +146,7 @@ pub struct SshBrokerBackend {
 }
 
 impl SshBrokerBackend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             inner: Arc::new(SshBrokerBackendInner { core }),
         }
@@ -594,7 +592,7 @@ impl SshBrokerBackendInner {
 // ─── Module wiring ──────────────────────────────────────────────────
 
 impl SshBrokerModule {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             name: "ssh-broker".to_string(),
             core,

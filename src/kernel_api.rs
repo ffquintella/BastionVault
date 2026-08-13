@@ -31,54 +31,69 @@
 //! | reached as | sites | exposed here as |
 //! |---|---|---|
 //! | `core.handle_request(..)` | 87 | [`VaultCtx::handle_request`] |
-//! | `core.module_manager.*` | 42 | [`VaultCtx::module_manager`] |
+//! | `core.module_manager().*` | 42 | [`VaultCtx::module_manager`] |
 //! | `core.state.load().system_view` | 24 | [`VaultCtx::system_view`] |
-//! | `core.barrier.*` | 39 | [`VaultCtx::barrier`] |
-//! | `core.router.*` | 23 | [`VaultCtx::router`] |
-//! | `core.state.load().sealed` | 11 | [`VaultCtx::sealed`] |
-//! | `core.state.load().hmac_key` | 4 | [`VaultCtx::hmac_key`] |
+//! | `core.barrier().*` | 39 | [`VaultCtx::barrier`] |
+//! | `core.router().*` | 23 | [`VaultCtx::router`] |
+//! | `core.sealed()` | 11 | [`VaultCtx::sealed`] |
+//! | `core.hmac_key()` | 4 | [`VaultCtx::hmac_key`] |
 //! | `core.add/delete_logical_backend` | 33 | [`VaultCtx::add_logical_backend`] |
 //! | `core.mounts_router()` | 10 | [`VaultCtx::mounts_router`] |
 //! | `core.dos_guard.*` | 5 | [`VaultCtx::dos_guard`] |
 //! | `core.stats.*` | 6 | [`VaultCtx::stats`] |
 //! | `core.audit_broker.*` | 4 | [`VaultCtx::audit_broker`] |
 //!
-//! Note what is *not* here: `self_ptr`, `physical`, `seal_provider_swap`,
-//! `exchange_preview_store`, `mounts_monitor`. Those are kernel internals that
-//! only `Core` and the `sys` HTTP surface use, and leaving them out is the
-//! point — an engine that cannot name them cannot grow a dependency on them.
+//! The surface grew during the conversion — `mount_entry_hmac_level`,
+//! `mounts_monitor`, `cache_config`, `auth_handlers`, the two machine-identity
+//! gates, `weak_ctx`, `physical` — each added only when a real call site
+//! needed it, never speculatively.
 //!
-//! ## What this commit does and does not do
+//! Still deliberately absent: `seal_provider_swap`, `exchange_preview_store`,
+//! and the `mount`/`unmount`/`remount`/`flush_caches`/`dos_*` management
+//! operations. Those are kernel internals, used only by `Core` itself and the
+//! `sys` HTTP surface, and leaving them out is the point — an engine that
+//! cannot name them cannot grow a dependency on them.
 //!
-//! This is additive. The trait is defined and `Core` implements it by
-//! delegating to its existing inherent methods and fields, so behaviour is
-//! byte-identical and no call site changes. That makes it verifiable on its
-//! own.
+//! ## Tiering: who is allowed to name `Core`
 //!
-//! The conversion is the next step, and it is not incremental per engine the
-//! way the roadmap suggests ("module by module, cheapest first: transit (1
-//! file), totp (2) …"). Two signatures make it atomic:
+//! Not every module has to stop. The split that fell out of the conversion is
+//! the one the roadmap's own graph implies:
 //!
-//! ```ignore
-//! // src/module_manager.rs — every one of the 17 modules implements this
-//! fn setup(&self, core: &Core) -> Result<(), RvError>;
-//! fn cleanup(&self, core: &Core) -> Result<(), RvError>;
+//! * **Kernel tier** — `auth`, `policy`, `identity`, `namespace`,
+//!   `resource_group`, `system`. These *are* the kernel and ship with it in
+//!   `bv-core` / `bv-kernel`, so naming `Core` is correct, not debt. They get
+//!   it from their own `self.core` field, set at construction, rather than
+//!   from a `VaultCtx` parameter. `PolicyStore` and `ExpirationManager` keep a
+//!   `Weak<Core>` back-reference for the same reason.
+//! * **Tier 3 engines** — everything else. All 14 directories (`transit`,
+//!   `totp`, `ldap`, `pki`, `files`, `kv`, `kv_v2`, `ssh`, `ssh_broker`,
+//!   `cert_lifecycle`, `resource`, `notifications`, `rustion`, `credential`)
+//!   now contain **zero** code references to `Core` — only prose in doc
+//!   comments. So does the plugin runtime, and `src/audit`'s sys emitter.
 //!
-//! // src/core.rs:44 — every engine's mount closure is one of these
-//! pub type LogicalBackendNewFunc =
-//!     dyn Fn(Arc<Core>) -> Result<Arc<dyn Backend>, RvError> + Send + Sync;
-//! ```
+//! That is the Phase 2 objective: an engine crate can compile against this
+//! trait without `bv-core` in its dependency graph.
 //!
-//! Changing either flips all 17 modules at once. So the realistic order is:
-//! this trait, then one commit that moves `Module::setup`/`cleanup` and
-//! `LogicalBackendNewFunc` onto `dyn VaultCtx` together with every engine's
-//! `core: Arc<Core>` field, then the ~101 kernel-five `get_module` call sites
-//! behind typed accessors.
+//! ## Two things that bite when extending this
+//!
+//! `&Arc<T>` does **not** coerce to `&dyn Trait` — only `&T` does. That is why
+//! there is a blanket `impl<T: VaultCtx + ?Sized> VaultCtx for Arc<T>` below:
+//! without it every helper taking `&dyn VaultCtx` needs `.as_ref()` at each
+//! call site, and engines hold their handle as an `Arc`. The corollary is that
+//! **parameters should be `&dyn VaultCtx`, never `&Arc<dyn VaultCtx>`** —
+//! `&Core`, `&Arc<Core>` and `&Arc<dyn VaultCtx>` all coerce to the former and
+//! none of them to the latter. Use `Arc<dyn VaultCtx>` by value only where the
+//! body genuinely needs to own the handle.
+//!
+//! Accessors that used to be fields now return owned values (`barrier()`,
+//! `physical()` hand back an `Arc` clone), so `core.barrier().as_storage()`
+//! borrows from a temporary and has to be bound to a local first.
 
-use std::sync::Arc;
+use std::sync::{atomic::AtomicBool, Arc, Weak};
 
 use crate::{
     audit::AuditBroker,
+    cache::CacheConfig,
     cli::config::MountEntryHMACLevel,
     core::{Core, LogicalBackendNewFunc},
     dos::DosGuard,
@@ -89,7 +104,7 @@ use crate::{
     mount::{MountsMonitor, MountsRouter},
     router::Router,
     stats::DashboardStats,
-    storage::{barrier::SecurityBarrier, barrier_view::BarrierView},
+    storage::{barrier::SecurityBarrier, barrier_view::BarrierView, Backend as PhysicalBackend},
 };
 
 /// The vault kernel, as an engine sees it.
@@ -130,10 +145,10 @@ pub trait VaultCtx: Send + Sync {
 
     /// Register a logical backend factory under a mount type.
     ///
-    /// `LogicalBackendNewFunc` still names `Arc<Core>` in its own signature
-    /// (`src/core.rs:44`). That is the single edge this trait cannot abstract
-    /// away on its own, and retyping it to `Arc<dyn VaultCtx>` is the atomic
-    /// step described in this module's docs.
+    /// `LogicalBackendNewFunc` is `dyn Fn(Arc<dyn VaultCtx>) -> ...`, so this
+    /// signature carries no `Core` either. That alias sat in every engine's
+    /// mount path and was the last shared edge forcing the engines to convert
+    /// together.
     fn add_logical_backend(&self, logical_type: &str, backend: Arc<LogicalBackendNewFunc>) -> Result<(), RvError>;
 
     fn delete_logical_backend(&self, logical_type: &str) -> Result<(), RvError>;
@@ -172,6 +187,45 @@ pub trait VaultCtx: Send + Sync {
     fn audit_broker(&self) -> Option<Arc<AuditBroker>>;
 
     fn dos_guard(&self) -> Arc<DosGuard>;
+
+    /// Server-wide gate for mandatory AppRole machine binding. The AppRole
+    /// login handler reads it on every login, so it is handed out as the shared
+    /// `Arc<AtomicBool>` rather than a snapshot — a copy would go stale the
+    /// moment an operator flipped the config.
+    fn approle_require_machine(&self) -> Arc<AtomicBool>;
+
+    /// Flip the gate above and persist it to the system view.
+    async fn set_approle_require_machine(&self, required: bool) -> Result<(), RvError>;
+
+    /// Fast-path mirror of the FerroGate mount's `require_machine_identity`
+    /// flag, consulted on every authenticated request. Shared `Arc` for the
+    /// same reason as `approle_require_machine`.
+    /// Cache subsystem configuration. Returned by reference: it is a plain
+    /// config struct living in `Core`, read once at store construction.
+    fn cache_config(&self) -> &CacheConfig;
+
+    /// Snapshot of the registered auth handlers. The token store seeds its own
+    /// `ArcSwap` from this at construction.
+    fn auth_handlers(&self) -> Arc<Vec<Arc<dyn AuthHandler>>>;
+
+    /// Logical mount prefix for the root tenant (`logical/`, or the re-rooted
+    /// namespace path).
+    fn root_logical_prefix(&self) -> String;
+
+    /// A weak handle back to the kernel, for stores that must not keep it
+    /// alive. `Core` owns the modules, which own the stores, so a strong
+    /// handle here would be a reference cycle — which is exactly why `Core`
+    /// carries a `self_ptr` in the first place.
+    fn weak_ctx(&self) -> Weak<dyn VaultCtx>;
+
+    /// The unencrypted physical backend, below the barrier. Needed to identify
+    /// the local Raft node for scheduled-export catalog records.
+    fn physical(&self) -> Arc<dyn PhysicalBackend>;
+
+    fn require_machine_identity(&self) -> Arc<AtomicBool>;
+
+    /// Flip the gate above and persist it.
+    async fn set_require_machine_identity(&self, required: bool) -> Result<(), RvError>;
 }
 
 /// Delegates to `Core`'s existing inherent methods and fields, so runtime
@@ -261,6 +315,145 @@ impl VaultCtx for Core {
 
     fn dos_guard(&self) -> Arc<DosGuard> {
         self.dos_guard.clone()
+    }
+
+    fn approle_require_machine(&self) -> Arc<AtomicBool> {
+        self.approle_require_machine.clone()
+    }
+
+    async fn set_approle_require_machine(&self, required: bool) -> Result<(), RvError> {
+        Core::set_approle_require_machine(self, required).await
+    }
+
+    fn cache_config(&self) -> &CacheConfig {
+        &self.cache_config
+    }
+
+    fn auth_handlers(&self) -> Arc<Vec<Arc<dyn AuthHandler>>> {
+        self.auth_handlers.load_full()
+    }
+
+    fn root_logical_prefix(&self) -> String {
+        Core::root_logical_prefix(self)
+    }
+
+    fn weak_ctx(&self) -> Weak<dyn VaultCtx> {
+        // `Weak<Core>` -> `Weak<dyn VaultCtx>` is a plain unsizing coercion.
+        self.self_ptr.clone()
+    }
+
+    fn physical(&self) -> Arc<dyn PhysicalBackend> {
+        self.physical.clone()
+    }
+
+    fn require_machine_identity(&self) -> Arc<AtomicBool> {
+        self.require_machine_identity.clone()
+    }
+
+    async fn set_require_machine_identity(&self, required: bool) -> Result<(), RvError> {
+        Core::set_require_machine_identity(self, required).await
+    }
+}
+
+/// Blanket impl so an `Arc<dyn VaultCtx>` (or `Arc<Core>`) is itself a
+/// `VaultCtx`.
+///
+/// Without this, `&Arc<dyn VaultCtx>` does not coerce to `&dyn VaultCtx` --
+/// only `&T` does -- so every helper taking `&dyn VaultCtx` would need
+/// `.as_ref()` at each call site. Engines hold their kernel handle as an
+/// `Arc`, so that would have been ~60 call sites of pure noise. Forwarding
+/// through `(**self)` costs one extra indirection and nothing else.
+#[maybe_async::maybe_async]
+impl<T: VaultCtx + ?Sized> VaultCtx for Arc<T> {
+    async fn handle_request(&self, req: &mut Request) -> Result<Option<Response>, RvError> {
+        (**self).handle_request(req).await
+    }
+    fn barrier(&self) -> Arc<dyn SecurityBarrier> {
+        (**self).barrier()
+    }
+    fn system_view(&self) -> Option<Arc<BarrierView>> {
+        (**self).system_view()
+    }
+    fn hmac_key(&self) -> Vec<u8> {
+        (**self).hmac_key()
+    }
+    fn sealed(&self) -> bool {
+        (**self).sealed()
+    }
+    async fn inited(&self) -> Result<bool, RvError> {
+        (**self).inited().await
+    }
+    fn router(&self) -> Arc<Router> {
+        (**self).router()
+    }
+    fn mounts_router(&self) -> Arc<MountsRouter> {
+        (**self).mounts_router()
+    }
+    fn root_storage_prefix(&self) -> Arc<String> {
+        (**self).root_storage_prefix()
+    }
+    fn add_logical_backend(&self, logical_type: &str, backend: Arc<LogicalBackendNewFunc>) -> Result<(), RvError> {
+        (**self).add_logical_backend(logical_type, backend)
+    }
+    fn delete_logical_backend(&self, logical_type: &str) -> Result<(), RvError> {
+        (**self).delete_logical_backend(logical_type)
+    }
+    fn add_handler(&self, handler: Arc<dyn Handler>) -> Result<(), RvError> {
+        (**self).add_handler(handler)
+    }
+    fn delete_handler(&self, handler: Arc<dyn Handler>) -> Result<(), RvError> {
+        (**self).delete_handler(handler)
+    }
+    fn add_auth_handler(&self, handler: Arc<dyn AuthHandler>) -> Result<(), RvError> {
+        (**self).add_auth_handler(handler)
+    }
+    fn delete_auth_handler(&self, handler: Arc<dyn AuthHandler>) -> Result<(), RvError> {
+        (**self).delete_auth_handler(handler)
+    }
+    fn mount_entry_hmac_level(&self) -> MountEntryHMACLevel {
+        (**self).mount_entry_hmac_level()
+    }
+    fn mounts_monitor(&self) -> Option<Arc<MountsMonitor>> {
+        (**self).mounts_monitor()
+    }
+    fn module_manager(&self) -> &ModuleManager {
+        (**self).module_manager()
+    }
+    fn stats(&self) -> Arc<DashboardStats> {
+        (**self).stats()
+    }
+    fn audit_broker(&self) -> Option<Arc<AuditBroker>> {
+        (**self).audit_broker()
+    }
+    fn dos_guard(&self) -> Arc<DosGuard> {
+        (**self).dos_guard()
+    }
+    fn approle_require_machine(&self) -> Arc<AtomicBool> {
+        (**self).approle_require_machine()
+    }
+    async fn set_approle_require_machine(&self, required: bool) -> Result<(), RvError> {
+        (**self).set_approle_require_machine(required).await
+    }
+    fn cache_config(&self) -> &CacheConfig {
+        (**self).cache_config()
+    }
+    fn auth_handlers(&self) -> Arc<Vec<Arc<dyn AuthHandler>>> {
+        (**self).auth_handlers()
+    }
+    fn root_logical_prefix(&self) -> String {
+        (**self).root_logical_prefix()
+    }
+    fn weak_ctx(&self) -> Weak<dyn VaultCtx> {
+        (**self).weak_ctx()
+    }
+    fn physical(&self) -> Arc<dyn PhysicalBackend> {
+        (**self).physical()
+    }
+    fn require_machine_identity(&self) -> Arc<AtomicBool> {
+        (**self).require_machine_identity()
+    }
+    async fn set_require_machine_identity(&self, required: bool) -> Result<(), RvError> {
+        (**self).set_require_machine_identity(required).await
     }
 }
 

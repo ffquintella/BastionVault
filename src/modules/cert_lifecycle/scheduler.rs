@@ -33,8 +33,8 @@ use serde_json::Map;
 use tokio::sync::Mutex;
 
 use super::storage::{self, SchedulerConfig, Target, TargetState, KEY_SCHEDULER_CONFIG};
+use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     logical::{Operation, Request},
     storage::Storage,
@@ -44,7 +44,7 @@ const OUTER_TICK_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Spawn the cert-lifecycle scheduler. Returns the JoinHandle for the
 /// caller's reference; dropping it does not stop the task.
-pub fn start_cert_lifecycle_scheduler(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
+pub fn start_cert_lifecycle_scheduler(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         let last_fired: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
         log::info!(
@@ -55,7 +55,7 @@ pub fn start_cert_lifecycle_scheduler(core: Arc<Core>) -> tokio::task::JoinHandl
         let mut interval = tokio::time::interval(OUTER_TICK_INTERVAL);
         loop {
             interval.tick().await;
-            if core.state.load().sealed {
+            if core.sealed() {
                 continue;
             }
             if let Err(e) = tick(&core, last_fired.clone()).await {
@@ -75,7 +75,7 @@ pub fn start_cert_lifecycle_scheduler(core: Arc<Core>) -> tokio::task::JoinHandl
 /// (every enabled mount fires this call).
 #[maybe_async::maybe_async]
 pub async fn run_cert_lifecycle_pass(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     last_fired: Option<Arc<Mutex<HashMap<String, Instant>>>>,
 ) -> Result<(), RvError> {
     let map = last_fired.unwrap_or_else(|| Arc::new(Mutex::new(HashMap::new())));
@@ -84,7 +84,7 @@ pub async fn run_cert_lifecycle_pass(
 
 #[maybe_async::maybe_async]
 async fn tick(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     last_fired: Arc<Mutex<HashMap<String, Instant>>>,
 ) -> Result<(), RvError> {
     let lifecycle_mounts: Vec<(String, String)> = {
@@ -117,7 +117,7 @@ async fn tick(
 
 #[maybe_async::maybe_async]
 async fn run_one_mount(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     mount_uuid: &str,
     mount_path: &str,
     last_fired: Arc<Mutex<HashMap<String, Instant>>>,
@@ -125,7 +125,7 @@ async fn run_one_mount(
     // Resolve the BarrierView for this mount so we can read config +
     // targets + state directly. PKI dispatch goes through the routed
     // path below.
-    let view = match core.router.matching_view(mount_path)? {
+    let view = match core.router().matching_view(mount_path)? {
         Some(v) => v,
         None => return Ok(()),
     };
@@ -184,7 +184,7 @@ async fn run_one_mount(
 
 #[maybe_async::maybe_async]
 async fn consider_target(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     mount_path: &str,
     storage_req: &Request,
     cfg: &SchedulerConfig,

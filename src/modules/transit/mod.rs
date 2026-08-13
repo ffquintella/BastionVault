@@ -21,7 +21,6 @@ use derive_more::Deref;
 
 use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     logical::{Backend, LogicalBackend, Path},
     modules::Module,
@@ -64,7 +63,7 @@ Operations:
 "#;
 
 pub struct TransitBackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
 }
 
 #[derive(Deref)]
@@ -74,7 +73,7 @@ pub struct TransitBackend {
 }
 
 impl TransitBackend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self { inner: Arc::new(TransitBackendInner { core }) }
     }
 
@@ -118,7 +117,7 @@ pub struct TransitModule {
 }
 
 impl TransitModule {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self {
             name: "transit".to_string(),
             backend: Arc::new(TransitBackend::new(core)),

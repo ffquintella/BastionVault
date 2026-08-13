@@ -24,6 +24,7 @@ use super::{
 };
 #[cfg(not(feature = "sync_handler"))]
 use super::CachedJwks;
+use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
     errors::RvError,
@@ -562,7 +563,7 @@ impl FerroGateBackendInner {
         if req.client_token.is_empty() {
             return false;
         }
-        let Some(auth_module) = self.core.module_manager.get_module::<AuthModule>("auth") else {
+        let Some(auth_module) = self.core.module_manager().get_module::<AuthModule>("auth") else {
             return false;
         };
         let guard = auth_module.token_store.load();
@@ -601,7 +602,7 @@ impl FerroGateBackendInner {
 
         let auth_module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<AuthModule>("auth")
             .ok_or_else(|| "user_binding_unavailable: auth module not loaded".to_string())?;
         let guard = auth_module.token_store.load();

@@ -66,9 +66,9 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_string,
-    core::Core,
     errors::RvError,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
 };
@@ -346,7 +346,7 @@ pub trait MasterCertIssuer: Send + Sync {
 /// `Core::handle_request`, propagating the operator's `client_token`
 /// so the PKI engine's ACL, audit, and lease layers all engage.
 pub struct CoreMasterCertIssuer {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
     pub client_token: String,
 }
 
@@ -403,7 +403,7 @@ enum PkiHalfKind {
 /// Do not thread a namespace prefix through here.
 #[maybe_async::maybe_async]
 async fn pki_issue_one(
-    core: &Core,
+    core: &dyn VaultCtx,
     client_token: &str,
     pki_mount: &str,
     pki_role: &str,
@@ -571,8 +571,8 @@ pub struct MasterStore {
 
 #[maybe_async::maybe_async]
 impl MasterStore {
-    pub async fn new(core: &Core) -> Result<Arc<Self>, RvError> {
-        let Some(system_view) = core.state.load().system_view.as_ref().cloned() else {
+    pub async fn new(core: &dyn VaultCtx) -> Result<Arc<Self>, RvError> {
+        let Some(system_view) = core.system_view() else {
             return Err(RvError::ErrBarrierSealed);
         };
         let view = Arc::new(system_view.new_sub_view(MASTER_SUB_PATH));

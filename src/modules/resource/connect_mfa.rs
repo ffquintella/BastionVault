@@ -42,9 +42,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_response_status,
-    core::Core,
     errors::RvError,
     logical::{Operation, Request},
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
@@ -149,10 +149,10 @@ pub struct ConnectMfaTicketStore {
 
 #[maybe_async::maybe_async]
 impl ConnectMfaTicketStore {
-    pub fn new(core: &Core) -> Result<Self, RvError> {
+    pub fn new(core: &dyn VaultCtx) -> Result<Self, RvError> {
         // The view is rooted at the barrier, and `ticket_key` already carries
         // the full prefix, so the view itself takes an empty prefix.
-        Ok(Self { view: Arc::new(BarrierView::new(core.barrier.clone(), "")) })
+        Ok(Self { view: Arc::new(BarrierView::new(core.barrier().clone(), "")) })
     }
 
     /// Mint a ticket for `binding`, proved by `method`. Returns the raw
@@ -303,7 +303,7 @@ pub fn caller_principal(req: &Request) -> Result<(String, String), RvError> {
 /// Mirrors `RustionBackendInner::namespace_sub_request_prefix` but returns
 /// the bare path (no trailing slash) so it is a stable comparison key rather
 /// than a request prefix.
-pub async fn caller_namespace(core: &Core, req: &Request) -> Result<String, RvError> {
+pub async fn caller_namespace(core: &dyn VaultCtx, req: &Request) -> Result<String, RvError> {
     use crate::modules::namespace::router::namespace_header_from_map;
     use crate::modules::namespace::{NamespaceModule, NAMESPACE_MODULE_NAME};
 
@@ -316,7 +316,7 @@ pub async fn caller_namespace(core: &Core, req: &Request) -> Result<String, RvEr
     if raw.is_empty() {
         return Ok(String::new());
     }
-    let Some(ns_module) = core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+    let Some(ns_module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
     else {
         return Ok(String::new());
     };
@@ -342,7 +342,7 @@ pub async fn caller_namespace(core: &Core, req: &Request) -> Result<String, RvEr
 /// `ns_prefix` is the caller's namespace request prefix (`""` for root,
 /// `"tenant-a/"` otherwise).
 pub async fn load_profile(
-    core: &Core,
+    core: &dyn VaultCtx,
     ns_prefix: &str,
     resource: &str,
     profile_id: &str,
@@ -350,7 +350,7 @@ pub async fn load_profile(
     let path = format!("{ns_prefix}resources/resources/{resource}");
     let mut sub = Request::new(&path);
     sub.operation = Operation::Read;
-    let Some(resp) = core.router.handle_request(&mut sub).await? else {
+    let Some(resp) = core.router().handle_request(&mut sub).await? else {
         return Ok(None);
     };
     let data = resp.data.unwrap_or_default();
@@ -378,7 +378,7 @@ pub fn profile_gate_flag(profile: &Value) -> bool {
 /// own "profile not found" handling produces a far better error than a
 /// misattributed MFA failure would.
 pub async fn profile_requires_mfa(
-    core: &Core,
+    core: &dyn VaultCtx,
     ns_prefix: &str,
     resource: &str,
     profile_id: &str,
@@ -400,7 +400,7 @@ pub async fn profile_requires_mfa(
 /// - Anything else ⇒ `Err`. There is no path through this function that
 ///   permits a gated connect without a redeemed ticket.
 pub async fn enforce(
-    core: &Core,
+    core: &dyn VaultCtx,
     req: &Request,
     ns_prefix: &str,
     resource: &str,
@@ -438,7 +438,7 @@ pub async fn enforce(
 
 /// Namespace *request prefix* (`""` or `"tenant-a/"`) for sub-requests, as
 /// opposed to the bare comparison key [`caller_namespace`] returns.
-async fn ns_request_prefix(core: &Core, req: &Request) -> Result<String, RvError> {
+async fn ns_request_prefix(core: &dyn VaultCtx, req: &Request) -> Result<String, RvError> {
     let ns = caller_namespace(core, req).await?;
     Ok(if ns.is_empty() { String::new() } else { format!("{ns}/") })
 }
@@ -471,7 +471,7 @@ impl super::ResourceBackendInner {
         }
         let policy_module = self
             .core
-            .module_manager
+            .module_manager()
             .get_module::<crate::modules::policy::PolicyModule>("policy")
             .ok_or_else(|| crate::bv_error_string!("policy module not registered"))?;
 
@@ -563,7 +563,7 @@ impl super::ResourceBackendInner {
         sub.auth = req.auth.clone();
         sub.client_token = req.client_token.clone();
         sub.data = Some(Map::new());
-        let resp = self.core.router.handle_request(&mut sub).await?;
+        let resp = self.core.router().handle_request(&mut sub).await?;
         let step_up = resp.and_then(|r| r.data).unwrap_or_default();
 
         let methods = step_up.get("methods").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
@@ -635,7 +635,7 @@ impl super::ResourceBackendInner {
         // A failed factor propagates as-is: the step-up path returns an error
         // rather than a falsy body, so there is no success-shaped failure to
         // mistake for a pass.
-        let resp = self.core.router.handle_request(&mut sub).await?;
+        let resp = self.core.router().handle_request(&mut sub).await?;
         let verified = resp
             .and_then(|r| r.data)
             .and_then(|d| d.get("verified").and_then(|v| v.as_bool()))
@@ -898,7 +898,7 @@ mod tests {
         // clock abstraction.
         let (ticket, mut record) = store.mint(&binding(), "totp").await.unwrap();
         record.expires_at = (Utc::now() - ChronoDuration::seconds(1)).to_rfc3339();
-        let view = BarrierView::new(core.barrier.clone(), "");
+        let view = BarrierView::new(core.barrier().clone(), "");
         view.put(&StorageEntry {
             key: ticket_key(&ticket),
             value: serde_json::to_vec(&record).unwrap(),

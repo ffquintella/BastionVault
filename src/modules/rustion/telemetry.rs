@@ -22,7 +22,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::core::Core;
+use crate::kernel_api::VaultCtx;
 use crate::errors::RvError;
 use crate::storage::{barrier_view::BarrierView, Storage, StorageEntry};
 use crate::modules::rustion::RustionModule;
@@ -178,7 +178,7 @@ pub async fn write_cursor(
 
 /// Spawn the polling task. Mirrors `probe::start_pinger`. The cache
 /// is held inside the module's `telemetry_cache` field.
-pub fn start_poller(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
+pub fn start_poller(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         log::info!(
             "rustion/telemetry: started (tick every {}s)",
@@ -188,7 +188,7 @@ pub fn start_poller(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
         interval.tick().await; // skip immediate first tick
         loop {
             interval.tick().await;
-            if core.state.load().sealed {
+            if core.sealed() {
                 continue;
             }
             if let Err(e) = tick(&core).await {
@@ -199,13 +199,13 @@ pub fn start_poller(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
 }
 
 /// Run one polling pass. Exposed for tests / admin endpoints.
-pub async fn run_pass(core: &Arc<Core>) -> Result<(), RvError> {
+pub async fn run_pass(core: &dyn VaultCtx) -> Result<(), RvError> {
     tick(core).await
 }
 
-async fn tick(core: &Arc<Core>) -> Result<(), RvError> {
+async fn tick(core: &dyn VaultCtx) -> Result<(), RvError> {
     let module = core
-        .module_manager
+        .module_manager()
         .get_module::<RustionModule>("rustion")
         .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
     let Some(store) = module.store() else {
@@ -216,7 +216,7 @@ async fn tick(core: &Arc<Core>) -> Result<(), RvError> {
     };
 
     // Cursor sub-view.
-    let Some(system_view) = core.state.load().system_view.as_ref().cloned() else {
+    let Some(system_view) = core.system_view() else {
         return Err(RvError::ErrBarrierSealed);
     };
     let cursors_view = std::sync::Arc::new(system_view.new_sub_view(CURSOR_SUB_PATH));

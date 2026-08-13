@@ -19,6 +19,7 @@ use rustls::{
 };
 use sysexits::ExitCode;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     cli::{command, config, config::TlsVersion},
     dos::middleware::dos_middleware,
@@ -254,7 +255,7 @@ impl Server {
                 return Err(e);
             }
         };
-        let hsm_bootstrap = hsm_cfg.map(|cfg| (cfg, core.physical.clone(), core.clone()));
+        let hsm_bootstrap = hsm_cfg.map(|cfg| (cfg, core.physical().clone(), core.clone()));
 
         // Phase 1.5: parse BASTIONVAULT_TRUSTED_PROXIES once at start.
         // Bad CIDRs are logged at warn level but do not abort the

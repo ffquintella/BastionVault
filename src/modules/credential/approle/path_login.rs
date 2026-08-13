@@ -5,9 +5,9 @@ use super::{
     validation::{create_hmac, verify_cidr_role_secret_id_subset},
     AppRoleBackend, AppRoleBackendInner,
 };
+use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
-    core::Core,
     errors::RvError,
     logical::{Auth, Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     modules::credential::ferrogate::{machine_id as ferrogate_machine_id, status as ferrogate_status},
@@ -23,12 +23,12 @@ use crate::{
 /// `scopes = ["owner"]` policy will not match — correct fail-closed
 /// behavior).
 pub(crate) async fn resolve_approle_entity_id(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     role_name: &str,
     ns_path: &str,
 ) -> Option<String> {
     let module = core
-        .module_manager
+        .module_manager()
         .get_module::<IdentityModule>("identity")?;
     let store = module.entity_store()?;
     match store.get_or_create_entity_ns("approle/", role_name, ns_path).await {
@@ -96,7 +96,7 @@ impl AppRoleBackendInner {
         direct: &[String],
         ns_path: &str,
     ) -> Vec<String> {
-        let Some(module) = self.core.module_manager.get_module::<IdentityModule>("identity") else {
+        let Some(module) = self.core.module_manager().get_module::<IdentityModule>("identity") else {
             return direct.to_vec();
         };
         let Some(store) = module.group_store() else {
@@ -324,7 +324,7 @@ impl AppRoleBackendInner {
         // Operators can disable the gate to stage rollout (e.g. before binding
         // machines to existing roles).
         let mut machine_envs: Vec<String> = Vec::new();
-        if self.core.approle_require_machine.load(std::sync::atomic::Ordering::Relaxed) {
+        if self.core.approle_require_machine().load(std::sync::atomic::Ordering::Relaxed) {
             let machine_token = req
                 .get_data("machine_token")
                 .ok()
@@ -338,7 +338,7 @@ impl AppRoleBackendInner {
 
             let auth_module = self
                 .core
-                .module_manager
+                .module_manager()
                 .get_module::<crate::modules::auth::AuthModule>("auth")
                 .ok_or_else(|| RvError::ErrResponse("auth module not loaded".to_string()))?;
             let guard = auth_module.token_store.load();

@@ -20,7 +20,7 @@
 //!   the same semantics the existing `scheduled_exports` runner uses, and is
 //!   the right safe default for a sweep that's idempotent (re-running it
 //!   does nothing if everything is already swept).
-//! - **Self-skip on sealed.** `core.state.load().sealed` is checked every
+//! - **Self-skip on sealed.** `core.sealed()` is checked every
 //!   tick. The barrier reads inside `run_tidy_inner` would fail anyway, but
 //!   skipping early avoids logging an avalanche of barrier-locked errors
 //!   right after a seal.
@@ -42,8 +42,8 @@ use super::{
     path_tidy::run_tidy_inner,
     storage::{self, AutoTidyConfig, KEY_CONFIG_AUTO_TIDY},
 };
+use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     logical::{Operation, Request},
     storage::Storage,
@@ -55,7 +55,7 @@ const TICK_INTERVAL: Duration = Duration::from_secs(30);
 /// can hold it for the process lifetime; dropping the handle does not stop
 /// the task (tokio detaches automatically when the handle drops in
 /// fire-and-forget mode), matching the existing `scheduled_exports` pattern.
-pub fn start_pki_tidy_scheduler(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
+pub fn start_pki_tidy_scheduler(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         let last_fired: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
         log::info!("pki/auto-tidy: scheduler started (tick every {}s)", TICK_INTERVAL.as_secs());
@@ -63,7 +63,7 @@ pub fn start_pki_tidy_scheduler(core: Arc<Core>) -> tokio::task::JoinHandle<()> 
         let mut interval = tokio::time::interval(TICK_INTERVAL);
         loop {
             interval.tick().await;
-            if core.state.load().sealed {
+            if core.sealed() {
                 continue;
             }
             if let Err(e) = tick(&core, last_fired.clone()).await {
@@ -87,7 +87,7 @@ pub fn start_pki_tidy_scheduler(core: Arc<Core>) -> tokio::task::JoinHandle<()> 
 /// with a longer-lived caller.
 #[maybe_async::maybe_async]
 pub async fn run_pki_tidy_pass(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     last_fired: Option<Arc<Mutex<HashMap<String, Instant>>>>,
 ) -> Result<(), RvError> {
     let map = last_fired.unwrap_or_else(|| Arc::new(Mutex::new(HashMap::new())));
@@ -95,7 +95,7 @@ pub async fn run_pki_tidy_pass(
 }
 
 #[maybe_async::maybe_async]
-async fn tick(core: &Arc<Core>, last_fired: Arc<Mutex<HashMap<String, Instant>>>) -> Result<(), RvError> {
+async fn tick(core: &dyn VaultCtx, last_fired: Arc<Mutex<HashMap<String, Instant>>>) -> Result<(), RvError> {
     // Snapshot the mount table — we drop the read lock immediately so the
     // sweeps below don't hold it across awaits.
     let pki_mounts: Vec<(String, String)> = {
@@ -128,7 +128,7 @@ async fn tick(core: &Arc<Core>, last_fired: Arc<Mutex<HashMap<String, Instant>>>
 
 #[maybe_async::maybe_async]
 async fn run_one(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     mount_uuid: &str,
     mount_path: &str,
     last_fired: Arc<Mutex<HashMap<String, Instant>>>,
@@ -137,7 +137,7 @@ async fn run_one(
     // resolve it via the router so we don't have to reconstruct the
     // `LOGICAL_BARRIER_PREFIX/<uuid>/` path manually — the router is the
     // single source of truth for live mount routing.
-    let view = match core.router.matching_view(mount_path)? {
+    let view = match core.router().matching_view(mount_path)? {
         Some(v) => v,
         None => return Ok(()),
     };

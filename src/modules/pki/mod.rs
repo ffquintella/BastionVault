@@ -12,7 +12,6 @@ use derive_more::Deref;
 
 use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     logical::{Backend, LogicalBackend, Path},
     modules::Module,
@@ -59,7 +58,7 @@ working unchanged. Endpoints not yet implemented in Phase 1 return a clear
 "#;
 
 pub struct PkiBackendInner {
-    pub core: Arc<Core>,
+    pub core: Arc<dyn VaultCtx>,
 }
 
 #[derive(Deref)]
@@ -69,7 +68,7 @@ pub struct PkiBackend {
 }
 
 impl PkiBackend {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self { inner: Arc::new(PkiBackendInner { core }) }
     }
 
@@ -161,7 +160,7 @@ pub struct PkiModule {
 }
 
 impl PkiModule {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self { name: "pki".to_string(), backend: Arc::new(PkiBackend::new(core)) }
     }
 }

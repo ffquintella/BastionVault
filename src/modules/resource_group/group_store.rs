@@ -30,8 +30,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     bv_error_string,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
@@ -112,8 +112,8 @@ pub struct ResourceGroupStore {
 
 #[maybe_async::maybe_async]
 impl ResourceGroupStore {
-    pub async fn new(core: &Core) -> Result<Arc<Self>, RvError> {
-        let Some(system_view) = core.state.load().system_view.as_ref().cloned() else {
+    pub async fn new(core: &dyn VaultCtx) -> Result<Arc<Self>, RvError> {
+        let Some(system_view) = core.system_view() else {
             return Err(RvError::ErrBarrierSealed);
         };
 

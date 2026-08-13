@@ -8,7 +8,7 @@
 use std::{any::Any, sync::Arc};
 
 use crate::kernel_api::VaultCtx;
-use crate::{core::Core, errors::RvError, modules::Module};
+use crate::{errors::RvError, modules::Module};
 
 pub mod cli {
     use serde_json::{Map, Value};
@@ -36,11 +36,11 @@ pub mod cli {
 
 pub struct CertModule {
     pub name: String,
-    pub _core: Arc<Core>,
+    pub _core: Arc<dyn VaultCtx>,
 }
 
 impl CertModule {
-    pub fn new(core: Arc<Core>) -> Self {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
         Self { name: "cert".to_string(), _core: core }
     }
 }

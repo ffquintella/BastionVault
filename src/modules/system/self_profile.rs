@@ -51,6 +51,7 @@
 use serde_json::{json, Map, Value};
 
 use super::SystemBackend;
+use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_response_status,
     errors::RvError,
@@ -103,12 +104,12 @@ impl SystemBackend {
             return Err(RvError::ErrPermissionDenied);
         };
 
-        let mount = self.core.router.matching_mount(&te.path)?;
+        let mount = self.core.router().matching_mount(&te.path)?;
         if mount.is_empty() {
             return Ok(None);
         }
         // Only a `userpass` mount owns a password we can change.
-        let Some(entry) = self.core.router.matching_mount_entry(&mount)? else {
+        let Some(entry) = self.core.router().matching_mount_entry(&mount)? else {
             return Ok(None);
         };
         {
@@ -127,7 +128,7 @@ impl SystemBackend {
             return Ok(None);
         }
 
-        let Some(view) = self.core.router.matching_view(&mount)? else {
+        let Some(view) = self.core.router().matching_view(&mount)? else {
             return Ok(None);
         };
         let Some(raw) = view.get(&format!("user/{username}")).await? else {
@@ -147,7 +148,7 @@ impl SystemBackend {
         &self,
         principal: &SelfUserpassPrincipal,
     ) -> Result<(), RvError> {
-        let Some(view) = self.core.router.matching_view(&principal.mount)? else {
+        let Some(view) = self.core.router().matching_view(&principal.mount)? else {
             return Err(bv_error_response_status!(
                 500,
                 "the auth mount that issued this token is no longer available"

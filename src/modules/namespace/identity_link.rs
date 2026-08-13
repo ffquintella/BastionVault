@@ -27,9 +27,9 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_response_status, bv_error_string,
-    core::Core,
     errors::RvError,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
     utils::generate_uuid,
@@ -76,8 +76,8 @@ pub struct IdentityLinkStore {
 
 #[maybe_async::maybe_async]
 impl IdentityLinkStore {
-    pub fn new(core: &Core) -> Result<Self, RvError> {
-        let view = Arc::new(BarrierView::new(core.barrier.clone(), IDENTITY_LINK_PREFIX));
+    pub fn new(core: &dyn VaultCtx) -> Result<Self, RvError> {
+        let view = Arc::new(BarrierView::new(core.barrier().clone(), IDENTITY_LINK_PREFIX));
         Ok(Self { view })
     }
 
@@ -188,7 +188,7 @@ mod tests {
     async fn test_identity_link_subtree_enforced() {
         let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_ns_identity_link").await;
         let ns_store = core
-            .module_manager
+            .module_manager()
             .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
             .and_then(|m| m.store())
             .unwrap();

@@ -41,8 +41,8 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
-    core::Core,
     errors::RvError,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
 };
@@ -127,8 +127,8 @@ pub struct DefaultResourceAccountStore {
 
 #[maybe_async::maybe_async]
 impl DefaultResourceAccountStore {
-    pub fn new(core: &Core) -> Result<Self, RvError> {
-        let view = Arc::new(BarrierView::new(core.barrier.clone(), DEFAULT_ACCOUNT_PREFIX));
+    pub fn new(core: &dyn VaultCtx) -> Result<Self, RvError> {
+        let view = Arc::new(BarrierView::new(core.barrier().clone(), DEFAULT_ACCOUNT_PREFIX));
         Ok(Self { view })
     }
 

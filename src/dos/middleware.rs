@@ -20,6 +20,7 @@ use actix_web::{
     Error, HttpResponse,
 };
 
+use crate::kernel_api::VaultCtx;
 use crate::core::Core;
 use crate::http::client_ip::{ClientIp, TrustedProxies};
 use crate::http::Connection;
@@ -88,7 +89,7 @@ fn ban_response(info: &BanInfo) -> HttpResponse {
         }))
 }
 
-async fn emit_ban_audit(core: &Core, ip: std::net::IpAddr, path: &str, info: &BanInfo) {
+async fn emit_ban_audit(core: &dyn VaultCtx, ip: std::net::IpAddr, path: &str, info: &BanInfo) {
     let body = serde_json::json!({
         "client_ip": ip.to_string(),
         "path": path,
