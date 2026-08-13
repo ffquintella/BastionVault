@@ -5,7 +5,10 @@ Status: **Phase 0 done. Phase 1 partially done: `bv-errors`, `bv-shamir` and
 *not* mechanical file moves — a re-measurement of the dependency graph (see
 "Verified clean leaves" below, which was wrong) shows `bv-utils` is Tier 1, and
 `bv-logical` and `bv-audit` are blocked on Phase 2 rather than the reverse.
-Moving to Phase 2 next, which unblocks them.**
+Phase 2 started: `VaultCtx` + `impl VaultCtx for Core` are landed and additive
+(`src/kernel_api.rs`). The conversion onto it was attempted and reverted, and
+the measured cost is in "Step 3 is not step-shaped" below — it is one atomic
+~353-site change, not the per-engine sequence this plan describes.**
 
 > **Read the two "re-measured" blocks below before planning against this
 > document.** Three of its load-bearing figures were derived from greps that
@@ -551,6 +554,69 @@ changes, the abstraction is wrong.
 **Risk:** this is the one phase with real design content. Budget for it
 being revised once. Keep it behind no feature flag — a half-inverted
 graph is worse than either end state.
+
+#### Step 3 is not step-shaped: measured cost of the `Module` trait flip
+
+`VaultCtx` + `impl VaultCtx for Core` **is landed** (`src/kernel_api.rs`), and
+it is additive: no call site changed, so it verified on its own.
+
+Step 3 — "change engine signatures from `Arc<Core>` to `Arc<dyn VaultCtx>`,
+module by module, cheapest first" — was then attempted and reverted, so the
+cost below is measured rather than guessed. **It cannot be done module by
+module, and it is not the phase's second step: it is the phase.**
+
+Two signatures make it atomic rather than incremental:
+
+```rust
+// src/modules/mod.rs — all 26 `impl Module for` blocks
+async fn init(&self, _core: &Core)  -> Result<(), RvError>;
+fn setup(&self, _core: &Core)       -> Result<(), RvError>;
+fn cleanup(&self, _core: &Core)     -> Result<(), RvError>;
+
+// src/core.rs:44 — every engine's mount closure is one of these
+pub type LogicalBackendNewFunc = dyn Fn(Arc<Core>) -> Result<Arc<dyn Backend>, RvError> + Send + Sync;
+```
+
+Flipping the `Module` trait alone took the tree from 58 errors to 17 across
+four mechanical passes, and the 17 that remained are the real content:
+
+| what | count | nature |
+|---|---|---|
+| missing `use crate::kernel_api::VaultCtx` | 47 | mechanical, two passes |
+| `core.<field>` → `core.<method>()` | 45 | mechanical (incl. 62 multi-line `core\n.module_manager`) |
+| `fn new(core: &Core)` store constructors to widen | 21 | mechanical — they only need `system_view()` + `router()` |
+| accessors still missing from `VaultCtx` | 5 | `cache_config`, `auth_handlers`, `require_machine_identity` |
+| `&Arc<Core>` passed where `&dyn VaultCtx` wanted | 9 | needs `as_ref()`; `&Arc<T>` does not coerce to `&dyn U` |
+| **`core.self_ptr.clone()` into a `Weak<Core>` field** | **2** | **the wall** |
+
+Those last two are why the flip cannot land on its own. `ExpirationManager`,
+`PolicyStore`, `TokenStore` and their peers keep a `core: Weak<Core>`
+back-reference obtained from `core.self_ptr`, and `self_ptr` is deliberately
+*not* on `VaultCtx`. Giving them a kernel handle means `Weak<dyn VaultCtx>`
+(the coercion is legal — `Weak<T>` is `CoerceUnsized`), which retypes the
+field, which drags in every use of it:
+
+| | count |
+|---|---|
+| `Arc<Core>` occurrences in `src/` | **353** |
+| `Weak<Core>` / `Arc<Core>` struct fields in `src/modules` | **118** |
+| `self.core` uses in `src/modules` | **171** |
+
+So the honest sequencing is a single atomic change covering the `Module`
+trait, `LogicalBackendNewFunc`, and the ~353 `Arc<Core>` sites together —
+*not* steps 3 and 4 as separate items, and not "cheapest engine first".
+Budget it as its own multi-day PR whose gate is the full suite, and expect
+`VaultCtx` to grow ~5 more accessors on the way.
+
+Two smaller corrections to the numbers above while re-measuring:
+
+- The self-lookups are **20**, not ~12: `RustionModule` 10, `AppRoleModule` 7,
+  `NotificationsModule` 2, `SshBrokerModule` 1. All four are genuinely
+  self-lookups (each resolved from inside its own directory), so the
+  "kernel of five" claim holds — `get_module::<T>()` has eight concrete
+  targets, and the three extra ones are these.
+- The `get_module` work is **~101** production call sites, not 43. The 43
+  counted only those spelled literally as `core.module_manager.get_module`.
 
 ### Phase 3 — Engines out, starting with PKI
 
