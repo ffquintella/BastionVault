@@ -121,7 +121,7 @@ impl Module for SamlModule {
 
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let saml = self.backend.clone();
-        let saml_backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
+        let saml_backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
             let mut b = saml.new_backend();
             b.init()?;
             Ok(Arc::new(b))

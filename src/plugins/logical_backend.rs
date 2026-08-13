@@ -53,8 +53,8 @@ use super::manifest::{PluginManifest, RuntimeKind};
 use super::process_runtime::ProcessRuntime;
 use super::runtime::{InvokeOutcome, InvokeOutput, WasmRuntime};
 use super::{PluginCatalog, PluginRecord};
+use crate::kernel_api::VaultCtx;
 use crate::context::Context;
-use crate::core::Core;
 use crate::errors::RvError;
 use crate::logical::{Backend, Operation, Request, Response};
 
@@ -67,11 +67,11 @@ use crate::logical::{Backend, Operation, Request, Response};
 /// built-in backend would.
 pub struct PluginLogicalBackend {
     plugin_name: String,
-    core: Arc<Core>,
+    core: Arc<dyn VaultCtx>,
 }
 
 impl PluginLogicalBackend {
-    pub fn new(plugin_name: String, core: Arc<Core>) -> Self {
+    pub fn new(plugin_name: String, core: Arc<dyn VaultCtx>) -> Self {
         Self { plugin_name, core }
     }
 }
@@ -107,7 +107,8 @@ impl Backend for PluginLogicalBackend {
     }
 
     async fn handle_request(&self, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let storage = self.core.barrier.as_storage();
+        let barrier = self.core.barrier();
+        let storage = barrier.as_storage();
 
         // Phase 5.7: a deleted plugin's mount surfaces a clear
         // "quarantined" error rather than a generic "unknown plugin"
@@ -353,7 +354,7 @@ fn translate_response(
 /// [`MountsRouter::get_backend`] hook returns one of these per
 /// `plugin:<name>` lookup.
 pub fn factory_for(plugin_name: String) -> Arc<crate::core::LogicalBackendNewFunc> {
-    Arc::new(move |core: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
+    Arc::new(move |core: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
         let backend = PluginLogicalBackend::new(plugin_name.clone(), core);
         Ok(Arc::new(backend) as Arc<dyn Backend>)
     })
@@ -381,11 +382,12 @@ impl PluginLogicalBackend {
 /// The caller owns interpreting the response bytes (the notification
 /// dispatcher expects a `{"delivered":[…],"failed":[…]}` object).
 pub async fn invoke_active_plugin(
-    core: Arc<Core>,
+    core: Arc<dyn VaultCtx>,
     plugin_name: &str,
     input: &[u8],
 ) -> Result<InvokeOutput, RvError> {
-    let storage = core.barrier.as_storage();
+    let barrier = core.barrier();
+    let storage = barrier.as_storage();
 
     if let Ok(Some(rec)) = super::quarantine::lookup(storage, plugin_name).await {
         return Err(RvError::ErrOther(::anyhow::anyhow!(

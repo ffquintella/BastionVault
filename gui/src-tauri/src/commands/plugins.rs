@@ -405,7 +405,7 @@ pub async fn plugins_register(
         _ => None,
     };
     bastion_vault::audit::emit_sys_audit(
-        &core_arc,
+        core_arc.as_ref(),
         &token,
         "sys/plugins/register",
         bastion_vault::logical::Operation::Write,
@@ -515,7 +515,7 @@ pub async fn plugins_delete(state: State<'_, AppState>, name: String) -> CmdResu
         _ => None,
     };
     bastion_vault::audit::emit_sys_audit(
-        &core_arc,
+        core_arc.as_ref(),
         &token,
         &format!("sys/plugins/{name}"),
         bastion_vault::logical::Operation::Delete,
@@ -608,7 +608,7 @@ pub async fn plugins_set_config(
         _ => None,
     };
     bastion_vault::audit::emit_sys_audit(
-        &core_arc,
+        core_arc.as_ref(),
         &token,
         &format!("sys/plugins/{name}/config"),
         bastion_vault::logical::Operation::Write,
@@ -747,7 +747,7 @@ pub async fn plugins_set_grants(
     audit_body.insert("hosts".into(), json!(hosts));
     let err_str = outcome.as_ref().err().map(|e| format!("{e:?}"));
     bastion_vault::audit::emit_sys_audit(
-        &core_arc,
+        core_arc.as_ref(),
         &token,
         &format!("sys/plugins/{name}/grants"),
         bastion_vault::logical::Operation::Write,
@@ -778,7 +778,7 @@ pub async fn plugins_delete_grants(state: State<'_, AppState>, name: String) -> 
     audit_body.insert("name".into(), Value::String(name.clone()));
     let err_str = outcome.as_ref().err().map(|e| format!("{e:?}"));
     bastion_vault::audit::emit_sys_audit(
-        &core_arc,
+        core_arc.as_ref(),
         &token,
         &format!("sys/plugins/{name}/grants"),
         bastion_vault::logical::Operation::Delete,
@@ -862,7 +862,7 @@ pub async fn plugins_activate_version(
         _ => None,
     };
     bastion_vault::audit::emit_sys_audit(
-        &core_arc,
+        core_arc.as_ref(),
         &token,
         &format!("sys/plugins/{name}/versions/{version}/activate"),
         bastion_vault::logical::Operation::Write,
@@ -947,7 +947,7 @@ pub async fn plugins_reload(
         serde_json::Value::Number(evicted.into()),
     );
     bastion_vault::audit::emit_sys_audit(
-        &core_arc,
+        core_arc.as_ref(),
         &token,
         &format!("sys/plugins/{name}/reload"),
         bastion_vault::logical::Operation::Write,
@@ -1065,7 +1065,7 @@ pub async fn plugins_invoke(
         Ok(_) => None,
     };
     bastion_vault::audit::emit_sys_audit(
-        &core_arc,
+        core_arc.as_ref(),
         &token,
         &format!("sys/plugins/{name}/invoke"),
         bastion_vault::logical::Operation::Write,

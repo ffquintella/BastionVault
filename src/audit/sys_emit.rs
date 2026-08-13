@@ -17,9 +17,9 @@
 
 use serde_json::{Map, Value};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     audit::{AuditBroker, AuditEntry},
-    core::Core,
     errors::RvError,
     logical::{Auth, Operation, Request},
 };
@@ -28,12 +28,12 @@ use crate::{
 /// empty `Auth` when the token isn't recognised (e.g. anonymous request,
 /// or the auth module isn't installed yet); the audit entry still goes
 /// out with the HMAC'd token as the only correlation handle.
-async fn resolve_auth(core: &Core, token: &str) -> Auth {
+async fn resolve_auth(core: &dyn VaultCtx, token: &str) -> Auth {
     if token.is_empty() {
         return Auth::default();
     }
     let Some(auth_module) = core
-        .module_manager
+        .module_manager()
         .get_module::<crate::modules::auth::AuthModule>("auth")
     else {
         return Auth::default();
@@ -68,14 +68,14 @@ async fn resolve_auth(core: &Core, token: &str) -> Auth {
 /// itself logs at WARN when a device fails; that's the operator's
 /// signal to investigate.
 pub async fn emit_sys_audit(
-    core: &Core,
+    core: &dyn VaultCtx,
     token: &str,
     path: &str,
     operation: Operation,
     body: Option<Map<String, Value>>,
     error: Option<&str>,
 ) {
-    let broker_arc = core.audit_broker.load_full();
+    let broker_arc = core.audit_broker();
     let Some(broker) = broker_arc else {
         return;
     };
@@ -102,7 +102,7 @@ pub async fn emit_sys_audit(
 /// non-secret fields the operator wants visible — e.g. a schedule id,
 /// a plugin name, the count of items applied.
 pub async fn emit_sys_audit_with_response(
-    core: &Core,
+    core: &dyn VaultCtx,
     token: &str,
     path: &str,
     operation: Operation,
@@ -110,7 +110,7 @@ pub async fn emit_sys_audit_with_response(
     response_data: Option<Map<String, Value>>,
     error: Option<&str>,
 ) {
-    let broker_arc = core.audit_broker.load_full();
+    let broker_arc = core.audit_broker();
     let Some(broker) = broker_arc else {
         return;
     };

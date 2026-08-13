@@ -93,7 +93,7 @@ impl Module for Fido2Module {
 
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let fido2 = self.backend.clone();
-        let fido2_backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
+        let fido2_backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
             let mut fido2_backend = fido2.new_backend();
             fido2_backend.init()?;
             Ok(Arc::new(fido2_backend))

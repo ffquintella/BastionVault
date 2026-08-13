@@ -20,6 +20,7 @@ use go_defer::defer;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     cache::CacheConfig,
     cli::config::MountEntryHMACLevel,
@@ -41,7 +42,12 @@ use crate::{
     utils::BHashSet,
 };
 
-pub type LogicalBackendNewFunc = dyn Fn(Arc<Core>) -> Result<Arc<dyn Backend>, RvError> + Send + Sync;
+// Takes `Arc<dyn VaultCtx>`, not `Arc<Core>`: this alias is in every
+// engine's mount-registration path, so while it named `Core` no engine
+// could compile without the kernel. See
+// roadmaps/workspace-decomposition.md Phase 2.
+pub type LogicalBackendNewFunc =
+    dyn Fn(Arc<dyn VaultCtx>) -> Result<Arc<dyn Backend>, RvError> + Send + Sync;
 
 const SEAL_CONFIG_PATH: &str = "core/seal-config";
 const DEPRECATED_UNSEAL_KEY_SET_PATH: &str = "core/used-unseal-keys-set";

@@ -2277,7 +2277,7 @@ impl Module for FilesModule {
 
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let backend = self.backend.clone();
-        let backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
+        let backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
             let mut b = backend.new_backend();
             b.init()?;
             Ok(Arc::new(b))

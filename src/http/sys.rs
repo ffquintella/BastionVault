@@ -1859,7 +1859,7 @@ impl SysAuditCtx {
     ) {
         let err_str = result.as_ref().err().map(|e| format!("{e}"));
         crate::audit::emit_sys_audit(
-            &self.core,
+            self.core.as_ref(),
             &self.token,
             path,
             op,

@@ -71,9 +71,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::timeout;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     audit,
-    core::Core,
     storage::StorageEntry,
 };
 
@@ -121,7 +121,7 @@ impl ProcessRuntime {
         manifest: &PluginManifest,
         binary: &[u8],
         input: &[u8],
-        core: Option<Arc<Core>>,
+        core: Option<Arc<dyn VaultCtx>>,
     ) -> Result<InvokeOutput, ProcessRuntimeError> {
         self.invoke_with_config(manifest, binary, input, core, Default::default())
             .await
@@ -134,7 +134,7 @@ impl ProcessRuntime {
         manifest: &PluginManifest,
         binary: &[u8],
         input: &[u8],
-        core: Option<Arc<Core>>,
+        core: Option<Arc<dyn VaultCtx>>,
         config: std::collections::BTreeMap<String, String>,
     ) -> Result<InvokeOutput, ProcessRuntimeError> {
         // Write the binary to a uniquely-named temp file so concurrent
@@ -238,7 +238,7 @@ async fn drive_invocation(
     manifest: &PluginManifest,
     bootstrap: &str,
     input: &[u8],
-    core: Option<Arc<Core>>,
+    core: Option<Arc<dyn VaultCtx>>,
     config: std::collections::BTreeMap<String, String>,
 ) -> Result<InvokeOutput, ProcessRuntimeError> {
     let mut stdin = child.stdin.take().ok_or(ProcessRuntimeError::Protocol("stdin"))?;
@@ -354,7 +354,7 @@ where
 /// back as `host_reply.error`.
 pub(super) async fn handle_host_call(
     manifest: &PluginManifest,
-    core: Option<&Arc<Core>>,
+    core: Option<&Arc<dyn VaultCtx>>,
     config: &std::collections::BTreeMap<String, String>,
     method: &str,
     params: &Value,
@@ -401,7 +401,7 @@ pub(super) async fn handle_host_call(
                 Some(c) => c,
                 None => return Err("no core".to_string()),
             };
-            match core.barrier.as_storage().get(&full).await {
+            match core.barrier().as_storage().get(&full).await {
                 Ok(Some(entry)) => Ok(json!({
                     "value_b64": base64::engine::general_purpose::STANDARD.encode(&entry.value),
                 })),
@@ -423,7 +423,7 @@ pub(super) async fn handle_host_call(
             let value = base64::engine::general_purpose::STANDARD
                 .decode(value_b64.as_bytes())
                 .map_err(|_| "bad_b64".to_string())?;
-            core.barrier
+            core.barrier()
                 .as_storage()
                 .put(&StorageEntry { key: full, value })
                 .await
@@ -440,7 +440,7 @@ pub(super) async fn handle_host_call(
                 Some(c) => c,
                 None => return Err("no core".to_string()),
             };
-            core.barrier
+            core.barrier()
                 .as_storage()
                 .delete(&full)
                 .await
@@ -477,8 +477,8 @@ pub(super) async fn handle_host_call(
                 full_prefix.push_str(req_norm);
                 full_prefix.push('/');
             }
-            let names = core
-                .barrier
+            let barrier = core.barrier();
+            let names = barrier
                 .as_storage()
                 .list(&full_prefix)
                 .await
@@ -497,7 +497,7 @@ pub(super) async fn handle_host_call(
             let mut body = serde_json::Map::new();
             body.insert("plugin_event".to_string(), payload);
             audit::emit_sys_audit(
-                core,
+                core.as_ref(),
                 "",
                 &format!("sys/plugins/{}/event", manifest.name),
                 crate::logical::Operation::Write,
@@ -841,7 +841,7 @@ mod tests {
     async fn invoke_proc(
         manifest: PluginManifest,
         input: &[u8],
-        core: Option<Arc<Core>>,
+        core: Option<Arc<dyn VaultCtx>>,
     ) -> Result<InvokeOutput, ProcessRuntimeError> {
         let bytes = current_exe_bytes();
         let runtime = ProcessRuntime::new();

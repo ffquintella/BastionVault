@@ -4753,7 +4753,7 @@ impl Module for SystemModule {
 
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let sys = self.backend.clone();
-        let sys_backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
+        let sys_backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
             let mut sys_backend = sys.new_backend();
             sys_backend.init()?;
             Ok(Arc::new(sys_backend))

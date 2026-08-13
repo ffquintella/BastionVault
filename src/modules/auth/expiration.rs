@@ -818,6 +818,7 @@ mod mod_expiration_tests {
     use serde_json::json;
 
     use super::*;
+    use crate::kernel_api::VaultCtx;
     use crate::{
         context::Context,
         logical::{Backend, Field, FieldType, Lease, LogicalBackend, Operation, Path, PathOperation, Secret},
@@ -1029,7 +1030,7 @@ mod mod_expiration_tests {
 
         core.add_logical_backend(
             "test",
-            Arc::new(move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
+            Arc::new(move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
                 let mut test_backend = new_backend_fn();
                 test_backend.init()?;
                 Ok(Arc::new(test_backend))

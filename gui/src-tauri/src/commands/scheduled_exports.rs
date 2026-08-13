@@ -608,7 +608,7 @@ pub async fn scheduled_exports_restore(
     audit_body.insert("skipped".into(), Value::Number(result.skipped.into()));
     audit_body.insert("renamed".into(), Value::Number(result.renamed.into()));
     bastion_vault::audit::emit_sys_audit(
-        &core_arc,
+        core_arc.as_ref(),
         &owner,
         "sys/scheduled-exports/restore",
         bastion_vault::logical::Operation::Write,

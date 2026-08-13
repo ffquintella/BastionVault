@@ -618,8 +618,13 @@ impl Module for SshBrokerModule {
     }
 
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
-        let backend_new_func = move |c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
-            let mut b = SshBrokerBackend::new(c).new_backend();
+        let core_for_backend = self.core.clone();
+        let backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
+            // This backend is not on `VaultCtx` yet, so it needs the concrete
+            // `Core`. Captured from the module rather than taken from the
+            // parameter: there is exactly one `Core` per server, so it is the
+            // same value, and this keeps the retype from cascading.
+            let mut b = SshBrokerBackend::new(core_for_backend.clone()).new_backend();
             b.init()?;
             Ok(Arc::new(b))
         };

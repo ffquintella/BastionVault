@@ -185,7 +185,7 @@ impl Module for AppRoleModule {
 
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let approle = self.backend.clone();
-        let approle_backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
+        let approle_backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
             let mut approle_backend = approle.new_backend();
             approle_backend.init()?;
             Ok(Arc::new(approle_backend))

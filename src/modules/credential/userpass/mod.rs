@@ -103,7 +103,7 @@ impl Module for UserPassModule {
 
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let userpass = self.backend.clone();
-        let userpass_backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
+        let userpass_backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
             let mut userpass_backend = userpass.new_backend();
             userpass_backend.init()?;
             Ok(Arc::new(userpass_backend))

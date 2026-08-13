@@ -163,7 +163,7 @@ async fn tick(
             body.insert("bytes_written".into(), serde_json::Value::Number(record.bytes_written.into()));
             let err_str = record.error.clone();
             crate::audit::emit_sys_audit(
-                &core_clone,
+                core_clone.as_ref(),
                 "",
                 &format!("sys/scheduled-exports/{}/run", sched_clone.id),
                 crate::logical::Operation::Write,

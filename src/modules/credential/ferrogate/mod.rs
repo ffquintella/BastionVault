@@ -408,7 +408,7 @@ impl Module for FerroGateModule {
 
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let ferrogate = self.backend.clone();
-        let ferrogate_backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
+        let ferrogate_backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
             let mut ferrogate_backend = ferrogate.new_backend();
             ferrogate_backend.init()?;
             Ok(Arc::new(ferrogate_backend))

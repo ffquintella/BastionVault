@@ -933,7 +933,7 @@ impl Module for KvV2Module {
 
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let kv = self.backend.clone();
-        let kv_backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
+        let kv_backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
             let mut kv_backend = kv.new_backend();
             kv_backend.init()?;
             Ok(Arc::new(kv_backend))

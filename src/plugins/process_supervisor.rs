@@ -64,7 +64,7 @@ use super::process_runtime::{
     generate_bootstrap_token, handle_host_call, write_temp_executable, ProcessRuntimeError,
 };
 use super::runtime::{InvokeOutcome, InvokeOutput};
-use crate::core::Core;
+use crate::kernel_api::VaultCtx;
 
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
@@ -231,7 +231,7 @@ pub async fn invoke_with_config(
     manifest: &PluginManifest,
     binary: &[u8],
     input: &[u8],
-    core: Option<Arc<Core>>,
+    core: Option<Arc<dyn VaultCtx>>,
     config: BTreeMap<String, String>,
 ) -> Result<InvokeOutput, ProcessRuntimeError> {
     let sup_arc = supervised_for(&manifest.name);
@@ -293,7 +293,7 @@ pub async fn invoke_with_config(
 async fn drive_invoke(
     sup: &mut Supervised,
     manifest: &PluginManifest,
-    core: &Option<Arc<Core>>,
+    core: &Option<Arc<dyn VaultCtx>>,
     config: &BTreeMap<String, String>,
     input: &[u8],
 ) -> Result<InvokeOutput, SupervisorError> {

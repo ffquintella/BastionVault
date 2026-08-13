@@ -333,7 +333,7 @@ impl Module for AuthModule {
 
         let ts = token_store.clone();
 
-        let token_backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
+        let token_backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
             let mut backend = token_store.new_backend();
             backend.init()?;
             Ok(Arc::new(backend))

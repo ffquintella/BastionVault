@@ -215,7 +215,7 @@ pub async fn exchange_export(
         _ => None,
     };
     bastion_vault::audit::emit_sys_audit(
-        &core_arc,
+        core_arc.as_ref(),
         &token,
         "sys/exchange/export",
         bastion_vault::logical::Operation::Write,
@@ -418,7 +418,7 @@ pub async fn exchange_preview(
     audit_body.insert("identical".into(), Value::Number(identical.into()));
     audit_body.insert("conflict".into(), Value::Number(conflict.into()));
     bastion_vault::audit::emit_sys_audit(
-        &core_arc,
+        core_arc.as_ref(),
         &owner,
         "sys/exchange/import/preview",
         bastion_vault::logical::Operation::Write,
@@ -513,7 +513,7 @@ pub async fn exchange_apply(
     audit_body.insert("skipped".into(), Value::Number(result.skipped.into()));
     audit_body.insert("renamed".into(), Value::Number(result.renamed.into()));
     bastion_vault::audit::emit_sys_audit(
-        &core_arc,
+        core_arc.as_ref(),
         &owner,
         "sys/exchange/import/apply",
         bastion_vault::logical::Operation::Write,

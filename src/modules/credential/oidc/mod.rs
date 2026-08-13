@@ -131,7 +131,7 @@ impl Module for OidcModule {
 
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         let oidc = self.backend.clone();
-        let oidc_backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
+        let oidc_backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
             let mut b = oidc.new_backend();
             b.init()?;
             Ok(Arc::new(b))
