@@ -8,12 +8,12 @@ use std::{collections::HashMap, sync::Arc};
 use serde_json::{Map, Value};
 
 use super::storage::{AcmeConfig, CONFIG_KEY};
+use bv_storage::StorageEntry;
 use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
-    storage::StorageEntry,
 };
 
 use super::super::{PkiBackend, PkiBackendInner};

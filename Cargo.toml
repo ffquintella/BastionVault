@@ -31,6 +31,7 @@ members = [
     "crates/bv-utils",
     "crates/bv-audit",
     "crates/bv-kernel-api",
+    "crates/bv-engine-pki",
     "crates/bv_crypto",
     "crates/bastion-plugin-sdk",
     "crates/bastion-plugin-testkit",
@@ -85,6 +86,11 @@ bv-audit = { path = "crates/bv-audit" }
 # `KernelServices`, the `Module` trait, and the routing/mount tables their
 # signatures name. See roadmaps/workspace-decomposition.md § Phase 3.
 bv-kernel-api = { path = "crates/bv-kernel-api" }
+# Tier 3 engines. Each is `bv-kernel-api` plus the Tier 0 substrate plus its
+# own domain crates, and nothing else. The root crate depends on them because
+# it is the assembly layer that mounts them — and because the kernel tier
+# (`system`, `identity`, `auth`) reads a few of their audit stores.
+bv-engine-pki = { path = "crates/bv-engine-pki" }
 bv_crypto = { path = "crates/bv_crypto" }
 bv_plugin_surface = { path = "crates/bv_plugin_surface" }
 bv_plugin_manifest = { path = "crates/bv-plugin-manifest" }

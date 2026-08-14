@@ -19,7 +19,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{errors::RvError, logical::Request, storage::StorageEntry};
+use bv_storage::StorageEntry;
+
+use crate::{errors::RvError, logical::Request};
 
 // Legacy singleton paths (Phases 1–5.1). Read-only after the lazy
 // migration in [`super::issuers`] runs on first use of any multi-issuer

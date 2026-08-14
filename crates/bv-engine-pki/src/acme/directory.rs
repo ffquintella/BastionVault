@@ -13,12 +13,12 @@ use super::{
     new_nonce,
     storage::{AcmeConfig, NonceRing, NONCE_KEY},
 };
+use bv_storage::StorageEntry;
 use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, Operation, Path, PathOperation, Request, Response},
     new_path, new_path_internal,
-    storage::StorageEntry,
 };
 
 use super::super::{PkiBackend, PkiBackendInner};

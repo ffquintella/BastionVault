@@ -14,12 +14,12 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine as _};
 use serde_json::{json, Map, Value};
 
 use super::storage::{EabKey, EAB_PREFIX};
+use bv_storage::StorageEntry;
 use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
-    storage::StorageEntry,
 };
 
 use super::super::{PkiBackend, PkiBackendInner};

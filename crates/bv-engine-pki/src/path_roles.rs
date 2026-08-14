@@ -11,12 +11,12 @@ use humantime::parse_duration;
 use serde::{Deserialize, Serialize};
 
 use super::{crypto::KeyAlgorithm, PkiBackend, PkiBackendInner};
+use bv_storage::StorageEntry;
 use crate::{
     context::Context,
     errors::RvError,
     logical::{field::FieldTrait, Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
-    storage::StorageEntry,
     utils::{deserialize_duration, serialize_duration},
 };
 

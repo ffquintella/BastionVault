@@ -6,15 +6,41 @@
 //! [features/pki-secret-engine.md](../../../features/pki-secret-engine.md)
 //! for the full design and roadmap.
 
+// The substrate, under the names this engine's 27 files have always spelled
+// it. Private: `crate::errors::RvError` and `crate::logical::Path` keep
+// resolving inside the crate, and none of it leaks into the public API, so the
+// extraction stayed a file move instead of an import rewrite across 15,127
+// lines. See roadmaps/workspace-decomposition.md § Phase 3.
+// `storage` is deliberately absent from this list: this engine has its own
+// `storage` module (the PKI key layout), and it wins the name. The handful of
+// files that want the substrate's `Storage`/`StorageEntry` import them from
+// `bv_storage` directly.
+use bv_context as context;
+use bv_errors as errors;
+use bv_kernel_api as kernel_api;
+use bv_logical as logical;
+use bv_utils as utils;
+
+// The eight backend-definition macros are `#[macro_export]`ed by `bv-logical`,
+// which places them at *that* crate's root; the call sites import them as
+// `crate::new_path` and friends. Same arrangement the root crate uses, and the
+// `_internal` halves are the recursive arms the public macros expand into, so
+// they must travel with them.
+pub use bv_logical::{
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
+    new_path_internal, new_secret, new_secret_internal,
+};
+pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
+
 use std::{any::Any, sync::Arc};
 
 use derive_more::Deref;
 
-use crate::kernel_api::VaultCtx;
+use bv_kernel_api::{Module, VaultCtx};
+
 use crate::{
     errors::RvError,
     logical::{Backend, LogicalBackend, Path},
-    modules::Module,
 };
 
 pub mod acme;

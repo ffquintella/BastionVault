@@ -16,12 +16,12 @@ use super::{
     new_object_id,
     storage::{AcmeAccount, ACCOUNT_PREFIX},
 };
+use bv_storage::StorageEntry;
 use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
-    storage::StorageEntry,
 };
 
 use super::super::{PkiBackend, PkiBackendInner};

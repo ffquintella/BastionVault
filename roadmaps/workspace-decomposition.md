@@ -999,6 +999,24 @@ monolith rlib — which is what makes them cheap enough for CI to run at
 all. **This single extraction closes most of the current integration-test
 coverage gap.**
 
+> **The test move does not work, and the reason is worth keeping.** All 23
+> candidate binaries (19 `test_pki_*`, 3 `test_cert_lifecycle_*`,
+> `test_rustion_master_pki_issue`) open with `BastionVault::new(...)`, unseal,
+> and mount `pki/` through the real mount table — they are testing the engine
+> *through the server*, which is most of their value. Moving them into
+> `crates/bv-engine-pki/tests/` would mean a dev-dependency on `bastion_vault`
+> (legal — cargo allows dev-dependency cycles) that links exactly the same
+> rlib, so it buys nothing; and rewriting them to drive a bare
+> `LogicalBackend` would delete the routing, mount and token coverage that
+> makes them integration tests rather than unit tests.
+>
+> So the "19 binaries get cheap" mechanism is wrong, and **the claim that this
+> single extraction closes the coverage gap is wrong with it.** What the split
+> actually buys CI is the Phase 5 mechanism, not this one: a PKI change now
+> invalidates `bv-engine-pki` rather than the root crate, so a path-filtered
+> matrix can run *only* the PKI binaries and skip the rest. The gap closes in
+> Phase 5, on the foundation Phase 3 lays — not here.
+
 Then, in descending order: `rustion`, `files`, `transit`, `ssh` +
 `ssh_broker`, `totp`, `ldap`, `notifications`, `cert_lifecycle`, `kv` +
 `kv_v2`, `resource` + `resource_group`.

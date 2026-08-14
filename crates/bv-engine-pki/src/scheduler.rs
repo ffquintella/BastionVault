@@ -43,10 +43,10 @@ use super::{
     storage::{self, AutoTidyConfig, KEY_CONFIG_AUTO_TIDY},
 };
 use crate::kernel_api::VaultCtx;
+use bv_storage::Storage;
 use crate::{
     errors::RvError,
     logical::{Operation, Request},
-    storage::Storage,
 };
 
 const TICK_INTERVAL: Duration = Duration::from_secs(30);

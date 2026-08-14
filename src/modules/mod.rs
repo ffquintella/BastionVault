@@ -12,6 +12,10 @@
 
 pub use bv_kernel_api::Module;
 
+/// The PKI secret engine, now the Tier 3 `bv-engine-pki` crate. Re-exported
+/// here so `bastion_vault::modules::pki::*` paths are unchanged.
+pub use bv_engine_pki as pki;
+
 pub mod auth;
 pub mod cert_lifecycle;
 pub mod credential;
@@ -23,7 +27,6 @@ pub mod kv_v2;
 pub mod ldap;
 pub mod namespace;
 pub mod notifications;
-pub mod pki;
 pub mod policy;
 pub mod resource;
 pub mod resource_group;
