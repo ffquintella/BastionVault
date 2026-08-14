@@ -2,7 +2,7 @@
 
 ## Summary
 
-Let BastionVault's existing **Encrypted File** storage backend (`src/storage/physical/file.rs`, selected by `storage "file" { ... }` in server config) write its per-key files to a user-owned cloud account — **AWS S3**, **Google Drive**, **Microsoft OneDrive**, or **Dropbox** — instead of (or in addition to) the local filesystem. The on-disk format, the barrier-encrypted `BackendEntry` shape, and the `Backend` trait surface are all unchanged. The cloud is a pluggable **target** underneath the existing file backend, not a new backend.
+Let BastionVault's existing **Encrypted File** storage backend (`crates/bv-storage/src/physical/file/`, selected by `storage "file" { ... }` in server config) write its per-key files to a user-owned cloud account — **AWS S3**, **Google Drive**, **Microsoft OneDrive**, or **Dropbox** — instead of (or in addition to) the local filesystem. The on-disk format, the barrier-encrypted `BackendEntry` shape, and the `Backend` trait surface are all unchanged. The cloud is a pluggable **target** underneath the existing file backend, not a new backend.
 
 Earlier drafts of this feature went through two mis-framings that were rejected in review:
 
@@ -17,7 +17,7 @@ The correct framing is: **the Encrypted File backend writes files somewhere. Tha
 
 ### Phase 1 — shipped
 
-- `src/storage/physical/file/` is now a module directory (was a single file).
+- `crates/bv-storage/src/physical/file/` is now a module directory (was a single file).
 - **`file/target.rs`** — new `FileTarget` trait with `read` / `write` / `delete` / `list` / `lock`, byte-level surface below the barrier.
 - **`file/local.rs`** — new `LocalFsTarget` carrying the exact behavior of the pre-refactor `FileBackend`: key→path mapping (`a/b/c` → `<root>/a/b/_c`), `_`-prefix leaf discriminator so `list()` returns both data names and trailing-slash directory names, `lockfile::Lockfile`-backed per-key lock.
 - **`file/mod.rs`** — `FileBackend` is now a thin wrapper holding `Arc<dyn FileTarget>`. Serializes `BackendEntry` to JSON above the trait, defers I/O to the target. Config now accepts `target = "..."` (defaults to `"local"`), so every existing `storage "file" { path = "..." }` config works bit-for-bit. New `FileBackend::from_target` hook for tests and future phases.

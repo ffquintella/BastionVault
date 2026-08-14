@@ -31,7 +31,7 @@ The HTTP surface follows Vault Enterprise's: every endpoint accepts an `X-Bastio
 > enforcement (`quota.rs`). Per-namespace **policy storage** lives in
 > `src/modules/policy/policy_store.rs` (tenant ACL keyspaces + namespace-aware
 > ACL compilation); per-namespace **audit broadcasters** + the root superuser
-> mirror live in `src/audit/broker.rs`; per-namespace **identity** (entities,
+> mirror live in `crates/bv-audit/src/broker.rs`; per-namespace **identity** (entities,
 > aliases, groups) lives in `src/modules/identity/`. CRUD is exposed under
 > `v2/sys/namespaces`; a management GUI ships at the Namespaces page. The
 > implicit root namespace is minted on first unseal.
@@ -503,10 +503,10 @@ Land the data model and the routing path. No identity/policy/audit scoping yet �
 |---|---|---|
 | `src/modules/namespace/token_binding.rs` | Namespace-bound tokens; `child_visible` flag; enforcement in `Core::handle_request`; create-time binding via header; root bypass; per-login binding across userpass/FIDO2/approle with `child_visible` from the namespace's `child_visible_default`; shared `token_operable` verdict, plus `token_operable_resolved` (assignment-aware widening) reused by both `enforce_request_token_binding` and `sys/capabilities-self`. | ✅ Done |
 | `{{namespace.path}}` / `{{namespace.id}}` policy templates (`src/modules/policy/policy_store.rs`) | Namespace-aware ACL templating. | ✅ Done |
-| `namespace` field on audit entries (`src/audit/entry.rs`) | Per-tenant audit attribution. | ✅ Done |
+| `namespace` field on audit entries (`crates/bv-audit/src/entry.rs`) | Per-tenant audit attribution. | ✅ Done |
 | `src/modules/namespace/policy_scope.rs` — cross-namespace path refusal (write-time guard, wired into policy write) | Refuses policies referencing another namespace's paths. | ✅ Done |
 | Per-namespace policy *storage* (separate policy documents per namespace, `src/modules/policy/policy_store.rs`) | Tenant ACL policies live in their own keyspace (`policy-ns/<b64(path)>/…`); root keeps the legacy keyspace. `get/set/list/delete/history` gain `_ns` variants; the `sys/policy*` handlers scope by the request namespace header. | ✅ Done |
-| `src/audit/broker.rs` — per-namespace *broadcasters* + root mirror | Devices carry a `namespace` + root-only `mirror` flag; `log` partitions fan-out by `entry.namespace` with a per-namespace hash chain and a superuser mirror on the root chain; `sys/audit` enable/disable/list scope by header. | ✅ Done |
+| `crates/bv-audit/src/broker.rs` — per-namespace *broadcasters* + root mirror | Devices carry a `namespace` + root-only `mirror` flag; `log` partitions fan-out by `entry.namespace` with a per-namespace hash chain and a superuser mirror on the root chain; `sys/audit` enable/disable/list scope by header. | ✅ Done |
 | `src/modules/policy/policy_store.rs` `new_acl_inner` (extension) | Compiles policies against the calling token's bound namespace (loads each named policy from that namespace's store). | ✅ Done |
 
 ### Phase 3 — Per-Namespace Identity + Cross-Tenant Linking

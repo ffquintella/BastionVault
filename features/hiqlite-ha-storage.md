@@ -20,7 +20,7 @@ With hiqlite, a BastionVault cluster **is** the Raft cluster. Each vault node em
 
 ### What Is Implemented
 
-**Phase 1 -- Backend** (`src/storage/hiqlite/mod.rs`):
+**Phase 1 -- Backend** (`crates/bv-storage/src/hiqlite/mod.rs`):
 - `HiqliteBackend` struct implementing the `Backend` trait.
 - CRUD operations via hiqlite's SQL interface:
   - `list()` -- `SELECT ... WHERE vault_key LIKE ?` with prefix truncation logic.
@@ -48,7 +48,7 @@ With hiqlite, a BastionVault cluster **is** the Raft cluster. Each vault node em
 - Config parsing test `test_load_config_hiqlite`.
 - CI jobs for Linux, macOS, and Windows.
 
-**Phase 2 -- Raft Error Mapping** (`src/storage/hiqlite/mod.rs`, `src/errors.rs`):
+**Phase 2 -- Raft Error Mapping** (`crates/bv-storage/src/hiqlite/mod.rs`, `crates/bv-errors/src/lib.rs`):
 - `CheckIsLeaderError` / `LeaderChange` → `ErrClusterNoLeader`.
 - `ClientWriteError` with forward_to_leader hint → `ErrClusterNoLeader`.
 - `Connect` / `Timeout` errors → `ErrClusterUnhealthy`.
@@ -82,7 +82,7 @@ With hiqlite, a BastionVault cluster **is** the Raft cluster. Each vault node em
 - `bvault cluster leave` -- gracefully leave cluster.
 - `bvault cluster remove-node` -- remove topology members (leader operation).
 
-**Post-Quantum TLS for Inter-Node Communication** (`src/storage/hiqlite/mod.rs`):
+**Post-Quantum TLS for Inter-Node Communication** (`crates/bv-storage/src/hiqlite/mod.rs`):
 - Switched rustls crypto provider from `ring` to `aws_lc_rs` for both hiqlite and server TLS.
 - X25519MLKEM768 hybrid post-quantum key exchange enabled by default in TLS 1.3 handshakes.
 - Configurable TLS for Raft channel: `tls_raft_disable`, `tls_raft_cert`, `tls_raft_key`.
@@ -323,8 +323,8 @@ For same-key migration (keeping unseal keys), the backup format stores encrypted
 
 | File | Status |
 |---|---|
-| `src/storage/hiqlite/mod.rs` | Done |
-| `src/storage/mod.rs` (module + factory) | Done |
+| `crates/bv-storage/src/hiqlite/mod.rs` | Done |
+| `crates/bv-storage/src/lib.rs` (module + factory) | Done |
 | `src/cli/config.rs` (keyword + test) | Done |
 | `Cargo.toml` (dependency + feature + default) | Done |
 | `tests/features/hiqlite_storage.feature` | Done |
@@ -335,8 +335,8 @@ For same-key migration (keeping unseal keys), the backup format stores encrypted
 
 | File | Status |
 |---|---|
-| `src/storage/hiqlite/mod.rs` (Raft error mapping) | Done |
-| `src/errors.rs` (cluster error variants) | Done |
+| `crates/bv-storage/src/hiqlite/mod.rs` (Raft error mapping) | Done |
+| `crates/bv-errors/src/lib.rs` (cluster error variants) | Done |
 | `src/http/sys.rs` (health/status/cluster endpoints) | Done |
 | `src/api/sys.rs` (SDK cluster_status method) | Done |
 | Post-quantum TLS for Raft and API channels | Done |
