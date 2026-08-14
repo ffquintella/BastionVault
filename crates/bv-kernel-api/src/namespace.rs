@@ -11,7 +11,7 @@
 //! call site outside those files changed.
 //!
 //! That also retires a cross-layer wart the decomposition roadmap tracked
-//! separately: `src/audit/entry.rs` reached into `crate::modules` for exactly
+//! separately: `src/audit/entry.rs` reached into `bastion_vault::modules` for exactly
 //! one constant, [`NS_PATH_META`].
 //!
 //! **[`NamespaceRegistry`]** — everything that needs the namespace store: path
@@ -25,7 +25,10 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{bv_error_string, errors::RvError, logical::Request, mount::MountsRouter};
+use bv_errors::{bv_error_string, RvError};
+use bv_logical::Request;
+
+use crate::mount::MountsRouter;
 
 use super::VaultCtx;
 
@@ -38,7 +41,7 @@ pub const NAMESPACE_HEADER: &str = "x-bastionvault-namespace";
 /// re-exported here — every call site that reaches for them through
 /// `kernel_api::namespace` (and, in turn, through
 /// `modules::namespace::token_binding`) is unchanged.
-pub use crate::logical::{CHILD_VISIBLE_META, NS_ID_META, NS_PATH_META};
+pub use bv_logical::{CHILD_VISIBLE_META, NS_ID_META, NS_PATH_META};
 
 /// The namespace header value on a request, if present. Case-insensitive.
 pub fn namespace_header_from_map(headers: Option<&HashMap<String, String>>) -> Option<String> {
@@ -243,7 +246,7 @@ pub async fn login_namespace_for_principal(
             .map(|s| s.trim().to_string())
             .is_some_and(|s| !s.is_empty());
         if named {
-            return Err(crate::bv_error_string!(
+            return Err(bv_errors::bv_error_string!(
                 "namespace header set but the namespace module is unavailable"
             ));
         }

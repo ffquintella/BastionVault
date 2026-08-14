@@ -26,7 +26,7 @@ use crate::{
     cli::config::MountEntryHMACLevel,
     errors::RvError,
     handler::{AuthHandler, HandlePhase, Handler},
-    logical::{Backend, Request, Response},
+    logical::{Request, Response},
     module_manager::ModuleManager,
     modules::auth::AuthModule,
     mount::{
@@ -42,12 +42,14 @@ use crate::{
     utils::BHashSet,
 };
 
-// Takes `Arc<dyn VaultCtx>`, not `Arc<Core>`: this alias is in every
-// engine's mount-registration path, so while it named `Core` no engine
-// could compile without the kernel. See
-// roadmaps/workspace-decomposition.md Phase 2.
-pub type LogicalBackendNewFunc =
-    dyn Fn(Arc<dyn VaultCtx>) -> Result<Arc<dyn Backend>, RvError> + Send + Sync;
+/// Re-exported from `bv-kernel-api`, which owns it since Phase 3.
+///
+/// It takes `Arc<dyn VaultCtx>`, not `Arc<Core>`: the alias is in every
+/// engine's mount-registration path, so while it named `Core` no engine could
+/// compile without the kernel. Now that it names only the trait, it belongs
+/// next to the trait — otherwise every engine crate would still have to import
+/// `bastion_vault::core` to register a mount.
+pub use bv_kernel_api::LogicalBackendNewFunc;
 
 const SEAL_CONFIG_PATH: &str = "core/seal-config";
 const DEPRECATED_UNSEAL_KEY_SET_PATH: &str = "core/used-unseal-keys-set";

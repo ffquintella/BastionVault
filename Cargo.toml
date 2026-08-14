@@ -30,6 +30,7 @@ members = [
     "crates/bv-logical",
     "crates/bv-utils",
     "crates/bv-audit",
+    "crates/bv-kernel-api",
     "crates/bv_crypto",
     "crates/bastion-plugin-sdk",
     "crates/bastion-plugin-testkit",
@@ -80,6 +81,10 @@ bv-utils = { path = "crates/bv-utils" }
 # Re-exported as `bastion_vault::audit`, which adds the `sys_emit` glue that
 # has to stay above it.
 bv-audit = { path = "crates/bv-audit" }
+# Tier 1: the kernel contract every engine compiles against — `VaultCtx`,
+# `KernelServices`, the `Module` trait, and the routing/mount tables their
+# signatures name. See roadmaps/workspace-decomposition.md § Phase 3.
+bv-kernel-api = { path = "crates/bv-kernel-api" }
 bv_crypto = { path = "crates/bv_crypto" }
 bv_plugin_surface = { path = "crates/bv_plugin_surface" }
 bv_plugin_manifest = { path = "crates/bv-plugin-manifest" }

@@ -63,6 +63,7 @@ CRATES=(
   bv-logical
   bv-utils
   bv-audit
+  bv-kernel-api
   bv_plugin_manifest
   bastion-plugin-sdk
   bastion-plugin-testkit

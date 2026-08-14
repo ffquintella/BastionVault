@@ -971,6 +971,15 @@ whichever phase extracts those two crates, not a Phase 2 one.
 
 ### Phase 3 — Engines out, starting with PKI
 
+> **"Unblocked" was half true, and the missing half is a whole crate.** Phase 2
+> left every Tier 3 engine free of `Core` and of its siblings, which is what
+> this section measured. It did not leave them free of the *root crate*: every
+> engine implements `crate::modules::Module` and holds an
+> `Arc<dyn crate::kernel_api::VaultCtx>`, and a crate cannot implement a trait
+> defined in the crate above it. So Phase 3 does not open with PKI. It opens
+> with **`bv-kernel-api`** — the Tier 1 crate Phase 2 deliberately deferred —
+> and nothing else could have gone first. See "Step 0" below.
+
 **Now unblocked, and the extraction order is free.** Phase 2 left every Tier 3
 engine with zero production references to `Core` and zero to any sibling
 module, so the engines form no graph among themselves: any order works, and
@@ -1005,6 +1014,70 @@ what remains is the test scope, since its `#[cfg(test)]` modules use
 **Expected:** a PKI-only change compiles PKI plus the facade, not 173k
 lines. Target: the 35.7 s test-binary rebuild drops to single digits for
 a leaf-engine edit.
+
+#### Step 0 — `bv-kernel-api`, and why it carries `router`/`mount`/`dos`/`stats`
+
+Phase 2's own note says the crate can be created "later, once `bv-storage`
+exists and `router`/`mount` have moved into `bv-core`". `bv-storage` exists.
+`bv-core` does not, and waiting for it would have inverted the whole
+decomposition: `bv-core` is Tier 2, Phase 4 work, and it cannot be extracted
+before the engines it currently compiles alongside.
+
+So the split was made on a different line — not "which tier does the roadmap
+assign this file", but **"does a `VaultCtx` signature name it"**:
+
+| type | named by | engine call sites |
+|---|---|---|
+| `Router` | `VaultCtx::router` | 8 (`totp`, `resource` ×4, `rustion` ×2, `credential`) |
+| `MountsRouter` | `VaultCtx::mounts_router` | 4 (`pki`, `ldap`, `files`, `cert_lifecycle` schedulers) |
+| `MountsMonitor` | `VaultCtx::mounts_monitor` | 0, but returned by the trait |
+| `DosGuard` | `VaultCtx::dos_guard` | 0, but returned by the trait |
+| `DashboardStats` | `VaultCtx::stats` | 0, but returned by the trait |
+| `MountEntryHMACLevel` | `VaultCtx::mount_entry_hmac_level` | 0, but returned by the trait |
+| `LogicalBackendNewFunc` | `VaultCtx::add_logical_backend` | every engine's mount registration |
+
+A crate holding only the traits would need all seven as dependencies anyway,
+so "only the traits" was never available. The alternative — another trait
+layer between the kernel contract and the mount table — buys nothing: the
+mount table *is* the engine-facing view of the routing tier, and `Core`'s own
+mount management is already excluded from it.
+
+What stayed in the root crate, and why:
+
+- **`impl VaultCtx for Core`** → `src/kernel_impl.rs`. `Core` is Tier 2 and
+  `bv-kernel-api` must not name it. Implementing a foreign trait for a local
+  type is exactly what the orphan rule allows, so this cost nothing — unlike
+  `bv-errors` in Phase 1, where the orphan rule cost 200 sites.
+- **`impl Core { mount, unmount, remount, unload_mounts }`** → `src/mount.rs`,
+  now a 200-line file over a `pub use bv_kernel_api::mount::*`. These are the
+  *management* operations, deliberately absent from `VaultCtx`.
+- **`dos::middleware`** — actix, which must not reach a leaf engine. Same
+  reason `metrics`' middleware stayed behind in Phase 1.
+- **`dos::store`'s tests** → `src/dos/store_tests.rs`, because they stand up a
+  whole vault through `crate::test_utils`. Third instance of the Phase 1
+  pattern.
+
+Three edges had to be inverted or moved first, all of them small:
+
+- **`mount.rs` → `crate::plugins`** — the wart this roadmap has tracked since
+  the "Cross-layer warts" table. The mount table stripped `plugin:` off a
+  mount type and called the plugin runtime's factory by name. Now the runtime
+  registers a `DynamicBackendResolver` from the assembly layer and the mount
+  table only asks. This was the last wart on that list.
+- **`MountEntryHMACLevel`** moved out of `cli::config` (re-exported from it),
+  and **`LogicalBackendNewFunc`** out of `core.rs` (likewise). Both are named
+  by the trait, and both would otherwise have dragged the CLI and `Core` under
+  every engine.
+- **`MountsMonitor::start` built an `actix_rt::Runtime`** to block on the
+  mount-table poll. `actix_rt::Runtime` is `tokio`'s current-thread builder
+  plus a `LocalSet`; the monitor's future spawns nothing and is `Send`, so the
+  `LocalSet` bought nothing and the actix dependency bought a leaf engine
+  actix. Replaced with the tokio builder directly.
+
+**Measured:** `src/` goes 154,373 → 151,070 lines and the new crate is 3,552,
+so ~250 lines of shim and relocated tests came back — the cost of keeping
+`bastion_vault::{mount,router,stats,dos,kernel_api}::*` resolving unchanged.
+`cargo check --workspace` and the full unit suite are unchanged.
 
 ### Phase 4 — Assembly split
 

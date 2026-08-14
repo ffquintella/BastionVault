@@ -14,7 +14,10 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use crate::{core::LogicalBackendNewFunc, errors::RvError, storage::barrier_view::BarrierView};
+use bv_errors::RvError;
+use bv_storage::barrier_view::BarrierView;
+
+use crate::ctx::LogicalBackendNewFunc;
 
 /// Ceiling on any lease or token TTL: 30 days.
 ///

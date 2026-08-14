@@ -6,13 +6,11 @@ use std::sync::{Arc, RwLock};
 
 use radix_trie::{Trie, TrieCommon};
 
-use crate::{
-    errors::RvError,
-    handler::Handler,
-    logical::{Backend, Operation, Request, Response},
-    mount::MountEntry,
-    storage::barrier_view::BarrierView,
-};
+use bv_errors::RvError;
+use bv_logical::{handler::Handler, Backend, Operation, Request, Response};
+use bv_storage::barrier_view::BarrierView;
+
+use crate::mount::MountEntry;
 
 struct RouterEntry {
     tainted: bool,

@@ -78,10 +78,11 @@ pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string
 /// `Request` that carries an `Arc<dyn Handler>`.
 pub use bv_logical::handler;
 pub mod hsm;
-/// The kernel contract modules depend on instead of `Core` — Phase 2 of the
-/// decomposition. Becomes the `bv-kernel-api` crate once `bv-storage` exists
-/// and `router`/`mount` have moved into `bv-core`.
-pub mod kernel_api;
+/// The kernel contract modules depend on instead of `Core` — the Tier 1
+/// `bv-kernel-api` crate. `impl VaultCtx for Core` cannot travel with it and
+/// lives in [`kernel_impl`].
+pub use bv_kernel_api as kernel_api;
+mod kernel_impl;
 pub mod http;
 pub mod logging;
 /// Request/Response/Backend/Path/Field — the Tier 0 `bv-logical` crate.
@@ -100,7 +101,9 @@ pub mod metrics;
 pub mod module_manager;
 pub mod modules;
 pub mod mount;
-pub mod router;
+/// The request router, moved into `bv-kernel-api`: engines reach it through
+/// [`kernel_api::VaultCtx::router`], so it sits below them.
+pub use bv_kernel_api::router;
 /// Diesel's generated table definition, moved into `bv-storage` alongside its
 /// only reader (the MySQL backend).
 #[cfg(feature = "storage_mysql")]
@@ -110,7 +113,9 @@ pub mod server_info;
 /// Moved to the Tier 0 `bv-shamir` crate — the one directory in the original
 /// Phase 1 list that really did reference nothing but `crate::errors`.
 pub use bv_shamir as shamir;
-pub mod stats;
+/// Dashboard counters, moved into `bv-kernel-api` alongside
+/// [`kernel_api::VaultCtx::stats`], which hands them out.
+pub use bv_kernel_api::stats;
 /// Barriers, physical backends and the read caches — the Tier 0 `bv-storage`
 /// crate, and the extraction that takes hiqlite, diesel and rusty-s3 out of
 /// the monolith's compilation unit.
@@ -232,6 +237,10 @@ impl BastionVault {
         // when enabled. No-op when `secret_cache_ttl_secs == 0` (default),
         // so existing deployments see zero overhead.
         let backend = crate::storage::wrap_with_cache(backend, &cache_config)?;
+        // The mount table cannot name the plugin runtime (it sits below it in
+        // the crate graph), so the runtime registers its `plugin:<name>`
+        // resolver here, at the assembly point, before any mount can be built.
+        crate::plugins::register_mount_resolver();
         let mut core = Core::new_with_barrier(backend, barrier_type);
         if let Some(conf) = config {
             core.mount_entry_hmac_level = conf.mount_entry_hmac_level;

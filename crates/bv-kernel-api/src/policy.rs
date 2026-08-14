@@ -19,7 +19,8 @@
 //! because scope-gated rules resolve owner and share qualifiers off the
 //! request. See `PolicyStore::may_connect_target`.
 
-use crate::{errors::RvError, logical::Request};
+use bv_errors::RvError;
+use bv_logical::Request;
 
 #[maybe_async::maybe_async]
 pub trait PolicyGate: Send + Sync {

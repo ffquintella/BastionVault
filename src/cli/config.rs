@@ -154,14 +154,14 @@ pub struct MetricsAccessConfig {
     pub allow_unauthenticated_cidrs: Vec<String>,
 }
 
-#[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum MountEntryHMACLevel {
-    #[default]
-    None,
-    Compat,
-    High,
-}
+/// Re-exported from `bv-kernel-api`, where it moved in Phase 3.
+///
+/// It is an operator setting parsed from this file's config, but the mount
+/// table is what enforces it and [`VaultCtx::mount_entry_hmac_level`] is what
+/// hands it out — both of which sit below the CLI in the crate graph.
+///
+/// [`VaultCtx::mount_entry_hmac_level`]: crate::kernel_api::VaultCtx::mount_entry_hmac_level
+pub use bv_kernel_api::MountEntryHMACLevel;
 
 fn default_hmac_level() -> MountEntryHMACLevel {
     MountEntryHMACLevel::None

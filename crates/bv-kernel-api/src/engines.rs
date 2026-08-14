@@ -26,7 +26,8 @@
 
 use serde_json::Value;
 
-use crate::{errors::RvError, logical::Request};
+use bv_errors::RvError;
+use bv_logical::Request;
 
 // ── resource → ssh_broker ──────────────────────────────────────────────
 

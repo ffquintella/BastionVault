@@ -19,7 +19,7 @@
 //!
 //! ## Registration and the empty-slot contract
 //!
-//! [`crate::modules::Module::register`] is the hook: `ModuleManager` calls it
+//! [`crate::module::Module::register`] is the hook: `ModuleManager` calls it
 //! on every module as it installs the set, handing over this registry. A
 //! module that provides nothing does nothing.
 //!

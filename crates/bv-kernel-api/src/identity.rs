@@ -20,7 +20,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{errors::RvError, logical::Request};
+use bv_errors::RvError;
+use bv_logical::Request;
 
 /// Which kind of identity group a membership lookup is about.
 ///
@@ -49,7 +50,7 @@ impl GroupKind {
         match s {
             "user" => Ok(GroupKind::User),
             "app" => Ok(GroupKind::App),
-            other => Err(crate::bv_error_string!(&format!(
+            other => Err(bv_errors::bv_error_string!(&format!(
                 "unknown group kind {other:?}: expected \"user\" or \"app\""
             ))),
         }

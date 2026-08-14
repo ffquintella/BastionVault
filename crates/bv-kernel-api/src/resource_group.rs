@@ -6,7 +6,7 @@
 //! or deleted, and the login-class resolver needs a resource's group
 //! memberships to pick a tier.
 
-use crate::errors::RvError;
+use bv_errors::RvError;
 
 /// The reverse index over asset-group membership.
 ///

@@ -1,25 +1,30 @@
 //! IP-based DoS / request-abuse protection.
 //!
-//! A configurable, per-client-IP request guard that temporarily bans IPs which
-//! exceed a request-rate threshold, with a stricter sub-limit for
-//! authentication paths (brute-force defense). Operators manage it from the
-//! GUI Settings "Abuse Protection" panel over `v2/sys/dos/*`.
+//! The config, the hot-path guard and the barrier-persisted store live in
+//! `bv-kernel-api` — [`VaultCtx::dos_guard`](crate::kernel_api::VaultCtx::dos_guard)
+//! returns a [`DosGuard`], so the guard is part of the kernel contract and has
+//! to sit below it. Everything there is re-exported here, so
+//! `bastion_vault::dos::*` paths are unchanged.
 //!
-//! Layout:
-//! - [`config`] — the runtime-adjustable [`DosConfig`] thresholds.
-//! - [`guard`] — the in-memory [`DosGuard`] hot-path enforcer (per node).
-//! - [`store`] — barrier-persisted config + manual bans (survive restart, HA).
-//! - [`middleware`] — the actix layer that consults the guard on every request.
+//! Two pieces stay in the root crate:
+//!
+//! - [`middleware`] — the actix layer that consults the guard on every
+//!   request. actix must not reach a leaf engine, which is the same reason the
+//!   metrics middleware stayed behind in Phase 1.
+//! - [`store_tests`] — they stand up a whole vault through `crate::test_utils`.
 //!
 //! Enforcement is per-node in memory; configuration and manual bans persist and
 //! converge across an HA cluster via a periodic reload. See
-//! `features/dos-abuse-protection.md` for the full model and its bounds.
+//! `features/dos-abuse-protection.md` for the full model and its bounds, and
+//! roadmaps/workspace-decomposition.md § Phase 3 for the split.
 
-pub mod config;
-pub mod guard;
+pub use bv_kernel_api::dos::{config, guard, store};
+
 pub mod middleware;
-pub mod store;
 
 pub use config::DosConfig;
 pub use guard::{BanInfo, BanKind, BanRecord, DosGuard, DosStats, IpUsage, ManualBan};
 pub use store::{DosStore, PersistedDosState};
+
+#[cfg(test)]
+mod store_tests;
