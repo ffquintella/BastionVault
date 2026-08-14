@@ -1,6 +1,6 @@
 //! Static-role auto-rotation scheduler — Phase 3.
 //!
-//! A single tokio task started from [`Core::post_unseal`](crate::core::Core)
+//! A single tokio task started from `bastion_vault::core::Core::post_unseal`
 //! ticks every 60 s, enumerates every mount of type `"openldap"`, reads
 //! every static-role under each mount, and rotates the ones whose
 //! `last_vault_rotation + rotation_period <= now`.

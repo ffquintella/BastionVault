@@ -69,6 +69,29 @@ CRATES=(
   bastion-plugin-testkit
   bv-client
   bv-plugin-pack
+  # Tier 3 engines (Phase 3). Order matters only within the auth backends:
+  # userpass needs fido2, approle needs ferrogate, and all of them need
+  # bv-auth-audit.
+  bv-engine-pki
+  bv-engine-kv
+  bv-engine-transit
+  bv-engine-cert-lifecycle
+  bv-engine-ldap
+  bv-engine-ssh
+  bv-engine-ssh-broker
+  bv-engine-totp
+  bv-engine-notifications
+  bv-engine-files
+  bv-engine-resource
+  bv-engine-rustion
+  bv-auth-audit
+  bv-auth-cert
+  bv-auth-fido2
+  bv-auth-oidc
+  bv-auth-saml
+  bv-auth-ferrogate
+  bv-auth-userpass
+  bv-auth-approle
 )
 
 while [[ $# -gt 0 ]]; do

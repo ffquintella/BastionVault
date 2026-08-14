@@ -1,7 +1,7 @@
 # Roadmap: Workspace Decomposition
 
-Status: **Phases 0, 1 and 2 are done.** Phase 3 is next and its extraction
-order is free.
+Status: **Phases 0, 1, 2 and 3 are done.** Phase 4 (the assembly split) is
+next.
 
 Phase 1 shipped eight Tier 0/1 crates — `bv-errors`, `bv-shamir`,
 `bv-context`, `bv-metrics`, `bv-storage`, `bv-logical`, `bv-utils`,
@@ -969,7 +969,7 @@ whichever phase extracts those two crates, not a Phase 2 one.
   into an engine crate regardless — they have to become `tests/` binaries,
   which is Phase 3 work and is exactly what Phase 3 does with the PKI suite.
 
-### Phase 3 — Engines out, starting with PKI
+### Phase 3 — Engines out, starting with PKI — **done**
 
 > **"Unblocked" was half true, and the missing half is a whole crate.** Phase 2
 > left every Tier 3 engine free of `Core` and of its siblings, which is what
@@ -1096,6 +1096,125 @@ Three edges had to be inverted or moved first, all of them small:
 so ~250 lines of shim and relocated tests came back — the cost of keeping
 `bastion_vault::{mount,router,stats,dos,kernel_api}::*` resolving unchanged.
 `cargo check --workspace` and the full unit suite are unchanged.
+#### What Phase 3 shipped
+
+Twenty-two crates: `bv-kernel-api` (Tier 1) plus twelve engines and nine auth
+crates.
+
+| crate | lines | note |
+|---|---|---|
+| `bv-engine-pki` | 15,127 | first out; owns the name `storage`, so nine files import `bv_storage::StorageEntry` directly |
+| `bv-engine-rustion` | 11,613 | four detached background tasks; its master-store tests came *back* into the crate once they turned out to need only a `bv-storage` fixture |
+| `bv-auth-approle` | 6,849 | → `bv-auth-ferrogate` (machine binding) |
+| `bv-engine-files` | 4,947 | `files_smb` / `files_ssh_sync` forwarded from the root |
+| `bv-auth-ferrogate` | 4,044 | the `ferro-*` SDK, from a second private registry |
+| `bv-auth-saml` | 3,868 | keeps `sha1`/`sha2` pinned at 0.10 for XML-DSig |
+| `bv-engine-resource` | 3,427 | provides `ConnectMfaGate`, consumes `LoginClassPolicy` |
+| `bv-engine-transit` | 3,155 | `transit_byok` / `transit_pqc_hybrid` forwarded; `x25519-dalek` left the root |
+| `bv-engine-ssh` | 2,935 | `ssh_pqc` forwarded |
+| `bv-auth-userpass` | 2,881 | → `bv-auth-fido2` (passkey routes) |
+| `bv-engine-ldap` | 2,736 | |
+| `bv-auth-fido2` | 2,182 | |
+| `bv-engine-notifications` | 2,025 | both ends of the plugin boundary, naming neither |
+| `bv-auth-oidc` | 1,804 | |
+| `bv-engine-totp` | 1,684 | provides `TotpMfa` |
+| `bv-engine-cert-lifecycle` | 1,552 | also owns the name `storage` |
+| `bv-engine-kv` | 1,323 | `v1` + `v2`, one crate |
+| `bv-engine-ssh-broker` | 1,291 | provides `LoginClassPolicy` |
+| `bv-auth-audit` | 257 | the login-audit store five backends write and the kernel tier reads |
+| `bv-auth-cert` | 180 | the retired backend, kept as a landing site |
+
+**Measured outcome:**
+
+| | before Phase 3 | after |
+|---|---|---|
+| `src/` (the root compilation unit) | 154,373 lines | **84,827** |
+| workspace members | 20 | **42** |
+| direct dependencies of `bastion_vault` | — | **26 fewer** |
+| unit test binaries | 19 | **39** |
+| unit suite wall clock | 180s | **91s** at the twelve-engine mark |
+| unit / integration / doctests | 1289 / 1358 / 17 | **unchanged** |
+
+The 26 dependencies that left the root manifest with their code: `base32`,
+`blake3`, `cms`, `const-oid`, `flate2`, `hickory-resolver`, `hyper-rustls`,
+`hyper-util`, `image`, `ldap3`, `openidconnect`, `pkcs12`, `pkcs5`, `prost`,
+`qrcode`, `quick-xml`, `rsa`, `russh`, `russh-sftp`, `sha1`, `sha1-saml`,
+`sha2-saml`, `subtle`, `tonic`, `tonic-prost`, `url`.
+
+#### The alias preamble, and why the extraction stayed a file move
+
+Each engine crate's root carries a **private** alias block:
+
+```rust
+use bv_context as context;
+use bv_errors as errors;
+use bv_kernel_api as kernel_api;
+use bv_logical as logical;
+use bv_storage as storage;
+use bv_utils as utils;
+```
+
+so `crate::errors::RvError` and `crate::logical::Path` keep resolving inside
+the new crate and not one engine file's imports changed. Private, so none of
+it reaches the crate's public API. Two consequences worth knowing:
+
+- **An engine that owns one of those names wins it.** `pki` and
+  `cert_lifecycle` both have a `storage` module; the alias is omitted there and
+  the handful of files wanting the substrate's `Storage`/`StorageEntry` name
+  `bv_storage` directly. The collision is a compile error, not a silent shadow.
+- **`use super::*` in a test stops seeing the parent's imports.** A glob sees a
+  module's *private* `use` statements only from inside the same crate. Every
+  lifted test block therefore needed the parent's import list written out.
+
+#### Three inversions, and one that was wrong twice
+
+- **`notifications` → `plugins`.** `channel.rs` called `PluginCatalog` and
+  `invoke_active_plugin` by name; the runtime holds an `Arc<dyn VaultCtx>` and
+  reaches the mount table, so it is above the engines. Now `PluginHost` in
+  `kernel_api::engines`, registered by the assembly layer because the runtime
+  is not a `Module`. It narrows on the way across the way `LoginClassVerdict`
+  did: a manifest becomes five strings.
+- **The CLI login handlers were not engine code.** `token/cli.rs`,
+  `userpass/cli.rs` and `cert`'s inline `cli` implement `LoginHandler` — read a
+  password off the terminal, POST through the HTTP client. Leaving them would
+  have put `crate::api`, `rpassword` and stdin under every auth crate. They are
+  `src/cli/command/login_handlers.rs` now.
+- **`credential/token` was not a backend.** One line: `pub mod cli;`. Token
+  auth *is* the kernel's `auth` module. There is no `bv-auth-token`.
+
+And the one to remember: **`actix_rt::spawn` is `tokio::task::spawn_local`,
+not `tokio::task::spawn`.** The AppRole tidy endpoint was converted to `spawn`
+on the reasoning that the future is `Send` and actix-rt only aliases tokio's
+`JoinHandle`. Both premises are true and the conclusion is still wrong —
+moving the routine off the caller's thread onto the runtime pool changes the
+interleaving, and the tidy *race* test caught it (2,988 accessors where 6,064
+were expected). `spawn_local` is the faithful translation. The same reasoning
+applied to `MountsMonitor::start` *is* sound, because that one is `block_on`,
+not a spawn: the future runs on the calling thread either way.
+
+#### Four feature flags had quietly become no-ops
+
+`ssh_pqc`, `pki_pqc_composite`, `transit_byok` and `transit_pqc_hybrid` were
+declared `= []` in the root manifest while the `cfg` gates they drive
+travelled into the engine crates — so an operator's `--features ssh_pqc` would
+have silently built without ML-DSA SSH CA support. They now forward to the
+engine crate, and the optional-feature build is verified. `files_smb` and
+`files_ssh_sync` forward the same way, with their optional deps moved to
+`bv-engine-files`.
+
+#### Tests that could not travel
+
+`crate::test_utils` stands up a whole vault and is a `#[cfg(test)]` module of
+the root crate, so anything using it stays in `src/engine_tests/` — the third
+instance of the Phase 1 pattern, after `storage_backend_tests.rs` and
+`dos/store_tests.rs`. The split is **per test block, not per file**: a block
+that only needs `super::*` stayed with its engine. Where a lifted block needed
+a private item, the item became `pub` with a comment saying why
+(`files::sha256_hex`, `approle::SECRET_ID_PREFIX`,
+`resource::connect_mfa::ticket_key`, `userpass::{is_plausible_email, now_secs}`,
+`rustion::namespace_sub_request_prefix`) — except where splitting the block was
+better, which is what happened to `connect_mfa`'s pure tests.
+
 
 ### Phase 4 — Assembly split
 
@@ -1204,4 +1323,4 @@ Update on each phase completion:
 - `roadmap.md` — one row, `Workspace Decomposition`, Todo → In Progress → Done
 - this file — phase status and the measured delta against the baseline table
 
-Done so far: Phases 0, 1 and 2. Phase 3 is next.
+Done so far: Phases 0, 1, 2 and 3. Phase 4 is next.

@@ -12,7 +12,7 @@
 //! background pinger (real probe), envelope crate, dispatcher,
 //! session lifecycle, and policy ladder land in later phases.
 
-// The substrate, under the names the Rustion engine's 19 files has always spelled it. Private:
+// The substrate, under the names this engine already spells it by. Private:
 // `crate::errors::RvError` and `crate::logical::Path` keep resolving inside
 // the crate, and none of it leaks into the public API, so the extraction
 // stayed a file move rather than an import rewrite.
@@ -1908,7 +1908,7 @@ impl RustionBackendInner {
 
     /// `POST rustion/v2/session/open` — the connect-only entry point.
     ///
-    /// Differs from [`handle_session_open`] in two ways:
+    /// Differs from [`Self::handle_session_open`] in two ways:
     ///   1. It enforces a `connect` (or `read`/`root`) capability on the
     ///      resource's secret path, so an operator can be granted the
     ///      ability to open a brokered session **without** read access to
@@ -1920,7 +1920,7 @@ impl RustionBackendInner {
     ///      never reads it.
     ///
     /// All brokering logic (dispatcher, envelope, policy resolution) is
-    /// shared with [`handle_session_open`], which this delegates into once
+    /// shared with [`Self::handle_session_open`], which this delegates into once
     /// credential material is in hand. v1 never calls v2.
     pub async fn handle_session_open_v2(
         &self,

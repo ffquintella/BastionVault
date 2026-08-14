@@ -16,7 +16,7 @@
 //!      demands and consumes a ticket.
 //!
 //! The factor ceremony itself lives in the auth backend that owns the
-//! factors ([`bastion_vault::modules::credential::userpass::path_step_up`]); this
+//! factors (`bastion_vault::modules::credential::userpass::path_step_up`); this
 //! module only orchestrates it and records the outcome.
 //!
 //! ## Storage layout (barrier root)
@@ -28,7 +28,7 @@
 //! Barrier root rather than the resource mount's view because the brokered
 //! path enforces from the `rustion/` mount while the direct path enforces
 //! from `resources/` — one record has to be reachable from both, exactly
-//! like [`bastion_vault::modules::identity::default_account`].
+//! like `bastion_vault::modules::identity::default_account`.
 //!
 //! Only the SHA-256 of the ticket is persisted. A dump of the barrier
 //! yields no redeemable tickets.

@@ -3,7 +3,7 @@
 //! `auth/userpass/v2/step-up/{begin,verify}` re-prove a factor the caller
 //! has already enrolled, **without minting a token or a lease**. The
 //! connect-time MFA gate
-//! ([`bastion_vault::modules::resource::connect_mfa`]) drives these two paths and
+//! (`bastion_vault::modules::resource::connect_mfa`) drives these two paths and
 //! turns a successful verification into a short-lived, single-use connect
 //! ticket.
 //!

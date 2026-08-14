@@ -83,6 +83,56 @@ EXAMPLE ENTRY:
 ### Changed
 
 #### Build and Test Tooling
+- **Phase 3 of [the decomposition](roadmaps/workspace-decomposition.md) is
+  complete -- the twenty-one secret engines and auth backends are their own
+  crates, plus the kernel contract they compile against.** `crates/bv-kernel-api`
+  (Tier 1) holds `VaultCtx`, `KernelServices`, the `Module` trait and the
+  routing/mount tables their signatures name; twelve engine crates
+  (`bv-engine-{pki,rustion,files,resource,transit,ssh,ldap,notifications,totp,cert-lifecycle,kv,ssh-broker}`)
+  and nine auth crates
+  (`bv-auth-{approle,userpass,fido2,oidc,saml,ferrogate,cert,audit}`) sit on
+  top of it. Every moved path is re-exported from `src/modules/mod.rs`, so
+  `bastion_vault::modules::*` resolves exactly as before and no call site
+  outside a moved directory changed.
+  **What operators get:** twenty-six dependencies left the `bastion_vault`
+  manifest with the code that used them -- `ldap3`, `openidconnect`,
+  `quick-xml`, `russh`, `russh-sftp`, `rsa`, `cms`, `pkcs12`, `pkcs5`,
+  `tonic`, `tonic-prost`, `prost`, `hyper-rustls`, `hyper-util`,
+  `hickory-resolver`, `image`, `qrcode`, `flate2`, `blake3`, `base32`,
+  `const-oid`, `sha1`, `sha1-saml`, `sha2-saml`, `subtle` and `url`. An LDAP
+  client, an OIDC client, an SSH stack, an XML parser and a gRPC stack are no
+  longer dependencies of the server or of any engine that does not use them.
+  Feature flags are unchanged in name and effect.
+  **What developers get:** the root compilation unit drops from 154,373 lines
+  to 84,827, and the unit suite runs across 39 test binaries instead of 19 --
+  which halves its wall clock. Editing one engine now recompiles that engine
+  and the facade, not 154k lines.
+  Behaviour is unchanged and verified as such: 1289 unit, 1358 integration and
+  17 doctests, identical counts before and after every extraction.
+- **Four feature flags had silently become no-ops, and are fixed.** `ssh_pqc`,
+  `pki_pqc_composite`, `transit_byok` and `transit_pqc_hybrid` were declared
+  empty in the root manifest while the code they gate moved into engine
+  crates, so `--features ssh_pqc` would have built a server without ML-DSA-65
+  SSH CA support while appearing to enable it. They now forward to the owning
+  crate, and the combined-feature build is covered. `files_smb` and
+  `files_ssh_sync` forward the same way.
+- **Fix 13 `bv-utils` doctests that could never have compiled.** They were
+  written as `use bastion_vault::utils::...` when the crate was extracted in
+  Phase 1, but `bv-utils` has no dependency on the root crate, so `cargo test
+  --doc` failed on every one of them. Unnoticed because the decomposition work
+  has been on a feature branch and CI runs doctests only on `main` or a pull
+  request. `make test-doc` is green: 17 pass, 0 fail. The Phase 1 and 2 notes
+  claiming "17 doctests, unchanged" were counting the total, not the passes.
+- **Fix broken intra-doc links across the extracted crates.** References to
+  `Core`, `crate::core::Core` and `crate::modules::*` from crates that sit
+  below the root are now code spans rather than links, and links to items that
+  changed module became explicit paths. `cargo doc` emits no unresolved-link
+  warning for any of the 22 new crates.
+- **The mount table no longer names the plugin runtime.** Resolving a
+  `plugin:<name>` mount type was the last entry on the decomposition
+  roadmap's cross-layer wart list. The plugin runtime registers a resolver
+  with the mount table at startup instead; mount behaviour and the error
+  returned for an unknown mount type are unchanged.
 - **Phase 1 of [the decomposition](roadmaps/workspace-decomposition.md) is
   complete -- five more Tier 0/1 crates, eight in total.** `crates/bv-metrics`,
   `crates/bv-storage` (with `src/cache` and `src/schema` folded in),

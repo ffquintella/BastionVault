@@ -286,7 +286,7 @@ impl MountsRouter {
 impl MountsRouter {
     /// Mount a single backend into this router, honouring the router's own
     /// `barrier_prefix` and `router_prefix`. This is the multi-tenant analogue
-    /// of [`Core::mount`]: a namespace's router carries `barrier_prefix =
+    /// of `Core::mount`: a namespace's router carries `barrier_prefix =
     /// namespaces/<uuid>/logical/` and `router_prefix = <ns_path>/`, so the
     /// same logic yields a mount that is storage-isolated under the namespace
     /// and addressable at `<ns_path>/<mount>` in the shared router trie.
@@ -326,7 +326,7 @@ impl MountsRouter {
     }
 
     /// Unmount a single mount from this router (namespace analogue of
-    /// [`Core::unmount`]). `path` is the mount-relative path (e.g. `secret/`).
+    /// `Core::unmount`). `path` is the mount-relative path (e.g. `secret/`).
     pub async fn unmount_one(&self, path: &str) -> Result<(), RvError> {
         let mut path = path.to_string();
         if !path.ends_with('/') {

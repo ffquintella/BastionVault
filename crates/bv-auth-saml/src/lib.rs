@@ -23,7 +23,7 @@
 //! Single-mount assumption: one IdP config per mount. Multi-IdP
 //! setups use multiple mounts (`auth/okta/`, `auth/adfs/`, etc.).
 
-// The substrate, under the names this backend has always spelled it. Private:
+// The substrate, under the names this engine already spells it by. Private:
 // `crate::errors::RvError` and `crate::logical::Path` keep resolving inside
 // the crate, and none of it leaks into the public API, so the extraction
 // stayed a file move rather than an import rewrite.

@@ -1,6 +1,6 @@
 //! Periodic auto-tidy scheduler — Phase 4.1.
 //!
-//! A single tokio task started from [`Core::post_unseal`](crate::core::Core)
+//! A single tokio task started from `bastion_vault::core::Core::post_unseal`
 //! ticks every 30 seconds, enumerates every mount of type `"pki"`, reads
 //! that mount's persisted [`AutoTidyConfig`](super::storage::AutoTidyConfig),
 //! and fires [`run_tidy_inner`](super::path_tidy::run_tidy_inner) when the

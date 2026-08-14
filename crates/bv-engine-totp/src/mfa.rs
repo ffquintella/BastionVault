@@ -1,9 +1,9 @@
 //! Shared TOTP second-factor verification.
 //!
 //! Both the userpass *login* second factor
-//! ([`bastion_vault::modules::credential::userpass::path_login`]) and the
+//! (`bastion_vault::modules::credential::userpass::path_login`) and the
 //! connect-time *step-up* ceremony
-//! ([`bastion_vault::modules::credential::userpass::path_step_up`]) need the same
+//! (`bastion_vault::modules::credential::userpass::path_step_up`) need the same
 //! operation: given a principal's bound `(mount, key)` pair and a code the
 //! operator just typed, decide whether the code is currently valid.
 //!

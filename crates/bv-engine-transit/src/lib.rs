@@ -15,7 +15,7 @@
 //! Phase 4 (composite/hybrid sigs, BYOK import, convergent encryption)
 //! is feature-gated and tracked in `features/transit-secret-engine.md`.
 
-// The substrate, under the names the Transit engine's 19 files has always spelled it. Private:
+// The substrate, under the names this engine already spells it by. Private:
 // `crate::errors::RvError` and `crate::logical::Path` keep resolving inside
 // the crate, and none of it leaks into the public API, so the extraction
 // stayed a file move rather than an import rewrite.

@@ -97,7 +97,7 @@ pub fn clamp_ttl_to_issuer(
 /// the parent is not on this mount the walk stops with whatever was
 /// found locally. Returns the cert PEMs in order, leaf-issuer first.
 ///
-/// Used by [`super::path_issuers::read_issuer_chain`] and by
+/// Used by [`PkiBackendInner::read_issuer_chain`](crate::PkiBackendInner::read_issuer_chain) and by
 /// `pki/issue` / `pki/sign` to surface a `ca_chain` on every response.
 #[maybe_async::maybe_async]
 pub async fn build_issuer_chain(req: &Request, leaf: &IssuerHandle) -> Result<Vec<String>, RvError> {

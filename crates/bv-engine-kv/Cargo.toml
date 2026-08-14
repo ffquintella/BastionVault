@@ -26,7 +26,6 @@ async-trait = "0.1"
 chrono = "0.4"
 derive_more = "2.1.1"
 humantime = "2.3"
-log = "0.4"
 maybe-async = "0.2"
 serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
 serde_json = "^1.0"

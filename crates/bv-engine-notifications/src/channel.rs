@@ -8,7 +8,7 @@
 //! * **Plugin channels** — a plugin declares one or more
 //!   `notification_channels` in its manifest. The service dispatches
 //!   delivery here, which invokes the plugin's active version through the
-//!   [`PluginHost`] capability with a `notify_deliver` envelope and
+//!   [`PluginHost`](bv_kernel_api::engines::PluginHost) capability with a `notify_deliver` envelope and
 //!   interprets the result.
 //!
 //! The runtime is reached as a capability rather than by name: it holds an

@@ -16,7 +16,7 @@
 pub mod connect_mfa;
 pub mod kernel_service;
 
-// The substrate, under the names the resource engine has always spelled it. Private:
+// The substrate, under the names this engine already spells it by. Private:
 // `crate::errors::RvError` and `crate::logical::Path` keep resolving inside
 // the crate, and none of it leaks into the public API, so the extraction
 // stayed a file move rather than an import rewrite.

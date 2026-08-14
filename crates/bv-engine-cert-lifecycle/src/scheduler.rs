@@ -1,6 +1,6 @@
 //! Periodic renewal scheduler — Phase L6.
 //!
-//! Single tokio task started from [`Core::post_unseal`](crate::core::Core)
+//! Single tokio task started from `bastion_vault::core::Core::post_unseal`
 //! ticks every 30 seconds at the outer loop, enumerates every mount of
 //! type `cert-lifecycle`, reads that mount's persisted
 //! [`SchedulerConfig`](super::storage::SchedulerConfig), and — when

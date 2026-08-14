@@ -8,7 +8,7 @@
 //! per-node state owned by [`super::guard::DosGuard`].
 //!
 //! Mirrors the singleton-config shape of
-//! [`crate::modules::rustion::policy::PolicyStore`] (`get_global`/`put_global`).
+//! `bastion_vault::modules::rustion::policy::PolicyStore` (`get_global`/`put_global`).
 
 use std::net::IpAddr;
 use std::sync::Arc;

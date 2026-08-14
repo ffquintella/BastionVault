@@ -6,7 +6,7 @@
 //! renewal targets and exposes a manual renew endpoint. The module
 //! consumes the PKI engine — it never holds a CA key of its own. The
 //! renewer dispatches `pki/issue/<role>` calls into the configured
-//! PKI mount via [`Core::handle_request`] so the same role / issuer /
+//! PKI mount via `Core::handle_request` so the same role / issuer /
 //! emission policies that gate any other caller apply here.
 //!
 //! Phase L5 surface:
@@ -19,7 +19,7 @@
 //! handler. L7 introduces a `CertDeliveryPlugin` trait so non-`file`
 //! kinds can deliver via plugin-ext.
 
-// The substrate, under the names the cert-lifecycle engine has always spelled it. Private:
+// The substrate, under the names this engine already spells it by. Private:
 // `crate::errors::RvError` and `crate::logical::Path` keep resolving inside
 // the crate, and none of it leaks into the public API, so the extraction
 // stayed a file move rather than an import rewrite.

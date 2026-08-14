@@ -68,7 +68,7 @@ pub trait CertDeliveryPlugin: Send + Sync {
     ) -> Result<DeliveryReceipt, String>;
 }
 
-/// Plugin lookup table held by [`CertLifecycleBackendInner`]. Built
+/// Plugin lookup table held by [`CertLifecycleBackendInner`](crate::CertLifecycleBackendInner). Built
 /// at module construction with the engine's built-ins; an L7
 /// follow-up will extend it from `plugin-ext` discovery at unseal
 /// time.

@@ -200,7 +200,7 @@ impl MlDsaSigner {
 
     /// True when the input looks like a PKCS#8 `PRIVATE KEY` envelope
     /// whose algorithm OID matches an ML-DSA security level. Used by the
-    /// import path so [`from_storage_pem`] can fall back through both
+    /// import path so [`Signer::from_storage_pem`](crate::crypto::Signer::from_storage_pem) can fall back through both
     /// the legacy `BV PQC SIGNER` envelope and the new PKCS#8 form
     /// without an out-of-band metadata flag.
     pub fn is_pkcs8_pem(pem: &str) -> bool {

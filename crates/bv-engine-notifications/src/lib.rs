@@ -11,7 +11,7 @@
 //! by `entity_id`); composing a broadcast to a group / all users sits
 //! behind the `create` ACL on `v2/notifications/send`.
 
-// The substrate, under the names the notifications engine has always spelled it. Private:
+// The substrate, under the names this engine already spells it by. Private:
 // `crate::errors::RvError` and `crate::logical::Path` keep resolving inside
 // the crate, and none of it leaks into the public API, so the extraction
 // stayed a file move rather than an import rewrite.

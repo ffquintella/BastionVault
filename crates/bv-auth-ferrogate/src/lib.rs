@@ -21,7 +21,7 @@
 //!   the root-token bootstrap, the CMIS gRPC JWKS source, the client CLI, and
 //!   the admin GUI page.
 
-// The substrate, under the names this backend has always spelled it. Private:
+// The substrate, under the names this engine already spells it by. Private:
 // `crate::errors::RvError` and `crate::logical::Path` keep resolving inside
 // the crate, and none of it leaks into the public API, so the extraction
 // stayed a file move rather than an import rewrite.

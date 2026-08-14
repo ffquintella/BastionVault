@@ -369,7 +369,7 @@ impl UserPassBackendInner {
     /// missing/unreadable key, or a malformed policy is an error (login
     /// refused), never a silent bypass.
     ///
-    /// The check itself lives in [`bastion_vault::modules::totp::mfa`] so the
+    /// The check itself lives in `bastion_vault::modules::totp::mfa` so the
     /// connect-time step-up ceremony validates codes exactly the same way
     /// this login path does — see that module for the note on why the
     /// engine's replay index is not consulted.

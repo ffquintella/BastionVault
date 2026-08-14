@@ -14,7 +14,7 @@
 //! at rest and disclosed exactly once (in the create response, when
 //! generate=true and exported=true).
 
-// The substrate, under the names the TOTP engine has always spelled it. Private:
+// The substrate, under the names this engine already spells it by. Private:
 // `crate::errors::RvError` and `crate::logical::Path` keep resolving inside
 // the crate, and none of it leaks into the public API, so the extraction
 // stayed a file move rather than an import rewrite.

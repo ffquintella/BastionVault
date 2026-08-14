@@ -1,7 +1,7 @@
 //! File Resources periodic re-sync scheduler.
 //!
 //! Mirrors the LDAP / PKI auto-tidy schedulers: a single tokio task
-//! started from [`Core::post_unseal`](crate::core::Core), tick every
+//! started from `bastion_vault::core::Core::post_unseal`, tick every
 //! 60 s, walk every `files`-typed mount, list every file's sync
 //! targets, and run a push against each target whose
 //! `auto_sync_interval_seconds > 0` AND whose
@@ -22,7 +22,7 @@
 //!
 //! Manual trigger: `POST /v1/<mount>/sync-tick` runs this same sweep
 //! on demand. Operators that disable the internal scheduler (config
-//! is read by [`load_files_sync_config`]; `enabled = false` flips the
+//! is read by the sync config; `enabled = false` flips the
 //! task into "wake every 60 s but skip the sweep") can drive the
 //! sweep externally via `cron` + that endpoint.
 

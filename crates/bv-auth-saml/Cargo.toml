@@ -20,7 +20,6 @@ bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionv
 bv-context = { path = "../bv-context", version = "0.1.0", registry = "uox-bastionvault" }
 bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
 bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
-bv-utils = { path = "../bv-utils", version = "0.1.0", registry = "uox-bastionvault" }
 bv-kernel-api = { path = "../bv-kernel-api", version = "0.1.0", registry = "uox-bastionvault" }
 bv-auth-audit = { path = "../bv-auth-audit", version = "0.1.0", registry = "uox-bastionvault" }
 
@@ -45,7 +44,6 @@ sync_handler = [
     "maybe-async/is_sync",
     "bv-storage/sync_handler",
     "bv-logical/sync_handler",
-    "bv-utils/sync_handler",
     "bv-kernel-api/sync_handler",
     "bv-auth-audit/sync_handler",
 ]
