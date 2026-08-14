@@ -9,7 +9,12 @@
 //! Same pattern as `src/storage_backend_tests.rs` and
 //! `src/dos/store_tests.rs`. See roadmaps/workspace-decomposition.md § Phase 3.
 
+mod approle;
+mod ferrogate;
 mod files;
 mod notifications;
 mod resource;
+mod oidc;
 mod rustion;
+mod saml;
+mod userpass;

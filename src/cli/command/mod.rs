@@ -31,6 +31,7 @@ pub mod delete;
 pub mod format;
 pub mod list;
 pub mod login;
+pub mod login_handlers;
 pub mod operator;
 pub mod operator_cloud_target_connect;
 #[cfg(not(feature = "sync_handler"))]

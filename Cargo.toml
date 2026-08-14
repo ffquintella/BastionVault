@@ -32,6 +32,14 @@ members = [
     "crates/bv-audit",
     "crates/bv-kernel-api",
     "crates/bv-engine-pki",
+    "crates/bv-auth-audit",
+    "crates/bv-auth-approle",
+    "crates/bv-auth-userpass",
+    "crates/bv-auth-ferrogate",
+    "crates/bv-auth-saml",
+    "crates/bv-auth-oidc",
+    "crates/bv-auth-fido2",
+    "crates/bv-auth-cert",
     "crates/bv-engine-rustion",
     "crates/bv-engine-resource",
     "crates/bv-engine-files",
@@ -102,6 +110,14 @@ bv-kernel-api = { path = "crates/bv-kernel-api" }
 # it is the assembly layer that mounts them — and because the kernel tier
 # (`system`, `identity`, `auth`) reads a few of their audit stores.
 bv-engine-pki = { path = "crates/bv-engine-pki" }
+bv-auth-audit = { path = "crates/bv-auth-audit" }
+bv-auth-approle = { path = "crates/bv-auth-approle" }
+bv-auth-userpass = { path = "crates/bv-auth-userpass" }
+bv-auth-ferrogate = { path = "crates/bv-auth-ferrogate" }
+bv-auth-saml = { path = "crates/bv-auth-saml" }
+bv-auth-oidc = { path = "crates/bv-auth-oidc" }
+bv-auth-fido2 = { path = "crates/bv-auth-fido2" }
+bv-auth-cert = { path = "crates/bv-auth-cert" }
 bv-engine-rustion = { path = "crates/bv-engine-rustion" }
 bv-engine-resource = { path = "crates/bv-engine-resource" }
 bv-engine-files = { path = "crates/bv-engine-files" }
@@ -477,6 +493,14 @@ sync_handler = [
     "bv-engine-files/sync_handler",
     "bv-engine-resource/sync_handler",
     "bv-engine-rustion/sync_handler",
+    "bv-auth-audit/sync_handler",
+    "bv-auth-approle/sync_handler",
+    "bv-auth-userpass/sync_handler",
+    "bv-auth-ferrogate/sync_handler",
+    "bv-auth-saml/sync_handler",
+    "bv-auth-oidc/sync_handler",
+    "bv-auth-fido2/sync_handler",
+    "bv-auth-cert/sync_handler",
 ]
 # Cloud Storage Targets for the Encrypted File backend.
 # See `features/cloud-storage-backend.md`. Default build stays lean —

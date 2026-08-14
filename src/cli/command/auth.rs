@@ -8,9 +8,9 @@ use sysexits::ExitCode;
 use super::{auth_disable, auth_enable, auth_help, auth_list, auth_move};
 use crate::{
     api::auth::LoginHandler,
-    cli::command::CommandExecutor,
-    modules::credential::{
-        cert::cli::CertAuthCliHandler, token::cli::TokenCliHandler, userpass::cli::UsesPassCliHandler,
+    cli::command::{
+        login_handlers::{CertAuthCliHandler, TokenCliHandler, UsesPassCliHandler},
+        CommandExecutor,
     },
     EXIT_CODE_INSUFFICIENT_PARAMS,
 };
