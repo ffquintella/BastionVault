@@ -198,8 +198,8 @@ pub fn verify_child_token(
 /// identified to case-fold.
 ///
 /// This is a verbatim port of `ferro_child_verify::normalize_htu` as it stood in
-/// FerroGate SDK 0.15.0 (Apache-2.0, same upstream project as the vendored SDK
-/// under `third_party/ferrogate-sdk-rust/`). SDK 0.21.3 dropped the helper and
+/// FerroGate SDK 0.15.0 (Apache-2.0, same upstream project as the `ferro-*`
+/// crates we depend on). SDK 0.21.3 dropped the helper and
 /// switched its internal `htu` check to a byte-exact comparison. The audience
 /// check is a relying-party policy decision BastionVault owns — the module doc
 /// says as much — so it lives here now rather than being borrowed from the

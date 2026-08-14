@@ -166,22 +166,31 @@ crate.
 
 ## Known constraints
 
-**The root `bastion_vault` crate cannot currently be published.** It
-path-depends on `ferro-child-verify`, `ferro-svid-verify`, and
-`ferro-crypto`, which live in `third_party/ferrogate-sdk-rust/` — a
-vendored tree that is its own Cargo workspace, excluded from ours, and
-not on any registry. A crate cannot be published while any dependency is
-unpublished. The `[patch.crates-io]` entries for `sspi` / `picky*` /
-`hiqlite` are workspace-local config and are *not* themselves a blocker,
-but a published `bastion_vault` would resolve those deps from crates.io
-rather than from the forks, which is a behaviour change nobody has
-validated.
+**~~The root `bastion_vault` crate path-depends on unpublished
+`ferro-*` crates.~~ Resolved 2026-08-14.** It used to path-depend on
+`ferro-child-verify`, `ferro-svid-verify`, and `ferro-crypto` in the
+vendored tree `third_party/ferrogate-sdk-rust/`, and a crate cannot be
+published while any dependency is unpublished. FerroGate now publishes
+all three to its own Cloudsmith registry, `uox/ferrogate` (public;
+registered as `uox-ferrogate` in `.cargo/config.toml`), and the root
+crate depends on them with `version` + `registry` — option 1 below, which
+this doc already called the clean answer. The vendored tree is gone.
 
-Two ways out, when it matters:
+**The root `bastion_vault` crate still isn't published, for a different
+reason.** The `[patch.crates-io]` entries for `sspi` / `picky*` /
+`hiqlite` are workspace-local config and are *not* themselves a hard
+blocker, but a published `bastion_vault` would resolve those deps from
+crates.io rather than from the forks, which is a behaviour change nobody
+has validated. Also note that publishing a crate whose dependencies come
+from a *third* registry requires the destination registry to allow
+cross-registry deps — Cloudsmith does, crates.io does not — so
+`bastion_vault` could only ever go to `uox-bastionvault`, never to
+crates.io.
 
-1. Publish the vendored `ferro-*` crates to this same Cloudsmith registry
-   and point the root crate at them with `version` + `registry`. This is
-   the clean answer and Cloudsmith is the right host for it.
+Two ways forward, when it matters:
+
+1. Validate the `[patch.crates-io]` forks' published equivalents (or
+   publish the forks too) and ship the facade to `uox-bastionvault`.
 2. Keep the facade crate unpublished. The decomposition roadmap makes
    this viable: consumers depend on the split crates, and
    `bastion_vault` stays a local assembly point.

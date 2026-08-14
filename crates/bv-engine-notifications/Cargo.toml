@@ -1,0 +1,58 @@
+[package]
+name = "bv-engine-notifications"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's notifications engine: in-app inbox, targeting and plugin delivery channels"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 3 of the workspace decomposition
+# (roadmaps/workspace-decomposition.md § Phase 3).
+#
+# This engine sits on both ends of the plugin boundary and names neither: it
+# publishes `NotificationSink` (so a plugin can raise a notification) and
+# consumes `PluginHost` (so it can deliver through a plugin channel). Both are
+# `bv-kernel-api` contracts, which is what let it become a crate at all --
+# `channel.rs` used to call `crate::plugins::invoke_active_plugin` by name.
+
+[dependencies]
+bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
+bv-context = { path = "../bv-context", version = "0.1.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
+bv-utils = { path = "../bv-utils", version = "0.1.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.1.0", registry = "uox-bastionvault" }
+
+arc-swap = "1.7"
+async-trait = "0.1"
+base64 = "0.22"
+chrono = "0.4"
+derive_more = "2.1.1"
+log = "0.4"
+maybe-async = "0.2"
+serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
+serde_json = "^1.0"
+
+[features]
+default = []
+sync_handler = [
+    "maybe-async/is_sync",
+    "bv-storage/sync_handler",
+    "bv-logical/sync_handler",
+    "bv-utils/sync_handler",
+    "bv-kernel-api/sync_handler",
+]
+
+# Lints this crate's code trips, all of which the root crate already allows.
+[lints.clippy]
+field_reassign_with_default = "allow"
+type_complexity = "allow"
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Pulled in by the `#[maybe_async::maybe_async]` attribute's async
+    # expansion, which is a token stream to a static `use` scan.
+    "async-trait",
+]

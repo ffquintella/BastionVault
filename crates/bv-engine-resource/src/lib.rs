@@ -1,0 +1,1757 @@
+//! Dedicated resource storage engine.
+//!
+//! Stores resource metadata and per-resource secrets behind the vault barrier,
+//! completely independent of the KV secret engine. All data is encrypted at rest.
+//!
+//! Storage layout within the mount's barrier view:
+//!   meta/<name>                         -> ResourceEntry JSON (current)
+//!   hist/<name>/<20-digit-nanos>        -> ResourceHistoryEntry JSON (append-only
+//!                                          audit log of who-changed-what; values
+//!                                          are NOT stored here)
+//!   secret/<resource>/<key>             -> current value of a resource secret
+//!                                          (kept for fast reads + backward compat)
+//!   smeta/<resource>/<key>              -> ResourceSecretMeta JSON (version index)
+//!   sver/<resource>/<key>/<version>     -> ResourceSecretVersion JSON (old values)
+
+pub mod connect_mfa;
+pub mod kernel_service;
+
+// The substrate, under the names the resource engine has always spelled it. Private:
+// `crate::errors::RvError` and `crate::logical::Path` keep resolving inside
+// the crate, and none of it leaks into the public API, so the extraction
+// stayed a file move rather than an import rewrite.
+// See roadmaps/workspace-decomposition.md § Phase 3.
+use bv_context as context;
+use bv_errors as errors;
+use bv_kernel_api as kernel_api;
+use bv_logical as logical;
+use bv_storage as storage;
+
+// The eight backend-definition macros are `#[macro_export]`ed by `bv-logical`,
+// which places them at *that* crate's root; the call sites import them as
+// `crate::new_path` and friends. The `_internal` halves are the recursive arms
+// the public macros expand into, so they must travel with them.
+pub use bv_logical::{
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
+    new_path_internal, new_secret, new_secret_internal,
+};
+pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
+
+use std::{any::Any, collections::HashMap, sync::Arc, time::Duration};
+
+use chrono::Utc;
+use derive_more::Deref;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+use bv_kernel_api::Module;
+use crate::kernel_api::{
+    engines::LoginClassVerdict,
+    identity::{caller_audit_actor, ObjectKind},
+    VaultCtx,
+};
+use crate::{
+    context::Context,
+    errors::RvError,
+    logical::{
+        secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation,
+        Request, Response,
+    },
+    storage::StorageEntry,
+};
+
+static RESOURCE_BACKEND_HELP: &str = r#"
+The resource backend provides dedicated storage for infrastructure resources
+(servers, databases, network devices, etc.) and their associated secrets.
+All data is encrypted behind the vault barrier.
+
+Each resource metadata write is recorded in an append-only history log
+(who + when + which fields changed). Each resource-secret write snapshots
+the previous value into a versioned entry so the full change history is
+available for audit.
+"#;
+
+/// True when a resource-secret body looks like a *static SSH login
+/// credential* — i.e. it carries a non-empty `private_key` or `password`
+/// field, exactly the shape the SSH `secret` credential source feeds to
+/// the dialler (`resolve_secret_ssh`). Brokered resources reject these at
+/// attach time. A bare `passphrase` (a modifier, not a credential) does
+/// not count on its own.
+fn static_ssh_credential_shape(body: &Map<String, Value>) -> bool {
+    let nonempty = |k: &str| {
+        body.get(k)
+            .and_then(|v| v.as_str())
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    };
+    nonempty("private_key") || nonempty("password")
+}
+
+/// Full (non-mount-relative) request path of a single resource's metadata
+/// endpoint, minus the name: this engine is mounted at `resources/` and the
+/// route inside it is `resources/<name>`. Backend handlers see the
+/// mount-relative path, so anything that has to speak the ACL's language —
+/// which is always the full path — rebuilds it from here. Mirrors the same
+/// hardcoded convention in `policy_store::resource_name_from_path`.
+const RESOURCE_METADATA_PATH_PREFIX: &str = "resources/resources/";
+
+// Storage key prefixes within this mount's barrier view
+const META_PREFIX: &str = "meta/";
+const HIST_PREFIX: &str = "hist/";
+const SECRET_PREFIX: &str = "secret/";
+const SMETA_PREFIX: &str = "smeta/";
+const SVER_PREFIX: &str = "sver/";
+
+/// Projection of `ResourceMetadata` that the search endpoint returns.
+/// Carries exactly what the GUI's card needs to render — keeping the
+/// payload small so a page-of-30 response stays well under a few KB
+/// even with tag-heavy resources.
+#[derive(Debug, Serialize)]
+pub struct ResourceCardEntry {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<String>,
+    /// Per-profile facts the GUI's card-level Connect button needs to decide
+    /// whether one click can launch anything for the calling operator. The
+    /// launchability matrix (which protocol × credential-source combinations
+    /// the in-app client can actually drive) lives client-side, so the card
+    /// carries the inputs rather than a precomputed verdict. Deliberately
+    /// omits targets, host-key pins and transport options — those stay on the
+    /// full `resources/resources/<name>` read.
+    ///
+    /// Always serialised, empty array included: the GUI distinguishes "this
+    /// resource has no launchable profile" (disable Connect) from "this card
+    /// came from a path that doesn't carry the hints" (leave it enabled), and
+    /// an omitted field would collapse the two.
+    pub connect_profiles: Vec<ConnectProfileHint>,
+}
+
+/// See `ResourceCardEntry::connect_profiles`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConnectProfileHint {
+    /// `ssh` | `rdp`.
+    pub protocol: String,
+    /// Transport: `direct` | `rustion`. Omitted when the profile predates
+    /// the field; the GUI reads an absent value as `direct`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub credential_source: ConnectProfileCredentialHint,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConnectProfileCredentialHint {
+    pub kind: String,
+    /// SSH-engine mint mode (`ca` | `otp` | `pqc`) where the source carries
+    /// one — `pqc` certs aren't launchable from the in-app client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
+impl ResourceCardEntry {
+    fn from_metadata(name: &str, data: &Map<String, Value>) -> Self {
+        let str_field = |k: &str| -> Option<String> {
+            data.get(k)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .filter(|s| !s.is_empty())
+        };
+        Self {
+            name: name.to_string(),
+            kind: str_field("type").unwrap_or_default(),
+            hostname: str_field("hostname"),
+            ip_address: str_field("ip_address"),
+            tags: str_field("tags"),
+            connect_profiles: Self::profile_hints(data),
+        }
+    }
+
+    /// Project `connection_profiles` down to the card hints. Tolerates the
+    /// field being absent or malformed (the profile array is opaque metadata
+    /// the host never validates) — an unparseable entry is skipped rather
+    /// than failing the whole search page.
+    fn profile_hints(data: &Map<String, Value>) -> Vec<ConnectProfileHint> {
+        let Some(Value::Array(profiles)) = data.get("connection_profiles") else {
+            return Vec::new();
+        };
+        let opt_str = |o: &Map<String, Value>, k: &str| -> Option<String> {
+            o.get(k)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .filter(|s| !s.is_empty())
+        };
+        profiles
+            .iter()
+            .filter_map(|p| {
+                let obj = p.as_object()?;
+                let protocol = opt_str(obj, "protocol")?;
+                let cred = obj.get("credential_source")?.as_object()?;
+                Some(ConnectProfileHint {
+                    protocol,
+                    kind: opt_str(obj, "kind"),
+                    credential_source: ConnectProfileCredentialHint {
+                        kind: opt_str(cred, "kind")?,
+                        mode: opt_str(cred, "mode"),
+                    },
+                })
+            })
+            .collect()
+    }
+}
+
+// Resource-metadata fields that are not meaningful in a change-tracking diff.
+// Timestamps are always updated on every write, and `name` is part of the
+// identity -- including them would make every entry look like a change.
+const HIST_IGNORED_FIELDS: &[&str] = &["created_at", "updated_at", "name"];
+
+// ── Data types ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResourceEntry {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub resource_type: String,
+    #[serde(default)]
+    pub hostname: String,
+    #[serde(default)]
+    pub ip_address: String,
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default)]
+    pub os: String,
+    #[serde(default)]
+    pub location: String,
+    #[serde(default)]
+    pub owner: String,
+    #[serde(default)]
+    pub tags: String,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+/// Audit log entry for a resource metadata change. Stores *what* field
+/// names changed but not the before/after values -- per requirement, the
+/// resource timeline is "who and when made the changes (and what field)".
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResourceHistoryEntry {
+    pub ts: String,
+    pub user: String,
+    /// "create" | "update" | "delete"
+    pub op: String,
+    #[serde(default)]
+    pub changed_fields: Vec<String>,
+}
+
+/// Per-version metadata for a resource secret.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResourceSecretVersionMeta {
+    pub created_time: String,
+    pub username: String,
+    /// "create" | "update" | "restore"
+    pub operation: String,
+}
+
+/// Version index for a single resource secret.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResourceSecretMeta {
+    pub current_version: u64,
+    pub versions: HashMap<String, ResourceSecretVersionMeta>,
+}
+
+/// On-disk payload for a single historical version of a resource secret.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResourceSecretVersion {
+    pub data: Map<String, Value>,
+    pub version: u64,
+    pub created_time: String,
+    pub username: String,
+    pub operation: String,
+}
+
+// ── Module boilerplate ─────────────────────────────────────────────
+
+pub struct ResourceModule {
+    pub name: String,
+    pub backend: Arc<ResourceBackend>,
+}
+
+pub struct ResourceBackendInner {
+    pub core: Arc<dyn VaultCtx>,
+}
+
+#[derive(Deref)]
+pub struct ResourceBackend {
+    #[deref]
+    pub inner: Arc<ResourceBackendInner>,
+}
+
+impl ResourceBackend {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
+        Self {
+            inner: Arc::new(ResourceBackendInner { core }),
+        }
+    }
+
+    pub fn new_backend(&self) -> LogicalBackend {
+        let h_cfg_read = self.inner.clone();
+        let h_cfg_write = self.inner.clone();
+        let h_res_read = self.inner.clone();
+        let h_res_write = self.inner.clone();
+        let h_res_delete = self.inner.clone();
+        let h_res_rename = self.inner.clone();
+        let h_res_list = self.inner.clone();
+        let h_res_search = self.inner.clone();
+        let h_res_hist = self.inner.clone();
+        let h_sec_read = self.inner.clone();
+        let h_sec_write = self.inner.clone();
+        let h_sec_delete = self.inner.clone();
+        let h_sec_list = self.inner.clone();
+        let h_sec_hist = self.inner.clone();
+        let h_sec_ver = self.inner.clone();
+        let h_noop1 = self.inner.clone();
+        let h_noop2 = self.inner.clone();
+        let h_mfa_begin = self.inner.clone();
+        let h_mfa_verify = self.inner.clone();
+        let h_authorize = self.inner.clone();
+
+        let backend = new_logical_backend!({
+            paths: [
+                {
+                    // Resource type configuration (read/write the type schema)
+                    pattern: "config/types$",
+                    operations: [
+                        {op: Operation::Read, handler: h_cfg_read.handle_config_types_read},
+                        {op: Operation::Write, handler: h_cfg_write.handle_config_types_write}
+                    ],
+                    help: "Read or write the resource type definitions (fields per type)."
+                },
+                {
+                    // List all resources
+                    pattern: "resources/?$",
+                    operations: [
+                        {op: Operation::List, handler: h_res_list.handle_resource_list}
+                    ],
+                    help: "List all resources."
+                },
+                {
+                    // Paginated metadata search. POST body fields:
+                    // q, type, offset, limit (all optional).
+                    pattern: "resources/search$",
+                    operations: [
+                        {op: Operation::Write, handler: h_res_search.handle_resource_search}
+                    ],
+                    help: "Search and paginate resource metadata."
+                },
+                {
+                    // Change history for a single resource (timeline of who/when/what fields)
+                    pattern: r"resources/(?P<name>[^/]+)/history/?$",
+                    fields: {
+                        "name": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_res_hist.handle_resource_history}
+                    ],
+                    help: "Read the change history for a resource."
+                },
+                {
+                    // Rename a resource: move its identity (and all
+                    // associated data) to `new_name`. Write-only.
+                    pattern: r"resources/(?P<name>[^/]+)/rename$",
+                    fields: {
+                        "name": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Current resource name."
+                        },
+                        "new_name": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "New resource name."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_res_rename.handle_resource_rename}
+                    ],
+                    help: "Rename a resource, migrating metadata, history, secrets, \
+                           shares, group membership, and ownership to the new name."
+                },
+                {
+                    // CRUD a single resource
+                    pattern: r"resources/(?P<name>[^/]+)$",
+                    fields: {
+                        "name": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_res_read.handle_resource_read},
+                        {op: Operation::Write, handler: h_res_write.handle_resource_write},
+                        {op: Operation::Delete, handler: h_res_delete.handle_resource_delete}
+                    ],
+                    help: "Read, create/update, or delete a resource."
+                },
+                {
+                    // List secrets for a resource
+                    pattern: r"secrets/(?P<resource>[^/]+)/?$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::List, handler: h_sec_list.handle_secret_list}
+                    ],
+                    help: "List secrets for a resource."
+                },
+                {
+                    // History of a single resource secret (all versions with user/ts).
+                    pattern: r"secrets/(?P<resource>[^/]+)/(?P<key>[^/]+)/history/?$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name."
+                        },
+                        "key": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Secret key name."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_sec_hist.handle_secret_history}
+                    ],
+                    help: "Read the version list (history) of a resource secret."
+                },
+                {
+                    // Read a specific historical version of a resource secret.
+                    pattern: r"secrets/(?P<resource>[^/]+)/(?P<key>[^/]+)/version/(?P<version>\d+)$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name."
+                        },
+                        "key": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Secret key name."
+                        },
+                        "version": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Version number."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_sec_ver.handle_secret_version_read}
+                    ],
+                    help: "Read a specific version of a resource secret."
+                },
+                {
+                    // CRUD a single secret within a resource
+                    pattern: r"secrets/(?P<resource>[^/]+)/(?P<key>[^/]+)$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name."
+                        },
+                        "key": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Secret key name."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_sec_read.handle_secret_read},
+                        {op: Operation::Write, handler: h_sec_write.handle_secret_write},
+                        {op: Operation::Delete, handler: h_sec_delete.handle_secret_delete}
+                    ],
+                    help: "Read, create/update, or delete a secret within a resource."
+                },
+                {
+                    // Connect-time MFA gate — step 1. Reports whether the
+                    // named profile is gated and which factors the caller
+                    // can satisfy it with. See
+                    // features/connect-mfa-and-fido2-ssh.md.
+                    pattern: r"v2/connect/mfa/begin$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name the profile lives on."
+                        },
+                        "profile_id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Connection-profile id."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_mfa_begin.handle_connect_mfa_begin}
+                    ],
+                    help: "Begin connect-time MFA re-validation for a connection profile."
+                },
+                {
+                    // Connect-time MFA gate — step 2. Verifies one factor and
+                    // mints the single-use connect ticket.
+                    pattern: r"v2/connect/mfa/verify$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name the profile lives on."
+                        },
+                        "profile_id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Connection-profile id."
+                        },
+                        "method": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Factor to verify: `totp` or `fido2`."
+                        },
+                        "totp_code": {
+                            field_type: FieldType::SecretStr,
+                            required: false,
+                            description: "Current TOTP code. Required when method = totp."
+                        },
+                        "credential": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "JSON-encoded FIDO2 assertion. Required when method = fido2."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_mfa_verify.handle_connect_mfa_verify}
+                    ],
+                    help: "Verify a second factor and mint a single-use connect ticket."
+                },
+                {
+                    // Direct-path pre-flight: consume the ticket (when the
+                    // profile is gated) and authorize the session open.
+                    pattern: r"v2/connect/authorize$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name the profile lives on."
+                        },
+                        "profile_id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Connection-profile id."
+                        },
+                        "connect_ticket": {
+                            field_type: FieldType::SecretStr,
+                            required: false,
+                            description: "Ticket from connect/mfa/verify. Required for gated profiles."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_authorize.handle_connect_authorize}
+                    ],
+                    help: "Authorize a direct-path session open, consuming the connect \
+                           MFA ticket when the profile requires re-validation."
+                }
+            ],
+            secrets: [{
+                secret_type: "resource",
+                renew_handler: h_noop1.handle_noop,
+                revoke_handler: h_noop2.handle_noop,
+            }],
+            help: RESOURCE_BACKEND_HELP,
+        });
+
+        backend
+    }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────
+
+fn now_rfc3339() -> String {
+    Utc::now().to_rfc3339()
+}
+
+/// Monotonic-ish 20-digit zero-padded nanoseconds since UNIX epoch, used
+/// as the suffix of history log keys so `storage_list()` returns entries
+/// in chronological order.
+fn hist_seq() -> String {
+    let n = Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
+    format!("{:020}", n.max(0) as u128)
+}
+
+/// Best-effort caller identity for audit purposes. Prefers the `username`
+/// metadata field (populated by userpass login), falls back to
+/// `auth.display_name`, and finally to `"unknown"` for root-token writes
+/// and any path where auth was not resolved.
+fn caller_username(req: &Request) -> String {
+    if let Some(auth) = req.auth.as_ref() {
+        if let Some(u) = auth.metadata.get("username") {
+            if !u.is_empty() {
+                return u.clone();
+            }
+        }
+        if !auth.display_name.is_empty() {
+            return auth.display_name.clone();
+        }
+    }
+    "unknown".to_string()
+}
+
+/// Return the sorted, deduped list of top-level field names that changed
+/// between `old` and `new`, ignoring timestamp/identity fields.
+fn diff_field_names(old: Option<&Map<String, Value>>, new: &Map<String, Value>) -> Vec<String> {
+    let empty = Map::new();
+    let old = old.unwrap_or(&empty);
+    let mut changed: Vec<String> = Vec::new();
+
+    for (k, v) in new {
+        if HIST_IGNORED_FIELDS.contains(&k.as_str()) {
+            continue;
+        }
+        match old.get(k) {
+            Some(ov) if ov == v => { /* unchanged */ }
+            _ => changed.push(k.clone()),
+        }
+    }
+    for k in old.keys() {
+        if HIST_IGNORED_FIELDS.contains(&k.as_str()) {
+            continue;
+        }
+        if !new.contains_key(k) {
+            changed.push(k.clone());
+        }
+    }
+    changed.sort();
+    changed.dedup();
+    changed
+}
+
+/// Resolve a resource name from the request URL into the actual storage
+/// key in use. New resources are written under their lowercase form; for
+/// new writes this is the canonical name. Legacy data, however, was
+/// written with mixed case (the resource module preserved case while the
+/// resource-group store always lowercased its member references), so a
+/// lowercase probe alone would 404 on every PMP-imported resource.
+///
+/// Lookup order:
+///   1. Exact lowercase `meta/<lower>` — the canonical form going forward.
+///   2. Exact as-supplied `meta/<raw>` — covers a caller that already
+///      passes the legacy mixed-case form.
+///   3. Case-insensitive scan of `meta/` — resolves legacy mixed-case
+///      keys when the caller passes lowercase (the common path from
+///      asset-group filtering, since group members are stored lowercase).
+///
+/// If nothing matches, returns the lowercase form so a fresh write lands
+/// at the canonical key — i.e., new resources are always lowercase, and
+/// any existing CI-equal record is updated in place rather than
+/// duplicated.
+pub(crate) async fn resolve_resource_name(
+    req: &mut Request,
+    raw: &str,
+) -> Result<String, RvError> {
+    let trimmed = raw.trim();
+    let lower = trimmed.to_ascii_lowercase();
+
+    if req.storage_get(&format!("{META_PREFIX}{lower}")).await?.is_some() {
+        return Ok(lower);
+    }
+    if trimmed != lower
+        && req.storage_get(&format!("{META_PREFIX}{trimmed}")).await?.is_some()
+    {
+        return Ok(trimmed.to_string());
+    }
+    for k in req.storage_list(META_PREFIX).await? {
+        if k.eq_ignore_ascii_case(trimmed) {
+            return Ok(k);
+        }
+    }
+    Ok(lower)
+}
+
+// ── Handlers ───────────────────────────────────────────────────────
+
+#[maybe_async::maybe_async]
+impl ResourceBackendInner {
+    // ── Config (type definitions) ────────────────────────────────
+
+    pub async fn handle_config_types_read(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let entry = req.storage_get("config/types").await?;
+        match entry {
+            Some(e) => {
+                let data: Map<String, Value> = serde_json::from_slice(&e.value)?;
+                Ok(Some(Response::data_response(Some(data))))
+            }
+            None => Ok(None), // no config yet — frontend uses defaults
+        }
+    }
+
+    pub async fn handle_config_types_write(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let body = req.body.as_ref().ok_or(RvError::ErrRequestNoDataField)?;
+        let data = serde_json::to_string(body)?;
+        let entry = StorageEntry {
+            key: "config/types".to_string(),
+            value: data.into_bytes(),
+        };
+        req.storage_put(&entry).await?;
+        Ok(None)
+    }
+
+    // ── Resource CRUD ──────────────────────────────────────────────
+
+    pub async fn handle_resource_list(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let keys = req.storage_list(META_PREFIX).await?;
+        let resp = Response::list_response(&keys);
+        Ok(Some(resp))
+    }
+
+    /// Paginated search over resource metadata.
+    ///
+    /// Request body fields (all optional):
+    ///   - `q`      — substring matched (case-insensitive) against
+    ///                `name`, `hostname`, `ip_address`, and `tags`.
+    ///   - `type`   — exact match against the `type` metadata field.
+    ///   - `offset` — 0-based start of the page (default 0).
+    ///   - `limit`  — page size, clamped to `[1, 200]` (default 30).
+    ///
+    /// Response:
+    ///   ```json
+    ///   {
+    ///     "items":   [{ "name", "type", "hostname", "ip_address", "tags",
+    ///                   "connect_profiles" }, …],
+    ///     "total":    <u64>,
+    ///     "has_more": <bool>
+    ///   }
+    ///   ```
+    ///
+    /// Implementation walks `META_PREFIX` once per call and reads each
+    /// metadata blob (we don't yet maintain a search index — at the
+    /// volumes this is built for, the cost is dominated by storage
+    /// read latency, which Hiqlite/embedded SQLite serves in single-
+    /// digit microseconds per row). If profiling later shows search
+    /// latency dominating, add an `RwLock<Option<Arc<Index>>>` on
+    /// `ResourceBackendInner` populated lazily and invalidated by
+    /// `handle_resource_write` / `handle_resource_delete`.
+    pub async fn handle_resource_search(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let body = req.body.clone().unwrap_or_default();
+        let q = body
+            .get("q")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty());
+        let type_filter = body
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+        let offset = body
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let limit = body
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(30)
+            .clamp(1, 200) as usize;
+
+        let keys = req.storage_list(META_PREFIX).await?;
+
+        // Scan every metadata blob so we honour the full match surface
+        // (name, hostname, ip_address, tags). An earlier revision had
+        // a name-only fast path that skipped reads when only `q` was
+        // set, but that silently dropped tag-only matches — exactly
+        // the case a tag-organised vault relies on. If query latency
+        // becomes a bottleneck past ~5k resources, add a lazy
+        // `RwLock<Option<Arc<SearchIndex>>>` on `ResourceBackendInner`,
+        // populated on first search and invalidated by
+        // `handle_resource_write` / `handle_resource_delete`. The
+        // embedded SQLite/file backends serve 5k reads well under
+        // 100ms today.
+        let mut matches: Vec<(String, ResourceCardEntry)> = Vec::new();
+        for key in &keys {
+            let storage_key = format!("{META_PREFIX}{key}");
+            let entry = match req.storage_get(&storage_key).await? {
+                Some(e) => e,
+                None => continue,
+            };
+            let data: Map<String, Value> = match serde_json::from_slice(&entry.value) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if let Some(t) = &type_filter {
+                if data.get("type").and_then(|v| v.as_str()) != Some(t.as_str()) {
+                    continue;
+                }
+            }
+            if let Some(needle) = &q {
+                let name_lc = key.to_ascii_lowercase();
+                let host_lc = data
+                    .get("hostname")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .unwrap_or_default();
+                let ip_lc = data
+                    .get("ip_address")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .unwrap_or_default();
+                let tags_lc = data
+                    .get("tags")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if !name_lc.contains(needle)
+                    && !host_lc.contains(needle)
+                    && !ip_lc.contains(needle)
+                    && !tags_lc.contains(needle)
+                {
+                    continue;
+                }
+            }
+            matches.push((key.clone(), ResourceCardEntry::from_metadata(key, &data)));
+        }
+
+        // Stable sort by name so paging is deterministic across calls.
+        matches.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Per-object visibility filter. `post_auth` authorized the *endpoint*
+        // path (`resources/resources/search`), not the resources in the
+        // response — so without this pass, anyone who may search learns every
+        // resource's name, hostname, IP, tags and connection-profile shape,
+        // including resources they cannot read. `readable_targets` re-runs the
+        // real evaluator against each candidate's own
+        // `resources/resources/<name>` path, honouring ungated grants,
+        // `groups = [...]`, `scopes = ["owner", "shared"]` and root exactly as
+        // a direct read would.
+        //
+        // Applied after the `q` / `type` match so the cost is bounded by the
+        // candidate set rather than the whole vault, and before `total` so the
+        // count and `has_more` describe what the caller can actually see.
+        //
+        // `req.auth == None` is the in-process server-authority path (a module
+        // dispatching through the router on the server's own behalf, not a
+        // caller's — the same convention the credential resolvers rely on);
+        // those are left unfiltered. Every token-bearing request is filtered.
+        //
+        // Cost: a caller holding an *ungated* grant (the admin case) is decided
+        // by `readable_targets`' first pass and adds no storage reads at all. A
+        // caller whose access is owner/share/group-scoped costs up to three
+        // extra reads per candidate, on top of the one metadata read the scan
+        // already does. If that shows up in profiling before the search index
+        // this comment block has long promised, the shape to build is the
+        // inverse query — enumerate what the caller owns and what is shared
+        // with them from the owner/share indexes, then intersect — rather than
+        // probing every candidate.
+        if req.auth.is_some() {
+            // ACLs are evaluated against the *full* request path, but a backend
+            // handler receives the mount-relative one (`resources/search`, not
+            // `resources/resources/search`), so rebuild the mount prefix here.
+            // In a child namespace the policy — and the rewritten path the
+            // pipeline would evaluate for a direct read — carries the `<ns>/`
+            // prefix, so it goes back on too; probing the bare path would
+            // consult the root namespace's same-named resource.
+            let ns_prefix = match req.namespace_path.as_deref() {
+                Some(ns) if !ns.trim().trim_matches('/').is_empty() => {
+                    format!("{}/", ns.trim().trim_matches('/'))
+                }
+                _ => String::new(),
+            };
+            let base = format!("{ns_prefix}{RESOURCE_METADATA_PATH_PREFIX}");
+            let targets: Vec<String> =
+                matches.iter().map(|(name, _)| format!("{base}{name}")).collect();
+            let policy = self
+                .core
+                .policy()
+                .ok_or_else(|| bv_error_string!("policy module not registered"))?;
+            let visible = policy.readable_targets(req, &targets).await;
+            let mut kept = Vec::with_capacity(matches.len());
+            for (entry, ok) in matches.into_iter().zip(visible) {
+                if ok {
+                    kept.push(entry);
+                }
+            }
+            matches = kept;
+        }
+
+        let total = matches.len();
+        let page_end = (offset + limit).min(total);
+        let items: Vec<Value> = if offset >= total {
+            Vec::new()
+        } else {
+            matches[offset..page_end]
+                .iter()
+                .map(|(_, card)| serde_json::to_value(card).unwrap_or(Value::Null))
+                .collect()
+        };
+
+        let mut resp = Map::new();
+        resp.insert("items".into(), Value::Array(items));
+        resp.insert("total".into(), Value::Number((total as u64).into()));
+        resp.insert("has_more".into(), Value::Bool(page_end < total));
+        Ok(Some(Response::data_response(Some(resp))))
+    }
+
+    pub async fn handle_resource_read(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let raw = req.get_data("name")?.as_str().unwrap().to_string();
+        let name = resolve_resource_name(req, &raw).await?;
+        let key = format!("{META_PREFIX}{name}");
+        let entry = req.storage_get(&key).await?;
+        match entry {
+            Some(e) => {
+                let data: Map<String, Value> = serde_json::from_slice(&e.value)?;
+                Ok(Some(Response::data_response(Some(data))))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub async fn handle_resource_write(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let raw = req.get_data("name")?.as_str().unwrap().to_string();
+        // Resolve to either the existing storage key (any case) or the
+        // canonical lowercase form for a fresh write. This collapses
+        // would-be duplicates from PMP-style imports that send mixed
+        // case after we've already standardized on lowercase.
+        let name = resolve_resource_name(req, &raw).await?;
+        let body = req.body.as_ref().ok_or(RvError::ErrRequestNoDataField)?.clone();
+        let key = format!("{META_PREFIX}{name}");
+
+        // Load previous value (if any) so we can compute the field diff
+        // before overwriting.
+        let previous: Option<Map<String, Value>> = match req.storage_get(&key).await? {
+            Some(e) => serde_json::from_slice(&e.value).ok(),
+            None => None,
+        };
+        let mut op = if previous.is_some() { "update" } else { "create" };
+        let mut changed_fields = diff_field_names(previous.as_ref(), &body);
+
+        // A write whose only diff is `recent_sessions` came from the
+        // GUI's session-recorder (`record_recent_session` in
+        // `commands/connect.rs`). That isn't a metadata edit — it's the
+        // operator opening a session — so we relabel it as a "connect"
+        // event with no field pill, and surface it on the security log
+        // so an operator tailing security.log sees connection activity
+        // without having to cross-reference operations.log.
+        let is_connect = op == "update"
+            && changed_fields.len() == 1
+            && changed_fields[0] == "recent_sessions";
+        if is_connect {
+            op = "connect";
+            changed_fields.clear();
+            log::info!(
+                target: "security",
+                "resource-connect: user={} resource={}",
+                caller_username(req),
+                name
+            );
+        }
+
+        // Only append a history entry if something actually changed -- the
+        // GUI saves on every Save button click which may be a no-op.
+        // (Always record the initial create, though, even if `body` is empty.)
+        let record_history = op == "create" || op == "connect" || !changed_fields.is_empty();
+
+        // Write the new metadata.
+        let data = serde_json::to_string(&body)?;
+        let entry = StorageEntry {
+            key,
+            value: data.into_bytes(),
+        };
+        req.storage_put(&entry).await?;
+
+        if record_history {
+            let hist = ResourceHistoryEntry {
+                ts: now_rfc3339(),
+                user: caller_username(req),
+                op: op.to_string(),
+                changed_fields,
+            };
+            let hist_key = format!("{HIST_PREFIX}{name}/{}", hist_seq());
+            let hist_entry = StorageEntry {
+                key: hist_key,
+                value: serde_json::to_string(&hist)?.into_bytes(),
+            };
+            req.storage_put(&hist_entry).await?;
+        }
+
+        Ok(None)
+    }
+
+    pub async fn handle_resource_delete(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let raw = req.get_data("name")?.as_str().unwrap().to_string();
+        let name = resolve_resource_name(req, &raw).await?;
+
+        // Record the delete in the history log *before* wiping it. The
+        // entry stays available for audit even after the resource is gone
+        // (until the caller also purges the hist/ prefix).
+        let hist = ResourceHistoryEntry {
+            ts: now_rfc3339(),
+            user: caller_username(req),
+            op: "delete".to_string(),
+            changed_fields: Vec::new(),
+        };
+        let hist_key = format!("{HIST_PREFIX}{name}/{}", hist_seq());
+        let hist_entry = StorageEntry {
+            key: hist_key,
+            value: serde_json::to_string(&hist)?.into_bytes(),
+        };
+        req.storage_put(&hist_entry).await?;
+
+        // Delete the resource metadata.
+        let meta_key = format!("{META_PREFIX}{name}");
+        req.storage_delete(&meta_key).await?;
+
+        // Prune the resource from every resource-group it is a member of.
+        // Resource-groups are an optional subsystem — if the module isn't
+        // loaded or the store isn't initialized yet, skip the prune.
+        // Failures are logged but do not block resource deletion: a stale
+        // group member will be cleaned up on the next group write or by
+        // the `resource-group/reindex` endpoint.
+        if let Some(groups) = self.core.resource_groups() {
+            if let Err(e) = groups.prune_resource(&name).await {
+                log::warn!(
+                    "resource-group prune failed for deleted resource '{name}': {e}. \
+                     Use the resource-group/reindex endpoint to clean up.",
+                );
+            }
+        }
+
+        // Delete all current-value secrets under this resource.
+        let secret_prefix = format!("{SECRET_PREFIX}{name}/");
+        for k in req.storage_list(&secret_prefix).await? {
+            req.storage_delete(&format!("{secret_prefix}{k}")).await?;
+        }
+
+        // Delete all secret version metadata + version payloads.
+        let smeta_prefix = format!("{SMETA_PREFIX}{name}/");
+        for k in req.storage_list(&smeta_prefix).await? {
+            req.storage_delete(&format!("{smeta_prefix}{k}")).await?;
+        }
+        let sver_prefix = format!("{SVER_PREFIX}{name}/");
+        // The sver/ tree is two levels deep: <resource>/<key>/<version>.
+        // storage_list returns the next-level children; recurse one step.
+        for k in req.storage_list(&sver_prefix).await? {
+            let sub = format!("{sver_prefix}{k}");
+            // k typically ends with "/" because there is a further level.
+            // Strip any trailing slash and iterate its children.
+            let sub_prefix = if sub.ends_with('/') { sub.clone() } else { format!("{sub}/") };
+            for v in req.storage_list(&sub_prefix).await? {
+                req.storage_delete(&format!("{sub_prefix}{v}")).await?;
+            }
+            // Some backends may also return a leaf without a trailing slash;
+            // delete that too (no-op if already gone).
+            let _ = req.storage_delete(&sub).await;
+        }
+
+        Ok(None)
+    }
+
+    /// Rename a resource, moving its identity and every piece of data
+    /// keyed by name to `new_name`. This is a multi-step migration across
+    /// several storage domains — there is no cross-backend transaction, so
+    /// the order is deliberately **write-new-then-delete-old**: a failure
+    /// partway through leaves a recoverable duplicate under the old name,
+    /// never a half-deleted resource.
+    ///
+    /// Migrated in this handler:
+    ///   - `meta/<name>` (this mount's view)
+    ///   - `secret/`, `smeta/`, `sver/` (this mount's view)
+    ///   - `hist/<name>/*` (copied forward; a `rename` entry is appended)
+    ///   - asset-group membership + reverse index (resource-group store)
+    ///   - explicit share grants (identity share store)
+    ///   - ownership record (identity owner store)
+    ///
+    /// File resources (`FileEntry.resource`) live in a separate mount and
+    /// are re-pointed by the caller via the files engine's
+    /// `files/repoint-resource` endpoint — they are NOT touched here.
+    ///
+    /// Policy documents that reference the old ACL path are intentionally
+    /// left untouched (they may use globs/templates that cannot be safely
+    /// rewritten); the operator is warned in the GUI to update them.
+    pub async fn handle_resource_rename(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let raw_old = req.get_data("name")?.as_str().unwrap_or("").to_string();
+        let old = resolve_resource_name(req, &raw_old).await?;
+
+        // Validate the target name. Names are the storage key *and* the
+        // ACL path segment, so reject anything that could escape the key
+        // space or collide with a sub-path.
+        let raw_new = req
+            .get_data("new_name")?
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if raw_new.is_empty() {
+            return Err(bv_error_string!("new_name is required"));
+        }
+        let new = raw_new.to_ascii_lowercase();
+        if new.contains('/') || new.contains("..") {
+            return Err(bv_error_string!(
+                "new_name must not contain '/' or '..'"
+            ));
+        }
+        if new == old {
+            return Err(bv_error_string!(
+                "new_name is the same as the current name"
+            ));
+        }
+
+        // Source must exist.
+        let old_meta_key = format!("{META_PREFIX}{old}");
+        let Some(old_entry) = req.storage_get(&old_meta_key).await? else {
+            return Err(bv_error_string!("resource not found"));
+        };
+
+        // Target must be free. Check the canonical key and a
+        // case-insensitive scan (mirrors `resolve_resource_name`) so a
+        // rename can never silently clobber a differently-cased record.
+        let new_meta_key = format!("{META_PREFIX}{new}");
+        if req.storage_get(&new_meta_key).await?.is_some() {
+            return Err(bv_error_string!(format!(
+                "a resource named '{new}' already exists"
+            )));
+        }
+        for k in req.storage_list(META_PREFIX).await? {
+            if k.eq_ignore_ascii_case(&new) {
+                return Err(bv_error_string!(format!(
+                    "a resource named '{new}' already exists"
+                )));
+            }
+        }
+
+        // ── 1. Metadata: write the new record (name + updated_at) ──────
+        let mut meta: Map<String, Value> =
+            serde_json::from_slice(&old_entry.value).unwrap_or_default();
+        meta.insert("name".to_string(), Value::String(new.clone()));
+        meta.insert(
+            "updated_at".to_string(),
+            Value::String(now_rfc3339()),
+        );
+        req.storage_put(&StorageEntry {
+            key: new_meta_key,
+            value: serde_json::to_vec(&meta)?,
+        })
+        .await?;
+
+        // ── 2. Secrets: current values, version index, version payloads ─
+        // Copy every key from the old prefix to the new, then delete the
+        // old copies. Mirrors the enumeration in `handle_resource_delete`.
+        let old_secret_prefix = format!("{SECRET_PREFIX}{old}/");
+        let new_secret_prefix = format!("{SECRET_PREFIX}{new}/");
+        for k in req.storage_list(&old_secret_prefix).await? {
+            if let Some(e) = req.storage_get(&format!("{old_secret_prefix}{k}")).await? {
+                req.storage_put(&StorageEntry {
+                    key: format!("{new_secret_prefix}{k}"),
+                    value: e.value,
+                })
+                .await?;
+            }
+        }
+
+        let old_smeta_prefix = format!("{SMETA_PREFIX}{old}/");
+        let new_smeta_prefix = format!("{SMETA_PREFIX}{new}/");
+        for k in req.storage_list(&old_smeta_prefix).await? {
+            if let Some(e) = req.storage_get(&format!("{old_smeta_prefix}{k}")).await? {
+                req.storage_put(&StorageEntry {
+                    key: format!("{new_smeta_prefix}{k}"),
+                    value: e.value,
+                })
+                .await?;
+            }
+        }
+
+        // The sver/ tree is two levels deep: <resource>/<key>/<version>.
+        let old_sver_prefix = format!("{SVER_PREFIX}{old}/");
+        let new_sver_prefix = format!("{SVER_PREFIX}{new}/");
+        for k in req.storage_list(&old_sver_prefix).await? {
+            let key_seg = k.trim_end_matches('/');
+            let old_sub = format!("{old_sver_prefix}{key_seg}/");
+            let new_sub = format!("{new_sver_prefix}{key_seg}/");
+            for v in req.storage_list(&old_sub).await? {
+                if let Some(e) = req.storage_get(&format!("{old_sub}{v}")).await? {
+                    req.storage_put(&StorageEntry {
+                        key: format!("{new_sub}{v}"),
+                        value: e.value,
+                    })
+                    .await?;
+                }
+            }
+        }
+
+        // ── 3. History: carry the timeline forward, then log the rename ─
+        let old_hist_prefix = format!("{HIST_PREFIX}{old}/");
+        let new_hist_prefix = format!("{HIST_PREFIX}{new}/");
+        for k in req.storage_list(&old_hist_prefix).await? {
+            if let Some(e) = req.storage_get(&format!("{old_hist_prefix}{k}")).await? {
+                req.storage_put(&StorageEntry {
+                    key: format!("{new_hist_prefix}{k}"),
+                    value: e.value,
+                })
+                .await?;
+            }
+        }
+        let hist = ResourceHistoryEntry {
+            ts: now_rfc3339(),
+            user: caller_username(req),
+            op: "rename".to_string(),
+            changed_fields: vec![format!("{old} -> {new}")],
+        };
+        req.storage_put(&StorageEntry {
+            key: format!("{new_hist_prefix}{}", hist_seq()),
+            value: serde_json::to_vec(&hist)?,
+        })
+        .await?;
+        log::info!(
+            target: "security",
+            "resource-rename: user={} old={} new={}",
+            caller_username(req),
+            old,
+            new
+        );
+
+        // ── 4. Cross-module references (best-effort, like delete) ──────
+        // Asset-group membership + reverse index.
+        if let Some(groups) = self.core.resource_groups() {
+            if let Err(e) = groups.rename_resource(&old, &new).await {
+                log::warn!(
+                    "resource-group rename failed for '{old}' -> '{new}': {e}. \
+                     Use the resource-group/reindex endpoint to clean up.",
+                );
+            }
+        }
+
+        // Shares + ownership. The namespace-scoped keying of owner and share
+        // records is the identity module's, so the whole move is one call:
+        // this engine should not know that a resource inside a namespace is
+        // keyed `<ns>/<name>`.
+        if let Some(identity) = self.core.identity() {
+            identity
+                .rename_object(
+                    ObjectKind::Resource,
+                    &old,
+                    &new,
+                    req.namespace_path.as_deref(),
+                    &caller_audit_actor(req),
+                )
+                .await;
+        }
+
+        // ── 5. Delete the old resource-mount keys (identity now moved) ──
+        req.storage_delete(&old_meta_key).await?;
+        for k in req.storage_list(&old_secret_prefix).await? {
+            req.storage_delete(&format!("{old_secret_prefix}{k}")).await?;
+        }
+        for k in req.storage_list(&old_smeta_prefix).await? {
+            req.storage_delete(&format!("{old_smeta_prefix}{k}")).await?;
+        }
+        for k in req.storage_list(&old_sver_prefix).await? {
+            let key_seg = k.trim_end_matches('/');
+            let old_sub = format!("{old_sver_prefix}{key_seg}/");
+            for v in req.storage_list(&old_sub).await? {
+                req.storage_delete(&format!("{old_sub}{v}")).await?;
+            }
+            let _ = req.storage_delete(&format!("{old_sver_prefix}{key_seg}")).await;
+        }
+        for k in req.storage_list(&old_hist_prefix).await? {
+            req.storage_delete(&format!("{old_hist_prefix}{k}")).await?;
+        }
+
+        let mut data = Map::new();
+        data.insert("name".to_string(), Value::String(new));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_resource_history(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let raw = req.get_data("name")?.as_str().unwrap().to_string();
+        let name = resolve_resource_name(req, &raw).await?;
+        let prefix = format!("{HIST_PREFIX}{name}/");
+
+        let mut keys = req.storage_list(&prefix).await?;
+        // storage_list returns children in insertion order for some backends
+        // and lexicographic order for others; sort explicitly so timelines
+        // always render newest-first after the reverse() below.
+        keys.sort();
+        keys.reverse();
+
+        let mut entries: Vec<Value> = Vec::with_capacity(keys.len());
+        for k in keys {
+            let full = format!("{prefix}{k}");
+            if let Some(e) = req.storage_get(&full).await? {
+                if let Ok(v) = serde_json::from_slice::<Value>(&e.value) {
+                    entries.push(v);
+                }
+            }
+        }
+
+        let mut data = Map::new();
+        data.insert("entries".to_string(), Value::Array(entries));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    // ── Per-resource secret CRUD ───────────────────────────────────
+
+    pub async fn handle_secret_list(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let raw = req.get_data("resource")?.as_str().unwrap().to_string();
+        let resource = resolve_resource_name(req, &raw).await?;
+        let prefix = format!("{SECRET_PREFIX}{resource}/");
+        let keys = req.storage_list(&prefix).await?;
+        let resp = Response::list_response(&keys);
+        Ok(Some(resp))
+    }
+
+    pub async fn handle_secret_read(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let raw = req.get_data("resource")?.as_str().unwrap().to_string();
+        let resource = resolve_resource_name(req, &raw).await?;
+        let key_name = req.get_data("key")?.as_str().unwrap().to_string();
+        let key = format!("{SECRET_PREFIX}{resource}/{key_name}");
+        let entry = req.storage_get(&key).await?;
+        match entry {
+            Some(e) => {
+                let data: Map<String, Value> = serde_json::from_slice(&e.value)?;
+                // Read of a secret value is the most sensitive event
+                // this module produces. The dispatcher's audit broker
+                // already records the request, but mirroring it on the
+                // security target gets it into security.log alongside
+                // the connect events, where ops watches for "who is
+                // pulling credentials right now."
+                log::info!(
+                    target: "security",
+                    "resource-secret-read: user={} resource={} key={}",
+                    caller_username(req),
+                    resource,
+                    key_name
+                );
+                Ok(Some(Response::data_response(Some(data))))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Resolve the effective SSH login class for a resource, walking the
+    /// four-tier `ssh-broker` policy. Returns `SharedCredential` (the
+    /// default) when the ssh-broker module isn't registered or no tier is
+    /// set — so a deployment that never configures brokering is
+    /// unaffected. The resource's classification hints (type + asset-group
+    /// memberships) come from the resource record and the resource-group
+    /// reverse index.
+    async fn resolve_login_class(
+        &self,
+        req: &Request,
+        resource: &str,
+    ) -> Result<LoginClassVerdict, RvError> {
+        let Some(policy) = self.core.login_class() else {
+            return Ok(LoginClassVerdict::default());
+        };
+
+        // Resource type from the metadata record.
+        let resource_type = match req.storage_get(&format!("{META_PREFIX}{resource}")).await? {
+            Some(e) => serde_json::from_slice::<Map<String, Value>>(&e.value)
+                .ok()
+                .and_then(|m| m.get("type").and_then(|v| v.as_str().map(String::from)))
+                .unwrap_or_default(),
+            None => String::new(),
+        };
+
+        // Asset-group memberships from the resource-group reverse index.
+        let asset_groups = match self.core.resource_groups() {
+            Some(groups) => groups.groups_for_resource(resource).await.unwrap_or_default(),
+            None => Vec::new(),
+        };
+
+        policy.resolve_for(&resource_type, &asset_groups, resource).await
+    }
+
+    pub async fn handle_secret_write(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let raw = req.get_data("resource")?.as_str().unwrap().to_string();
+        let resource = resolve_resource_name(req, &raw).await?;
+        let key_name = req.get_data("key")?.as_str().unwrap().to_string();
+        let body = req.body.as_ref().ok_or(RvError::ErrRequestNoDataField)?.clone();
+
+        // Brokered-resource enforcement: a resource pinned to `brokered`
+        // (at any tier) may not carry a *static SSH credential*. Reject at
+        // attach time — not merely hidden in the GUI — so the control is
+        // enforceable, not advisory. A static secret carrying a
+        // `private_key` or `password` is exactly what the SSH `secret`
+        // credential source would hand the dialler; on a brokered resource
+        // every login must be minted per-connect from the SSH engine.
+        if static_ssh_credential_shape(&body) {
+            let eff = self.resolve_login_class(req, &resource).await?;
+            if eff.brokered {
+                return Err(bv_error_response_status!(
+                    409,
+                    &format!(
+                        "brokered_resource_no_static_credential: resource `{resource}` is \
+                         brokered (login_class via tier `{}`); a static SSH credential may \
+                         not be attached — every SSH login is minted per-connect from the \
+                         SSH engine. Bind an `ssh-engine` credential source instead.",
+                        eff.source
+                    )
+                ));
+            }
+        }
+
+        let curr_key = format!("{SECRET_PREFIX}{resource}/{key_name}");
+        let smeta_key = format!("{SMETA_PREFIX}{resource}/{key_name}");
+
+        // Load (or initialize) the version index for this secret.
+        let mut meta: ResourceSecretMeta = match req.storage_get(&smeta_key).await? {
+            Some(e) => serde_json::from_slice(&e.value).unwrap_or_default(),
+            None => ResourceSecretMeta::default(),
+        };
+
+        let new_version = meta.current_version + 1;
+        let now = now_rfc3339();
+        let user = caller_username(req);
+        let op = if new_version == 1 { "create" } else { "update" };
+
+        // Snapshot the new value to the version store.
+        let ver_payload = ResourceSecretVersion {
+            data: body.clone(),
+            version: new_version,
+            created_time: now.clone(),
+            username: user.clone(),
+            operation: op.to_string(),
+        };
+        let ver_key = format!("{SVER_PREFIX}{resource}/{key_name}/{new_version}");
+        req.storage_put(&StorageEntry {
+            key: ver_key,
+            value: serde_json::to_string(&ver_payload)?.into_bytes(),
+        })
+        .await?;
+
+        // Keep the current-value entry for O(1) reads.
+        let data = serde_json::to_string(&body)?;
+        req.storage_put(&StorageEntry {
+            key: curr_key,
+            value: data.into_bytes(),
+        })
+        .await?;
+
+        // Update and persist the version index.
+        meta.current_version = new_version;
+        meta.versions.insert(
+            new_version.to_string(),
+            ResourceSecretVersionMeta {
+                created_time: now,
+                username: user,
+                operation: op.to_string(),
+            },
+        );
+        req.storage_put(&StorageEntry {
+            key: smeta_key,
+            value: serde_json::to_string(&meta)?.into_bytes(),
+        })
+        .await?;
+
+        Ok(None)
+    }
+
+    pub async fn handle_secret_delete(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let raw = req.get_data("resource")?.as_str().unwrap().to_string();
+        let resource = resolve_resource_name(req, &raw).await?;
+        let key_name = req.get_data("key")?.as_str().unwrap().to_string();
+
+        // Delete current value.
+        let curr_key = format!("{SECRET_PREFIX}{resource}/{key_name}");
+        req.storage_delete(&curr_key).await?;
+
+        // Delete all version payloads.
+        let sver_prefix = format!("{SVER_PREFIX}{resource}/{key_name}/");
+        for v in req.storage_list(&sver_prefix).await? {
+            req.storage_delete(&format!("{sver_prefix}{v}")).await?;
+        }
+
+        // Delete the version index.
+        let smeta_key = format!("{SMETA_PREFIX}{resource}/{key_name}");
+        req.storage_delete(&smeta_key).await?;
+
+        Ok(None)
+    }
+
+    pub async fn handle_secret_history(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let raw = req.get_data("resource")?.as_str().unwrap().to_string();
+        let resource = resolve_resource_name(req, &raw).await?;
+        let key_name = req.get_data("key")?.as_str().unwrap().to_string();
+
+        let smeta_key = format!("{SMETA_PREFIX}{resource}/{key_name}");
+        let meta: ResourceSecretMeta = match req.storage_get(&smeta_key).await? {
+            Some(e) => serde_json::from_slice(&e.value).unwrap_or_default(),
+            None => {
+                // No version index yet (legacy secret written before
+                // versioning). Return an empty list rather than an error.
+                let mut data = Map::new();
+                data.insert("current_version".to_string(), Value::from(0u64));
+                data.insert("versions".to_string(), Value::Array(Vec::new()));
+                return Ok(Some(Response::data_response(Some(data))));
+            }
+        };
+
+        // Convert the HashMap<String, VersionMeta> into a sorted array for
+        // the frontend. Descending version order puts the newest first.
+        let mut versions: Vec<(u64, &ResourceSecretVersionMeta)> = meta
+            .versions
+            .iter()
+            .filter_map(|(k, v)| k.parse::<u64>().ok().map(|n| (n, v)))
+            .collect();
+        versions.sort_by_key(|v| std::cmp::Reverse(v.0));
+
+        let mut entries = Vec::with_capacity(versions.len());
+        for (ver, vm) in versions {
+            let mut e = Map::new();
+            e.insert("version".to_string(), Value::from(ver));
+            e.insert("created_time".to_string(), Value::from(vm.created_time.clone()));
+            e.insert("username".to_string(), Value::from(vm.username.clone()));
+            e.insert("operation".to_string(), Value::from(vm.operation.clone()));
+            entries.push(Value::Object(e));
+        }
+
+        let mut data = Map::new();
+        data.insert(
+            "current_version".to_string(),
+            Value::from(meta.current_version),
+        );
+        data.insert("versions".to_string(), Value::Array(entries));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_secret_version_read(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let raw = req.get_data("resource")?.as_str().unwrap().to_string();
+        let resource = resolve_resource_name(req, &raw).await?;
+        let key_name = req.get_data("key")?.as_str().unwrap().to_string();
+        let version_str = req.get_data("version")?.as_str().unwrap().to_string();
+        let version: u64 = version_str
+            .parse()
+            .map_err(|_| RvError::ErrRequestInvalid)?;
+
+        let ver_key = format!("{SVER_PREFIX}{resource}/{key_name}/{version}");
+        let entry = match req.storage_get(&ver_key).await? {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+        let v: ResourceSecretVersion =
+            serde_json::from_slice(&entry.value).map_err(|_| RvError::ErrRequestInvalid)?;
+
+        let mut data = Map::new();
+        data.insert("version".to_string(), Value::from(v.version));
+        data.insert("created_time".to_string(), Value::from(v.created_time));
+        data.insert("username".to_string(), Value::from(v.username));
+        data.insert("operation".to_string(), Value::from(v.operation));
+        data.insert("data".to_string(), Value::Object(v.data));
+        // Historical-version reads disclose secret material just like
+        // current-value reads; record them on the same security
+        // channel with the version tag included.
+        log::info!(
+            target: "security",
+            "resource-secret-read: user={} resource={} key={} version={}",
+            caller_username(req),
+            resource,
+            key_name,
+            version
+        );
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_noop(
+        &self,
+        _backend: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        Ok(None)
+    }
+}
+
+// ── Module registration ────────────────────────────────────────────
+
+impl ResourceModule {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
+        Self {
+            name: "resource".to_string(),
+            backend: Arc::new(ResourceBackend::new(core)),
+        }
+    }
+}
+
+impl Module for ResourceModule {
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+
+    fn register(self: Arc<Self>, services: &crate::kernel_api::KernelServices) {
+        kernel_service::register(self, services);
+    }
+
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
+        let backend = self.backend.clone();
+        let backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
+            let mut b = backend.new_backend();
+            b.init()?;
+            Ok(Arc::new(b))
+        };
+        core.add_logical_backend("resource", Arc::new(backend_new_func))
+    }
+
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
+        core.delete_logical_backend("resource")
+    }
+}
+
+// ── Unit tests ─────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn obj(v: Value) -> Map<String, Value> {
+        v.as_object().cloned().unwrap()
+    }
+
+    #[test]
+    fn diff_create_treats_everything_as_changed() {
+        let new = obj(json!({
+            "hostname": "h",
+            "owner": "alice",
+            "created_at": "t",
+            "updated_at": "t",
+            "name": "x",
+        }));
+        let changed = diff_field_names(None, &new);
+        // name/created_at/updated_at are ignored; the rest is considered changed.
+        assert_eq!(changed, vec!["hostname".to_string(), "owner".to_string()]);
+    }
+
+    #[test]
+    fn diff_equal_returns_empty() {
+        let a = obj(json!({ "hostname": "h", "owner": "alice" }));
+        let b = a.clone();
+        assert!(diff_field_names(Some(&a), &b).is_empty());
+    }
+
+    #[test]
+    fn diff_detects_changed_added_and_removed_fields() {
+        let old = obj(json!({ "hostname": "old", "port": 22, "owner": "alice" }));
+        let new = obj(json!({ "hostname": "new", "port": 22, "tags": "web" }));
+        // Changed: hostname; added: tags; removed: owner.
+        let changed = diff_field_names(Some(&old), &new);
+        assert_eq!(
+            changed,
+            vec!["hostname".to_string(), "owner".to_string(), "tags".to_string()]
+        );
+    }
+
+    #[test]
+    fn diff_ignores_timestamps_even_when_different() {
+        let old = obj(json!({ "hostname": "h", "updated_at": "2020" }));
+        let new = obj(json!({ "hostname": "h", "updated_at": "2030" }));
+        assert!(diff_field_names(Some(&old), &new).is_empty());
+    }
+
+    #[test]
+    fn hist_seq_is_sortable_and_20_digits() {
+        let a = hist_seq();
+        // Sleep a hair so nanos advance even on fast CPUs.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = hist_seq();
+        assert_eq!(a.len(), 20);
+        assert_eq!(b.len(), 20);
+        assert!(a < b, "expected {a} < {b}");
+    }
+
+    #[test]
+    fn static_ssh_credential_shape_detects_key_and_password() {
+        assert!(static_ssh_credential_shape(&obj(json!({ "private_key": "x" }))));
+        assert!(static_ssh_credential_shape(&obj(json!({ "password": "p" }))));
+        // Empty values don't count as a credential.
+        assert!(!static_ssh_credential_shape(&obj(json!({ "password": "" }))));
+        // A bare passphrase or a generic KV blob is not a static credential.
+        assert!(!static_ssh_credential_shape(&obj(json!({ "passphrase": "p" }))));
+        assert!(!static_ssh_credential_shape(&obj(json!({ "token": "t" }))));
+    }
+}
+
+

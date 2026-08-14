@@ -47,6 +47,41 @@ EXAMPLE ENTRY:
 
 ### Changed
 
+#### FerroGate SDK: vendored tree → Cargo registry
+- **The `ferro-*` verifier crates now come from FerroGate's own Cargo registry
+  instead of `third_party/ferrogate-sdk-rust/`.** `ferro-crypto`,
+  `ferro-child-verify` and `ferro-svid-verify` are published to the public
+  Cloudsmith repository `uox/ferrogate`, registered as `uox-ferrogate` in
+  `.cargo/config.toml`, and the root `Cargo.toml` depends on all three at
+  `=0.21.5`. The published 0.21.5 sources are **byte-identical** to the 0.21.3
+  sources that were vendored, so no verifier behaviour changed -- this is a
+  packaging change, not a crypto change.
+  **What operators get:** nothing observable at runtime. For builders: the repo
+  drops ~4 500 lines of vendored third-party source, and a first build now
+  fetches three crates from `cargo.cloudsmith.io` (public -- no token, no CI
+  secret).
+  The trust-root posture that motivated vendoring is kept by pinning: the
+  version requirements are **exact** (`=`), not caret, and since `Cargo.lock` is
+  gitignored here the manifest *is* the pin -- a `cargo update` cannot slide a
+  new verifier under the machine-auth path, and a bump stays a reviewable
+  commit. Cargo verifies the registry's SHA-256 on download. Bump procedure:
+  `docs/ferrogate-machine-auth.md` § SDK dependency.
+  **This clears the root crate's path-dependency blocker on publishing** (see
+  `docs/publishing-crates.md` § Known constraints); the `[patch.crates-io]`
+  forks remain the open question there.
+
+### Removed
+
+- **Vendored FerroGate SDK.** `third_party/ferrogate-sdk-rust/` (three crates +
+  `PROVENANCE.md`), `scripts/vendor-ferrogate-sdk.sh`, and the
+  `make vendor-ferrogate-sdk` / `vendor-ferrogate-sdk-check` targets are gone,
+  superseded by the registry dependency above. The Makefile's `TEST_SCOPE` also
+  drops its three `--exclude ferro-*` flags, and the workspace `exclude` list
+  drops `third_party/ferrogate-sdk-rust` -- registry dependencies are never
+  workspace members, so neither exclusion has anything left to do.
+
+### Changed
+
 #### Build and Test Tooling
 - **Phase 1 of [the decomposition](roadmaps/workspace-decomposition.md) is
   complete -- five more Tier 0/1 crates, eight in total.** `crates/bv-metrics`,

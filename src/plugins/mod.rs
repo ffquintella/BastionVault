@@ -24,6 +24,7 @@
 pub mod catalog;
 pub mod config;
 pub mod grants;
+pub mod kernel_service;
 pub mod logical_backend;
 pub mod manifest;
 pub mod net_gate;
@@ -39,6 +40,7 @@ pub mod verifier;
 
 pub use catalog::{PluginCatalog, PluginRecord, PLUGIN_PREFIX};
 pub use config::ConfigStore;
+pub use kernel_service::PluginRuntimeHost;
 pub use logical_backend::{
     factory_for as plugin_logical_backend_factory, invoke_active_plugin, PluginLogicalBackend,
 };

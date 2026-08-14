@@ -32,6 +32,17 @@ members = [
     "crates/bv-audit",
     "crates/bv-kernel-api",
     "crates/bv-engine-pki",
+    "crates/bv-engine-rustion",
+    "crates/bv-engine-resource",
+    "crates/bv-engine-files",
+    "crates/bv-engine-notifications",
+    "crates/bv-engine-kv",
+    "crates/bv-engine-ssh",
+    "crates/bv-engine-totp",
+    "crates/bv-engine-ssh-broker",
+    "crates/bv-engine-ldap",
+    "crates/bv-engine-cert-lifecycle",
+    "crates/bv-engine-transit",
     "crates/bv_crypto",
     "crates/bastion-plugin-sdk",
     "crates/bastion-plugin-testkit",
@@ -47,7 +58,7 @@ members = [
 # separately — its build artefacts shouldn't pollute the host's
 # `target/`, and its release-profile (panic=abort, opt=s) shouldn't
 # leak into our normal builds.
-exclude = ["plugins-ext", "IronRDP", "third_party/ferrogate-sdk-rust", "third_party/hiqlite"]
+exclude = ["plugins-ext", "IronRDP", "third_party/hiqlite"]
 resolver = "2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -91,6 +102,17 @@ bv-kernel-api = { path = "crates/bv-kernel-api" }
 # it is the assembly layer that mounts them — and because the kernel tier
 # (`system`, `identity`, `auth`) reads a few of their audit stores.
 bv-engine-pki = { path = "crates/bv-engine-pki" }
+bv-engine-rustion = { path = "crates/bv-engine-rustion" }
+bv-engine-resource = { path = "crates/bv-engine-resource" }
+bv-engine-files = { path = "crates/bv-engine-files" }
+bv-engine-notifications = { path = "crates/bv-engine-notifications" }
+bv-engine-kv = { path = "crates/bv-engine-kv" }
+bv-engine-ssh = { path = "crates/bv-engine-ssh" }
+bv-engine-totp = { path = "crates/bv-engine-totp" }
+bv-engine-ssh-broker = { path = "crates/bv-engine-ssh-broker" }
+bv-engine-ldap = { path = "crates/bv-engine-ldap" }
+bv-engine-cert-lifecycle = { path = "crates/bv-engine-cert-lifecycle" }
+bv-engine-transit = { path = "crates/bv-engine-transit" }
 bv_crypto = { path = "crates/bv_crypto" }
 bv_plugin_surface = { path = "crates/bv_plugin_surface" }
 bv_plugin_manifest = { path = "crates/bv-plugin-manifest" }
@@ -288,18 +310,27 @@ pkcs5 = { version = "0.7", features = ["alloc", "pbes2"] }
 fips204 = { version = "0.4", default-features = false, features = ["default-rng", "ml-dsa-44", "ml-dsa-65", "ml-dsa-87"] }
 # FerroGate machine-auth backend (`auth/ferrogate/`): the official reference
 # verifier for FerroGate's DPoP-bound, composite-signed (Ed25519 + ML-DSA-65)
-# child tokens. Vendored from the FerroGate `releases/v0.21.3` SDK under
-# `third_party/ferrogate-sdk-rust/` (see its PROVENANCE.md); that tree is its
-# own workspace and is excluded from ours. Lean — pulls only serde / base64 /
-# sha2 / ed25519-dalek / fips204, all already in our tree. No custom crypto.
-ferro-child-verify = { path = "third_party/ferrogate-sdk-rust/crates/ferro-child-verify" }
+# child tokens. Resolved from the FerroGate SDK's own Cargo registry,
+# `uox-ferrogate` (see `.cargo/config.toml`); until 0.21.5 these were
+# vendored under `third_party/ferrogate-sdk-rust/`. Lean — pulls only serde /
+# base64 / sha2 / ed25519-dalek / fips204, all already in our tree. No custom
+# crypto.
+#
+# The version requirement is EXACT (`=`) on all three, deliberately. These
+# crates are the trust root for machine logins: a `cargo update` must not be
+# able to slide a new verifier under us, so a verifier bump stays a reviewable
+# commit that moves these lines. (Upstream pins the same way — the two
+# verifiers each require `ferro-crypto =0.21.5`.) `Cargo.lock` is gitignored
+# here, so THIS is the pin — do not relax it to a caret. Cargo still verifies
+# the registry's SHA-256 on download.
+ferro-child-verify = { version = "=0.21.5", registry = "uox-ferrogate" }
 # Reference verifier for host SVIDs (direct-SVID `accept_svid` mode + CRL
-# enforcement via `verify_unrevoked`). Same vendored SDK.
-ferro-svid-verify = { path = "third_party/ferrogate-sdk-rust/crates/ferro-svid-verify" }
-# `ferro-crypto` (same vendored SDK) provides the hybrid post-quantum TLS
-# provider (X25519MLKEM768) and SPKI-pinning verifier used by the `cmis_grpc`
-# JWKS source's PQ-TLS transport, plus the composite primitive.
-ferro-crypto = { path = "third_party/ferrogate-sdk-rust/crates/ferro-crypto" }
+# enforcement via `verify_unrevoked`). Same SDK, same registry.
+ferro-svid-verify = { version = "=0.21.5", registry = "uox-ferrogate" }
+# `ferro-crypto` (same SDK) provides the hybrid post-quantum TLS provider
+# (X25519MLKEM768) and SPKI-pinning verifier used by the `cmis_grpc` JWKS
+# source's PQ-TLS transport, plus the composite primitive.
+ferro-crypto = { version = "=0.21.5", registry = "uox-ferrogate" }
 # CMIS gRPC client (Phase 4 — `cmis_grpc` JWKS source). The gRPC stubs are
 # pre-generated from FerroGate's machine_identity.proto and vendored at
 # `src/modules/credential/ferrogate/cmis_proto.rs`, so protoc is NOT required to
@@ -361,12 +392,6 @@ p256 = { version = "0.13", features = ["ecdsa", "ecdh"], default-features = fals
 # the project's TLS surface — no second TLS stack, no native-tls.
 ldap3 = { version = "0.12", default-features = false, features = ["sync", "tls-rustls-aws-lc-rs"] }
 
-# X25519 for the optional `hybrid-x25519+ml-kem-768` Transit key type
-# (Phase 4, behind the `transit_pqc_hybrid` feature flag). `static_secrets`
-# lets us hold the secret half across requests; `zeroize` is on by
-# default. Pure-Rust on top of curve25519-dalek (already transitive
-# via ed25519-dalek), so the marginal dep cost is the wrapper crate.
-x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
 
 # YubiHSM 2 client (feature `hsm_yubihsm2`). Pure-Rust, maintained by
 # iqlusion; `http` for the yubihsm-connector, `usb` for direct device
@@ -433,7 +458,26 @@ default = ["storage_hiqlite", "ssh_pqc"]
 # compiled in exactly when the backend is.
 storage_mysql = ["bv-errors/storage_mysql", "bv-storage/storage_mysql"]
 storage_hiqlite = ["bv-storage/storage_hiqlite"]
-sync_handler = ["maybe-async/is_sync", "bv-storage/sync_handler", "bv-logical/sync_handler", "bv-utils/sync_handler", "bv-audit/sync_handler"]
+sync_handler = [
+    "maybe-async/is_sync",
+    "bv-storage/sync_handler",
+    "bv-logical/sync_handler",
+    "bv-utils/sync_handler",
+    "bv-audit/sync_handler",
+    "bv-kernel-api/sync_handler",
+    "bv-engine-pki/sync_handler",
+    "bv-engine-transit/sync_handler",
+    "bv-engine-cert-lifecycle/sync_handler",
+    "bv-engine-ldap/sync_handler",
+    "bv-engine-ssh/sync_handler",
+    "bv-engine-ssh-broker/sync_handler",
+    "bv-engine-totp/sync_handler",
+    "bv-engine-kv/sync_handler",
+    "bv-engine-notifications/sync_handler",
+    "bv-engine-files/sync_handler",
+    "bv-engine-resource/sync_handler",
+    "bv-engine-rustion/sync_handler",
+]
 # Cloud Storage Targets for the Encrypted File backend.
 # See `features/cloud-storage-backend.md`. Default build stays lean —
 # operators who don't need cloud targets pay no compile / binary cost.
@@ -457,7 +501,7 @@ cloud_targets = ["cloud_s3", "cloud_onedrive", "cloud_gdrive", "cloud_dropbox", 
 # all churned across recent revisions), so the engine ships this as
 # an opt-in preview rather than a stable interop guarantee. See
 # `features/pki-secret-engine.md`.
-pki_pqc_composite = []
+pki_pqc_composite = ["bv-engine-pki/pki_pqc_composite"]
 
 # File Resources — SMB sync transport. Off by default because the
 # `smb` crate carries its own (pure-Rust) SMB2/3 + NTLM stack and a
@@ -466,7 +510,7 @@ pki_pqc_composite = []
 # `FileSyncTarget { kind = "smb" }` becomes a valid target shape
 # whose `target_path` is parsed as `smb://[user@]host[:port]/share/path`.
 # See `features/file-resources.md` § "Phase 5 — SMB sync transport".
-files_smb = ["smolder-smb-core"]
+files_smb = ["bv-engine-files/files_smb"]
 # File Resources — SFTP + SCP sync transports. Off by default for the
 # same reason as files_smb: the SSH stack is multi-MiB of compiled
 # code that operators not pushing files over SSH don't need to pay
@@ -475,7 +519,7 @@ files_smb = ["smolder-smb-core"]
 # `scp://[user@]host[:port]/path`. Shares the same russh dep tree
 # the planned Resource Connect SSH window will use.
 # See `features/file-resources.md` § "Phase 6 — SFTP / SCP sync".
-files_ssh_sync = ["russh", "russh-sftp"]
+files_ssh_sync = ["bv-engine-files/files_ssh_sync"]
 
 # Transit Secret Engine — Phase 4 follow-ups, both off by default.
 #
@@ -491,7 +535,11 @@ files_ssh_sync = ["russh", "russh-sftp"]
 # Off by default because the IETF lamps `draft-ietf-lamps-pq-composite-{sigs,kem}`
 # specs are still moving on the prehash domain + KEM-combiner shape;
 # operators who want them today opt in explicitly.
-transit_pqc_hybrid = ["dep:x25519-dalek"]
+# Forwards to the engine crate: `x25519-dalek` and the `cfg` gates travel
+# with the code, which since Phase 3 is `bv-engine-transit`. The root
+# manifest keeps the name so an existing `--features transit_pqc_hybrid`
+# build command produces the same binary.
+transit_pqc_hybrid = ["bv-engine-transit/transit_pqc_hybrid"]
 # `transit_byok` enables the BYOK import flow:
 #   * `POST /v1/transit/wrapping_key` — engine returns a per-mount
 #     ML-KEM-768 public key.
@@ -501,7 +549,7 @@ transit_pqc_hybrid = ["dep:x25519-dalek"]
 #     bytes as a fresh version of the named symmetric key.
 # Off by default so the wrapping-key derivation stays inert on
 # deployments that don't import key material from outside.
-transit_byok = []
+transit_byok = ["bv-engine-transit/transit_byok"]
 
 # SSH Phase 3 — post-quantum SSH certificates (ML-DSA-65). Off by
 # default because OpenSSH does not yet ship native support for
@@ -510,7 +558,7 @@ transit_byok = []
 # Operators wiring an ML-DSA-aware Rust SSH client into automation
 # pipelines opt in via this flag; everyone else pays nothing. See
 # `features/ssh-secret-engine.md` Phase 3.
-ssh_pqc = []
+ssh_pqc = ["bv-engine-ssh/ssh_pqc"]
 
 # HSM Support (features/hsm-support.md). Two mutually-independent backends
 # behind the narrow `hsm::HsmBackend` trait, both off by default so the

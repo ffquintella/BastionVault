@@ -10,7 +10,6 @@
 #
 #   IronRDP/                        git submodule (Devolutions fork)
 #   third_party/hiqlite/            git submodule (our hiqlite fork)
-#   third_party/ferrogate-sdk-rust/ vendored SDK, sources kept verbatim
 #   plugins-ext/                    git submodule (reference plugins)
 #
 # So the sweep is filtered down to our own manifests. Findings in the excluded
@@ -45,7 +44,7 @@ fi
 
 # Manifests we do not own. Matched as substrings against cargo-machete's
 # reported path.
-EXCLUDED_RE='IronRDP/|third_party/hiqlite/|third_party/ferrogate-sdk-rust/|plugins-ext/'
+EXCLUDED_RE='IronRDP/|third_party/hiqlite/|plugins-ext/'
 
 RAW=$(mktemp); trap 'rm -f "$RAW" "$OURS" "$THEIRS"' EXIT
 OURS=$(mktemp)

@@ -89,8 +89,21 @@
 #
 # Per-machine registry overrides likewise belong in
 # `$CARGO_HOME/config.toml`, not here.
+#
+# ── Cloudsmith Cargo registry (uox/ferrogate) ─────────────────────
+#
+# Source of the FerroGate SDK verifier crates (`ferro-crypto`,
+# `ferro-child-verify`, `ferro-svid-verify`) that `auth/ferrogate/`
+# depends on. Public repository — anonymous reads work, so no token is
+# needed to build, and CI needs no extra secret.
+#
+# Same sparse-vs-git reasoning as above. These crates used to be
+# vendored under `third_party/ferrogate-sdk-rust/`; they now resolve
+# from here, pinned to an exact version in the root `Cargo.toml` and to
+# a checksum in `Cargo.lock`.
 [registries]
 uox-bastionvault = { index = "sparse+https://cargo.cloudsmith.io/uox/bastionvault/" }
+uox-ferrogate = { index = "sparse+https://cargo.cloudsmith.io/uox/ferrogate/" }
 
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-Clink-arg=/PDBPAGESIZE:8192"]

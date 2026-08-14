@@ -50,7 +50,7 @@ use arc_swap::ArcSwap;
 
 use super::{
     auth::{AuthMountRegistry, TokenService},
-    engines::{ConnectMfaGate, LoginClassPolicy, NotificationSink, TotpMfa},
+    engines::{ConnectMfaGate, LoginClassPolicy, NotificationSink, PluginHost, TotpMfa},
     identity::IdentityService,
     namespace::NamespaceRegistry,
     policy::PolicyGate,
@@ -75,6 +75,7 @@ pub struct KernelServices {
     login_class: ArcSwap<Option<Arc<dyn LoginClassPolicy>>>,
     connect_mfa: ArcSwap<Option<Arc<dyn ConnectMfaGate>>>,
     totp_mfa: ArcSwap<Option<Arc<dyn TotpMfa>>>,
+    plugin_host: ArcSwap<Option<Arc<dyn PluginHost>>>,
 }
 
 /// Generates the paired setter/getter for one slot.
@@ -146,4 +147,7 @@ impl KernelServices {
         "connect-MFA gate"
     );
     service_slot!(set_totp_mfa, totp_mfa, totp_mfa, TotpMfa, "TOTP verifier");
+    // Registered by the assembly layer, not by a `Module`: the plugin runtime
+    // is not one.
+    service_slot!(set_plugin_host, plugin_host, plugin_host, PluginHost, "plugin runtime");
 }

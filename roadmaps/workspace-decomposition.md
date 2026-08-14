@@ -1153,10 +1153,14 @@ script's ordered `CRATES` list.
 Remaining Phase 6 work:
 
 - Move shared dependency versions to `[workspace.dependencies]`.
-- Resolve the root crate's unpublishability — it path-depends on the
+- ~~Resolve the root crate's unpublishability — it path-depends on the
   vendored, unpublished `ferro-*` crates in
-  `third_party/ferrogate-sdk-rust/`. Either publish those to the same
-  registry or keep the facade local. See
+  `third_party/ferrogate-sdk-rust/`.~~ **Done 2026-08-14.** FerroGate
+  publishes the three verifier crates to its own public Cloudsmith
+  registry (`uox/ferrogate`), so they are now `version` + `registry`
+  dependencies pinned exactly at `=0.21.5` and the vendored tree is
+  deleted. The remaining question for the facade is the
+  `[patch.crates-io]` forks, not the `ferro-*` crates. See
   [docs/publishing-crates.md](../docs/publishing-crates.md)
   § Known constraints.
 - Wire tag-triggered publishing into CI.

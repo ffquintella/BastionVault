@@ -131,6 +131,11 @@ pub mod test_utils;
 #[cfg(test)]
 mod storage_backend_tests;
 
+/// Engine tests that need `test_utils`, and so could not travel into the
+/// engine crates. See the module docs.
+#[cfg(test)]
+mod engine_tests;
+
 /// When the test binary is spawned as a plugin subprocess (the
 /// `ProcessRuntime` does this — same exe acts as runner *and* plugin
 /// in the test suite), this constructor catches the env var the
@@ -258,6 +263,12 @@ impl BastionVault {
         if core.mounts_monitor_interval > 0 {
             core.mounts_monitor.store(Some(Arc::new(MountsMonitor::new(core.clone(), core.mounts_monitor_interval))));
         }
+
+        // The plugin runtime publishes itself as a `PluginHost` capability so
+        // the notifications engine can dispatch a plugin channel without
+        // naming `crate::plugins`. Not a `Module::register`, because the
+        // runtime is not a module. See src/plugins/kernel_service.rs.
+        core.kernel_services.set_plugin_host(crate::plugins::PluginRuntimeHost::new(core.clone()));
 
         core.module_manager().set_modules(default_modules(), core.clone())?;
 

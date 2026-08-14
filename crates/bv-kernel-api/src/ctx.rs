@@ -94,7 +94,7 @@ use bv_storage::{
 use crate::{
     auth::{AuthMountRegistry, TokenService},
     dos::DosGuard,
-    engines::{ConnectMfaGate, LoginClassPolicy, NotificationSink, TotpMfa},
+    engines::{ConnectMfaGate, LoginClassPolicy, NotificationSink, PluginHost, TotpMfa},
     identity::IdentityService,
     mount::{MountsMonitor, MountsRouter},
     namespace::NamespaceRegistry,
@@ -254,6 +254,11 @@ pub trait VaultCtx: Send + Sync {
     /// TOTP second-factor verification.
     fn totp_mfa(&self) -> Option<Arc<dyn TotpMfa>> {
         self.kernel().totp_mfa()
+    }
+
+    /// The plugin runtime, for engines that dispatch through a plugin.
+    fn plugin_host(&self) -> Option<Arc<dyn PluginHost>> {
+        self.kernel().plugin_host()
     }
 
     // ── ancillary subsystems ───────────────────────────────────────────

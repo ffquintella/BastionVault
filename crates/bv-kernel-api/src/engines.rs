@@ -175,3 +175,59 @@ pub trait NotificationSink: Send + Sync {
         id: &str,
     ) -> Result<Option<Value>, RvError>;
 }
+
+// ── notifications → plugins ────────────────────────────────────────────
+
+/// One delivery channel a plugin declares in its manifest.
+///
+/// Narrowed on the way across, the same way [`LoginClassVerdict`] is: the
+/// notifications engine renders a channel list and routes a delivery, so it
+/// needs five strings. The manifest they come from — signatures, capabilities,
+/// runtime kind, the `ChannelKind` enum — stays inside the plugin runtime.
+#[derive(Debug, Clone)]
+pub struct PluginChannel {
+    /// Name of the plugin declaring it.
+    pub plugin: String,
+    /// Channel id within that plugin. The addressable id is `plugin:id`.
+    pub id: String,
+    pub name: String,
+    /// `email`, `sms`, `slack`, `teams`, `whatsapp`, `webhook` or `other`.
+    pub kind: String,
+    pub description: String,
+}
+
+/// What a plugin returned from one invocation.
+#[derive(Debug, Clone)]
+pub struct PluginInvocation {
+    /// The plugin's response bytes, whatever its outcome.
+    pub response: Vec<u8>,
+    /// `Some(code)` when the plugin itself signalled failure. A transport-level
+    /// failure is an `Err` from [`PluginHost::invoke`] instead, so a caller
+    /// cannot confuse "the plugin said no" with "the plugin never ran".
+    ///
+    /// `i32` because that is what the plugin ABI's status word is.
+    pub error_status: Option<i32>,
+}
+
+/// The plugin runtime, as the notifications engine sees it.
+///
+/// This is the one Tier 3 → runtime edge Phase 2 did not invert, because it
+/// only mattered once `notifications` became a crate: `channel.rs` called
+/// `plugins::PluginCatalog` and `plugins::invoke_active_plugin` by name, and
+/// the plugin runtime is above the engines (it holds an `Arc<dyn VaultCtx>`
+/// and reaches the mount table).
+///
+/// Registered by the assembly layer rather than by a module, because the
+/// plugin runtime is not one.
+#[maybe_async::maybe_async]
+pub trait PluginHost: Send + Sync {
+    /// Every delivery channel declared by the active version of every
+    /// registered plugin. A catalog read failure yields an empty list, not an
+    /// error: an unreadable catalog must not take the built-in in-app channel
+    /// down with it.
+    async fn notification_channels(&self) -> Vec<PluginChannel>;
+
+    /// Invoke `plugin`'s active version with `input` and hand back what it
+    /// wrote. `Err` means the invocation could not complete at all.
+    async fn invoke(&self, plugin: &str, input: &[u8]) -> Result<PluginInvocation, RvError>;
+}

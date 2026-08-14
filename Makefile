@@ -97,7 +97,7 @@ $(FAST_BUILD_TARGETS): export RUSTFLAGS := $(strip $(RUSTFLAGS) -Z threads=$(RUS
 endif
 endif
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-integration test-doc test-cucumber test-hiqlite test-all docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify vendor-ferrogate-sdk vendor-ferrogate-sdk-check bench-build bench-build-quick deps-unused deps-unused-warn build-timings
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-integration test-doc test-cucumber test-hiqlite test-all docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify bench-build bench-build-quick deps-unused deps-unused-warn build-timings
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -261,20 +261,17 @@ test-bin: prune-stale ## Build the bvault executable that the cli::command::* te
 # Excluded, and why:
 #   bastion-vault-gui  desktop app; drags in the whole Tauri toolchain.
 #                      Has its own checks (see `cd gui && npx vitest run`).
-#   ferro-*            vendored FerroGate SDK under
-#                      third_party/ferrogate-sdk-rust/. Sources are kept
-#                      verbatim, so their suite is upstream's business, not
-#                      a gate on our commits. (These are workspace members
-#                      despite the [workspace] `exclude` entry, because a
-#                      path dependency of a member is pulled in regardless.)
+#
+# The FerroGate `ferro-*` verifier crates used to need an exclusion here:
+# they were vendored under third_party/ and a path dependency of a member
+# is a workspace member regardless of `exclude`. They now come from the
+# `uox-ferrogate` registry, so cargo never builds their test targets and
+# there is nothing to exclude.
 #
 # Stated as exclusions, not an inclusion list, so a crate created by a
 # future phase is covered the day it exists with no Makefile edit to forget.
 TEST_SCOPE := --workspace \
-	--exclude bastion-vault-gui \
-	--exclude ferro-crypto \
-	--exclude ferro-child-verify \
-	--exclude ferro-svid-verify
+	--exclude bastion-vault-gui
 
 test: require-nextest test-bin ## Run the unit test suite (lib + bins) with nextest
 	cargo nextest run $(TEST_SCOPE) --lib --bins
@@ -343,18 +340,13 @@ build-timings: ## Write a cargo --timings HTML for a full lib rebuild (target/ca
 	@echo "    archive it as docs/build-timings/lib-selftime-<commit>.html when it"
 	@echo "    is a phase boundary worth keeping."
 
-# ── Vendored FerroGate SDK ────────────────────────────────────────
+# ── FerroGate SDK ─────────────────────────────────────────────────
 #
-# NOT part of any build: `cargo build` must never reach the network for
-# these crates. They verify FerroGate machine-identity tokens, so their
-# source is committed and a version bump is a reviewable commit. See
-# third_party/ferrogate-sdk-rust/PROVENANCE.md.
-
-vendor-ferrogate-sdk: ## Re-vendor the FerroGate Rust SDK at its newest release (review the diff before committing)
-	scripts/vendor-ferrogate-sdk.sh
-
-vendor-ferrogate-sdk-check: ## Report whether the vendored FerroGate SDK is behind the newest release
-	scripts/vendor-ferrogate-sdk.sh --check
+# The `ferro-*` verifier crates come from the `uox-ferrogate` Cloudsmith
+# registry (declared in .cargo/config.toml), pinned to an exact version in
+# Cargo.toml. There is no re-vendoring step any more — bump the three `=`
+# requirements and commit that. See docs/ferrogate-machine-auth.md
+# § SDK dependency.
 
 # ── Cargo registry: Cloudsmith uox/bastionvault ───────────────────
 #

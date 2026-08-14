@@ -92,8 +92,9 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   admin pre-authorization and as the way to exercise the lifecycle before real `login` lands. `login` returns a
   `not_implemented` error pending Phase 2.
 - **Phase 2 shipped.** `auth/ferrogate/login` verifies a DPoP-bound, composite-signed FerroGate child token via
-  the vendored `ferro-child-verify` reference verifier ([`third_party/ferrogate-sdk-rust/`](../third_party/ferrogate-sdk-rust/),
-  pinned to FerroGate `releases/v0.13.2`) against a `static_jwks` trust anchor, then checks audience + trust
+  the `ferro-child-verify` reference verifier (then vendored under `third_party/ferrogate-sdk-rust/` and
+  pinned to FerroGate `releases/v0.13.2`; a registry dependency since 0.21.5 — see the entry dated
+  2026-08-14 below) against a `static_jwks` trust anchor, then checks audience + trust
   domain and applies the approval gate: an approved machine mints a token bound to its policies/TTL; an unknown
   machine is recorded `pending` and denied; pending/rejected/revoked are denied. The DPoP proof is read from the
   `DPoP` header (now plumbed through the HTTP logical layer) or a `dpop` body field. Covered by an integration
@@ -184,7 +185,7 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   last resort. `ferrogate_default_socket` and the `--socket` flags resolve through it; the constant remains only
   as the fallback. Adds `toml` as a runtime dependency.
 - **Phase 7 shipped — feature complete.** Opt-in **direct-SVID mode** (`accept_svid`): a host SVID presented at
-  `login` is verified via the vendored `ferro-svid-verify::verify_unrevoked`, which **enforces FerroGate's
+  `login` is verified via `ferro-svid-verify::verify_unrevoked`, which **enforces FerroGate's
   composite-signed CRL** (a revoked host, or a stale/absent CRL, fails closed); the host identity is the SVID
   `sub`, and attestation evidence (`ek_cert_sha384`, `policy_id`) is recorded on the machine. Login routes by
   JOSE `typ` (SVID vs child token). Added a per-source-IP **login rate limit** (`login_rate_limit_per_min`,
@@ -287,6 +288,23 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   server-advertised one when the machine gate dials `mia-<env>.toml`. Fixes the dead-end where a connect failed
   with "not on the MIA's local allowlist" (wrong MIA daemon dialed) and the operator had no way to override the
   environment from the Get Started screen.
+- **SDK crates moved from vendored to registry (Unreleased, 2026-08-14).** The three FerroGate verifier
+  crates — `ferro-crypto`, `ferro-child-verify`, `ferro-svid-verify` — are published to the FerroGate
+  project's own public Cloudsmith Cargo registry (`uox/ferrogate`, registered as `uox-ferrogate` in
+  [`.cargo/config.toml`](../.cargo/config.toml)) and are now ordinary registry dependencies at **0.21.5**.
+  The vendored tree `third_party/ferrogate-sdk-rust/`, its `PROVENANCE.md`,
+  `scripts/vendor-ferrogate-sdk.sh`, and the `make vendor-ferrogate-sdk{,-check}` targets are gone, as are
+  the `ferro-*` entries in the Makefile's `TEST_SCOPE` (they were only workspace members because a path
+  dependency of a member is one regardless of `[workspace] exclude`). **No source change:** the published
+  0.21.5 `src/` trees are byte-identical to the 0.21.3 sources that were vendored, so no verifier behaviour
+  moved with this. **This closes the long-standing constraint** that the root `bastion_vault` crate could
+  not be published because it path-depended on unpublished crates — see
+  [docs/publishing-crates.md](../docs/publishing-crates.md) § Known constraints, and the Open Question below,
+  now settled. The trust-root posture that motivated vendoring is preserved by pinning: all three
+  requirements are **exact** (`=0.21.5`) rather than caret, and `Cargo.lock` is gitignored here, so the
+  manifest is the pin and a verifier bump is still a reviewable commit. Cargo verifies the registry SHA-256
+  on download. Bump procedure: [docs/ferrogate-machine-auth.md](../docs/ferrogate-machine-auth.md)
+  § SDK dependency.
 - Caveats: `cmis_grpc` is async-build only (the `sync_handler` feature is independently broken repo-wide);
   child-token revocation on the `static_jwks` source relies on short token TTL (the CRL is enforced on the SVID
   path); audit events are structured log lines (no dedicated audit-store rows).
@@ -428,8 +446,9 @@ Properties:
   - All entries encrypted under the existing barrier; no new crypto introduced.
 
 - **Verification core** — a thin wrapper around `ferro-child-verify` / `ferro-svid-verify`. The plugin crate
-  depends on `ferro-child-verify`, `ferro-svid-verify`, and `ferro-crypto` (path/git dependency on the sibling
-  repo, version-pinned). No signature/crypto code is written in BastionVault — only orchestration.
+  depends on `ferro-child-verify`, `ferro-svid-verify`, and `ferro-crypto`, resolved from the FerroGate
+  project's `uox-ferrogate` Cloudsmith registry at an exact pinned version. No signature/crypto code is
+  written in BastionVault — only orchestration.
 
 - **JWKS refresher** — for `cmis_grpc`, a background task (lifecycle-tied to the mount) that refreshes the
   cached JWKS + CRL on `jwks_refresh_secs`, with stale-while-revalidate and a hard fail-closed max-age.
@@ -549,9 +568,11 @@ operator on attested host                     server
 - **Child token vs. direct SVID as the default.** Recommended default is child-token + DPoP (sender-constrained,
   short-lived, FerroGate's intended relying-party path). Direct-SVID is weaker (no per-request DPoP) and stays
   opt-in. Confirm no deployment needs SVID-direct as the *default*.
-- **How BastionVault depends on the FerroGate verifier crates.** Path dependency on the sibling repo, a git
-  dependency pinned to a tag, or vendoring the (deliberately copy-pasteable) verifier modules? Leaning
-  git-pinned-by-tag so verifier upgrades are explicit and reviewable.
+- ~~**How BastionVault depends on the FerroGate verifier crates.**~~ **Settled (2026-08-14): a registry
+  dependency.** Vendoring under `third_party/` carried it from 0.13.2 to 0.21.3; FerroGate now publishes the
+  three crates to its own public Cloudsmith registry, so they are plain `version` + `registry` dependencies
+  pinned exactly (`=0.21.5`). Upgrades stay explicit and reviewable — the pin is in the manifest, not a
+  lockfile — and the root crate is no longer unpublishable for depending on unpublished path crates.
 - **Multi-trust-domain.** v1 assumes a single FerroGate trust domain per mount. Operators with several FerroGate
   environments can mount `auth/ferrogate/` more than once with different configs. Is a single mount that holds
   multiple trust anchors worth it later?

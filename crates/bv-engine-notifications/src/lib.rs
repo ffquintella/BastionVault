@@ -1,0 +1,507 @@
+//! Notifications module.
+//!
+//! A first-class in-app notification system plus the substrate that lets
+//! plugins raise notifications and provide delivery channels
+//! (email/SMS/Slack/…). See `features/notifications.md`.
+//!
+//! The module mounts a logical backend at `notifications/` (reached via
+//! the forward-going `/v2/notifications/…` API), so every route rides the
+//! standard ACL + audit + namespace pipeline and resolves the caller from
+//! `req.auth`. A caller only ever reads *their own* inbox (server-scoped
+//! by `entity_id`); composing a broadcast to a group / all users sits
+//! behind the `create` ACL on `v2/notifications/send`.
+
+// The substrate, under the names the notifications engine has always spelled it. Private:
+// `crate::errors::RvError` and `crate::logical::Path` keep resolving inside
+// the crate, and none of it leaks into the public API, so the extraction
+// stayed a file move rather than an import rewrite.
+// See roadmaps/workspace-decomposition.md § Phase 3.
+use bv_context as context;
+use bv_errors as errors;
+use bv_kernel_api as kernel_api;
+use bv_logical as logical;
+use bv_storage as storage;
+use bv_utils as utils;
+
+// The eight backend-definition macros are `#[macro_export]`ed by `bv-logical`,
+// which places them at *that* crate's root; the call sites import them as
+// `crate::new_path` and friends. The `_internal` halves are the recursive arms
+// the public macros expand into, so they must travel with them.
+pub use bv_logical::{
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
+    new_path_internal, new_secret, new_secret_internal,
+};
+pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
+
+use std::{any::Any, collections::HashMap, sync::Arc};
+
+use arc_swap::ArcSwap;
+use derive_more::Deref;
+use serde::Deserialize;
+use serde_json::{Map, Value};
+
+use bv_kernel_api::{Module, VaultCtx};
+use crate::{
+    context::Context,
+    errors::RvError,
+    logical::{Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation, Request, Response},
+    kernel_api::identity::caller_audit_actor,
+};
+
+pub mod channel;
+pub mod contacts;
+pub mod kernel_service;
+pub mod service;
+pub mod store;
+pub mod types;
+
+pub use service::NotificationService;
+pub use store::NotificationStore;
+pub use types::{
+    ChannelInfo, InboxEntry, Notification, NotificationConfig, NotificationTarget, Recipient,
+    Severity,
+};
+
+static NOTIFICATIONS_BACKEND_HELP: &str = r#"
+The notifications backend delivers in-app notifications to users, user
+groups, or everyone, and fans them out to plugin-provided channels
+(email, Slack, SMS, …). Users read their own inbox; administrators
+compose and broadcast, manage channels, and tune retention.
+"#;
+
+/// Late-bound handle to the notification service.
+///
+/// The service is created at unseal (`Module::init`), but the logical backend
+/// is built before that — so the backend cannot own the service, and used to
+/// re-find it on every request by asking the module manager for its own module
+/// by name. Sharing the slot instead gives the backend the same late binding
+/// with no lookup and no self-reference.
+pub type ServiceSlot = ArcSwap<Option<Arc<NotificationService>>>;
+
+pub struct NotificationsModule {
+    pub name: String,
+    pub core: Arc<dyn VaultCtx>,
+    pub service: Arc<ServiceSlot>,
+}
+
+pub struct NotificationsBackendInner {
+    pub core: Arc<dyn VaultCtx>,
+    pub service: Arc<ServiceSlot>,
+}
+
+#[derive(Deref)]
+pub struct NotificationsBackend {
+    #[deref]
+    pub inner: Arc<NotificationsBackendInner>,
+}
+
+impl NotificationsBackend {
+    pub fn new(core: Arc<dyn VaultCtx>, service: Arc<ServiceSlot>) -> Self {
+        Self { inner: Arc::new(NotificationsBackendInner { core, service }) }
+    }
+
+    pub fn new_backend(&self) -> LogicalBackend {
+        let h_send = self.inner.clone();
+        let h_inbox_read = self.inner.clone();
+        let h_inbox_list = self.inner.clone();
+        let h_unread = self.inner.clone();
+        let h_read_all = self.inner.clone();
+        let h_read = self.inner.clone();
+        let h_dismiss = self.inner.clone();
+        let h_channels_read = self.inner.clone();
+        let h_channels_list = self.inner.clone();
+        let h_channel_test = self.inner.clone();
+        let h_sent_read = self.inner.clone();
+        let h_sent_list = self.inner.clone();
+        let h_config_read = self.inner.clone();
+        let h_config_write = self.inner.clone();
+
+        new_logical_backend!({
+            paths: [
+                {
+                    pattern: r"send$",
+                    fields: {
+                        "title": { field_type: FieldType::Str, required: true, description: "Notification title." },
+                        "body": { field_type: FieldType::Str, default: "", description: "Notification body." },
+                        "severity": { field_type: FieldType::Str, default: "info", description: "info | success | warning | critical." },
+                        "channels": { field_type: FieldType::CommaStringSlice, required: false, description: "Channel ids to deliver through beyond the in-app inbox." },
+                        "action_url": { field_type: FieldType::Str, required: false, description: "Optional deep link opened when the notification is clicked." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_send.handle_send}
+                    ],
+                    help: "Compose and send a notification. Body carries `target` (a {kind,...} object) and optional `metadata`."
+                },
+                {
+                    pattern: r"inbox/unread-count$",
+                    operations: [
+                        {op: Operation::Read, handler: h_unread.handle_unread_count}
+                    ],
+                    help: "Number of unread notifications in the caller's inbox."
+                },
+                {
+                    pattern: r"inbox/read-all$",
+                    operations: [
+                        {op: Operation::Write, handler: h_read_all.handle_mark_all_read}
+                    ],
+                    help: "Mark every notification in the caller's inbox read."
+                },
+                {
+                    pattern: r"inbox/(?P<id>[^/]+)/read$",
+                    fields: {
+                        "id": { field_type: FieldType::Str, required: true, description: "Notification id." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_read.handle_mark_read}
+                    ],
+                    help: "Mark one notification read."
+                },
+                {
+                    pattern: r"inbox/(?P<id>[^/]+)$",
+                    fields: {
+                        "id": { field_type: FieldType::Str, required: true, description: "Notification id." }
+                    },
+                    operations: [
+                        {op: Operation::Delete, handler: h_dismiss.handle_dismiss}
+                    ],
+                    help: "Dismiss (remove) one notification from the caller's inbox."
+                },
+                {
+                    pattern: r"inbox/?$",
+                    operations: [
+                        {op: Operation::Read, handler: h_inbox_read.handle_inbox_list},
+                        {op: Operation::List, handler: h_inbox_list.handle_inbox_list}
+                    ],
+                    help: "The caller's inbox (read + unread)."
+                },
+                {
+                    pattern: r"channels/(?P<channel>[^/]+)/test$",
+                    fields: {
+                        "channel": { field_type: FieldType::Str, required: true, description: "Channel id (`<plugin>:<channel>`)." },
+                        "to": { field_type: FieldType::Str, required: true, description: "Destination address for the test." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_channel_test.handle_channel_test}
+                    ],
+                    help: "Send a test notification through a channel (admin)."
+                },
+                {
+                    pattern: r"channels/?$",
+                    operations: [
+                        {op: Operation::Read, handler: h_channels_read.handle_channels_list},
+                        {op: Operation::List, handler: h_channels_list.handle_channels_list}
+                    ],
+                    help: "List available delivery channels."
+                },
+                {
+                    pattern: r"sent/?$",
+                    operations: [
+                        {op: Operation::Read, handler: h_sent_read.handle_sent_list},
+                        {op: Operation::List, handler: h_sent_list.handle_sent_list}
+                    ],
+                    help: "Every notification sent in the namespace (admin audit view)."
+                },
+                {
+                    pattern: r"config$",
+                    fields: {
+                        "inbox_cap": { field_type: FieldType::Int, required: false, description: "Max notifications retained per user inbox." },
+                        "plugin_rate_per_min": { field_type: FieldType::Int, required: false, description: "Per-plugin send rate limit (per rolling minute)." }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_config_read.handle_config_read},
+                        {op: Operation::Write, handler: h_config_write.handle_config_write}
+                    ],
+                    help: "Read or update notification settings (admin)."
+                }
+            ],
+            help: NOTIFICATIONS_BACKEND_HELP,
+        })
+    }
+}
+
+/// Body payload for `POST v2/notifications/send`. `target` and
+/// `metadata` are read from the raw body since `target` is a nested
+/// object the typed field layer doesn't model.
+#[derive(Debug, Deserialize)]
+struct SendPayload {
+    title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    severity: Option<String>,
+    target: NotificationTarget,
+    #[serde(default)]
+    channels: Vec<String>,
+    #[serde(default)]
+    action_url: Option<String>,
+    #[serde(default)]
+    metadata: Map<String, Value>,
+}
+
+fn ns_from_req(req: &Request) -> String {
+    crate::kernel_api::namespace::writer_namespace_path(req.headers.as_ref())
+}
+
+#[maybe_async::maybe_async]
+impl NotificationsBackendInner {
+    fn resolve_service(&self) -> Result<Arc<NotificationService>, RvError> {
+        self.service
+            .load()
+            .as_ref()
+            .clone()
+            .ok_or_else(|| bv_error_string!("notification service unavailable"))
+    }
+
+    /// The caller's stable inbox key. Empty for tokens with no entity
+    /// (e.g. root) — those have no inbox, which is the correct outcome.
+    fn caller_entity(req: &Request) -> String {
+        caller_audit_actor(req)
+    }
+
+    pub async fn handle_send(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let service = self.resolve_service()?;
+        let ns = ns_from_req(req);
+
+        let body = req.body.clone().unwrap_or_default();
+        let payload: SendPayload = serde_json::from_value(Value::Object(body))
+            .map_err(|e| bv_error_string!(format!("invalid notification payload: {e}")))?;
+
+        let caller = Self::caller_entity(req);
+        let source = if caller.is_empty() {
+            "system".to_string()
+        } else {
+            format!("user:{caller}")
+        };
+
+        let notif = Notification {
+            id: String::new(),
+            title: payload.title,
+            body: payload.body,
+            severity: payload
+                .severity
+                .as_deref()
+                .map(Severity::parse)
+                .unwrap_or_default(),
+            source,
+            target: payload.target,
+            channels: payload.channels,
+            action_url: payload.action_url,
+            created_at: String::new(),
+            namespace: String::new(),
+            metadata: payload.metadata,
+            recipient_count: 0,
+        };
+
+        let outcome = service.send(notif, &ns).await?;
+        let data = serde_json::to_value(&outcome)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_inbox_list(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let service = self.resolve_service()?;
+        let ns = ns_from_req(req);
+        let entity = Self::caller_entity(req);
+        let items = service.inbox(&ns, &entity, true).await?;
+        let mut data = Map::new();
+        data.insert("notifications".into(), Value::Array(items));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_unread_count(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let service = self.resolve_service()?;
+        let ns = ns_from_req(req);
+        let entity = Self::caller_entity(req);
+        let count = service.unread_count(&ns, &entity).await?;
+        let mut data = Map::new();
+        data.insert("unread".into(), Value::from(count));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_mark_read(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let service = self.resolve_service()?;
+        let ns = ns_from_req(req);
+        let entity = Self::caller_entity(req);
+        let id = req.get_data("id")?.as_str().unwrap_or("").to_string();
+        service.mark_read(&ns, &entity, &id).await?;
+        Ok(None)
+    }
+
+    pub async fn handle_mark_all_read(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let service = self.resolve_service()?;
+        let ns = ns_from_req(req);
+        let entity = Self::caller_entity(req);
+        let n = service.mark_all_read(&ns, &entity).await?;
+        let mut data = Map::new();
+        data.insert("marked".into(), Value::from(n));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_dismiss(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let service = self.resolve_service()?;
+        let ns = ns_from_req(req);
+        let entity = Self::caller_entity(req);
+        let id = req.get_data("id")?.as_str().unwrap_or("").to_string();
+        service.dismiss(&ns, &entity, &id).await?;
+        Ok(None)
+    }
+
+    pub async fn handle_channels_list(
+        &self,
+        _backend: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let service = self.resolve_service()?;
+        let channels = service.list_channels().await?;
+        let mut data = Map::new();
+        data.insert("channels".into(), serde_json::to_value(channels).unwrap_or(Value::Null));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_channel_test(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let service = self.resolve_service()?;
+        let channel = req.get_data("channel")?.as_str().unwrap_or("").to_string();
+        let to = req.get_data("to")?.as_str().unwrap_or("").to_string();
+        let result = service.test_channel(&channel, &to).await?;
+        let data = serde_json::to_value(&result)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_sent_list(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let service = self.resolve_service()?;
+        let ns = ns_from_req(req);
+        let sent = service.list_sent(&ns).await?;
+        let mut data = Map::new();
+        data.insert("notifications".into(), serde_json::to_value(sent).unwrap_or(Value::Null));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_config_read(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let service = self.resolve_service()?;
+        let ns = ns_from_req(req);
+        let cfg = service.get_config(&ns).await?;
+        let data = serde_json::to_value(&cfg)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_config_write(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let service = self.resolve_service()?;
+        let ns = ns_from_req(req);
+        let mut cfg = service.get_config(&ns).await?;
+        if let Ok(v) = req.get_data("inbox_cap") {
+            if let Some(n) = v.as_u64() {
+                cfg.inbox_cap = n as u32;
+            }
+        }
+        if let Ok(v) = req.get_data("plugin_rate_per_min") {
+            if let Some(n) = v.as_u64() {
+                cfg.plugin_rate_per_min = n as u32;
+            }
+        }
+        service.put_config(&ns, &cfg).await?;
+        Ok(None)
+    }
+}
+
+impl NotificationsModule {
+    pub fn new(core: Arc<dyn VaultCtx>) -> Self {
+        Self {
+            name: "notifications".to_string(),
+            core,
+            service: Arc::new(ArcSwap::new(Arc::new(None))),
+        }
+    }
+
+    pub fn service(&self) -> Option<Arc<NotificationService>> {
+        self.service.load().as_ref().clone()
+    }
+}
+
+#[maybe_async::maybe_async]
+impl Module for NotificationsModule {
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+
+    fn register(self: Arc<Self>, services: &crate::kernel_api::KernelServices) {
+        kernel_service::register(self, services);
+    }
+
+    fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
+        let core_for_backend = self.core.clone();
+        // The backend shares the module's service slot, so it sees the service
+        // the moment `init` installs it — and never has to look the module up.
+        let service = self.service.clone();
+        let backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
+            let mut b =
+                NotificationsBackend::new(core_for_backend.clone(), service.clone()).new_backend();
+            b.init()?;
+            Ok(Arc::new(b))
+        };
+        core.add_logical_backend("notifications", Arc::new(backend_new_func))
+    }
+
+    async fn init(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
+        let store = NotificationStore::new(&self.core).await?;
+        let service = NotificationService::new(self.core.clone(), store);
+        self.service.store(Arc::new(Some(service)));
+        Ok(())
+    }
+
+    fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
+        self.service.store(Arc::new(None));
+        core.delete_logical_backend("notifications")
+    }
+}
