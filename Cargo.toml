@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.39.7"
+version = "0.40.0"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -51,6 +51,10 @@ members = [
     "crates/bv-engine-ldap",
     "crates/bv-engine-cert-lifecycle",
     "crates/bv-engine-transit",
+    # Tier 4 — the assembly layer, above the library rather than below it.
+    # See roadmaps/workspace-decomposition.md § Phase 4.
+    "crates/bv-server",
+    "crates/bvault-cli",
     "crates/bv_crypto",
     "crates/bastion-plugin-sdk",
     "crates/bastion-plugin-testkit",
@@ -72,9 +76,6 @@ resolver = "2"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# Parsing the installed MIA's `mia.toml` to discover its configured helper
-# socket (FerroGate machine login). See cli::command::ferrogate_mia.
-toml = "1.1.2"
 # Tier 0 substrate: `RvError`, re-exported as `bastion_vault::errors`.
 # See roadmaps/workspace-decomposition.md § Phase 1.
 bv-errors = { path = "crates/bv-errors" }
@@ -144,7 +145,6 @@ thiserror = { version = "^2.0" }
 serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
 serde_json = "^1.0"
 serde_bytes = "0.11"
-serde_yaml = "0.9"
 go-defer = "^0.1"
 rand = "^0.10"
 strum = { version = "0.28", features = ["derive"] }
@@ -152,15 +152,31 @@ strum_macros = "0.28"
 radix_trie = "0.3.0"
 lazy_static = "1.5.0"
 regex = "1.12"
-clap = { version = "4.6", features = ["wrap_help", "derive", "env", "suggestions"] }
 sysexits = { version = "0.13", features = ["std"] }
 build-time = "0.1"
 hcl-rs = "0.19"
-actix-web = { version = "4.13", features = ["rustls-0_23"] }
-actix-tls = "3.5"
+# Nine dependencies left this manifest in Phase 4 with `src/cli` and the
+# `bvault` binary -- clap, env_logger, prettytable, rpassword, serde_yaml,
+# toml -- plus ciborium, ipnetwork and uuid, which Phase 3's engine moves had
+# already orphaned without anyone noticing. `sysexits` stays: the
+# `EXIT_CODE_*` constants below are its `ExitCode`, and `bvault-cli` reads
+# them from here.
+# `actix-web` and `actix-tls` left this crate in Phase 4, with `src/http` and
+# `src/cli`; they are dependencies of `bv-server` and `bvault-cli` now. That
+# is the extraction's headline win: `gui/src-tauri` path-depends on this
+# crate, so the Tauri host no longer builds a web framework it never serves
+# from. See roadmaps/workspace-decomposition.md § Phase 4.
+#
+# `actix-rt` stays, and is production code: `ExpirationManager::
+# start_check_expired_lease_entries` blocks a dedicated thread on an
+# `actix_rt::Runtime`. That is tokio's current-thread builder plus a
+# `LocalSet`, so it *looks* replaceable the way `MountsMonitor::start` was in
+# Phase 3 — but proving the swept future never spawns a local task means
+# tracing `revoke_lease_id` through the whole lease graph, and Phase 3 already
+# recorded one wrong conclusion from exactly this reasoning (the AppRole tidy
+# race). Behaviour preservation wins; it is a small crate and not a web server.
 actix-rt = "2.11"
 log = "0.4"
-env_logger = "0.11"
 hex = "0.4"
 humantime = "2.3"
 pem = "3.0"
@@ -184,15 +200,12 @@ rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
 rustls-pki-types = "1"
 webpki-roots = { version = "1.0", default-features = true }
 base64 = "0.22"
-ipnetwork = { version = "0.21", features = ["serde"] }
 derive_more = "2.1.1"
 dashmap = "6.1"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }
 ctor = "1.0"
 better_default = "1.0.5"
 prometheus-client = "0.25"
-prettytable = "0.10"
-rpassword = "7.4"
 async-trait = "0.1"
 stretto = "0.9"
 priority-queue = "2.7"
@@ -214,7 +227,6 @@ x509-parser = { version = "0.18", features = ["verify"] }
 # which is what we always accepted anyway. CBOR for COSE_Key /
 # attestationObject parsing comes from `ciborium`; signature verification
 # uses the existing `p256` and `ed25519-dalek` deps.
-ciborium = "0.2"
 zstd = "0.13"
 # Exchange (import/export) module: password-encrypted .bvx files.
 # Argon2id is the OWASP-recommended memory-hard KDF; XChaCha20-Poly1305
@@ -228,7 +240,6 @@ chacha20poly1305 = "0.10"
 cron = "0.17"
 # `uuid` v4 is used for FIDO2 user-handle generation and for the
 # scheduled-exports id generation.
-uuid = { version = "1", features = ["v4"] }
 # Plugin system v1: WASM runtime via wasmtime. Pure-Rust JIT with fuel
 # metering + memory limits + linker-based host capability injection. See
 # `features/plugin-system.md`. We disable the cranelift parallel feature
@@ -336,6 +347,13 @@ toml = "1.1.2"
 # crate's two multi-process backend tests run. Declared here rather than
 # in `[dependencies]` so a release build never compiles them.
 bv-storage = { path = "crates/bv-storage", features = ["test-support"] }
+# The HTTP surface, which Phase 4 moved ABOVE this crate. It is a normal
+# dependency in the other direction (`bv-server` -> `bastion_vault`), so this
+# is a dependency cycle — legal because it is a *dev* dependency, and it is
+# what lets `test_utils::TestHttpServer` and the ~50 tests here that drive a
+# real server stay where they are. See
+# roadmaps/workspace-decomposition.md § Phase 4.
+bv-server = { path = "crates/bv-server", features = ["test-support"] }
 serial_test = "3.4"
 cucumber = "0.23"
 # `ferro-crypto` is a normal dependency (PQ-TLS transport for cmis_grpc); the
@@ -373,6 +391,12 @@ default = ["storage_hiqlite", "ssh_pqc"]
 # compiled in exactly when the backend is.
 storage_mysql = ["bv-errors/storage_mysql", "bv-storage/storage_mysql"]
 storage_hiqlite = ["bv-storage/storage_hiqlite"]
+# Exposes `test_utils` — `new_test_bastion_vault`, the seal helpers and the
+# `test_*_api` request helpers — to `bv-server`, which builds its own HTTP
+# harness on top of them. Off by default: these fixtures create vaults on
+# disk and shell out to the `bvault` binary. Same arrangement `bv-storage`
+# uses for its backend fixtures (Phase 1).
+test-support = ["bv-storage/test-support"]
 sync_handler = [
     "maybe-async/is_sync",
     "bv-storage/sync_handler",
@@ -580,69 +604,12 @@ collapsible_match = "allow"
 large_enum_variant = "allow"
 unnecessary_map_or = "allow"
 
-[[bin]]
-name = "bvault"
-path = "bin/bastion_vault.rs"
+# The `bvault` binary, and the deb/rpm packaging metadata that ships it,
+# moved to `crates/bvault-cli` in Phase 4 -- a `[[bin]]` shares its package's
+# dependencies, so leaving it here would have meant the library depending on
+# the CLI that depends on the library. See
+# roadmaps/workspace-decomposition.md § Phase 4.
 
-# ── CLI Linux packaging: deb (cargo-deb) + rpm (cargo-generate-rpm) ──
-#
-# Wave 2 / Phase 1 of the Packaging & Distribution roadmap. The
-# `bastionvault` package provides the operator/end-user CLI binary
-# `bvault` plus its manpage and shell completions. It does NOT install
-# a systemd unit / Windows service — server installs go through the
-# container image, not the workstation package.
-#
-# Build locally:
-#   cargo install cargo-deb cargo-generate-rpm
-#   make linux-cli-packages
-#
-# See features/packaging-client-binaries.md for the full design.
-
-[package.metadata.deb]
-name = "bastionvault"
-maintainer = "BastionVault <noreply@bastionvault.io>"
-copyright = "2026 BastionVault Contributors"
-license-file = ["LICENSE", "0"]
-extended-description = """
-BastionVault is an identity-based secrets management server with a
-Vault-compatible API. This package installs the bvault command-line
-client used to interact with a BastionVault server.
-"""
-section = "utils"
-priority = "optional"
-depends = "ca-certificates"
-assets = [
-    # Binary (cargo-deb implicitly builds the `bvault` bin first).
-    ["target/release/bvault", "usr/bin/", "755"],
-    # Static manpage + shell completions. Phase 1 ships hand-written
-    # stubs; a follow-up will plug clap_mangen / clap_complete in for
-    # auto-generation. cargo-deb's deb_compression default (xz) keeps
-    # the on-wire size small even with the stubs.
-    ["installers/cli/manpage/bvault.1", "usr/share/man/man1/", "644"],
-    ["installers/cli/completions/bvault.bash", "usr/share/bash-completion/completions/bvault", "644"],
-    ["installers/cli/completions/_bvault",     "usr/share/zsh/site-functions/_bvault", "644"],
-    ["installers/cli/completions/bvault.fish", "usr/share/fish/vendor_completions.d/bvault.fish", "644"],
-    # Project docs the package archive ships, in line with Debian policy.
-    ["README.md",    "usr/share/doc/bastionvault/", "644"],
-    ["CHANGELOG.md", "usr/share/doc/bastionvault/", "644"],
-]
-
-[package.metadata.generate-rpm]
-name = "bastionvault"
-summary = "BastionVault command-line client"
-license = "Apache-2.0"
-# `assets` mirrors the deb shape, with the path conventions RPM expects.
-assets = [
-    { source = "target/release/bvault", dest = "/usr/bin/bvault", mode = "755" },
-    { source = "installers/cli/manpage/bvault.1", dest = "/usr/share/man/man1/bvault.1", mode = "644", doc = true },
-    { source = "installers/cli/completions/bvault.bash", dest = "/usr/share/bash-completion/completions/bvault", mode = "644" },
-    { source = "installers/cli/completions/_bvault",     dest = "/usr/share/zsh/site-functions/_bvault", mode = "644" },
-    { source = "installers/cli/completions/bvault.fish", dest = "/usr/share/fish/vendor_completions.d/bvault.fish", mode = "644" },
-    { source = "README.md",    dest = "/usr/share/doc/bastionvault/README.md",   mode = "644", doc = true },
-    { source = "CHANGELOG.md", dest = "/usr/share/doc/bastionvault/CHANGELOG.md",mode = "644", doc = true },
-]
-[package.metadata.generate-rpm.requires]
-ca-certificates = "*"
 
 # Phase 2 of the SSH secret engine: target-host helper that PAM's
 # `pam_exec` invokes to validate an OTP against `/v1/ssh/verify`.

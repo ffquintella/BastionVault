@@ -7,9 +7,26 @@ use serde_json::{json, Map, Value};
 use super::{secret::SecretAuth, Client, HttpResponse};
 use crate::{
     errors::RvError,
-    http::sys::InitRequest,
     utils::{deserialize_duration, serialize_duration},
 };
+
+/// The `sys/init` request body.
+///
+/// A wire shape, so it belongs with the client that serializes it rather than
+/// with the server that deserializes it — `bv-server` sits above this crate
+/// and imports it from here. It was the other way round until Phase 4, which
+/// made `src/api` name the HTTP surface and would have kept the client pinned
+/// to it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitRequest {
+    /// Optional: an auto-unseal seal (HSM) produces no operator shares, so the
+    /// server defaults both to 1 when the request omits them. A Shamir seal
+    /// still requires both.
+    #[serde(default)]
+    pub secret_shares: Option<u8>,
+    #[serde(default)]
+    pub secret_threshold: Option<u8>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Secret {

@@ -32,7 +32,7 @@ use zeroize::Zeroizing;
 
 use crate::kernel_api::VaultCtx;
 use crate::{
-    cli::config::Config,
+    config::Config,
     core::Core,
     errors::RvError,
     logical::{Request, Response},
@@ -58,7 +58,13 @@ pub mod scheduled_exports;
 /// `storage` reference each other, so they are one compilation unit either
 /// way. Re-exported here so `bastion_vault::cache::*` paths are unchanged.
 pub use bv_storage::cache;
-pub mod cli;
+/// The command-line client moved to the `bvault-cli` crate in Phase 4, which
+/// sits above this one and above `bv-server`. It carried 111 of the last 300
+/// commits' churn inside this compilation unit.
+///
+/// The server configuration model it used to own is [`config`] now — it was
+/// never CLI code.
+pub mod config;
 /// Moved to the Tier 0 `bv-context` crate. Not in the roadmap's Tier 0 list,
 /// but it belongs there and `bv-logical` needs it.
 pub use bv_context as context;
@@ -83,7 +89,10 @@ pub mod hsm;
 /// lives in [`kernel_impl`].
 pub use bv_kernel_api as kernel_api;
 mod kernel_impl;
-pub mod http;
+/// The HTTP(S) API surface moved to the `bv-server` crate in Phase 4, which
+/// sits *above* this one — it is the assembly layer, and it is what took
+/// `actix-web` and `actix-tls` out of this crate's dependency graph. There is
+/// deliberately no re-export: a shim here would put the web framework back.
 pub mod logging;
 /// Request/Response/Backend/Path/Field — the Tier 0 `bv-logical` crate.
 pub use bv_logical as logical;
@@ -123,7 +132,9 @@ pub use bv_storage as storage;
 /// Shared helpers — the Tier 1 `bv-utils` crate.
 pub use bv_utils as utils;
 
-#[cfg(test)]
+/// Shared test fixtures. Also reachable behind the `test-support` feature,
+/// which `bv-server` turns on to build its HTTP harness on top of them.
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_utils;
 
 /// The two backend tests that need a second vault process; see the module

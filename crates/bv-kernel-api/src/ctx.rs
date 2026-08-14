@@ -118,7 +118,7 @@ pub type LogicalBackendNewFunc = dyn Fn(Arc<dyn VaultCtx>) -> Result<Arc<dyn Bac
 /// How much of a mount-table entry its HMAC covers.
 ///
 /// An operator setting, parsed from the server config file and re-exported
-/// from `bastion_vault::cli::config` where it has always been named. It lives
+/// from `bastion_vault::config`, which is where the server config model lives.
 /// here because [`VaultCtx::mount_entry_hmac_level`] returns it and the mount
 /// table enforces it, both of which are below the CLI in the crate graph.
 #[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq)]

@@ -1,0 +1,96 @@
+[package]
+name = "bv-server"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's HTTP(S) API surface: the actix-web routes, middleware and TLS plumbing"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 4 of the workspace decomposition
+# (roadmaps/workspace-decomposition.md § Phase 4).
+#
+# The first crate that sits ABOVE `bastion_vault` rather than below it. The
+# HTTP surface is the assembly layer -- it mounts the kernel, the plugin
+# runtime, the exchange, the backup and the scheduled-export subsystems, so
+# something has to name all of them, and that something cannot be underneath
+# them. What the split buys is the other direction: `actix-web` and
+# `actix-tls` are no longer dependencies of the library, so the Tauri host and
+# every consumer that embeds a vault without serving HTTP stops building a web
+# framework.
+
+[dependencies]
+bastion_vault = { path = "../..", version = "0.40.0", registry = "uox-bastionvault", default-features = false }
+# The Prometheus families, named directly rather than through
+# `bastion_vault::metrics`: this crate owns the module name `metrics` (the
+# `/metrics` scrape endpoint), so the alias would collide. Same collision
+# `bv-engine-pki` has with `storage`, resolved the same way.
+bv-metrics = { path = "../bv-metrics", version = "0.1.0", registry = "uox-bastionvault" }
+# The plugin client-surface manifest, parsed by the `sys/plugins/.../surface`
+# route before it is handed to the GUI.
+bv_plugin_surface = { path = "../bv_plugin_surface", version = "0.1.0", registry = "uox-bastionvault" }
+
+actix-web = { version = "4.13", features = ["rustls-0_23"] }
+actix-tls = "3.5"
+base64 = "0.22"
+chrono = "0.4"
+# Validating the `cron` field on a scheduled-export schedule at write time,
+# so a bad expression is a 400 rather than a silently dead schedule.
+cron = "0.17"
+hex = "0.4"
+humantime = "2.3"
+ipnetwork = { version = "0.21", features = ["serde"] }
+log = "0.4"
+maybe-async = "0.2"
+prometheus-client = "0.25"
+rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
+serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
+serde_json = "^1.0"
+thiserror = { version = "^2.0" }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "io-util"] }
+# `sys.rs` uses it for the cluster-peer probes; `test_support`'s harness uses
+# it to drive the server it starts.
+ureq = { version = "3.3", features = ["json", "socks-proxy", "win-system-proxy"] }
+uuid = { version = "1", features = ["v4"] }
+zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
+
+# `test_support`'s harness only. `http::Request::builder` builds the requests
+# it sends over the wire; `actix-rt` stops the `System` the harness runs the
+# server on.
+actix-rt = { version = "2.11", optional = true }
+http = { version = "1", optional = true }
+
+[dev-dependencies]
+# Re-declared to turn on the fixtures this crate's own tests need
+# (`new_test_bastion_vault`, the seal helpers). Cargo unifies features across
+# normal and dev dependencies, so `test-support` is on when building tests and
+# off when this crate is built as somebody else's dependency.
+bastion_vault = { path = "../..", features = ["test-support"] }
+bv-server = { path = ".", features = ["test-support"] }
+ctor = "0.6"
+
+[features]
+default = []
+# The in-process HTTP test harness (`TestHttpServer`). Off by default: it
+# spawns threads, binds ports and shells out to the `bvault` binary.
+# `bastion_vault` dev-depends on this crate with the feature on -- a
+# dev-dependency cycle, which cargo allows.
+test-support = ["dep:actix-rt", "dep:http", "bastion_vault/test-support"]
+sync_handler = ["maybe-async/is_sync", "bastion_vault/sync_handler"]
+storage_mysql = ["bastion_vault/storage_mysql"]
+storage_hiqlite = ["bastion_vault/storage_hiqlite"]
+cloud_targets = ["bastion_vault/cloud_targets"]
+
+# Lints this crate's code trips, all of which the root crate already allows.
+[lints.clippy]
+field_reassign_with_default = "allow"
+type_complexity = "allow"
+too_many_arguments = "allow"
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Pulled in by the `#[maybe_async::maybe_async]` attribute's async
+    # expansion, which is a token stream to a static `use` scan.
+    "maybe-async",
+]

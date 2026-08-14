@@ -1,0 +1,169 @@
+[package]
+name = "bvault-cli"
+version = "0.40.0"
+edition = "2021"
+description = "BastionVault's command-line client, `bvault`, and the `bvault server` command"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 4 of the workspace decomposition
+# (roadmaps/workspace-decomposition.md § Phase 4).
+#
+# This was `bastion_vault::cli` -- 111 of the last 300 commits and 11,126
+# lines sitting inside the library's compilation unit, so every flag edit
+# recompiled the vault. It sits above `bv-server` because `command::server`
+# is the actix wrap site: the one place that assembles an `App` out of the
+# HTTP crate's routes and middleware. That is also why the two crates had to
+# be extracted in the same change -- leaving `src/cli` in the library while
+# `src/http` moved above it would have been a dependency cycle.
+#
+# The version tracks the product version, not `0.1.0` like the library
+# crates: `bvault --version` is operator-visible, and `make bump-*` keeps it
+# in lockstep with the server, GUI and installers.
+
+[[bin]]
+name = "bvault"
+path = "src/main.rs"
+
+[dependencies]
+bastion_vault = { path = "../..", version = "0.40.0", registry = "uox-bastionvault", default-features = false }
+bv-server = { path = "../bv-server", version = "0.1.0", registry = "uox-bastionvault" }
+# SRV-based cluster node selection for `bvault cluster discover` and
+# `HttpOptions::client_with_discovery`. This was a dependency of the root
+# crate purely because the CLI lived there; it travels with its only caller.
+bv-client = { path = "../bv-client", version = "0.4.0", registry = "uox-bastionvault" }
+
+actix-web = { version = "4.13", features = ["rustls-0_23"] }
+actix-rt = "2.11"
+anyhow = { version = "^1.0" }
+base64 = "0.22"
+better_default = "1.0.5"
+chacha20poly1305 = "0.10"
+clap = { version = "4.6", features = ["wrap_help", "derive", "env", "suggestions"] }
+# `bvault server --daemon` on unix.
+daemonize = "0.5"
+dashmap = "6.1"
+derive_more = "2.1.1"
+env_logger = "0.11"
+hex = "0.4"
+hkdf = "0.13"
+humantime = "2.3"
+lazy_static = "1.5.0"
+log = "0.4"
+maybe-async = "0.2"
+prettytable = "0.10"
+rand = "^0.10"
+regex = "1.12"
+rpassword = "7.4"
+rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
+serde_json = "^1.0"
+serde_yaml = "0.9"
+# ed25519-dalek, serde and toml are deliberately absent: they belonged to
+# `ferrogate_mia`, which Phase 4 moved to `bv-auth-ferrogate` where the GUI
+# can reach it without depending on the CLI.
+sha2 = "0.11"
+sysexits = { version = "0.13", features = ["std"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }
+zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
+
+[dev-dependencies]
+# `#[maybe_async::maybe_async]` on a trait impl expands to `#[async_trait]`;
+# only the test `SealProvider` stub in `command::operator_init` uses it.
+async-trait = "0.1"
+# `command::mod`'s URL-parsing test builds a `ureq::http::Uri` directly.
+ureq = { version = "3.3", features = ["json", "socks-proxy", "win-system-proxy"] }
+# The command tests drive a real server through `TestHttpServer` and shell
+# out to the `bvault` binary they build. Both features are dev-only.
+bastion_vault = { path = "../..", features = ["test-support"] }
+bv-server = { path = "../bv-server", features = ["test-support"] }
+serial_test = "3.4"
+
+[features]
+default = ["storage_hiqlite", "ssh_pqc"]
+storage_mysql = ["bastion_vault/storage_mysql"]
+storage_hiqlite = ["bastion_vault/storage_hiqlite"]
+cloud_targets = ["bastion_vault/cloud_targets"]
+ssh_pqc = ["bastion_vault/ssh_pqc"]
+pki_pqc_composite = ["bastion_vault/pki_pqc_composite"]
+transit_byok = ["bastion_vault/transit_byok"]
+transit_pqc_hybrid = ["bastion_vault/transit_pqc_hybrid"]
+files_smb = ["bastion_vault/files_smb"]
+files_ssh_sync = ["bastion_vault/files_ssh_sync"]
+sync_handler = ["bastion_vault/sync_handler", "bv-server/sync_handler"]
+
+# ── CLI Linux packaging: deb (cargo-deb) + rpm (cargo-generate-rpm) ──
+#
+# Wave 2 / Phase 1 of the Packaging & Distribution roadmap. The
+# `bastionvault` package provides the operator/end-user CLI binary
+# `bvault` plus its manpage and shell completions. It does NOT install
+# a systemd unit / Windows service — server installs go through the
+# container image, not the workstation package.
+#
+# Moved here from the root manifest in Phase 4, with the binary it packages.
+# Source paths are relative to THIS manifest, hence the `../../` on the
+# repo-root assets; `target/release/bvault` is resolved by both tools
+# against the workspace target directory, so it is unchanged.
+#
+# Build locally:
+#   cargo install cargo-deb cargo-generate-rpm
+#   make linux-cli-packages
+#
+# See features/packaging-client-binaries.md for the full design.
+
+[package.metadata.deb]
+name = "bastionvault"
+maintainer = "BastionVault <noreply@bastionvault.io>"
+copyright = "2026 BastionVault Contributors"
+license-file = ["../../LICENSE", "0"]
+extended-description = """
+BastionVault is an identity-based secrets management server with a
+Vault-compatible API. This package installs the bvault command-line
+client used to interact with a BastionVault server.
+"""
+section = "utils"
+priority = "optional"
+depends = "ca-certificates"
+assets = [
+    # Binary (cargo-deb implicitly builds the `bvault` bin first).
+    ["target/release/bvault", "usr/bin/", "755"],
+    # Static manpage + shell completions. Phase 1 ships hand-written
+    # stubs; a follow-up will plug clap_mangen / clap_complete in for
+    # auto-generation. cargo-deb's deb_compression default (xz) keeps
+    # the on-wire size small even with the stubs.
+    ["../../installers/cli/manpage/bvault.1", "usr/share/man/man1/", "644"],
+    ["../../installers/cli/completions/bvault.bash", "usr/share/bash-completion/completions/bvault", "644"],
+    ["../../installers/cli/completions/_bvault",     "usr/share/zsh/site-functions/_bvault", "644"],
+    ["../../installers/cli/completions/bvault.fish", "usr/share/fish/vendor_completions.d/bvault.fish", "644"],
+    # Project docs the package archive ships, in line with Debian policy.
+    ["../../README.md",    "usr/share/doc/bastionvault/", "644"],
+    ["../../CHANGELOG.md", "usr/share/doc/bastionvault/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "bastionvault"
+summary = "BastionVault command-line client"
+license = "Apache-2.0"
+# `assets` mirrors the deb shape, with the path conventions RPM expects.
+assets = [
+    { source = "target/release/bvault", dest = "/usr/bin/bvault", mode = "755" },
+    { source = "../../installers/cli/manpage/bvault.1", dest = "/usr/share/man/man1/bvault.1", mode = "644", doc = true },
+    { source = "../../installers/cli/completions/bvault.bash", dest = "/usr/share/bash-completion/completions/bvault", mode = "644" },
+    { source = "../../installers/cli/completions/_bvault",     dest = "/usr/share/zsh/site-functions/_bvault", mode = "644" },
+    { source = "../../installers/cli/completions/bvault.fish", dest = "/usr/share/fish/vendor_completions.d/bvault.fish", mode = "644" },
+    { source = "../../README.md",    dest = "/usr/share/doc/bastionvault/README.md",   mode = "644", doc = true },
+    { source = "../../CHANGELOG.md", dest = "/usr/share/doc/bastionvault/CHANGELOG.md",mode = "644", doc = true },
+]
+[package.metadata.generate-rpm.requires]
+ca-certificates = "*"
+
+# Lints this crate's code trips, all of which the root crate already allows.
+[lints.clippy]
+field_reassign_with_default = "allow"
+type_complexity = "allow"
+too_many_arguments = "allow"
+unnecessary_unwrap = "allow"
+collapsible_match = "allow"
+large_enum_variant = "allow"
+unnecessary_map_or = "allow"

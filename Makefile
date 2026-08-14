@@ -236,7 +236,7 @@ require-nextest: ## Check cargo-nextest is installed; print install instructions
 # It is easy to miss locally, where a stale binary from an earlier build is
 # usually lying around; CI has no such luck. Declare the dependency.
 test-bin: prune-stale ## Build the bvault executable that the cli::command::* tests spawn
-	cargo build --bin bvault
+	cargo build -p bvault-cli --bin bvault
 
 # ── Test scope ────────────────────────────────────────────────────────
 #
@@ -414,16 +414,22 @@ else
 SED_INPLACE := $(shell sed --version >/dev/null 2>&1 && echo "sed -i" || echo "sed -i ''")
 endif
 
-# `bump-*` keeps the four version sites in lockstep:
+# `bump-*` keeps the shipped-product version sites in lockstep:
 #   * root `Cargo.toml`               (workspace crate version)
 #   * `gui/src-tauri/Cargo.toml`      (Tauri Rust crate)
 #   * `gui/package.json`              (npm — bastion-vault-gui)
 #   * `gui/src-tauri/tauri.conf.json` (Tauri runtime version pin)
+#   * `crates/bvault-cli/Cargo.toml`  (the `bvault` CLI — Phase 4 moved the
+#                                      binary out of the root package, and
+#                                      `bvault --version` is operator-facing)
+#   * the `bastion_vault` version pins in `crates/bvault-cli/Cargo.toml` and
+#     `crates/bv-server/Cargo.toml` — Tier 4 depends on the root crate by
+#     version as well as by path, so a stale pin breaks resolution outright.
 #
-# Workspace crates under `crates/` (`bv_crypto`, `bastion-plugin-sdk`,
-# `bv-plugin-pack`) have independent versioning lifecycles and are NOT
-# touched here — bump them by hand or via dedicated scripts as
-# semver-relevant changes land.
+# The library crates under `crates/` (`bv_crypto`, `bastion-plugin-sdk`,
+# `bv-plugin-pack`, and the Tier 0–3 crates Phases 1–3 created) have
+# independent versioning lifecycles and are NOT touched here — bump them by
+# hand or via dedicated scripts as semver-relevant changes land.
 #
 # Each sed uses `[^\"]*` for the existing-version match so a manually
 # patched root (or a previously-drifted gui) still bumps cleanly.
@@ -453,11 +459,22 @@ _bump-write:
 	@$(SED_INPLACE) '1,/^version = /s/^version = "[^"]*"/version = "$(NEW)"/' gui/src-tauri/Cargo.toml
 	@$(SED_INPLACE) '1,/^  "version":/s/^  "version": "[^"]*"/  "version": "$(NEW)"/' gui/package.json
 	@$(SED_INPLACE) '1,/^  "version":/s/^  "version": "[^"]*"/  "version": "$(NEW)"/' gui/src-tauri/tauri.conf.json
+	@# `bvault-cli` carries the shipped product version, not an independent
+	@# one: `bvault --version` is what operators read. Phase 4.
+	@$(SED_INPLACE) '1,/^version = /s/^version = "[^"]*"/version = "$(NEW)"/' crates/bvault-cli/Cargo.toml
+	@# Both Tier 4 crates pin `bastion_vault` by version as well as by path
+	@# (the `publish = ["uox-bastionvault"]` setup requires it). Leaving these
+	@# behind makes the workspace unresolvable on the very next bump, because
+	@# a `version = "0.39.7"` requirement cannot match a 0.40.0 package.
+	@$(SED_INPLACE) 's/^bastion_vault = { path = "\.\.\/\.\.", version = "[^"]*"/bastion_vault = { path = "..\/..", version = "$(NEW)"/' crates/bvault-cli/Cargo.toml
+	@$(SED_INPLACE) 's/^bastion_vault = { path = "\.\.\/\.\.", version = "[^"]*"/bastion_vault = { path = "..\/..", version = "$(NEW)"/' crates/bv-server/Cargo.toml
 	@echo "Bumped version: $(VERSION) -> $(NEW)"
 	@echo "  Cargo.toml:                    $$(grep '^version' Cargo.toml | head -1)"
 	@echo "  gui/src-tauri/Cargo.toml:      $$(grep '^version' gui/src-tauri/Cargo.toml | head -1)"
 	@echo "  gui/package.json:              $$(grep '\"version\"' gui/package.json | head -1 | sed 's/^[ \t]*//')"
 	@echo "  gui/src-tauri/tauri.conf.json: $$(grep '\"version\"' gui/src-tauri/tauri.conf.json | head -1 | sed 's/^[ \t]*//')"
+	@echo "  crates/bvault-cli/Cargo.toml:  $$(grep '^version' crates/bvault-cli/Cargo.toml | head -1)"
+	@echo "  bastion_vault pins:            $$(grep -h '^bastion_vault = ' crates/bvault-cli/Cargo.toml crates/bv-server/Cargo.toml | grep -o 'version = \"[^\"]*\"' | tr '\n' ' ')"
 
 # ── Server container image (Wave 1, Phase 1 of Packaging & Distribution) ──
 #
@@ -665,8 +682,8 @@ linux-cli-deb: ## Build the bvault CLI .deb (Linux amd64; cross-built via Docker
 		exit 1; \
 	}
 	$(_cli_require_cross)
-	$(CLI_LINUX_CARGO) build --release --bin bvault --target $(CLI_LINUX_TARGET)
-	cargo deb --no-build --no-strip --target $(CLI_LINUX_TARGET)
+	$(CLI_LINUX_CARGO) build -p bvault-cli --release --bin bvault --target $(CLI_LINUX_TARGET)
+	cargo deb -p bvault-cli --no-build --no-strip --target $(CLI_LINUX_TARGET)
 	@echo ""
 	@echo "==> .deb under target/$(CLI_LINUX_TARGET)/debian/:"
 	@ls -lh target/$(CLI_LINUX_TARGET)/debian/*.deb 2>/dev/null || true
@@ -677,8 +694,8 @@ linux-cli-rpm: ## Build the bvault CLI .rpm (Linux amd64; cross-built via Docker
 		exit 1; \
 	}
 	$(_cli_require_cross)
-	$(CLI_LINUX_CARGO) build --release --bin bvault --target $(CLI_LINUX_TARGET)
-	cargo generate-rpm --target $(CLI_LINUX_TARGET) --arch $(CLI_LINUX_RPM_ARCH) --auto-req $(CLI_LINUX_AUTOREQ)
+	$(CLI_LINUX_CARGO) build -p bvault-cli --release --bin bvault --target $(CLI_LINUX_TARGET)
+	cargo generate-rpm -p bvault-cli --target $(CLI_LINUX_TARGET) --arch $(CLI_LINUX_RPM_ARCH) --auto-req $(CLI_LINUX_AUTOREQ)
 	@echo ""
 	@echo "==> .rpm under target/$(CLI_LINUX_TARGET)/generate-rpm/:"
 	@ls -lh target/$(CLI_LINUX_TARGET)/generate-rpm/*.rpm 2>/dev/null || true
@@ -751,7 +768,7 @@ ifeq ($(CLI_WIN_NATIVE),1)
 		echo "       or pass CANDLE=/LIGHT= with full paths."; \
 		exit 1; \
 	}
-	cargo build --release --bin bvault
+	cargo build -p bvault-cli --release --bin bvault
 	@mkdir -p target/msi
 	$(CANDLE) -nologo -arch x64 \
 		-dVersion=$(VERSION) \
@@ -770,7 +787,7 @@ else
 		exit 1; \
 	}
 	$(_cli_win_require_cross)
-	cross build --release --bin bvault --target $(CLI_WIN_TARGET)
+	cross build -p bvault-cli --release --bin bvault --target $(CLI_WIN_TARGET)
 	@mkdir -p target/msi
 	$(WIXL) --arch x64 \
 		-D Version=$(VERSION) \
@@ -789,7 +806,7 @@ ifeq ($(CLI_WIN_NATIVE),1)
 		echo "ERROR: choco not found. Install Chocolatey: https://chocolatey.org/install"; \
 		exit 1; \
 	}
-	cargo build --release --bin bvault
+	cargo build -p bvault-cli --release --bin bvault
 	@rm -rf target/nupkg/staging
 	@mkdir -p target/nupkg/staging/tools
 	cp installers/cli/nupkg/bastionvault-cli.nuspec target/nupkg/staging/
@@ -805,7 +822,7 @@ else
 		exit 1; \
 	}
 	$(_cli_win_require_cross)
-	cross build --release --bin bvault --target $(CLI_WIN_TARGET)
+	cross build -p bvault-cli --release --bin bvault --target $(CLI_WIN_TARGET)
 	@mkdir -p target/nupkg
 	python3 installers/cli/nupkg/build-nupkg.py \
 		--nuspec installers/cli/nupkg/bastionvault-cli.nuspec \
@@ -850,9 +867,9 @@ ifneq ($(shell uname -s),Darwin)
 else
 	@if [ -n "$(CLI_MAC_TARGET)" ]; then \
 		rustup target list --installed | grep -q '^$(CLI_MAC_TARGET)$$' || rustup target add $(CLI_MAC_TARGET); \
-		cargo build --release --bin bvault --target $(CLI_MAC_TARGET); \
+		cargo build -p bvault-cli --release --bin bvault --target $(CLI_MAC_TARGET); \
 	else \
-		cargo build --release --bin bvault; \
+		cargo build -p bvault-cli --release --bin bvault; \
 	fi
 	VERSION=$(VERSION) BVAULT_BIN=$(CLI_MAC_EXE) PKG_ARCH=$(CLI_MAC_ARCH) OUTPUT_DIR=target/pkg \
 		bash installers/cli/pkg/build-macos-pkg.sh

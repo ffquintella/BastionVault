@@ -64,17 +64,32 @@ final-status-level = "slow"
 default-filter = 'not (binary(cucumber_hiqlite) | binary(hiqlite_ha_fault_injection) | test(/^(storage::)?hiqlite::test::/))'
 
 # `src/plugins/process_runtime.rs` tests copy the *entire test binary*
-# into a temp dir per invocation (`current_exe_bytes()` → `Vec<u8>`).
-# That binary is ~210 MB today, so the seven of them running concurrently
-# would hold well over a gigabyte of heap and write as much to disk. They
-# carry `#[serial_test::serial]` for exactly this reason; the in-process
-# mutex stops working under nextest, so pin them to one at a time here.
+# into a temp dir per invocation (`current_exe_bytes()` → `Vec<u8>`), then
+# spawn the copy and drive a JSON-RPC handshake against a 30s deadline
+# (`DEFAULT_INVOKE_TIMEOUT`, a production constant — do not relax it to make
+# these pass). They carry `#[serial_test::serial]` for exactly this reason;
+# the in-process mutex stops working under nextest, so they are pinned here.
+#
+# `max-threads = 1` only serialises them against *each other*, which was
+# enough while the binary was ~210 MB. Phase 4 of the workspace decomposition
+# took it to **227 MB**: `bastion_vault` gained a dev-dependency on `bv-server`
+# so `test_utils::TestHttpServer` could stay put, and that pulls actix-web and
+# ureq into the lib-test binary. At that size, copying 227 MB while ~75 sibling
+# `plugins::` tests (the wasmtime ones especially) compete for disk and CPU is
+# enough to blow the 30s deadline — reproduced as 3–6 failures under
+# `make plugins-test`, while the same seven pass in 16s when run alone.
+#
+# `threads-required = "num-cpus"` is the fix: it makes each of these take the
+# whole runner, so they are serial against *everything*, not just each other.
+# The cost is bounded — seven tests, ~16s total — and the alternative is a
+# timing-dependent failure that looks like a plugin-protocol bug.
 [test-groups.exe-copy]
 max-threads = 1
 
 [[profile.default.overrides]]
 filter = 'test(/^plugins::process_runtime::tests::/)'
 test-group = 'exe-copy'
+threads-required = "num-cpus"
 
 # CI profile: machine-readable results, and no retries. Retrying a failed
 # security test until it passes is how a real race gets shipped — a flake
@@ -84,7 +99,7 @@ test-group = 'exe-copy'
 # profile.default. The `exe-copy` override is repeated below rather than
 # assumed: `cargo nextest show-config test-groups --profile ci` reports it
 # as belonging to the *default* profile, and if it silently did not apply
-# here, seven tests would each load a ~210 MB binary into memory at once
+# here, seven tests would each load a 227 MB binary into memory at once
 # on a 16 GB shared runner. Not worth inferring.
 [profile.ci]
 fail-fast = false
@@ -95,6 +110,7 @@ final-status-level = "slow"
 [[profile.ci.overrides]]
 filter = 'test(/^plugins::process_runtime::tests::/)'
 test-group = 'exe-copy'
+threads-required = "num-cpus"
 
 [profile.ci.junit]
 path = "junit.xml"

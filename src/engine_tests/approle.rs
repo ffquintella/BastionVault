@@ -1036,7 +1036,8 @@ mod path_role_test {
     async fn test_approle_login_with_live_mia_machine_token() {
         use std::os::unix::net::UnixStream;
 
-        use crate::cli::command::ferrogate_mia::{self, DpopKey};
+        use crate::modules::credential::ferrogate::mia as ferrogate_mia;
+        use ferrogate_mia::DpopKey;
 
         // ---- Availability gate: skip cleanly when there is no local MIA. ----
         let socket = ferrogate_mia::resolve_mia_socket_for(None);

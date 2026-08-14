@@ -20,10 +20,9 @@ use go_defer::defer;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::kernel_api::{KernelServices, VaultCtx};
+use crate::kernel_api::{KernelServices, MountEntryHMACLevel, VaultCtx};
 use crate::{
     cache::CacheConfig,
-    cli::config::MountEntryHMACLevel,
     errors::RvError,
     handler::{AuthHandler, HandlePhase, Handler},
     logical::{Request, Response},

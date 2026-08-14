@@ -10,9 +10,8 @@ use std::{
 use arc_swap::ArcSwapOption;
 use lazy_static::lazy_static;
 
-use crate::kernel_api::VaultCtx;
+use crate::kernel_api::{MountEntryHMACLevel, VaultCtx};
 use crate::{
-    cli::config::MountEntryHMACLevel,
     core::{Core, LogicalBackendNewFunc},
     errors::RvError,
     handler::{AuthHandler, Handler},

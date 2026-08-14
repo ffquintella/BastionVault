@@ -1,7 +1,18 @@
 # Roadmap: Workspace Decomposition
 
-Status: **Phases 0, 1, 2 and 3 are done.** Phase 4 (the assembly split) is
-next.
+Status: **Phases 0, 1, 2, 3 and 4 are done.** Phase 5 (CI shape) is next,
+and it is now unblocked in full — the crates a path-filtered matrix needs all
+exist.
+
+**One thing this document has promised since the start has not happened, and
+it should stop being implied:** `bastion_vault` is not a facade. Phase 4 took
+the assembly layer off the *top* of it — `src/http` and `src/cli`, 19,124
+lines — but the kernel underneath (`core.rs`, `modules/`, `module_manager`,
+`plugins`, `exchange`, `hsm`) is still one 65,703-line crate. That is the
+`bv-core` / `bv-kernel` split from the target graph's Tier 2, and **no
+numbered phase owns it.** Phase 3 was engines, Phase 4 was assembly; Tier 2
+fell between them. It wants a Phase 4.5 before Phase 6's per-crate versioning
+means much, and the GUI cannot narrow past the root crate until it lands.
 
 Phase 1 shipped eight Tier 0/1 crates — `bv-errors`, `bv-shamir`,
 `bv-context`, `bv-metrics`, `bv-storage`, `bv-logical`, `bv-utils`,
@@ -1216,18 +1227,201 @@ a private item, the item became `pub` with a comment saying why
 better, which is what happened to `connect_mfa`'s pure tests.
 
 
-### Phase 4 — Assembly split
+### Phase 4 — Assembly split — **done**
 
-- `bv-server` — `src/http`, taking actix out of every engine's tree
-- `bvault-cli` — `src/cli` (111 commits; deserves to build alone)
-- `bastion_vault` becomes a thin facade: re-exports plus the registration
-  list that wires engines into a `ModuleRegistry`
-- `gui/src-tauri` keeps depending on the facade at first; once the engine
-  crates are stable, narrow it to `bv-core` plus the engines the embedded
-  vault actually mounts. **This is the biggest single GUI-CI win** —
-  today `gui/src-tauri/Cargo.toml` carries
-  `bastion_vault = { path = "../.." }`, so every server-side change
-  rebuilds the Tauri host.
+The plan, kept because the record of where it was wrong is the useful part:
+
+> - `bv-server` — `src/http`, taking actix out of every engine's tree
+> - `bvault-cli` — `src/cli` (111 commits; deserves to build alone)
+> - `bastion_vault` becomes a thin facade: re-exports plus the registration
+>   list that wires engines into a `ModuleRegistry`
+> - `gui/src-tauri` keeps depending on the facade at first; once the engine
+>   crates are stable, narrow it to `bv-core` plus the engines the embedded
+>   vault actually mounts. **This is the biggest single GUI-CI win** —
+>   today `gui/src-tauri/Cargo.toml` carries
+>   `bastion_vault = { path = "../.." }`, so every server-side change
+>   rebuilds the Tauri host.
+
+#### The tier is above the library, not below it
+
+Every phase so far extracted crates *downward* — a new crate the root crate
+depends on. Phase 4 cannot: `src/http` names `Core`, `modules`, `plugins`,
+`exchange`, `scheduled_exports` and `backup`, and `src/cli` names all of those
+plus `BastionVault` itself. Extracting them downward would require `bv-core`
+and `bv-kernel` (Tier 2) to exist first, and **those are in no phase** — the
+target graph lists them but neither Phase 3 nor Phase 4 creates them.
+
+That is not a gap in the plan so much as a misreading of what the assembly
+layer *is*. The HTTP surface and the CLI are not libraries the vault depends
+on; they are the things that mount it. So both went **above**
+`bastion_vault`, which is exactly where the target graph's Tier 4 puts them —
+and the phase needed no Tier 2 extraction at all.
+
+Consequence for the third bullet: `bastion_vault` is **not** a thin facade,
+and could not become one in this phase. It is 65,703 lines — the kernel
+(`core.rs`, `modules/`, `module_manager`) plus the subsystems the assembly
+layer mounts (`plugins`, `exchange`, `hsm`, `backup`, `scheduled_exports`,
+`api`). Thinning it is the `bv-core` / `bv-kernel` split, and that is a
+separate phase this document should stop implying happens for free.
+
+#### The two crates had to land together
+
+`src/cli/command/server.rs` is the actix wrap site: the one place that builds
+an `App` out of the HTTP routes and middleware. So `bvault-cli` depends on
+`bv-server`, and leaving `src/cli` in the library while `src/http` moved above
+it is a **normal dependency cycle** — `bastion_vault` → `bv-server` →
+`bastion_vault` — which cargo rejects. Same for the `bvault` binary: a
+`[[bin]]` shares its package's `[dependencies]`, so it could not stay in the
+root package either, and its deb/rpm packaging metadata travelled with it.
+
+| crate | lines | note |
+|---|---|---|
+| `bv-server` | 9,049 | `src/http` + the two actix middleware layers + the test harness |
+| `bvault-cli` | 9,560 | `src/cli` + the `bvault` binary + its Linux packaging metadata |
+
+**Measured outcome:**
+
+| | before Phase 4 | after |
+|---|---|---|
+| `src/` (the root compilation unit) | 84,827 lines | **65,703** |
+| workspace members | 42 | **44** |
+| `actix-web` / `actix-tls` in `bastion_vault` | yes | **gone** — `cargo tree -p bastion-vault-gui -i actix-web` finds no such package |
+| unused direct deps in our crates (`make deps-unused`) | 9 | **0** |
+| unit / integration / doctests | 1289 / 1358 / 17 | **unchanged** |
+| unit test binaries | 39 | **41** |
+
+The actix row is the phase's point. `gui/src-tauri` path-depends on
+`bastion_vault`, so until now the Tauri host compiled a web framework it never
+serves from. Nine dependencies left the root manifest with the CLI — `clap`,
+`env_logger`, `prettytable`, `rpassword`, `serde_yaml`, `toml`, plus
+`ciborium`, `ipnetwork` and `uuid`, which **Phase 3's engine moves had already
+orphaned without anyone noticing**; `make deps-unused` was failing on them and
+is green again.
+
+#### Four things that had to move before the split would hold
+
+- **`cli::config::Config` was never CLI code.** It is the *server's*
+  configuration model — `core.rs`, `modules::auth`, `src/http` and
+  `BastionVault::new` all name it. It is `bastion_vault::config` now. This was
+  the single edge pinning the command-line layer into the library.
+- **`src/api/sys.rs` named `http::sys::InitRequest`.** A wire shape belongs
+  with the client that serializes it, not the server that deserializes it, so
+  `InitRequest` moved down into `api::sys` and `bv-server` re-exports it.
+- **`ferrogate_mia` was not command-line code either.** 784 lines speaking
+  length-delimited CBOR over a Unix socket, wanted by three callers — the
+  `bvault ferrogate` subcommands, the Tauri host, and the approle engine
+  tests. Leaving it in the CLI would have made the **GUI depend on the CLI**,
+  dragging actix-web and clap back into the Tauri host and inverting the whole
+  point of the phase. It is `bv_auth_ferrogate::mia` now.
+- **The two actix middleware layers went up, not down.** Phase 1 refused to
+  let `metrics::middleware` travel into `bv-metrics` and Phase 3 refused to let
+  `dos::middleware` travel into `bv-kernel-api`, both because actix must not
+  reach a leaf engine. Neither was ever going to find a home below; Phase 4 is
+  where they get one above, as `bv_server::middleware::{dos, metrics}`.
+
+#### The dev-dependency cycle, and why it is the right shape
+
+`test_utils::TestHttpServer` runs an **in-process** actix server configured by
+`http::init_service` — so it had to travel up into `bv-server` with the routes
+it serves. But ~50 root-crate tests drive it, and the whole point of Phase 1's
+"test-scope hole" section is that extractions must not quietly cost coverage.
+
+Resolved with the arrangement cargo explicitly permits:
+
+- `bv-server` → `bastion_vault` is a normal dependency.
+- `bastion_vault` → `bv-server` is a **dev**-dependency, with
+  `features = ["test-support"]`. Dev-dependency cycles are legal.
+- `bastion_vault::test_utils` is `#[cfg(any(test, feature = "test-support"))]`
+  and re-exports `TestHttpServer` from `bv_server` under plain `#[cfg(test)]`.
+
+So not one of the ~50 call sites that say `crate::test_utils::TestHttpServer`
+changed, and a consumer who enables `test-support` gets the vault fixtures
+without getting a web server. Same shape `bv-storage` used for its backend
+fixtures in Phase 1, one tier up.
+
+**The cycle has a measured cost, and it landed on the plugin tests.** Pulling
+`bv-server` into the root crate's *test* build pulls actix-web and ureq with
+it: the `bastion_vault` lib-test binary went **213 MB → 227 MB**. That is
+invisible everywhere except `src/plugins/process_runtime.rs`, whose seven tests
+each read the entire test binary into a `Vec<u8>`, write a copy to a temp dir,
+spawn it and drive a JSON-RPC handshake against a 30s deadline. At 227 MB,
+copying that while ~75 sibling `plugins::` tests compete for disk was enough to
+blow the deadline — 3 to 6 of them failed under `make plugins-test` while the
+same seven passed in 16s run alone.
+
+The deadline is `DEFAULT_INVOKE_TIMEOUT`, a **production** constant governing
+how long the host waits on a plugin. Relaxing it to make tests pass would have
+traded a real operational bound for a green run. The fix is scheduling:
+`threads-required = "num-cpus"` in `.config/nextest.toml` makes each of the
+seven take the whole runner, so they are serial against everything rather than
+only against each other. `make plugins-test` went from 3–6 failures in 153s to
+**82/82 in 21s** — making them exclusive was faster, not slower, because the
+contention was the cost.
+
+**`get_project_binary_path` had to stop trusting `CARGO_MANIFEST_DIR`.** It
+resolved `target/debug/bvault` relative to that variable, which was the repo
+root while there was only one package running tests. Three packages run these
+fixtures now and cargo sets it per-package, so it is derived from
+`current_exe()` — the test binary sits at `<target>/<profile>/deps/`, whose
+grandparent is the profile directory — which also honours `CARGO_TARGET_DIR`.
+
+#### The brace-import trap, for the fourth time
+
+This document has now recorded three separate measurement errors caused by
+regexes that cannot see `use crate::{ ... }`. Phase 4 made it four: a
+`s/crate::cli::/crate::/g` pass over the moved CLI reported zero remaining
+matches while **66 sites survived**, every one of them a `cli::` entry nested
+inside a brace group where the literal string `crate::cli` never appears.
+
+Worse, the fix for it over-corrected: splicing `http::` groups up a level also
+ate `actix_web::{..., http::{header, StatusCode}, ...}` in six files, because
+that `http::` also starts a path segment. Both were caught by the compiler
+rather than by a grep.
+
+**The rule this document keeps re-learning, stated once more:** never rewrite
+an import with a line-oriented regex. Parse the use-tree by counting braces —
+and when hoisting a segment, check what the *enclosing* path is, not just the
+segment. The scanner in "Phase 1 § the third measurement error" does the first
+half; Phase 4 needed the second.
+
+#### Two name collisions, resolved the opposite way to Phase 3
+
+`bv-server` has route modules called `logical` and `metrics`, and it also
+needs `bastion_vault::logical` and `bastion_vault::metrics`. Phase 3 hit this
+with `bv-engine-pki`'s `storage` module and let the engine win the name,
+naming `bv_storage` directly at the few sites that wanted the substrate. Here
+the substrate is wanted at far more sites than the routes are, so the routes
+were renamed `logical_routes` and `metrics_routes` instead. Either resolution
+works; the collision is a compile error, never a silent shadow.
+
+#### What Phase 4 did not do
+
+- **`bastion_vault` is not a facade.** See above — that is the `bv-core` /
+  `bv-kernel` split, which no phase currently owns.
+- **`gui/src-tauri` still depends on the root crate.** It stops building
+  actix-web, actix-tls and the CLI's nine dependencies, which is the win that
+  was actually available; narrowing it to `bv-core` plus the engines it mounts
+  needs Tier 2 to exist.
+- **`actix-rt` stays in the root crate**, and is production code:
+  `ExpirationManager::start_check_expired_lease_entries` blocks a dedicated
+  thread on an `actix_rt::Runtime`. That is tokio's current-thread builder plus
+  a `LocalSet`, so it *looks* like the `MountsMonitor::start` swap Phase 3
+  made — but proving the swept future never spawns a local task means tracing
+  `revoke_lease_id` through the whole lease graph, and Phase 3 already recorded
+  one wrong conclusion from exactly this reasoning (the AppRole tidy race).
+  Behaviour preservation won. It is a small crate and not a web server.
+- **Neither Tier 4 crate is published.** Both carry
+  `publish = ["uox-bastionvault"]`, but each depends on `bastion_vault`, which
+  is unpublishable while the `[patch.crates-io]` forks stand. They are
+  documented as blocked in `scripts/publish-crates.sh` rather than added to its
+  `CRATES` list, which would only make `crates-publish` fail.
+- **The deb/rpm packaging is untested here.** The metadata moved to
+  `crates/bvault-cli/Cargo.toml` with relative asset paths rewritten
+  (`../../installers/...`) and the Makefile now passes `-p bvault-cli` to
+  `cargo deb` / `cargo generate-rpm`. Neither tool is installed on the
+  development host and both target Linux, so this is **reasoned, not
+  verified** — `make linux-cli-packages` is the check, and it should be run
+  before the next release cut.
 
 ### Phase 5 — CI shape
 
@@ -1323,4 +1517,7 @@ Update on each phase completion:
 - `roadmap.md` — one row, `Workspace Decomposition`, Todo → In Progress → Done
 - this file — phase status and the measured delta against the baseline table
 
-Done so far: Phases 0, 1, 2 and 3. Phase 4 is next.
+Done so far: Phases 0, 1, 2, 3 and 4. Phase 5 is next.
+
+Outstanding, and not owned by any phase: the Tier 2 `bv-core` / `bv-kernel`
+split. See the note at the top of this file.

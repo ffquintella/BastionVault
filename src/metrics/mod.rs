@@ -6,20 +6,18 @@
 //! Read that crate's module docs for the methodology and for how to add a new
 //! metric.
 //!
-//! What stays in the root crate is the part that is not substrate:
+//! The actix-web middleware that times requests and feeds [`http_metrics`] is
+//! `bv_server::middleware::metrics` as of Phase 4. Phase 1 refused to let it
+//! travel *down* into `bv-metrics` — that would have put actix-web under every
+//! crate that records a metric, `bv-storage` included — and Phase 4 gave it
+//! somewhere above to go instead.
 //!
-//! * [`middleware`] — the actix-web middleware that times requests and feeds
-//!   [`http_metrics`]. It is assembly-layer code, and keeping it out of
-//!   `bv-metrics` keeps actix-web out of the dependency graph of every crate
-//!   that records a metric, `bv-storage` included.
-//! * the two scrape-level test modules below, which drive a whole
-//!   `TestHttpServer` from `crate::test_utils` and so cannot travel.
+//! What stays here are the two scrape-level test modules below, which drive a
+//! whole `TestHttpServer` from `crate::test_utils`.
 //!
-//! See roadmaps/workspace-decomposition.md § Phase 1.
+//! See roadmaps/workspace-decomposition.md §§ Phase 1, Phase 4.
 
 pub use bv_metrics::{cache_metrics, ferrogate_metrics, http_metrics, manager, system_metrics};
-
-pub mod middleware;
 
 #[cfg(test)]
 mod http_metrics_tests;

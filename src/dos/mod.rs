@@ -6,12 +6,13 @@
 //! to sit below it. Everything there is re-exported here, so
 //! `bastion_vault::dos::*` paths are unchanged.
 //!
-//! Two pieces stay in the root crate:
+//! The actix layer that consults the guard on every request went the other
+//! way in Phase 4: it is `bv_server::middleware::dos` now. It could never live
+//! below the kernel contract (actix must not reach a leaf engine), and Phase 4
+//! gave it somewhere above to go.
 //!
-//! - [`middleware`] — the actix layer that consults the guard on every
-//!   request. actix must not reach a leaf engine, which is the same reason the
-//!   metrics middleware stayed behind in Phase 1.
-//! - [`store_tests`] — they stand up a whole vault through `crate::test_utils`.
+//! What stays here is [`store_tests`] — they stand up a whole vault through
+//! `crate::test_utils`.
 //!
 //! Enforcement is per-node in memory; configuration and manual bans persist and
 //! converge across an HA cluster via a periodic reload. See
@@ -19,8 +20,6 @@
 //! roadmaps/workspace-decomposition.md § Phase 3 for the split.
 
 pub use bv_kernel_api::dos::{config, guard, store};
-
-pub mod middleware;
 
 pub use config::DosConfig;
 pub use guard::{BanInfo, BanKind, BanRecord, DosGuard, DosStats, IpUsage, ManualBan};

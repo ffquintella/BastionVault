@@ -55,6 +55,18 @@ use crate::{
 };
 
 pub mod cmis;
+/// Client side of the FerroGate MIA helper socket, plus DPoP proof
+/// construction.
+///
+/// It was `bastion_vault::cli::command::ferrogate_mia` until Phase 4, which is
+/// the wrong place twice over: it is not command-line code (it speaks a CBOR
+/// protocol over a Unix socket), and three separate callers wanted it — the
+/// `bvault ferrogate` subcommands, the Tauri host, and this crate's own
+/// machine-binding tests. Leaving it in the CLI would have made the GUI depend
+/// on the CLI, dragging actix-web and clap into the Tauri host — the exact
+/// opposite of what Phase 4 is for.
+#[cfg(unix)]
+pub mod mia;
 pub mod path_config;
 pub mod path_machines;
 pub mod verify;

@@ -1,0 +1,236 @@
+use std::{collections::HashMap, sync::Arc, time::Duration};
+
+use actix_web::{
+    cookie::{time::OffsetDateTime, Cookie},
+    web,
+    HttpRequest,
+    HttpResponse,
+    http::{Method, StatusCode},
+};
+use humantime::parse_duration;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use super::AUTH_COOKIE_NAME;
+use crate::{
+    core::Core,
+    errors::RvError,
+    HttpError,
+        client_ip::{ClientIp, TrustedProxies},
+        request_auth, response_error, response_json_ok, response_ok, Connection,
+    logical::{Connection as ReqConnection, Operation, Response},
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Auth {
+    client_token: String,
+    policies: Vec<String>,
+    metadata: HashMap<String, String>,
+    lease_duration: u64,
+    renewable: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct LogicalResponse {
+    renewable: bool,
+    lease_id: String,
+    lease_duration: u64,
+    auth: Option<Auth>,
+    data: HashMap<String, Value>,
+}
+
+async fn logical_request_handler_v1(
+    req: HttpRequest,
+    body: web::Bytes,
+    method: Method,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+    trusted: web::Data<TrustedProxies>,
+) -> Result<HttpResponse, HttpError> {
+    logical_request_handler_inner(req, body, method, path, core, trusted, 1).await
+}
+
+async fn logical_request_handler_v2(
+    req: HttpRequest,
+    body: web::Bytes,
+    method: Method,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+    trusted: web::Data<TrustedProxies>,
+) -> Result<HttpResponse, HttpError> {
+    logical_request_handler_inner(req, body, method, path, core, trusted, 2).await
+}
+
+async fn logical_request_handler_inner(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    method: Method,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+    trusted: web::Data<TrustedProxies>,
+    api_version: u8,
+) -> Result<HttpResponse, HttpError> {
+    let Some(conn) = req.conn_data::<Connection>() else {
+        return Err(RvError::ErrRequestInvalid.into());
+    };
+    log::debug!("logical request, connection info: {conn:?}, method: {method:?}, path: {path:?}, api_version: {api_version}");
+
+    let mut req_conn = ReqConnection::default();
+    req_conn.peer_addr = conn.peer.to_string();
+    // Phase 1.5: walk X-Forwarded-For / Forwarded against the
+    // configured trusted-proxy CIDRs to derive the original client IP.
+    // Falls back to the socket peer when no proxies are trusted.
+    let cip = ClientIp::resolve(conn.peer, &req, trusted.get_ref());
+    req_conn.peer_addr_derived = cip.derived.to_string();
+    if let Some(tls) = &conn.tls {
+        req_conn.peer_tls_cert.clone_from(&tls.client_cert_chain);
+    }
+
+    let mut r = request_auth(&req);
+    r.path.clone_from(&path.into_inner());
+    r.connection = Some(req_conn);
+    r.api_version = api_version;
+
+    // Surface the RFC 9449 DPoP proof header to backends that consume it
+    // (the `ferrogate` machine-auth backend binds a child token to it). We
+    // copy only this one header rather than the whole header map to keep the
+    // logical request lean and avoid leaking unrelated headers into backends.
+    if let Some(dpop) = req.headers().get("dpop").and_then(|v| v.to_str().ok()) {
+        r.headers.get_or_insert_with(Default::default).insert("dpop".to_string(), dpop.to_string());
+    }
+
+    // Multi-tenancy namespace selector. Backends and the core router resolve
+    // the target namespace from this header (the equivalent path-prefix form
+    // needs no header). Stored under the canonical lower-case key.
+    if let Some(ns) = req
+        .headers()
+        .get("x-bastionvault-namespace")
+        .and_then(|v| v.to_str().ok())
+    {
+        r.headers
+            .get_or_insert_with(Default::default)
+            .insert("x-bastionvault-namespace".to_string(), ns.to_string());
+    }
+
+    match method {
+        Method::GET => {
+            r.operation = Operation::Read;
+        }
+        Method::POST | Method::PUT => {
+            r.operation = Operation::Write;
+            if !body.is_empty() {
+                let payload = serde_json::from_slice(&body)?;
+                r.body = Some(payload);
+                body.clear();
+            }
+        }
+        Method::DELETE => {
+            r.operation = Operation::Delete;
+        }
+        other => {
+            if other.as_str() != "LIST" {
+                return Ok(response_error(StatusCode::METHOD_NOT_ALLOWED, ""));
+            }
+            r.operation = Operation::List;
+        }
+    }
+
+    // Lift allowlisted query parameters (`env`, `version`) into `r.data` so
+    // they are visible to the ACL check (which runs before path captures are
+    // populated) and to KV handlers. Writes carry these in the JSON body
+    // instead; parsing the query here is harmless when empty.
+    if let Some(params) = crate::logical::parse_query_allowlist(req.query_string()) {
+        let data = r.data.get_or_insert_with(Default::default);
+        for (k, v) in params {
+            data.entry(k).or_insert(v);
+        }
+    }
+
+    #[cfg(feature = "sync_handler")]
+    let ret = core.handle_request(&mut r)?;
+    #[cfg(not(feature = "sync_handler"))]
+    let ret = core.handle_request(&mut r).await?;
+
+    match ret {
+        Some(resp) => response_logical(&resp, &r.path),
+        None => {
+            if matches!(r.operation, Operation::Read | Operation::List) {
+                return Ok(response_error(StatusCode::NOT_FOUND, ""));
+            }
+            Ok(response_ok(None, None))
+        }
+    }
+}
+
+fn response_logical(resp: &Response, path: &str) -> Result<HttpResponse, HttpError> {
+    let mut logical_resp = LogicalResponse::default();
+    let mut cookie: Option<Cookie> = None;
+    let mut no_content = true;
+
+    if let Some(ref secret) = &resp.secret {
+        logical_resp.lease_id.clone_from(&secret.lease_id);
+        logical_resp.renewable = secret.lease.renewable;
+        logical_resp.lease_duration = secret.lease.ttl.as_secs();
+        no_content = false;
+    }
+
+    if let Some(ref auth) = &resp.auth {
+        let mut expire_duration = parse_duration("365d")?;
+        if logical_resp.lease_duration != 0 {
+            expire_duration = Duration::from_secs(logical_resp.lease_duration);
+        }
+
+        if !path.starts_with("auth/token/") {
+            let expire_time = OffsetDateTime::now_utc() + expire_duration;
+            cookie = Some(Cookie::build(AUTH_COOKIE_NAME, &auth.client_token).path("/").expires(expire_time).finish());
+        }
+
+        logical_resp.auth = Some(Auth {
+            client_token: auth.client_token.clone(),
+            policies: auth.policies.clone(),
+            metadata: auth.metadata.clone(),
+            lease_duration: auth.ttl.as_secs(),
+            renewable: auth.renewable(),
+        });
+
+        no_content = false;
+    }
+
+    if let Some(ref data) = &resp.data {
+        logical_resp.data = data.iter().map(|(key, value)| (key.clone(), value.clone())).collect();
+
+        no_content = false;
+    }
+
+    if no_content {
+        Ok(response_ok(cookie, None))
+    } else {
+        Ok(response_json_ok(cookie, logical_resp))
+    }
+}
+
+pub fn init_logical_service(cfg: &mut web::ServiceConfig) {
+    // Bump the per-request body limit off actix's 256 KiB default.
+    // The logical surface includes file uploads (`files/files` POST
+    // carries a base64-encoded blob inline) and PKI workflows (CSRs,
+    // certificate chains) that routinely exceed that ceiling. 32 MiB
+    // matches `sys/batch`'s explicit limit and gives operators
+    // headroom for normal file workloads without making the server
+    // an unbounded sink. Larger uploads should chunk via a dedicated
+    // engine later; for now this is the pragmatic ceiling.
+    let payload_cfg = web::PayloadConfig::default().limit(default_logical_body_limit());
+    cfg.service(
+        web::scope("/v1")
+            .app_data(payload_cfg.clone())
+            .route("/{path:.*}", web::route().to(logical_request_handler_v1)),
+    );
+    cfg.service(
+        web::scope("/v2")
+            .app_data(payload_cfg)
+            .route("/{path:.*}", web::route().to(logical_request_handler_v2)),
+    );
+}
+
+fn default_logical_body_limit() -> usize {
+    32 * 1024 * 1024
+}

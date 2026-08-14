@@ -38,6 +38,13 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http2"
 hyper-util = "0.1"
 base64 = "0.22"
 blake3 = "1.8"
+# `mia`'s two wire formats: the helper socket speaks length-delimited CBOR,
+# and the installed MIA's `mia.toml` is where its configured socket path and
+# CMIS endpoint are read from. Both arrived with that module in Phase 4.
+ciborium = "0.2"
+hex = "0.4"
+rand = "^0.10"
+toml = "1.1.2"
 ipnetwork = { version = "0.21", features = ["serde"] }
 ed25519-dalek = "2"
 # The FerroGate SDK, from the same private registry the root crate takes it

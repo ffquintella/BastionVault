@@ -47,6 +47,68 @@ EXAMPLE ENTRY:
 
 ### Changed
 
+#### Workspace decomposition Phase 4: the HTTP server and CLI become their own crates
+- **`bastion_vault` no longer builds a web framework.** `src/http` is now the
+  `bv-server` crate and `src/cli` is now `bvault-cli`, which means `actix-web` and
+  `actix-tls` have left the library's dependency graph entirely, along with nine
+  more crates the command-line layer was dragging in (`clap`, `env_logger`,
+  `prettytable`, `rpassword`, `serde_yaml`, `toml`, and -- already dead since
+  Phase 3 -- `ciborium`, `ipnetwork` and `uuid`).
+  **What this changes for you:** nothing at runtime. Every API route, CLI flag and
+  config key behaves exactly as before, and the full suite is unchanged (1289 unit,
+  1358 integration, 17 doctests). What it changes is build cost for anyone who
+  embeds BastionVault as a library without serving HTTP from it -- most visibly the
+  desktop GUI, whose Tauri host path-depends on the root crate and had been
+  compiling an unused web server on every server-side change.
+  **For packagers:** the `bvault` binary now lives in the `bvault-cli` package. A
+  bare `cargo build --bin bvault` needs `-p bvault-cli`, as do `cargo deb` and
+  `cargo generate-rpm`; the Makefile targets (`make linux-cli-packages` and the
+  Windows/macOS equivalents) already pass it. The produced binary, its path under
+  `target/`, and the .deb/.rpm contents are unchanged.
+  (Phase 4, roadmaps/workspace-decomposition.md)
+- **`bvault --version` prints `bvault 0.40.0` instead of `bastion_vault 0.40.0`.**
+  clap derives the application name from the package name, which the split changed;
+  it is now pinned explicitly to the binary's own name rather than left to follow
+  whichever package happens to hold it.
+- **The server configuration model moved from `bastion_vault::cli::config` to
+  `bastion_vault::config`.** It was never command-line code -- `Core`, the auth
+  module, the HTTP layer and `BastionVault::new` all take it. Config **files** are
+  untouched; this is a Rust module path, and affects only code embedding the crate.
+- **The FerroGate MIA helper client moved from
+  `bastion_vault::cli::command::ferrogate_mia` to
+  `bastion_vault::modules::credential::ferrogate::mia`.** It speaks a CBOR protocol
+  over a Unix socket and is used by the CLI, the desktop GUI and the test suite
+  alike; leaving it under `cli` would have forced the GUI to depend on the whole
+  command-line stack.
+
+- **The plugin process-runtime tests no longer flake under load.** They copy the
+  whole test binary before spawning it, and that binary grew when the split gave
+  the root crate a test-only dependency on `bv-server`; at 227 MB, copying it
+  while dozens of sibling tests competed for disk could exceed the plugin
+  invoke deadline. They are now scheduled exclusively rather than merely
+  serially, which made `make plugins-test` both correct and ~7x faster (153s
+  with 3-6 failures to 21s with none). The 30-second plugin invoke timeout
+  itself is unchanged -- it is an operational bound, not a test knob.
+
+
+#### Agent instructions: one authoritative file
+- **`AGENTS.md` is now the single source of truth for AI-agent instructions**, and
+  `CLAUDE.md` / `agent.md` are thin pointers to it (Claude Code imports it via
+  `@AGENTS.md`). The three files previously carried overlapping, partly stale copies
+  of the build and test commands, and none of them described the crate topology -- so
+  every agent session re-derived the workspace layout from a 25 KB manifest and an
+  80 KB Makefile before it could touch anything.
+  **What it adds:** an architectural map of the 39-member workspace by tier
+  (substrate → kernel contract → engines → kernel tier → assembly) with the
+  dependency direction and per-component test locations; a blast-radius table
+  (what to check and test for each area you edit); four validation levels with real
+  commands (`cargo check -p bv-engine-pki` → `cargo nextest run -p bv-engine-pki --lib`
+  → `make test` → `make test-integration`); and the build-hygiene rules this tree
+  actually needs -- one cargo invocation at a time (they serialise on the `target/`
+  build lock), never `--all-features`, never `--workspace` for a check, never clean.
+  No security, API-versioning, testing or tracking rule was dropped; one broken path
+  in the old `agent.md` was fixed (`docs/docs/api.md` → `docs/api.md`).
+
 #### FerroGate SDK: vendored tree → Cargo registry
 - **The `ferro-*` verifier crates now come from FerroGate's own Cargo registry
   instead of `third_party/ferrogate-sdk-rust/`.** `ferro-crypto`,

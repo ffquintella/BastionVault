@@ -52,6 +52,17 @@ ONLY=""
 # NOT published, deliberately:
 #   bastion_vault       — root crate; see docs/publishing-crates.md
 #   bastion-vault-gui   — desktop app, publish = false
+#
+# NOT published yet, blocked rather than deliberate:
+#   bv-server           — Tier 4 (Phase 4). Both carry
+#   bvault-cli            `publish = ["uox-bastionvault"]` because they are
+#                         meant to publish, but each depends on
+#                         `bastion_vault`, which is not publishable while the
+#                         `[patch.crates-io]` forks stand. They join CRATES
+#                         below the day the root crate does, and not before —
+#                         adding them now would only make `crates-publish`
+#                         fail on a dependency that is not on the registry.
+#                         See docs/publishing-crates.md § Known constraints.
 CRATES=(
   bv-errors
   bv-shamir

@@ -179,7 +179,7 @@ impl Default for HsmObjectIds {
 }
 
 /// Fully-resolved HSM seal configuration (env-expanded, defaults applied). The
-/// raw HCL shape is parsed in `cli::config` and handed to [`resolve_config`].
+/// raw HCL shape is parsed in `crate::config` and handed to [`resolve_config`].
 #[derive(Clone)]
 pub struct ResolvedHsmConfig {
     /// `"yubihsm2"` | `"mock"` — the HCL block label.
