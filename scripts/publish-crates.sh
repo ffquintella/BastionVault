@@ -32,13 +32,22 @@ ONLY=""
 #   bv-errors           — no workspace deps (Tier 0 substrate: RvError)
 #   bv-shamir           -> bv-errors
 #   bv-context          -> bv-errors
+#   bv-metrics          — no workspace deps
 #   bv_plugin_surface   — no workspace deps
 #   bv_crypto           — no workspace deps
+#   bv-storage          -> bv-errors, bv-metrics, bv_crypto
+#   bv-logical          -> bv-errors, bv-context, bv-storage
+#   bv-utils            -> bv-errors, bv-shamir, bv-storage, bv-logical, bv_crypto
+#   bv-audit            -> bv-errors, bv-logical, bv-storage
 #   bv_plugin_manifest  -> bv_plugin_surface
 #   bastion-plugin-sdk  -> bv_plugin_surface (optional dep)
 #   bastion-plugin-testkit — no workspace deps (wasmtime directly)
 #   bv-client           -> bv_plugin_surface
 #   bv-plugin-pack      -> bv_crypto, bv_plugin_manifest
+#
+# `bv_crypto` sits above the Tier 0 leaves here even though it has no
+# workspace deps of its own: `bv-storage` (the barriers) and `bv-utils` both
+# depend on it, so it has to be on the registry before either.
 #
 # NOT published, deliberately:
 #   bastion_vault       — root crate; see docs/publishing-crates.md
@@ -48,12 +57,12 @@ CRATES=(
   bv-shamir
   bv-context
   bv-metrics
+  bv_plugin_surface
+  bv_crypto
   bv-storage
   bv-logical
   bv-utils
   bv-audit
-  bv_plugin_surface
-  bv_crypto
   bv_plugin_manifest
   bastion-plugin-sdk
   bastion-plugin-testkit

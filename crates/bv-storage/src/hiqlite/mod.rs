@@ -152,7 +152,8 @@ pub struct HiqliteBackend {
     /// Kept verbatim rather than pre-resolved because the documented config
     /// form allows hostnames (`"1:bv-1:8210:bv-1:8220"` — compose/k8s DNS),
     /// whose addresses change across peer restarts. Consumers resolve on
-    /// demand; see `crate::http::sys`'s cluster-local disclosure gate.
+    /// demand; see the cluster-local disclosure gate in the root crate's
+    /// `http::sys` (this crate sits below the HTTP layer and cannot name it).
     peer_addrs: Vec<String>,
     /// Whether TLS is enabled on the API channel (affects certificate verification for self-signed)
     tls_api_auto_certs: bool,

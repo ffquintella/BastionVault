@@ -1,5 +1,17 @@
 # Feature: Caching
 
+> **Paths in this document predate the workspace decomposition.** As of Phase 1
+> of [`roadmaps/workspace-decomposition.md`](../roadmaps/workspace-decomposition.md),
+> `src/cache/` and `src/storage/` are `crates/bv-storage/src/{cache,}/` and
+> `src/metrics/cache_metrics.rs` is `crates/bv-metrics/src/cache_metrics.rs`.
+> The re-exports in `src/lib.rs` mean every `bastion_vault::{cache, storage,
+> metrics}` path in code is unchanged. Two behavioural notes for this spec:
+> `TokenCache::{lookup, insert}` are now generic over the cached entry type
+> rather than naming `TokenEntry` (the four security invariants above are
+> unaffected — the payload is the same serialized bytes), and the per-plugin
+> counters are registered through `MetricsManager::register_collector` at the
+> assembly point rather than by name inside `MetricsManager::new`.
+
 ## Summary
 
 Extend BastionVault's caching layer beyond the current policy-only scope to include token lookups, secret reads, and mount table resolution, reducing storage backend round-trips and improving request latency.

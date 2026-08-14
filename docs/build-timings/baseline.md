@@ -74,3 +74,29 @@ a feature nobody intended — it does not remove compilation work. **No build-ti
 improvement should be attributed to Phase 0.** Phase 0's deliverable is the
 instrument, not a speedup.
 | 2026-08-13 17:15 UTC | `d5d288e` (dirty) | 0.50s | 8.81s | 9.92s | 22.18s | 247 MB | 1198 | 15 | 175104 | 10 | **Phase 2 complete (sibling cycle cut).** No crate was created, so no movement was expected and none should be read into this row. `check-leaf` 6.97s → 8.81s and `check-core` 7.65s → 9.92s are both inside the ~25% noise floor, and the raw samples say so: check-leaf ran 27.65 / 8.81 / 8.64 on a target dir warmed by the full test suite. `lock` 1195 → 1198 and `src/` 173,938 → 175,104 lines come from the three Phase 1 crates and this phase's `kernel_api/` split, not from new dependencies — Phase 2 added none. **The two columns still have not diverged, which is the point: they are still one compilation unit.** Phase 3 is what splits them. |
+| 2026-08-14 00:02 UTC | `606f4f8` (dirty) | 0.53s | 9.26s | 8.82s | 17.76s | 230 MB | 1203 | 20 | 154373 | 10 | **Phase 1 complete — five more crates (`bv-metrics`, `bv-storage`, `bv-logical`, `bv-utils`, `bv-audit`), eight in total.** The four scenarios did not move and nothing here should be read as a speedup: `check-leaf` and `check-core` both touch files that are still in the root crate, so Phase 1 was never going to separate them (Phase 3 is). `rlib` 245 → 230 MB and `src/` 173,938 → 154,373 lines are the real movement — 19.5k lines and five subsystems left the root compilation unit. `lock` 1195 → 1203 is the eight new workspace members counting themselves; Phase 1 added no external dependency, and removed eleven from the root manifest (hiqlite, diesel, r2d2, rusty-s3, keyring, sysinfo, libc, lockfile, as-any, blake2b_simd, enum-map). `test-build-leaf` 22.70 → 17.76s looks like a win and is not claimed as one: it is inside the noise floor (raw samples 26.42 / 17.76 / 16.26). |
+
+### What Phase 1 did and did not move
+
+Same shape as the Phase 0 note above, and worth stating just as plainly.
+
+**Did not move:** all four benchmark scenarios. `check-noop`, `check-leaf`,
+`check-core` and `test-build-leaf` are within the noise floor of the Phase 0
+baseline. `check-leaf` and `check-core` are *still equal* — they touch
+`src/modules/transit/mod.rs` and `src/core.rs`, both of which remain in the
+root crate, so there was never a mechanism by which Phase 1 could separate
+them. Phase 3 is what splits them, and Phase 0's findings said so.
+
+**Did move:** the size of the thing being compiled. 19,565 lines and 15 MB of
+rlib left the root compilation unit. Eleven dependencies — including a Raft/SQLite
+engine, a MySQL client and an S3 signer — are no longer dependencies of
+`bastion_vault`; they belong to `bv-storage`, which is where the code that uses
+them now lives.
+
+**The number that is not in this table**, because the script does not measure
+it: iterating on the storage substrate. Editing `src/storage/mod.rs` used to
+cost a `check-core`-class rebuild of the monolith, ~7.7s at the Phase 0
+baseline. Editing `crates/bv-storage/src/lib.rs` and running
+`cargo check -p bv-storage` costs **0.78s** (median of 3, warm). That is the
+Phase 1 payoff, and it is the shape every later phase repeats — one crate at a
+time, not one monolith.

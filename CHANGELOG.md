@@ -48,6 +48,44 @@ EXAMPLE ENTRY:
 ### Changed
 
 #### Build and Test Tooling
+- **Phase 1 of [the decomposition](roadmaps/workspace-decomposition.md) is
+  complete -- five more Tier 0/1 crates, eight in total.** `crates/bv-metrics`,
+  `crates/bv-storage` (with `src/cache` and `src/schema` folded in),
+  `crates/bv-logical` (with `src/handler.rs`), `crates/bv-utils` and
+  `crates/bv-audit` join the three already extracted. Every moved path is
+  re-exported from `src/lib.rs`, so `bastion_vault::{metrics, storage, cache,
+  schema, logical, handler, utils, audit}` all resolve exactly as before and no
+  call site outside the moved directories changed.
+  **What operators get:** eleven dependencies left the `bastion_vault` manifest
+  with the code that used them -- `hiqlite`, `diesel`, `r2d2`, `rusty-s3`,
+  `keyring`, `sysinfo`, `libc`, `lockfile`, `as-any`, `blake2b_simd`,
+  `enum-map`. A Raft/SQLite engine, a MySQL client and an S3 signer are no
+  longer in the dependency list of the server, the CLI or any secret engine.
+  Feature flags are unchanged: `storage_hiqlite`, `storage_mysql`, `cloud_*`
+  and `sync_handler` now forward to the same-named features on `bv-storage`,
+  so an existing build command produces the same binary.
+  **What developers get:** editing the storage substrate is a 0.78s
+  `cargo check -p bv-storage` instead of a ~8s rebuild of the monolith. The
+  root compilation unit lost 19,565 lines and 15 MB of rlib. The four
+  `make bench-build` scenarios did **not** move and no speedup is claimed
+  from them -- `check-leaf` and `check-core` both touch files still in the
+  root crate, which is Phase 3's problem, not Phase 1's. See
+  `docs/build-timings/baseline.md`.
+  Behaviour is unchanged and verified as such: 1289 unit, 1358 integration and
+  17 doctests, identical counts before and after every one of the five
+  extractions.
+- **Four of those five were dependency inversions, not file moves.**
+  `MetricsManager::new` called `plugins::metrics::register` by name, which
+  pointed the metrics substrate at the plugin runtime; it now takes the
+  collector from whoever builds it. `TokenCache` named
+  `modules::auth::token_store::TokenEntry`, which pointed storage at the auth
+  engine; it is now generic over the caller's type, with the four security
+  invariants in `features/caching.md` untouched (raw tokens never cached, values
+  zeroized on drop, never serialized out, zero TTL disables). `AuditBroker::new`
+  took a kernel handle to fetch one `BarrierView`; it takes the view. And
+  `audit::sys_emit` stayed in the root crate because it is kernel glue -- that
+  is what breaks the `VaultCtx` ↔ `AuditBroker` loop that had kept the audit
+  subsystem unextractable.
 - **`RvError` moved to its own crate** (`crates/bv-errors`) -- the first Tier 0
   extraction of [the decomposition](roadmaps/workspace-decomposition.md).
   Re-exported as `bastion_vault::errors`, so `crate::errors::RvError` and the
@@ -80,8 +118,9 @@ EXAMPLE ENTRY:
   inside the monolith but which a separately publishable crate must state in
   its manifest.
   The roadmap's other three "clean leaves" turned out not to be leaves; see the
-  corrected dependency table in the roadmap. `src/utils` and `src/logical` are
-  blocked, the latter on Phase 2.
+  corrected dependency table in the roadmap. (`src/utils` and `src/logical`
+  were blocked at the time of this entry. Both shipped later in Phase 1 -- and
+  the blocker on `src/logical` was `bv-storage`, not Phase 2 as stated here.)
 - **`RvError` no longer depends on actix-web** (`src/errors.rs`) -- Phase 1 of
   [the decomposition](roadmaps/workspace-decomposition.md) needs the error type to
   be a dependency-free leaf, and it was importing the HTTP server.
@@ -232,6 +271,17 @@ EXAMPLE ENTRY:
   high-value slice is breaking that cycle plus extracting PKI: 19 of the 30
   integration-test binaries are PKI, and only 2 of its 39 files touch `Core`.
 
+### Fixed
+
+#### Build and Test Tooling
+- **The nextest exclusion for the port-bound hiqlite tests had silently
+  lapsed.** `.config/nextest.toml` excluded them by the test path
+  `storage::hiqlite::test::`; they lost the `storage::` prefix when they moved
+  into `bv-storage`, so the filter stopped matching and a default `make test`
+  began running 8 tests that need a single process and a process-global port
+  allocator. Both spellings are matched now, and `make test-hiqlite` targets
+  `-p bv-storage`. ([Phase 1](roadmaps/workspace-decomposition.md))
+
 ### Security
 
 - **Three lock-across-await deadlocks made visible and fixed.**
@@ -272,6 +322,21 @@ EXAMPLE ENTRY:
 ### Removed
 
 #### Build and Test Tooling
+- **`Handler::post_config`** -- a trait method with zero implementors anywhere
+  in the workspace, whose only caller discarded the `ErrHandlerDefault` its
+  default body always returned. It has never done anything. It was, however,
+  the sole reason `Handler` named `Core` and `cli::config::Config`, which in
+  turn pinned `logical::Request` (which holds an `Arc<dyn Handler>`) to the
+  kernel -- so removing it is what let `bv-logical` become a crate. A public
+  API change with no possible behavioural effect.
+  ([Phase 1](roadmaps/workspace-decomposition.md))
+- **Eleven direct dependencies from the root crate**, each moving down with the
+  code that used it: `hiqlite`, `diesel`, `r2d2`, `rusty-s3` and `keyring` to
+  `bv-storage`; `sysinfo` to `bv-metrics`; `libc` and `lockfile` to
+  `bv-storage`; `as-any` and `blake2b_simd` to `bv-utils`; `enum-map` to
+  `bv-logical`. Unlike the Phase 0 triage below, these are not dead edges --
+  the code is still built, just not by `bastion_vault`.
+  ([Phase 1](roadmaps/workspace-decomposition.md))
 - **Five dead direct dependencies**, from the Phase 0 triage: `foreign-types`,
   `glob`, and `serde_derive` from the root crate; `serde` from `bv-plugin-pack`
   (only `serde_json` was ever used -- the manifest types live in

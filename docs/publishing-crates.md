@@ -90,14 +90,26 @@ A registry rejects a crate whose dependencies it cannot resolve, so the
 script publishes in topological order:
 
 ```
+bv-errors                (no workspace deps)
+bv-shamir                -> bv-errors
+bv-context               -> bv-errors
+bv-metrics               (no workspace deps)
 bv_plugin_surface        (no workspace deps)
 bv_crypto                (no workspace deps)
-bastion-plugin-testkit   (no workspace deps)
+bv-storage               -> bv-errors, bv-metrics, bv_crypto
+bv-logical               -> bv-errors, bv-context, bv-storage
+bv-utils                 -> bv-errors, bv-shamir, bv-storage, bv-logical, bv_crypto
+bv-audit                 -> bv-errors, bv-logical, bv-storage
 bv_plugin_manifest       -> bv_plugin_surface
 bastion-plugin-sdk       -> bv_plugin_surface
+bastion-plugin-testkit   (no workspace deps)
 bv-client                -> bv_plugin_surface
 bv-plugin-pack           -> bv_crypto, bv_plugin_manifest
 ```
+
+`bv_crypto` has no workspace dependencies of its own but is listed above the
+Tier 0 storage crates deliberately: `bv-storage` (the barriers) and `bv-utils`
+both depend on it, so it must reach the registry first.
 
 ### Internal deps must name the registry
 
@@ -174,8 +186,8 @@ Two ways out, when it matters:
    this viable: consumers depend on the split crates, and
    `bastion_vault` stays a local assembly point.
 
-Nothing here blocks publishing the seven library crates above — they are
-all free of vendored path deps.
+Nothing here blocks publishing the library crates above — all fifteen are
+free of vendored path deps.
 
 ## CI
 

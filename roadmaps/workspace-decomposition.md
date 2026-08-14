@@ -1,12 +1,16 @@
 # Roadmap: Workspace Decomposition
 
-Status: **Phase 0 done. Phase 2 done.** Phase 1 partially done: `bv-errors`,
-`bv-shamir` and `bv-context` are extracted and green. The remaining five Tier 0
-crates are *not* mechanical file moves — a re-measurement of the dependency
-graph (see "Verified clean leaves" below, which was wrong) shows `bv-utils` is
-Tier 1, and `bv-logical` and `bv-audit` were blocked on Phase 2 rather than the
-reverse. **Phase 2 is now complete on both halves**: the `Core` ↔ `modules`
-cycle is cut *and* the sibling cycle is cut. Measured at the end of the phase:
+Status: **Phases 0, 1 and 2 are done.** Phase 3 is next and its extraction
+order is free.
+
+Phase 1 shipped eight Tier 0/1 crates — `bv-errors`, `bv-shamir`,
+`bv-context`, `bv-metrics`, `bv-storage`, `bv-logical`, `bv-utils`,
+`bv-audit` — in an order the original plan got wrong three separate times.
+See "Phase 1" below for what landed, what it cost, and the measurement bug
+that caused the misordering.
+
+Phase 2 is complete on both halves: the `Core` ↔ `modules` cycle is cut *and*
+the sibling cycle is cut. Measured at the end of that phase:
 
 | measured on production code (`#[cfg(test)]` excluded) | phase start | after 2a | **after 2b** |
 |---|---|---|---|
@@ -31,6 +35,14 @@ crate regardless; they become `tests/` binaries in Phase 3.
 > comments, and they were wrong in ways that changed the plan: the "clean
 > leaves" are not leaves, Phase 2 had ~101 cross-module call sites rather than
 > 43, and three of the five Tier 3 ↔ Tier 3 "cycles" were prose.
+>
+> **This document has now measured its own dependency graph wrong three
+> times, each time with a different broken regex, and each time the error
+> changed the extraction order.** If you need the graph again, do not write a
+> fourth grep — match braces by counting, expand one level of nesting, and
+> split `#[cfg(test)]` blocks out before counting. The third failure is
+> written up under "Phase 1 § the third measurement error"; it is the one that
+> is easiest to repeat, because the regex looked correct.
 
 ## Goal
 
@@ -182,8 +194,8 @@ Each is a handful of lines and each blocks a Tier-0 extraction:
 | ~~`errors.rs` imports `actix_web::http::StatusCode`~~ | 2 | **Done.** `response_status()` returns `u16`; the actix `ResponseError` impl in `src/http/mod.rs` maps it. The header-decode variant no longer wraps an actix type. |
 | ~~`src/audit` → `crate::modules`~~ | 2 (`sys_emit.rs`, `entry.rs`) | **Done** (Phase 2). `sys_emit.rs` takes the token store through `kernel_api::auth::TokenService`; `NS_PATH_META` and its two siblings moved to `kernel_api::namespace`, re-exported from `token_binding`. |
 | `src/mount.rs` → `crate::plugins` | 2 | Invert: the plugin runtime registers its backend factory with the mount table |
-| `src/metrics` → `crate::plugins` | 1 | Invert: plugins register their collectors |
-| `src/storage` → `crate::http` | 1 | Doc comment only — no real coupling |
+| ~~`src/metrics` → `crate::plugins`~~ | 1 | **Done** (Phase 1). `MetricsManager::register_collector` takes the registration function; the two assembly points that build a manager supply the plugin collector. |
+| ~~`src/storage` → `crate::http`~~ | 1 | **Done** (Phase 1). Was a doc comment; rewritten as prose when `src/storage` became `bv-storage`. |
 
 ~~Verified clean leaves, needing no inversion at all: `src/logical`,
 `src/utils`, `src/shamir.rs` reference **only** `crate::errors`;
@@ -454,7 +466,150 @@ adopt only if it oscillates.
 **Exit:** met — a reproducible number to beat, an archived timings artefact, and
 a CI job that reports dependency drift.
 
-### Phase 1 — Tier 0 substrate
+### Phase 1 — Tier 0 substrate — **done**
+
+Eight crates, in this order, each its own commit with the full suite as its
+gate:
+
+| # | crate | lines | what it actually took |
+|---|---|---|---|
+| 1 | `bv-errors` | 622 | the `HttpError` newtype in `src/http` (orphan rule); 149 signatures, 7 `.into()` |
+| 2 | `bv-shamir` | 685 | true leaf |
+| 3 | `bv-context` | 86 | true leaf; added to Tier 0, was not in the plan |
+| 4 | `bv-metrics` | 618 | inverting `MetricsManager::new` → `plugins::metrics::register`; actix middleware left behind |
+| 5 | `bv-storage` (+ `cache`, `schema`) | 11,067 | `TokenCache` made generic; storage test fixtures moved to a `test-support` feature |
+| 6 | `bv-logical` (+ `handler`) | 3,341 | deleting the dead `Handler::post_config` hook |
+| 7 | `bv-utils` | 4,841 | nothing — but it had to come last, being Tier 1 |
+| 8 | `bv-audit` | 1,128 | `AuditBroker::new` off the kernel handle; `sys_emit` left above the crate |
+
+**Measured outcome** (`606f4f8`, versus the Phase 0 baseline at `d04a72c`):
+
+| | before | after |
+|---|---|---|
+| `src/` (the root compilation unit) | 173,938 lines | **154,373** |
+| `libbastion_vault.rlib` (debug) | 245 MB | **230 MB** |
+| workspace members | 12 | **20** |
+| `cargo check` after editing a storage file | ~7.7s (it was `src/storage`, so `check-core`-class) | **0.78s** (`cargo check -p bv-storage`) |
+| `check-leaf` / `check-core` | 6.97s / 7.65s | 9.26s / 8.82s — **unmoved, and still equal** |
+| unit / integration / doctests | 1289 / 1358 / 17 | **1289 / 1358 / 17** |
+
+Read the last two rows together. `check-leaf` and `check-core` both touch
+files that are *still in the root crate*, so Phase 1 was never going to
+separate them — Phase 3 is what does that, and the roadmap says so in the
+Phase 0 findings. What Phase 1 bought is the row above them: work on the
+storage substrate is now a 0.78s loop instead of a ~8s one, because it is a
+crate you can check on its own. And eleven dependencies — `hiqlite`,
+`diesel`, `r2d2`, `rusty-s3`, `keyring`, `sysinfo`, `libc`, `lockfile`,
+`as-any`, `blake2b_simd`, `enum-map` — are no longer dependencies of
+`bastion_vault` at all; they belong to the crates that use them. Phase 1
+added no new external dependency.
+
+**No wall-clock speedup should be attributed to Phase 1 on the four
+benchmark scenarios.** They did not move, and the noise floor is ~25%.
+
+#### The third measurement error
+
+The plan below was rewritten twice on re-measurement, and then a *third*
+time during the work, because the scanner used to re-measure it was also
+wrong. It matched brace-grouped imports with `crate::\{([^}]*)\}` — which
+stops at the **first** `}`, not the matching one. So in
+
+```rust
+use crate::{
+    context::Context,
+    errors::RvError,
+    handler::{HandlePhase, Handler},   // <- the scan ends here
+    logical::{auth::Auth, ...},
+    storage::{Storage, StorageEntry},  // <- never seen
+};
+```
+
+everything after the first nested group was invisible. That is how
+`bv-logical` was measured as a leaf depending only on `errors`, `context`
+and `handler`, when `Request` in fact carries a `Storage` handle. The
+extraction was started in the wrong order and had to be backed out and
+redone after `bv-storage`.
+
+The working scanner counts braces, expands one level of nesting, and splits
+`#[cfg(test)]` blocks out before counting. The corrected graph, which is
+what the shipped order follows:
+
+| crate | production deps (workspace only; `bv_crypto` predates this phase) |
+|---|---|
+| `bv-errors`, `bv-shamir`, `bv-context`, `bv-metrics` | none |
+| `bv-storage` | errors, metrics, bv_crypto |
+| `bv-logical` | errors, context, **storage** |
+| `bv-audit` | errors, logical, storage |
+| `bv-utils` | errors, shamir, storage, logical, bv_crypto |
+
+`bv_crypto` already existed and has no workspace dependencies of its own, but
+it is *below* `bv-storage` (the barriers use it) and below `bv-utils`. That
+ordering was wrong in `scripts/publish-crates.sh`, which listed the new Tier 0
+crates ahead of it; fixed in the same change.
+
+#### What each inversion actually was
+
+Four of the eight were not file moves. Recording them because the pattern
+repeats in Phase 3:
+
+- **`bv-metrics`.** `MetricsManager::new` called
+  `crate::plugins::metrics::register` by name — one line, and the only
+  thing keeping the metrics substrate out of Tier 0. Replaced by
+  `register_collector`, which the two assembly points that build a manager
+  call. The actix-web middleware stayed in `src/metrics` deliberately:
+  `bv-storage` depends on `bv-metrics` for the cache counters, so anything
+  in it lands under every leaf engine and actix must not.
+- **`bv-storage`.** `TokenCache` named
+  `modules::auth::token_store::TokenEntry`, pointing storage at the auth
+  engine. The entry only ever exists in the cache as opaque serialized
+  bytes, so `lookup`/`insert` became generic and the naming went away with
+  no change to what is stored or to the four security invariants in
+  `features/caching.md`. Separately, the backend and barrier tests needed
+  `crate::test_utils`; the four fixtures they use moved into
+  `bv_storage::test_support` behind a `test-support` feature that the root
+  crate turns on through a dev-dependency, and `test_utils` re-exports them
+  so no call site changed. The two tests that drive a *second vault
+  process* through the `bvault` CLI could not travel and live in
+  `src/storage_backend_tests.rs`.
+- **`bv-logical`.** `Handler::post_config(Arc<Core>, Option<&Config>)` had
+  **zero implementors** anywhere in the workspace, and its only caller
+  discarded the error it always returned. That dead signature was the sole
+  reason `Handler` named `Core` and the CLI's config parser, and
+  `Request` holds an `Arc<dyn Handler>`. Deleting it is what made the
+  extraction possible.
+- **`bv-audit`.** The hard one, and the one this roadmap had wrong until the
+  end — see the next section.
+
+#### `bv-audit` was never unblocked by Phase 2
+
+The table below (and the summary that used to head this file) said
+`bv-audit` was "unblocked (Phase 2 done)" because it had stopped reaching
+`crate::core::Core` directly. That was true and it was not the blocker.
+The blocker is that `VaultCtx::audit_broker()` returns an
+`Arc<AuditBroker>` — **the kernel contract and the audit subsystem named
+each other**, so neither could become a crate while that held. Phase 2 did
+not change this; it moved audit's one `crate::modules` constant into
+`kernel_api`, which for these purposes made it slightly worse.
+
+Cut by pushing audit *below* the kernel contract, in three moves:
+
+1. `AuditBroker::new` took a `&dyn VaultCtx` to fetch one thing off it. It
+   now takes the `BarrierView`. The `ErrBarrierSealed` check moved to
+   `post_unseal`, its only caller, which is the code that actually knows.
+2. `audit::sys_emit` — resolving a token through `TokenService` and
+   fetching the broker off `VaultCtx` — stayed in the root crate. It is
+   kernel glue, not audit. `src/audit/mod.rs` is now a shim over
+   `bv_audit` plus that module, the same shape `src/metrics` took, so
+   `bastion_vault::audit::*` paths are unchanged.
+3. `NS_PATH_META` and its two siblings moved to `bv-logical`, next to the
+   `Auth::metadata` map they key. `kernel_api::namespace` re-exports them,
+   so the call sites Phase 2 created still resolve.
+
+**Generalisation for Phase 3:** when two things name each other, look for
+which of them is fetching a *handle* it only uses once, and which of them
+is glue that belongs in the assembly layer. Both were true here.
+
+#### The original plan, kept for the record
 
 The original plan was:
 
@@ -465,19 +620,11 @@ The original plan was:
 >    `hiqlite`, `diesel`, and `rusty-s3` out of the monolith's compile unit
 > 5. `bv-audit`, `bv-metrics` (after their two inversions)
 
-Steps 2–5 do not survive the corrected dependency table above. The revised
-order, with what each actually needs:
-
-| # | crate | status | gate |
-|---|---|---|---|
-| 1 | `bv-errors` | **done** | needed the `HttpError` newtype; 149 signatures, 7 `.into()` |
-| 2 | `bv-shamir` | **done** | true leaf |
-| 3 | `bv-context` | **done** | true leaf; added to Tier 0, was not in the plan |
-| 4 | `bv-metrics` | after inversion | `plugins` registers its own collectors |
-| 5 | `bv-storage` (+ `cache`) | after 4 | `cache` → `modules::auth::token_store::TokenEntry`; 6 tests need root `test_utils` |
-| 6 | `bv-logical` | **unblocked** (Phase 2 done) | `Request.handler: Option<Arc<dyn Handler>>` → `Handler` → `Core` |
-| 7 | `bv-utils` | after 5 and 6 | Tier 1: `salt.rs`→storage, `token_util.rs`→logical, `seal.rs`→shamir |
-| 8 | `bv-audit` | **unblocked** (Phase 2 done) | reached `crate::core::Core` directly; now goes through `VaultCtx` |
+Steps 2–5 did not survive the corrected dependency table above, and the
+revision that replaced them did not survive the *third* re-measurement
+either — it kept `bv-logical` before `bv-storage`, and claimed `bv-audit`
+was unblocked. Both are wrong; see the two sections above for what shipped
+and why.
 
 `bv-errors` is a hard prerequisite for everything, not a deferrable
 tail-end change: a new crate cannot depend on the root crate, so no module
@@ -513,9 +660,44 @@ pre-existing family of flaky timing-dependent tests
 either scope. They are tracked separately and must not be papered over with
 nextest `retries` — see `.config/nextest.toml`.
 
-**Expected:** the substrate stops recompiling on engine edits. Touching
-an engine no longer invalidates ~19k lines of storage/logical code.
-Modest wall-clock win; the real value is that Phases 2–4 become possible.
+#### Lint scope is not inherited, and that is on purpose
+
+Every extracted crate starts from clippy's defaults. `bv-logical`,
+`bv-utils` and `bv-audit` each carry their own short `[lints.clippy]` block
+listing only the lints their own code trips — all of which the root crate
+already allows — rather than inheriting a `[workspace.lints]` block.
+
+That is deliberate, and the reason is in the root manifest's own comment:
+`await_holding_lock` was set to `"allow"` for years and hid a real deadlock
+in the lease sweeper. It was caught only when `bv-context` was extracted and
+stopped inheriting the allow. A workspace-wide lint block would give that
+back. One nit was fixed rather than allowed on the way out (`use blake3;`,
+which edition 2021 does not need).
+
+#### The test-scope hole, revisited
+
+The `--workspace` scoping described below held for all five new crates: unit
+counts went 1289 → 1289 across every extraction, because each crate's tests
+travel with it and nextest picks up the new member the day it exists. Two
+things needed manual attention:
+
+- **`.config/nextest.toml`'s `default-filter`** excluded the port-bound
+  hiqlite tests by the path `storage::hiqlite::test::`. Those tests lost the
+  `storage::` prefix when they changed crate, so the filter silently stopped
+  matching and the run picked up 8 extra tests. Now matched with the prefix
+  optional, and `make test-hiqlite` targets `-p bv-storage`.
+- **Tests that cannot travel** — anything using `crate::test_utils`, which
+  stands up a whole vault — were relocated into the root crate rather than
+  deleted: `src/metrics/{http,system}_metrics_tests.rs`,
+  `src/storage_backend_tests.rs`, and `src/audit/tests.rs`.
+
+**Outcome vs. the expectation:** "the substrate stops recompiling on engine
+edits" is now structurally true — 19,565 lines left the root compilation
+unit — but it does not show up in `check-leaf`/`check-core`, because those
+were already served by rustc's incremental cache within the single unit.
+The win that *is* measurable is the other direction: a substrate edit no
+longer rebuilds the monolith to be checked (0.78s vs ~8s). The real value
+remains that Phases 3–4 are now possible.
 
 ### Phase 2 — Break the `Core` ↔ `modules` cycle — **done**
 
@@ -927,4 +1109,4 @@ Update on each phase completion:
 - `roadmap.md` — one row, `Workspace Decomposition`, Todo → In Progress → Done
 - this file — phase status and the measured delta against the baseline table
 
-Done so far: Phase 0, Phase 2, and steps 1–3 of Phase 1.
+Done so far: Phases 0, 1 and 2. Phase 3 is next.
