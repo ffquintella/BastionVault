@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-08-17
+
 ### Added
 
 #### Change-scoped test runs: `make test-changed`
@@ -83,7 +85,96 @@ EXAMPLE ENTRY:
   `slow-timeout` are inherited, so it excludes exactly the same port-bound suites
   and skips nothing a `default` run would have executed.
 
+#### Workspace decomposition Phase 5: CI runs the whole suite again
+- **CI now runs everything except `tests/e2e/rustion-ssh`.** Until now
+  `.github/workflows/tests.yml` ran only `--lib --bins` plus the GUI's vitest,
+  and deliberately skipped the ~30 `tests/` integration binaries, the hiqlite
+  storage and HA fault-injection suites, and the cucumber features -- because
+  each `tests/` binary linked the full dependency graph plus a 245 MB rlib.
+  Those three now have jobs, alongside doctests, the GUI, and a new per-crate
+  isolation check. That coverage gap was outcome #1 of the decomposition
+  roadmap, not a speed problem.
+  (Phase 5, roadmaps/workspace-decomposition.md)
+- **A pull request runs only what its change can reach.** A push to `main` runs
+  the full suite; a PR runs the packages in the reverse-dependency closure of
+  what it touched. The affected set comes from `cargo metadata` -- the same graph
+  `make test-changed` uses locally, exposed as `scripts/test-changed.sh --json`
+  and turned into job matrices by `scripts/ci-plan.sh` -- rather than from a
+  hand-maintained list of path globs, which would be a second copy of the
+  dependency graph that drifts silently the first time a crate gains a
+  dependency.
+- **`make ci-plan`** prints the CI job plan for your change and builds nothing.
+  `BASE=main` widens it to the whole branch, `PKG=<name>` answers "what would CI
+  do if I touched this crate?", `FULL=1` shows what `main` runs.
+- **`make check-isolated`** runs `cargo check -p <pkg>` over every workspace
+  member on its own. `cargo check --workspace` is not a proxy for "each crate
+  builds": cargo unifies features across one build, so a crate can be missing a
+  feature it needs and stay green because a sibling turns it on. Phase 4 shipped
+  a `bv-server` that could not build alone for exactly that reason while the
+  workspace check passed. CI runs this whenever a manifest changes.
+- **The `tests/` suite is sharded by binary, four ways.** Not by
+  `nextest --partition`, which splits test execution but still links every
+  ~190 MB harness in every shard -- linking is the cost that made the suite
+  unaffordable in CI. A new `tests/test_foo.rs` is picked up automatically.
+
+#### Workspace decomposition Phase 6: per-crate versions, per-crate releases
+- **Library crates are versioned and released individually.** Each of the 38
+  publishable crates carries its own version and ships on its own schedule.
+  The **product** version -- what `bvault --version` prints and what the
+  installers are named after -- stays in lockstep across the root crate,
+  `bvault-cli` and the GUI under `make bump-*`, and no longer drags the
+  libraries with it. `bv-shamir` has not changed since it was extracted and is
+  no longer republished because the GUI shipped.
+  (Phase 6, roadmaps/workspace-decomposition.md)
+- **`make crates-plan`** shows which crates changed since their last published
+  version, and what would ship, without building or uploading anything. The
+  answer comes from three inputs per crate: its last `<crate>-v<version>` git
+  tag, a `git diff` of the crate's directory since that tag, and the registry's
+  sparse index. Each crate is `publish`, `bump` (changed, but that version is
+  already on the registry) or `skip`. `OFFLINE=1` skips the index lookups.
+- **`make crates-bump`** patch-bumps exactly the changed crates.
+  `MINOR=<crate>` marks a breaking change -- the one call the tool cannot make
+  for you, because it is a judgement about the crate's public API.
+  `CRATE=<name>` bumps one regardless, `DRY=1` shows the edits.
+- **`make crates-publish-changed`** builds and uploads only those crates, in
+  dependency order, and refuses to run while any crate needs a bump first --
+  a published version can never be overwritten. `-dry` for a dry run.
+  **`make crates-tag-push`** publishes the release record; the publish step
+  writes `<crate>-v<version>` tags locally but never pushes them.
+- **A patch bump no longer cascades, by design.** Internal dependencies are
+  declared `version = "0.1.0"`, a caret requirement matching every 0.1.x, so
+  bumping `bv-errors` to 0.1.1 leaves its 32 dependents untouched and
+  unpublished -- a consumer picks up 0.1.1 on its own. A breaking bump
+  (0.1 -> 0.2) rewrites all 29 dependents and cascades, which is correct.
+  Do not pin internal deps with `=`, and do not move dependencies into
+  `[workspace.dependencies]`; both turn every release into a whole-workspace
+  release. See AGENTS.md § Per-crate versioning.
+
+### Security
+
+#### Workspace decomposition Phase 6
+- **The root `bastion_vault` crate can no longer be published to crates.io by
+  accident.** It carried no `publish` key, which means "any registry" -- so a
+  bare `cargo publish` in the repository root would have attempted to push the
+  entire server, including its full source, to the public crates.io index.
+  Every other crate already carried `publish = ["uox-bastionvault"]`; the root
+  was the one gap, while `docs/publishing-crates.md` described the guard as
+  universal. It is `publish = false` now, and `make crates-plan` warns about
+  any manifest missing the key so the gap cannot silently return.
+
 ### Changed
+
+#### Workspace decomposition Phase 6
+- **The crate publish order is derived from `cargo metadata`, not maintained by
+  hand.** The hand-maintained list had already drifted: `bv-core` and
+  `bv-kernel` were created in Phase 4.5 carrying `publish =
+  ["uox-bastionvault"]` and were never added to it, so every release would have
+  silently skipped the entire kernel. There are **38** publishable crates, not
+  the 36 the list knew about. Which crates are publishable is derived the same
+  way -- a fixpoint over the dependency graph, since a crate cannot ship while
+  anything it depends on cannot. That is why `bv-server` and `bvault-cli` are
+  excluded today (both reach `bastion_vault`) and how they rejoin on their own
+  if that changes.
 
 #### Workspace decomposition Phase 4.5: the vault kernel becomes two crates
 - **`bastion_vault` is finally a facade.** The kernel split into `bv-core`

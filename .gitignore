@@ -68,3 +68,9 @@ node_modules/
 
 # `cargo package` / `cargo publish` staging output.
 /target/package
+
+# The release plan `make crates-publish-changed` computes once and hands to
+# the publish run, so the set you confirm is exactly the set that ships. It is
+# deleted on the way out; this catches the run that was interrupted between
+# the two.
+/.crates-plan.json

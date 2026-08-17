@@ -1,0 +1,102 @@
+name: Set up Rust for BastionVault CI
+description: >-
+  Toolchain, the shared dependency cache, and cargo-nextest. Every Rust job in
+  tests.yml starts with this, so the caching policy is stated once.
+
+inputs:
+  cache-key:
+    description: >-
+      Swatinem/rust-cache `shared-key`. Jobs that build the same shape of
+      artefact should pass the same value; see the "one writer" note below.
+    required: false
+    default: build
+  save-cache:
+    description: >-
+      Pass 'true' for the ONE job allowed to write this key. Everything else
+      restores read-only. Saving is additionally gated on `main`.
+    required: false
+    default: "false"
+  nextest:
+    description: Pass 'false' for jobs that only run cargo check / cargo test.
+    required: false
+    default: "true"
+
+# ── The caching policy, in one place ──────────────────────────────
+#
+# GitHub evicts caches LRU past 10 GB per repository. A dependency cache for
+# this workspace (~1200 crates, debug) is on the order of GBs, so a per-job key
+# would thrash the whole repo's cache budget within one run — and the per-crate
+# keys Phase 5 originally sketched would be far worse: 33 keys for a substrate
+# change.
+#
+# So there are TWO keys, and each has exactly ONE writer:
+#
+#   check   `cargo check` artefacts. Written by the `check` gate; restored by
+#           the per-crate `isolation` job.
+#   build   real codegen artefacts. Written by `unit-full`, which on main runs
+#           `nextest --workspace --lib --bins` and so compiles every dependency
+#           AND every dev-dependency for real. Restored by every test job.
+#
+# Two rather than one because `cargo check` emits `.rmeta` and `cargo build`
+# emits `.rlib`, under different metadata hashes. They do not share artefacts in
+# either direction, so a single key would mean whichever job wrote it left the
+# other half of CI with a useless cache. That is easy to get wrong and invisible
+# when you do — the jobs still pass, just slowly.
+#
+# Two more consequences worth knowing before changing this:
+#
+#   * A GitHub cache key is immutable once written. If two jobs saved the same
+#     key, the first to finish would win and the rest would fail silently — so
+#     "which cache do we have?" would depend on job scheduling. One writer per
+#     key makes it deterministic.
+#   * Saving only on `main` means a PR never pollutes the cache with a
+#     half-built tree, and every PR starts from the last known-good full build.
+#     A PR that adds a dependency pays for it once per job; that is the intended
+#     trade and it is bounded, because rust-cache keys on Cargo.lock and falls
+#     back to the nearest prefix match rather than starting cold.
+#
+# `unit-full` is a reliable writer because a push to main always plans as
+# `full`, and `full` always collapses the unit matrix into that one job. If that
+# ever stops being true, the `build` cache stops being written and every test
+# job gets slower without anything going red — so keep the two facts together.
+#
+# sccache is deliberately NOT used here. It was in the Phase 5 sketch ("plus
+# sccache with a shared bucket for the invariant substrate"), and the reason it
+# is not here is that it has no bucket to share: the only backend available
+# without new infrastructure is the GitHub Actions cache, which is the same
+# 10 GB pool rust-cache is already using — so it would compete with the thing it
+# was supposed to accelerate rather than add to it. Revisit if and when there is
+# real object storage to point it at; that is an infrastructure decision, not a
+# workflow one.
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        # Mirrors rust-toolchain.toml.
+        components: rustfmt
+
+    - name: Cache cargo + target
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ inputs.cache-key }}
+        save-if: ${{ inputs.save-cache == 'true' && github.ref == 'refs/heads/main' }}
+        cache-on-failure: true
+
+    # Built from crates.io source rather than fetched as a prebuilt binary or
+    # via a third-party action, to keep CI's trusted computing base to what the
+    # repo already trusts. rust-cache caches ~/.cargo/bin, so on a warm cache
+    # this is a `command -v` and nothing else; the build cost is paid once, by
+    # whichever main-branch run last wrote the cache.
+    #
+    # `.config/nextest.toml` uses `default-filter`, so nextest must be
+    # >= 0.9.84. Unpinned `cargo install` always satisfies that; pin a
+    # `--version` here if reproducibility matters more than currency.
+    - name: Install cargo-nextest
+      if: ${{ inputs.nextest == 'true' }}
+      shell: bash
+      run: |
+        command -v cargo-nextest >/dev/null 2>&1 || cargo install --locked cargo-nextest
+        cargo nextest --version

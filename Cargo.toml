@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.40.0"
+version = "0.41.0"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -15,6 +15,22 @@ BastionVault's RESTful API is designed to be fully compatible with Hashicorp Vau
 repository = "https://github.com/ffquintella/BastionVault"
 documentation = "https://docs.rs/bastion_vault/latest/bastion_vault/"
 build = "build.rs"
+# The facade is NOT publishable, and this is the guard that makes that true
+# rather than merely documented. Every other crate carries
+# `publish = ["uox-bastionvault"]`, so a bare `cargo publish` cannot reach
+# crates.io — but this one had no `publish` key at all, which means "any
+# registry", i.e. crates.io by default. Running `cargo publish` in the repo
+# root would have tried to push the whole server there.
+#
+# It is `false` and not `["uox-bastionvault"]` because it cannot go to
+# Cloudsmith either, yet: `[patch.crates-io]` points sspi/picky*/hiqlite at
+# forks, and a published `bastion_vault` would resolve those from crates.io
+# instead — a behaviour change nobody has validated. See
+# docs/publishing-crates.md § Known constraints. Flipping this back is one
+# line, and `scripts/crates-plan.sh` picks `bv-server` and `bvault-cli` up
+# automatically when it happens, because it derives publishability from this
+# field rather than from a list.
+publish = false
 exclude = [
     "docs/*",
 ]

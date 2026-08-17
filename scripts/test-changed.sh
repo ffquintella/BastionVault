@@ -5,6 +5,7 @@
 #   scripts/test-changed.sh                       # uncommitted work (tracked + untracked)
 #   scripts/test-changed.sh --base main           # ...plus everything since merge-base(main)
 #   scripts/test-changed.sh --list                # print the plan, build nothing
+#   scripts/test-changed.sh --json                # print the plan as JSON, build nothing
 #   scripts/test-changed.sh --direct              # changed packages only, no dependents
 #   scripts/test-changed.sh --pkg bv-engine-pki   # explicit seed, ignore git entirely
 #   scripts/test-changed.sh -- issue_cert         # extra args go to nextest (filter, -E, ...)
@@ -64,6 +65,33 @@
 # This is a WALL-CLOCK optimisation, not a coverage policy. It narrows the inner
 # loop. It does not replace the release gate, and nothing here may make
 # `make test-release` narrower.
+#
+# `--json` AND THE CI MATRIX
+#
+# Phase 5 of roadmaps/workspace-decomposition.md builds the CI job matrix from
+# THIS graph rather than from a second, hand-maintained list of path globs. That
+# is deliberate: the roadmap sketched `dorny/paths-filter`, and this repo has
+# already mis-measured its own dependency graph three separate times with three
+# different bad regexes (see the roadmap's "the third measurement error"). A
+# path-glob filter is a fourth copy of the graph that drifts silently the first
+# time a crate gains a dependency. `cargo metadata` cannot drift.
+#
+# So `--json` prints the whole plan — including things the interactive run only
+# reports as prose — and scripts/ci-plan.sh turns it into GitHub Actions matrix
+# outputs. The extra fields exist for that consumer:
+#
+#   integration_bins       `#[test]` harnesses under tests/ owned by an affected
+#                          package, minus the two nextest cannot enumerate
+#   all_integration_bins   the same, for every member — CI's full-run plan
+#   needs_bvault_bin       affected packages whose lib tests spawn
+#                          target/debug/bvault
+#   manifest_files         any Cargo.toml / Cargo.lock hit, which gates the
+#                          per-crate isolation check
+#   ci_files               .github/** hits, which the interactive run ignores and
+#                          CI must not (you cannot validate a workflow edit with
+#                          an empty matrix)
+#
+# Adding a field here is cheap; teaching CI a second way to compute one is not.
 
 set -euo pipefail
 
@@ -71,6 +99,7 @@ cd "$(git rev-parse --show-toplevel)"
 
 BASE=""
 LIST_ONLY=0
+JSON_ONLY=0
 DIRECT=0
 PROFILE="quick"
 SEED_PKGS=()
@@ -80,11 +109,12 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --base)           BASE="${2:?--base needs a git ref}"; shift 2 ;;
     --list|--dry-run) LIST_ONLY=1; shift ;;
+    --json)           JSON_ONLY=1; shift ;;
     --direct)         DIRECT=1; shift ;;
     --profile)        PROFILE="${2:?--profile needs a nextest profile name}"; shift 2 ;;
     --pkg)            SEED_PKGS+=("${2:?--pkg needs a package name}"); shift 2 ;;
     --)               shift; NEXTEST_ARGS=("$@"); break ;;
-    -h|--help)        sed -n '2,66p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)        sed -n '2,94p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "test-changed: unknown argument '$1' (use -- to pass args to nextest)" >&2; exit 2 ;;
   esac
 done
@@ -156,6 +186,39 @@ has_lib = {
     if any(k in ("lib", "rlib", "proc-macro") for t in p["targets"] for k in t["kind"])
 }
 
+# Integration-test harnesses, by owning package: every `tests/*.rs` is its own
+# binary and its own full link of the graph below it. Two are unrunnable under
+# nextest and are excluded here rather than in the consumer, so the exclusion
+# lives next to the reason:
+#
+#   cucumber_hiqlite            `harness = false` — a plain main(), not libtest,
+#                               so nextest cannot enumerate its cases.
+#   hiqlite_ha_fault_injection  hands itself TCP ports from a process-global
+#                               atomic; process-per-test collides on every one.
+#
+# Both mirror `default-filter` in .config/nextest.toml and both have their own
+# make target (`test-cucumber`, `test-hiqlite`).
+NEXTEST_CANNOT_RUN = {"cucumber_hiqlite", "hiqlite_ha_fault_injection"}
+test_bins = {
+    p["name"]: sorted(
+        t["name"]
+        for t in p["targets"]
+        if "test" in t["kind"] and t["name"] not in NEXTEST_CANNOT_RUN
+    )
+    for p in members.values()
+}
+
+# Packages whose *lib* tests spawn the real `bvault` executable rather than
+# calling the CLI in-process — `test_utils::get_project_binary_path()` resolves
+# it as target/<profile>/bvault, and building a test harness does not produce
+# it. A developer's tree usually has a stale one lying around; a CI runner does
+# not, and the failure reads "No such file or directory (os error 2)".
+#
+# Re-derive after adding a caller — every hit outside test_utils.rs itself
+# belongs to a package that needs the binary:
+#     grep -rln get_project_binary_path --include='*.rs' src crates
+BIN_DEP_PKGS = {"bastion_vault", "bv-server", "bvault-cli"}
+
 # Bin targets that actually contain tests. Every other [[bin]] in this workspace
 # links a full ~200 MB test harness to run zero tests, so `--bins` is only worth
 # paying for these. Today: bvault-cli's main.rs is a 19-line delegate to its lib
@@ -185,6 +248,12 @@ IGNORED_PREFIXES = (
     "third_party/", "IronRDP/", "plugins-ext/", "target/", "node_modules/",
     "gui/node_modules/", "gui/dist/",
 )
+
+# Ignored for *test selection* — a workflow edit cannot break a Rust test — but
+# reported separately, because CI has the opposite need: a PR that only edits
+# .github/workflows/tests.yml must still run enough of the suite to show that
+# the edit works. scripts/ci-plan.sh forces a full run on these.
+CI_PREFIXES = (".github/",)
 IGNORED_EXACT = {
     "README.md", "CHANGELOG.md", "AGENTS.md", "CLAUDE.md", "agent.md",
     "roadmap.md", "LICENSE", "Makefile", ".gitignore",
@@ -194,10 +263,14 @@ with open(os.path.join(work, "changed")) as fh:
     files = [l.strip() for l in fh if l.strip()]
 
 global_hits, gui_frontend, integration, ignored = [], [], [], 0
+ci_files = []
 seeds = set()
 
 for f in files:
-    if f in GLOBAL:
+    if f.startswith(CI_PREFIXES):
+        ci_files.append(f)
+        ignored += 1
+    elif f in GLOBAL:
         global_hits.append(f)
     elif f in IGNORED_EXACT or f.startswith(IGNORED_PREFIXES):
         ignored += 1
@@ -245,6 +318,8 @@ else:
 affected -= EXCLUDED
 lib_pkgs = sorted(p for p in affected if p in has_lib)
 bin_pkgs = sorted(affected & BIN_TEST_PKGS)
+integ_bins = sorted(b for p in affected for b in test_bins.get(p, ()))
+bvault_bin = sorted(affected & BIN_DEP_PKGS)
 
 
 def emit(fh, key, value):
@@ -262,7 +337,53 @@ with open(os.path.join(work, "plan.sh"), "w") as fh:
     emit(fh, "PLAN_N_CHANGED", len(files))
     emit(fh, "PLAN_N_IGNORED", ignored)
     emit(fh, "PLAN_N_MEMBERS", len(members) - len(EXCLUDED))
+
+# The same plan, losslessly, for scripts/ci-plan.sh. Written unconditionally —
+# it costs nothing and it means the JSON can never describe a different graph
+# from the one the interactive run just printed.
+with open(os.path.join(work, "plan.json"), "w") as fh:
+    json.dump(
+        {
+            "full": bool(global_hits),
+            "global_hits": sorted(global_hits),
+            "lib_pkgs": lib_pkgs,
+            "bin_pkgs": bin_pkgs,
+            "seeds": sorted(seeds - EXCLUDED),
+            "gui_files": sorted(gui_frontend),
+            "integration_files": sorted(integration),
+            "integration_bins": integ_bins,
+            # Every runnable harness in the workspace, not just the affected
+            # ones. CI needs this for its full-run plan, and deriving it there
+            # would mean a second copy of the NEXTEST_CANNOT_RUN exclusion.
+            "all_integration_bins": sorted(
+                b for bins in test_bins.values() for b in bins
+            ),
+            "needs_bvault_bin": bvault_bin,
+            "ci_files": sorted(ci_files),
+            # Any manifest, not just the root one GLOBAL catches. A
+            # `crates/*/Cargo.toml` edit is package-local for test *selection*
+            # but not for feature unification, which is what the isolation job
+            # exists to catch — see Phase 4.5's `log/std` bug.
+            "manifest_files": sorted(
+                f for f in files if f == "Cargo.lock" or f.endswith("Cargo.toml")
+            ),
+            "n_changed": len(files),
+            "n_ignored": ignored,
+            "n_members": len(members) - len(EXCLUDED),
+        },
+        fh,
+        indent=2,
+        sort_keys=True,
+    )
 PY
+
+# `--json` is a pure query: the plan on stdout, nothing else, and no exit code
+# that means "a full run is required" — the consumer reads the `full` field and
+# decides. Everything below this line is the interactive presentation.
+if [[ "$JSON_ONLY" == "1" ]]; then
+  cat "$WORK/plan.json"
+  exit 0
+fi
 
 # shellcheck source=/dev/null
 . "$WORK/plan.sh"

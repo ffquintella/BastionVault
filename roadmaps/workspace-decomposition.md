@@ -1,8 +1,14 @@
 # Roadmap: Workspace Decomposition
 
-Status: **Phases 0, 1, 2, 3, 4 and 4.5 are done.** Phase 5 (CI shape) is next,
-and it is now unblocked in full — every crate a path-filtered matrix needs
-exists.
+Status: **every phase is done — 0, 1, 2, 3, 4, 4.5, 5 and 6.** What is left is
+one operational step this roadmap cannot do for itself: cutting the first
+actual release to the registry, by hand, because it creates 38 crate versions
+that can never be reused.
+
+Phase 5 delivered outcome #1 below: **CI runs the integration suite again**, plus
+the hiqlite and cucumber suites, plus a per-crate isolation check — and it runs
+only what a change can reach, derived from `cargo metadata` rather than from a
+hand-maintained list of path globs.
 
 The Tier 2 split this document kept predicting and never scheduling has
 landed: `bv-core` (6,424 lines) and `bv-kernel` (32,017) came out of the root
@@ -60,10 +66,10 @@ repository.
 
 Three concrete outcomes, in order of value:
 
-1. **CI runs the integration suite again.** Today `.github/workflows/tests.yml`
-   deliberately skips `tests/` (~30 binaries), the hiqlite suites, and
-   cucumber — because each `tests/` binary links the full dependency graph
-   plus a 245 MB rlib. That is a coverage gap, not just a speed problem.
+1. **CI runs the integration suite again.** `.github/workflows/tests.yml` used
+   to skip `tests/` (~30 binaries), the hiqlite suites, and cucumber — because
+   each `tests/` binary links the full dependency graph plus a 245 MB rlib. That
+   was a coverage gap, not just a speed problem. **Met in Phase 5.**
 2. **A one-engine change compiles and tests one engine.** Editing the PKI
    engine should not recompile the SSH broker, the Tauri host, or the
    actix surface.
@@ -1592,26 +1598,195 @@ are seal-path features an operator turns on for real hardware. They forward
 `yubihsm` / `rusb` deps moved with them. Verified by building with the
 feature on, not by reading the manifest.
 
-### Phase 5 — CI shape
+### Phase 5 — CI shape — **done**
 
-Only meaningful after Phase 3; the workflow changes are cheap once the
-crates exist.
+The plan, kept as written, because three of its five bullets did not survive:
 
-- Path-filtered jobs (`dorny/paths-filter`) → matrix of
-  `cargo nextest run -p <crate>` for affected crates only.
-- **Re-enable `tests/`**, per crate, now that each links a small crate
-  rather than the monolith. Same for the hiqlite suites, which stay on
-  `cargo test` for their process-global port allocator (see
-  `.config/nextest.toml`) but now only rebuild when `bv-storage` changes.
-- Per-crate `Swatinem/rust-cache` keys, plus `sccache` with a shared
-  bucket for the invariant substrate.
-- Keep one `cargo check --workspace` gate job so a green matrix can never
-  hide a broken assembly.
-- Update `.config/nextest.toml` and the `NOTE ON SCOPE` comment block in
-  `tests.yml` as exclusions are retired — that comment is currently the
-  honest record of what CI does not cover, and it must stay honest.
+> - Path-filtered jobs (`dorny/paths-filter`) → matrix of
+>   `cargo nextest run -p <crate>` for affected crates only.
+> - **Re-enable `tests/`**, per crate, now that each links a small crate
+>   rather than the monolith. Same for the hiqlite suites, which stay on
+>   `cargo test` for their process-global port allocator (see
+>   `.config/nextest.toml`) but now only rebuild when `bv-storage` changes.
+> - Per-crate `Swatinem/rust-cache` keys, plus `sccache` with a shared
+>   bucket for the invariant substrate.
+> - Keep one `cargo check --workspace` gate job so a green matrix can never
+>   hide a broken assembly.
+> - Update `.config/nextest.toml` and the `NOTE ON SCOPE` comment block in
+>   `tests.yml` as exclusions are retired — that comment is currently the
+>   honest record of what CI does not cover, and it must stay honest.
 
-### Phase 6 — Independent versioning and publishing
+#### What CI runs now
+
+Everything this repository has except `tests/e2e/rustion-ssh`, which needs real
+remote hosts and cannot be hermetic. A push to `main` runs the lot; a pull
+request runs only what the change can reach.
+
+| job | what | when |
+|---|---|---|
+| `plan` | derives the affected set from `cargo metadata` | always |
+| `check` | `cargo check --workspace --all-targets` | always |
+| `unit` | `nextest -p <pkg> --lib` + `cargo test --doc -p <pkg>`, one job per affected package | affected ≤ 12 packages |
+| `unit-full` | the same over `--workspace` | affected > 12, or `main` |
+| `integration` | the ~30 `tests/` harnesses, sharded 4 ways | root crate affected |
+| `hiqlite` | `make test-hiqlite` | `bv-storage` affected |
+| `cucumber` | `make test-cucumber` | root crate affected |
+| `isolation` | `make check-isolated` — `cargo check -p X` over every member | any manifest changed |
+| `gui` | `tsc --noEmit` + vitest | `gui/` changed |
+| `deps` | `cargo machete`, advisory | always |
+| `required` | one status for branch protection | always |
+
+**Outcome #1 of this roadmap is met.** The `tests/` binaries have been skipped
+in CI since the suite existed; they run now. So do the hiqlite and cucumber
+suites, which were the other two documented holes.
+
+#### `dorny/paths-filter` was the wrong instrument
+
+Path globs are a **second copy of the dependency graph, maintained by hand**.
+This document has already measured its own graph wrong three separate times,
+with three different broken regexes, each time changing the plan — and a glob
+list has a worse failure mode than any of those did: it drifts silently the
+first time a crate gains a dependency, and the symptom is a green pull request
+that skipped the suite which would have caught the bug.
+
+So the affected set comes from `cargo metadata`, through
+[`scripts/test-changed.sh --json`](../scripts/test-changed.sh) — the same code
+path `make test-changed` already used locally. There is one graph, and CI and
+the inner loop read it the same way. `scripts/ci-plan.sh` is the only new logic:
+it turns that plan into GitHub Actions matrix outputs and decides which suites
+are worth running.
+
+`make ci-plan` runs the whole thing locally and builds nothing, so "what will CI
+do with this?" is answerable before pushing:
+
+```
+make ci-plan BASE=main          # this branch
+make ci-plan PKG=bv-engine-pki  # a hypothetical change to one crate
+make ci-plan FULL=1             # what main runs
+```
+
+**The matrix has a cap, and the measurement is why.** Reverse-dependency closure
+sizes on this tree fall into groups with a wide gap between them: 0–1 for the
+Tier 4 leaves, **4–10** for every engine, auth backend, `bv-core`, `bv-kernel`,
+`bv-server` and the root crate, and **26–33** for Tier 0/1. Above the cap
+(12) the matrix stops being an optimisation — N jobs rebuild the same substrate
+N times from the same cache — so a substrate change collapses into one
+`--workspace` job. Any cap between 11 and 25 partitions those groups
+identically; 12 is far enough from both edges to survive a few more crates.
+`scripts/ci-plan.sh` carries the one-liner that re-derives the table, so the
+number can be checked rather than trusted.
+
+#### Per-crate cache keys would have been actively harmful
+
+GitHub evicts caches LRU past **10 GB per repository**, and a dependency cache
+for a 1200-crate debug graph is on the order of GBs. Per-crate keys — 33 of them
+for a substrate change — would thrash the whole repo's budget inside one run.
+
+What landed is two keys with **one writer each**, which took one non-obvious
+correction to get right: `cargo check` emits `.rmeta` and `cargo build` emits
+`.rlib`, under different metadata hashes, and they share nothing in either
+direction. A single key would have meant whichever job wrote it left the other
+half of CI with a useless cache — and the jobs would still pass, just slowly, so
+nothing would have gone red. So `check` (written by the gate) serves the two
+check-only jobs, and `build` (written by `unit-full`, which on main compiles
+every dependency *and* dev-dependency for real) serves every test job. Saving
+only on `main` means a pull request never pollutes the cache and always starts
+from the last known-good full build.
+
+**sccache is not adopted, and the reason is that it has no bucket.** The plan
+said "sccache with a shared bucket for the invariant substrate"; the only
+backend available without new infrastructure is the GitHub Actions cache, which
+is the same 10 GB pool `rust-cache` is already using — so it would compete with
+the thing it was meant to accelerate. Revisit when there is real object storage
+to point it at. That is an infrastructure decision, not a workflow one.
+
+#### Sharding `tests/` by binary, not by `nextest --partition`
+
+`--partition` splits test *execution* and still builds and links every harness
+in every shard. Linking is the cost that made this suite unaffordable — each
+`tests/` binary was measured at **~190 MB** on this tree — so partitioning would
+have multiplied the expensive half by the shard count. Shards are therefore
+lists of `--test <name>` flags, assigned round-robin from the target list by
+`ci-plan.sh`, so a new `tests/test_foo.rs` lands in a shard with no edit
+anywhere. Eight binaries per shard is ~1.5 GB of linked output, which leaves
+room on a runner's ~14 GB.
+
+`hiqlite` is gated on `bv-storage`, as the plan said. Worth recording why that
+is not the obvious gate: `tests/hiqlite_ha_fault_injection.rs` lives in `tests/`
+and is therefore owned by the **root** crate, which nearly every change reaches
+— gating on the owner would stand hiqlite clusters up on every pull request.
+Both suites exercise `bv-storage`'s backend, so that is the trigger that means
+something, and `main` runs them unconditionally.
+
+#### The Phase 4.5 lesson is now a job
+
+Phase 4.5 ended: "`cargo check --workspace` is not a proxy for 'each crate
+builds'. Feature unification makes it strictly weaker, and the path-filtered
+per-crate matrix Phase 5 is about would have caught this." It does, twice over:
+
+- the per-package `unit` matrix builds each crate's subgraph on its own, so on a
+  pull request the affected crates are checked in isolation as a side effect;
+- `make check-isolated` (the `isolation` job) walks **every** member with
+  `cargo check -p <pkg>`, and runs whenever any manifest changes — which is when
+  feature unification can shift. One job, one target dir, sequential, so each
+  check reuses what the previous one built and the only real cost is the crates
+  whose feature set genuinely differs. That is exactly the set it is looking
+  for.
+
+`make check-isolated` is also the local form of the same gate, and is the answer
+to "will this crate still build for a downstream consumer?"
+
+#### What is not in this phase
+
+- **`cargo fmt --check` is not a gate**, and that is deliberate rather than an
+  omission. `rustfmt.toml` sets six nightly-only options (`imports_granularity`,
+  `group_imports`, `format_strings`, `comment_width`, `binop_separator`,
+  `trailing_comma`), which stable rustfmt warns about and then ignores — so
+  `cargo fmt --all --check` on the stable toolchain this workflow pins reports
+  diffs against a format the repo does not use. Verified, not assumed: it
+  reports diffs on the current tree. A fmt gate needs a nightly rustfmt first,
+  and that is its own change.
+- **Timing.** No wall-clock number is claimed for this phase, because none has
+  been measured — see the next section.
+
+#### What was verified, and what was not
+
+Stated plainly because the distinction matters more here than usual: this phase
+changes the thing that verifies everything else.
+
+**Verified locally:**
+
+- `scripts/ci-plan.sh` against the real graph, for the working tree, for
+  `--full`, for a one-engine seed (5 packages, 4 integration shards, hiqlite
+  skipped) and for a substrate seed (`bv-errors` → collapse to one job, hiqlite
+  run). The `.github/**` escape hatch was verified by the fact that this change
+  itself forces a full plan.
+- Both YAML files parse, and the `required` gate's aggregation script was run
+  against both a passing and a failing `needs` payload.
+- **`make check-isolated` is green: all 41 members build on their own**, in
+  **~37 minutes** on a warm 10-core local tree. Most crates check in under 30s;
+  the two that dominate are `bv-server` (1m22s) and `bvault-cli` (1m00s), both
+  of which pull the facade and the kernel behind them. The run is also a
+  demonstration of the thing it exists to catch: several crates re-checked
+  `bv-errors` and its `rustls`/`ureq`/`bcrypt` chain because they need a
+  narrower feature set than the workspace build unifies to. That churn is the
+  cost of the check and it is the signal, not noise.
+- That the tree is *not* `cargo fmt --check`-clean on stable, which is why that
+  gate is absent.
+
+**Not verified:** the workflow has never run on GitHub Actions. Job graph,
+matrix expansion, cache behaviour, runner disk headroom for the integration
+shards and the wall-clock cost of each job are all *reasoned*, from measured
+local numbers, and the first run on `main` is what turns them into facts. The
+`timeout-minutes` values are sized from the local measurements above with room
+for a slower runner (`check` 120, `unit-full` 120, `isolation` 150, integration
+shards 90); the integration shards are the likeliest to need revising, because
+their cost is linking rather than compiling and nothing local measures that on
+a 4-core box. Expect one corrective commit; that is the normal cost of a CI
+change and it is cheaper than the alternative, which is not shipping the
+coverage.
+
+### Phase 6 — Independent versioning and publishing — **done**
 
 **The registry plumbing is already in place** (branch
 `feat/workspace-decomposition`), so every crate the earlier phases create
@@ -1632,9 +1807,117 @@ Each new crate from Phases 1 and 3 must therefore land with: `version`,
 `version` + `registry` on every internal dep, and an entry in the
 script's ordered `CRATES` list.
 
+#### What landed — per-crate versions, and releasing only what changed
+
+The scheme is two versions, not one, and keeping them apart is the whole
+design:
+
+| | what | who moves it |
+|---|---|---|
+| **Product** | one number — `bvault --version`, the installer filenames. Root crate, `bvault-cli`, GUI. Not published. | `make bump-*` |
+| **Library** | **38** independent numbers, one per publishable crate. Moved by *content*, not by release. | `make crates-bump` |
+
+`bv-shamir` has not changed since Phase 1 extracted it. It must not be
+republished because the GUI shipped, and now it is not.
+
+The release loop:
+
+```
+make crates-plan               # what changed since its last published version
+make crates-bump               # patch-bump exactly those (MINOR=<crate> if breaking)
+make crates-publish-changed    # build + upload exactly those, in dependency order
+make crates-tag-push           # push the release record
+```
+
+[`scripts/crates-plan.sh`](../scripts/crates-plan.sh) answers "what needs
+publishing?" per crate from three inputs: the crate's last `<name>-v<version>`
+git tag, `git diff <that tag> HEAD -- <crate dir>`, and the registry's sparse
+index. Each crate lands in **publish**, **bump** (changed, but this version is
+already on the registry) or **skip**, and the publish step refuses to run while
+anything is in `bump` — a published version cannot be overwritten, so failing
+early beats failing halfway through an ordered run.
+
+#### The property everything else protects: a patch bump does not cascade
+
+Internal deps are declared `version = "0.1.0"` — a **caret** requirement
+matching every 0.1.x. So bumping `bv-errors` to 0.1.1 leaves all 32 dependents'
+manifests untouched, their tarballs unchanged, and them unpublished; a consumer
+resolves 0.1.1 by itself. A breaking bump (0.1 → 0.2) invalidates the
+requirement, `crates-bump` rewrites all 29 dependents, and they cascade — which
+is correct, because a breaking change in a dependency *is* a change in its
+dependents.
+
+Three things would destroy that property, and all three are now written down in
+AGENTS.md § Per-crate versioning: pinning internal deps with `=`, letting
+`make bump-*` touch library versions, and `[workspace.dependencies]` — see
+below.
+
+#### `[workspace.dependencies]` was a Phase 6 item and is now a documented "no"
+
+It is incompatible with the thing this phase is for. Cargo **inlines** the
+concrete version when it packages, so a crate using
+`serde = { workspace = true }` publishes a manifest saying `serde = "1.0.228"`.
+Bumping `serde` at the workspace level therefore changes the *published
+manifest* of all 35 crates that use it while changing **no file in any crate
+directory** — invisible to a `git diff`-based change detector, so 35 crates go
+stale on the registry silently. Making it visible means treating the root
+manifest as part of every crate's change signature, i.e. one `serde` bump
+republishes all 38: exactly the whole-workspace release the scheme exists to
+avoid.
+
+The cost of declining it is real and is recorded rather than hidden: **83
+external dependencies are declared in more than one manifest**, so version skew
+between crates is possible. `Cargo.lock` unifies them for anything built from
+this workspace; the exposure is a consumer resolving two of our crates from the
+registry. If that bites, the answer is a lint comparing declarations across
+manifests, not a shared table.
+
+#### Two things the derivation found that a list had already lost
+
+- **The hand-maintained publish order had drifted.** `bv-core` and `bv-kernel`
+  were created in Phase 4.5 carrying `publish = ["uox-bastionvault"]` and were
+  never added to `scripts/publish-crates.sh`'s `CRATES` array, so every release
+  would have silently skipped the entire kernel. Order and publishability are
+  now derived from `cargo metadata` — the same argument Phase 5 made against
+  path-glob CI filters, and the second time in two phases that a hand-copied
+  view of the graph was found stale.
+- **The root crate had no `publish` key**, which means "any registry", i.e.
+  crates.io. A bare `cargo publish` in the repo root would have tried to push
+  the whole server there — while `docs/publishing-crates.md` said the
+  accidental-publish guard was universal. It is `publish = false` now, and
+  `crates-plan` warns about any manifest missing the key.
+
+Two derivation rules that are not obvious and are load-bearing:
+
+- **Publishability is a fixpoint, not a flag.** A crate cannot ship while
+  anything it depends on cannot, so `bv-server` and `bvault-cli` drop out on
+  their own from `bastion_vault` being unpublishable — and rejoin on their own
+  the day it is not.
+- **Path-only dev-dependencies do not count.** Cargo strips them from the
+  published manifest. Without that rule `bv-kernel` would look unpublishable:
+  it dev-depends on `bastion_vault` and `bv-server` for its test fixtures.
+
+#### Verified, and not
+
+**Verified locally:** the derived order is a valid topological sort of the
+workspace graph (checked programmatically against `cargo metadata`, including
+the dev-dep rule); 38 publishable crates with `bv-server`/`bvault-cli`
+correctly excluded and their blockers named; a real patch bump writes only the
+`[package]` version line and nothing else; a breaking bump rewrites exactly the
+29 dependents; `--changed` publishes nothing when nothing changed, refuses when
+a crate needs a bump first, and narrows to the right subset in topological
+order when two crates are ready; the registry index is reachable and reports
+the registry as empty.
+
+**Not verified:** nothing has been published. The registry is virgin — the
+index returns 404 for every crate — so the first `--execute` is also the first
+test of the upload path, the inter-crate index delay, and the tagging. Do that
+run by hand, not from CI: it creates 38 versions that can never be reused.
+
 Remaining Phase 6 work:
 
-- Move shared dependency versions to `[workspace.dependencies]`.
+- ~~Move shared dependency versions to `[workspace.dependencies]`.~~
+  **Declined**, with reasons, above.
 - ~~Resolve the root crate's unpublishability — it path-depends on the
   vendored, unpublished `ferro-*` crates in
   `third_party/ferrogate-sdk-rust/`.~~ **Done 2026-08-14.** FerroGate
@@ -1645,24 +1928,42 @@ Remaining Phase 6 work:
   `[patch.crates-io]` forks, not the `ferro-*` crates. See
   [docs/publishing-crates.md](../docs/publishing-crates.md)
   § Known constraints.
-- Wire tag-triggered publishing into CI.
-- Adopt `release-plz` or `cargo-release` for per-crate semver from
-  conventional commits.
-- Rework `make bump-*`: today `_bump-write` rewrites `Cargo.toml`,
-  `gui/src-tauri/Cargo.toml`, `gui/package.json`, and `tauri.conf.json`
-  in lockstep. Keep that lockstep for the **shipped product version**
-  (server, CLI, GUI, installers — the thing operators see), and let the
-  library crates version independently underneath it.
+- ~~Rework `make bump-*`~~ **Done.** It moves the product version only —
+  root `Cargo.toml`, `bvault-cli`, `gui/package.json`,
+  `tauri.conf.json` — and its comment block now says why adding a
+  `crates/bv-<library>` line to `_bump-write` would re-couple the two
+  schemes. `bv-server` keeps its own inert `0.1.0`; it is Tier 4 but
+  nothing prints it.
+- **Cut the first release by hand.** The registry is empty, so the first
+  `--execute` creates 38 versions that can never be reused. Do it from a
+  terminal, watch the inter-crate index delay, and push the tags — then
+  wire CI.
+- Wire tag-triggered publishing into CI, once there has been one manual
+  release to model it on. `--changed --execute` is the invocation;
+  `fetch-depth: 0` is the trap, because without the tags every crate
+  reads as "never released".
+- **`release-plz` / `cargo-release` are not needed for this and should
+  not be adopted reflexively.** What they add over what landed is
+  conventional-commit parsing to *guess* the bump level — and that guess
+  is the one judgement this scheme deliberately leaves to a person,
+  because "is this breaking?" is a question about the crate's public API
+  and a wrong answer is a broken downstream build rather than a failing
+  test. Revisit only if commit discipline becomes strict enough that the
+  guess is better than the default.
 - `CHANGELOG.md` stays the product changelog. Per-crate changelogs only
-  for crates that are actually published.
+  for crates that are actually published — i.e. not before the first
+  release, and only for crates that acquire external consumers.
 
 ## Ordering rationale
 
 Phase 1 is safe and unlocks Phase 2. Phase 2 has the design risk and
 zero visible payoff — resist reordering it after Phase 3, because
 extracting an engine while the cycle exists means re-doing it. Phase 3 is
-where the numbers move. Phases 5 and 6 are policy, not engineering, and
-can slip without blocking anything.
+where the numbers move. Phases 5 and 6 read as policy rather than engineering,
+and were sequenced last on that basis — which was right for Phase 5 and only
+half right for Phase 6: deriving the publishable set from the graph turned up
+two live defects (a drifted publish order that omitted the whole kernel, and a
+root crate that would have published itself to crates.io).
 
 If only one phase is ever done, do **Phase 2 plus the PKI half of
 Phase 3**: it cuts the cycle, proves the pattern on the highest-churn
@@ -1686,4 +1987,5 @@ Update on each phase completion:
 - `roadmap.md` — one row, `Workspace Decomposition`, Todo → In Progress → Done
 - this file — phase status and the measured delta against the baseline table
 
-Done so far: Phases 0, 1, 2, 3, 4 and 4.5. Phase 5 is next.
+Done: Phases 0, 1, 2, 3, 4, 4.5, 5 and 6. The roadmap is complete; the
+first manual release to `uox-bastionvault` is the remaining operational step.
