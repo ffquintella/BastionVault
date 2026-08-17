@@ -1,6 +1,6 @@
 [package]
 name = "bv-engine-ssh-broker"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "BastionVault's SSH login-class broker: shared-credential vs brokered policy tiers"
 license = "Apache-2.0"
@@ -15,11 +15,11 @@ publish = ["uox-bastionvault"]
 # is how the resource engine reads a tier without naming this crate.
 
 [dependencies]
-bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
-bv-context = { path = "../bv-context", version = "0.1.0", registry = "uox-bastionvault" }
-bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
-bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
-bv-kernel-api = { path = "../bv-kernel-api", version = "0.1.0", registry = "uox-bastionvault" }
+bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
+bv-context = { path = "../bv-context", version = "0.41.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.41.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.41.0", registry = "uox-bastionvault" }
 
 async-trait = "0.1"
 arc-swap = "1.7"

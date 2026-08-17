@@ -1,6 +1,6 @@
 [package]
 name = "bv-server"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "BastionVault's HTTP(S) API surface: the actix-web routes, middleware and TLS plumbing"
 license = "Apache-2.0"
@@ -26,10 +26,10 @@ bastion_vault = { path = "../..", version = "0.41.0", registry = "uox-bastionvau
 # `bastion_vault::metrics`: this crate owns the module name `metrics` (the
 # `/metrics` scrape endpoint), so the alias would collide. Same collision
 # `bv-engine-pki` has with `storage`, resolved the same way.
-bv-metrics = { path = "../bv-metrics", version = "0.1.0", registry = "uox-bastionvault" }
+bv-metrics = { path = "../bv-metrics", version = "0.41.0", registry = "uox-bastionvault" }
 # The plugin client-surface manifest, parsed by the `sys/plugins/.../surface`
 # route before it is handed to the GUI.
-bv_plugin_surface = { path = "../bv_plugin_surface", version = "0.1.0", registry = "uox-bastionvault" }
+bv_plugin_surface = { path = "../bv_plugin_surface", version = "0.41.0", registry = "uox-bastionvault" }
 
 actix-web = { version = "4.13", features = ["rustls-0_23"] }
 actix-tls = "3.5"

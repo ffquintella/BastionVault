@@ -1,6 +1,6 @@
 [package]
 name = "bv-context"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "BastionVault's generic keyed context store and task registry"
 license = "Apache-2.0"
@@ -14,6 +14,6 @@ publish = ["uox-bastionvault"]
 # and `logical::mod` all take a `&Context`). See
 # roadmaps/workspace-decomposition.md § Phase 1.
 [dependencies]
-bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
+bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
 dashmap = "6.1"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }

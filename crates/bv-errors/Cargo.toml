@@ -1,6 +1,6 @@
 [package]
 name = "bv-errors"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "BastionVault's shared error type (RvError) — Tier 0 substrate, no web framework"
 license = "Apache-2.0"

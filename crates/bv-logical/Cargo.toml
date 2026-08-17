@@ -1,6 +1,6 @@
 [package]
 name = "bv-logical"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "BastionVault's request/response types, field schema and backend traits"
 license = "Apache-2.0"
@@ -20,9 +20,9 @@ publish = ["uox-bastionvault"]
 # backend reads through. The roadmap listed this as a leaf; it is not.
 
 [dependencies]
-bv-context = { path = "../bv-context", version = "0.1.0", registry = "uox-bastionvault" }
-bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
-bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
+bv-context = { path = "../bv-context", version = "0.41.0", registry = "uox-bastionvault" }
+bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-bastionvault" }
 
 async-trait = "0.1"
 better_default = "1.0.5"

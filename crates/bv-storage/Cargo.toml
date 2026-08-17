@@ -1,6 +1,6 @@
 [package]
 name = "bv-storage"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "BastionVault's storage barriers, physical backends and read caches"
 license = "Apache-2.0"
@@ -18,9 +18,9 @@ publish = ["uox-bastionvault"]
 # directory.
 
 [dependencies]
-bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
-bv-metrics = { path = "../bv-metrics", version = "0.1.0", registry = "uox-bastionvault" }
-bv_crypto = { path = "../bv_crypto", version = "0.1.0", registry = "uox-bastionvault" }
+bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
+bv-metrics = { path = "../bv-metrics", version = "0.41.0", registry = "uox-bastionvault" }
+bv_crypto = { path = "../bv_crypto", version = "0.41.0", registry = "uox-bastionvault" }
 
 aes-gcm = "0.10"
 arc-swap = "1"

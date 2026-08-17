@@ -1,6 +1,6 @@
 [package]
 name = "bv-auth-approle"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "BastionVault's AppRole auth backend: role IDs, secret IDs and machine binding"
 license = "Apache-2.0"
@@ -16,14 +16,14 @@ publish = ["uox-bastionvault"]
 # machine token at login.
 
 [dependencies]
-bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
-bv-context = { path = "../bv-context", version = "0.1.0", registry = "uox-bastionvault" }
-bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
-bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
-bv-utils = { path = "../bv-utils", version = "0.1.0", registry = "uox-bastionvault" }
-bv-kernel-api = { path = "../bv-kernel-api", version = "0.1.0", registry = "uox-bastionvault" }
-bv-auth-audit = { path = "../bv-auth-audit", version = "0.1.0", registry = "uox-bastionvault" }
-bv-auth-ferrogate = { path = "../bv-auth-ferrogate", version = "0.1.0", registry = "uox-bastionvault" }
+bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
+bv-context = { path = "../bv-context", version = "0.41.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.41.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-bastionvault" }
+bv-utils = { path = "../bv-utils", version = "0.41.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.41.0", registry = "uox-bastionvault" }
+bv-auth-audit = { path = "../bv-auth-audit", version = "0.41.0", registry = "uox-bastionvault" }
+bv-auth-ferrogate = { path = "../bv-auth-ferrogate", version = "0.41.0", registry = "uox-bastionvault" }
 
 async-trait = "0.1"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time"] }

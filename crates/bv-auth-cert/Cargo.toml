@@ -1,6 +1,6 @@
 [package]
 name = "bv-auth-cert"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "BastionVault's certificate auth backend (retired in the OpenSSL-free build)"
 license = "Apache-2.0"
@@ -16,8 +16,8 @@ publish = ["uox-bastionvault"]
 # somewhere to land.
 
 [dependencies]
-bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
-bv-kernel-api = { path = "../bv-kernel-api", version = "0.1.0", registry = "uox-bastionvault" }
+bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.41.0", registry = "uox-bastionvault" }
 
 async-trait = "0.1"
 log = "0.4"

@@ -1,6 +1,6 @@
 [package]
 name = "bastion-plugin-testkit"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "Unit-test harness for BastionVault WASM plugins: in-memory mock host mirroring the `bv.*` ABI, form-hook runner, and conformance fixtures. See features/plugin-testing.md."
 license = "Apache-2.0"

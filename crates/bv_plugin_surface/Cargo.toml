@@ -1,6 +1,6 @@
 [package]
 name = "bv_plugin_surface"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "BastionVault plugin surface manifest types — shared between server, bv-client, and the Tauri GUI"
 license = "MPL-2.0"

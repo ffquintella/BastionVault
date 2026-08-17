@@ -1,6 +1,6 @@
 [package]
 name = "bv-shamir"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "Shamir secret sharing over GF(256) — BastionVault's unseal-key splitting"
 # Not plain Apache-2.0 like the rest of the workspace. This module is a
@@ -16,6 +16,6 @@ publish = ["uox-bastionvault"]
 # A genuine Tier 0 leaf: the whole module referenced exactly one thing from the
 # monolith (`crate::errors`). See roadmaps/workspace-decomposition.md § Phase 1.
 [dependencies]
-bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
+bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
 rand = "^0.10"
 zeroize = { version = "1.8.2", features = ["zeroize_derive"] }

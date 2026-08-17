@@ -1,6 +1,6 @@
 [package]
 name = "bastion-plugin-sdk"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "SDK for authoring BastionVault WASM plugins. See features/plugin-system.md."
 license = "Apache-2.0"
@@ -30,7 +30,7 @@ serde_json = { version = "1", optional = true }
 # without needing to depend on the host crate. Behind the
 # `surface` feature so plugins that don't ship a surface keep
 # their dep tree minimal.
-bv_plugin_surface = { version = "0.1.0", path = "../bv_plugin_surface", registry = "uox-bastionvault", optional = true }
+bv_plugin_surface = { version = "0.41.0", path = "../bv_plugin_surface", registry = "uox-bastionvault", optional = true }
 
 [dev-dependencies]
 # Serializes the host_test tests so the shared in-memory STATE in

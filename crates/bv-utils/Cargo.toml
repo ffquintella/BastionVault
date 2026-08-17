@@ -1,6 +1,6 @@
 [package]
 name = "bv-utils"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "BastionVault's shared helpers: salts, seal boxes, socket addresses, TLS and cert utilities"
 license = "Apache-2.0"
@@ -14,11 +14,11 @@ publish = ["uox-bastionvault"]
 # See roadmaps/workspace-decomposition.md § Phase 1.
 
 [dependencies]
-bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
-bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
-bv-shamir = { path = "../bv-shamir", version = "0.1.0", registry = "uox-bastionvault" }
-bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
-bv_crypto = { path = "../bv_crypto", version = "0.1.0", registry = "uox-bastionvault" }
+bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.41.0", registry = "uox-bastionvault" }
+bv-shamir = { path = "../bv-shamir", version = "0.41.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-bastionvault" }
+bv_crypto = { path = "../bv_crypto", version = "0.41.0", registry = "uox-bastionvault" }
 
 as-any = "0.3.2"
 better_default = "1.0.5"

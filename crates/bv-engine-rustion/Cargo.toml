@@ -1,6 +1,6 @@
 [package]
 name = "bv-engine-rustion"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "BastionVault's Rustion engine: PQC bastion fleet targets, master cert, recordings and policy"
 license = "Apache-2.0"
@@ -16,13 +16,13 @@ publish = ["uox-bastionvault"]
 # slot in Phase 2 (see the roadmap's "self-lookups" section).
 
 [dependencies]
-bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
-bv-context = { path = "../bv-context", version = "0.1.0", registry = "uox-bastionvault" }
-bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
-bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
-bv-kernel-api = { path = "../bv-kernel-api", version = "0.1.0", registry = "uox-bastionvault" }
+bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
+bv-context = { path = "../bv-context", version = "0.41.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.41.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.41.0", registry = "uox-bastionvault" }
 
-bv_crypto = { path = "../bv_crypto", version = "0.1.0", registry = "uox-bastionvault" }
+bv_crypto = { path = "../bv_crypto", version = "0.41.0", registry = "uox-bastionvault" }
 
 arc-swap = "1.7"
 async-trait = "0.1"
@@ -66,5 +66,5 @@ type_complexity = "allow"
 # The master-store tests build a barrier straight from a fixture backend --
 # no Core, no unseal. `bv-storage` already ships those fixtures, so the
 # tests stayed with the code instead of moving to the root crate.
-bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault", features = ["test-support"] }
+bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-bastionvault", features = ["test-support"] }
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }

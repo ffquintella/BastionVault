@@ -1,6 +1,6 @@
 [package]
 name = "bv-engine-totp"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "BastionVault's TOTP engine: RFC 6238 second factors, enrolment barcodes and MFA verification"
 license = "Apache-2.0"
@@ -15,11 +15,11 @@ publish = ["uox-bastionvault"]
 # the credential backends verify a second factor without naming this crate.
 
 [dependencies]
-bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
-bv-context = { path = "../bv-context", version = "0.1.0", registry = "uox-bastionvault" }
-bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
-bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
-bv-kernel-api = { path = "../bv-kernel-api", version = "0.1.0", registry = "uox-bastionvault" }
+bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
+bv-context = { path = "../bv-context", version = "0.41.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.41.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.41.0", registry = "uox-bastionvault" }
 
 async-trait = "0.1"
 hex = "0.4"

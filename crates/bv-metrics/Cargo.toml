@@ -1,6 +1,6 @@
 [package]
 name = "bv-metrics"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "BastionVault's Prometheus registry, metric families and system collector"
 license = "Apache-2.0"

@@ -1,6 +1,6 @@
 [package]
 name = "bv-auth-audit"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "BastionVault's login-audit store: the who/when/where record every auth backend writes"
 license = "Apache-2.0"
@@ -21,10 +21,10 @@ publish = ["uox-bastionvault"]
 # Phase 1's "bv-audit was never unblocked by Phase 2").
 
 [dependencies]
-bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
-bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
-bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
-bv-kernel-api = { path = "../bv-kernel-api", version = "0.1.0", registry = "uox-bastionvault" }
+bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.41.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.41.0", registry = "uox-bastionvault" }
 
 async-trait = "0.1"
 chrono = "0.4"

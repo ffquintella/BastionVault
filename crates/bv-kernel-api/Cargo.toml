@@ -1,6 +1,6 @@
 [package]
 name = "bv-kernel-api"
-version = "0.1.0"
+version = "0.41.0"
 edition = "2021"
 description = "BastionVault's kernel contract: what an engine is allowed to know about the vault"
 license = "Apache-2.0"
@@ -32,11 +32,11 @@ publish = ["uox-bastionvault"]
 #   * `dos::middleware` — actix, which must not reach a leaf engine.
 
 [dependencies]
-bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
-bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
-bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
-bv-audit = { path = "../bv-audit", version = "0.1.0", registry = "uox-bastionvault" }
-bv-utils = { path = "../bv-utils", version = "0.1.0", registry = "uox-bastionvault" }
+bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.41.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-bastionvault" }
+bv-audit = { path = "../bv-audit", version = "0.41.0", registry = "uox-bastionvault" }
+bv-utils = { path = "../bv-utils", version = "0.41.0", registry = "uox-bastionvault" }
 
 arc-swap = "1.7"
 async-trait = "0.1"
