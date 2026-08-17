@@ -2049,6 +2049,7 @@ async fn sys_exchange_import_preview_handler(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
+    preview_store: web::Data<crate::exchange::PreviewStore>,
 ) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
     // Owner header is needed inside the work block but `req` is not moved
@@ -2102,13 +2103,13 @@ async fn sys_exchange_import_preview_handler(
 
     // Owner binding: tokens are bound to the actor's display name; the
     // header was resolved before we moved into the async block.
-    let preview_token = core.exchange_preview_store.insert(document, owner_header);
+    let preview_token = preview_store.insert(document, owner_header);
 
     Ok(response_json_ok(
         None,
         json!({
             "token": preview_token,
-            "expires_in_secs": core.exchange_preview_store.ttl_secs(),
+            "expires_in_secs": preview_store.ttl_secs(),
             "total": items.len() as u64,
             "new": new,
             "identical": identical,
@@ -2136,6 +2137,11 @@ async fn sys_exchange_import_apply_handler(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
+    // App data, not a field on `Core`: this is an in-memory, per-node,
+    // TTL-bounded cache for the two-step preview → apply flow, and this crate
+    // is its only reader. It sat on `Core` until Phase 4.5, where it was one
+    // of three edges pointing from the kernel down into a facade subsystem.
+    preview_store: web::Data<crate::exchange::PreviewStore>,
 ) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
     let owner_header = req
@@ -2151,9 +2157,7 @@ async fn sys_exchange_import_apply_handler(
         let payload: ExchangeApplyRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
 
-        let document = core
-            .exchange_preview_store
-            .consume(&payload.token, &owner_header)?;
+        let document = preview_store.consume(&payload.token, &owner_header)?;
 
         let result = crate::exchange::import_all_namespaces(
             &core.get_ref().clone(),

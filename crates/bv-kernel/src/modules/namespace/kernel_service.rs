@@ -14,12 +14,16 @@ use std::sync::Arc;
 
 use crate::{
     errors::RvError,
-    kernel_api::namespace::{NamespaceRef, NamespaceRegistry},
+    kernel_api::{
+        namespace::{NamespaceRef, NamespaceRegistry},
+        pipeline::{RequestPipeline, RerootActivation},
+        VaultCtx,
+    },
     logical::Request,
     mount::MountsRouter,
 };
 
-use super::{ns_assignment, quota, token_binding, NamespaceModule};
+use super::{migrate, ns_assignment, quota, router, store::NamespaceStore, token_binding, NamespaceModule};
 
 #[maybe_async::maybe_async]
 impl NamespaceRegistry for NamespaceModule {
@@ -83,7 +87,53 @@ impl NamespaceRegistry for NamespaceModule {
     }
 }
 
-/// Publish the namespace module as the vault's namespace registry.
+/// The four per-request multi-tenancy steps `Core::handle_request` used to
+/// call by name.
+///
+/// Each forwards to the free function that has always implemented it, with
+/// this module's own `Arc<Core>` — the same value `Core` would have passed in,
+/// since there is exactly one per server. Nothing about the steps changed;
+/// what changed is that `Core` no longer names `modules::namespace`.
+#[maybe_async::maybe_async]
+impl RequestPipeline for NamespaceModule {
+    async fn rewrite_request(&self, req: &mut Request) -> Result<(), RvError> {
+        router::rewrite_request_for_namespace(&self.core, req).await
+    }
+
+    async fn enforce_token_binding(&self, req: &Request) -> Result<(), RvError> {
+        token_binding::enforce_request_token_binding(&self.core, req).await
+    }
+
+    async fn enforce_request_rate(&self, req: &Request) -> Result<(), RvError> {
+        quota::enforce_request_rate(&self.core, req).await
+    }
+
+    async fn enforce_write_storage_quota(&self, req: &Request) -> Result<(), RvError> {
+        quota::enforce_write_storage_quota(&self.core, req).await
+    }
+}
+
+/// The re-root migration, which runs before any module exists.
+///
+/// A unit struct rather than an impl on `NamespaceModule`: at the point
+/// `post_unseal` calls this, `ModuleManager::setup` has not run, so there is
+/// no module instance to have published itself. It takes the `&dyn VaultCtx`
+/// the caller already has, which is all `NamespaceStore::new` and
+/// `resolve_root_activation` ever needed.
+pub struct NamespaceReroot;
+
+#[maybe_async::maybe_async]
+impl RerootActivation for NamespaceReroot {
+    async fn resolve(&self, ctx: &dyn VaultCtx) -> Result<Option<String>, RvError> {
+        let store = NamespaceStore::new(ctx)?;
+        store.ensure_root().await?;
+        migrate::resolve_root_activation(ctx, &store).await
+    }
+}
+
+/// Publish the namespace module as the vault's namespace registry and
+/// per-request pipeline.
 pub fn register(module: Arc<NamespaceModule>, services: &crate::kernel_api::KernelServices) {
-    services.set_namespaces(module);
+    services.set_namespaces(module.clone());
+    services.set_request_pipeline(module);
 }

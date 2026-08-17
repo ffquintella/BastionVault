@@ -44,6 +44,18 @@ impl TokenService for AuthModule {
             .ok_or_else(|| crate::bv_error_string!("token store not initialised"))?;
         store.revoke(token).await
     }
+
+    async fn mint_root_token(&self) -> Result<String, RvError> {
+        let store = self
+            .token_store
+            .load_full()
+            .ok_or_else(|| crate::bv_error_string!("token store not initialised"))?;
+        Ok(store.root_token().await?.id)
+    }
+
+    fn set_auth_handlers(&self, handlers: Arc<Vec<Arc<dyn crate::handler::AuthHandler>>>) {
+        AuthModule::set_auth_handlers(self, handlers)
+    }
 }
 
 impl AuthMountRegistry for AuthModule {

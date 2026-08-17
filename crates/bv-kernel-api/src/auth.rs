@@ -15,6 +15,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use bv_errors::RvError;
+use bv_logical::handler::AuthHandler;
 use bv_storage::barrier_view::BarrierView;
 
 use crate::ctx::LogicalBackendNewFunc;
@@ -68,6 +69,24 @@ pub trait TokenService: Send + Sync {
 
     /// Revoke a token and its lease tree.
     async fn revoke(&self, token: &str) -> Result<(), RvError>;
+
+    /// Mint the initial root token, returning its id.
+    ///
+    /// Called once, from `Core::init`, immediately after the first unseal.
+    /// Returns only the id because that is all the caller puts in the
+    /// `InitResult` — the `TokenEntry` itself stays inside the token store,
+    /// which is the point: a caller that could see the entry could also
+    /// forge one.
+    async fn mint_root_token(&self) -> Result<String, RvError>;
+
+    /// Replace the auth-handler chain the token store consults on `pre_route`.
+    ///
+    /// `Core` owns the canonical list (`Core::add_auth_handler` /
+    /// `delete_auth_handler`) and pushes it here on every change. It lives on
+    /// this trait rather than [`AuthMountRegistry`] because the list is the
+    /// *token store's* state — the handlers are what turn a bearer token into
+    /// an identity — not part of mounting a backend.
+    fn set_auth_handlers(&self, handlers: Arc<Vec<Arc<dyn AuthHandler>>>);
 }
 
 /// Registration and inspection of `auth/` mounts.

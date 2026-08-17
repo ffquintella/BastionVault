@@ -336,6 +336,10 @@ impl Server {
             http::metrics_routes::METRICS_ACL_PATH,
         );
         let metrics_access = web::Data::new(metrics_access);
+        // One store for the whole server: the preview token minted by one
+        // worker must be redeemable by whichever worker handles the apply.
+        let exchange_preview_store =
+            web::Data::new(bastion_vault::exchange::PreviewStore::default());
 
         // Clone for the background DoS sweep task (see below); the original
         // `core` is moved into the per-worker `App` factory closure.
@@ -352,6 +356,10 @@ impl Server {
                 .wrap(middleware::Logger::default())
                 .wrap(from_fn(metrics_midleware))
                 .app_data(web::Data::new(core.clone()))
+                // The exchange import preview → apply cache. App data rather
+                // than a field on `Core` since Phase 4.5; `bv-server` is its
+                // only reader.
+                .app_data(exchange_preview_store.clone())
                 .app_data(web::Data::new(metrics_manager.clone()))
                 .app_data(trusted_proxies.clone())
                 .app_data(metrics_access.clone())

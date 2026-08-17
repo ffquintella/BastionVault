@@ -1,0 +1,133 @@
+[package]
+name = "bv-kernel"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's kernel tier: tokens and leases, identity, policy, namespaces, resource groups and the sys/ backend"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 2b of the workspace decomposition
+# (roadmaps/workspace-decomposition.md § Phase 4.5).
+#
+# Above `bv-core`, which is what makes the split work: `Core` is the substrate
+# these six modules are built on, so they name it freely -- 93 `get_module`
+# sites and 38 distinct `core.<member>` accessors, none of which had to
+# change. The eight places `Core` named *them* went through contracts in
+# `bv_kernel_api::{pipeline, auth}` first.
+#
+# One crate and not six because the six are mutually entangled: 93
+# `get_module::<T>()` lookups run between them, and they change together.
+
+[dependencies]
+bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
+bv-context = { path = "../bv-context", version = "0.1.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
+bv-utils = { path = "../bv-utils", version = "0.1.0", registry = "uox-bastionvault" }
+bv-audit = { path = "../bv-audit", version = "0.1.0", registry = "uox-bastionvault" }
+bv-metrics = { path = "../bv-metrics", version = "0.1.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.1.0", registry = "uox-bastionvault" }
+bv-core = { path = "../bv-core", version = "0.1.0", registry = "uox-bastionvault" }
+
+# The four engines whose audit stores the kernel tier reads: `system` folds
+# them into the Audit page, `token_store` records logins and logouts, and
+# `self_profile` validates an e-mail change against the userpass record.
+bv-auth-audit = { path = "../bv-auth-audit", version = "0.1.0", registry = "uox-bastionvault" }
+bv-auth-userpass = { path = "../bv-auth-userpass", version = "0.1.0", registry = "uox-bastionvault" }
+bv-engine-files = { path = "../bv-engine-files", version = "0.1.0", registry = "uox-bastionvault" }
+bv-engine-ssh = { path = "../bv-engine-ssh", version = "0.1.0", registry = "uox-bastionvault" }
+
+# `actix-rt` is production code: `ExpirationManager::
+# start_check_expired_lease_entries` blocks a dedicated thread on an
+# `actix_rt::Runtime`. That is tokio's current-thread builder plus a
+# `LocalSet`, so it *looks* like the `MountsMonitor::start` swap Phase 3 made
+# -- but proving the swept future never spawns a local task means tracing
+# `revoke_lease_id` through the whole lease graph, and Phase 3 already recorded
+# one wrong conclusion from exactly that reasoning (the AppRole tidy race).
+actix-rt = "2.11"
+arc-swap = "1.7"
+base64 = "0.22"
+async-trait = "0.1"
+better_default = "1.0.5"
+bcrypt = "0.19"
+chrono = "0.4"
+crossbeam-channel = "0.5"
+dashmap = "6.1"
+derive_more = "2.1.1"
+hex = "0.4"
+humantime = "2.3"
+lazy_static = "1.5.0"
+log = { version = "0.4", features = ["std"] }
+maybe-async = "0.2"
+# The policy store parses HCL policy documents.
+hcl-rs = "0.19"
+# The lease queue the expiration manager sweeps.
+priority-queue = "2.7"
+radix_trie = "0.3.0"
+regex = "1.12"
+serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
+serde_json = "^1.0"
+sha2 = "0.11"
+# The identity/entity lookup cache.
+stretto = "0.9"
+strum = { version = "0.28", features = ["derive"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "io-util"] }
+strum_macros = "0.28"
+
+[dev-dependencies]
+# The dependency cycle that keeps ~5,000 lines of tests where they are.
+# `bastion_vault` is the assembly layer and depends on this crate normally;
+# reaching back for its fixtures is legal because this edge is dev-only, and
+# it is the same arrangement `bastion_vault` uses to reach `bv-server`'s HTTP
+# harness. See the crate docs.
+bastion_vault = { path = "../..", features = ["test-support"] }
+# Two tests here drive a real server through `TestHttpServer`, which
+# configures `bv-server`'s own routes and so has to live there.
+bv-server = { path = "../bv-server", features = ["test-support"] }
+serial_test = "3.4"
+
+[features]
+default = []
+# Exposes the handful of `*_for_test` fixtures whose callers are lifted test
+# blocks in `bastion_vault::engine_tests`. `cfg(test)` cannot reach across a
+# crate boundary, so those would otherwise be unbuildable.
+test-support = []
+sync_handler = [
+    "maybe-async/is_sync",
+    "bv-storage/sync_handler",
+    "bv-logical/sync_handler",
+    "bv-utils/sync_handler",
+    "bv-audit/sync_handler",
+    "bv-kernel-api/sync_handler",
+    "bv-core/sync_handler",
+    "bv-auth-audit/sync_handler",
+    "bv-auth-userpass/sync_handler",
+    "bv-engine-files/sync_handler",
+    "bv-engine-ssh/sync_handler",
+]
+storage_mysql = ["bv-errors/storage_mysql", "bv-storage/storage_mysql", "bv-core/storage_mysql"]
+storage_hiqlite = ["bv-storage/storage_hiqlite", "bv-core/storage_hiqlite"]
+
+# Lints this crate's code trips, all of which the root crate already allows.
+[lints.clippy]
+await_holding_lock = "warn"
+field_reassign_with_default = "allow"
+type_complexity = "allow"
+too_many_arguments = "allow"
+unnecessary_unwrap = "allow"
+collapsible_match = "allow"
+large_enum_variant = "allow"
+unnecessary_map_or = "allow"
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Pulled in by the `#[maybe_async::maybe_async]` attribute's async
+    # expansion, which is a token stream to a static `use` scan.
+    "maybe-async",
+    "async-trait",
+    # Package name != lib name: the crate is `hcl-rs`, the lib is `hcl`, and
+    # the policy store calls `hcl::from_str`.
+    "hcl-rs",
+]

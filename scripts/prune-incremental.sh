@@ -22,9 +22,16 @@ set -eu
 
 KEEP="${KEEP:-3}"
 
+# `target/rust-analyzer` is rust-analyzer's own artefact directory
+# (`rust-analyzer.cargo.targetDir` in .vscode/settings.json, set so its
+# on-save `cargo check` does not contend for the main build lock). It
+# accumulates incremental sessions exactly like the others, and nothing
+# else prunes it.
 ROOTS="
   target/debug/incremental
   target/release/incremental
+  target/rust-analyzer/debug/incremental
+  target/rust-analyzer/release/incremental
   gui/src-tauri/target/debug/incremental
   gui/src-tauri/target/release/incremental
 "

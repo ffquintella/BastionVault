@@ -91,6 +91,11 @@ transit_byok = ["bastion_vault/transit_byok"]
 transit_pqc_hybrid = ["bastion_vault/transit_pqc_hybrid"]
 files_smb = ["bastion_vault/files_smb"]
 files_ssh_sync = ["bastion_vault/files_ssh_sync"]
+# The seal backends. `bvault` is the binary an operator builds, so these have
+# to be reachable from here or `--features hsm_yubihsm2` would silently do
+# nothing -- exactly the trap Phase 3 found four flags already in.
+hsm_mock = ["bastion_vault/hsm_mock"]
+hsm_yubihsm2 = ["bastion_vault/hsm_yubihsm2"]
 sync_handler = ["bastion_vault/sync_handler", "bv-server/sync_handler"]
 
 # ── CLI Linux packaging: deb (cargo-deb) + rpm (cargo-generate-rpm) ──

@@ -53,6 +53,7 @@ use super::{
     engines::{ConnectMfaGate, LoginClassPolicy, NotificationSink, PluginHost, TotpMfa},
     identity::IdentityService,
     namespace::NamespaceRegistry,
+    pipeline::{DenialAudit, NsScopeDatafix, RequestPipeline, RerootActivation, UnsealHook},
     policy::PolicyGate,
     resource_group::ResourceGroupIndex,
 };
@@ -76,6 +77,14 @@ pub struct KernelServices {
     connect_mfa: ArcSwap<Option<Arc<dyn ConnectMfaGate>>>,
     totp_mfa: ArcSwap<Option<Arc<dyn TotpMfa>>>,
     plugin_host: ArcSwap<Option<Arc<dyn PluginHost>>>,
+    // The Tier 2 slots: what `Core::handle_request` and `Core::post_unseal`
+    // delegate to the kernel tier instead of calling by name. See
+    // `crate::pipeline`.
+    request_pipeline: ArcSwap<Option<Arc<dyn RequestPipeline>>>,
+    denial_audit: ArcSwap<Option<Arc<dyn DenialAudit>>>,
+    reroot: ArcSwap<Option<Arc<dyn RerootActivation>>>,
+    ns_scope_datafix: ArcSwap<Option<Arc<dyn NsScopeDatafix>>>,
+    unseal_hooks: ArcSwap<Vec<Arc<dyn UnsealHook>>>,
 }
 
 /// Generates the paired setter/getter for one slot.
@@ -150,4 +159,53 @@ impl KernelServices {
     // Registered by the assembly layer, not by a `Module`: the plugin runtime
     // is not one.
     service_slot!(set_plugin_host, plugin_host, plugin_host, PluginHost, "plugin runtime");
+
+    // ── Tier 2: the request pipeline and the unseal path ──────────────
+    service_slot!(
+        set_request_pipeline,
+        request_pipeline,
+        request_pipeline,
+        RequestPipeline,
+        "per-request multi-tenancy pipeline"
+    );
+    service_slot!(
+        set_denial_audit,
+        denial_audit,
+        denial_audit,
+        DenialAudit,
+        "permission-denial audit sink"
+    );
+    // Registered by the assembly layer, like the plugin host: it runs before
+    // any module is installed, so no module could have published it.
+    service_slot!(
+        set_reroot,
+        reroot,
+        reroot,
+        RerootActivation,
+        "namespace re-root migration"
+    );
+    service_slot!(
+        set_ns_scope_datafix,
+        ns_scope_datafix,
+        ns_scope_datafix,
+        NsScopeDatafix,
+        "owner/share namespace-scope datafix"
+    );
+
+    /// Add a hook to run once per unseal, after the module set is initialised.
+    ///
+    /// A list rather than a single slot: unlike every other capability here,
+    /// there is no reason two subsystems could not both want one, and the
+    /// registration order is the run order. Appends rather than replaces, so a
+    /// second registration cannot silently drop the first.
+    pub fn add_unseal_hook(&self, hook: Arc<dyn UnsealHook>) {
+        let mut next = self.unseal_hooks.load().as_ref().clone();
+        next.push(hook);
+        self.unseal_hooks.store(Arc::new(next));
+    }
+
+    /// The unseal hooks, in registration order.
+    pub fn unseal_hooks(&self) -> Vec<Arc<dyn UnsealHook>> {
+        self.unseal_hooks.load().as_ref().clone()
+    }
 }

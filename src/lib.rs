@@ -63,12 +63,17 @@ pub use bv_storage::cache;
 /// commits' churn inside this compilation unit.
 ///
 /// The server configuration model it used to own is [`config`] now — it was
-/// never CLI code.
-pub mod config;
+/// never CLI code. It travelled into `bv-core` in Phase 4.5, next to the
+/// `Core` that takes one.
+pub use bv_core::config;
 /// Moved to the Tier 0 `bv-context` crate. Not in the roadmap's Tier 0 list,
 /// but it belongs there and `bv-logical` needs it.
 pub use bv_context as context;
-pub mod core;
+/// The vault kernel — `Core`, the mount table, the module registry, the seal
+/// path and the server config model — now the Tier 2 `bv-core` crate. It sits
+/// *below* the kernel tier, which is what makes the split work: `Core` does
+/// not name a module. See roadmaps/workspace-decomposition.md § Phase 4.5.
+pub use bv_core::core;
 pub mod dos;
 /// `RvError` now lives in the Tier 0 `bv-errors` crate. Re-exported here so
 /// `crate::errors::RvError` and `bastion_vault::errors::RvError` keep
@@ -83,17 +88,20 @@ pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string
 /// The request-pipeline hook traits, now in `bv-logical` alongside the
 /// `Request` that carries an `Arc<dyn Handler>`.
 pub use bv_logical::handler;
-pub mod hsm;
+/// HSM backends for the seal path — a module of `bv-core`.
+pub use bv_core::hsm;
 /// The kernel contract modules depend on instead of `Core` — the Tier 1
-/// `bv-kernel-api` crate. `impl VaultCtx for Core` cannot travel with it and
-/// lives in [`kernel_impl`].
+/// `bv-kernel-api` crate. `impl VaultCtx for Core` travelled into `bv-core`
+/// with the `Core` it implements for; the orphan rule allows it there and
+/// nowhere else.
 pub use bv_kernel_api as kernel_api;
-mod kernel_impl;
 /// The HTTP(S) API surface moved to the `bv-server` crate in Phase 4, which
 /// sits *above* this one — it is the assembly layer, and it is what took
 /// `actix-web` and `actix-tls` out of this crate's dependency graph. There is
 /// deliberately no re-export: a shim here would put the web framework back.
-pub mod logging;
+/// Structured logging setup — a module of `bv-core`, which needs
+/// `default_audit_options` when it bootstraps the audit device at unseal.
+pub use bv_core::logging;
 /// Request/Response/Backend/Path/Field — the Tier 0 `bv-logical` crate.
 pub use bv_logical as logical;
 /// The eight backend-definition macros are `#[macro_export]`ed by
@@ -107,9 +115,12 @@ pub use bv_logical::{
     new_path_internal, new_secret, new_secret_internal,
 };
 pub mod metrics;
-pub mod module_manager;
+/// The module registry — a module of `bv-core`.
+pub use bv_core::module_manager;
 pub mod modules;
-pub mod mount;
+/// The mount table's management operations — a module of `bv-core`. The
+/// engine-facing view is `bv_kernel_api::mount`, which this re-exports.
+pub use bv_core::mount;
 /// The request router, moved into `bv-kernel-api`: engines reach it through
 /// [`kernel_api::VaultCtx::router`], so it sits below them.
 pub use bv_kernel_api::router;
@@ -117,8 +128,11 @@ pub use bv_kernel_api::router;
 /// only reader (the MySQL backend).
 #[cfg(feature = "storage_mysql")]
 pub use bv_storage::schema;
-pub mod seal;
-pub mod server_info;
+/// Seal/unseal and the KEK providers — a module of `bv-core`.
+pub use bv_core::seal;
+/// Process-level server facts (version, uptime, listen address) — a module of
+/// `bv-core`.
+pub use bv_core::server_info;
 /// Moved to the Tier 0 `bv-shamir` crate — the one directory in the original
 /// Phase 1 list that really did reference nothing but `crate::errors`.
 pub use bv_shamir as shamir;
@@ -146,6 +160,11 @@ mod storage_backend_tests;
 /// engine crates. See the module docs.
 #[cfg(test)]
 mod engine_tests;
+
+/// `Core`'s own tests, which could not travel into `bv-core`. See the module
+/// docs.
+#[cfg(test)]
+mod core_tests;
 
 /// When the test binary is spawned as a plugin subprocess (the
 /// `ProcessRuntime` does this — same exe acts as runner *and* plugin
@@ -280,6 +299,21 @@ impl BastionVault {
         // naming `crate::plugins`. Not a `Module::register`, because the
         // runtime is not a module. See src/plugins/kernel_service.rs.
         core.kernel_services.set_plugin_host(crate::plugins::PluginRuntimeHost::new(core.clone()));
+
+        // The namespace re-root migration runs at the very top of
+        // `post_unseal` — before `ModuleManager::setup`, so before any module
+        // exists to have published it, and deliberately before any system view
+        // or root mount table is built. Registered here for the same reason
+        // the plugin host is: this is the assembly point.
+        core.kernel_services
+            .set_reroot(Arc::new(crate::modules::namespace::kernel_service::NamespaceReroot));
+
+        // The scheduled-export tick loop, which `Core::post_unseal` used to
+        // start by name. A `Weak` handle, so registering it does not keep the
+        // vault alive through the registry that lives on it.
+        core.kernel_services.add_unseal_hook(Arc::new(
+            crate::scheduled_exports::runner::ScheduledExportsHook::new(Arc::downgrade(&core)),
+        ));
 
         core.module_manager().set_modules(default_modules(), core.clone())?;
 

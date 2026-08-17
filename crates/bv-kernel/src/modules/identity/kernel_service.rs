@@ -260,7 +260,25 @@ impl IdentityService for IdentityModule {
     }
 }
 
-/// Publish the identity module as the vault's identity service.
+/// The owner/share namespace-scope datafix, which `Core::post_unseal` used to
+/// call by name.
+///
+/// Returns a formatted summary rather than the module's own `NsScopeReport`:
+/// `bv-kernel-api` cannot name a type defined in the kernel it is the contract
+/// for, so what crosses the boundary is owned data. `None` means the marker
+/// was already set — the common case on every boot after the first — which is
+/// exactly the `report.skipped` arm the caller used to branch on.
+#[maybe_async::maybe_async]
+impl crate::kernel_api::pipeline::NsScopeDatafix for IdentityModule {
+    async fn run_if_needed(&self) -> Result<Option<String>, RvError> {
+        let report = super::ns_scope_migrate::run_if_needed(&self.core).await?;
+        Ok(if report.skipped { None } else { Some(format!("{report:?}")) })
+    }
+}
+
+/// Publish the identity module as the vault's identity service and the
+/// provider of the namespace-scope datafix.
 pub fn register(module: Arc<IdentityModule>, services: &crate::kernel_api::KernelServices) {
-    services.set_identity(module);
+    services.set_identity(module.clone());
+    services.set_ns_scope_datafix(module);
 }

@@ -91,6 +91,39 @@ filter = 'test(/^plugins::process_runtime::tests::/)'
 test-group = 'exe-copy'
 threads-required = "num-cpus"
 
+# ── `quick`: the inner-loop profile ───────────────────────────────
+#
+# What `make test-changed` / `scripts/test-changed.sh` run under. It differs
+# from `default` in one way, and only one:
+#
+#   fail-fast = true
+#
+# `default` sets `fail-fast = false` because a full run is expensive enough that
+# you want the whole picture from one invocation. The inner loop has the
+# opposite economics: you are running a handful of packages against a change you
+# made 30 seconds ago, the first failure is almost always THE failure, and
+# stopping there gets you back to the editor sooner.
+#
+# It is a reporting choice, not a scope choice — `default-filter` and
+# `slow-timeout` are plain keys and are inherited from `profile.default`, so
+# this profile excludes exactly the same port-bound suites and applies the same
+# slow-test threshold. Nothing is skipped here that a `default` run would have
+# executed.
+#
+# The `exe-copy` override is repeated rather than assumed, for the same reason
+# it is repeated in `profile.ci` below: nextest reports test-group overrides as
+# belonging to the profile that declares them, and if this one silently did not
+# apply, seven tests would each load a 227 MB binary into memory at once.
+[profile.quick]
+fail-fast = true
+status-level = "fail"
+final-status-level = "slow"
+
+[[profile.quick.overrides]]
+filter = 'test(/^plugins::process_runtime::tests::/)'
+test-group = 'exe-copy'
+threads-required = "num-cpus"
+
 # CI profile: machine-readable results, and no retries. Retrying a failed
 # security test until it passes is how a real race gets shipped — a flake
 # here is a bug report, not something to paper over.

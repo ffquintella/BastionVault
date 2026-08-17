@@ -27,7 +27,6 @@ use crate::{
     handler::{AuthHandler, HandlePhase, Handler},
     logical::{Request, Response},
     module_manager::ModuleManager,
-    modules::auth::AuthModule,
     mount::{
         MountTable, MountsMonitor, MountsRouter, CORE_MOUNT_CONFIG_PATH, LOGICAL_BARRIER_PREFIX, SYSTEM_BARRIER_PREFIX,
     },
@@ -133,12 +132,6 @@ pub struct Core {
     /// audit subsystem is ready. Handle is installed by
     /// `post_unseal_init_audit` and cleared on seal.
     pub audit_broker: ArcSwapOption<crate::audit::AuditBroker>,
-    /// In-memory preview store backing the two-step
-    /// `/v1/sys/exchange/import/preview` -> `/import/apply` flow.
-    /// Tokens are TTL'd, single-use, and owner-bound. State is
-    /// process-local on purpose: previews carry decrypted plaintext, so
-    /// keeping them out of the barrier minimises the persistence surface.
-    pub exchange_preview_store: crate::exchange::PreviewStore,
     /// Fast-path mirror of the FerroGate mount's `require_machine_identity`
     /// flag. When `true`, every authenticated request must present a
     /// FerroGate machine-bound token (or a root token) — enforced in
@@ -208,7 +201,6 @@ impl Default for Core {
             cache_config: CacheConfig::default(),
             state: ArcSwap::from_pointee(CoreState::default()),
             audit_broker: ArcSwapOption::empty(),
-            exchange_preview_store: crate::exchange::PreviewStore::default(),
             require_machine_identity: Arc::new(AtomicBool::new(false)),
             approle_require_machine: Arc::new(AtomicBool::new(true)),
             stats: Arc::new(crate::stats::DashboardStats::default()),
@@ -398,9 +390,8 @@ impl Core {
         self.post_unseal().await?;
 
         // Generate a new root token
-        if let Some(auth_module) = self.module_manager.get_module::<AuthModule>("auth") {
-            let te = auth_module.token_store.load().as_ref().unwrap().root_token().await?;
-            init_result.root_token = te.id;
+        if let Some(tokens) = self.kernel_services.tokens() {
+            init_result.root_token = tokens.mint_root_token().await?;
         } else {
             log::error!("get auth module failed!");
         }
@@ -587,8 +578,8 @@ impl Core {
         self.auth_handlers.store(Arc::new(auth_handlers));
 
         // update auth_module
-        if let Some(auth_module) = self.module_manager.get_module::<AuthModule>("auth") {
-            auth_module.set_auth_handlers(self.auth_handlers.load().clone());
+        if let Some(tokens) = self.kernel_services.tokens() {
+            tokens.set_auth_handlers(self.auth_handlers.load().clone());
         }
 
         Ok(())
@@ -600,8 +591,8 @@ impl Core {
         self.auth_handlers.store(Arc::new(auth_handlers));
 
         // update auth_module
-        if let Some(auth_module) = self.module_manager.get_module::<AuthModule>("auth") {
-            auth_module.set_auth_handlers(self.auth_handlers.load().clone());
+        if let Some(tokens) = self.kernel_services.tokens() {
+            tokens.set_auth_handlers(self.auth_handlers.load().clone());
         }
 
         Ok(())
@@ -896,13 +887,15 @@ impl Core {
         // first operation. Fails safe: an unverifiable copy leaves the legacy
         // layout authoritative for this boot (see
         // `modules::namespace::migrate::resolve_root_activation`).
-        if let Some(core_arc) = self.self_ptr.upgrade() {
-            let store = crate::modules::namespace::store::NamespaceStore::new(&core_arc)?;
-            store.ensure_root().await?;
-            if let Some(root_uuid) =
-                crate::modules::namespace::migrate::resolve_root_activation(&core_arc, &store).await?
-            {
-                self.activate_reroot(&root_uuid)?;
+        // Delegated rather than called by name: the provider is registered by
+        // the assembly layer, because at this point `ModuleManager::setup` has
+        // not run and no module could have published itself. See
+        // `kernel_api::pipeline::RerootActivation`.
+        if let Some(reroot) = self.kernel_services.reroot() {
+            if let Some(core_arc) = self.self_ptr.upgrade() {
+                if let Some(root_uuid) = reroot.resolve(core_arc.as_ref()).await? {
+                    self.activate_reroot(&root_uuid)?;
+                }
             }
         }
 
@@ -927,15 +920,18 @@ impl Core {
         // boot after the first. Best-effort: a failure leaves the legacy keys
         // in place, which denies access (fail-closed) rather than granting it,
         // and must not stop the server from coming up — it retries next unseal.
-        if let Some(core_arc) = self.self_ptr.upgrade() {
-            match crate::modules::identity::ns_scope_migrate::run_if_needed(&core_arc).await {
-                Ok(report) if !report.skipped => {
+        if let Some(datafix) = self.kernel_services.ns_scope_datafix() {
+            match datafix.run_if_needed().await {
+                // `Some(summary)` is the ran-and-did-something arm; `None` is
+                // the marker-already-set arm, which is every boot after the
+                // first. Same branch the `report.skipped` flag drove.
+                Ok(Some(summary)) => {
                     log::info!(
                         target: "migration",
-                        "owner/share ns-scope datafix: {report:?}",
+                        "owner/share ns-scope datafix: {summary}",
                     );
                 }
-                Ok(_) => {}
+                Ok(None) => {}
                 Err(e) => log::warn!(
                     target: "migration",
                     "owner/share ns-scope datafix failed (will retry on next unseal): {e}",
@@ -1030,8 +1026,15 @@ impl Core {
         // HA leader gating lands in a follow-up. Detached task — the
         // returned JoinHandle is dropped intentionally so the loop runs
         // until the process exits. The loop self-skips when sealed.
+        // Registered by the assembly layer, for the same reason the engines'
+        // schedulers stopped being named here in Phase 2: the scheduled-export
+        // runner is a facade subsystem, and `Core` naming it was an edge from
+        // Tier 2 straight up into Tier 4. See
+        // `kernel_api::pipeline::UnsealHook`.
         if let Some(core_arc) = self.self_ptr.upgrade() {
-            let _ = crate::scheduled_exports::start_scheduler(core_arc);
+            for hook in self.kernel_services.unseal_hooks() {
+                hook.on_unseal(core_arc.clone());
+            }
         }
 
         // Boot every module's own background loops — the PKI auto-tidy
@@ -1101,7 +1104,13 @@ impl Core {
         // Multi-tenancy: converge the X-BastionVault-Namespace header onto the
         // path-prefix form so the shared router dispatches namespace mounts
         // uniformly. No-op when no namespace header is present.
-        crate::modules::namespace::router::rewrite_request_for_namespace(self, req).await?;
+        // `None` when no namespace module is mounted, which is a legitimate
+        // minimal-embedded configuration; every step below is a no-op for a
+        // vault with no namespaces anyway.
+        let pipeline = self.kernel_services.request_pipeline();
+        if let Some(p) = pipeline.as_ref() {
+            p.rewrite_request(req).await?;
+        }
 
         match self.handle_pre_route_phase(&handlers, req).await {
             Ok(ret) => resp = ret,
@@ -1112,29 +1121,30 @@ impl Core {
         // and before any backend dispatch. A token may not be used outside its
         // namespace (except a child_visible token into a descendant).
         if resp.is_none() && err.is_none() {
-            if let Err(e) =
-                crate::modules::namespace::token_binding::enforce_request_token_binding(self, req)
-                    .await
-            {
-                err = Some(e);
+            if let Some(p) = pipeline.as_ref() {
+                if let Err(e) = p.enforce_token_binding(req).await {
+                    err = Some(e);
+                }
             }
         }
 
         // Multi-tenancy: per-namespace request-rate quota (429 when exhausted).
         // A no-op for root / unlimited namespaces.
         if resp.is_none() && err.is_none() {
-            if let Err(e) = crate::modules::namespace::quota::enforce_request_rate(self, req).await {
-                err = Some(e);
+            if let Some(p) = pipeline.as_ref() {
+                if let Err(e) = p.enforce_request_rate(req).await {
+                    err = Some(e);
+                }
             }
         }
 
         // Multi-tenancy: per-namespace storage-bytes quota (507 when the write
         // would cross the cap). A no-op for non-writes / root / unlimited.
         if resp.is_none() && err.is_none() {
-            if let Err(e) =
-                crate::modules::namespace::quota::enforce_write_storage_quota(self, req).await
-            {
-                err = Some(e);
+            if let Some(p) = pipeline.as_ref() {
+                if let Err(e) = p.enforce_write_storage_quota(req).await {
+                    err = Some(e);
+                }
             }
         }
 
@@ -1170,7 +1180,9 @@ impl Core {
         // lost on restart). Best-effort — the 403 is returned unchanged
         // whether or not the append succeeds.
         if matches!(err.as_ref(), Some(RvError::ErrPermissionDenied)) {
-            crate::modules::system::denial_audit_store::record_denial(self, req).await;
+            if let Some(sink) = self.kernel_services.denial_audit() {
+                sink.record_denial(req).await;
+            }
         }
 
         if err.is_some() {
@@ -1323,334 +1335,3 @@ impl Core {
     }
 }
 
-#[cfg(test)]
-mod test {
-    use crate::kernel_api::VaultCtx;
-    use crate::{errors::RvError, test_utils::new_unseal_test_bastion_vault};
-
-    #[test]
-    #[allow(clippy::let_underscore_future)]
-    fn test_core_init() {
-        let _ = new_unseal_test_bastion_vault("test_core_init");
-    }
-
-    /// `Core::flush_caches` must clear the token cache so a previously
-    /// cached entry can no longer be served without a storage re-read.
-    /// Regression for the seal path: pre_seal invokes this helper, and
-    /// a missed flush would leave live token payloads in memory after
-    /// the unseal key has been released.
-    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_core_flush_caches_empties_token_cache() {
-        use crate::modules::auth::{
-            token_store::TokenEntry, AuthModule,
-        };
-
-        let (_bvault, core, root_token) =
-            new_unseal_test_bastion_vault("test_core_flush_caches_empties_token_cache").await;
-
-        let auth_module = core
-            .module_manager
-            .get_module::<AuthModule>("auth")
-            .expect("auth module must exist in a default unseal");
-        let token_store =
-            auth_module.token_store.load_full().expect("token store must be installed");
-
-        // The root token is already in storage; force a cache-populating
-        // lookup, then verify the cache has it.
-        let _ = token_store.lookup(&root_token).await.unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let salted = token_store.salt_id(&root_token);
-        assert!(
-            token_store.token_cache.as_ref().unwrap().lookup::<TokenEntry>(&salted).is_some(),
-            "precondition: cache must be populated before flush"
-        );
-
-        // Also populate with a freshly created token so the test isn't
-        // contingent on lookup behaviour alone.
-        let mut entry = TokenEntry {
-            policies: vec!["default".into()],
-            path: "auth/token/create".into(),
-            display_name: "flush-probe".into(),
-            ..TokenEntry::default()
-        };
-        token_store.create(&mut entry).await.unwrap();
-        token_store.lookup(&entry.id).await.unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let salted_probe = token_store.salt_id(&entry.id);
-        assert!(token_store.token_cache.as_ref().unwrap().lookup::<TokenEntry>(&salted_probe).is_some());
-
-        core.flush_caches();
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        assert!(
-            token_store.token_cache.as_ref().unwrap().lookup::<TokenEntry>(&salted).is_none(),
-            "flush_caches must drop the root-token entry"
-        );
-        assert!(
-            token_store.token_cache.as_ref().unwrap().lookup::<TokenEntry>(&salted_probe).is_none(),
-            "flush_caches must drop every token cache entry"
-        );
-    }
-
-    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_generate_unseal_keys_basic() {
-        let (_bvault, core, _) = new_unseal_test_bastion_vault("test_generate_unseal_keys_basic").await;
-
-        // Test that generate_unseal_keys works when unsealed
-        let result = core.generate_unseal_keys().await;
-        assert!(result.is_ok());
-
-        let keys = result.unwrap();
-        let seal_config = core.seal_config().await.unwrap();
-        assert_eq!(keys.len(), seal_config.secret_shares as usize); // Default test configuration: 3 shares
-
-        // Each key should have the expected length (key bytes + 1 byte Shamir overhead)
-        // ChaCha20Poly1305 barrier uses 64-byte ML-KEM-768 seeds, AES-GCM uses 32-byte keys
-        let (min_key_len, _) = core.barrier().key_length_range();
-        let expected_key_len = min_key_len + crate::shamir::SHAMIR_OVERHEAD;
-        for key in keys.iter() {
-            assert_eq!(key.len(), expected_key_len);
-        }
-
-        // Keys should be unique
-        for i in 0..keys.len() {
-            for j in (i + 1)..keys.len() {
-                assert_ne!(keys[i], keys[j]);
-            }
-        }
-    }
-
-    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_generate_unseal_keys_when_sealed() {
-        let (_bvault, core, _) = new_unseal_test_bastion_vault("test_generate_unseal_keys_when_sealed").await;
-
-        // Seal the vault
-        let seal_result = core.seal().await;
-        assert!(seal_result.is_ok());
-
-        // Should fail when sealed
-        let result = core.generate_unseal_keys().await;
-        assert!(result.is_err());
-    }
-
-    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_generate_unseal_keys_multiple_calls() {
-        let (_bvault, core, _) = new_unseal_test_bastion_vault("test_generate_unseal_keys_multiple_calls").await;
-
-        // Generate keys multiple times
-        let keys1 = core.generate_unseal_keys().await.unwrap();
-        let keys2 = core.generate_unseal_keys().await.unwrap();
-        let keys3 = core.generate_unseal_keys().await.unwrap();
-
-        // All should succeed and produce the same number of keys
-        assert_eq!(keys1.len(), keys2.len());
-        assert_eq!(keys2.len(), keys3.len());
-
-        // But keys should be different (due to randomness in Shamir sharing)
-        assert_ne!(keys1[0], keys2[0]);
-        assert_ne!(keys2[0], keys3[0]);
-    }
-
-    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_unseal_once_basic() {
-        let (_bvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_basic").await;
-
-        // Get initial keys for testing
-        let initial_keys = core.generate_unseal_keys().await.unwrap();
-
-        // Seal the vault
-        core.seal().await.unwrap();
-
-        // Test unseal_once with sufficient keys
-        let mut new_keys = None;
-        for key in initial_keys.iter() {
-            match core.unseal_once(key).await {
-                Ok(keys) => {
-                    new_keys = Some(keys);
-                    break;
-                }
-                Err(_) => continue,
-            }
-        }
-
-        assert!(new_keys.is_some());
-        let new_keys = new_keys.unwrap();
-        let seal_config = core.seal_config().await.unwrap();
-        assert_eq!(new_keys.len(), seal_config.secret_shares as usize); // Should generate new keys
-
-        // Vault should be unsealed
-        assert!(!core.sealed());
-
-        // New keys should be different from initial keys
-        assert_ne!(initial_keys[0], new_keys[0]);
-    }
-
-    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_unseal_once_insufficient_keys() {
-        let (_bvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_insufficient_keys").await;
-
-        // Get initial keys
-        let initial_keys = core.generate_unseal_keys().await.unwrap();
-
-        // Seal the vault
-        core.seal().await.unwrap();
-
-        // Try unseal_once with just one key (insufficient for threshold=2)
-        let result = core.unseal_once(&initial_keys[0]).await;
-        assert!(result.is_err());
-
-        // Vault should still be sealed
-        assert!(core.sealed());
-    }
-
-    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_unseal_once_key_deprecation() {
-        let (_bvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_key_deprecation").await;
-
-        // Get initial keys
-        let initial_keys = core.generate_unseal_keys().await.unwrap();
-
-        // Seal the vault
-        core.seal().await.unwrap();
-
-        // Use unseal_once to unseal
-        let mut new_keys = None;
-        for key in initial_keys.iter() {
-            match core.unseal_once(key).await {
-                Ok(keys) => {
-                    new_keys = Some(keys);
-                    break;
-                }
-                Err(_) => continue,
-            }
-        }
-
-        assert!(new_keys.is_some());
-        let new_keys = new_keys.unwrap();
-        let seal_config = core.seal_config().await.unwrap();
-        assert_eq!(new_keys.len(), seal_config.secret_shares as usize);
-
-        // Seal again
-        core.seal().await.unwrap();
-
-        // Try to use the same key again - should fail due to deprecation
-        for i in 0..5 {
-            let result = core.unseal_once(&initial_keys[i]).await;
-            assert!(matches!(result, Err(RvError::ErrBarrierKeyDeprecated)));
-        }
-
-        for i in 5..initial_keys.len() {
-            let result = core.unseal_once(&initial_keys[i]).await;
-            assert!(matches!(result, Err(RvError::ErrBarrierUnsealing)));
-        }
-        let result = core.unseal_once(&new_keys[0]).await;
-        assert!(matches!(result, Err(RvError::ErrBarrierUnsealFailed)));
-
-        // But new keys should work
-        let mut new_keys2 = None;
-        for key in new_keys.iter() {
-            match core.unseal_once(key).await {
-                Ok(keys) => {
-                    new_keys2 = Some(keys);
-                    break;
-                }
-                Err(_) => continue,
-            }
-        }
-
-        assert!(new_keys2.is_some());
-        let new_keys2 = new_keys2.unwrap();
-        let seal_config = core.seal_config().await.unwrap();
-        assert_eq!(new_keys2.len(), seal_config.secret_shares as usize);
-    }
-
-    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_unseal_once_when_already_unsealed() {
-        let (_bvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_when_already_unsealed").await;
-
-        // Get keys for testing
-        let keys = core.generate_unseal_keys().await.unwrap();
-
-        // Vault is already unsealed, so unseal_once should fail
-        let result = core.unseal_once(&keys[0]).await;
-        assert!(result.is_err());
-    }
-
-    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_unseal_once_forward_secrecy() {
-        let (_bvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_forward_secrecy").await;
-
-        // Get initial keys
-        let keys1 = core.generate_unseal_keys().await.unwrap();
-
-        // Seal and unseal_once to get new keys
-        core.seal().await.unwrap();
-        let mut keys2 = None;
-        for key in keys1.iter() {
-            match core.unseal_once(key).await {
-                Ok(keys) => {
-                    keys2 = Some(keys);
-                    break;
-                }
-                Err(_) => continue,
-            }
-        }
-
-        assert!(keys2.is_some());
-        let keys2 = keys2.unwrap();
-        let seal_config = core.seal_config().await.unwrap();
-        assert_eq!(keys2.len(), seal_config.secret_shares as usize);
-
-        // Seal and unseal_once again
-        core.seal().await.unwrap();
-
-        let mut keys3 = None;
-        for key in keys2.iter() {
-            match core.unseal_once(key).await {
-                Ok(keys) => {
-                    keys3 = Some(keys);
-                    break;
-                }
-                Err(_) => continue,
-            }
-        }
-        assert!(keys3.is_some());
-        let keys3 = keys3.unwrap();
-        let seal_config = core.seal_config().await.unwrap();
-        assert_eq!(keys3.len(), seal_config.secret_shares as usize);
-
-        // All key sets should be different (forward secrecy)
-        for i in 0..keys1.len() {
-            assert_ne!(keys1[i], keys2[i]);
-            assert_ne!(keys2[i], keys3[i]);
-            assert_ne!(keys1[i], keys3[i]);
-        }
-
-        // Old keys should be deprecated and unusable
-        core.seal().await.unwrap();
-        for key in keys1.iter() {
-            let result = core.unseal_once(key).await;
-            assert!(result.is_err());
-        }
-        for key in keys2.iter() {
-            let result = core.unseal_once(key).await;
-            assert!(result.is_err());
-        }
-        for key in keys3.iter() {
-            if let Err(RvError::ErrBarrierUnsealFailed) = core.unseal_once(key).await {
-                break;
-            }
-        }
-
-        let result = core.unseal_once(&keys3[0]).await;
-        assert!(matches!(result, Err(RvError::ErrBarrierUnsealing)));
-        let result = core.unseal_once(&keys3[1]).await;
-        assert!(matches!(result, Err(RvError::ErrBarrierUnsealing)));
-        let result = core.unseal_once(&keys3[2]).await;
-        assert!(matches!(result, Err(RvError::ErrBarrierUnsealing)));
-        let result = core.unseal_once(&keys3[3]).await;
-        assert!(matches!(result, Err(RvError::ErrBarrierUnsealing)));
-        let result = core.unseal_once(&keys3[4]).await;
-        assert!(result.is_ok());
-    }
-}

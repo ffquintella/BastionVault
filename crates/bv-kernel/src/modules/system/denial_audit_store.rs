@@ -169,3 +169,15 @@ fn hist_seq() -> String {
         .unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
     format!("{:020}", n.max(0) as u128)
 }
+
+/// The system module as the vault's permission-denial audit sink.
+///
+/// `Core::handle_request` used to call [`record_denial`] by name on the 403
+/// path. It forwards to the same function with this module's own handle — the
+/// same `Core` the caller would have passed, since there is one per server.
+#[maybe_async::maybe_async]
+impl crate::kernel_api::pipeline::DenialAudit for super::SystemModule {
+    async fn record_denial(&self, req: &Request) {
+        record_denial(self.backend.core.as_ref(), req).await
+    }
+}

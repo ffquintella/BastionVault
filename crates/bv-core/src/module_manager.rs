@@ -12,8 +12,12 @@ use std::{any::Any, sync::Arc};
 
 use arc_swap::ArcSwap;
 
-use crate::kernel_api::{KernelServices, VaultCtx};
-use crate::{core::Core, errors::RvError, modules::Module};
+// `Module` from the kernel contract, not from `crate::modules` — that module
+// is the kernel tier's namespace, which sits *above* this file. Phase 3 put
+// the trait in `bv-kernel-api` precisely so the registry could name it from
+// below. See roadmaps/workspace-decomposition.md § Phase 4.5.
+use crate::kernel_api::{KernelServices, Module, VaultCtx};
+use crate::{core::Core, errors::RvError};
 
 /// Builds one module, given the kernel handle.
 ///

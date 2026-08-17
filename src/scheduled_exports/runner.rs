@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use chrono::{DateTime, Local, Utc};
@@ -448,5 +448,38 @@ mod tests {
         assert_eq!(due, prev + ChronoDuration::seconds(MAX_CATCHUP_SCAN as i64));
         // Still behind, so the next tick keeps making progress.
         assert!(latest_due(&every_second, due, now).is_some());
+    }
+}
+
+/// The scheduled-export runner as an unseal hook.
+///
+/// `Core::post_unseal` called [`start_scheduler`] by name until Phase 4.5.
+/// A unit struct registered by the assembly layer, which is the same shape
+/// the plugin host and the namespace re-root migration take: the runner is
+/// not a `Module`, so `Module::start_background` was never available to it.
+/// Holds a `Weak<Core>`, not an `Arc`. The registry lives *on* `Core`, so an
+/// owning handle here would be a reference cycle that leaks the whole vault —
+/// which matters for the desktop host, where cores are built and torn down
+/// in-process. Phase 2 reached the same conclusion for the Rustion background
+/// loops.
+///
+/// It captures the handle rather than using the `&dyn VaultCtx` it is passed
+/// because the runner needs the concrete `Core`: `exchange` reaches
+/// `module_manager`, which `VaultCtx` deliberately does not expose.
+pub struct ScheduledExportsHook {
+    core: Weak<Core>,
+}
+
+impl ScheduledExportsHook {
+    pub fn new(core: Weak<Core>) -> Self {
+        Self { core }
+    }
+}
+
+impl crate::kernel_api::pipeline::UnsealHook for ScheduledExportsHook {
+    fn on_unseal(&self, _ctx: Arc<dyn crate::kernel_api::VaultCtx>) {
+        if let Some(core) = self.core.upgrade() {
+            let _ = start_scheduler(core);
+        }
     }
 }

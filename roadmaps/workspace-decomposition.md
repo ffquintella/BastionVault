@@ -1,18 +1,14 @@
 # Roadmap: Workspace Decomposition
 
-Status: **Phases 0, 1, 2, 3 and 4 are done.** Phase 5 (CI shape) is next,
-and it is now unblocked in full — the crates a path-filtered matrix needs all
-exist.
+Status: **Phases 0, 1, 2, 3, 4 and 4.5 are done.** Phase 5 (CI shape) is next,
+and it is now unblocked in full — every crate a path-filtered matrix needs
+exists.
 
-**One thing this document has promised since the start has not happened, and
-it should stop being implied:** `bastion_vault` is not a facade. Phase 4 took
-the assembly layer off the *top* of it — `src/http` and `src/cli`, 19,124
-lines — but the kernel underneath (`core.rs`, `modules/`, `module_manager`,
-`plugins`, `exchange`, `hsm`) is still one 65,703-line crate. That is the
-`bv-core` / `bv-kernel` split from the target graph's Tier 2, and **no
-numbered phase owns it.** Phase 3 was engines, Phase 4 was assembly; Tier 2
-fell between them. It wants a Phase 4.5 before Phase 6's per-crate versioning
-means much, and the GUI cannot narrow past the root crate until it lands.
+The Tier 2 split this document kept predicting and never scheduling has
+landed: `bv-core` (6,424 lines) and `bv-kernel` (32,017) came out of the root
+crate in Phase 4.5, which is written up below. `bastion_vault` is finally what
+the target graph called it — a facade — at 27,921 lines, **12,095 of which are
+test modules that could not travel**. The production facade is under 16k.
 
 Phase 1 shipped eight Tier 0/1 crates — `bv-errors`, `bv-shamir`,
 `bv-context`, `bv-metrics`, `bv-storage`, `bv-logical`, `bv-utils`,
@@ -1423,6 +1419,179 @@ works; the collision is a compile error, never a silent shadow.
   verified** — `make linux-cli-packages` is the check, and it should be run
   before the next release cut.
 
+### Phase 4.5 — The Tier 2 split — **done**
+
+The crate pair the target graph named from the first draft — `bv-core` and
+`bv-kernel` — and that no numbered phase ever scheduled. Phase 3 was engines,
+Phase 4 was assembly, and Tier 2 fell between them.
+
+#### The cycle Phase 2 measured and deferred
+
+Phase 2 ended by naming this exactly: "the remaining `core.rs` →
+`crate::modules` edges (namespace ×5, identity, system, auth) are the
+`bv-core` ↔ `bv-kernel` entanglement the target graph already predicts …
+Resolving that is a Tier 2 question for whichever phase extracts those two
+crates." Re-measured at the start of this phase, with the brace-matching
+scanner:
+
+| edge | production sites |
+|---|---|
+| `core.rs` → kernel modules | 8 functions, 12 call sites |
+| kernel modules → `core::Core` | 13 files |
+| `get_module::<T>()` inside the kernel tier | 93 |
+| distinct `core.<member>` accessors the kernel uses | 38 |
+
+**It is only a cycle if you insist `Core` sits above the modules.** It does
+not: `Core` is the substrate the six kernel modules are built on. So
+`bv-kernel` went *above* `bv-core`, the 93 lookups and 38 accessors were left
+exactly as they were — not one of them changed — and only the 8 downward edges
+needed inverting. That reading is what turned a feared rewrite into a
+tractable phase.
+
+#### The eight inversions
+
+Five of the eight already took `&dyn VaultCtx`; the rest needed contracts.
+[`kernel_api::pipeline`](../crates/bv-kernel-api/src/pipeline.rs) is the new
+file, with four traits and one hook, plus two methods added to `TokenService`:
+
+| what `Core` called by name | now |
+|---|---|
+| `namespace::router::rewrite_request_for_namespace` | `RequestPipeline::rewrite_request` |
+| `namespace::token_binding::enforce_request_token_binding` | `RequestPipeline::enforce_token_binding` |
+| `namespace::quota::enforce_request_rate` | `RequestPipeline::enforce_request_rate` |
+| `namespace::quota::enforce_write_storage_quota` | `RequestPipeline::enforce_write_storage_quota` |
+| `system::denial_audit_store::record_denial` | `DenialAudit::record_denial` |
+| `namespace::{store::NamespaceStore::new, migrate::resolve_root_activation}` | `RerootActivation::resolve` |
+| `identity::ns_scope_migrate::run_if_needed` | `NsScopeDatafix::run_if_needed` |
+| `AuthModule::token_store…root_token()` | `TokenService::mint_root_token` |
+| `AuthModule::set_auth_handlers` | `TokenService::set_auth_handlers` |
+
+None of the underlying functions changed. Each provider is a module that
+already holds an `Arc<Core>`, so the traits carry operations and no context
+argument — the same shape `PolicyGate` and its Phase 2 siblings take, for the
+same reason.
+
+**`RerootActivation` is the one that is not like the others**, and the reason
+is ordering rather than design. It runs at the very top of `post_unseal`,
+*before* `ModuleManager::setup` and deliberately before any system view or
+root mount table exists, so the root tenant's first read lands at the active
+prefix. At that moment no module is registered and none could have published
+itself, so it takes a `&dyn VaultCtx` and the **assembly layer** registers it —
+next to the plugin host, which is there for exactly the same reason.
+
+`NsScopeDatafix` returns `Option<String>` rather than the identity module's own
+`NsScopeReport`: `bv-kernel-api` cannot name a type from the kernel it is the
+contract for, so what crosses is owned data. `None` is the marker-already-set
+arm the caller used to read off `report.skipped`.
+
+#### Three more edges pointed the wrong way, and two were things in the wrong place
+
+- **`Core` held an `exchange::PreviewStore` field.** An in-memory, per-process,
+  TTL-bounded cache for the `/sys/exchange/import/preview` → `/apply` flow,
+  read by the HTTP surface and the Tauri host and nothing else. It is actix
+  app data in `bv-server` and a field on `AppState` in the GUI now. Behaviour
+  is unchanged because it was always per-process — a preview minted on one node
+  was never redeemable on another.
+- **`Core::post_unseal` started the scheduled-export loop by name.** The
+  engines' schedulers stopped being called that way in Phase 2
+  (`Module::start_background`); the export runner is not a `Module`, so it gets
+  `UnsealHook`, registered by the assembly layer. It captures a **`Weak<Core>`**,
+  not an `Arc`: the registry lives *on* `Core`, so an owning handle would be a
+  cycle that leaks the whole vault — which matters for the desktop host, where
+  cores are built and torn down in-process.
+- **`logging.rs` had zero code dependencies on anything** and travelled into
+  `bv-core` unchanged; `Core` needs `default_audit_options` when it bootstraps
+  the audit device.
+
+#### What each crate is
+
+| crate | lines | contents |
+|---|---|---|
+| `bv-core` | 6,424 | `core.rs`, `mount.rs`, `module_manager.rs`, `kernel_impl.rs`, `seal/`, `hsm/`, `config.rs`, `logging.rs`, `server_info.rs` |
+| `bv-kernel` | 32,017 | `modules/{auth,identity,policy,namespace,resource_group,system,crypto}` |
+
+`dos` and `metrics` were left behind deliberately: both were pure re-export
+shims over `bv-kernel-api` and `bv-metrics`, and `bv-core` names those
+directly rather than through a facade above it. `audit::sys_emit` likewise —
+its only callers are the plugin runtime, the export runner and `bv-server`,
+all above.
+
+**One crate and not six** for the kernel tier, as the target graph always
+said: 93 `get_module` lookups run between those six modules, and they change
+together. Splitting them would buy six more trait boundaries across a graph
+with no natural cut.
+
+**Measured outcome:**
+
+| | before Phase 4.5 | after |
+|---|---|---|
+| `src/` | 65,703 lines | **27,921** — of which **12,095 are relocated tests** |
+| workspace members | 44 | **46** |
+| unused direct deps (`make deps-unused`) | 0 | **0** (14 more left the root with the kernel) |
+| unit / integration / doctests | 1289 / 1358 / 17 | **unchanged** |
+| unit test binaries | 41 | **43** |
+
+Fourteen dependencies followed the code out: `bcrypt`, `crossbeam-channel`,
+`humantime`, `lazy_static`, `priority-queue`, `radix_trie`, `stretto`,
+`strum`, `strum_macros` (kernel tier) and `aes-gcm`, `hkdf`, `yubihsm`,
+`rusb`, plus `hcl-rs` (seal, HSM and config, into `bv-core`).
+
+#### `TypeId` does not survive a dev-dependency cycle
+
+Phase 4 established that a dev-dependency cycle lets tests stay where they are:
+`bastion_vault` dev-depends on `bv-server` to get `TestHttpServer` back. The
+same trick was tried here for ~5,000 lines of kernel tests, and **it compiled
+and then failed 25 tests at runtime.**
+
+The reason is worth keeping. A crate's `cfg(test)` build is a *separate
+compilation* from the rlib its dependents link. So `bv-kernel`'s test binary
+contains two copies of `bv-kernel`: the one under test, and the one inside
+`bastion_vault`. `test_utils::new_unseal_test_bastion_vault` builds a vault
+through `bastion_vault::default_modules()` — the second copy — and the test
+then asks for its modules by type. `get_module::<T>()` resolves by `TypeId`,
+the two copies disagree, every lookup returns `None`, and the failure surfaces
+as `namespace store must be installed after unseal`.
+
+Phase 4's use of the cycle is safe because nothing crosses it by type
+identity — `TestHttpServer` is used as a value, not looked up. **The rule: a
+dev-dependency cycle is fine for fixtures, and unsound for anything resolved
+by `TypeId`, `Any::downcast` or a type-keyed registry.**
+
+So the 25 affected tests moved into `bastion_vault::engine_tests` after all,
+where they compile once against the same rlib the vault is built from — the
+fifth instance of "tests that could not travel", and the first caused by type
+identity rather than a missing dependency. The other 203 `bv-kernel` tests
+stayed put. Lifting them cost the Phase 3 tax again (a `use super::*` glob
+stops seeing the parent's private imports), plus four private items made `pub`
+with a comment saying why, and one `#[cfg(test)]` fixture regated to
+`#[cfg(any(test, feature = "test-support"))]` because `test` does not cross a
+crate boundary.
+
+#### A latent Phase 4 bug this phase surfaced
+
+`cargo check -p bv-server` failed on `log::set_boxed_logger` not existing.
+Phase 4 had removed `env_logger` from the root manifest with the CLI, and
+`env_logger` was what pulled in `log/std` — but a workspace-wide `cargo check`
+unified the feature back in from `bvault-cli`, so the workspace stayed green
+while any *downstream* consumer of `bv-server` would have failed. The root
+manifest declares `log = { features = ["std"] }` now.
+
+**The lesson for Phase 5:** `cargo check --workspace` is not a proxy for "each
+crate builds". Feature unification makes it strictly weaker, and the
+path-filtered per-crate matrix Phase 5 is about would have caught this.
+
+#### The HSM feature flags, nearly no-ops for the second time
+
+Phase 3 found four feature flags declared `= []` in the root manifest while
+the `cfg` gates they drive had travelled into engine crates — so
+`--features ssh_pqc` silently built without it. Moving `src/hsm` into
+`bv-core` sets up exactly that trap for `hsm_mock` and `hsm_yubihsm2`, which
+are seal-path features an operator turns on for real hardware. They forward
+(`bastion_vault` → `bv-core`, and `bvault-cli` → `bastion_vault`, since
+`bvault` is the binary an operator actually builds), and the optional
+`yubihsm` / `rusb` deps moved with them. Verified by building with the
+feature on, not by reading the manifest.
+
 ### Phase 5 — CI shape
 
 Only meaningful after Phase 3; the workflow changes are cheap once the
@@ -1517,7 +1686,4 @@ Update on each phase completion:
 - `roadmap.md` — one row, `Workspace Decomposition`, Todo → In Progress → Done
 - this file — phase status and the measured delta against the baseline table
 
-Done so far: Phases 0, 1, 2, 3 and 4. Phase 5 is next.
-
-Outstanding, and not owned by any phase: the Tier 2 `bv-core` / `bv-kernel`
-split. See the note at the top of this file.
+Done so far: Phases 0, 1, 2, 3, 4 and 4.5. Phase 5 is next.

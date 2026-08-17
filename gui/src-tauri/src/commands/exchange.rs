@@ -405,8 +405,8 @@ pub async fn exchange_preview(
         .collect();
 
     let owner = state.token.lock().await.clone().unwrap_or_default();
-    let preview_token = core.exchange_preview_store.insert(document, owner.clone());
-    let expires_in_secs = core.exchange_preview_store.ttl_secs();
+    let preview_token = state.exchange_preview_store.insert(document, owner.clone());
+    let expires_in_secs = state.exchange_preview_store.ttl_secs();
 
     let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
     drop(vault_guard);
@@ -492,7 +492,7 @@ pub async fn exchange_apply(
     let core = vault.core.load();
 
     let owner = state.token.lock().await.clone().unwrap_or_default();
-    let document = core
+    let document = state
         .exchange_preview_store
         .consume(&token, &owner)
         .map_err(CommandError::from)?;

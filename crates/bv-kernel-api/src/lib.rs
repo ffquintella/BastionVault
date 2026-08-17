@@ -68,6 +68,7 @@ pub mod identity;
 pub mod module;
 pub mod mount;
 pub mod namespace;
+pub mod pipeline;
 pub mod policy;
 pub mod resource_group;
 pub mod router;

@@ -499,7 +499,10 @@ mod test {
     use std::{env, fs, io::prelude::*};
 
     use super::*;
-    use crate::test_utils::TEST_DIR;
+    // `TEST_DIR` originates in `bv-storage`'s fixtures; the root crate's
+    // `test_utils` only ever re-exported it, and that module is above this
+    // crate now. Named at its source instead.
+    use bv_storage::test_support::TEST_DIR;
 
     fn write_file(path: &str, config: &str) -> Result<(), RvError> {
         let mut file = fs::File::create(path)?;

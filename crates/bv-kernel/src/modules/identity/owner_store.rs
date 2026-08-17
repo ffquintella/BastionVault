@@ -290,7 +290,12 @@ impl OwnerStore {
     /// simulate a "ghost" owner row from an older server version.
     /// Used by the regression test in `identity_tests` that verifies
     /// `record_kv_owner_if_absent` overwrites such rows.
-    #[cfg(test)]
+    ///
+    /// Not `#[cfg(test)]`: that test lives in `bastion_vault::engine_tests`
+    /// now (it needs a vault built by the assembly layer, or `get_module`
+    /// sees two `TypeId`s for the same type), and `test` does not cross a
+    /// crate boundary. Gated on the fixture feature that consumer enables.
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn plant_kv_ghost_for_test(&self, path: &str) -> Result<(), RvError> {
         let canonical = Self::canonicalize_kv_path(path).expect("valid kv path");
         let key = Self::kv_key(&canonical);

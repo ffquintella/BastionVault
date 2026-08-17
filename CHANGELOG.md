@@ -45,7 +45,101 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### Change-scoped test runs: `make test-changed`
+- **The inner dev loop no longer pays for the whole workspace.** `make test` is
+  `cargo nextest run --workspace --lib --bins`, which links ~40 test harnesses,
+  five of them over 200 MB. Running it after every edit is the largest single
+  sink of wall-clock time in development, and nearly all of it goes on tests the
+  edit cannot reach.
+  `make test-changed` (`scripts/test-changed.sh`) derives the affected set from
+  `git diff` plus the cargo dependency graph -- file to owning package by longest
+  matching manifest directory, then the reverse-dependency closure over workspace
+  members including **dev-dependencies**, so the root crate's dev-dep on
+  `bv-server` is not missed -- and runs `cargo nextest run -p ... --lib` over just
+  that set. Measured widths: one engine crate reaches 4 of 40 packages,
+  `bv-kernel-api` reaches 25, `bv-errors` reaches 32.
+  Editing `Cargo.toml`, `Cargo.lock`, `.cargo/config.toml`, `rust-toolchain.toml`
+  or `.config/nextest.toml` short-circuits to "run the full suite" rather than
+  guessing, because a `[workspace.dependencies]` bump changes what every crate
+  compiles against. `tests/`, doctests and the GUI frontend are reported with the
+  command to run them, never silently skipped.
+  Flags: `BASE=main` (widen to everything since the merge-base), `DIRECT=1`
+  (changed packages only, no dependents), `PKG=<name>` (explicit seed),
+  `FILTER=<substr>` (passed through to nextest).
+- **`make test-plan`** prints the package set `test-changed` would run without
+  building anything, so the blast-radius table in AGENTS.md §3 can be checked
+  rather than recalled.
+- **`make test-release`** runs every suite in the repo in one ordered target --
+  `test`, `test-integration`, `test-doc`, `test-hiqlite`, `test-cucumber`,
+  `plugins-test`, `gui-check`, `gui-test`. Required before cutting a release and
+  before merging anything touching a persisted format, a storage barrier,
+  authn/authz or the plugin ABI. Only `tests/e2e/rustion-ssh` is excluded (needs
+  real remote hosts). `make test-all` is unchanged and remains the narrower
+  unit + integration + doctest subset.
+- **nextest `quick` profile** (`.config/nextest.toml`) for the inner loop. It
+  differs from `default` only in `fail-fast = true`; `default-filter` and
+  `slow-timeout` are inherited, so it excludes exactly the same port-bound suites
+  and skips nothing a `default` run would have executed.
+
 ### Changed
+
+#### Workspace decomposition Phase 4.5: the vault kernel becomes two crates
+- **`bastion_vault` is finally a facade.** The kernel split into `bv-core`
+  (`Core`, the mount table, the module registry, the seal path, the HSM
+  backends and the server config model) and `bv-kernel` (tokens and leases,
+  identity, policy, namespaces, resource groups and the `sys/` backend),
+  leaving the root crate at 27,921 lines -- under 16,000 of them production
+  code -- against 65,703 before.
+  **What this changes for you:** nothing at runtime. Every API route, CLI flag,
+  config key and `bastion_vault::*` path behaves exactly as before, and the
+  suite is unchanged at 1289 unit / 1358 integration / 17 doctests. What it
+  changes is that a change to policy evaluation no longer rebuilds the seal
+  path, and vice versa.
+  **For anyone embedding the crate:** all paths are preserved by re-export
+  (`bastion_vault::core`, `::mount`, `::seal`, `::hsm`, `::config`,
+  `::modules::*` and the rest), so no import changes.
+  (Phase 4.5, roadmaps/workspace-decomposition.md)
+- **The exchange import-preview cache moved off `Core`.** It was an in-memory,
+  per-process, TTL-bounded cache read only by the HTTP server and the desktop
+  app; each now holds its own. Preview tokens were never redeemable across
+  nodes, so behaviour is unchanged -- this only makes that explicit.
+- **`--features hsm_mock` / `hsm_yubihsm2` keep working from the CLI.** The HSM
+  backends moved into `bv-core` with the seal path, and the flags now forward
+  through `bvault-cli` and `bastion_vault` to reach them. Verified by building
+  with the feature enabled, since a flag that silently stops reaching its `cfg`
+  gates is a failure mode this project has already had once.
+
+- **`make -j` can no longer overlap two recipes** (`.NOTPARALLEL` in the
+  Makefile). All cargo invocations share one `target/` build lock, so a second
+  concurrent one does not run in parallel -- it blocks for as long as the first
+  takes. This was already documented in AGENTS.md §5 with a measured case (a
+  `cargo check` that should cost under a second taking 9m14s wall for 0.4s of
+  CPU); the aggregate targets that list several cargo invocations now enforce it.
+  Cargo's own internal parallelism is unaffected.
+- **rust-analyzer no longer competes with your builds for the `target/` lock**
+  (`rust-analyzer.cargo.targetDir` in `.vscode/settings.json`). It runs
+  `cargo check --workspace --all-targets` on every save, and without this it did
+  so in the same `target/` as `make test` -- all cargo invocations share one build
+  lock, and the loser blocks for as long as the winner takes rather than running
+  alongside it. Measured while adding this: a narrow `make test-changed` run whose
+  own work was ~4s of CPU spent 3m01s of 3m27s wall printing "Blocking waiting for
+  file lock on build directory". Artefacts now go to `target/rust-analyzer`, which
+  has its own lock. `check.workspace` and `check.allTargets` stay on -- turning
+  them off would drop diagnostics inside the in-crate `#[cfg(test)]` modules where
+  most of this repo's tests live. Costs a second check-only artefact set on disk;
+  `scripts/prune-incremental.sh` now trims that directory too, so `make prune` and
+  the automatic `prune-stale` cover it.
+- **`make test-changed` warns when another cargo process is running**, so a run
+  that is queued behind someone else's build says so instead of looking like a
+  slow test suite.
+- **`make test-changed` skips bin test harnesses that contain no tests.** Only
+  `bv-plugin-pack`'s `[[bin]]` has a `#[cfg(test)]` module; `bvault`'s `main.rs`
+  is a 19-line delegate to its lib and `bin/bv_ssh_helper.rs` has no test module,
+  so `--bins` there links two ~200 MB harnesses to run zero tests. `make test`
+  is deliberately left as-is -- it is the CI gate, and keeping its scope stated as
+  `--lib --bins` means a bin that grows a test is covered the day it does.
 
 #### Workspace decomposition Phase 4: the HTTP server and CLI become their own crates
 - **`bastion_vault` no longer builds a web framework.** `src/http` is now the
@@ -499,6 +593,16 @@ EXAMPLE ENTRY:
   "cleaned up" -- deps declared to **pin a feature** rather than be imported:
   `tower`'s `util`, `rusb`'s `vendored`, `webpki-roots`' defaults,
   `rustls-pki-types`' major, and `bv-client`'s `rustls/aws_lc_rs`.
+
+### Fixed
+
+#### Workspace decomposition
+- **A latent build break for downstream consumers of `bv-server`.** Removing
+  `env_logger` from the library in Phase 4 also removed the `log/std` feature it
+  happened to enable, which `logging.rs` needs. A workspace-wide build masked it
+  by unifying the feature back in from the CLI, so the workspace stayed green
+  while building `bv-server` on its own failed. The library now declares the
+  feature it actually uses. (Phase 4.5)
 
 ## [0.39.7] - 2026-08-12
 

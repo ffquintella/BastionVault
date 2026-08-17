@@ -4747,6 +4747,12 @@ impl Module for SystemModule {
         self.name.clone()
     }
 
+    /// Publish the system module as the vault's denial-audit sink, so
+    /// `Core::handle_request` can persist a 403 without naming this module.
+    fn register(self: Arc<Self>, services: &crate::kernel_api::KernelServices) {
+        services.set_denial_audit(self);
+    }
+
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
         self
     }

@@ -31,6 +31,10 @@ members = [
     "crates/bv-utils",
     "crates/bv-audit",
     "crates/bv-kernel-api",
+    # Tier 2 — the kernel, below the kernel tier and above the substrate.
+    # See roadmaps/workspace-decomposition.md § Phase 4.5.
+    "crates/bv-core",
+    "crates/bv-kernel",
     "crates/bv-engine-pki",
     "crates/bv-auth-audit",
     "crates/bv-auth-approle",
@@ -106,6 +110,14 @@ bv-audit = { path = "crates/bv-audit" }
 # `KernelServices`, the `Module` trait, and the routing/mount tables their
 # signatures name. See roadmaps/workspace-decomposition.md § Phase 3.
 bv-kernel-api = { path = "crates/bv-kernel-api" }
+# Tier 2: `Core`, the mount table, the module registry, the seal path and the
+# server config model. Re-exported below so `bastion_vault::{core, mount,
+# seal, hsm, config, logging, server_info, module_manager}` are unchanged.
+bv-core = { path = "crates/bv-core" }
+# Tier 2b: the kernel tier — tokens and leases, identity, policy, namespaces,
+# resource groups and the `sys/` backend. Above `bv-core`. Re-exported through
+# `bastion_vault::modules` so those paths are unchanged.
+bv-kernel = { path = "crates/bv-kernel" }
 # Tier 3 engines. Each is `bv-kernel-api` plus the Tier 0 substrate plus its
 # own domain crates, and nothing else. The root crate depends on them because
 # it is the assembly layer that mounts them — and because the kernel tier
@@ -139,7 +151,6 @@ bv_plugin_manifest = { path = "crates/bv-plugin-manifest" }
 # dispatch, plugin surface fetch, etc.) is GUI-only; the CLI only
 # touches `discovery` + `health`.
 bv-client = { path = "crates/bv-client" }
-aes-gcm = "0.10"
 anyhow = { version = "^1.0" }
 thiserror = { version = "^2.0" }
 serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
@@ -147,10 +158,6 @@ serde_json = "^1.0"
 serde_bytes = "0.11"
 go-defer = "^0.1"
 rand = "^0.10"
-strum = { version = "0.28", features = ["derive"] }
-strum_macros = "0.28"
-radix_trie = "0.3.0"
-lazy_static = "1.5.0"
 regex = "1.12"
 sysexits = { version = "0.13", features = ["std"] }
 build-time = "0.1"
@@ -176,13 +183,18 @@ hcl-rs = "0.19"
 # recorded one wrong conclusion from exactly this reasoning (the AppRole tidy
 # race). Behaviour preservation wins; it is a small crate and not a web server.
 actix-rt = "2.11"
-log = "0.4"
+# `std` is explicit, not inherited. `logging.rs` calls `log::set_boxed_logger`,
+# which only exists with that feature on. It used to arrive by unification --
+# `env_logger` pulled it in -- and when Phase 4 moved the CLI out and dropped
+# `env_logger` from this manifest, the root crate kept building only because a
+# workspace-wide `cargo check` unified the feature back in from `bvault-cli`.
+# `cargo check -p bv-server` (and any downstream consumer) failed. Declare what
+# the code actually needs.
+log = { version = "0.4", features = ["std"] }
 hex = "0.4"
-humantime = "2.3"
 pem = "3.0"
 chrono = "0.4"
 zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
-bcrypt = "0.19"
 ureq = { version = "3.3", features = ["json", "socks-proxy", "win-system-proxy"] }
 # Pure-Rust SMB2/3 client (NTLM auth via the `sspi` crate). Optional —
 # enabled by the `files_smb` feature so default builds don't ship the
@@ -207,9 +219,6 @@ ctor = "1.0"
 better_default = "1.0.5"
 prometheus-client = "0.25"
 async-trait = "0.1"
-stretto = "0.9"
-priority-queue = "2.7"
-crossbeam-channel = "0.5"
 maybe-async = { version = "0.2", optional = false }
 arc-swap = "1"
 hmac = "0.13"
@@ -308,7 +317,6 @@ ssh-encoding = "0.2"
 # hkdf via the rsa stack) so the marginal cost is zero. The PQC bits
 # (ml-kem-768 / ml-dsa-44/65/87) come through bv_crypto.
 ed25519-dalek = "2"
-hkdf = "0.13"
 # ECDSA P-256 verification for the PKI ACME server's `ES256` JWS
 # account-key algorithm. Promoted from dev-deps to direct deps when
 # Phase 6.1 of the ACME spec landed. `digest 0.10` (matches rsa 0.9's
@@ -328,14 +336,12 @@ p256 = { version = "0.13", features = ["ecdsa", "ecdh"], default-features = fals
 # behind it and flags it experimental). BastionVault needs device ECDH for
 # the HSM-to-HSM replication channel and hybrid-PQC seed derivation; the
 # `BVAULT_TEST_YUBIHSM=1` suite validates it against real hardware before use.
-yubihsm = { version = "0.42.1", optional = true, default-features = false, features = ["http", "usb", "passwords", "untested"] }
 
 # Pulled transitively by `yubihsm`'s `usb` feature; declared directly only to
 # force the `vendored` feature, which statically compiles libusb from bundled C
 # source with the (cross-)toolchain. This keeps the official container image
 # self-contained — no libusb-1.0 dev package in the builder and no libusb .so in
 # the minimal Wolfi runtime (Linux hotplug uses netlink, so no libudev either).
-rusb = { version = "0.9", optional = true, features = ["vendored"] }
 
 [build-dependencies]
 toml = "1.1.2"
@@ -396,7 +402,7 @@ storage_hiqlite = ["bv-storage/storage_hiqlite"]
 # harness on top of them. Off by default: these fixtures create vaults on
 # disk and shell out to the `bvault` binary. Same arrangement `bv-storage`
 # uses for its backend fixtures (Phase 1).
-test-support = ["bv-storage/test-support"]
+test-support = ["bv-storage/test-support", "bv-kernel/test-support"]
 sync_handler = [
     "maybe-async/is_sync",
     "bv-storage/sync_handler",
@@ -524,12 +530,12 @@ ssh_pqc = ["bv-engine-ssh/ssh_pqc"]
 # It provides NO hardware protection and REFUSES TO START in production
 # (BVAULT_ENV=production / environment="production"); it exists for dev, CI,
 # and the homologation cluster (no USB passthrough).
-hsm_mock = []
+hsm_mock = ["bv-core/hsm_mock"]
 # `hsm_yubihsm2` is the production backend for the mandated YubiHSM 2, via
 # the pure-Rust `yubihsm` crate over the HTTP connector or direct USB.
 # `x509-cert` (attestation parsing) is already a direct dep; `rusb` is declared
 # directly only to force libusb's `vendored` (static) build (see above).
-hsm_yubihsm2 = ["dep:yubihsm", "dep:rusb"]
+hsm_yubihsm2 = ["bv-core/hsm_yubihsm2"]
 
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"
