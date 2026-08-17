@@ -356,7 +356,7 @@ deploy/compose/
 Acceptance bar fully met: 6 deliverable files shipped, `openssl-sys` build
 issue resolved (libssl-dev + `OPENSSL_STATIC=1` + `ldd` guard), and the
 audit chain now carries the socket-level peer IP on every entry
-(see [`src/audit/entry.rs`](../src/audit/entry.rs); 2 regression tests).
+(see [`crates/bv-audit/src/entry.rs`](../crates/bv-audit/src/entry.rs); 2 regression tests).
 
 | File | Purpose |
 |---|---|
@@ -376,7 +376,7 @@ socket-level IP** (verified by hitting the API from a second container
 on the same Podman network and grepping the audit chain for that
 container's address). The audit-side wiring (`AuditEntry.auth.remote_address`
 + `AuditEntry.request.remote_address` populated from
-`Request.connection.peer_addr`) is in [`src/audit/entry.rs`](../src/audit/entry.rs);
+`Request.connection.peer_addr`) is in [`crates/bv-audit/src/entry.rs`](../crates/bv-audit/src/entry.rs);
 two regression tests guard it.
 
 ### Phase 1.5 — Trusted-Proxy / PROXY-Protocol Client-IP Propagation — **DONE (XFF/Forwarded), partial (PROXY-protocol)**
@@ -385,15 +385,15 @@ two regression tests guard it.
 |---|---|---|
 | [`src/http/client_ip.rs`](../src/http/client_ip.rs) | `BASTIONVAULT_TRUSTED_PROXIES` CIDR parser + right-to-left `X-Forwarded-For` / `Forwarded` walker; surfaces a `ClientIp { socket, derived }` struct. 9 unit tests cover empty config, untrusted-socket guard, multi-hop chain walk, attacker-injected internal IP, RFC 7239 precedence, IPv6 brackets. | **Done.** |
 | [`src/http/proxy_protocol.rs`](../src/http/proxy_protocol.rs) | PROXY-protocol v1 + v2 **parser** + `ProxyProtocolMode` env-var validator. The listener-side acceptor that wraps actix-web's TCP accept loop is **deferred** to a follow-up — the parser is the load-bearing piece, and the wiring choice (custom `ServerBuilder` shim vs. localhost-loopback proxy) is its own design decision. The env var is parsed at startup so an invalid value fails loudly. | **Done (parser); deferred (acceptor wiring).** |
-| [`src/logical/connection.rs`](../src/logical/connection.rs) (extension) | Added `peer_addr_derived: String` next to the existing `peer_addr` so handlers downstream of the HTTP layer (audit, rate-limit) receive both views. | **Done.** |
+| [`crates/bv-logical/src/connection.rs`](../crates/bv-logical/src/connection.rs) (extension) | Added `peer_addr_derived: String` next to the existing `peer_addr` so handlers downstream of the HTTP layer (audit, rate-limit) receive both views. | **Done.** |
 | [`src/http/logical.rs`](../src/http/logical.rs) (extension) | Threads `web::Data<TrustedProxies>` into the v1/v2 logical handlers and calls `ClientIp::resolve` on every request. | **Done.** |
-| [`src/audit/entry.rs`](../src/audit/entry.rs) (extension) | `AuditAuth` and `AuditRequest` carry `remote_address_socket` + `remote_address_derived` alongside the existing `remote_address` (which now holds the derived address for forward-compat with consumers that read only one field). 1 new regression test. | **Done.** |
+| [`crates/bv-audit/src/entry.rs`](../crates/bv-audit/src/entry.rs) (extension) | `AuditAuth` and `AuditRequest` carry `remote_address_socket` + `remote_address_derived` alongside the existing `remote_address` (which now holds the derived address for forward-compat with consumers that read only one field). 1 new regression test. | **Done.** |
 | [`src/cli/command/server.rs`](../src/cli/command/server.rs) (extension) | Reads `BASTIONVAULT_TRUSTED_PROXIES` and `BASTIONVAULT_PROXY_PROTOCOL` at startup, logs invalid CIDR entries at warn level, registers `web::Data<TrustedProxies>`. | **Done.** |
 | [`deploy/container/config/config.hcl.sample`](../deploy/container/config/config.hcl.sample) (extension) | Both env vars documented in a commented "Client-IP propagation" block. | **Done.** |
 | `docs/docs/operations/container-image.md` (Phase 3 extension) | "Running behind a reverse proxy" + "Running behind an L4 load balancer with PROXY protocol" sections. | **Deferred** with the rest of the operator-docs writing task. |
 
 Acceptance (XFF / Forwarded path): the unit tests in
-`src/http/client_ip.rs::tests` and `src/audit/entry.rs::tests`
+`src/http/client_ip.rs::tests` and `crates/bv-audit/src/entry.rs::tests`
 verify the right-to-left walk, the spoof-resistance property
 ("attacker outside the trusted set cannot impersonate an internal
 IP"), RFC 7239 precedence, and that audit entries record both views

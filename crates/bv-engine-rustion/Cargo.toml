@@ -1,0 +1,70 @@
+[package]
+name = "bv-engine-rustion"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's Rustion engine: PQC bastion fleet targets, master cert, recordings and policy"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 3 of the workspace decomposition
+# (roadmaps/workspace-decomposition.md § Phase 3).
+#
+# 11,613 lines and 44 of the last 300 commits -- second only to PKI, and the
+# engine whose four detached background tasks drove the `RustionStores` shared
+# slot in Phase 2 (see the roadmap's "self-lookups" section).
+
+[dependencies]
+bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
+bv-context = { path = "../bv-context", version = "0.1.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.1.0", registry = "uox-bastionvault" }
+
+bv_crypto = { path = "../bv_crypto", version = "0.1.0", registry = "uox-bastionvault" }
+
+arc-swap = "1.7"
+async-trait = "0.1"
+hex = "0.4"
+thiserror = "^2.0"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+ciborium = "0.2"
+derive_more = "2.1.1"
+ed25519-dalek = "2"
+fips204 = { version = "0.4", default-features = false, features = ["default-rng", "ml-dsa-44", "ml-dsa-65", "ml-dsa-87"] }
+log = "0.4"
+maybe-async = "0.2"
+pkcs8 = { version = "0.10", features = ["pem", "alloc"] }
+rand = "^0.10"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
+serde_json = "^1.0"
+sha2 = "0.11"
+ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "ecdsa", "encryption"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "io-util"] }
+uuid = { version = "1", features = ["v4"] }
+zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
+
+[features]
+default = []
+sync_handler = [
+    "maybe-async/is_sync",
+    "bv-storage/sync_handler",
+    "bv-logical/sync_handler",
+    "bv-kernel-api/sync_handler",
+]
+
+# Lints this crate's code trips, all of which the root crate already allows.
+[lints.clippy]
+field_reassign_with_default = "allow"
+type_complexity = "allow"
+
+
+[dev-dependencies]
+# The master-store tests build a barrier straight from a fixture backend --
+# no Core, no unseal. `bv-storage` already ships those fixtures, so the
+# tests stayed with the code instead of moving to the root crate.
+bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault", features = ["test-support"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }

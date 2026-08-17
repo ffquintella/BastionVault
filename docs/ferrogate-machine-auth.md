@@ -206,6 +206,40 @@ deliberate, human-gated step. The full identification flow:
 - **Misconfigured trust anchor** — the gate is only as strong as `config`
   (config writes are root/sudo-gated and audited).
 
+## SDK dependency
+
+All token verification is done by FerroGate's own reference verifiers —
+BastionVault implements no cryptography of its own here:
+
+| Crate | Used for |
+|---|---|
+| `ferro-child-verify` | DPoP-bound, composite-signed child tokens (`verify_bound`) |
+| `ferro-svid-verify` | Host SVIDs + composite-signed CRL (`verify_unrevoked`) |
+| `ferro-crypto` | Composite (Ed25519 + ML-DSA-65) primitive; X25519MLKEM768 PQ-TLS and SPKI pinning for the `cmis_grpc` transport |
+
+They resolve from the FerroGate SDK's Cargo registry —
+`sparse+https://cargo.cloudsmith.io/uox/ferrogate/`, registered as
+`uox-ferrogate` in [`.cargo/config.toml`](../.cargo/config.toml). It is a
+public repository: no token is needed to build, and CI needs no extra secret.
+Before 0.21.5 these three crates were vendored in-tree under
+`third_party/ferrogate-sdk-rust/`.
+
+Because they are the trust root for machine logins, the root `Cargo.toml` pins
+all three with an **exact** requirement (`=0.21.5`) rather than a caret, so a
+`cargo update` cannot move the verifier. `Cargo.lock` is gitignored in this
+repo, so that requirement *is* the pin — do not relax it. Cargo verifies the
+registry's SHA-256 for each crate on download. Upstream pins the same way: both
+verifiers require `ferro-crypto =0.21.5`.
+
+To take a new SDK release:
+
+1. Bump the three `=X.Y.Z` requirements in `Cargo.toml`.
+2. Read the upstream release notes for verifier behaviour changes — 0.15.0 →
+   0.21.3 removed `normalize_htu` and made `verify_bound`'s `htu` comparison
+   byte-exact, which is why `normalize_origin` now lives in
+   [`verify.rs`](../src/modules/credential/ferrogate/verify.rs).
+3. `cargo nextest run --lib -E 'test(ferrogate)'`, then commit.
+
 ### Notes / caveats
 
 - **`accept_svid` is weaker** than the default child-token path: a host SVID has

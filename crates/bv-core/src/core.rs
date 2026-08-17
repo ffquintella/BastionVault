@@ -1,0 +1,1337 @@
+//! The `bastion_vault::core` module implements several key functions that are
+//! in charge of the whole process of BastionVault. For instance, to seal or unseal the BastionVault we
+//! have the `seal()` and `unseal()` functions in this module. Also, the `handle_request()`
+//! function in this module is to route an API call to its correct backend and get the result back
+//! to the caller.
+//!
+//! This module is very low-level and usually it should not disturb end users and module developers
+//! of BastionVault.
+
+use std::{
+    ops::Deref,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Weak,
+    },
+};
+
+use arc_swap::{ArcSwap, ArcSwapOption};
+use go_defer::defer;
+use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, Zeroizing};
+
+use crate::kernel_api::{KernelServices, MountEntryHMACLevel, VaultCtx};
+use crate::{
+    cache::CacheConfig,
+    errors::RvError,
+    handler::{AuthHandler, HandlePhase, Handler},
+    logical::{Request, Response},
+    module_manager::ModuleManager,
+    mount::{
+        MountTable, MountsMonitor, MountsRouter, CORE_MOUNT_CONFIG_PATH, LOGICAL_BARRIER_PREFIX, SYSTEM_BARRIER_PREFIX,
+    },
+    router::Router,
+    seal::{SealProvider, ShamirSealProvider},
+    shamir::{ShamirSecret, SHAMIR_OVERHEAD},
+    storage::{
+        barrier::SecurityBarrier, barrier_view::BarrierView, new_barrier, physical, Backend as PhysicalBackend,
+        BackendEntry as PhysicalBackendEntry, BarrierType, Storage, StorageEntry,
+    },
+    utils::BHashSet,
+};
+
+/// Re-exported from `bv-kernel-api`, which owns it since Phase 3.
+///
+/// It takes `Arc<dyn VaultCtx>`, not `Arc<Core>`: the alias is in every
+/// engine's mount-registration path, so while it named `Core` no engine could
+/// compile without the kernel. Now that it names only the trait, it belongs
+/// next to the trait — otherwise every engine crate would still have to import
+/// `bastion_vault::core` to register a mount.
+pub use bv_kernel_api::LogicalBackendNewFunc;
+
+const SEAL_CONFIG_PATH: &str = "core/seal-config";
+const DEPRECATED_UNSEAL_KEY_SET_PATH: &str = "core/used-unseal-keys-set";
+/// System-view key mirroring the FerroGate `require_machine_identity` flag.
+/// The canonical operator value lives in the `auth/ferrogate/config` blob; this
+/// mirror is the restart-durable enforcement cache the token layer reads
+/// (loaded into [`Core::require_machine_identity`] at unseal).
+const FERROGATE_REQUIRE_MI_PATH: &str = "core/ferrogate-require-machine-identity";
+/// System-view key for the AppRole mandatory-machine-binding gate. Absent ⇒
+/// mandatory (the default); mirrored into [`Core::approle_require_machine`] at
+/// unseal.
+const APPROLE_REQUIRE_MACHINE_PATH: &str = "core/approle-require-machine";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SealConfig {
+    pub secret_shares: u8,
+    pub secret_threshold: u8,
+}
+
+impl SealConfig {
+    pub fn validate(&self) -> Result<(), RvError> {
+        if self.secret_threshold > self.secret_shares {
+            return Err(RvError::ErrCoreSealConfigInvalid);
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Zeroize)]
+#[zeroize(drop)]
+pub struct InitResult {
+    pub secret_shares: Zeroizing<Vec<Vec<u8>>>,
+    pub root_token: String,
+}
+
+#[derive(Clone, Zeroize)]
+#[zeroize(drop)]
+pub struct CoreState {
+    #[zeroize(skip)]
+    pub system_view: Option<Arc<BarrierView>>,
+    pub sealed: bool,
+    pub hmac_key: Vec<u8>,
+    unseal_key_shares: Vec<Vec<u8>>,
+    kek: Vec<u8>,
+}
+
+pub struct Core {
+    pub self_ptr: Weak<Core>,
+    pub physical: Arc<dyn PhysicalBackend>,
+    pub barrier: Arc<dyn SecurityBarrier>,
+    /// Root-namespace mount router. Swappable so re-root activation can rebuild
+    /// it at unseal pointing at `namespaces/<root_uuid>/…` (see
+    /// [`Core::root_storage_prefix`]). Access via [`Core::mounts_router`].
+    pub mounts_router_swap: ArcSwap<MountsRouter>,
+    /// Storage-prefix root for the root tenant. Empty (legacy `logical/`,
+    /// `sys/`, `core/mounts`) unless re-root activation is in effect, in which
+    /// case it is `namespaces/<root_uuid>/`. Set at `post_unseal`.
+    pub root_storage_prefix: ArcSwap<String>,
+    pub router: Arc<Router>,
+    pub handlers: ArcSwap<Vec<Arc<dyn Handler>>>,
+    pub auth_handlers: ArcSwap<Vec<Arc<dyn AuthHandler>>>,
+    pub module_manager: ModuleManager,
+    /// Capabilities the installed modules publish to each other — identity,
+    /// tokens, policy, namespaces, and the engine-to-engine contracts.
+    ///
+    /// Populated by [`ModuleManager::set_modules`] / `add_module` as each
+    /// module registers itself. This is what a module reaches a sibling
+    /// through; the old route was `module_manager.get_module::<T>()`, which
+    /// required naming the sibling's concrete type. See
+    /// [`crate::kernel_api::services`].
+    pub kernel_services: KernelServices,
+    pub mount_entry_hmac_level: MountEntryHMACLevel,
+    pub mounts_monitor: ArcSwapOption<MountsMonitor>,
+    pub mounts_monitor_interval: u64,
+    /// Cache subsystem configuration. Slice 1 wires this through but only
+    /// `policy_cache_size` is consumed today (by `PolicyStore::new`). Token
+    /// and secret caches will read from this in later slices.
+    pub cache_config: CacheConfig,
+    pub state: ArcSwap<CoreState>,
+    /// Audit broker — Some once the vault is unsealed and the
+    /// audit subsystem is ready. Handle is installed by
+    /// `post_unseal_init_audit` and cleared on seal.
+    pub audit_broker: ArcSwapOption<crate::audit::AuditBroker>,
+    /// Fast-path mirror of the FerroGate mount's `require_machine_identity`
+    /// flag. When `true`, every authenticated request must present a
+    /// FerroGate machine-bound token (or a root token) — enforced in
+    /// [`crate::modules::auth::token_store::TokenStore::pre_route`]. Loaded
+    /// from the system view at `post_unseal` and updated whenever the
+    /// `auth/ferrogate/config` write handler runs, so the token layer never
+    /// touches storage to read it.
+    pub require_machine_identity: Arc<AtomicBool>,
+    /// Server-wide gate for mandatory AppRole machine binding. When `true`
+    /// (the default), every AppRole login must present a valid FerroGate
+    /// machine token bound to the role — enforced in the AppRole login
+    /// handler. Operators can set it `false` to stage rollout (e.g. before
+    /// binding machines to existing roles). Loaded from the system view at
+    /// `post_unseal` and updated via the `auth/approle/config` write handler.
+    pub approle_require_machine: Arc<AtomicBool>,
+    /// Process-wide request-outcome counters (denied requests, failed
+    /// logins, audit-write failures) surfaced on the GUI Dashboard via
+    /// `sys/dashboard/summary`. Always present; incremented from the
+    /// request hot path in [`Core::handle_request`].
+    pub stats: Arc<crate::stats::DashboardStats>,
+    /// KEK custody policy. Empty ⇒ the classic operator-driven Shamir unseal.
+    /// When an [`crate::seal::hsm::HsmSealProvider`] is installed (from the
+    /// `hsm "..."` config block at server startup), `init` wraps the KEK under
+    /// the HSM and [`Core::auto_unseal`] recovers it without operator shares.
+    pub seal_provider_swap: std::sync::RwLock<Option<Arc<dyn SealProvider>>>,
+    /// Process-local IP-based DoS / request-abuse guard. Consulted by the HTTP
+    /// middleware on every request (see [`crate::dos::middleware`]). Its
+    /// thresholds and manual bans are loaded from the system view at
+    /// `post_unseal` ([`Core::load_dos_state`]); live counters and auto-bans
+    /// are ephemeral per node. Always present; enforcement is a no-op until
+    /// configured/enabled.
+    pub dos_guard: Arc<crate::dos::DosGuard>,
+}
+
+impl Default for CoreState {
+    fn default() -> Self {
+        Self { system_view: None, sealed: true, unseal_key_shares: Vec::new(), hmac_key: Vec::new(), kek: Vec::new() }
+    }
+}
+
+impl Default for Core {
+    fn default() -> Self {
+        let backend: Arc<dyn PhysicalBackend> = Arc::new(physical::mock::MockBackend::new());
+        let barrier = new_barrier(BarrierType::Chacha20Poly1305, backend.clone());
+        let router = Arc::new(Router::new());
+
+        Core {
+            self_ptr: Weak::new(),
+            physical: backend,
+            barrier: barrier.clone(),
+            router: router.clone(),
+            mounts_router_swap: ArcSwap::from_pointee(MountsRouter::new(
+                Arc::new(MountTable::new(CORE_MOUNT_CONFIG_PATH)),
+                router.clone(),
+                barrier.clone(),
+                LOGICAL_BARRIER_PREFIX,
+                "",
+            )),
+            root_storage_prefix: ArcSwap::from_pointee(String::new()),
+            handlers: ArcSwap::from_pointee(vec![router]),
+            auth_handlers: ArcSwap::from_pointee(Vec::new()),
+            module_manager: ModuleManager::new(),
+            kernel_services: KernelServices::new(),
+            mount_entry_hmac_level: MountEntryHMACLevel::None,
+            mounts_monitor: ArcSwapOption::empty(),
+            mounts_monitor_interval: 0,
+            cache_config: CacheConfig::default(),
+            state: ArcSwap::from_pointee(CoreState::default()),
+            audit_broker: ArcSwapOption::empty(),
+            require_machine_identity: Arc::new(AtomicBool::new(false)),
+            approle_require_machine: Arc::new(AtomicBool::new(true)),
+            stats: Arc::new(crate::stats::DashboardStats::default()),
+            seal_provider_swap: std::sync::RwLock::new(None),
+            dos_guard: Arc::new(crate::dos::DosGuard::new(crate::dos::DosConfig::default())),
+        }
+    }
+}
+
+#[maybe_async::maybe_async]
+impl Core {
+    pub fn new(backend: Arc<dyn PhysicalBackend>) -> Self {
+        Self::new_with_barrier(backend, BarrierType::Chacha20Poly1305)
+    }
+
+    pub fn new_with_barrier(backend: Arc<dyn PhysicalBackend>, barrier_type: BarrierType) -> Self {
+        let barrier = new_barrier(barrier_type, backend.clone());
+        let router = Arc::new(Router::new());
+
+        Core {
+            handlers: ArcSwap::from_pointee(vec![router.clone()]),
+            physical: backend,
+            barrier: barrier.clone(),
+            router: router.clone(),
+            mounts_router_swap: ArcSwap::from_pointee(MountsRouter::new(
+                Arc::new(MountTable::new(CORE_MOUNT_CONFIG_PATH)),
+                router,
+                barrier,
+                LOGICAL_BARRIER_PREFIX,
+                "",
+            )),
+            ..Default::default()
+        }
+    }
+
+    pub fn wrap(self) -> Arc<Self> {
+        let mut wrap_self = Arc::new(self);
+        let weak_self = Arc::downgrade(&wrap_self);
+        unsafe {
+            let ptr_self = Arc::into_raw(wrap_self) as *mut Self;
+            (*ptr_self).self_ptr = weak_self;
+            wrap_self = Arc::from_raw(ptr_self);
+        }
+
+        wrap_self
+    }
+
+    /// The current root-namespace mount router. Cheap `Arc` clone; callers hold
+    /// it for the duration of an operation. Swapped only at unseal by re-root
+    /// activation, so a held handle stays consistent for the call.
+    pub fn mounts_router(&self) -> Arc<MountsRouter> {
+        self.mounts_router_swap.load_full()
+    }
+
+    /// The installed module set.
+    ///
+    /// Inherent, and deliberately *not* on [`VaultCtx`]: the kernel owns the
+    /// module set and may enumerate it, but an engine reaching a sibling this
+    /// way had to name the sibling's concrete type, which is the edge Phase 2
+    /// removes. Engines use [`VaultCtx::kernel`] and the service accessors on
+    /// it instead. See `roadmaps/workspace-decomposition.md` Phase 2.
+    pub fn module_manager(&self) -> &ModuleManager {
+        &self.module_manager
+    }
+
+    /// Barrier prefix for the root tenant's logical mounts — `logical/` by
+    /// default, or `namespaces/<root_uuid>/logical/` when re-root activation is
+    /// in effect.
+    pub fn root_logical_prefix(&self) -> String {
+        format!("{}{}", self.root_storage_prefix.load(), LOGICAL_BARRIER_PREFIX)
+    }
+
+    /// Barrier prefix for the root tenant's system view.
+    pub fn root_system_prefix(&self) -> String {
+        format!("{}{}", self.root_storage_prefix.load(), SYSTEM_BARRIER_PREFIX)
+    }
+
+    /// Barrier key for the root tenant's mount-table config.
+    pub fn root_mount_config_path(&self) -> String {
+        format!("{}{}", self.root_storage_prefix.load(), CORE_MOUNT_CONFIG_PATH)
+    }
+
+    /// Repoint the root tenant's storage at `namespaces/<root_uuid>/…` (re-root
+    /// activation). Sets [`Core::root_storage_prefix`], rebuilds the system view
+    /// and the root mount router at the new prefix. Called once at the top of
+    /// `post_unseal`, before any view/mount-table use, so every downstream
+    /// subsystem (policies, identity, audit, mounts) builds on the active root.
+    fn activate_reroot(&self, root_uuid: &str) -> Result<(), RvError> {
+        self.root_storage_prefix.store(Arc::new(format!("namespaces/{root_uuid}/")));
+
+        let mut state = (*self.state.load_full()).clone();
+        state.system_view =
+            Some(Arc::new(BarrierView::new(self.barrier.clone(), &self.root_system_prefix())));
+        self.state.store(Arc::new(state));
+
+        let new_router = MountsRouter::new(
+            Arc::new(MountTable::new(&self.root_mount_config_path())),
+            self.router.clone(),
+            self.barrier.clone(),
+            &self.root_logical_prefix(),
+            "",
+        );
+        self.mounts_router_swap.store(Arc::new(new_router));
+        Ok(())
+    }
+
+    pub async fn inited(&self) -> Result<bool, RvError> {
+        self.barrier.inited().await
+    }
+
+    /// The active seal provider. Defaults to the classic Shamir provider when
+    /// none has been installed (i.e. no `hsm "..."` seal in the config).
+    pub fn seal_provider(&self) -> Arc<dyn SealProvider> {
+        match self.seal_provider_swap.read() {
+            Ok(guard) => guard.clone().unwrap_or_else(|| Arc::new(ShamirSealProvider::new())),
+            Err(_) => Arc::new(ShamirSealProvider::new()),
+        }
+    }
+
+    /// Install a seal provider (e.g. HSM auto-unseal). Called once at server
+    /// startup after the HSM backend is opened from config.
+    pub fn set_seal_provider(&self, provider: Arc<dyn SealProvider>) {
+        if let Ok(mut guard) = self.seal_provider_swap.write() {
+            *guard = Some(provider);
+        }
+    }
+
+    pub async fn init(&self, seal_config: &SealConfig) -> Result<InitResult, RvError> {
+        let inited = self.inited().await?;
+        if inited {
+            return Err(RvError::ErrBarrierAlreadyInit);
+        }
+
+        seal_config.validate()?;
+
+        // Encode the seal configuration
+        let serialized_seal_config = serde_json::to_string(seal_config)?;
+
+        // Store the seal configuration
+        let pe = PhysicalBackendEntry {
+            key: SEAL_CONFIG_PATH.to_string(),
+            value: serialized_seal_config.as_bytes().to_vec(),
+        };
+        self.physical.put(&pe).await?;
+
+        let deprecated_key_set = BHashSet::default();
+        let pe = PhysicalBackendEntry {
+            key: DEPRECATED_UNSEAL_KEY_SET_PATH.to_string(),
+            value: serde_json::to_string(&deprecated_key_set)?.as_bytes().to_vec(),
+        };
+        self.physical.put(&pe).await?;
+
+        let barrier = &self.barrier;
+        // Generate a key encryption key, will be zeroized on drop.
+        let kek = barrier.generate_key()?;
+
+        // Initialize the barrier
+        barrier.init(kek.deref().as_slice()).await?;
+
+        let mut init_result = InitResult { secret_shares: Zeroizing::new(Vec::new()), root_token: String::new() };
+
+        // Unseal the barrier
+        barrier.unseal(kek.deref().as_slice()).await?;
+
+        let state_old = self.state.load_full();
+        let mut state = (*self.state.load_full()).clone();
+
+        state.hmac_key = barrier.derive_hmac_key()?;
+        state.system_view = Some(Arc::new(BarrierView::new(barrier.clone(), SYSTEM_BARRIER_PREFIX)));
+        state.sealed = false;
+        state.kek = kek.deref().clone();
+        self.state.store(Arc::new(state));
+
+        // KEK custody is delegated to the active seal provider. The default
+        // Shamir provider reproduces the original behaviour (split into
+        // operator shares, or the raw KEK for a 1-of-1 config); an HSM provider
+        // wraps the KEK under the device and returns no shares (auto-unseal).
+        init_result.secret_shares = self.seal_provider().init_kek(kek.deref().as_slice(), seal_config).await?;
+
+        defer! (
+            // Ensure the barrier is re-sealed
+            let _ = barrier.seal();
+            self.state.store(state_old);
+        );
+
+        // Perform initial setup
+        self.post_unseal().await?;
+
+        // Generate a new root token
+        if let Some(tokens) = self.kernel_services.tokens() {
+            init_result.root_token = tokens.mint_root_token().await?;
+        } else {
+            log::error!("get auth module failed!");
+        }
+
+        // Prepare to re-seal
+        self.pre_seal()?;
+
+        Ok(init_result)
+    }
+
+    pub fn get_system_view(&self) -> Option<Arc<BarrierView>> {
+        self.state.load().system_view.clone()
+    }
+
+    /// Persist the FerroGate `require_machine_identity` enforcement flag to the
+    /// system view and update the in-memory fast-path mirror. Called by the
+    /// `auth/ferrogate/config` write handler. A `false` value is persisted too
+    /// (rather than deleting the key) so the stored state is unambiguous.
+    pub async fn set_require_machine_identity(&self, required: bool) -> Result<(), RvError> {
+        if let Some(view) = self.get_system_view() {
+            let entry = StorageEntry {
+                key: FERROGATE_REQUIRE_MI_PATH.to_string(),
+                value: if required { b"true".to_vec() } else { b"false".to_vec() },
+            };
+            view.put(&entry).await?;
+        }
+        self.require_machine_identity.store(required, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Load the FerroGate `require_machine_identity` flag from the system view
+    /// into the in-memory mirror. Absent key (mount never configured) ⇒
+    /// `false`. Called once at `post_unseal` so the very first authenticated
+    /// request after unseal sees the correct, restart-durable value.
+    pub async fn load_require_machine_identity(&self) -> Result<(), RvError> {
+        let required = match self.get_system_view() {
+            Some(view) => view
+                .get(FERROGATE_REQUIRE_MI_PATH)
+                .await?
+                .is_some_and(|e| e.value == b"true"),
+            None => false,
+        };
+        self.require_machine_identity.store(required, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Persist the AppRole mandatory-machine gate to the system view and update
+    /// the in-memory mirror. Called by the `auth/approle/config` write handler.
+    pub async fn set_approle_require_machine(&self, required: bool) -> Result<(), RvError> {
+        if let Some(view) = self.get_system_view() {
+            let entry = StorageEntry {
+                key: APPROLE_REQUIRE_MACHINE_PATH.to_string(),
+                value: if required { b"true".to_vec() } else { b"false".to_vec() },
+            };
+            view.put(&entry).await?;
+        }
+        self.approle_require_machine.store(required, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Load the AppRole mandatory-machine gate from the system view into the
+    /// in-memory mirror. Absent key (never configured) ⇒ `true` (mandatory by
+    /// default). Called once at `post_unseal`.
+    pub async fn load_approle_require_machine(&self) -> Result<(), RvError> {
+        let required = match self.get_system_view() {
+            Some(view) => view
+                .get(APPROLE_REQUIRE_MACHINE_PATH)
+                .await?
+                .map(|e| e.value != b"false")
+                .unwrap_or(true),
+            None => true,
+        };
+        self.approle_require_machine.store(required, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Load persisted DoS-protection state (thresholds + manual bans) from the
+    /// system view into the in-memory guard. Called once at `post_unseal` and
+    /// again on each periodic refresh (see the server's sweep task) so a manual
+    /// ban applied on one HA node converges on the others. Best-effort: a read
+    /// or decode failure leaves the guard on its current (seeded) config rather
+    /// than blocking unseal.
+    pub async fn load_dos_state(&self) -> Result<(), RvError> {
+        let store = crate::dos::DosStore::new(self)?;
+        match store.get_stored().await? {
+            // A persisted value wins over the startup `[dos]` seed.
+            Some(state) => {
+                self.dos_guard.set_config(state.config);
+                self.dos_guard.load_manual_bans(&state.manual_bans);
+            }
+            // Fresh install: keep the guard's seeded (or default) config and
+            // persist it once, so the stored value is stable from here on.
+            None => {
+                store.put_config(&self.dos_guard.config()).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reload only the manual-ban set and sweep expired in-memory state. Called
+    /// on the periodic refresh timer; cheaper than a full `load_dos_state` and
+    /// never touches the live thresholds an operator may have just changed.
+    pub async fn refresh_dos_bans(&self) -> Result<(), RvError> {
+        let store = crate::dos::DosStore::new(self)?;
+        let state = store.get().await?;
+        self.dos_guard.load_manual_bans(&state.manual_bans);
+        self.dos_guard.sweep();
+        Ok(())
+    }
+
+    /// Persist new DoS thresholds and update the in-memory guard atomically
+    /// from the operator's point of view (storage first, then memory).
+    pub async fn set_dos_config(&self, config: crate::dos::DosConfig) -> Result<(), RvError> {
+        let store = crate::dos::DosStore::new(self)?;
+        store.put_config(&config).await?;
+        self.dos_guard.set_config(config);
+        Ok(())
+    }
+
+    /// Apply a manual ban: persist it, then enforce it in the local guard.
+    pub async fn dos_manual_ban(
+        &self,
+        ip: std::net::IpAddr,
+        ttl_secs: u64,
+        reason: &str,
+    ) -> Result<(), RvError> {
+        let until_unix = self.dos_guard.manual_ban(ip, ttl_secs, reason);
+        let store = crate::dos::DosStore::new(self)?;
+        store
+            .add_manual_ban(crate::dos::ManualBan { ip, until_unix, reason: reason.to_string() })
+            .await
+    }
+
+    /// Lift any ban on `ip`: remove it from the local guard and drop any
+    /// persisted manual record. Returns whether an in-memory ban existed.
+    pub async fn dos_unban(&self, ip: std::net::IpAddr) -> Result<bool, RvError> {
+        let existed = self.dos_guard.unban(ip);
+        let store = crate::dos::DosStore::new(self)?;
+        store.remove_manual_ban(ip).await?;
+        Ok(existed)
+    }
+
+    pub fn get_logical_backend(&self, logical_type: &str) -> Result<Arc<LogicalBackendNewFunc>, RvError> {
+        self.mounts_router().get_backend(logical_type)
+    }
+
+    pub fn add_logical_backend(&self, logical_type: &str, backend: Arc<LogicalBackendNewFunc>) -> Result<(), RvError> {
+        self.mounts_router().add_backend(logical_type, backend)
+    }
+
+    pub fn delete_logical_backend(&self, logical_type: &str) -> Result<(), RvError> {
+        self.mounts_router().delete_backend(logical_type)
+    }
+
+    pub fn add_handler(&self, handler: Arc<dyn Handler>) -> Result<(), RvError> {
+        let handlers = self.handlers.load();
+        if handlers.iter().any(|h| h.name() == handler.name()) {
+            return Err(RvError::ErrCoreHandlerExist);
+        }
+
+        let mut handlers = (*self.handlers.load_full()).clone();
+
+        handlers.push(handler);
+        self.handlers.store(Arc::new(handlers));
+        Ok(())
+    }
+
+    pub fn delete_handler(&self, handler: Arc<dyn Handler>) -> Result<(), RvError> {
+        let mut handlers = (*self.handlers.load_full()).clone();
+        handlers.retain(|h| h.name() != handler.name());
+        self.handlers.store(Arc::new(handlers));
+        Ok(())
+    }
+
+    pub fn add_auth_handler(&self, auth_handler: Arc<dyn AuthHandler>) -> Result<(), RvError> {
+        let auth_handlers = self.auth_handlers.load();
+        if auth_handlers.iter().any(|h| h.name() == auth_handler.name()) {
+            return Err(RvError::ErrCoreHandlerExist);
+        }
+
+        let mut auth_handlers = (*self.auth_handlers.load_full()).clone();
+
+        auth_handlers.push(auth_handler);
+        self.auth_handlers.store(Arc::new(auth_handlers));
+
+        // update auth_module
+        if let Some(tokens) = self.kernel_services.tokens() {
+            tokens.set_auth_handlers(self.auth_handlers.load().clone());
+        }
+
+        Ok(())
+    }
+
+    pub fn delete_auth_handler(&self, auth_handler: Arc<dyn AuthHandler>) -> Result<(), RvError> {
+        let mut auth_handlers = (*self.auth_handlers.load_full()).clone();
+        auth_handlers.retain(|h| h.name() != auth_handler.name());
+        self.auth_handlers.store(Arc::new(auth_handlers));
+
+        // update auth_module
+        if let Some(tokens) = self.kernel_services.tokens() {
+            tokens.set_auth_handlers(self.auth_handlers.load().clone());
+        }
+
+        Ok(())
+    }
+
+    pub async fn seal_config(&self) -> Result<SealConfig, RvError> {
+        let pe = self.physical.get(SEAL_CONFIG_PATH).await?;
+
+        if pe.is_none() {
+            return Err(RvError::ErrCoreSealConfigNotFound);
+        }
+
+        let config: SealConfig = serde_json::from_slice(pe.unwrap().value.as_slice())?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub async fn deprecated_unseal_keys_set(&self) -> Result<BHashSet, RvError> {
+        let pe = self
+            .physical
+            .get(DEPRECATED_UNSEAL_KEY_SET_PATH)
+            .await?
+            .ok_or(RvError::ErrCoreDeprecatedUnsealKeySetNotFound)?;
+        let used_key_set: BHashSet = serde_json::from_slice(pe.value.as_slice())?;
+        Ok(used_key_set)
+    }
+
+    pub fn sealed(&self) -> bool {
+        self.state.load().sealed
+    }
+
+    pub fn unseal_progress(&self) -> usize {
+        self.state.load().unseal_key_shares.len()
+    }
+
+    pub async fn do_unseal(&self, key: &[u8], once: bool) -> Result<bool, RvError> {
+        let inited = self.barrier.inited().await?;
+        if !inited {
+            return Err(RvError::ErrBarrierNotInit);
+        }
+
+        let sealed = self.barrier.sealed()?;
+        if !sealed {
+            return Err(RvError::ErrBarrierUnsealed);
+        }
+
+        let (min, mut max) = self.barrier.key_length_range();
+        max += SHAMIR_OVERHEAD;
+        if key.len() < min || key.len() > max {
+            return Err(RvError::ErrBarrierKeyInvalid);
+        }
+
+        let mut state = (*self.state.load_full()).clone();
+        let config = self.seal_config().await?;
+        if state.unseal_key_shares.iter().any(|v| *v == key) {
+            return Ok(false);
+        }
+
+        let mut deprecated_key_set = self.deprecated_unseal_keys_set().await;
+        if let Ok(deprecated_key_set) = &deprecated_key_set {
+            if deprecated_key_set.contains(key) {
+                return Err(RvError::ErrBarrierKeyDeprecated);
+            }
+        }
+
+        state.unseal_key_shares.push(key.to_vec());
+        if state.unseal_key_shares.len() < config.secret_threshold as usize {
+            self.state.store(Arc::new(state));
+            return Ok(false);
+        }
+
+        let kek: Zeroizing<Vec<u8>>;
+        if config.secret_threshold == 1 {
+            kek = Zeroizing::new(state.unseal_key_shares[0].clone());
+        } else if let Some(res) = ShamirSecret::combine(state.unseal_key_shares.clone()) {
+            kek = Zeroizing::new(res);
+        } else {
+            //TODO
+            state.unseal_key_shares.clear();
+            self.state.store(Arc::new(state));
+            return Err(RvError::ErrBarrierKeyInvalid);
+        }
+
+        // Unseal the barrier
+        if let Err(e) = self.barrier.unseal(kek.as_slice()).await {
+            state.unseal_key_shares.clear();
+            self.state.store(Arc::new(state));
+            return Err(e);
+        }
+
+        let unseal_key_shares = Zeroizing::new(state.unseal_key_shares.clone());
+        state.unseal_key_shares.clear();
+        state.hmac_key = self.barrier.derive_hmac_key()?;
+        state.system_view = Some(Arc::new(BarrierView::new(self.barrier.clone(), SYSTEM_BARRIER_PREFIX)));
+        state.sealed = false;
+        state.kek = kek.deref().clone();
+        self.state.store(Arc::new(state));
+
+        log::info!(target: "security", "vault unsealed");
+
+        // Perform initial setup
+        if let Err(e) = self.post_unseal().await {
+            let mut state = (*self.state.load_full()).clone();
+            state.unseal_key_shares.clear();
+            state.kek.clear();
+            state.hmac_key.clear();
+            state.system_view = None;
+            state.sealed = true;
+            self.state.store(Arc::new(state));
+            return Err(e);
+        }
+
+        if once {
+            if let Ok(deprecated_key_set) = &mut deprecated_key_set {
+                for key in unseal_key_shares.iter() {
+                    deprecated_key_set.insert(key);
+                }
+
+                let pe = PhysicalBackendEntry {
+                    key: DEPRECATED_UNSEAL_KEY_SET_PATH.to_string(),
+                    value: serde_json::to_string(deprecated_key_set)?.as_bytes().to_vec(),
+                };
+                self.physical.put(&pe).await?;
+            }
+        }
+
+        Ok(true)
+    }
+
+    pub async fn unseal(&self, key: &[u8]) -> Result<bool, RvError> {
+        self.do_unseal(key, false).await
+    }
+
+    /// HSM auto-unseal: recover the KEK from the local HSM (no operator shares)
+    /// and bring the barrier up. Returns `Ok(false)` when the active seal
+    /// provider is share-based, and `Ok(true)` when already unsealed. Fail
+    /// closed: any error leaves the barrier sealed so an unreachable or
+    /// unenrolled HSM never opens the vault (spec § fail-closed).
+    pub async fn auto_unseal(&self) -> Result<bool, RvError> {
+        let provider = self.seal_provider();
+        if provider.requires_shares() {
+            return Ok(false);
+        }
+
+        let inited = self.barrier.inited().await?;
+        if !inited {
+            return Err(RvError::ErrBarrierNotInit);
+        }
+        if !self.barrier.sealed()? {
+            return Ok(true);
+        }
+
+        let kek = provider.recover_kek().await?;
+
+        self.barrier.unseal(kek.as_slice()).await?;
+
+        let mut state = (*self.state.load_full()).clone();
+        state.unseal_key_shares.clear();
+        state.hmac_key = self.barrier.derive_hmac_key()?;
+        state.system_view = Some(Arc::new(BarrierView::new(self.barrier.clone(), SYSTEM_BARRIER_PREFIX)));
+        state.sealed = false;
+        state.kek = kek.deref().clone();
+        self.state.store(Arc::new(state));
+
+        log::info!(target: "security", "vault auto-unsealed via HSM");
+
+        if let Err(e) = self.post_unseal().await {
+            let mut state = (*self.state.load_full()).clone();
+            state.unseal_key_shares.clear();
+            state.kek.clear();
+            state.hmac_key.clear();
+            state.system_view = None;
+            state.sealed = true;
+            self.state.store(Arc::new(state));
+            let _ = self.barrier.seal();
+            return Err(e);
+        }
+
+        Ok(true)
+    }
+
+    /// Unseals the bastion_vault once and immediately generates new unseal keys.
+    ///
+    /// This method performs a one-time unseal operation that automatically invalidates
+    /// the used unseal keys and generates a fresh set of keys for future use. This is
+    /// a security feature that prevents replay attacks and ensures that unseal keys
+    /// can only be used once.
+    ///
+    /// # Arguments
+    /// - `key`: The unseal key to use for the unseal operation
+    ///
+    /// # Returns
+    /// A `Result` containing new unseal keys if successful, or an error if the operation fails.
+    ///
+    /// # Errors
+    /// - Returns `RvError::ErrBarrierUnsealing` if the unseal operation fails or insufficient keys
+    /// - Returns errors from `do_unseal()` if the unseal process encounters issues
+    /// - Returns errors from `generate_unseal_keys()` if key generation fails
+    ///
+    /// # Security Features
+    /// - Marks used unseal keys as deprecated to prevent reuse
+    /// - Automatically generates fresh unseal keys after successful unseal
+    /// - Provides protection against replay attacks
+    /// - Ensures forward secrecy by invalidating old keys
+    ///
+    /// # Usage
+    /// This method is typically used in high-security environments where unseal keys
+    /// should only be valid for a single use, or in automated systems that need to
+    /// rotate keys after each unseal operation.
+    pub async fn unseal_once(&self, key: &[u8]) -> Result<Zeroizing<Vec<Vec<u8>>>, RvError> {
+        let unseal = self.do_unseal(key, true).await?;
+        if unseal {
+            self.generate_unseal_keys().await
+        } else {
+            Err(RvError::ErrBarrierUnsealing)
+        }
+    }
+
+    pub async fn seal(&self) -> Result<(), RvError> {
+        let inited = self.barrier.inited().await?;
+        if !inited {
+            return Err(RvError::ErrBarrierNotInit);
+        }
+
+        let sealed = self.barrier.sealed()?;
+        if sealed {
+            return Err(RvError::ErrBarrierSealed);
+        }
+
+        self.pre_seal()?;
+
+        let mut state = (*self.state.load_full()).clone();
+        state.sealed = true;
+        state.system_view = None;
+        state.unseal_key_shares.clear();
+        state.hmac_key.clear();
+        state.kek.clear();
+        self.state.store(Arc::new(state));
+
+        log::info!(target: "security", "vault sealed");
+        self.barrier.seal()
+    }
+
+    /// Generates new unseal keys using Shamir's Secret Sharing.
+    ///
+    /// This method creates a new set of unseal keys by splitting the current Key Encryption Key (KEK)
+    /// using Shamir's Secret Sharing scheme. The generated keys can be used to unseal the bastion_vault
+    /// in the future. This is typically called after a successful unseal operation to provide
+    /// new keys for the next seal/unseal cycle.
+    ///
+    /// # Returns
+    /// A `Result` containing a zeroizing vector of unseal key shares, or an error if generation fails.
+    ///
+    /// # Errors
+    /// - Returns `RvError::ErrBarrierSealed` if the barrier is currently sealed
+    /// - Returns `RvError::ErrBarrierKeyInvalid` if the KEK is empty or invalid
+    /// - Returns Shamir secret splitting errors if the key splitting process fails
+    ///
+    /// # Security
+    /// - Uses the current KEK as the source for key generation
+    /// - Applies Shamir's Secret Sharing with configured threshold and share count
+    /// - Returns zeroizing vector to ensure secure memory cleanup
+    /// - Generated keys are cryptographically independent of previous keys
+    ///
+    /// # Usage
+    /// This method should only be called when the bastion_vault is unsealed and a valid KEK exists.
+    /// It's commonly used in key rotation scenarios or after unseal_once operations.
+    pub async fn generate_unseal_keys(&self) -> Result<Zeroizing<Vec<Vec<u8>>>, RvError> {
+        if self.state.load().sealed {
+            return Err(RvError::ErrBarrierSealed);
+        }
+
+        let kek = self.state.load().kek.clone();
+        if kek.is_empty() {
+            return Err(RvError::ErrBarrierKeyInvalid);
+        }
+
+        let config = self.seal_config().await?;
+        ShamirSecret::split(kek.as_slice(), config.secret_shares, config.secret_threshold)
+    }
+
+    // The background schedulers below are spawned tasks whose `JoinHandle` is
+    // dropped on purpose (detached): the loops run until the process exits. The
+    // `let _ = start_*()` form is therefore intentional, not an un-awaited
+    // future, so the `let_underscore_future` lint is allowed for this method.
+    #[allow(clippy::let_underscore_future)]
+    async fn post_unseal(&self) -> Result<(), RvError> {
+        // Multi-tenancy: re-root activation is the default for every install. We
+        // decide and (for existing installs) run the non-destructive copy +
+        // verify *before* any system view or root mount table is built, so the
+        // root tenant's reads and writes land at the active prefix from the
+        // first operation. Fails safe: an unverifiable copy leaves the legacy
+        // layout authoritative for this boot (see
+        // `modules::namespace::migrate::resolve_root_activation`).
+        // Delegated rather than called by name: the provider is registered by
+        // the assembly layer, because at this point `ModuleManager::setup` has
+        // not run and no module could have published itself. See
+        // `kernel_api::pipeline::RerootActivation`.
+        if let Some(reroot) = self.kernel_services.reroot() {
+            if let Some(core_arc) = self.self_ptr.upgrade() {
+                if let Some(root_uuid) = reroot.resolve(core_arc.as_ref()).await? {
+                    self.activate_reroot(&root_uuid)?;
+                }
+            }
+        }
+
+        self.module_manager.setup(self)?;
+
+        // Perform initial setup
+        self.mounts_router()
+            .load_or_default(self.barrier.as_storage(), Some(&self.state.load().hmac_key), self.mount_entry_hmac_level)
+            .await?;
+
+        self.mounts_router().setup(self.self_ptr.upgrade().unwrap().clone())?;
+
+        self.module_manager.init(self).await?;
+
+        // (Re-root copy + activation already ran at the top of post_unseal, via
+        // `resolve_root_activation`, before any view/mount-table was built.)
+
+        // One-shot datafix: re-key legacy bare resource owner/share records to
+        // their namespace-scoped form. Runs here because it needs both the
+        // identity stores (created in `module_manager.init` above) and the
+        // loaded root mount table. Marker-guarded, so it is a no-op on every
+        // boot after the first. Best-effort: a failure leaves the legacy keys
+        // in place, which denies access (fail-closed) rather than granting it,
+        // and must not stop the server from coming up — it retries next unseal.
+        if let Some(datafix) = self.kernel_services.ns_scope_datafix() {
+            match datafix.run_if_needed().await {
+                // `Some(summary)` is the ran-and-did-something arm; `None` is
+                // the marker-already-set arm, which is every boot after the
+                // first. Same branch the `report.skipped` flag drove.
+                Ok(Some(summary)) => {
+                    log::info!(
+                        target: "migration",
+                        "owner/share ns-scope datafix: {summary}",
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => log::warn!(
+                    target: "migration",
+                    "owner/share ns-scope datafix failed (will retry on next unseal): {e}",
+                ),
+            }
+        }
+
+        // Load the restart-durable FerroGate machine-identity enforcement flag
+        // into its in-memory mirror before serving requests. Best-effort: a
+        // read failure leaves the safe default (false) rather than blocking
+        // unseal — operators can re-assert it via the config endpoint.
+        if let Err(e) = self.load_require_machine_identity().await {
+            log::warn!("failed to load ferrogate require_machine_identity flag: {e}");
+        }
+
+        // Load the AppRole mandatory-machine gate (defaults to true/mandatory).
+        if let Err(e) = self.load_approle_require_machine().await {
+            log::warn!("failed to load approle require_machine flag: {e}");
+        }
+
+        // Load persisted DoS-protection thresholds + manual bans into the
+        // in-memory guard. Best-effort: a failure leaves the guard on its
+        // seeded config rather than blocking unseal.
+        if let Err(e) = self.load_dos_state().await {
+            log::warn!("failed to load DoS-protection state: {e}");
+        }
+
+        if let Some(mounts_monitor) = self.mounts_monitor.load().as_ref() {
+            mounts_monitor.add_mounts_router(self.mounts_router().clone());
+            mounts_monitor.start();
+        }
+
+        // Install the audit broker. Uses the barrier-derived HMAC
+        // key for entry redaction. Re-hydrates any persisted device
+        // configs. Silent on failure — the broker is optional
+        // infrastructure; ops continue, just without audit, unless
+        // operators require it via the fail-closed policy.
+        let hmac_key = self.state.load().hmac_key.clone();
+        if !hmac_key.is_empty() {
+            let Some(system_view) = self.system_view() else {
+                return Err(RvError::ErrBarrierSealed);
+            };
+            match crate::audit::AuditBroker::new(system_view, hmac_key).await {
+                Ok(broker) => {
+                    // First-boot convenience: if the operator pointed
+                    // `log_dir` at a directory but never enabled any
+                    // audit device, register a file device on
+                    // `<log_dir>/audit.log` so the third structured
+                    // stream lights up alongside operations + security.
+                    // No-ops on re-unseal once a device exists.
+                    if let Some((path, rotate_size, rotate_keep)) =
+                        crate::logging::default_audit_options()
+                    {
+                        if !broker.has_devices() {
+                            let mut opts = std::collections::HashMap::new();
+                            opts.insert(
+                                "file_path".to_string(),
+                                path.to_string_lossy().into_owned(),
+                            );
+                            opts.insert(
+                                "rotate_size_bytes".to_string(),
+                                rotate_size.to_string(),
+                            );
+                            opts.insert("rotate_keep".to_string(), rotate_keep.to_string());
+                            let cfg = crate::audit::AuditDeviceConfig {
+                                path: "file/".to_string(),
+                                device_type: "file".to_string(),
+                                description: "default file audit device".to_string(),
+                                options: opts,
+                                ..Default::default()
+                            };
+                            if let Err(e) = broker.enable_device(cfg).await {
+                                log::warn!(
+                                    "audit: failed to auto-enable default file device at {}: {e}",
+                                    path.display()
+                                );
+                            } else {
+                                log::info!(
+                                    "audit: auto-enabled default file device at {}",
+                                    path.display()
+                                );
+                            }
+                        }
+                    }
+                    self.audit_broker.store(Some(broker));
+                }
+                Err(e) => log::warn!("audit broker init failed: {e}. Audit disabled."),
+            }
+        }
+
+        // Boot the scheduled-exports tick loop. Single-process scheduler;
+        // HA leader gating lands in a follow-up. Detached task — the
+        // returned JoinHandle is dropped intentionally so the loop runs
+        // until the process exits. The loop self-skips when sealed.
+        // Registered by the assembly layer, for the same reason the engines'
+        // schedulers stopped being named here in Phase 2: the scheduled-export
+        // runner is a facade subsystem, and `Core` naming it was an edge from
+        // Tier 2 straight up into Tier 4. See
+        // `kernel_api::pipeline::UnsealHook`.
+        if let Some(core_arc) = self.self_ptr.upgrade() {
+            for hook in self.kernel_services.unseal_hooks() {
+                hook.on_unseal(core_arc.clone());
+            }
+        }
+
+        // Boot every module's own background loops — the PKI auto-tidy
+        // sweep, the four Rustion loops, LDAP rotation, the File Resources
+        // sync, the access-audit reconciler, the cert-lifecycle renewal
+        // scheduler. Each is a detached task that self-skips while sealed.
+        //
+        // This block used to name six engines' entry points by path, which
+        // made `Core` depend on the engines it is supposed to be independent
+        // of — the same edge `VaultCtx` removed in the other direction. The
+        // kernel now asks the module set; what is in it is the assembly
+        // point's business. See roadmaps/workspace-decomposition.md Phase 2.
+        if let Some(core_arc) = self.self_ptr.upgrade() {
+            self.module_manager.start_background(core_arc);
+        }
+
+        Ok(())
+    }
+
+    /// Flush every cache layer (policy, token, secret) and zeroize the
+    /// held payloads. Called from `pre_seal` and from the
+    /// `sys/cache/flush` admin endpoint. Never returns an error — any
+    /// individual flush failure is logged and the rest of the layers
+    /// still get flushed, because half-flushed is worse than
+    /// best-effort-flushed on a seal hot path.
+    pub fn flush_caches(&self) {
+        // Per-module caches — the policy ACL cache and the token cache today.
+        // Asked of the module set rather than of two named modules, so the
+        // kernel does not have to know which of them hold a cache.
+        self.module_manager.flush_caches();
+
+        // Secret read cache (ciphertext-only `CachingBackend` decorator).
+        // `Backend: Any` gives us a runtime downcast without wiring a
+        // dedicated trait method.
+        let any_backend: &dyn std::any::Any = &*self.physical;
+        if let Some(caching) = any_backend.downcast_ref::<crate::cache::CachingBackend>() {
+            caching.clear();
+        }
+    }
+
+    fn pre_seal(&self) -> Result<(), RvError> {
+        // Flush every cache layer before releasing the unseal key: cached
+        // material must not survive into the sealed state even briefly.
+        self.flush_caches();
+        // Drop the audit broker so a subsequent unseal gets a fresh
+        // one tied to the new hmac_key.
+        self.audit_broker.store(None);
+        if let Some(mounts_monitor) = self.mounts_monitor.load().as_ref() {
+            mounts_monitor.remove_mounts_router(self.mounts_router().clone());
+            mounts_monitor.stop();
+        }
+        self.module_manager.cleanup(self)?;
+        self.unload_mounts()?;
+        Ok(())
+    }
+
+    pub async fn handle_request(&self, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let mut resp = None;
+        let mut err: Option<RvError> = None;
+        let handlers = self.handlers.load();
+        let now = chrono::Utc::now().timestamp();
+
+        if self.state.load().sealed {
+            return Err(RvError::ErrBarrierSealed);
+        }
+
+        // Multi-tenancy: converge the X-BastionVault-Namespace header onto the
+        // path-prefix form so the shared router dispatches namespace mounts
+        // uniformly. No-op when no namespace header is present.
+        // `None` when no namespace module is mounted, which is a legitimate
+        // minimal-embedded configuration; every step below is a no-op for a
+        // vault with no namespaces anyway.
+        let pipeline = self.kernel_services.request_pipeline();
+        if let Some(p) = pipeline.as_ref() {
+            p.rewrite_request(req).await?;
+        }
+
+        match self.handle_pre_route_phase(&handlers, req).await {
+            Ok(ret) => resp = ret,
+            Err(e) => err = Some(e),
+        }
+
+        // Multi-tenancy: enforce token namespace binding once auth is resolved
+        // and before any backend dispatch. A token may not be used outside its
+        // namespace (except a child_visible token into a descendant).
+        if resp.is_none() && err.is_none() {
+            if let Some(p) = pipeline.as_ref() {
+                if let Err(e) = p.enforce_token_binding(req).await {
+                    err = Some(e);
+                }
+            }
+        }
+
+        // Multi-tenancy: per-namespace request-rate quota (429 when exhausted).
+        // A no-op for root / unlimited namespaces.
+        if resp.is_none() && err.is_none() {
+            if let Some(p) = pipeline.as_ref() {
+                if let Err(e) = p.enforce_request_rate(req).await {
+                    err = Some(e);
+                }
+            }
+        }
+
+        // Multi-tenancy: per-namespace storage-bytes quota (507 when the write
+        // would cross the cap). A no-op for non-writes / root / unlimited.
+        if resp.is_none() && err.is_none() {
+            if let Some(p) = pipeline.as_ref() {
+                if let Err(e) = p.enforce_write_storage_quota(req).await {
+                    err = Some(e);
+                }
+            }
+        }
+
+        if resp.is_none() && err.is_none() {
+            match self.handle_route_phase(&handlers, req).await {
+                Ok(ret) => resp = ret,
+                Err(e) => err = Some(e),
+            }
+
+            if err.is_none() {
+                if let Err(e) = self.handle_post_route_phase(&handlers, req, &mut resp).await {
+                    err = Some(e)
+                }
+            }
+        }
+
+        if err.is_none() {
+            if let Err(e) = self.handle_log_phase(&handlers, req, &mut resp).await {
+                // The audit-broker fan-out is the only fallible step in
+                // the log phase; a device write failure (which must
+                // never go unnoticed) lands here. Count it before
+                // propagating — the request still fails closed.
+                self.stats.record_audit_write_failure(now);
+                err = Some(e);
+            }
+        }
+
+        // Request-outcome statistics for the operational dashboard.
+        self.record_request_stats(req, &resp, err.as_ref(), now);
+
+        // Persist permission denials to the audit trail so they show up
+        // on the Audit page (the in-memory counter above is per-node and
+        // lost on restart). Best-effort — the 403 is returned unchanged
+        // whether or not the append succeeds.
+        if matches!(err.as_ref(), Some(RvError::ErrPermissionDenied)) {
+            if let Some(sink) = self.kernel_services.denial_audit() {
+                sink.record_denial(req).await;
+            }
+        }
+
+        if err.is_some() {
+            return Err(err.unwrap());
+        }
+
+        Ok(resp)
+    }
+
+    /// Tally one request's outcome into the in-memory dashboard
+    /// counters. Cheap (a few relaxed atomics + a path check) and called
+    /// for every request.
+    ///
+    /// A failed login is any attempt on a `/login` route that did not
+    /// yield an auth token — that covers both hard errors *and* the
+    /// `Ok(error_response)` path the credential backends use for a bad
+    /// password (no `auth` on the response). A denial is
+    /// `ErrPermissionDenied` on any route. A denied login increments
+    /// both, since they answer different operator questions.
+    fn record_request_stats(
+        &self,
+        req: &Request,
+        resp: &Option<Response>,
+        err: Option<&RvError>,
+        now: i64,
+    ) {
+        self.stats.record_request(now);
+
+        if req.path.contains("/login") {
+            let authenticated = resp.as_ref().map(|r| r.auth.is_some()).unwrap_or(false);
+            if !authenticated {
+                self.stats.record_auth_failure(now);
+            }
+        }
+
+        if matches!(err, Some(RvError::ErrPermissionDenied)) {
+            self.stats.record_denied(now);
+        }
+    }
+
+    async fn handle_pre_route_phase(
+        &self,
+        handlers: &Vec<Arc<dyn Handler>>,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        req.handle_phase = HandlePhase::PreRoute;
+        for handler in handlers.iter() {
+            match handler.pre_route(req).await {
+                Ok(Some(res)) => return Ok(Some(res)),
+                Err(e) if e != RvError::ErrHandlerDefault => return Err(e),
+                _ => continue,
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn handle_route_phase(
+        &self,
+        handlers: &Vec<Arc<dyn Handler>>,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        req.handle_phase = HandlePhase::Route;
+        if let Some(bind_handler) = req.get_handler() {
+            match bind_handler.route(req).await {
+                Ok(res) => return Ok(res),
+                Err(e) if e != RvError::ErrHandlerDefault => return Err(e),
+                _ => {}
+            }
+        }
+
+        for handler in handlers.iter() {
+            match handler.route(req).await {
+                Ok(Some(res)) => return Ok(Some(res)),
+                Err(e) if e != RvError::ErrHandlerDefault => return Err(e),
+                _ => continue,
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn handle_post_route_phase(
+        &self,
+        handlers: &Vec<Arc<dyn Handler>>,
+        req: &mut Request,
+        resp: &mut Option<Response>,
+    ) -> Result<(), RvError> {
+        req.handle_phase = HandlePhase::PostRoute;
+        if let Some(bind_handler) = req.get_handler() {
+            match bind_handler.post_route(req, resp).await {
+                Ok(_) => return Ok(()),
+                Err(e) if e != RvError::ErrHandlerDefault => return Err(e),
+                _ => {}
+            }
+        }
+
+        for handler in handlers.iter() {
+            match handler.post_route(req, resp).await {
+                Err(e) if e != RvError::ErrHandlerDefault => return Err(e),
+                _ => continue,
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_log_phase(
+        &self,
+        handlers: &Vec<Arc<dyn Handler>>,
+        req: &mut Request,
+        resp: &mut Option<Response>,
+    ) -> Result<(), RvError> {
+        req.handle_phase = HandlePhase::Log;
+        if let Some(bind_handler) = req.get_handler() {
+            match bind_handler.log(req, resp).await {
+                Ok(_) => return Ok(()),
+                Err(e) if e != RvError::ErrHandlerDefault => return Err(e),
+                _ => {}
+            }
+        }
+
+        for handler in handlers.iter() {
+            match handler.log(req, resp).await {
+                Err(e) if e != RvError::ErrHandlerDefault => return Err(e),
+                _ => continue,
+            }
+        }
+
+        // Audit broker fan-out. Emits one `response`-type entry per
+        // request covering the final state. Phase-1 simplification:
+        // the spec calls for separate pre-dispatch request entries;
+        // those require a second hook higher in the pipeline and are
+        // deferred. Fail-closed per design — if any device errors,
+        // the request fails here.
+        if let Some(broker) = self.audit_broker.load().as_ref().cloned() {
+            if broker.has_devices() {
+                let mut entry = crate::audit::AuditEntry::from_response(
+                    req,
+                    resp,
+                    None,
+                    broker.hmac_key(),
+                    false,
+                );
+                broker.log(&mut entry).await?;
+            }
+        }
+
+        Ok(())
+    }
+}
+

@@ -1,0 +1,66 @@
+[package]
+name = "bv-engine-files"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's file-resource engine: versioned encrypted files with SMB/SFTP/SCP sync"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 3 of the workspace decomposition
+# (roadmaps/workspace-decomposition.md § Phase 3).
+#
+# The two sync targets stay optional for the same reason they always were: the
+# SMB and SSH stacks are multi-MiB of compiled code that a deployment which
+# never pushes a file elsewhere should not pay for.
+
+[dependencies]
+bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
+bv-context = { path = "../bv-context", version = "0.1.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
+bv-utils = { path = "../bv-utils", version = "0.1.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.1.0", registry = "uox-bastionvault" }
+
+async-trait = "0.1"
+base64 = "0.22"
+chrono = "0.4"
+derive_more = "2.1.1"
+log = "0.4"
+maybe-async = "0.2"
+serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
+serde_json = "^1.0"
+sha2 = "0.11"
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "io-util"] }
+
+russh = { version = "=0.61.1", optional = true, default-features = true }
+russh-sftp = { version = "2", optional = true }
+smolder-smb-core = { version = "0.3", optional = true }
+
+[features]
+default = []
+files_smb = ["smolder-smb-core"]
+files_ssh_sync = ["russh", "russh-sftp"]
+sync_handler = [
+    "maybe-async/is_sync",
+    "bv-storage/sync_handler",
+    "bv-logical/sync_handler",
+    "bv-utils/sync_handler",
+    "bv-kernel-api/sync_handler",
+]
+
+# Lints this crate's code trips, all of which the root crate already allows.
+[lints.clippy]
+field_reassign_with_default = "allow"
+type_complexity = "allow"
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Pulled in by the `#[maybe_async::maybe_async]` attribute's async
+    # expansion, which is a token stream to a static `use` scan.
+    "async-trait",
+    # Package name != lib name (`smolder-smb-core` -> `smolder_core`), which a
+    # static `use` scan cannot follow.
+    "smolder-smb-core",
+]

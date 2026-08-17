@@ -1,5 +1,15 @@
 # Feature: Audit Logging (Tamper-Evident, HMAC Chain)
 
+> **Paths in this document predate the workspace decomposition.** As of Phase 1
+> of [`roadmaps/workspace-decomposition.md`](../roadmaps/workspace-decomposition.md),
+> `src/audit/{mod,entry,broker,file_device,hash_chain}.rs` are
+> `crates/bv-audit/src/{lib,entry,broker,file_device,hash_chain}.rs`.
+> `src/audit/` still exists in the root crate and still re-exports all of it,
+> so `bastion_vault::audit::*` paths in code are unchanged; what stayed behind
+> is `sys_emit.rs` (kernel glue — it resolves tokens through `TokenService`)
+> and the end-to-end tests. One signature changed: `AuditBroker::new` takes the
+> root `BarrierView` rather than a `&dyn VaultCtx`.
+
 ## Summary
 
 Add a pluggable audit logging subsystem that records every authenticated request and response through one or more audit devices, with tamper-evident hash chaining across entries and HMAC-based integrity verification.

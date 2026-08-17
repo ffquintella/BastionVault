@@ -89,9 +89,10 @@ jobs:
           # No submodules on purpose. plugins-ext, IronRDP and third_party/hiqlite
           # are submodules for local editing only — the build consumes all three
           # as *git* dependencies (see [patch.crates-io] in Cargo.toml and the
-          # ironrdp entries in gui/src-tauri/Cargo.toml), and
-          # third_party/ferrogate-sdk-rust is vendored in-tree. Cargo fetches what
-          # it needs; cloning the submodules would only cost minutes.
+          # ironrdp entries in gui/src-tauri/Cargo.toml), and the FerroGate
+          # ferro-* crates come from the public uox-ferrogate registry. Cargo
+          # fetches what it needs; cloning the submodules would only cost
+          # minutes.
           submodules: false
 
       # Catches the "tagged a release but forgot `make bump-patch`" mistake

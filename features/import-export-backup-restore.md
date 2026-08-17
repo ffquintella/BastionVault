@@ -21,7 +21,7 @@ All features described in this spec are now implemented:
 
 - **Backup/Restore**: `src/backup/format.rs` (BVBK binary format with HMAC-SHA256), `src/backup/create.rs`, `src/backup/restore.rs`. CLI: `bvault operator backup/restore`. HTTP: `POST /v1/sys/backup`, `POST /v1/sys/restore`.
 - **Export/Import**: `src/backup/export.rs` (decrypted JSON), `src/backup/import.rs` (with `--force`). CLI: `bvault operator export/import`. HTTP: `GET /v1/sys/export/{path}`, `POST /v1/sys/import/{mount}`.
-- **Backend Migration**: `src/storage/migrate.rs` + `src/cli/command/operator_migrate.rs` for direct encrypted backend-to-backend copy.
+- **Backend Migration**: `crates/bv-storage/src/migrate.rs` + `src/cli/command/operator_migrate.rs` for direct encrypted backend-to-backend copy.
 - **Desktop GUI (File -> Backup)**: `gui/src-tauri/src/commands/backup.rs` wraps
   the in-tree BVBK blob in an Argon2id + ChaCha20-Poly1305 password envelope
   (`BVBKP1`) so the file can leave the vault without the barrier HMAC key.

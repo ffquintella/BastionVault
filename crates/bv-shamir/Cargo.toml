@@ -1,0 +1,21 @@
+[package]
+name = "bv-shamir"
+version = "0.1.0"
+edition = "2021"
+description = "Shamir secret sharing over GF(256) — BastionVault's unseal-key splitting"
+# Not plain Apache-2.0 like the rest of the workspace. This module is a
+# modified derivative of MIT-licensed code (© 2016 Chris MacNaughton), whose
+# notice is retained in the crate docs. Inside the monolith that nuance was
+# carried by the file header alone; as a separately publishable crate the
+# manifest has to state it, and a combined work needs the conjunctive form.
+license = "MIT AND Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# A genuine Tier 0 leaf: the whole module referenced exactly one thing from the
+# monolith (`crate::errors`). See roadmaps/workspace-decomposition.md § Phase 1.
+[dependencies]
+bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
+rand = "^0.10"
+zeroize = { version = "1.8.2", features = ["zeroize_derive"] }

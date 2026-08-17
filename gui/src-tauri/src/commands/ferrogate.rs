@@ -275,7 +275,7 @@ pub async fn ferrogate_delete_machine(state: State<'_, AppState>, id: String) ->
 // at `auth/<mount>/login` to self-enrol this host.
 //
 // The MIA wire format, DPoP proof construction, and JWK thumbprint are reused
-// verbatim from the CLI (`bastion_vault::cli::command::ferrogate_mia`) so they
+// verbatim from the CLI (`bastion_vault::modules::credential::ferrogate::mia`) so they
 // stay byte-identical to what the server's `ferro-child-verify` verifies —
 // there is no second copy of the crypto to drift.
 
@@ -333,12 +333,12 @@ fn classify_enrolment_error(text: &str) -> Option<&'static str> {
 /// Returns `(child_token_jws, dpop_proof_jws, spiffe_id)`.
 #[cfg(unix)]
 async fn mia_mint(socket: String, audience: String, ttl: u32) -> Result<(String, String, String), String> {
-    use bastion_vault::cli::command::ferrogate_mia::{self, DpopKey};
+    use bastion_vault::modules::credential::ferrogate::mia::{self, DpopKey};
     tokio::task::spawn_blocking(move || {
         let dpop = DpopKey::generate();
-        let child = ferrogate_mia::request_child_token(&socket, &audience, &dpop.jkt(), ttl)?;
+        let child = mia::request_child_token(&socket, &audience, &dpop.jkt(), ttl)?;
         let proof = dpop.proof("POST", &audience);
-        let spiffe = ferrogate_mia::jws_claim_str(&child.jws, "iss").unwrap_or_default();
+        let spiffe = mia::jws_claim_str(&child.jws, "iss").unwrap_or_default();
         Ok((child.jws, proof, spiffe))
     })
     .await
@@ -356,7 +356,7 @@ pub fn ferrogate_default_socket(environment: Option<String>) -> String {
     #[cfg(unix)]
     {
         let env = environment.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        bastion_vault::cli::command::ferrogate_mia::resolve_mia_socket_for(env)
+        bastion_vault::modules::credential::ferrogate::mia::resolve_mia_socket_for(env)
     }
     #[cfg(not(unix))]
     {
@@ -372,7 +372,7 @@ pub fn ferrogate_default_socket(environment: Option<String>) -> String {
 #[cfg(unix)]
 #[tauri::command]
 pub fn ferrogate_list_environments() -> Vec<String> {
-    bastion_vault::cli::command::ferrogate_mia::list_environments()
+    bastion_vault::modules::credential::ferrogate::mia::list_environments()
 }
 
 #[cfg(not(unix))]
@@ -393,14 +393,14 @@ pub fn ferrogate_list_environments() -> Vec<String> {
 pub async fn ferrogate_autoconfig(
     audience: String,
     environment: Option<String>,
-) -> CmdResult<bastion_vault::cli::command::ferrogate_mia::FerrogateAutoConfig> {
-    use bastion_vault::cli::command::ferrogate_mia;
+) -> CmdResult<bastion_vault::modules::credential::ferrogate::mia::FerrogateAutoConfig> {
+    use bastion_vault::modules::credential::ferrogate::mia;
     let audience = audience.trim().to_string();
     let env = environment.as_deref().map(str::trim).filter(|s| !s.is_empty());
     if let Some(e) = env {
-        ferrogate_mia::validate_environment(e).map_err(crate::error::CommandError::from)?;
+        mia::validate_environment(e).map_err(crate::error::CommandError::from)?;
     }
-    ferrogate_mia::build_autoconfig(audience, env).await.map_err(Into::into)
+    mia::build_autoconfig(audience, env).await.map_err(Into::into)
 }
 
 #[cfg(not(unix))]
@@ -423,7 +423,7 @@ fn norm_socket(socket: String, environment: Option<String>) -> Result<String, St
     let env = environment.as_deref().map(str::trim).filter(|e| !e.is_empty());
     #[cfg(unix)]
     if let Some(e) = env {
-        bastion_vault::cli::command::ferrogate_mia::validate_environment(e)?;
+        bastion_vault::modules::credential::ferrogate::mia::validate_environment(e)?;
     }
     Ok(ferrogate_default_socket(env.map(str::to_string)))
 }

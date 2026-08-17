@@ -25,7 +25,7 @@ const RUNS_PREFIX: &str = "core/scheduled_exports/runs/";
 const MAX_RUNS_PER_SCHEDULE: usize = 100;
 
 /// Stateless helper struct. Storage is passed per-call so the caller can
-/// supply the barrier-decrypted view (`core.barrier.as_storage()`) without
+/// supply the barrier-decrypted view (`core.barrier().as_storage()`) without
 /// us holding a long-lived `Arc<dyn Storage>` across the seal/unseal
 /// cycle.
 #[derive(Default, Clone)]

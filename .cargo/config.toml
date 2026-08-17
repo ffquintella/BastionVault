@@ -62,6 +62,49 @@
 # [build]
 # incremental = false
 
+# ── Cloudsmith Cargo registry (uox/bastionvault) ──────────────────
+#
+# Publishing target for the workspace's library crates. See
+# `docs/publishing-crates.md` and `roadmaps/workspace-decomposition.md`
+# Phase 6 for the release model.
+#
+# This is the SPARSE index, not the git index Cloudsmith's web UI still
+# shows. Both endpoints are live:
+#
+#   sparse+https://cargo.cloudsmith.io/uox/bastionvault/                (this one)
+#   https://dl.cloudsmith.io/public/uox/bastionvault/cargo/index.git    (git, fallback)
+#
+# Sparse is the better default: cargo fetches only the index entries a
+# resolve actually needs over plain HTTPS, instead of cloning and then
+# incrementally fetching the whole index repo. It is what crates.io has
+# defaulted to since cargo 1.68, and it needs no `git` on PATH — which
+# matters for the container build and for Windows CI runners. Switch to
+# the `.git` URL only if a Cloudsmith-side sparse outage forces it.
+#
+# ⚠ NEVER put a registry token in this file. It is TRACKED IN GIT, and
+# cargo has no `config.local.toml` override to hide one in. Tokens go in
+# `$CARGO_HOME/credentials.toml` (written by `cargo login`, outside the
+# repo) or in `CARGO_REGISTRIES_UOX_BASTIONVAULT_TOKEN` for CI. Run
+# `make crates-login` and it will do the right thing.
+#
+# Per-machine registry overrides likewise belong in
+# `$CARGO_HOME/config.toml`, not here.
+#
+# ── Cloudsmith Cargo registry (uox/ferrogate) ─────────────────────
+#
+# Source of the FerroGate SDK verifier crates (`ferro-crypto`,
+# `ferro-child-verify`, `ferro-svid-verify`) that `auth/ferrogate/`
+# depends on. Public repository — anonymous reads work, so no token is
+# needed to build, and CI needs no extra secret.
+#
+# Same sparse-vs-git reasoning as above. These crates used to be
+# vendored under `third_party/ferrogate-sdk-rust/`; they now resolve
+# from here, pinned to an exact version in the root `Cargo.toml` and to
+# a checksum in `Cargo.lock`.
+[registries]
+uox-bastionvault = { index = "sparse+https://cargo.cloudsmith.io/uox/bastionvault/" }
+uox-ferrogate = { index = "sparse+https://cargo.cloudsmith.io/uox/ferrogate/" }
+
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-Clink-arg=/PDBPAGESIZE:8192"]
 

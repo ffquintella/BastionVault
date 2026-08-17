@@ -30,8 +30,9 @@ use arc_swap::ArcSwap;
 use serde_json::{Map, Value};
 use zeroize::Zeroizing;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
-    cli::config::Config,
+    config::Config,
     core::Core,
     errors::RvError,
     logical::{Request, Response},
@@ -47,42 +48,123 @@ use crate::{
     storage::{Backend, BarrierType},
 };
 
-#[cfg(feature = "storage_mysql")]
-extern crate diesel;
-
 pub mod api;
 pub mod audit;
 pub mod backup;
 pub mod exchange;
 pub mod plugins;
 pub mod scheduled_exports;
-pub mod cache;
-pub mod cli;
-pub mod context;
-pub mod core;
+/// The read caches, now a module of the Tier 0 `bv-storage` crate — they and
+/// `storage` reference each other, so they are one compilation unit either
+/// way. Re-exported here so `bastion_vault::cache::*` paths are unchanged.
+pub use bv_storage::cache;
+/// The command-line client moved to the `bvault-cli` crate in Phase 4, which
+/// sits above this one and above `bv-server`. It carried 111 of the last 300
+/// commits' churn inside this compilation unit.
+///
+/// The server configuration model it used to own is [`config`] now — it was
+/// never CLI code. It travelled into `bv-core` in Phase 4.5, next to the
+/// `Core` that takes one.
+pub use bv_core::config;
+/// Moved to the Tier 0 `bv-context` crate. Not in the roadmap's Tier 0 list,
+/// but it belongs there and `bv-logical` needs it.
+pub use bv_context as context;
+/// The vault kernel — `Core`, the mount table, the module registry, the seal
+/// path and the server config model — now the Tier 2 `bv-core` crate. It sits
+/// *below* the kernel tier, which is what makes the split work: `Core` does
+/// not name a module. See roadmaps/workspace-decomposition.md § Phase 4.5.
+pub use bv_core::core;
 pub mod dos;
-pub mod errors;
-pub mod handler;
-pub mod hsm;
-pub mod http;
-pub mod logging;
-pub mod logical;
+/// `RvError` now lives in the Tier 0 `bv-errors` crate. Re-exported here so
+/// `crate::errors::RvError` and `bastion_vault::errors::RvError` keep
+/// resolving unchanged. See roadmaps/workspace-decomposition.md § Phase 1.
+pub use bv_errors as errors;
+/// The three `RvError` constructor macros are `#[macro_export]`ed by
+/// `bv-errors`, which places them at *that* crate's root. Re-exporting them
+/// here restores the crate-root macro namespace the ~490 bare
+/// `bv_error_string!(...)` call sites resolve through, and keeps the
+/// `crate::bv_error_string!(...)` form working too.
+pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
+/// The request-pipeline hook traits, now in `bv-logical` alongside the
+/// `Request` that carries an `Arc<dyn Handler>`.
+pub use bv_logical::handler;
+/// HSM backends for the seal path — a module of `bv-core`.
+pub use bv_core::hsm;
+/// The kernel contract modules depend on instead of `Core` — the Tier 1
+/// `bv-kernel-api` crate. `impl VaultCtx for Core` travelled into `bv-core`
+/// with the `Core` it implements for; the orphan rule allows it there and
+/// nowhere else.
+pub use bv_kernel_api as kernel_api;
+/// The HTTP(S) API surface moved to the `bv-server` crate in Phase 4, which
+/// sits *above* this one — it is the assembly layer, and it is what took
+/// `actix-web` and `actix-tls` out of this crate's dependency graph. There is
+/// deliberately no re-export: a shim here would put the web framework back.
+/// Structured logging setup — a module of `bv-core`, which needs
+/// `default_audit_options` when it bootstraps the audit device at unseal.
+pub use bv_core::logging;
+/// Request/Response/Backend/Path/Field — the Tier 0 `bv-logical` crate.
+pub use bv_logical as logical;
+/// The eight backend-definition macros are `#[macro_export]`ed by
+/// `bv-logical`, which places them at *that* crate's root. Re-exporting them
+/// here restores the crate-root macro namespace every engine's
+/// `new_logical_backend!` / `new_path!` call site resolves through. Same
+/// arrangement as `bv_error_string!` above; the `_internal` halves are the
+/// recursive arms the public macros expand into and must travel with them.
+pub use bv_logical::{
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
+    new_path_internal, new_secret, new_secret_internal,
+};
 pub mod metrics;
-pub mod module_manager;
+/// The module registry — a module of `bv-core`.
+pub use bv_core::module_manager;
 pub mod modules;
-pub mod mount;
-pub mod router;
+/// The mount table's management operations — a module of `bv-core`. The
+/// engine-facing view is `bv_kernel_api::mount`, which this re-exports.
+pub use bv_core::mount;
+/// The request router, moved into `bv-kernel-api`: engines reach it through
+/// [`kernel_api::VaultCtx::router`], so it sits below them.
+pub use bv_kernel_api::router;
+/// Diesel's generated table definition, moved into `bv-storage` alongside its
+/// only reader (the MySQL backend).
 #[cfg(feature = "storage_mysql")]
-pub mod schema;
-pub mod seal;
-pub mod server_info;
-pub mod shamir;
-pub mod stats;
-pub mod storage;
-pub mod utils;
+pub use bv_storage::schema;
+/// Seal/unseal and the KEK providers — a module of `bv-core`.
+pub use bv_core::seal;
+/// Process-level server facts (version, uptime, listen address) — a module of
+/// `bv-core`.
+pub use bv_core::server_info;
+/// Moved to the Tier 0 `bv-shamir` crate — the one directory in the original
+/// Phase 1 list that really did reference nothing but `crate::errors`.
+pub use bv_shamir as shamir;
+/// Dashboard counters, moved into `bv-kernel-api` alongside
+/// [`kernel_api::VaultCtx::stats`], which hands them out.
+pub use bv_kernel_api::stats;
+/// Barriers, physical backends and the read caches — the Tier 0 `bv-storage`
+/// crate, and the extraction that takes hiqlite, diesel and rusty-s3 out of
+/// the monolith's compilation unit.
+pub use bv_storage as storage;
+/// Shared helpers — the Tier 1 `bv-utils` crate.
+pub use bv_utils as utils;
 
-#[cfg(test)]
+/// Shared test fixtures. Also reachable behind the `test-support` feature,
+/// which `bv-server` turns on to build its HTTP harness on top of them.
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_utils;
+
+/// The two backend tests that need a second vault process; see the module
+/// docs for why they are not next to the backends in `bv-storage`.
+#[cfg(test)]
+mod storage_backend_tests;
+
+/// Engine tests that need `test_utils`, and so could not travel into the
+/// engine crates. See the module docs.
+#[cfg(test)]
+mod engine_tests;
+
+/// `Core`'s own tests, which could not travel into `bv-core`. See the module
+/// docs.
+#[cfg(test)]
+mod core_tests;
 
 /// When the test binary is spawned as a plugin subprocess (the
 /// `ProcessRuntime` does this — same exe acts as runner *and* plugin
@@ -119,6 +201,57 @@ pub const BUILD_TIME: &str = build_time::build_time_utc!();
 /// bastion_vault version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The module set a default BastionVault server mounts.
+///
+/// This list lives here, at the assembly point, and not in
+/// `module_manager.rs`: naming the 17 concrete engine types is exactly the
+/// dependency that would stop `bv-core` from being a crate independent of the
+/// engines. See roadmaps/workspace-decomposition.md Phase 2 step 4.
+///
+/// **Order is load-bearing.** The namespace module is the multi-tenancy
+/// registry and must initialise before the system module's request handlers
+/// reference its store.
+pub fn default_modules() -> Vec<Box<dyn crate::module_manager::ModuleFactory>> {
+    use crate::modules::{
+        cert_lifecycle::CertLifecycleModule, files::FilesModule, identity::IdentityModule,
+        kv::KvModule, kv_v2::KvV2Module, ldap::LdapModule, namespace::NamespaceModule,
+        notifications::NotificationsModule, pki::PkiModule, resource::ResourceModule,
+        resource_group::ResourceGroupModule, rustion::RustionModule, ssh::SshModule,
+        ssh_broker::SshBrokerModule, system::SystemModule, totp::TotpModule,
+        transit::TransitModule, Module,
+    };
+
+    // One `Box::new(...)` per engine. The closure shape is what the blanket
+    // `ModuleFactory` impl accepts.
+    macro_rules! factory {
+        ($ty:ident) => {
+            Box::new(|c: Arc<Core>| Arc::new($ty::new(c)) as Arc<dyn Module>)
+                as Box<dyn crate::module_manager::ModuleFactory>
+        };
+    }
+
+    vec![
+        factory!(KvModule),
+        factory!(KvV2Module),
+        factory!(PkiModule),
+        factory!(ResourceModule),
+        factory!(FilesModule),
+        factory!(IdentityModule),
+        factory!(NotificationsModule),
+        factory!(ResourceGroupModule),
+        factory!(RustionModule),
+        factory!(SshModule),
+        factory!(SshBrokerModule),
+        factory!(TotpModule),
+        factory!(TransitModule),
+        factory!(LdapModule),
+        factory!(CertLifecycleModule),
+        // Namespace before system: see the note above.
+        factory!(NamespaceModule),
+        factory!(SystemModule),
+    ]
+}
+
 pub struct BastionVault {
     pub core: ArcSwap<Core>,
     pub token: ArcSwap<String>,
@@ -139,6 +272,10 @@ impl BastionVault {
         // when enabled. No-op when `secret_cache_ttl_secs == 0` (default),
         // so existing deployments see zero overhead.
         let backend = crate::storage::wrap_with_cache(backend, &cache_config)?;
+        // The mount table cannot name the plugin runtime (it sits below it in
+        // the crate graph), so the runtime registers its `plugin:<name>`
+        // resolver here, at the assembly point, before any mount can be built.
+        crate::plugins::register_mount_resolver();
         let mut core = Core::new_with_barrier(backend, barrier_type);
         if let Some(conf) = config {
             core.mount_entry_hmac_level = conf.mount_entry_hmac_level;
@@ -157,53 +294,60 @@ impl BastionVault {
             core.mounts_monitor.store(Some(Arc::new(MountsMonitor::new(core.clone(), core.mounts_monitor_interval))));
         }
 
-        core.module_manager.set_default_modules(core.clone())?;
+        // The plugin runtime publishes itself as a `PluginHost` capability so
+        // the notifications engine can dispatch a plugin channel without
+        // naming `crate::plugins`. Not a `Module::register`, because the
+        // runtime is not a module. See src/plugins/kernel_service.rs.
+        core.kernel_services.set_plugin_host(crate::plugins::PluginRuntimeHost::new(core.clone()));
+
+        // The namespace re-root migration runs at the very top of
+        // `post_unseal` — before `ModuleManager::setup`, so before any module
+        // exists to have published it, and deliberately before any system view
+        // or root mount table is built. Registered here for the same reason
+        // the plugin host is: this is the assembly point.
+        core.kernel_services
+            .set_reroot(Arc::new(crate::modules::namespace::kernel_service::NamespaceReroot));
+
+        // The scheduled-export tick loop, which `Core::post_unseal` used to
+        // start by name. A `Weak` handle, so registering it does not keep the
+        // vault alive through the registry that lives on it.
+        core.kernel_services.add_unseal_hook(Arc::new(
+            crate::scheduled_exports::runner::ScheduledExportsHook::new(Arc::downgrade(&core)),
+        ));
+
+        core.module_manager().set_modules(default_modules(), core.clone())?;
 
         // add auth_module
         let auth_module = AuthModule::new(core.clone())?;
-        core.module_manager.add_module(Arc::new(auth_module))?;
+        core.module_manager().add_module(Arc::new(auth_module), &core.kernel_services)?;
 
         // add policy_module
         let policy_module = PolicyModule::new(core.clone());
-        core.module_manager.add_module(Arc::new(policy_module))?;
+        core.module_manager().add_module(Arc::new(policy_module), &core.kernel_services)?;
 
         // add credential module: userpass
         let userpass_module = UserPassModule::new(core.clone());
-        core.module_manager.add_module(Arc::new(userpass_module))?;
+        core.module_manager().add_module(Arc::new(userpass_module), &core.kernel_services)?;
 
         // add credential module: approle
         let approle_module = AppRoleModule::new(core.clone());
-        core.module_manager.add_module(Arc::new(approle_module))?;
+        core.module_manager().add_module(Arc::new(approle_module), &core.kernel_services)?;
 
         // add credential module: fido2
         let fido2_module = modules::credential::fido2::Fido2Module::new(core.clone());
-        core.module_manager.add_module(Arc::new(fido2_module))?;
+        core.module_manager().add_module(Arc::new(fido2_module), &core.kernel_services)?;
 
         // add credential module: oidc
         let oidc_module = OidcModule::new(core.clone());
-        core.module_manager.add_module(Arc::new(oidc_module))?;
+        core.module_manager().add_module(Arc::new(oidc_module), &core.kernel_services)?;
 
         // add credential module: saml (Phase 1+2 — config + roles only)
         let saml_module = SamlModule::new(core.clone());
-        core.module_manager.add_module(Arc::new(saml_module))?;
+        core.module_manager().add_module(Arc::new(saml_module), &core.kernel_services)?;
 
         // add credential module: ferrogate (Phase 1 — config + admin lifecycle; login stubbed)
         let ferrogate_module = FerroGateModule::new(core.clone());
-        core.module_manager.add_module(Arc::new(ferrogate_module))?;
-
-        let handlers = core.handlers.load().clone();
-        for handler in handlers.iter() {
-            match handler.post_config(core.clone(), config) {
-                Ok(_) => {
-                    continue;
-                }
-                Err(error) => {
-                    if error != RvError::ErrHandlerDefault {
-                        return Err(error);
-                    }
-                }
-            }
-        }
+        core.module_manager().add_module(Arc::new(ferrogate_module), &core.kernel_services)?;
 
         Ok(Self { core: ArcSwap::new(core), token: ArcSwap::new(Arc::new(String::new())) })
     }

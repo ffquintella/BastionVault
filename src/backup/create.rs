@@ -67,6 +67,7 @@ pub async fn create_backup(
 
 #[cfg(test)]
 mod tests {
+    use crate::kernel_api::VaultCtx;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -112,7 +113,7 @@ mod tests {
             new_unseal_test_bastion_vault("test_backup_all_namespaces").await;
 
         let store = core
-            .module_manager
+            .module_manager()
             .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
             .and_then(|m| m.store())
             .expect("namespace store");
@@ -137,10 +138,10 @@ mod tests {
         )
         .await;
 
-        let hmac_key = core.barrier.derive_hmac_key().unwrap();
+        let hmac_key = core.barrier().derive_hmac_key().unwrap();
         let mut out = Vec::new();
         let copied =
-            super::create_backup(core.physical.as_ref(), &hmac_key, &mut out, false).await.unwrap();
+            super::create_backup(core.physical().as_ref(), &hmac_key, &mut out, false).await.unwrap();
         assert!(copied > 0);
 
         // Walk the frames and collect the keys the backup actually carries.

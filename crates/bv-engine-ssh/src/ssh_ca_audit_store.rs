@@ -1,0 +1,106 @@
+//! SSH CA configuration audit trail.
+//!
+//! Captures lifecycle events for the SSH engine's signing CA — create
+//! (write `config/ca`, classical or PQC) and delete — in a
+//! system-view-backed append log so they surface on the admin Audit
+//! page alongside policy / identity-group / asset-group / share /
+//! user / file / login events.
+//!
+//! Storage:
+//!   sys/ssh-ca-audit/<20-digit-nanos> -> SshCaAuditEntry JSON
+//!
+//! Mirrors `FileAuditStore` / `LoginAuditStore`: flat, timestamp-keyed,
+//! immutable entries, cheap prefix-walk to list. Constructed lazily by
+//! the SSH-module handlers on first access (no post_unseal wiring
+//! needed). The underlying `BarrierView` is an `Arc`, so re-deriving it
+//! on each audit write is cheap.
+
+use std::sync::Arc;
+
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+
+use crate::kernel_api::VaultCtx;
+use crate::{
+    errors::RvError,
+    storage::{barrier_view::BarrierView, Storage, StorageEntry},
+};
+
+const SSH_CA_AUDIT_SUB_PATH: &str = "ssh-ca-audit/";
+
+/// One row in the SSH CA audit log.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SshCaAuditEntry {
+    pub ts: String,
+    /// `entity_id` of the caller, with the same `caller_audit_actor`
+    /// fallback used elsewhere (display name, then empty → "root" at
+    /// the aggregator).
+    pub actor_entity_id: String,
+    /// `"create" | "delete"`.
+    pub op: String,
+    /// Mount path the CA lives under (e.g. `"ssh/"`), so the audit row
+    /// points at the right engine when multiple SSH mounts exist.
+    #[serde(default)]
+    pub mount: String,
+    /// CA algorithm at the time of the event (e.g. `"ssh-ed25519"` or
+    /// `"ssh-mldsa65@openssh.com"`). Empty on delete.
+    #[serde(default)]
+    pub algorithm: String,
+}
+
+pub struct SshCaAuditStore {
+    view: Arc<BarrierView>,
+}
+
+#[maybe_async::maybe_async]
+impl SshCaAuditStore {
+    pub fn from_core(core: &dyn VaultCtx) -> Result<Arc<Self>, RvError> {
+        let Some(system_view) = core.system_view() else {
+            return Err(RvError::ErrBarrierSealed);
+        };
+        let view = Arc::new(system_view.new_sub_view(SSH_CA_AUDIT_SUB_PATH));
+        Ok(Arc::new(Self { view }))
+    }
+
+    /// Append an entry. `ts` is stamped here if empty. Key is monotonic
+    /// nanoseconds so `get_keys` + sort yields chronological order.
+    pub async fn append(&self, mut entry: SshCaAuditEntry) -> Result<(), RvError> {
+        if entry.ts.is_empty() {
+            entry.ts = Utc::now().to_rfc3339();
+        }
+        let key = hist_seq();
+        let value = serde_json::to_vec(&entry)?;
+        self.view.put(&StorageEntry { key, value }).await
+    }
+
+    /// Full log, newest first. One bulk read instead of a prefix walk
+    /// plus a `get` per entry.
+    pub async fn list_all(&self) -> Result<Vec<SshCaAuditEntry>, RvError> {
+        Ok(Self::decode(self.view.get_entries("").await?))
+    }
+
+    /// Entries from `since_key` onward (inclusive), newest first.
+    /// `since_key` is a zero-padded nanosecond key (see [`hist_seq`]),
+    /// so the aggregator can bound a time-window scan to the recent tail
+    /// instead of reading all history.
+    pub async fn list_since(&self, since_key: &str) -> Result<Vec<SshCaAuditEntry>, RvError> {
+        Ok(Self::decode(self.view.get_entries_since("", since_key).await?))
+    }
+
+    /// Sort newest-first (keys are monotonic nanoseconds, so descending
+    /// key order is reverse-chronological) and decode each value,
+    /// skipping any that fail to parse.
+    fn decode(mut entries: Vec<StorageEntry>) -> Vec<SshCaAuditEntry> {
+        entries.sort_by(|a, b| b.key.cmp(&a.key));
+        entries.into_iter().filter_map(|e| serde_json::from_slice::<SshCaAuditEntry>(&e.value).ok()).collect()
+    }
+}
+
+/// 20-digit zero-padded nanoseconds since UNIX epoch. Matches the
+/// other append-only audit logs so they sort chronologically.
+fn hist_seq() -> String {
+    let n = Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
+    format!("{:020}", n.max(0) as u128)
+}

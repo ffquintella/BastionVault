@@ -24,6 +24,7 @@
 pub mod catalog;
 pub mod config;
 pub mod grants;
+pub mod kernel_service;
 pub mod logical_backend;
 pub mod manifest;
 pub mod net_gate;
@@ -39,6 +40,7 @@ pub mod verifier;
 
 pub use catalog::{PluginCatalog, PluginRecord, PLUGIN_PREFIX};
 pub use config::ConfigStore;
+pub use kernel_service::PluginRuntimeHost;
 pub use logical_backend::{
     factory_for as plugin_logical_backend_factory, invoke_active_plugin, PluginLogicalBackend,
 };
@@ -51,6 +53,28 @@ pub use process_runtime::{
 pub use runtime::{InvokeOutput, InvokeOutcome, RuntimeError, WasmRuntime, DEFAULT_FUEL, DEFAULT_MEMORY_BYTES};
 
 /// Mount type-prefix that triggers the [`PluginLogicalBackend`] path.
-/// Used in `MountsRouter::get_backend` to dispatch `plugin:<name>`
-/// strings to the dynamic factory.
+/// A `plugin:<name>` mount type resolves to a backend bound to that plugin.
 pub const PLUGIN_MOUNT_PREFIX: &str = "plugin:";
+
+/// Teach the mount table how to resolve `plugin:<name>` mount types.
+///
+/// The mount table used to strip [`PLUGIN_MOUNT_PREFIX`] and call
+/// [`plugin_logical_backend_factory`] itself, which made `src/mount.rs` depend
+/// on this runtime. Registration inverts that edge: the runtime is the side
+/// that knows about plugins, so it is the side that speaks up.
+///
+/// Called from the assembly layer (`BastionVault::new`) rather than at mount
+/// time, and idempotent — see [`crate::mount::set_dynamic_backend_resolver`].
+///
+/// Catalog lookup stays deferred inside the returned factory, so registration
+/// order still does not matter as long as the plugin exists when the mount is
+/// actually used.
+pub fn register_mount_resolver() {
+    crate::mount::set_dynamic_backend_resolver(std::sync::Arc::new(|logical_type: &str| {
+        let name = logical_type.strip_prefix(PLUGIN_MOUNT_PREFIX)?;
+        if name.is_empty() {
+            return None;
+        }
+        Some(plugin_logical_backend_factory(name.to_string()))
+    }));
+}

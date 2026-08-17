@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use chrono::{DateTime, Local, Utc};
@@ -30,6 +30,7 @@ use cron::Schedule as CronSchedule;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     core::Core,
     errors::RvError,
@@ -63,7 +64,7 @@ pub fn start_scheduler(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
         let mut interval = tokio::time::interval(TICK_INTERVAL);
         loop {
             interval.tick().await;
-            if core.state.load().sealed {
+            if core.sealed() {
                 continue;
             }
             if let Err(e) = tick(&core, &store, last_fired.clone()).await {
@@ -78,7 +79,7 @@ async fn tick(
     store: &ScheduleStore,
     last_fired: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
 ) -> Result<(), RvError> {
-    let schedules = store.list(core.barrier.as_storage()).await?;
+    let schedules = store.list(core.barrier().as_storage()).await?;
     let now = Utc::now();
     for sched in schedules {
         if !sched.enabled {
@@ -163,7 +164,7 @@ async fn tick(
             body.insert("bytes_written".into(), serde_json::Value::Number(record.bytes_written.into()));
             let err_str = record.error.clone();
             crate::audit::emit_sys_audit(
-                &core_clone,
+                core_clone.as_ref(),
                 "",
                 &format!("sys/scheduled-exports/{}/run", sched_clone.id),
                 crate::logical::Operation::Write,
@@ -209,7 +210,7 @@ async fn resume_point(
     store: &ScheduleStore,
     schedule_id: &str,
 ) -> Option<DateTime<Utc>> {
-    let runs = store.list_runs(core.barrier.as_storage(), schedule_id).await.ok()?;
+    let runs = store.list_runs(core.barrier().as_storage(), schedule_id).await.ok()?;
     // `list_runs` sorts newest-first.
     let newest = runs.first()?;
     DateTime::parse_from_rfc3339(&newest.run_at)
@@ -223,7 +224,8 @@ pub async fn run_once(
     core: &Arc<Core>,
     sched: &Schedule,
 ) -> Result<(u64, DestinationKind), RvError> {
-    let storage = core.barrier.as_storage();
+    let __barrier = core.barrier();
+    let storage = __barrier.as_storage();
 
     // 1. Build the bvx.v1 document. An `all_namespaces` schedule fans out over
     //    every tenant (each namespace's data lives under its own barrier
@@ -446,5 +448,38 @@ mod tests {
         assert_eq!(due, prev + ChronoDuration::seconds(MAX_CATCHUP_SCAN as i64));
         // Still behind, so the next tick keeps making progress.
         assert!(latest_due(&every_second, due, now).is_some());
+    }
+}
+
+/// The scheduled-export runner as an unseal hook.
+///
+/// `Core::post_unseal` called [`start_scheduler`] by name until Phase 4.5.
+/// A unit struct registered by the assembly layer, which is the same shape
+/// the plugin host and the namespace re-root migration take: the runner is
+/// not a `Module`, so `Module::start_background` was never available to it.
+/// Holds a `Weak<Core>`, not an `Arc`. The registry lives *on* `Core`, so an
+/// owning handle here would be a reference cycle that leaks the whole vault —
+/// which matters for the desktop host, where cores are built and torn down
+/// in-process. Phase 2 reached the same conclusion for the Rustion background
+/// loops.
+///
+/// It captures the handle rather than using the `&dyn VaultCtx` it is passed
+/// because the runner needs the concrete `Core`: `exchange` reaches
+/// `module_manager`, which `VaultCtx` deliberately does not expose.
+pub struct ScheduledExportsHook {
+    core: Weak<Core>,
+}
+
+impl ScheduledExportsHook {
+    pub fn new(core: Weak<Core>) -> Self {
+        Self { core }
+    }
+}
+
+impl crate::kernel_api::pipeline::UnsealHook for ScheduledExportsHook {
+    fn on_unseal(&self, _ctx: Arc<dyn crate::kernel_api::VaultCtx>) {
+        if let Some(core) = self.core.upgrade() {
+            let _ = start_scheduler(core);
+        }
     }
 }

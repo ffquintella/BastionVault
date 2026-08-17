@@ -132,6 +132,17 @@ pub struct SelectedNode {
 }
 
 pub struct AppState {
+    /// The exchange import preview → apply cache.
+    ///
+    /// A field on `Core` until Phase 4.5 of the workspace decomposition, which
+    /// is where it stopped making sense: it is an in-memory, per-process,
+    /// TTL-bounded cache read only by an assembly layer, and `Core` naming
+    /// `exchange` was one of three edges pointing from the kernel down into a
+    /// facade subsystem. The HTTP server holds its own as actix app data; this
+    /// is the desktop host's equivalent. Behaviour is unchanged — it was
+    /// already per-process, so a preview minted here was never redeemable
+    /// anywhere else.
+    pub exchange_preview_store: bastion_vault::exchange::PreviewStore,
     pub mode: Mutex<VaultMode>,
     /// Embedded vault instance (only set in Embedded mode).
     pub vault: Mutex<Option<Arc<BastionVault>>>,
@@ -222,6 +233,7 @@ pub struct RustionSessionBundle {
 impl AppState {
     pub fn new() -> Self {
         Self {
+            exchange_preview_store: bastion_vault::exchange::PreviewStore::default(),
             mode: Mutex::new(VaultMode::Embedded),
             vault: Mutex::new(None),
             remote_client: Mutex::new(None),

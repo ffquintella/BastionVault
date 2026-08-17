@@ -31,6 +31,7 @@
 
 use std::sync::Arc;
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     core::Core,
     errors::RvError,
@@ -63,7 +64,7 @@ pub async fn all_namespace_indexes(
         mounts: MountIndex::from_core(core)?,
     }];
 
-    let Some(module) = core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+    let Some(module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
     else {
         return Ok(out);
     };
@@ -79,7 +80,7 @@ pub async fn all_namespace_indexes(
         if ns.is_root() {
             continue;
         }
-        match module.registry.ensure_router(core, &ns.uuid, &ns.path).await {
+        match module.registry.ensure_router(core.clone(), &ns.uuid, &ns.path).await {
             Ok(router) => match MountIndex::from_namespace_router(core, &router, &ns.uuid, &ns.path)
             {
                 Ok(mounts) => out.push(NamespaceIndex { path: ns.path.clone(), mounts }),
@@ -104,7 +105,8 @@ pub async fn export_all_namespaces(
     exporter: ExporterInfo,
     scope: ScopeSpec,
 ) -> Result<ExchangeDocument, RvError> {
-    let storage = core.barrier.as_storage();
+    let __barrier = core.barrier();
+    let storage = __barrier.as_storage();
     let mut warnings: Vec<String> = Vec::new();
     let indexes = all_namespace_indexes(core, &mut warnings).await?;
 
@@ -148,7 +150,8 @@ pub async fn import_document(
     dry_run: bool,
 ) -> Result<ImportResult, RvError> {
     document.validate_schema_tag().map_err(|_| RvError::ErrRequestInvalid)?;
-    let storage: &dyn Storage = core.barrier.as_storage();
+    let barrier = core.barrier();
+    let storage: &dyn Storage = barrier.as_storage();
 
     let mut result = ImportResult::default();
     let mut warnings: Vec<String> = Vec::new();
@@ -191,7 +194,7 @@ pub async fn import_document(
     // made on data the operator has already replaced.
     if !dry_run && document_carries_policies(document) {
         if let Some(policy_module) =
-            core.module_manager.get_module::<crate::modules::policy::PolicyModule>("policy")
+            core.module_manager().get_module::<crate::modules::policy::PolicyModule>("policy")
         {
             policy_module.policy_store.load().flush_caches();
         }
@@ -373,7 +376,7 @@ mod tests {
 
         let mounts = crate::exchange::scope::MountIndex::from_core(&core).unwrap();
         let doc = crate::exchange::scope::export_to_document(
-            core.barrier.as_storage(),
+            core.barrier().as_storage(),
             &mounts,
             ExporterInfo::default(),
             ScopeSpec { kind: ScopeKind::Full, include: vec![] },

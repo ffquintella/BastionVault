@@ -1,0 +1,112 @@
+[package]
+name = "bv-storage"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's storage barriers, physical backends and read caches"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 0 of the workspace decomposition
+# (roadmaps/workspace-decomposition.md § Phase 1). This is the crate that
+# moves hiqlite, diesel and rusty-s3 out of the monolith's compilation unit.
+#
+# `src/cache` is folded in rather than made its own crate: the two reference
+# each other (the caching decorator implements `Backend`; `wrap_with_cache`
+# installs it), so they are one compilation unit whether or not they are one
+# directory.
+
+[dependencies]
+bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
+bv-metrics = { path = "../bv-metrics", version = "0.1.0", registry = "uox-bastionvault" }
+bv_crypto = { path = "../bv_crypto", version = "0.1.0", registry = "uox-bastionvault" }
+
+aes-gcm = "0.10"
+arc-swap = "1"
+async-trait = "0.1"
+base64 = "0.22"
+better_default = "1.0.5"
+blake3 = "1.8"
+chrono = "0.4"
+dashmap = "6.1"
+hmac = "0.13"
+http = "1"
+libc = "0.2"
+lockfile = "0.4.0"
+log = "0.4"
+maybe-async = "0.2"
+rand = "^0.10"
+rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
+serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
+serde_json = "^1.0"
+sha2 = "0.11"
+stretto = "0.9"
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "process", "sync", "time", "io-util"] }
+ureq = { version = "3.3", features = ["json", "socks-proxy", "win-system-proxy"] }
+url = "2.5"
+zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
+
+# Optional, one per storage/target feature — see [features] below. All five
+# moved down from the root manifest with the code that uses them.
+diesel = { version = "2.3.8", features = ["mysql", "r2d2"], optional = true }
+r2d2 = { version = "0.8.10", optional = true }
+# Pinned to our fork submodule (`third_party/hiqlite`, branch `main-local`):
+# upstream v0.14.0 stable plus the raft-client socket-leak fix
+# (AbortOnDrop), which is still not upstreamed as of 2026-07. See the
+# `[patch.crates-io]` entry in the workspace root manifest.
+# `default-features = false` drops hiqlite's `backup` feature, which is what
+# pulled `cryptr/s3` -> `s3-simple` -> `quick-xml 0.39` into the tree
+# (RUSTSEC-2026-0194 / RUSTSEC-2026-0195, both DoS in XML parsing, no 0.39
+# patch release). We never call hiqlite's backup API — vault backups use our
+# own BVBK format in `bastion_vault::backup` — so the feature was dead
+# weight. The rest of hiqlite's defaults (`auto-heal`, `sqlite`, `toml`) are
+# re-listed explicitly so behaviour is unchanged.
+hiqlite = { version = "=0.14.0", optional = true, default-features = false, features = [
+    "auto-heal",
+    "sqlite",
+    "toml",
+    "dlock",
+] }
+# Cloud Storage Targets — S3 via rusty-s3 (URL signing + XML parsing only,
+# ~15 transitive deps). HTTP is handled by the existing `ureq` dep, so
+# enabling `cloud_s3` does not pull in reqwest / hyper / aws-sdk-*. See
+# `features/cloud-storage-backend.md`.
+rusty-s3 = { version = "0.10", optional = true }
+# OS keychain writer for `credentials_ref = "keychain:..."`. Uses the
+# platform-native secret store on macOS (Keychain) / Windows (Credential
+# Vault) / Linux (Secret Service). v4's default `v1` feature auto-selects the
+# platform store (zbus-based Secret Service on Linux — pure Rust, no dbus C
+# dep). Feature-gated so server-only operators who never use `keychain:`
+# refs don't carry the extra transitive deps.
+keyring = { version = "4", optional = true }
+
+[dev-dependencies]
+serial_test = "3.4"
+
+[features]
+default = []
+# Forwards to `bv-errors/storage_mysql` for the two MySQL-only `RvError`
+# variants, exactly as the root crate's feature of the same name does.
+storage_mysql = ["diesel", "r2d2", "bv-errors/storage_mysql"]
+storage_hiqlite = ["hiqlite"]
+sync_handler = ["maybe-async/is_sync"]
+cloud_s3 = ["rusty-s3"]
+cloud_onedrive = []
+cloud_gdrive = []
+cloud_dropbox = []
+cloud_keychain = ["keyring"]
+# Exposes the backend/barrier test fixtures (`test_support`) and the shared
+# backend conformance suite (`test`) to *other* crates' test builds. The root
+# crate turns it on through a dev-dependency, so a normal `cargo build` never
+# compiles it. Without this the fixtures would have to be duplicated: the
+# root crate's `test_utils` builds file backends, and two of the backend
+# tests here need the root crate's `bvault` CLI harness.
+test-support = []
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Pulled in by the `#[maybe_async::maybe_async]` attribute's async
+    # expansion, which is a token stream to a static `use` scan.
+    "async-trait",
+]

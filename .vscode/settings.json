@@ -2,6 +2,31 @@
     "rust-analyzer.linkedProjects": [
         "Cargo.toml"
     ],
+    // ── Keep rust-analyzer out of the main build lock ──────────────
+    //
+    // rust-analyzer runs `cargo check --workspace --all-targets` on every save
+    // (that is the default for `check.workspace` + `check.allTargets`, and both
+    // are left on deliberately — turning allTargets off would drop diagnostics
+    // inside the in-crate `#[cfg(test)]` modules where most of this repo's tests
+    // live).
+    //
+    // Without this setting that check runs in the SAME `target/` as your builds,
+    // and all cargo invocations share one build lock. They do not run in
+    // parallel: whichever loses the race blocks for as long as the winner takes.
+    // Observed on this tree: `make test-changed` for one small crate, whose own
+    // work is ~4s of CPU, spent 3m01s of its 3m27s wall time printing "Blocking
+    // waiting for file lock on build directory". AGENTS.md §5 records the same
+    // failure mode at 9m14s.
+    //
+    // `targetDir: true` moves rust-analyzer's artefacts to `target/rust-analyzer`,
+    // a separate directory with its own lock. Saving a file can no longer stall a
+    // test run, and a test run can no longer stall your diagnostics.
+    //
+    // Cost is disk: a second, check-only artefact set (rmeta, no final links).
+    // `target/` was 412 GB of a 954 GB volume when this was added, with 389 GB
+    // free. Run `make target-size` to see where it stands, and `make prune` to
+    // reclaim — scripts/prune-incremental.sh trims this directory too.
+    "rust-analyzer.cargo.targetDir": true,
     "rust-analyzer.cargo.features": ["storage_mysql"],
     // The `storage_mysql` feature pulls `mysqlclient-sys`, which needs
     // libmysqlclient. Homebrew's `mysql-client` is keg-only, so expose its

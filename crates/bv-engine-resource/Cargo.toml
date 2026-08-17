@@ -1,0 +1,56 @@
+[package]
+name = "bv-engine-resource"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's infrastructure-resource engine: assets, connection profiles and the connect-MFA gate"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 3 of the workspace decomposition
+# (roadmaps/workspace-decomposition.md § Phase 3).
+#
+# Provides the `ConnectMfaGate` engine contract every transport enforces, and
+# consumes `LoginClassPolicy` from the ssh-broker engine. Both go through
+# `bv-kernel-api`, so neither engine names the other.
+
+[dependencies]
+bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
+bv-context = { path = "../bv-context", version = "0.1.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.1.0", registry = "uox-bastionvault" }
+
+async-trait = "0.1"
+hex = "0.4"
+base64 = "0.22"
+chrono = "0.4"
+derive_more = "2.1.1"
+log = "0.4"
+maybe-async = "0.2"
+rand = "^0.10"
+serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
+serde_json = "^1.0"
+sha2 = "0.11"
+
+[features]
+default = []
+sync_handler = [
+    "maybe-async/is_sync",
+    "bv-storage/sync_handler",
+    "bv-logical/sync_handler",
+    "bv-kernel-api/sync_handler",
+]
+
+# Lints this crate's code trips, all of which the root crate already allows.
+[lints.clippy]
+field_reassign_with_default = "allow"
+type_complexity = "allow"
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Pulled in by the `#[maybe_async::maybe_async]` attribute's async
+    # expansion, which is a token stream to a static `use` scan.
+    "async-trait",
+]

@@ -45,6 +45,656 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-08-17
+
+### Added
+
+#### Change-scoped test runs: `make test-changed`
+- **The inner dev loop no longer pays for the whole workspace.** `make test` is
+  `cargo nextest run --workspace --lib --bins`, which links ~40 test harnesses,
+  five of them over 200 MB. Running it after every edit is the largest single
+  sink of wall-clock time in development, and nearly all of it goes on tests the
+  edit cannot reach.
+  `make test-changed` (`scripts/test-changed.sh`) derives the affected set from
+  `git diff` plus the cargo dependency graph -- file to owning package by longest
+  matching manifest directory, then the reverse-dependency closure over workspace
+  members including **dev-dependencies**, so the root crate's dev-dep on
+  `bv-server` is not missed -- and runs `cargo nextest run -p ... --lib` over just
+  that set. Measured widths: one engine crate reaches 4 of 40 packages,
+  `bv-kernel-api` reaches 25, `bv-errors` reaches 32.
+  Editing `Cargo.toml`, `Cargo.lock`, `.cargo/config.toml`, `rust-toolchain.toml`
+  or `.config/nextest.toml` short-circuits to "run the full suite" rather than
+  guessing, because a `[workspace.dependencies]` bump changes what every crate
+  compiles against. `tests/`, doctests and the GUI frontend are reported with the
+  command to run them, never silently skipped.
+  Flags: `BASE=main` (widen to everything since the merge-base), `DIRECT=1`
+  (changed packages only, no dependents), `PKG=<name>` (explicit seed),
+  `FILTER=<substr>` (passed through to nextest).
+- **`make test-plan`** prints the package set `test-changed` would run without
+  building anything, so the blast-radius table in AGENTS.md §3 can be checked
+  rather than recalled.
+- **`make test-release`** runs every suite in the repo in one ordered target --
+  `test`, `test-integration`, `test-doc`, `test-hiqlite`, `test-cucumber`,
+  `plugins-test`, `gui-check`, `gui-test`. Required before cutting a release and
+  before merging anything touching a persisted format, a storage barrier,
+  authn/authz or the plugin ABI. Only `tests/e2e/rustion-ssh` is excluded (needs
+  real remote hosts). `make test-all` is unchanged and remains the narrower
+  unit + integration + doctest subset.
+- **nextest `quick` profile** (`.config/nextest.toml`) for the inner loop. It
+  differs from `default` only in `fail-fast = true`; `default-filter` and
+  `slow-timeout` are inherited, so it excludes exactly the same port-bound suites
+  and skips nothing a `default` run would have executed.
+
+#### Workspace decomposition Phase 5: CI runs the whole suite again
+- **CI now runs everything except `tests/e2e/rustion-ssh`.** Until now
+  `.github/workflows/tests.yml` ran only `--lib --bins` plus the GUI's vitest,
+  and deliberately skipped the ~30 `tests/` integration binaries, the hiqlite
+  storage and HA fault-injection suites, and the cucumber features -- because
+  each `tests/` binary linked the full dependency graph plus a 245 MB rlib.
+  Those three now have jobs, alongside doctests, the GUI, and a new per-crate
+  isolation check. That coverage gap was outcome #1 of the decomposition
+  roadmap, not a speed problem.
+  (Phase 5, roadmaps/workspace-decomposition.md)
+- **A pull request runs only what its change can reach.** A push to `main` runs
+  the full suite; a PR runs the packages in the reverse-dependency closure of
+  what it touched. The affected set comes from `cargo metadata` -- the same graph
+  `make test-changed` uses locally, exposed as `scripts/test-changed.sh --json`
+  and turned into job matrices by `scripts/ci-plan.sh` -- rather than from a
+  hand-maintained list of path globs, which would be a second copy of the
+  dependency graph that drifts silently the first time a crate gains a
+  dependency.
+- **`make ci-plan`** prints the CI job plan for your change and builds nothing.
+  `BASE=main` widens it to the whole branch, `PKG=<name>` answers "what would CI
+  do if I touched this crate?", `FULL=1` shows what `main` runs.
+- **`make check-isolated`** runs `cargo check -p <pkg>` over every workspace
+  member on its own. `cargo check --workspace` is not a proxy for "each crate
+  builds": cargo unifies features across one build, so a crate can be missing a
+  feature it needs and stay green because a sibling turns it on. Phase 4 shipped
+  a `bv-server` that could not build alone for exactly that reason while the
+  workspace check passed. CI runs this whenever a manifest changes.
+- **The `tests/` suite is sharded by binary, four ways.** Not by
+  `nextest --partition`, which splits test execution but still links every
+  ~190 MB harness in every shard -- linking is the cost that made the suite
+  unaffordable in CI. A new `tests/test_foo.rs` is picked up automatically.
+
+#### Workspace decomposition Phase 6: per-crate versions, per-crate releases
+- **Library crates are versioned and released individually.** Each of the 38
+  publishable crates carries its own version and ships on its own schedule.
+  The **product** version -- what `bvault --version` prints and what the
+  installers are named after -- stays in lockstep across the root crate,
+  `bvault-cli` and the GUI under `make bump-*`, and no longer drags the
+  libraries with it. `bv-shamir` has not changed since it was extracted and is
+  no longer republished because the GUI shipped.
+  (Phase 6, roadmaps/workspace-decomposition.md)
+- **`make crates-plan`** shows which crates changed since their last published
+  version, and what would ship, without building or uploading anything. The
+  answer comes from three inputs per crate: its last `<crate>-v<version>` git
+  tag, a `git diff` of the crate's directory since that tag, and the registry's
+  sparse index. Each crate is `publish`, `bump` (changed, but that version is
+  already on the registry) or `skip`. `OFFLINE=1` skips the index lookups.
+- **`make crates-bump`** patch-bumps exactly the changed crates.
+  `MINOR=<crate>` marks a breaking change -- the one call the tool cannot make
+  for you, because it is a judgement about the crate's public API.
+  `CRATE=<name>` bumps one regardless, `DRY=1` shows the edits.
+- **`make crates-publish-changed`** builds and uploads only those crates, in
+  dependency order, and refuses to run while any crate needs a bump first --
+  a published version can never be overwritten. `-dry` for a dry run.
+  **`make crates-tag-push`** publishes the release record; the publish step
+  writes `<crate>-v<version>` tags locally but never pushes them.
+- **A patch bump no longer cascades, by design.** Internal dependencies are
+  declared `version = "0.1.0"`, a caret requirement matching every 0.1.x, so
+  bumping `bv-errors` to 0.1.1 leaves its 32 dependents untouched and
+  unpublished -- a consumer picks up 0.1.1 on its own. A breaking bump
+  (0.1 -> 0.2) rewrites all 29 dependents and cascades, which is correct.
+  Do not pin internal deps with `=`, and do not move dependencies into
+  `[workspace.dependencies]`; both turn every release into a whole-workspace
+  release. See AGENTS.md § Per-crate versioning.
+
+### Security
+
+#### Workspace decomposition Phase 6
+- **The root `bastion_vault` crate can no longer be published to crates.io by
+  accident.** It carried no `publish` key, which means "any registry" -- so a
+  bare `cargo publish` in the repository root would have attempted to push the
+  entire server, including its full source, to the public crates.io index.
+  Every other crate already carried `publish = ["uox-bastionvault"]`; the root
+  was the one gap, while `docs/publishing-crates.md` described the guard as
+  universal. It is `publish = false` now, and `make crates-plan` warns about
+  any manifest missing the key so the gap cannot silently return.
+
+### Changed
+
+#### Workspace decomposition Phase 6
+- **The crate publish order is derived from `cargo metadata`, not maintained by
+  hand.** The hand-maintained list had already drifted: `bv-core` and
+  `bv-kernel` were created in Phase 4.5 carrying `publish =
+  ["uox-bastionvault"]` and were never added to it, so every release would have
+  silently skipped the entire kernel. There are **38** publishable crates, not
+  the 36 the list knew about. Which crates are publishable is derived the same
+  way -- a fixpoint over the dependency graph, since a crate cannot ship while
+  anything it depends on cannot. That is why `bv-server` and `bvault-cli` are
+  excluded today (both reach `bastion_vault`) and how they rejoin on their own
+  if that changes.
+
+#### Workspace decomposition Phase 4.5: the vault kernel becomes two crates
+- **`bastion_vault` is finally a facade.** The kernel split into `bv-core`
+  (`Core`, the mount table, the module registry, the seal path, the HSM
+  backends and the server config model) and `bv-kernel` (tokens and leases,
+  identity, policy, namespaces, resource groups and the `sys/` backend),
+  leaving the root crate at 27,921 lines -- under 16,000 of them production
+  code -- against 65,703 before.
+  **What this changes for you:** nothing at runtime. Every API route, CLI flag,
+  config key and `bastion_vault::*` path behaves exactly as before, and the
+  suite is unchanged at 1289 unit / 1358 integration / 17 doctests. What it
+  changes is that a change to policy evaluation no longer rebuilds the seal
+  path, and vice versa.
+  **For anyone embedding the crate:** all paths are preserved by re-export
+  (`bastion_vault::core`, `::mount`, `::seal`, `::hsm`, `::config`,
+  `::modules::*` and the rest), so no import changes.
+  (Phase 4.5, roadmaps/workspace-decomposition.md)
+- **The exchange import-preview cache moved off `Core`.** It was an in-memory,
+  per-process, TTL-bounded cache read only by the HTTP server and the desktop
+  app; each now holds its own. Preview tokens were never redeemable across
+  nodes, so behaviour is unchanged -- this only makes that explicit.
+- **`--features hsm_mock` / `hsm_yubihsm2` keep working from the CLI.** The HSM
+  backends moved into `bv-core` with the seal path, and the flags now forward
+  through `bvault-cli` and `bastion_vault` to reach them. Verified by building
+  with the feature enabled, since a flag that silently stops reaching its `cfg`
+  gates is a failure mode this project has already had once.
+
+- **`make -j` can no longer overlap two recipes** (`.NOTPARALLEL` in the
+  Makefile). All cargo invocations share one `target/` build lock, so a second
+  concurrent one does not run in parallel -- it blocks for as long as the first
+  takes. This was already documented in AGENTS.md §5 with a measured case (a
+  `cargo check` that should cost under a second taking 9m14s wall for 0.4s of
+  CPU); the aggregate targets that list several cargo invocations now enforce it.
+  Cargo's own internal parallelism is unaffected.
+- **rust-analyzer no longer competes with your builds for the `target/` lock**
+  (`rust-analyzer.cargo.targetDir` in `.vscode/settings.json`). It runs
+  `cargo check --workspace --all-targets` on every save, and without this it did
+  so in the same `target/` as `make test` -- all cargo invocations share one build
+  lock, and the loser blocks for as long as the winner takes rather than running
+  alongside it. Measured while adding this: a narrow `make test-changed` run whose
+  own work was ~4s of CPU spent 3m01s of 3m27s wall printing "Blocking waiting for
+  file lock on build directory". Artefacts now go to `target/rust-analyzer`, which
+  has its own lock. `check.workspace` and `check.allTargets` stay on -- turning
+  them off would drop diagnostics inside the in-crate `#[cfg(test)]` modules where
+  most of this repo's tests live. Costs a second check-only artefact set on disk;
+  `scripts/prune-incremental.sh` now trims that directory too, so `make prune` and
+  the automatic `prune-stale` cover it.
+- **`make test-changed` warns when another cargo process is running**, so a run
+  that is queued behind someone else's build says so instead of looking like a
+  slow test suite.
+- **`make test-changed` skips bin test harnesses that contain no tests.** Only
+  `bv-plugin-pack`'s `[[bin]]` has a `#[cfg(test)]` module; `bvault`'s `main.rs`
+  is a 19-line delegate to its lib and `bin/bv_ssh_helper.rs` has no test module,
+  so `--bins` there links two ~200 MB harnesses to run zero tests. `make test`
+  is deliberately left as-is -- it is the CI gate, and keeping its scope stated as
+  `--lib --bins` means a bin that grows a test is covered the day it does.
+
+#### Workspace decomposition Phase 4: the HTTP server and CLI become their own crates
+- **`bastion_vault` no longer builds a web framework.** `src/http` is now the
+  `bv-server` crate and `src/cli` is now `bvault-cli`, which means `actix-web` and
+  `actix-tls` have left the library's dependency graph entirely, along with nine
+  more crates the command-line layer was dragging in (`clap`, `env_logger`,
+  `prettytable`, `rpassword`, `serde_yaml`, `toml`, and -- already dead since
+  Phase 3 -- `ciborium`, `ipnetwork` and `uuid`).
+  **What this changes for you:** nothing at runtime. Every API route, CLI flag and
+  config key behaves exactly as before, and the full suite is unchanged (1289 unit,
+  1358 integration, 17 doctests). What it changes is build cost for anyone who
+  embeds BastionVault as a library without serving HTTP from it -- most visibly the
+  desktop GUI, whose Tauri host path-depends on the root crate and had been
+  compiling an unused web server on every server-side change.
+  **For packagers:** the `bvault` binary now lives in the `bvault-cli` package. A
+  bare `cargo build --bin bvault` needs `-p bvault-cli`, as do `cargo deb` and
+  `cargo generate-rpm`; the Makefile targets (`make linux-cli-packages` and the
+  Windows/macOS equivalents) already pass it. The produced binary, its path under
+  `target/`, and the .deb/.rpm contents are unchanged.
+  (Phase 4, roadmaps/workspace-decomposition.md)
+- **`bvault --version` prints `bvault 0.40.0` instead of `bastion_vault 0.40.0`.**
+  clap derives the application name from the package name, which the split changed;
+  it is now pinned explicitly to the binary's own name rather than left to follow
+  whichever package happens to hold it.
+- **The server configuration model moved from `bastion_vault::cli::config` to
+  `bastion_vault::config`.** It was never command-line code -- `Core`, the auth
+  module, the HTTP layer and `BastionVault::new` all take it. Config **files** are
+  untouched; this is a Rust module path, and affects only code embedding the crate.
+- **The FerroGate MIA helper client moved from
+  `bastion_vault::cli::command::ferrogate_mia` to
+  `bastion_vault::modules::credential::ferrogate::mia`.** It speaks a CBOR protocol
+  over a Unix socket and is used by the CLI, the desktop GUI and the test suite
+  alike; leaving it under `cli` would have forced the GUI to depend on the whole
+  command-line stack.
+
+- **The plugin process-runtime tests no longer flake under load.** They copy the
+  whole test binary before spawning it, and that binary grew when the split gave
+  the root crate a test-only dependency on `bv-server`; at 227 MB, copying it
+  while dozens of sibling tests competed for disk could exceed the plugin
+  invoke deadline. They are now scheduled exclusively rather than merely
+  serially, which made `make plugins-test` both correct and ~7x faster (153s
+  with 3-6 failures to 21s with none). The 30-second plugin invoke timeout
+  itself is unchanged -- it is an operational bound, not a test knob.
+
+
+#### Agent instructions: one authoritative file
+- **`AGENTS.md` is now the single source of truth for AI-agent instructions**, and
+  `CLAUDE.md` / `agent.md` are thin pointers to it (Claude Code imports it via
+  `@AGENTS.md`). The three files previously carried overlapping, partly stale copies
+  of the build and test commands, and none of them described the crate topology -- so
+  every agent session re-derived the workspace layout from a 25 KB manifest and an
+  80 KB Makefile before it could touch anything.
+  **What it adds:** an architectural map of the 39-member workspace by tier
+  (substrate → kernel contract → engines → kernel tier → assembly) with the
+  dependency direction and per-component test locations; a blast-radius table
+  (what to check and test for each area you edit); four validation levels with real
+  commands (`cargo check -p bv-engine-pki` → `cargo nextest run -p bv-engine-pki --lib`
+  → `make test` → `make test-integration`); and the build-hygiene rules this tree
+  actually needs -- one cargo invocation at a time (they serialise on the `target/`
+  build lock), never `--all-features`, never `--workspace` for a check, never clean.
+  No security, API-versioning, testing or tracking rule was dropped; one broken path
+  in the old `agent.md` was fixed (`docs/docs/api.md` → `docs/api.md`).
+
+#### FerroGate SDK: vendored tree → Cargo registry
+- **The `ferro-*` verifier crates now come from FerroGate's own Cargo registry
+  instead of `third_party/ferrogate-sdk-rust/`.** `ferro-crypto`,
+  `ferro-child-verify` and `ferro-svid-verify` are published to the public
+  Cloudsmith repository `uox/ferrogate`, registered as `uox-ferrogate` in
+  `.cargo/config.toml`, and the root `Cargo.toml` depends on all three at
+  `=0.21.5`. The published 0.21.5 sources are **byte-identical** to the 0.21.3
+  sources that were vendored, so no verifier behaviour changed -- this is a
+  packaging change, not a crypto change.
+  **What operators get:** nothing observable at runtime. For builders: the repo
+  drops ~4 500 lines of vendored third-party source, and a first build now
+  fetches three crates from `cargo.cloudsmith.io` (public -- no token, no CI
+  secret).
+  The trust-root posture that motivated vendoring is kept by pinning: the
+  version requirements are **exact** (`=`), not caret, and since `Cargo.lock` is
+  gitignored here the manifest *is* the pin -- a `cargo update` cannot slide a
+  new verifier under the machine-auth path, and a bump stays a reviewable
+  commit. Cargo verifies the registry's SHA-256 on download. Bump procedure:
+  `docs/ferrogate-machine-auth.md` § SDK dependency.
+  **This clears the root crate's path-dependency blocker on publishing** (see
+  `docs/publishing-crates.md` § Known constraints); the `[patch.crates-io]`
+  forks remain the open question there.
+
+### Removed
+
+- **Vendored FerroGate SDK.** `third_party/ferrogate-sdk-rust/` (three crates +
+  `PROVENANCE.md`), `scripts/vendor-ferrogate-sdk.sh`, and the
+  `make vendor-ferrogate-sdk` / `vendor-ferrogate-sdk-check` targets are gone,
+  superseded by the registry dependency above. The Makefile's `TEST_SCOPE` also
+  drops its three `--exclude ferro-*` flags, and the workspace `exclude` list
+  drops `third_party/ferrogate-sdk-rust` -- registry dependencies are never
+  workspace members, so neither exclusion has anything left to do.
+
+### Changed
+
+#### Build and Test Tooling
+- **Phase 3 of [the decomposition](roadmaps/workspace-decomposition.md) is
+  complete -- the twenty-one secret engines and auth backends are their own
+  crates, plus the kernel contract they compile against.** `crates/bv-kernel-api`
+  (Tier 1) holds `VaultCtx`, `KernelServices`, the `Module` trait and the
+  routing/mount tables their signatures name; twelve engine crates
+  (`bv-engine-{pki,rustion,files,resource,transit,ssh,ldap,notifications,totp,cert-lifecycle,kv,ssh-broker}`)
+  and nine auth crates
+  (`bv-auth-{approle,userpass,fido2,oidc,saml,ferrogate,cert,audit}`) sit on
+  top of it. Every moved path is re-exported from `src/modules/mod.rs`, so
+  `bastion_vault::modules::*` resolves exactly as before and no call site
+  outside a moved directory changed.
+  **What operators get:** twenty-six dependencies left the `bastion_vault`
+  manifest with the code that used them -- `ldap3`, `openidconnect`,
+  `quick-xml`, `russh`, `russh-sftp`, `rsa`, `cms`, `pkcs12`, `pkcs5`,
+  `tonic`, `tonic-prost`, `prost`, `hyper-rustls`, `hyper-util`,
+  `hickory-resolver`, `image`, `qrcode`, `flate2`, `blake3`, `base32`,
+  `const-oid`, `sha1`, `sha1-saml`, `sha2-saml`, `subtle` and `url`. An LDAP
+  client, an OIDC client, an SSH stack, an XML parser and a gRPC stack are no
+  longer dependencies of the server or of any engine that does not use them.
+  Feature flags are unchanged in name and effect.
+  **What developers get:** the root compilation unit drops from 154,373 lines
+  to 84,827, and the unit suite runs across 39 test binaries instead of 19 --
+  which halves its wall clock. Editing one engine now recompiles that engine
+  and the facade, not 154k lines.
+  Behaviour is unchanged and verified as such: 1289 unit, 1358 integration and
+  17 doctests, identical counts before and after every extraction.
+- **Four feature flags had silently become no-ops, and are fixed.** `ssh_pqc`,
+  `pki_pqc_composite`, `transit_byok` and `transit_pqc_hybrid` were declared
+  empty in the root manifest while the code they gate moved into engine
+  crates, so `--features ssh_pqc` would have built a server without ML-DSA-65
+  SSH CA support while appearing to enable it. They now forward to the owning
+  crate, and the combined-feature build is covered. `files_smb` and
+  `files_ssh_sync` forward the same way.
+- **Fix 13 `bv-utils` doctests that could never have compiled.** They were
+  written as `use bastion_vault::utils::...` when the crate was extracted in
+  Phase 1, but `bv-utils` has no dependency on the root crate, so `cargo test
+  --doc` failed on every one of them. Unnoticed because the decomposition work
+  has been on a feature branch and CI runs doctests only on `main` or a pull
+  request. `make test-doc` is green: 17 pass, 0 fail. The Phase 1 and 2 notes
+  claiming "17 doctests, unchanged" were counting the total, not the passes.
+- **Fix broken intra-doc links across the extracted crates.** References to
+  `Core`, `crate::core::Core` and `crate::modules::*` from crates that sit
+  below the root are now code spans rather than links, and links to items that
+  changed module became explicit paths. `cargo doc` emits no unresolved-link
+  warning for any of the 22 new crates.
+- **The mount table no longer names the plugin runtime.** Resolving a
+  `plugin:<name>` mount type was the last entry on the decomposition
+  roadmap's cross-layer wart list. The plugin runtime registers a resolver
+  with the mount table at startup instead; mount behaviour and the error
+  returned for an unknown mount type are unchanged.
+- **Phase 1 of [the decomposition](roadmaps/workspace-decomposition.md) is
+  complete -- five more Tier 0/1 crates, eight in total.** `crates/bv-metrics`,
+  `crates/bv-storage` (with `src/cache` and `src/schema` folded in),
+  `crates/bv-logical` (with `src/handler.rs`), `crates/bv-utils` and
+  `crates/bv-audit` join the three already extracted. Every moved path is
+  re-exported from `src/lib.rs`, so `bastion_vault::{metrics, storage, cache,
+  schema, logical, handler, utils, audit}` all resolve exactly as before and no
+  call site outside the moved directories changed.
+  **What operators get:** eleven dependencies left the `bastion_vault` manifest
+  with the code that used them -- `hiqlite`, `diesel`, `r2d2`, `rusty-s3`,
+  `keyring`, `sysinfo`, `libc`, `lockfile`, `as-any`, `blake2b_simd`,
+  `enum-map`. A Raft/SQLite engine, a MySQL client and an S3 signer are no
+  longer in the dependency list of the server, the CLI or any secret engine.
+  Feature flags are unchanged: `storage_hiqlite`, `storage_mysql`, `cloud_*`
+  and `sync_handler` now forward to the same-named features on `bv-storage`,
+  so an existing build command produces the same binary.
+  **What developers get:** editing the storage substrate is a 0.78s
+  `cargo check -p bv-storage` instead of a ~8s rebuild of the monolith. The
+  root compilation unit lost 19,565 lines and 15 MB of rlib. The four
+  `make bench-build` scenarios did **not** move and no speedup is claimed
+  from them -- `check-leaf` and `check-core` both touch files still in the
+  root crate, which is Phase 3's problem, not Phase 1's. See
+  `docs/build-timings/baseline.md`.
+  Behaviour is unchanged and verified as such: 1289 unit, 1358 integration and
+  17 doctests, identical counts before and after every one of the five
+  extractions.
+- **Four of those five were dependency inversions, not file moves.**
+  `MetricsManager::new` called `plugins::metrics::register` by name, which
+  pointed the metrics substrate at the plugin runtime; it now takes the
+  collector from whoever builds it. `TokenCache` named
+  `modules::auth::token_store::TokenEntry`, which pointed storage at the auth
+  engine; it is now generic over the caller's type, with the four security
+  invariants in `features/caching.md` untouched (raw tokens never cached, values
+  zeroized on drop, never serialized out, zero TTL disables). `AuditBroker::new`
+  took a kernel handle to fetch one `BarrierView`; it takes the view. And
+  `audit::sys_emit` stayed in the root crate because it is kernel glue -- that
+  is what breaks the `VaultCtx` ↔ `AuditBroker` loop that had kept the audit
+  subsystem unextractable.
+- **`RvError` moved to its own crate** (`crates/bv-errors`) -- the first Tier 0
+  extraction of [the decomposition](roadmaps/workspace-decomposition.md).
+  Re-exported as `bastion_vault::errors`, so `crate::errors::RvError` and the
+  ~490 `bv_error_*!` call sites outside `src/http` are untouched. The three
+  `#[macro_export]` macros are re-exported from `src/lib.rs` as well, because
+  `#[macro_export]` places them at *bv-errors'* crate root and the bare
+  `bv_error_string!(...)` form resolves through the *defining* crate's root
+  macro namespace.
+  The orphan rule made this more than a file move: with `RvError` foreign,
+  `impl actix_web::ResponseError for RvError` is illegal, so `src/http` gained
+  an `HttpError(RvError)` newtype and handlers return
+  `Result<HttpResponse, HttpError>`. A blanket
+  `impl<E: Into<RvError>> From<E> for HttpError` keeps every `?` working, which
+  cut the predicted 59 explicit `.into()` sites to **7**; 149 handler
+  signatures were rewritten mechanically. `Debug` and `Display` both forward to
+  the wrapped error rather than being derived, so actix's error logs and the
+  `sys` audit records read exactly as before.
+  Status-code behaviour is unchanged and covered by the 68 status assertions in
+  the lib suite (200/204/400/403/404), which drive a real actix server through
+  `http::init_service`. All 20 `#[from]` conversions came along, with versions
+  and feature lists mirrored from the root manifest so extraction cannot shift
+  feature unification; `storage_mysql` forwards to `bv-errors/storage_mysql`.
+- **`shamir` and `context` moved to their own crates** (`crates/bv-shamir`,
+  `crates/bv-context`), re-exported as `bastion_vault::shamir` and
+  `bastion_vault::context`. These are the only two directories in the Tier 0
+  list that really reference nothing but `crate::errors` -- `context` was not in
+  the roadmap's list and was added to it. `bv-shamir` is licensed
+  `MIT AND Apache-2.0`: it is a modified derivative of MIT-licensed code
+  (© 2016 Chris MacNaughton), a nuance the file header carried on its own
+  inside the monolith but which a separately publishable crate must state in
+  its manifest.
+  The roadmap's other three "clean leaves" turned out not to be leaves; see the
+  corrected dependency table in the roadmap. (`src/utils` and `src/logical`
+  were blocked at the time of this entry. Both shipped later in Phase 1 -- and
+  the blocker on `src/logical` was `bv-storage`, not Phase 2 as stated here.)
+- **`RvError` no longer depends on actix-web** (`src/errors.rs`) -- Phase 1 of
+  [the decomposition](roadmaps/workspace-decomposition.md) needs the error type to
+  be a dependency-free leaf, and it was importing the HTTP server.
+  `RvError::response_status()` now returns a plain `u16`; the actix
+  `ResponseError` impl in `src/http/mod.rs` -- its only consumer -- maps that to a
+  `StatusCode`. The `ActixWebHttpHeaderError` variant, which wrapped
+  `actix_web::http::header::ToStrError`, becomes `ErrHeaderValueNotUtf8(String)`,
+  and the two header reads that relied on its `#[from]` map explicitly.
+  Worth recording because the obvious fix does not work: actix-web 4 is built on
+  `http 0.2` while this workspace also carries a direct `http 1` dep, so
+  "just use `http::StatusCode`" yields a *different type* than actix wants.
+  `src/errors.rs` now imports only `std` and `thiserror`.
+
+### Added
+
+#### Build and Test Tooling
+- **`VaultCtx` -- the kernel contract that breaks the `Core` ↔ `modules` cycle**
+  (`src/kernel_api.rs`), Phase 2 of
+  [the decomposition](roadmaps/workspace-decomposition.md). Modules hold an
+  `Arc<Core>` and `Core` imports `AuthModule` + `PolicyModule`, so neither side
+  can become a crate. `VaultCtx` is the seam; `Core` implements it by
+  delegating, so this step is additive and behaviour is byte-identical -- no
+  call site changes yet. The surface was chosen by counting what `src/modules`
+  actually reaches for (`handle_request` ×87, `module_manager` ×42,
+  `system_view` ×24, `barrier` ×39, `router` ×23, …) rather than by mirroring
+  `Core`'s ~30 public fields; `self_ptr`, `physical`, `seal_provider_swap` and
+  `exchange_preview_store` are deliberately absent, so an engine cannot grow a
+  dependency on them.
+  It lives in the monolith rather than in a `bv-kernel-api` crate because the
+  signatures name types that are not extracted yet (`BarrierView` /
+  `SecurityBarrier` are Tier 0, `Router` / `MountsRouter` are Tier 2). The
+  crate is not what cuts the cycle -- the abstraction is -- so the trait lands
+  first and the file moves later.
+- **The `Core` <-> `modules` cycle is cut.** `Module::init`/`setup`/`cleanup`
+  and `LogicalBackendNewFunc` (the alias in every engine's mount path) now take
+  `dyn VaultCtx`, and `ModuleManager::set_modules` consumes
+  `Vec<Box<dyn ModuleFactory>>` supplied by `default_modules()` in `src/lib.rs`
+  instead of naming 17 concrete engine types.
+  Result: all 14 Tier 3 engine directories -- transit, totp, ldap, pki, files,
+  kv, kv_v2, ssh, ssh_broker, cert_lifecycle, resource, notifications, rustion,
+  credential -- plus the plugin runtime and the sys audit emitter contain
+  **zero** code references to `Core`. Files in `src/modules` naming it: 86 ->
+  33, and all 33 are the six kernel modules (`auth`, `policy`, `identity`,
+  `namespace`, `resource_group`, `system`), which keep it deliberately: they
+  *are* the kernel and ship with it.
+  An engine crate can now compile against the trait without `bv-core` in its
+  dependency graph. Behaviour is unchanged -- module init order was diffed
+  against the old `vec![]` to confirm it is identical in sequence.
+- **The sibling cycle is cut too -- Phase 2 complete.** `VaultCtx` stopped an
+  engine naming `Core`; this stops it naming *other engines*, which was the
+  actual blocker for Phase 3. `src/kernel_api.rs` became `src/kernel_api/`, and
+  `VaultCtx::module_manager()` is **gone**: the module set is reachable only
+  through the inherent `Core::module_manager()`, so the split is enforced by
+  the type system rather than by convention.
+  In its place, [`KernelServices`](src/kernel_api/services.rs) -- a registry of
+  *capabilities*, not of modules. Each provider publishes itself as a trait
+  object at installation (a new `Module::register` hook, which needs an
+  `Arc<Self>` that `init`/`setup` do not have), and a consumer asks `VaultCtx`
+  for the capability: `core.identity()`, `core.tokens()`, `core.policy()`,
+  `core.namespaces()`, `core.resource_groups()`. No name, no `Arc::downcast`,
+  no concrete type. Six kernel traits (`IdentityService`, `TokenService`,
+  `AuthMountRegistry`, `PolicyGate`, `NamespaceRegistry`, `ResourceGroupIndex`)
+  plus four engine-to-engine ones (`LoginClassPolicy`, `ConnectMfaGate`,
+  `TotpMfa`, `NotificationSink`) kept in their own file, since those are engine
+  contracts and belong in a future `bv-engine-api` rather than in the kernel's.
+  The traits carry **operations, not store handles** -- `IdentityService` has
+  `rename_object(kind, old, new, ns, actor)`, not `Arc<OwnerStore>`. That is
+  what makes the boundary real (a kernel-API crate cannot depend on the kernel,
+  so only owned data may cross) and it deleted code: the resource engine's
+  rename used to inline twenty lines of namespace-key scoping and share/owner
+  moving, which required it to know how owner records are keyed.
+  Measured across the 14 Tier 3 engine directories plus `src/audit` and
+  `src/plugins`: `get_module::<T>()` production sites **~40 -> 0**, references
+  to any sibling module directory **12 -> 0**, references to `Core` **0**
+  (already). What remains is 79 sites inside the kernel tier and 10 in the
+  assembly layer, both by design.
+  Also inverted, because it is the same edge pointing the other way:
+  `Core::post_unseal` no longer names six engines' schedulers (new
+  `Module::start_background`), `Core::flush_caches` no longer names the policy
+  and auth modules (new `Module::flush_caches`), and `src/audit/entry.rs` no
+  longer reaches into `crate::modules` for one constant -- the namespace
+  token-metadata keys and the pure namespace-path helpers moved to
+  `kernel_api::namespace` and are re-exported from their old homes, so no call
+  site outside those files changed.
+  The 20 module self-lookups (`get_module::<RustionModule>("rustion")` from
+  inside Rustion, ×10) are gone as well: the engines' late-bound stores now sit
+  in one shared slot (`RustionStores`, `ServiceSlot`, `PolicyStoreSlot`) that
+  the module, its logical backend and its background tasks all hold. The lookup
+  only ever existed because the *handle* had to be late -- the stores are built
+  at unseal -- and it never needed the module to get there.
+  **Zero change in test outcomes**, which was this phase's own gate: 1289 unit,
+  1358 integration, 17 doctests, 109 plugin-substrate, 8 hiqlite, 8 cucumber
+  scenarios, all green. No dependency was added and no crate was created, so no
+  build-time movement was expected or observed -- see
+  [docs/build-timings/baseline.md](docs/build-timings/baseline.md). Phase 2
+  buys the ability to split; Phase 3 is where the numbers move.
+
+- **The workspace's library crates can be published to the Cloudsmith Cargo
+  registry** (`uox/bastionvault`). `.cargo/config.toml` declares the registry
+  against Cloudsmith's *sparse* index (`sparse+https://cargo.cloudsmith.io/...`)
+  rather than the git index its web UI still shows -- cargo then fetches only
+  the index entries a resolve needs, over plain HTTPS, with no `git` binary
+  required (which matters for the container build and Windows CI).
+  `scripts/publish-crates.sh` publishes the seven library crates in topological
+  order behind `make crates-publish-dry` / `make crates-publish` /
+  `make crates-verify` / `make crates-login`. Dry run is the default, and a real
+  publish refuses a dirty tree so every artefact corresponds to a commit.
+  Each crate now carries `publish = ["uox-bastionvault"]`, so a bare
+  `cargo publish` fails instead of pushing an internal crate to crates.io;
+  `bastion-vault-gui` carries `publish = false`. Internal deps gained
+  `version` + `registry` alongside `path` -- without `registry` the *published*
+  manifest points at crates.io and the upload fails, and `path` still wins for
+  local builds so nothing about `cargo build` changes. Registry credentials are
+  gitignored (`.cargo/credentials*`) and documented as belonging in
+  `$CARGO_HOME/credentials.toml` or
+  `CARGO_REGISTRIES_UOX_BASTIONVAULT_TOKEN`, never in the tracked
+  `.cargo/config.toml`. See [docs/publishing-crates.md](docs/publishing-crates.md).
+- **Workspace-decomposition Phase 0 -- the build-cost instrument**
+  ([roadmaps/workspace-decomposition.md](roadmaps/workspace-decomposition.md)).
+  `make bench-build` measures four scenarios (no-op check, check after touching a
+  leaf engine, check after touching `core.rs`, and a test-binary rebuild that
+  includes the link `cargo check` never does) as the **median of 3 samples**, and
+  appends a row to [docs/build-timings/baseline.md](docs/build-timings/baseline.md).
+  Medians rather than single samples because the measured spread is ±13-16%: the
+  log states a **~25% noise floor**, so no later phase can claim a win from
+  noise. `make build-timings` writes the `--timings` HTML (archived
+  pre-decomposition artefact: the monolith compiles as **one unit in 25.94s**
+  with all deps cached). Baseline at `d04a72c`: no-op 0.48s, leaf 6.97s, core
+  7.65s, test+link 22.70s, 245 MB rlib, 1195 lock packages.
+  **The baseline confirms the premise of the whole roadmap:** touching a
+  self-contained 3,155-line secret engine and touching the 1,699-line object every
+  module depends on cost the *same* (6.97s vs 7.65s, overlapping sample ranges),
+  because they are one compilation unit.
+- **`make deps-unused` reports unused direct dependencies**
+  (`scripts/deps-unused.sh`, wrapping `cargo-machete`), scoped to the crates we
+  own -- the raw sweep also walks `IronRDP/`, `third_party/`, and `plugins-ext/`,
+  whose findings are printed as informational and never fail. Wired into
+  `tests.yml` as an **advisory** job that cannot block a merge, because a static
+  `use` scan has known blind spots.
+
+#### Documentation
+- **Workspace decomposition roadmap** ([roadmaps/workspace-decomposition.md](roadmaps/workspace-decomposition.md))
+  -- a measured plan to split the 173k-line, 245 MB-rlib `bastion_vault`
+  monolith into independently versioned crates. Records the baseline (one leaf
+  file touched rebuilds the test binary in ~36 s; 30 `tests/` binaries each
+  link the full rlib, which is why CI skips the suite entirely), identifies the
+  `Core` <-> `modules` cycle as the sole blocker, and sequences the split. The
+  high-value slice is breaking that cycle plus extracting PKI: 19 of the 30
+  integration-test binaries are PKI, and only 2 of its 39 files touch `Core`.
+
+### Fixed
+
+#### Build and Test Tooling
+- **The nextest exclusion for the port-bound hiqlite tests had silently
+  lapsed.** `.config/nextest.toml` excluded them by the test path
+  `storage::hiqlite::test::`; they lost the `storage::` prefix when they moved
+  into `bv-storage`, so the filter stopped matching and a default `make test`
+  began running 8 tests that need a single process and a process-global port
+  allocator. Both spellings are matched now, and `make test-hiqlite` targets
+  `-p bv-storage`. ([Phase 1](roadmaps/workspace-decomposition.md))
+
+### Security
+
+- **Three lock-across-await deadlocks made visible and fixed.**
+  `[lints.clippy] await_holding_lock` was `"allow"` repo-wide, which was hiding
+  a bug class rather than a style nit: a `std::sync` guard is not re-entrant and
+  an awaiting task cannot release it, and every site here sits on a
+  current-thread `actix_rt` runtime where nothing else can progress meanwhile.
+  Now `"warn"`, with all three sites fixed rather than silenced -- each drains
+  what it needs, drops the guard, and only then awaits.
+  `Context::wait_task_finish` (`crates/bv-context`) held its `MutexGuard`
+  across the `.await` of each task -- and the AppRole secret-id tidy path
+  registers its sweep task with `req.ctx.add_task(...)`, so an awaited task
+  calling `add_task`/`clear_task` would block forever on a mutex its awaiter
+  would not release. Handles are now drained under the lock and awaited outside
+  it. Found only because the code moved into a crate that does not inherit the
+  root's allow list.
+  **`src/modules/auth/expiration.rs` was the one that mattered**: the lease
+  sweeper held the lease-queue **write** guard across `revoke_lease_id(..).await`,
+  whose call path re-enters that same `RwLock`. The consequence is leases not
+  being revoked on schedule, which is a security property, not just
+  availability. Due leases are now drained under the guard and revoked after it
+  is dropped. Because that window lets a lease be renewed before it is revoked,
+  each one is re-checked against storage first -- the renew paths persist the new
+  `expire_time` *before* re-registering the queue entry, so a lease whose
+  persisted expiry has moved into the future is re-queued instead of revoked. A
+  lease whose revocation fails is re-queued too, which the pre-drain code got
+  for free by not popping on error. This was the cause of the intermittent
+  `mod_expiration_tests::*` failures (`test_secret_expiration`,
+  `test_expiration_renew_token_period_backend`,
+  `test_expiration_register_and_restore_benchmark`); the unit suite passed
+  1143/1143 across four consecutive runs afterwards.
+  `src/mount.rs` held the mount-table read guard across `table.load(..)`.
+  Read-read does not self-block, but `std::sync::RwLock` is not guaranteed
+  fair, so a writer arriving mid-await can block later readers and wedge the
+  monitor; the routers are now snapshotted (one `Arc` clone each) before the
+  await.
+
+### Removed
+
+#### Build and Test Tooling
+- **`Handler::post_config`** -- a trait method with zero implementors anywhere
+  in the workspace, whose only caller discarded the `ErrHandlerDefault` its
+  default body always returned. It has never done anything. It was, however,
+  the sole reason `Handler` named `Core` and `cli::config::Config`, which in
+  turn pinned `logical::Request` (which holds an `Arc<dyn Handler>`) to the
+  kernel -- so removing it is what let `bv-logical` become a crate. A public
+  API change with no possible behavioural effect.
+  ([Phase 1](roadmaps/workspace-decomposition.md))
+- **Eleven direct dependencies from the root crate**, each moving down with the
+  code that used it: `hiqlite`, `diesel`, `r2d2`, `rusty-s3` and `keyring` to
+  `bv-storage`; `sysinfo` to `bv-metrics`; `libc` and `lockfile` to
+  `bv-storage`; `as-any` and `blake2b_simd` to `bv-utils`; `enum-map` to
+  `bv-logical`. Unlike the Phase 0 triage below, these are not dead edges --
+  the code is still built, just not by `bastion_vault`.
+  ([Phase 1](roadmaps/workspace-decomposition.md))
+- **Five dead direct dependencies**, from the Phase 0 triage: `foreign-types`,
+  `glob`, and `serde_derive` from the root crate; `serde` from `bv-plugin-pack`
+  (only `serde_json` was ever used -- the manifest types live in
+  `bv_plugin_manifest`); `futures-util` and `ironrdp-pdu` from the GUI (the
+  umbrella `ironrdp` dep already enables its `pdu` feature). **This did not change
+  build time and was not expected to: `Cargo.lock` stayed at 1195 packages**,
+  since all five remain in the graph transitively. What it buys is a clean
+  `cargo machete` signal and no stale edge silently pinning a feature.
+  The dependencies that a static scan *wrongly* reports are now carried in
+  `[package.metadata.cargo-machete] ignored` lists with a stated reason, split
+  between name mismatches (`hcl-rs`->`hcl`, `smolder-smb-core`->`smolder_core`),
+  attribute-only use (`serde_bytes`), and -- the category that must not be
+  "cleaned up" -- deps declared to **pin a feature** rather than be imported:
+  `tower`'s `util`, `rusb`'s `vendored`, `webpki-roots`' defaults,
+  `rustls-pki-types`' major, and `bv-client`'s `rustls/aws_lc_rs`.
+
+### Fixed
+
+#### Workspace decomposition
+- **A latent build break for downstream consumers of `bv-server`.** Removing
+  `env_logger` from the library in Phase 4 also removed the `log/std` feature it
+  happened to enable, which `logging.rs` needs. A workspace-wide build masked it
+  by unifying the feature back in from the CLI, so the workspace stayed green
+  while building `bv-server` on its own failed. The library now declares the
+  feature it actually uses. (Phase 4.5)
+
 ## [0.39.7] - 2026-08-12
 
 ### Added
@@ -85,6 +735,25 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+- **The test suite only ever ran the root package.** `make test`,
+  `make test-integration`, `make test-doc` and the CI steps used a bare
+  `cargo nextest run` / `cargo test`, and because this workspace has a root
+  package that scopes the run to *that package alone* -- `crates/*` were never
+  tested here. Invisible while all the code lived in the root crate, and a live
+  coverage hole as soon as [the decomposition](roadmaps/workspace-decomposition.md)
+  started moving code out: extracting `src/shamir.rs` into `crates/bv-shamir`
+  silently dropped its 21 tests (1145 → 1124). Now scoped to `--workspace`
+  minus `bastion-vault-gui` (own Tauri/vitest checks) and the vendored
+  `ferro-*` SDK, written as exclusions so a crate added by a future phase is
+  covered the day it exists. This also picked up ~143 tests in the
+  *pre-existing* crates (`bv_crypto`, `bv-client`, the plugin crates) that had
+  never run: **1145 → 1288 unit tests, 15 → 17 doctests**.
+  Note for whoever sees a red run next: this surfaced a *pre-existing* family
+  of flaky timing-dependent tests (`modules::auth::expiration::*`, the 20s
+  window in `metrics::system_metrics::test_sys_metrics`, the AppRole tidy
+  race). Measured at both scopes -- three consecutive runs failed 1/0/2 tests
+  wide and 0/0/3 root-only -- so the wider scope does not cause them. They are
+  not to be papered over with nextest `retries`; see `.config/nextest.toml`.
 - **Connect no longer 403s for every non-root principal at the first call.**
   The GUI calls `resources/v2/connect/mfa/begin` unconditionally before every
   session open (`useConnectMfa.gateConnect` -- the server decides whether a

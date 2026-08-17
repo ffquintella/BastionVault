@@ -1,608 +1,79 @@
+//! Shared test fixtures.
+//!
+//! Available to this crate's own tests, and — behind the `test-support`
+//! feature — to `bv-server`, which needs `new_test_bastion_vault` and the seal
+//! helpers to build its own harness.
+//!
+//! The in-process HTTP harness ([`TestHttpServer`] and friends) went the other
+//! way in Phase 4: it configures an actix `App` from `bv_server::init_service`,
+//! so it had to travel up into that crate. It is re-exported below under its
+//! original name, so the ~50 call sites in this crate that say
+//! `crate::test_utils::TestHttpServer` did not change.
+
 use std::{
-    collections::HashMap,
     default::Default,
     env, fs,
-    io::prelude::*,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-    str::FromStr,
-    sync::{Arc, Barrier, RwLock},
-    thread::{self, sleep},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    path::PathBuf,
+    sync::{Arc, RwLock},
+    time::Duration,
 };
 
-use actix_web::{
-    dev::Server,
-    middleware::{self, from_fn},
-    web, App, HttpResponse, HttpServer,
-};
-use lazy_static::lazy_static;
-use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use serde_json::{json, Map, Value};
-use tokio::sync::oneshot;
-use ureq::tls::{Certificate, ClientCert, PrivateKey, RootCerts, TlsConfig};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
-    api::{client::TLSConfigBuilder, Client},
-    cli::config::Config,
+    bv_error_string,
     core::{Core, InitResult, SealConfig},
     errors::RvError,
-    http,
     logical::{self, Operation, Request, Response},
-    metrics::{manager::MetricsManager, middleware::metrics_midleware, system_metrics::SystemMetrics},
-    bv_error_response, bv_error_string,
-    storage::{self, Backend},
-    utils::rustls::OptionalClientAuthVerifier,
     BastionVault,
 };
 
-lazy_static! {
-    pub static ref TEST_DIR: &'static str = "bastion_vault_test";
-}
-
-#[derive(Debug, Clone)]
-pub struct TestTlsConfig {
-    pub cert_path: String,
-    pub key_path: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct TestTlsClientAuth {
-    pub ca_pem: String,
-    pub cert_pem: String,
-    pub key_pem: String,
-}
-
-pub struct TestHttpServer {
-    pub name: String,
-    pub binary_path: String,
-    pub mount_path: String,
-    pub core: Arc<Core>,
-    pub root_token: String,
-    pub token: String,
-    pub ca_cert_pem: String,
-    pub ca_key_pem: String,
-    pub server_cert_pem: String,
-    pub server_key_pem: String,
-    pub cert_dir: String,
-    pub tls_enable: bool,
-    pub listen_addr: String,
-    pub url_prefix: String,
-    pub stop_tx: Option<oneshot::Sender<()>>,
-    pub thread: Option<thread::JoinHandle<()>>,
-}
-
-#[maybe_async::maybe_async]
-impl TestHttpServer {
-    pub async fn new(name: &str, tls_enable: bool) -> Self {
-        
-        let seal_config = SealConfig { secret_shares: 10, secret_threshold: 5 };
-        let mut test_http_server = TestHttpServer::new_without_init(name, tls_enable);
-
-        let core = test_http_server.core.clone();
-        let init_result = core.init(&seal_config).await;
-        println!("init_result: {:?}", init_result);
-        let init_result = init_result.unwrap();
-
-        let mut keys: Vec<Vec<u8>> = Vec::new();
-
-        for i in 0..seal_config.secret_threshold {
-            keys.push(init_result.secret_shares[i as usize].clone());
-        }
-
-        let k: Vec<&[u8]> = keys.iter().map(|v| v.as_slice()).collect();
-
-        let result = unseal_test_bastion_vault_core(core.as_ref(), &k).await;
-        assert!(result);
-
-        let root_token = init_result.root_token.clone();
-        println!("root_token: {:?}", root_token);
-
-        test_http_server.root_token = root_token;
-
-        test_http_server
-    }
-
-    pub fn new_without_init(name: &str, _tls_enable: bool) -> Self {
-        let barrier = Arc::new(Barrier::new(2));
-        let (stop_tx, stop_rx) = oneshot::channel();
-        let bvault = new_test_bastion_vault(name);
-        let core = bvault.core.load().clone();
-
-        let scheme = "http";
-        let ca_cert_pem = "".into();
-        let ca_key_pem = "".into();
-        let server_cert_pem = "".into();
-        let server_key_pem = "".into();
-        let test_tls_config = None;
-        let cert_dir = "".into();
-
-        // TLS test certificate generation was removed with OpenSSL; fall back to plaintext
-        let tls_enable = false;
-        let _ = tls_enable;
-
-        let (server, listen_addr) = new_test_http_server(core.clone(), test_tls_config).unwrap();
-        let server_thread = start_test_http_server(server, barrier.clone(), stop_rx);
-
-        barrier.wait();
-
-        let url_prefix = format!("{}://{}/v1", scheme, listen_addr);
-
-        Self {
-            name: name.to_string(),
-            binary_path: get_project_binary_path(),
-            core,
-            root_token: "".into(),
-            token: "".into(),
-            tls_enable,
-            ca_cert_pem,
-            ca_key_pem,
-            server_cert_pem,
-            server_key_pem,
-            cert_dir,
-            listen_addr,
-            url_prefix,
-            mount_path: "".into(),
-            stop_tx: Some(stop_tx),
-            thread: Some(server_thread),
-        }
-    }
-
-    pub fn new_with_backend(backend: Arc<dyn Backend>, _tls_enable: bool) -> Self {
-        let config = Config::default();
-        let barrier = Arc::new(Barrier::new(2));
-        let (stop_tx, stop_rx) = oneshot::channel();
-        let bvault = BastionVault::new(backend, Some(&config)).unwrap();
-        let core = bvault.core.load().clone();
-
-        let scheme = "http";
-        let ca_cert_pem = "".into();
-        let ca_key_pem = "".into();
-        let server_cert_pem = "".into();
-        let server_key_pem = "".into();
-        let test_tls_config = None;
-        let cert_dir = "".into();
-
-        // TLS test certificate generation was removed with OpenSSL; fall back to plaintext
-        let tls_enable = false;
-        let _ = tls_enable;
-
-        let (server, listen_addr) = new_test_http_server(core.clone(), test_tls_config).unwrap();
-        let server_thread = start_test_http_server(server, barrier.clone(), stop_rx);
-
-        barrier.wait();
-
-        let url_prefix = format!("{}://{}/v1", scheme, listen_addr);
-
-        Self {
-            name: "".into(),
-            binary_path: get_project_binary_path(),
-            core,
-            root_token: "".into(),
-            token: "".into(),
-            tls_enable,
-            ca_cert_pem,
-            ca_key_pem,
-            server_cert_pem,
-            server_key_pem,
-            cert_dir,
-            listen_addr,
-            url_prefix,
-            mount_path: "".into(),
-            stop_tx: Some(stop_tx),
-            thread: Some(server_thread),
-        }
-    }
-
-    pub async fn new_with_prometheus(name: &str, _tls_enable: bool) -> Self {
-        let barrier = Arc::new(Barrier::new(2));
-        let (stop_tx, stop_rx) = oneshot::channel();
-        let (_bvault, core, root_token) = new_unseal_test_bastion_vault(name).await;
-
-        let scheme = "http";
-        let ca_cert_pem = "".into();
-        let ca_key_pem = "".into();
-        let server_cert_pem = "".into();
-        let server_key_pem = "".into();
-        let test_tls_config = None;
-        let cert_dir = "".into();
-
-        // TLS test certificate generation was removed with OpenSSL; fall back to plaintext
-        let tls_enable = false;
-        let _ = tls_enable;
-
-        let collection_interval: u64 = 15;
-        let metrics_manager = Arc::new(RwLock::new(MetricsManager::new(collection_interval)));
-        let system_metrics = metrics_manager.read().unwrap().system_metrics.clone();
-
-        let (server, listen_addr) =
-            new_test_http_server_with_prometheus(core.clone(), metrics_manager, test_tls_config).unwrap();
-        let server_thread = start_test_http_server_with_prometheus(server, barrier.clone(), stop_rx, system_metrics);
-
-        barrier.wait();
-
-        let url_prefix = format!("{}://{}", scheme, listen_addr);
-
-        Self {
-            name: name.to_string(),
-            binary_path: get_project_binary_path(),
-            core,
-            root_token,
-            token: "".into(),
-            tls_enable,
-            ca_cert_pem,
-            ca_key_pem,
-            server_cert_pem,
-            server_key_pem,
-            cert_dir,
-            listen_addr,
-            url_prefix,
-            mount_path: "".into(),
-            stop_tx: Some(stop_tx),
-            thread: Some(server_thread),
-        }
-    }
-
-    pub fn mount(&mut self, path: &str, mtype: &str) -> Result<(u16, Value), RvError> {
-        let data = json!({
-            "type": mtype,
-        })
-        .as_object()
-        .cloned();
-        let (status, resp) = self.write(&format!("sys/mounts/{}", path), data, None)?;
-        if status == 200 || status == 204 {
-            self.mount_path = path.into();
-        }
-
-        Ok((status, resp))
-    }
-
-    pub fn mount_auth(&mut self, path: &str, atype: &str) -> Result<(u16, Value), RvError> {
-        let data = json!({
-            "type": atype,
-        })
-        .as_object()
-        .cloned();
-        let (status, resp) = self.write(&format!("sys/auth/{}", path), data, None)?;
-        if status == 200 || status == 204 {
-            self.mount_path = path.into();
-        }
-
-        Ok((status, resp))
-    }
-
-    pub fn login(
-        &self,
-        path: &str,
-        data: Option<Map<String, Value>>,
-        tls_client_auth: Option<TestTlsClientAuth>,
-    ) -> Result<(u16, Value), RvError> {
-        self.request("POST", path, data, None, tls_client_auth)
-    }
-
-    pub fn list(&self, path: &str, token: Option<&str>) -> Result<(u16, Value), RvError> {
-        self.request("LIST", path, None, token, None)
-    }
-
-    pub fn read(&self, path: &str, token: Option<&str>) -> Result<(u16, Value), RvError> {
-        self.request("GET", path, None, token, None)
-    }
-
-    pub fn write(
-        &self,
-        path: &str,
-        data: Option<Map<String, Value>>,
-        token: Option<&str>,
-    ) -> Result<(u16, Value), RvError> {
-        self.request("POST", path, data, token, None)
-    }
-
-    pub fn delete(
-        &self,
-        path: &str,
-        data: Option<Map<String, Value>>,
-        token: Option<&str>,
-    ) -> Result<(u16, Value), RvError> {
-        self.request("DELETE", path, data, token, None)
-    }
-
-    pub fn request(
-        &self,
-        method: &str,
-        path: &str,
-        data: Option<Map<String, Value>>,
-        token: Option<&str>,
-        tls_client_auth: Option<TestTlsClientAuth>,
-    ) -> Result<(u16, Value), RvError> {
-        self.request_with_headers(method, path, data, token, tls_client_auth, &[])
-    }
-
-    /// Like [`Self::request`] but with caller-supplied extra request headers
-    /// (e.g. `X-BastionVault-Namespace` to exercise multi-tenancy routing).
-    pub fn request_with_headers(
-        &self,
-        method: &str,
-        path: &str,
-        data: Option<Map<String, Value>>,
-        token: Option<&str>,
-        tls_client_auth: Option<TestTlsClientAuth>,
-        extra_headers: &[(&str, &str)],
-    ) -> Result<(u16, Value), RvError> {
-        let url = format!("{}/{}", self.url_prefix, path);
-        println!("request url: {}, method: {}", url, method);
-        let tk = token.unwrap_or(&self.root_token);
-        let agent = if self.tls_enable {
-            let mut tls_builder = TlsConfig::builder();
-            if let Some(client_auth) = tls_client_auth {
-                let root_certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(client_auth.ca_pem.as_bytes())
-                    .filter_map(|item| match item {
-                        Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
-                        _ => None,
-                    })
-                    .collect();
-                tls_builder = tls_builder.root_certs(RootCerts::Specific(Arc::new(root_certs)));
-
-                let client_certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(client_auth.cert_pem.as_bytes())
-                    .filter_map(|item| match item {
-                        Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
-                        _ => None,
-                    })
-                    .collect();
-                let client_key = PrivateKey::from_pem(client_auth.key_pem.as_bytes())
-                    .map_err(|e| bv_error_response!("client key format invalid: {}", e))?;
-                tls_builder = tls_builder.client_cert(Some(ClientCert::new_with_certs(&client_certs, client_key)));
-            } else {
-                let root_certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(self.ca_cert_pem.as_bytes())
-                    .filter_map(|item| match item {
-                        Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
-                        _ => None,
-                    })
-                    .collect();
-                tls_builder = tls_builder.root_certs(RootCerts::Specific(Arc::new(root_certs)));
-            }
-
-            ureq::Agent::config_builder()
-                .timeout_connect(Some(Duration::from_secs(10)))
-                .timeout_global(Some(Duration::from_secs(30)))
-                .http_status_as_error(false)
-                .allow_non_standard_methods(true)
-                .tls_config(tls_builder.build())
-                .build()
-                .new_agent()
-        } else {
-            ureq::Agent::config_builder()
-                .http_status_as_error(false)
-                .allow_non_standard_methods(true)
-                .build()
-                .new_agent()
-        };
-
-        let method_upper = method.to_uppercase();
-        let mut req_builder = ::http::Request::builder()
-            .method(method_upper.as_str())
-            .uri(&url)
-            .header("Accept", "application/json");
-        if !path.ends_with("/login") {
-            req_builder = req_builder.header("X-BastionVault-Token", tk);
-        }
-        for (name, value) in extra_headers {
-            req_builder = req_builder.header(*name, *value);
-        }
-
-        let response_result = if let Some(send_data) = data {
-            let body = serde_json::to_vec(&send_data)?;
-            let req = req_builder.header("Content-Type", "application/json").body(body)?;
-            agent.run(req)
-        } else {
-            let req = req_builder.body(())?;
-            agent.run(req)
-        };
-
-        match response_result {
-            Ok(mut response) => {
-                let status = response.status().as_u16();
-                if status == 204 {
-                    return Ok((status, json!("")));
-                }
-                let json: Value = response.body_mut().read_json()?;
-                Ok((status, json))
-            }
-            Err(e) => {
-                println!("Request failed: {e}");
-                Err(RvError::UreqError { source: e })
-            }
-        }
-    }
-
-    pub fn request_prometheus(
-        &self,
-        method: &str,
-        path: &str,
-        data: Option<Map<String, Value>>,
-        token: Option<&str>,
-        tls_client_auth: Option<TestTlsClientAuth>,
-    ) -> Result<(u16, Value), RvError> {
-        let url = format!("{}/{}", self.url_prefix, path);
-        println!("request url: {}, method: {}", url, method);
-        let tk = token.unwrap_or(&self.root_token);
-        let agent = if self.tls_enable {
-            let mut tls_builder = TlsConfig::builder();
-            if let Some(client_auth) = tls_client_auth {
-                let root_certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(client_auth.ca_pem.as_bytes())
-                    .filter_map(|item| match item {
-                        Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
-                        _ => None,
-                    })
-                    .collect();
-                tls_builder = tls_builder.root_certs(RootCerts::Specific(Arc::new(root_certs)));
-
-                let client_certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(client_auth.cert_pem.as_bytes())
-                    .filter_map(|item| match item {
-                        Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
-                        _ => None,
-                    })
-                    .collect();
-                let client_key = PrivateKey::from_pem(client_auth.key_pem.as_bytes())
-                    .map_err(|e| bv_error_response!("client key format invalid: {}", e))?;
-                tls_builder = tls_builder.client_cert(Some(ClientCert::new_with_certs(&client_certs, client_key)));
-            } else {
-                let root_certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(self.ca_cert_pem.as_bytes())
-                    .filter_map(|item| match item {
-                        Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
-                        _ => None,
-                    })
-                    .collect();
-                tls_builder = tls_builder.root_certs(RootCerts::Specific(Arc::new(root_certs)));
-            }
-
-            ureq::Agent::config_builder()
-                .timeout_connect(Some(Duration::from_secs(10)))
-                .timeout_global(Some(Duration::from_secs(30)))
-                .http_status_as_error(false)
-                .allow_non_standard_methods(true)
-                .tls_config(tls_builder.build())
-                .build()
-                .new_agent()
-        } else {
-            ureq::Agent::config_builder()
-                .http_status_as_error(false)
-                .allow_non_standard_methods(true)
-                .build()
-                .new_agent()
-        };
-
-        let method_upper = method.to_uppercase();
-        let mut req_builder = ::http::Request::builder()
-            .method(method_upper.as_str())
-            .uri(&url)
-            .header("Accept", "application/json");
-        if !path.ends_with("/login") {
-            req_builder = req_builder.header("X-BastionVault-Token", tk);
-        }
-
-        let response_result = if let Some(send_data) = data {
-            let body = serde_json::to_vec(&send_data)?;
-            let req = req_builder.header("Content-Type", "application/json").body(body)?;
-            agent.run(req)
-        } else {
-            let req = req_builder.body(())?;
-            agent.run(req)
-        };
-
-        match response_result {
-            Ok(mut response) => {
-                let status = response.status().as_u16();
-                if status == 204 {
-                    return Ok((status, json!("")));
-                }
-                let text = response.body_mut().read_to_string()?;
-                let wrapped_json = json!({"metrics":text});
-                Ok((status, wrapped_json))
-            }
-            Err(e) => {
-                println!("Request failed: {e}");
-                Err(RvError::UreqError { source: e })
-            }
-        }
-    }
-
-    pub fn cli(&self, commands: &[&str], args: &[&str]) -> Result<String, RvError> {
-        self.cli_with_input(commands, args, None)
-    }
-
-    pub fn cli_with_input(&self, commands: &[&str], args: &[&str], input: Option<&str>) -> Result<String, RvError> {
-        let mut cmd = Command::new(&self.binary_path);
-
-        for command in commands {
-            cmd.arg(command);
-        }
-
-        if self.tls_enable {
-            cmd.arg(format!("--address=https://{}", self.listen_addr));
-            cmd.arg(format!("--ca-cert={}/ca.crt", self.cert_dir));
-            cmd.arg(format!("--client-cert={}/server.crt", self.cert_dir));
-            cmd.arg(format!("--client-key={}/key.pem", self.cert_dir));
-            cmd.arg("--tls-skip-verify");
-        } else {
-            cmd.arg(format!("--address=http://{}", self.listen_addr));
-        }
-
-        for arg in args {
-            cmd.arg(arg);
-        }
-
-        cmd.env("VAULT_TOKEN", &self.token);
-
-        println!("cmd: {}, args: {:?}", self.binary_path, cmd.get_args());
-
-        let ret = if let Some(input_value) = input {
-            let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
-            let mut stdin = child.stdin.take().unwrap();
-            stdin.write_all(input_value.as_bytes())?;
-            drop(stdin);
-            child.wait_with_output()
-        } else {
-            cmd.output()
-        };
-
-        match ret {
-            Ok(output) => {
-                if output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    Ok(stdout.into_owned())
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    Err(bv_error_string!(format!("{}{}", stdout, stderr)))
-                }
-            }
-            Err(e) => Err(bv_error_string!(format!("Failed to execute command: {e}"))),
-        }
-    }
-
-    pub fn client(&self) -> Result<Client, RvError> {
-        let mut client = Client::new().with_token(&self.token);
-
-        if self.tls_enable {
-            let mut tls_config_builder = TLSConfigBuilder::new().with_insecure(true);
-
-            tls_config_builder =
-                tls_config_builder.with_server_ca_path(&PathBuf::from(&format!("{}/ca.crt", self.cert_dir)))?;
-
-            tls_config_builder = tls_config_builder.with_client_cert_path(
-                &PathBuf::from(&format!("{}/server.crt", self.cert_dir)),
-                &PathBuf::from(&format!("{}/key.pem", self.cert_dir)),
-            )?;
-
-            let tls_config = tls_config_builder.build()?;
-
-            client = client.with_addr(&format!("https://{}", self.listen_addr)).with_tls_config(tls_config);
-        } else {
-            client = client.with_addr(&format!("http://{}", self.listen_addr));
-        }
-
-        Ok(client.build())
-    }
-}
-
-impl Drop for TestHttpServer {
-    fn drop(&mut self) {
-        if let Some(tx) = self.stop_tx.take() {
-            tx.send(()).expect("Failed to send stop signal.");
-        }
-
-        if let Some(thread) = self.thread.take() {
-            thread.join().expect("Failed to join thread.");
-        }
-    }
-}
-
-mod tests {
+/// Used only by `test_multi_routine`, which is `cfg(test)` because it drives
+/// a `TestHttpServer` from the dev-dependency.
+#[cfg(test)]
+use std::{str::FromStr, thread::sleep};
+#[cfg(test)]
+use crate::storage::Backend;
+
+/// The backend fixtures now live in `bv-storage`, next to the barrier and
+/// backend tests that use them; a test in that crate cannot import from this
+/// one. Re-exported under their original names so every call site here and in
+/// `tests/` is unchanged. See roadmaps/workspace-decomposition.md § Phase 1.
+pub use bv_storage::test_support::{new_test_backend, new_test_file_backend, new_test_temp_dir, TEST_DIR};
+
+/// The in-process HTTP harness, which moved to `bv-server` in Phase 4 — it
+/// builds an actix `App` out of that crate's routes, so it belongs on that
+/// side of the split. `bv-server` is a **dev**-dependency here (cargo permits
+/// dev-dependency cycles), which is why this re-export is `cfg(test)` and not
+/// available under the `test-support` feature: a consumer that turns the
+/// feature on gets the fixtures below, not a web server.
+#[cfg(test)]
+pub use bv_server::test_support::{TestHttpServer, TestTlsClientAuth, TestTlsConfig};
+
+
+/// Process-wide fixture setup, run before any test's `main`.
+///
+/// **This deliberately travels with the `test-support` feature and is not
+/// `#[cfg(test)]`.** `bv-server` and `bvault-cli` stand up TLS listeners in
+/// their harnesses, and a `cfg(test)` gate here would not fire for them —
+/// `test` is per-crate, and they consume this module through the feature. So
+/// the provider install and the `TEST_DIR` creation have to be part of what
+/// the feature provides, or those two crates' suites would fault on the first
+/// rustls handshake.
+///
+/// The consequence to be aware of: enabling `test-support` on a *non-test*
+/// build installs a process-default crypto provider as a side effect. That is
+/// why the feature is off by default and declared only in dev-dependencies.
+/// `install_default` returns `Err` if a provider is already set, which is the
+/// normal case when a real binary has already chosen one — hence `let _`, not
+/// an unwrap: this must never override a deliberate choice made by the host.
+mod fixture_init {
     use super::*;
 
     #[ctor::ctor(unsafe)]
     fn init() {
-        let dir = env::temp_dir().join(*TEST_DIR);
+        let dir = env::temp_dir().join(TEST_DIR);
         let _ = rustls::crypto::ring::default_provider().install_default();
         assert!(fs::create_dir_all(&dir).is_ok());
     }
@@ -658,31 +129,6 @@ pub fn cert_to_x509(
 /// is retained solely so existing call sites continue to type-check.
 pub unsafe fn new_test_crl(_revoked_cert_pem: &str, _ca_cert_pem: &str, _ca_key_pem: &str) -> Result<String, RvError> {
     Err(bv_error_string!("OpenSSL-based test CRL generation has been removed"))
-}
-
-pub fn new_test_temp_dir(name: &str) -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let test_dir = env::temp_dir().join(format!("{}/{}-{}", *TEST_DIR, name, now).as_str());
-    let dir = test_dir.to_string_lossy().into_owned();
-    assert!(fs::create_dir_all(&test_dir).is_ok());
-    println!("new_test_temp_dir: {}", dir);
-    dir
-}
-
-pub fn new_test_backend(name: &str) -> Arc<dyn Backend> {
-    let dir = new_test_temp_dir(name);
-    println!("new_test_backend, dir: {}", dir);
-    new_test_file_backend(&dir)
-}
-
-pub fn new_test_file_backend(path: &str) -> Arc<dyn Backend> {
-    let mut conf: HashMap<String, Value> = HashMap::new();
-    conf.insert("path".to_string(), Value::String(path.to_string()));
-
-    let backend = storage::new_backend("file", &conf);
-    assert!(backend.is_ok());
-
-    backend.unwrap()
 }
 
 pub fn new_test_bastion_vault(name: &str) -> BastionVault {
@@ -743,168 +189,9 @@ pub async fn new_unseal_test_bastion_vault(name: &str) -> (BastionVault, Arc<Cor
     (bvault, core, root_token)
 }
 
-pub fn new_test_http_server(core: Arc<Core>, tls_config: Option<TestTlsConfig>) -> Result<(Server, String), RvError> {
-    // Tests run with no trusted proxies — direct-exposure semantics,
-    // matching the production default. Phase 1.5 hookup, mirrors
-    // src/cli/command/server.rs.
-    let trusted_proxies = web::Data::new(http::client_ip::TrustedProxies::default());
-    let mut http_server = HttpServer::new(move || {
-        App::new()
-            .wrap(middleware::Logger::default())
-            .app_data(web::Data::new(core.clone()))
-            .app_data(trusted_proxies.clone())
-            .configure(http::init_service)
-            .default_service(web::to(HttpResponse::NotFound))
-    })
-    .on_connect(http::request_on_connect_handler);
-
-    if let Some(tls) = tls_config {
-        let tls_config = build_test_rustls_server_config(&tls)?;
-        http_server = http_server.bind_rustls_0_23("127.0.0.1:0", tls_config)?;
-    } else {
-        http_server = http_server.bind("127.0.0.1:0")?;
-    }
-
-    let addr_info = http_server.addrs().first().unwrap().to_string();
-
-    println!("HTTP Server is running at {}", addr_info);
-
-    Ok((http_server.run(), addr_info))
-}
-
-pub fn new_test_http_server_with_prometheus(
-    core: Arc<Core>,
-    metrics_manager: Arc<RwLock<MetricsManager>>,
-    tls_config: Option<TestTlsConfig>,
-) -> Result<(Server, String), RvError> {
-    let trusted_proxies = web::Data::new(http::client_ip::TrustedProxies::default());
-    let mut http_server = HttpServer::new(move || {
-        App::new()
-            .wrap(middleware::Logger::default())
-            .wrap(from_fn(metrics_midleware))
-            .app_data(web::Data::new(core.clone()))
-            .app_data(web::Data::new(metrics_manager.clone()))
-            .app_data(trusted_proxies.clone())
-            .configure(http::init_service)
-            .default_service(web::to(HttpResponse::NotFound))
-    })
-    .on_connect(http::request_on_connect_handler);
-
-    if let Some(tls) = tls_config {
-        let tls_config = build_test_rustls_server_config(&tls)?;
-        http_server = http_server.bind_rustls_0_23("127.0.0.1:0", tls_config)?;
-    } else {
-        http_server = http_server.bind("127.0.0.1:0")?;
-    }
-
-    let addr_info = http_server.addrs().first().unwrap().to_string();
-
-    println!("HTTP Server is running at {}", addr_info);
-
-    Ok((http_server.run(), addr_info))
-}
-
-fn build_test_rustls_server_config(tls: &TestTlsConfig) -> Result<rustls::ServerConfig, RvError> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let cert_chain = load_test_rustls_cert_chain(Path::new(&tls.cert_path))?;
-    let private_key = load_test_rustls_private_key(Path::new(&tls.key_path))?;
-
-    let mut config = rustls::ServerConfig::builder()
-        .with_client_cert_verifier(Arc::new(OptionalClientAuthVerifier::new()))
-        .with_single_cert(cert_chain, private_key)?;
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    Ok(config)
-}
-
-fn load_test_rustls_cert_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>, RvError> {
-    let cert_pem = fs::read(path)?;
-    Ok(CertificateDer::pem_slice_iter(&cert_pem).collect::<Result<Vec<_>, _>>()?)
-}
-
-fn load_test_rustls_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, RvError> {
-    let key_pem = fs::read(path)?;
-    PrivateKeyDer::from_pem_slice(&key_pem).map_err(|err| {
-        log::error!("no usable private key in {}: {err}", path.display());
-        RvError::ErrConfigLoadFailed
-    })
-}
-
-pub fn start_test_http_server(
-    server: Server,
-    barrier: Arc<Barrier>,
-    stop_rx: oneshot::Receiver<()>,
-) -> thread::JoinHandle<()> {
-    let server_thread = thread::spawn(move || {
-        let sys = actix_web::rt::System::new();
-
-        let server_future = async {
-            server.await.unwrap();
-        };
-
-        let stop_future = async {
-            stop_rx.await.ok();
-        };
-
-        barrier.wait();
-
-        sys.block_on(async {
-            tokio::select! {
-                _ = server_future => {},
-                _ = stop_future => {
-                    actix_rt::System::current().stop();
-                }
-            }
-        });
-
-        sys.run().unwrap();
-        println!("HTTP Server has stopped.");
-    });
-
-    server_thread
-}
-
-pub fn start_test_http_server_with_prometheus(
-    server: Server,
-    barrier: Arc<Barrier>,
-    stop_rx: oneshot::Receiver<()>,
-    system_metrics: Arc<SystemMetrics>,
-) -> thread::JoinHandle<()> {
-    let server_thread = thread::spawn(move || {
-        let sys = actix_web::rt::System::new();
-
-        let server_future = async {
-            server.await.unwrap();
-        };
-
-        let stop_future = async {
-            stop_rx.await.ok();
-        };
-
-        let system_metrics_fucture = async {
-            system_metrics.start_collecting().await;
-        };
-
-        barrier.wait();
-
-        sys.block_on(async {
-            tokio::select! {
-                _ = server_future => {},
-                _ = system_metrics_fucture => {},
-                _ = stop_future => {
-                    actix_rt::System::current().stop();
-                }
-            }
-        });
-
-        sys.run().unwrap();
-        println!("HTTP Server has stopped.");
-    });
-
-    server_thread
-}
 
 #[maybe_async::maybe_async]
-pub async fn test_list_api(core: &Core, token: &str, path: &str, is_ok: bool) -> Result<Option<Response>, RvError> {
+pub async fn test_list_api(core: &dyn VaultCtx, token: &str, path: &str, is_ok: bool) -> Result<Option<Response>, RvError> {
     let mut req = Request::new(path);
     req.operation = Operation::List;
     req.client_token = token.to_string();
@@ -914,6 +201,10 @@ pub async fn test_list_api(core: &Core, token: &str, path: &str, is_ok: bool) ->
     resp
 }
 
+/// Drives a real `TestHttpServer`, which lives in `bv-server` — a
+/// dev-dependency here. So this helper, unlike the rest of the module, is not
+/// available under the `test-support` feature.
+#[cfg(test)]
 pub fn test_multi_routine(backend: Arc<dyn Backend>) {
     let mut test_http_server1 = TestHttpServer::new_with_backend(backend.clone(), false);
 
@@ -996,7 +287,7 @@ pub fn test_multi_routine(backend: Arc<dyn Backend>) {
 }
 
 #[maybe_async::maybe_async]
-pub async fn test_read_api(core: &Core, token: &str, path: &str, is_ok: bool) -> Result<Option<Response>, RvError> {
+pub async fn test_read_api(core: &dyn VaultCtx, token: &str, path: &str, is_ok: bool) -> Result<Option<Response>, RvError> {
     let mut req = Request::new(path);
     req.operation = Operation::Read;
     req.client_token = token.to_string();
@@ -1008,7 +299,7 @@ pub async fn test_read_api(core: &Core, token: &str, path: &str, is_ok: bool) ->
 
 #[maybe_async::maybe_async]
 pub async fn test_write_api(
-    core: &Core,
+    core: &dyn VaultCtx,
     token: &str,
     path: &str,
     is_ok: bool,
@@ -1027,7 +318,7 @@ pub async fn test_write_api(
 
 #[maybe_async::maybe_async]
 pub async fn test_delete_api(
-    core: &Core,
+    core: &dyn VaultCtx,
     token: &str,
     path: &str,
     is_ok: bool,
@@ -1044,7 +335,7 @@ pub async fn test_delete_api(
 }
 
 #[maybe_async::maybe_async]
-pub async fn test_mount_api(core: &Core, token: &str, mtype: &str, path: &str) {
+pub async fn test_mount_api(core: &dyn VaultCtx, token: &str, mtype: &str, path: &str) {
     let data = json!({
         "type": mtype,
     })
@@ -1056,7 +347,7 @@ pub async fn test_mount_api(core: &Core, token: &str, mtype: &str, path: &str) {
 }
 
 #[maybe_async::maybe_async]
-pub async fn test_mount_auth_api(core: &Core, token: &str, atype: &str, path: &str) {
+pub async fn test_mount_auth_api(core: &dyn VaultCtx, token: &str, atype: &str, path: &str) {
     let auth_data = json!({
         "type": atype,
     })
@@ -1079,6 +370,26 @@ pub fn get_project_binary_path() -> String {
     // subcommands the tests exercise. Hard-coding the name keeps the
     // resolution stable across cargo + platform variations.
     let bin_name = "bvault";
+
+    // Preferred: derive it from the running test executable, which cargo puts
+    // at `<target>/<profile>/deps/<name>-<hash>` — so its grandparent is the
+    // profile directory `bvault` is built into.
+    //
+    // `CARGO_MANIFEST_DIR` (the fallback below) stopped being sufficient in
+    // Phase 4: this fixture is now used from three packages — `bastion_vault`,
+    // `bv-server` and `bvault-cli` — and cargo sets that variable to the
+    // manifest dir of whichever one is under test, while the target directory
+    // is shared and lives at the workspace root. Deriving from `current_exe`
+    // also honours `CARGO_TARGET_DIR`, which the plugin targets set.
+    if let Ok(exe) = env::current_exe() {
+        if let Some(profile_dir) = exe.parent().and_then(|deps| deps.parent()) {
+            let candidate = profile_dir.join(bin_name);
+            if candidate.exists() {
+                return candidate.into_os_string().into_string().unwrap_or_default();
+            }
+        }
+    }
+
     let build_profile = env::var("CARGO_PROFILE_RELEASE_DEBUG").unwrap_or("debug".into());
     let mut binary_path = PathBuf::from(manifest_dir);
     if build_profile == "release" {

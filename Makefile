@@ -97,7 +97,21 @@ $(FAST_BUILD_TARGETS): export RUSTFLAGS := $(strip $(RUSTFLAGS) -Z threads=$(RUS
 endif
 endif
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-integration test-doc test-cucumber test-hiqlite test-all docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages
+# ── Never run two recipes at once ─────────────────────────────────
+#
+# Almost every target here is a cargo invocation, and cargo already saturates
+# the machine. Two of them do NOT run in parallel — the second blocks on the
+# shared target/ build lock for as long as the first takes. Measured on this
+# tree: a `cargo check -p bv-errors` that should cost <1s took 9m14s wall with
+# 0.4s of CPU because a concurrent test + clippy held the lock (AGENTS.md §5).
+#
+# Aggregate targets (`test-all`, `test-release`, `cli-packages-all`) list
+# several such invocations, so a stray `make -j` turns a slow run into a
+# pathological one. This makes -j a no-op for recipe scheduling; it does not
+# affect cargo's own internal parallelism, which is where the cores actually go.
+.NOTPARALLEL:
+
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated test-integration test-doc test-cucumber test-hiqlite test-all test-release docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -236,19 +250,137 @@ require-nextest: ## Check cargo-nextest is installed; print install instructions
 # It is easy to miss locally, where a stale binary from an earlier build is
 # usually lying around; CI has no such luck. Declare the dependency.
 test-bin: prune-stale ## Build the bvault executable that the cli::command::* tests spawn
-	cargo build --bin bvault
+	cargo build -p bvault-cli --bin bvault
+
+# ── Test scope ────────────────────────────────────────────────────────
+#
+# This workspace has a ROOT package, so a bare `cargo nextest run` runs
+# only that package — not `crates/*`. That was invisible while all the code
+# lived in the root crate, and it became a coverage hole the moment
+# roadmaps/workspace-decomposition.md started moving code out: extracting
+# `src/shamir.rs` into `crates/bv-shamir` silently dropped its 21 tests
+# from `make test`, and every later extraction would do the same, quietly.
+#
+# A separate `test-crates` target was tried first, on the theory that mixing
+# the crates in destabilised the suite. That theory was wrong, and the
+# measurement is kept here so nobody re-derives it: three consecutive runs at
+# each scope failed 1/0/2 tests wide and 0/0/3 tests root-only. The suite has
+# a pre-existing family of flaky timing-dependent tests (`modules::auth::
+# expiration::*`, the 20s window in `metrics::system_metrics::test_sys_metrics`,
+# the AppRole tidy race) that fail at either scope, so there is nothing to
+# isolate — widening is simply the simpler correct thing. Those tests are
+# tracked separately; do NOT add nextest `retries` to paper over them
+# (.config/nextest.toml explains why).
+#
+# Excluded, and why:
+#   bastion-vault-gui  desktop app; drags in the whole Tauri toolchain.
+#                      Has its own checks (see `cd gui && npx vitest run`).
+#
+# The FerroGate `ferro-*` verifier crates used to need an exclusion here:
+# they were vendored under third_party/ and a path dependency of a member
+# is a workspace member regardless of `exclude`. They now come from the
+# `uox-ferrogate` registry, so cargo never builds their test targets and
+# there is nothing to exclude.
+#
+# Stated as exclusions, not an inclusion list, so a crate created by a
+# future phase is covered the day it exists with no Makefile edit to forget.
+TEST_SCOPE := --workspace \
+	--exclude bastion-vault-gui
 
 test: require-nextest test-bin ## Run the unit test suite (lib + bins) with nextest
-	cargo nextest run --lib --bins
+	cargo nextest run $(TEST_SCOPE) --lib --bins
+
+# ── Inner loop: only what the change can have broken ──────────────
+#
+# `make test` links ~40 test harnesses, five of them 200 MB+. Paying that on
+# every edit is the largest single sink of wall-clock time in development, and
+# nearly all of it goes on tests the edit cannot reach.
+#
+# `test-changed` derives the affected set from git + the cargo dependency graph
+# (reverse deps, dev-deps included) and runs only those packages. See
+# scripts/test-changed.sh for how the set is derived and what forces a full run.
+#
+#   make test-changed                 # uncommitted work
+#   make test-changed BASE=main       # ...plus everything since merge-base(main)
+#   make test-changed DIRECT=1        # changed packages only, no dependents
+#   make test-changed PKG=bv-engine-pki
+#   make test-changed FILTER=issue_cert
+#   make test-plan                    # print the plan, build nothing
+#
+# It does NOT replace `make test-release`. It narrows the loop; the gate stays
+# where it is.
+TC_FLAGS := $(foreach p,$(PKG),--pkg $(p))
+ifdef BASE
+TC_FLAGS += --base $(BASE)
+endif
+ifdef DIRECT
+TC_FLAGS += --direct
+endif
+
+test-changed: require-nextest prune-stale ## Run only the tests affected by your changes (PKG=/BASE=/DIRECT=1/FILTER=)
+	scripts/test-changed.sh $(TC_FLAGS) $(if $(FILTER),-- $(FILTER))
+
+test-plan: ## Show which packages `make test-changed` would test, without building
+	@scripts/test-changed.sh --list $(TC_FLAGS)
+
+# ── The CI plan, runnable locally ─────────────────────────────────
+#
+# What .github/workflows/tests.yml will do with a change, without pushing to
+# find out. Same graph as `test-plan`, different consumer.
+#
+#   make ci-plan                    # the working tree, as a PR would see it
+#   make ci-plan BASE=main          # ...plus everything since merge-base(main)
+#   make ci-plan FULL=1             # the everything plan, which is what main runs
+#   make ci-plan PKG=bv-engine-pki  # "what would CI do if I touched this crate?"
+ci-plan: ## Show the CI job plan for your change (scripts/ci-plan.sh), building nothing
+	@scripts/ci-plan.sh $(if $(BASE),--base $(BASE)) $(if $(FULL),--full) $(foreach p,$(PKG),--pkg $(p))
+
+# ── Each crate builds on its own ──────────────────────────────────
+#
+# `cargo check --workspace` is NOT a proxy for "each crate builds". Cargo
+# unifies features across everything in one build, so a crate can be missing a
+# feature it needs and stay green because some sibling turns it on. That is not
+# hypothetical here: Phase 4 of roadmaps/workspace-decomposition.md left
+# `bv-server` unable to build alone (`log::set_boxed_logger` — `env_logger` had
+# been what pulled in `log/std`) while the workspace check passed, and Phase 4.5
+# found it by hand. Anything downstream of `bv-server` would have hit it first.
+#
+# One target dir and one cargo invocation per member, sequentially: each check
+# reuses what the previous one built, so the only real cost is the crates whose
+# feature set genuinely differs — which is exactly the set this is looking for.
+# Serial on purpose (AGENTS.md §5): parallel cargo invocations queue on the
+# shared target/ lock rather than overlapping.
+#
+# The GUI is excluded for the same reason it is everywhere else: it drags in the
+# whole Tauri toolchain and has its own checks.
+#
+# No `--all-targets`: the `check` gate already front-end-compiles every test
+# target across the workspace, and repeating that here would roughly double this
+# target's cost to re-check code that cannot be affected by the thing it is
+# looking for. Feature unification bites the production graph — a lib that
+# cannot build without a sibling's feature — which is what `cargo check -p X`
+# alone measures.
+check-isolated: prune-stale ## cargo check every workspace member on its own (catches feature-unification bugs)
+	@set -e; \
+	pkgs=$$(cargo metadata --format-version 1 --no-deps \
+	        | python3 -c 'import json,sys; print(" ".join(sorted(p["name"] for p in json.load(sys.stdin)["packages"] if p["name"] != "bastion-vault-gui")))'); \
+	n=$$(echo $$pkgs | wc -w | tr -d " "); i=0; \
+	for p in $$pkgs; do \
+	  i=$$((i+1)); \
+	  echo "==> [$$i/$$n] cargo check -p $$p"; \
+	  cargo check -p $$p; \
+	done; \
+	echo ""; \
+	echo "==> check-isolated: all $$n members build on their own."
 
 test-integration: require-nextest prune-stale ## Run the tests/ integration suite with nextest (links ~30 binaries; slow)
-	cargo nextest run --tests
+	cargo nextest run $(TEST_SCOPE) --tests
 
 # nextest cannot run doctests — it drives libtest binaries, and rustdoc's
 # test runner is a separate thing entirely. This stays on `cargo test`.
 # See https://nexte.st/docs/design/custom-test-harnesses/
 test-doc: prune-stale ## Run doctests (cargo test --doc; nextest cannot run these)
-	cargo test --doc
+	cargo test $(TEST_SCOPE) --doc
 
 # `harness = false`, so nextest cannot enumerate its cases. Binds fixed
 # ports 28100/28200 and shares one backend across all scenarios, so it
@@ -262,7 +394,7 @@ test-cucumber: prune-stale ## Run the cucumber feature suite (harness = false, s
 # would restart the counter at zero every time and collide on ports.
 # `--test-threads=1` on top of the in-crate `#[serial]` markers.
 test-hiqlite: prune-stale ## Run the hiqlite storage + HA fault-injection suites (plain cargo test, single process)
-	CARGO_TEST_HIQLITE=1 cargo test --lib storage::hiqlite:: -- --test-threads=1
+	CARGO_TEST_HIQLITE=1 cargo test -p bv-storage --lib --features storage_hiqlite hiqlite::test:: -- --test-threads=1
 	CARGO_TEST_HIQLITE=1 cargo test --test hiqlite_ha_fault_injection -- --test-threads=1
 
 test-all: test test-integration test-doc ## Run unit + integration + doctests (excludes the port-bound hiqlite suites; see test-hiqlite)
@@ -271,11 +403,217 @@ test-all: test test-integration test-doc ## Run unit + integration + doctests (e
 	@echo "    make test-hiqlite   # hiqlite storage + HA fault injection"
 	@echo "    make test-cucumber  # cucumber feature files"
 
+# ── The release gate ──────────────────────────────────────────────
+#
+# EVERY suite this repo has, in one target, so "did we run everything?" has an
+# answer that is not a checklist someone reads from memory. Run it before
+# cutting a release, and before merging anything that touches a persisted
+# format, a storage barrier, authn/authz, or the plugin ABI.
+#
+# `test-all` is the subset that excludes the port-bound and non-libtest suites;
+# this is the superset that does not. Expect tens of minutes: it links the ~30
+# integration binaries, runs rustdoc over every crate, and stands hiqlite
+# clusters up and down on real TCP ports.
+#
+# Ordered cheapest-and-broadest first, so the run that is going to fail usually
+# fails early. Each line is a separate sub-make, and `.NOTPARALLEL` above keeps
+# them from overlapping — two cargo invocations do not run in parallel, they
+# queue on the shared target/ lock (AGENTS.md §5).
+#
+# Deliberately NOT here: `make build` (a release *build* is its own step) and
+# `tests/e2e/rustion-ssh` (needs real remote hosts, cannot be hermetic).
+test-release: require-nextest ## Every suite, for a release or a high-risk merge (slow: tens of minutes)
+	@echo "==> [1/7] unit tests (lib + bins)"      && $(MAKE) --no-print-directory test
+	@echo "==> [2/7] integration tests (tests/)"   && $(MAKE) --no-print-directory test-integration
+	@echo "==> [3/7] doctests"                     && $(MAKE) --no-print-directory test-doc
+	@echo "==> [4/7] hiqlite storage + HA"         && $(MAKE) --no-print-directory test-hiqlite
+	@echo "==> [5/7] cucumber features"            && $(MAKE) --no-print-directory test-cucumber
+	@echo "==> [6/7] plugin ABI + substrate"       && $(MAKE) --no-print-directory plugins-test
+	@echo "==> [7/7] GUI typecheck + vitest"       && $(MAKE) --no-print-directory gui-check gui-test
+	@echo ""
+	@echo "==> test-release complete: every suite in this repo passed."
+	@echo "    Not covered (needs real hosts, run by hand): tests/e2e/rustion-ssh"
+
 docs: ## Serve the Docsify-powered documentation site locally on http://localhost:3000
 	@command -v docsify >/dev/null 2>&1 || npm i -g docsify-cli
 	docsify serve docs
 
-# `bump-*` targets bump the workspace version everywhere it lives:
+# ── Decomposition instrumentation (Phase 0) ───────────────────────
+#
+# See roadmaps/workspace-decomposition.md. `bench-build` is the instrument every
+# later phase reports its delta against; `deps-unused` keeps the dependency
+# graph from re-growing the slack Phase 0 removed.
+
+bench-build: require-nextest ## Measure incremental build cost (median of 3) and append a row to docs/build-timings/baseline.md
+	scripts/bench-build.sh
+
+bench-build-quick: require-nextest ## Same, single sample, nothing written to the log
+	scripts/bench-build.sh --repeat 1 --no-log
+
+deps-unused: ## Report unused direct dependencies in our crates (needs cargo-machete)
+	scripts/deps-unused.sh
+
+deps-unused-warn: ## Same, but never fails -- the shape CI uses
+	scripts/deps-unused.sh --warn
+
+build-timings: ## Write a cargo --timings HTML for a full lib rebuild (target/cargo-timings/)
+	@# Touching core.rs forces the monolith to rebuild as one unit, which is the
+	@# number the decomposition divides. Deps stay cached, so this shows the
+	@# crate's own cost rather than a cold graph -- the cold picture comes from
+	@# CI, where a cold build happens anyway.
+	touch src/core.rs
+	cargo build --lib --timings
+	@echo
+	@echo "==> open target/cargo-timings/cargo-timing.html"
+	@echo "    archive it as docs/build-timings/lib-selftime-<commit>.html when it"
+	@echo "    is a phase boundary worth keeping."
+
+# ── FerroGate SDK ─────────────────────────────────────────────────
+#
+# The `ferro-*` verifier crates come from the `uox-ferrogate` Cloudsmith
+# registry (declared in .cargo/config.toml), pinned to an exact version in
+# Cargo.toml. There is no re-vendoring step any more — bump the three `=`
+# requirements and commit that. See docs/ferrogate-machine-auth.md
+# § SDK dependency.
+
+# ── Cargo registry: Cloudsmith uox/bastionvault ───────────────────
+#
+# The registry itself is declared in `.cargo/config.toml`. The token is
+# never stored in the repo — see docs/publishing-crates.md.
+
+CARGO_REGISTRY ?= uox-bastionvault
+
+crates-login: ## Store a Cloudsmith Cargo API token in $CARGO_HOME (prompts; never touches the repo)
+	@echo "Get an API key: https://cloudsmith.io/user/settings/api/"
+	@echo "It is written to \$$CARGO_HOME/credentials.toml, outside this repo."
+	@echo "(The repo's .gitignore also blocks .cargo/credentials* as a backstop.)"
+	@echo
+	cargo login --registry $(CARGO_REGISTRY)
+
+crates-verify: ## Package the dependency-free crates from a staged tarball (no upload, no token)
+	@# Only the crates with no *workspace* dependencies can be packaged
+	@# before anything is on the registry: cargo resolves each dependency
+	@# in its published (registry) form before it will stage a tarball, so
+	@# a crate like bv_plugin_manifest cannot be verified until
+	@# bv_plugin_surface is actually live. `make crates-publish-dry`
+	@# reports those as "deferred".
+	cargo package -p bv_plugin_surface -p bv_crypto -p bastion-plugin-testkit --allow-dirty
+
+crates-publish-dry: ## Dry-run publish of all library crates in dependency order (uploads nothing)
+	scripts/publish-crates.sh --registry $(CARGO_REGISTRY)
+
+crates-publish: ## Publish all library crates to the Cloudsmith registry FOR REAL (irreversible; needs a clean tree)
+	@echo "This uploads crates to '$(CARGO_REGISTRY)'. A published version can"
+	@echo "never be replaced -- only yanked and superseded. Ctrl-C to abort."
+	@echo
+	@printf "Type the registry name to confirm: "; \
+	read -r confirm; \
+	if [ "$$confirm" != "$(CARGO_REGISTRY)" ]; then echo "aborted."; exit 1; fi
+	scripts/publish-crates.sh --registry $(CARGO_REGISTRY) --execute
+
+# ── Per-crate releases: build and push only what changed ──────────
+#
+# Phase 6 of roadmaps/workspace-decomposition.md. Every library crate carries
+# its own version and is released on its own schedule, so a normal release
+# ships a handful of crates rather than all 38. The three targets below are
+# the whole loop:
+#
+#   make crates-plan               # what changed, and what would ship
+#   make crates-bump               # patch-bump exactly those crates
+#   make crates-publish-changed    # build + upload exactly those crates
+#
+# "Changed" means the crate's directory differs from its last
+# `<name>-v<version>` release tag — scripts/crates-plan.sh explains how, and
+# `make crates-plan` prints the reason per crate. Nothing here consults the
+# product version: `bv-shamir` has not changed since it was extracted and must
+# not be republished 40 times because the GUI shipped.
+#
+# WHY A PATCH BUMP DOES NOT DRAG THE WORKSPACE WITH IT: internal dependencies
+# are declared `version = "0.1.0"`, a caret requirement matching every 0.1.x.
+# Bumping `bv-errors` to 0.1.1 leaves all 32 dependents' manifests untouched,
+# so their tarballs are unchanged and they are not republished — a consumer
+# picks up 0.1.1 on its own. Do NOT pin internal deps with `=`, and do NOT
+# move them into `[workspace.dependencies]`; either turns every release into a
+# whole-workspace release. See AGENTS.md § Per-crate versioning.
+
+crates-plan: ## Show which crates changed since their last published version (no build, no upload)
+	@scripts/crates-plan.sh --registry $(CARGO_REGISTRY) $(if $(OFFLINE),--offline)
+
+# MINOR=<crate> for a breaking change — that is the one call this cannot make
+# for you, because it is a judgement about the crate's public API. Patch is the
+# default because it is the safe default.
+#
+#   make crates-bump                        # patch-bump every changed crate
+#   make crates-bump MINOR=bv-errors        # ...and treat bv-errors as breaking
+#   make crates-bump CRATE=bv-engine-pki    # bump one, changed or not
+#   make crates-bump DRY=1                  # show the edits, write nothing
+crates-bump: ## Bump the version of each changed crate (MINOR=<crate> for breaking, CRATE=<name>, DRY=1)
+	@scripts/crates-bump.sh $(if $(DRY),--dry-run) \
+		$(foreach c,$(MINOR),--minor $(c)) $(foreach c,$(CRATE),--crate $(c))
+
+crates-publish-changed-dry: ## Dry-run publish of ONLY the changed crates (uploads nothing)
+	scripts/publish-crates.sh --registry $(CARGO_REGISTRY) --changed
+
+crates-publish-changed: ## Publish ONLY the changed crates FOR REAL (irreversible; needs a clean tree)
+	@# The plan is computed ONCE here and handed to the publish run, so the
+	@# set you are asked to confirm is exactly the set that ships. Recomputing
+	@# it after the prompt would leave a window where a `git commit` in another
+	@# terminal changes what gets uploaded.
+	@scripts/crates-plan.sh --registry $(CARGO_REGISTRY) --json > .crates-plan.json
+	@scripts/crates-plan.sh --registry $(CARGO_REGISTRY)
+	@echo
+	@echo "This uploads the crates marked 'publish' above to '$(CARGO_REGISTRY)'."
+	@echo "A published version can never be replaced -- only yanked and"
+	@echo "superseded. Ctrl-C to abort."
+	@echo
+	@printf "Type the registry name to confirm: "; \
+	read -r confirm; \
+	if [ "$$confirm" != "$(CARGO_REGISTRY)" ]; then echo "aborted."; rm -f .crates-plan.json; exit 1; fi
+	scripts/publish-crates.sh --registry $(CARGO_REGISTRY) --changed --execute \
+		--plan-file .crates-plan.json
+	@rm -f .crates-plan.json
+
+# Separate from the publish step on purpose. The upload is irreversible and
+# has already happened; pushing the tags is what makes the release visible to
+# everyone else, and that stays a deliberate second action.
+crates-tag-push: ## Push the local <crate>-v<version> tags written by the last publish
+	@tags=$$(git tag --points-at HEAD | grep -E -- '-v[0-9]+\.[0-9]+\.[0-9]+$$' || true); \
+	if [ -z "$$tags" ]; then \
+		echo "No per-crate release tags at HEAD. Nothing to push."; exit 0; \
+	fi; \
+	echo "Pushing to origin:"; echo "$$tags" | sed 's/^/  /'; echo; \
+	printf "Push these tags? [y/N] "; read -r ans; \
+	if [ "$$ans" != "y" ] && [ "$$ans" != "Y" ]; then echo "aborted."; exit 1; fi; \
+	git push origin $$tags
+
+# ── The PRODUCT version, which is not the library versions ────────
+#
+# Two version schemes live in this repo since Phase 6 of
+# roadmaps/workspace-decomposition.md, and conflating them is the mistake to
+# avoid:
+#
+#   PRODUCT  — one number, what `bvault --version` prints and what the
+#              installers are named after. The root crate, `bvault-cli` and
+#              the GUI move together, and `bump-*` below is what moves them.
+#              None of them is published to the registry.
+#
+#   LIBRARY  — 38 independent numbers, one per publishable crate, moved by
+#              content rather than by release: `make crates-bump` bumps only
+#              the crates that actually changed. See `make crates-plan`.
+#
+# `bv-server` is the odd one: it is Tier 4 like `bvault-cli`, but it carries
+# its own 0.1.0 rather than the product version, because nothing prints it —
+# it is a library the CLI and the GUI link, not a thing an operator names. It
+# is unpublishable either way (it reaches `bastion_vault`), so the number is
+# inert. Left as it is rather than "tidied" into the lockstep list.
+#
+# So `bump-*` deliberately does NOT touch the `crates/bv-*` libraries. A
+# release that ships the GUI must not republish `bv-shamir`, which has not
+# changed since it was extracted. If you find yourself adding a
+# `crates/bv-<library>` line to `_bump-write`, you are re-coupling the two
+# schemes — use `crates-bump` instead.
+#
+# `bump-*` targets bump the product version everywhere it lives:
 # - `Cargo.toml` (root crate)
 # - `gui/src-tauri/Cargo.toml` (Tauri host crate)
 # - `gui/package.json` (npm package — drives `npm publish` / vite build IDs)
@@ -306,16 +644,22 @@ else
 SED_INPLACE := $(shell sed --version >/dev/null 2>&1 && echo "sed -i" || echo "sed -i ''")
 endif
 
-# `bump-*` keeps the four version sites in lockstep:
+# `bump-*` keeps the shipped-product version sites in lockstep:
 #   * root `Cargo.toml`               (workspace crate version)
 #   * `gui/src-tauri/Cargo.toml`      (Tauri Rust crate)
 #   * `gui/package.json`              (npm — bastion-vault-gui)
 #   * `gui/src-tauri/tauri.conf.json` (Tauri runtime version pin)
+#   * `crates/bvault-cli/Cargo.toml`  (the `bvault` CLI — Phase 4 moved the
+#                                      binary out of the root package, and
+#                                      `bvault --version` is operator-facing)
+#   * the `bastion_vault` version pins in `crates/bvault-cli/Cargo.toml` and
+#     `crates/bv-server/Cargo.toml` — Tier 4 depends on the root crate by
+#     version as well as by path, so a stale pin breaks resolution outright.
 #
-# Workspace crates under `crates/` (`bv_crypto`, `bastion-plugin-sdk`,
-# `bv-plugin-pack`) have independent versioning lifecycles and are NOT
-# touched here — bump them by hand or via dedicated scripts as
-# semver-relevant changes land.
+# The library crates under `crates/` (`bv_crypto`, `bastion-plugin-sdk`,
+# `bv-plugin-pack`, and the Tier 0–3 crates Phases 1–3 created) have
+# independent versioning lifecycles and are NOT touched here — bump them by
+# hand or via dedicated scripts as semver-relevant changes land.
 #
 # Each sed uses `[^\"]*` for the existing-version match so a manually
 # patched root (or a previously-drifted gui) still bumps cleanly.
@@ -345,11 +689,22 @@ _bump-write:
 	@$(SED_INPLACE) '1,/^version = /s/^version = "[^"]*"/version = "$(NEW)"/' gui/src-tauri/Cargo.toml
 	@$(SED_INPLACE) '1,/^  "version":/s/^  "version": "[^"]*"/  "version": "$(NEW)"/' gui/package.json
 	@$(SED_INPLACE) '1,/^  "version":/s/^  "version": "[^"]*"/  "version": "$(NEW)"/' gui/src-tauri/tauri.conf.json
+	@# `bvault-cli` carries the shipped product version, not an independent
+	@# one: `bvault --version` is what operators read. Phase 4.
+	@$(SED_INPLACE) '1,/^version = /s/^version = "[^"]*"/version = "$(NEW)"/' crates/bvault-cli/Cargo.toml
+	@# Both Tier 4 crates pin `bastion_vault` by version as well as by path
+	@# (the `publish = ["uox-bastionvault"]` setup requires it). Leaving these
+	@# behind makes the workspace unresolvable on the very next bump, because
+	@# a `version = "0.39.7"` requirement cannot match a 0.40.0 package.
+	@$(SED_INPLACE) 's/^bastion_vault = { path = "\.\.\/\.\.", version = "[^"]*"/bastion_vault = { path = "..\/..", version = "$(NEW)"/' crates/bvault-cli/Cargo.toml
+	@$(SED_INPLACE) 's/^bastion_vault = { path = "\.\.\/\.\.", version = "[^"]*"/bastion_vault = { path = "..\/..", version = "$(NEW)"/' crates/bv-server/Cargo.toml
 	@echo "Bumped version: $(VERSION) -> $(NEW)"
 	@echo "  Cargo.toml:                    $$(grep '^version' Cargo.toml | head -1)"
 	@echo "  gui/src-tauri/Cargo.toml:      $$(grep '^version' gui/src-tauri/Cargo.toml | head -1)"
 	@echo "  gui/package.json:              $$(grep '\"version\"' gui/package.json | head -1 | sed 's/^[ \t]*//')"
 	@echo "  gui/src-tauri/tauri.conf.json: $$(grep '\"version\"' gui/src-tauri/tauri.conf.json | head -1 | sed 's/^[ \t]*//')"
+	@echo "  crates/bvault-cli/Cargo.toml:  $$(grep '^version' crates/bvault-cli/Cargo.toml | head -1)"
+	@echo "  bastion_vault pins:            $$(grep -h '^bastion_vault = ' crates/bvault-cli/Cargo.toml crates/bv-server/Cargo.toml | grep -o 'version = \"[^\"]*\"' | tr '\n' ' ')"
 
 # ── Server container image (Wave 1, Phase 1 of Packaging & Distribution) ──
 #
@@ -557,8 +912,8 @@ linux-cli-deb: ## Build the bvault CLI .deb (Linux amd64; cross-built via Docker
 		exit 1; \
 	}
 	$(_cli_require_cross)
-	$(CLI_LINUX_CARGO) build --release --bin bvault --target $(CLI_LINUX_TARGET)
-	cargo deb --no-build --no-strip --target $(CLI_LINUX_TARGET)
+	$(CLI_LINUX_CARGO) build -p bvault-cli --release --bin bvault --target $(CLI_LINUX_TARGET)
+	cargo deb -p bvault-cli --no-build --no-strip --target $(CLI_LINUX_TARGET)
 	@echo ""
 	@echo "==> .deb under target/$(CLI_LINUX_TARGET)/debian/:"
 	@ls -lh target/$(CLI_LINUX_TARGET)/debian/*.deb 2>/dev/null || true
@@ -569,8 +924,8 @@ linux-cli-rpm: ## Build the bvault CLI .rpm (Linux amd64; cross-built via Docker
 		exit 1; \
 	}
 	$(_cli_require_cross)
-	$(CLI_LINUX_CARGO) build --release --bin bvault --target $(CLI_LINUX_TARGET)
-	cargo generate-rpm --target $(CLI_LINUX_TARGET) --arch $(CLI_LINUX_RPM_ARCH) --auto-req $(CLI_LINUX_AUTOREQ)
+	$(CLI_LINUX_CARGO) build -p bvault-cli --release --bin bvault --target $(CLI_LINUX_TARGET)
+	cargo generate-rpm -p bvault-cli --target $(CLI_LINUX_TARGET) --arch $(CLI_LINUX_RPM_ARCH) --auto-req $(CLI_LINUX_AUTOREQ)
 	@echo ""
 	@echo "==> .rpm under target/$(CLI_LINUX_TARGET)/generate-rpm/:"
 	@ls -lh target/$(CLI_LINUX_TARGET)/generate-rpm/*.rpm 2>/dev/null || true
@@ -643,7 +998,7 @@ ifeq ($(CLI_WIN_NATIVE),1)
 		echo "       or pass CANDLE=/LIGHT= with full paths."; \
 		exit 1; \
 	}
-	cargo build --release --bin bvault
+	cargo build -p bvault-cli --release --bin bvault
 	@mkdir -p target/msi
 	$(CANDLE) -nologo -arch x64 \
 		-dVersion=$(VERSION) \
@@ -662,7 +1017,7 @@ else
 		exit 1; \
 	}
 	$(_cli_win_require_cross)
-	cross build --release --bin bvault --target $(CLI_WIN_TARGET)
+	cross build -p bvault-cli --release --bin bvault --target $(CLI_WIN_TARGET)
 	@mkdir -p target/msi
 	$(WIXL) --arch x64 \
 		-D Version=$(VERSION) \
@@ -681,7 +1036,7 @@ ifeq ($(CLI_WIN_NATIVE),1)
 		echo "ERROR: choco not found. Install Chocolatey: https://chocolatey.org/install"; \
 		exit 1; \
 	}
-	cargo build --release --bin bvault
+	cargo build -p bvault-cli --release --bin bvault
 	@rm -rf target/nupkg/staging
 	@mkdir -p target/nupkg/staging/tools
 	cp installers/cli/nupkg/bastionvault-cli.nuspec target/nupkg/staging/
@@ -697,7 +1052,7 @@ else
 		exit 1; \
 	}
 	$(_cli_win_require_cross)
-	cross build --release --bin bvault --target $(CLI_WIN_TARGET)
+	cross build -p bvault-cli --release --bin bvault --target $(CLI_WIN_TARGET)
 	@mkdir -p target/nupkg
 	python3 installers/cli/nupkg/build-nupkg.py \
 		--nuspec installers/cli/nupkg/bastionvault-cli.nuspec \
@@ -742,9 +1097,9 @@ ifneq ($(shell uname -s),Darwin)
 else
 	@if [ -n "$(CLI_MAC_TARGET)" ]; then \
 		rustup target list --installed | grep -q '^$(CLI_MAC_TARGET)$$' || rustup target add $(CLI_MAC_TARGET); \
-		cargo build --release --bin bvault --target $(CLI_MAC_TARGET); \
+		cargo build -p bvault-cli --release --bin bvault --target $(CLI_MAC_TARGET); \
 	else \
-		cargo build --release --bin bvault; \
+		cargo build -p bvault-cli --release --bin bvault; \
 	fi
 	VERSION=$(VERSION) BVAULT_BIN=$(CLI_MAC_EXE) PKG_ARCH=$(CLI_MAC_ARCH) OUTPUT_DIR=target/pkg \
 		bash installers/cli/pkg/build-macos-pkg.sh

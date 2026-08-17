@@ -1,26 +1,53 @@
 name: Tests
 
-# Runs the Rust unit suite and the GUI frontend suite under cargo-nextest /
-# vitest.
+# The test suite, scoped to what a change can actually have broken.
 #
-# NOTE ON SCOPE: this workflow only runs the fast, hermetic suites —
-# `--lib --bins` plus doctests, and the GUI's vitest run. It deliberately
-# does NOT run:
+# ── NOTE ON SCOPE ─────────────────────────────────────────────────
 #
-#   * `tests/` integration suites — ~30 test binaries, each linking the full
-#     1200-crate dependency graph plus a ~315 MB rlib. Thirty full links per
-#     run is not a sensible CI shape; run them locally with
-#     `make test-integration`.
-#   * the hiqlite storage / HA fault-injection suites — they bind fixed TCP
-#     port ranges and depend on all tests sharing one process. They are
-#     opt-in behind CARGO_TEST_HIQLITE=1 and covered by `make test-hiqlite`.
-#   * the cucumber suite — `harness = false`, so nextest cannot enumerate it;
-#     `make test-cucumber`.
+# This block used to be the honest record of what CI did NOT cover. Phase 5 of
+# roadmaps/workspace-decomposition.md closed most of that gap, so it is now the
+# record of what CI *does* cover, and it must stay honest as things change.
 #
-# See .config/nextest.toml for the full reasoning behind each exclusion.
+# RUN HERE:
 #
-# No workflow expression here is interpolated into a `run:` script. The only
-# one used at all is `github.ref` (a ref name) in the concurrency group.
+#   * unit tests (`--lib --bins`) and doctests, for every workspace member
+#     except the Tauri GUI host
+#   * the `tests/` integration binaries — ~30 harnesses, sharded. Skipped in CI
+#     from the day they existed until Phase 5; re-enabling them was outcome #1
+#     of the decomposition roadmap, not a speed optimisation.
+#   * the hiqlite storage + HA fault-injection suites, on `cargo test` in one
+#     process (they hand themselves TCP ports from a process-global counter, so
+#     nextest's process-per-test would collide — see .config/nextest.toml)
+#   * the cucumber feature suite (`harness = false`, so nextest cannot
+#     enumerate it)
+#   * `cargo check -p <crate>` over every member in isolation, because
+#     `cargo check --workspace` is NOT a proxy for "each crate builds": feature
+#     unification makes it strictly weaker, and Phase 4.5 shipped a `bv-server`
+#     that could not build on its own while the workspace check stayed green
+#   * GUI type-check + vitest
+#
+# NOT RUN HERE, and why:
+#
+#   * `tests/e2e/rustion-ssh` — needs real remote hosts. Cannot be hermetic.
+#   * the plugin substrate (`make plugins-test`) has no job of its own because
+#     it has no tests of its own: it is `-p bastion-plugin-testkit --lib`,
+#     `--test test_plugin_testkit_parity` and the root crate's `plugins::*` lib
+#     tests, all three of which are covered above.
+#   * release builds, packaging, and the desktop host's Rust build.
+#
+# ── SCOPING ───────────────────────────────────────────────────────
+#
+# A push to `main` runs everything. A pull request runs only the packages the
+# change can reach, derived from `cargo metadata` by scripts/ci-plan.sh — the
+# same dependency graph `make test-changed` uses locally, deliberately NOT a
+# second hand-maintained list of path globs. Read that script's header for why.
+#
+# ── INJECTION ─────────────────────────────────────────────────────
+#
+# No workflow expression is interpolated into any `run:` script. Values that a
+# script needs (matrix entries, job results) are passed through `env:` and read
+# as shell variables, so a value can never be parsed as script text. Keep it
+# that way: this is a secrets server's repository.
 
 on:
   push:
@@ -45,81 +72,366 @@ permissions:
   contents: read
 
 jobs:
-  rust:
-    name: Rust unit tests (nextest)
+  # ── What to run ─────────────────────────────────────────────────
+  #
+  # Costs one runner-minute and decides how many the rest of the workflow
+  # spends. `cargo metadata` resolves the graph; it compiles nothing.
+  plan:
+    name: Plan
     runs-on: ubuntu-latest
-    # A cold build of this tree — aws-lc-rs, vendored openssl, russh, hiqlite —
-    # is slow enough that the default 360-minute ceiling is meaningless, but a
-    # genuine hang should still be cut off.
-    timeout-minutes: 90
+    timeout-minutes: 10
+
+    outputs:
+      full: ${{ steps.plan.outputs.full }}
+      unit_matrix: ${{ steps.plan.outputs.unit_matrix }}
+      run_unit_matrix: ${{ steps.plan.outputs.run_unit_matrix }}
+      collapse: ${{ steps.plan.outputs.collapse }}
+      integration_matrix: ${{ steps.plan.outputs.integration_matrix }}
+      run_integration: ${{ steps.plan.outputs.run_integration }}
+      run_hiqlite: ${{ steps.plan.outputs.run_hiqlite }}
+      run_cucumber: ${{ steps.plan.outputs.run_cucumber }}
+      run_isolation: ${{ steps.plan.outputs.run_isolation }}
+      run_gui: ${{ steps.plan.outputs.run_gui }}
 
     steps:
       - uses: actions/checkout@v4
-        # plugins-ext / third_party are not needed: plugins-ext is excluded
-        # from the workspace, and the hiqlite fork is consumed as a [patch]
-        # git dependency, which cargo fetches itself.
         with:
           submodules: false
+          # merge-base against the PR's base branch needs real history.
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          # Mirrors rust-toolchain.toml.
-          components: rustfmt
 
-      - name: Cache cargo + target
+      # Registry and git checkouts only, no target/ — this job compiles nothing.
+      # `cargo metadata` still has to resolve the graph, and [patch.crates-io]
+      # points three entries at git forks (sspi, picky, picky-asn1) that would
+      # otherwise be cloned on every run, on the critical path of every other
+      # job. The cache is small for the same reason the job is fast.
+      - name: Cache the cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          key: ubuntu-tests
-          cache-on-failure: true
+          shared-key: plan
+          cache-targets: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # Built from crates.io source rather than fetched as a prebuilt binary
-      # or via a third-party action, to keep CI's trusted computing base to
-      # what the repo already trusts (this mirrors how rust.yml installs
-      # cargo-audit). It costs a couple of minutes on a cold cache; swap in
-      # `taiki-e/install-action@nextest` or the official prebuilt tarball from
-      # https://get.nexte.st if that trade looks different later.
-      #
-      # `.config/nextest.toml` uses `default-filter`, so nextest must be
-      # >= 0.9.84. Unpinned `cargo install` always satisfies that; pin a
-      # `--version` here if reproducibility matters more than currency.
-      - name: Install cargo-nextest
-        run: cargo install --locked cargo-nextest
+      # `--full` on anything that is not a pull request: a push to main is the
+      # gate AND the run that writes the shared cache, so it must build the
+      # whole workspace. workflow_dispatch is someone asking for a full run.
+      - name: Derive the plan
+        id: plan
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if [ -z "$BASE_REF" ]; then
+            scripts/ci-plan.sh --full
+          else
+            # fetch-depth: 0 above already fetched every branch, but a PR is
+            # checked out as refs/pull/N/merge and the base ref is only
+            # guaranteed to be present as one of that commit's parents. Make it
+            # a named ref so merge-base has something to resolve.
+            git fetch --no-tags origin \
+              "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+            scripts/ci-plan.sh --base "origin/$BASE_REF"
+          fi
 
-      - name: Show nextest version
-        run: cargo nextest --version
+  # ── The assembly gate ───────────────────────────────────────────
+  #
+  # Unconditional. `--all-targets` front-end-compiles the integration, cucumber
+  # and hiqlite harnesses too, so a broken test file is caught even in a run
+  # where its suite is not selected.
+  #
+  # It is deliberately kept even though the per-crate matrix is finer-grained:
+  # a green matrix must never be able to hide a broken assembly.
+  #
+  # Writes the `check` cache key. See .github/actions/setup-rust for why check
+  # and build artefacts are cached separately.
+  #
+  # No `cargo fmt --check` here, and that is not an oversight: rustfmt.toml sets
+  # six nightly-only options (`imports_granularity`, `group_imports`,
+  # `format_strings`, ...) which stable rustfmt warns about and then ignores, so
+  # `cargo fmt --all --check` on the stable toolchain this workflow pins reports
+  # diffs against a format the repo does not use. A fmt gate needs a nightly
+  # rustfmt first; that is its own change.
+  check:
+    name: Workspace check (gate)
+    runs-on: ubuntu-latest
+    # A cold build of this tree — aws-lc-rs, vendored openssl, russh, hiqlite —
+    # is slow enough that the default 360-minute ceiling is meaningless, but a
+    # genuine hang should still be cut off. `--all-targets` over the whole
+    # workspace is the widest front-end compile in this file.
+    timeout-minutes: 120
 
-      # The cli::command::* unit tests spawn the real `bvault` executable
-      # (test_utils::get_project_binary_path() → target/debug/bvault) rather
-      # than calling the CLI in-process. Building the test harnesses does not
-      # produce that file, so without this step 19 tests fail with
-      # "Failed to execute command: No such file or directory (os error 2)".
-      # A developer's tree usually has a stale binary lying around, which is
-      # exactly why this prerequisite is easy to miss. Mirrors `make test-bin`.
-      - name: Build the bvault binary (the CLI tests spawn it)
-        run: cargo build --bin bvault
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
 
-      # `--profile ci` selects the [profile.ci] block in .config/nextest.toml:
-      # no retries (a flake is a bug report, not something to retry away) and
-      # JUnit output for the artefact below.
-      - name: Run unit tests
-        run: cargo nextest run --profile ci --lib --bins
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: check
+          save-cache: "true"
+          nextest: "false"
+
+      # `--exclude bastion-vault-gui` for the same reason `make test` excludes
+      # it: the Tauri host needs webkit2gtk and friends, and has its own checks.
+      - name: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets --exclude bastion-vault-gui
+
+  # ── Unit tests + doctests, one job per affected package ─────────
+  #
+  # This is the shape Phase 3/4/4.5 bought. `-p <pkg>` builds that crate and
+  # what is below it and nothing else, which is both the speed win and — because
+  # cargo unifies features per build, not per workspace — the isolation check
+  # that `cargo check --workspace` cannot give.
+  unit:
+    name: Unit ${{ matrix.pkg }}
+    needs: plan
+    if: needs.plan.outputs.run_unit_matrix == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.unit_matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: build
+
+      # Not every package needs this, so it is not unconditional: linking the
+      # ~200 MB bvault binary costs more than a bv-shamir job does. The set is
+      # derived in scripts/test-changed.sh (BIN_DEP_PKGS) from which crates call
+      # `test_utils::get_project_binary_path()`, which spawns the real
+      # executable rather than driving the CLI in-process. Without it those
+      # tests fail with "No such file or directory (os error 2)".
+      - name: Build the bvault binary (these tests spawn it)
+        if: matrix.bvault_bin
+        run: cargo build -p bvault-cli --bin bvault
+
+      # `--bins` only where a [[bin]] actually has a #[cfg(test)] module — today
+      # just bv-plugin-pack. Everywhere else it would link a full harness to run
+      # zero tests. Derived in scripts/test-changed.sh (BIN_TEST_PKGS), which
+      # documents how to re-derive it.
+      - name: Unit tests
+        env:
+          PKG: ${{ matrix.pkg }}
+          BINS: ${{ matrix.bins && '--bins' || '' }}
+        run: cargo nextest run --profile ci -p "$PKG" --lib $BINS
 
       # nextest cannot run doctests — rustdoc's test runner is not a libtest
-      # binary. This is the only `cargo test` invocation left in CI.
-      - name: Run doctests
-        run: cargo test --doc
+      # binary. This is the only `cargo test` in the unit path.
+      - name: Doctests
+        env:
+          PKG: ${{ matrix.pkg }}
+        run: cargo test --doc -p "$PKG"
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nextest-junit
+          name: nextest-junit-unit-${{ matrix.pkg }}
           path: target/nextest/ci/junit.xml
           if-no-files-found: warn
 
+  # Above scripts/ci-plan.sh's MATRIX_CAP the matrix stops being an
+  # optimisation — N jobs rebuild the same substrate N times — so a substrate
+  # change (and every push to main) collapses to this instead.
+  #
+  # This job writes the `build` cache key, and it is the right one to: on main
+  # it compiles every dependency and dev-dependency in the workspace for real,
+  # which is exactly what the other test jobs need restored.
+  unit-full:
+    name: Unit (whole workspace)
+    needs: plan
+    if: needs.plan.outputs.collapse == 'true'
+    runs-on: ubuntu-latest
+    # The widest real (codegen, not check) build in this file, and on a cache
+    # miss it is also the one paying for every dependency in the graph.
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: build
+          save-cache: "true"
+
+      - name: Build the bvault binary (the CLI tests spawn it)
+        run: cargo build -p bvault-cli --bin bvault
+
+      - name: Unit tests
+        run: |
+          cargo nextest run --profile ci --lib --bins \
+            --workspace --exclude bastion-vault-gui
+
+      - name: Doctests
+        run: cargo test --doc --workspace --exclude bastion-vault-gui
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit-unit-full
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
+  # ── The integration suite, back in CI ───────────────────────────
+  #
+  # Each tests/ binary is its own full link of the graph beneath it (~190 MB on
+  # this tree), which is why this was skipped for as long as it was. Sharding is
+  # by BINARY, not by `nextest --partition`: partitioning splits test execution
+  # but still builds and links every harness in every shard, which is exactly
+  # the cost that made the suite unaffordable.
+  #
+  # `needs: check` so four shards are not spent discovering a compile error the
+  # gate would have found in one.
+  integration:
+    name: Integration ${{ matrix.shard }}
+    needs: [plan, check]
+    if: needs.plan.outputs.run_integration == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.integration_matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: build
+
+      - name: Build the bvault binary (these tests spawn it)
+        run: cargo build -p bvault-cli --bin bvault
+
+      # $TESTS is a pre-built list of `--test <name>` flags and is intentionally
+      # unquoted so the shell splits it. It comes from cargo metadata via
+      # scripts/ci-plan.sh, never from user input.
+      - name: Integration tests
+        env:
+          TESTS: ${{ matrix.tests }}
+        # shellcheck disable=SC2086
+        run: |
+          cargo nextest run --profile ci \
+            --workspace --exclude bastion-vault-gui $TESTS
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit-integration-${{ strategy.job-index }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
+  # ── Port-bound suites: one process, plain cargo test ────────────
+  #
+  # Gated on bv-storage rather than on the root crate. The HA fault-injection
+  # binary lives in tests/ and is therefore owned by the root crate, which
+  # nearly every change reaches — gating on that would stand hiqlite clusters up
+  # on every pull request. Both suites exercise bv-storage's hiqlite backend, so
+  # that is the trigger that means something, and main runs them unconditionally.
+  hiqlite:
+    name: hiqlite storage + HA
+    needs: [plan, check]
+    if: needs.plan.outputs.run_hiqlite == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: build
+          nextest: "false"
+
+      # Via make so the flags have one definition — CARGO_TEST_HIQLITE,
+      # --features storage_hiqlite and --test-threads=1 are all load-bearing and
+      # are documented at the target.
+      - name: make test-hiqlite
+        run: make test-hiqlite
+
+  cucumber:
+    name: Cucumber features
+    needs: [plan, check]
+    if: needs.plan.outputs.run_cucumber == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: build
+          nextest: "false"
+
+      # `harness = false`, fixed ports 28100/28200, one backend shared across
+      # scenarios. Cannot overlap with another run of itself; `concurrency`
+      # above keeps that true per branch.
+      - name: make test-cucumber
+        run: make test-cucumber
+
+  # ── Each crate builds on its own ────────────────────────────────
+  #
+  # The job that exists because of a specific bug. Phase 4 removed `env_logger`
+  # from the root manifest; `env_logger` was what pulled in `log/std`, and
+  # `bv-server` needed it. `cargo check --workspace` unified the feature back in
+  # from `bvault-cli` and stayed green, so the workspace was fine and every
+  # DOWNSTREAM consumer of `bv-server` was broken. Phase 4.5 found it by hand.
+  #
+  # One job rather than a 41-way matrix: the checks run in one target dir, so
+  # each `-p` reuses everything the previous one built and only pays for the
+  # crates whose feature set actually differs — which is precisely the set this
+  # is looking for.
+  isolation:
+    name: Per-crate isolation check
+    needs: plan
+    if: needs.plan.outputs.run_isolation == 'true'
+    runs-on: ubuntu-latest
+    # Measured at ~37 minutes for all 41 members on a warm 10-core local tree.
+    # A 4-core runner starting from a restored check cache should land in the
+    # same order of magnitude; this is sized for it being several times worse.
+    timeout-minutes: 150
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      # The `check` key, not `build`: this job runs cargo check, and check
+      # artefacts are cached separately from build artefacts.
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: check
+          nextest: "false"
+
+      - name: cargo check -p <crate>, for every member
+        run: make check-isolated
+
   gui:
     name: GUI frontend tests (vitest)
+    needs: plan
+    if: needs.plan.outputs.run_gui == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -145,3 +457,90 @@ jobs:
 
       - name: Run tests
         run: cd gui && npx vitest run
+
+  # Advisory only. Phase 0 of roadmaps/workspace-decomposition.md added this to
+  # stop the dependency graph quietly re-growing the slack that pass removed
+  # (five dead direct deps across four manifests). It must never block a merge:
+  # cargo-machete is a static `use` scan with known blind spots (package name !=
+  # lib name, and deps that exist to pin a feature rather than be imported), so
+  # a finding is a prompt to triage, not proof of a defect. The wrapper filters
+  # out the submodule / vendored trees we do not own.
+  deps:
+    name: Unused dependencies (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Registry only: cargo-machete parses manifests and sources, it does not
+      # build, so a target/ cache here would spend the repo's 10 GB budget on
+      # nothing.
+      - name: Cache the cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: deps
+          cache-targets: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+
+      # Built from source to keep CI's trusted computing base to what the repo
+      # already trusts, matching how the setup action installs cargo-nextest.
+      - name: Install cargo-machete
+        run: command -v cargo-machete >/dev/null 2>&1 || cargo install --locked cargo-machete
+
+      # `--warn` always exits 0. Read the step's log, not its status.
+      - name: Report unused direct dependencies
+        run: make deps-unused-warn
+
+  # ── One status for branch protection ────────────────────────────
+  #
+  # Matrix job names change with the plan, so they cannot be named as required
+  # checks. This one can. `skipped` counts as success — that is the whole point
+  # of the plan — but `cancelled` and `failure` do not, so a job that never ran
+  # because an earlier one failed still fails the gate.
+  required:
+    name: All required checks
+    if: always()
+    needs:
+      - plan
+      - check
+      - unit
+      - unit-full
+      - integration
+      - hiqlite
+      - cucumber
+      - isolation
+      - gui
+      - deps
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      # Through the environment, not interpolated into the script. `deps` is
+      # advisory and is exempted by name here rather than by being left out of
+      # `needs`, so its result is still visible in this job's log.
+      - name: Assert every required job succeeded or was skipped
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          printenv NEEDS
+          printenv NEEDS | python3 -c '
+          import json, sys
+          results = json.load(sys.stdin)
+          bad = {
+              name: job["result"]
+              for name, job in results.items()
+              if name != "deps" and job["result"] not in ("success", "skipped")
+          }
+          if bad:
+              for name, result in sorted(bad.items()):
+                  print(f"FAILED: {name} -> {result}")
+              sys.exit(1)
+          print("All required jobs succeeded or were skipped.")
+          '

@@ -28,7 +28,7 @@ always exempt so monitoring and load balancers can never be banned.
 
 ## Design
 
-### Threshold model (`src/dos/config.rs`)
+### Threshold model (`crates/bv-kernel-api/src/dos/config.rs`)
 
 A single process-wide [`DosConfig`]:
 
@@ -44,7 +44,7 @@ A single process-wide [`DosConfig`]:
 Defaults are secure-but-non-disruptive: 200 req / 10 s general, 20 req / 10 s on
 auth paths, 300 s bans.
 
-### In-memory guard (`src/dos/guard.rs`)
+### In-memory guard (`crates/bv-kernel-api/src/dos/guard.rs`)
 
 `DosGuard` is the hot-path enforcer, held on `Core` (`core.dos_guard`) and
 consulted by the middleware on every request. It keeps a fixed-window counter
@@ -66,7 +66,7 @@ emits one audit event (never one per blocked request; never logs bodies/tokens).
 It **fails open** if connection info or the guard is unavailable, so a defect can
 never lock out all traffic; it **fails closed** on an active ban.
 
-### Persistence (`src/dos/store.rs`)
+### Persistence (`crates/bv-kernel-api/src/dos/store.rs`)
 
 `DosStore` persists exactly two things through the core system view (barrier root
 `sys/`, key `dos/state`): the `DosConfig` thresholds and the set of **manual**
@@ -129,7 +129,10 @@ Settings → **Abuse Protection** (`gui/src/components/DosProtectionPanel.tsx`):
 
 ## Current State
 
-**Done.** Backend (`src/dos/` — config, guard, middleware, store; `Core`
+**Done.** Backend (config, guard and store in `crates/bv-kernel-api/src/dos/`
+since Phase 3 of the decomposition — `VaultCtx::dos_guard` returns the guard,
+so it sits below the kernel contract; the actix middleware stays in
+`src/dos/middleware.rs`, and `Core`
 integration; `server.rs` wiring + sweep task; `sys/dos/*` logical routes + HTTP
 shims; `[dos]` startup config), GUI (Tauri commands + `api.ts` + panel + Settings
 tab), and tests (guard unit tests, store round-trip, actix middleware
@@ -137,10 +140,11 @@ integration test, GUI vitest) all shipped.
 
 ## Testing
 
-- `src/dos/guard.rs` — window counting, general/auth thresholds, ban expiry,
+- `crates/bv-kernel-api/src/dos/guard.rs` — window counting, general/auth thresholds, ban expiry,
   manual ban/unban, exempt/auth classifiers, config re-arm.
-- `src/dos/store.rs` — config + manual-ban round-trip; `Core` helper
-  persist/reload into the guard.
+- `src/dos/store_tests.rs` — config + manual-ban round-trip; `Core` helper
+  persist/reload into the guard. In the root crate, not next to the store,
+  because it stands up a whole vault through `crate::test_utils`.
 - `src/dos/middleware.rs` — actix `TestRequest` proof that a flooding IP gets
   `429` while an exempt path never does.
 - `gui/src/test/dosProtection.test.tsx` — panel renders stats/bans and drives

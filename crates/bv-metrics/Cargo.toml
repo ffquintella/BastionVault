@@ -1,0 +1,22 @@
+[package]
+name = "bv-metrics"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's Prometheus registry, metric families and system collector"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 0 of the workspace decomposition
+# (roadmaps/workspace-decomposition.md § Phase 1). Deliberately does *not*
+# depend on `bv-errors`: nothing here returns `RvError`.
+#
+# The actix-web middleware that reads these families stays in the root
+# crate (`bastion_vault::metrics::middleware`). Keeping it out matters:
+# `bv-storage` depends on this crate for the cache counters, so anything
+# in here lands underneath every leaf engine, and actix must not.
+[dependencies]
+prometheus-client = "0.25"
+sysinfo = "0.39"
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time"] }

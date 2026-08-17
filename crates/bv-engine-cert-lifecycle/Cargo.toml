@@ -1,0 +1,58 @@
+[package]
+name = "bv-engine-cert-lifecycle"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's certificate lifecycle engine: expiry tracking, renewal and delivery"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 3 of the workspace decomposition
+# (roadmaps/workspace-decomposition.md § Phase 3).
+#
+# The `storage` alias is absent from `lib.rs`: this engine owns that module
+# name (its target/state key layout), so the files that want the substrate's
+# `Storage`/`StorageEntry` import them from `bv_storage` directly.
+
+[dependencies]
+bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
+bv-context = { path = "../bv-context", version = "0.1.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.1.0", registry = "uox-bastionvault" }
+
+async-trait = "0.1"
+pem = "3.0"
+ureq = { version = "3.3", features = ["json"] }
+derive_more = "2.1.1"
+log = "0.4"
+maybe-async = "0.2"
+serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
+serde_json = "^1.0"
+humantime = "2.3"
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time"] }
+x509-parser = { version = "0.18", features = ["verify"] }
+
+[features]
+default = []
+sync_handler = [
+    "maybe-async/is_sync",
+    "bv-storage/sync_handler",
+    "bv-logical/sync_handler",
+    "bv-kernel-api/sync_handler",
+]
+
+# Lints this crate's code trips, all of which the root crate already allows.
+# Per-crate rather than a `[workspace.lints]` block, for the reason recorded in
+# `bv-logical`'s manifest.
+[lints.clippy]
+field_reassign_with_default = "allow"
+type_complexity = "allow"
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Pulled in by the `#[maybe_async::maybe_async]` attribute's async
+    # expansion, which is a token stream to a static `use` scan.
+    "async-trait",
+]

@@ -1,0 +1,77 @@
+[package]
+name = "bv-kernel-api"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's kernel contract: what an engine is allowed to know about the vault"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 1 of the workspace decomposition
+# (roadmaps/workspace-decomposition.md § Phase 3).
+#
+# Phase 2 defined `VaultCtx`, `KernelServices` and the `Module` trait inside
+# the monolith, deliberately: the crate is not what breaks the `Core` ↔
+# `modules` cycle, the abstraction is. This crate is that deferred move, and
+# it is what makes an engine crate possible at all — every Tier 3 engine
+# implements `Module` and holds an `Arc<dyn VaultCtx>`.
+#
+# It carries more than the traits, because the traits name it: `Router`,
+# `MountsRouter`/`MountsMonitor`, `DosGuard` and `DashboardStats` all appear
+# in a `VaultCtx` signature, and engines call `router()` and `mounts_router()`
+# for real (16 production sites). The roadmap's target graph puts `router` and
+# `mount` in Tier 2 `bv-core`; that placement assumed `VaultCtx` would not
+# name them, which it does. Splitting them out would mean a fourth trait layer
+# between the kernel contract and the mount table for no gain.
+#
+# What stayed behind in the root crate, and why:
+#
+#   * `impl VaultCtx for Core` (`src/kernel_impl.rs`) — `Core` is Tier 2.
+#   * `impl Core { mount/unmount/remount }` (`src/mount.rs`) — same.
+#   * `dos::middleware` — actix, which must not reach a leaf engine.
+
+[dependencies]
+bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
+bv-audit = { path = "../bv-audit", version = "0.1.0", registry = "uox-bastionvault" }
+bv-utils = { path = "../bv-utils", version = "0.1.0", registry = "uox-bastionvault" }
+
+arc-swap = "1.7"
+async-trait = "0.1"
+crossbeam-channel = "0.5"
+dashmap = "6.1"
+derive_more = { version = "2.0", features = ["deref"] }
+lazy_static = "1.5"
+log = "0.4"
+maybe-async = "0.2"
+radix_trie = "0.2"
+serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
+serde_json = "^1.0"
+tokio = { version = "1.52", features = ["rt", "time", "macros"] }
+
+[features]
+default = []
+sync_handler = [
+    "maybe-async/is_sync",
+    "bv-storage/sync_handler",
+    "bv-logical/sync_handler",
+    "bv-utils/sync_handler",
+    "bv-audit/sync_handler",
+]
+
+# Lints this crate's own code trips, all of which the root crate already
+# allows. Stated per-crate rather than inherited from a `[workspace.lints]`
+# block, for the reason recorded in `bv-logical`'s manifest: a
+# workspace-wide allow is how `await_holding_lock` hid a real deadlock for
+# years.
+[lints.clippy]
+type_complexity = "allow"
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Pulled in by the `#[maybe_async::maybe_async]` attribute's async
+    # expansion, which is a token stream to a static `use` scan.
+    "async-trait",
+]

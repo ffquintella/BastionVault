@@ -396,7 +396,9 @@ pub async fn scheduled_exports_backups_list(
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
-    let local_node = bastion_vault::scheduled_exports::local_node(&core);
+    // `core` is an `arc_swap::Guard<Arc<Core>>`; deref twice to reach the
+    // `&Core` that coerces to `&dyn VaultCtx`.
+    let local_node = bastion_vault::scheduled_exports::local_node(&**core);
     let (dir, entries) =
         bastion_vault::scheduled_exports::list_backups(core.barrier.as_storage(), &sched, &local_node)
             .await
@@ -608,7 +610,7 @@ pub async fn scheduled_exports_restore(
     audit_body.insert("skipped".into(), Value::Number(result.skipped.into()));
     audit_body.insert("renamed".into(), Value::Number(result.renamed.into()));
     bastion_vault::audit::emit_sys_audit(
-        &core_arc,
+        core_arc.as_ref(),
         &owner,
         "sys/scheduled-exports/restore",
         bastion_vault::logical::Operation::Write,

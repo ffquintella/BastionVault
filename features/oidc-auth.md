@@ -129,5 +129,5 @@ The Add/Edit SSO Provider dialog surfaces the callback URL(s) to register with t
 - `src/modules/credential/userpass/mod.rs` -- Module/Backend pattern
 - `src/modules/credential/userpass/path_login.rs` -- login handler returning Auth
 - `src/modules/credential/approle/mod.rs` -- complex backend with async init
-- `src/logical/path.rs` -- `new_path!` macro
-- `src/logical/backend.rs` -- `new_logical_backend!` macro
+- `crates/bv-logical/src/path.rs` -- `new_path!` macro
+- `crates/bv-logical/src/backend.rs` -- `new_logical_backend!` macro

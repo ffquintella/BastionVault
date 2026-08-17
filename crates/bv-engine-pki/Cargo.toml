@@ -1,0 +1,92 @@
+[package]
+name = "bv-engine-pki"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's PKI secret engine: X.509 issuance, issuers, CRLs, ACME and PQC"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 3 of the workspace decomposition
+# (roadmaps/workspace-decomposition.md § Phase 3), and the first engine out.
+#
+# It went first for the reason the roadmap gives: 15,127 lines, 96 of the last
+# 300 commits, and 19 of the 30 `tests/` binaries. Those binaries now link this
+# crate plus the substrate instead of the 245 MB monolith rlib, which is what
+# makes them cheap enough for CI to run at all.
+#
+# The dependency list below is the whole point of the exercise: an X.509 stack
+# and nothing else. No actix, no hiqlite, no diesel, no CLI, no kernel.
+
+[dependencies]
+bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
+bv-context = { path = "../bv-context", version = "0.1.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
+bv-utils = { path = "../bv-utils", version = "0.1.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.1.0", registry = "uox-bastionvault" }
+bv_crypto = { path = "../bv_crypto", version = "0.1.0", registry = "uox-bastionvault" }
+
+async-trait = "0.1"
+base64 = "0.22"
+better_default = "1.0.5"
+cms = { version = "0.2", default-features = false, features = ["alloc", "pem", "std"] }
+const-oid = { version = "0.9", features = ["db"] }
+derive_more = "2.1.1"
+ed25519-dalek = "2"
+fips204 = { version = "0.4", default-features = false, features = ["default-rng", "ml-dsa-44", "ml-dsa-65", "ml-dsa-87"] }
+hickory-resolver = { version = "0.26", default-features = false, features = ["system-config", "tokio"] }
+hmac = "0.13"
+humantime = "2.3"
+log = "0.4"
+maybe-async = "0.2"
+p256 = { version = "0.13", features = ["ecdsa", "ecdh"], default-features = false }
+pem = "3.0"
+pkcs12 = { version = "0.1", features = ["kdf"] }
+pkcs5 = { version = "0.7", features = ["alloc", "pbes2"] }
+pkcs8 = { version = "0.10", features = ["pem", "alloc"] }
+rand = "^0.10"
+rcgen = { version = "0.14", features = ["x509-parser"] }
+rsa = "0.9"
+serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
+serde_json = "^1.0"
+sha2 = "0.11"
+# `sha2` 0.10 under an alias, for the crates in the X.509 tree that still pin
+# the 0.10 digest traits. Same arrangement as the root crate's.
+sha2-saml = { package = "sha2", version = "0.10", features = ["oid"] }
+thiserror = "2"
+time = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time"] }
+ureq = { version = "3.3", features = ["json"] }
+uuid = { version = "1", features = ["v4"] }
+x509-cert = { version = "0.2", default-features = false, features = ["builder", "pem", "std"] }
+x509-parser = { version = "0.18", features = ["verify"] }
+zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
+
+[features]
+default = []
+# Composite (classical + ML-DSA in one certificate) issuance. Off by default;
+# see `features/pki-secret-engine.md`.
+pki_pqc_composite = []
+sync_handler = [
+    "maybe-async/is_sync",
+    "bv-storage/sync_handler",
+    "bv-logical/sync_handler",
+    "bv-utils/sync_handler",
+    "bv-kernel-api/sync_handler",
+]
+
+# Lints this crate's code trips, all of which the root crate already allows.
+# Per-crate rather than a `[workspace.lints]` block, for the reason recorded in
+# `bv-logical`'s manifest.
+[lints.clippy]
+field_reassign_with_default = "allow"
+type_complexity = "allow"
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Pulled in by the `#[maybe_async::maybe_async]` attribute's async
+    # expansion, which is a token stream to a static `use` scan.
+    "async-trait",
+]

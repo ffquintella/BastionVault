@@ -91,7 +91,7 @@ Reads are symmetric: the router strips the mount prefix, the handler calls `req.
 
 Two layers stack:
 
-- **Barrier** (`src/storage/barrier_*.rs`): every `Get`/`Put`/`Delete` is encrypted. Plaintext keys never touch disk. The barrier's data encryption key is wrapped by the KEK reconstructed at unseal time.
+- **Barrier** (`crates/bv-storage/src/barrier_*.rs`): every `Get`/`Put`/`Delete` is encrypted. Plaintext keys never touch disk. The barrier's data encryption key is wrapped by the KEK reconstructed at unseal time.
 - **StorageView**: each mount sees only its `logical/<uuid>/` slice. The view rewrites paths transparently so engine code can pretend it owns the whole keyspace.
 
 This is why you can mount `kv` twice (`secret/` and `team-a/`) without collision, and why deleting a mount can wipe its data by removing one prefix.

@@ -1,0 +1,851 @@
+//! This module defines and handles the config file options for BastionVault application.
+//! For instance, the IP address and port for the BastionVault to listen on is handled in this
+//! module.
+//!
+//! It used to live at `cli::config`, which was never accurate: [`Config`] is
+//! the *server's* configuration model, and [`BastionVault::new`] takes one.
+//! `core.rs`, `modules::auth`, `src/http` and `test_utils` all name it, so
+//! leaving it under `cli` would have pinned the whole command-line layer into
+//! the library's compilation unit. See
+//! roadmaps/workspace-decomposition.md § Phase 4.
+//!
+//! [`BastionVault::new`]: crate::BastionVault::new
+
+use std::{collections::HashMap, fmt, fs, path::Path};
+
+use better_default::Default;
+use serde::{
+    de::{self, Visitor},
+    Deserialize, Deserializer, Serialize, Serializer,
+};
+use serde_json::Value;
+
+use crate::{cache::CacheConfig, errors::RvError, storage::BarrierType};
+
+/// Supported TLS protocol versions for the listener.
+///
+/// `rustls` only supports TLS 1.2 and 1.3; any older value in a config file
+/// is rejected at deserialization time.
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum TlsVersion {
+    Tls12,
+    Tls13,
+}
+
+/// A struct that contains several configurable options of BastionVault server
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(deserialize_with = "validate_listener")]
+    pub listener: HashMap<String, Listener>,
+    #[serde(deserialize_with = "validate_storage")]
+    pub storage: HashMap<String, Storage>,
+    #[serde(default)]
+    pub api_addr: String,
+    #[serde(default)]
+    pub log_format: String,
+    /// `RUST_LOG`-style filter. A bare level sets the global ceiling
+    /// (`"info"`); `target=level` tokens quiet noisy dependencies by
+    /// prefix, e.g. `"info,hiqlite=warn"` to silence the hiqlite raft
+    /// WebSocket logs while keeping everything else at info.
+    #[serde(default)]
+    pub log_level: String,
+    /// Directory the server writes structured log files into:
+    /// `operations.log`, `security.log`, and `audit.log`. Empty
+    /// disables file logging (logs go to stderr only). The audit log
+    /// is bootstrapped on first unseal via the audit broker.
+    #[serde(default)]
+    pub log_dir: String,
+    /// Also mirror operational + security logs to stderr. Defaults
+    /// to true so foreground/dev runs stay readable; flip to false
+    /// in production when you only want the on-disk files.
+    #[serde(default = "default_bool_true", deserialize_with = "parse_bool_string")]
+    #[default(true)]
+    pub log_to_stderr: bool,
+    /// Per-file rotation threshold in megabytes. When an individual
+    /// log file (operations / security / audit) reaches this size it
+    /// is renamed to `<name>.1`, prior `.1` shifts to `.2`, etc.,
+    /// keeping `log_rotate_keep` historical copies. `0` → use the
+    /// built-in default (100 MiB).
+    #[serde(default)]
+    pub log_rotate_size_mb: u64,
+    /// Number of rotated copies to keep per stream. `0` → use the
+    /// built-in default (5).
+    #[serde(default)]
+    pub log_rotate_keep: u32,
+    #[serde(default)]
+    pub pid_file: String,
+    #[serde(default)]
+    pub work_dir: String,
+    #[serde(default, deserialize_with = "parse_bool_string")]
+    pub daemon: bool,
+    #[serde(default)]
+    pub daemon_user: String,
+    #[serde(default)]
+    pub daemon_group: String,
+    #[serde(default = "default_collection_interval")]
+    pub collection_interval: u64,
+    #[serde(default = "default_hmac_level")]
+    pub mount_entry_hmac_level: MountEntryHMACLevel,
+    #[serde(default = "default_mounts_monitor_interval")]
+    #[default(5)]
+    pub mounts_monitor_interval: u64,
+    #[serde(default = "default_barrier_type")]
+    pub barrier_type: BarrierType,
+    #[serde(default)]
+    pub cache: CacheConfig,
+    /// Hard cap on operations per batch request. `0` means use the
+    /// built-in default (`http::batch::DEFAULT_BATCH_MAX_OPERATIONS`).
+    /// Operators can raise or lower this to match their expected
+    /// workload — a single batch occupies one request thread for the
+    /// duration of all its operations.
+    #[serde(default)]
+    pub batch_max_operations: usize,
+    /// Hard cap on batch request body size in bytes. Applied as the
+    /// actix `PayloadConfig` limit on the batch route. `0` means use the
+    /// built-in default of 32 MiB.
+    #[serde(default)]
+    pub batch_max_body_size: usize,
+    /// Directory the process-plugin runtime stages plugin executables in
+    /// before spawning them. The OS temp dir (`/tmp`) is frequently
+    /// mounted `noexec` in hardened containers, which makes `execve` of a
+    /// process-runtime plugin (e.g. `xca-import`) fail with `EACCES` —
+    /// surfacing to the GUI as a generic invoke error. Point this at a
+    /// writable, exec-allowed directory (e.g. `/var/lib/bvault/plugin-run`);
+    /// the server creates it on first use. Empty uses the OS temp dir.
+    /// Overridable at runtime via the `BV_PLUGIN_RUNTIME_DIR` environment
+    /// variable, which takes precedence over this value.
+    #[serde(default)]
+    pub plugin_runtime_dir: String,
+    /// Optional HSM seal block: `hsm "yubihsm2" { ... }` or `hsm "mock" { ... }`.
+    /// The map is keyed by the block label (the backend type). At most one
+    /// entry is permitted; more than one is a config error. Absent ⇒ the
+    /// classic operator-driven Shamir unseal. See `features/hsm-support.md`.
+    #[serde(default)]
+    pub hsm: HashMap<String, crate::hsm::HsmConfigBlock>,
+    /// Optional `dos { ... }` block seeding the IP-based DoS-protection
+    /// thresholds on first unseal. Once an operator edits the thresholds
+    /// through `v2/sys/dos/config`, the barrier-persisted value takes
+    /// precedence on every subsequent unseal. Absent ⇒ built-in secure
+    /// defaults ([`crate::dos::DosConfig::default`]).
+    #[serde(default)]
+    pub dos: Option<crate::dos::DosConfig>,
+    /// Optional `metrics { ... }` block controlling who may scrape the
+    /// Prometheus endpoint. Absent ⇒ every scrape must present a token
+    /// with `read` on `sys/metrics`.
+    #[serde(default)]
+    pub metrics: MetricsAccessConfig,
+}
+
+/// `metrics { ... }` — access control for the `/metrics` scrape endpoint.
+///
+/// The endpoint is token-authorized (ACL path `sys/metrics`) for every
+/// caller that is not covered by one of the two IP allowances below.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct MetricsAccessConfig {
+    /// Serve `/metrics` without a token to loopback and to the IPs of
+    /// the configured cluster `nodes` — the same predicate that gates
+    /// `sys/cluster-status`, judged on the socket peer so no header can
+    /// forge it. Defaults to `true`: it is what lets a node-local
+    /// scrape, and a scrape of a *sealed* node (no barrier ⇒ no token
+    /// validation), work without credential plumbing. Set `false` for
+    /// strict token-only scraping.
+    #[serde(default = "default_bool_true", deserialize_with = "parse_bool_string")]
+    #[default(true)]
+    pub allow_cluster_local: bool,
+    /// Additional CIDRs whose requests may scrape `/metrics` without a
+    /// token, e.g. `["10.20.0.0/16"]` for a monitoring subnet. Empty by
+    /// default. Matched against the trusted-proxy-aware client IP
+    /// (`BASTIONVAULT_TRUSTED_PROXIES`), so an untrusted
+    /// `X-Forwarded-For` cannot forge an allowlisted source.
+    /// Unparseable entries are logged and dropped — never treated as a
+    /// wildcard.
+    #[serde(default)]
+    pub allow_unauthenticated_cidrs: Vec<String>,
+}
+
+/// Re-exported from `bv-kernel-api`, where it moved in Phase 3.
+///
+/// It is an operator setting parsed from this file's config, but the mount
+/// table is what enforces it and [`VaultCtx::mount_entry_hmac_level`] is what
+/// hands it out — both of which sit below the CLI in the crate graph.
+///
+/// [`VaultCtx::mount_entry_hmac_level`]: crate::kernel_api::VaultCtx::mount_entry_hmac_level
+pub use bv_kernel_api::MountEntryHMACLevel;
+
+fn default_hmac_level() -> MountEntryHMACLevel {
+    MountEntryHMACLevel::None
+}
+
+fn default_collection_interval() -> u64 {
+    15
+}
+
+fn default_mounts_monitor_interval() -> u64 {
+    5
+}
+
+fn default_barrier_type() -> BarrierType {
+    BarrierType::Chacha20Poly1305
+}
+
+/// A struct that contains several configurable options for networking stuffs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Listener {
+    #[serde(default)]
+    pub ltype: String,
+    pub address: String,
+    #[serde(default = "default_bool_true", deserialize_with = "parse_bool_string")]
+    pub tls_disable: bool,
+    #[serde(default)]
+    pub tls_cert_file: String,
+    #[serde(default)]
+    pub tls_key_file: String,
+    #[serde(default)]
+    pub tls_client_ca_file: String,
+    #[serde(default, deserialize_with = "parse_bool_string")]
+    pub tls_disable_client_certs: bool,
+    #[serde(default, deserialize_with = "parse_bool_string")]
+    pub tls_require_and_verify_client_cert: bool,
+    #[serde(
+        default = "default_tls_min_version",
+        serialize_with = "serialize_tls_version",
+        deserialize_with = "deserialize_tls_version"
+    )]
+    pub tls_min_version: TlsVersion,
+    #[serde(
+        default = "default_tls_max_version",
+        serialize_with = "serialize_tls_version",
+        deserialize_with = "deserialize_tls_version"
+    )]
+    pub tls_max_version: TlsVersion,
+    #[serde(default = "default_tls_cipher_suites")]
+    pub tls_cipher_suites: String,
+    /// Optional path where the server publishes its serving certificate (PEM)
+    /// on startup, so local CLI invocations can pick it up as a trust anchor
+    /// without `--tls-skip-verify` or an explicit `--ca-cert` on every call.
+    /// Empty disables publishing. The CLI reads `/etc/bvault/ca.pem` and
+    /// `~/.bvault/ca.pem` by default — point this at one of those (or a path
+    /// you bind-mount out of a container) to opt in.
+    #[serde(default)]
+    pub tls_publish_ca_path: String,
+}
+
+/// A struct that contains several configurable options for storage stuffs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Storage {
+    #[serde(default)]
+    pub stype: String,
+    #[serde(flatten)]
+    pub config: HashMap<String, Value>,
+}
+
+static STORAGE_TYPE_KEYWORDS: &[&str] = &["file", "mysql", "hiqlite"];
+
+fn default_bool_true() -> bool {
+    true
+}
+
+fn parse_bool_string<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value: Value = Deserialize::deserialize(deserializer)?;
+    match value {
+        Value::Bool(b) => Ok(b),
+        Value::String(s) => match s.as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err(serde::de::Error::custom("Invalid value for bool")),
+        },
+        _ => Err(serde::de::Error::custom("Invalid value for bool")),
+    }
+}
+
+fn default_tls_min_version() -> TlsVersion {
+    TlsVersion::Tls12
+}
+
+fn default_tls_max_version() -> TlsVersion {
+    TlsVersion::Tls13
+}
+
+fn default_tls_cipher_suites() -> String {
+    "HIGH:!PSK:!SRP:!3DES".to_string()
+}
+
+fn serialize_tls_version<S>(version: &TlsVersion, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match *version {
+        TlsVersion::Tls12 => serializer.serialize_str("tls12"),
+        TlsVersion::Tls13 => serializer.serialize_str("tls13"),
+    }
+}
+
+fn deserialize_tls_version<'de, D>(deserializer: D) -> Result<TlsVersion, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct TlsVersionVisitor;
+
+    impl Visitor<'_> for TlsVersionVisitor {
+        type Value = TlsVersion;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("\"tls12\" or \"tls13\"")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<TlsVersion, E>
+        where
+            E: de::Error,
+        {
+            match value {
+                "tls12" => Ok(TlsVersion::Tls12),
+                "tls13" => Ok(TlsVersion::Tls13),
+                "tls10" | "tls11" => Err(E::custom(format!("TLS version {value} is not supported; use tls12 or tls13"))),
+                _ => Err(E::custom(format!("unexpected TLS version: {value}"))),
+            }
+        }
+    }
+
+    deserializer.deserialize_str(TlsVersionVisitor)
+}
+
+fn validate_storage<'de, D>(deserializer: D) -> Result<HashMap<String, Storage>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let storage: HashMap<String, Storage> = Deserialize::deserialize(deserializer)?;
+
+    for key in storage.keys() {
+        if !STORAGE_TYPE_KEYWORDS.contains(&key.as_str()) {
+            return Err(serde::de::Error::custom("Invalid storage key"));
+        }
+    }
+
+    Ok(storage)
+}
+
+fn validate_listener<'de, D>(deserializer: D) -> Result<HashMap<String, Listener>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let listeners: HashMap<String, Listener> = Deserialize::deserialize(deserializer)?;
+
+    for (key, listener) in &listeners {
+        if key != "tcp" {
+            return Err(serde::de::Error::custom("Invalid listener key"));
+        }
+
+        if !listener.tls_disable && (listener.tls_cert_file.is_empty() || listener.tls_key_file.is_empty()) {
+            return Err(serde::de::Error::custom(
+                "when tls_disable is false, tls_cert_file and tls_key_file must be configured",
+            ));
+        }
+
+        if !listener.tls_disable && listener.tls_require_and_verify_client_cert && listener.tls_disable_client_certs {
+            return Err(serde::de::Error::custom(
+                "'tls_disable_client_certs' and 'tls_require_and_verify_client_cert' are mutually exclusive",
+            ));
+        }
+    }
+
+    Ok(listeners)
+}
+
+impl Config {
+    /// Resolve the optional `hsm "<label>" { ... }` block into a validated,
+    /// env-expanded seal config. `Ok(None)` when no HSM seal is configured;
+    /// an error when more than one block is present or the block is invalid.
+    pub fn resolve_hsm(&self) -> Result<Option<crate::hsm::ResolvedHsmConfig>, RvError> {
+        if self.hsm.is_empty() {
+            return Ok(None);
+        }
+        if self.hsm.len() > 1 {
+            return Err(RvError::ErrHsmConfigInvalid(
+                "at most one `hsm` seal block may be configured".into(),
+            ));
+        }
+        let (label, block) = self.hsm.iter().next().expect("len checked above");
+        Ok(Some(crate::hsm::resolve_config(label, block)?))
+    }
+
+    pub fn merge(&mut self, other: Config) {
+        self.listener.extend(other.listener);
+        self.storage.extend(other.storage);
+        self.hsm.extend(other.hsm);
+        if !other.api_addr.is_empty() {
+            self.api_addr = other.api_addr;
+        }
+
+        if !other.log_format.is_empty() {
+            self.log_format = other.log_format;
+        }
+
+        if !other.log_level.is_empty() {
+            self.log_level = other.log_level;
+        }
+
+        if !other.pid_file.is_empty() {
+            self.pid_file = other.pid_file;
+        }
+
+        if other.mount_entry_hmac_level != MountEntryHMACLevel::None {
+            self.mount_entry_hmac_level = other.mount_entry_hmac_level;
+        }
+
+        if other.barrier_type != BarrierType::Chacha20Poly1305 {
+            self.barrier_type = other.barrier_type;
+        }
+
+        if !other.plugin_runtime_dir.is_empty() {
+            self.plugin_runtime_dir = other.plugin_runtime_dir;
+        }
+
+        if other.dos.is_some() {
+            self.dos = other.dos;
+        }
+
+        self.cache.merge(other.cache);
+    }
+}
+
+pub fn load_config(path: &str) -> Result<Config, RvError> {
+    let f = Path::new(path);
+    if f.is_dir() {
+        load_config_dir(path)
+    } else if f.is_file() {
+        load_config_file(path)
+    } else {
+        Err(RvError::ErrConfigPathInvalid)
+    }
+}
+
+fn load_config_dir(dir: &str) -> Result<Config, RvError> {
+    log::debug!("load_config_dir: {dir}");
+    let mut paths: Vec<String> = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+
+            if let Some(ext) = path.extension() {
+                if ext == "hcl" || ext == "json" {
+                    let filename = path.to_string_lossy().into_owned();
+                    paths.push(filename);
+                }
+            }
+        }
+    }
+
+    let mut result = None;
+
+    for path in paths {
+        log::debug!("load_config_dir path: {path}");
+        let config = load_config_file(&path)?;
+        if result.is_none() {
+            result = Some(config.clone());
+        } else {
+            result.as_mut().unwrap().merge(config);
+        }
+    }
+
+    result.ok_or(RvError::ErrConfigLoadFailed)
+}
+
+fn load_config_file(path: &str) -> Result<Config, RvError> {
+    log::debug!("load_config_file: {path}");
+    let file = fs::File::open(path)?;
+
+    if path.ends_with(".hcl") {
+        let mut config: Config = hcl::from_reader(file)?;
+        set_config_type_field(&mut config)?;
+        check_config(&config)?;
+        Ok(config)
+    } else if path.ends_with(".json") {
+        let mut config: Config = serde_json::from_reader(file)?;
+        set_config_type_field(&mut config)?;
+        check_config(&config)?;
+        Ok(config)
+    } else {
+        Err(RvError::ErrConfigPathInvalid)
+    }
+}
+
+fn set_config_type_field(config: &mut Config) -> Result<(), RvError> {
+    config.storage.iter_mut().for_each(|(key, value)| value.stype.clone_from(key));
+    config.listener.iter_mut().for_each(|(key, value)| value.ltype.clone_from(key));
+    Ok(())
+}
+
+fn check_config(config: &Config) -> Result<(), RvError> {
+    if config.storage.len() != 1 {
+        return Err(RvError::ErrConfigStorageNotFound);
+    }
+
+    if config.listener.len() != 1 {
+        return Err(RvError::ErrConfigListenerNotFound);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use std::{env, fs, io::prelude::*};
+
+    use super::*;
+    // `TEST_DIR` originates in `bv-storage`'s fixtures; the root crate's
+    // `test_utils` only ever re-exported it, and that module is above this
+    // crate now. Named at its source instead.
+    use bv_storage::test_support::TEST_DIR;
+
+    fn write_file(path: &str, config: &str) -> Result<(), RvError> {
+        let mut file = fs::File::create(path)?;
+
+        file.write_all(config.as_bytes())?;
+
+        file.flush()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_config() {
+        let dir = env::temp_dir().join(TEST_DIR).join("test_load_config");
+        let _ = fs::remove_dir_all(&dir);
+        assert!(fs::create_dir_all(&dir).is_ok());
+
+        let file_path = dir.join("config.hcl");
+        let path = file_path.to_str().unwrap_or("config.hcl");
+
+        let hcl_config_str = r#"
+            storage "file" {
+              path    = "./vault/data"
+            }
+
+            listener "tcp" {
+              address     = "127.0.0.1:8200"
+            }
+
+            api_addr = "http://127.0.0.1:8200"
+            log_level = "debug"
+            log_format = "{date} {req.path}"
+            pid_file = "/tmp/bastion_vault.pid"
+        "#;
+
+        assert!(write_file(path, hcl_config_str).is_ok());
+
+        let config = load_config(path);
+        assert!(config.is_ok());
+        let hcl_config = config.unwrap();
+        println!("hcl config: {:?}", hcl_config);
+
+        let json_config_str = r#"{
+            "storage": {
+                "file": {
+                    "path": "./vault/data"
+                }
+            },
+            "listener": {
+                "tcp": {
+                    "address": "127.0.0.1:8200"
+                }
+            },
+            "api_addr": "http://127.0.0.1:8200",
+            "log_level": "debug",
+            "log_format": "{date} {req.path}",
+            "pid_file": "/tmp/bastion_vault.pid"
+        }"#;
+
+        let file_path = dir.join("config.json");
+        let path = file_path.to_str().unwrap_or("config.json");
+        assert!(write_file(path, json_config_str).is_ok());
+
+        let config = load_config(path);
+        assert!(config.is_ok());
+        let json_config = config.unwrap();
+        println!("json config: {:?}", json_config);
+
+        let hcl_config_value = serde_json::to_value(&hcl_config);
+        assert!(hcl_config_value.is_ok());
+        let hcl_config_value: Value = hcl_config_value.unwrap();
+
+        let json_config_value = serde_json::to_value(&json_config);
+        assert!(json_config_value.is_ok());
+        let json_config_value: Value = json_config_value.unwrap();
+        assert_eq!(hcl_config_value, json_config_value);
+
+        assert_eq!(json_config.listener.len(), 1);
+        assert_eq!(json_config.storage.len(), 1);
+        assert_eq!(json_config.api_addr.as_str(), "http://127.0.0.1:8200");
+        assert_eq!(json_config.log_format.as_str(), "{date} {req.path}");
+        assert_eq!(json_config.log_level.as_str(), "debug");
+        assert_eq!(json_config.pid_file.as_str(), "/tmp/bastion_vault.pid");
+        assert_eq!(json_config.work_dir.as_str(), "");
+        assert!(!json_config.daemon);
+        assert_eq!(json_config.daemon_user.as_str(), "");
+        assert_eq!(json_config.daemon_group.as_str(), "");
+        assert_eq!(json_config.mount_entry_hmac_level, MountEntryHMACLevel::None);
+        assert_eq!(json_config.barrier_type, BarrierType::Chacha20Poly1305);
+
+        let (_, listener) = json_config.listener.iter().next().unwrap();
+        assert!(listener.tls_disable);
+        assert_eq!(listener.ltype.as_str(), "tcp");
+        assert_eq!(listener.address.as_str(), "127.0.0.1:8200");
+
+        let (_, storage) = json_config.storage.iter().next().unwrap();
+        assert_eq!(storage.stype.as_str(), "file");
+        assert_eq!(storage.config.len(), 1);
+        let (_, path) = storage.config.iter().next().unwrap();
+        assert_eq!(path.as_str(), Some("./vault/data"));
+    }
+
+    #[test]
+    fn test_load_config_dir() {
+        let dir = env::temp_dir().join(TEST_DIR).join("test_load_config_dir");
+        let _ = fs::remove_dir_all(&dir);
+        assert!(fs::create_dir_all(&dir).is_ok());
+
+        let file_path = dir.join("config1.hcl");
+        let path = file_path.to_str().unwrap_or("config1.hcl");
+
+        let hcl_config_str = r#"
+            storage "file" {
+              path    = "./vault/data"
+            }
+
+            listener "tcp" {
+              address     = "127.0.0.1:8200"
+              tls_disable = "true"
+            }
+
+            api_addr = "http://127.0.0.1:8200"
+            log_level = "debug"
+            log_format = "{date} {req.path}"
+            pid_file = "/tmp/bastion_vault.pid"
+            mount_entry_hmac_level = "compat"
+        "#;
+
+        assert!(write_file(path, hcl_config_str).is_ok());
+
+        let file_path = dir.join("config2.hcl");
+        let path = file_path.to_str().unwrap_or("config2.hcl");
+
+        let hcl_config_str = r#"
+            storage "file" {
+              address    = "127.0.0.1:8899"
+            }
+
+            listener "tcp" {
+              address     = "127.0.0.1:8800"
+              tls_disable = true
+            }
+
+            log_level = "info"
+            barrier_type = "chacha20-poly1305"
+        "#;
+
+        assert!(write_file(path, hcl_config_str).is_ok());
+
+        let config = load_config(dir.to_str().unwrap());
+        println!("config: {:?}", config);
+        assert!(config.is_ok());
+        let hcl_config = config.unwrap();
+        println!("hcl config: {:?}", hcl_config);
+        assert_eq!(hcl_config.mount_entry_hmac_level, MountEntryHMACLevel::Compat);
+        assert_eq!(hcl_config.barrier_type, BarrierType::Chacha20Poly1305);
+
+        let (_, listener) = hcl_config.listener.iter().next().unwrap();
+        assert!(listener.tls_disable);
+    }
+
+    #[test]
+    fn test_load_config_tls() {
+        let dir = env::temp_dir().join(TEST_DIR).join("test_load_config_tls");
+        let _ = fs::remove_dir_all(&dir);
+        assert!(fs::create_dir_all(&dir).is_ok());
+
+        let file_path = dir.join("config.hcl");
+        let path = file_path.to_str().unwrap_or("config.hcl");
+
+        let hcl_config_str = r#"
+            storage "file" {
+              path    = "./vault/data"
+            }
+
+            listener "tcp" {
+              address     = "127.0.0.1:8200"
+              tls_disable = false
+              tls_cert_file = "./cert/test.crt"
+              tls_key_file = "./cert/test.key"
+              tls_client_ca_file = "./cert/ca.pem"
+              tls_min_version = "tls12"
+              tls_max_version = "tls13"
+            }
+
+            api_addr = "http://127.0.0.1:8200"
+            log_level = "debug"
+            log_format = "{date} {req.path}"
+            pid_file = "/tmp/bastion_vault.pid"
+            mount_entry_hmac_level = "high"
+        "#;
+
+        assert!(write_file(path, hcl_config_str).is_ok());
+
+        let config = load_config(path);
+        assert!(config.is_ok());
+        let hcl_config = config.unwrap();
+        println!("hcl config: {:?}", hcl_config);
+
+        assert_eq!(hcl_config.listener.len(), 1);
+        assert_eq!(hcl_config.storage.len(), 1);
+        assert_eq!(hcl_config.api_addr.as_str(), "http://127.0.0.1:8200");
+        assert_eq!(hcl_config.log_format.as_str(), "{date} {req.path}");
+        assert_eq!(hcl_config.log_level.as_str(), "debug");
+        assert_eq!(hcl_config.pid_file.as_str(), "/tmp/bastion_vault.pid");
+        assert_eq!(hcl_config.work_dir.as_str(), "");
+        assert!(!hcl_config.daemon);
+        assert_eq!(hcl_config.daemon_user.as_str(), "");
+        assert_eq!(hcl_config.daemon_group.as_str(), "");
+        assert_eq!(hcl_config.mount_entry_hmac_level, MountEntryHMACLevel::High);
+
+        let (_, listener) = hcl_config.listener.iter().next().unwrap();
+        assert_eq!(listener.ltype.as_str(), "tcp");
+        assert_eq!(listener.address.as_str(), "127.0.0.1:8200");
+        assert!(!listener.tls_disable);
+        assert_eq!(listener.tls_cert_file.as_str(), "./cert/test.crt");
+        assert_eq!(listener.tls_key_file.as_str(), "./cert/test.key");
+        assert_eq!(listener.tls_client_ca_file.as_str(), "./cert/ca.pem");
+        assert!(!listener.tls_disable_client_certs);
+        assert!(!listener.tls_require_and_verify_client_cert);
+        assert_eq!(listener.tls_min_version, TlsVersion::Tls12);
+        assert_eq!(listener.tls_max_version, TlsVersion::Tls13);
+
+        let (_, storage) = hcl_config.storage.iter().next().unwrap();
+        assert_eq!(storage.stype.as_str(), "file");
+        assert_eq!(storage.config.len(), 1);
+        let (_, path) = storage.config.iter().next().unwrap();
+        assert_eq!(path.as_str(), Some("./vault/data"));
+    }
+
+    #[test]
+    fn test_load_config_with_chacha_barrier_type() {
+        let dir = env::temp_dir().join(TEST_DIR).join("test_load_config_with_chacha_barrier_type");
+        let _ = fs::remove_dir_all(&dir);
+        assert!(fs::create_dir_all(&dir).is_ok());
+
+        let file_path = dir.join("config.json");
+        let path = file_path.to_str().unwrap_or("config.json");
+
+        let json_config_str = r#"{
+            "storage": {
+                "file": {
+                    "path": "./vault/data"
+                }
+            },
+            "listener": {
+                "tcp": {
+                    "address": "127.0.0.1:8200"
+                }
+            },
+            "barrier_type": "chacha20-poly1305"
+        }"#;
+
+        assert!(write_file(path, json_config_str).is_ok());
+
+        let config = load_config(path);
+        assert!(config.is_ok());
+        let json_config = config.unwrap();
+        assert_eq!(json_config.barrier_type, BarrierType::Chacha20Poly1305);
+    }
+
+    /// A config with no `metrics` block keeps the shipped default
+    /// (cluster-local waived, nothing else), and an explicit block is
+    /// parsed — including turning the cluster-local waiver off, which is
+    /// the strict token-only posture.
+    #[test]
+    fn test_load_config_metrics_block() {
+        let dir = env::temp_dir().join(TEST_DIR).join("test_load_config_metrics");
+        let _ = fs::remove_dir_all(&dir);
+        assert!(fs::create_dir_all(&dir).is_ok());
+
+        let base = r#"
+            storage "file" {
+              path    = "./vault/data"
+            }
+
+            listener "tcp" {
+              address     = "127.0.0.1:8200"
+            }
+        "#;
+
+        let file_path = dir.join("default.hcl");
+        let path = file_path.to_str().unwrap();
+        assert!(write_file(path, base).is_ok());
+        let config = load_config(path).unwrap();
+        assert!(config.metrics.allow_cluster_local);
+        assert!(config.metrics.allow_unauthenticated_cidrs.is_empty());
+
+        let with_block = format!(
+            r#"{base}
+            metrics {{
+              allow_cluster_local = false
+              allow_unauthenticated_cidrs = ["10.20.0.0/16", "::1/128"]
+            }}
+        "#
+        );
+        let file_path = dir.join("explicit.hcl");
+        let path = file_path.to_str().unwrap();
+        assert!(write_file(path, &with_block).is_ok());
+        let config = load_config(path).unwrap();
+        assert!(!config.metrics.allow_cluster_local);
+        assert_eq!(
+            config.metrics.allow_unauthenticated_cidrs,
+            vec!["10.20.0.0/16".to_string(), "::1/128".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_load_config_hiqlite() {
+        let dir = env::temp_dir().join(TEST_DIR).join("test_load_config_hiqlite");
+        let _ = fs::remove_dir_all(&dir);
+        assert!(fs::create_dir_all(&dir).is_ok());
+
+        let file_path = dir.join("config.hcl");
+        let path = file_path.to_str().unwrap_or("config.hcl");
+
+        let hcl_config_str = r#"
+            storage "hiqlite" {
+              data_dir    = "/var/lib/bvault/data"
+              node_id     = 1
+              secret_raft = "raft_secret_1234567"
+              secret_api  = "api_secret_12345678"
+            }
+
+            listener "tcp" {
+              address     = "127.0.0.1:8200"
+            }
+
+            api_addr = "http://127.0.0.1:8200"
+        "#;
+
+        assert!(write_file(path, hcl_config_str).is_ok());
+
+        let config = load_config(path);
+        assert!(config.is_ok());
+        let hcl_config = config.unwrap();
+
+        assert_eq!(hcl_config.storage.len(), 1);
+        let (_, storage) = hcl_config.storage.iter().next().unwrap();
+        assert_eq!(storage.stype.as_str(), "hiqlite");
+        assert_eq!(storage.config.get("data_dir").and_then(|v| v.as_str()), Some("/var/lib/bvault/data"));
+        assert_eq!(storage.config.get("node_id").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(storage.config.get("secret_raft").and_then(|v| v.as_str()), Some("raft_secret_1234567"));
+        assert_eq!(storage.config.get("secret_api").and_then(|v| v.as_str()), Some("api_secret_12345678"));
+    }
+}

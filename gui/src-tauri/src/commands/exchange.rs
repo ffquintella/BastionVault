@@ -215,7 +215,7 @@ pub async fn exchange_export(
         _ => None,
     };
     bastion_vault::audit::emit_sys_audit(
-        &core_arc,
+        core_arc.as_ref(),
         &token,
         "sys/exchange/export",
         bastion_vault::logical::Operation::Write,
@@ -405,8 +405,8 @@ pub async fn exchange_preview(
         .collect();
 
     let owner = state.token.lock().await.clone().unwrap_or_default();
-    let preview_token = core.exchange_preview_store.insert(document, owner.clone());
-    let expires_in_secs = core.exchange_preview_store.ttl_secs();
+    let preview_token = state.exchange_preview_store.insert(document, owner.clone());
+    let expires_in_secs = state.exchange_preview_store.ttl_secs();
 
     let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
     drop(vault_guard);
@@ -418,7 +418,7 @@ pub async fn exchange_preview(
     audit_body.insert("identical".into(), Value::Number(identical.into()));
     audit_body.insert("conflict".into(), Value::Number(conflict.into()));
     bastion_vault::audit::emit_sys_audit(
-        &core_arc,
+        core_arc.as_ref(),
         &owner,
         "sys/exchange/import/preview",
         bastion_vault::logical::Operation::Write,
@@ -492,7 +492,7 @@ pub async fn exchange_apply(
     let core = vault.core.load();
 
     let owner = state.token.lock().await.clone().unwrap_or_default();
-    let document = core
+    let document = state
         .exchange_preview_store
         .consume(&token, &owner)
         .map_err(CommandError::from)?;
@@ -513,7 +513,7 @@ pub async fn exchange_apply(
     audit_body.insert("skipped".into(), Value::Number(result.skipped.into()));
     audit_body.insert("renamed".into(), Value::Number(result.renamed.into()));
     bastion_vault::audit::emit_sys_audit(
-        &core_arc,
+        core_arc.as_ref(),
         &owner,
         "sys/exchange/import/apply",
         bastion_vault::logical::Operation::Write,

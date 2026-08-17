@@ -3,7 +3,12 @@ name = "bv_crypto"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
 description = "Small, auditable cryptographic primitives for BastionVault migrations."
+
+# Pinned to the Cloudsmith registry so a bare `cargo publish` cannot
+# leak this crate to crates.io. See docs/publishing-crates.md.
+publish = ["uox-bastionvault"]
 
 [features]
 default = ["ml-kem-768", "ml-dsa-44", "ml-dsa-65", "ml-dsa-87"]

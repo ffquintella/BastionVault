@@ -47,8 +47,9 @@ final-status-level = "slow"
 #
 #   * The hiqlite storage tests and the HA fault-injection suite hand
 #     themselves disjoint TCP ports from a `static AtomicU16` counter
-#     (`NEXT_PORT_OFFSET` in src/storage/hiqlite/mod.rs, `NEXT_PORT_BLOCK`
-#     in tests/hiqlite_ha_fault_injection.rs). Both files document that a
+#     (`NEXT_PORT_OFFSET` in crates/bv-storage/src/hiqlite/mod.rs,
+#     `NEXT_PORT_BLOCK` in tests/hiqlite_ha_fault_injection.rs). Both files
+#     document that a
 #     dropped backend releases its listeners asynchronously, so reusing a
 #     port fails with "Address already in use". Under process-per-test
 #     every process would start that counter at 0 and every test would
@@ -56,30 +57,93 @@ final-status-level = "slow"
 #     via `make test-hiqlite`. (They are inert without
 #     CARGO_TEST_HIQLITE=1, so a default nextest run would pass either
 #     way — this exclusion keeps that from being luck.)
-default-filter = 'not (binary(cucumber_hiqlite) | binary(hiqlite_ha_fault_injection) | test(/^storage::hiqlite::test::/))'
+#     The `storage::` prefix is optional in the pattern because these tests
+#     moved into the `bv-storage` crate in Phase 1 of
+#     roadmaps/workspace-decomposition.md, where their path lost it. Both
+#     spellings are matched so the exclusion cannot silently lapse again.
+#
+# Neither exclusion is a coverage gap any more. Phase 5 gave both suites their
+# own CI job (`cucumber`, `hiqlite` in .github/workflows/tests.yml), running the
+# same `make` targets under plain `cargo test`. What is excluded here is
+# excluded from *nextest*, not from CI — keep those two facts together, because
+# widening this filter would now silently double-run them.
+default-filter = 'not (binary(cucumber_hiqlite) | binary(hiqlite_ha_fault_injection) | test(/^(storage::)?hiqlite::test::/))'
 
 # `src/plugins/process_runtime.rs` tests copy the *entire test binary*
-# into a temp dir per invocation (`current_exe_bytes()` → `Vec<u8>`).
-# That binary is ~210 MB today, so the seven of them running concurrently
-# would hold well over a gigabyte of heap and write as much to disk. They
-# carry `#[serial_test::serial]` for exactly this reason; the in-process
-# mutex stops working under nextest, so pin them to one at a time here.
+# into a temp dir per invocation (`current_exe_bytes()` → `Vec<u8>`), then
+# spawn the copy and drive a JSON-RPC handshake against a 30s deadline
+# (`DEFAULT_INVOKE_TIMEOUT`, a production constant — do not relax it to make
+# these pass). They carry `#[serial_test::serial]` for exactly this reason;
+# the in-process mutex stops working under nextest, so they are pinned here.
+#
+# `max-threads = 1` only serialises them against *each other*, which was
+# enough while the binary was ~210 MB. Phase 4 of the workspace decomposition
+# took it to **227 MB**: `bastion_vault` gained a dev-dependency on `bv-server`
+# so `test_utils::TestHttpServer` could stay put, and that pulls actix-web and
+# ureq into the lib-test binary. At that size, copying 227 MB while ~75 sibling
+# `plugins::` tests (the wasmtime ones especially) compete for disk and CPU is
+# enough to blow the 30s deadline — reproduced as 3–6 failures under
+# `make plugins-test`, while the same seven pass in 16s when run alone.
+#
+# `threads-required = "num-cpus"` is the fix: it makes each of these take the
+# whole runner, so they are serial against *everything*, not just each other.
+# The cost is bounded — seven tests, ~16s total — and the alternative is a
+# timing-dependent failure that looks like a plugin-protocol bug.
 [test-groups.exe-copy]
 max-threads = 1
 
 [[profile.default.overrides]]
 filter = 'test(/^plugins::process_runtime::tests::/)'
 test-group = 'exe-copy'
+threads-required = "num-cpus"
+
+# ── `quick`: the inner-loop profile ───────────────────────────────
+#
+# What `make test-changed` / `scripts/test-changed.sh` run under. It differs
+# from `default` in one way, and only one:
+#
+#   fail-fast = true
+#
+# `default` sets `fail-fast = false` because a full run is expensive enough that
+# you want the whole picture from one invocation. The inner loop has the
+# opposite economics: you are running a handful of packages against a change you
+# made 30 seconds ago, the first failure is almost always THE failure, and
+# stopping there gets you back to the editor sooner.
+#
+# It is a reporting choice, not a scope choice — `default-filter` and
+# `slow-timeout` are plain keys and are inherited from `profile.default`, so
+# this profile excludes exactly the same port-bound suites and applies the same
+# slow-test threshold. Nothing is skipped here that a `default` run would have
+# executed.
+#
+# The `exe-copy` override is repeated rather than assumed, for the same reason
+# it is repeated in `profile.ci` below: nextest reports test-group overrides as
+# belonging to the profile that declares them, and if this one silently did not
+# apply, seven tests would each load a 227 MB binary into memory at once.
+[profile.quick]
+fail-fast = true
+status-level = "fail"
+final-status-level = "slow"
+
+[[profile.quick.overrides]]
+filter = 'test(/^plugins::process_runtime::tests::/)'
+test-group = 'exe-copy'
+threads-required = "num-cpus"
 
 # CI profile: machine-readable results, and no retries. Retrying a failed
 # security test until it passes is how a real race gets shipped — a flake
 # here is a bug report, not something to paper over.
 #
+# Since Phase 5 this profile is used by several jobs per run — the per-package
+# unit matrix and each integration shard — rather than by one. They are separate
+# runners with separate target dirs, so nothing is shared except the JUnit path
+# below, and each job uploads its own artefact under its own name.
+#
 # Plain keys (`default-filter`, `slow-timeout`) are inherited from
 # profile.default. The `exe-copy` override is repeated below rather than
 # assumed: `cargo nextest show-config test-groups --profile ci` reports it
 # as belonging to the *default* profile, and if it silently did not apply
-# here, seven tests would each load a ~210 MB binary into memory at once
+# here, seven tests would each load a 227 MB binary into memory at once
 # on a 16 GB shared runner. Not worth inferring.
 [profile.ci]
 fail-fast = false
@@ -90,6 +154,7 @@ final-status-level = "slow"
 [[profile.ci.overrides]]
 filter = 'test(/^plugins::process_runtime::tests::/)'
 test-group = 'exe-copy'
+threads-required = "num-cpus"
 
 [profile.ci.junit]
 path = "junit.xml"

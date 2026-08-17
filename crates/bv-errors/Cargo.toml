@@ -1,0 +1,59 @@
+[package]
+name = "bv-errors"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's shared error type (RvError) — Tier 0 substrate, no web framework"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+# Pinned to the Cloudsmith registry so a bare `cargo publish` cannot
+# leak this crate to crates.io. See docs/publishing-crates.md.
+publish = ["uox-bastionvault"]
+
+# `RvError` carries `#[from]` conversions for 20 external crates, so this
+# "leaf" crate is not dependency-free. Feature-gating each conversion was
+# considered and deferred — see roadmaps/workspace-decomposition.md
+# § "`bv-errors` is not the cheap leaf this plan assumed" (option 3). Every
+# version below MIRRORS the root crate's declaration, including feature
+# lists, so extracting the file cannot change feature unification.
+[dependencies]
+thiserror = { version = "^2.0" }
+anyhow = { version = "^1.0" }
+serde_json = "^1.0"
+serde_yaml = "0.9"
+pem = "3.0"
+regex = "1.12"
+hex = "0.4"
+hcl-rs = "0.19"
+humantime = "2.3"
+chrono = "0.4"
+bcrypt = "0.19"
+ureq = { version = "3.3", features = ["json", "socks-proxy", "win-system-proxy"] }
+http = "1"
+ipnetwork = { version = "0.21", features = ["serde"] }
+url = "2.5"
+rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }
+lockfile = "0.4.0"
+diesel = { version = "2.3.8", features = ["mysql", "r2d2"], optional = true }
+r2d2 = { version = "0.8.10", optional = true }
+
+[features]
+# Mirrors the root crate's feature of the same name. The root's
+# `storage_mysql` forwards to this one so the two `#[cfg]`-gated variants
+# (`ErrConnectionPoolCreate`, `ErrDatabaseExecuteEntry`) appear exactly
+# when the MySQL backend is compiled in.
+storage_mysql = ["diesel", "r2d2"]
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Package name != lib name: the crate is `hcl-rs`, the lib is `hcl`, and
+    # `RvError::Hcl` wraps `hcl::Error`.
+    "hcl-rs",
+]
+
+[lints.clippy]
+# `RvError` is a 149-variant enum; several variants box nothing and the
+# largest carries a `String`, so the type is wide by construction. Matches
+# the root crate's allow.
+result_large_err = "allow"

@@ -1,0 +1,54 @@
+[package]
+name = "bv-auth-audit"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's login-audit store: the who/when/where record every auth backend writes"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 3 of the workspace decomposition
+# (roadmaps/workspace-decomposition.md § Phase 3), and the one piece of
+# `src/modules/credential/` that is not a backend.
+#
+# It is its own crate rather than a module of one because five backends write
+# to it and the kernel tier reads it: `auth::token_store` records logout and
+# login-via-view, and the `system` engine serves the operator-facing history.
+# Folding it into any single backend would make the other six depend on that
+# backend; folding it into `bv-audit` is not possible, because it resolves a
+# `VaultCtx` and `bv-audit` must stay *below* the kernel contract (see
+# Phase 1's "bv-audit was never unblocked by Phase 2").
+
+[dependencies]
+bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.1.0", registry = "uox-bastionvault" }
+
+async-trait = "0.1"
+chrono = "0.4"
+log = "0.4"
+maybe-async = "0.2"
+serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
+serde_json = "^1.0"
+
+[features]
+default = []
+sync_handler = [
+    "maybe-async/is_sync",
+    "bv-storage/sync_handler",
+    "bv-logical/sync_handler",
+    "bv-kernel-api/sync_handler",
+]
+
+[lints.clippy]
+field_reassign_with_default = "allow"
+type_complexity = "allow"
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Pulled in by the `#[maybe_async::maybe_async]` attribute's async
+    # expansion, which is a token stream to a static `use` scan.
+    "async-trait",
+]

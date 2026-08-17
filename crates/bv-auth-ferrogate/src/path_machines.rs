@@ -1,0 +1,1005 @@
+//! Machine enrolment records and the admin lifecycle routes (Phase 1).
+//!
+//! Routes (all root/sudo-gated except `login`):
+//! - `POST   register`                      — admin pre-registers a SPIFFE ID → `pending`.
+//! - `LIST   machines`                      — enumerate machines with summaries.
+//! - `GET    machines/{id}`                 — show one record.
+//! - `DELETE machines/{id}`                 — forget a record.
+//! - `POST   machines/{id}/approve`         — approve with policies + ttl.
+//! - `POST   machines/{id}/reject`          — reject with a reason.
+//! - `POST   machines/{id}/revoke`          — revoke an approved machine.
+//! - `POST   login`                         — **stubbed** until Phase 2.
+//!
+//! `{id}` is the [`machine_id`] (BLAKE3 hex) of the SPIFFE ID, as returned by
+//! `register` / `LIST` — a raw SPIFFE ID can't be a single path segment.
+
+use std::{collections::HashMap, sync::Arc, time::Duration};
+
+use serde_json::{json, Map, Value};
+
+use super::{
+    jwks_source, machine_id, now_unix, status,
+    verify::{self, verify_child_token},
+    FerroGateBackend, FerroGateBackendInner, FerroGateConfig, MachineEntry,
+};
+#[cfg(not(feature = "sync_handler"))]
+use super::CachedJwks;
+use crate::kernel_api::VaultCtx;
+use bv_metrics::ferrogate_metrics::{ferrogate_metrics, DenyReason};
+
+use crate::{
+    context::Context,
+    errors::RvError,
+    logical::{
+        field::FieldTrait, Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response,
+    },
+    new_fields, new_fields_internal, new_path, new_path_internal,
+    storage::StorageEntry,
+};
+
+const MACHINE_PREFIX: &str = "machine/";
+
+/// Result of binding a user token to a machine login: the intersected policy
+/// set plus the user's identity to stamp on the combined session token.
+struct BoundUser {
+    policies: Vec<String>,
+    entity_id: String,
+    username: String,
+}
+
+fn machine_key(id: &str) -> String {
+    format!("{MACHINE_PREFIX}{id}")
+}
+
+/// Caller-facing summary of a machine record (no secrets — there are none).
+fn summarize(id: &str, m: &MachineEntry) -> Value {
+    json!({
+        "id": id,
+        "spiffe_id": m.spiffe_id,
+        "status": m.status,
+        "policies": m.policies,
+        "ttl_seconds": m.ttl_seconds,
+        "ek_cert_sha384": m.ek_cert_sha384,
+        "policy_id": m.policy_id,
+        "parent_svid": m.parent_svid,
+        "first_seen_at": m.first_seen_at,
+        "approved_at": m.approved_at,
+        "approver": m.approver,
+        "last_login_at": m.last_login_at,
+        "last_login_ip": m.last_login_ip,
+        "reject_reason": m.reject_reason,
+        "comment": m.comment,
+        "self_enrolled": m.self_enrolled,
+    })
+}
+
+/// Whether a caller matches any entry in an allow/block list. Each entry is
+/// classified once: an entry that parses as an IP or CIDR is matched against
+/// the request source `ip`; any other entry is matched against the caller's
+/// claimed `spiffe_id` (exact, or as a prefix when it ends with `*`) or the
+/// derived 64-hex `machine_id`. Self-asserted identity is untrusted, so these
+/// lists are a coarse filter on top of the admin-approval gate — the source-IP
+/// rules are the harder-to-spoof half.
+fn enroll_list_matches(list: &[String], ip: &str, spiffe_id: &str, machine_id: &str) -> bool {
+    list.iter().any(|raw| {
+        let entry = raw.trim();
+        if entry.is_empty() {
+            return false;
+        }
+        // An IP or CIDR entry only ever matches the source IP.
+        if let Ok(net) = entry.parse::<ipnetwork::IpNetwork>() {
+            return ip.parse::<std::net::IpAddr>().map(|addr| net.contains(addr)).unwrap_or(false);
+        }
+        // Otherwise it is an identity rule.
+        if let Some(prefix) = entry.strip_suffix('*') {
+            return !spiffe_id.is_empty() && spiffe_id.starts_with(prefix);
+        }
+        entry == spiffe_id || entry == machine_id
+    })
+}
+
+impl FerroGateBackend {
+    pub fn register_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"register$",
+            fields: {
+                "spiffe_id": {
+                    field_type: FieldType::Str,
+                    required: true,
+                    description: "SPIFFE ID to pre-register, e.g. spiffe://ferrogate.prod/host/<uuid>."
+                },
+                "comment": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "Optional free-text note."
+                }
+            },
+            operations: [
+                {op: Operation::Write, handler: r.register_machine}
+            ],
+            help: r#"Admin pre-registration of a machine by SPIFFE ID (creates a pending record)."#
+        })
+    }
+
+    pub fn enroll_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"enroll$",
+            fields: {
+                "spiffe_id": {
+                    field_type: FieldType::Str,
+                    required: true,
+                    description: "SPIFFE ID this machine is requesting to register, e.g. spiffe://ferrogate.prod/host/<uuid>."
+                },
+                "comment": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "Optional free-text note shown to the approving administrator."
+                }
+            },
+            operations: [
+                {op: Operation::Write, handler: r.enroll_machine}
+            ],
+            help: r#"Unauthenticated machine self-enrolment: request that this SPIFFE ID be registered (creates a pending record awaiting administrator approval). Never mints a token. Disabled unless the mount's self_enroll_enabled is set."#
+        })
+    }
+
+    pub fn machines_list_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"machines/?$",
+            operations: [
+                {op: Operation::List, handler: r.list_machines}
+            ],
+            help: r#"List enrolled machines with status and attestation summary."#
+        })
+    }
+
+    pub fn machine_path(&self) -> Path {
+        let read_ref = self.inner.clone();
+        let del_ref = self.inner.clone();
+        new_path!({
+            pattern: r"machines/(?P<id>[0-9a-f]{64})$",
+            fields: {
+                "id": {
+                    field_type: FieldType::Str,
+                    required: true,
+                    description: "Machine handle (BLAKE3 hex of the SPIFFE ID)."
+                }
+            },
+            operations: [
+                {op: Operation::Read, handler: read_ref.show_machine},
+                {op: Operation::Delete, handler: del_ref.delete_machine}
+            ],
+            help: r#"Show or forget a single machine record."#
+        })
+    }
+
+    pub fn machine_approve_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"machines/(?P<id>[0-9a-f]{64})/approve$",
+            fields: {
+                "id": {
+                    field_type: FieldType::Str,
+                    required: true,
+                    description: "Machine handle."
+                },
+                "policies": {
+                    field_type: FieldType::CommaStringSlice,
+                    required: false,
+                    description: "Policies to grant tokens this machine mints."
+                },
+                "ttl_seconds": {
+                    field_type: FieldType::Int,
+                    required: false,
+                    description: "Token TTL (seconds); 0 uses the config default."
+                },
+                "comment": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "Optional approval note."
+                }
+            },
+            operations: [
+                {op: Operation::Write, handler: r.approve_machine}
+            ],
+            help: r#"Approve a machine and attach its policy set."#
+        })
+    }
+
+    pub fn machine_reject_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"machines/(?P<id>[0-9a-f]{64})/reject$",
+            fields: {
+                "id": {
+                    field_type: FieldType::Str,
+                    required: true,
+                    description: "Machine handle."
+                },
+                "reason": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "Reason for rejection."
+                }
+            },
+            operations: [
+                {op: Operation::Write, handler: r.reject_machine}
+            ],
+            help: r#"Reject a pending machine."#
+        })
+    }
+
+    pub fn machine_revoke_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"machines/(?P<id>[0-9a-f]{64})/revoke$",
+            fields: {
+                "id": {
+                    field_type: FieldType::Str,
+                    required: true,
+                    description: "Machine handle."
+                }
+            },
+            operations: [
+                {op: Operation::Write, handler: r.revoke_machine}
+            ],
+            help: r#"Revoke an approved machine."#
+        })
+    }
+
+    pub fn login_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"login/?$",
+            fields: {
+                "token": {
+                    field_type: FieldType::Str,
+                    required: true,
+                    description: "FerroGate-issued, DPoP-bound child token (compact JWS)."
+                },
+                "dpop": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "DPoP proof JWS (RFC 9449). Preferred via the 'DPoP' header; this body field is a fallback for non-browser clients."
+                },
+                "user_token": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "Optional already-authenticated user token to bind. When present (or when the mount's require_user_token is set), the minted token's policies are the intersection of the machine's and the user token's; the user token is then revoked."
+                }
+            },
+            operations: [
+                {op: Operation::Write, handler: r.login}
+            ],
+            help: r#"Authenticate a machine using a FerroGate-issued child token (+ DPoP proof)."#
+        })
+    }
+
+    pub fn status_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"status/?$",
+            fields: {
+                "token": {
+                    field_type: FieldType::Str,
+                    required: true,
+                    description: "FerroGate-issued, DPoP-bound child token (compact JWS)."
+                },
+                "dpop": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "DPoP proof JWS (RFC 9449). Preferred via the 'DPoP' header."
+                }
+            },
+            operations: [
+                {op: Operation::Write, handler: r.status}
+            ],
+            help: r#"Report this machine's enrolment status (verifies the token; mints nothing)."#
+        })
+    }
+}
+
+#[maybe_async::maybe_async]
+impl FerroGateBackendInner {
+    pub async fn get_machine(&self, req: &mut Request, id: &str) -> Result<Option<MachineEntry>, RvError> {
+        match req.storage_get(&machine_key(id)).await? {
+            Some(entry) => Ok(Some(serde_json::from_slice(entry.value.as_slice())?)),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn set_machine(&self, req: &mut Request, id: &str, m: &MachineEntry) -> Result<(), RvError> {
+        let entry = StorageEntry::new(&machine_key(id), m)?;
+        req.storage_put(&entry).await
+    }
+
+    /// Best-effort display name of the requesting administrator.
+    fn approver_name(req: &Request) -> String {
+        req.auth
+            .as_ref()
+            .map(|a| a.display_name.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "admin".to_string())
+    }
+
+    fn id_from(req: &Request) -> Result<String, RvError> {
+        let v = req.get_data("id")?;
+        Ok(v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string())
+    }
+
+    pub async fn register_machine(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let spiffe_id = req.get_data("spiffe_id")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        if !spiffe_id.starts_with("spiffe://") {
+            return Ok(Some(Response::error_response("spiffe_id must be a spiffe:// URI")));
+        }
+        let id = machine_id(&spiffe_id);
+
+        // Idempotent: an existing record is returned untouched.
+        if let Some(existing) = self.get_machine(req, &id).await? {
+            let mut data = Map::new();
+            data.insert("id".to_string(), Value::String(id));
+            data.insert("spiffe_id".to_string(), Value::String(existing.spiffe_id));
+            data.insert("status".to_string(), Value::String(existing.status));
+            return Ok(Some(Response::data_response(Some(data))));
+        }
+
+        let comment = req.get_data("comment").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        let m = MachineEntry {
+            spiffe_id: spiffe_id.clone(),
+            status: status::PENDING.to_string(),
+            first_seen_at: now_unix(),
+            comment,
+            ..Default::default()
+        };
+        self.set_machine(req, &id, &m).await?;
+
+        let mut data = Map::new();
+        data.insert("id".to_string(), Value::String(id));
+        data.insert("spiffe_id".to_string(), Value::String(spiffe_id));
+        data.insert("status".to_string(), Value::String(status::PENDING.to_string()));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// Unauthenticated machine self-enrolment. A machine asks to register its
+    /// own (self-asserted) SPIFFE ID; on success a `pending` record is created
+    /// for an administrator to approve. This endpoint NEVER mints a token and
+    /// never grants access — real authentication still requires the attested
+    /// `login` flow, so a spoofed SPIFFE ID here is harmless on its own. The
+    /// endpoint is refused entirely unless `self_enroll_enabled` is set, and is
+    /// gated by an allow-list / block-list and a per-source-IP rate limit to
+    /// keep the pending queue from being flooded.
+    pub async fn enroll_machine(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let config = self.get_config(req).await?;
+        if !config.self_enroll_enabled {
+            return Ok(Some(Response::error_response(
+                "self_enroll_disabled: machine self-registration is not enabled on this mount",
+            )));
+        }
+
+        let spiffe_id =
+            req.get_data("spiffe_id")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
+        if !spiffe_id.starts_with("spiffe://") {
+            return Ok(Some(Response::error_response("spiffe_id must be a spiffe:// URI")));
+        }
+        let ip = Self::source_ip(req);
+        let id = machine_id(&spiffe_id);
+
+        // Per-source-IP rate limit first — the cheapest flood defence, applied
+        // before any storage access.
+        if !self.enroll_rate_ok(&ip, config.self_enroll_rate_limit_per_min) {
+            log::warn!(target: "security", "ferrogate self-enroll rate-limited ip={ip}");
+            ferrogate_metrics().record_denied(DenyReason::RateLimited);
+            return Ok(Some(Response::error_response(
+                "rate_limited: too many enrolment requests, retry shortly",
+            )));
+        }
+
+        // Block-list wins over the allow-list; a non-empty allow-list then
+        // requires an explicit match.
+        let blocked = enroll_list_matches(&config.self_enroll_blocklist, &ip, &spiffe_id, &id);
+        let allowed = config.self_enroll_allowlist.is_empty()
+            || enroll_list_matches(&config.self_enroll_allowlist, &ip, &spiffe_id, &id);
+        if blocked || !allowed {
+            log::warn!(
+                target: "security",
+                "ferrogate self-enroll denied ip={ip} spiffe_id={spiffe_id} blocked={blocked}"
+            );
+            ferrogate_metrics().record_denied(DenyReason::SelfEnrollDenied);
+            return Ok(Some(Response::error_response(
+                "self_enroll_denied: this caller is not permitted to self-enrol",
+            )));
+        }
+
+        // Idempotent and non-destructive: an existing record (pending, approved,
+        // rejected, or revoked) is returned unchanged — an unauthenticated
+        // caller can never reset or downgrade an administrator's decision.
+        if let Some(existing) = self.get_machine(req, &id).await? {
+            let mut data = Map::new();
+            data.insert("id".to_string(), Value::String(id));
+            data.insert("spiffe_id".to_string(), Value::String(existing.spiffe_id));
+            data.insert("status".to_string(), Value::String(existing.status));
+            return Ok(Some(Response::data_response(Some(data))));
+        }
+
+        let comment =
+            req.get_data("comment").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        let m = MachineEntry {
+            spiffe_id: spiffe_id.clone(),
+            status: status::PENDING.to_string(),
+            first_seen_at: now_unix(),
+            last_login_ip: ip.clone(),
+            self_enrolled: true,
+            comment,
+            ..Default::default()
+        };
+        self.set_machine(req, &id, &m).await?;
+        log::info!(target: "audit", "ferrogate.machine.self_enrolled spiffe_id={spiffe_id} ip={ip}");
+        ferrogate_metrics().record_pending();
+
+        let mut data = Map::new();
+        data.insert("id".to_string(), Value::String(id));
+        data.insert("spiffe_id".to_string(), Value::String(spiffe_id));
+        data.insert("status".to_string(), Value::String(status::PENDING.to_string()));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn list_machines(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let ids = req.storage_list(MACHINE_PREFIX).await?;
+        let mut machines = Vec::with_capacity(ids.len());
+        for id in &ids {
+            if let Some(m) = self.get_machine(req, id).await? {
+                machines.push(summarize(id, &m));
+            }
+        }
+        let mut data = Map::new();
+        data.insert("keys".to_string(), Value::Array(ids.into_iter().map(Value::String).collect()));
+        data.insert("machines".to_string(), Value::Array(machines));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn show_machine(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let id = Self::id_from(req)?;
+        match self.get_machine(req, &id).await? {
+            Some(m) => {
+                let data = summarize(&id, &m).as_object().cloned().ok_or(RvError::ErrResponseDataInvalid)?;
+                Ok(Some(Response::data_response(Some(data))))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub async fn delete_machine(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let id = Self::id_from(req)?;
+        req.storage_delete(&machine_key(&id)).await?;
+        Ok(None)
+    }
+
+    pub async fn approve_machine(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let id = Self::id_from(req)?;
+        let Some(mut m) = self.get_machine(req, &id).await? else {
+            return Ok(Some(Response::error_response("unknown machine")));
+        };
+
+        if let Ok(v) = req.get_data("policies") {
+            m.policies = v.as_comma_string_slice().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
+        if let Ok(v) = req.get_data("ttl_seconds") {
+            m.ttl_seconds = v.as_int().ok_or(RvError::ErrRequestFieldInvalid)?.max(0) as u64;
+        }
+        if let Ok(v) = req.get_data("comment") {
+            if let Some(c) = v.as_str() {
+                m.comment = c.to_string();
+            }
+        }
+        m.status = status::APPROVED.to_string();
+        m.approved_at = now_unix();
+        m.approver = Self::approver_name(req);
+        m.reject_reason.clear();
+        self.set_machine(req, &id, &m).await?;
+        log::info!(target: "audit", "ferrogate.machine.approved spiffe_id={} approver={}", m.spiffe_id, m.approver);
+        ferrogate_metrics().record_approved();
+        Ok(None)
+    }
+
+    pub async fn reject_machine(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let id = Self::id_from(req)?;
+        let Some(mut m) = self.get_machine(req, &id).await? else {
+            return Ok(Some(Response::error_response("unknown machine")));
+        };
+        m.status = status::REJECTED.to_string();
+        m.reject_reason =
+            req.get_data("reason").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        self.set_machine(req, &id, &m).await?;
+        Ok(None)
+    }
+
+    pub async fn revoke_machine(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let id = Self::id_from(req)?;
+        let Some(mut m) = self.get_machine(req, &id).await? else {
+            return Ok(Some(Response::error_response("unknown machine")));
+        };
+        // Phase 1 flips status only; active-token revocation through the lease
+        // manager lands once login mints tokens (Phase 3+).
+        m.status = status::REVOKED.to_string();
+        self.set_machine(req, &id, &m).await?;
+        Ok(None)
+    }
+
+    /// Source IP of the calling client, best-effort (resolved client IP if a
+    /// trusted proxy set it, else the socket peer).
+    fn source_ip(req: &Request) -> String {
+        req.connection
+            .as_ref()
+            .map(|c| {
+                if c.peer_addr_derived.is_empty() {
+                    c.peer_addr.clone()
+                } else {
+                    c.peer_addr_derived.clone()
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    /// Extract `(token, dpop_proof)` from a login/status request. The DPoP proof
+    /// is taken from the RFC 9449 `DPoP` header (plumbed by the HTTP layer) or a
+    /// `dpop` body field (fallback for non-browser clients / tests).
+    fn extract_token_dpop(req: &mut Request) -> Result<(String, Option<String>), RvError> {
+        let token = req.get_data("token")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let dpop = req
+            .headers
+            .as_ref()
+            .and_then(|h| h.get("dpop").or_else(|| h.get("DPoP")))
+            .cloned()
+            .or_else(|| req.get_data("dpop").ok().and_then(|v| v.as_str().map(str::to_string)));
+        Ok((token, dpop))
+    }
+
+    /// Whether the request carries a BastionVault token that holds the `root`
+    /// policy. Used only to gate the one-shot first-machine bootstrap.
+    async fn caller_is_root(&self, req: &Request) -> bool {
+        if req.client_token.is_empty() {
+            return false;
+        }
+        let Some(tokens) = self.core.tokens() else {
+            return false;
+        };
+        matches!(tokens.lookup(&req.client_token).await, Ok(Some(te)) if te.is_root())
+    }
+
+    /// Bind an already-authenticated user token to this machine login.
+    ///
+    /// Looks the token up in the token store, computes the policy intersection
+    /// (named policies present in BOTH the machine's approved set and the user
+    /// token's set — `default` is excluded here and re-injected by the token
+    /// store), captures the user's `entity_id`/`username` so the combined
+    /// session carries the *user's* identity, and revokes the (broader)
+    /// intermediate user token so only the narrower combined token survives.
+    ///
+    /// Returns `Ok(None)` when no `user_token` was supplied. Returns
+    /// `Err(reason)` (a user-facing message) when a token was supplied but is
+    /// invalid or carries `root` — never bind a root token into a machine
+    /// session.
+    async fn bind_user_token(
+        &self,
+        req: &Request,
+        machine_policies: &[String],
+    ) -> Result<Option<BoundUser>, String> {
+        let user_token = req
+            .get_data("user_token")
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .filter(|t| !t.trim().is_empty());
+        let Some(user_token) = user_token else {
+            return Ok(None);
+        };
+
+        let tokens = self
+            .core
+            .tokens()
+            .ok_or_else(|| "user_binding_unavailable: auth module not loaded".to_string())?;
+
+        let te = match tokens.lookup(&user_token).await {
+            Ok(Some(te)) => te,
+            _ => return Err("invalid_user_token: the supplied user token is not valid".to_string()),
+        };
+        if te.is_root() {
+            return Err("invalid_user_token: root tokens cannot be bound to a machine login".to_string());
+        }
+
+        // Intersect named policies; `default` is baseline and re-injected by the
+        // token store, so exclude it from the comparison on both sides.
+        let user_named: std::collections::HashSet<&str> =
+            te.policies.iter().map(String::as_str).filter(|p| *p != "default").collect();
+        let policies: Vec<String> = machine_policies
+            .iter()
+            .filter(|p| p.as_str() != "default" && user_named.contains(p.as_str()))
+            .cloned()
+            .collect();
+
+        let entity_id = te.meta_or_empty("entity_id");
+        let username = te.meta_or_empty("username");
+
+        // Drop the broader intermediate token — only the combined token should
+        // remain usable. Best-effort: a revoke failure must not block the login
+        // (the combined token is still the narrower of the two).
+        if let Err(e) = tokens.revoke(&user_token).await {
+            log::warn!(target: "security", "ferrogate: failed to revoke bound user token: {e}");
+        }
+
+        Ok(Some(BoundUser { policies, entity_id, username }))
+    }
+
+    /// Count machines currently in the `approved` state.
+    async fn approved_count(&self, req: &mut Request) -> Result<usize, RvError> {
+        let ids = req.storage_list(MACHINE_PREFIX).await?;
+        let mut n = 0;
+        for id in &ids {
+            if let Some(m) = self.get_machine(req, id).await? {
+                if m.status == status::APPROVED {
+                    n += 1;
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    /// Per-source-IP fixed-window rate check. Returns `true` if the attempt is
+    /// within `limit` for the current minute (`limit == 0` = unlimited).
+    fn rate_ok(&self, ip: &str, limit: u32) -> bool {
+        if limit == 0 || ip.is_empty() {
+            return true;
+        }
+        let window = now_unix() / 60;
+        let mut entry = self.login_attempts.entry(ip.to_string()).or_insert((window, 0));
+        if entry.0 != window {
+            *entry = (window, 0);
+        }
+        entry.1 += 1;
+        entry.1 <= limit
+    }
+
+    /// Per-source-IP fixed-window rate check for self-enrolment, using the
+    /// dedicated `enroll_attempts` map so it does not share a budget with
+    /// `login`. Returns `true` if within `limit` for the current minute
+    /// (`limit == 0` = unlimited).
+    fn enroll_rate_ok(&self, ip: &str, limit: u32) -> bool {
+        if limit == 0 || ip.is_empty() {
+            return true;
+        }
+        let window = now_unix() / 60;
+        let mut entry = self.enroll_attempts.entry(ip.to_string()).or_insert((window, 0));
+        if entry.0 != window {
+            *entry = (window, 0);
+        }
+        entry.1 += 1;
+        entry.1 <= limit
+    }
+
+    /// Resolve the JWKS (trust anchor) to verify tokens against, per the
+    /// configured source: `static_jwks` returns the pasted set; `cmis_grpc`
+    /// fetches it from CMIS (cached for `jwks_refresh_secs`).
+    ///
+    /// `token_kid` is the JOSE `kid` of the token about to be verified (empty
+    /// = unknown). On the `cmis_grpc` source it does double duty: a fresh
+    /// cached set that *misses* the kid is treated as stale (a host whose MIA
+    /// restarted signs with a brand-new key the cache predates), and the kid
+    /// rides the fetch as a hint so a CMIS replica that never witnessed the
+    /// host's attestation rehydrates it from the replicated store on miss.
+    pub async fn resolve_jwks(&self, config: &FerroGateConfig, token_kid: &str) -> Result<String, String> {
+        match config.jwks_source.as_str() {
+            jwks_source::STATIC => {
+                if config.static_jwks.trim().is_empty() {
+                    return Err("ferrogate backend is not configured: static_jwks is empty".to_string());
+                }
+                Ok(config.static_jwks.clone())
+            }
+            jwks_source::CMIS_GRPC => {
+                #[cfg(feature = "sync_handler")]
+                {
+                    let _ = (config, token_kid);
+                    Err("cmis_grpc JWKS source requires the async (default) build".to_string())
+                }
+                #[cfg(not(feature = "sync_handler"))]
+                {
+                    self.resolve_cmis_jwks(config, token_kid).await
+                }
+            }
+            other => Err(format!("unknown jwks_source '{other}'")),
+        }
+    }
+
+    /// Fetch the CMIS JWKS, honouring the in-memory cache and falling back to a
+    /// stale cached copy if a refresh fails (stale-while-revalidate). A cached
+    /// set missing `token_kid` bypasses the cache: the set is refetched with
+    /// the kid as an on-miss rehydrate hint. Refetch frequency for tokens
+    /// naming unknown kids is bounded by the per-IP login rate limit, and a
+    /// kid genuinely absent from CMIS still fails verification exactly as
+    /// before — the bypass can only turn spurious misses into successes.
+    #[cfg(not(feature = "sync_handler"))]
+    async fn resolve_cmis_jwks(&self, config: &FerroGateConfig, token_kid: &str) -> Result<String, String> {
+        let now = now_unix();
+        if let Some(c) = self.jwks_cache.load_full() {
+            if now - c.fetched_at < config.jwks_refresh_secs.max(1)
+                && (token_kid.is_empty() || verify::jwks_has_kid(&c.json, token_kid))
+            {
+                return Ok(c.json.clone());
+            }
+        }
+        match super::cmis::fetch_jwks_json(config, token_kid).await {
+            Ok(json) => {
+                self.jwks_cache.store(Some(Arc::new(CachedJwks { json: json.clone(), fetched_at: now })));
+                Ok(json)
+            }
+            Err(e) => match self.jwks_cache.load_full() {
+                Some(c) => {
+                    log::warn!(target: "security", "ferrogate CMIS JWKS refresh failed ({e}); serving cached JWKS");
+                    Ok(c.json.clone())
+                }
+                None => Err(e),
+            },
+        }
+    }
+
+    /// Authenticate a machine. Verifies the FerroGate child token (signature +
+    /// DPoP sender-constraint) against the configured trust anchor, then applies
+    /// the admin-approval gate keyed on the token's SPIFFE ID:
+    /// approved → mint a token; unknown → record `pending` and deny;
+    /// pending/rejected/revoked → deny.
+    ///
+    /// First-machine bootstrap: if no machine is approved yet and the request
+    /// carries a BastionVault root token, this machine is auto-approved with the
+    /// configured `bootstrap_policies` (one-shot — only true while the approved
+    /// count is zero).
+    pub async fn login(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let config = self.get_config(req).await?;
+        let (token, dpop) = Self::extract_token_dpop(req)?;
+        let ip = Self::source_ip(req);
+
+        // Per-source-IP rate limit — keeps a flood of unknown machines from
+        // filling the pending queue.
+        if !self.rate_ok(&ip, config.login_rate_limit_per_min) {
+            log::warn!(target: "security", "ferrogate login rate-limited ip={ip}");
+            ferrogate_metrics().record_denied(DenyReason::RateLimited);
+            return Ok(Some(Response::error_response("rate_limited: too many login attempts, retry shortly")));
+        }
+
+        let jwks_json = match self.resolve_jwks(&config, &verify::token_kid(&token).unwrap_or_default()).await {
+            Ok(j) => j,
+            Err(reason) => {
+                log::warn!(target: "security", "ferrogate login rejected: {reason}");
+                return Ok(Some(Response::error_response(&reason)));
+            }
+        };
+
+        // Route by token type: a directly-presented host SVID (opt-in
+        // `accept_svid`, CRL-enforced, no DPoP) or the default DPoP-bound child
+        // token. Yields the host identity plus any attestation evidence.
+        let typ = verify::token_typ(&token).unwrap_or_default();
+        let (spiffe_id, parent_svid, ek_cert_sha384, policy_id, kid) = if typ == ferro_svid_verify::SVID_TYP {
+            if !config.accept_svid {
+                log::warn!(target: "security", "ferrogate login rejected: direct SVID presented but accept_svid is disabled");
+                return Ok(Some(Response::error_response("direct SVID login is disabled (accept_svid is off)")));
+            }
+            match verify::verify_svid_token(&config, &jwks_json, &token, now_unix()) {
+                Ok(v) => (v.spiffe_id, String::new(), v.ek_cert_sha384, v.policy_id, String::new()),
+                Err(reason) => {
+                    log::warn!(target: "security", "ferrogate login rejected: {reason}");
+                    ferrogate_metrics().record_denied(DenyReason::VerifyFailed);
+                    return Ok(Some(Response::error_response(&reason)));
+                }
+            }
+        } else {
+            match verify_child_token(&config, &jwks_json, &token, dpop.as_deref(), now_unix()) {
+                Ok(v) => (
+                    v.claims.iss.clone(),
+                    v.claims.ferrogate.parent_svid.clone(),
+                    String::new(),
+                    String::new(),
+                    v.kid.clone(),
+                ),
+                Err(reason) => {
+                    log::warn!(target: "security", "ferrogate login rejected: {reason}");
+                    ferrogate_metrics().record_denied(DenyReason::VerifyFailed);
+                    return Ok(Some(Response::error_response(&reason)));
+                }
+            }
+        };
+
+        let id = machine_id(&spiffe_id);
+        let mut machine = self.get_machine(req, &id).await?;
+
+        // One-shot first-machine bootstrap (root token + zero approved machines).
+        let status_now = machine.as_ref().map(|m| m.status.as_str());
+        let is_terminal = matches!(status_now, Some(s) if s == status::REJECTED || s == status::REVOKED);
+        let is_approved = matches!(status_now, Some(s) if s == status::APPROVED);
+        if config.bootstrap_root_auto_approve
+            && !is_approved
+            && !is_terminal
+            && self.approved_count(req).await? == 0
+            && self.caller_is_root(req).await
+        {
+            let mut m = machine.take().unwrap_or_default();
+            if m.spiffe_id.is_empty() {
+                m.spiffe_id = spiffe_id.clone();
+                m.first_seen_at = now_unix();
+            }
+            m.parent_svid = parent_svid.clone();
+            if !ek_cert_sha384.is_empty() {
+                m.ek_cert_sha384 = ek_cert_sha384.clone();
+            }
+            if !policy_id.is_empty() {
+                m.policy_id = policy_id.clone();
+            }
+            m.status = status::APPROVED.to_string();
+            m.policies = config.bootstrap_policies.clone();
+            m.approved_at = now_unix();
+            m.approver = "bootstrap(root)".to_string();
+            m.reject_reason.clear();
+            self.set_machine(req, &id, &m).await?;
+            log::info!(
+                target: "audit",
+                "ferrogate.machine.bootstrap_approved spiffe_id={} policies={:?} ip={}",
+                m.spiffe_id, m.policies, ip
+            );
+            ferrogate_metrics().record_approved();
+            machine = Some(m);
+        }
+
+        match machine {
+            Some(mut m) if m.status == status::APPROVED => {
+                m.last_login_at = now_unix();
+                m.last_login_ip = ip;
+                if m.parent_svid.is_empty() && !parent_svid.is_empty() {
+                    m.parent_svid = parent_svid.clone();
+                }
+                if m.ek_cert_sha384.is_empty() && !ek_cert_sha384.is_empty() {
+                    m.ek_cert_sha384 = ek_cert_sha384.clone();
+                }
+                if m.policy_id.is_empty() && !policy_id.is_empty() {
+                    m.policy_id = policy_id.clone();
+                }
+                self.set_machine(req, &id, &m).await?;
+
+                // Combined machine+user auth: bind an optional user token and
+                // intersect policies. When the mount enforces it, a login with
+                // no user_token is denied outright.
+                let bound = match self.bind_user_token(req, &m.policies).await {
+                    Ok(b) => b,
+                    Err(reason) => {
+                        log::warn!(target: "security", "ferrogate login rejected: {reason}");
+                        ferrogate_metrics().record_denied(DenyReason::VerifyFailed);
+                        return Ok(Some(Response::error_response(&reason)));
+                    }
+                };
+                if config.require_user_token && bound.is_none() {
+                    log::warn!(target: "security", "ferrogate login rejected: user_token required but absent spiffe_id={}", m.spiffe_id);
+                    ferrogate_metrics().record_denied(DenyReason::VerifyFailed);
+                    return Ok(Some(Response::error_response(
+                        "user_token_required: this mount requires a user token bound to the machine login",
+                    )));
+                }
+                let policies = match &bound {
+                    Some(b) => b.policies.clone(),
+                    None => m.policies.clone(),
+                };
+
+                let ttl = if m.ttl_seconds > 0 { m.ttl_seconds } else { config.default_token_ttl };
+                let mut auth = Auth {
+                    lease: Lease {
+                        ttl: Duration::from_secs(ttl),
+                        renewable: ttl > 0,
+                        ..Default::default()
+                    },
+                    display_name: spiffe_id.clone(),
+                    policies: policies.clone(),
+                    token_policies: policies,
+                    ..Default::default()
+                };
+                auth.metadata.insert("spiffe_id".to_string(), spiffe_id);
+                auth.metadata.insert("mount_path".to_string(), "ferrogate/".to_string());
+                if !kid.is_empty() {
+                    auth.metadata.insert("ferrogate_kid".to_string(), kid);
+                }
+                // Stamp the bound user's identity so the combined session is
+                // owned by the user (ownership/ACL "owner" scope) while still
+                // recording the attesting machine via spiffe_id above.
+                if let Some(b) = &bound {
+                    if !b.entity_id.is_empty() {
+                        auth.metadata.insert("entity_id".to_string(), b.entity_id.clone());
+                    }
+                    if !b.username.is_empty() {
+                        auth.metadata.insert("username".to_string(), b.username.clone());
+                    }
+                }
+                log::info!(
+                    target: "audit",
+                    "ferrogate.machine.login spiffe_id={} ip={} bound_user={}",
+                    m.spiffe_id,
+                    m.last_login_ip,
+                    bound.as_ref().map(|b| b.username.as_str()).filter(|u| !u.is_empty()).unwrap_or("-")
+                );
+                ferrogate_metrics().record_login();
+                Ok(Some(Response { auth: Some(auth), ..Response::default() }))
+            }
+            Some(m) if m.status == status::PENDING => {
+                ferrogate_metrics().record_denied(DenyReason::Pending);
+                Ok(Some(Response::error_response("enrolment_pending: awaiting administrator approval")))
+            }
+            Some(m) if m.status == status::REJECTED => {
+                ferrogate_metrics().record_denied(DenyReason::Rejected);
+                Ok(Some(Response::error_response("enrolment_rejected")))
+            }
+            Some(m) if m.status == status::REVOKED => {
+                ferrogate_metrics().record_denied(DenyReason::Revoked);
+                Ok(Some(Response::error_response("machine_revoked")))
+            }
+            Some(_) => Ok(Some(Response::error_response("enrolment_pending"))),
+            None => {
+                // First sighting of an attested-but-unauthorized machine: record
+                // it as pending so it surfaces in the admin queue, then deny.
+                let m = MachineEntry {
+                    spiffe_id,
+                    status: status::PENDING.to_string(),
+                    first_seen_at: now_unix(),
+                    last_login_ip: ip,
+                    parent_svid,
+                    ek_cert_sha384,
+                    policy_id,
+                    ..Default::default()
+                };
+                self.set_machine(req, &id, &m).await?;
+                log::info!(target: "audit", "ferrogate.machine.first_seen spiffe_id={} ip={}", m.spiffe_id, m.last_login_ip);
+                ferrogate_metrics().record_pending();
+                ferrogate_metrics().record_denied(DenyReason::Pending);
+                Ok(Some(Response::error_response("enrolment_pending: awaiting administrator approval")))
+            }
+        }
+    }
+
+    /// Report this machine's enrolment status without minting a token. Verifies
+    /// the presented FerroGate token (so a client can poll its own status), then
+    /// returns `{ spiffe_id, status, policies, ttl_seconds, approved_at }`, or
+    /// `status: "unknown"` if the machine has never been seen.
+    pub async fn status(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let config = self.get_config(req).await?;
+        let (token, dpop) = Self::extract_token_dpop(req)?;
+
+        let jwks_json = match self.resolve_jwks(&config, &verify::token_kid(&token).unwrap_or_default()).await {
+            Ok(j) => j,
+            Err(reason) => return Ok(Some(Response::error_response(&reason))),
+        };
+
+        // Accept either a child token or (when enabled) a host SVID.
+        let typ = verify::token_typ(&token).unwrap_or_default();
+        let spiffe_id = if typ == ferro_svid_verify::SVID_TYP && config.accept_svid {
+            match verify::verify_svid_token(&config, &jwks_json, &token, now_unix()) {
+                Ok(v) => v.spiffe_id,
+                Err(reason) => return Ok(Some(Response::error_response(&reason))),
+            }
+        } else {
+            match verify_child_token(&config, &jwks_json, &token, dpop.as_deref(), now_unix()) {
+                Ok(v) => v.claims.iss,
+                Err(reason) => return Ok(Some(Response::error_response(&reason))),
+            }
+        };
+        let id = machine_id(&spiffe_id);
+
+        let mut data = Map::new();
+        data.insert("spiffe_id".to_string(), Value::String(spiffe_id));
+        match self.get_machine(req, &id).await? {
+            Some(m) => {
+                data.insert("status".to_string(), Value::String(m.status));
+                data.insert("policies".to_string(), json!(m.policies));
+                data.insert("ttl_seconds".to_string(), json!(m.ttl_seconds));
+                data.insert("approved_at".to_string(), json!(m.approved_at));
+            }
+            None => {
+                data.insert("status".to_string(), Value::String("unknown".to_string()));
+            }
+        }
+        Ok(Some(Response::data_response(Some(data))))
+    }
+}

@@ -1,0 +1,129 @@
+[package]
+name = "bv-core"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's kernel: Core, the mount table, the module registry, the seal path and the server config model"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 2 of the workspace decomposition
+# (roadmaps/workspace-decomposition.md § Phase 4.5).
+#
+# The crate the target graph predicted from the start and that no numbered
+# phase created: Phase 3 took the engines off the top, Phase 4 took the
+# assembly layer off the top of those, and this is the middle.
+#
+# It sits BELOW the kernel tier (`bv-kernel`), which is what makes the split
+# work: `Core` does not name a module, modules name `Core`. The eight call
+# sites where `Core` did name one went through contracts in
+# `bv_kernel_api::{pipeline, auth}` first.
+
+[dependencies]
+bv-errors = { path = "../bv-errors", version = "0.1.0", registry = "uox-bastionvault" }
+bv-shamir = { path = "../bv-shamir", version = "0.1.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.1.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.1.0", registry = "uox-bastionvault" }
+bv-utils = { path = "../bv-utils", version = "0.1.0", registry = "uox-bastionvault" }
+bv-audit = { path = "../bv-audit", version = "0.1.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.1.0", registry = "uox-bastionvault" }
+bv_crypto = { path = "../bv_crypto", version = "0.1.0", registry = "uox-bastionvault" }
+
+arc-swap = "1.7"
+# Pulled in by the `#[maybe_async::maybe_async]` attribute's async expansion,
+# which is a token stream to a static `use` scan. Without it every async trait
+# in the seal and HSM paths fails as "not dyn compatible".
+async-trait = "0.1"
+better_default = "1.0.5"
+chrono = "0.4"
+go-defer = "^0.1"
+hex = "0.4"
+hcl-rs = "0.19"
+log = { version = "0.4", features = ["std"] }
+maybe-async = "0.2"
+rand = "^0.10"
+serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
+serde_json = "^1.0"
+zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
+
+# The seal path's HSM backends: envelope encryption, the custody-blob digest
+# and the Ed25519 authorization signatures on operator approvals.
+aes-gcm = "0.10"
+ed25519-dalek = "2"
+hkdf = "0.13"
+# `ecdh` as well as `ecdsa`: the HSM `bv-identity` key does ECDH for the
+# HSM-to-HSM replication channel and the hybrid-PQC seed derivation.
+p256 = { version = "0.13", features = ["ecdsa", "ecdh"], default-features = false }
+
+# YubiHSM 2 client (feature `hsm_yubihsm2`). Pure-Rust, maintained by
+# iqlusion; `http` for the yubihsm-connector, `usb` for direct device access.
+# Optional, so the stock build (and the USB/libusb link dependency) is only
+# paid for by operators who enable the hardware backend. `untested` is
+# required for `Client::derive_ecdh` -- the crate gates ECDH behind it and
+# flags it experimental; the `BVAULT_TEST_YUBIHSM=1` suite validates it
+# against real hardware before use. See features/hsm-support.md.
+yubihsm = { version = "0.42.1", optional = true, default-features = false, features = ["http", "usb", "passwords", "untested"] }
+
+# Pulled transitively by `yubihsm`'s `usb` feature; declared directly only to
+# force the `vendored` feature, which statically compiles libusb from bundled C
+# source with the (cross-)toolchain. This keeps the official container image
+# self-contained -- no libusb-1.0 dev package in the builder and no libusb .so
+# in the minimal Wolfi runtime.
+rusb = { version = "0.9", optional = true, features = ["vendored"] }
+serde_bytes = "0.11"
+sha2 = "0.11"
+
+[dev-dependencies]
+# The config loader's tests write fixture files under `TEST_DIR`, which is
+# `bv-storage`'s. Same crate as the normal dependency; the extra feature is
+# dev-only so a release build never compiles the fixtures.
+bv-storage = { path = "../bv-storage", features = ["test-support"] }
+
+[features]
+default = []
+sync_handler = [
+    "maybe-async/is_sync",
+    "bv-storage/sync_handler",
+    "bv-logical/sync_handler",
+    "bv-utils/sync_handler",
+    "bv-audit/sync_handler",
+    "bv-kernel-api/sync_handler",
+]
+storage_mysql = ["bv-errors/storage_mysql", "bv-storage/storage_mysql"]
+storage_hiqlite = ["bv-storage/storage_hiqlite"]
+# Two mutually-independent seal backends behind the narrow `hsm::HsmBackend`
+# trait, both off by default. `hsm_mock` is pure software (AES-GCM wrap,
+# ed25519 authz, p256 identity/ECDH) with a file-persisted object store; it
+# provides NO hardware protection and REFUSES TO START in production. See
+# features/hsm-support.md.
+hsm_mock = []
+hsm_yubihsm2 = ["dep:yubihsm", "dep:rusb"]
+
+# Lints this crate's code trips, all of which the root crate already allows.
+[lints.clippy]
+await_holding_lock = "warn"
+field_reassign_with_default = "allow"
+type_complexity = "allow"
+too_many_arguments = "allow"
+unnecessary_unwrap = "allow"
+collapsible_match = "allow"
+large_enum_variant = "allow"
+unnecessary_map_or = "allow"
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Pulled in by the `#[maybe_async::maybe_async]` attribute's async
+    # expansion, which is a token stream to a static `use` scan.
+    "maybe-async",
+    "async-trait",
+    # Package name != lib name: the crate is `hcl-rs`, the lib is `hcl`, and
+    # the config loader calls `hcl::from_str` / `from_body` / `from_reader`.
+    "hcl-rs",
+    # Used only through the `#[serde(with = "serde_bytes")]` attribute (see
+    # hsm/replicate.rs), which is a string literal to a static scan.
+    "serde_bytes",
+    # Declared *only* to force libusb's `vendored` feature so the official
+    # container image links libusb statically. Intentionally never imported.
+    "rusb",
+]

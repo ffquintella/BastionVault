@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.39.7"
+version = "0.41.0"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -15,6 +15,22 @@ BastionVault's RESTful API is designed to be fully compatible with Hashicorp Vau
 repository = "https://github.com/ffquintella/BastionVault"
 documentation = "https://docs.rs/bastion_vault/latest/bastion_vault/"
 build = "build.rs"
+# The facade is NOT publishable, and this is the guard that makes that true
+# rather than merely documented. Every other crate carries
+# `publish = ["uox-bastionvault"]`, so a bare `cargo publish` cannot reach
+# crates.io — but this one had no `publish` key at all, which means "any
+# registry", i.e. crates.io by default. Running `cargo publish` in the repo
+# root would have tried to push the whole server there.
+#
+# It is `false` and not `["uox-bastionvault"]` because it cannot go to
+# Cloudsmith either, yet: `[patch.crates-io]` points sspi/picky*/hiqlite at
+# forks, and a published `bastion_vault` would resolve those from crates.io
+# instead — a behaviour change nobody has validated. See
+# docs/publishing-crates.md § Known constraints. Flipping this back is one
+# line, and `scripts/crates-plan.sh` picks `bv-server` and `bvault-cli` up
+# automatically when it happens, because it derives publishability from this
+# field rather than from a list.
+publish = false
 exclude = [
     "docs/*",
 ]
@@ -22,6 +38,43 @@ exclude = [
 [workspace]
 members = [
     ".",
+    "crates/bv-errors",
+    "crates/bv-shamir",
+    "crates/bv-context",
+    "crates/bv-metrics",
+    "crates/bv-storage",
+    "crates/bv-logical",
+    "crates/bv-utils",
+    "crates/bv-audit",
+    "crates/bv-kernel-api",
+    # Tier 2 — the kernel, below the kernel tier and above the substrate.
+    # See roadmaps/workspace-decomposition.md § Phase 4.5.
+    "crates/bv-core",
+    "crates/bv-kernel",
+    "crates/bv-engine-pki",
+    "crates/bv-auth-audit",
+    "crates/bv-auth-approle",
+    "crates/bv-auth-userpass",
+    "crates/bv-auth-ferrogate",
+    "crates/bv-auth-saml",
+    "crates/bv-auth-oidc",
+    "crates/bv-auth-fido2",
+    "crates/bv-auth-cert",
+    "crates/bv-engine-rustion",
+    "crates/bv-engine-resource",
+    "crates/bv-engine-files",
+    "crates/bv-engine-notifications",
+    "crates/bv-engine-kv",
+    "crates/bv-engine-ssh",
+    "crates/bv-engine-totp",
+    "crates/bv-engine-ssh-broker",
+    "crates/bv-engine-ldap",
+    "crates/bv-engine-cert-lifecycle",
+    "crates/bv-engine-transit",
+    # Tier 4 — the assembly layer, above the library rather than below it.
+    # See roadmaps/workspace-decomposition.md § Phase 4.
+    "crates/bv-server",
+    "crates/bvault-cli",
     "crates/bv_crypto",
     "crates/bastion-plugin-sdk",
     "crates/bastion-plugin-testkit",
@@ -37,15 +90,74 @@ members = [
 # separately — its build artefacts shouldn't pollute the host's
 # `target/`, and its release-profile (panic=abort, opt=s) shouldn't
 # leak into our normal builds.
-exclude = ["plugins-ext", "IronRDP", "third_party/ferrogate-sdk-rust", "third_party/hiqlite"]
+exclude = ["plugins-ext", "IronRDP", "third_party/hiqlite"]
 resolver = "2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# Parsing the installed MIA's `mia.toml` to discover its configured helper
-# socket (FerroGate machine login). See cli::command::ferrogate_mia.
-toml = "1.1.2"
+# Tier 0 substrate: `RvError`, re-exported as `bastion_vault::errors`.
+# See roadmaps/workspace-decomposition.md § Phase 1.
+bv-errors = { path = "crates/bv-errors" }
+# Tier 0 leaf: Shamir secret sharing, re-exported as `bastion_vault::shamir`.
+bv-shamir = { path = "crates/bv-shamir" }
+# Tier 0 leaf: re-exported as `bastion_vault::context`.
+bv-context = { path = "crates/bv-context" }
+# Tier 0 leaf: Prometheus families + registry, re-exported as
+# `bastion_vault::metrics`. The actix middleware stays in `src/metrics`.
+bv-metrics = { path = "crates/bv-metrics" }
+# Tier 0: barriers, physical backends and the read caches. Re-exported as
+# `bastion_vault::{storage, cache, schema}`. It owns the backend-specific
+# optional deps (diesel, hiqlite, rusty-s3, keyring); the root features of
+# the same names below forward to its features, so operators' choices are
+# unchanged.
+bv-storage = { path = "crates/bv-storage" }
+# Tier 0: Request/Response/Backend/Path/Field plus the `Handler` trait they
+# carry. Re-exported as `bastion_vault::{logical, handler}`.
+bv-logical = { path = "crates/bv-logical" }
+# Tier 1: shared helpers (salts, seal boxes, socket addresses, TLS and cert
+# utilities). Re-exported as `bastion_vault::utils`.
+bv-utils = { path = "crates/bv-utils" }
+# Tier 0: audit entries, hash chain, file device and broker fan-out.
+# Re-exported as `bastion_vault::audit`, which adds the `sys_emit` glue that
+# has to stay above it.
+bv-audit = { path = "crates/bv-audit" }
+# Tier 1: the kernel contract every engine compiles against — `VaultCtx`,
+# `KernelServices`, the `Module` trait, and the routing/mount tables their
+# signatures name. See roadmaps/workspace-decomposition.md § Phase 3.
+bv-kernel-api = { path = "crates/bv-kernel-api" }
+# Tier 2: `Core`, the mount table, the module registry, the seal path and the
+# server config model. Re-exported below so `bastion_vault::{core, mount,
+# seal, hsm, config, logging, server_info, module_manager}` are unchanged.
+bv-core = { path = "crates/bv-core" }
+# Tier 2b: the kernel tier — tokens and leases, identity, policy, namespaces,
+# resource groups and the `sys/` backend. Above `bv-core`. Re-exported through
+# `bastion_vault::modules` so those paths are unchanged.
+bv-kernel = { path = "crates/bv-kernel" }
+# Tier 3 engines. Each is `bv-kernel-api` plus the Tier 0 substrate plus its
+# own domain crates, and nothing else. The root crate depends on them because
+# it is the assembly layer that mounts them — and because the kernel tier
+# (`system`, `identity`, `auth`) reads a few of their audit stores.
+bv-engine-pki = { path = "crates/bv-engine-pki" }
+bv-auth-audit = { path = "crates/bv-auth-audit" }
+bv-auth-approle = { path = "crates/bv-auth-approle" }
+bv-auth-userpass = { path = "crates/bv-auth-userpass" }
+bv-auth-ferrogate = { path = "crates/bv-auth-ferrogate" }
+bv-auth-saml = { path = "crates/bv-auth-saml" }
+bv-auth-oidc = { path = "crates/bv-auth-oidc" }
+bv-auth-fido2 = { path = "crates/bv-auth-fido2" }
+bv-auth-cert = { path = "crates/bv-auth-cert" }
+bv-engine-rustion = { path = "crates/bv-engine-rustion" }
+bv-engine-resource = { path = "crates/bv-engine-resource" }
+bv-engine-files = { path = "crates/bv-engine-files" }
+bv-engine-notifications = { path = "crates/bv-engine-notifications" }
+bv-engine-kv = { path = "crates/bv-engine-kv" }
+bv-engine-ssh = { path = "crates/bv-engine-ssh" }
+bv-engine-totp = { path = "crates/bv-engine-totp" }
+bv-engine-ssh-broker = { path = "crates/bv-engine-ssh-broker" }
+bv-engine-ldap = { path = "crates/bv-engine-ldap" }
+bv-engine-cert-lifecycle = { path = "crates/bv-engine-cert-lifecycle" }
+bv-engine-transit = { path = "crates/bv-engine-transit" }
 bv_crypto = { path = "crates/bv_crypto" }
 bv_plugin_surface = { path = "crates/bv_plugin_surface" }
 bv_plugin_manifest = { path = "crates/bv-plugin-manifest" }
@@ -55,85 +167,51 @@ bv_plugin_manifest = { path = "crates/bv-plugin-manifest" }
 # dispatch, plugin surface fetch, etc.) is GUI-only; the CLI only
 # touches `discovery` + `health`.
 bv-client = { path = "crates/bv-client" }
-aes-gcm = "0.10"
 anyhow = { version = "^1.0" }
 thiserror = { version = "^2.0" }
 serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
-serde_derive = "^1.0"
 serde_json = "^1.0"
 serde_bytes = "0.11"
-serde_yaml = "0.9"
 go-defer = "^0.1"
 rand = "^0.10"
-enum-map = "2.7.3"
-strum = { version = "0.28", features = ["derive"] }
-strum_macros = "0.28"
-radix_trie = "0.3.0"
-lazy_static = "1.5.0"
 regex = "1.12"
-clap = { version = "4.6", features = ["wrap_help", "derive", "env", "suggestions"] }
 sysexits = { version = "0.13", features = ["std"] }
 build-time = "0.1"
 hcl-rs = "0.19"
-actix-web = { version = "4.13", features = ["rustls-0_23"] }
-actix-tls = "3.5"
+# Nine dependencies left this manifest in Phase 4 with `src/cli` and the
+# `bvault` binary -- clap, env_logger, prettytable, rpassword, serde_yaml,
+# toml -- plus ciborium, ipnetwork and uuid, which Phase 3's engine moves had
+# already orphaned without anyone noticing. `sysexits` stays: the
+# `EXIT_CODE_*` constants below are its `ExitCode`, and `bvault-cli` reads
+# them from here.
+# `actix-web` and `actix-tls` left this crate in Phase 4, with `src/http` and
+# `src/cli`; they are dependencies of `bv-server` and `bvault-cli` now. That
+# is the extraction's headline win: `gui/src-tauri` path-depends on this
+# crate, so the Tauri host no longer builds a web framework it never serves
+# from. See roadmaps/workspace-decomposition.md § Phase 4.
+#
+# `actix-rt` stays, and is production code: `ExpirationManager::
+# start_check_expired_lease_entries` blocks a dedicated thread on an
+# `actix_rt::Runtime`. That is tokio's current-thread builder plus a
+# `LocalSet`, so it *looks* replaceable the way `MountsMonitor::start` was in
+# Phase 3 — but proving the swept future never spawns a local task means
+# tracing `revoke_lease_id` through the whole lease graph, and Phase 3 already
+# recorded one wrong conclusion from exactly this reasoning (the AppRole tidy
+# race). Behaviour preservation wins; it is a small crate and not a web server.
 actix-rt = "2.11"
-log = "0.4"
-env_logger = "0.11"
+# `std` is explicit, not inherited. `logging.rs` calls `log::set_boxed_logger`,
+# which only exists with that feature on. It used to arrive by unification --
+# `env_logger` pulled it in -- and when Phase 4 moved the CLI out and dropped
+# `env_logger` from this manifest, the root crate kept building only because a
+# workspace-wide `cargo check` unified the feature back in from `bvault-cli`.
+# `cargo check -p bv-server` (and any downstream consumer) failed. Declare what
+# the code actually needs.
+log = { version = "0.4", features = ["std"] }
 hex = "0.4"
-humantime = "2.3"
-as-any = "0.3.2"
 pem = "3.0"
 chrono = "0.4"
 zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
-diesel = { version = "2.3.8", features = ["mysql", "r2d2"], optional = true }
-r2d2 = { version = "0.8.10", optional = true }
-# Pinned to our fork submodule (`third_party/hiqlite`, branch
-# `main-local`): upstream v0.14.0 stable plus the raft-client
-# socket-leak fix (AbortOnDrop), which is still not upstreamed as of
-# 2026-07. See the `[patch.crates-io]` entry below.
-# `default-features = false` drops hiqlite's `backup` feature, which is
-# what pulled `cryptr/s3` -> `s3-simple` -> `quick-xml 0.39` into the tree
-# (RUSTSEC-2026-0194 / RUSTSEC-2026-0195, both DoS in XML parsing, no
-# 0.39 patch release). We never call hiqlite's backup API — vault backups
-# use our own BVBK format in `crate::backup` — so the feature was dead
-# weight. The rest of hiqlite's defaults (`auto-heal`, `sqlite`, `toml`)
-# are re-listed explicitly so behaviour is unchanged.
-hiqlite = { version = "=0.14.0", optional = true, default-features = false, features = [
-    "auto-heal",
-    "sqlite",
-    "toml",
-    "dlock",
-] }
-# cryptr was only ever used to build `NodeConfig::enc_keys` for hiqlite's
-# S3-backup/dashboard features, both of which we now build without.
-# Cloud Storage Targets — Phase 2b: S3 via rusty-s3 (URL signing +
-# XML parsing only, ~15 transitive deps). HTTP is handled by the
-# existing `ureq` dep, so enabling `cloud_s3` does not pull in
-# reqwest / hyper / aws-sdk-*. See `features/cloud-storage-backend.md`.
-rusty-s3 = { version = "0.10", optional = true }
-# Now non-optional: SAML Phase 3 (`src/modules/credential/saml/`) uses
-# it to parse IdP responses. `cloud_s3` also consumes it, but gating
-# it on that feature would force a feature-flag dance for the SAML
-# code path — keeping it always-on is simpler and the transitive
-# footprint is small (~3 crates).
-quick-xml = { version = "0.41" }
-# OS keychain writer for `credentials_ref = "keychain:..."`. Uses the
-# platform-native secret store on macOS (Keychain) / Windows
-# (Credential Vault) / Linux (Secret Service). v4's default `v1`
-# feature auto-selects the platform store (zbus-based Secret Service
-# on Linux — pure Rust, no dbus C dep). Feature-gated so server-only
-# operators who never use `keychain:` refs don't carry the extra
-# transitive deps.
-keyring = { version = "4", optional = true }
-bcrypt = "0.19"
-url = "2.5"
 ureq = { version = "3.3", features = ["json", "socks-proxy", "win-system-proxy"] }
-# DNS resolver for ACME DNS-01 validator. Sync API; no rustls/aws-lc
-# duplication (uses tokio internally only when the async API is used —
-# we exclusively use the blocking `Resolver` so no extra runtime is
-# pulled in for DNS-01).
-hickory-resolver = { version = "0.26", default-features = false, features = ["system-config", "tokio"] }
 # Pure-Rust SMB2/3 client (NTLM auth via the `sspi` crate). Optional —
 # enabled by the `files_smb` feature so default builds don't ship the
 # SMB stack. No direct C deps; sspi pulls `ring` which we already
@@ -142,20 +220,6 @@ hickory-resolver = { version = "0.26", default-features = false, features = ["sy
 # covers the corporate Samba / Windows Server use cases this transport
 # targets in v1.
 smolder-smb-core = { version = "0.3", optional = true }
-# Pure-Rust SSH client (`russh`) + SFTP layer (`russh-sftp`). Optional —
-# enabled by `files_ssh_sync` to gate the SFTP / SCP file sync
-# transports. No `libssh2-sys` C dep, no OpenSSL. The same crate
-# pair will be reused by the planned Resource Connect SSH window
-# (see `features/resource-connect.md`); shipping it here first
-# pre-stages that infrastructure.
-# Pinned `=0.61.1`: fixes RUSTSEC-2026-0153/0154 (unbounded CryptoVec
-# allocation DoS, fixed in 0.60.3+) while staying on the rc line the GUI's
-# sspi/picky stack shares (`p256 =rc.9`, `elliptic-curve =rc.32`,
-# `rsa =rc.18`, `ed25519-dalek =pre.7`). 0.61.2 moves to `p256 =rc.10` /
-# `ed25519-dalek =3.0.0-rc.0`, which the picky/sspi chain doesn't support
-# yet — bump only together with the forks in `[patch.crates-io]` below.
-russh = { version = "=0.61.1", optional = true, default-features = true }
-russh-sftp = { version = "2", optional = true }
 http = "1"
 rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
 # PEM parsing for TLS cert / key / CA files via the `PemObject` trait
@@ -163,62 +227,31 @@ rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
 # unmaintained `rustls-pemfile` (RUSTSEC-2025-0134).
 rustls-pki-types = "1"
 webpki-roots = { version = "1.0", default-features = true }
-glob = "0.3"
 base64 = "0.22"
-ipnetwork = { version = "0.21", features = ["serde"] }
-blake2b_simd = "1.0"
 derive_more = "2.1.1"
 dashmap = "6.1"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }
 ctor = "1.0"
 better_default = "1.0.5"
 prometheus-client = "0.25"
-sysinfo = "0.39"
-prettytable = "0.10"
-rpassword = "7.4"
 async-trait = "0.1"
-stretto = "0.9"
-priority-queue = "2.7"
-crossbeam-channel = "0.5"
 maybe-async = { version = "0.2", optional = false }
-lockfile = "0.4.0"
 arc-swap = "1"
-blake3 = "1.8"
 hmac = "0.13"
-# OIDC auth backend. Pulls in its own reqwest-based http client for
-# discovery + JWKS + token exchange; reqwest is already transitively
-# in the tree (hiqlite), so the marginal dep cost is the openidconnect
-# crate itself + a small jwt transitive closure.
-openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
 # Reqwest as a direct dep so the Rustion target-health pinger can hit
 # the bastion's control-plane `/v1/health` endpoint. Already in the
 # tree transitively via openidconnect + hiqlite; listing it here pins
 # the feature set explicitly. Rustls-only (no native-tls) so we stay
 # off the OpenSSL surface.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-sha1 = "0.11"
 sha2 = "0.11"
-# SAML 2.0 auth backend (Phase 3) — pure-Rust stack instead of
-# `samael`'s libxml2/libxmlsec1 C deps. `rsa` verifies IdP-signed
-# assertions, `x509-parser` pulls the public key out of the
-# configured PEM cert, `flate2` handles the HTTP-Redirect binding's
-# DEFLATE envelope. `rsa 0.9` expects `digest 0.10` which is what
-# the aliased `sha1-saml` / `sha2-saml` deps below pull in — the
-# project's main `sha1 = "0.11"` and `sha2 = "0.11"` deps use
-# `digest 0.11` and are incompatible with the `rsa::signature::Verifier`
-# trait bounds. Renaming keeps the two coexistent.
-rsa = "0.9"
 x509-parser = { version = "0.18", features = ["verify"] }
-flate2 = "1.0"
-sha1-saml = { package = "sha1", version = "0.10", features = ["oid"] }
-sha2-saml = { package = "sha2", version = "0.10", features = ["oid"] }
 # Pure-Rust WebAuthn RP support (replaces `webauthn-rs`, which transitively
 # pulled OpenSSL via `webauthn-attestation-ca`). The in-tree RP lives at
 # `src/modules/credential/fido2/rp/` and only handles attestation `none`,
 # which is what we always accepted anyway. CBOR for COSE_Key /
 # attestationObject parsing comes from `ciborium`; signature verification
 # uses the existing `p256` and `ed25519-dalek` deps.
-ciborium = "0.2"
 zstd = "0.13"
 # Exchange (import/export) module: password-encrypted .bvx files.
 # Argon2id is the OWASP-recommended memory-hard KDF; XChaCha20-Poly1305
@@ -232,7 +265,6 @@ chacha20poly1305 = "0.10"
 cron = "0.17"
 # `uuid` v4 is used for FIDO2 user-handle generation and for the
 # scheduled-exports id generation.
-uuid = { version = "1", features = ["v4"] }
 # Plugin system v1: WASM runtime via wasmtime. Pure-Rust JIT with fuel
 # metering + memory limits + linker-based host capability injection. See
 # `features/plugin-system.md`. We disable the cranelift parallel feature
@@ -257,52 +289,31 @@ time = { version = "0.3", default-features = false, features = ["std"] }
 # no C system deps. `const-oid` (already transitive via `der`) carries
 # the algorithm OIDs.
 x509-cert = { version = "0.2", default-features = false, features = ["builder", "pem", "std"] }
-# CMS / PKCS#7 builder used by `pki/cert/<serial>/export?format=pkcs7`
-# and `pki/issuer/<ref>/export?format=pkcs7` to wrap a cert + chain in
-# a SignedData ContentInfo with no signers (the "certs-only" PKCS#7
-# envelope every TLS importer accepts). Stays on the same `der 0.7` /
-# `x509-cert 0.2` family the rest of the PKI module already uses, so
-# it fits in without triggering the Phase-3 RustCrypto-formats cascade.
-cms = { version = "0.2", default-features = false, features = ["alloc", "pem", "std"] }
-# PKCS#12 builder for `pki/cert/<serial>/export?format=pkcs12` and the
-# matching issuer route. `kdf` enables RFC 7292 Appendix B.2 — the
-# legacy PKCS#12 KDF used to derive the MAC key from the password.
-pkcs12 = { version = "0.1", features = ["kdf"] }
-# PBES2 encryption envelope used by the shrouded private-key bag and
-# the encrypted cert bag inside `.p12` files.  PBES2 + PBKDF2-SHA256
-# + AES-256-CBC is the modern shape every importer accepts.
-pkcs5 = { version = "0.7", features = ["alloc", "pbes2"] }
 fips204 = { version = "0.4", default-features = false, features = ["default-rng", "ml-dsa-44", "ml-dsa-65", "ml-dsa-87"] }
 # FerroGate machine-auth backend (`auth/ferrogate/`): the official reference
 # verifier for FerroGate's DPoP-bound, composite-signed (Ed25519 + ML-DSA-65)
-# child tokens. Vendored from the FerroGate `releases/v0.13.2` SDK under
-# `third_party/ferrogate-sdk-rust/` (see its PROVENANCE.md); that tree is its
-# own workspace and is excluded from ours. Lean — pulls only serde / base64 /
-# sha2 / ed25519-dalek / fips204, all already in our tree. No custom crypto.
-ferro-child-verify = { path = "third_party/ferrogate-sdk-rust/crates/ferro-child-verify" }
+# child tokens. Resolved from the FerroGate SDK's own Cargo registry,
+# `uox-ferrogate` (see `.cargo/config.toml`); until 0.21.5 these were
+# vendored under `third_party/ferrogate-sdk-rust/`. Lean — pulls only serde /
+# base64 / sha2 / ed25519-dalek / fips204, all already in our tree. No custom
+# crypto.
+#
+# The version requirement is EXACT (`=`) on all three, deliberately. These
+# crates are the trust root for machine logins: a `cargo update` must not be
+# able to slide a new verifier under us, so a verifier bump stays a reviewable
+# commit that moves these lines. (Upstream pins the same way — the two
+# verifiers each require `ferro-crypto =0.21.5`.) `Cargo.lock` is gitignored
+# here, so THIS is the pin — do not relax it to a caret. Cargo still verifies
+# the registry's SHA-256 on download.
+ferro-child-verify = { version = "=0.21.5", registry = "uox-ferrogate" }
 # Reference verifier for host SVIDs (direct-SVID `accept_svid` mode + CRL
-# enforcement via `verify_unrevoked`). Same vendored SDK.
-ferro-svid-verify = { path = "third_party/ferrogate-sdk-rust/crates/ferro-svid-verify" }
-# `ferro-crypto` (same vendored SDK) provides the hybrid post-quantum TLS
-# provider (X25519MLKEM768) and SPKI-pinning verifier used by the `cmis_grpc`
-# JWKS source's PQ-TLS transport, plus the composite primitive.
-ferro-crypto = { path = "third_party/ferrogate-sdk-rust/crates/ferro-crypto" }
-# CMIS gRPC client (Phase 4 — `cmis_grpc` JWKS source). The gRPC stubs are
-# pre-generated from FerroGate's machine_identity.proto and vendored at
-# `src/modules/credential/ferrogate/cmis_proto.rs`, so protoc is NOT required to
-# build BastionVault — only the tonic/prost runtimes.
-tonic = { version = "0.14", default-features = false, features = ["transport", "codegen"] }
-# tonic 0.14 split the prost codec out of the core crate; the vendored
-# stubs in cmis_proto.rs reference `tonic_prost::ProstCodec`.
-tonic-prost = "0.14"
-prost = "0.14"
-# Custom-connector plumbing so the CMIS channel can use ferro-crypto's PQ-TLS
-# rustls config (a provider tonic's built-in TLS can't supply). All three are
-# already in the dependency tree; promoted to direct deps.
-hyper-rustls = { version = "0.27", default-features = false, features = ["http2"] }
-hyper-util = "0.1"
+# enforcement via `verify_unrevoked`). Same SDK, same registry.
+ferro-svid-verify = { version = "=0.21.5", registry = "uox-ferrogate" }
+# `ferro-crypto` (same SDK) provides the hybrid post-quantum TLS provider
+# (X25519MLKEM768) and SPKI-pinning verifier used by the `cmis_grpc` JWKS
+# source's PQ-TLS transport, plus the composite primitive.
+ferro-crypto = { version = "=0.21.5", registry = "uox-ferrogate" }
 tower = { version = "0.5", features = ["util"] }
-const-oid = { version = "0.9", features = ["db"] }
 # Phase 5.3: PKCS#8 (`PrivateKeyInfo`) emit/parse for ML-DSA private keys.
 # Already transitive in the dep tree via `der` / `x509-cert` / `rsa` / `p256`,
 # but promoted to a direct dep so the PKI module's `MlDsaSigner::to_pkcs8_pem`
@@ -317,23 +328,11 @@ pkcs8 = { version = "0.10", features = ["pem", "alloc"] }
 # signed (the CA itself stays Ed25519). Later phases may add `rsa`.
 ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "ecdsa", "encryption"] }
 ssh-encoding = "0.2"
-# TOTP Secret Engine (RFC 6238). Pure-Rust stack:
-#   * `base32` — RFC 4648 base32 codec for the seed.
-#   * `qrcode` — pure-Rust QR encoder; emits an `image::ImageBuffer`.
-#   * `image`  — only the `png` feature; no decoders, no JPEG/WebP/etc.
-#   * `subtle` — constant-time compare for code validation.
-# `hmac`, `sha1`, `sha2`, `url`, `base64`, `rand`, `hex` are already
-# direct deps. See `features/totp-secret-engine.md`.
-base32 = "0.5"
-qrcode = { version = "0.14", default-features = false, features = ["image"] }
-image  = { version = "0.25", default-features = false, features = ["png"] }
-subtle = "2.6"
 # Transit Secret Engine. Promotes ed25519-dalek + hkdf to direct deps;
 # both were already in the transitive tree (ed25519-dalek via ssh-key,
 # hkdf via the rsa stack) so the marginal cost is zero. The PQC bits
 # (ml-kem-768 / ml-dsa-44/65/87) come through bv_crypto.
 ed25519-dalek = "2"
-hkdf = "0.13"
 # ECDSA P-256 verification for the PKI ACME server's `ES256` JWS
 # account-key algorithm. Promoted from dev-deps to direct deps when
 # Phase 6.1 of the ACME spec landed. `digest 0.10` (matches rsa 0.9's
@@ -342,18 +341,7 @@ hkdf = "0.13"
 # replication channel and the hybrid-PQC seed derivation (feature
 # `hsm_mock` / `hsm_yubihsm2`). Pure-Rust; enables `elliptic-curve/ecdh`.
 p256 = { version = "0.13", features = ["ecdsa", "ecdh"], default-features = false }
-# OpenLDAP / AD password-rotation engine (`src/modules/ldap/`).
-# Pure-Rust LDAP client; we pick the `tls-rustls-aws-lc-rs` feature
-# so it consumes the same rustls + aws_lc_rs provider as the rest of
-# the project's TLS surface — no second TLS stack, no native-tls.
-ldap3 = { version = "0.12", default-features = false, features = ["sync", "tls-rustls-aws-lc-rs"] }
 
-# X25519 for the optional `hybrid-x25519+ml-kem-768` Transit key type
-# (Phase 4, behind the `transit_pqc_hybrid` feature flag). `static_secrets`
-# lets us hold the secret half across requests; `zeroize` is on by
-# default. Pure-Rust on top of curve25519-dalek (already transitive
-# via ed25519-dalek), so the marginal dep cost is the wrapper crate.
-x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
 
 # YubiHSM 2 client (feature `hsm_yubihsm2`). Pure-Rust, maintained by
 # iqlusion; `http` for the yubihsm-connector, `usb` for direct device
@@ -364,19 +352,30 @@ x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
 # behind it and flags it experimental). BastionVault needs device ECDH for
 # the HSM-to-HSM replication channel and hybrid-PQC seed derivation; the
 # `BVAULT_TEST_YUBIHSM=1` suite validates it against real hardware before use.
-yubihsm = { version = "0.42.1", optional = true, default-features = false, features = ["http", "usb", "passwords", "untested"] }
 
 # Pulled transitively by `yubihsm`'s `usb` feature; declared directly only to
 # force the `vendored` feature, which statically compiles libusb from bundled C
 # source with the (cross-)toolchain. This keeps the official container image
 # self-contained — no libusb-1.0 dev package in the builder and no libusb .so in
 # the minimal Wolfi runtime (Linux hotplug uses netlink, so no libudev either).
-rusb = { version = "0.9", optional = true, features = ["vendored"] }
 
 [build-dependencies]
 toml = "1.1.2"
 
 [dev-dependencies]
+# Same crate as the normal dependency above; the extra feature exposes
+# `bv_storage::{test_support, test}` — the backend fixtures that
+# `test_utils` re-exports, and the backend conformance suite that this
+# crate's two multi-process backend tests run. Declared here rather than
+# in `[dependencies]` so a release build never compiles them.
+bv-storage = { path = "crates/bv-storage", features = ["test-support"] }
+# The HTTP surface, which Phase 4 moved ABOVE this crate. It is a normal
+# dependency in the other direction (`bv-server` -> `bastion_vault`), so this
+# is a dependency cycle — legal because it is a *dev* dependency, and it is
+# what lets `test_utils::TestHttpServer` and the ~50 tests here that drive a
+# real server stay where they are. See
+# roadmaps/workspace-decomposition.md § Phase 4.
+bv-server = { path = "crates/bv-server", features = ["test-support"] }
 serial_test = "3.4"
 cucumber = "0.23"
 # `ferro-crypto` is a normal dependency (PQ-TLS transport for cmis_grpc); the
@@ -409,25 +408,61 @@ bastion-plugin-testkit = { path = "crates/bastion-plugin-testkit" }
 # want to ship a smaller binary can override with `--no-default-features
 # --features storage_hiqlite` at their own workspace level.
 default = ["storage_hiqlite", "ssh_pqc"]
-storage_mysql = ["diesel", "r2d2"]
-storage_hiqlite = ["hiqlite"]
-sync_handler = ["maybe-async/is_sync"]
+# Forwards to `bv-errors/storage_mysql` so the two MySQL-only `RvError`
+# variants (`ErrConnectionPoolCreate`, `ErrDatabaseExecuteEntry`) are
+# compiled in exactly when the backend is.
+storage_mysql = ["bv-errors/storage_mysql", "bv-storage/storage_mysql"]
+storage_hiqlite = ["bv-storage/storage_hiqlite"]
+# Exposes `test_utils` — `new_test_bastion_vault`, the seal helpers and the
+# `test_*_api` request helpers — to `bv-server`, which builds its own HTTP
+# harness on top of them. Off by default: these fixtures create vaults on
+# disk and shell out to the `bvault` binary. Same arrangement `bv-storage`
+# uses for its backend fixtures (Phase 1).
+test-support = ["bv-storage/test-support", "bv-kernel/test-support"]
+sync_handler = [
+    "maybe-async/is_sync",
+    "bv-storage/sync_handler",
+    "bv-logical/sync_handler",
+    "bv-utils/sync_handler",
+    "bv-audit/sync_handler",
+    "bv-kernel-api/sync_handler",
+    "bv-engine-pki/sync_handler",
+    "bv-engine-transit/sync_handler",
+    "bv-engine-cert-lifecycle/sync_handler",
+    "bv-engine-ldap/sync_handler",
+    "bv-engine-ssh/sync_handler",
+    "bv-engine-ssh-broker/sync_handler",
+    "bv-engine-totp/sync_handler",
+    "bv-engine-kv/sync_handler",
+    "bv-engine-notifications/sync_handler",
+    "bv-engine-files/sync_handler",
+    "bv-engine-resource/sync_handler",
+    "bv-engine-rustion/sync_handler",
+    "bv-auth-audit/sync_handler",
+    "bv-auth-approle/sync_handler",
+    "bv-auth-userpass/sync_handler",
+    "bv-auth-ferrogate/sync_handler",
+    "bv-auth-saml/sync_handler",
+    "bv-auth-oidc/sync_handler",
+    "bv-auth-fido2/sync_handler",
+    "bv-auth-cert/sync_handler",
+]
 # Cloud Storage Targets for the Encrypted File backend.
 # See `features/cloud-storage-backend.md`. Default build stays lean —
 # operators who don't need cloud targets pay no compile / binary cost.
-cloud_s3 = ["rusty-s3"]
+cloud_s3 = ["bv-storage/cloud_s3"]
 # OneDrive target pulls no new external deps — reuses `ureq` for HTTP,
 # `serde_json` for Graph API JSON, and the shared OAuth infra from
 # `file/oauth.rs`. The feature flag still exists so operators who
 # don't need OneDrive can opt out of compiling the module + its tests.
-cloud_onedrive = []
+cloud_onedrive = ["bv-storage/cloud_onedrive"]
 # Google Drive target. Like OneDrive, pulls no new external deps —
 # reuses `ureq` + `serde_json` + the shared OAuth infra.
-cloud_gdrive = []
+cloud_gdrive = ["bv-storage/cloud_gdrive"]
 # Dropbox target. Zero new external deps — reuses `ureq` +
 # `serde_json` + the shared OAuth infra.
-cloud_dropbox = []
-cloud_keychain = ["keyring"]
+cloud_dropbox = ["bv-storage/cloud_dropbox"]
+cloud_keychain = ["bv-storage/cloud_keychain"]
 cloud_targets = ["cloud_s3", "cloud_onedrive", "cloud_gdrive", "cloud_dropbox", "cloud_keychain"]
 # PKI Phase 3 — composite / hybrid signatures (ECDSA-P256 + ML-DSA-65).
 # Off by default. The IETF draft `draft-ietf-lamps-pq-composite-sigs`
@@ -435,7 +470,7 @@ cloud_targets = ["cloud_s3", "cloud_onedrive", "cloud_gdrive", "cloud_dropbox", 
 # all churned across recent revisions), so the engine ships this as
 # an opt-in preview rather than a stable interop guarantee. See
 # `features/pki-secret-engine.md`.
-pki_pqc_composite = []
+pki_pqc_composite = ["bv-engine-pki/pki_pqc_composite"]
 
 # File Resources — SMB sync transport. Off by default because the
 # `smb` crate carries its own (pure-Rust) SMB2/3 + NTLM stack and a
@@ -444,7 +479,7 @@ pki_pqc_composite = []
 # `FileSyncTarget { kind = "smb" }` becomes a valid target shape
 # whose `target_path` is parsed as `smb://[user@]host[:port]/share/path`.
 # See `features/file-resources.md` § "Phase 5 — SMB sync transport".
-files_smb = ["smolder-smb-core"]
+files_smb = ["bv-engine-files/files_smb"]
 # File Resources — SFTP + SCP sync transports. Off by default for the
 # same reason as files_smb: the SSH stack is multi-MiB of compiled
 # code that operators not pushing files over SSH don't need to pay
@@ -453,7 +488,7 @@ files_smb = ["smolder-smb-core"]
 # `scp://[user@]host[:port]/path`. Shares the same russh dep tree
 # the planned Resource Connect SSH window will use.
 # See `features/file-resources.md` § "Phase 6 — SFTP / SCP sync".
-files_ssh_sync = ["russh", "russh-sftp"]
+files_ssh_sync = ["bv-engine-files/files_ssh_sync"]
 
 # Transit Secret Engine — Phase 4 follow-ups, both off by default.
 #
@@ -469,7 +504,11 @@ files_ssh_sync = ["russh", "russh-sftp"]
 # Off by default because the IETF lamps `draft-ietf-lamps-pq-composite-{sigs,kem}`
 # specs are still moving on the prehash domain + KEM-combiner shape;
 # operators who want them today opt in explicitly.
-transit_pqc_hybrid = ["dep:x25519-dalek"]
+# Forwards to the engine crate: `x25519-dalek` and the `cfg` gates travel
+# with the code, which since Phase 3 is `bv-engine-transit`. The root
+# manifest keeps the name so an existing `--features transit_pqc_hybrid`
+# build command produces the same binary.
+transit_pqc_hybrid = ["bv-engine-transit/transit_pqc_hybrid"]
 # `transit_byok` enables the BYOK import flow:
 #   * `POST /v1/transit/wrapping_key` — engine returns a per-mount
 #     ML-KEM-768 public key.
@@ -479,7 +518,7 @@ transit_pqc_hybrid = ["dep:x25519-dalek"]
 #     bytes as a fresh version of the named symmetric key.
 # Off by default so the wrapping-key derivation stays inert on
 # deployments that don't import key material from outside.
-transit_byok = []
+transit_byok = ["bv-engine-transit/transit_byok"]
 
 # SSH Phase 3 — post-quantum SSH certificates (ML-DSA-65). Off by
 # default because OpenSSH does not yet ship native support for
@@ -488,7 +527,7 @@ transit_byok = []
 # Operators wiring an ML-DSA-aware Rust SSH client into automation
 # pipelines opt in via this flag; everyone else pays nothing. See
 # `features/ssh-secret-engine.md` Phase 3.
-ssh_pqc = []
+ssh_pqc = ["bv-engine-ssh/ssh_pqc"]
 
 # HSM Support (features/hsm-support.md). Two mutually-independent backends
 # behind the narrow `hsm::HsmBackend` trait, both off by default so the
@@ -507,21 +546,53 @@ ssh_pqc = []
 # It provides NO hardware protection and REFUSES TO START in production
 # (BVAULT_ENV=production / environment="production"); it exists for dev, CI,
 # and the homologation cluster (no USB passthrough).
-hsm_mock = []
+hsm_mock = ["bv-core/hsm_mock"]
 # `hsm_yubihsm2` is the production backend for the mandated YubiHSM 2, via
 # the pure-Rust `yubihsm` crate over the HTTP connector or direct USB.
 # `x509-cert` (attestation parsing) is already a direct dep; `rusb` is declared
 # directly only to force libusb's `vendored` (static) build (see above).
-hsm_yubihsm2 = ["dep:yubihsm", "dep:rusb"]
+hsm_yubihsm2 = ["bv-core/hsm_yubihsm2"]
 
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"
 
-[dependencies.foreign-types]
-version = "0.5.0"
 
-[dependencies.libc]
-version = "0.2"
+# ── cargo-machete allowlist ────────────────────────────────────────
+#
+# `make deps-unused` (cargo-machete) flags a dependency when no `use` of it
+# appears in the sources. Every entry below is a dependency that IS needed but
+# that a static scan cannot see. Triaged once in Phase 0 of
+# roadmaps/workspace-decomposition.md; three genuinely dead deps
+# (`foreign-types`, `glob`, `serde_derive`) were dropped in the same pass.
+#
+# Do not add an entry here to silence the tool. Add it only with a reason that
+# says why the scan is wrong.
+[package.metadata.cargo-machete]
+ignored = [
+    # Package name != lib name: the crate is `hcl-rs`, the lib is `hcl`, and the
+    # config loader calls `hcl::from_str` / `from_body` / `from_reader`.
+    "hcl-rs",
+    # Used only through the `#[serde(with = "serde_bytes")]` attribute (see
+    # src/hsm/mock.rs), which is a string literal to a static scan.
+    "serde_bytes",
+    # Package name != lib name again: `smolder-smb-core` exposes `smolder_core`,
+    # used by src/modules/files/smb.rs behind the `files_smb` feature.
+    "smolder-smb-core",
+    # Declared *only* to force libusb's `vendored` feature so the official
+    # container image links libusb statically. Intentionally never imported —
+    # see the dependency's own comment above.
+    "rusb",
+    # The next three are direct deps that pin a FEATURE SET for the transitive
+    # graph rather than being imported. Removing them would silently change
+    # feature unification, not just the manifest:
+    #   * tower — `features = ["util"]` for the CMIS gRPC custom connector
+    #   * webpki-roots — `default-features = true` for the TLS root store
+    #   * rustls-pki-types — pins major 1; consumed via the `rustls::pki_types`
+    #     re-export, which is why no direct `use` exists
+    "tower",
+    "webpki-roots",
+    "rustls-pki-types",
+]
 
 [lints.clippy]
 result_large_err = "allow"
@@ -530,77 +601,37 @@ let_and_return = "allow"
 should_implement_trait = "allow"
 new_without_default = "allow"
 field_reassign_with_default = "allow"
-await_holding_lock = "allow"
+# Was "allow", which hid a real deadlock rather than a style nit: it caught
+# `Context::wait_task_finish` holding a `MutexGuard` across an `.await` only
+# once that code moved into `crates/bv-context`, which does not inherit this
+# list. A `std::sync` guard held across an await is not re-entrant and the
+# awaiting task cannot release it, so anything the awaited future touches that
+# wants the same lock deadlocks — and on the current-thread `actix_rt` runtimes
+# this codebase spawns for its sweepers, nothing else can make progress either.
+#
+# Set to "warn", not "allow", so the class stays visible. The two sites this
+# flagged when it was turned on are both fixed — they now drain what they need,
+# drop the guard, and only then await:
+#   * src/modules/auth/expiration.rs — held the lease-queue write guard across
+#     `revoke_lease_id(..).await`, which re-enters that same lock. This was the
+#     cause of the intermittent `mod_expiration_tests::*` failures, and of
+#     leases not being revoked on schedule.
+#   * src/mount.rs — held the mount-table read guard across `table.load(..)`.
+# Fix the site rather than silencing it; do not add a local `#[allow]`.
+# Not "deny": CI runs no clippy job, so denying would only bite locally.
+await_holding_lock = "warn"
 too_many_arguments = "allow"
 unnecessary_unwrap = "allow"
 collapsible_match = "allow"
 large_enum_variant = "allow"
 unnecessary_map_or = "allow"
 
-[[bin]]
-name = "bvault"
-path = "bin/bastion_vault.rs"
+# The `bvault` binary, and the deb/rpm packaging metadata that ships it,
+# moved to `crates/bvault-cli` in Phase 4 -- a `[[bin]]` shares its package's
+# dependencies, so leaving it here would have meant the library depending on
+# the CLI that depends on the library. See
+# roadmaps/workspace-decomposition.md § Phase 4.
 
-# ── CLI Linux packaging: deb (cargo-deb) + rpm (cargo-generate-rpm) ──
-#
-# Wave 2 / Phase 1 of the Packaging & Distribution roadmap. The
-# `bastionvault` package provides the operator/end-user CLI binary
-# `bvault` plus its manpage and shell completions. It does NOT install
-# a systemd unit / Windows service — server installs go through the
-# container image, not the workstation package.
-#
-# Build locally:
-#   cargo install cargo-deb cargo-generate-rpm
-#   make linux-cli-packages
-#
-# See features/packaging-client-binaries.md for the full design.
-
-[package.metadata.deb]
-name = "bastionvault"
-maintainer = "BastionVault <noreply@bastionvault.io>"
-copyright = "2026 BastionVault Contributors"
-license-file = ["LICENSE", "0"]
-extended-description = """
-BastionVault is an identity-based secrets management server with a
-Vault-compatible API. This package installs the bvault command-line
-client used to interact with a BastionVault server.
-"""
-section = "utils"
-priority = "optional"
-depends = "ca-certificates"
-assets = [
-    # Binary (cargo-deb implicitly builds the `bvault` bin first).
-    ["target/release/bvault", "usr/bin/", "755"],
-    # Static manpage + shell completions. Phase 1 ships hand-written
-    # stubs; a follow-up will plug clap_mangen / clap_complete in for
-    # auto-generation. cargo-deb's deb_compression default (xz) keeps
-    # the on-wire size small even with the stubs.
-    ["installers/cli/manpage/bvault.1", "usr/share/man/man1/", "644"],
-    ["installers/cli/completions/bvault.bash", "usr/share/bash-completion/completions/bvault", "644"],
-    ["installers/cli/completions/_bvault",     "usr/share/zsh/site-functions/_bvault", "644"],
-    ["installers/cli/completions/bvault.fish", "usr/share/fish/vendor_completions.d/bvault.fish", "644"],
-    # Project docs the package archive ships, in line with Debian policy.
-    ["README.md",    "usr/share/doc/bastionvault/", "644"],
-    ["CHANGELOG.md", "usr/share/doc/bastionvault/", "644"],
-]
-
-[package.metadata.generate-rpm]
-name = "bastionvault"
-summary = "BastionVault command-line client"
-license = "Apache-2.0"
-url = "https://github.com/ffquintella/BastionVault"
-# `assets` mirrors the deb shape, with the path conventions RPM expects.
-assets = [
-    { source = "target/release/bvault", dest = "/usr/bin/bvault", mode = "755" },
-    { source = "installers/cli/manpage/bvault.1", dest = "/usr/share/man/man1/bvault.1", mode = "644", doc = true },
-    { source = "installers/cli/completions/bvault.bash", dest = "/usr/share/bash-completion/completions/bvault", mode = "644" },
-    { source = "installers/cli/completions/_bvault",     dest = "/usr/share/zsh/site-functions/_bvault", mode = "644" },
-    { source = "installers/cli/completions/bvault.fish", dest = "/usr/share/fish/vendor_completions.d/bvault.fish", mode = "644" },
-    { source = "README.md",    dest = "/usr/share/doc/bastionvault/README.md",   mode = "644", doc = true },
-    { source = "CHANGELOG.md", dest = "/usr/share/doc/bastionvault/CHANGELOG.md",mode = "644", doc = true },
-]
-[package.metadata.generate-rpm.requires]
-ca-certificates = "*"
 
 # Phase 2 of the SSH secret engine: target-host helper that PAM's
 # `pam_exec` invokes to validate an OTP against `/v1/ssh/verify`.

@@ -10,14 +10,14 @@ is finally enforceable on KV reads.
 
 What landed:
 
-- **Request plumbing** — `src/logical/util.rs` (`split_path_query`,
+- **Request plumbing** — `crates/bv-logical/src/util.rs` (`split_path_query`,
   `parse_query_allowlist`) lifts allowlisted query params (`env`, `version`)
   into `req.data` at both entry boundaries: the HTTP handler
   (`src/http/logical.rs`, from `HttpRequest::query_string()`) and the embedded
   GUI backend (`gui/src-tauri/src/backend.rs`, splitting `?env=` off the path).
   This happens *before* `core.handle_request`, because the ACL check runs in the
   pre-route phase and reads `req.data`/`req.body` directly. The logical router
-  (`src/logical/backend.rs`) now **merges** path captures into seeded `req.data`
+  (`crates/bv-logical/src/backend.rs`) now **merges** path captures into seeded `req.data`
   instead of replacing it.
 - **Storage** — `VersionData.envs: Map<String, Value>` (`src/modules/kv_v2/version.rs`),
   serde-defaulted + `skip_serializing_if` so legacy on-disk versions are
@@ -40,7 +40,7 @@ What landed:
   per-key inherited/override markers, env-scoped editing (saves via
   `write_secret_env`), optional environment on the create modal, and the env
   registry on the engine-config editor. `read_secret` returns env metadata.
-- **Audit** — `src/audit/entry.rs` folds the non-secret `env` selector from
+- **Audit** — `crates/bv-audit/src/entry.rs` folds the non-secret `env` selector from
   `req.data` into the audited request `data` (verbatim, not HMAC'd).
 - **Policy builder** — `gui/src/components/PolicyBlockEditor.tsx` has a "Restrict
   to environments" field per rule. It emits `required_parameters = ["env"]` +

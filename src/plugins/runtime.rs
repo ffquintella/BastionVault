@@ -68,9 +68,9 @@ use std::sync::Arc;
 
 use wasmtime::{AsContextMut, Caller, Linker, Memory, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
 
+use crate::kernel_api::VaultCtx;
 use crate::{
     audit,
-    core::Core,
     storage::StorageEntry,
 };
 
@@ -141,7 +141,7 @@ struct PluginCtx {
     storage_prefix: Option<String>,
     response_window: Option<(u32, u32)>,
     limits: StoreLimits,
-    core: Option<Arc<Core>>,
+    core: Option<Arc<dyn VaultCtx>>,
     /// Operator-supplied config — `bv.config_get(key)` reads from this
     /// map. Loaded by the caller before invoke (typically by reading
     /// `core/plugins/<name>/config` via `crate::plugins::ConfigStore`).
@@ -239,7 +239,7 @@ impl WasmRuntime {
         manifest: &PluginManifest,
         wasm_bytes: &[u8],
         input: &[u8],
-        core: Option<Arc<Core>>,
+        core: Option<Arc<dyn VaultCtx>>,
     ) -> Result<InvokeOutput, RuntimeError> {
         self.invoke_with_config(manifest, wasm_bytes, input, core, Default::default())
             .await
@@ -253,7 +253,7 @@ impl WasmRuntime {
         manifest: &PluginManifest,
         wasm_bytes: &[u8],
         input: &[u8],
-        core: Option<Arc<Core>>,
+        core: Option<Arc<dyn VaultCtx>>,
         config: std::collections::BTreeMap<String, String>,
     ) -> Result<InvokeOutput, RuntimeError> {
         // Reuse a previously-compiled module when one is cached for
@@ -271,7 +271,7 @@ impl WasmRuntime {
         // record the client enforcer uses. A changed/absent request →
         // no hosts → `NET_NOT_GRANTED`.
         let net_hosts = match &core {
-            Some(c) => super::grants::active_net_hosts(c.barrier.as_storage(), &manifest.name, manifest)
+            Some(c) => super::grants::active_net_hosts(c.barrier().as_storage(), &manifest.name, manifest)
                 .await
                 .unwrap_or(None)
                 .unwrap_or_default(),
@@ -723,7 +723,7 @@ async fn net_http_impl(
     let plugin = caller.data().plugin_name.clone();
     let core = caller.data().core.clone();
 
-    let audit = |core: &Option<Arc<Core>>, method: &str, host: &str, outcome: &str, status: Option<u16>| {
+    let audit = |core: &Option<Arc<dyn VaultCtx>>, method: &str, host: &str, outcome: &str, status: Option<u16>| {
         if let Some(c) = core {
             let mut body = serde_json::Map::new();
             body.insert("method".into(), method.into());
@@ -736,7 +736,7 @@ async fn net_http_impl(
             let path = format!("sys/plugins/{plugin}/net");
             // Fire-and-forget: audit-emit must not fail the call.
             tokio::spawn(async move {
-                crate::audit::emit_sys_audit(&c, "", &path, crate::logical::Operation::Write, Some(body), None).await;
+                crate::audit::emit_sys_audit(c.as_ref(), "", &path, crate::logical::Operation::Write, Some(body), None).await;
             });
         }
     };
@@ -915,7 +915,7 @@ async fn crypto_op_impl(
 /// data map out. Tagged `Result<_, ()>` because the plugin only sees
 /// a single error code; any logging happens host-side.
 async fn transit_call(
-    core: &Arc<Core>,
+    core: &dyn VaultCtx,
     path: &str,
     body: serde_json::Value,
 ) -> Result<serde_json::Map<String, serde_json::Value>, ()> {
@@ -951,7 +951,8 @@ async fn storage_get_impl(
         Some(v) => v,
         None => return STORAGE_FORBIDDEN,
     };
-    let storage = core.barrier.as_storage();
+    let barrier = core.barrier();
+    let storage = barrier.as_storage();
     match storage.get(&full_key).await {
         Ok(Some(entry)) => write_to_buffer(caller, &entry.value, out_ptr, out_max),
         Ok(None) => STORAGE_NOT_FOUND,
@@ -978,7 +979,8 @@ async fn storage_put_impl(
         Some(v) => v,
         None => return STORAGE_FORBIDDEN,
     };
-    let storage = core.barrier.as_storage();
+    let barrier = core.barrier();
+    let storage = barrier.as_storage();
     match storage.put(&StorageEntry { key: full_key, value }).await {
         Ok(()) => 0,
         Err(_) => STORAGE_INTERNAL_ERROR,
@@ -998,7 +1000,8 @@ async fn storage_delete_impl(
         Some(v) => v,
         None => return STORAGE_FORBIDDEN,
     };
-    let storage = core.barrier.as_storage();
+    let barrier = core.barrier();
+    let storage = barrier.as_storage();
     match storage.delete(&full_key).await {
         Ok(()) => 0,
         Err(_) => STORAGE_INTERNAL_ERROR,
@@ -1045,7 +1048,8 @@ async fn storage_list_impl(
         full_prefix.push_str(req_norm);
         full_prefix.push('/');
     }
-    let storage = core.barrier.as_storage();
+    let barrier = core.barrier();
+    let storage = barrier.as_storage();
     let names = match storage.list(&full_prefix).await {
         Ok(v) => v,
         Err(_) => return STORAGE_INTERNAL_ERROR,
@@ -1081,7 +1085,7 @@ async fn audit_emit_impl(
         .unwrap_or(serde_json::Value::String(payload_str));
     body.insert("plugin_event".to_string(), parsed);
     audit::emit_sys_audit(
-        &core,
+        core.as_ref(),
         "",
         &path,
         crate::logical::Operation::Write,
@@ -1094,33 +1098,39 @@ async fn audit_emit_impl(
 
 /// Input shape for `bv.notify_send` — a subset of a full `Notification`
 /// (the host stamps id / created_at / source / namespace).
-#[derive(serde::Deserialize)]
+///
+/// `target` stays a raw `Value`: its shape belongs to the notifications
+/// engine, and naming `NotificationTarget` here would put a Tier 3 type in the
+/// plugin substrate. The sink validates it. Declaring the other fields is
+/// still worth it — it is what rejects a plugin trying to set `source`.
+#[derive(serde::Deserialize, serde::Serialize)]
 struct PluginNotifyInput {
     title: String,
     #[serde(default)]
     body: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     severity: Option<String>,
-    target: crate::modules::notifications::NotificationTarget,
+    target: serde_json::Value,
     #[serde(default)]
     channels: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     action_url: Option<String>,
     #[serde(default)]
     metadata: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Resolve the live notification service + the calling plugin's name.
-/// Returns `None` when the service is unavailable (sealed / not wired).
+/// Resolve the live notification sink + the calling plugin's name.
+/// Returns `None` when no notifications engine is wired in.
+///
+/// A trait object, not `NotificationService`: the plugin substrate is Tier 0
+/// and must not name a Tier 3 engine's concrete type. See
+/// `kernel_api::engines`.
 fn plugin_notify_service(
     caller: &Caller<'_, PluginCtx>,
-) -> Option<(Arc<crate::modules::notifications::NotificationService>, String)> {
+) -> Option<(Arc<dyn crate::kernel_api::engines::NotificationSink>, String)> {
     let core = caller.data().core.clone()?;
-    let service = core
-        .module_manager
-        .get_module::<crate::modules::notifications::NotificationsModule>("notifications")
-        .and_then(|m| m.service())?;
-    Some((service, caller.data().plugin_name.clone()))
+    let sink = core.notifications()?;
+    Some((sink, caller.data().plugin_name.clone()))
 }
 
 async fn notify_send_impl(
@@ -1145,31 +1155,18 @@ async fn notify_send_impl(
         return STORAGE_FORBIDDEN;
     };
 
-    use crate::modules::notifications::{Notification, Severity};
-    let notif = Notification {
-        id: String::new(),
-        title: input.title,
-        body: input.body,
-        severity: input.severity.as_deref().map(Severity::parse).unwrap_or_default(),
-        // Overwritten by the service to `plugin:<name>` — a plugin can
-        // never forge a system/admin source.
-        source: String::new(),
-        target: input.target,
-        channels: input.channels,
-        action_url: input.action_url,
-        created_at: String::new(),
-        namespace: String::new(),
-        metadata: input.metadata,
-        recipient_count: 0,
+    // Hand the sink the plugin's own request body. `source` is deliberately
+    // absent: the service stamps `plugin:<name>`, so a plugin can never forge
+    // a system/admin origin, and re-encoding the notification here would be a
+    // second copy of its schema to keep in sync.
+    let notif = match serde_json::to_value(&input) {
+        Ok(v) => v,
+        Err(_) => return STORAGE_INTERNAL_ERROR,
     };
 
     match service.send_from_plugin(&plugin_name, notif, "").await {
         Ok(outcome) => {
-            let body = serde_json::json!({
-                "id": outcome.id,
-                "recipient_count": outcome.recipient_count,
-            });
-            let bytes = serde_json::to_vec(&body).unwrap_or_default();
+            let bytes = serde_json::to_vec(&outcome).unwrap_or_default();
             write_to_buffer(caller, &bytes, out_ptr, out_max)
         }
         Err(_) => STORAGE_INTERNAL_ERROR,
@@ -1232,9 +1229,9 @@ async fn notify_get_impl(
 }
 
 /// Resolve a plugin-supplied key into the absolute barrier key + the
-/// `Arc<Core>` to use. Returns `None` when the plugin lacks a storage
+/// `Arc<dyn VaultCtx>` to use. Returns `None` when the plugin lacks a storage
 /// prefix capability or the key is outside it.
-fn resolve_for_storage(caller: &Caller<'_, PluginCtx>, requested: &str) -> Option<(String, Arc<Core>)> {
+fn resolve_for_storage(caller: &Caller<'_, PluginCtx>, requested: &str) -> Option<(String, Arc<dyn VaultCtx>)> {
     let full = caller.data().rebase_key(requested)?;
     let core = caller.data().core.clone()?;
     Some((full, core))
@@ -1615,7 +1612,7 @@ mod tests {
     /// passes a unique `name` so tests don't share storage state with
     /// each other (the canonical test fixture seeds the backend by
     /// name).
-    async fn test_core(name: &str) -> Arc<Core> {
+    async fn test_core(name: &str) -> Arc<dyn VaultCtx> {
         let (_bv, core, _token) = crate::test_utils::new_unseal_test_bastion_vault(name).await;
         core
     }
