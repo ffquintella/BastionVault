@@ -79,8 +79,8 @@ not be republished because the GUI shipped, and under this split it is
 not.
 
 `bv-server` is the exception that proves the rule: Tier 4 like
-`bvault-cli`, but it carries its own `0.1.0` because nothing prints it.
-It is unpublishable either way, so the number is inert.
+`bvault-cli`, but its version is its own rather than the product's, because
+nothing prints it. It is unpublishable either way, so the number is inert.
 
 ## Releasing only what changed
 
@@ -112,18 +112,34 @@ Add `OFFLINE=1` to skip the index lookups and infer from tags alone.
 
 ### A patch bump does not cascade. That is the whole point.
 
-Internal dependencies are declared `version = "0.1.0"`, which is a
-**caret** requirement matching every `0.1.x`:
+Internal dependencies are declared with a plain `version = "<x.y.z>"`, which
+is a **caret** requirement matching every later patch in the same minor:
 
-- **`0.1.0` → `0.1.1`** — nothing else is touched. The 32 crates that
-  depend on `bv-errors` keep `version = "0.1.0"`, their packaged tarballs
+- **`0.41.0` → `0.41.1`** — nothing else is touched. The 32 crates that
+  depend on `bv-errors` keep `version = "0.41.0"`, their packaged tarballs
   are unchanged, and they are not republished. A consumer resolving them
-  picks up `0.1.1` on its own.
-- **`0.1.x` → `0.2.0`** — `^0.1.0` stops matching, so `crates-bump`
+  picks up `0.41.1` on its own.
+- **`0.41.x` → `0.42.0`** — `^0.41.0` stops matching, so `crates-bump`
   rewrites every dependent's requirement. Those manifests are now
   changed, so the next plan wants to bump and republish them too. The
   cascade is correct: a breaking change in a dependency *is* a change in
   its dependents.
+
+### Why every crate reads `0.41.0` today
+
+They were all created at `0.1.0` during the decomposition and never moved,
+because the scheme only moves a crate when its content changes — so the PKI
+engine and the storage barriers advertised "brand new, never released" about
+code that ships in production. On **2026-08-17** all 40 were flat-synced to
+`0.41.0`, the product version, together with the 170 internal requirements
+that had to move with them.
+
+That was a one-off, and it is the one state this scheme cannot detect changes
+from: with every crate on the same number there is no per-crate drift for
+`crates-plan` to find. It cost nothing because nothing had been published yet.
+Do not repeat it — after the first release, crates *should* diverge, and
+`bv-shamir` sitting at `0.41.0` while `bv-engine-pki` reaches `0.41.4` is the
+design working rather than untidiness to correct.
 
 Three things would destroy this property, and all three are called out in
 `AGENTS.md` § Per-crate versioning: pinning internal deps with `=`,
@@ -203,7 +219,7 @@ An internal dependency needs **all three** of `version`, `path`, and
 `registry`:
 
 ```toml
-bv_plugin_surface = { version = "0.1.0", path = "../bv_plugin_surface", registry = "uox-bastionvault" }
+bv_plugin_surface = { version = "0.41.0", path = "../bv_plugin_surface", registry = "uox-bastionvault" }
 ```
 
 - Without `version`, `cargo publish` refuses the crate outright.
@@ -222,7 +238,7 @@ cannot be dry-run or verified until its dependencies are actually live.
 The dry run classifies this rather than failing:
 
 ```
-── bv_plugin_manifest 0.1.0 ───────────────────────────
+── bv_plugin_manifest 0.41.0 ──────────────────────────
    SKIPPED — needs 'bv_plugin_surface' on the registry first (publish order).
 ```
 

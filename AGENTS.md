@@ -418,10 +418,12 @@ silently dropped `bv-core` and `bv-kernel` from every release.
 protect the same property, and breaking any of them makes every release a
 whole-workspace release:
 
-1. **Declare internal deps as `version = "0.1.0"`, never `=0.1.0`.** That is a
-   caret requirement matching every 0.1.x, so bumping `bv-errors` to 0.1.1
-   leaves its 32 dependents' manifests untouched — their tarballs do not
-   change, they are not republished, and a consumer resolves 0.1.1 by itself.
+1. **Declare internal deps as a plain `version = "<x.y.z>"`, never `=<x.y.z>`.**
+   A plain requirement is a caret one, matching every later patch in the same
+   minor, so bumping `bv-errors` from 0.41.0 to 0.41.1 leaves its 32
+   dependents' manifests untouched — their tarballs do not change, they are
+   not republished, and a consumer resolves 0.41.1 by itself. An `=` pin
+   turns every patch release into a whole-workspace release.
 2. **Do not move dependencies into `[workspace.dependencies]`.** Cargo inlines
    the concrete version when it packages, so a workspace-level bump changes
    every crate's *published* manifest while changing no file in any crate
@@ -436,6 +438,29 @@ whole-workspace release:
 judgement about the crate's public API. Patch is the default; pass
 `MINOR=<crate>` when you removed or changed a public item, and it will rewrite
 dependents' requirements and tell you which ones now need republishing too.
+
+**The library numbers were flat-synced once, on 2026-08-17, and that is not
+the scheme resuming.** Every crate was created at `0.1.0` during the
+decomposition and never moved, because the scheme above moves a crate only
+when its content changes. Correct in principle and misleading in practice: a
+manifest reading `0.1.0` says "brand new, never released" about the PKI engine
+and the storage barriers, which is what ships in production. All 40 were set
+to `0.41.0` — the number `bvault --version` prints — along with the 170
+internal dependency requirements that had to move with them.
+
+Two things follow, and neither is an invitation to do it again:
+
+- **Do not re-sync.** The flat state costs the property the three rules
+  protect: with every crate on one number there is no per-crate drift for
+  `crates-plan` to detect. It cost nothing on the day, because nothing had
+  been published; it costs a whole-workspace release every time it is
+  repeated. Divergence is the correct end state — after the first release,
+  `bv-shamir` staying at `0.41.0` while `bv-engine-pki` reaches `0.41.4` is
+  the scheme working, not drift to be tidied up.
+- **`make bump-*` still must not touch `crates/bv-*`.** The product version
+  and the library versions are equal right now, which makes the two schemes
+  look like one. They are not, and the moment a single crate is republished
+  they stop matching.
 
 ### Testing requirements
 
