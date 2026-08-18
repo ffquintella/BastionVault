@@ -18,6 +18,14 @@ interface EntityPickerProps {
   mountFilter?: string;
 }
 
+/** `name @ mount`, with the namespace appended when the alias is not
+ *  root's. A namespaced listing carries root's aliases alongside its own,
+ *  so the same login can appear twice with different `entity_id`s; the
+ *  suffix is what distinguishes them once one is picked. */
+function aliasLabel(a: EntityAliasInfo): string {
+  return a.namespace ? `${a.name} @ ${a.mount} (${a.namespace})` : `${a.name} @ ${a.mount}`;
+}
+
 /**
  * Typeahead picker that resolves a login (mount + principal name)
  * to a stable `entity_id`. Loads the alias list lazily on first
@@ -88,7 +96,8 @@ export function EntityPicker({
         (a) =>
           a.name.toLowerCase().includes(q) ||
           a.mount.toLowerCase().includes(q) ||
-          a.entity_id.toLowerCase().includes(q),
+          a.entity_id.toLowerCase().includes(q) ||
+          (a.namespace ?? "").toLowerCase().includes(q),
       )
       .slice(0, 25);
   }, [aliases, query, mountFilter]);
@@ -100,7 +109,7 @@ export function EntityPicker({
 
   function select(alias: EntityAliasInfo) {
     onChange(alias.entity_id, alias);
-    setQuery(`${alias.name} @ ${alias.mount}`);
+    setQuery(aliasLabel(alias));
     setOpen(false);
   }
 
@@ -127,7 +136,7 @@ export function EntityPicker({
       )}
       <input
         type="text"
-        value={query || (selectedAlias ? `${selectedAlias.name} @ ${selectedAlias.mount}` : value)}
+        value={query || (selectedAlias ? aliasLabel(selectedAlias) : value)}
         onFocus={() => {
           setOpen(true);
           ensureLoaded();
@@ -154,16 +163,21 @@ export function EntityPicker({
           ) : (
             filtered.map((a) => (
               <button
-                key={`${a.mount}|${a.name}`}
+                key={`${a.namespace}|${a.mount}|${a.name}`}
                 type="button"
                 onClick={() => select(a)}
                 className={`w-full text-left px-3 py-2 hover:bg-[var(--color-surface-hover)] flex items-center justify-between gap-2 ${
                   a.entity_id === value ? "bg-[var(--color-surface-hover)]" : ""
                 }`}
               >
-                <span className="text-sm">
+                <span className="text-sm min-w-0 truncate">
                   <span className="font-medium">{a.name}</span>
                   <span className="text-[var(--color-text-muted)]"> @ {a.mount}</span>
+                  {a.namespace && (
+                    <span className="ml-1 text-[10px] px-1 py-0.5 rounded bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]">
+                      {a.namespace}
+                    </span>
+                  )}
                 </span>
                 <span className="font-mono text-[10px] text-[var(--color-text-muted)] truncate max-w-[50%]">
                   {a.entity_id}

@@ -45,6 +45,31 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+#### The grantee picker was empty in every non-root namespace
+- **Sharing was unusable outside root from the GUI.** `identity/entity/aliases`
+  scoped its listing to the namespace named by `X-BastionVault-Namespace` and
+  nothing else, but aliases are written to root: `write_user` pre-provisions
+  there unconditionally, and a namespace's own keyspace only ever fills up from
+  logins carrying that namespace's header. On a deployment where operators
+  authenticate at root and switch namespaces in the GUI, the list came back
+  empty, so the share dialog offered no grantees at all -- not even the caller's
+  own login -- and the only way to grant anything was to paste a raw
+  `entity_id`.
+- **A namespaced listing now carries root's aliases as well as its own**
+  (`crates/bv-kernel/src/modules/identity/mod.rs`). Root owns the auth mounts a
+  namespaced caller authenticates through, so this exposes no principal the
+  caller could not already enumerate from those mounts. Sibling namespaces stay
+  invisible.
+- **Every alias record gained a `namespace` field** (`""` = root), surfaced
+  through the Tauri `list_entity_aliases` command to the picker, which tags
+  non-root rows and includes the namespace in its search. The two keyspaces are
+  concatenated rather than merged, so a login that exists in both appears twice
+  with both `entity_id`s visible -- picking the wrong one silently grants access
+  to an entity that never authenticates, which is exactly what a silent merge
+  would have hidden. See `features/per-user-scoping.md`.
+
 ### Changed
 
 #### Local builds are no longer pinned to a fixed core count

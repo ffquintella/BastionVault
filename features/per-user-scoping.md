@@ -371,6 +371,28 @@ without forcing a migration. Policy templating (Phase 2), the owner
 backfill admin endpoint (migration story from the *Testing Plan*), and
 the GUI for sharing + owner transfer are all live.
 
+### The alias directory across namespaces
+
+`identity/entity/aliases` is what the GUI's grantee picker reads to turn a
+login into an `entity_id`. Its keyspace is partitioned per namespace —
+`identity-ns/<b64url(ns)>/alias/<mount>/<name>` — because the same external
+principal is a *different* entity in each namespace, and a namespace's
+partition only fills from logins that carried that namespace's header.
+
+Aliases otherwise live at root: `write_user` pre-provisions there so a
+freshly-created user is grantable before their first login, and operators who
+authenticate at root keep their root entity while switching namespaces in the
+GUI. A strictly namespace-scoped listing was therefore empty for them, which
+made sharing impossible outside root without pasting a raw UUID.
+
+A listing made from a namespace now returns that namespace's aliases **plus
+root's**; siblings stay isolated. Root is the parent of every namespace and
+owns the auth mounts a namespaced caller authenticates through, so nothing is
+disclosed that the caller could not enumerate from those mounts. Each record
+carries the `namespace` it came from and the two sets are concatenated, never
+merged: when a login exists in both, both `entity_id`s are shown, because only
+the one the grantee's token actually carries will match at access-check time.
+
 ### Per-object filtering of set-returning endpoints
 
 The design's step 4 ("for list operations, also filter the response keys by

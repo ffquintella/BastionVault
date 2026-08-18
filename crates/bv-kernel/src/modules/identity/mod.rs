@@ -1666,8 +1666,28 @@ impl IdentityBackendInner {
             .entity_store()
             .ok_or_else(|| bv_error_string!("entity store unavailable"))?;
 
+        // A namespace's alias keyspace holds only the principals that
+        // logged in *through* that namespace. Every other alias —
+        // including every user an admin created from inside the
+        // namespace, which `path_users` pre-provisions into root —
+        // lives in the root keyspace, so a namespace-only listing is
+        // empty on a deployment whose users authenticate at root. That
+        // made the GUI's grantee picker permanently empty outside root.
+        //
+        // Root aliases are therefore appended to a namespaced listing.
+        // Root is the parent of every namespace and owns the auth
+        // mounts a namespaced caller authenticates through, so this
+        // discloses nothing the caller cannot already reach by listing
+        // those mounts' principals. Sibling namespaces are *not*
+        // included — they stay isolated. Each record carries the
+        // namespace it came from rather than being silently merged, so
+        // a `(mount, name)` that exists in both appears twice, with the
+        // two distinct entity_ids visible to whoever picks a grantee.
         let ns = group_ns_from_req(req);
-        let aliases = store.list_aliases_ns(&ns).await?;
+        let mut aliases = store.list_aliases_ns(&ns).await?;
+        if !ns.is_empty() {
+            aliases.extend(store.list_aliases_ns("").await?);
+        }
         let arr = Value::Array(
             aliases
                 .iter()
@@ -1676,6 +1696,7 @@ impl IdentityBackendInner {
                     m.insert("mount".into(), Value::String(a.mount.clone()));
                     m.insert("name".into(), Value::String(a.name.clone()));
                     m.insert("entity_id".into(), Value::String(a.entity_id.clone()));
+                    m.insert("namespace".into(), Value::String(a.namespace.clone()));
                     Value::Object(m)
                 })
                 .collect(),

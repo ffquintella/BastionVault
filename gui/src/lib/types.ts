@@ -1007,6 +1007,10 @@ export interface EntityAliasInfo {
   mount: string;
   name: string;
   entity_id: string;
+  /** Namespace the alias was read from (`""` = root). A listing made from
+   *  a namespace also carries root's aliases, so the same login can appear
+   *  twice with different `entity_id`s — this is what tells them apart. */
+  namespace: string;
 }
 
 /** One row of the admin audit trail. `category` identifies the subsystem

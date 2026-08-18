@@ -41,6 +41,10 @@ pub struct EntityAliasInfo {
     pub mount: String,
     pub name: String,
     pub entity_id: String,
+    /// Namespace the alias was read from (`""` = root). A namespaced
+    /// listing also carries root's aliases, so the picker needs this
+    /// to tell two same-named principals apart.
+    pub namespace: String,
 }
 
 /// Enumerate every known alias so the frontend can resolve a login
@@ -48,6 +52,11 @@ pub struct EntityAliasInfo {
 /// the share dialog. Hits `identity/entity/aliases`, which is ACL-
 /// gated; callers without access get an empty list rather than a
 /// leak.
+///
+/// Scoped to the session's active namespace, which the backend
+/// answers with that namespace's aliases *plus* root's — see
+/// `handle_entity_aliases_list`. Each record's `namespace` says which
+/// keyspace it came from.
 #[tauri::command]
 pub async fn list_entity_aliases(
     state: State<'_, AppState>,
@@ -79,6 +88,11 @@ pub async fn list_entity_aliases(
                     .to_string(),
                 entity_id: o
                     .get("entity_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                namespace: o
+                    .get("namespace")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),

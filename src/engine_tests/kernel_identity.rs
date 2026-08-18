@@ -111,6 +111,150 @@ use serde_json::json;
         assert!(!still_there, "delete-user should forget the alias: {arr:?}");
     }
 
+    /// List `identity/entity/aliases` with an explicit namespace header.
+    /// `test_list_api` builds a header-less request, and the header is the
+    /// only thing that scopes this route.
+    #[maybe_async::maybe_async]
+    async fn list_aliases_in_ns(
+        core: &dyn VaultCtx,
+        token: &str,
+        ns: &str,
+    ) -> Vec<serde_json::Value> {
+        let mut req = Request::new("identity/entity/aliases");
+        req.operation = Operation::List;
+        req.client_token = token.to_string();
+        if !ns.is_empty() {
+            let mut headers = HashMap::new();
+            headers.insert("X-BastionVault-Namespace".to_string(), ns.to_string());
+            req.headers = Some(headers);
+        }
+        let resp = core.handle_request(&mut req).await.unwrap().unwrap();
+        resp.data
+            .and_then(|d| d.get("aliases").and_then(|v| v.as_array()).cloned())
+            .unwrap_or_default()
+    }
+
+    fn alias_named<'a>(
+        arr: &'a [serde_json::Value],
+        name: &str,
+    ) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+        arr.iter()
+            .filter_map(|v| v.as_object())
+            .find(|o| o.get("name").and_then(|v| v.as_str()) == Some(name))
+    }
+
+    /// Regression: the grantee picker was permanently empty in every
+    /// non-root namespace. Aliases are written to root — `write_user`
+    /// pre-provisions there unconditionally, and users on this deployment
+    /// authenticate at root — while the list route scoped itself to the
+    /// namespace header alone, so a namespaced caller saw zero grantees and
+    /// could not share anything without pasting a raw UUID.
+    ///
+    /// A namespaced listing must therefore carry root's aliases too, each
+    /// tagged with the namespace it came from, while a *sibling* namespace's
+    /// aliases stay invisible.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_entity_aliases_list_includes_root_in_namespace() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_entity_aliases_list_includes_root_in_namespace")
+                .await;
+
+        for ns in ["pns", "sib"] {
+            let _ = test_write_api(
+                &core,
+                &root_token,
+                &format!("sys/namespaces/{ns}"),
+                true,
+                json!({}).as_object().cloned(),
+            )
+            .await
+            .unwrap();
+        }
+
+        // A root user: created at root, alias pre-provisioned at root.
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "sys/auth/pass",
+            true,
+            json!({ "type": "userpass" }).as_object().cloned(),
+        )
+        .await;
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "auth/pass/users/rootuser",
+            true,
+            json!({ "password": "hunter22XX!", "token_policies": "default" })
+                .as_object()
+                .cloned(),
+        )
+        .await
+        .unwrap();
+
+        // An alias that only exists in the sibling namespace's keyspace —
+        // what a namespaced login would have created.
+        let store = EntityStore::new(&core).await.unwrap();
+        let sib_entity = store
+            .get_or_create_entity_ns("userpass/", "sibuser", "sib")
+            .await
+            .unwrap();
+
+        // Root's own listing is unchanged: root aliases, tagged root.
+        let at_root = list_aliases_in_ns(&core, &root_token, "").await;
+        let root_rec = alias_named(&at_root, "rootuser")
+            .unwrap_or_else(|| panic!("root listing must contain rootuser: {at_root:?}"));
+        assert_eq!(
+            root_rec.get("namespace").and_then(|v| v.as_str()),
+            Some(""),
+            "root alias must be tagged with the root namespace: {root_rec:?}"
+        );
+        assert!(
+            alias_named(&at_root, "sibuser").is_none(),
+            "a namespace's alias must not leak into root's listing: {at_root:?}"
+        );
+
+        // The regression itself: listing from `pns` sees root's user.
+        let in_pns = list_aliases_in_ns(&core, &root_token, "pns").await;
+        let seen = alias_named(&in_pns, "rootuser").unwrap_or_else(|| {
+            panic!("a namespaced listing must include root's aliases: {in_pns:?}")
+        });
+        assert_eq!(
+            seen.get("namespace").and_then(|v| v.as_str()),
+            Some(""),
+            "a root alias surfaced in a namespace must still say it is root's: {seen:?}"
+        );
+        assert!(
+            seen.get("entity_id").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false),
+            "grantee picker needs a usable entity_id: {seen:?}"
+        );
+
+        // ...but not the sibling's, which stays isolated.
+        assert!(
+            alias_named(&in_pns, "sibuser").is_none(),
+            "a sibling namespace's aliases must not be visible from `pns`: {in_pns:?}"
+        );
+
+        // The sibling's own listing has it, tagged with its namespace.
+        let in_sib = list_aliases_in_ns(&core, &root_token, "sib").await;
+        let sib_rec = alias_named(&in_sib, "sibuser")
+            .unwrap_or_else(|| panic!("`sib` must see its own alias: {in_sib:?}"));
+        assert_eq!(
+            sib_rec.get("namespace").and_then(|v| v.as_str()),
+            Some("sib"),
+            "a namespace-local alias must be tagged with its namespace: {sib_rec:?}"
+        );
+        assert_eq!(
+            sib_rec.get("entity_id").and_then(|v| v.as_str()),
+            Some(sib_entity.id.as_str()),
+            "the namespace-local entity_id is the one a namespaced login resolves to: {sib_rec:?}"
+        );
+        assert!(
+            alias_named(&in_sib, "rootuser").is_some(),
+            "`sib` must also see root's aliases: {in_sib:?}"
+        );
+    }
+
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_share_store_roundtrip_and_cascade() {
         let (_bvault, core, _root_token) =

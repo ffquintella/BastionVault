@@ -273,6 +273,7 @@ impl EntityStore {
                 mount: format!("{mount}/"),
                 name: name.to_string(),
                 entity_id: uuid,
+                namespace: ns_path.to_string(),
             });
         }
         out.sort_by(|a, b| {
@@ -294,4 +295,11 @@ pub struct AliasRecord {
     pub mount: String,
     pub name: String,
     pub entity_id: String,
+    /// Namespace whose alias keyspace this record was read from
+    /// (`""` = root). Two records can share a `(mount, name)` and
+    /// differ here: the same external principal resolves to a
+    /// distinct entity per namespace, so the namespace is what tells
+    /// them apart for a caller choosing a grantee.
+    #[serde(default)]
+    pub namespace: String,
 }
