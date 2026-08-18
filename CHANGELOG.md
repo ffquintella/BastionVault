@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.6] - 2026-08-18
+
 ### Fixed
 
 #### The unit suite no longer requires the `plugins-ext` submodule
