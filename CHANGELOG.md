@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.7] - 2026-08-18
+
 ### Fixed
 
 #### The grantee picker was empty in every non-root namespace
