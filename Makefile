@@ -292,7 +292,7 @@ test: require-nextest test-bin ## Run the unit test suite (lib + bins) with next
 
 # ── Inner loop: only what the change can have broken ──────────────
 #
-# `make test` links ~40 test harnesses, five of them 200 MB+. Paying that on
+# `make test` links ~44 test harnesses, five of them 200 MB+. Paying that on
 # every edit is the largest single sink of wall-clock time in development, and
 # nearly all of it goes on tests the edit cannot reach.
 #

@@ -29,9 +29,11 @@ commands at the same time (§5).
 
 ## 2. Architecture map
 
-Dependency direction is strictly upward: Tier 0 → 1 → 2 → 4. A crate never
-depends on a higher tier. `cargo check -p <pkg>` compiles only that crate and
-what is below it.
+Dependency direction is strictly upward. The tier numbers are historical, not
+an ordering — the real chain is 0 → 1 → 3 (engines) → 2 (`bv-core` →
+`bv-kernel` → the `bastion_vault` facade) → 4. A crate never depends on a
+higher tier. `cargo check -p <pkg>` compiles only that crate and what is below
+it.
 
 ### Tier 0 — substrate (`crates/`)
 
@@ -58,8 +60,10 @@ Editing this crate rebuilds every engine and everything above. Treat as high bla
 
 ### Tier 3 — engines and auth backends
 
-Each is `bv-kernel-api` + Tier 0 + its own domain deps, and **nothing else**.
-Unit tests are in-crate `#[cfg(test)]`. Test with `cargo nextest run -p <pkg> --lib`.
+Each is `bv-kernel-api` + Tier 0 + its own domain deps, and **nothing else** —
+except the auth backends, five of which depend on `bv-auth-audit` (the shared
+login-audit store) and two on a sibling backend. Unit tests are in-crate
+`#[cfg(test)]`. Test with `cargo nextest run -p <pkg> --lib`.
 
 | Package (`crates/…`) | Domain |
 |---|---|
@@ -84,27 +88,64 @@ Unit tests are in-crate `#[cfg(test)]`. Test with `cargo nextest run -p <pkg> --
 | `bv-auth-saml` | SAML |
 | `bv-auth-oidc` | OIDC |
 
-### Tier 2 — kernel tier: root crate `bastion_vault` (`src/`, ~66k lines)
+### Tier 2 — kernel tier: `bv-core`, `bv-kernel`, the `bastion_vault` facade
 
-One compilation unit. Any edit here rebuilds `bv-server`, `bvault-cli` and the GUI.
+Split in three by Phase 4.5. `bv-kernel` sits **above** `bv-core`: `Core` is the
+substrate the six kernel modules are built on, not their caller, and the eight
+edges that pointed the other way go through contracts in
+`bv_kernel_api::pipeline` / `::auth`. Do not re-derive that — the roadmap's
+Phase 4.5 section records it.
+
+| Package | Path | Purpose | Depends on |
+|---|---|---|---|
+| `bv-core` | `crates/bv-core` | Tier 2a, 6.4k lines. `Core`, mount table, module registry, `KernelServices` impl, seal path, HSM, config, logging | `bv-errors` `bv-logical` `bv-storage` `bv-audit` `bv-utils` `bv-shamir` `bv_crypto` `bv-kernel-api` |
+| `bv-kernel` | `crates/bv-kernel` | Tier 2b, 32k lines. The six kernel modules — the bulk of what the root crate used to be | `bv-core` `bv-kernel-api` + Tier 0 + `bv-auth-audit` `bv-auth-userpass` `bv-engine-files` `bv-engine-ssh` (audit stores + the userpass record) |
+| `bastion_vault` | `src/`, 28k lines (16k production) | The facade: mount list, plugin runtime, backup/exchange/exports, in-process API, and the tests that could not travel | `bv-core` `bv-kernel` + every engine and auth crate |
+
+An edit anywhere in this tier rebuilds `bv-server`, `bvault-cli` and the GUI.
+`bv-core` also rebuilds `bv-kernel` and the facade; the facade rebuilds nothing
+below it.
+
+#### `bv-core` — `crates/bv-core/src/`
 
 | Path | Responsibility |
 |---|---|
-| `src/core.rs`, `src/mount.rs`, `src/module_manager.rs`, `src/kernel_impl.rs` | Vault core, mount table, module registry, `KernelServices` impl |
-| `src/modules/auth/` | Token store, lease/expiration manager |
-| `src/modules/identity/` | Entities, groups, aliases |
-| `src/modules/policy/` | Policy store + evaluation (largest kernel module) |
-| `src/modules/namespace/` | Namespaces / multi-tenancy |
-| `src/modules/resource_group/` | Resource groups |
-| `src/modules/system/` | `sys/` backend: mounts, seal, remount, health |
+| `core.rs`, `mount.rs`, `module_manager.rs`, `kernel_impl.rs` | Vault core, mount table, module registry, `KernelServices` impl |
+| `seal/` | Seal/unseal, incl. the HSM-backed seal (`seal/hsm.rs`) |
+| `hsm/` | HSM backends (`hsm_mock`, `hsm_yubihsm2`), enroll, custody, replicate, derive |
+| `config.rs`, `logging.rs`, `server_info.rs` | HCL config, logging, server identity |
+
+The `hsm_mock` / `hsm_yubihsm2` features live here and are forwarded
+`bvault-cli` → `bastion_vault` → `bv-core`. Nothing else in the workspace
+compiles them — verify a feature change with `make check-hsm` (§4), not by
+reading the manifest.
+
+#### `bv-kernel` — `crates/bv-kernel/src/modules/`
+
+| Path | Responsibility |
+|---|---|
+| `auth/` | Token store, lease/expiration manager |
+| `identity/` | Entities, groups, aliases |
+| `policy/` | Policy store + evaluation (largest kernel module) |
+| `namespace/` | Namespaces / multi-tenancy |
+| `resource_group/` | Resource groups |
+| `system/` | `sys/` backend: mounts, seal, remount, health |
+| `credential/` | The two-entry subset of the facade's credential list the kernel itself reads |
+| `crypto/` | Retired placeholder; the crypto is `bv_crypto` |
+
+#### `bastion_vault` — `src/`
+
+| Path | Responsibility |
+|---|---|
+| `src/lib.rs`, `src/modules/` | The facade itself: re-exports `bv-core` and `bv-kernel` under the paths they have always had, plus the full engine mount list |
 | `src/plugins/` | WASM (wasmtime) + process plugin runtime, catalog, grants, verifier, quarantine |
 | `src/backup/`, `src/exchange/`, `src/scheduled_exports/` | BVBK backup, `.bvx` import/export, cron exports |
-| `src/seal/`, `src/config.rs`, `src/logging.rs` | Seal/unseal, HCL config, logging |
 | `src/api/` | In-process client API |
 | `src/audit/` | `sys_emit` glue above `bv-audit` |
 | `src/dos/`, `src/metrics/` | DoS store + metrics registry glue (middleware lives in `bv-server`) |
 | `src/test_utils.rs` | `new_test_bastion_vault`, seal helpers, `test_*_api` (feature `test-support`) |
 | `src/engine_tests/` | Engine tests that need `test_utils` and therefore cannot live in the engine crate |
+| `src/core_tests.rs`, `src/storage_backend_tests.rs` | `Core` and storage-backend tests, here for the same reason |
 
 ### Tier 4 — assembly
 
@@ -121,14 +162,19 @@ One compilation unit. Any edit here rebuilds `bv-server`, `bvault-cli` and the G
 
 GUI frontend: `gui/src/` (React 19 + TS + Tailwind 4), tests co-located as `*.test.tsx`.
 
-Note: `bastion_vault` **dev**-depends on `bv-server` (a deliberate dev-only cycle) so the
-~50 tests that drive a real HTTP server can stay in the root crate.
+Note: two deliberate dev-only cycles. `bastion_vault` **dev**-depends on
+`bv-server` so the ~50 tests that drive a real HTTP server can stay in the root
+crate, and `bv-kernel` **dev**-depends on `bastion_vault` so its ~200 tests can
+reach `test_utils`. A dev-dependency cycle is fine for fixtures used as values
+and **unsound** for anything resolved by `TypeId`, `Any::downcast` or a
+type-keyed registry — that is why 25 kernel tests live in `src/engine_tests/`
+instead. See the roadmap's Phase 4.5 section.
 
 ### Reference docs — read instead of re-deriving
 
 | Doc | Use for |
 |---|---|
-| `roadmaps/workspace-decomposition.md` | Why the tiers exist, what each phase moved, measured deltas. Phases 0–5 done; only Phase 6 (per-crate publishing) is left. |
+| `roadmaps/workspace-decomposition.md` | Why the tiers exist, what each phase moved, measured deltas. Every phase (0–6, incl. 4.5, the Tier 2 split) is done; what is left is cutting the first release by hand. |
 | `.config/nextest.toml` | Which suites are excluded from nextest and why (read before touching test scope) |
 | `scripts/ci-plan.sh`, `.github/workflows/tests.yml` | What CI runs and how it decides — read before changing test scope or cache keys |
 | `docs/publishing-crates.md`, `scripts/crates-plan.sh` | Per-crate versions and the Cloudsmith release loop — read before touching any `version` field |
@@ -145,8 +191,10 @@ Note: `bastion_vault` **dev**-depends on `bv-server` (a deliberate dev-only cycl
 | One engine/auth crate | `cargo check -p <pkg>` | `cargo nextest run -p <pkg> --lib` | Root only if its public API changed |
 | `bv-kernel-api` | `cargo check -p bv-kernel-api` | one dependent engine | `cargo check --lib`, then L3 |
 | `bv-storage` / `bv-logical` / `bv-utils` / `bv-audit` | `cargo check -p <pkg>` | `cargo nextest run -p <pkg> --lib` | one engine, then `cargo check --lib` |
+| `crates/bv-core` | `cargo check -p bv-core` | `cargo nextest run -p bv-core --lib` | `cargo check -p bv-kernel --lib`, then L3 — it rebuilds the whole tier |
 | `crates/bv-core/src/hsm/` | `make check-hsm` | `cargo nextest run -p bv-core --lib` | nothing else compiles these — see L4 |
-| `src/` (root crate) | `cargo check --lib` | `cargo nextest run -p bastion_vault --lib` | `cargo check -p bv-server -p bvault-cli` |
+| `crates/bv-kernel` | `cargo check -p bv-kernel` | `cargo nextest run -p bv-kernel --lib` | `cargo check --lib`, then `-p bv-server -p bvault-cli` |
+| `src/` (the facade) | `cargo check --lib` | `cargo nextest run -p bastion_vault --lib` | `cargo check -p bv-server -p bvault-cli` |
 | `crates/bv-server` | `cargo check -p bv-server` | `cargo nextest run -p bv-server --lib` | nothing above it |
 | `crates/bvault-cli` | `cargo check -p bvault-cli` | `make test-bin` then CLI tests | nothing above it |
 | `gui/src/` | `cd gui && npx tsc --noEmit` | `npx vitest run <file>` | — |
@@ -155,8 +203,9 @@ Note: `bastion_vault` **dev**-depends on `bv-server` (a deliberate dev-only cycl
 The "Then" column is the same reverse-dependency walk `make test-changed`
 performs from the cargo graph. Use it as the check that you got the radius
 right — `make test-plan` prints the set without building anything. Measured
-widths today: one engine → 4 of 40 packages, `bv-kernel-api` → 25, `bv-errors` →
-32.
+widths today (of 41 packages `test-plan` considers): one engine → 5,
+`bv-kernel` or the facade → 4, `bv-core` → 5, `bv-kernel-api` → 26, `bv-errors`
+→ 33.
 
 ---
 
@@ -192,8 +241,8 @@ make test-changed    # run them
 `test-changed` derives the set from `git diff` + the cargo dependency graph
 (reverse deps, dev-dependencies included) and runs `cargo nextest run -p ...
 --lib` over just that. It is the correct default at this level: `make test`
-links ~40 test harnesses, five of them 200 MB+, and a one-engine change reaches
-4 of 40 packages.
+links ~44 test harnesses, five of them 200 MB+, and a one-engine change reaches
+5 of 41 packages.
 
 ```bash
 make test-changed BASE=main         # + everything committed since merge-base(main)
@@ -280,7 +329,7 @@ what §4's L1–L3 are for.
 | Kind | Location | Command |
 |---|---|---|
 | Unit | in-crate `#[cfg(test)]` | `cargo nextest run -p <pkg> --lib` |
-| Engine tests needing `test_utils` | `src/engine_tests/` | part of `-p bastion_vault --lib` |
+| Tests needing `test_utils` (engines, `Core`, 25 kernel tests) | `src/engine_tests/`, `src/core_tests.rs` | part of `-p bastion_vault --lib` |
 | Integration (~30 bins) | `tests/test_*.rs` | `--test <name>` for one; `make test-integration` for all |
 | Standalone crate tests | `crates/bv-client/tests`, `crates/bv_crypto/tests` | `cargo nextest run -p bv-client` |
 | Cucumber | `tests/features/*.feature`, `tests/cucumber_hiqlite.rs` | `make test-cucumber` |

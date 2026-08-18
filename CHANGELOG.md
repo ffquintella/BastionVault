@@ -45,6 +45,30 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+#### The agent architecture map catches up with the Tier 2 split
+- **`AGENTS.md` §2 still described the pre-Phase-4.5 layout.** It had no entry
+  for `bv-core` or `bv-kernel`, and its path table pointed at `src/core.rs`,
+  `src/seal/`, `src/config.rs` and the six `src/modules/*` kernel modules --
+  none of which resolve since the Tier 2 split. The root crate was billed as
+  "one compilation unit, ~66k lines" when it is now a 28k-line facade.
+  (`roadmaps/workspace-decomposition.md` § Phase 4.5)
+- **Tier 2 is now a package table for the three crates that make it up**, with
+  dependency sets read off `cargo metadata` and one path sub-table each for
+  `bv-core`, `bv-kernel` and the facade. §3 gains `bv-core` and `bv-kernel`
+  blast-radius rows. Every path in §2 verified to resolve on disk.
+- **Re-measure the reverse-dependency widths**, which moved with the member
+  count: one engine reaches 5 of 41 packages and not 4 of 40, `bv-kernel-api`
+  26, `bv-errors` 33. Correct the same stale figure where §4 repeats it, and
+  the `~40 test harnesses` in the `Makefile` comment §4 paraphrases -- `make
+  test` links 44 (40 lib + 4 bin).
+- **Two inaccuracies pre-dating the split**: Tier 3's "nothing else" was false
+  for the auth backends (five depend on `bv-auth-audit`), and the dev-cycle
+  note covered only `bastion_vault` -> `bv-server`, not `bv-kernel` ->
+  `bastion_vault` and the `TypeId` rule that keeps 25 kernel tests in
+  `src/engine_tests/`.
+
 ## [0.41.4] - 2026-08-18
 
 ### Fixed
