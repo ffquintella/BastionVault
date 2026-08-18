@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.5] - 2026-08-18
+
 ### Fixed
 
 #### The agent architecture map catches up with the Tier 2 split
