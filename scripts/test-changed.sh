@@ -360,6 +360,15 @@ with open(os.path.join(work, "plan.json"), "w") as fh:
             ),
             "needs_bvault_bin": bvault_bin,
             "ci_files": sorted(ci_files),
+            # The container image's build recipe. `deploy/` is in
+            # IGNORED_PREFIXES because a Containerfile cannot break a Rust test
+            # — but it declares BVAULT_FEATURES, which is the ONLY place in the
+            # repo that turns the HSM seal backends on, and scripts/check-hsm.sh
+            # reads it. Reported so scripts/ci-plan.sh can gate the hsm job on a
+            # change to it; still ignored for test selection.
+            "hsm_files": sorted(
+                f for f in files if f == "deploy/container/Containerfile"
+            ),
             # Any manifest, not just the root one GLOBAL catches. A
             # `crates/*/Cargo.toml` edit is package-local for test *selection*
             # but not for feature unification, which is what the isolation job
@@ -460,8 +469,14 @@ fi
 # sets `rust-analyzer.cargo.targetDir`, so its on-save check holds a different
 # lock. Anything this catches is a real second build.
 if command -v pgrep >/dev/null 2>&1; then
+  # `|| true` is load-bearing under `set -o pipefail`: pgrep exits 1 when it
+  # matches nothing, and so does `grep -v` when it emits no lines — so on a
+  # quiet machine, which is the normal case, the pipeline returned 1, the
+  # assignment failed, and `set -e` killed the run HERE, after printing the
+  # plan and before running a single test. `--json` (and therefore all of CI)
+  # returns above this point, which is why it stayed hidden.
   OTHER=$(pgrep -f '/cargo (build|check|test|nextest|clippy|run|doc)' 2>/dev/null \
-          | grep -v "^$$\$" | wc -l | tr -d ' ')
+          | grep -v "^$$\$" | wc -l | tr -d ' ' || true)
   if [[ "${OTHER:-0}" -gt 0 ]]; then
     echo ""
     echo "    WARNING: $OTHER other cargo process(es) are running."

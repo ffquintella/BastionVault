@@ -321,6 +321,40 @@ Dependencies: `yubihsm` crate (with `mockhsm` for the mock feature), behind `hsm
 
 ## Testing Requirements
 
+### Build coverage (`make check-hsm`)
+
+Both backends are off by default in every build in the repository, and
+`--all-features` is banned by AGENTS.md §5 (it pulls the vendored-libusb C
+build, `storage_mysql`, every cloud target and every PQC preview at once). So
+until this target existed, **nothing compiled the seal backends at all** --
+`cargo check --workspace --all-targets`, `make check-isolated`, `make test` and
+every CI matrix are default-features builds, and the code below is entirely
+behind `#[cfg(feature = "hsm_mock")]` / `#[cfg(feature = "hsm_yubihsm2")]`. The
+first build to notice a break was the official container image, which bakes in
+`BVAULT_FEATURES="hsm_mock,hsm_yubihsm2"`, minutes into a cross-compile -- twice,
+most recently a `bv-core` that named `x509_cert` without depending on it after
+Phase 4.5 moved `src/hsm/` down into that crate.
+
+`make check-hsm` (`scripts/check-hsm.sh`, CI job `hsm`) covers this in two
+halves:
+
+1. **The feature chain**, from `cargo metadata`, compiling nothing:
+   `bvault-cli/hsm_*` -> `bastion_vault/hsm_*` -> `bv-core/hsm_*`. A cut link is
+   the quiet failure -- `--features hsm_yubihsm2` would resolve, do nothing, and
+   ship a binary with no backend in it.
+2. **`cargo check -p bv-core --features hsm_mock,hsm_yubihsm2`.** Every
+   `#[cfg(feature = "hsm_*")]` site in the workspace is in `bv-core`, so this
+   one crate is the whole compile-error surface (~35 s). Re-derive that claim
+   with `grep -rn 'feature *= *"hsm_' --include='*.rs' src/ crates/`.
+
+The feature list is read out of `deploy/container/Containerfile`, not restated,
+so the check tracks the image. `make check-hsm DEEP=1` additionally builds the
+image's own graph (`-p bvault-cli`); it is part of `make test-release`, not of
+the per-change path.
+
+This is build coverage, not behavioural coverage -- it proves the backends
+compile, and the suites below prove they work.
+
 ### Unit Tests (mock backend, no hardware)
 - Wrap/unwrap round-trip; unwrap fails under a different context string, purpose, or epoch.
 - Signed unwrap authorization: missing/invalid/replayed (stale counter) authorizations are rejected.

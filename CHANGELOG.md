@@ -45,6 +45,45 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### `make check-hsm` -- the seal backends get compiled somewhere other than the release image
+- **New target and CI job covering `hsm_mock` / `hsm_yubihsm2`
+  (`scripts/check-hsm.sh`, Makefile `check-hsm`, `tests.yml` job `hsm`).**
+  Both backends are off in every default build and `--all-features` is banned
+  by AGENTS.md §5, so the workspace gate, `make check-isolated`, `make test`
+  and every CI matrix compiled *around* the seal path rather than through it.
+  The first build that ever compiled it was the official container image, which
+  bakes in `BVAULT_FEATURES="hsm_mock,hsm_yubihsm2"` -- roughly six minutes into
+  a cross-compile, twice.
+- Two halves, both cheap. A `cargo metadata` walk asserts the feature chain
+  (`bvault-cli` -> `bastion_vault` -> `bv-core`) still carries the flags down,
+  which compiles nothing and catches the quiet failure where `--features
+  hsm_yubihsm2` resolves, does nothing, and ships a binary with no backend.
+  Then `cargo check -p bv-core --features hsm_mock,hsm_yubihsm2` -- `bv-core`
+  holds every `#[cfg(feature = "hsm_*")]` site in the workspace, so it is the
+  whole compile-error surface, at ~35 s against `-p bvault-cli`'s rebuild of the
+  root crate, `bv-server` and the CLI.
+- The feature list is read out of `deploy/container/Containerfile` rather than
+  restated, so the check tracks the image. `make check-hsm DEEP=1` runs the
+  image's real graph and is wired into `make test-release`, not into the
+  per-pull-request path.
+- Planned like every other job: `scripts/ci-plan.sh` emits `run_hsm`, gated on
+  `bv-core` being affected, any manifest changing, or the Containerfile moving
+  (`scripts/test-changed.sh` reports the last of these as `hsm_files`).
+
+### Fixed
+
+#### `make test-changed` ran no tests
+- **The L3 gate aborted at its own concurrency guard** (`scripts/test-changed.sh`).
+  Under `set -o pipefail`, `pgrep` exits 1 when it matches nothing and so does
+  the `grep -v` behind it, so on a quiet machine -- the normal case, and the
+  only case in which the guard has nothing to warn about -- the assignment
+  failed, `set -e` fired, and the script exited 1 after printing the plan and
+  before running a single test. `make test-changed` therefore reported
+  `make: *** [test-changed] Error 1` with no test output at all. CI was never
+  affected: `--json` returns above that point, which is why it went unnoticed.
+
 ## [0.41.2] - 2026-08-18
 
 ### Fixed

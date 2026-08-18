@@ -98,7 +98,6 @@ One compilation unit. Any edit here rebuilds `bv-server`, `bvault-cli` and the G
 | `src/modules/resource_group/` | Resource groups |
 | `src/modules/system/` | `sys/` backend: mounts, seal, remount, health |
 | `src/plugins/` | WASM (wasmtime) + process plugin runtime, catalog, grants, verifier, quarantine |
-| `src/hsm/` | HSM backends (`hsm_mock`, `hsm_yubihsm2`) |
 | `src/backup/`, `src/exchange/`, `src/scheduled_exports/` | BVBK backup, `.bvx` import/export, cron exports |
 | `src/seal/`, `src/config.rs`, `src/logging.rs` | Seal/unseal, HCL config, logging |
 | `src/api/` | In-process client API |
@@ -146,6 +145,7 @@ Note: `bastion_vault` **dev**-depends on `bv-server` (a deliberate dev-only cycl
 | One engine/auth crate | `cargo check -p <pkg>` | `cargo nextest run -p <pkg> --lib` | Root only if its public API changed |
 | `bv-kernel-api` | `cargo check -p bv-kernel-api` | one dependent engine | `cargo check --lib`, then L3 |
 | `bv-storage` / `bv-logical` / `bv-utils` / `bv-audit` | `cargo check -p <pkg>` | `cargo nextest run -p <pkg> --lib` | one engine, then `cargo check --lib` |
+| `crates/bv-core/src/hsm/` | `make check-hsm` | `cargo nextest run -p bv-core --lib` | nothing else compiles these — see L4 |
 | `src/` (root crate) | `cargo check --lib` | `cargo nextest run -p bastion_vault --lib` | `cargo check -p bv-server -p bvault-cli` |
 | `crates/bv-server` | `cargo check -p bv-server` | `cargo nextest run -p bv-server --lib` | nothing above it |
 | `crates/bvault-cli` | `cargo check -p bvault-cli` | `make test-bin` then CLI tests | nothing above it |
@@ -221,8 +221,8 @@ make test-release   # every suite in the repo, in order (tens of minutes)
 Required before cutting a release, and before merging anything that touches a
 persisted format, a storage barrier, authn/authz, or the plugin ABI. Runs
 `test`, `test-integration`, `test-doc`, `test-hiqlite`, `test-cucumber`,
-`plugins-test`, `gui-check`, `gui-test`. Only `tests/e2e/rustion-ssh` is left
-out — it needs real remote hosts.
+`plugins-test`, `gui-check`, `gui-test` and `check-hsm DEEP=1`. Only
+`tests/e2e/rustion-ssh` is left out — it needs real remote hosts.
 
 The pieces, when you want one of them on its own:
 
@@ -231,14 +231,27 @@ make test-integration   # tests/: ~30 binaries, each links the full graph + a 24
 make test-hiqlite       # port-bound, single process, CARGO_TEST_HIQLITE=1
 make test-cucumber      # harness = false, fixed ports 28100/28200
 make plugins-test       # testkit + host ABI parity + plugin substrate
+make check-hsm          # the HSM seal backends; DEEP=1 for the container image's own graph
 make test-all           # test + test-integration + test-doc
 make build              # release build
 ```
 
+`check-hsm` is the only thing in this file that compiles `hsm_mock` /
+`hsm_yubihsm2`. They are off in every default build and `--all-features` is
+banned (§5), so `cargo check --workspace`, `check-isolated` and every test
+target compile *around* the seal backends rather than through them — the first
+build to notice a break was the container image, minutes into a cross-compile,
+twice. It stops at `bv-core` (every `#[cfg(feature = "hsm_*")]` site in the
+workspace is there) and walks the feature chain above it from `cargo metadata`,
+so the cheap form costs ~35 s. Run it after touching anything under
+`crates/bv-core/src/hsm/`, `bv-core`'s manifest, or the feature declarations
+that pass the flags down.
+
 CI (`.github/workflows/tests.yml`) runs **everything except
 `tests/e2e/rustion-ssh`** — unit, doctests, `tests/`, hiqlite, cucumber, the
-per-crate isolation check, and the GUI. A push to `main` runs the lot; a pull
-request runs only the packages the change can reach, derived from the same
+per-crate isolation check, the HSM seal backends, and the GUI. A push to `main`
+runs the lot; a pull request runs only the packages the change can reach,
+derived from the same
 `cargo metadata` graph `make test-changed` uses. `make ci-plan` prints that plan
 locally without building anything:
 
@@ -246,6 +259,7 @@ locally without building anything:
 make ci-plan BASE=main          # what CI will do with this branch
 make ci-plan PKG=bv-engine-pki  # what it would do if you touched that crate
 make check-isolated             # cargo check every member on its own
+make check-hsm                  # the seal backends, which no other build compiles
 ```
 
 Do not weaken it, and do not reproduce it locally after every edit — that is

@@ -111,7 +111,7 @@ endif
 # affect cargo's own internal parallelism, which is where the cores actually go.
 .NOTPARALLEL:
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated test-integration test-doc test-cucumber test-hiqlite test-all test-release docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-integration test-doc test-cucumber test-hiqlite test-all test-release docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -373,6 +373,35 @@ check-isolated: prune-stale ## cargo check every workspace member on its own (ca
 	echo ""; \
 	echo "==> check-isolated: all $$n members build on their own."
 
+# ── The HSM seal backends ─────────────────────────────────────────
+#
+# The one part of the workspace that NO other target compiles. `hsm_mock` and
+# `hsm_yubihsm2` are off by default everywhere, `--all-features` is banned
+# (AGENTS.md §5), and `check-isolated` above checks each member with default
+# features — so the whole seal-backend surface was unbuilt until the official
+# container image built it, twice, minutes into a cross-compile.
+#
+# Two halves, both in scripts/check-hsm.sh: a cargo-metadata walk of the
+# feature chain (bvault-cli -> bastion_vault -> bv-core; compiles nothing) and
+# `cargo check -p bv-core --features <both>`. bv-core is the whole compile-error
+# surface because every `#[cfg(feature = "hsm_*")]` site in the workspace lives
+# there; the script's header shows how to re-derive that.
+#
+# DEEP=1 also checks `-p bvault-cli`, which is the image's own build graph.
+# Measured at 53 s wall / 213 s CPU on a warm local tree, against ~6 s for the
+# cheap form. It is kept out of the per-change path on grounds of what it adds
+# rather than what it costs: bv-core is already the entire compile-error
+# surface, so DEEP re-checks the same ten cfg blocks through 70k more lines of
+# root crate, bv-server and CLI. It runs in `make test-release`, where the
+# question is "would the release image build?" rather than "did I break it?".
+#
+# Note this pulls `yubihsm` + `rusb`, and rusb's `vendored` feature compiles
+# libusb from C source via its build script — which `cargo check` runs. That is
+# the bulk of a cold run here (~35 s on a warm target dir); it is also the
+# reason this is its own target and not folded into `check-isolated`.
+check-hsm: prune-stale ## cargo check the HSM seal backends (nothing else compiles them; DEEP=1 for the image's graph)
+	@scripts/check-hsm.sh $(if $(DEEP),--deep)
+
 test-integration: require-nextest prune-stale ## Run the tests/ integration suite with nextest (links ~30 binaries; slow)
 	cargo nextest run $(TEST_SCOPE) --tests
 
@@ -423,13 +452,17 @@ test-all: test test-integration test-doc ## Run unit + integration + doctests (e
 # Deliberately NOT here: `make build` (a release *build* is its own step) and
 # `tests/e2e/rustion-ssh` (needs real remote hosts, cannot be hermetic).
 test-release: require-nextest ## Every suite, for a release or a high-risk merge (slow: tens of minutes)
-	@echo "==> [1/7] unit tests (lib + bins)"      && $(MAKE) --no-print-directory test
-	@echo "==> [2/7] integration tests (tests/)"   && $(MAKE) --no-print-directory test-integration
-	@echo "==> [3/7] doctests"                     && $(MAKE) --no-print-directory test-doc
-	@echo "==> [4/7] hiqlite storage + HA"         && $(MAKE) --no-print-directory test-hiqlite
-	@echo "==> [5/7] cucumber features"            && $(MAKE) --no-print-directory test-cucumber
-	@echo "==> [6/7] plugin ABI + substrate"       && $(MAKE) --no-print-directory plugins-test
-	@echo "==> [7/7] GUI typecheck + vitest"       && $(MAKE) --no-print-directory gui-check gui-test
+	@echo "==> [1/8] unit tests (lib + bins)"      && $(MAKE) --no-print-directory test
+	@echo "==> [2/8] integration tests (tests/)"   && $(MAKE) --no-print-directory test-integration
+	@echo "==> [3/8] doctests"                     && $(MAKE) --no-print-directory test-doc
+	@echo "==> [4/8] hiqlite storage + HA"         && $(MAKE) --no-print-directory test-hiqlite
+	@echo "==> [5/8] cucumber features"            && $(MAKE) --no-print-directory test-cucumber
+	@echo "==> [6/8] plugin ABI + substrate"       && $(MAKE) --no-print-directory plugins-test
+	@echo "==> [7/8] GUI typecheck + vitest"       && $(MAKE) --no-print-directory gui-check gui-test
+	@# DEEP=1, not the cheap per-change variant: a release cuts the container
+	@# image, and the image builds `-p bvault-cli` with both HSM backends. This
+	@# is the one place that is worth paying for the image's real graph.
+	@echo "==> [8/8] HSM seal backends (image graph)" && $(MAKE) --no-print-directory check-hsm DEEP=1
 	@echo ""
 	@echo "==> test-release complete: every suite in this repo passed."
 	@echo "    Not covered (needs real hosts, run by hand): tests/e2e/rustion-ssh"

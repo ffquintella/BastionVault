@@ -1598,6 +1598,25 @@ are seal-path features an operator turns on for real hardware. They forward
 `yubihsm` / `rusb` deps moved with them. Verified by building with the
 feature on, not by reading the manifest.
 
+> **Correction (2026-08-18).** That last sentence did not hold for
+> `hsm_yubihsm2`. The forwarding was right and the `yubihsm` / `rusb` deps did
+> move — but `x509-cert`, which `hsm/yubihsm2.rs` uses to parse the attestation
+> certificate, did **not**, so the crate named a dependency its own manifest
+> did not declare and `--features hsm_yubihsm2` failed at `E0433`. Nothing
+> caught it, because "verified by building with the feature on" was a one-off
+> by hand and no target in the repository repeats it: the backends are off in
+> every default build and AGENTS.md §5 bans `--all-features`, so the CI gate,
+> `check-isolated`, `make test` and every matrix in Phase 5's table are
+> default-features builds that compile *around* this code. The first build to
+> notice was the container image (`BVAULT_FEATURES="hsm_mock,hsm_yubihsm2"`),
+> minutes into a cross-compile — the same failure mode, and the same discovery
+> channel, as the `--bin bvault` package-selection bug in 0.41.1.
+>
+> The fix is that the one-off is now a target: `make check-hsm` (the `hsm` job
+> below). It also asserts the forwarding this section describes, from
+> `cargo metadata` rather than by reading manifests — a leaf feature like
+> `hsm_mock` gates no dependency, so `cargo tree` cannot see the chain at all.
+
 ### Phase 5 — CI shape — **done**
 
 The plan, kept as written, because three of its five bullets did not survive:
@@ -1632,6 +1651,7 @@ request runs only what the change can reach.
 | `hiqlite` | `make test-hiqlite` | `bv-storage` affected |
 | `cucumber` | `make test-cucumber` | root crate affected |
 | `isolation` | `make check-isolated` — `cargo check -p X` over every member | any manifest changed |
+| `hsm` | `make check-hsm` — the seal backends, which no other job compiles | `bv-core` affected, any manifest changed, or the Containerfile moved |
 | `gui` | `tsc --noEmit` + vitest | `gui/` changed |
 | `deps` | `cargo machete`, advisory | always |
 | `required` | one status for branch protection | always |

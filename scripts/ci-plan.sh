@@ -37,6 +37,8 @@
 #   hiqlite        the port-bound storage/HA suites, when bv-storage is affected
 #   cucumber       the harness = false suite, when the root crate is affected
 #   isolation      `cargo check -p X` over every member, when any manifest moved
+#   hsm            `make check-hsm`, when bv-core, a manifest or the image recipe
+#                  moved — the seal backends are off in every other job
 #   gui            tsc + vitest, when gui/ (not gui/src-tauri) moved
 #
 # The `check` gate job in tests.yml is unconditional and is not planned here.
@@ -167,6 +169,26 @@ run_cucumber = full or "bastion_vault" in lib_pkgs
 # That is the Phase 4.5 `log/std` bug exactly: `cargo check --workspace` stayed
 # green while `cargo check -p bv-server` was broken.
 run_isolation = full or bool(plan["manifest_files"])
+# The HSM seal backends are compiled by NOTHING else in this file: they are off
+# by default, `--all-features` is banned, and the isolation job checks each
+# member with default features. Three inputs can break them, so all three gate:
+#
+#   bv-core in lib_pkgs   every `#[cfg(feature = "hsm_*")]` site lives there,
+#                         so this covers the code and everything beneath it
+#   manifest_files        the Phase 4.5 break was a MISSING dependency, and the
+#                         pass-through feature declarations that carry the flag
+#                         down to bv-core live in manifests above it. Broad on
+#                         purpose, and cheap: any manifest change is already
+#                         paying for the isolation job.
+#   hsm_files             deploy/container/Containerfile, which is where
+#                         BVAULT_FEATURES is declared and where check-hsm reads
+#                         the feature list from
+run_hsm = (
+    full
+    or "bv-core" in lib_pkgs
+    or bool(plan["manifest_files"])
+    or bool(plan["hsm_files"])
+)
 
 out = {
     "full": "true" if full else "false",
@@ -179,6 +201,7 @@ out = {
     "run_hiqlite": "true" if run_hiqlite else "false",
     "run_cucumber": "true" if run_cucumber else "false",
     "run_isolation": "true" if run_isolation else "false",
+    "run_hsm": "true" if run_hsm else "false",
 }
 
 def write(path, text):
@@ -213,6 +236,7 @@ lines = [
     f"| hiqlite | {'run' if run_hiqlite else 'skipped (bv-storage not affected)'} |",
     f"| cucumber | {'run' if run_cucumber else 'skipped (root crate not affected)'} |",
     f"| isolation | {'run' if run_isolation else 'skipped (no manifest changed)'} |",
+    f"| hsm | {'run' if run_hsm else 'skipped (bv-core, manifests and the image recipe all untouched)'} |",
     f"| gui | {'run' if run_gui else 'skipped (gui/ not touched)'} |",
 ]
 if plan["global_hits"]:

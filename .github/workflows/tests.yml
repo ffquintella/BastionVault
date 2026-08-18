@@ -20,6 +20,11 @@ name: Tests
 #     nextest's process-per-test would collide — see .config/nextest.toml)
 #   * the cucumber feature suite (`harness = false`, so nextest cannot
 #     enumerate it)
+#   * `make check-hsm` — the `hsm_mock` / `hsm_yubihsm2` seal backends, which
+#     NOTHING else here compiles: they are off in every default build and
+#     `--all-features` is banned (AGENTS.md §5), so the whole surface was
+#     unbuilt until the container image built it, twice, minutes into a
+#     cross-compile
 #   * `cargo check -p <crate>` over every member in isolation, because
 #     `cargo check --workspace` is NOT a proxy for "each crate builds": feature
 #     unification makes it strictly weaker, and Phase 4.5 shipped a `bv-server`
@@ -91,6 +96,7 @@ jobs:
       run_hiqlite: ${{ steps.plan.outputs.run_hiqlite }}
       run_cucumber: ${{ steps.plan.outputs.run_cucumber }}
       run_isolation: ${{ steps.plan.outputs.run_isolation }}
+      run_hsm: ${{ steps.plan.outputs.run_hsm }}
       run_gui: ${{ steps.plan.outputs.run_gui }}
 
     steps:
@@ -428,6 +434,56 @@ jobs:
       - name: cargo check -p <crate>, for every member
         run: make check-isolated
 
+  # ── The seal backends, which nothing else builds ────────────────
+  #
+  # `hsm_mock` and `hsm_yubihsm2` are off by default in every build in this
+  # file, and AGENTS.md §5 bans `--all-features` — so the workspace gate, the
+  # isolation job and every test matrix all compiled around this code rather
+  # than through it. The first build to notice was deploy/container/Containerfile,
+  # which bakes in BVAULT_FEATURES; it found a `bv-core` naming `x509_cert`
+  # without depending on it (Phase 4.5 moved `src/hsm/` down and left the
+  # dependency in the root manifest) roughly six minutes into a cross-compile.
+  #
+  # Cheap because it stops at `bv-core`: every `#[cfg(feature = "hsm_*")]` site
+  # in the workspace is there, so `-p bv-core` is the whole compile-error
+  # surface, and the crates above it are covered by a cargo-metadata walk of the
+  # feature chain that compiles nothing. `make check-hsm DEEP=1` builds the
+  # image's real graph (`-p bvault-cli`) and is deliberately NOT run here: it
+  # re-checks the same ten cfg blocks through 70k more lines of root crate,
+  # bv-server and CLI. `make test-release` runs it, which is where the question
+  # is "would the release image build?" rather than "did this change break it?".
+  #
+  # Budget note: this is the only job that builds `yubihsm` + `rusb`, and rusb's
+  # `vendored` feature compiles libusb from C source in a build script, which
+  # `cargo check` runs. Those three crates are NOT in the `check` cache — that
+  # key is written by the workspace gate, which does not enable these features —
+  # so they are rebuilt on every run of this job. Measured at ~35 s locally on a
+  # warm target dir; everything beneath bv-core does restore from the cache,
+  # because neither feature changes how Tier 0/1 is compiled.
+  hsm:
+    name: HSM seal backends
+    needs: plan
+    if: needs.plan.outputs.run_hsm == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      # The `check` key, not `build`: this job runs cargo check.
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: check
+          nextest: "false"
+
+      # Via make so the feature list has ONE definition. The script reads
+      # BVAULT_FEATURES out of the Containerfile rather than restating it, so
+      # this job tracks the image instead of drifting from it.
+      - name: make check-hsm
+        run: make check-hsm
+
   gui:
     name: GUI frontend tests (vitest)
     needs: plan
@@ -516,6 +572,7 @@ jobs:
       - hiqlite
       - cucumber
       - isolation
+      - hsm
       - gui
       - deps
     runs-on: ubuntu-latest
