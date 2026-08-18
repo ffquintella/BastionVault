@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.4] - 2026-08-18
+
 ### Fixed
 
 #### `make test-changed` builds the binary its CLI tests spawn
