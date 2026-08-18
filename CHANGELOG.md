@@ -45,6 +45,29 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+#### `make test-changed` builds the binary its CLI tests spawn
+- **A narrow run that reached the CLI failed five tests `make test` passes**
+  (`command::auth::test::test_cli_auth_{help,enable_disable,list,move}`,
+  `command::login::test::test_cli_login`). Those tests do not drive the CLI
+  in-process -- they spawn the real executable, which
+  `test_utils::get_project_binary_path()` resolves next to the running test
+  harness. Building a harness does not produce it, so on a tree with no
+  `target/debug/bvault` -- a fresh clone, or a CI runner -- they failed with
+  `Failed to execute command: No such file or directory (os error 2)`.
+  `make test` has always declared this dependency (`test-bin`) and the CI unit
+  matrix gates a step on it, but the local L3 path never did.
+- `scripts/test-changed.sh` now runs `cargo build -p bvault-cli --bin bvault`
+  before nextest whenever the affected set intersects the packages whose lib
+  tests spawn it, read from the plan's existing `needs_bvault_bin` field rather
+  than a second list -- the same derivation CI uses, so the two cannot drift.
+  One sequential cargo invocation, never backgrounded (AGENTS.md §5), announced
+  with its cost so the link does not read as an unexplained stall on a narrow
+  run, and shown by `make test-plan`. Unconditional for those packages rather
+  than only when the file is missing: a stale binary is the normal state of a
+  developer's tree, and testing last week's CLI silently is worse than the link.
+
 ## [0.41.3] - 2026-08-18
 
 ### Added

@@ -84,7 +84,9 @@
 #                          package, minus the two nextest cannot enumerate
 #   all_integration_bins   the same, for every member — CI's full-run plan
 #   needs_bvault_bin       affected packages whose lib tests spawn
-#                          target/debug/bvault
+#                          target/debug/bvault. The interactive run reads this
+#                          one too (as PLAN_BVAULT_BIN) and builds the binary
+#                          before nextest; CI gates a matrix step on it.
 #   manifest_files         any Cargo.toml / Cargo.lock hit, which gates the
 #                          per-crate isolation check
 #   ci_files               .github/** hits, which the interactive run ignores and
@@ -114,7 +116,7 @@ while [[ $# -gt 0 ]]; do
     --profile)        PROFILE="${2:?--profile needs a nextest profile name}"; shift 2 ;;
     --pkg)            SEED_PKGS+=("${2:?--pkg needs a package name}"); shift 2 ;;
     --)               shift; NEXTEST_ARGS=("$@"); break ;;
-    -h|--help)        sed -n '2,94p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)        sed -n '2,96p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "test-changed: unknown argument '$1' (use -- to pass args to nextest)" >&2; exit 2 ;;
   esac
 done
@@ -331,6 +333,7 @@ with open(os.path.join(work, "plan.sh"), "w") as fh:
     emit(fh, "PLAN_GLOBAL_HITS", " ".join(sorted(global_hits)))
     emit(fh, "PLAN_LIB_PKGS", " ".join(lib_pkgs))
     emit(fh, "PLAN_BIN_PKGS", " ".join(bin_pkgs))
+    emit(fh, "PLAN_BVAULT_BIN", " ".join(bvault_bin))
     emit(fh, "PLAN_SEEDS", " ".join(sorted(seeds - EXCLUDED)))
     emit(fh, "PLAN_GUI_FILES", " ".join(sorted(gui_frontend)))
     emit(fh, "PLAN_INTEG_FILES", " ".join(sorted(integration)))
@@ -451,6 +454,8 @@ BIN_FLAGS=(); for p in $PLAN_BIN_PKGS; do BIN_FLAGS+=(-p "$p"); done
 
 if [[ "$LIST_ONLY" == "1" ]]; then
   echo ""
+  [[ -n "$PLAN_BVAULT_BIN" ]] && \
+    echo "    would run: cargo build -p bvault-cli --bin bvault   (spawned by: $PLAN_BVAULT_BIN)"
   [[ -n "$PLAN_LIB_PKGS" ]] && \
     echo "    would run: cargo nextest run --profile $PROFILE ${LIB_FLAGS[*]} --lib ${NEXTEST_ARGS[*]+${NEXTEST_ARGS[*]}}"
   [[ -n "$PLAN_BIN_PKGS" ]] && \
@@ -483,6 +488,35 @@ if command -v pgrep >/dev/null 2>&1; then
     echo "             They share this tree's target/ build lock, so this run will"
     echo "             queue behind them rather than run alongside (AGENTS.md §5)."
   fi
+fi
+
+# ── Build the bvault executable, if any affected test spawns it ────
+#
+# `test_utils::get_project_binary_path()` resolves the real binary next to the
+# running test harness, and building a harness does not produce it. `make test`
+# declares this as a dependency (`test-bin`); the narrow run has to derive it,
+# because a one-crate change usually does NOT need it — see BIN_DEP_PKGS above
+# for the set and how to re-derive it.
+#
+# Unconditional for the affected packages rather than "only if the file is
+# missing": a stale binary from an earlier build is the normal state of a
+# developer's tree, and silently testing last week's CLI is worse than the link.
+#
+# `cargo build` directly rather than `make test-bin`, for two reasons: this
+# script is a supported entry point on its own (scripts/test-changed.sh, and
+# scripts/ci-plan.sh's consumers), so it must not require make; and test-bin
+# depends on `prune-stale`, which `make test-changed` has already run by the
+# time we get here. Same command CI runs, so there is one form to keep correct.
+if [[ -n "$PLAN_BVAULT_BIN" ]]; then
+  echo ""
+  echo "    Building target/debug/bvault first — spawned by the tests in:"
+  for p in $PLAN_BVAULT_BIN; do echo "      $p"; done
+  echo "    First link is a minute or two even on a warm tree — the largest single"
+  echo "    cost of a narrow run that reaches it; after that this is a freshness"
+  echo "    check. Without it those tests fail with \"No such file or directory\"."
+  echo ""
+  # ONE cargo invocation at a time — never background this (AGENTS.md §5).
+  cargo build -p bvault-cli --bin bvault
 fi
 
 echo ""

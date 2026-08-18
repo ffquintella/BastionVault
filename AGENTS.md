@@ -202,6 +202,16 @@ make test-changed PKG=bv-engine-pki # explicit seed, ignore git
 make test-changed FILTER=issue_cert # pass a filter through to nextest
 ```
 
+If the affected set reaches `bastion_vault`, `bv-server` or `bvault-cli`,
+`test-changed` builds `target/debug/bvault` first and says so — those packages'
+lib tests spawn the real executable rather than driving the CLI in-process, and
+building a test harness does not produce it. That link is the largest single
+cost of a narrow run that reaches it: a minute or two before the first test
+runs, then a few seconds' freshness check on every run after. It is not
+optional — without it five `cli::command::*` tests fail with `No such file or
+directory (os error 2)`, or pass against a stale binary. `make test-plan` shows
+whether your run pays it, and `make test-bin` is the same build on its own.
+
 Read the header of `scripts/test-changed.sh` before trusting an unexpected
 result. Two behaviours matter: editing `Cargo.toml`, `Cargo.lock`,
 `.cargo/config.toml`, `rust-toolchain.toml` or `.config/nextest.toml` forces a
