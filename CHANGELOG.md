@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.3] - 2026-08-18
+
 ### Added
 
 #### `make check-hsm` -- the seal backends get compiled somewhere other than the release image

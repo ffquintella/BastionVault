@@ -76,6 +76,7 @@ rusb = { version = "0.9", optional = true, features = ["vendored"] }
 # 2 attestation cert). DER decode only -- no `builder`, no `pem` -- so the
 # hardware backend does not drag the PKI engine's certificate-authoring surface
 # into the seal path. Optional, and reached only through `hsm_yubihsm2`.
+# `make check-hsm` is what compiles this -- no default build does.
 x509-cert = { version = "0.2", default-features = false, features = ["std"], optional = true }
 serde_bytes = "0.11"
 sha2 = "0.11"
