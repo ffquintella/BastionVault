@@ -71,6 +71,12 @@ yubihsm = { version = "0.42.1", optional = true, default-features = false, featu
 # self-contained -- no libusb-1.0 dev package in the builder and no libusb .so
 # in the minimal Wolfi runtime.
 rusb = { version = "0.9", optional = true, features = ["vendored"] }
+
+# Leaf-certificate parsing for `hsm::yubihsm2::verify_attestation` (the YubiHSM
+# 2 attestation cert). DER decode only -- no `builder`, no `pem` -- so the
+# hardware backend does not drag the PKI engine's certificate-authoring surface
+# into the seal path. Optional, and reached only through `hsm_yubihsm2`.
+x509-cert = { version = "0.2", default-features = false, features = ["std"], optional = true }
 serde_bytes = "0.11"
 sha2 = "0.11"
 
@@ -98,7 +104,7 @@ storage_hiqlite = ["bv-storage/storage_hiqlite"]
 # provides NO hardware protection and REFUSES TO START in production. See
 # features/hsm-support.md.
 hsm_mock = []
-hsm_yubihsm2 = ["dep:yubihsm", "dep:rusb"]
+hsm_yubihsm2 = ["dep:yubihsm", "dep:rusb", "dep:x509-cert"]
 
 # Lints this crate's code trips, all of which the root crate already allows.
 [lints.clippy]

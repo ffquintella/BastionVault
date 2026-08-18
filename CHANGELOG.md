@@ -45,6 +45,24 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.2] - 2026-08-18
+
+### Fixed
+
+#### `hsm_yubihsm2` compiles again after the kernel split
+- **`bv-core` used `x509_cert` without declaring it.** Phase 4.5 moved
+  `src/hsm/` into `crates/bv-core`, but the `x509-cert` dependency the YubiHSM 2
+  attestation parser needs (`hsm::yubihsm2::verify_attestation`) stayed behind in
+  the root manifest, so any build with `--features hsm_yubihsm2` failed with
+  `E0433: unresolved module or unlinked crate x509_cert`. Nothing caught it: the
+  feature is off by default, `--all-features` is banned locally, and CI does not
+  enable the seal backends -- so the first build to exercise it was the official
+  container image, which bakes in `hsm_mock,hsm_yubihsm2`.
+  `bv-core` now declares `x509-cert` as an optional dependency pulled in by
+  `hsm_yubihsm2`, with `default-features = false, features = ["std"]`: the seal
+  path decodes one DER certificate and has no business linking the PKI engine's
+  `builder`/`pem` certificate-authoring surface.
+
 ## [0.41.1] - 2026-08-18
 
 ### Fixed
