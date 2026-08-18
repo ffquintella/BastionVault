@@ -618,6 +618,91 @@ path "{{namespace.path}}/resources/v2/connect/mfa/verify" { capabilities = ["upd
 path "{{namespace.path}}/resources/v2/connect/authorize"  { capabilities = ["update"] }
 "#;
 
+// Cross-namespace share access. Assignable, opt-in, share-scoped.
+//
+// The gap it closes: the implicit `namespace-shared` policy above is injected
+// on the strength of the caller's *token binding*, so it reaches a principal
+// who logged in to the namespace. It does not reach a principal who logged in
+// at root and operates inside the namespace through a cross-namespace
+// assignment (`ns_assignment`) — the route the GUI's namespace picker takes.
+// Such a caller's request path is rewritten to `<ns>/resources/...` by
+// `rewrite_request_for_namespace`, while their ACL is built from `default`,
+// whose share-scoped rules are written un-prefixed and therefore match
+// nothing. The share was granted, the feed listed it, and every attempt to
+// open it 403'd.
+//
+// Why a named policy rather than widening the implicit injection: injecting
+// share access for the request's namespace automatically would silently grant
+// it to every principal ever assigned to a namespace, on upgrade, with nothing
+// in the policy store to read. Sharing across a tenant boundary is a decision
+// an operator should make per principal, so it is spelled out here and
+// attached by name.
+//
+// Every rule is `scopes = ["shared"]` except the `resource-group/groups` list
+// and the connect-time endpoint gates, exactly as in `default` and
+// `namespace-shared`: a rule contributes access only when an active
+// `SecretShare` exists for the (target, caller) pair carrying the capability
+// the operation maps to. With no matching share these rules grant nothing, so
+// the policy widens the holder's reach by precisely "you may use what was
+// explicitly shared with you, in whichever namespace it lives" — never blanket
+// access to a namespace's data, and never an ownership carve-out (no `owner`
+// scope is granted here).
+//
+// `{{request.namespace}}` — not `{{namespace.path}}` — is what makes that work
+// at any namespace depth: it resolves to the namespace the request is
+// addressed to, and to the empty string (with its separator swallowed, see
+// `substitute_path`) when the request is addressed to root, so one rule text
+// covers `secret/*` and `dti/esi/secret/*` alike. The caller still has to be
+// allowed into the namespace at all — `token_operable_resolved` gates that
+// independently, and this policy does not confer it.
+static SHARED_ACCESS_POLICY_NAME: &str = "shared-access";
+static SHARED_ACCESS_POLICY: &str = r#"
+# KV secrets shared with the caller, in the namespace being addressed.
+path "{{request.namespace}}/secret/*" {
+    capabilities = ["read", "list", "update"]
+    scopes       = ["shared"]
+}
+path "{{request.namespace}}/secret/data/*" {
+    capabilities = ["read", "list", "update"]
+    scopes       = ["shared"]
+}
+path "{{request.namespace}}/secret/metadata/*" {
+    capabilities = ["read", "list"]
+    scopes       = ["shared"]
+}
+
+# Resources shared with the caller. `read` = see the record, `update` = the
+# connect path's recent-session stamp, `connect` = open a session against its
+# credential. Delete is withheld: destructive inventory operations need a real
+# operator policy. `connect` is listed but never inferred — the scope gate
+# demands `connect` on the share itself (`share_capability_override`), so a
+# share granting only `read` conveys no session.
+path "{{request.namespace}}/resources/*" {
+    capabilities = ["read", "list", "update", "connect"]
+    scopes       = ["shared"]
+}
+
+# Asset groups. The `groups` list is ungated -- the handler narrows the
+# response to groups the caller owns or has been shared on -- while reading an
+# individual group is share-scoped.
+path "{{request.namespace}}/resource-group/groups" {
+    capabilities = ["list"]
+}
+path "{{request.namespace}}/resource-group/groups/+" {
+    capabilities = ["read"]
+    scopes       = ["shared"]
+}
+
+# Connect-time gates. Endpoint-level, so scoping them to a share would be
+# checking the wrong object -- there is no per-target share on
+# `.../connect/mfa/begin`. Each handler re-authorizes the resource named in the
+# request body through `PolicyStore::may_connect_target`, so these reach no
+# resource the caller could not already reach.
+path "{{request.namespace}}/resources/v2/connect/mfa/begin"  { capabilities = ["update"] }
+path "{{request.namespace}}/resources/v2/connect/mfa/verify" { capabilities = ["update"] }
+path "{{request.namespace}}/resources/v2/connect/authorize"  { capabilities = ["update"] }
+"#;
+
 // Administrator baseline. Full access to every path with every
 // capability — the equivalent of `root` for non-root tokens. Issued
 // for break-glass / day-1 admin use; pair with audit logging.
@@ -1829,6 +1914,12 @@ impl PolicyStore {
         // objects is now denied. Operators who deliberately
         // customised this policy should fork it under a new name.
         self.force_load_acl_policy(STANDARD_USER_POLICY_NAME, STANDARD_USER_POLICY).await?;
+        // `shared-access` is force-loaded for the same reason as `default`:
+        // its text is server-managed, so a vault seeded under an older build
+        // picks up later rules without operator intervention. It is inert
+        // until an operator attaches it, and inert on any target the holder
+        // has no share on.
+        self.force_load_acl_policy(SHARED_ACCESS_POLICY_NAME, SHARED_ACCESS_POLICY).await?;
         // Ownership-aware baselines. See `features/per-user-scoping.md`.
         self.load_acl_policy(STANDARD_USER_READONLY_POLICY_NAME, STANDARD_USER_READONLY_POLICY)
             .await?;
@@ -1863,7 +1954,7 @@ impl PolicyStore {
         policy_names: &[String],
         additional_policies: Option<Vec<Arc<Policy>>>,
     ) -> Result<ACL, RvError> {
-        self.new_acl_inner(policy_names, additional_policies, None).await
+        self.new_acl_inner(policy_names, additional_policies, None, None).await
     }
 
     /// ACL construction with templating context. Templated policies (those
@@ -1874,13 +1965,21 @@ impl PolicyStore {
     /// placeholders that cannot be resolved cause the owning path rule
     /// to be dropped (fail-closed) with a logged warning. Non-templated
     /// policies pass through untouched.
+    /// `request_ns` is the namespace the request being authorized is
+    /// addressed to (`req.namespace_path`), which is **not** the namespace the
+    /// token is bound to: a root-bound principal holding a cross-namespace
+    /// assignment operates inside a tenant while its binding stays root. It
+    /// feeds the `{{request.namespace}}` template, so pass it whenever a real
+    /// request is in hand; `None` fail-closes every rule that uses that
+    /// placeholder.
     pub async fn new_acl_for_request(
         &self,
         policy_names: &[String],
         additional_policies: Option<Vec<Arc<Policy>>>,
         auth: &crate::logical::Auth,
+        request_ns: Option<&str>,
     ) -> Result<ACL, RvError> {
-        self.new_acl_inner(policy_names, additional_policies, Some(auth))
+        self.new_acl_inner(policy_names, additional_policies, Some(auth), request_ns)
             .await
     }
 
@@ -1922,10 +2021,10 @@ impl PolicyStore {
         if auth.policies.is_empty() {
             return out;
         }
-        let Ok(acl) = self.new_acl_for_request(&auth.policies, None, auth).await else {
+        let ns = req.namespace_path.as_deref();
+        let Ok(acl) = self.new_acl_for_request(&auth.policies, None, auth, ns).await else {
             return out;
         };
-        let ns = req.namespace_path.as_deref();
         for (i, target) in target_paths.iter().enumerate() {
             let mut probe = Request::new(target);
             probe.operation = Operation::Read;
@@ -1997,7 +2096,10 @@ impl PolicyStore {
         if auth.policies.is_empty() {
             return false;
         }
-        let Ok(acl) = self.new_acl_for_request(&auth.policies, None, auth).await else {
+        let Ok(acl) = self
+            .new_acl_for_request(&auth.policies, None, auth, req.namespace_path.as_deref())
+            .await
+        else {
             return false;
         };
 
@@ -2033,6 +2135,7 @@ impl PolicyStore {
         policy_names: &[String],
         additional_policies: Option<Vec<Arc<Policy>>>,
         auth: Option<&crate::logical::Auth>,
+        request_ns: Option<&str>,
     ) -> Result<ACL, RvError> {
         // Multi-tenancy: load each named policy from the namespace the calling
         // token is bound to. Root-bound tokens (and every non-auth caller)
@@ -2080,7 +2183,7 @@ impl PolicyStore {
             .filter_map(|p| {
                 if p.templated {
                     match auth {
-                        Some(a) => apply_templates(&p, a),
+                        Some(a) => apply_templates(&p, a, request_ns),
                         // No caller context: drop templated policies
                         // fail-closed rather than let literal `{{...}}`
                         // strings reach path matching where they would
@@ -2921,9 +3024,14 @@ async fn resolve_asset_groups(
 ///                      a legitimate value).
 ///   `{{namespace.id}}`   — the token's bound namespace UUID (fail-closed
 ///                      when absent, e.g. root/login tokens).
+///   `{{request.namespace}}` — the namespace this *request* is addressed to
+///                      (root = "", a legitimate value). Fail-closed when
+///                      `request_ns` is `None`, i.e. outside the request
+///                      pipeline. See `substitute_path`.
 fn apply_templates(
     policy: &Arc<Policy>,
     auth: &crate::logical::Auth,
+    request_ns: Option<&str>,
 ) -> Option<Arc<Policy>> {
     let username = auth
         .metadata
@@ -2961,7 +3069,15 @@ fn apply_templates(
     let mut dropped = 0usize;
 
     for mut rule in cloned.paths.drain(..) {
-        match substitute_path(&rule.path, &username, &entity_id, &auth_mount, &namespace_path, &namespace_id) {
+        match substitute_path(
+            &rule.path,
+            &username,
+            &entity_id,
+            &auth_mount,
+            &namespace_path,
+            &namespace_id,
+            request_ns,
+        ) {
             Some(new_path) => {
                 rule.path = new_path;
                 kept.push(rule);
@@ -3003,6 +3119,7 @@ fn substitute_path(
     auth_mount: &str,
     namespace_path: &str,
     namespace_id: &str,
+    request_namespace: Option<&str>,
 ) -> Option<String> {
     let mut out = String::with_capacity(path.len());
     let mut rest = path;
@@ -3034,6 +3151,15 @@ fn substitute_path(
             // Multi-tenancy: the root namespace's path is legitimately empty,
             // so `namespace.path` is allowed to substitute the empty string.
             "namespace.path" => namespace_path,
+            // The namespace the *request* is addressed to, which is not the
+            // same thing as the namespace the token is bound to: a root-bound
+            // principal carrying a cross-namespace assignment (see
+            // `ns_assignment`) operates inside a tenant while its binding
+            // stays root. Fail-closed without a request context — an ACL built
+            // outside the request pipeline (`new_acl`) cannot know which
+            // namespace a rule would be addressing, and guessing root there
+            // would silently point a tenant-scoped rule at the root mounts.
+            "request.namespace" => request_namespace?,
             // The namespace id is opaque; an absent id is unresolved (root and
             // login tokens carry no id today), so fail closed like other ids.
             "namespace.id" => {
@@ -3044,8 +3170,22 @@ fn substitute_path(
             }
             _ => return None,
         };
+        // `{{request.namespace}}` resolves to "" at root, so a rule written as
+        // `{{request.namespace}}/resources/*` would otherwise become
+        // `/resources/*` — a path that matches nothing, because request paths
+        // carry no leading slash. Swallow the separator that the placeholder
+        // was meant to introduce so the same rule text addresses the root
+        // mounts and a tenant's mounts alike. Deliberately not applied to
+        // `namespace.path`: that placeholder's empty-at-root behaviour is
+        // load-bearing for policies already in the field, and quietly turning
+        // their inert `/secret/*` rules into live `secret/*` ones would widen
+        // access on upgrade.
+        let consume_separator = key == "request.namespace" && value.is_empty();
         out.push_str(value);
         rest = &after[end + 2..];
+        if consume_separator {
+            rest = rest.strip_prefix('/').unwrap_or(rest);
+        }
     }
     out.push_str(rest);
     Some(out)
@@ -3104,7 +3244,9 @@ impl AuthHandler for PolicyStore {
             // has expired.
             req.target_shared_caps = resolve_target_shared_caps(&self.core, req).await;
 
-            let acl = self.new_acl_for_request(&auth.policies, None, auth).await?;
+            let acl = self
+                .new_acl_for_request(&auth.policies, None, auth, req.namespace_path.as_deref())
+                .await?;
             acl_result = acl.allow_operation(req, false)?;
         }
 
@@ -3461,7 +3603,7 @@ impl PolicyStore {
         req.target_shared_caps = resolve_target_shared_caps(&self.core, &req).await;
 
         let acl = match self
-            .new_acl_for_request(&auth.policies, None, auth)
+            .new_acl_for_request(&auth.policies, None, auth, ns_path)
             .await
         {
             Ok(a) => a,
@@ -3836,6 +3978,78 @@ mod implicit_rustion_grant_tests {
         let r = rule(shared, "{{namespace.path}}/resources/").expect("tenant resources rule");
         assert!(r.capabilities.contains(&Capability::Connect));
     }
+
+    /// `shared-access` must reach objects through a share and through nothing
+    /// else. Every rule that names an object path carries `scopes = ["shared"]`
+    /// — the two exceptions are the asset-group *list* (the handler narrows the
+    /// response itself) and the connect-time endpoints (which are not object
+    /// paths at all, and re-authorize the named resource server-side).
+    #[test]
+    fn shared_access_grants_only_through_a_share() {
+        let p = Policy::from_str(SHARED_ACCESS_POLICY).expect("shared-access must parse");
+        assert!(p.templated, "shared-access is templated on {{{{request.namespace}}}}");
+
+        let ungated_by_design = [
+            "{{request.namespace}}/resource-group/groups",
+            "{{request.namespace}}/resources/v2/connect/mfa/begin",
+            "{{request.namespace}}/resources/v2/connect/mfa/verify",
+            "{{request.namespace}}/resources/v2/connect/authorize",
+        ];
+        for r in p.paths.iter() {
+            if ungated_by_design.contains(&r.path.as_str()) {
+                continue;
+            }
+            assert_eq!(
+                r.scopes,
+                vec!["shared".to_string()],
+                "{} must be share-scoped, and must not carry `owner`",
+                r.path,
+            );
+        }
+    }
+
+    /// Delete is the capability that separates "use what I was given" from
+    /// "administer someone else's inventory". A share must never convey it.
+    #[test]
+    fn shared_access_withholds_delete_and_sudo() {
+        let p = Policy::from_str(SHARED_ACCESS_POLICY).unwrap();
+        for r in p.paths.iter() {
+            assert!(!r.capabilities.contains(&Capability::Delete), "{} grants delete", r.path);
+            assert!(!r.capabilities.contains(&Capability::Sudo), "{} grants sudo", r.path);
+        }
+    }
+
+    /// Every object rule is written against `{{request.namespace}}`, not
+    /// `{{namespace.path}}`: the whole point is to address the namespace the
+    /// *request* names, which for a root-bound principal operating through a
+    /// cross-namespace assignment is not the one their token is bound to.
+    #[test]
+    fn shared_access_templates_on_the_request_namespace() {
+        let p = Policy::from_str(SHARED_ACCESS_POLICY).unwrap();
+        for r in p.paths.iter() {
+            assert!(
+                r.path.starts_with("{{request.namespace}}/"),
+                "{} must be namespace-templated, or it silently never matches \
+                 inside a namespace",
+                r.path,
+            );
+            assert!(
+                !r.path.contains("{{namespace.path}}"),
+                "{} must not use the token-binding template",
+                r.path,
+            );
+        }
+    }
+
+    /// A resource share is useless without `connect`, and `connect` must be
+    /// carried by the rule for the scope gate to be able to demand it on the
+    /// share itself.
+    #[test]
+    fn shared_access_carries_connect_on_resources() {
+        let p = Policy::from_str(SHARED_ACCESS_POLICY).unwrap();
+        let r = rule(&p, "{{request.namespace}}/resources/").expect("resources rule");
+        assert!(r.capabilities.contains(&Capability::Connect));
+    }
 }
 
 #[cfg(test)]
@@ -3851,6 +4065,7 @@ mod templating_tests {
             "userpass/",
             "",
             "",
+            None,
         );
         assert_eq!(got.as_deref(), Some("secret/data/users/alice/*"));
 
@@ -3861,6 +4076,7 @@ mod templating_tests {
             "",
             "",
             "",
+            None,
         );
         assert_eq!(got.as_deref(), Some("kv/ent-123/inbox"));
 
@@ -3871,6 +4087,7 @@ mod templating_tests {
             "userpass/",
             "",
             "",
+            None,
         );
         assert_eq!(got.as_deref(), Some("userpass/login"));
     }
@@ -3885,6 +4102,7 @@ mod templating_tests {
             "userpass/",
             "engineering/platform",
             "ns-uuid-1",
+            None,
         );
         assert_eq!(got.as_deref(), Some("engineering/platform/secret/*"));
 
@@ -3896,6 +4114,7 @@ mod templating_tests {
             "userpass/",
             "",
             "",
+            None,
         );
         assert_eq!(got.as_deref(), Some("secret/*"));
 
@@ -3907,13 +4126,61 @@ mod templating_tests {
             "userpass/",
             "engineering",
             "ns-uuid-1",
+            None,
         );
         assert_eq!(got.as_deref(), Some("audit/ns-uuid-1"));
 
         // {{namespace.id}} fails closed when absent (root/login tokens).
         assert_eq!(
-            substitute_path("audit/{{namespace.id}}", "alice", "ent-123", "userpass/", "", ""),
+            substitute_path("audit/{{namespace.id}}", "alice", "ent-123", "userpass/", "", "", None),
             None
+        );
+    }
+
+    /// `{{request.namespace}}` addresses the namespace the request names, and
+    /// resolves to nothing at all at root — separator included, so one rule
+    /// text covers both. Without swallowing that separator the root form would
+    /// be `/resources/*`, which matches no request path (they carry no leading
+    /// slash) and would have failed silently.
+    #[test]
+    fn test_substitute_path_request_namespace() {
+        let sub = |path, ns| substitute_path(path, "alice", "ent-1", "userpass/", "", "", ns);
+
+        assert_eq!(
+            sub("{{request.namespace}}/resources/*", Some("dti/esi")).as_deref(),
+            Some("dti/esi/resources/*"),
+        );
+        assert_eq!(
+            sub("{{request.namespace}}/resources/*", Some("")).as_deref(),
+            Some("resources/*"),
+        );
+        // Nested deeper than the two levels the `+`-wildcard workaround could
+        // have enumerated — the template is depth-agnostic by construction.
+        assert_eq!(
+            sub("{{request.namespace}}/secret/data/*", Some("a/b/c/d")).as_deref(),
+            Some("a/b/c/d/secret/data/*"),
+        );
+
+        // No request context (an ACL built outside the request pipeline):
+        // fail closed rather than guess root, which would point a
+        // tenant-scoped rule at the root mounts.
+        assert_eq!(sub("{{request.namespace}}/resources/*", None), None);
+
+        // The token-binding template keeps its old empty-at-root behaviour —
+        // it does NOT swallow the separator — so policies already in the field
+        // do not change meaning on upgrade.
+        assert_eq!(
+            substitute_path(
+                "{{namespace.path}}/secret/*",
+                "alice",
+                "ent-1",
+                "userpass/",
+                "",
+                "",
+                Some(""),
+            )
+            .as_deref(),
+            Some("/secret/*"),
         );
     }
 
@@ -3921,7 +4188,7 @@ mod templating_tests {
     fn test_substitute_path_fail_closed_on_unknown_placeholder() {
         // Unknown key — typo — must drop the rule, not widen access.
         assert_eq!(
-            substitute_path("secret/{{uzername}}", "alice", "ent-123", "userpass/", "", ""),
+            substitute_path("secret/{{uzername}}", "alice", "ent-123", "userpass/", "", "", None),
             None
         );
     }
@@ -3930,12 +4197,12 @@ mod templating_tests {
     fn test_substitute_path_fail_closed_on_missing_value() {
         // `{{username}}` but username is empty — drop.
         assert_eq!(
-            substitute_path("secret/{{username}}/*", "", "ent-123", "userpass/", "", ""),
+            substitute_path("secret/{{username}}/*", "", "ent-123", "userpass/", "", "", None),
             None
         );
         // `{{entity.id}}` but entity_id empty — drop.
         assert_eq!(
-            substitute_path("secret/{{entity.id}}", "alice", "", "userpass/", "", ""),
+            substitute_path("secret/{{entity.id}}", "alice", "", "userpass/", "", "", None),
             None
         );
     }
@@ -3943,7 +4210,7 @@ mod templating_tests {
     #[test]
     fn test_substitute_path_no_placeholders_is_identity() {
         assert_eq!(
-            substitute_path("secret/foo/bar", "alice", "ent-123", "userpass/", "", "").as_deref(),
+            substitute_path("secret/foo/bar", "alice", "ent-123", "userpass/", "", "", None).as_deref(),
             Some("secret/foo/bar")
         );
     }
@@ -4003,7 +4270,7 @@ mod templating_tests {
             "kv/{{entity.id}}/inbox",
         ]);
         let auth = auth_with(Some("alice"), Some("ent-abc"), Some("userpass/"), "alice");
-        let got = apply_templates(&policy, &auth).expect("policy must survive");
+        let got = apply_templates(&policy, &auth, None).expect("policy must survive");
         let paths: Vec<&str> = got.paths.iter().map(|r| r.path.as_str()).collect();
         assert_eq!(
             paths,
@@ -4019,7 +4286,7 @@ mod templating_tests {
         // still authorizes a `{{username}}` rule.
         let policy = policy_with_paths(vec!["secret/data/users/{{username}}/*"]);
         let auth = auth_with(None, Some("ent-abc"), Some("userpass/"), "bob");
-        let got = apply_templates(&policy, &auth).expect("policy must survive");
+        let got = apply_templates(&policy, &auth, None).expect("policy must survive");
         assert_eq!(got.paths[0].path, "secret/data/users/bob/*");
     }
 
@@ -4033,7 +4300,7 @@ mod templating_tests {
             "{{auth.mount}}login",
         ]);
         let auth = auth_with(Some("alice"), Some("ent-abc"), None, "alice");
-        let got = apply_templates(&policy, &auth).expect("at least one rule survives");
+        let got = apply_templates(&policy, &auth, None).expect("at least one rule survives");
         let paths: Vec<&str> = got.paths.iter().map(|r| r.path.as_str()).collect();
         assert_eq!(paths, vec!["secret/data/users/alice/*"]);
     }
@@ -4048,7 +4315,7 @@ mod templating_tests {
         ]);
         let auth = auth_with(Some("alice"), None, None, "alice");
         assert!(
-            apply_templates(&policy, &auth).is_none(),
+            apply_templates(&policy, &auth, None).is_none(),
             "all-rules-dropped must return None so the policy grants nothing"
         );
     }
@@ -4070,7 +4337,7 @@ mod templating_tests {
         policy.paths = vec![rule];
 
         let auth = auth_with(Some("carol"), Some("ent-c"), Some("userpass/"), "carol");
-        let got = apply_templates(&Arc::new(policy), &auth).expect("survives");
+        let got = apply_templates(&Arc::new(policy), &auth, None).expect("survives");
         let r = &got.paths[0];
         assert_eq!(r.path, "secret/data/users/carol/*");
         assert_eq!(r.capabilities.len(), 2);
@@ -4165,7 +4432,7 @@ mod mod_policy_store_tests {
         stamp_binding(&mut ns_auth.metadata, "nsa", "uuid-nsa", false);
 
         let acl = policy_store
-            .new_acl_for_request(&ns_auth.policies, None, &ns_auth)
+            .new_acl_for_request(&ns_auth.policies, None, &ns_auth, None)
             .await
             .unwrap();
 
@@ -4207,7 +4474,7 @@ mod mod_policy_store_tests {
 
         let root_auth = Auth { policies: vec!["rootonly".into()], ..Default::default() };
         let root_acl = policy_store
-            .new_acl_for_request(&root_auth.policies, None, &root_auth)
+            .new_acl_for_request(&root_auth.policies, None, &root_auth, None)
             .await
             .unwrap();
         assert_eq!(
@@ -4243,7 +4510,7 @@ mod mod_policy_store_tests {
         // anonymous caller can never satisfy a `shared` scope.
         ns_auth.metadata.insert("entity_id".to_string(), "entity-tina".to_string());
         let acl = policy_store
-            .new_acl_for_request(&ns_auth.policies, None, &ns_auth)
+            .new_acl_for_request(&ns_auth.policies, None, &ns_auth, None)
             .await
             .unwrap();
 
@@ -4446,7 +4713,7 @@ mod mod_policy_store_tests {
         let auth =
             Auth { policies: vec!["lives-in-a-child-namespace".into()], ..Default::default() };
         let acl = policy_store
-            .new_acl_for_request(&auth.policies, None, &auth)
+            .new_acl_for_request(&auth.policies, None, &auth, None)
             .await
             .expect("ACL construction must not fail because a named policy is unresolvable");
 

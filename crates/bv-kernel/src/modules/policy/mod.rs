@@ -700,6 +700,7 @@ mod mod_policy_tests {
             "pki-user",
             policy1_name,
             "secret-author",
+            "shared-access",
             "standard-user",
             "standard-user-readonly",
             "totp-admin",
@@ -729,7 +730,7 @@ mod mod_policy_tests {
         let policies = policies.unwrap().unwrap().data.unwrap();
         let seeded_after_delete = json!([
             "administrator", "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user",
-            "secret-author", "standard-user", "standard-user-readonly",
+            "secret-author", "shared-access", "standard-user", "standard-user-readonly",
             "totp-admin", "totp-user", "transit-admin", "transit-user", "root"
         ]);
         assert_eq!(policies["keys"], seeded_after_delete);
@@ -753,7 +754,7 @@ mod mod_policy_tests {
         assert!(ret.is_ok());
         let seeded = json!([
             "administrator", "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user",
-            "secret-author", "standard-user", "standard-user-readonly",
+            "secret-author", "shared-access", "standard-user", "standard-user-readonly",
             "totp-admin", "totp-user", "transit-admin", "transit-user", "root"
         ]);
         assert_eq!(
@@ -790,7 +791,7 @@ mod mod_policy_tests {
         assert!(ret.is_ok());
         let with_policy1 = json!([
             "administrator", "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user", "policy1",
-            "secret-author", "standard-user", "standard-user-readonly",
+            "secret-author", "shared-access", "standard-user", "standard-user-readonly",
             "totp-admin", "totp-user", "transit-admin", "transit-user", "root"
         ]);
         assert_eq!(
@@ -807,7 +808,7 @@ mod mod_policy_tests {
         assert!(ret.is_ok());
         let baseline = json!([
             "administrator", "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user",
-            "secret-author", "standard-user", "standard-user-readonly",
+            "secret-author", "shared-access", "standard-user", "standard-user-readonly",
             "totp-admin", "totp-user", "transit-admin", "transit-user", "root"
         ]);
         assert_eq!(

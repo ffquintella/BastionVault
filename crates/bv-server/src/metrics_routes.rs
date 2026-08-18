@@ -259,8 +259,11 @@ async fn token_grants_scrape(core: &Arc<Core>, token: &str) -> Result<bool, RvEr
         .get_module::<PolicyModule>("policy")
         .ok_or(RvError::ErrPermissionDenied)?;
     let policy_store = policy_module.policy_store.load();
+    // `None` for the request namespace: `/metrics` is not a routed logical
+    // path and is never namespace-scoped, so no `{{request.namespace}}` rule
+    // should contribute to the scrape verdict.
     let acl = policy_store
-        .new_acl_for_request(&auth.policies, None, &auth)
+        .new_acl_for_request(&auth.policies, None, &auth, None)
         .await?;
 
     let mut probe = Request::new(METRICS_ACL_PATH);

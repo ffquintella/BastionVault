@@ -49,7 +49,10 @@ impl PolicyGate for PolicyModule {
             .auth
             .clone()
             .ok_or_else(|| crate::bv_error_response_status!(401, "no authenticated caller"))?;
-        let acl = self.store().new_acl_for_request(&auth.policies, None, &auth).await?;
+        let acl = self
+            .store()
+            .new_acl_for_request(&auth.policies, None, &auth, req.namespace_path.as_deref())
+            .await?;
         let verdict = acl.explain_capability(path, Capability::Sudo);
         Ok(verdict.allowed || verdict.is_root)
     }

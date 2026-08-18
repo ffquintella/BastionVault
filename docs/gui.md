@@ -107,7 +107,7 @@ Visible to tokens with `root`, `super-admin`, `administrator`, `admin`, or a del
 | AppID | AppID role lifecycle and secret-id generation |
 | Identity Groups | User / app groups, with the policies that group members inherit |
 | Asset Groups | Named bundles of resources and KV paths that can be shared as a unit |
-| Policies | View, edit, and create HCL policies; surfaces seeded baselines (default, standard-user, secret-author, pki-user, …) |
+| Policies | View, edit, and create HCL policies; surfaces seeded baselines (default, standard-user, secret-author, shared-access, pki-user, …) |
 | Mounts | Browse and unmount secret/auth engines (mount creation lives next to each engine's own page) |
 | Audit | Live tail of the audit log with category filters (auth, user lifecycle, policy, share, etc.) |
 | Plugins | Plugin Extensibility v1: registry view, activation, surface bundle browser |

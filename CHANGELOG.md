@@ -45,6 +45,48 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### A share can be used from outside the namespace it lives in
+- **`shared-access`, a new assignable baseline policy**
+  (`crates/bv-kernel/src/modules/policy/policy_store.rs`). Grants read / list /
+  update on KV secrets, read / list / update / connect on resources, read on
+  asset groups, and the three connect-time endpoints -- every object rule
+  gated by `scopes = ["shared"]`, so it contributes nothing at all until an
+  active `SecretShare` names the holder and carries the capability the
+  operation maps to. No `owner` scope, no `delete`, no `sudo`.
+- **Why it was needed.** The implicit `namespace-shared` policy is injected on
+  the strength of a token's *binding*, so it reaches a principal who logged in
+  to the namespace and nobody else. A principal who logs in at root and enters
+  a namespace through a cross-namespace assignment -- the route the GUI's
+  namespace picker takes -- has their request path rewritten to
+  `<ns>/resources/...` while their ACL is still built from `default`, whose
+  share-scoped rules are written un-prefixed and therefore match nothing. The
+  share was granted, the "Shared with me" feed listed it, and every attempt to
+  open it returned 403.
+- **Attach it per principal.** It is deliberately a named policy rather than a
+  widening of the implicit injection: sharing across a tenant boundary is an
+  operator decision, and doing it automatically would grant it to everyone ever
+  assigned to a namespace, on upgrade, with nothing in the policy store to
+  read. Force-loaded on unseal like `default`, so its text stays server-managed.
+
+### Changed
+
+#### Policy templating learned the request's namespace
+- **`{{request.namespace}}`** (`policy_store.rs`) resolves to the namespace the
+  *request* is addressed to, as opposed to `{{namespace.path}}`, which resolves
+  to the namespace the token is bound to. At root it substitutes the empty
+  string *and* swallows the separator that followed it, so one rule text
+  (`{{request.namespace}}/resources/*`) addresses the root mounts and a
+  tenant's mounts alike, at any namespace depth. `{{namespace.path}}` keeps its
+  previous empty-at-root behaviour untouched, so no policy in the field changes
+  meaning on upgrade.
+- **Fail-closed without a request.** An ACL built outside the request pipeline
+  (`PolicyStore::new_acl`) drops every rule using the placeholder rather than
+  guessing root, which would have pointed a tenant-scoped rule at the root
+  mounts. `new_acl_for_request` therefore takes the request namespace
+  explicitly; `/metrics`, which is never namespace-scoped, passes `None`.
+
 ## [0.41.7] - 2026-08-18
 
 ### Fixed

@@ -3032,7 +3032,7 @@ impl SystemBackend {
 
         let policy_store = policy_module.policy_store.load();
         let acl: ACL = policy_store
-            .new_acl_for_request(&auth.policies, None, &auth)
+            .new_acl_for_request(&auth.policies, None, &auth, active_ns.as_deref())
             .await?;
 
         // Probe the path the *router* would authorize, not the one the client
@@ -3157,7 +3157,12 @@ impl SystemBackend {
                 policy_module
                     .policy_store
                     .load()
-                    .new_acl_for_request(&auth.policies, None, &auth)
+                    .new_acl_for_request(
+                        &auth.policies,
+                        None,
+                        &auth,
+                        req.namespace_path.as_deref(),
+                    )
                     .await?,
             ),
             _ => None,
@@ -3373,7 +3378,18 @@ impl SystemBackend {
                 None
             } else {
                 is_authed = true;
-                Some(policy_module.policy_store.load().new_acl_for_request(&auth.policies, None, &auth).await?)
+                Some(
+                    policy_module
+                        .policy_store
+                        .load()
+                        .new_acl_for_request(
+                            &auth.policies,
+                            None,
+                            &auth,
+                            req.namespace_path.as_deref(),
+                        )
+                        .await?,
+                )
             }
         } else {
             None
@@ -3510,7 +3526,11 @@ impl SystemBackend {
             if auth.policies.is_empty() {
                 return Err(RvError::ErrPermissionDenied);
             } else {
-                policy_module.policy_store.load().new_acl_for_request(&auth.policies, None, &auth).await?
+                policy_module
+                    .policy_store
+                    .load()
+                    .new_acl_for_request(&auth.policies, None, &auth, req.namespace_path.as_deref())
+                    .await?
             }
         } else {
             return Err(RvError::ErrPermissionDenied);

@@ -77,6 +77,9 @@ Supported placeholders (v1):
 | `{{username}}`            | `auth.metadata.username`, falls back to `auth.display_name` |
 | `{{entity.id}}`            | stable per-user UUID (see §4)         |
 | `{{auth.mount}}`          | e.g. `userpass/`, `approle/`           |
+| `{{namespace.path}}`      | the namespace the *token is bound to* (root = `""`) |
+| `{{namespace.id}}`        | that namespace's UUID (fail-closed when absent) |
+| `{{request.namespace}}`   | the namespace the *request* is addressed to (root = `""`, separator swallowed); fail-closed outside the request pipeline |
 
 Rules:
 
@@ -370,6 +373,40 @@ installs all three so operators can opt into ownership-aware ACLs
 without forcing a migration. Policy templating (Phase 2), the owner
 backfill admin endpoint (migration story from the *Testing Plan*), and
 the GUI for sharing + owner transfer are all live.
+
+### Using a share from outside the namespace it lives in
+
+A share is stored globally — `ShareStore` keys on the namespace-scoped
+canonical target (`dti/esi/segdc1vhm0003`), not in a per-namespace
+keyspace — so the "Shared with me" feed lists it for the grantee no matter
+where they logged in. Actually *opening* it is a separate question, and until
+`shared-access` landed the answer depended on how the grantee reached the
+namespace:
+
+| Grantee reaches the namespace by | Implicit policy | Result |
+|---|---|---|
+| logging in to it (token binding) | `namespace-shared`, templated on `{{namespace.path}}` | share works |
+| logging in at root + a cross-namespace assignment | none — injection keys on the *binding* | every open 403s |
+
+The second row is the route the GUI's namespace picker takes for an operator
+who authenticates at root. Their request path is rewritten to
+`<ns>/resources/...` by `rewrite_request_for_namespace`, while their ACL is
+compiled from `default`, whose share-scoped rules are written un-prefixed and
+so match nothing.
+
+`shared-access` (seeded, assignable, force-loaded) closes it. Every object
+rule is `scopes = ["shared"]` and templated on the new
+`{{request.namespace}}` placeholder — the namespace the *request* names,
+rather than the one the token is bound to — so one rule text covers root and
+any namespace at any depth. It is a named policy an operator attaches per
+principal, not a widening of the implicit injection: crossing a tenant
+boundary with a share is a decision worth recording in the policy store.
+
+Two properties keep it narrow. It grants nothing without an active
+`SecretShare` for the (target, caller) pair carrying the capability the
+operation maps to, and it does not confer the right to enter the namespace at
+all — `token_operable_resolved` gates that independently, off the namespace
+assignment.
 
 ### The alias directory across namespaces
 
