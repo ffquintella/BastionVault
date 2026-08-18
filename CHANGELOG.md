@@ -45,6 +45,30 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.1] - 2026-08-18
+
+### Fixed
+
+#### Container and release builds select the package that owns `bvault`
+- **`make container-image` / `make container-image-push` could not build the
+  server binary.** Phase 4 of the workspace decomposition moved the `bvault`
+  bin from the root crate to `crates/bvault-cli`, and the container build ran
+  `cargo build --bin bvault` from the repository root -- where cargo scopes
+  `--bin` to the root package -- so the build died at target selection with
+  `no bin target named 'bvault' in default-run packages` after fetching the
+  whole dependency graph. `deploy/container/Containerfile` and
+  `Containerfile.debug` now pass `-p bvault-cli` for `bvault` and
+  `-p bastion_vault` for `bv-ssh-helper`; `BVAULT_FEATURES`
+  (`hsm_mock,hsm_yubihsm2`) resolves against `bvault-cli`, which forwards both
+  seal backends to the library.
+- The e2e harness image (`Dockerfile`) and the macOS release workflow
+  (`.github/workflows/macos-release.yml`) carried the same stale invocation and
+  are fixed the same way. The macOS job builds the two bins in two commands,
+  because they live in two packages.
+- Operator docs updated to match: `docs/hsm.md`,
+  `features/packaging-podman-server.md`,
+  `installers/cli/nupkg/tools/VERIFICATION.txt`.
+
 ## [0.41.0] - 2026-08-17
 
 ### Added

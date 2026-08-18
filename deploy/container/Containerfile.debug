@@ -25,8 +25,8 @@ RUN apt-get update \
 
 WORKDIR /src
 COPY . .
-RUN cargo build --release --bin bvault \
- && cargo build --release --bin bv-ssh-helper
+RUN cargo build --release -p bvault-cli --bin bvault \
+ && cargo build --release -p bastion_vault --bin bv-ssh-helper
 RUN if ldd /src/target/release/bvault | grep -E 'libssl|libcrypto'; then \
         echo "ERROR: bvault is dynamically linked against openssl."; \
         exit 1; \

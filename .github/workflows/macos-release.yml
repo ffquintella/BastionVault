@@ -187,7 +187,9 @@ jobs:
 
       # ── CLI ───────────────────────────────────────────────────────────
       - name: Build the CLI
-        run: cargo build --release --bin bvault --bin bv-ssh-helper
+        run: |
+          cargo build --release -p bvault-cli --bin bvault
+          cargo build --release -p bastion_vault --bin bv-ssh-helper
 
       - name: Sign the CLI binaries
         run: |

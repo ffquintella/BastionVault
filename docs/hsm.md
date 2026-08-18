@@ -33,7 +33,7 @@ still refuses to start when the environment is production. For a local
 explicitly:
 
 ```bash
-cargo build --features hsm_mock --bin bvault
+cargo build -p bvault-cli --features hsm_mock --bin bvault
 ```
 
 Add an `hsm "mock"` block to your config (e.g. `config/dev.hcl`):
@@ -81,7 +81,7 @@ server logs `HSM auto-unseal succeeded` on subsequent starts.
 Build with the hardware backend feature:
 
 ```bash
-cargo build --features hsm_yubihsm2 --release --bin bvault
+cargo build -p bvault-cli --features hsm_yubihsm2 --release --bin bvault
 ```
 
 This pulls the pure-Rust `yubihsm` crate and its USB (libusb) dependency. Each

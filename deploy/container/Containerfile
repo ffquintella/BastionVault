@@ -96,8 +96,8 @@ RUN set -eux; \
     export AR_${RUST_TARGET_VAR}=${CROSS_PFX}-ar; \
     : "${CARGO_BUILD_JOBS:=2}"; export CARGO_BUILD_JOBS; \
     export RUST_MIN_STACK=16777216; \
-    cargo build --release --target "$RUST_TARGET" ${BVAULT_FEATURES:+--features "$BVAULT_FEATURES"} --bin bvault; \
-    cargo build --release --target "$RUST_TARGET" --bin bv-ssh-helper; \
+    cargo build --release --target "$RUST_TARGET" -p bvault-cli ${BVAULT_FEATURES:+--features "$BVAULT_FEATURES"} --bin bvault; \
+    cargo build --release --target "$RUST_TARGET" -p bastion_vault --bin bv-ssh-helper; \
     mkdir -p /out; \
     cp "target/${RUST_TARGET}/release/bvault"        /out/bvault; \
     cp "target/${RUST_TARGET}/release/bv-ssh-helper" /out/bv-ssh-helper

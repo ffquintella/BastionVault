@@ -2,7 +2,7 @@
 # (tests/e2e/rustion-ssh/). Multi-stage:
 #
 #   stage 1 (builder): debian:bookworm-slim + rust stable, cargo
-#                      build --release --bin bvault
+#                      build --release -p bvault-cli --bin bvault
 #   stage 2 (runtime): distroless gcr.io/distroless/cc-debian12 with
 #                      the bvault binary + a minimal /etc/bastion-vault
 #                      layout the e2e configs bind-mount into
@@ -32,7 +32,7 @@ COPY gui/src-tauri/Cargo.toml ./gui/src-tauri/Cargo.toml
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo build --release --bin bvault \
+    cargo build --release -p bvault-cli --bin bvault \
     && cp target/release/bvault /usr/local/bin/bvault
 
 # Runtime stage — distroless cc-debian12 keeps the attack surface

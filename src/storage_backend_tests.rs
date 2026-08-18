@@ -19,7 +19,7 @@ use crate::test_utils::{new_test_file_backend, new_test_temp_dir, test_multi_rou
 /// Run with:
 ///
 /// ```sh
-/// cargo build --bin bvault
+/// cargo build -p bvault-cli --bin bvault
 /// cargo test --lib test_file_backend_multi_routine -- --ignored
 /// ```
 ///

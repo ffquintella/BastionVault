@@ -81,7 +81,7 @@ A two-stage build:
 │  - apt: pkg-config, clang, cmake (for     │
 │    optional sub-deps), git, libssl-dev    │
 │  - ENV OPENSSL_STATIC=1 OPENSSL_NO_VENDOR=1│
-│  - cargo build --release --bin bvault     │
+│  - cargo build -p bvault-cli --bin bvault │
 │  - cargo build --release --bin bv-ssh-    │
 │    helper                                 │
 │  - ldd guard: fail if bvault dynamically  │
