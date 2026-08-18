@@ -1,6 +1,6 @@
 [package]
 name = "bv-core"
-version = "0.41.0"
+version = "0.41.1"
 edition = "2021"
 description = "BastionVault's kernel: Core, the mount table, the module registry, the seal path and the server config model"
 license = "Apache-2.0"
