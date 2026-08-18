@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.8] - 2026-08-18
+
 ### Added
 
 #### A share can be used from outside the namespace it lives in
