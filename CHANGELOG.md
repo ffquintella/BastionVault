@@ -116,6 +116,21 @@ EXAMPLE ENTRY:
   binary reports its version correctly under emulation and still passes the
   `readelf` openssl guard.
 
+#### The GUI install no longer warns about unreviewed install scripts
+- **Every `npm install` under `gui/` printed an npm 11.17 `allow-scripts`
+  warning** for `fsevents@2.3.3`, the macOS-only optional watcher dependency of
+  vite: its registry metadata carries `hasInstallScript: true`, so npm listed it
+  as an install script nobody had reviewed and told the operator to run
+  `npm approve-scripts`. In the current npm release the field is advisory and
+  the scripts still run; a future release will block unreviewed ones.
+- **The decision is now recorded explicitly as `allowScripts: {"fsevents":
+  false}`** in `gui/package.json`. Denied rather than approved: the published
+  tarball ships a prebuilt `fsevents.node` and declares no `install`,
+  `preinstall` or `postinstall` script at all, so nothing is being suppressed
+  and no `node-gyp` toolchain is pulled into the build. `npm approve-scripts
+  --allow-scripts-pending` now reports nothing pending, and `require('fsevents')`
+  still resolves the native binding.
+
 ### Fixed
 
 #### `make bump-*` keeps `gui/package-lock.json` in step
