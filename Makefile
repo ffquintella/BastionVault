@@ -111,7 +111,7 @@ endif
 # affect cargo's own internal parallelism, which is where the cores actually go.
 .NOTPARALLEL:
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-integration test-doc test-cucumber test-hiqlite test-all test-release docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-integration test-doc test-cucumber test-hiqlite test-all test-release docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-cache-clean container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -754,6 +754,21 @@ _bump-write:
 #   make container-image IMAGE_TAG=v0.4.0-rc1
 #   make container-image PLATFORM=linux/arm64    # default is linux/amd64
 #   make container-image INCLUDE_SHELL=0         # opt-out of /bin/sh
+#   make container-image CACHE=0                 # cold build, ignore the cache
+#   make container-image CARGO_BUILD_JOBS=2      # cap compile parallelism
+#   make container-image CACHE_REF=ghcr.io/ffquintella/bastionvault:buildcache
+#
+# Build cache: the Containerfile splits the compile into a cargo-chef
+# dependency layer and a workspace layer, so an ordinary rebuild reuses the
+# ~1200 third-party crates and recompiles only the workspace. That works off
+# the local layer cache with no flags. `CACHE_REF` additionally imports and
+# exports that layer from a registry, which is what makes a fresh machine (or
+# a CI runner) skip the dependency build too — it needs docker with
+# BUILDX=1 (the docker-container driver); podman ignores it.
+#
+# `CACHE=0` forces a cold build. Use it for the artefact you sign and publish
+# if you want the release to owe nothing to mutable cache state; `make
+# container-cache-clean` drops the local build cache outright.
 #
 # `BUILDX` toggles `docker buildx build` (multi-arch capable) when
 # CONTAINER_TOOL=docker. Podman handles --platform natively so the toggle
@@ -786,6 +801,21 @@ INCLUDE_SHELL  ?= 1
 # Override on the command line for cross-arch builds:
 #   make container-image PLATFORM=linux/arm64    # default is linux/amd64
 PLATFORM ?= linux/amd64
+
+# Build-cache knobs. Empty CARGO_BUILD_JOBS means one job per core, which is
+# the Containerfile's default too (it used to be pinned to 2).
+CACHE            ?= 1
+CACHE_REF        ?=
+CARGO_BUILD_JOBS ?=
+
+ifeq ($(CACHE),0)
+_CACHE_FLAGS := --no-cache
+else
+ifneq ($(CACHE_REF),)
+_CACHE_FLAGS := --cache-from type=registry,ref=$(CACHE_REF) \
+                --cache-to type=registry,ref=$(CACHE_REF),mode=max
+endif
+endif
 
 # Docker's BuildKit/buildx `docker-container` driver (Docker Desktop's default
 # builder) leaves the build result in the cache and does NOT place it in the
@@ -844,9 +874,10 @@ container-image: ## Build the server OCI image (auto-detects podman/docker, over
 			fi; \
 		fi; \
 	fi
-	@echo "==> Building $(IMAGE_NAME):$(IMAGE_TAG) ($(PLATFORM), INCLUDE_SHELL=$(INCLUDE_SHELL)) with $(CONTAINER_TOOL)"
-	$(_BUILD_CMD) \
+	@echo "==> Building $(IMAGE_NAME):$(IMAGE_TAG) ($(PLATFORM), INCLUDE_SHELL=$(INCLUDE_SHELL), CACHE=$(CACHE)) with $(CONTAINER_TOOL)"
+	$(_BUILD_CMD) $(_CACHE_FLAGS) \
 		--build-arg INCLUDE_SHELL=$(INCLUDE_SHELL) \
+		--build-arg CARGO_BUILD_JOBS=$(CARGO_BUILD_JOBS) \
 		-f deploy/container/Containerfile \
 		-t $(IMAGE_NAME):$(IMAGE_TAG) \
 		-t $(IMAGE_NAME):latest \
@@ -855,6 +886,14 @@ container-image: ## Build the server OCI image (auto-detects podman/docker, over
 	@echo "==> Built $(IMAGE_NAME):$(IMAGE_TAG) and $(IMAGE_NAME):latest"
 	@echo "    Inspect: $(CONTAINER_TOOL) images $(IMAGE_NAME)"
 	@echo "    Run:     make container-image-run"
+
+container-cache-clean: ## Drop the local container build cache (forces a cold dependency build)
+	@echo "==> Pruning $(CONTAINER_TOOL) build cache"
+	@if [ "$(CONTAINER_TOOL)" = "docker" ]; then \
+		docker builder prune --force ; \
+	else \
+		podman system prune --force ; \
+	fi
 
 container-image-test: ## Test the Wolfi runtime images (static checks; set SMOKE=1 to also build + run-smoke the image)
 	@if [ "$(SMOKE)" = "1" ]; then \

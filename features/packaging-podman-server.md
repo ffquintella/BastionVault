@@ -73,24 +73,35 @@ client-side counterpart (GUI + CLI binaries served from a static site) is
 
 ### Image layout
 
-A two-stage build:
+A four-stage build — one toolchain base, a recipe stage, a compile stage
+split into a cached dependency layer and a workspace layer, and the runtime:
 
 ```
-┌──────────── Stage 1: builder ────────────┐
-│ FROM docker.io/library/rust:<pin>-slim    │
-│  - apt: pkg-config, clang, cmake (for     │
-│    optional sub-deps), git, libssl-dev    │
-│  - ENV OPENSSL_STATIC=1 OPENSSL_NO_VENDOR=1│
-│  - cargo build -p bvault-cli --bin bvault │
-│  - cargo build --release --bin bv-ssh-    │
-│    helper                                 │
-│  - ldd guard: fail if bvault dynamically  │
-│    links libssl/libcrypto (distroless has │
-│    neither)                               │
+┌──────────── Stage 1: chef ───────────────┐
+│ FROM docker.io/library/rust:1-slim         │
+│  - apt: clang, cmake, git, binutils, the  │
+│    amd64 + arm64 gcc cross toolchains     │
+│  - cargo install cargo-chef               │
+│  - COPY deploy/container/cross-env.sh     │
 └──────────────────────────────────────────┘
+      │                        │
+      ▼                        ▼
+┌── Stage 2: planner ──┐  ┌──── Stage 3: builder ────────────┐
+│ COPY . .              │  │ COPY rust-toolchain.toml         │
+                          │ rustup target add <triple>      │
+│ cargo chef prepare    │─▶│ cargo chef cook   ← DEP LAYER   │
+│ → /recipe.json        │  │   (~1200 crates, keyed on the   │
+└──────────────────────┘  │    recipe, not the source tree) │
+                          │ COPY . .                        │
+                          │ cargo build -p bvault-cli       │
+                          │ cargo build -p bastion_vault    │
+                          │ readelf guard: fail if bvault   │
+                          │ dynamically links libssl/       │
+                          │ libcrypto (Wolfi has neither)   │
+                          └─────────────────────────────────┘
                   │ COPY --from=builder
                   ▼
-┌──────────── Stage 2: runtime ────────────┐
+┌──────────── Stage 4: runtime ────────────┐
 │ FROM cgr.dev/chainguard/wolfi-base:latest │
 │  - apk add ca-certificates-bundle         │
 │  - /usr/local/bin/bvault                  │
@@ -103,6 +114,47 @@ A two-stage build:
 │         "/etc/bvault/config.hcl"]   │
 └──────────────────────────────────────────┘
 ```
+
+### Build caching
+
+The compile is the whole cost of this image, and before the cargo-chef split
+none of it was cached: `COPY . .` immediately preceded the single `cargo
+build`, so the layer's cache key was the hash of the entire context and one
+edited file — or one `make bump-patch` — rebuilt all ~1200 dependencies.
+
+Three properties make the current split hold:
+
+- **The dependency layer is keyed on `recipe.json`**, which is manifests plus
+  the lock file with every workspace member's version normalised to `0.0.1`.
+  Editing `src/` does not touch it, and neither does a product-version bump —
+  which matters because a bump is the last thing that happens before every
+  release build.
+- **`cook` and `cargo build` must agree exactly** on target triple, package
+  selection, features and the cross-toolchain environment. Cargo fingerprints
+  all of it, so a mismatch leaves the cooked artefacts unused and silently
+  rebuilds everything. The environment half lives in
+  `deploy/container/cross-env.sh`, sourced by both; the cargo-argument half is
+  two pairs of adjacent lines in the Containerfile.
+- **The toolchain file is copied in before the target is added.** The repo
+  pins `stable`, so every cargo step runs under it; adding the cross target
+  while `/src` is still empty puts it on the base image's default toolchain
+  instead, and the cook step then fails with `can't find crate for core`.
+- **Cooked artefacts stay in the layer**, not in a BuildKit cache mount. A
+  mount over `/src/target` would shadow them, and a mount cannot be exported —
+  only a layer can go to a registry cache, which is the only thing that helps
+  a CI runner that is discarded after every job.
+
+CI (`.github/workflows/container-image.yml`) imports and exports that layer as
+`ghcr.io/<owner>/bastionvault:buildcache[-debug]`. Registry cache rather than
+`type=gha` because the GitHub cache is capped at 10 GB per repository with LRU
+eviction, and a `mode=max` export of a release-profile Rust graph across two
+arches and two variants exceeds that and then thrashes.
+
+Knobs: `make container-image CACHE=0` for a cold build (worth considering for
+the artefact that gets Cosign-signed, so the release owes nothing to mutable
+cache state), `CACHE_REF=<ref>` to use the registry cache locally,
+`CARGO_BUILD_JOBS=<n>` to cap parallelism on a memory-constrained builder, and
+`make container-cache-clean` to drop the local build cache.
 
 Why Wolfi: the runtime base is `cgr.dev/chainguard/wolfi-base` —
 Chainguard's free, open-source, glibc-based "undistro" built for

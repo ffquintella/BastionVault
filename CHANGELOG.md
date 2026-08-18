@@ -45,6 +45,62 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Changed
+
+#### The container image caches its dependency build
+- **Every `make container-image` was a cold build of ~1200 crates.** The
+  Containerfile put `COPY . .` immediately before a single `cargo build`, so
+  that layer's cache key was the hash of the whole build context: one edited
+  source file invalidated it, and so did `make bump-patch`, which is the last
+  thing that happens before every release build. The `cache-from/cache-to`
+  already configured in the container-image workflow could never hit the
+  compile step for the same reason.
+- **The compile is now split with cargo-chef** (`deploy/container/Containerfile`):
+  a `chef` toolchain base, a `planner` stage that reduces the tree to
+  `recipe.json`, then a `builder` stage that cooks the third-party dependencies
+  as their own layer before copying the workspace in. The dependency layer is
+  keyed on the recipe -- manifests plus the lock file, with every workspace
+  member's version normalised to `0.0.1` -- so it survives both source edits
+  and a product-version bump. Cooked artefacts deliberately stay in the layer
+  rather than in a BuildKit cache mount: a mount over `/src/target` would
+  shadow them, and only a layer can be exported to a registry cache, which is
+  what a CI runner needs.
+- **`cook` and `cargo build` have to agree exactly** on target triple, package
+  selection, features and cross-toolchain environment, or cargo fingerprints
+  them differently and the cooked artefacts are silently ignored. The
+  environment half is now a single sourced file,
+  `deploy/container/cross-env.sh`, instead of an inline block that would have
+  had to be duplicated.
+- **`rust-toolchain.toml` is copied in before `rustup target add`.** The repo
+  pins the `stable` channel, so every cargo step runs under it rather than
+  under the base image's pinned default toolchain. With the target added
+  before that file exists, it lands on the wrong toolchain and the cook step
+  dies with `can't find crate for core` as soon as chef hydrates its own copy
+  of the file -- a failure the old single-`RUN` shape could not produce,
+  because it always ran with the whole tree already in place.
+- **CI switches from `type=gha` to a registry cache**
+  (`ghcr.io/<owner>/bastionvault:buildcache[-debug]`). The GitHub cache is
+  capped at 10 GB per repository with LRU eviction; a `mode=max` export of a
+  release-profile Rust graph over two arches and two image variants exceeds
+  that and then thrashes, which reads as random cache misses.
+- **The compile is no longer pinned to two jobs.** `CARGO_BUILD_JOBS` was
+  hard-coded to 2 in the Containerfile -- a hedge from when every build was
+  cold -- and was the single largest contributor to the build's wall clock. It
+  now defaults to one job per core and is an `ARG`, so a memory-constrained
+  builder can cap it again with `make container-image CARGO_BUILD_JOBS=2`.
+- New knobs: `CACHE=0` (cold build -- worth using for the artefact that gets
+  Cosign-signed, so the release owes nothing to mutable cache state),
+  `CACHE_REF=<ref>` (use the registry cache locally; needs `BUILDX=1`), and
+  `make container-cache-clean`.
+- `deploy/container/Containerfile.debug` is unchanged and still builds cold;
+  the production image is what `make container-image-push` ships.
+- Measured on an M-series host, linux/amd64, cross-compiled: cold build 419 s
+  (236 s cook + 159 s workspace); no-change rebuild seconds, 13 layers cached;
+  after `make bump-patch` the recipe is byte-identical, the cook layer stays
+  CACHED and only the 147 s workspace layer re-runs. The resulting amd64
+  binary reports its version correctly under emulation and still passes the
+  `readelf` openssl guard.
+
 ## [0.41.6] - 2026-08-18
 
 ### Fixed

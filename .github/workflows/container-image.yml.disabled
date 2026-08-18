@@ -56,11 +56,11 @@ jobs:
           - variant: production
             file: deploy/container/Containerfile
             tag_suffix: ''
-            cache_scope: container-image
+            cache_tag: buildcache
           - variant: debug
             file: deploy/container/Containerfile.debug
             tag_suffix: -debug
-            cache_scope: container-image-debug
+            cache_tag: buildcache-debug
 
     steps:
       - name: Checkout
@@ -122,11 +122,22 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Cache builder layers across runs to amortise the slow Rust
-          # compile. Per-variant scope keeps the prod and debug caches
-          # from invalidating each other when only one Containerfile
-          # changes.
-          cache-from: type=gha,scope=${{ matrix.cache_scope }}
-          cache-to:   type=gha,scope=${{ matrix.cache_scope }},mode=max
+          # compile. What makes this pay off is the Containerfile's
+          # cargo-chef split: the ~1200 third-party crates are their own
+          # layer, keyed on the recipe (manifests + lock, with workspace
+          # versions normalised), so it survives both source edits and
+          # `make bump-patch`. Before that split this cache could never
+          # hit the compile step — `COPY . .` invalidated it every push.
+          #
+          # Registry cache, not type=gha: the GitHub cache is capped at
+          # 10 GB per repository with LRU eviction, and a mode=max export
+          # of a release-profile Rust dependency graph — two arches, two
+          # image variants — blows through that and then thrashes, which
+          # shows up as random-looking misses. ghcr has no such cap and
+          # we are already authenticated to it. Per-variant tag keeps the
+          # prod and debug caches from evicting each other.
+          cache-from: type=registry,ref=${{ env.IMAGE }}:${{ matrix.cache_tag }}
+          cache-to:   type=registry,ref=${{ env.IMAGE }}:${{ matrix.cache_tag }},mode=max
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3

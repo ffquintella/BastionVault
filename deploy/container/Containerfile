@@ -22,26 +22,32 @@
 #   make container-image CONTAINER_TOOL=docker BUILDX=1
 # Podman supports these automatic ARGs natively.
 #
+# Build caching:
+#   The compile is split into a dependency layer and a workspace layer with
+#   cargo-chef. `chef prepare` reduces the tree to a recipe of manifests plus
+#   the lock file; `chef cook` builds ~1200 third-party crates against a
+#   stubbed workspace. That layer's cache key is the recipe, NOT the source
+#   tree, so editing `src/` reuses it, and so does `make bump-patch` — chef
+#   normalises every workspace member's version (and the lock's) to 0.0.1, so
+#   a product-version bump does not touch the recipe.
+#
+#   The cooked artefacts live in the layer rather than in a BuildKit cache
+#   mount on purpose: a mount would shadow them, and only a layer can be
+#   exported to a registry cache for CI (`--cache-to type=registry`), where
+#   the builder is a fresh runner every time. See the Makefile's
+#   `container-image` target and .github/workflows/container-image.yml.
+#
 # See features/packaging-podman-server.md for the full design and
 # roadmaps/packaging-and-distribution.md for the wave sequencing.
 
-# ---------- Stage 1: builder (runs on BUILDPLATFORM, cross-compiles to TARGETPLATFORM) ----------
-FROM --platform=$BUILDPLATFORM docker.io/library/rust:1-slim-bookworm AS builder
+# ---------- Stage 1: chef (toolchain base, runs on BUILDPLATFORM) ----------
+# Shared by the planner and builder stages so the apt layer, the cargo-chef
+# binary and the cross-env script are each built once.
+FROM --platform=$BUILDPLATFORM docker.io/library/rust:1-slim-bookworm AS chef
 
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 ARG TARGETARCH
-
-# Both HSM auto-unseal backends are baked into the official image so a single
-# artifact serves production and homologation:
-#   - hsm_yubihsm2: real YubiHSM 2 (production). libusb is compiled statically
-#     from vendored C source (rusb `vendored` feature), so no libusb dev is
-#     needed here and no libusb .so is needed in the runtime stage.
-#   - hsm_mock: software mock for dev/homolog. It REFUSES to start when the
-#     environment is production, so shipping it here is safe — the active
-#     backend is chosen at runtime by the `hsm "<label>"` config block.
-# See features/hsm-support.md.
-ARG BVAULT_FEATURES="hsm_mock,hsm_yubihsm2"
 
 # Build tooling. The server crate is fully OpenSSL-free as of the
 # FIDO2 RP migration (`src/modules/credential/fido2/rp/`), so we no
@@ -74,28 +80,72 @@ RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/99-no-sandbox \
         git \
  && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /src
-COPY . .
+# cargo-chef itself. Pinned to a minor range: `cook` has to keep accepting
+# the same flags the builder stage passes, and the recipe format is internal
+# to the tool. Its own layer, so it is built once and never again.
+RUN cargo install cargo-chef --locked --version '^0.1'
 
-# Resolve TARGETARCH → Rust target triple + cross-toolchain prefix,
-# install the rust target, and build with cc-rs / cargo pointed at
-# the cross compiler. Output goes to /out/ so the runtime stage doesn't
-# need to know the target triple.
+# Target triple, cross toolchain and job count, resolved in one place and
+# sourced by every cargo step below. See the script's header for why this is
+# not inlined twice.
+COPY --chmod=0755 deploy/container/cross-env.sh /usr/local/bin/bv-cross-env
+
+WORKDIR /src
+
+# ---------- Stage 2: planner (recipe only — no compilation) ----------
+# The one stage that sees the whole source tree. It is invalidated by every
+# edit, which is fine: it only reads manifests and writes a ~450 KB recipe.
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path /recipe.json
+
+# ---------- Stage 3: builder (dependencies, then the workspace) ----------
+FROM chef AS builder
+
+ARG TARGETARCH
+
+# Both HSM auto-unseal backends are baked into the official image so a single
+# artifact serves production and homologation:
+#   - hsm_yubihsm2: real YubiHSM 2 (production). libusb is compiled statically
+#     from vendored C source (rusb `vendored` feature), so no libusb dev is
+#     needed here and no libusb .so is needed in the runtime stage.
+#   - hsm_mock: software mock for dev/homolog. It REFUSES to start when the
+#     environment is production, so shipping it here is safe — the active
+#     backend is chosen at runtime by the `hsm "<label>"` config block.
+# See features/hsm-support.md.
+ARG BVAULT_FEATURES="hsm_mock,hsm_yubihsm2"
+# Empty = one job per core. See cross-env.sh; the old hard-coded 2 was a
+# no-cache-era hedge and cost more than anything else in this file.
+ARG CARGO_BUILD_JOBS=""
+
+# The toolchain file first, and on its own: `rustup target add` honours a
+# directory override, and every cargo step below runs under the `stable`
+# channel this file pins — not the base image's pinned default. Without it the
+# target lands on the wrong toolchain and the cook step fails with
+# `can't find crate for core` the moment chef hydrates its own copy of this
+# file. Its own layer, keyed on the one file that can invalidate it.
+COPY rust-toolchain.toml ./
+RUN . /usr/local/bin/bv-cross-env && rustup target add "$RUST_TARGET"
+
+# The dependency layer. Keyed on the recipe alone.
+#
+# The two `cook` invocations mirror the two `cargo build` invocations below
+# line for line — same package selection, same features, same target. They
+# have to: cargo fingerprints the feature set, so a cook that does not match
+# its build produces artefacts the build ignores. Change one, change both.
+COPY --from=planner /recipe.json /recipe.json
 RUN set -eux; \
-    case "$TARGETARCH" in \
-        amd64)  RUST_TARGET=x86_64-unknown-linux-gnu;  CROSS_PFX=x86_64-linux-gnu ;; \
-        arm64)  RUST_TARGET=aarch64-unknown-linux-gnu; CROSS_PFX=aarch64-linux-gnu ;; \
-        *)      echo "unsupported TARGETARCH=$TARGETARCH"; exit 1 ;; \
-    esac; \
-    rustup target add "$RUST_TARGET"; \
-    RUST_TARGET_ENV=$(echo "$RUST_TARGET" | tr '[:lower:]-' '[:upper:]_'); \
-    RUST_TARGET_VAR=$(echo "$RUST_TARGET" | tr '-' '_'); \
-    export CARGO_TARGET_${RUST_TARGET_ENV}_LINKER=${CROSS_PFX}-gcc; \
-    export CC_${RUST_TARGET_VAR}=${CROSS_PFX}-gcc; \
-    export CXX_${RUST_TARGET_VAR}=${CROSS_PFX}-g++; \
-    export AR_${RUST_TARGET_VAR}=${CROSS_PFX}-ar; \
-    : "${CARGO_BUILD_JOBS:=2}"; export CARGO_BUILD_JOBS; \
-    export RUST_MIN_STACK=16777216; \
+    . /usr/local/bin/bv-cross-env; \
+    cargo chef cook --release --recipe-path /recipe.json --target "$RUST_TARGET" \
+        -p bvault-cli ${BVAULT_FEATURES:+--features "$BVAULT_FEATURES"}; \
+    cargo chef cook --release --recipe-path /recipe.json --target "$RUST_TARGET" \
+        -p bastion_vault
+
+# The workspace layer. Everything above this line survives a source edit.
+# Output goes to /out/ so the runtime stage doesn't need the target triple.
+COPY . .
+RUN set -eux; \
+    . /usr/local/bin/bv-cross-env; \
     cargo build --release --target "$RUST_TARGET" -p bvault-cli ${BVAULT_FEATURES:+--features "$BVAULT_FEATURES"} --bin bvault; \
     cargo build --release --target "$RUST_TARGET" -p bastion_vault --bin bv-ssh-helper; \
     mkdir -p /out; \
@@ -113,7 +163,7 @@ RUN if readelf -d /out/bvault | grep -E 'NEEDED.*(libssl|libcrypto)'; then \
         exit 1; \
     fi
 
-# ---------- Stage 2: runtime (pulled for TARGETPLATFORM) ----------
+# ---------- Stage 4: runtime (pulled for TARGETPLATFORM) ----------
 # Wolfi — Chainguard's free, open-source, glibc-based "undistro" built
 # for containers (cgr.dev/chainguard/wolfi-base). Like distroless it
 # carries glibc + a CA bundle and nothing application-specific, so the
