@@ -45,6 +45,22 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+#### The unit suite no longer requires the `plugins-ext` submodule
+- **`bv-plugin-pack`'s `shipped_email_manifest_parses_with_required_if` read a
+  file that no CI job has on disk.** The manifest it asserts against lives in
+  the `plugins-ext` submodule, which every workflow checks out with
+  `submodules: false` on purpose, so the test failed with `NotFound` on every
+  push to `main` and took the whole `Unit (whole workspace)` job -- and the
+  required-checks gate -- down with it. It now reports itself skipped when the
+  submodule is absent and still asserts against the real file on a developer
+  tree that has run `make plugins-init`.
+- **Added `required_if_inline_table_syntax_parses`**, a literal in-repo fixture
+  covering the same `required_if = { field = ..., equals = [...] }` inline-table
+  shape, so the syntax the original test existed to guard is now checked
+  unconditionally rather than only where the submodule happens to be present.
+
 ## [0.41.5] - 2026-08-18
 
 ### Fixed

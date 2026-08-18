@@ -317,10 +317,28 @@ mod tests {
     /// `required_if`, and its inline-table TOML syntax is easy to get
     /// wrong (a broken condition would only show up as a pack failure
     /// during a release build). Parse and validate the real file.
+    ///
+    /// The file lives in the `plugins-ext` submodule, which no CI job
+    /// checks out on purpose (`submodules: false` everywhere — the
+    /// build consumes it as a git dependency instead), so this asserts
+    /// against the real file on a developer tree and reports itself
+    /// skipped where the submodule is absent. The syntax itself is
+    /// covered unconditionally by the fixture test below.
     #[test]
     fn shipped_email_manifest_parses_with_required_if() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../plugins-ext/bastion-plugin-email/plugin.toml");
+        // Skip only on an un-checked-out submodule. Any *other* read
+        // failure (a truncated or unreadable file) still fails the
+        // test rather than passing quietly.
+        if !path.exists() {
+            eprintln!(
+                "SKIP: {} is absent — `make plugins-init` checks out the \
+                 plugins-ext submodule and brings this assertion back",
+                path.display()
+            );
+            return;
+        }
         let text = fs::read_to_string(&path).expect("email plugin.toml is readable");
         let m: PluginManifest = toml::from_str(&text).expect("email plugin.toml parses");
         m.validate().expect("email plugin.toml validates");
@@ -333,6 +351,70 @@ mod tests {
         assert_eq!(cond.field, "mode");
         assert!(cond.matches("smtp"));
         assert!(!cond.matches("office365"));
+    }
+
+    /// The half of the check above that survives without the
+    /// `plugins-ext` submodule: the same
+    /// `required_if = { field = ..., equals = [...] }` inline-table
+    /// shape the shipped email manifest uses, as a literal fixture, so
+    /// a regression in parsing or validating that shape still fails a
+    /// submodule-less run.
+    #[test]
+    fn required_if_inline_table_syntax_parses() {
+        let text = r#"
+name = "email"
+version = "0.1.0"
+plugin_type = "notification"
+runtime = "process"
+abi_version = "1.2"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 0
+description = "mode-scoped config fixture"
+
+[capabilities]
+log_emit = true
+
+[[config_schema]]
+name        = "mode"
+kind        = "select"
+required    = true
+default     = "smtp"
+options     = ["smtp", "office365"]
+
+[[config_schema]]
+name        = "from_address"
+kind        = "string"
+required    = false
+required_if = { field = "mode", equals = ["smtp"] }
+
+[[config_schema]]
+name        = "o365_tenant_id"
+kind        = "string"
+required    = false
+required_if = { field = "mode", equals = ["office365"] }
+"#;
+        let m: PluginManifest = toml::from_str(text).expect("fixture parses");
+        m.validate().expect("fixture validates");
+
+        let condition_on = |name: &str| {
+            m.config_schema
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap_or_else(|| panic!("{name} is declared"))
+                .required_if
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} is mode-scoped"))
+        };
+
+        let smtp = condition_on("from_address");
+        assert_eq!(smtp.field, "mode");
+        assert!(smtp.matches("smtp"));
+        assert!(!smtp.matches("office365"));
+
+        let o365 = condition_on("o365_tenant_id");
+        assert_eq!(o365.field, "mode");
+        assert!(o365.matches("office365"));
+        assert!(!o365.matches("smtp"));
     }
 
     #[test]
