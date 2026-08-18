@@ -681,6 +681,8 @@ endif
 #   * root `Cargo.toml`               (workspace crate version)
 #   * `gui/src-tauri/Cargo.toml`      (Tauri Rust crate)
 #   * `gui/package.json`              (npm — bastion-vault-gui)
+#   * `gui/package-lock.json`         (the same version, twice: the top-level
+#                                      one and `packages[""].version`)
 #   * `gui/src-tauri/tauri.conf.json` (Tauri runtime version pin)
 #   * `crates/bvault-cli/Cargo.toml`  (the `bvault` CLI — Phase 4 moved the
 #                                      binary out of the root package, and
@@ -721,6 +723,15 @@ _bump-write:
 	@$(SED_INPLACE) '1,/^version = /s/^version = "[^"]*"/version = "$(NEW)"/' Cargo.toml
 	@$(SED_INPLACE) '1,/^version = /s/^version = "[^"]*"/version = "$(NEW)"/' gui/src-tauri/Cargo.toml
 	@$(SED_INPLACE) '1,/^  "version":/s/^  "version": "[^"]*"/  "version": "$(NEW)"/' gui/package.json
+	@# The lockfile carries the same version twice and is otherwise full of
+	@# dependency `"version"` keys, so neither substitution may run
+	@# unanchored. The first is the top-level object's own key (2-space
+	@# indent, first in the file). The second lives in `packages[""]`, the
+	@# root-project entry — the range is opened by that entry's key so the
+	@# substitution can only ever reach its version and not a
+	@# `node_modules/...` entry's.
+	@$(SED_INPLACE) '1,/^  "version":/s/^  "version": "[^"]*"/  "version": "$(NEW)"/' gui/package-lock.json
+	@$(SED_INPLACE) '/^    "":/,/^      "version":/s/^      "version": "[^"]*"/      "version": "$(NEW)"/' gui/package-lock.json
 	@$(SED_INPLACE) '1,/^  "version":/s/^  "version": "[^"]*"/  "version": "$(NEW)"/' gui/src-tauri/tauri.conf.json
 	@# `bvault-cli` carries the shipped product version, not an independent
 	@# one: `bvault --version` is what operators read. Phase 4.
@@ -736,6 +747,7 @@ _bump-write:
 	@echo "  gui/src-tauri/Cargo.toml:      $$(grep '^version' gui/src-tauri/Cargo.toml | head -1)"
 	@echo "  gui/package.json:              $$(grep '\"version\"' gui/package.json | head -1 | sed 's/^[ \t]*//')"
 	@echo "  gui/src-tauri/tauri.conf.json: $$(grep '\"version\"' gui/src-tauri/tauri.conf.json | head -1 | sed 's/^[ \t]*//')"
+	@echo "  gui/package-lock.json:         $$(grep -E '^  \"version\":|^      \"version\":' gui/package-lock.json | head -2 | grep -o '\"version\": \"[^\"]*\"' | tr '\n' ' ')"
 	@echo "  crates/bvault-cli/Cargo.toml:  $$(grep '^version' crates/bvault-cli/Cargo.toml | head -1)"
 	@echo "  bastion_vault pins:            $$(grep -h '^bastion_vault = ' crates/bvault-cli/Cargo.toml crates/bv-server/Cargo.toml | grep -o 'version = \"[^\"]*\"' | tr '\n' ' ')"
 

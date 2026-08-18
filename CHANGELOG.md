@@ -101,6 +101,28 @@ EXAMPLE ENTRY:
   binary reports its version correctly under emulation and still passes the
   `readelf` openssl guard.
 
+### Fixed
+
+#### `make bump-*` keeps `gui/package-lock.json` in step
+- **The product-version bump rewrote seven sites and skipped the npm lock
+  file**, so `gui/package-lock.json` fell a release further behind
+  `gui/package.json` every time a version was cut. It was found reading 0.39.7
+  against a `package.json` of 0.41.6 -- three releases of drift, plus a partial
+  correction to 0.41.2 that some `npm install` had written on its own. The
+  lockfile was patched by hand in 2f7db8f; `_bump-write` now covers it, so the
+  next bump does not reopen the gap.
+- **The file carries the version twice** -- the top-level `"version"` and
+  `packages[""].version` -- and is otherwise full of dependency `"version"`
+  keys, so it takes two anchored substitutions rather than one. The top-level
+  key is matched at its two-space indent within a `1,/.../` range; the
+  `packages[""]` one is matched inside a range opened by that entry's own key,
+  which is what keeps the substitution from reaching a `node_modules/...`
+  entry. An unanchored `s///` would rewrite every pinned dependency version in
+  the lock file.
+- Verified by bumping a clean tree (exactly the two version lines change and
+  the file still parses as JSON) and by bumping from the half-corrected drift
+  state, which the `[^"]*` match repairs in one pass.
+
 ## [0.41.6] - 2026-08-18
 
 ### Fixed
