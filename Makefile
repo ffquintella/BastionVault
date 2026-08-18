@@ -80,8 +80,13 @@ export PATH := $(RUSTUP_CARGO_BIN):$(PATH)
 #   * the signed/distributable plugin artefacts must not carry an
 #     ad-hoc host RUSTFLAGS that changes their output.
 #
+# The default is one thread per core on the build host, detected below,
+# rather than a number pinned to whichever machine was in front of us
+# when the flag was added. Returns flatten well before they stop on a
+# very large host, so dial it down there if a build starts thrashing.
+#
 # Tune or disable from the command line:
-#   make build RUSTC_THREADS=6   # use 6 threads instead of 8
+#   make build RUSTC_THREADS=6   # cap the front-end at 6 threads
 #   make build RUSTC_THREADS=0   # off — plain stable behaviour
 #
 # Windows is intentionally excluded: setting RUSTFLAGS here would
@@ -90,7 +95,11 @@ export PATH := $(RUSTUP_CARGO_BIN):$(PATH)
 # back the GUI link failure `LNK1318` that flag exists to prevent.
 FAST_BUILD_TARGETS := build run-dev run-dev-gui run-dev-gui-hiqlite run-dev-gui-only bootstrap
 ifneq ($(OS),Windows_NT)
-RUSTC_THREADS ?= 8
+# `getconf` is POSIX and present on macOS and every Linux distro we build on;
+# `sysctl -n hw.ncpu` covers the BSDs, and 8 is the last-resort fallback so a
+# detection failure degrades to the old fixed default instead of `-Z threads=`.
+HOST_CORES := $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 8)
+RUSTC_THREADS ?= $(if $(strip $(HOST_CORES)),$(strip $(HOST_CORES)),8)
 ifneq ($(RUSTC_THREADS),0)
 $(FAST_BUILD_TARGETS): export RUSTC_BOOTSTRAP := 1
 $(FAST_BUILD_TARGETS): export RUSTFLAGS := $(strip $(RUSTFLAGS) -Z threads=$(RUSTC_THREADS))
@@ -119,6 +128,23 @@ endif
 # an incremental-compilation bug where older generations need to
 # stick around.
 KEEP ?= 3
+
+# ── Dev rebuild parallelism ───────────────────────────────────────
+#
+# The `run-dev*` targets used to pin `CARGO_BUILD_JOBS=6`, which capped
+# cargo at 6 concurrent rustc processes no matter how many cores the host
+# had. Empty now means cargo's own default — one job per core — so a dev
+# rebuild uses the whole machine, matching `make build` and the container
+# build (whose `CARGO_BUILD_JOBS` is likewise empty by default).
+#
+# Set it to cap parallelism again when the machine is memory-bound rather
+# than CPU-bound: the GUI dev build links `bastion_vault` + Tauri + wry,
+# and N concurrent rustc processes each holding a large crate graph can
+# push a 16 GB host into swap, which is slower than fewer jobs.
+#
+#   make run-dev-gui DEV_BUILD_JOBS=6   # back to the old fixed cap
+DEV_BUILD_JOBS ?=
+_DEV_JOBS_ENV := $(if $(strip $(DEV_BUILD_JOBS)),CARGO_BUILD_JOBS=$(strip $(DEV_BUILD_JOBS)) ,)
 
 # WSL projects checked out under /mnt/c can reject npm's chmod while
 # creating node_modules/.bin links. Avoid bin links there and call the
@@ -184,7 +210,7 @@ build: prune-stale ## Build the project in release mode
 	cargo build --release
 
 run-dev: prune-stale ## Run the development server
-	CARGO_BUILD_JOBS=6 cargo run -- server --config config/dev.hcl
+	$(_DEV_JOBS_ENV)cargo run -- server --config config/dev.hcl
 
 gui-deps: ## Install GUI frontend dependencies
 	cd gui && $(GUI_NPM_INSTALL)
@@ -194,10 +220,10 @@ gui-deps: ## Install GUI frontend dependencies
 # can see exactly what the dev / prod GUI binaries ship with.
 # `ssh_pqc` enables ML-DSA-65 SSH CA generation in the /ssh page.
 run-dev-gui: gui-deps prune-stale ## Run the desktop GUI in dev mode with local MCP bridge enabled
-	cd gui && CARGO_BUILD_JOBS=6 BASTION_EMBEDDED_STORAGE=file BASTION_TAURI_MCP=1 $(GUI_TAURI) dev -- --features storage_hiqlite,mcp_local_dev,ssh_pqc
+	cd gui && $(_DEV_JOBS_ENV)BASTION_EMBEDDED_STORAGE=file BASTION_TAURI_MCP=1 $(GUI_TAURI) dev -- --features storage_hiqlite,mcp_local_dev,ssh_pqc
 
 run-dev-gui-hiqlite: gui-deps prune-stale ## Run the desktop GUI in dev mode, embedded vault on hiqlite (ports 8210/8220)
-	cd gui && CARGO_BUILD_JOBS=6 BASTION_EMBEDDED_STORAGE=hiqlite $(GUI_TAURI) dev -- --features storage_hiqlite,ssh_pqc
+	cd gui && $(_DEV_JOBS_ENV)BASTION_EMBEDDED_STORAGE=hiqlite $(GUI_TAURI) dev -- --features storage_hiqlite,ssh_pqc
 
 # Lightest dev build: Tauri host + vite, with `bastion_vault` pulled
 # in at default-features=false. That means no hiqlite (no Raft/SQLite
@@ -207,7 +233,7 @@ run-dev-gui-hiqlite: gui-deps prune-stale ## Run the desktop GUI in dev mode, em
 # features won't work in this build; that's the trade-off for the
 # faster compile.
 run-dev-gui-only: gui-deps prune-stale ## Run the desktop GUI in dev mode with no backend storage features (lightest compile) + MCP bridge
-	cd gui && CARGO_BUILD_JOBS=6 BASTION_TAURI_MCP=1 $(GUI_TAURI) dev -- --no-default-features --features mcp_local_dev
+	cd gui && $(_DEV_JOBS_ENV)BASTION_TAURI_MCP=1 $(GUI_TAURI) dev -- --no-default-features --features mcp_local_dev
 
 gui-build: gui-deps prune-stale ## Build the desktop GUI for production
 	cd gui && $(GUI_TAURI) build -- --features storage_hiqlite,ssh_pqc

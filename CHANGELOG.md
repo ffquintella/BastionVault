@@ -47,6 +47,21 @@ EXAMPLE ENTRY:
 
 ### Changed
 
+#### Local builds are no longer pinned to a fixed core count
+- **`make run-dev`, `run-dev-gui`, `run-dev-gui-hiqlite` and `run-dev-gui-only`
+  hardcoded `CARGO_BUILD_JOBS=6`**, capping cargo at six concurrent rustc
+  processes regardless of how many cores the host had. The cap is now the
+  `DEV_BUILD_JOBS` variable, empty by default, so a dev rebuild uses cargo's
+  own default of one job per core — the same default `make build` and the
+  container build already had. Cap it again on a memory-bound machine with
+  `make run-dev-gui DEV_BUILD_JOBS=6`.
+- **`RUSTC_THREADS` (the `-Z threads=N` parallel rustc front-end on
+  `FAST_BUILD_TARGETS`) defaulted to a literal 8**, a number pinned to one
+  machine. It now defaults to the host's online core count, detected with
+  `getconf _NPROCESSORS_ONLN` and falling back to `sysctl -n hw.ncpu` and then
+  to 8. `RUSTC_THREADS=N` still caps it and `RUSTC_THREADS=0` still disables
+  the escape hatch entirely.
+
 #### The container image caches its dependency build
 - **Every `make container-image` was a cold build of ~1200 crates.** The
   Containerfile put `COPY . .` immediately before a single `cargo build`, so
