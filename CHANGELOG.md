@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.10] - 2026-08-21
+
 ### Fixed
 
 #### A share granted inside a namespace named an identity that never authenticates
@@ -80,6 +82,29 @@ EXAMPLE ENTRY:
   literal id, so a share written before this landed stays revocable by the id
   the GUI lists for it. Existing mis-keyed shares are not migrated: re-issue
   the grant, which now lands correctly, then revoke the stale row.
+
+#### A running server reported a library version where the product version belongs
+- **A 0.41.9 server answered `0.41.1`.** The `version` field of `GET /sys/info`
+  and the GUI's Server Info dialog both read
+  `bv_core::server_info::version()`, which was `env!("CARGO_PKG_VERSION")`
+  expanded *inside `bv-core`* -- that crate's own library version, which moves
+  when its content changes and not when a release is cut (AGENTS.md 7).
+  `bvault --version` reads the product version and was correct throughout, so
+  the two disagreed by however far `bv-core` had drifted since the last time it
+  was published.
+- **Both surfaces now read `bastion_vault::VERSION`** -- the same constant
+  `bvault --version` prints and the installer filenames carry
+  (`crates/bv-server/src/sys.rs`, `gui/src-tauri/src/commands/system.rs`).
+  Operators who recorded a version from a running server or from the GUI should
+  re-read it after upgrading; nothing but the reported string changes.
+- **`bv_core::server_info::version()` is removed, not corrected.** `bv-core`
+  cannot see the product version, so any getter living there is wrong by
+  construction while looking right at every call site. Removing it makes the
+  wrong value unreachable. Consumers of the `bv-core` crate that called it
+  should read `bastion_vault::VERSION` instead.
+- **The regression test now pins the product constant.** The `/sys/info`
+  assertion compared the response against the same getter that produced it, so
+  it could not have caught this; it compares against `bastion_vault::VERSION`.
 
 ## [0.41.9] - 2026-08-21
 

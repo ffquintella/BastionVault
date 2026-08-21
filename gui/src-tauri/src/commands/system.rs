@@ -491,7 +491,7 @@ pub async fn get_server_info(state: State<'_, AppState>) -> CmdResult<ServerInfo
             return Ok(ServerInfo {
                 connection_kind: "embedded".to_string(),
                 endpoint: "embedded".to_string(),
-                version: bastion_vault::server_info::version().to_string(),
+                version: bastion_vault::VERSION.to_string(),
                 started_at: bastion_vault::server_info::started_at().to_rfc3339(),
                 uptime_seconds: bastion_vault::server_info::uptime_seconds(),
                 initialized,

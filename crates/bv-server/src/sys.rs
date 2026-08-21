@@ -1569,7 +1569,7 @@ async fn sys_info_request_handler(
         #[cfg(not(all(not(feature = "sync_handler"), feature = "storage_hiqlite")))]
         let storage_type = "unknown";
 
-        resp.version = Some(crate::server_info::version());
+        resp.version = Some(bastion_vault::VERSION);
         resp.started_at = Some(crate::server_info::started_at().to_rfc3339());
         resp.uptime_seconds = Some(crate::server_info::uptime_seconds());
         resp.storage_type = Some(storage_type.to_string());
@@ -4401,8 +4401,10 @@ mod sys_info_disclosure_tests {
         assert_eq!(status, 200, "sys/info must answer an authenticated caller: {resp:?}");
         assert_eq!(
             resp["version"].as_str(),
-            Some(crate::server_info::version()),
-            "authenticated callers still get the build version: {resp:?}"
+            Some(bastion_vault::VERSION),
+            "authenticated callers get the *product* version — what `bvault --version` prints — and not \
+             the library version of whichever crate the getter happens to live in (a 0.41.9 server used \
+             to report `bv-core`'s 0.41.1 here): {resp:?}"
         );
         assert!(resp["started_at"].as_str().is_some_and(|s| !s.is_empty()), "{resp:?}");
         assert!(resp["uptime_seconds"].as_i64().is_some(), "{resp:?}");
@@ -4463,7 +4465,7 @@ mod sys_info_disclosure_tests {
         );
         assert_eq!(
             auth_body["version"].as_str(),
-            Some(crate::server_info::version()),
+            Some(bastion_vault::VERSION),
             "{auth_body:?}"
         );
         assert!(auth_body["storage_type"].as_str().is_some(), "{auth_body:?}");

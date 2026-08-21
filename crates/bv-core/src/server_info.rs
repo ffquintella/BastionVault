@@ -4,9 +4,16 @@
 //! tracking this value — set explicitly by `record_start_now()` from
 //! the HTTP server or embedded-GUI startup paths, or lazily on first
 //! access (which is good enough for "uptime since first request" if
-//! the explicit hook ever gets skipped). `version()` returns the
-//! Cargo-baked crate version so both the HTTP `/sys/info` endpoint
-//! and the GUI's Server Info dialog read from a single source.
+//! the explicit hook ever gets skipped).
+//!
+//! There is deliberately no `version()` here. The version an operator
+//! reads out of `/sys/info` or the GUI's Server Info dialog has to be
+//! the *product* version — the one `bvault --version` prints and the one
+//! on the installer — and `env!("CARGO_PKG_VERSION")` in this file
+//! expands to *this crate's* library version instead, which moves by
+//! content rather than by release (AGENTS.md §7). That mismatch shipped:
+//! a 0.41.9 server reported 0.41.1, because that is where `bv-core`
+//! happened to be. The single source is `bastion_vault::VERSION`.
 
 use std::sync::OnceLock;
 
@@ -29,10 +36,6 @@ pub fn started_at() -> DateTime<Utc> {
 
 pub fn uptime_seconds() -> i64 {
     (Utc::now() - started_at()).num_seconds().max(0)
-}
-
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
 }
 
 /// Record this node's externally reachable API base URL — the `api_addr`
