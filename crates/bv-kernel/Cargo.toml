@@ -1,6 +1,6 @@
 [package]
 name = "bv-kernel"
-version = "0.41.1"
+version = "0.41.2"
 edition = "2021"
 description = "BastionVault's kernel tier: tokens and leases, identity, policy, namespaces, resource groups and the sys/ backend"
 license = "Apache-2.0"
