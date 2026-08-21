@@ -530,6 +530,7 @@ Credential-source matrix after this phase:
 ### Phase 8 — Future / deferred
 
 - Session recording (keystroke + bitmap capture; storage tier; replay viewer).
+- Tabbed / split session layout — one window per session is the model today; specced out separately in [session-workspace.md](session-workspace.md) (Todo).
 - SFTP file panel attached to an SSH session.
 - Multi-hop via a designated bastion resource.
 - Smartcard / certificate auth for RDP.

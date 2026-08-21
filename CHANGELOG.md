@@ -45,6 +45,50 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.9] - 2026-08-21
+
+### Added
+
+#### Session Workspace design (spec only -- no behaviour ships in this release)
+- **`features/session-workspace.md`** -- the design for replacing
+  one-free-floating-OS-window-per-session with a **Session Workspace** window:
+  a tab strip plus, per tab, a Ghostty-style binary split tree (split right /
+  down, focus-move, divider drag with ratio clamping, pane zoom), carrying SSH
+  (xterm.js), RDP (canvas) and recording-replay panes alike. Platform-aware
+  chords come from a single reserved-chord table shared by the terminal pane's
+  `attachCustomKeyEventHandler` and the RDP pane's keydown filter, so a chord
+  can never be captured in one pane type and silently typed into a remote
+  Windows desktop in another. Eight phases (0-7), GUI-only: no server change,
+  no new logical paths, no new Rust or npm dependency.
+- **Phase 0 is separable and cheap** -- macOS `tabbing_identifier` on the
+  existing per-session window builder gives native window tabs with today's
+  per-session webview isolation fully intact.
+- **Two design constraints are called out as the load-bearing ones.** Panes
+  must own their DOM outside the React tree that lays them out (a module-level
+  `token -> host element` registry the layout renderer `appendChild`s into
+  slots), because React unmounts a subtree when it changes parent and that
+  destroys xterm scrollback and the RDP canvas backing store. And session
+  teardown moves off `WindowEvent::CloseRequested` onto a token -> window
+  attachment registry with a heartbeat watchdog -- pane close, tab close,
+  window close and webview death all converging on the same `drop_session` +
+  `run_cleanup` path, which also closes today's leak of a session whose
+  webview dies without emitting a close event.
+- **The isolation trade-off is stated, not buried.** Splits put N panes in one
+  JS realm, giving up the current per-session `WebviewWindow` context boundary;
+  the spec makes the mitigations mandatory (session routes only in that bundle,
+  no `innerHTML` of remote bytes), keeps a `layout_mode = "windows"` preference
+  for operators who want the old isolation, and records why the
+  isolation-preserving alternative (one Tauri webview per pane) is deferred --
+  it sits behind tauri's `unstable` feature flag and costs a process per pane.
+  Persisted layouts are skeletons only (resource + profile references, never
+  tokens, never credentials, never session output), restored by an explicit
+  operator action that re-runs the full connect path including connect-time
+  MFA, and refused across a namespace boundary. Broadcast / synchronised input
+  is explicitly out of scope.
+- Registered as Todo in [roadmap.md](roadmap.md) and cross-referenced from
+  `features/resource-connect.md`'s deferred list.
+
+
 ## [0.41.8] - 2026-08-18
 
 ### Added
