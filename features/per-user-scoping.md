@@ -374,6 +374,49 @@ without forcing a migration. Policy templating (Phase 2), the owner
 backfill admin endpoint (migration story from the *Testing Plan*), and
 the GUI for sharing + owner transfer are all live.
 
+### Which entity a share names
+
+One login is several entities. The alias keyspace is partitioned per namespace
+(`identity-ns/<b64url(ns)>/alias/<mount>/<name>`), and `get_or_create_entity_ns`
+mints a fresh UUID the first time a principal signs in to a given namespace, so
+`userpass/felipe2` at root and `userpass/felipe2` in `dti/esi` are two entity
+records with two ids. Every request carries exactly one of them — the one for
+the namespace the token is bound to.
+
+That matters because the grantee picker lists the active namespace's aliases
+*plus* root's (root owns the auth mounts, so operators who authenticate there
+have to be enumerable). Granting inside a namespace to the root row produced a
+share keyed on an entity that never authenticates there: the "Shared with me"
+feed reads the by-grantee index under the caller's own `entity_id` and found
+nothing, and every `scopes = ["shared"]` rule resolved no capabilities. For a
+user who had not yet logged in to the namespace, the root row was the *only*
+row on offer, so the failure was not avoidable by picking more carefully.
+
+`handle_share_put` therefore treats the grantee as naming a **login**, not a
+storage record: it resolves that login's `(mount, name)` into the request's
+namespace and creates the entity there if this is its first mention — what a
+first login would have done. Pre-provisioning grants nothing; an entity record
+is an identity.
+
+The re-point is conditional, and each condition is a case where guessing would
+be wrong:
+
+| Grantee | Stored as |
+|---|---|
+| an entity from another namespace's keyspace | the request namespace's entity for the same login |
+| an entity already local to the request namespace | unchanged |
+| a group grantee (`grantee_kind` = `group_user` / `group_app`) | unchanged — the id is a group *name* |
+| an id that resolves to no entity (pasted UUID, restored backup) | unchanged — there is no login to re-resolve |
+
+A grant at root is not exempt: naming a namespace entity there re-points to
+root's, because a root share belongs to whoever authenticates at root.
+
+Revocation deliberately does **not** apply the mapping. `handle_share_delete`
+uses the literal id, so a share written before this landed stays revocable by
+the id the GUI lists for it. Mis-keyed shares already in storage are not
+migrated — re-issue the grant, which now lands correctly, then revoke the stale
+row.
+
 ### Using a share from outside the namespace it lives in
 
 A share is stored globally — `ShareStore` keys on the namespace-scoped

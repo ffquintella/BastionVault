@@ -255,6 +255,197 @@ use serde_json::json;
         );
     }
 
+    /// Regression: a share granted inside a namespace to a login whose only
+    /// entity lives in root must be redeemable by that login when it signs in
+    /// to the namespace.
+    ///
+    /// The grantee picker lists the active namespace's aliases *plus* root's,
+    /// and for a user who has never logged in to the namespace the root row is
+    /// the only row on offer. Keying the share on it produced a grant nobody
+    /// could redeem: `identity/sharing/for-me` indexes by the caller's own
+    /// `entity_id`, which for a namespace login is a *different* UUID, so the
+    /// share was invisible to the person it named and every
+    /// `scopes = ["shared"]` rule resolved no capabilities.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_share_grant_in_namespace_keys_on_the_namespace_entity() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_share_grant_in_namespace_keys_on_the_namespace_entity")
+                .await;
+
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "sys/namespaces/pns",
+            true,
+            json!({}).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+
+        // The grantee exists only in root — the state of every user who has
+        // not yet logged in to the namespace.
+        let store = EntityStore::new(&core).await.unwrap();
+        let root_entity = store
+            .get_or_create_entity_ns("userpass/", "grantee", "")
+            .await
+            .unwrap();
+        assert!(
+            store.get_by_alias_ns("userpass/", "grantee", "pns").await.unwrap().is_none(),
+            "precondition: the grantee must have no entity in `pns` yet"
+        );
+
+        // Grant inside `pns`, naming the only row the picker could offer.
+        let target = URL_SAFE_NO_PAD.encode("db1".as_bytes());
+        let mut req = Request::new(&format!(
+            "identity/sharing/by-target/resource/{target}/{}",
+            root_entity.id
+        ));
+        req.operation = Operation::Write;
+        req.client_token = root_token.clone();
+        let mut headers = HashMap::new();
+        headers.insert("X-BastionVault-Namespace".to_string(), "pns".to_string());
+        req.headers = Some(headers);
+        req.body = json!({ "capabilities": ["read", "connect"] }).as_object().cloned();
+        let resp = core.handle_request(&mut req).await.unwrap().unwrap();
+        let stored = resp.data.unwrap();
+
+        // The share is keyed on `pns`'s entity for that login, which the grant
+        // pre-provisioned exactly as a first login would have.
+        let pns_entity = store
+            .get_by_alias_ns("userpass/", "grantee", "pns")
+            .await
+            .unwrap()
+            .expect("granting in `pns` must resolve the login's entity there");
+        assert_ne!(
+            pns_entity.id, root_entity.id,
+            "a namespace login resolves to its own entity, or there is nothing to fix"
+        );
+        assert_eq!(
+            stored.get("grantee_entity_id").and_then(|v| v.as_str()),
+            Some(pns_entity.id.as_str()),
+            "the share must name the entity that authenticates in `pns`: {stored:?}"
+        );
+
+        // And it is reachable through the index that feeds "Shared with me".
+        let share_store = ShareStore::new(&core).await.unwrap();
+        let ptrs = share_store
+            .list_shares_for_grantee(&pns_entity.id)
+            .await
+            .unwrap();
+        assert!(
+            ptrs.iter().any(|p| p.target_path.ends_with("db1")),
+            "the grantee's own feed must list the share: {ptrs:?}"
+        );
+        assert!(
+            share_store
+                .list_shares_for_grantee(&root_entity.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "nothing may be left keyed on the entity that never authenticates in `pns`"
+        );
+
+        // The capability the scope gate demands resolves for the right entity
+        // and for nobody else.
+        assert_eq!(
+            share_store
+                .shared_capabilities(ShareTargetKind::Resource, "pns/db1", &pns_entity.id)
+                .await
+                .unwrap(),
+            vec!["read".to_string(), "connect".to_string()],
+        );
+        assert!(
+            share_store
+                .shared_capabilities(ShareTargetKind::Resource, "pns/db1", &root_entity.id)
+                .await
+                .unwrap()
+                .is_empty(),
+        );
+    }
+
+    /// The mirror case, and the reason the re-point is conditional: a grant at
+    /// root must stay on root's entity even when the grantee also has a
+    /// namespace entity. Re-pointing unconditionally would send a root share
+    /// to an identity that never authenticates at root — the same bug with the
+    /// sign flipped.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_share_grant_at_root_keys_on_the_root_entity() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_share_grant_at_root_keys_on_the_root_entity").await;
+
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "sys/namespaces/pns",
+            true,
+            json!({}).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+
+        let store = EntityStore::new(&core).await.unwrap();
+        let root_entity = store.get_or_create_entity_ns("userpass/", "both", "").await.unwrap();
+        let ns_entity = store.get_or_create_entity_ns("userpass/", "both", "pns").await.unwrap();
+        assert_ne!(root_entity.id, ns_entity.id);
+
+        // Grant at root, naming the *namespace* entity — the inverse mistake.
+        let target = URL_SAFE_NO_PAD.encode("db2".as_bytes());
+        let mut req = Request::new(&format!(
+            "identity/sharing/by-target/resource/{target}/{}",
+            ns_entity.id
+        ));
+        req.operation = Operation::Write;
+        req.client_token = root_token.clone();
+        req.body = json!({ "capabilities": ["read"] }).as_object().cloned();
+        let resp = core.handle_request(&mut req).await.unwrap().unwrap();
+        let stored = resp.data.unwrap();
+
+        assert_eq!(
+            stored.get("grantee_entity_id").and_then(|v| v.as_str()),
+            Some(root_entity.id.as_str()),
+            "a root grant belongs to the entity that authenticates at root: {stored:?}"
+        );
+    }
+
+    /// A grantee id that resolves to no entity at all — a raw UUID pasted by
+    /// an operator, or a share restored from a backup — has no login to
+    /// re-resolve, so it must be stored verbatim rather than guessed at.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_share_grant_leaves_an_unknown_grantee_alone() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_share_grant_leaves_an_unknown_grantee_alone").await;
+
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "sys/namespaces/pns",
+            true,
+            json!({}).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+
+        let orphan = "11111111-2222-3333-4444-555555555555";
+        let target = URL_SAFE_NO_PAD.encode("db3".as_bytes());
+        let mut req = Request::new(&format!(
+            "identity/sharing/by-target/resource/{target}/{orphan}"
+        ));
+        req.operation = Operation::Write;
+        req.client_token = root_token.clone();
+        let mut headers = HashMap::new();
+        headers.insert("X-BastionVault-Namespace".to_string(), "pns".to_string());
+        req.headers = Some(headers);
+        req.body = json!({ "capabilities": ["read"] }).as_object().cloned();
+        let resp = core.handle_request(&mut req).await.unwrap().unwrap();
+        let stored = resp.data.unwrap();
+
+        assert_eq!(
+            stored.get("grantee_entity_id").and_then(|v| v.as_str()),
+            Some(orphan),
+            "an unresolvable grantee must be stored verbatim: {stored:?}"
+        );
+    }
+
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_share_store_roundtrip_and_cascade() {
         let (_bvault, core, _root_token) =

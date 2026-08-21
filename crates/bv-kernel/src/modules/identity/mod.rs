@@ -989,6 +989,89 @@ impl IdentityBackendInner {
             .ok_or_else(|| bv_error_string!("share store unavailable"))
     }
 
+    fn resolve_entity_store(&self) -> Result<Arc<EntityStore>, RvError> {
+        self.core
+            .module_manager()
+            .get_module::<IdentityModule>("identity")
+            .and_then(|m| m.entity_store())
+            .ok_or_else(|| bv_error_string!("entity store unavailable"))
+    }
+
+    /// Re-point an entity grantee at the entity that will actually
+    /// authenticate in the namespace this share lives in.
+    ///
+    /// An external principal resolves to a *different* entity per namespace:
+    /// the alias keyspace is partitioned (`identity-ns/<b64url(ns)>/alias/...`)
+    /// and `get_or_create_entity_ns` mints a fresh UUID the first time that
+    /// principal logs in to a given namespace. The grantee picker lists the
+    /// active namespace's aliases *plus* root's (root owns the auth mounts, so
+    /// operators authenticating there must be enumerable), which means an
+    /// operator granting inside a namespace can pick a row whose entity will
+    /// never authenticate *there* — and for a user who has not yet logged in
+    /// to the namespace, that wrong row is the only row on offer.
+    ///
+    /// The result was a share nobody could redeem: `identity/sharing/for-me`
+    /// looks up the by-grantee index under the caller's own `entity_id`, so
+    /// the grant was invisible to the very person it named, and every
+    /// `scopes = ["shared"]` rule resolved no capabilities. Observed in
+    /// production with the grant landing on the root entity nine seconds
+    /// before the grantee's first namespace login created the entity they
+    /// have carried ever since.
+    ///
+    /// So the grantee an operator picks is treated as naming a *login*, not a
+    /// storage record: resolve that login's `(mount, name)` into the request's
+    /// namespace, creating the entity if this is the first time it has been
+    /// named there — exactly what a login does. Pre-provisioning confers
+    /// nothing on its own; an entity record is an identity, not a grant.
+    ///
+    /// Left alone in three cases, each of which would be a guess:
+    ///   * group grantees — the id is a group *name*, not an entity id;
+    ///   * an unknown id — a raw UUID pasted by an operator or a share
+    ///     restored from a backup, where there is no login to re-resolve;
+    ///   * an entity that is already the namespace's own, or whose record
+    ///     carries no `primary_name` to resolve with.
+    async fn scope_grantee_to_namespace(
+        &self,
+        grantee: String,
+        grantee_kind: ShareGranteeKind,
+        req: &Request,
+    ) -> Result<String, RvError> {
+        if grantee_kind.is_group() {
+            return Ok(grantee);
+        }
+        let ns = req
+            .namespace_path
+            .as_deref()
+            .map(|n| n.trim().trim_matches('/'))
+            .unwrap_or("");
+
+        let store = self.resolve_entity_store()?;
+        let Some(entity) = store.get_entity(&grantee).await? else {
+            return Ok(grantee);
+        };
+        if entity.namespace.trim().trim_matches('/') == ns {
+            return Ok(grantee);
+        }
+        if entity.primary_name.trim().is_empty() {
+            return Ok(grantee);
+        }
+
+        let scoped = store
+            .get_or_create_entity_ns(&entity.primary_mount, &entity.primary_name, ns)
+            .await?;
+        if scoped.id != grantee {
+            log::info!(
+                "share grantee re-pointed from entity {} (namespace {:?}) to {} for namespace {:?}: \
+                 the grantee's login resolves to a different entity there",
+                grantee,
+                entity.namespace,
+                scoped.id,
+                ns,
+            );
+        }
+        Ok(scoped.id)
+    }
+
     /// Authorize the caller to manage shares on `(kind, target_path)`.
     ///
     /// A token is allowed when either:
@@ -1498,6 +1581,15 @@ impl IdentityBackendInner {
             .ok_or_else(|| bv_error_string!("invalid grantee_kind"))?;
 
         self.require_share_admin(req, kind, &target_path).await?;
+
+        // The picker hands us whichever keyspace's row the operator clicked;
+        // key the share on the entity that will authenticate where the object
+        // lives. Grant-path only -- `handle_share_delete` deliberately uses
+        // the literal id, so a share written before this landed (or by an
+        // older peer) stays revocable by the id the GUI lists for it.
+        let grantee = self
+            .scope_grantee_to_namespace(grantee, grantee_kind, req)
+            .await?;
 
         let share = SecretShare {
             target_kind: kind.as_str().to_string(),

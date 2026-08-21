@@ -45,6 +45,42 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+#### A share granted inside a namespace named an identity that never authenticates
+- **The grant landed on the wrong entity.** An external principal resolves to a
+  *different* entity per namespace — the alias keyspace is partitioned
+  (`identity-ns/<b64url(ns)>/alias/...`) and `get_or_create_entity_ns` mints a
+  fresh UUID the first time that principal logs in to a given namespace. The
+  grantee picker lists the active namespace's aliases *plus* root's, so an
+  operator granting inside a namespace could pick a row whose entity will never
+  authenticate there; for a user who has not yet logged in to the namespace,
+  that wrong row is the only row on offer.
+- **The result was a share nobody could redeem.**
+  `identity/sharing/for-me` indexes by the caller's own `entity_id`, so the
+  grant was invisible to the very person it named -- "Shared with me" read 0 --
+  and every `scopes = ["shared"]` rule resolved no capabilities, leaving the
+  resource unopenable. Observed in production with the grant landing on the
+  root entity nine seconds before the grantee's first namespace login created
+  the entity they have carried ever since.
+- **The grant path now treats the grantee as a login, not a storage record**
+  (`crates/bv-kernel/src/modules/identity/mod.rs`). `handle_share_put` resolves
+  the named entity's `(mount, name)` into the request's namespace, creating the
+  entity there if this is the first time it has been named -- exactly what a
+  login does. Pre-provisioning confers nothing on its own; an entity record is
+  an identity, not a grant. Either row in the picker now lands on the identity
+  that authenticates where the object lives.
+- **Conditional, in both directions.** A grant at root stays on root's entity
+  even when the grantee also has a namespace entity; re-pointing
+  unconditionally would be the same bug with the sign flipped. Group grantees
+  (whose id is a group *name*), unknown ids (a raw UUID pasted by an operator,
+  or a share restored from a backup) and entities already local to the
+  namespace are stored verbatim rather than guessed at.
+- **Revocation is unchanged on purpose.** `handle_share_delete` still uses the
+  literal id, so a share written before this landed stays revocable by the id
+  the GUI lists for it. Existing mis-keyed shares are not migrated: re-issue
+  the grant, which now lands correctly, then revoke the stale row.
+
 ## [0.41.9] - 2026-08-21
 
 ### Added
