@@ -109,6 +109,25 @@ pub struct MasterConfig {
     /// accepted by the verify helper. Default 1 day.
     #[serde(default = "default_rotate_grace_secs")]
     pub rotate_grace_secs: u64,
+    /// Authority name this deployment presents to Rustion — the
+    /// `X-Rustion-Authority` header value on every signed envelope, and
+    /// the name of the record the bastion pins the master pubkey under
+    /// (`authorities/<name>.yaml`).
+    ///
+    /// Configurable because Rustion verifies against **exactly one**
+    /// record, looked up by this header (see `verify_and_replay` in
+    /// `rustion-control-plane/src/routes.rs`); a bastion that already
+    /// trusts another BV deployment under `bastion-vault` therefore
+    /// cannot also trust this one until the two use distinct names.
+    /// Approving a second deployment under the same name displaces the
+    /// first.
+    ///
+    /// Empty (including configs persisted before this field existed)
+    /// reads back as [`DEFAULT_AUTHORITY_NAME`] — see
+    /// [`MasterConfig::authority`], which is the only sanctioned way to
+    /// read it. Never interpolate this field directly.
+    #[serde(default = "default_authority_name")]
+    pub authority_name: String,
     /// Current cert serial. Empty before the first `issue`.
     #[serde(default)]
     pub current_serial: String,
@@ -141,6 +160,77 @@ fn default_ttl_secs() -> u64 {
 
 fn default_rotate_grace_secs() -> u64 {
     24 * 3600
+}
+
+/// The authority name every deployment presented before the name became
+/// configurable. Kept as the default so an upgrade is a no-op on the
+/// wire: existing bastions keep verifying against the record they
+/// already pin.
+pub const DEFAULT_AUTHORITY_NAME: &str = "bastion-vault";
+
+fn default_authority_name() -> String {
+    DEFAULT_AUTHORITY_NAME.to_string()
+}
+
+/// Longest authority name we accept. Rustion stores the record as
+/// `authorities/<name>.yaml`, so this is a filename budget, not just a
+/// header one.
+const AUTHORITY_NAME_MAX: usize = 64;
+
+/// Reject anything that is not a plain `[A-Za-z0-9._-]` token.
+///
+/// This value is interpolated into an HTTP header (`X-Rustion-Authority`)
+/// and into a path segment on the bastion (`authorities/<name>.yaml`), so
+/// it is validated on the way *in* rather than escaped at each of the ten
+/// places that emit it. Rejecting `/`, `..`, whitespace and control
+/// characters here is what keeps those two sinks safe.
+///
+/// Leading `.` is refused as well, so a name can never produce a hidden
+/// file or resolve to `.` / `..`.
+pub fn validate_authority_name(name: &str) -> Result<(), RvError> {
+    if name.is_empty() {
+        return Err(bv_error_string!(
+            "rustion master authority_name: must not be empty (omit the field to keep the default)"
+        ));
+    }
+    if name.len() > AUTHORITY_NAME_MAX {
+        return Err(bv_error_string!(&format!(
+            "rustion master authority_name: {} chars exceeds the {AUTHORITY_NAME_MAX}-char limit",
+            name.len()
+        )));
+    }
+    if name.starts_with('.') {
+        return Err(bv_error_string!(
+            "rustion master authority_name: must not start with `.`"
+        ));
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+    {
+        return Err(bv_error_string!(&format!(
+            "rustion master authority_name: character {bad:?} is not allowed \
+             (permitted: ASCII letters, digits, `.`, `_`, `-`)"
+        )));
+    }
+    Ok(())
+}
+
+impl MasterConfig {
+    /// The effective `X-Rustion-Authority` value for this deployment.
+    ///
+    /// Normalizes empty to [`DEFAULT_AUTHORITY_NAME`], which is what a
+    /// config persisted before the field existed deserializes to via
+    /// `Default`, and what `MasterConfig::default()` produces in tests.
+    /// Every envelope-posting path reads the name through here so those
+    /// two cases cannot silently send an empty header.
+    pub fn authority(&self) -> &str {
+        if self.authority_name.is_empty() {
+            DEFAULT_AUTHORITY_NAME
+        } else {
+            &self.authority_name
+        }
+    }
 }
 
 /// One half of the persisted signing material. `current` always
@@ -207,6 +297,11 @@ struct LegacyStubSigningKey {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct MasterPubKeyExport {
     pub algorithm: String,
+    /// Authority name the bastion must file this key under, and the
+    /// `X-Rustion-Authority` value every envelope from this deployment
+    /// carries. Exported so the operator does not have to guess the
+    /// record name when approving.
+    pub authority_name: String,
     pub ed25519_pem: String,
     pub mldsa65_pem: String,
     pub fingerprint: String,
@@ -274,11 +369,15 @@ pub fn signature_rejection_hint(
              pubkey is re-approved on it"
         ));
     }
-    out.push_str(
+    out.push_str(&format!(
         ". Compare `GET rustion/master/pubkey` with the pubkey the refusing bastion has approved \
-         for the `bastion-vault` authority; if they differ, re-approve the current pubkey there \
-         (or re-run enrolment for that bastion).",
-    );
+         for the `{}` authority; if they differ, re-approve the current pubkey there \
+         (or re-run enrolment for that bastion). If that bastion holds no record under that name \
+         at all, this deployment was never enrolled on it — note that Rustion verifies against \
+         exactly one record, looked up by the `X-Rustion-Authority` name, so a key approved under \
+         a different name does not count.",
+        cfg.authority()
+    ));
     Some(out)
 }
 
@@ -608,8 +707,19 @@ impl MasterStore {
             algorithm: default_algorithm(),
             default_ttl_secs: default_ttl_secs(),
             rotate_grace_secs: default_rotate_grace_secs(),
+            authority_name: default_authority_name(),
             ..Default::default()
         })
+    }
+
+    /// The `X-Rustion-Authority` value this deployment signs under.
+    ///
+    /// Every envelope-posting caller already holds the `MasterStore` it
+    /// pulled the signing key from, so this keeps the name and the key
+    /// coming from one place rather than making each call site load the
+    /// config itself.
+    pub async fn authority_name(&self) -> Result<String, RvError> {
+        Ok(self.get_or_default().await?.authority().to_string())
     }
 
     /// Read the persisted signing-key record, applying the Phase 1
@@ -837,6 +947,7 @@ impl MasterStore {
         let cfg = self.get_or_default().await?;
         let Some(rec) = self.read_signing_record().await? else {
             return Ok(MasterPubKeyExport {
+                authority_name: cfg.authority().to_string(),
                 algorithm: cfg.algorithm,
                 issued: false,
                 ..Default::default()
@@ -844,6 +955,7 @@ impl MasterStore {
         };
         let Some(half) = rec.current else {
             return Ok(MasterPubKeyExport {
+                authority_name: cfg.authority().to_string(),
                 algorithm: cfg.algorithm,
                 issued: false,
                 ..Default::default()
@@ -865,6 +977,9 @@ impl MasterStore {
         // 32-byte form is unambiguous on the Rustion side).
         let ed25519_pem = pem_armour("BVRG ED25519 PUBLIC KEY", &ed_bytes);
         let mldsa65_pem = pem_armour("BVRG ML-DSA-65 PUBLIC KEY", &ml_bytes);
+        // Bound before `current_serial` moves out of `cfg` below —
+        // `authority()` borrows the whole struct.
+        let authority_name = cfg.authority().to_string();
         // Update the issued flag from the persisted serial rather
         // than the config field; storage is the source of truth.
         let current_serial = if cfg.current_serial.is_empty() {
@@ -873,6 +988,7 @@ impl MasterStore {
             cfg.current_serial
         };
         Ok(MasterPubKeyExport {
+            authority_name,
             algorithm: cfg.algorithm,
             ed25519_pem,
             mldsa65_pem,
@@ -1400,5 +1516,88 @@ mod tests {
             signature_rejection_hint("http 401: signature_invalid", &cfg, &issued_export("42:aa:bb")).expect("hint");
         assert!(hint.contains("rotated"), "got: {hint}");
         assert!(hint.contains("previous serial=41:99:00"), "got: {hint}");
+    }
+
+    // ─── Authority name (configurable X-Rustion-Authority) ──────────
+
+    #[test]
+    fn authority_defaults_when_the_field_is_absent_or_empty() {
+        // A config persisted before the field existed deserializes with
+        // `authority_name: ""` via `Default`; so does `MasterConfig::default()`.
+        // Both must read back as the historical name, or an upgrade would
+        // silently start sending an empty header to every bastion.
+        assert_eq!(empty_cfg().authority(), DEFAULT_AUTHORITY_NAME);
+        assert_eq!(MasterConfig::default().authority(), "bastion-vault");
+    }
+
+    #[test]
+    fn authority_survives_a_round_trip_through_a_pre_field_record() {
+        // Read-old / write-new: the on-disk JSON of an older deployment has
+        // no `authority_name` key at all.
+        let legacy = r#"{"pki_mount":"pki","pki_role":"r","updated_at":"2026-01-01T00:00:00Z"}"#;
+        let cfg: MasterConfig = serde_json::from_str(legacy).expect("decode legacy config");
+        assert_eq!(cfg.authority(), "bastion-vault");
+        // …and re-encoding it now carries the field explicitly.
+        let round: MasterConfig =
+            serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(round.authority(), "bastion-vault");
+    }
+
+    #[test]
+    fn authority_returns_the_configured_name_when_set() {
+        let cfg = MasterConfig { authority_name: "bastion-vault-dev".into(), ..empty_cfg() };
+        assert_eq!(cfg.authority(), "bastion-vault-dev");
+    }
+
+    #[test]
+    fn validate_authority_name_accepts_ordinary_names() {
+        for ok in ["bastion-vault", "bastion-vault-dev", "bv_prod", "bv.dev", "a", "A1"] {
+            assert!(validate_authority_name(ok).is_ok(), "should accept {ok:?}");
+        }
+    }
+
+    #[test]
+    fn validate_authority_name_rejects_header_and_path_injection() {
+        // This value reaches an HTTP header and a bastion-side
+        // `authorities/<name>.yaml` path, so the traversal, separator and
+        // control-character cases are the reason the validator exists.
+        for bad in [
+            "",
+            "..",
+            ".hidden",
+            "../../etc/passwd",
+            "bastion/vault",
+            "bastion vault",
+            "bastion\r\nX-Evil: 1",
+            "bastion\nX-Evil: 1",
+            "bastion\tvault",
+            "bastion:vault",
+            "bastión-vault",
+            "bastion\u{0}vault",
+        ] {
+            assert!(validate_authority_name(bad).is_err(), "should reject {bad:?}");
+        }
+        // Over the filename budget.
+        assert!(validate_authority_name(&"a".repeat(AUTHORITY_NAME_MAX + 1)).is_err());
+        assert!(validate_authority_name(&"a".repeat(AUTHORITY_NAME_MAX)).is_ok());
+    }
+
+    #[test]
+    fn hint_names_the_configured_authority_not_the_default() {
+        // The remedy sends the operator to a specific record on the bastion.
+        // Naming `bastion-vault` on a deployment that signs as
+        // `bastion-vault-dev` would point them at the wrong one.
+        let cfg = MasterConfig { authority_name: "bastion-vault-dev".into(), ..empty_cfg() };
+        let hint = signature_rejection_hint(
+            "http 401: signature_invalid",
+            &cfg,
+            &issued_export("42:aa:bb"),
+        )
+        .expect("hint");
+        assert!(hint.contains("`bastion-vault-dev` authority"), "got: {hint}");
+        assert!(
+            hint.contains("exactly one record"),
+            "must say a key approved under another name does not count: {hint}"
+        );
     }
 }

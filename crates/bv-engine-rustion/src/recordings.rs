@@ -300,6 +300,7 @@ pub struct ReconcileReport {
 pub async fn reconcile_from_bastion(
     targets: &super::store::RustionStore,
     recordings: &RecordingsStore,
+    authority: &str,
     bastion_id: &str,
 ) -> Result<ReconcileReport, RvError> {
     let target = targets
@@ -314,7 +315,7 @@ pub async fn reconcile_from_bastion(
     let client = super::http::build_client_for(&target, std::time::Duration::from_secs(15))?;
     let resp = client
         .get(&url)
-        .header("X-Rustion-Authority", "bastion-vault")
+        .header("X-Rustion-Authority", authority)
         .send()
         .await
         .map_err(|e| bv_error_string!(&format!("transport: {e}")))?;

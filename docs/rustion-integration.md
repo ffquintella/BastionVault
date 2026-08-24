@@ -180,6 +180,14 @@ Use this when you already have a PKI mount you want to reuse, when you need to m
        rotate_grace_secs=86400
    ```
 
+   Add `authority_name=<name>` if this deployment must share a bastion
+   with another BastionVault. It defaults to `bastion-vault`, and the
+   bastion resolves the authority record by exactly this name — two
+   deployments sending the same name cannot both be trusted, because
+   approving the second displaces the first. Validated as
+   `[A-Za-z0-9._-]{1,64}`; changing it later invalidates every existing
+   approval.
+
    Confirm:
 
    ```bash
@@ -382,7 +390,7 @@ The Rustion-side rows are mirrored into BV's chain as `rustion.audit.witness` af
 | `403 authority_tombstoned` | Name was rejected/deenrolled before | `rustion authority untombstone --name <n>` → BV re-submits |
 | `403 attestation_mismatch` | BV's `deployment_id` ≠ pinned value | Re-approve with current deployment_id, or deenrol + re-submit |
 | `401 unknown_authority` | No record on this bastion | BV submits, admin approves |
-| `401 signature_invalid` (`Ed25519 signature half failed verification`) | The master pubkey this bastion pinned at approval time is **not** the one BV signs with today: the master was rotated or re-issued without re-approving it here, or BV never had a PKI-issued master and minted one on the fly (serial `legacy-…`) | Compare `bvault rustion master export` (or `GET rustion/master/pubkey`) with the pubkey on the bastion's authority record; re-approve the current pubkey there, or `rustion authority deenrol` + re-submit. BV's own error text names the serial + fingerprint it used. **Not** a namespace or token problem — the master keypair is deployment-global, so a namespaced session signs with exactly the same key a root session does |
+| `401 signature_invalid` (`Ed25519 signature half failed verification`) | The master pubkey this bastion pinned at approval time is **not** the one BV signs with today: the master was rotated or re-issued without re-approving it here, BV never had a PKI-issued master and minted one on the fly (serial `legacy-…`), or **another BastionVault deployment already owns this `authority_name` on that bastion** (check `rustion authority list` for a deployment_id that isn't yours — if so, give this deployment its own `authority_name` rather than approving over the other one) | Compare `bvault rustion master export` (or `GET rustion/master/pubkey`) with the pubkey on the bastion's authority record; re-approve the current pubkey there, or `rustion authority deenrol` + re-submit. BV's own error text names the serial + fingerprint it used. **Not** a namespace or token problem — the master keypair is deployment-global, so a namespaced session signs with exactly the same key a root session does |
 | `409 envelope_replay` | Same nonce seen twice within the replay window | Almost always benign retry under load; if it persists, check system clock skew |
 | `bastion_rejected_authority` (BV GUI) | All candidate bastions returned a 4xx | Read the underlying bastion error from the GUI panel; usually one of the above |
 | `policy_denied` | Bastion's `allowed_targets` doesn't match the resource's host | Widen `allowed_targets` on the authority YAML or re-route via a different bastion group |

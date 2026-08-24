@@ -81,6 +81,7 @@ async fn tick(stores: &super::RustionStores) -> Result<enrolment::AttestAllResul
         .get_or_init_signing_key()
         .await
         .map_err(|e| crate::bv_error_string!(&format!("master signing key: {e}")))?;
+    let authority = master_store.authority_name().await?;
     let deployment_id = master_store
         .get_or_init_deployment_id()
         .await
@@ -92,7 +93,7 @@ async fn tick(stores: &super::RustionStores) -> Result<enrolment::AttestAllResul
         src_ip: "0.0.0.0".into(),
         deployment_id,
     };
-    let r = enrolment::attest_all(&store, &master, &operator)
+    let r = enrolment::attest_all(&store, &master, &authority, &operator)
         .await
         .map_err(|e| crate::bv_error_string!(&format!("attest_all: {e}")))?;
 

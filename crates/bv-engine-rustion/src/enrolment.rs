@@ -64,6 +64,7 @@ pub struct AttestResult {
 pub async fn attest_bastion(
     store: &RustionStore,
     master: &BvrgMasterSigningKey,
+    authority: &str,
     operator: &OperatorContext,
     bastion_id: &str,
 ) -> Result<AttestResult, EnrolmentError> {
@@ -84,7 +85,7 @@ pub async fn attest_bastion(
     );
     let resp = client
         .post(&url)
-        .header("X-Rustion-Authority", "bastion-vault")
+        .header("X-Rustion-Authority", authority)
         .header("Content-Type", "application/octet-stream")
         .body(built.bytes)
         .send()
@@ -146,6 +147,7 @@ pub enum AttestOutcome {
 pub async fn attest_all(
     store: &RustionStore,
     master: &BvrgMasterSigningKey,
+    authority: &str,
     operator: &OperatorContext,
 ) -> Result<AttestAllResult, EnrolmentError> {
     let targets = store
@@ -160,7 +162,7 @@ pub async fn attest_all(
     };
     for t in targets {
         out.attempted += 1;
-        match attest_bastion(store, master, operator, &t.id).await {
+        match attest_bastion(store, master, authority, operator, &t.id).await {
             Ok(r) => {
                 out.succeeded += 1;
                 out.results.push(AttestOutcome::Ok(r));
@@ -191,6 +193,7 @@ pub struct DeenrolResult {
 pub async fn deenrol_bastion(
     target: &RustionTarget,
     master: &BvrgMasterSigningKey,
+    authority: &str,
     operator: &OperatorContext,
     reason: &str,
 ) -> Result<DeenrolResult, EnrolmentError> {
@@ -205,7 +208,7 @@ pub async fn deenrol_bastion(
     );
     let resp = client
         .post(&url)
-        .header("X-Rustion-Authority", "bastion-vault")
+        .header("X-Rustion-Authority", authority)
         .header("Content-Type", "application/octet-stream")
         .body(built.bytes)
         .send()

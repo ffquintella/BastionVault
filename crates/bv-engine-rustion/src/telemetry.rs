@@ -222,6 +222,15 @@ async fn tick(core: &dyn VaultCtx, stores: &super::RustionStores) -> Result<(), 
     };
     let cursors_view = std::sync::Arc::new(system_view.new_sub_view(CURSOR_SUB_PATH));
 
+    // The authority name is deployment-global, so resolve it once per
+    // pass rather than per target. A missing master store means the
+    // engine is mid-init; fall back to the default rather than skipping
+    // the whole telemetry pass over it.
+    let authority = match stores.master() {
+        Some(m) => m.authority_name().await?,
+        None => super::master::DEFAULT_AUTHORITY_NAME.to_string(),
+    };
+
     let ids = store.list_target_ids().await?;
 
     for id in ids {
@@ -246,7 +255,7 @@ async fn tick(core: &dyn VaultCtx, stores: &super::RustionStores) -> Result<(), 
             }
         };
         let base = format!("https://{}", target.endpoint.trim_end_matches('/'));
-        let auth_header = "bastion-vault";
+        let auth_header = authority.as_str();
         let mut snap = TargetSnapshot {
             target_id: id.clone(),
             target_name: target.name.clone(),

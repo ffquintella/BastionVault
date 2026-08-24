@@ -15,7 +15,10 @@ use crate::{
 expect: separate `ed25519` and `mldsa65` halves plus a SHA-256
 fingerprint over the canonical `ed25519 || mldsa65` concatenation.
 Paste the two pubkey halves into `authorities/<name>.yaml` on each
-enrolled Rustion bastion.
+enrolled Rustion bastion, where `<name>` is the `authority_name` this
+command reports — the bastion looks the record up by exactly that name
+when it verifies an envelope, so filing it under any other name leaves
+the deployment untrusted.
 
 Before the master keypair has been issued, this command returns the
 algorithm marker but empty pubkey halves and `issued = false`. Run

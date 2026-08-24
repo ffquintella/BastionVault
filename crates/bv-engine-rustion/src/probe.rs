@@ -49,9 +49,10 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Authority name the pinger announces itself as. Rustion's authority
 /// store maps this name to the master pubkey BastionVault enrolled.
-/// Phase 2+ will let operators override this per-deployment; today
-/// the value is a fixed default that matches the spec.
-pub const PROBE_AUTHORITY: &str = "bastion-vault";
+/// Now operator-settable per deployment via `authority_name` on
+/// `rustion/master/config`; this constant is only the fallback for the
+/// paths that have no master store to read (see `probe_target_now`).
+pub const PROBE_AUTHORITY: &str = crate::master::DEFAULT_AUTHORITY_NAME;
 
 /// Spawn the background pinger. Returns the JoinHandle so the caller
 /// can hold it; dropping the handle does not stop the task (tokio
@@ -93,7 +94,7 @@ pub async fn run_probe_pass(stores: &super::RustionStores) -> Result<(), RvError
 /// Probe one specific target and persist the fresh health record.
 /// Used by the synchronous "test connection" admin endpoint so the
 /// GUI / CLI can surface a verdict without waiting for the next tick.
-pub async fn probe_target_now(store: &Arc<RustionStore>, target: &RustionTarget) {
+pub async fn probe_target_now(store: &Arc<RustionStore>, authority: &str, target: &RustionTarget) {
     let client = match build_client_for(target) {
         Ok(c) => c,
         Err(e) => {
@@ -101,12 +102,19 @@ pub async fn probe_target_now(store: &Arc<RustionStore>, target: &RustionTarget)
             return;
         }
     };
-    probe_one(&client, store, target).await;
+    probe_one(&client, store, authority, target).await;
 }
 
 async fn tick(stores: &super::RustionStores) -> Result<(), RvError> {
     let Some(store) = stores.store() else {
         return Ok(());
+    };
+    // Deployment-global, so resolved once per pass. A missing master
+    // store means the engine is still initialising; the default keeps
+    // the pinger running rather than blanking every health record.
+    let authority = match stores.master() {
+        Some(m) => m.authority_name().await?,
+        None => PROBE_AUTHORITY.to_string(),
     };
 
     let ids = store.list_target_ids().await?;
@@ -141,19 +149,24 @@ async fn tick(stores: &super::RustionStores) -> Result<(), RvError> {
                 continue;
             }
         };
-        probe_one(&client, &store, &target).await;
+        probe_one(&client, &store, &authority, &target).await;
     }
     Ok(())
 }
 
-async fn probe_one(client: &reqwest::Client, store: &Arc<RustionStore>, target: &RustionTarget) {
+async fn probe_one(
+    client: &reqwest::Client,
+    store: &Arc<RustionStore>,
+    authority: &str,
+    target: &RustionTarget,
+) {
     let prev = store
         .get_health(&target.id)
         .await
         .ok()
         .flatten()
         .unwrap_or_default();
-    let outcome = run_single_probe(client, target).await;
+    let outcome = run_single_probe(client, authority, target).await;
     let now = Utc::now();
     let (next, changed) = apply_probe(&prev, outcome, now);
 
@@ -177,14 +190,18 @@ async fn probe_one(client: &reqwest::Client, store: &Arc<RustionStore>, target: 
     }
 }
 
-async fn run_single_probe(client: &reqwest::Client, target: &RustionTarget) -> ProbeOutcome {
+async fn run_single_probe(
+    client: &reqwest::Client,
+    authority: &str,
+    target: &RustionTarget,
+) -> ProbeOutcome {
     let url = format!("https://{}/v1/health", target.endpoint.trim_end_matches('/'));
     let nonce_b64 = mint_nonce();
 
     let start = std::time::Instant::now();
     let resp = client
         .get(&url)
-        .header("X-Rustion-Authority", PROBE_AUTHORITY)
+        .header("X-Rustion-Authority", authority)
         .header("X-Rustion-Nonce", &nonce_b64)
         // Signature header reserved for Phase 2's hybrid signer.
         // Sending it empty makes the header presence stable for

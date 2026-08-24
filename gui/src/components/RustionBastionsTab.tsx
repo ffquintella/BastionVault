@@ -793,6 +793,7 @@ function MasterEditModal({
   const [pkiRole, setPkiRole] = useState("");
   const [pkiRolePqc, setPkiRolePqc] = useState("");
   const [issuerRef, setIssuerRef] = useState("");
+  const [authorityName, setAuthorityName] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -801,6 +802,7 @@ function MasterEditModal({
       setPkiRole(current.pki_role);
       setPkiRolePqc(current.pki_role_pqc);
       setIssuerRef(current.issuer_ref);
+      setAuthorityName(current.authority_name);
     }
   }, [open, current]);
 
@@ -814,6 +816,7 @@ function MasterEditModal({
         pki_role: pkiRole.trim(),
         pki_role_pqc: pkiRolePqc.trim(),
         issuer_ref: issuerRef.trim(),
+        authority_name: authorityName.trim(),
       });
       toast("success", "Master-cert config saved");
       onSaved();
@@ -872,6 +875,21 @@ function MasterEditModal({
           onChange={(e) => setIssuerRef(e.target.value)}
           placeholder="(leave blank for mount default)"
         />
+        <Input
+          label="Authority name"
+          value={authorityName}
+          onChange={(e) => setAuthorityName(e.target.value)}
+          placeholder="bastion-vault"
+        />
+        <p className="text-xs text-[var(--color-text-muted)]">
+          The name this deployment signs under, and the record each
+          bastion pins the master pubkey as
+          (<code>authorities/&lt;name&gt;.yaml</code>). A bastion verifies
+          against exactly one record, looked up by this name — so give a
+          second BastionVault sharing the same bastion a distinct name
+          (e.g. <code>bastion-vault-dev</code>) rather than approving it
+          over the first. Changing it means re-approving on every bastion.
+        </p>
       </div>
     </Modal>
   );
@@ -1116,6 +1134,9 @@ export function BootstrapMasterModal({
         algorithm: "",
         default_ttl_secs: 31536000,
         rotate_grace_secs: graceSecs,
+        // Empty = leave unchanged; the wizard does not rename an existing
+        // deployment's authority, which would invalidate every approval.
+        authority_name: "",
         current_serial: "",
         current_not_after: "",
         updated_at: "",

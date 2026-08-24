@@ -113,6 +113,12 @@ pub struct RustionMasterConfig {
     pub algorithm: String,
     pub default_ttl_secs: u64,
     pub rotate_grace_secs: u64,
+    /// `X-Rustion-Authority` this deployment presents, and the record
+    /// name the bastion pins the master pubkey under. Optional on the
+    /// wire so a GUI predating the field still round-trips; the engine
+    /// reports the effective value (`bastion-vault` by default).
+    #[serde(default)]
+    pub authority_name: String,
     pub current_serial: String,
     pub current_not_after: String,
     pub updated_at: String,
@@ -128,6 +134,7 @@ pub struct RustionMasterIssueResult {
 
 #[derive(Serialize, Default)]
 pub struct RustionMasterPubkey {
+    pub authority_name: String,
     pub algorithm: String,
     pub ed25519_pem: String,
     pub mldsa65_pem: String,
@@ -301,6 +308,12 @@ pub async fn rustion_master_write(
     if !input.issuer_ref.is_empty() {
         body.insert("issuer_ref".into(), Value::String(input.issuer_ref));
     }
+    // Empty means "leave unchanged" on the engine side too — the GUI has
+    // no separate "reset to default" affordance, and clearing would only
+    // restore the default the operator already has.
+    if !input.authority_name.is_empty() {
+        body.insert("authority_name".into(), Value::String(input.authority_name));
+    }
     if input.default_ttl_secs > 0 {
         body.insert("default_ttl_secs".into(), Value::Number(input.default_ttl_secs.into()));
     }
@@ -336,6 +349,7 @@ fn master_config_from_map(data: &Map<String, Value>) -> RustionMasterConfig {
         algorithm: s(data, "algorithm"),
         default_ttl_secs: u64_field(data, "default_ttl_secs"),
         rotate_grace_secs: u64_field(data, "rotate_grace_secs"),
+        authority_name: s(data, "authority_name"),
         current_serial: s(data, "current_serial"),
         current_not_after: s(data, "current_not_after"),
         updated_at: s(data, "updated_at"),
@@ -1428,6 +1442,7 @@ pub async fn rustion_master_pubkey_export(state: State<'_, AppState>) -> CmdResu
     let resp = make_request(&state, Operation::Read, format!("{RUSTION_MOUNT}master/pubkey"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(RustionMasterPubkey {
+        authority_name: s(&data, "authority_name"),
         algorithm: s(&data, "algorithm"),
         ed25519_pem: s(&data, "ed25519_pem"),
         mldsa65_pem: s(&data, "mldsa65_pem"),

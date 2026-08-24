@@ -159,6 +159,7 @@ pub struct AttemptOutcome {
 pub async fn open_session(
     store: &RustionStore,
     master: &BvrgMasterSigningKey,
+    authority: &str,
     operator: &OperatorContext,
     request: &SessionOpenRequest,
 ) -> Result<SessionOpenResponse, SessionOpenError> {
@@ -209,7 +210,7 @@ pub async fn open_session(
             }
         };
 
-        let outcome = post_envelope(&client, target, &built).await;
+        let outcome = post_envelope(&client, target, authority, &built).await;
         match outcome {
             OpenAttemptOutcome::Success => {
                 // The post_envelope wrapper returns the parsed
@@ -253,6 +254,7 @@ pub async fn open_session(
 pub async fn open_session_v2(
     store: &RustionStore,
     master: &BvrgMasterSigningKey,
+    authority: &str,
     operator: &OperatorContext,
     request: &SessionOpenRequest,
 ) -> Result<SessionOpenResponse, SessionOpenError> {
@@ -311,7 +313,7 @@ pub async fn open_session_v2(
         let url = format!("https://{}/v1/sessions", target.endpoint.trim_end_matches('/'));
         let send = client
             .post(&url)
-            .header("X-Rustion-Authority", "bastion-vault")
+            .header("X-Rustion-Authority", authority)
             .header("Content-Type", "application/octet-stream")
             .body(built.bytes.clone())
             .send()
@@ -422,11 +424,16 @@ fn build_open_envelope(
 }
 
 #[maybe_async::maybe_async]
-async fn post_envelope(client: &reqwest::Client, target: &RustionTarget, built: &BuiltEnvelope) -> OpenAttemptOutcome {
+async fn post_envelope(
+    client: &reqwest::Client,
+    target: &RustionTarget,
+    authority: &str,
+    built: &BuiltEnvelope,
+) -> OpenAttemptOutcome {
     let url = format!("https://{}/v1/sessions", target.endpoint.trim_end_matches('/'));
     let result = client
         .post(&url)
-        .header("X-Rustion-Authority", "bastion-vault")
+        .header("X-Rustion-Authority", authority)
         .header("Content-Type", "application/octet-stream")
         .body(built.bytes.clone())
         .send()
@@ -501,6 +508,7 @@ pub enum SessionRenewError {
 pub async fn renew_session(
     store: &RustionStore,
     master: &BvrgMasterSigningKey,
+    authority: &str,
     operator: &OperatorContext,
     request: &SessionRenewRequest,
 ) -> Result<SessionRenewResponse, SessionRenewError> {
@@ -518,7 +526,7 @@ pub async fn renew_session(
     let url = format!("https://{}/v1/sessions/{}/renew", target.endpoint.trim_end_matches('/'), request.session_id);
     let resp = client
         .post(&url)
-        .header("X-Rustion-Authority", "bastion-vault")
+        .header("X-Rustion-Authority", authority)
         .header("Content-Type", "application/octet-stream")
         .body(built.bytes)
         .send()
@@ -555,6 +563,7 @@ pub async fn renew_session(
 pub async fn kill_session(
     store: &RustionStore,
     master: &BvrgMasterSigningKey,
+    authority: &str,
     operator: &OperatorContext,
     request: &SessionKillRequest,
 ) -> Result<SessionKillResponse, SessionRenewError> {
@@ -572,7 +581,7 @@ pub async fn kill_session(
     let url = format!("https://{}/v1/sessions/{}", target.endpoint.trim_end_matches('/'), request.session_id);
     let resp = client
         .delete(&url)
-        .header("X-Rustion-Authority", "bastion-vault")
+        .header("X-Rustion-Authority", authority)
         .header("Content-Type", "application/octet-stream")
         .body(built.bytes)
         .send()

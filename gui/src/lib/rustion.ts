@@ -89,6 +89,12 @@ export interface RustionMasterConfig {
   algorithm: string;
   default_ttl_secs: number;
   rotate_grace_secs: number;
+  /** `X-Rustion-Authority` this deployment presents, and the name the
+   *  bastion files the pinned pubkey under (`authorities/<name>.yaml`).
+   *  Defaults to `bastion-vault`. Rustion verifies against exactly one
+   *  record, looked up by this name, so two BV deployments sharing one
+   *  bastion need distinct names. Empty on write = leave unchanged. */
+  authority_name: string;
   current_serial: string;
   current_not_after: string;
   updated_at: string;
@@ -102,6 +108,8 @@ export interface RustionMasterIssueResult {
 }
 
 export interface RustionMasterPubkey {
+  /** The authority name this key must be approved under on the bastion. */
+  authority_name: string;
   algorithm: string;
   ed25519_pem: string;
   mldsa65_pem: string;

@@ -510,6 +510,11 @@ impl RustionBackend {
                             field_type: FieldType::Int,
                             default: 0,
                             description: "Grace window during which the previous cert is accepted. Zero = default (1d)."
+                        },
+                        "authority_name": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Authority name this deployment presents to Rustion (`X-Rustion-Authority`, and the record the bastion pins as `authorities/<name>.yaml`). Empty = leave unchanged; defaults to `bastion-vault`. Set a distinct name when a bastion must trust more than one BV deployment — Rustion verifies against exactly one record, looked up by this name."
                         }
                     },
                     operations: [
@@ -1285,7 +1290,8 @@ impl RustionBackendInner {
         // Reuse the same client + state-machine path the background
         // pinger uses so single-target test = exactly one tick of
         // the regular probe loop.
-        probe::probe_target_now(&store, &target).await;
+        let authority = self.resolve_master_store()?.authority_name().await?;
+        probe::probe_target_now(&store, &authority, &target).await;
         let health = store.get_health(&id).await?.unwrap_or_default();
         let mut data = Map::new();
         data.insert("id".into(), Value::String(target.id.clone()));
@@ -1352,6 +1358,18 @@ impl RustionBackendInner {
         if let Some(n) = req.get_data("rotate_grace_secs").ok().and_then(|v| v.as_u64()) {
             if n > 0 && n != cfg.rotate_grace_secs {
                 cfg.rotate_grace_secs = n;
+                touched = true;
+            }
+        }
+        if let Some(v) = req.get_data("authority_name").ok().and_then(|v| v.as_str().map(String::from)) {
+            // Empty means "leave unchanged" — the field is a plain string
+            // with no sentinel for "clear", and clearing it would only
+            // reintroduce the default the operator already has. A
+            // non-empty value is validated before it can reach a header
+            // or a bastion-side filename; see `validate_authority_name`.
+            if !v.is_empty() && v != cfg.authority() {
+                master::validate_authority_name(&v)?;
+                cfg.authority_name = v;
                 touched = true;
             }
         }
@@ -1574,6 +1592,7 @@ impl RustionBackendInner {
             .get_or_init_signing_key()
             .await
             .map_err(|e| bv_error_string!(&format!("master signing key: {e}")))?;
+        let authority = master_store.authority_name().await?;
 
         let pick = |k: &str| -> String {
             req.get_data(k).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
@@ -1762,7 +1781,7 @@ impl RustionBackendInner {
         let brokered_kind = request.credential_kind.clone();
         let cert_serial = pick("credential_serial");
 
-        match session::open_session_v2(&store, &master, &operator, &request).await {
+        match session::open_session_v2(&store, &master, &authority, &operator, &request).await {
             Ok(resp) => {
                 let mut data = Map::new();
                 let session_id_owned = resp.session_id.clone();
@@ -2288,6 +2307,7 @@ impl RustionBackendInner {
             .get_or_init_signing_key()
             .await
             .map_err(|e| bv_error_string!(&format!("master signing key: {e}")))?;
+        let authority = master_store.authority_name().await?;
 
         let pick = |k: &str| -> String {
             req.get_data(k).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
@@ -2307,7 +2327,7 @@ impl RustionBackendInner {
             extend_secs,
         };
 
-        match session::renew_session(&store, &master, &operator, &request).await {
+        match session::renew_session(&store, &master, &authority, &operator, &request).await {
             Ok(resp) => {
                 let mut data = Map::new();
                 data.insert("session_id".into(), Value::String(resp.session_id.clone()));
@@ -2343,6 +2363,7 @@ impl RustionBackendInner {
             .get_or_init_signing_key()
             .await
             .map_err(|e| bv_error_string!(&format!("master signing key: {e}")))?;
+        let authority = master_store.authority_name().await?;
 
         let pick = |k: &str| -> String {
             req.get_data(k).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
@@ -2354,7 +2375,7 @@ impl RustionBackendInner {
             correlation_id: pick("correlation_id"),
         };
 
-        match session::kill_session(&store, &master, &operator, &request).await {
+        match session::kill_session(&store, &master, &authority, &operator, &request).await {
             Ok(resp) => {
                 let mut data = Map::new();
                 data.insert("session_id".into(), Value::String(resp.session_id.clone()));
@@ -2391,12 +2412,13 @@ impl RustionBackendInner {
             .get_or_init_signing_key()
             .await
             .map_err(|e| bv_error_string!(&format!("master signing key: {e}")))?;
+        let authority = master_store.authority_name().await?;
         let operator = self.operator_context(req).await?;
         let bastion_id =
             req.get_data("bastion_id").ok().and_then(|v| v.as_str().map(|s| s.to_string())).filter(|s| !s.is_empty());
 
         let mut outcomes = if let Some(id) = bastion_id {
-            match enrolment::attest_bastion(&store, &master, &operator, &id).await {
+            match enrolment::attest_bastion(&store, &master, &authority, &operator, &id).await {
                 Ok(r) => {
                     log::info!("{}: bastion={} correlation={}", audit::MASTER_ATTEST, r.bastion_id, r.correlation_id);
                     enrolment::AttestAllResult {
@@ -2414,7 +2436,7 @@ impl RustionBackendInner {
                 },
             }
         } else {
-            let r = enrolment::attest_all(&store, &master, &operator)
+            let r = enrolment::attest_all(&store, &master, &authority, &operator)
                 .await
                 .map_err(|e| bv_error_string!(&format!("attest_all: {e}")))?;
             for o in &r.results {
@@ -2456,6 +2478,7 @@ impl RustionBackendInner {
             .get_or_init_signing_key()
             .await
             .map_err(|e| bv_error_string!(&format!("master signing key: {e}")))?;
+        let authority = master_store.authority_name().await?;
         let operator = self.operator_context(req).await?;
         let bastion_id =
             req.get_data("bastion_id").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
@@ -2468,7 +2491,7 @@ impl RustionBackendInner {
             .get_target(&bastion_id)
             .await?
             .ok_or_else(|| bv_error_response_status!(404, &format!("bastion_not_found: {bastion_id}")))?;
-        let result = enrolment::deenrol_bastion(&target, &master, &operator, &reason)
+        let result = enrolment::deenrol_bastion(&target, &master, &authority, &operator, &reason)
             .await
             .map_err(|e| bv_error_string!(&format!("{e}")))?;
         log::info!(
@@ -2740,6 +2763,7 @@ impl RustionBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let recordings = self.resolve_recordings_store()?;
+        let authority = self.resolve_master_store()?.authority_name().await?;
         let bastion_id =
             req.get_data("bastion_id").ok().and_then(|v| v.as_str().map(|s| s.trim().to_string())).unwrap_or_default();
 
@@ -2752,7 +2776,7 @@ impl RustionBackendInner {
         let mut errors = Map::new();
         let (mut total_found, mut total_imported, mut total_skipped) = (0u64, 0u64, 0u64);
         for id in ids {
-            match recordings::reconcile_from_bastion(&store, &recordings, &id).await {
+            match recordings::reconcile_from_bastion(&store, &recordings, &authority, &id).await {
                 Ok(rep) => {
                     total_found += rep.found as u64;
                     total_imported += rep.imported as u64;
@@ -3385,6 +3409,7 @@ impl RustionBackendInner {
         let store = self.resolve_master_store()?;
         let export = store.export_pubkey().await?;
         let mut data = Map::new();
+        data.insert("authority_name".into(), Value::String(export.authority_name));
         data.insert("algorithm".into(), Value::String(export.algorithm));
         data.insert("ed25519_pem".into(), Value::String(export.ed25519_pem));
         data.insert("mldsa65_pem".into(), Value::String(export.mldsa65_pem));
@@ -3506,6 +3531,10 @@ fn master_config_response(cfg: &MasterConfig) -> Response {
     data.insert("algorithm".into(), Value::String(cfg.algorithm.clone()));
     data.insert("default_ttl_secs".into(), Value::Number(cfg.default_ttl_secs.into()));
     data.insert("rotate_grace_secs".into(), Value::Number(cfg.rotate_grace_secs.into()));
+    // Report the *effective* name, so a config persisted before the field
+    // existed reads back as `bastion-vault` rather than empty — that is
+    // what the deployment actually sends.
+    data.insert("authority_name".into(), Value::String(cfg.authority().to_string()));
     data.insert("current_serial".into(), Value::String(cfg.current_serial.clone()));
     if let Some(ts) = cfg.current_not_after {
         data.insert("current_not_after".into(), Value::String(ts.to_rfc3339()));

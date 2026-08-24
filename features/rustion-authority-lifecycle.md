@@ -13,6 +13,7 @@ how a clean deenrolment works at end-of-life.
 | 1 — Master config slot | Done | `rustion/master/config` HTTP + `bvault rustion master read` CLI. PKI mount/role/issuer pointers persisted under the barrier. Phase-1 ephemerally-minted stub keypair so the Phase 3 session-open path could run end-to-end. |
 | 2 — Master issue / rotate / grace window | Done | `rustion/master/issue` + `rustion/master/rotate` HTTP, `bvault rustion master issue` + `bvault rustion master rotate` CLI. Hybrid Ed25519 + ML-DSA-65 keypair lifecycle minted through the configured PKI engine — two roles (`pki_role` Ed25519, `pki_role_pqc` ML-DSA-65) issued via `Core::handle_request`, so engine ACL + audit + issuer state all engage. Real pubkey export with SHA-256 fingerprint over `ed25519 \|\| mldsa65`. `MasterStore::load_active_keys` returns current + previous (within `rotate_grace_secs`) so `envelope::verify_with_grace` accepts envelopes signed by the outgoing key until the grace window closes. |
 | 9.2 — Authority enrolment lifecycle (this doc) | Done | YAML on-disk authority store, pending/active/tombstoned states, weekly re-attestation timer, deployment_id binding. |
+| Configurable authority name | Done | `authority_name` on `rustion/master/config` sets the `X-Rustion-Authority` this deployment presents and the record name each bastion pins it under. Defaults to `bastion-vault`, which is what every deployment sent when the value was hardcoded — so an upgrade changes nothing on the wire. Required for the multi-deployment layouts this doc already assumes (`bv-prod.yaml` + `bv-staging.yaml` on one bastion): Rustion verifies against exactly one record, looked up by that name. |
 | Phase 9 — cluster-replicated master | Pending | Replicate the signing material across cluster nodes (PKI-engine cert emission landed with Phase 2). |
 
 Read alongside [`rustion-integration.md`](rustion-integration.md) — Phase 9.1
@@ -205,10 +206,26 @@ On the BV side (operator GUI or CLI):
 # Show the master pubkey + deployment id the bastion will need.
 bvault rustion master export
 # Output:
+#   authority_name:  bv-prod
 #   pubkey_ed25519:  Zk6JhJxQ7yK3l8...wA
 #   pubkey_mldsa65:  MIIBCgKCAQEA...=
 #   deployment_id:   f47ac10b-58cc-4372-a567-0e02b2c3d479
 ```
+
+`authority_name` is the value this deployment sends as
+`X-Rustion-Authority`, and therefore the **only** name the bastion will
+look its record up under. It defaults to `bastion-vault`; set a distinct
+one before enrolling a second deployment on a bastion that already
+trusts another:
+
+```bash
+bvault write rustion/master/config authority_name=bv-staging
+```
+
+Renaming an already-enrolled deployment invalidates every existing
+approval — each bastion must approve the key afresh under the new name.
+The name is validated as `[A-Za-z0-9._-]{1,64}` (it becomes both a
+header value and a filename on the bastion).
 
 The deployment_id is minted on first PKI init and persists at
 `sys/rustion/master/deployment-id`. It is the trust anchor that
@@ -234,6 +251,11 @@ EOF
 
 scp /tmp/bv-prod.yaml rustion-host:/opt/rustion/authorities-pending/
 ```
+
+The YAML's `name:` (and the filename) **must equal** the submitting
+deployment's `authority_name` — the bastion resolves the record by the
+header alone. A record filed under any other name is never consulted,
+and the envelope fails closed with `401 signature_invalid`.
 
 Until the bastion admin approves, **every envelope signed by this BV
 returns `403 authority_pending_approval`** and the BV GUI shows the
@@ -463,6 +485,8 @@ through the Phase 8.2 audit-witness puller; they re-anchor as
 | `403 authority_pending_approval`              | BV submitted but bastion admin hasn't approved yet         | `rustion authority list-pending` → `approve --name` → `rustion reload`                                  |
 | `403 authority_tombstoned`                    | Name was rejected or deenrolled previously                 | `rustion authority untombstone --name <n>` → BV re-submits                                              |
 | `401 unknown_authority`                       | No record on the bastion at all                           | BV submits fresh; admin approves                                                                       |
+| `401 signature_invalid`                       | The record under this `authority_name` pins a different key — commonly another BV deployment already holds the name, or this one was never enrolled | Compare `bvault rustion master export` against `rustion authority list`. If another deployment owns the name, give this one its own `authority_name` and enrol under that — do **not** approve over the existing record |
+| `401 authority_key_mismatch`                  | The key verifies, but against a record filed under a *different* name than the header sent | Point `authority_name` at the record that holds the key, or deenrol the stale one |
 | `403 attestation_mismatch`                    | Envelope's `deployment_id` ≠ pinned value                  | Re-approve with the new deployment_id, OR (if expected) deenrol + re-submit                            |
 | BV "Awaiting approval" never clears           | YAML lives under `authorities-pending/` but admin hasn't approved | `rustion reload` if YAML is fresh on disk; `list-pending` to confirm visibility                  |
 | Attestation never refreshes (Rustion log)     | BV's attest timer is stuck OR BV → bastion network is down | `bvault rustion authority attest` (manual trigger). Check audit log for `rustion.master.attest` rows.   |

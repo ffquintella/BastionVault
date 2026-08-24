@@ -45,6 +45,42 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.14] - 2026-08-24
+
+### Added
+
+#### Configurable Rustion authority name
+- **`authority_name` on `rustion/master/config`** -- sets the
+  `X-Rustion-Authority` this deployment presents on every signed envelope, and
+  therefore the record name each bastion pins its master pubkey under
+  (`authorities/<name>.yaml`). Defaults to `bastion-vault`, the value that was
+  hardcoded at all twelve call sites before (session open/renew/kill, attest,
+  deenrol, the four telemetry pulls, recordings reconcile and the health
+  pinger), so an upgrade changes nothing on the
+  wire and no existing approval is invalidated. Readable via
+  `bvault rustion master read` / `export`, editable from the GUI's
+  "Configure master signing cert" modal.
+  (`features/rustion-authority-lifecycle.md`)
+- **Why it matters:** a Rustion bastion verifies an envelope against *exactly
+  one* authority record, looked up by that header. Two BastionVault
+  deployments sharing a bastion therefore could not both be trusted -- the
+  second had to be approved over the first, cutting the first off. This is what
+  the multi-deployment layouts in the authority-lifecycle guide
+  (`bv-prod.yaml` + `bv-staging.yaml`) always assumed but BV could not send.
+  Give each deployment its own name and both can be enrolled side by side.
+- The value is validated as `[A-Za-z0-9._-]{1,64}` with no leading `.`, since
+  it is interpolated into an HTTP header and into a path segment on the
+  bastion. Rejected at the config write, not escaped at each use.
+
+### Changed
+
+- **`rustion/master/pubkey` now reports `authority_name`** -- the operator
+  approving a key no longer has to guess which record name to file it under.
+- **The `signature_invalid` diagnostic names the configured authority** instead
+  of hardcoding `bastion-vault`, and now states that a key approved under a
+  different name does not count -- the previous wording sent operators to the
+  wrong record on a renamed deployment.
+
 ## [0.41.13] - 2026-08-24
 
 ### Added
