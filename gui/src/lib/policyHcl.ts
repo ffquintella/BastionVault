@@ -9,7 +9,8 @@
  *   - {@link serializePolicyModel} — render a block model back to HCL.
  *   - {@link lintPolicyModel} — capability / glob / TTL lint.
  *   - {@link previewCapability} — a lightweight allow/deny preview that
- *     mirrors the backend's exact > prefix > segment precedence.
+ *     mirrors the backend's exact > prefix > segment precedence, across the
+ *     draft plus any policies a token carries alongside it.
  *
  * The authoritative verdict always comes from the backend dry-run
  * (`policyTest` in `api.ts`); the preview here is explicitly labelled
@@ -608,23 +609,77 @@ export interface PreviewVerdict {
   matchedPath: string | null;
   matchKind: MatchKind;
   deniedByDeny: boolean;
+  /** Names of the models that contributed the matched rule, in evaluation
+   *  order. Empty when nothing matched. A model with no `name` in its HCL
+   *  gets a positional label (`policy-1`, …), since a policy's real name
+   *  comes from its storage key, not the document. */
+  grantingPolicies: string[];
+  /** The verdict the first model would give alone. Disagreeing with
+   *  `allowed` means an attached policy changed the answer. */
+  draftOnlyAllowed: boolean;
   /** Always true — this verdict is a client-side preview, not authoritative. */
   preview: true;
 }
 
 interface ClassifiedRule {
-  block: PolicyBlock;
   kind: MatchKind;
   /** path with a trailing `*` stripped (prefix rules). */
   base: string;
+  /** The rule's path string, verbatim, as written in the HCL. */
+  path: string;
+  /** Capabilities, unioned across every model that wrote this exact path. */
+  capabilities: string[];
+  /** Which models wrote it, in evaluation order. */
+  policies: string[];
 }
 
-function classify(block: PolicyBlock): ClassifiedRule {
-  const p = stripLeadingSlash(block.path);
+function classifyPath(path: string): { kind: MatchKind; base: string } {
+  const p = stripLeadingSlash(path);
   const hasSegment = p === "+" || p.includes("/+") || p.startsWith("+/");
-  if (hasSegment) return { block, kind: "segment_wildcard", base: p };
-  if (p.endsWith("*")) return { block, kind: "prefix", base: p.slice(0, -1) };
-  return { block, kind: "exact", base: p };
+  if (hasSegment) return { kind: "segment_wildcard", base: p };
+  if (p.endsWith("*")) return { kind: "prefix", base: p.slice(0, -1) };
+  return { kind: "exact", base: p };
+}
+
+/**
+ * Flatten one or more policy models into the rule set the backend's
+ * `ACL::new` would build, mirroring two of its properties exactly:
+ *
+ *  - **Rules with an identical path string merge**, unioning capabilities
+ *    across policies (`Permissions::merge`). Rules with *different* path
+ *    strings do not merge at all — they compete on precedence, and exactly
+ *    one wins.
+ *  - **Group- and scope-gated rules are excluded.** The backend stores them
+ *    unmerged and layers them additively at authorize time, so they never
+ *    out-specify an ungated rule. Including them here would invent
+ *    narrowing that production does not do (`default`'s `secret/*` and
+ *    `resources/*` are scope-gated for exactly this reason).
+ */
+function flattenRules(models: PolicyModel[]): ClassifiedRule[] {
+  const byPath = new Map<string, ClassifiedRule>();
+  models.forEach((model, i) => {
+    const policyName = model.name?.trim() || `policy-${i + 1}`;
+    for (const block of model.blocks) {
+      if (block.groups?.length || block.scopes?.length) continue;
+      const existing = byPath.get(block.path);
+      if (existing) {
+        for (const c of block.capabilities ?? []) {
+          if (!existing.capabilities.includes(c)) existing.capabilities.push(c);
+        }
+        if (!existing.policies.includes(policyName)) existing.policies.push(policyName);
+        continue;
+      }
+      const { kind, base } = classifyPath(block.path);
+      byPath.set(block.path, {
+        kind,
+        base,
+        path: block.path,
+        capabilities: [...(block.capabilities ?? [])],
+        policies: [policyName],
+      });
+    }
+  });
+  return Array.from(byPath.values());
 }
 
 function stripLeadingSlash(s: string): string {
@@ -649,54 +704,87 @@ function segmentMatch(rulePath: string, reqPath: string): boolean {
   return true;
 }
 
-/**
- * A lightweight, **non-authoritative** preview of whether the model grants
- * `capability` on `path`. Mirrors the backend's exact > prefix > segment
- * precedence so the builder can show an instant verdict while typing, but
- * the real answer always comes from the backend dry-run. Group- and
- * scope-gated rules are ignored here (they need request context the client
- * does not have).
- */
-export function previewCapability(model: PolicyModel, path: string, capability: string): PreviewVerdict {
-  const target = stripLeadingSlash(path);
-  const rules = model.blocks.map(classify);
-
+/** Resolve the single winning rule for `target`, or undefined. */
+function selectWinner(rules: ClassifiedRule[], target: string): ClassifiedRule | undefined {
   const pick = (r: ClassifiedRule): boolean => {
     if (r.kind === "exact") return r.base === target || r.base === target.replace(/\/$/, "");
     if (r.kind === "prefix") return target.startsWith(r.base);
-    return segmentMatch(r.block.path, target);
+    return segmentMatch(r.path, target);
   };
 
   // Exact wins outright.
   const exact = rules.find((r) => r.kind === "exact" && pick(r));
+  if (exact) return exact;
+
   // Otherwise the longest-literal prefix/segment match wins (approximates
   // the backend's WcPathDescr ordering).
-  let best: ClassifiedRule | undefined = exact;
-  if (!best) {
-    let bestLen = -1;
-    for (const r of rules) {
-      if (r.kind === "exact" || !pick(r)) continue;
-      const literalLen = r.base.replace(/\+/g, "").length;
-      if (literalLen > bestLen) {
-        bestLen = literalLen;
-        best = r;
-      }
+  let best: ClassifiedRule | undefined;
+  let bestLen = -1;
+  for (const r of rules) {
+    if (r.kind === "exact" || !pick(r)) continue;
+    const literalLen = r.base.replace(/\+/g, "").length;
+    if (literalLen > bestLen) {
+      bestLen = literalLen;
+      best = r;
     }
   }
+  return best;
+}
 
+function verdictFor(rules: ClassifiedRule[], target: string, capability: string): PreviewVerdict {
+  const best = selectWinner(rules, target);
   if (!best) {
-    return { allowed: false, matchedPath: null, matchKind: "none", deniedByDeny: false, preview: true };
+    return {
+      allowed: false,
+      matchedPath: null,
+      matchKind: "none",
+      deniedByDeny: false,
+      grantingPolicies: [],
+      draftOnlyAllowed: false,
+      preview: true,
+    };
   }
-
-  const caps = best.block.capabilities ?? [];
-  const deniedByDeny = caps.includes("deny");
-  const isRoot = caps.includes("root");
-  const allowed = !deniedByDeny && (isRoot || caps.includes(capability));
+  const deniedByDeny = best.capabilities.includes("deny");
+  const isRoot = best.capabilities.includes("root");
   return {
-    allowed,
-    matchedPath: best.block.path,
+    allowed: !deniedByDeny && (isRoot || best.capabilities.includes(capability)),
+    matchedPath: best.path,
     matchKind: best.kind,
     deniedByDeny,
+    grantingPolicies: [...best.policies],
+    draftOnlyAllowed: false,
     preview: true,
   };
+}
+
+/**
+ * A lightweight, **non-authoritative** preview of whether `model` grants
+ * `capability` on `path`. Mirrors the backend's exact > prefix > segment
+ * precedence so the builder can show an instant verdict while typing, but
+ * the real answer always comes from the backend dry-run.
+ *
+ * `attached` names the other policies a real token would carry (`default`
+ * rides on every token). They are folded into one rule set exactly as
+ * `ACL::new` does — identical path strings union, different ones compete —
+ * so the preview shows the same cross-policy narrowing the dry-run reports:
+ * a narrow rule in `default` *replaces* a broad rule in the draft. The
+ * verdict the draft would give alone is reported as `draftOnlyAllowed`, so
+ * the caller can point at the difference.
+ *
+ * Group- and scope-gated rules are excluded (the backend layers them
+ * additively at authorize time and they need request context the client
+ * does not have), so this can under-report a *grant*, never a narrowing.
+ */
+export function previewCapability(
+  model: PolicyModel,
+  path: string,
+  capability: string,
+  attached: PolicyModel[] = [],
+): PreviewVerdict {
+  const target = stripLeadingSlash(path);
+  const draftOnly = verdictFor(flattenRules([model]), target, capability);
+  if (!attached.length) return { ...draftOnly, draftOnlyAllowed: draftOnly.allowed };
+
+  const combined = verdictFor(flattenRules([model, ...attached]), target, capability);
+  return { ...combined, draftOnlyAllowed: draftOnly.allowed };
 }

@@ -360,6 +360,12 @@ export interface PolicyTestCaseInput {
   /** Optional environment, fed to the matcher as the `env` request param so
    *  the rule's env restriction (required/allowed_parameters) is evaluated. */
   env?: string;
+  /** The policies a real token carries alongside the draft, evaluated
+   *  together as one ACL so the verdict matches what a token actually gets.
+   *
+   *  Tri-state: omitted means `["default"]` (every token carries it), `[]`
+   *  evaluates the draft alone, and an explicit list is used as given. */
+  policies?: string[];
 }
 
 /** How the rule that decided a verdict related to the evaluated path. */
@@ -374,6 +380,19 @@ export interface PolicyTestResultRow {
   matched_path: string | null;
   match_kind: PolicyMatchKind;
   denied_by_deny: boolean;
+  /** Policies that contributed the rule named by `matched_path`. When the
+   *  policy being edited is absent from this list, an attached policy
+   *  out-specified it — ACL precedence picks one winning rule rather than
+   *  unioning across policies. */
+  granting_policies: string[];
+  /** Every policy the ACL was built from, draft first. */
+  evaluated_policies: string[];
+  /** Named attached policies that do not exist (so the evaluated ACL is
+   *  narrower than the token it models). */
+  missing_policies: string[];
+  /** The verdict the draft alone would give. Disagreeing with `allowed` is
+   *  the cross-policy narrowing, and `granting_policies` names the cause. */
+  draft_only_allowed: boolean;
   /** Present only when the capability name was unrecognized. */
   error?: string;
 }
@@ -406,6 +425,10 @@ export interface PolicyTestCase {
   /** Value assertion: the expected value of `expect_key`. Checked at Run
    *  time via a live read; not enforced by the save-time regression gate. */
   expect_value?: string;
+  /** The policies a real token carries alongside this one. Omitted means
+   *  `["default"]`; `[]` evaluates the policy alone. The distinction is
+   *  load-bearing, so this stays `undefined` rather than `[]` when unset. */
+  policies?: string[];
 }
 
 // Resources

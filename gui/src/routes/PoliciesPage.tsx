@@ -119,12 +119,22 @@ export function PoliciesPage() {
    * authoritative backend dry-run. Returns the number of failing cases
    * (a case fails when its verdict disagrees with its `expect`). A parse
    * failure is reported as all cases failing so save is gated.
+   *
+   * Each case is evaluated against the policies it names — `default` when
+   * it names none, since every token carries it — so the gate asserts what
+   * a token actually gets rather than what the draft says in isolation.
    */
   async function runRegressionGate(): Promise<{ failed: number; total: number }> {
     if (savedCases.length === 0) return { failed: 0, total: 0 };
     const res = await api.policyTest(
       policyContent,
-      savedCases.map((c) => ({ path: c.path, capability: c.capability, env: c.env?.trim() || undefined })),
+      savedCases.map((c) => ({
+        path: c.path,
+        capability: c.capability,
+        env: c.env?.trim() || undefined,
+        policies: c.policies,
+      })),
+      selected ?? undefined,
     );
     if (!res.parse_ok) return { failed: savedCases.length, total: savedCases.length };
     let failed = 0;

@@ -45,6 +45,106 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.12] - 2026-08-24
+
+### Security
+
+#### The `default` policy narrowed administrators on every path it names
+- **`default`'s narrow rules out-specified `administrator`'s `path "*"`, and so
+  replaced it.** ACL precedence selects a single winning rule and unions
+  capabilities only between rules whose path string is *identical*
+  (`Permissions::merge`, driven from `ACL::new`). Every administrator also
+  carries `default`, so on each of the 35 paths `default` names, an
+  administrator held exactly `default`'s capabilities rather than the full
+  set. Distinct from the `rustion/targets/` fix in 0.41.11, which addressed
+  `+` matching a trailing empty segment; this is the ordinary
+  exact-beats-glob precedence that fix deliberately left alone.
+- **Real loss of function on one path: `rustion/targets/+`.** `default` grants
+  `read` there, while the route (`targets/(?P<id>...)$`, `bv-engine-rustion`)
+  also serves Write and Delete — so updating or deleting a bastion target
+  403'd for administrators. On the other 34 paths the withheld capabilities
+  have no handler behind them (`default` grants `update` on Write-only routes
+  and `list` on List-only collections, which is all those routes accept), so
+  `sys/capabilities-self` reported a short list without any operation actually
+  being refused.
+- **Fixed by restating every ungated `default` path in `ADMINISTRATOR_POLICY`**
+  (`crates/bv-kernel/src/modules/policy/policy_store.rs`) with the full
+  capability set. Identical path strings merge, so the administrator keeps
+  `path "*"`'s grant; the block asserts nothing that `path "*"` did not
+  already declare. `group`/`scope`-gated rules need no entry (they are stored
+  unmerged and layered additively at authorize time, so they never
+  out-specify), and templated paths cannot be restated by a non-templated
+  policy.
+- **The matcher was deliberately *not* changed to union across policies.**
+  Narrow-out-specifies-broad is HashiCorp Vault's documented behaviour and
+  operators rely on it to restrict; unioning would silently escalate
+  privileges on upgrade in any deployment built on that. Operators who want no
+  `default` at all still have `token_no_default_policy`.
+- **Regression coverage** in `mod default_policy_does_not_narrow_admins_tests`:
+  a sweep over `default` fails if an ungated rule is missing from
+  `ADMINISTRATOR_POLICY`, so a rule added to `default` cannot silently
+  re-narrow administrators; plus a direct assertion that an administrator can
+  update and delete a named Rustion target, and one that a `default`-only
+  token is unaffected by the restatement.
+- Precedence semantics, the three remedies and the gated/templated exemptions
+  are documented in `features/policy-builder-validator.md` ("One winner, not a
+  union: how multiple policies combine").
+
+### Added
+
+#### Multi-policy effectivity in the policy dry-run
+- **`POST /v2/sys/policies/acl/test` now evaluates a case against the draft
+  *plus* the policies a real token carries alongside it**, built into one ACL
+  and run through the production matcher. Previously the dry-run built an ACL
+  from the single draft, so the validator could not see the class of defect
+  fixed in the Security entry above: an admin draft validated in isolation
+  showed the full capability set and never revealed that `default`, attached
+  to every token, out-specifies it on the paths it names. Diagnosing that used
+  to mean minting a token and calling `sys/capabilities-self`.
+  (`features/policy-builder-validator.md`, "Multi-policy effectivity")
+- **A case's `policies` field is tri-state**: absent means `["default"]` —
+  what a normal token carries, so an unqualified case now reports production
+  reality; `[]` evaluates the draft alone (the previous behaviour, kept as an
+  explicit opt-out); an explicit list is used as given. Naming `root` is
+  refused with `400` rather than filtered, since an ACL containing it allows
+  every path. A named policy that does not exist is reported in
+  `missing_policies` rather than dropped, and one the caller cannot `read` on
+  `sys/policies/acl/<name>` is refused with `403` — attaching a policy reads
+  it, so the endpoint must not become a read oracle for one the caller could
+  not fetch directly, and it fails closed rather than evaluating the readable
+  subset.
+- **Each result row now reports `granting_policies`** — the policies that
+  contributed the winning rule — **and `draft_only_allowed`**, the verdict the
+  draft alone would give. The two disagreeing *is* the cross-policy narrowing,
+  and the first names its cause, so an operator can see why a capability was
+  withheld and which path to restate. `evaluated_policies` lists the whole set
+  the ACL was built from. All three are advisory; `allowed` remains the
+  authoritative matcher verdict.
+- **The request takes an optional `name`** (the name the draft would be saved
+  under). It attributes the draft's own rules, and it is how an attached
+  policy that *is* the draft is recognized and skipped — editing `default` no
+  longer merges the stored copy back in underneath.
+- **Saved test cases persist `policies`**, and the GUI's save-time regression
+  gate replays it, so a saved case gates on the same multi-policy verdict it
+  was authored against. A case saved before this existed has no `policies`
+  field and therefore starts reporting the cross-policy verdict — which is the
+  verdict its token gets. The absent/empty distinction round-trips.
+- **GUI**: the Validate & test panel gains a per-row **With policies** field
+  (blank = `default`); a narrowed verdict is badged and names the policy whose
+  rule won together with the path to restate. The offline preview matcher
+  (`previewCapability`) now takes the attached models and mirrors `ACL::new`'s
+  merge — identical path strings union, gated rules are excluded — so it
+  cannot drift from the server on the narrowing it is meant to surface.
+- **Backend**: `ACL::locate_match` resolves the winning rule's permissions and
+  `CapabilityExplain` carries `granting_policies`
+  (`crates/bv-kernel/src/modules/policy/acl.rs`);
+  `PolicyModule::handle_policy_test` memoizes one ACL per distinct
+  attached-policy set (`.../policy/mod.rs`). Coverage:
+  `test_explain_capability_names_granting_policies`,
+  `test_policy_acl_dry_run_multi_policy`, the tri-state round trip in
+  `test_policy_tests_persistence_endpoint`, and six `vitest` cases in
+  `describe("policyHcl — multi-policy preview")`.
+
 ## [0.41.11] - 2026-08-24
 
 ### Security

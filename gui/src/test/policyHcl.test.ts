@@ -203,6 +203,72 @@ describe("policyHcl — preview matcher precedence", () => {
   });
 });
 
+describe("policyHcl — multi-policy preview", () => {
+  // An "administrator"-shaped draft: everything, everywhere.
+  const admin = parsePolicyHcl(`
+    name = "administrator"
+    path "*" { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+  `).model;
+
+  // The narrow rules `default` carries on every token, plus one that is
+  // scope-gated (which the backend layers additively and never lets narrow).
+  const dflt = parsePolicyHcl(`
+    name = "default"
+    path "sys/capabilities-self" { capabilities = ["update"] }
+    path "rustion/targets/+" { capabilities = ["read"] }
+    path "secret/*" {
+      capabilities = ["read", "list", "update"]
+      scopes = ["shared"]
+    }
+  `).model;
+
+  it("shows a narrow attached rule replacing a broad one", () => {
+    const solo = previewCapability(admin, "rustion/targets/abc", "delete");
+    expect(solo.allowed).toBe(true);
+
+    const v = previewCapability(admin, "rustion/targets/abc", "delete", [dflt]);
+    expect(v.allowed).toBe(false);
+    expect(v.draftOnlyAllowed).toBe(true);
+    expect(v.matchKind).toBe("segment_wildcard");
+    expect(v.matchedPath).toBe("rustion/targets/+");
+    expect(v.grantingPolicies).toEqual(["default"]);
+  });
+
+  it("shows the same narrowing through an exact rule", () => {
+    const v = previewCapability(admin, "sys/capabilities-self", "read", [dflt]);
+    expect(v.allowed).toBe(false);
+    expect(v.draftOnlyAllowed).toBe(true);
+    expect(v.matchKind).toBe("exact");
+    expect(v.grantingPolicies).toEqual(["default"]);
+  });
+
+  it("unions rules whose path string is identical", () => {
+    const restating = parsePolicyHcl(`
+      name = "administrator"
+      path "*" { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+      path "rustion/targets/+" { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+    `).model;
+    const v = previewCapability(restating, "rustion/targets/abc", "delete", [dflt]);
+    expect(v.allowed).toBe(true);
+    expect(v.matchedPath).toBe("rustion/targets/+");
+    expect([...v.grantingPolicies].sort()).toEqual(["administrator", "default"]);
+  });
+
+  it("ignores group- and scope-gated attached rules", () => {
+    // `default`'s `secret/*` is scope-gated, so it must not out-specify
+    // `path "*"` — the backend stores it unmerged and layers it additively.
+    const v = previewCapability(admin, "secret/data/anything", "delete", [dflt]);
+    expect(v.allowed).toBe(true);
+    expect(v.grantingPolicies).toEqual(["administrator"]);
+  });
+
+  it("reports draftOnlyAllowed for the single-policy case too", () => {
+    const v = previewCapability(admin, "rustion/targets/abc", "delete");
+    expect(v.draftOnlyAllowed).toBe(true);
+    expect(v.grantingPolicies).toEqual(["administrator"]);
+  });
+});
+
 describe("policyHcl — capability set", () => {
   it("matches the backend's ten capabilities", () => {
     expect([...CAPABILITIES].sort()).toEqual(

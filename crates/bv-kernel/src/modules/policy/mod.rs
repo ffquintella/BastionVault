@@ -284,17 +284,40 @@ impl PolicyModule {
     /// Stateless dry-run for the graphical policy builder/validator.
     ///
     /// Parses a *draft* HCL policy (never persisted), constructs an
-    /// in-memory `ACL` from it via the production builder, and evaluates
-    /// each supplied `(path, capability)` case with the production
-    /// matcher. Returns, per case, the authoritative allow/deny verdict
-    /// plus an advisory identification of the rule that decided it.
+    /// in-memory `ACL` from it plus the policies a real token would carry
+    /// alongside it, and evaluates each supplied `(path, capability)` case
+    /// with the production matcher. Returns, per case, the authoritative
+    /// allow/deny verdict plus an advisory identification of the rule that
+    /// decided it and of the policies that wrote that rule.
+    ///
+    /// ## Why more than one policy
+    ///
+    /// ACL precedence selects a *single* winning rule and unions
+    /// capabilities only between rules whose path string is identical, so a
+    /// narrow rule in an attached policy replaces — rather than adds to —
+    /// a broad rule in the draft. `default` is attached to every token
+    /// unless the auth mount sets `token_no_default_policy`, so a draft
+    /// validated in isolation can look correct and still be narrowed in
+    /// production; that is exactly how `default`'s `rustion/targets/+`
+    /// silently downgraded every administrator. A case therefore carries an
+    /// optional `policies` array:
+    ///
+    ///   * absent / `null` — `["default"]`, the set a real token carries.
+    ///   * `[]` — the draft alone (the original single-policy dry-run).
+    ///   * `["a", "b"]` — the draft plus exactly those.
+    ///
+    /// Each row also reports `draft_only_allowed`: the verdict the draft
+    /// would give on its own. When it disagrees with `allowed`, the
+    /// difference *is* the cross-policy narrowing, and `granting_policies`
+    /// names who caused it.
     ///
     /// A parse failure is reported as a normal result
     /// (`parse_ok = false` + the message) rather than an error, so the
     /// GUI can surface syntax problems inline. The endpoint requires the
     /// same ACL capability as a policy write because it shares the
-    /// `sys/policies/acl/*` path prefix; it discloses nothing the caller
-    /// could not already author. See
+    /// `sys/policies/acl/*` path prefix; the attached policies are read
+    /// through the same store the caller could already read them from, so
+    /// it discloses nothing new. See
     /// `features/policy-builder-validator.md` (Phase 1).
     pub async fn handle_policy_test(
         &self,
@@ -312,29 +335,38 @@ impl PolicyModule {
             policy_str
         };
 
+        // The name the draft would be saved under. Supplied by the client
+        // because a policy's name comes from the URL, not the HCL — and it
+        // matters twice: it is what `granting_policies` reports for the
+        // draft's own rules, and it is how an attached policy that *is* the
+        // draft is recognized and skipped (an operator editing `default`
+        // must not have the stored `default` merged back in underneath).
+        let supplied_name = req
+            .get_data("name")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty());
+
+        let ns = crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
+
         // Cases parse independently of the policy so the GUI can still
         // render rows when the draft fails to parse.
-        // The optional `env` is fed to the matcher as a request parameter so
-        // the governing rule's env restriction (`required_parameters` /
-        // `allowed_parameters.env`) is actually evaluated. Empty/absent env
-        // preserves the bitmap-only dry-run.
-        let cases: Vec<(String, String, Option<String>)> = match req.get_data("cases") {
-            Ok(Value::Array(arr)) => arr
-                .iter()
-                .filter_map(|v| {
-                    let o = v.as_object()?;
-                    let path = o.get("path")?.as_str()?.to_string();
-                    let cap = o.get("capability")?.as_str()?.to_string();
-                    let env = o
-                        .get("env")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string());
-                    Some((path, cap, env))
-                })
-                .collect(),
+        let cases: Vec<DryRunCase> = match req.get_data("cases") {
+            Ok(Value::Array(arr)) => arr.iter().filter_map(parse_dry_run_case).collect(),
             _ => Vec::new(),
         };
+
+        // `root` is a synthetic superuser policy, not a document: an ACL
+        // containing it allows everything, and `ACL::new` rejects it
+        // alongside any sibling. Refuse explicitly rather than filtering it
+        // out, so a case naming it never reports a silently different set.
+        if cases.iter().any(|c| c.attached.iter().any(|n| n == "root")) {
+            return Err(bv_error_response_status!(
+                400,
+                "\"root\" cannot be named as an attached policy; it is a synthetic superuser policy that allows every \
+                 path, so the dry-run would be meaningless"
+            ));
+        }
 
         let mut data = Map::new();
 
@@ -347,6 +379,9 @@ impl PolicyModule {
                 return Ok(Some(Response::data_response(Some(data))));
             }
         };
+        if let Some(name) = supplied_name {
+            policy.name = name;
+        }
         // ACL::new requires a name; a lone "root" policy would build a
         // superuser ACL, so reject that here — a dry-run must evaluate the
         // literal rules, not synthesize root.
@@ -360,24 +395,130 @@ impl PolicyModule {
             policy.name = "__draft__".into();
         }
 
-        // Throwaway ACL built from the single draft policy. Never stored.
-        let acl = ACL::new(&[Arc::new(policy)])?;
+        let draft_name = policy.name.clone();
+        let draft = Arc::new(policy);
+
+        let store = self.policy_store.load();
+
+        // Attaching a policy *reads* it, so the caller must be able to read
+        // it. Without this the dry-run would be a read oracle for a caller
+        // holding `update` on `sys/policies/acl/test` (the dry-run route)
+        // but not `read` on the policy it names: attach it to an empty
+        // draft and the per-case `matched_path` / `allowed` pairs recover
+        // its rules. That combination is unusual — a caller who can write
+        // any ACL policy can rewrite `default` and escalate anyway — but
+        // "unusual" is not a control, and the endpoint's stated contract is
+        // that it discloses nothing the caller could not already reach.
+        //
+        // Checked once per request against the caller's own ACL, built from
+        // the token's own policies exactly as the request pipeline does.
+        // Root short-circuits (`is_root`). No auth means the request never
+        // reached a Write route, so treat it as deny.
+        let attached_named: Vec<String> = {
+            let mut names: Vec<String> = Vec::new();
+            for case in cases.iter() {
+                for n in case.attached.iter() {
+                    if *n != draft_name && !names.iter().any(|x| x == n) {
+                        names.push(n.clone());
+                    }
+                }
+            }
+            names
+        };
+        if !attached_named.is_empty() {
+            let auth = req.auth.clone().ok_or(RvError::ErrPermissionDenied)?;
+            let request_ns = if ns.is_empty() { None } else { Some(ns.as_str()) };
+            let caller_acl = store.new_acl_for_request(&auth.policies, None, &auth, request_ns).await?;
+            for name in attached_named.iter() {
+                let probe = format!("sys/policies/acl/{name}");
+                if !caller_acl
+                    .explain_capability(&probe, crate::modules::policy::policy::Capability::Read)
+                    .allowed
+                {
+                    return Err(bv_error_response_status!(
+                        403,
+                        &format!(
+                            "cannot attach policy \"{name}\": the caller has no `read` capability on \
+                             sys/policies/acl/{name}"
+                        )
+                    ));
+                }
+            }
+        }
+
+        // Throwaway ACLs, all built from the draft. Never stored.
+        //
+        // The draft-only ACL backs `draft_only_allowed` on every row: it is
+        // the verdict the single-policy dry-run used to give, kept so the
+        // GUI can point at the difference instead of just reporting a
+        // narrower answer than the operator's draft says.
+        let draft_acl = ACL::new(std::slice::from_ref(&draft))?;
+        // One ACL per distinct attached-policy set, keyed by that set.
+        // Cases usually share one set, so this reads each attached policy
+        // from the store once.
+        let mut acl_cache: Vec<AttachedAcl> = Vec::new();
 
         let mut results = Vec::with_capacity(cases.len());
-        for (path, cap_str, env) in &cases {
+        for case in &cases {
+            let key = case.attached.join("\u{0}");
+            let cached = match acl_cache.iter().position(|c| c.key == key) {
+                Some(i) => i,
+                None => {
+                    let mut policies: Vec<Arc<Policy>> = vec![draft.clone()];
+                    let mut evaluated: Vec<String> = vec![draft_name.clone()];
+                    let mut missing: Vec<String> = Vec::new();
+                    for name in case.attached.iter() {
+                        // Already present: either it is the draft itself
+                        // (the draft wins — it is the version under test)
+                        // or the name was listed twice.
+                        if evaluated.iter().any(|e| e == name) {
+                            continue;
+                        }
+                        match store.get_policy_ns(name, PolicyType::Acl, &ns).await? {
+                            Some(p) => {
+                                evaluated.push(name.clone());
+                                policies.push(p);
+                            }
+                            // Reported, not silently dropped: a missing
+                            // policy makes the ACL narrower than the token
+                            // it is meant to model.
+                            None => missing.push(name.clone()),
+                        }
+                    }
+                    acl_cache.push(AttachedAcl {
+                        key,
+                        acl: ACL::new(&policies)?,
+                        evaluated,
+                        missing,
+                    });
+                    acl_cache.len() - 1
+                }
+            };
+            let entry = &acl_cache[cached];
+
             let mut row = Map::new();
-            row.insert("path".into(), Value::String(path.clone()));
-            row.insert("capability".into(), Value::String(cap_str.clone()));
-            match Capability::from_str(cap_str) {
+            row.insert("path".into(), Value::String(case.path.clone()));
+            row.insert("capability".into(), Value::String(case.capability.clone()));
+            row.insert("evaluated_policies".into(), string_array(&entry.evaluated));
+            row.insert("missing_policies".into(), string_array(&entry.missing));
+            match Capability::from_str(&case.capability) {
                 Ok(cap) => {
-                    let ex = match env {
+                    // The optional `env` is fed to the matcher as a request
+                    // parameter so the governing rule's env restriction
+                    // (`required_parameters` / `allowed_parameters.env`) is
+                    // actually evaluated. Empty/absent env preserves the
+                    // bitmap-only dry-run.
+                    let explain = |acl: &ACL| match &case.env {
                         Some(e) => {
                             let mut params = Map::new();
                             params.insert("env".into(), Value::String(e.clone()));
-                            acl.explain_capability_with_params(path, cap, &params)
+                            acl.explain_capability_with_params(&case.path, cap, &params)
                         }
-                        None => acl.explain_capability(path, cap),
+                        None => acl.explain_capability(&case.path, cap),
                     };
+                    let ex = explain(&entry.acl);
+                    let draft_only = explain(&draft_acl);
+
                     row.insert("allowed".into(), Value::Bool(ex.allowed));
                     row.insert("denied_by_deny".into(), Value::Bool(ex.denied_by_deny));
                     row.insert("match_kind".into(), Value::String(ex.match_kind.as_str().into()));
@@ -385,13 +526,17 @@ impl PolicyModule {
                         "matched_path".into(),
                         ex.matched_path.map(Value::String).unwrap_or(Value::Null),
                     );
+                    row.insert("granting_policies".into(), string_array(&ex.granting_policies));
+                    row.insert("draft_only_allowed".into(), Value::Bool(draft_only.allowed));
                 }
                 Err(_) => {
                     row.insert("allowed".into(), Value::Bool(false));
                     row.insert("denied_by_deny".into(), Value::Bool(false));
                     row.insert("match_kind".into(), Value::String("none".into()));
                     row.insert("matched_path".into(), Value::Null);
-                    row.insert("error".into(), Value::String(format!("unknown capability: {cap_str}")));
+                    row.insert("granting_policies".into(), Value::Array(vec![]));
+                    row.insert("draft_only_allowed".into(), Value::Bool(false));
+                    row.insert("error".into(), Value::String(format!("unknown capability: {}", case.capability)));
                 }
             }
             results.push(Value::Object(row));
@@ -427,6 +572,11 @@ impl PolicyModule {
                     m.insert("env".into(), Value::String(c.env.clone()));
                     m.insert("expect_key".into(), Value::String(c.expect_key.clone()));
                     m.insert("expect_value".into(), Value::String(c.expect_value.clone()));
+                    // Emitted only when set: the client must be able to
+                    // tell "unspecified" from an explicit empty list.
+                    if let Some(policies) = c.policies.as_ref() {
+                        m.insert("policies".into(), string_array(policies));
+                    }
                     Value::Object(m)
                 })
                 .collect(),
@@ -467,7 +617,33 @@ impl PolicyModule {
                     let env = o.get("env").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let expect_key = o.get("expect_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let expect_value = o.get("expect_value").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    Some(PolicyTestCase { path, capability, expect, note, env, expect_key, expect_value })
+                    // Tri-state, preserved verbatim: absent stays absent
+                    // (resolves to `["default"]` at run time), an explicit
+                    // empty array stays empty (draft alone). Collapsing the
+                    // two would silently change what the saved case — and
+                    // therefore the save-time regression gate — asserts.
+                    let policies = match o.get("policies") {
+                        Some(Value::Array(names)) => Some(
+                            names
+                                .iter()
+                                .filter_map(|n| n.as_str())
+                                .map(|s| s.trim())
+                                .filter(|s| !s.is_empty())
+                                .map(|s| s.to_string())
+                                .collect(),
+                        ),
+                        _ => None,
+                    };
+                    Some(PolicyTestCase {
+                        path,
+                        capability,
+                        expect,
+                        note,
+                        env,
+                        expect_key,
+                        expect_value,
+                        policies,
+                    })
                 })
                 .collect(),
             _ => Vec::new(),
@@ -476,6 +652,62 @@ impl PolicyModule {
         self.policy_store.load().set_policy_tests_ns(&name, &cases, &ns).await?;
         Ok(None)
     }
+}
+
+/// One parsed dry-run case: the `(path, capability)` assertion, the
+/// optional `env` request parameter, and the set of policies a real token
+/// would carry alongside the draft.
+struct DryRunCase {
+    path: String,
+    capability: String,
+    env: Option<String>,
+    /// Already resolved: an absent wire field becomes `["default"]`, an
+    /// explicit empty array stays empty (draft alone). See
+    /// [`parse_dry_run_case`].
+    attached: Vec<String>,
+}
+
+/// An ACL built for one distinct attached-policy set, memoized across the
+/// cases that share that set.
+struct AttachedAcl {
+    /// The case's `attached` list joined by NUL — a separator no policy
+    /// name can contain, so distinct sets never collide.
+    key: String,
+    acl: acl::ACL,
+    /// Every policy in `acl`, draft first. The draft appears under its own
+    /// name, so an operator editing `default` sees a single entry.
+    evaluated: Vec<String>,
+    /// Attached names that do not exist in this namespace.
+    missing: Vec<String>,
+}
+
+/// Parse one wire case. Rows missing `path` or `capability` are dropped
+/// (the GUI sends partially-filled rows while the operator types).
+///
+/// The `policies` field is tri-state and the distinction is deliberate:
+/// absent means "a normal token", which carries `default`; an explicit
+/// empty array means "the draft alone" and is the only way back to the
+/// original single-policy dry-run.
+fn parse_dry_run_case(v: &Value) -> Option<DryRunCase> {
+    let o = v.as_object()?;
+    let path = o.get("path")?.as_str()?.to_string();
+    let capability = o.get("capability")?.as_str()?.to_string();
+    let env = o.get("env").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let attached = match o.get("policies") {
+        Some(Value::Array(names)) => names
+            .iter()
+            .filter_map(|n| n.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect(),
+        _ => vec![policy_store::DEFAULT_POLICY_NAME.to_string()],
+    };
+    Some(DryRunCase { path, capability, env, attached })
+}
+
+fn string_array(values: &[String]) -> Value {
+    Value::Array(values.iter().map(|s| Value::String(s.clone())).collect())
 }
 
 /// Collect the deduped list of asset-group names referenced via

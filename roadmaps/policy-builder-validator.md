@@ -79,3 +79,4 @@ Phase 1 lands first because it is the authoritative engine and can be validated 
 
 - Whether restoring a historical policy version should also restore its test cases of that era, or keep current test cases. Leaning toward keeping current cases (they encode present intent) and surfacing a warning when a restore makes them fail.
 - Optional Monaco/CodeMirror syntax highlighting for the source tab — deferred; not required for any phase.
+- ~~Whether a test case should be able to name the other policies a token carries, so the verdict reflects cross-policy narrowing rather than the draft in isolation.~~ **Resolved and implemented** — a case carries a tri-state `policies` field defaulting to `["default"]`, and each row reports `granting_policies` + `draft_only_allowed`. See "Multi-policy effectivity" in [`features/policy-builder-validator.md`](../features/policy-builder-validator.md).

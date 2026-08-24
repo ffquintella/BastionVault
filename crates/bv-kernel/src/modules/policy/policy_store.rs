@@ -108,7 +108,7 @@ pub fn policy_tests_keyspace(ns_path: &str) -> String {
 }
 
 // DEFAULT_POLICY_NAME is the name of the default policy
-const DEFAULT_POLICY_NAME: &str = "default";
+pub(crate) const DEFAULT_POLICY_NAME: &str = "default";
 pub static DEFAULT_POLICY: &str = r#"
 # Allow tokens to look up their own properties
 path "auth/token/lookup-self" {
@@ -712,6 +712,74 @@ static ADMINISTRATOR_POLICY: &str = r#"
 path "*" {
     capabilities = ["create", "read", "update", "delete", "list", "sudo"]
 }
+
+# --- Restatement of every ungated `default` rule ---------------------------
+#
+# `path "*"` above says "every path, every capability" and this block says
+# nothing more than that. It exists because ACL precedence picks a *single*
+# winning rule rather than unioning capabilities across the policies a token
+# carries (`ACL::get_none_exact_paths_permissions` sorts candidates and takes
+# one; `ACL::allow_operation` consults `exact_rules` first). Capabilities are
+# unioned only between rules whose path string is *identical* -- that is
+# `Permissions::merge`, driven by `ACL::get_permissions` in `ACL::new`.
+#
+# Every administrator also carries `default`, so without this block each of
+# `default`'s narrow rules out-specifies `path "*"` and *replaces* it. An
+# administrator then holds exactly `default`'s capabilities on 35 paths: e.g.
+# `read` alone on `rustion/targets/+`, whose route (`targets/(?P<id>...)$` in
+# `bv-engine-rustion`) also serves Write and Delete -- so updating or deleting
+# a bastion target 403'd for administrators. `sys/capabilities-self` reported
+# the narrowed set correctly, which is how this was found.
+#
+# Restating each path here makes the strings identical, so `merge` unions them
+# and the administrator keeps the full set. This is the HashiCorp Vault
+# remedy, and it is deliberately preferred over changing the matcher to union
+# across policies: narrow-rule-out-specifies-broad is Vault-compatible
+# behaviour that operators use to *restrict*, and unioning would silently
+# escalate, on upgrade, every deployment relying on that. Operators who want
+# no `default` at all still have `token_no_default_policy` (`bv-utils`
+# `token_util.rs`).
+#
+# `mod default_policy_does_not_narrow_admins_tests` sweeps `default` and fails
+# if an ungated rule is missing here, so adding a rule to `default` cannot
+# silently re-narrow administrators. `groups`/`scopes`-gated rules need no
+# entry: they are stored unmerged and layered additively at authorize time
+# (`ACL::new`), so they never out-specify anything. Templated paths
+# (`{{...}}`) have no entry either -- `administrator` is not a templated
+# policy, so it cannot restate a per-caller path.
+path "auth/token/lookup-self"             { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "auth/token/renew-self"              { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "auth/token/revoke-self"             { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "auth/token/audit-login"             { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "sys/capabilities-self"              { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "sys/namespaces-self"                { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "sys/dashboard/summary"              { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "identity/entity/self"               { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "sys/identity/profile/self"          { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "sys/identity/profile/self/password" { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "sys/identity/profile/self/contact"  { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "sys/identity/default-account/self"  { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "identity/sharing/for-me"            { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "notifications/inbox"                { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "notifications/inbox/*"              { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "sys/internal/ui/resultant-acl"      { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "sys/renew"                          { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "sys/leases/renew"                   { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "sys/leases/lookup"                  { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "cubbyhole/*"                        { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "sys/wrapping/wrap"                  { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "sys/wrapping/lookup"                { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "sys/wrapping/unwrap"                { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "sys/tools/hash"                     { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "sys/tools/hash/*"                   { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "sys/control-group/request"          { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "resource-group/groups"              { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "rustion/policy/effective"           { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "rustion/dispatcher/preview"         { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "rustion/targets/+"                  { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "resources/v2/connect/mfa/begin"     { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "resources/v2/connect/mfa/verify"    { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "resources/v2/connect/authorize"     { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 "#;
 
 static RESPONSE_WRAPPING_POLICY_NAME: &str = "response-wrapping";
@@ -1366,6 +1434,22 @@ pub struct PolicyTestCase {
     /// Optional value assertion: the expected value of `expect_key`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub expect_value: String,
+    /// The policies a real token would carry alongside the one under test,
+    /// evaluated together as one ACL so the verdict matches what a token
+    /// actually gets (see "One winner, not a union" in
+    /// `features/policy-builder-validator.md`).
+    ///
+    /// Tri-state, and the distinction is load-bearing:
+    ///   * `None` — unspecified. Resolves to `["default"]`, because every
+    ///     token BastionVault issues carries `default` unless the auth
+    ///     mount sets `token_no_default_policy`. This is also what records
+    ///     written before the field existed deserialize to, so an old
+    ///     saved case starts reporting the cross-policy verdict.
+    ///   * `Some([])` — evaluate the draft alone. The original
+    ///     single-policy dry-run, kept as an explicit opt-out.
+    ///   * `Some([names…])` — evaluate the draft plus exactly these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policies: Option<Vec<String>>,
 }
 
 /// The main policy store structure.
@@ -4782,6 +4866,83 @@ mod default_policy_does_not_narrow_admins_tests {
 
         assert_eq!(acl.capabilities("rustion/targets/".to_string()), vec!["deny".to_string()]);
         assert!(acl.capabilities("rustion/targets/bastion-1".to_string()).contains(&"read".to_string()));
+    }
+
+    /// An administrator must hold the full capability set on every path
+    /// `default` also names, swept off `default` itself rather than a
+    /// hand-maintained list.
+    ///
+    /// ACL precedence picks one winning rule and unions capabilities only
+    /// between *identical* path strings, so every narrow `default` rule
+    /// out-specifies -- and replaces -- `administrator`'s `path "*"`. The
+    /// remedy is the restatement block in `ADMINISTRATOR_POLICY`; this test
+    /// is what keeps it complete, so a rule added to `default` cannot
+    /// silently re-narrow every administrator.
+    ///
+    /// Exempt by construction, not by oversight:
+    ///   * `groups`/`scopes`-gated rules -- stored unmerged and layered
+    ///     additively at authorize time, so they never out-specify.
+    ///   * templated paths (`{{...}}`) -- `administrator` is not a templated
+    ///     policy, so it cannot restate a per-caller path.
+    #[test]
+    fn default_never_narrows_an_administrator() {
+        let default = Policy::from_str(DEFAULT_POLICY).expect("default policy must parse");
+        let acl = acl_of(&[DEFAULT_POLICY, ADMINISTRATOR_POLICY]);
+        let full = ["create", "read", "update", "delete", "list", "sudo"];
+
+        let mut checked = 0;
+        for rule in default.paths.iter() {
+            if !rule.groups.is_empty() || !rule.scopes.is_empty() || rule.path.contains("{{") {
+                continue;
+            }
+
+            // Probe a path the rule actually governs: `*` and `+` never
+            // decide their own literal spelling.
+            let probe = if let Some(stem) = rule.path.strip_suffix('*') {
+                format!("{stem}probe")
+            } else if let Some(stem) = rule.path.strip_suffix('+') {
+                format!("{stem}probe")
+            } else {
+                rule.path.clone()
+            };
+
+            let caps = acl.capabilities(probe.clone());
+            let missing: Vec<&str> = full.iter().filter(|c| !caps.iter().any(|x| x == *c)).copied().collect();
+            assert!(
+                missing.is_empty(),
+                "`default`'s `{}` narrows an administrator on `{probe}`: missing {missing:?} (has {caps:?}). \
+                 Restate the path in ADMINISTRATOR_POLICY.",
+                rule.path
+            );
+            checked += 1;
+        }
+
+        assert!(checked > 20, "sweep only checked {checked} rules — did the rule shape change?");
+    }
+
+    /// The concrete break the restatement block was written for: the
+    /// `rustion/targets/(?P<id>...)$` route serves Read, Write and Delete,
+    /// and `default`'s read-only `rustion/targets/+` used to replace
+    /// `path "*"` on it, so administrators could not update or delete a
+    /// bastion target.
+    #[test]
+    fn an_administrator_can_update_and_delete_a_rustion_target() {
+        let caps = admin_caps("rustion/targets/bastion-1");
+        for want in ["read", "update", "delete"] {
+            assert!(caps.contains(&want.to_string()), "administrator lacks `{want}` on a named target: {caps:?}");
+        }
+    }
+
+    /// The restatement must not leak into a token that only carries
+    /// `default`: it lives in `administrator`, so a `default`-only caller
+    /// still sees exactly the narrow grant.
+    #[test]
+    fn default_alone_is_unaffected_by_the_administrator_restatement() {
+        let acl = acl_of(&[DEFAULT_POLICY]);
+
+        assert_eq!(acl.capabilities("rustion/targets/bastion-1".to_string()), vec!["read".to_string()]);
+        assert_eq!(acl.capabilities("resource-group/groups".to_string()), vec!["list".to_string()]);
+        assert_eq!(acl.capabilities("sys/capabilities-self".to_string()), vec!["update".to_string()]);
     }
 
     /// The whole class, swept off the policy itself rather than a

@@ -39,6 +39,26 @@ function emptyRow(): Row {
 }
 
 /**
+ * The policies a case is evaluated against, as an editable comma list.
+ *
+ * `undefined` (the field never set) means "a normal token", which the
+ * backend resolves to `["default"]` — so the input shows `default` as a
+ * placeholder rather than pre-filling it, and a blank field keeps meaning
+ * "whatever a real token carries". Typing a list replaces that set.
+ */
+function attachedText(policies: string[] | undefined): string {
+  return policies === undefined ? "" : policies.join(", ");
+}
+
+function parseAttached(text: string): string[] | undefined {
+  const names = text
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return names.length ? names : undefined;
+}
+
+/**
  * Map a KV v2 policy path (`<mount>/data/<secret>`) to the (mount, path)
  * pair `read_secret` expects. The GUI's `read_secret` re-inserts the `data/`
  * infix via `adjust_kv_path`, so we hand it the mount (with the trailing
@@ -91,7 +111,13 @@ export function PolicyValidatorPanel({ name, hcl, savedCases, onSavedCasesChange
     try {
       const res = await api.policyTest(
         hcl,
-        cases.map((c) => ({ path: c.path, capability: c.capability, env: c.env?.trim() || undefined })),
+        cases.map((c) => ({
+          path: c.path,
+          capability: c.capability,
+          env: c.env?.trim() || undefined,
+          policies: c.policies,
+        })),
+        name,
       );
       if (!res.parse_ok) {
         toast("error", `Policy does not parse: ${res.errors[0] ?? "syntax error"}`);
@@ -150,6 +176,7 @@ export function PolicyValidatorPanel({ name, hcl, savedCases, onSavedCasesChange
           env: r.env?.trim() || undefined,
           expect_key: r.expect_key?.trim() || undefined,
           expect_value: r.expect_value || undefined,
+          policies: r.policies,
         }));
       await api.writePolicyTests(name, cases);
       onSavedCasesChange(cases);
@@ -226,6 +253,14 @@ export function PolicyValidatorPanel({ name, hcl, savedCases, onSavedCasesChange
           matches — this runs at <em>Run</em> time only and does not gate saves. Saved cases gate every future save on
           their allow/deny verdict.
         </p>
+        <p className="mb-3 text-xs text-[var(--color-text-muted)]">
+          <strong>With policies</strong> is the set a real token carries alongside this one — left blank it means{" "}
+          <code>default</code>, which every token gets. It matters because ACL precedence picks a <em>single</em>{" "}
+          winning rule instead of unioning across policies, so a narrow rule in <code>default</code>{" "}
+          <em>replaces</em> a broad one here. When that happens the verdict is tagged{" "}
+          <strong>narrowed</strong> and names the policy whose rule won. The fix is usually to restate that exact path
+          in this policy — identical path strings do merge.
+        </p>
         <div className="space-y-3">
           {rows.map((r, i) => (
             <div
@@ -283,7 +318,7 @@ export function PolicyValidatorPanel({ name, hcl, savedCases, onSavedCasesChange
                     placeholder="optional"
                   />
                 </div>
-                <div className="col-span-4 min-w-0">
+                <div className="col-span-3 min-w-0">
                   <Input
                     label={i === 0 ? "= value" : undefined}
                     value={r.expect_value ?? ""}
@@ -291,9 +326,17 @@ export function PolicyValidatorPanel({ name, hcl, savedCases, onSavedCasesChange
                     placeholder="expected value"
                   />
                 </div>
-                <div className="col-span-5 min-w-0">
+                <div className="col-span-2 min-w-0">
+                  <Input
+                    label={i === 0 ? "With policies" : undefined}
+                    value={attachedText(r.policies)}
+                    onChange={(e) => update(i, { policies: parseAttached(e.target.value) })}
+                    placeholder="default"
+                  />
+                </div>
+                <div className="col-span-4 min-w-0">
                   {r.verdict ? (
-                    <VerdictCell row={r} />
+                    <VerdictCell row={r} policyName={name} />
                   ) : (
                     <Input
                       label={i === 0 ? "Note" : undefined}
@@ -317,8 +360,17 @@ export function PolicyValidatorPanel({ name, hcl, savedCases, onSavedCasesChange
       <CollapsibleSection title="About the verdict">
         <p className="text-xs text-[var(--color-text-muted)]">
           The <strong>Run</strong> verdict is authoritative — it comes from the server building an in-memory ACL from
-          your draft and evaluating it with the production matcher. The visual builder&apos;s inline hints are a
-          client-side preview only.
+          your draft <em>plus</em> the policies each case names, and evaluating it with the production matcher. The
+          visual builder&apos;s inline hints are a client-side preview only.
+        </p>
+        <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+          Capabilities are unioned only between rules whose path string is <em>identical</em>. Across different paths
+          there is no union: exact beats prefix (<code>*</code>) beats segment-wildcard (<code>+</code>), and the one
+          winning rule&apos;s capabilities are the whole answer. This is HashiCorp Vault&apos;s behaviour and is
+          deliberate — operators rely on a narrow rule out-specifying a broad one in order to restrict. Remedies, in
+          order of preference: restate the path here, drop <code>default</code> from the token
+          (<code>token_no_default_policy</code>), or — almost always wrong, since it widens every tenant — widen the
+          rule in <code>default</code>.
         </p>
       </CollapsibleSection>
     </div>
@@ -335,22 +387,43 @@ function verdictPasses(r: Row): boolean {
   return true;
 }
 
-function VerdictCell({ row }: { row: Row }) {
+/** "prefix: rustion/targets/+ (via default)" — the rule that decided it. */
+function matchSummary(v: PolicyTestResultRow): string {
+  if (!v.matched_path) return "no rule matched";
+  const via = v.granting_policies?.length ? ` (via ${v.granting_policies.join(", ")})` : "";
+  return `${v.match_kind}: ${v.matched_path}${via}`;
+}
+
+function VerdictCell({ row, policyName }: { row: Row; policyName: string }) {
   const v = row.verdict!;
   const pass = verdictPasses(row);
   const vc = row.valueCheck;
+  // The winning rule came from somewhere other than the policy being
+  // edited, and the draft on its own would have allowed it: that is the
+  // cross-policy narrowing, and `granting_policies` names the cause.
+  const others = (v.granting_policies ?? []).filter((p) => p !== policyName);
+  const narrowed = v.draft_only_allowed && !v.allowed && others.length > 0;
   return (
     <div className="flex flex-col gap-0.5 text-xs">
       <div className="flex items-center gap-1.5">
         <Badge variant={pass ? "success" : "error"} label={pass ? "pass" : "fail"} />
         <span className={v.allowed ? "text-green-400" : "text-red-400"}>{v.allowed ? "allowed" : "denied"}</span>
+        {narrowed ? <Badge variant="warning" label="narrowed" /> : null}
         {row.env?.trim() ? (
           <span className="text-[var(--color-text-muted)]">env={row.env.trim()}</span>
         ) : null}
       </div>
-      <span className="truncate text-[var(--color-text-muted)]" title={v.matched_path ?? "no rule matched"}>
-        {v.matched_path ? `${v.match_kind}: ${v.matched_path}` : "no rule matched"}
+      <span className="truncate text-[var(--color-text-muted)]" title={matchSummary(v)}>
+        {matchSummary(v)}
       </span>
+      {narrowed ? (
+        <span className="text-yellow-400">
+          {others.join(", ")} wins here — restate <code>{v.matched_path}</code> in this policy to keep the grant
+        </span>
+      ) : null}
+      {v.missing_policies?.length ? (
+        <span className="text-yellow-400">no such policy: {v.missing_policies.join(", ")}</span>
+      ) : null}
       {vc ? (
         <span className={vc.error ? "text-yellow-400" : vc.ok ? "text-green-400" : "text-red-400"}>
           {vc.error

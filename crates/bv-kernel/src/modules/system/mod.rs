@@ -378,9 +378,13 @@ impl SystemBackend {
                             field_type: FieldType::Str,
                             description: r#"The draft policy to evaluate, in HCL (or base64-encoded HCL)."#
                         },
+                        "name": {
+                            field_type: FieldType::Str,
+                            description: r#"The name the draft would be saved under. Used to attribute the draft's own rules in `granting_policies`, and to skip an attached policy that *is* the draft."#
+                        },
                         "cases": {
                             field_type: FieldType::Array,
-                            description: r#"Array of { path, capability } cases to evaluate against the draft."#
+                            description: r#"Array of { path, capability, env?, policies? } cases to evaluate against the draft. `policies` names the policies a real token carries alongside it: absent means ["default"], an empty array means the draft alone."#
                         }
                     },
                     operations: [
@@ -5854,6 +5858,258 @@ mod mod_system_tests {
         assert!(keys.iter().any(|k| k == "administrator"), "built-ins intact: {keys:?}");
     }
 
+    /// Multi-policy effectivity: the dry-run must report what a *token*
+    /// gets, not what the draft says in isolation.
+    ///
+    /// ACL precedence picks one winning rule and unions capabilities only
+    /// between identical path strings, and `default` rides on every token —
+    /// so an admin draft validated alone looks correct while being narrowed
+    /// in production. That is the defect class fixed by the `default`
+    /// restatement in `policy_store.rs`; this asserts the validator can now
+    /// see it. See features/policy-builder-validator.md.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_policy_acl_dry_run_multi_policy() {
+        let mut server = TestHttpServer::new("test_policy_acl_dry_run_multi", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        // An "administrator"-shaped draft: everything, everywhere. Exactly
+        // the policy an operator would validate and believe.
+        let draft = r#"path "*" { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }"#;
+
+        let run = |server: &mut TestHttpServer, body: serde_json::Value| {
+            let (status, resp) = server
+                .request("POST", "v2/sys/policies/acl/test", body.as_object().cloned(), Some(&root), None)
+                .unwrap();
+            (status, resp)
+        };
+
+        // --- Default: `default` is attached, because every token has it --
+        let (status, resp) = run(
+            &mut server,
+            serde_json::json!({
+                "policy": draft,
+                "name": "my-admin",
+                "cases": [
+                    { "path": "rustion/targets/abc", "capability": "delete" },
+                    { "path": "sys/capabilities-self", "capability": "read" },
+                    { "path": "secret/data/anything", "capability": "delete" }
+                ]
+            }),
+        );
+        assert_eq!(status, 200, "{resp:?}");
+        assert_eq!(resp["parse_ok"], Value::Bool(true), "{resp:?}");
+        let r = &resp["results"];
+
+        // The exact regression: `default`'s read-only `rustion/targets/+`
+        // out-specifies `path "*"`, so delete is withheld — and the row
+        // names `default` as the author of the winning rule while still
+        // reporting that the draft alone would have allowed it.
+        assert_eq!(r[0]["allowed"], Value::Bool(false), "{:?}", r[0]);
+        assert_eq!(r[0]["draft_only_allowed"], Value::Bool(true), "{:?}", r[0]);
+        assert_eq!(r[0]["match_kind"], "segment_wildcard");
+        assert_eq!(r[0]["matched_path"], "rustion/targets/+");
+        assert_eq!(r[0]["granting_policies"], serde_json::json!(["default"]), "{:?}", r[0]);
+        assert_eq!(r[0]["evaluated_policies"], serde_json::json!(["my-admin", "default"]));
+        assert_eq!(r[0]["missing_policies"], serde_json::json!([]));
+
+        // Same narrowing through an exact rule.
+        assert_eq!(r[1]["allowed"], Value::Bool(false), "{:?}", r[1]);
+        assert_eq!(r[1]["draft_only_allowed"], Value::Bool(true));
+        assert_eq!(r[1]["match_kind"], "exact");
+        assert_eq!(r[1]["granting_policies"], serde_json::json!(["default"]));
+
+        // A path `default` only reaches through a scope-gated rule is not
+        // narrowed: gated rules are stored unmerged and layered additively,
+        // so they never out-specify anything.
+        assert_eq!(r[2]["allowed"], Value::Bool(true), "{:?}", r[2]);
+        assert_eq!(r[2]["granting_policies"], serde_json::json!(["my-admin"]));
+
+        // --- Explicit empty array: the draft alone (old behaviour) ------
+        let (_status, resp) = run(
+            &mut server,
+            serde_json::json!({
+                "policy": draft,
+                "name": "my-admin",
+                "cases": [ { "path": "rustion/targets/abc", "capability": "delete", "policies": [] } ]
+            }),
+        );
+        let r = &resp["results"][0];
+        assert_eq!(r["allowed"], Value::Bool(true), "draft alone grants delete: {r:?}");
+        assert_eq!(r["granting_policies"], serde_json::json!(["my-admin"]));
+        assert_eq!(r["evaluated_policies"], serde_json::json!(["my-admin"]));
+
+        // --- The built-in `administrator` restates `default`'s rules, so
+        //     it is *not* narrowed, and both authors are named. ----------
+        let (status, admin) = server.read("v1/sys/policies/acl/administrator", Some(&root)).unwrap();
+        assert_eq!(status, 200, "{admin:?}");
+        let admin_hcl = admin["policy"].as_str().expect("administrator policy HCL").to_string();
+        let (_status, resp) = run(
+            &mut server,
+            serde_json::json!({
+                "policy": admin_hcl,
+                "name": "administrator",
+                "cases": [ { "path": "rustion/targets/abc", "capability": "delete" } ]
+            }),
+        );
+        let r = &resp["results"][0];
+        assert_eq!(r["allowed"], Value::Bool(true), "restated path unions: {r:?}");
+        let granting: Vec<String> = r["granting_policies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        assert!(granting.contains(&"administrator".to_string()), "{granting:?}");
+        assert!(granting.contains(&"default".to_string()), "{granting:?}");
+
+        // --- An attached policy that does not exist is reported, not
+        //     silently dropped: the ACL is narrower than the token. -----
+        let (_status, resp) = run(
+            &mut server,
+            serde_json::json!({
+                "policy": draft,
+                "name": "my-admin",
+                "cases": [ { "path": "a/b", "capability": "read", "policies": ["default", "no-such-policy"] } ]
+            }),
+        );
+        let r = &resp["results"][0];
+        assert_eq!(r["missing_policies"], serde_json::json!(["no-such-policy"]), "{r:?}");
+        assert_eq!(r["evaluated_policies"], serde_json::json!(["my-admin", "default"]));
+
+        // --- Editing `default` itself: the draft *is* the attached policy,
+        //     so the stored copy must not be merged back in underneath. --
+        let (_status, resp) = run(
+            &mut server,
+            serde_json::json!({
+                "policy": r#"path "sys/capabilities-self" { capabilities = ["update", "read"] }"#,
+                "name": "default",
+                "cases": [ { "path": "sys/capabilities-self", "capability": "read" } ]
+            }),
+        );
+        let r = &resp["results"][0];
+        assert_eq!(r["evaluated_policies"], serde_json::json!(["default"]), "{r:?}");
+        assert_eq!(r["allowed"], Value::Bool(true), "the draft's own widening applies: {r:?}");
+
+        // --- Naming `root` is refused rather than filtered ---------------
+        let (status, _resp) = run(
+            &mut server,
+            serde_json::json!({
+                "policy": draft,
+                "name": "my-admin",
+                "cases": [ { "path": "a/b", "capability": "read", "policies": ["root"] } ]
+            }),
+        );
+        assert_eq!(status, 400, "root must be refused as an attached policy");
+
+        // --- Still stateless: nothing above was persisted ---------------
+        let (status, list) = server.read("v1/sys/policies/acl", Some(&root)).unwrap();
+        assert_eq!(status, 200, "{list:?}");
+        let keys: Vec<String> = list["keys"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        assert!(!keys.iter().any(|k| k == "my-admin"), "dry-run must not persist: {keys:?}");
+    }
+
+    /// Attaching a policy reads it, so the dry-run must not hand its rules to
+    /// a caller who could not fetch it directly. A token holding `update` on
+    /// the dry-run route but no `read` on `sys/policies/acl/*` gets 403 for a
+    /// named policy, and can still evaluate its draft alone.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_policy_acl_dry_run_requires_read_on_attached_policy() {
+        let mut server = TestHttpServer::new("test_policy_acl_dry_run_authz", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+        // The harness hardcodes `/v1` in `url_prefix`; strip it so both
+        // `v1/...` and `v2/...` paths below resolve.
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        // The dry-run route and nothing else: no `read` anywhere under
+        // `sys/policies/acl/`, so no policy may be attached.
+        server
+            .write(
+                "v1/sys/policies/acl/dry-run-only",
+                serde_json::json!({
+                    "policy": r#"path "sys/policies/acl/test" { capabilities = ["update"] }"#
+                })
+                .as_object()
+                .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        let (status, resp) = server
+            .write("v1/sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
+            .unwrap();
+        assert!(status < 300, "mounting userpass: {status} {resp:?}");
+        let (status, resp) = server
+            .write(
+                "v1/auth/pass/users/dryrun",
+                serde_json::json!({
+                    "password": "hunter22XX!",
+                    "token_policies": "dry-run-only",
+                    "ttl": 0,
+                })
+                .as_object()
+                .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert!(status < 300, "creating the user: {status} {resp:?}");
+        let (status, resp) = server
+            .write(
+                "v1/auth/pass/login/dryrun",
+                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                None,
+            )
+            .unwrap();
+        let token = resp["auth"]["client_token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("login: {status} {resp:?}"))
+            .to_string();
+
+        let draft = r#"path "a/b" { capabilities = ["read"] }"#;
+
+        // The implicit `default` attachment is refused, loudly.
+        let (status, resp) = server
+            .request(
+                "POST",
+                "v2/sys/policies/acl/test",
+                serde_json::json!({
+                    "policy": draft,
+                    "name": "scratch",
+                    "cases": [ { "path": "a/b", "capability": "read" } ]
+                })
+                .as_object()
+                .cloned(),
+                Some(&token),
+                None,
+            )
+            .unwrap();
+        assert_eq!(status, 403, "attaching an unreadable policy must fail closed: {resp:?}");
+
+        // Draft-alone still works — the caller's own text, nothing read.
+        let (status, resp) = server
+            .request(
+                "POST",
+                "v2/sys/policies/acl/test",
+                serde_json::json!({
+                    "policy": draft,
+                    "name": "scratch",
+                    "cases": [ { "path": "a/b", "capability": "read", "policies": [] } ]
+                })
+                .as_object()
+                .cloned(),
+                Some(&token),
+                None,
+            )
+            .unwrap();
+        assert_eq!(status, 200, "{resp:?}");
+        assert_eq!(resp["results"][0]["allowed"], Value::Bool(true), "{resp:?}");
+        assert_eq!(resp["results"][0]["evaluated_policies"], serde_json::json!(["scratch"]));
+    }
+
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_policy_tests_persistence_endpoint() {
         let mut server = TestHttpServer::new("test_policy_tests_persistence", true).await;
@@ -5894,6 +6150,35 @@ mod mod_system_tests {
         assert_eq!(cases[0]["expect"], "allow");
         assert_eq!(cases[0]["note"], "sre reads");
         assert_eq!(cases[1]["expect"], "deny");
+        // No `policies` field was sent, so none comes back — "unspecified"
+        // must stay distinguishable from an explicit empty list, since the
+        // two mean opposite things at run time (see `PolicyTestCase`).
+        assert!(cases[0].get("policies").is_none(), "{:?}", cases[0]);
+
+        // The tri-state round-trips: absent, explicitly empty, explicit set.
+        let (status, _) = server
+            .request(
+                "POST",
+                "v2/sys/policy-tests/my-policy",
+                serde_json::json!({
+                    "cases": [
+                        { "path": "a", "capability": "read", "expect": "allow" },
+                        { "path": "b", "capability": "read", "expect": "allow", "policies": [] },
+                        { "path": "c", "capability": "read", "expect": "allow", "policies": ["default", "totp-admin"] }
+                    ]
+                })
+                .as_object()
+                .cloned(),
+                Some(&root),
+                None,
+            )
+            .unwrap();
+        assert_eq!(status, 204);
+        let (_status, resp) = server.read("v2/sys/policy-tests/my-policy", Some(&root)).unwrap();
+        let cases = resp["cases"].as_array().unwrap();
+        assert!(cases[0].get("policies").is_none(), "absent stays absent: {:?}", cases[0]);
+        assert_eq!(cases[1]["policies"], serde_json::json!([]), "{:?}", cases[1]);
+        assert_eq!(cases[2]["policies"], serde_json::json!(["default", "totp-admin"]));
 
         // An empty array clears them.
         let (status, _) = server

@@ -265,12 +265,37 @@ Request body:
 ~~~json
 {
   "policy": "path \"secret/data/*\" { capabilities = [\"read\", \"list\"] }",
+  "name": "team-reader",
   "cases": [
     { "path": "secret/data/x", "capability": "read" },
-    { "path": "secret/data/x", "capability": "delete" }
+    { "path": "secret/data/x", "capability": "delete", "policies": ["default", "totp-admin"] }
   ]
 }
 ~~~
+
+`name` is the name the draft would be saved under. It is optional but
+recommended: it is what `granting_policies` reports for the draft's own
+rules, and it is how an attached policy that *is* the draft is recognized
+and skipped (so editing `default` does not merge the stored copy back in
+underneath).
+
+Per case, `policies` names the policies a real token would carry alongside
+the draft; all of them are built into one ACL and evaluated together, so
+the verdict matches what a token actually gets. It is tri-state:
+
+| `policies` | meaning |
+|---|---|
+| absent / `null` | `["default"]` — what a normal token carries |
+| `[]` | the draft alone |
+| `["a", "b"]` | the draft plus exactly those |
+
+Naming `root` is rejected with `400`: root is a synthetic superuser policy
+that allows every path, so the dry-run would be meaningless. Naming a policy
+the caller cannot `read` on `sys/policies/acl/<name>` is rejected with `403`
+— attaching a policy reads it, and the endpoint must not become a read
+oracle for one the caller could not fetch directly. It fails rather than
+evaluating a narrower ACL, since an optimistically-wide verdict is the
+failure this field exists to prevent.
 
 Response (`parse_ok = false` with `errors` when the draft fails to parse):
 
@@ -285,15 +310,30 @@ Response (`parse_ok = false` with `errors` when the draft fails to parse):
       "allowed": true,
       "matched_path": "secret/data/*",
       "match_kind": "prefix",
-      "denied_by_deny": false
+      "denied_by_deny": false,
+      "granting_policies": ["team-reader"],
+      "evaluated_policies": ["team-reader", "default"],
+      "missing_policies": [],
+      "draft_only_allowed": true
     }
   ]
 }
 ~~~
 
 `match_kind` is one of `exact` | `prefix` | `segment_wildcard` | `none`.
-`matched_path` / `match_kind` are advisory; `allowed` / `denied_by_deny`
-are authoritative (produced by the real matcher).
+`matched_path`, `match_kind` and `granting_policies` are advisory;
+`allowed` / `denied_by_deny` are authoritative (produced by the real
+matcher).
+
+`granting_policies` names the policies that contributed the rule at
+`matched_path`. It is a list because capabilities are unioned **only**
+between rules whose path string is identical; across different path strings
+precedence picks exactly one winning rule. That is why a narrow rule in an
+attached policy *replaces* a broad rule in the draft rather than adding to
+it — and `draft_only_allowed` (the verdict the draft alone would give)
+disagreeing with `allowed` is precisely that narrowing. `missing_policies`
+lists named policies that do not exist in the namespace, so a caller is
+never misled by an ACL narrower than the token it models.
 
 **Read / write saved test cases**
 
@@ -311,10 +351,16 @@ Write body (an empty `cases` array clears them):
 {
   "cases": [
     { "path": "secret/data/x", "capability": "read", "expect": "allow", "note": "sre reads" },
-    { "path": "secret/data/x", "capability": "delete", "expect": "deny" }
+    { "path": "secret/data/x", "capability": "delete", "expect": "deny", "policies": ["default"] }
   ]
 }
 ~~~
+
+A case may carry the same optional `env` and `policies` fields the dry-run
+accepts; the save-time regression gate replays them, so a saved case gates
+on the same multi-policy verdict it was authored against. `policies` keeps
+its tri-state on the round trip — a case saved without it reads back
+without it, which is not the same as reading back `[]`.
 
 ### Server Info
 

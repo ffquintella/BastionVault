@@ -21,8 +21,9 @@ The two are complementary: the builder reduces the chance of writing a bad polic
 - **Complete (all 5 phases).** Implemented end-to-end with automated coverage. Two deliberate deviations from this spec's original draft, both noted inline below:
   1. **`v2/` not `v1/`.** Per `agent.md` (which `CLAUDE.md` says overrides everything), all new HTTP routes are introduced under `v2/`. The dry-run is `POST /v2/sys/policies/acl/test`; `v1` remains frozen for Vault compatibility.
   2. **Test-case persistence path.** Saved cases live at `GET`/`POST /v2/sys/policy-tests/{name}` (a sibling top-level route, like `capabilities-self`) rather than `/v1/sys/policies/acl/<name>/tests`. This avoids the `policies/acl/{name}` catch-all route shadowing the sub-resource and works in both embedded and remote GUI modes through a dedicated HTTP shim. `test` is consequently a reserved policy name (the dry-run owns `policies/acl/test`).
-- Backend: `ACL::explain_capability` ([`acl.rs`](../src/modules/policy/acl.rs)) reuses the production matcher for the verdict; `PolicyModule::handle_policy_test` / `handle_policy_tests_*` ([`mod.rs`](../src/modules/policy/mod.rs)); `PolicyStore::{get,set}_policy_tests_ns` ([`policy_store.rs`](../src/modules/policy/policy_store.rs)). Rust tests: `test_explain_capability_*`, `test_policy_acl_dry_run_endpoint`, `test_policy_tests_persistence_endpoint`.
-- Client: [`gui/src/lib/policyHcl.ts`](../gui/src/lib/policyHcl.ts) (parser/serializer/lint/preview, 22 `vitest` cases in [`policyHcl.test.ts`](../gui/src/test/policyHcl.test.ts)); [`PolicyBlockEditor.tsx`](../gui/src/components/PolicyBlockEditor.tsx) and [`PolicyValidatorPanel.tsx`](../gui/src/components/PolicyValidatorPanel.tsx); Tauri commands `policy_test` / `read_policy_tests` / `write_policy_tests`.
+- Backend: `ACL::explain_capability` ([`acl.rs`](../crates/bv-kernel/src/modules/policy/acl.rs)) reuses the production matcher for the verdict; `PolicyModule::handle_policy_test` / `handle_policy_tests_*` ([`mod.rs`](../crates/bv-kernel/src/modules/policy/mod.rs)); `PolicyStore::{get,set}_policy_tests_ns` ([`policy_store.rs`](../crates/bv-kernel/src/modules/policy/policy_store.rs)). Rust tests: `test_explain_capability_*`, `test_policy_acl_dry_run_endpoint`, `test_policy_acl_dry_run_multi_policy`, `test_policy_tests_persistence_endpoint`.
+- **Multi-policy effectivity is implemented** (see the section below): a case is evaluated against the draft plus the policies a token carries alongside it, defaulting to `default`, and the response names the policy that contributed the winning rule.
+- Client: [`gui/src/lib/policyHcl.ts`](../gui/src/lib/policyHcl.ts) (parser/serializer/lint/multi-policy preview, 31 `vitest` cases in [`policyHcl.test.ts`](../gui/src/test/policyHcl.test.ts)); [`PolicyBlockEditor.tsx`](../gui/src/components/PolicyBlockEditor.tsx) and [`PolicyValidatorPanel.tsx`](../gui/src/components/PolicyValidatorPanel.tsx); Tauri commands `policy_test` / `read_policy_tests` / `write_policy_tests`.
 - The Policies page now has four tabs: **Visual builder**, **HCL source**, **Validate & test**, **History**. Interactive (live-app) verification requires `make run-dev-gui` — the browser preview has no Tauri `invoke` bridge.
 
 ### Original draft note
@@ -58,6 +59,35 @@ The simulator and the lint both encode the ACL's evaluation order:
 
 The illegal `+*` combination (a segment wildcard immediately followed by a prefix wildcard) is rejected by the parser and must be caught by the client lint before save.
 
+### One winner, not a union: how multiple policies combine
+
+This is the single most misread part of the model, so the simulator states it explicitly and the lint warns on it.
+
+Capabilities are unioned **only between rules whose path string is identical**. That merge happens once, when the ACL is built (`ACL::new` → `ACL::get_permissions` → `Permissions::merge`). Across *different* path strings there is no union at all: the precedence list above selects exactly one winning rule (`ACL::allow_operation` consults `exact_rules` first; `ACL::get_none_exact_paths_permissions` sorts the remaining candidates and takes the last one), and that rule's capabilities are the answer.
+
+The consequence operators trip over: **a narrow rule in one policy replaces a broad rule in another.** A token carrying both
+
+```hcl
+# policy "administrator"
+path "*"                { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+
+# policy "default"
+path "sys/capabilities-self" { capabilities = ["update"] }
+```
+
+holds `["update"]` on `sys/capabilities-self` — not the union. `sys/capabilities-self` reports this faithfully, and so does the dry-run once the case names the attached policy (see [Multi-policy effectivity](#multi-policy-effectivity)); either is a fast way to diagnose it.
+
+This is HashiCorp Vault's behaviour and BastionVault matches it deliberately. It is not a bug to be smoothed over: operators rely on a narrow rule out-specifying a broad one in order to *restrict*, so making the matcher union across policies would silently widen, on upgrade, every deployment built on that. The three remedies, in order of preference:
+
+1. **Restate the path in the broad policy.** Identical path strings merge, so `path "sys/capabilities-self" { capabilities = [...all...] }` in the admin policy restores the full set. This is what `ADMINISTRATOR_POLICY` does for all 33 restatable `default` rules; `mod default_policy_does_not_narrow_admins_tests` in `policy_store.rs` sweeps `default` and fails if one is missing, so a rule added to `default` cannot silently re-narrow every administrator.
+2. **Drop `default` from the token** — `token_no_default_policy` on the auth mount / role (`bv-utils` `token_util.rs`).
+3. **Widen the rule in `default`** — almost always wrong, because `default` is attached to every token, so widening it widens every tenant.
+
+Two rule kinds are exempt from single-winner selection by construction, and need no restatement: **group-gated** (`groups = [...]`) and **scope-filtered** (`scopes = [...]`) rules are stored unmerged and layered *additively* onto the base verdict at authorize time, because each carries a per-request gate that merging would destroy. This is why `default`'s `resources/*`, `secret/*` and `resource-group/groups/+` rules do not narrow an administrator while its ungated rules do. **Templated** paths (`{{identity.entity.id}}`) are also unrestatable — a non-templated policy cannot name a per-caller path.
+
+Narrowing is only *observable* where the withheld capability has a handler behind it. `default` granting `update` on a Write-only route, or `list` on a List-only collection, costs an administrator nothing even though `sys/capabilities-self` shows the short list (`Operation::Write` maps to `Capability::Update`; see `Permissions::check`). The one case where it cost real function was `rustion/targets/+`: `read` alone, against a route serving Read, Write and Delete.
+
+
 ### Hybrid evaluation engine
 
 The effectivity verdict uses a **hybrid** approach (decided during design review):
@@ -67,9 +97,19 @@ The effectivity verdict uses a **hybrid** approach (decided during design review
 
 ### New backend surface
 
+Shipped shape (the route is `v2/`, not the `v1/` this draft first named —
+see Current State):
+
 ```
-POST /v1/sys/policies/acl/test
-  body: { "policy": "<draft HCL>", "cases": [ { "path": "...", "capability": "read" }, ... ] }
+POST /v2/sys/policies/acl/test
+  body: {
+    "policy": "<draft HCL>",
+    "name":   "team-reader",                   # name the draft would be saved under
+    "cases":  [ { "path": "...", "capability": "read",
+                  "env": "staging",            # optional; exercises param constraints
+                  "policies": ["default"] },   # optional; absent = ["default"], [] = draft alone
+                ... ]
+  }
   resp: {
     "parse_ok": true,
     "errors": [],                              # parse/lint errors with message (+ line/col when available)
@@ -77,16 +117,21 @@ POST /v1/sys/policies/acl/test
       { "path": "...", "capability": "read",
         "allowed": true,
         "matched_path": "secret/data/team/+/*", # the rule that decided it
-        "match_kind": "segment_wildcard",        # exact | prefix | segment_wildcard | none
-        "denied_by_deny": false }
+        "match_kind": "segment_wildcard",       # exact | prefix | segment_wildcard | none
+        "denied_by_deny": false,
+        "granting_policies": ["default"],       # who wrote the winning rule
+        "evaluated_policies": ["team-reader", "default"],
+        "missing_policies": [],                 # named but nonexistent
+        "draft_only_allowed": true }            # verdict of the draft alone
     ]
   }
 ```
 
-- The endpoint is **stateless** — it never writes the policy. It requires the same capability as `write_policy` on `sys/policies/acl/*` so it is not an information-disclosure primitive beyond what the caller could already author.
-- Reuses the existing parser (`PolicyConfig::parse`) and the `ACL` builder + matcher; no new evaluation logic.
+- The endpoint is **stateless** — it never writes the policy. It requires the same capability as `write_policy` on `sys/policies/acl/*` so it is not an information-disclosure primitive beyond what the caller could already author. Attached policies are read through the same store the caller could already read them from.
+- Reuses the existing parser (`PolicyConfig::parse`) and the `ACL` builder + matcher; no new evaluation logic. One `ACL` is built per distinct attached-policy set and memoized across the cases that share it.
+- See [Multi-policy effectivity](#multi-policy-effectivity) for what `policies` / `granting_policies` / `draft_only_allowed` are for.
 
-A companion Tauri command `policy_test(policy: String, cases: Vec<PolicyTestCase>)` wraps it in [`gui/src-tauri/src/commands/policies.rs`](../gui/src-tauri/src/commands/policies.rs), with a TS wrapper in [`gui/src/lib/api.ts`](../gui/src/lib/api.ts).
+A companion Tauri command `policy_test(policy, cases, name)` wraps it in [`gui/src-tauri/src/commands/policies.rs`](../gui/src-tauri/src/commands/policies.rs), with a TS wrapper in [`gui/src/lib/api.ts`](../gui/src/lib/api.ts).
 
 ### Test-case persistence
 
@@ -150,6 +195,90 @@ optional fields (persisted on `PolicyTestCase`, omitted when empty):
   gate (which must not couple a policy save to mutable secret contents). Value
   assertions only apply to `read` on a KV v2 data path; other paths report
   "not a kv-v2 data path".
+
+## Multi-policy effectivity
+
+A test case is evaluated against the draft **plus the policies a real token
+carries alongside it**, built into one `ACL` and run through the production
+matcher. Without this the validator could not see the defect class described
+under "One winner, not a union": an operator validating an admin draft saw
+the full capability set and never learned that `default` — attached to every
+token — out-specifies it on the 35 paths it names. That is exactly the
+`rustion/targets/+` narrowing fixed in `policy_store.rs`, and diagnosing it
+used to mean minting a token and calling `sys/capabilities-self`.
+
+Each case carries an optional `policies` array, and it is **tri-state**
+because the three states mean different things:
+
+| `policies` | meaning |
+|---|---|
+| absent / `null` | `["default"]` — what a normal token carries, so an unqualified case reports production reality |
+| `[]` | the draft alone — the original single-policy dry-run, kept as an explicit opt-out |
+| `["a", "b"]` | the draft plus exactly those |
+
+Absent defaults to `default` rather than to the draft alone on purpose: the
+draft-alone verdict is the one that misled operators. Nothing is lost by it,
+because every row also reports `draft_only_allowed` — the verdict the draft
+would give on its own. When that disagrees with `allowed`, the difference
+*is* the cross-policy narrowing, and `granting_policies` names the policy
+whose rule won. The GUI tags such a row **narrowed** and points at the
+remedy (restate that exact path, since identical path strings do merge).
+
+Details that matter:
+
+- **`name`.** The request carries the name the draft would be saved under
+  (a policy's name comes from the URL, not the HCL). It attributes the
+  draft's own rules in `granting_policies`, and it is how an attached policy
+  that *is* the draft is recognized and skipped — an operator editing
+  `default` must not have the stored `default` merged back in underneath.
+  `evaluated_policies` then reports the single entry, so the substitution is
+  visible rather than implied.
+- **`root` is refused, not filtered.** An ACL containing `root` allows every
+  path and `ACL::new` rejects it alongside any sibling, so naming it returns
+  `400` instead of quietly evaluating a different set.
+- **The caller must be able to read what it attaches.** Attaching a policy
+  reads it, so the handler checks the caller's own `read` on
+  `sys/policies/acl/<name>` (against an ACL built from the token's own
+  policies, exactly as the request pipeline does) and returns `403`
+  otherwise. Without it the dry-run would be a read oracle for a caller
+  holding `update` on `sys/policies/acl/test` but not `read` on the policy it
+  names: attach it to an empty draft and the per-case `matched_path` /
+  `allowed` pairs recover its rules. That ACL shape is unusual — a caller who
+  can write any policy can rewrite `default` and escalate anyway — but the
+  endpoint's contract is that it discloses nothing the caller could not
+  already reach. It fails closed rather than evaluating the readable subset:
+  an optimistically-wide verdict is the exact failure this feature exists to
+  prevent, which is also why a *missing* policy is only reported (it is in no
+  token's ACL either) while an unreadable one is refused.
+- **A missing attached policy is reported** in `missing_policies`. Dropping
+  it silently would leave the ACL narrower than the token it models.
+- **Gated rules still do not narrow.** `groups`/`scopes`-filtered rules are
+  stored unmerged and layered additively at authorize time, so they never
+  out-specify an ungated rule. Both the backend (by construction) and the
+  client preview (`flattenRules` excludes them) preserve this — which is why
+  `default`'s scope-gated `secret/*` does not appear to narrow an admin.
+- **`granting_policies` unions across every capability bit**, not just the
+  one under test. The case that needs explaining is the one where the
+  capability was *withheld*, and there the tested bit has no entry at all.
+- **The save-time regression gate replays each saved case's `policies`**, so
+  gating stays consistent with what the operator tested. A case saved before
+  this existed has no `policies` field and therefore starts reporting the
+  cross-policy verdict — deliberately, since that is the verdict its token
+  gets.
+
+Backend: `ACL::locate_match` resolves the winning rule's `Permissions` and
+`granting_policy_names` reads its `granting_policies_map`, surfaced as
+`CapabilityExplain::granting_policies`; `PolicyModule::handle_policy_test`
+memoizes one `ACL` per distinct attached-policy set. Client:
+`previewCapability(model, path, cap, attached)` mirrors the merge offline;
+`PolicyValidatorPanel` exposes a per-row **With policies** field
+(blank = `default`; the panel deliberately offers no draft-alone control,
+because `draft_only_allowed` already reports that verdict on every row).
+Tests:
+`test_explain_capability_names_granting_policies`,
+`test_policy_acl_dry_run_multi_policy`, the tri-state round trip in
+`test_policy_tests_persistence_endpoint`, and
+`describe("policyHcl — multi-policy preview")`.
 
 ## Out of scope (deferred follow-ups)
 

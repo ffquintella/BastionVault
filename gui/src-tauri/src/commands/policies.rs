@@ -162,6 +162,12 @@ pub struct PolicyTestCaseInput {
     /// dry-run exercises the rule's env restriction.
     #[serde(default)]
     pub env: Option<String>,
+    /// The policies a real token would carry alongside the draft, evaluated
+    /// together as one ACL. `None` (the field omitted) means `["default"]`,
+    /// which every token carries; `Some([])` evaluates the draft alone.
+    /// Forwarded verbatim so the server sees the same tri-state.
+    #[serde(default)]
+    pub policies: Option<Vec<String>>,
 }
 
 /// Per-case verdict from the stateless dry-run endpoint.
@@ -179,6 +185,21 @@ pub struct PolicyTestResultRow {
     pub match_kind: String,
     #[serde(default)]
     pub denied_by_deny: bool,
+    /// Policies that contributed the rule named by `matched_path`. When this
+    /// does not include the policy being edited, an attached policy
+    /// out-specified it — that is the cross-policy narrowing.
+    #[serde(default)]
+    pub granting_policies: Vec<String>,
+    /// Every policy the ACL was built from, draft first.
+    #[serde(default)]
+    pub evaluated_policies: Vec<String>,
+    /// Named attached policies that do not exist in this namespace.
+    #[serde(default)]
+    pub missing_policies: Vec<String>,
+    /// The verdict the draft alone would give. Differing from `allowed` is
+    /// the signal that an attached policy changed the answer.
+    #[serde(default)]
+    pub draft_only_allowed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -202,9 +223,17 @@ pub async fn policy_test(
     state: State<'_, AppState>,
     policy: String,
     cases: Vec<PolicyTestCaseInput>,
+    name: Option<String>,
 ) -> CmdResult<PolicyTestResult> {
     let mut body = Map::new();
     body.insert("policy".to_string(), Value::String(policy));
+    // The name the draft would be saved under. The server uses it to
+    // attribute the draft's own rules and to recognize an attached policy
+    // that *is* the draft (editing `default` must not merge the stored copy
+    // back in).
+    if let Some(name) = name.filter(|s| !s.is_empty()) {
+        body.insert("name".to_string(), Value::String(name));
+    }
     let cases_json: Vec<Value> = cases
         .into_iter()
         .map(|c| {
@@ -213,6 +242,15 @@ pub async fn policy_test(
             m.insert("capability".to_string(), Value::String(c.capability));
             if let Some(env) = c.env.filter(|s| !s.is_empty()) {
                 m.insert("env".to_string(), Value::String(env));
+            }
+            // Absent stays absent: the server reads that as "a normal
+            // token", i.e. `["default"]`. Only an explicit list (including
+            // an explicit empty one) is sent.
+            if let Some(policies) = c.policies {
+                m.insert(
+                    "policies".to_string(),
+                    Value::Array(policies.into_iter().map(Value::String).collect()),
+                );
             }
             Value::Object(m)
         })
@@ -251,6 +289,11 @@ pub struct PolicyTestCase {
     /// Value assertion: expected value of `expect_key`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub expect_value: String,
+    /// The policies a real token carries alongside this one. Absent means
+    /// `["default"]`; an explicit empty list means the draft alone. The
+    /// absent/empty distinction is load-bearing, hence `Option`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policies: Option<Vec<String>>,
 }
 
 /// Read the saved effectivity test cases attached to a policy (empty when

@@ -525,9 +525,15 @@ export const listPolicyHistory = (name: string) =>
  * cases against the authoritative backend ACL matcher, without
  * persisting. Returns parse errors (when the draft is invalid) and a
  * per-case allow/deny verdict with the matched rule.
+ *
+ * Each case is evaluated against the draft *plus* the policies it names in
+ * `policies` (defaulting to `["default"]`, which every token carries), so
+ * the verdict matches what a token actually gets. `name` is the name the
+ * draft would be saved under — the server needs it to attribute the draft's
+ * own rules and to skip an attached policy that *is* the draft.
  */
-export const policyTest = (policy: string, cases: PolicyTestCaseInput[]) =>
-  invoke<PolicyTestResult>("policy_test", { policy, cases });
+export const policyTest = (policy: string, cases: PolicyTestCaseInput[], name?: string) =>
+  invoke<PolicyTestResult>("policy_test", { policy, cases, name });
 /** Read the saved effectivity test cases attached to a policy. */
 export const readPolicyTests = (name: string) =>
   invoke<PolicyTestCase[]>("read_policy_tests", { name });

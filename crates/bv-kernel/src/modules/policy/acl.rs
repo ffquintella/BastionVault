@@ -23,6 +23,7 @@ use std::sync::Arc;
 use better_default::Default;
 use dashmap::DashMap;
 use radix_trie::{Trie, TrieCommon};
+use strum::IntoEnumIterator;
 
 use super::{
     policy::{to_granting_capabilities, Capability},
@@ -667,10 +668,11 @@ impl ACL {
     ///
     /// The verdict (`allowed`, `denied_by_deny`, `is_root`) is produced by
     /// the production matcher via `allow_operation(check_only)`, so it can
-    /// never silently drift from live authorization. `matched_path` /
-    /// `match_kind` are *advisory* — a best-effort identification of the
-    /// rule that decided the verdict, surfaced so operators can reason
-    /// about precedence; see [`ACL::locate_match`].
+    /// never silently drift from live authorization. `matched_path`,
+    /// `match_kind` and `granting_policies` are *advisory* — a best-effort
+    /// identification of the rule that decided the verdict and of the
+    /// policies that wrote it, surfaced so operators can reason about
+    /// precedence; see [`ACL::locate_match`].
     ///
     /// Group- and scope-gated rules cannot fully resolve without a caller
     /// identity and a concrete request target, so a stateless dry-run
@@ -697,6 +699,7 @@ impl ACL {
                 matched_path: Some("*".to_string()),
                 match_kind: MatchKind::Prefix,
                 denied_by_deny: false,
+                granting_policies: vec!["root".to_string()],
             };
         }
 
@@ -704,9 +707,16 @@ impl ACL {
         let denied_by_deny = bitmap & Capability::Deny.to_bits() != 0;
         let allowed = !denied_by_deny && (bitmap & capability.to_bits() != 0);
 
-        let (matched_path, match_kind) = self.locate_match(&path);
+        let loc = self.locate_match(&path);
 
-        CapabilityExplain { allowed, matched_path, match_kind, denied_by_deny, is_root: false }
+        CapabilityExplain {
+            allowed,
+            matched_path: loc.path,
+            match_kind: loc.kind,
+            denied_by_deny,
+            is_root: false,
+            granting_policies: loc.granting_policies,
+        }
     }
 
     /// Identity-carrying counterpart to [`ACL::explain_capability`]: does
@@ -738,6 +748,7 @@ impl ACL {
                 matched_path: Some("*".to_string()),
                 match_kind: MatchKind::Prefix,
                 denied_by_deny: false,
+                granting_policies: vec!["root".to_string()],
             };
         }
 
@@ -745,9 +756,16 @@ impl ACL {
         let denied_by_deny = bitmap & Capability::Deny.to_bits() != 0;
         let allowed = !denied_by_deny && (bitmap & capability.to_bits() != 0);
 
-        let (matched_path, match_kind) = self.locate_match(&path);
+        let loc = self.locate_match(&path);
 
-        CapabilityExplain { allowed, matched_path, match_kind, denied_by_deny, is_root: false }
+        CapabilityExplain {
+            allowed,
+            matched_path: loc.path,
+            match_kind: loc.kind,
+            denied_by_deny,
+            is_root: false,
+            granting_policies: loc.granting_policies,
+        }
     }
 
     /// Parameter-aware stateless dry-run. Like [`ACL::explain_capability`],
@@ -802,54 +820,58 @@ impl ACL {
                 matched_path: Some("*".to_string()),
                 match_kind: MatchKind::Prefix,
                 denied_by_deny: false,
+                granting_policies: vec!["root".to_string()],
             };
         }
 
         let denied_by_deny = result.capabilities_bitmap & Capability::Deny.to_bits() != 0;
-        let (matched_path, match_kind) = self.locate_match(&path);
+        let loc = self.locate_match(&path);
 
         CapabilityExplain {
             allowed: result.allowed && !denied_by_deny,
-            matched_path,
-            match_kind,
+            matched_path: loc.path,
+            match_kind: loc.kind,
             denied_by_deny,
             is_root: false,
+            granting_policies: loc.granting_policies,
         }
     }
 
     /// Best-effort identification of the rule that governs `path`, used
-    /// only for the advisory `matched_path` / `match_kind` fields of the
-    /// dry-run. Mirrors the production precedence — exact beats the winner
-    /// among prefix and segment-wildcard rules — but is purely diagnostic:
-    /// the authoritative verdict is computed separately by the real
-    /// matcher in [`ACL::explain_capability`].
-    fn locate_match(&self, path: &str) -> (Option<String>, MatchKind) {
-        if self.exact_rules.get(path).is_some() {
-            return (Some(path.to_string()), MatchKind::Exact);
+    /// only for the advisory `matched_path` / `match_kind` /
+    /// `granting_policies` fields of the dry-run. Mirrors the production
+    /// precedence — exact beats the winner among prefix and
+    /// segment-wildcard rules — but is purely diagnostic: the
+    /// authoritative verdict is computed separately by the real matcher in
+    /// [`ACL::explain_capability`].
+    fn locate_match(&self, path: &str) -> MatchLocation {
+        if let Some(perm) = self.exact_rules.get(path) {
+            return MatchLocation::found(path.to_string(), MatchKind::Exact, perm);
         }
         // The matcher also probes the trailing-slash-trimmed exact key for
         // LIST; mirror that so a list rule isn't misreported as a prefix.
         let trimmed = path.trim_end_matches('/');
-        if trimmed != path && self.exact_rules.get(trimmed).is_some() {
-            return (Some(trimmed.to_string()), MatchKind::Exact);
+        if trimmed != path {
+            if let Some(perm) = self.exact_rules.get(trimmed) {
+                return MatchLocation::found(trimmed.to_string(), MatchKind::Exact, perm);
+            }
         }
 
         // Longest matching prefix rule (the radix-trie ancestor is the
         // longest prefix). Stored keys have the trailing `*` stripped at
         // parse time, so re-append it for display.
-        let prefix_match: Option<(String, usize)> = self
-            .prefix_rules
-            .get_ancestor(path)
-            .and_then(|item| item.key().cloned())
-            .map(|k| {
-                let len = k.len();
-                (format!("{k}*"), len)
+        let prefix_match: Option<(String, usize, Vec<String>)> =
+            self.prefix_rules.get_ancestor(path).and_then(|item| {
+                let key = item.key()?.clone();
+                let perm = item.value()?;
+                let len = key.len();
+                Some((format!("{key}*"), len, granting_policy_names(perm)))
             });
 
         // Best matching segment-wildcard rule. Rank by the count of
         // literal (non-`+`) characters so the most specific wildcard wins,
         // approximating the WcPathDescr ordering used by the live matcher.
-        let mut seg_best: Option<(String, usize)> = None;
+        let mut seg_best: Option<(String, usize, Vec<String>)> = None;
         for item in self.segment_wildcard_paths.iter() {
             let key = item.key();
             if key.is_empty() {
@@ -859,25 +881,74 @@ impl ACL {
             let rule_path = if is_prefix { &key[..key.len() - 1] } else { key.as_str() };
             if segment_wildcard_matches(rule_path, is_prefix, path) {
                 let literal_len = rule_path.chars().filter(|c| *c != '+').count();
-                if seg_best.as_ref().map(|(_, l)| literal_len > *l).unwrap_or(true) {
-                    seg_best = Some((key.clone(), literal_len));
+                if seg_best.as_ref().map(|(_, l, _)| literal_len > *l).unwrap_or(true) {
+                    seg_best = Some((key.clone(), literal_len, granting_policy_names(item.value())));
                 }
             }
         }
 
         match (prefix_match, seg_best) {
-            (Some((pp, pl)), Some((sp, sl))) => {
+            (Some((pp, pl, pg)), Some((sp, sl, sg))) => {
                 if pl >= sl {
-                    (Some(pp), MatchKind::Prefix)
+                    MatchLocation { path: Some(pp), kind: MatchKind::Prefix, granting_policies: pg }
                 } else {
-                    (Some(sp), MatchKind::SegmentWildcard)
+                    MatchLocation { path: Some(sp), kind: MatchKind::SegmentWildcard, granting_policies: sg }
                 }
             }
-            (Some((pp, _)), None) => (Some(pp), MatchKind::Prefix),
-            (None, Some((sp, _))) => (Some(sp), MatchKind::SegmentWildcard),
-            (None, None) => (None, MatchKind::None),
+            (Some((pp, _, pg)), None) => {
+                MatchLocation { path: Some(pp), kind: MatchKind::Prefix, granting_policies: pg }
+            }
+            (None, Some((sp, _, sg))) => {
+                MatchLocation { path: Some(sp), kind: MatchKind::SegmentWildcard, granting_policies: sg }
+            }
+            (None, None) => MatchLocation::none(),
         }
     }
+}
+
+/// Where [`ACL::locate_match`] landed, and which policies wrote the rule
+/// it landed on.
+#[derive(Debug, Clone, Default)]
+struct MatchLocation {
+    path: Option<String>,
+    kind: MatchKind,
+    granting_policies: Vec<String>,
+}
+
+impl MatchLocation {
+    fn found(path: String, kind: MatchKind, perm: &Permissions) -> Self {
+        Self { path: Some(path), kind, granting_policies: granting_policy_names(perm) }
+    }
+
+    fn none() -> Self {
+        Self { path: None, kind: MatchKind::None, granting_policies: Vec::new() }
+    }
+}
+
+/// Names of the policies that contributed a merged permission set, in
+/// [`Capability`] declaration order and deduped.
+///
+/// `Permissions::granting_policies_map` is keyed per capability bit and is
+/// populated in [`ACL::new`], where rules sharing an identical path string
+/// are merged across policies. Unioning over *every* bit — rather than
+/// looking up only the capability under test — is deliberate: the case that
+/// needs explaining is the one where the capability was **withheld**, and
+/// there the tested bit has no entry at all. What the operator needs to
+/// know then is who wrote the rule that won, not who granted a bit nobody
+/// granted.
+fn granting_policy_names(perm: &Permissions) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for cap in Capability::iter() {
+        let Some(entry) = perm.granting_policies_map.get(&cap.to_bits()) else {
+            continue;
+        };
+        for pi in entry.value().iter() {
+            if !out.iter().any(|n| n == &pi.name) {
+                out.push(pi.name.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Outcome of a stateless dry-run evaluation of one `(path, capability)`
@@ -889,6 +960,19 @@ pub struct CapabilityExplain {
     pub match_kind: MatchKind,
     pub denied_by_deny: bool,
     pub is_root: bool,
+    /// Names of the policies that contributed the rule identified by
+    /// `matched_path`, deduped. Advisory, like `matched_path` itself.
+    ///
+    /// When the ACL was built from more than one policy this is what
+    /// answers "why was this capability withheld": ACL precedence picks a
+    /// single winning rule rather than unioning across policies, so a
+    /// narrow rule in an attached policy (`default` is attached to every
+    /// token) out-specifies and *replaces* a broad rule in the policy
+    /// under test. Capabilities union only between rules whose path
+    /// string is identical, which is why this is a list rather than a
+    /// single name. See the "One winner, not a union" section of
+    /// `features/policy-builder-validator.md`.
+    pub granting_policies: Vec<String>,
 }
 
 /// How the matched rule's path related to the evaluated path. Serialized
@@ -2742,6 +2826,97 @@ path "kv/deny" {
         // A rule with no parameter constraints is unaffected by a stray env.
         let ex = acl.explain_capability_with_params("secret/data/open/y", Capability::Read, &with_env("prod"));
         assert!(ex.allowed);
+    }
+
+    /// Cross-policy attribution: which policy wrote the rule that won?
+    ///
+    /// ACL precedence picks one winning rule; capabilities union only
+    /// between rules whose path string is identical. So a narrow rule in an
+    /// attached policy *replaces* a broad rule in the policy under test,
+    /// and the only way an operator can see why a capability vanished is
+    /// being told whose rule won. This is the shape of the `default`
+    /// narrowing fixed in `policy_store.rs`.
+    #[test]
+    fn test_explain_capability_names_granting_policies() {
+        let admin = create_test_policy(
+            "administrator",
+            r#"
+            path "*" {
+                capabilities = ["create", "read", "update", "delete", "list", "sudo"]
+            }
+            "#,
+        );
+        let default = create_test_policy(
+            "default",
+            r#"
+            path "sys/capabilities-self" {
+                capabilities = ["update"]
+            }
+            path "rustion/targets/+" {
+                capabilities = ["read"]
+            }
+            "#,
+        );
+        let acl = ACL::new(&[Arc::new(admin.clone()), Arc::new(default.clone())]).unwrap();
+
+        // `administrator` alone grants delete everywhere.
+        let solo = ACL::new(&[Arc::new(admin.clone())]).unwrap();
+        let ex = solo.explain_capability("rustion/targets/abc", Capability::Delete);
+        assert!(ex.allowed, "administrator's `path \"*\"` grants delete");
+        assert_eq!(ex.granting_policies, vec!["administrator".to_string()]);
+
+        // With `default` attached, its narrower segment-wildcard rule wins
+        // and delete is withheld — attributed to `default`, not to the
+        // policy the operator is editing.
+        let ex = acl.explain_capability("rustion/targets/abc", Capability::Delete);
+        assert!(!ex.allowed, "default's read-only rule out-specifies path \"*\"");
+        assert_eq!(ex.match_kind, MatchKind::SegmentWildcard);
+        assert_eq!(ex.matched_path.as_deref(), Some("rustion/targets/+"));
+        assert_eq!(ex.granting_policies, vec!["default".to_string()]);
+
+        // Same story on an exact rule.
+        let ex = acl.explain_capability("sys/capabilities-self", Capability::Read);
+        assert!(!ex.allowed);
+        assert_eq!(ex.match_kind, MatchKind::Exact);
+        assert_eq!(ex.granting_policies, vec!["default".to_string()]);
+
+        // Restating the path in the broad policy makes the strings
+        // identical, so `Permissions::merge` unions them — and both
+        // contributors are named. This is the documented remedy.
+        let restating = create_test_policy(
+            "administrator",
+            r#"
+            path "*" {
+                capabilities = ["create", "read", "update", "delete", "list", "sudo"]
+            }
+            path "rustion/targets/+" {
+                capabilities = ["create", "read", "update", "delete", "list", "sudo"]
+            }
+            "#,
+        );
+        let acl = ACL::new(&[Arc::new(restating), Arc::new(default)]).unwrap();
+        let ex = acl.explain_capability("rustion/targets/abc", Capability::Delete);
+        assert!(ex.allowed, "restated path unions instead of being replaced");
+        assert_eq!(ex.matched_path.as_deref(), Some("rustion/targets/+"));
+        let mut names = ex.granting_policies.clone();
+        names.sort();
+        assert_eq!(names, vec!["administrator".to_string(), "default".to_string()]);
+
+        // A path no rule matches has no granting policy. (Checked against
+        // an ACL with no `path "*"`, which would otherwise match.)
+        let narrow = ACL::new(&[Arc::new(create_test_policy(
+            "default",
+            r#"path "sys/capabilities-self" { capabilities = ["update"] }"#,
+        ))])
+        .unwrap();
+        let ex = narrow.explain_capability("nowhere/at/all", Capability::Read);
+        assert_eq!(ex.match_kind, MatchKind::None);
+        assert!(ex.granting_policies.is_empty());
+
+        // Root is attributed to root.
+        let root = ACL::new(&[Arc::new(Policy { name: "root".into(), ..Default::default() })]).unwrap();
+        let ex = root.explain_capability("any/path", Capability::Sudo);
+        assert_eq!(ex.granting_policies, vec!["root".to_string()]);
     }
 
     /// `+` matches exactly one *non-empty* segment.
