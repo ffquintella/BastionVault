@@ -45,6 +45,41 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### Publishable dependency-layer image for the container build
+- **`deps` build stage + `BUILDER_BASE`** (`deploy/container/Containerfile`) --
+  the ~1200-crate `cargo chef cook` now lives in its own stage that can be
+  published as an image and fed back in. Unset, `BUILDER_BASE` cooks locally as
+  before; set to an image reference, the `chef`, `planner` and `deps` stages are
+  never built at all. This is the only way a CI runner that is a fresh container
+  every time gets a warm dependency layer.
+  (`features/packaging-podman-server.md`)
+- **`container-deps-*` Make targets** -- `container-deps-key` (the cache key:
+  a digest of `Cargo.lock`, `rust-toolchain.toml`, the Containerfile and
+  `cross-env.sh`, and nothing else, so source edits do not move it),
+  `container-deps-ref`, `container-deps-image` and `container-deps-push`. The
+  key is computed in the Makefile so a laptop and a runner agree on it.
+- **`TLS_VERIFY` and `BVAULT_FEATURES` are threaded through both builds** --
+  the feature set especially: cargo fingerprints it, so a `deps` image cooked
+  with a different set than the build requests is silently ignored and every
+  crate rebuilt -- a cache that looks like it hit and behaves like it missed.
+
+### Fixed
+
+#### Container build cache
+- **`CACHE_REF` was a no-op on every podman runner.** podman/buildah take a bare
+  image reference for `--cache-from` / `--cache-to`, not buildx's
+  `type=registry,ref=` descriptor; passing the descriptor made podman treat the
+  whole string as an image name and the cache never hit. The flag now branches on
+  the detected container tool.
+- **The pinned toolchain was synced twice per image build.** `rust-toolchain.toml`
+  pins `stable`, which is not the base image's default, so the first cargo call
+  under the source tree made rustup fetch the whole channel -- once in `planner`
+  (2m33s inside what is only a manifest read, in a stage every source edit
+  invalidates) and again in the builder. It is now installed once in `chef`, in a
+  layer keyed on that one file, which every stage below inherits.
+
 ## [0.41.12] - 2026-08-24
 
 ### Security

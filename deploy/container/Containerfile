@@ -33,12 +33,29 @@
 #
 #   The cooked artefacts live in the layer rather than in a BuildKit cache
 #   mount on purpose: a mount would shadow them, and only a layer can be
-#   exported to a registry cache for CI (`--cache-to type=registry`), where
-#   the builder is a fresh runner every time. See the Makefile's
-#   `container-image` target and .github/workflows/container-image.yml.
+#   published as an image.
+#
+#   That publishing is what makes CI fast. The cook lives in its own `deps`
+#   stage, and `BUILDER_BASE` decides where the workspace build starts from:
+#
+#     unset (default)   -> `deps`, i.e. cook locally. Laptops, cold builds.
+#     an image ref      -> that image IS the cooked layer; `chef`, `planner`
+#                          and `deps` are then never built at all (an unused
+#                          stage is skipped, even under --no-cache).
+#
+#   CI keys an image on the recipe's inputs (Cargo.lock, rust-toolchain.toml,
+#   this file), pushes it once, and passes it back on every later run — which
+#   is the only way a build gets a warm dependency layer on a runner that is a
+#   fresh container every time. See bv-build's container-image workflow.
 #
 # See features/packaging-podman-server.md for the full design and
 # roadmaps/packaging-and-distribution.md for the wave sequencing.
+
+# Where the workspace build starts from. `deps` (the default) cooks the
+# dependencies in this build; an image reference short-circuits to a previously
+# cooked one. Declared before the first FROM so it is in scope for the `FROM
+# ${BUILDER_BASE}` below — an ARG used in a FROM must be global.
+ARG BUILDER_BASE=deps
 
 # ---------- Stage 1: chef (toolchain base, runs on BUILDPLATFORM) ----------
 # Shared by the planner and builder stages so the apt layer, the cargo-chef
@@ -92,6 +109,22 @@ COPY --chmod=0755 deploy/container/cross-env.sh /usr/local/bin/bv-cross-env
 
 WORKDIR /src
 
+# The pinned toolchain, materialised once for every stage that inherits `chef`.
+#
+# rust-toolchain.toml pins `stable`, which is NOT the channel the base image
+# defaults to, so the first cargo/rustup call under a directory carrying this
+# file makes rustup sync the whole channel. That used to happen twice per build
+# — once in `planner` (2m33s inside what is supposed to be a manifest read) and
+# again in the builder — and the planner copy could never be cached, because
+# that stage is invalidated by every source edit. Installing it here puts it in
+# a layer keyed on this one file, which every stage below inherits and no source
+# change touches.
+#
+# `rustup show` is the install: under a directory override it resolves the
+# override and downloads it if missing.
+COPY rust-toolchain.toml ./
+RUN rustup show
+
 # ---------- Stage 2: planner (recipe only — no compilation) ----------
 # The one stage that sees the whole source tree. It is invalidated by every
 # edit, which is fine: it only reads manifests and writes a ~450 KB recipe.
@@ -99,8 +132,12 @@ FROM chef AS planner
 COPY . .
 RUN cargo chef prepare --recipe-path /recipe.json
 
-# ---------- Stage 3: builder (dependencies, then the workspace) ----------
-FROM chef AS builder
+# ---------- Stage 3: deps (the dependency compile — the cacheable half) ----
+# Everything here is a function of the recipe and the toolchain, never of the
+# application source. CI publishes this stage as an image and feeds it back as
+# BUILDER_BASE, so the ~1200-crate cook happens once per Cargo.lock rather than
+# once per run.
+FROM chef AS deps
 
 ARG TARGETARCH
 
@@ -118,13 +155,12 @@ ARG BVAULT_FEATURES="hsm_mock,hsm_yubihsm2"
 # no-cache-era hedge and cost more than anything else in this file.
 ARG CARGO_BUILD_JOBS=""
 
-# The toolchain file first, and on its own: `rustup target add` honours a
-# directory override, and every cargo step below runs under the `stable`
-# channel this file pins — not the base image's pinned default. Without it the
-# target lands on the wrong toolchain and the cook step fails with
-# `can't find crate for core` the moment chef hydrates its own copy of this
-# file. Its own layer, keyed on the one file that can invalidate it.
-COPY rust-toolchain.toml ./
+# The cross-compilation std for the target triple. `rustup target add` honours
+# the directory override, so it lands on the `stable` channel that `chef`
+# installed from rust-toolchain.toml — not the base image's default. Without
+# that pairing the target lands on the wrong toolchain and the cook step fails
+# with `can't find crate for core` the moment chef hydrates its own copy of the
+# toolchain file.
 RUN . /usr/local/bin/bv-cross-env && rustup target add "$RUST_TARGET"
 
 # The dependency layer. Keyed on the recipe alone.
@@ -141,7 +177,29 @@ RUN set -eux; \
     cargo chef cook --release --recipe-path /recipe.json --target "$RUST_TARGET" \
         -p bastion_vault
 
-# The workspace layer. Everything above this line survives a source edit.
+# ---------- Stage 4: builder (the workspace) ----------
+# `deps` by default; a published image when CI passes one. Either way the
+# contract is identical: /src carries the cooked target/ and registry, the
+# pinned toolchain is installed, and bv-cross-env is on PATH.
+#
+# The ARGs are re-declared because a stage does not inherit the ones above it,
+# and the two `cargo build` invocations below must see exactly the features and
+# job count the `cook` above them saw — cargo fingerprints the feature set, so a
+# mismatch silently discards every cooked artefact and rebuilds the lot.
+#
+# `--platform=$BUILDPLATFORM` is not decoration. It used to come for free from
+# `FROM chef`; naming a base explicitly would otherwise default this stage to
+# TARGETPLATFORM and put rustc under QEMU — the exact thing this file's header
+# says kills a cross-arch build. It also means a *published* BUILDER_BASE is
+# specific to the build host's architecture, not just the target's.
+FROM --platform=$BUILDPLATFORM ${BUILDER_BASE} AS builder
+
+ARG TARGETARCH
+ARG BVAULT_FEATURES="hsm_mock,hsm_yubihsm2"
+ARG CARGO_BUILD_JOBS=""
+
+WORKDIR /src
+
 # Output goes to /out/ so the runtime stage doesn't need the target triple.
 COPY . .
 RUN set -eux; \
@@ -163,7 +221,7 @@ RUN if readelf -d /out/bvault | grep -E 'NEEDED.*(libssl|libcrypto)'; then \
         exit 1; \
     fi
 
-# ---------- Stage 4: runtime (pulled for TARGETPLATFORM) ----------
+# ---------- Stage 5: runtime (pulled for TARGETPLATFORM) ----------
 # Wolfi — Chainguard's free, open-source, glibc-based "undistro" built
 # for containers (cgr.dev/chainguard/wolfi-base). Like distroless it
 # carries glibc + a CA bundle and nothing application-specific, so the

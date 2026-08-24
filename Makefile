@@ -120,7 +120,7 @@ endif
 # affect cargo's own internal parallelism, which is where the cores actually go.
 .NOTPARALLEL:
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-integration test-doc test-cucumber test-hiqlite test-all test-release docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-cache-clean container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-integration test-doc test-cucumber test-hiqlite test-all test-release docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-deps-key container-deps-ref container-deps-image container-deps-push container-cache-clean container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -846,12 +846,72 @@ CACHE            ?= 1
 CACHE_REF        ?=
 CARGO_BUILD_JOBS ?=
 
+# ── Dependency-layer image (the cross-run build cache) ─────────────────
+#
+# The Containerfile's `deps` stage is the ~1200-crate cook. Published as an
+# image and passed back via BUILDER_BASE, it turns a cold CI build into a pull:
+# the `chef`, `planner` and `deps` stages are then not built at all.
+#
+#   make container-deps-image            # build the cook as an image
+#   make container-deps-push             # publish it
+#   make container-image BUILDER_BASE=$$(make -s container-deps-ref)
+#
+# DEPS_KEY is the cache key: the digest of every input the cook depends on and
+# nothing else. Source edits do not change it; a Cargo.lock or toolchain change
+# does, which is exactly when the dependencies have to be rebuilt. It lives here
+# rather than in CI so a laptop and a runner compute the same key.
+_SHA256          := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo 'shasum -a 256')
+_DEPS_KEY_FILES  := Cargo.lock rust-toolchain.toml deploy/container/Containerfile deploy/container/cross-env.sh
+DEPS_KEY         ?= $(shell cat $(_DEPS_KEY_FILES) 2>/dev/null | $(_SHA256) | cut -c1-16)
+DEPS_IMAGE       ?= $(IMAGE_NAME)-builder
+# The cook is per-architecture (it compiles for the target triple), so the tag
+# has to be too — otherwise an arm64 run would happily start from an amd64 cook.
+PLATFORM_SLUG    := $(subst /,-,$(PLATFORM))
+DEPS_TAG         ?= deps-$(PLATFORM_SLUG)-$(DEPS_KEY)
+DEPS_REF         ?= $(DEPS_IMAGE):$(DEPS_TAG)
+
+# Where the workspace build starts from. Empty = build the `deps` stage in this
+# build (the Containerfile's default).
+BUILDER_BASE     ?=
+ifneq ($(BUILDER_BASE),)
+_BUILDER_BASE_FLAG := --build-arg BUILDER_BASE=$(BUILDER_BASE)
+endif
+
+# Registry TLS for the dependency-image pull/push and for a `FROM` that resolves
+# to a registry. Only podman takes the flag; docker configures insecure
+# registries at the daemon instead, so the flag is dropped there rather than
+# failing the command. Set TLS_VERIFY=false for a plaintext-http registry.
+TLS_VERIFY       ?=
+ifneq ($(TLS_VERIFY),)
+ifneq ($(CONTAINER_TOOL),docker)
+_TLS_FLAG := --tls-verify=$(TLS_VERIFY)
+endif
+endif
+
+# HSM feature set. Threaded through BOTH the cook and the workspace build from
+# one variable: cargo fingerprints the feature set, so a `deps` image cooked
+# with a different set than the build asks for is silently ignored and every
+# crate is rebuilt — a cache that looks like it hit and behaves like it missed.
+# Empty (the default) leaves the Containerfile's own default in force for both.
+BVAULT_FEATURES  ?=
+ifneq ($(BVAULT_FEATURES),)
+_FEATURES_FLAG := --build-arg BVAULT_FEATURES=$(BVAULT_FEATURES)
+endif
+
 ifeq ($(CACHE),0)
 _CACHE_FLAGS := --no-cache
 else
 ifneq ($(CACHE_REF),)
+ifeq ($(CONTAINER_TOOL),docker)
 _CACHE_FLAGS := --cache-from type=registry,ref=$(CACHE_REF) \
                 --cache-to type=registry,ref=$(CACHE_REF),mode=max
+else
+# podman/buildah take a bare image reference here, NOT buildx's
+# `type=registry,ref=` descriptor — passing the descriptor makes podman treat
+# the whole string as an image name and the cache silently never hits. This
+# branch is why CACHE_REF was a no-op on every podman runner.
+_CACHE_FLAGS := --cache-from $(CACHE_REF) --cache-to $(CACHE_REF)
+endif
 endif
 endif
 
@@ -913,7 +973,7 @@ container-image: ## Build the server OCI image (auto-detects podman/docker, over
 		fi; \
 	fi
 	@echo "==> Building $(IMAGE_NAME):$(IMAGE_TAG) ($(PLATFORM), INCLUDE_SHELL=$(INCLUDE_SHELL), CACHE=$(CACHE)) with $(CONTAINER_TOOL)"
-	$(_BUILD_CMD) $(_CACHE_FLAGS) \
+	$(_BUILD_CMD) $(_CACHE_FLAGS) $(_BUILDER_BASE_FLAG) $(_TLS_FLAG) $(_FEATURES_FLAG) \
 		--build-arg INCLUDE_SHELL=$(INCLUDE_SHELL) \
 		--build-arg CARGO_BUILD_JOBS=$(CARGO_BUILD_JOBS) \
 		-f deploy/container/Containerfile \
@@ -924,6 +984,27 @@ container-image: ## Build the server OCI image (auto-detects podman/docker, over
 	@echo "==> Built $(IMAGE_NAME):$(IMAGE_TAG) and $(IMAGE_NAME):latest"
 	@echo "    Inspect: $(CONTAINER_TOOL) images $(IMAGE_NAME)"
 	@echo "    Run:     make container-image-run"
+
+container-deps-key: ## Print the dependency-layer cache key (digest of Cargo.lock + toolchain + Containerfile)
+	@echo "$(DEPS_KEY)"
+
+container-deps-ref: ## Print the dependency-layer image reference for this key + platform
+	@echo "$(DEPS_REF)"
+
+container-deps-image: ## Build the dependency (cargo-chef cook) stage as a publishable image
+	@echo "==> Building $(DEPS_REF) ($(PLATFORM)) with $(CONTAINER_TOOL)"
+	$(_BUILD_CMD) $(_TLS_FLAG) $(_FEATURES_FLAG) \
+		--build-arg CARGO_BUILD_JOBS=$(CARGO_BUILD_JOBS) \
+		--target deps \
+		-f deploy/container/Containerfile \
+		-t $(DEPS_REF) \
+		.
+	@echo "==> Built $(DEPS_REF)"
+	@echo "    Use it: make container-image BUILDER_BASE=$(DEPS_REF)"
+
+container-deps-push: ## Push the dependency-layer image (build it first)
+	@echo "==> Pushing $(DEPS_REF)"
+	$(CONTAINER_TOOL) push $(_TLS_FLAG) $(DEPS_REF)
 
 container-cache-clean: ## Drop the local container build cache (forces a cold dependency build)
 	@echo "==> Pruning $(CONTAINER_TOOL) build cache"
