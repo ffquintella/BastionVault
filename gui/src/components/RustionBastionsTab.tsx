@@ -97,18 +97,25 @@ function PubkeyHealthBadges({ kemPublicKey, mldsa65PublicKey }: PubkeyHealthBadg
 function PinBadges({ target }: { target: RustionTargetSummary }) {
   const sshPin = target.ssh_host_key_fingerprint ?? "";
   const rdpPin = target.rdp_tls_pin_sha256 ?? "";
+  const syncedAt = target.listeners_synced_at ?? "";
   // Nothing synced yet at all — stay quiet rather than shout "unpinned"
   // on a target whose listeners were never discovered.
-  if (!target.listeners_synced_at) return null;
+  if (!syncedAt) return null;
+  // Discovery fires once at enrolment, so an empty pin says "the bastion
+  // advertised none *at that moment*", not "this bastion cannot be
+  // pinned" — a bastion upgraded to listener schema v2 afterwards reads
+  // as unpinned until Re-sync. Name the capture time in the tooltip so
+  // the operator can tell a genuine v1 bastion from a stale record.
+  const stale = ` (as of ${syncedAt}) — Re-sync to re-read`;
   return (
     <div className="flex gap-1 mt-1 flex-wrap">
-      <span title={sshPin || "no SSH host-key fingerprint advertised"}>
+      <span title={sshPin || `no SSH host-key fingerprint advertised${stale}`}>
         <Badge
           label={sshPin ? "SSH host-key pinned" : "SSH unpinned"}
           variant={sshPin ? "success" : "warning"}
         />
       </span>
-      <span title={rdpPin || "no RDP TLS fingerprint advertised"}>
+      <span title={rdpPin || `no RDP TLS fingerprint advertised${stale}`}>
         <Badge
           label={rdpPin ? "RDP TLS pinned" : "RDP unpinned"}
           variant={rdpPin ? "success" : "warning"}
@@ -127,6 +134,7 @@ export function RustionBastionsTab() {
   const [editTarget, setEditTarget] = useState<RustionTargetSummary | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<RustionTargetSummary | null>(null);
   const [probingId, setProbingId] = useState<string | null>(null);
+  const [syncingId, setSyncingId] = useState<string | null>(null);
   const [masterCfg, setMasterCfg] = useState<RustionMasterConfig | null>(null);
   const [masterPub, setMasterPub] = useState<RustionMasterPubkey | null>(null);
   const [showMasterEdit, setShowMasterEdit] = useState(false);
@@ -198,6 +206,28 @@ export function RustionBastionsTab() {
       toast("error", extractError(e));
     } finally {
       setProbingId(null);
+    }
+  }
+
+  /// Re-run listener discovery against one bastion. The pins on the
+  /// target record are captured once at enrolment and never refreshed
+  /// on their own, so this is the only operator affordance that picks
+  /// up a bastion upgraded to listener schema v2, a rotated SSH host
+  /// key, or a regenerated RDP TLS cert. Without it the dialler keeps
+  /// hopping unpinned against a bastion that is advertising a pin.
+  async function handleRefreshListeners(t: RustionTargetSummary) {
+    setSyncingId(t.id);
+    try {
+      const updated = await rustion.rustionTargetRefreshListeners(t.id);
+      const ssh = updated.ssh_host_key_fingerprint ? "SSH pinned" : "SSH unpinned";
+      const rdp = updated.rdp_tls_pin_sha256 ? "RDP pinned" : "RDP unpinned";
+      const pinned = Boolean(updated.ssh_host_key_fingerprint || updated.rdp_tls_pin_sha256);
+      toast(pinned ? "success" : "info", `${t.name}: ${ssh}, ${rdp}`);
+      await refresh();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setSyncingId(null);
     }
   }
 
@@ -311,6 +341,15 @@ export function RustionBastionsTab() {
                             disabled={probingId !== null}
                           >
                             {probingId === t.id ? "Testing..." : "Test"}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => handleRefreshListeners(t)}
+                            disabled={syncingId !== null}
+                            title="Re-read GET /v1/listeners: dial coordinates + SSH host-key / RDP TLS pins"
+                          >
+                            {syncingId === t.id ? "Syncing..." : "Re-sync"}
                           </Button>
                           <Button
                             size="sm"

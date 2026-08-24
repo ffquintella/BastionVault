@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.13] - 2026-08-24
+
 ### Added
 
 #### Publishable dependency-layer image for the container build
@@ -66,6 +68,24 @@ EXAMPLE ENTRY:
   crate rebuilt -- a cache that looks like it hit and behaves like it missed.
 
 ### Fixed
+
+#### Rustion bastion transport pins went stale with no way to re-read them
+- **"Re-sync" action per bastion row** (Settings -> Rustion Bastions) -- listener
+  discovery (`GET /v1/listeners`) fired exactly once, best-effort, at enrolment,
+  and nothing in the GUI or the CLI could re-trigger it: the backend route
+  (`rustion/targets/<id>/listeners/refresh`) and the Tauri command
+  (`rustion_target_refresh_listeners`) both existed but had no frontend caller.
+  A bastion enrolled before it advertised transport pins -- a pre-listener-schema-v2
+  Rustion, or one whose SSH host key or RDP TLS cert rotated since -- kept its
+  empty pins forever. The row showed amber "SSH unpinned" / "RDP unpinned" and,
+  worse, `resolve_bastion_dial_coords` read the same empty fields, so Connect
+  dialled that bastion's SSH proxy in unpinned TOFU mode and its RDP gateway with
+  no TLS verification against a bastion that was in fact publishing both pins.
+  Re-enrolling the target was the only workaround.
+  (`features/rustion-integration.md` Phase 9.4)
+- **Unpinned-badge tooltip now names the capture time** -- an empty pin means "the
+  bastion advertised none *at that moment*", not "this bastion cannot be pinned",
+  so the tooltip carries the `listeners_synced_at` timestamp and points at Re-sync.
 
 #### Container build cache
 - **`CACHE_REF` was a no-op on every podman runner.** podman/buildah take a bare

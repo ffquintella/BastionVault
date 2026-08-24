@@ -146,6 +146,15 @@ export const rustionTargetUpsert = (
 export const rustionTargetDelete = (id: string) =>
   invoke<void>("rustion_target_delete", { id });
 
+/** Re-run `GET /v1/listeners` against the bastion and persist the
+ *  discovered dial coordinates + transport pins on the target record.
+ *  Discovery otherwise fires only once, best-effort, at enrolment — so
+ *  a bastion upgraded to listener schema v2 (or one whose host key /
+ *  RDP TLS cert rotated) keeps whatever was captured that day until
+ *  this is called. */
+export const rustionTargetRefreshListeners = (id: string) =>
+  invoke<RustionTargetSummary>("rustion_target_refresh_listeners", { id });
+
 export const rustionTargetHealthAll = () =>
   invoke<RustionTargetHealth[]>("rustion_target_health_all");
 
