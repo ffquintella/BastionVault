@@ -4724,3 +4724,93 @@ mod mod_policy_store_tests {
         );
     }
 }
+
+/// The built-in `default` policy is attached to *every* token, and ACL
+/// precedence picks a single winning rule rather than unioning across
+/// policies. So any path `default` names is a path no other policy can
+/// widen. That is intended for its exact endpoint grants; it was not
+/// intended for `rustion/targets/+`, where `+` used to match the trailing
+/// empty segment of the LIST path `rustion/targets/`. That made the
+/// read-only rule the most specific match for the *collection*, silently
+/// downgrading every non-root token holding `administrator`'s `path "*"`,
+/// and the GUI's Settings → Rustion panel 403'd on `op=list
+/// rustion/targets/` for administrators.
+///
+/// The withheld LIST is itself intentional (see the comment above the rule
+/// in `DEFAULT_POLICY`) and must stay withheld from a caller who holds
+/// nothing but `default`.
+#[cfg(test)]
+mod default_policy_does_not_narrow_admins_tests {
+    use super::super::{acl::MatchKind, policy::Capability};
+    use super::*;
+
+    fn acl_of(hcls: &[&str]) -> ACL {
+        let policies: Vec<Arc<Policy>> = hcls
+            .iter()
+            .map(|h| Arc::new(Policy::from_str(h).expect("built-in policy must parse")))
+            .collect();
+        ACL::new(&policies).expect("ACL must build")
+    }
+
+    /// What `sys/capabilities-self` reports for an administrator — who
+    /// always also carries `default`.
+    fn admin_caps(path: &str) -> Vec<String> {
+        let mut c = acl_of(&[DEFAULT_POLICY, ADMINISTRATOR_POLICY]).capabilities(path.to_string());
+        c.sort();
+        c
+    }
+
+    #[test]
+    fn an_administrator_can_list_the_rustion_target_fleet() {
+        assert!(
+            admin_caps("rustion/targets/").contains(&"list".to_string()),
+            "`path \"*\"` must not be out-specified by default's read-only `rustion/targets/+`"
+        );
+    }
+
+    /// The pin read that `+` exists for is untouched.
+    #[test]
+    fn a_named_target_is_still_readable() {
+        assert!(admin_caps("rustion/targets/bastion-1").contains(&"read".to_string()));
+    }
+
+    /// Withheld from a caller carrying nothing but `default`: a tenant
+    /// resolves only the bastions the dispatcher already named for them.
+    #[test]
+    fn default_alone_still_withholds_list_over_the_fleet() {
+        let acl = acl_of(&[DEFAULT_POLICY]);
+
+        assert_eq!(acl.capabilities("rustion/targets/".to_string()), vec!["deny".to_string()]);
+        assert!(acl.capabilities("rustion/targets/bastion-1".to_string()).contains(&"read".to_string()));
+    }
+
+    /// The whole class, swept off the policy itself rather than a
+    /// hand-maintained list: for every `<collection>/+` rule `default`
+    /// carries, the rule that decides `<collection>/` for an administrator
+    /// must not be that segment-wildcard.
+    ///
+    /// Asserted on `match_kind` rather than on capabilities because
+    /// `default` also carries *exact* rules on some of those collections
+    /// (`resource-group/groups` grants `list` alone), and an exact rule
+    /// out-specifying `path "*"` is ordinary ACL precedence — a separate
+    /// question from `+` swallowing an empty segment.
+    #[test]
+    fn no_plus_rule_in_default_decides_its_own_collection_path() {
+        let default = Policy::from_str(DEFAULT_POLICY).expect("default policy must parse");
+        let acl = acl_of(&[DEFAULT_POLICY, ADMINISTRATOR_POLICY]);
+
+        let plus_rules: Vec<&str> =
+            default.paths.iter().filter(|r| r.path.ends_with("/+")).map(|r| r.path.as_str()).collect();
+        assert!(!plus_rules.is_empty(), "sweep found nothing — did the rule shape change?");
+
+        for rule_path in plus_rules {
+            let collection = format!("{}/", rule_path.trim_end_matches('+').trim_end_matches('/'));
+            let ex = acl.explain_capability(&collection, Capability::List);
+            assert_ne!(
+                ex.match_kind,
+                MatchKind::SegmentWildcard,
+                "{collection} is decided by `{rule_path}` — `+` matched the trailing empty segment"
+            );
+        }
+    }
+}

@@ -45,6 +45,39 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.11] - 2026-08-24
+
+### Security
+
+#### The `default` policy silently downgraded every non-root token on `rustion/targets/`
+- **`+` matched an empty path segment, so a rule for a named child decided its
+  own collection.** A LIST is issued against the collection path with a
+  trailing slash (`rustion/targets/`), which splits to a trailing *empty*
+  segment. The segment-wildcard matcher accepted `+` against that empty
+  segment, so `default`'s read-only `path "rustion/targets/+"` matched the
+  collection as well as a named target.
+- **Because ACL precedence picks one winning rule rather than unioning across
+  policies, the narrow rule *replaced* the broad one.** `default` is attached
+  to every token, so a token holding `administrator`'s `path "*"` resolved to
+  `["read"]` on `rustion/targets/` — no `list`. The desktop GUI's
+  Settings → Rustion panel returned `403 Permission denied` with
+  `reason=policy` for administrators, and `sys/capabilities-self` reported the
+  downgrade. Only `root` was unaffected, since it short-circuits the ACL.
+- **Fix: `+` now matches exactly one non-empty segment**, in both the
+  enforcement matcher and the matcher backing group-gated rules, share-scoped
+  rules and the policy-builder dry-run
+  (`crates/bv-kernel/src/modules/policy/acl.rs`). This matches Vault, and it
+  keeps the withheld LIST withheld: a caller holding only `default` still has
+  no rule matching `rustion/targets/`, so the fleet stays unlistable for
+  share-grantees while `path "*"` reaches it again. Mount visibility
+  (`has_mount_access`, which matches rules against a shorter mount path on
+  purpose) is explicitly exempt and unchanged.
+- **Operator-visible behaviour change.** A stored policy of the form
+  `path "x/+" { capabilities = ["list"] }` previously permitted `LIST x/` and
+  no longer does; grant the collection explicitly (`path "x"` or `path "x/*"`).
+  No built-in policy relied on this — every `+` rule shipped in
+  `policy_store.rs` is `read`-only.
+
 ## [0.41.10] - 2026-08-21
 
 ### Fixed

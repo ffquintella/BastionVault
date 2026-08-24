@@ -551,6 +551,26 @@ impl ACL {
             for (i, acl_part) in split_curr_wc_path.iter().enumerate() {
                 match *acl_part {
                     "+" => {
+                        // `+` is exactly one *non-empty* segment. The LIST
+                        // form of a collection path (`rustion/targets/`)
+                        // splits to a trailing empty segment; matching it
+                        // here let a rule written for a named child
+                        // out-specify -- and therefore *replace*, since the
+                        // sort below picks a single winner rather than
+                        // unioning -- any broader grant on the collection
+                        // itself. `default`'s read-only `rustion/targets/+`
+                        // silently downgraded every non-root token holding
+                        // `path "*"` to read on `rustion/targets/`, so LIST
+                        // 403'd for administrators as well as the
+                        // share-grantees it was written to withhold it from.
+                        //
+                        // `bare_mount` is exempt: that mode matches a rule
+                        // against a *shorter* mount path on purpose, so that
+                        // `secret/foo/+` makes the `secret/` mount visible.
+                        if !bare_mount && path_parts[i].is_empty() {
+                            skip = true;
+                            break;
+                        }
                         pd.wildcards += 1;
                         segments.push(path_parts[i]);
                     }
@@ -906,9 +926,15 @@ fn grouped_rule_matches(rule: &GroupGatedRule, path: &str) -> bool {
     }
 }
 
-/// Minimal segment-wildcard matcher: `+` matches exactly one path
-/// segment; if `is_prefix` is true the rule path may end with a `*`
+/// Minimal segment-wildcard matcher: `+` matches exactly one *non-empty*
+/// path segment; if `is_prefix` is true the rule path may end with a `*`
 /// glob and we match any suffix on the final segment.
+///
+/// The non-empty requirement must stay in step with the `"+"` arm of
+/// [`ACL::get_none_exact_paths_permissions`]: this function decides
+/// group-gated and share-scoped rules, so letting `+` swallow the trailing
+/// empty segment of a LIST path here while the ungated matcher rejects it
+/// would make the two disagree on the same rule.
 fn segment_wildcard_matches(rule_path: &str, is_prefix: bool, req_path: &str) -> bool {
     let rule_parts: Vec<&str> = rule_path.split('/').collect();
     let req_parts: Vec<&str> = req_path.split('/').collect();
@@ -922,6 +948,9 @@ fn segment_wildcard_matches(rule_path: &str, is_prefix: bool, req_path: &str) ->
 
     for (i, rp) in rule_parts.iter().enumerate() {
         if *rp == "+" {
+            if req_parts[i].is_empty() {
+                return false;
+            }
             continue;
         }
         if is_prefix && i == rule_parts.len() - 1 {
@@ -2713,5 +2742,138 @@ path "kv/deny" {
         // A rule with no parameter constraints is unaffected by a stray env.
         let ex = acl.explain_capability_with_params("secret/data/open/y", Capability::Read, &with_env("prod"));
         assert!(ex.allowed);
+    }
+
+    /// `+` matches exactly one *non-empty* segment.
+    ///
+    /// A LIST on a collection (`rustion/targets/`) splits to a trailing
+    /// empty segment. Letting `+` match it made a rule written for a named
+    /// child (`rustion/targets/+`) the most specific match for the
+    /// collection path — and because the wildcard sort picks a single
+    /// winner instead of unioning, that rule *replaced* a broader grant
+    /// rather than adding to it. `default`'s read-only `rustion/targets/+`
+    /// therefore downgraded every non-root token holding `path "*"` to
+    /// read on `rustion/targets/`, and the GUI's target list 403'd for
+    /// administrators as well as for the share-grantees the withheld LIST
+    /// was aimed at.
+    mod segment_wildcard_empty_segment_tests {
+        use super::*;
+
+        fn acl_of(policy_str: &str) -> ACL {
+            ACL::new(&[Arc::new(create_test_policy("p", policy_str))]).unwrap()
+        }
+
+        fn caps(acl: &ACL, path: &str) -> Vec<String> {
+            let mut c = acl.capabilities(path);
+            c.sort();
+            c
+        }
+
+        /// The reported bug, end to end: `administrator` + `default`.
+        #[test]
+        fn a_broad_grant_survives_a_narrow_rule_on_the_collection_path() {
+            let acl = acl_of(
+                r#"
+                path "*"                 { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+                path "rustion/targets/+" { capabilities = ["read"] }
+                "#,
+            );
+
+            let req = Request {
+                operation: Operation::List,
+                path: "rustion/targets/".to_string(),
+                ..Default::default()
+            };
+            assert!(acl.allow_operation(&req, false).unwrap().allowed, "LIST rustion/targets/ must fall through to `path \"*\"`");
+
+            assert!(caps(&acl, "rustion/targets/").contains(&Capability::List.to_string()));
+        }
+
+        /// The withheld LIST is still withheld from a caller whose only
+        /// grant is the named-child rule — that is what the rule is for.
+        #[test]
+        fn the_narrow_rule_alone_still_withholds_list_on_the_collection() {
+            let acl = acl_of(r#"path "rustion/targets/+" { capabilities = ["read"] }"#);
+
+            let req = Request {
+                operation: Operation::List,
+                path: "rustion/targets/".to_string(),
+                ..Default::default()
+            };
+            assert!(!acl.allow_operation(&req, false).unwrap().allowed);
+
+            let req = Request {
+                operation: Operation::Read,
+                path: "rustion/targets/".to_string(),
+                ..Default::default()
+            };
+            assert!(!acl.allow_operation(&req, false).unwrap().allowed, "the collection path is not a target named \"\"");
+        }
+
+        /// What `+` is actually for keeps working.
+        #[test]
+        fn a_named_child_still_matches() {
+            let acl = acl_of(r#"path "rustion/targets/+" { capabilities = ["read"] }"#);
+
+            let req = Request {
+                operation: Operation::Read,
+                path: "rustion/targets/bastion-1".to_string(),
+                ..Default::default()
+            };
+            assert!(acl.allow_operation(&req, false).unwrap().allowed);
+        }
+
+        /// `+` in a non-final position is held to the same rule.
+        #[test]
+        fn an_interior_empty_segment_does_not_match_either() {
+            let acl = acl_of(r#"path "pki/issuer/+/pem" { capabilities = ["read"] }"#);
+
+            for (path, want) in [("pki/issuer/default/pem", true), ("pki/issuer//pem", false)] {
+                let req = Request { operation: Operation::Read, path: path.to_string(), ..Default::default() };
+                assert_eq!(acl.allow_operation(&req, false).unwrap().allowed, want, "{path}");
+            }
+        }
+
+        /// `bare_mount` is exempt on purpose: it matches a rule against a
+        /// *shorter* mount path so that a grant below a mount still makes
+        /// the mount itself visible in the UI.
+        #[test]
+        fn mount_visibility_is_unchanged() {
+            let acl = acl_of(r#"path "secret/foo/+" { capabilities = ["read"] }"#);
+            assert!(acl.has_mount_access("secret/"), "a grant below the mount keeps the mount visible");
+            assert!(acl.get_none_exact_paths_permissions("secret/", true).is_some());
+            assert!(acl.get_none_exact_paths_permissions("secret/", false).is_none());
+        }
+
+        /// The advisory matcher behind `matched_path` / `match_kind` must
+        /// agree with the enforcement matcher, or the policy-builder
+        /// dry-run panel names a rule that did not decide the verdict.
+        #[test]
+        fn the_dry_run_matcher_agrees() {
+            let acl = acl_of(
+                r#"
+                path "*"                 { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+                path "rustion/targets/+" { capabilities = ["read"] }
+                "#,
+            );
+
+            let ex = acl.explain_capability("rustion/targets/", Capability::List);
+            assert!(ex.allowed);
+            assert_eq!(ex.matched_path.as_deref(), Some("*"));
+            assert_eq!(ex.match_kind, MatchKind::Prefix);
+
+            let ex = acl.explain_capability("rustion/targets/bastion-1", Capability::Read);
+            assert!(ex.allowed);
+            assert_eq!(ex.matched_path.as_deref(), Some("rustion/targets/+"));
+            assert_eq!(ex.match_kind, MatchKind::SegmentWildcard);
+        }
+
+        /// A share-scoped `+` rule routes through `segment_wildcard_matches`
+        /// rather than the ungated matcher, so it needs its own gate.
+        #[test]
+        fn a_scoped_rule_does_not_match_the_collection_path_either() {
+            assert!(!segment_wildcard_matches("resource-group/groups/+", false, "resource-group/groups/"));
+            assert!(segment_wildcard_matches("resource-group/groups/+", false, "resource-group/groups/g1"));
+        }
     }
 }

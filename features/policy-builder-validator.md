@@ -52,7 +52,7 @@ The simulator and the lint both encode the ACL's evaluation order:
 
 1. **Exact** rules (no wildcard) — highest precedence.
 2. **Prefix** rules (trailing `*`) — longest matching prefix wins.
-3. **Segment-wildcard** rules (`+` matches exactly one path segment).
+3. **Segment-wildcard** rules (`+` matches exactly one *non-empty* path segment). The non-empty part matters: a LIST is issued against a collection path with a trailing slash (`rustion/targets/`), which splits to a trailing empty segment, so `path "x/+"` governs the *children* of `x` and never the collection itself. Grant a collection explicitly (`path "x"` or `path "x/*"`). Before this was enforced, `+` swallowed the empty segment and a read-only child rule became the most specific match for the collection — and since precedence picks one winner rather than unioning across policies, `default`'s `rustion/targets/+` silently downgraded every non-root token holding `path "*"`.
 4. **Group-gated** (`groups = [...]`) and **scope-filtered** (`scopes = [...]`) rules are evaluated as additional gates at authorize time, not merged into the base trie.
 5. `deny` on any matching rule overrides all granted capabilities.
 
