@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.19] - 2026-08-26
+
 ### Fixed
 
 #### Cluster status reported a live Raft cluster as a single-node file backend
