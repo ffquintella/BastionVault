@@ -21,7 +21,7 @@ publish = ["uox-bastionvault"]
 # framework.
 
 [dependencies]
-bastion_vault = { path = "../..", version = "0.41.17", registry = "uox-bastionvault", default-features = false }
+bastion_vault = { path = "../..", version = "0.41.18", registry = "uox-bastionvault", default-features = false }
 # The Prometheus families, named directly rather than through
 # `bastion_vault::metrics`: this crate owns the module name `metrics` (the
 # `/metrics` scrape endpoint), so the alias would collide. Same collision

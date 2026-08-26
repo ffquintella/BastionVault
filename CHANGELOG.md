@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.18] - 2026-08-26
+
 <!--
   RECOVERY NOTE (2026-08-26): the uncommitted [Unreleased] entries for the
   Windows packaging work were destroyed by an accidental
