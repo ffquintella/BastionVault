@@ -45,6 +45,23 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.16] - 2026-08-26
+
+### Fixed
+
+#### PKI CA import
+
+- **A CA renewed on its original key now imports its *newest* certificate as
+  the signing issuer** (`crates/bv-engine-pki/src/path_config.rs`). A `.p12` /
+  `.pfx` export -- or a pasted bundle -- of a reissued CA carries both the
+  expired original and the reissue, and both share the key's public key.
+  `pki/config/ca` took the first match in bundle order, which is normally the
+  oldest cert, so the mount's signing issuer was an expired CA that could not
+  sign anything. The longest-lived matching certificate (latest `notAfter`) is
+  now the signing issuer; the other matches still import as key-less trust
+  anchors, so existing chains keep resolving. Regression coverage in
+  `tests/test_pki_chain_import.rs`.
+
 ## [0.41.15] - 2026-08-26
 
 ### Added

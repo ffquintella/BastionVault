@@ -217,3 +217,58 @@ async fn test_config_ca_idempotent_reimport() {
     let issuers = list(&core, &token, "pki/issuers").await;
     assert_eq!(issuers["keys"].as_array().unwrap().len(), 2);
 }
+
+/// A CA renewed on its original key ships both certs in the same `.p12`
+/// (or paste): the expired original and the reissued one, same SPKI.
+/// The signing issuer must be the *newest* match, not whichever the
+/// container happened to list first — importing the expired one made the
+/// mount's default issuer unable to sign anything.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_config_ca_renewed_same_key_picks_newest_cert() {
+    use rcgen::SerialNumber;
+    use time::{Duration, OffsetDateTime};
+
+    let (bvault, dir, token) = setup().await;
+    defer!( let _ = fs::remove_dir_all(&dir); );
+    let core = bvault.core.load();
+    write(&core, &token, "sys/mounts/pki/", json!({"type": "pki"}).as_object().unwrap().clone()).await.unwrap();
+
+    // One key pair, two self-signed certs with the same subject: the
+    // 2010–2017-style original and its long-lived reissue.
+    let kp = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let kp_pem = kp.serialize_pem();
+    let now = OffsetDateTime::now_utc();
+    let mint = |serial: u8, not_before: OffsetDateTime, not_after: OffsetDateTime| {
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "Renewed Test CA");
+        params.distinguished_name = dn;
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params.serial_number = Some(SerialNumber::from(vec![serial]));
+        params.not_before = not_before;
+        params.not_after = not_after;
+        params.self_signed(&kp).unwrap().pem()
+    };
+    let old_pem = mint(0x11, now - Duration::days(5000), now - Duration::days(300));
+    let new_pem = mint(0x22, now - Duration::days(200), now + Duration::days(3650));
+
+    // Oldest cert first — the order a `.p12` unwrap routinely produces.
+    let bundle = format!("{old_pem}{new_pem}{kp_pem}");
+    let resp = write_ok(&core, &token, "pki/config/ca", json!({"pem_bundle": bundle}).as_object().unwrap().clone()).await;
+
+    let chain = resp["chain"].as_array().unwrap();
+    assert_eq!(chain.len(), 2, "both certs import");
+    let signing = chain.iter().find(|e| e["has_key"].as_bool().unwrap()).expect("a signing issuer");
+    assert_eq!(signing["serial"], "22", "the reissued cert must be the signing issuer");
+    let keyless = chain.iter().find(|e| e["keyless"].as_bool().unwrap()).expect("a key-less anchor");
+    assert_eq!(keyless["serial"], "11", "the expired original stays as a trust anchor");
+    assert_eq!(resp["issuer_id"], signing["issuer_id"], "primary issuer is the reissued cert");
+
+    // The imported issuer can actually sign.
+    write_ok(&core, &token, "pki/roles/web",
+        json!({"ttl": "24h", "key_type": "ec", "allow_any_name": true, "server_flag": true}).as_object().unwrap().clone()).await;
+    let issued = write_ok(&core, &token, "pki/issue/web",
+        json!({"common_name": "leaf.example.com", "ttl": "12h"}).as_object().unwrap().clone()).await;
+    assert!(issued["certificate"].as_str().unwrap().contains("BEGIN CERTIFICATE"));
+}

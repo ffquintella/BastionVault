@@ -116,12 +116,16 @@ impl PkiBackendInner {
     /// The bundle is a PEM concatenation of **one or more CA
     /// certificates** and an **optional** single private key:
     ///
-    /// * If a key is present it must match exactly one certificate in the
+    /// * If a key is present it must match at least one certificate in the
     ///   bundle; that cert becomes a full **signing issuer** (backed by a
     ///   managed key). Every *other* CA cert imports as a **key-less**
     ///   issuer — a trust/chain anchor that resolves `ca_chain` but can't
     ///   sign. This is how an operator imports "intermediate + its root"
-    ///   or "root + a cross-signed root" in one shot.
+    ///   or "root + a cross-signed root" in one shot. When several certs
+    ///   share the key's public key — a CA renewed or cross-signed on its
+    ///   original key, the usual shape of a `.p12` export — the
+    ///   longest-lived one (latest `notAfter`) is the signing issuer and
+    ///   the rest import key-less.
     /// * With **no key**, all CA certs import as key-less trust anchors.
     ///
     /// Certificate order in the paste is irrelevant — the key match (not
@@ -185,7 +189,21 @@ impl PkiBackendInner {
             };
             use rcgen::PublicKeyData;
             let key_pub = classical.key_pair().der_bytes();
-            signing_idx = certs.iter().position(|c| c.spki_raw == key_pub);
+            // A renewed CA keeps its key, so a `.p12`/`.pfx` (or a pasted
+            // bundle) routinely holds *several* certs with the same SPKI:
+            // the expired original plus the reissued one. Taking the first
+            // match made the signing issuer whichever cert the container
+            // happened to list first — in practice the oldest, which then
+            // became the mount's default issuer and could not sign
+            // anything. Pick the longest-lived match instead (latest
+            // notAfter, earliest bundle position on a tie, so the choice
+            // stays deterministic); the other matches still import as
+            // key-less trust anchors so old chains keep resolving.
+            signing_idx = certs
+                .iter()
+                .filter(|c| c.spki_raw == key_pub)
+                .max_by_key(|c| (c.not_after_unix, std::cmp::Reverse(c.index)))
+                .map(|c| c.index);
             if signing_idx.is_none() {
                 return Err(RvError::ErrResponseStatus(
                     400,

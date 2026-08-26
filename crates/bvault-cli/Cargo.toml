@@ -1,6 +1,6 @@
 [package]
 name = "bvault-cli"
-version = "0.41.15"
+version = "0.41.16"
 edition = "2021"
 description = "BastionVault's command-line client, `bvault`, and the `bvault server` command"
 license = "Apache-2.0"
@@ -28,7 +28,7 @@ name = "bvault"
 path = "src/main.rs"
 
 [dependencies]
-bastion_vault = { path = "../..", version = "0.41.15", registry = "uox-bastionvault", default-features = false }
+bastion_vault = { path = "../..", version = "0.41.16", registry = "uox-bastionvault", default-features = false }
 bv-server = { path = "../bv-server", version = "0.41.0", registry = "uox-bastionvault" }
 # SRV-based cluster node selection for `bvault cluster discover` and
 # `HttpOptions::client_with_discovery`. This was a dependency of the root
