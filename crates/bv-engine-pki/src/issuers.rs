@@ -515,7 +515,7 @@ pub fn take_signer(signer: Option<Signer>, issuer_name: &str) -> Result<Signer, 
     signer.ok_or_else(|| keyless_signing_error(issuer_name))
 }
 
-fn keyless_signing_error(issuer_name: &str) -> RvError {
+pub(crate) fn keyless_signing_error(issuer_name: &str) -> RvError {
     RvError::ErrResponseStatus(
         400,
         format!(

@@ -87,7 +87,8 @@ Surfaces every mounted PKI engine (selectable via the **Mount** dropdown). The p
 - **Keys** — manage stored key material; import via PEM or PKCS#12; delete with `--force` when there are bound issuers.
 - **Issue** — interactive certificate-issuance form using one of the roles, returns the chain + private key (when applicable).
 - **Certs** — every certificate the engine has issued, with serial, common name, NotAfter, and revocation status.
-- **CSR** — sign-verbatim and sign-with-role flows.
+- **Outgoing CSR** — generate a CSR here for an external CA to sign, then install the signed cert (`pki/csr/*`).
+- **Sign Requests** — the inbound direction: import a CSR generated elsewhere, see what it actually asks for, dry-run it against every role, then approve it (under a role, or verbatim) or refuse it with a recorded reason (`pki/sign-request/*`). See `features/pki-inbound-sign-requests.md`.
 - **Tidy** — manual and scheduled CRL/certificate cleanup. Auto-tidy schedule editing lives here.
 - **XCA** — XCA-compatible import/export.
 

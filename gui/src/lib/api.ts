@@ -2314,6 +2314,137 @@ export const pkiCsrDelete = (mount: string, csrId: string) =>
 export const pkiCsrSetSigned = (request: PkiCsrSetSignedRequest) =>
   invoke<PkiCsrSetSignedResult>("pki_csr_set_signed", { request });
 
+// ── Inbound sign requests (`pki/sign-request/*`) ─────────────────────
+//
+// The mirror of the outgoing `pki/csr/*` flow above: a CSR generated
+// elsewhere, parked while an operator decides how — or whether — to sign
+// it. See features/pki-inbound-sign-requests.md.
+
+export type PkiSignRequestStatus = "pending" | "signed" | "rejected";
+
+export interface PkiSignRequest {
+  request_id: string;
+  status: PkiSignRequestStatus | string;
+  subject_dn: string;
+  common_name: string;
+  dns_sans: string[];
+  ip_sans: string[];
+  /** `rsa-2048` | `ec-p256` | `ml-dsa-65` | … — presentation only. */
+  key_description: string;
+  /** SHA-256 of the DER SubjectPublicKeyInfo, lower-case hex. */
+  spki_sha256: string;
+  requester: string;
+  notes: string;
+  suggested_role: string;
+  created_at: number;
+  imported_by: string;
+  decided_at: number;
+  decided_by: string;
+  reject_reason: string;
+  sign_mode: string;
+  role: string;
+  serial_number: string;
+  issuer_id: string;
+  /** Present on read; empty in summaries. */
+  csr: string;
+  /** Present once approved. */
+  certificate: string;
+}
+
+export interface PkiSignRequestImportRequest {
+  mount: string;
+  csr: string;
+  requester?: string;
+  notes?: string;
+  suggested_role?: string;
+  /** Accept a CSR whose public key already has a pending request. */
+  allow_duplicate?: boolean;
+}
+
+/** Shared body for preflight and approve. On preflight, omitting both
+ *  `mode` and `role` evaluates verbatim plus every role on the mount. */
+export interface PkiSignRequestDecideRequest {
+  mount: string;
+  request_id: string;
+  /** `role` (policy applies) | `verbatim` (policy bypassed). */
+  mode?: string;
+  role?: string;
+  common_name?: string;
+  alt_names?: string;
+  ttl?: string;
+  issuer_ref?: string;
+  key_ref?: string;
+  upn_sans?: string;
+  ad_sid?: string;
+}
+
+/** What one mode/role would produce — or why it would refuse. */
+export interface PkiSignVerdict {
+  mode: string;
+  role: string;
+  allowed: boolean;
+  reason: string;
+  /** Which specific value the role refused. */
+  hints: string[];
+  common_name: string;
+  dns_sans: string[];
+  ip_sans: string[];
+  upn_sans: string[];
+  ad_sid: string;
+  ttl_seconds: number;
+  ttl_clamped: boolean;
+  not_after: number;
+  issuer_id: string;
+  issuer_name: string;
+  issuer_not_after: number;
+  key_description: string;
+  key_id: string;
+  /** Legal but notable — policy bypass, dropped SANs, key-type drift. */
+  warnings: string[];
+}
+
+export interface PkiSignRequestPreflight {
+  request: PkiSignRequest;
+  verdicts: PkiSignVerdict[];
+}
+
+export interface PkiSignRequestApproval {
+  request: PkiSignRequest;
+  certificate: string;
+  issuing_ca: string;
+  ca_chain: string[];
+  ttl_seconds: number;
+  not_after: number;
+  warnings: string[];
+  key_id: string;
+}
+
+export interface PkiSignRequestRejectRequest {
+  mount: string;
+  request_id: string;
+  reason: string;
+}
+
+/** Park an externally generated CSR for a decision. The engine verifies
+ *  the CSR's self-signature first and refuses a duplicate of a pending
+ *  request unless `allow_duplicate` is set. */
+export const pkiSignRequestImport = (request: PkiSignRequestImportRequest) =>
+  invoke<PkiSignRequest>("pki_sign_request_import", { request });
+export const pkiSignRequestList = (mount: string) =>
+  invoke<string[]>("pki_sign_request_list", { mount });
+export const pkiSignRequestRead = (mount: string, requestId: string) =>
+  invoke<PkiSignRequest | null>("pki_sign_request_read", { mount, requestId });
+export const pkiSignRequestDelete = (mount: string, requestId: string) =>
+  invoke<void>("pki_sign_request_delete", { mount, requestId });
+/** Dry run — reports what would be issued without issuing anything. */
+export const pkiSignRequestPreflight = (request: PkiSignRequestDecideRequest) =>
+  invoke<PkiSignRequestPreflight>("pki_sign_request_preflight", { request });
+export const pkiSignRequestApprove = (request: PkiSignRequestDecideRequest) =>
+  invoke<PkiSignRequestApproval>("pki_sign_request_approve", { request });
+/** Refuse a request. `reason` is required and is kept on the record. */
+export const pkiSignRequestReject = (request: PkiSignRequestRejectRequest) =>
+  invoke<PkiSignRequest>("pki_sign_request_reject", { request });
+
 // ── Cert / issuer export (PEM / PKCS#7) ──────────────────────────────
 
 export interface PkiExportCertRequest {

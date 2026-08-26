@@ -1,9 +1,10 @@
 //! `pki/issue/:role` — generate a fresh keypair and issue a leaf cert.
 //!
-//! `pki/sign/:role` and `pki/sign-verbatim` are stubbed for Phase 1: CSR
-//! parsing requires plumbing through `x509-parser` to reconstruct an `rcgen`
-//! `PublicKey`, which lands in a follow-up so the Phase 1 surface stays
-//! reviewable.
+//! `pki/sign/:role` and `pki/sign-verbatim` live here too, but only as
+//! request adapters: the decisions and the certificate building both sit in
+//! [`super::sign_flow`], so the inbound sign-request queue's dry run
+//! ([`super::path_sign_request`]) evaluates the identical code rather than a
+//! copy of it.
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -14,6 +15,7 @@ use super::{
     crypto::{AlgorithmClass, KeyAlgorithm, Signer},
     keys::{self, KeyEntry},
     path_roles::RoleEntry,
+    sign_flow::{SignArgs, SignMode, SignPlan},
     storage::{self, CertRecord},
     x509::{self, SubjectInput},
     x509_pqc,
@@ -256,172 +258,9 @@ impl PkiBackendInner {
     pub async fn sign_csr_role(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let role_name = req.get_data("role")?.as_str()
             .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
-        let role = self.get_role(req, &role_name).await?.ok_or(RvError::ErrPkiRoleNotFound)?;
-
-        let csr_input = req.get_data("csr")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
-        let parsed = super::csr::parse_and_verify(&csr_input)?;
-
-        // Phase L2: optional `key_ref` asserts the CSR's SPKI matches a
-        // managed key on this mount. The cert content is unchanged by
-        // pinning (the public key in the cert still comes from the CSR);
-        // the assertion is what lets the engine record a managed-key
-        // binding for the issued serial. Default-secure: roles must
-        // opt in via `allow_key_reuse`.
-        let request_key_ref = req
-            .get_data_or_default("key_ref")?
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let pinned_key: Option<KeyEntry> = if request_key_ref.is_empty() {
-            None
-        } else {
-            let role_alg = role.algorithm()?;
-            let entry = resolve_pinned_key(req, &role, &request_key_ref, role_alg).await?;
-            let entry_spki = keys::entry_spki_der(&entry)?;
-            if entry_spki != parsed.spki_der {
-                return Err(RvError::ErrString(
-                    "sign_csr: CSR SubjectPublicKeyInfo does not match the pinned managed key".into(),
-                ));
-            }
-            Some(entry)
-        };
-
-        // Decide CN + SANs based on role policy. `use_csr_common_name` /
-        // `use_csr_sans` are Vault-parity knobs that let an operator force
-        // the values from the request body even when the CSR is signed by
-        // someone the engine implicitly trusts (e.g. a Kubernetes node).
-        let common_name = if role.use_csr_common_name {
-            parsed.common_name.clone().unwrap_or_default()
-        } else {
-            req.get_data_or_default("common_name")?.as_str().unwrap_or("").to_string()
-        };
-        if common_name.is_empty() {
-            return Err(RvError::ErrPkiDataInvalid);
-        }
-        x509::validate_common_name(&role, &common_name)?;
-
-        let (mut alt_dns, mut alt_ips) = if role.use_csr_sans {
-            (parsed.requested_dns_sans.clone(), parsed.requested_ip_sans.clone())
-        } else {
-            let alt_str = req.get_data_or_default("alt_names")?.as_str().unwrap_or("").to_string();
-            x509::split_alt_names(&alt_str)
-        };
-        if !role.allow_ip_sans && !alt_ips.is_empty() {
-            return Err(RvError::ErrPkiDataInvalid);
-        }
-        // Phase L4: validate every DNS SAN against the role policy. The
-        // CN was already checked above. We dedupe the CN out of alt_dns
-        // afterwards so a CN that survives validation is not re-checked.
-        for dns in &alt_dns {
-            x509::validate_dns_name(&role, dns)?;
-        }
-        // De-dup CN out of alt_dns (rcgen treats SAN list as authoritative).
-        alt_dns.retain(|d| d != &common_name);
-        // No-op kept to silence warnings if `alt_ips` ends up unused on a
-        // future role with `allow_ip_sans = false` and no IPs.
-        let _ = &mut alt_ips;
-
-        let requested_ttl = parse_optional_ttl(req, "ttl")?;
-        let mut ttl = role.effective_ttl(requested_ttl);
-
-        // Same issuer-resolution priority as `issue_cert`:
-        //   request body > role-level pin > mount default.
-        let request_issuer_ref = req.get_data_or_default("issuer_ref")?.as_str().unwrap_or("").to_string();
-        let issuer = if !request_issuer_ref.is_empty() {
-            super::issuers::load_issuer(req, &request_issuer_ref).await?
-        } else if !role.issuer_ref.is_empty() {
-            super::issuers::load_issuer(req, &role.issuer_ref).await?
-        } else {
-            super::issuers::load_default_issuer(req).await?
-        };
-        super::issuers::require_issuing(&issuer)?;
-        // Phase L4: clamp leaf TTL to the issuer's remaining lifetime.
-        let (clamped_ttl, _was_clamped) = super::issuers::clamp_ttl_to_issuer(&issuer, ttl)?;
-        ttl = clamped_ttl;
-        let ca_cert_pem = issuer.cert_pem.clone();
-        let ca_chain = super::issuers::build_issuer_chain(req, &issuer).await?;
-        let ca_signer = super::issuers::take_signer(issuer.signer, &issuer.name)?;
-        let issuer_id = issuer.id.clone();
-
-        // `sign/:role` honours the same AD knobs as `issue/:role`. A CSR
-        // cannot carry a UPN otherName or the SID extension through our
-        // parser, so both come from the request body / role policy — the
-        // engine is the authority on what identity claim it asserts.
-        let (upn_sans, ad_sid) = resolve_ad_smartcard_input(req, &role)?;
-        let urls = load_issuance_urls(req).await?;
-        let subject = super::x509::SubjectInput {
-            common_name: common_name.clone(),
-            alt_names: alt_dns,
-            ip_sans: alt_ips,
-            upn_sans,
-            ad_sid,
-        };
-
-        // Dispatch on (CSR class, CA class). Mixed-chain rejection is the
-        // same default-secure rule as Phase 2's `pki/issue`: a PQC CA can
-        // only sign a PQC CSR, classical can only sign classical.
-        use super::csr::CsrAlgClass;
-        let (cert_pem, serial_bytes) = match (&parsed.algorithm_class, &ca_signer) {
-            (CsrAlgClass::Classical, Signer::Classical(ca_classical)) => {
-                let (cert, serial) = x509::build_leaf_from_spki(
-                    &role, &subject, ttl, &parsed.spki_der, ca_classical, &ca_cert_pem, &urls,
-                )?;
-                (cert.pem(), serial)
-            }
-            (CsrAlgClass::MlDsa(level), Signer::MlDsa(ca_ml)) => {
-                super::x509_pqc::build_leaf_from_pqc_spki(
-                    &role,
-                    &subject,
-                    ttl,
-                    &parsed.raw_public_key,
-                    *level,
-                    ca_ml,
-                    &ca_cert_pem,
-                    &urls,
-                )?
-            }
-            // Mixed CSR / CA classes — refuse to issue.
-            _ => return Err(RvError::ErrPkiKeyTypeInvalid),
-        };
-        let serial_hex = storage::serial_to_hex(&serial_bytes);
-
-        if !role.no_store {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let not_after_unix = (now as i64).saturating_add(ttl.as_secs() as i64);
-            let record = CertRecord {
-                serial_hex: serial_hex.clone(),
-                certificate_pem: cert_pem.clone(),
-                issued_at_unix: now,
-                revoked_at_unix: None,
-                not_after_unix,
-                issuer_id: issuer_id.clone(),
-                is_orphaned: false,
-                source: String::new(),
-                key_id: pinned_key.as_ref().map(|e| e.id.clone()).unwrap_or_default(),
-            };
-            storage::put_json(req, &storage::cert_storage_key(&serial_hex), &record).await?;
-        }
-
-        // Phase L2: record the binding when a managed key was pinned.
-        if let Some(entry) = &pinned_key {
-            keys::add_cert_ref(req, &entry.id, &serial_hex).await?;
-        }
-
-        let mut data: Map<String, Value> = Map::new();
-        data.insert("certificate".into(), json!(cert_pem));
-        data.insert("issuing_ca".into(), json!(ca_cert_pem));
-        data.insert("ca_chain".into(), json!(ca_chain));
-        data.insert("serial_number".into(), json!(serial_hex));
-        data.insert("issuer_id".into(), json!(issuer_id));
-        if let Some(entry) = &pinned_key {
-            data.insert("key_id".into(), json!(entry.id));
-        }
-        Ok(Some(Response::data_response(Some(data))))
+        let args = sign_args_from_request(req)?;
+        let plan = self.plan_sign(req, &SignMode::Role(role_name), &args).await?;
+        self.sign_response(req, plan).await
     }
 
     /// `pki/sign-verbatim` — sign the CSR's subject and SANs as-is, no role
@@ -429,121 +268,32 @@ impl PkiBackendInner {
     /// authorised the request out-of-band. The TTL still gets clamped to
     /// the engine's max so a runaway request can't issue a 100-year cert.
     pub async fn sign_csr_verbatim(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let csr_input = req.get_data("csr")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
-        let parsed = super::csr::parse_and_verify(&csr_input)?;
+        let args = sign_args_from_request(req)?;
+        let plan = self.plan_sign(req, &SignMode::Verbatim, &args).await?;
+        self.sign_response(req, plan).await
+    }
 
-        let common_name = parsed.common_name.clone().unwrap_or_default();
-        if common_name.is_empty() {
-            return Err(RvError::ErrPkiDataInvalid);
+    /// Execute a plan and shape the `certificate` / `issuing_ca` /
+    /// `ca_chain` / `serial_number` / `issuer_id` response every signing
+    /// path has returned since Phase 5.
+    async fn sign_response(
+        &self,
+        req: &Request,
+        plan: SignPlan,
+    ) -> Result<Option<Response>, RvError> {
+        for warning in &plan.warnings {
+            log::debug!("pki/sign: {warning}");
         }
-
-        let requested_ttl = parse_optional_ttl(req, "ttl")?;
-        // No role: cap at 30 days to match Vault's sign-verbatim default
-        // ceiling. Operators who want longer should use `sign/:role`.
-        let max = std::time::Duration::from_secs(30 * 24 * 3600);
-        let mut ttl = match requested_ttl {
-            Some(d) if !d.is_zero() => std::cmp::min(d, max),
-            _ => max,
-        };
-
-        // sign-verbatim takes the same `issuer_ref` knob as sign/:role.
-        let request_issuer_ref = req.get_data_or_default("issuer_ref")?.as_str().unwrap_or("").to_string();
-        let issuer = if !request_issuer_ref.is_empty() {
-            super::issuers::load_issuer(req, &request_issuer_ref).await?
-        } else {
-            super::issuers::load_default_issuer(req).await?
-        };
-        super::issuers::require_issuing(&issuer)?;
-        // Phase L4: clamp TTL to issuer's remaining lifetime even on
-        // sign-verbatim (no role gate, but the chain rule still holds).
-        let (clamped_ttl, _was_clamped) = super::issuers::clamp_ttl_to_issuer(&issuer, ttl)?;
-        ttl = clamped_ttl;
-        let ca_cert_pem = issuer.cert_pem.clone();
-        let ca_chain = super::issuers::build_issuer_chain(req, &issuer).await?;
-        let ca_signer = super::issuers::take_signer(issuer.signer, &issuer.name)?;
-        let issuer_id = issuer.id.clone();
-
-        // Synthesize a permissive role: server+client EKUs, no CN
-        // restrictions. The CSR-supplied SANs flow through unmodified.
-        let role = super::path_roles::RoleEntry {
-            ttl,
-            max_ttl: ttl,
-            not_before_duration: std::time::Duration::from_secs(30),
-            key_type: "ec".to_string(),
-            allow_any_name: true,
-            allow_ip_sans: true,
-            server_flag: true,
-            client_flag: true,
-            ..Default::default()
-        };
-
-        let mut alt_dns = parsed.requested_dns_sans.clone();
-        alt_dns.retain(|d| d != &common_name);
-        // sign-verbatim deliberately carries no AD smart-card material:
-        // there is no role to gate it, and an unauthenticated identity
-        // claim is exactly what the SID extension must never be.
-        let urls = load_issuance_urls(req).await?;
-        let subject = super::x509::SubjectInput {
-            common_name: common_name.clone(),
-            alt_names: alt_dns,
-            ip_sans: parsed.requested_ip_sans.clone(),
-            ..Default::default()
-        };
-
-        // Same class-match dispatch as `sign_csr_role`. PQC CSR + PQC CA →
-        // PQC builder; classical + classical → rcgen builder; mixed →
-        // reject (default-secure). Phase 5.1 closes the gap that PQC roles
-        // could `issue` but not sign a CSR.
-        use super::csr::CsrAlgClass;
-        let (cert_pem, serial_bytes) = match (&parsed.algorithm_class, &ca_signer) {
-            (CsrAlgClass::Classical, Signer::Classical(ca_classical)) => {
-                let (cert, serial) = x509::build_leaf_from_spki(
-                    &role, &subject, ttl, &parsed.spki_der, ca_classical, &ca_cert_pem, &urls,
-                )?;
-                (cert.pem(), serial)
-            }
-            (CsrAlgClass::MlDsa(level), Signer::MlDsa(ca_ml)) => {
-                super::x509_pqc::build_leaf_from_pqc_spki(
-                    &role,
-                    &subject,
-                    ttl,
-                    &parsed.raw_public_key,
-                    *level,
-                    ca_ml,
-                    &ca_cert_pem,
-                    &urls,
-                )?
-            }
-            _ => return Err(RvError::ErrPkiKeyTypeInvalid),
-        };
-        let serial_hex = storage::serial_to_hex(&serial_bytes);
-
-        // sign-verbatim records get persisted unconditionally (Vault parity)
-        // so they show up in revocation flows.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let record = CertRecord {
-            serial_hex: serial_hex.clone(),
-            certificate_pem: cert_pem.clone(),
-            issued_at_unix: now,
-            revoked_at_unix: None,
-            not_after_unix: (now as i64).saturating_add(ttl.as_secs() as i64),
-            issuer_id: issuer_id.clone(),
-            is_orphaned: false,
-            source: String::new(),
-            key_id: String::new(),
-        };
-        storage::put_json(req, &storage::cert_storage_key(&serial_hex), &record).await?;
-
+        let outcome = self.execute_sign(req, plan).await?;
         let mut data: Map<String, Value> = Map::new();
-        data.insert("certificate".into(), json!(cert_pem));
-        data.insert("issuing_ca".into(), json!(ca_cert_pem));
-        data.insert("ca_chain".into(), json!(ca_chain));
-        data.insert("serial_number".into(), json!(serial_hex));
-        data.insert("issuer_id".into(), json!(issuer_id));
+        data.insert("certificate".into(), json!(outcome.certificate));
+        data.insert("issuing_ca".into(), json!(outcome.issuing_ca));
+        data.insert("ca_chain".into(), json!(outcome.ca_chain));
+        data.insert("serial_number".into(), json!(outcome.serial_hex));
+        data.insert("issuer_id".into(), json!(outcome.issuer_id));
+        if !outcome.key_id.is_empty() {
+            data.insert("key_id".into(), json!(outcome.key_id));
+        }
         Ok(Some(Response::data_response(Some(data))))
     }
 }
@@ -559,7 +309,7 @@ impl PkiBackendInner {
 ///   the role's algorithm.
 /// - `ErrString("...")` — the key reference doesn't resolve.
 #[maybe_async::maybe_async]
-async fn resolve_pinned_key(
+pub(crate) async fn resolve_pinned_key(
     req: &Request,
     role: &RoleEntry,
     key_ref: &str,
@@ -602,7 +352,7 @@ async fn resolve_pinned_key(
 /// opted in. AD smart-card logon wants a reachable CDP so the domain
 /// controller has a revocation source for the logon certificate.
 #[maybe_async::maybe_async]
-async fn load_issuance_urls(req: &Request) -> Result<x509::IssuanceUrls, RvError> {
+pub(crate) async fn load_issuance_urls(req: &Request) -> Result<x509::IssuanceUrls, RvError> {
     let cfg: storage::UrlsConfig =
         storage::get_json(req, storage::KEY_CONFIG_URLS).await?.unwrap_or_default();
     Ok(x509::IssuanceUrls {
@@ -629,6 +379,18 @@ fn resolve_ad_smartcard_input(
     role: &RoleEntry,
 ) -> Result<(Vec<String>, Option<String>), RvError> {
     let upn_raw = req.get_data_or_default("upn_sans")?.as_str().unwrap_or("").to_string();
+    let sid_raw = req.get_data_or_default("ad_sid")?.as_str().unwrap_or("").to_string();
+    resolve_ad_smartcard(role, &upn_raw, &sid_raw)
+}
+
+/// The body of [`resolve_ad_smartcard_input`], over plain strings, so the
+/// inbound sign-request queue ([`super::path_sign_request`]) can apply the
+/// identical policy to a body whose field names it owns.
+pub(crate) fn resolve_ad_smartcard(
+    role: &RoleEntry,
+    upn_raw: &str,
+    sid_raw: &str,
+) -> Result<(Vec<String>, Option<String>), RvError> {
     let mut upn_sans: Vec<String> = Vec::new();
     for candidate in upn_raw.split(',') {
         let upn = candidate.trim();
@@ -641,7 +403,7 @@ fn resolve_ad_smartcard_input(
         }
     }
 
-    let requested_sid = req.get_data_or_default("ad_sid")?.as_str().unwrap_or("").trim().to_string();
+    let requested_sid = sid_raw.trim().to_string();
     let sid_source = if !requested_sid.is_empty() {
         Some(requested_sid)
     } else if !role.ad_sid.trim().is_empty() {
@@ -667,4 +429,34 @@ fn parse_optional_ttl(req: &Request, key: &str) -> Result<Option<Duration>, RvEr
         return Ok(None);
     }
     parse_duration(s).map(Some).map_err(|_| RvError::ErrRequestFieldInvalid)
+}
+
+/// Collect the signing knobs from a request body into a [`SignArgs`].
+///
+/// Every field is optional here rather than at this layer's edge: the two
+/// `sign` paths declare different subsets (`sign-verbatim` has no
+/// `key_ref` / `common_name` / `alt_names` / AD fields), and
+/// [`super::sign_flow`] is where "not accepted in this mode" is decided and
+/// reported. A field the path does not declare reads as unset; a field
+/// declared with the wrong JSON type still errors.
+fn sign_args_from_request(req: &Request) -> Result<SignArgs, RvError> {
+    Ok(SignArgs {
+        csr: optional_str_field(req, "csr")?,
+        common_name: optional_str_field(req, "common_name")?,
+        alt_names: optional_str_field(req, "alt_names")?,
+        ttl: optional_str_field(req, "ttl")?,
+        issuer_ref: optional_str_field(req, "issuer_ref")?,
+        key_ref: optional_str_field(req, "key_ref")?,
+        upn_sans: optional_str_field(req, "upn_sans")?,
+        ad_sid: optional_str_field(req, "ad_sid")?,
+    })
+}
+
+fn optional_str_field(req: &Request, key: &str) -> Result<String, RvError> {
+    match req.get_data_or_default(key) {
+        Ok(v) => Ok(v.as_str().unwrap_or("").to_string()),
+        // The matched path does not declare this field — unset, not an error.
+        Err(RvError::ErrRequestNoDataField) => Ok(String::new()),
+        Err(e) => Err(e),
+    }
 }

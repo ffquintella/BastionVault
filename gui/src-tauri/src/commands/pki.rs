@@ -2720,3 +2720,358 @@ mod tests {
         assert!(out[0].contains("BEGIN CERTIFICATE"));
     }
 }
+
+// ── Inbound sign requests (`pki/sign-request/*`) ──────────────────
+//
+// The mirror of the `pki/csr/*` block above: a CSR that arrived from
+// outside, parked while an operator decides how — or whether — to sign
+// it. See features/pki-inbound-sign-requests.md.
+
+/// One inbound sign request, plus its decision once it has one.
+#[derive(Serialize, Clone)]
+pub struct PkiSignRequest {
+    pub request_id: String,
+    /// `pending` | `signed` | `rejected`.
+    pub status: String,
+    pub subject_dn: String,
+    pub common_name: String,
+    pub dns_sans: Vec<String>,
+    pub ip_sans: Vec<String>,
+    pub key_description: String,
+    pub spki_sha256: String,
+    pub requester: String,
+    pub notes: String,
+    pub suggested_role: String,
+    pub created_at: u64,
+    pub imported_by: String,
+    pub decided_at: u64,
+    pub decided_by: String,
+    pub reject_reason: String,
+    pub sign_mode: String,
+    pub role: String,
+    pub serial_number: String,
+    pub issuer_id: String,
+    /// The CSR PEM — present on read, absent from list summaries.
+    #[serde(default)]
+    pub csr: String,
+    /// The issued certificate, once approved.
+    #[serde(default)]
+    pub certificate: String,
+}
+
+fn sign_request_from_map(map: &Map<String, Value>) -> PkiSignRequest {
+    PkiSignRequest {
+        request_id: val_str(map, "request_id"),
+        status: val_str(map, "status"),
+        subject_dn: val_str(map, "subject_dn"),
+        common_name: val_str(map, "common_name"),
+        dns_sans: val_str_array(map, "dns_sans"),
+        ip_sans: val_str_array(map, "ip_sans"),
+        key_description: val_str(map, "key_description"),
+        spki_sha256: val_str(map, "spki_sha256"),
+        requester: val_str(map, "requester"),
+        notes: val_str(map, "notes"),
+        suggested_role: val_str(map, "suggested_role"),
+        created_at: val_u64(map, "created_at"),
+        imported_by: val_str(map, "imported_by"),
+        decided_at: val_u64(map, "decided_at"),
+        decided_by: val_str(map, "decided_by"),
+        reject_reason: val_str(map, "reject_reason"),
+        sign_mode: val_str(map, "sign_mode"),
+        role: val_str(map, "role"),
+        serial_number: val_str(map, "serial_number"),
+        issuer_id: val_str(map, "issuer_id"),
+        csr: val_str(map, "csr"),
+        certificate: val_str(map, "certificate"),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PkiSignRequestImportRequest {
+    pub mount: String,
+    pub csr: String,
+    pub requester: Option<String>,
+    pub notes: Option<String>,
+    pub suggested_role: Option<String>,
+    /// Accept a CSR whose public key already has a pending request.
+    pub allow_duplicate: Option<bool>,
+}
+
+#[tauri::command]
+pub async fn pki_sign_request_import(
+    state: State<'_, AppState>,
+    request: PkiSignRequestImportRequest,
+) -> CmdResult<PkiSignRequest> {
+    let mount = mount_prefix(&request.mount);
+    let mut body = Map::new();
+    body.insert("csr".into(), json!(request.csr));
+    if let Some(v) = request.requester.filter(|s| !s.trim().is_empty()) {
+        body.insert("requester".into(), json!(v));
+    }
+    if let Some(v) = request.notes.filter(|s| !s.trim().is_empty()) {
+        body.insert("notes".into(), json!(v));
+    }
+    if let Some(v) = request.suggested_role.filter(|s| !s.trim().is_empty()) {
+        body.insert("suggested_role".into(), json!(v));
+    }
+    if request.allow_duplicate.unwrap_or(false) {
+        body.insert("allow_duplicate".into(), json!(true));
+    }
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{mount}/sign-request/import"),
+        Some(body),
+    )
+    .await?;
+    Ok(sign_request_from_map(&data_to_map(resp)))
+}
+
+#[tauri::command]
+pub async fn pki_sign_request_list(
+    state: State<'_, AppState>,
+    mount: String,
+) -> CmdResult<Vec<String>> {
+    let mount = mount_prefix(&mount);
+    let resp = make_request(&state, Operation::List, format!("{mount}/sign-request"), None).await?;
+    Ok(val_str_array(&data_to_map(resp), "keys"))
+}
+
+#[tauri::command]
+pub async fn pki_sign_request_read(
+    state: State<'_, AppState>,
+    mount: String,
+    request_id: String,
+) -> CmdResult<Option<PkiSignRequest>> {
+    let mount = mount_prefix(&mount);
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{mount}/sign-request/{request_id}"),
+        None,
+    )
+    .await
+    .ok();
+    let Some(resp) = resp else { return Ok(None) };
+    let map = data_to_map(resp);
+    if map.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(sign_request_from_map(&map)))
+}
+
+#[tauri::command]
+pub async fn pki_sign_request_delete(
+    state: State<'_, AppState>,
+    mount: String,
+    request_id: String,
+) -> CmdResult<()> {
+    let mount = mount_prefix(&mount);
+    make_request(
+        &state,
+        Operation::Delete,
+        format!("{mount}/sign-request/{request_id}"),
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+/// The signing knobs shared by preflight and approve. `mode` is `role` or
+/// `verbatim`; on preflight both may be omitted to evaluate the whole
+/// decision surface at once.
+#[derive(Deserialize)]
+pub struct PkiSignRequestDecideRequest {
+    pub mount: String,
+    pub request_id: String,
+    pub mode: Option<String>,
+    pub role: Option<String>,
+    pub common_name: Option<String>,
+    pub alt_names: Option<String>,
+    pub ttl: Option<String>,
+    pub issuer_ref: Option<String>,
+    pub key_ref: Option<String>,
+    pub upn_sans: Option<String>,
+    pub ad_sid: Option<String>,
+}
+
+impl PkiSignRequestDecideRequest {
+    fn body(&self) -> Map<String, Value> {
+        let mut body = Map::new();
+        let mut put = |key: &str, value: &Option<String>| {
+            if let Some(v) = value.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                body.insert(key.into(), json!(v));
+            }
+        };
+        put("mode", &self.mode);
+        put("role", &self.role);
+        put("common_name", &self.common_name);
+        put("alt_names", &self.alt_names);
+        put("ttl", &self.ttl);
+        put("issuer_ref", &self.issuer_ref);
+        put("key_ref", &self.key_ref);
+        put("upn_sans", &self.upn_sans);
+        put("ad_sid", &self.ad_sid);
+        body
+    }
+}
+
+/// One row of the dry run: what a given mode/role would produce, or why
+/// it would refuse.
+#[derive(Serialize)]
+pub struct PkiSignVerdict {
+    pub mode: String,
+    pub role: String,
+    pub allowed: bool,
+    /// Populated when `allowed` is false.
+    pub reason: String,
+    /// Which specific value the role refused, when the engine's error
+    /// alone doesn't say.
+    pub hints: Vec<String>,
+    pub common_name: String,
+    pub dns_sans: Vec<String>,
+    pub ip_sans: Vec<String>,
+    pub upn_sans: Vec<String>,
+    pub ad_sid: String,
+    pub ttl_seconds: u64,
+    pub ttl_clamped: bool,
+    pub not_after: i64,
+    pub issuer_id: String,
+    pub issuer_name: String,
+    pub issuer_not_after: i64,
+    pub key_description: String,
+    pub key_id: String,
+    /// Legal but notable — policy bypass, dropped SANs, key-type drift.
+    pub warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct PkiSignRequestPreflight {
+    pub request: PkiSignRequest,
+    pub verdicts: Vec<PkiSignVerdict>,
+}
+
+#[tauri::command]
+pub async fn pki_sign_request_preflight(
+    state: State<'_, AppState>,
+    request: PkiSignRequestDecideRequest,
+) -> CmdResult<PkiSignRequestPreflight> {
+    let mount = mount_prefix(&request.mount);
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{mount}/sign-request/{}/preflight", request.request_id),
+        Some(request.body()),
+    )
+    .await?;
+    let map = data_to_map(resp);
+    let verdicts = map
+        .get("verdicts")
+        .and_then(|v| v.as_array())
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.as_object())
+                .map(|row| PkiSignVerdict {
+                    mode: val_str(row, "mode"),
+                    role: val_str(row, "role"),
+                    allowed: val_bool(row, "allowed"),
+                    reason: val_str(row, "reason"),
+                    hints: val_str_array(row, "hints"),
+                    common_name: val_str(row, "common_name"),
+                    dns_sans: val_str_array(row, "dns_sans"),
+                    ip_sans: val_str_array(row, "ip_sans"),
+                    upn_sans: val_str_array(row, "upn_sans"),
+                    ad_sid: val_str(row, "ad_sid"),
+                    ttl_seconds: val_u64(row, "ttl_seconds"),
+                    ttl_clamped: val_bool(row, "ttl_clamped"),
+                    not_after: val_i64(row, "not_after"),
+                    issuer_id: val_str(row, "issuer_id"),
+                    issuer_name: val_str(row, "issuer_name"),
+                    issuer_not_after: val_i64(row, "issuer_not_after"),
+                    key_description: val_str(row, "key_description"),
+                    key_id: val_str(row, "key_id"),
+                    warnings: val_str_array(row, "warnings"),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(PkiSignRequestPreflight { request: sign_request_from_map(&map), verdicts })
+}
+
+#[derive(Serialize)]
+pub struct PkiSignRequestApproval {
+    pub request: PkiSignRequest,
+    pub certificate: String,
+    pub issuing_ca: String,
+    pub ca_chain: Vec<String>,
+    pub ttl_seconds: u64,
+    pub not_after: i64,
+    pub warnings: Vec<String>,
+    pub key_id: String,
+}
+
+/// Approve a request. `mode = verbatim` routes to the engine's separate
+/// `approve-verbatim` path rather than passing a flag: verbatim bypasses
+/// role policy, and a policy that grants role-approval must not thereby
+/// grant a policy-free signature. The two are distinct capabilities in a
+/// policy file because they are distinct paths.
+#[tauri::command]
+pub async fn pki_sign_request_approve(
+    state: State<'_, AppState>,
+    request: PkiSignRequestDecideRequest,
+) -> CmdResult<PkiSignRequestApproval> {
+    let mount = mount_prefix(&request.mount);
+    let verbatim = request.mode.as_deref().map(str::trim) == Some("verbatim");
+    let route = if verbatim { "approve-verbatim" } else { "approve" };
+    let mut body = request.body();
+    // `mode` is the GUI's own selector; the engine infers it from the path.
+    body.remove("mode");
+    if verbatim {
+        // The verbatim path declares only these two knobs; sending a
+        // role-only field would be rejected as an unknown field.
+        body.retain(|k, _| k == "ttl" || k == "issuer_ref");
+    }
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{mount}/sign-request/{}/{route}", request.request_id),
+        Some(body),
+    )
+    .await?;
+    let map = data_to_map(resp);
+    Ok(PkiSignRequestApproval {
+        request: sign_request_from_map(&map),
+        certificate: val_str(&map, "certificate"),
+        issuing_ca: val_str(&map, "issuing_ca"),
+        ca_chain: val_str_array(&map, "ca_chain"),
+        ttl_seconds: val_u64(&map, "ttl_seconds"),
+        not_after: val_i64(&map, "not_after"),
+        warnings: val_str_array(&map, "warnings"),
+        key_id: val_str(&map, "key_id"),
+    })
+}
+
+#[derive(Deserialize)]
+pub struct PkiSignRequestRejectRequest {
+    pub mount: String,
+    pub request_id: String,
+    pub reason: String,
+}
+
+#[tauri::command]
+pub async fn pki_sign_request_reject(
+    state: State<'_, AppState>,
+    request: PkiSignRequestRejectRequest,
+) -> CmdResult<PkiSignRequest> {
+    let mount = mount_prefix(&request.mount);
+    let mut body = Map::new();
+    body.insert("reason".into(), json!(request.reason));
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{mount}/sign-request/{}/reject", request.request_id),
+        Some(body),
+    )
+    .await?;
+    Ok(sign_request_from_map(&data_to_map(resp)))
+}

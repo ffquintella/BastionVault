@@ -151,6 +151,7 @@ type TabId =
   | "issue"
   | "certs"
   | "csr"
+  | "signreq"
   | "tidy"
   | "xca";
 
@@ -441,7 +442,8 @@ export function PkiPage() {
                     : []),
                   { id: "issue", label: "Issue" },
                   { id: "certs", label: "Certificates" },
-                  { id: "csr", label: "External CSR" },
+                  { id: "csr", label: "Outgoing CSR" },
+                  { id: "signreq", label: "Sign Requests" },
                   ...(isAdmin
                     ? ([{ id: "tidy", label: "Tidy" }] as { id: TabId; label: string }[])
                     : []),
@@ -460,6 +462,7 @@ export function PkiPage() {
             {tab === "issue" && <IssueTab mount={activeMount} />}
             {tab === "certs" && <CertsTab mount={activeMount} />}
             {tab === "csr" && <ExternalCsrTab mount={activeMount} />}
+            {tab === "signreq" && <SignRequestsTab mount={activeMount} />}
             {tab === "tidy" && <TidyTab mount={activeMount} />}
             {tab === "xca" && xcaPluginPresent && (
               <XcaImportTab mount={activeMount} pluginVersion={xcaPluginVersion} />
@@ -5304,6 +5307,851 @@ function Field({
       >
         {value || "—"}
       </div>
+    </div>
+  );
+}
+
+// ── Sign Requests tab — inbound CSRs awaiting a decision ─────────────
+//
+// The mirror of ExternalCsrTab above. There, we generate a CSR and an
+// upstream CA signs it. Here, someone else generated the CSR and we are
+// the CA: import it, see what it actually asks for, dry-run it against
+// every role, then sign it (under a role, or verbatim) or refuse it with
+// a reason that stays on the record.
+//
+// Mirrors `pki/sign-request/*`. See features/pki-inbound-sign-requests.md.
+
+const SIGN_REQUEST_STATUS_VARIANTS: Record<string, "warning" | "success" | "error"> = {
+  pending: "warning",
+  signed: "success",
+  rejected: "error",
+};
+
+function unixLabel(seconds: number): string {
+  if (!seconds) return "—";
+  return new Date(seconds * 1000).toLocaleString();
+}
+
+function ttlLabel(seconds: number): string {
+  if (!seconds) return "—";
+  const hours = Math.round(seconds / 3600);
+  if (hours < 48) return `${hours}h`;
+  return `${Math.round(hours / 24)}d (${hours}h)`;
+}
+
+function SignRequestsTab({ mount }: { mount: string }) {
+  const { toast } = useToast();
+  const [roles, setRoles] = useState<string[]>([]);
+  const [requests, setRequests] = useState<api.PkiSignRequest[]>([]);
+  const [statusFilter, setStatusFilter] = useState("pending");
+  const [busy, setBusy] = useState(false);
+
+  // Import form
+  const [csrText, setCsrText] = useState("");
+  const [csrFileName, setCsrFileName] = useState("");
+  const [requester, setRequester] = useState("");
+  const [notes, setNotes] = useState("");
+  const [suggestedRole, setSuggestedRole] = useState("");
+  const [allowDuplicate, setAllowDuplicate] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Review panel
+  const [selected, setSelected] = useState<api.PkiSignRequest | null>(null);
+  const [verdicts, setVerdicts] = useState<api.PkiSignVerdict[] | null>(null);
+  const [showCsr, setShowCsr] = useState(false);
+  const [mode, setMode] = useState("role");
+  const [role, setRole] = useState("");
+  const [overrideCn, setOverrideCn] = useState("");
+  const [overrideSans, setOverrideSans] = useState("");
+  const [ttl, setTtl] = useState("");
+  const [issuerRef, setIssuerRef] = useState("");
+  const [keyRef, setKeyRef] = useState("");
+  const [rejectReason, setRejectReason] = useState("");
+  const [approval, setApproval] = useState<api.PkiSignRequestApproval | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+
+  const loadRoles = useCallback(async () => {
+    if (!mount) return;
+    try {
+      setRoles(await api.pkiListRoles(mount));
+    } catch (e) {
+      toast("error", extractError(e));
+    }
+  }, [mount, toast]);
+
+  const loadRequests = useCallback(async () => {
+    if (!mount) return;
+    try {
+      const ids = await api.pkiSignRequestList(mount);
+      const records = await Promise.all(
+        ids.map((id) => api.pkiSignRequestRead(mount, id).catch(() => null)),
+      );
+      const rows = records.filter((r): r is api.PkiSignRequest => !!r);
+      rows.sort((a, b) => b.created_at - a.created_at);
+      setRequests(rows);
+    } catch (e) {
+      toast("error", extractError(e));
+    }
+  }, [mount, toast]);
+
+  useEffect(() => {
+    loadRoles();
+    loadRequests();
+  }, [loadRoles, loadRequests]);
+
+  const visible = useMemo(
+    () =>
+      statusFilter === "all"
+        ? requests
+        : requests.filter((r) => r.status === statusFilter),
+    [requests, statusFilter],
+  );
+
+  const pendingCount = useMemo(
+    () => requests.filter((r) => r.status === "pending").length,
+    [requests],
+  );
+
+  /** Read a chosen CSR file as text. DER would arrive as mojibake, so we
+   *  only accept the armoured form here — the engine takes either, but a
+   *  paste box cannot carry binary. */
+  function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result || "");
+      if (!text.includes("BEGIN CERTIFICATE REQUEST") && !text.includes("BEGIN NEW CERTIFICATE REQUEST")) {
+        toast(
+          "error",
+          "That file has no PEM certificate-request block. Convert a DER CSR first: openssl req -inform DER -in req.der -out req.pem",
+        );
+        return;
+      }
+      setCsrText(text);
+      setCsrFileName(file.name);
+    };
+    reader.onerror = () => toast("error", "Could not read that file.");
+    reader.readAsText(file);
+  }
+
+  async function handleImport() {
+    if (!csrText.trim()) {
+      toast("error", "Paste a CSR, or choose a .pem/.csr file.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const record = await api.pkiSignRequestImport({
+        mount,
+        csr: csrText.trim(),
+        requester: requester.trim() || undefined,
+        notes: notes.trim() || undefined,
+        suggested_role: suggestedRole || undefined,
+        allow_duplicate: allowDuplicate || undefined,
+      });
+      toast("success", `Imported request for ${record.common_name || "(no CN)"}.`);
+      setCsrText("");
+      setCsrFileName("");
+      setRequester("");
+      setNotes("");
+      setSuggestedRole("");
+      setAllowDuplicate(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      await loadRequests();
+      openReview(record);
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openReview(record: api.PkiSignRequest) {
+    setSelected(record);
+    setVerdicts(null);
+    setApproval(null);
+    setShowCsr(false);
+    setMode("role");
+    setRole(record.suggested_role || "");
+    setOverrideCn("");
+    setOverrideSans("");
+    setTtl("");
+    setIssuerRef("");
+    setKeyRef("");
+    setRejectReason("");
+    // Fetch the full record: the list rows carry no CSR PEM.
+    api
+      .pkiSignRequestRead(mount, record.request_id)
+      .then((full) => full && setSelected(full))
+      .catch((e) => toast("error", extractError(e)));
+  }
+
+  function decideBody() {
+    if (!selected) return null;
+    return {
+      mount,
+      request_id: selected.request_id,
+      mode,
+      role: mode === "role" ? role : undefined,
+      common_name: overrideCn.trim() || undefined,
+      alt_names: overrideSans.trim() || undefined,
+      ttl: ttl.trim() || undefined,
+      issuer_ref: issuerRef.trim() || undefined,
+      key_ref: keyRef.trim() || undefined,
+    };
+  }
+
+  /** Dry run. With no mode/role, the engine evaluates verbatim plus every
+   *  role, which is what an operator wants the first time they look. */
+  async function handlePreflight(allModes: boolean) {
+    if (!selected) return;
+    setBusy(true);
+    try {
+      const body = allModes
+        ? { mount, request_id: selected.request_id }
+        : decideBody()!;
+      const result = await api.pkiSignRequestPreflight(body);
+      setVerdicts(result.verdicts);
+      if (result.verdicts.length === 0) {
+        toast("error", "No roles are defined on this mount, and verbatim was not evaluated.");
+      }
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleApprove() {
+    if (!selected) return;
+    if (mode === "role" && !role) {
+      toast("error", "Pick the role to sign under.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await api.pkiSignRequestApprove(decideBody()!);
+      setApproval(result);
+      setSelected(result.request);
+      toast("success", `Signed — serial ${result.request.serial_number.slice(0, 16)}…`);
+      await loadRequests();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleReject() {
+    if (!selected) return;
+    if (!rejectReason.trim()) {
+      toast("error", "A reason is required — it is what the record is for.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const updated = await api.pkiSignRequestReject({
+        mount,
+        request_id: selected.request_id,
+        reason: rejectReason.trim(),
+      });
+      setSelected(updated);
+      setRejectReason("");
+      toast("success", "Request rejected.");
+      await loadRequests();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDelete(requestId: string) {
+    setBusy(true);
+    try {
+      await api.pkiSignRequestDelete(mount, requestId);
+      toast("success", "Request deleted.");
+      if (selected?.request_id === requestId) setSelected(null);
+      await loadRequests();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+      setConfirmDelete(null);
+    }
+  }
+
+  async function copyToClipboard(text: string, label: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("success", `${label} copied to clipboard.`);
+    } catch (e) {
+      toast("error", `Copy failed: ${extractError(e)}`);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <div className="space-y-3">
+          <div>
+            <h3 className="text-base font-semibold">Import a CSR</h3>
+            <p className="text-xs text-[var(--color-text-muted)] mt-1">
+              For a PKCS#10 request generated somewhere else. The engine
+              verifies the CSR's self-signature before accepting it, then
+              parks it here until you decide. Nothing is signed at import.
+            </p>
+          </div>
+
+          <Textarea
+            label="CSR (PEM)"
+            value={csrText}
+            onChange={(e) => setCsrText(e.target.value)}
+            rows={6}
+            placeholder="-----BEGIN CERTIFICATE REQUEST-----"
+            className="font-mono text-xs"
+          />
+
+          <div className="flex items-center gap-3">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csr,.pem,.req,.p10,application/pkcs10"
+              onChange={onFile}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="px-3 py-1.5 rounded-lg border border-[var(--color-border)] text-sm hover:border-[var(--color-primary)] hover:text-[var(--color-primary)]"
+            >
+              {csrFileName ? "Choose a different file" : "Choose file…"}
+            </button>
+            {csrFileName ? (
+              <code className="text-xs text-[var(--color-text-muted)] truncate min-w-0">
+                {csrFileName}
+              </code>
+            ) : (
+              <span className="text-xs text-[var(--color-text-muted)]">
+                or paste above
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              label="Requester"
+              value={requester}
+              onChange={(e) => setRequester(e.target.value)}
+              placeholder="who asked for this certificate"
+            />
+            <Select
+              label="Suggested role (optional)"
+              value={suggestedRole}
+              onChange={(e) => setSuggestedRole(e.target.value)}
+              options={[
+                { value: "", label: "— none —" },
+                ...roles.map((r) => ({ value: r, label: r })),
+              ]}
+            />
+            <div className="col-span-2">
+              <Input
+                label="Notes"
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="ticket reference, context for the approver"
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <label className="inline-flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={allowDuplicate}
+                onChange={(e) => setAllowDuplicate(e.target.checked)}
+              />
+              <span className="text-[var(--color-text-muted)]">
+                Allow a duplicate of a pending request for the same key
+              </span>
+            </label>
+            <Button onClick={handleImport} disabled={busy || !mount}>
+              {busy ? "Importing…" : "Import CSR"}
+            </Button>
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <h3 className="text-base font-semibold">Sign requests</h3>
+              {pendingCount > 0 && (
+                <Badge variant="warning" label={`${pendingCount} pending`} />
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <Select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                options={[
+                  { value: "pending", label: "Pending" },
+                  { value: "signed", label: "Signed" },
+                  { value: "rejected", label: "Rejected" },
+                  { value: "all", label: "All" },
+                ]}
+              />
+              <Button variant="ghost" onClick={loadRequests} disabled={busy}>
+                Refresh
+              </Button>
+            </div>
+          </div>
+
+          {visible.length === 0 ? (
+            <EmptyState
+              title={
+                statusFilter === "pending"
+                  ? "Nothing waiting on a decision"
+                  : "No requests with that status"
+              }
+              description="CSRs you import above land here until you approve or reject them."
+            />
+          ) : (
+            <Table
+              tableClassName="table-fixed"
+              columns={[
+                {
+                  key: "common_name",
+                  header: "Common Name",
+                  className: "w-1/4",
+                  render: (r) => (
+                    <span className="truncate block min-w-0">
+                      {r.common_name || "—"}
+                    </span>
+                  ),
+                },
+                {
+                  key: "key_description",
+                  header: "Key",
+                  className: "w-28",
+                  render: (r) => (
+                    <code className="text-xs">{r.key_description || "—"}</code>
+                  ),
+                },
+                {
+                  key: "status",
+                  header: "Status",
+                  className: "w-28",
+                  render: (r) => (
+                    <Badge
+                      variant={SIGN_REQUEST_STATUS_VARIANTS[r.status] || "neutral"}
+                      label={r.status}
+                    />
+                  ),
+                },
+                {
+                  key: "requester",
+                  header: "Requester",
+                  className: "w-1/5",
+                  render: (r) => (
+                    <span className="truncate block min-w-0">
+                      {r.requester || "—"}
+                    </span>
+                  ),
+                },
+                {
+                  key: "created_at",
+                  header: "Imported",
+                  className: "w-40",
+                  render: (r) => (
+                    <span className="text-xs text-[var(--color-text-muted)]">
+                      {unixLabel(r.created_at)}
+                    </span>
+                  ),
+                },
+                {
+                  key: "actions",
+                  header: "",
+                  className: "w-40",
+                  render: (r) => (
+                    <div className="flex gap-2 justify-end">
+                      <Button variant="ghost" onClick={() => openReview(r)}>
+                        {r.status === "pending" ? "Review" : "Open"}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        onClick={() => setConfirmDelete(r.request_id)}
+                      >
+                        Delete
+                      </Button>
+                    </div>
+                  ),
+                },
+              ]}
+              data={visible}
+              rowKey={(r) => r.request_id}
+              onRowClick={(r) => openReview(r)}
+            />
+          )}
+        </div>
+      </Card>
+
+      {selected && (
+        <Card>
+          <div className="space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h3 className="text-base font-semibold flex items-center gap-2">
+                  <span className="truncate">
+                    {selected.common_name || "(no common name)"}
+                  </span>
+                  <Badge
+                    variant={SIGN_REQUEST_STATUS_VARIANTS[selected.status] || "neutral"}
+                    label={selected.status}
+                  />
+                </h3>
+                <p className="text-xs text-[var(--color-text-muted)] mt-1 font-mono truncate">
+                  {selected.request_id}
+                </p>
+              </div>
+              <Button variant="ghost" onClick={() => setSelected(null)}>
+                Close
+              </Button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              <Field label="Subject DN" value={selected.subject_dn} mono />
+              <Field label="Key" value={selected.key_description} />
+              <Field label="Public key SHA-256" value={selected.spki_sha256} mono />
+              <Field label="DNS SANs" value={selected.dns_sans.join(", ")} />
+              <Field label="IP SANs" value={selected.ip_sans.join(", ")} />
+              <Field label="Suggested role" value={selected.suggested_role} />
+              <Field label="Requester" value={selected.requester} />
+              <Field label="Imported by" value={selected.imported_by} />
+              <Field label="Imported" value={unixLabel(selected.created_at)} />
+              {selected.notes ? (
+                <div className="sm:col-span-2 lg:col-span-3">
+                  <Field label="Notes" value={selected.notes} />
+                </div>
+              ) : null}
+            </div>
+
+            <div>
+              <Button variant="ghost" onClick={() => setShowCsr((v) => !v)}>
+                {showCsr ? "Hide CSR" : "Show CSR"}
+              </Button>
+              {selected.csr ? (
+                <Button
+                  variant="ghost"
+                  onClick={() => copyToClipboard(selected.csr, "CSR")}
+                >
+                  Copy CSR
+                </Button>
+              ) : null}
+              {showCsr && (
+                <pre className="mt-2 bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded p-2 text-xs font-mono whitespace-pre-wrap break-all max-h-64 overflow-y-auto">
+                  {selected.csr || "(not loaded)"}
+                </pre>
+              )}
+            </div>
+
+            {selected.status === "pending" ? (
+              <>
+                <div className="border-t border-[var(--color-border)] pt-4 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <h4 className="text-sm font-semibold">Decide</h4>
+                    <Button
+                      variant="ghost"
+                      onClick={() => handlePreflight(true)}
+                      disabled={busy}
+                    >
+                      {busy ? "Checking…" : "Check every role"}
+                    </Button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <Select
+                      label="Mode"
+                      value={mode}
+                      onChange={(e) => setMode(e.target.value)}
+                      options={[
+                        { value: "role", label: "Sign against a role (policy applies)" },
+                        { value: "verbatim", label: "Verbatim — bypass role policy" },
+                      ]}
+                    />
+                    {mode === "role" ? (
+                      <Select
+                        label="Role"
+                        value={role}
+                        onChange={(e) => setRole(e.target.value)}
+                        options={[
+                          { value: "", label: "— pick a role —" },
+                          ...roles.map((r) => ({ value: r, label: r })),
+                        ]}
+                      />
+                    ) : (
+                      <div className="flex items-end">
+                        <p className="text-xs text-[var(--color-warning,#eab308)] pb-2">
+                          The subject and SANs are taken from the CSR with no
+                          allowed_domains or IP-SAN check.
+                        </p>
+                      </div>
+                    )}
+                    {mode === "role" ? (
+                      <>
+                        <Input
+                          label="Common Name override"
+                          value={overrideCn}
+                          onChange={(e) => setOverrideCn(e.target.value)}
+                          placeholder="only for roles with use_csr_common_name = false"
+                        />
+                        <Input
+                          label="SAN override"
+                          value={overrideSans}
+                          onChange={(e) => setOverrideSans(e.target.value)}
+                          placeholder="only for roles with use_csr_sans = false"
+                        />
+                        <Input
+                          label="Pin managed key (optional)"
+                          value={keyRef}
+                          onChange={(e) => setKeyRef(e.target.value)}
+                          placeholder="key-name | uuid — requires role.allow_key_reuse"
+                        />
+                      </>
+                    ) : null}
+                    <Input
+                      label="TTL (optional)"
+                      value={ttl}
+                      onChange={(e) => setTtl(e.target.value)}
+                      placeholder={mode === "verbatim" ? "720h (30d ceiling)" : "720h"}
+                    />
+                    <Input
+                      label="Issuer override (optional)"
+                      value={issuerRef}
+                      onChange={(e) => setIssuerRef(e.target.value)}
+                      placeholder="default | uuid"
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      variant="ghost"
+                      onClick={() => handlePreflight(false)}
+                      disabled={busy}
+                    >
+                      Dry run these settings
+                    </Button>
+                    <Button onClick={handleApprove} disabled={busy}>
+                      {busy ? "Signing…" : "Approve & sign"}
+                    </Button>
+                  </div>
+                </div>
+
+                {verdicts && verdicts.length > 0 && (
+                  <div className="space-y-2">
+                    <h4 className="text-sm font-semibold">Dry run</h4>
+                    <p className="text-xs text-[var(--color-text-muted)]">
+                      Nothing has been issued. Each row is what that mode
+                      would produce, checked against the same policy the
+                      signing call applies.
+                    </p>
+                    <Table
+                      columns={[
+                        {
+                          key: "target",
+                          header: "Mode / role",
+                          render: (v) => (
+                            <span className="truncate block min-w-0">
+                              {v.mode === "verbatim" ? "verbatim" : v.role || "(role)"}
+                            </span>
+                          ),
+                        },
+                        {
+                          key: "allowed",
+                          header: "Verdict",
+                          render: (v) => (
+                            <Badge
+                              variant={v.allowed ? "success" : "error"}
+                              label={v.allowed ? "would sign" : "refused"}
+                            />
+                          ),
+                        },
+                        {
+                          key: "common_name",
+                          header: "Effective CN",
+                          render: (v) => (
+                            <span className="truncate block min-w-0">
+                              {v.allowed ? v.common_name || "—" : "—"}
+                            </span>
+                          ),
+                        },
+                        {
+                          key: "sans",
+                          header: "Effective SANs",
+                          render: (v) => (
+                            <span className="truncate block min-w-0 text-xs">
+                              {v.allowed
+                                ? [...v.dns_sans, ...v.ip_sans].join(", ") || "—"
+                                : "—"}
+                            </span>
+                          ),
+                        },
+                        {
+                          key: "ttl",
+                          header: "TTL",
+                          render: (v) => (
+                            <span className="text-xs">
+                              {v.allowed ? ttlLabel(v.ttl_seconds) : "—"}
+                              {v.ttl_clamped ? " (clamped)" : ""}
+                            </span>
+                          ),
+                        },
+                        {
+                          key: "issuer",
+                          header: "Issuer",
+                          render: (v) => (
+                            <span className="truncate block min-w-0 text-xs">
+                              {v.allowed ? v.issuer_name || "—" : "—"}
+                            </span>
+                          ),
+                        },
+                        {
+                          key: "why",
+                          header: "Notes",
+                          render: (v) => (
+                            <div className="space-y-1 min-w-0">
+                              {!v.allowed && (
+                                <p className="text-xs text-red-400">{v.reason}</p>
+                              )}
+                              {v.hints.map((h, i) => (
+                                <p
+                                  key={`h-${i}`}
+                                  className="text-xs text-[var(--color-text-muted)]"
+                                >
+                                  {h}
+                                </p>
+                              ))}
+                              {v.warnings.map((w, i) => (
+                                <p key={`w-${i}`} className="text-xs text-yellow-400">
+                                  ⚠ {w}
+                                </p>
+                              ))}
+                            </div>
+                          ),
+                        },
+                        {
+                          key: "use",
+                          header: "",
+                          render: (v) =>
+                            v.allowed ? (
+                              <Button
+                                variant="ghost"
+                                onClick={() => {
+                                  setMode(v.mode);
+                                  setRole(v.role);
+                                }}
+                              >
+                                Use
+                              </Button>
+                            ) : null,
+                        },
+                      ]}
+                      data={verdicts}
+                      rowKey={(v) => `${v.mode}:${v.role}`}
+                    />
+                  </div>
+                )}
+
+                <div className="border-t border-[var(--color-border)] pt-4 space-y-2">
+                  <h4 className="text-sm font-semibold">Or refuse it</h4>
+                  <p className="text-xs text-[var(--color-text-muted)]">
+                    The reason is required and stays on the record — that is
+                    what makes a refusal auditable.
+                  </p>
+                  <div className="flex items-end gap-3">
+                    <div className="flex-1 min-w-0">
+                      <Input
+                        label="Reason"
+                        value={rejectReason}
+                        onChange={(e) => setRejectReason(e.target.value)}
+                        placeholder="e.g. requester unverified, no change ticket"
+                      />
+                    </div>
+                    <Button variant="danger" onClick={handleReject} disabled={busy}>
+                      Reject
+                    </Button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="border-t border-[var(--color-border)] pt-4 space-y-3">
+                <h4 className="text-sm font-semibold">Decision</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  <Field label="Decided" value={unixLabel(selected.decided_at)} />
+                  <Field label="Decided by" value={selected.decided_by} />
+                  {selected.status === "signed" ? (
+                    <>
+                      <Field
+                        label="Mode"
+                        value={
+                          selected.sign_mode === "verbatim"
+                            ? "verbatim (role policy bypassed)"
+                            : `role: ${selected.role}`
+                        }
+                      />
+                      <Field label="Serial" value={selected.serial_number} mono />
+                      <Field label="Issuer" value={selected.issuer_id} mono />
+                    </>
+                  ) : (
+                    <div className="sm:col-span-2">
+                      <Field label="Reason" value={selected.reject_reason} />
+                    </div>
+                  )}
+                </div>
+                {selected.certificate ? (
+                  <div>
+                    <Button
+                      variant="ghost"
+                      onClick={() =>
+                        copyToClipboard(selected.certificate, "Certificate")
+                      }
+                    >
+                      Copy certificate
+                    </Button>
+                    <pre className="mt-2 bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded p-2 text-xs font-mono whitespace-pre-wrap break-all max-h-64 overflow-y-auto">
+                      {selected.certificate}
+                    </pre>
+                  </div>
+                ) : null}
+                {approval && approval.warnings.length > 0 && (
+                  <div className="space-y-1">
+                    {approval.warnings.map((w, i) => (
+                      <p key={i} className="text-xs text-yellow-400">
+                        ⚠ {w}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </Card>
+      )}
+
+      <ConfirmModal
+        open={!!confirmDelete}
+        onClose={() => setConfirmDelete(null)}
+        onConfirm={() => {
+          if (confirmDelete) void handleDelete(confirmDelete);
+        }}
+        title="Delete sign request"
+        message="The record and its decision are removed. A signed certificate is not revoked by this — revoke it from the Certificates tab if that is what you want."
+        confirmLabel="Delete"
+        variant="danger"
+        loading={busy}
+      />
     </div>
   );
 }

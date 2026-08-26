@@ -45,6 +45,123 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+<!--
+  RECOVERY NOTE (2026-08-26): the uncommitted [Unreleased] entries for the
+  Windows packaging work were destroyed by an accidental
+  `git checkout CHANGELOG.md` during the PKI sign-request change. Everything
+  below down to the TRUNCATED marker is restored verbatim from a transcript
+  of the file; the rest of that section was never captured and must be
+  rewritten from `roadmaps/packaging-and-distribution.md`,
+  `features/packaging-client-binaries.md`,
+  `gui/src-tauri/installers/windows/README.md` and `git diff` of the
+  installer trees, all of which are intact. Delete this comment once the
+  section is whole again.
+-->
+
+### Added
+
+#### Windows GUI installer without a Windows host or VM
+
+- **`make gui-windows-nsis`** (`gui/src-tauri/installers/windows/docker/`) --
+  cross-compiles the desktop GUI to `x86_64-pc-windows-msvc` inside a Linux
+  container and bundles a Windows x64 installer, with no Windows machine and
+  no Windows VM in the loop. `cargo-xwin` drives `clang-cl` + `lld-link`
+  against Microsoft's CRT/SDK headers; Tauri's NSIS bundler runs Linux
+  `makensis`. Output lands in `target/windows-docker/`. Verified on an Apple
+  Silicon Mac: `PE32+ x86-64` app binary,
+  `BastionVault_0.41.17_x64-setup.exe` (24 MB). Not install-tested on real
+  Windows -- treat that as the remaining acceptance step.
+  (`roadmaps/packaging-and-distribution.md` Wave 3)
+- **The artefact is an NSIS `.exe`, not an `.msi`.** Tauri v2 compiles its
+  WiX/MSI bundler in on Windows hosts only -- it drives WiX's `candle.exe` /
+  `light.exe` -- whereas its NSIS bundler resolves `makensis` from `PATH` and
+  has no such gate. `make gui-windows-msi` (disposable Tart Win11 ARM64 VM)
+  remains the only route to a GUI `.msi`, and is still what to use when a
+  deployment tool requires that format.
+- **The container runs at the host's native architecture**, so nothing is
+  emulated -- the cross-compile targets x64 Windows whether the container is
+  `linux/arm64` or `linux/amd64`. This is unlike `make gui-linux-packages`,
+  which must run in an emulated amd64 userland.
+- **Requires an explicit `XWIN_ACCEPT_LICENSE=1`.** `cargo-xwin` downloads
+  Microsoft's Visual C++ CRT and Windows SDK, which is permitted only under
+  the Visual Studio licence terms. That acceptance is the operator's to give,
+  so it is deliberately not baked into the Dockerfile or the script -- the
+  build refuses to start without it and prints why.
+
+#### Unattended Windows deployment via Puppet + Chocolatey
+
+- **`make windows-gui-nupkg` now packs either bundle format** (`Makefile`,
+  `gui/src-tauri/installers/windows/nupkg/`). The two off-Windows build paths
+  produce different installers, and Chocolatey abstracts the difference away:
+  `choco install bastionvault-gui` behaves identically whether the payload is
+
+<!-- TRUNCATED: the rest of the Windows packaging entries were lost. See the RECOVERY NOTE above. -->
+
+#### PKI inbound sign requests -- import an external CSR and decide on it
+
+- **`pki/sign-request/*`** (`crates/bv-engine-pki/src/path_sign_request.rs`) --
+  the inbound counterpart to `pki/csr/*`. A CSR generated somewhere else is
+  imported, parked as `pending`, inspected, dry-run against every role, then
+  either approved (signed) or rejected with a recorded reason. Seven
+  endpoints: `import`, `LIST`, `READ`/`DELETE`, `preflight`, `approve`,
+  `approve-verbatim`, `reject`. The engine could already sign a foreign CSR
+  via `pki/sign/:role`; nothing helped an operator decide, and a refusal left
+  no trace in the vault. (`features/pki-inbound-sign-requests.md`)
+- **Dry run before signing** (`.../preflight`) -- reports what would be
+  issued (effective CN, SANs, TTL, issuer, `NotAfter`) or why it would be
+  refused, without minting anything. Called with no `role`, it evaluates
+  verbatim plus *every* role on the mount, so an operator sees which roles
+  would accept the request and which value the others refused. Refusals carry
+  `hints` naming the offending CN / SAN / knob, because several of the
+  engine's policy errors (`ErrPkiDataInvalid`) carry no detail on their own.
+- **Verbatim approval is a separate path, not a flag.** `.../approve`
+  requires a `role` and applies role policy; `.../approve-verbatim` takes the
+  subject and SANs from the CSR and bypasses it. Splitting them means a policy
+  can grant `pki/sign-request/+/approve` -- sign what a role permits --
+  without thereby granting a policy-free signature. `approve-verbatim`
+  accepts only `ttl` and `issuer_ref`; `key_ref` / `upn_sans` / `ad_sid` are
+  role-authorised knobs and there is no role.
+- **Import verifies the CSR's self-signature before persisting anything**, and
+  refuses a CSR whose public key already has a pending request unless
+  `allow_duplicate=true` -- parking unverified material, or two approvable
+  copies of one ask, are both ways to get a certificate signed by accident.
+- **Decisions are terminal and auditable.** `signed` / `rejected` records keep
+  the deciding identity, timestamp, mode, role, serial and reject reason until
+  explicitly deleted; `reject` requires a `reason`. Record format is versioned
+  (`SignRequestRecord.version = 1`) with `#[serde(default)]` throughout.
+- **GUI: PKI -> Sign Requests tab** (`gui/src/routes/PkiPage.tsx`) -- paste or
+  choose a `.csr` / `.pem` file, see the decoded subject / SANs / key
+  algorithm / SPKI fingerprint rather than base64, run the dry run, then
+  approve with optional overrides or reject with a reason. Verbatim is
+  labelled as policy-bypassing in the mode selector and again in the verdict
+  table. The pre-existing tab is relabelled **Outgoing CSR** so the two
+  directions are no longer both called "CSR".
+- **Tauri commands** `pki_sign_request_{import,list,read,delete,preflight,approve,reject}`
+  (`gui/src-tauri/src/commands/pki.rs`). `approve` routes to the engine's
+  `approve-verbatim` path when the GUI's mode selector says verbatim.
+- **Policy examples updated** -- `docs/policies/pki-issuer.hcl` grants the
+  queue, with `approve-verbatim` called out as the block to drop when
+  withholding policy bypass; `docs/policies/pki-readonly.hcl` grants
+  read/list so an auditor can see the refusals.
+
+### Changed
+
+#### PKI CSR signing: one decide-then-build pipeline
+
+- **`crates/bv-engine-pki/src/sign_flow.rs`** -- extracted the decision and
+  certificate-building halves of `pki/sign/:role` and `pki/sign-verbatim` out
+  of `path_issue.rs`. `plan_sign` performs every policy check and touches no
+  signing key; `execute_sign` mints from that plan and performs no policy
+  work. The two `sign` handlers are now request adapters over it. This is what
+  lets `preflight` be truthful: a dry run that could drift from the signing
+  path would be worse than no dry run. No behaviour change intended -- the
+  error order of the pre-split handlers is deliberately preserved, and the
+  existing Phase 5 / 5.1 / key-reuse suites pass unchanged.
+- **`csr::describe_spki` / `csr::spki_fingerprint`** -- render a CSR's public
+  key as `rsa-2048` / `ec-p256` / `ml-dsa-65` and fingerprint its SPKI, for
+  the queue's list view and duplicate detection.
+
+
 ## [0.41.17] - 2026-08-26
 
 ### Fixed

@@ -283,3 +283,64 @@ pub fn decode_pem_or_der(input: &str) -> Result<Vec<u8>, RvError> {
         }
     }
 }
+
+/// Human-readable description of a SubjectPublicKeyInfo — `rsa-2048`,
+/// `ec-p256`, `ed25519`, `ml-dsa-65`, … — for the inbound sign-request
+/// surface, where an operator has to judge a CSR they did not create.
+///
+/// This is presentation, not policy: nothing gates on the string. An SPKI
+/// we cannot classify comes back as `unknown` (with the algorithm OID
+/// appended) rather than erroring, because the caller has already
+/// verified the CSR's self-signature by the time it asks.
+pub fn describe_spki(spki_der: &[u8]) -> String {
+    use x509_parser::{public_key::PublicKey, x509::SubjectPublicKeyInfo};
+
+    let Ok((_, spki)) = SubjectPublicKeyInfo::from_der(spki_der) else {
+        return "unknown".to_string();
+    };
+    let alg_oid = &spki.algorithm.algorithm;
+
+    match classify_alg(alg_oid) {
+        CsrAlgClass::MlDsa(MlDsaLevel::L44) => return "ml-dsa-44".to_string(),
+        CsrAlgClass::MlDsa(MlDsaLevel::L65) => return "ml-dsa-65".to_string(),
+        CsrAlgClass::MlDsa(MlDsaLevel::L87) => return "ml-dsa-87".to_string(),
+        CsrAlgClass::Classical => {}
+    }
+
+    // Ed25519 / Ed448 carry the key in the BIT STRING with no parameters,
+    // so `parsed()` reports them as `Unknown`; match the OID directly.
+    if *alg_oid == oid!(1.3.101 .112) {
+        return "ed25519".to_string();
+    }
+    if *alg_oid == oid!(1.3.101 .113) {
+        return "ed448".to_string();
+    }
+
+    match spki.parsed() {
+        Ok(PublicKey::RSA(rsa)) => format!("rsa-{}", rsa.key_size()),
+        Ok(PublicKey::EC(point)) => match point.key_size() {
+            256 => "ec-p256".to_string(),
+            384 => "ec-p384".to_string(),
+            // P-521 points are 66 bytes per coordinate → 528, not 521.
+            521 | 528 => "ec-p521".to_string(),
+            bits => format!("ec-{bits}"),
+        },
+        Ok(PublicKey::DSA(_)) => "dsa".to_string(),
+        _ => format!("unknown ({alg_oid})"),
+    }
+}
+
+/// SHA-256 of the DER SubjectPublicKeyInfo, lower-case hex. Stable
+/// identifier for "the same key asked again" — used to refuse a duplicate
+/// inbound sign request without comparing whole PEMs (which differ by
+/// line wrapping and armour while carrying the same key).
+pub fn spki_fingerprint(spki_der: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(spki_der);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}

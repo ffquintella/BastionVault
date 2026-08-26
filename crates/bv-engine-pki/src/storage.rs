@@ -435,3 +435,98 @@ pub async fn get_string(req: &Request, key: &str) -> Result<Option<String>, RvEr
         None => Ok(None),
     }
 }
+
+// ── Inbound sign-request queue (`pki/sign-request/*`) ────────────────
+//
+// The mirror image of the outgoing flow above: a CSR that arrived from
+// somewhere else, parked at `sign-requests/<id>` while an operator
+// decides. Records are terminal once decided (`signed` / `rejected`) and
+// are kept for the audit trail until explicitly deleted — the whole point
+// of the queue is that a refusal leaves a trace.
+//
+// See features/pki-inbound-sign-requests.md.
+pub const KEY_PREFIX_SIGN_REQUEST: &str = "sign-requests/";
+
+pub fn sign_request_storage_key(id: &str) -> String {
+    format!("{KEY_PREFIX_SIGN_REQUEST}{id}")
+}
+
+/// Persisted-format version for [`SignRequestRecord`]. Bump alongside a
+/// read-old/write-new migration; every field added after v1 must carry
+/// `#[serde(default)]` so an older record still deserialises.
+pub const SIGN_REQUEST_FORMAT_VERSION: u32 = 1;
+
+/// Lifecycle of an inbound sign request.
+pub mod sign_request_status {
+    pub const PENDING: &str = "pending";
+    pub const SIGNED: &str = "signed";
+    pub const REJECTED: &str = "rejected";
+}
+
+/// One inbound CSR and, once an operator has decided, the decision.
+///
+/// Everything before `decided_at_unix` is derived from the CSR at import
+/// time so the list view needs no re-parsing, and so the record shows what
+/// the CSR said *when it arrived* even if the PEM is later re-read by a
+/// different parser version.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SignRequestRecord {
+    /// Persisted-format version. Absent in no released version — but
+    /// defaulted anyway so a hand-written record without it still loads.
+    #[serde(default)]
+    pub version: u32,
+    /// UUID assigned at import. Also the path component.
+    pub id: String,
+    /// `pending` | `signed` | `rejected` — see [`sign_request_status`].
+    pub status: String,
+    /// The CSR exactly as imported, re-served verbatim on read.
+    pub csr_pem: String,
+    /// Full subject DN as the CSR states it.
+    #[serde(default)]
+    pub subject_dn: String,
+    #[serde(default)]
+    pub common_name: String,
+    #[serde(default)]
+    pub dns_sans: Vec<String>,
+    #[serde(default)]
+    pub ip_sans: Vec<String>,
+    /// `rsa-2048` / `ec-p256` / `ml-dsa-65` / … — presentation only.
+    #[serde(default)]
+    pub key_description: String,
+    /// SHA-256 of the DER SubjectPublicKeyInfo, lower-case hex. Used to
+    /// spot the same key being submitted twice.
+    #[serde(default)]
+    pub spki_sha256: String,
+    /// Free-text, operator-supplied: who asked, and why.
+    #[serde(default)]
+    pub requester: String,
+    #[serde(default)]
+    pub notes: String,
+    /// Role the importer suggests signing under. Advisory only — the
+    /// approver picks the role that actually applies.
+    #[serde(default)]
+    pub suggested_role: String,
+    pub created_at_unix: u64,
+    /// Display name of the token that imported the request, when the
+    /// request carried one.
+    #[serde(default)]
+    pub imported_by: String,
+    #[serde(default)]
+    pub decided_at_unix: u64,
+    #[serde(default)]
+    pub decided_by: String,
+    /// Required on rejection; empty otherwise.
+    #[serde(default)]
+    pub reject_reason: String,
+    // ── outcome, set only when `status == signed` ──
+    #[serde(default)]
+    pub sign_mode: String,
+    #[serde(default)]
+    pub role_name: String,
+    #[serde(default)]
+    pub serial_number: String,
+    #[serde(default)]
+    pub issuer_id: String,
+    #[serde(default)]
+    pub certificate_pem: String,
+}

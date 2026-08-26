@@ -12,8 +12,8 @@ Three example Vault-style policies for separating concerns on a PKI mount:
 
 | File | Role | Can do | Cannot do |
 |------|------|--------|-----------|
-| [`pki-readonly.hcl`](pki-readonly.hcl) | View-only | Read certs, issuers, roles, CRL. | Issue, sign, revoke, **export**. |
-| [`pki-issuer.hcl`](pki-issuer.hcl) | Issue + revoke | Everything `pki-readonly` does, plus `pki/issue/<role>`, `pki/sign/<role>`, `pki/sign-verbatim`, `pki/revoke`, `pki/csr/*`. | **Export** cert / key bytes. |
+| [`pki-readonly.hcl`](pki-readonly.hcl) | View-only | Read certs, issuers, roles, CRL, and the inbound sign-request queue (incl. refusals). | Issue, sign, revoke, decide a sign request, **export**. |
+| [`pki-issuer.hcl`](pki-issuer.hcl) | Issue + revoke | Everything `pki-readonly` does, plus `pki/issue/<role>`, `pki/sign/<role>`, `pki/sign-verbatim`, `pki/revoke`, `pki/csr/*`, `pki/sign-request/*`. | **Export** cert / key bytes. |
 | [`pki-exporter.hcl`](pki-exporter.hcl) | Pull cert + key out | Everything `pki-readonly` does, plus `pki/cert/+/export` and `pki/issuer/+/export`. | Issue / revoke. |
 
 These compose. A typical operator setup:

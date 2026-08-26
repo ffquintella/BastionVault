@@ -5,6 +5,7 @@
 #   * `pki/sign/<role>`  — sign a caller-supplied CSR
 #   * `pki/sign-verbatim`
 #   * `pki/revoke`
+#   * `pki/sign-request/*` — the inbound CSR queue
 #
 # Notably absent: every `*/export` path. A holder of this role can
 # issue an X.509 cert tied to a freshly-generated managed key but
@@ -79,6 +80,34 @@ path "pki/csr/+" {
   capabilities = ["read", "delete"]
 }
 path "pki/csr/+/set-signed" {
+  capabilities = ["update"]
+}
+
+# Inbound sign requests (a CSR arrives from a third party and an
+# operator decides). `approve` signs under a role, so role policy still
+# constrains it; `approve-verbatim` does not — it is a separate path
+# precisely so it can be withheld. Drop the `approve-verbatim` block
+# below to let this role approve requests without granting it a
+# policy-free signature.
+path "pki/sign-request/import" {
+  capabilities = ["update"]
+}
+path "pki/sign-request" {
+  capabilities = ["list"]
+}
+path "pki/sign-request/+" {
+  capabilities = ["read", "delete"]
+}
+path "pki/sign-request/+/preflight" {
+  capabilities = ["update"]
+}
+path "pki/sign-request/+/approve" {
+  capabilities = ["update"]
+}
+path "pki/sign-request/+/approve-verbatim" {
+  capabilities = ["update"]
+}
+path "pki/sign-request/+/reject" {
   capabilities = ["update"]
 }
 

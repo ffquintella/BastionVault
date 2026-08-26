@@ -48,6 +48,17 @@ path "pki/issuer/+/crl" {
   capabilities = ["read"]
 }
 
+# Inbound sign requests: an auditor should be able to see what was
+# asked for and how it was decided — including the refusals, which is
+# the reason the queue persists them. Read-only: no import, no
+# approve, no reject, no delete.
+path "pki/sign-request" {
+  capabilities = ["list"]
+}
+path "pki/sign-request/+" {
+  capabilities = ["read"]
+}
+
 # Explicitly DENY every export path. The path wildcards above don't
 # cover `*/export` (Vault's wildcards are non-recursive past `/`),
 # but a defence-in-depth deny-list keeps the role's intent obvious

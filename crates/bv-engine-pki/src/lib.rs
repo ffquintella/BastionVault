@@ -63,9 +63,11 @@ pub mod path_fetch;
 pub mod path_issue;
 pub mod path_revoke;
 pub mod path_roles;
+pub mod path_sign_request;
 pub mod path_root;
 pub mod path_tidy;
 pub mod scheduler;
+pub mod sign_flow;
 pub mod pqc;
 pub mod storage;
 pub mod x509;
@@ -110,6 +112,14 @@ impl PkiBackend {
             self.csr_list_path(),
             self.csr_set_signed_path(),
             self.csr_item_path(),
+            // ── Inbound sign-request queue ──
+            self.sign_request_import_path(),
+            self.sign_request_list_path(),
+            self.sign_request_preflight_path(),
+            self.sign_request_approve_path(),
+            self.sign_request_approve_verbatim_path(),
+            self.sign_request_reject_path(),
+            self.sign_request_item_path(),
             self.cert_export_path(),
             self.issuer_export_path(),
             self.issue_path(),
