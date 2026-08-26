@@ -24,7 +24,7 @@ Each phase is independently shippable and adds no runtime cost to the hot path. 
 | 1.1 | `SysRoute` trait + `Authorized<R>` extractor | `[ ]` Todo |
 | 1.2 | Migrate the 44 inline `sys` handlers to the witness | `[ ]` Todo |
 | 1.3 | Route table as data + anonymous-surface golden file | `[ ]` Todo |
-| 2 | SQL injection elimination (`SqlIdent` / `Sql` + lint gate) | `[ ]` Todo |
+| 2 | SQL injection elimination (`SqlIdent` / `Sql` + lint gate) | `[/]` In progress — via 2.1 |
 | 2.1 | `bv-sql-guard` crate + `LIKE`-pattern fix | `[/]` In progress — `LIKE`-pattern + table-identifier fixes shipped (F3/F4/F5); the `SqlIdent` / `Sql` crate is still Todo |
 | 2.2 | Migrate hiqlite + MySQL backends to the guarded API | `[ ]` Todo |
 | 2.3 | Mechanical gate (Semgrep ruleset), escape-hatch registry | `[ ]` Todo |
@@ -909,6 +909,6 @@ Stated explicitly so the guarantee is not read more broadly than it is.
 Per `CLAUDE.md`:
 
 - `roadmap.md` — registered under Core as *Formal Verification & Type-Driven Security* (`[ ]` Todo), and listed as a next-up initiative.
-- `CHANGELOG.md` — **no entry yet.** Nothing here changes behaviour until the phase-0 fix PRs (F2–F4) land; those get `[Unreleased]` → Security entries, and each phase adds its own on completion.
+- `CHANGELOG.md` — the phase-0 fix PRs (F2–F5) shipped in **v0.38.6** with Security entries. No phase has landed yet, so nothing further is recorded; each phase adds its own entry on completion.
 - Update the Status table above as sub-phases complete. A phase is Done only when every sub-phase is — Phase 3 in particular is **not** Done at 3.2, however good the Kani output looks (see § The model-vs-code trap).
 - Every PR touching `Login`, `Auditoria`, `Permissionamento`, or `Método de autenticação` needs the `02` §6 change record and an ESI signal in its compliance report.

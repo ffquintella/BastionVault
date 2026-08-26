@@ -1,0 +1,161 @@
+# BastionVault client downloads site — official OCI image.
+#
+# Wave 3 / Phase 2 of the Packaging & Distribution roadmap: two-stage,
+# linux/amd64, UNSIGNED. Multi-arch, Cosign signing, an SBOM attestation and
+# built-in TLS are Phase 3 — see features/packaging-distribution-website.md
+# and roadmaps/packaging-and-distribution.md.
+#
+# What it serves: a directory of signed client artefacts plus the
+# `manifest.json` that describes them, mounted read-only at
+# /srv/bv-downloads. Nothing else. There is no upload path, no admin surface,
+# no API and no per-user state, and the index page is rendered once at startup
+# rather than per request.
+#
+# Build context is the repository root. Build with:
+#   docker buildx build -f deploy/downloads/Containerfile --platform linux/amd64 \
+#       -t bastionvault-downloads:dev --load .
+# Or via the make target (auto-detects podman/docker, defaults to amd64):
+#   make downloads-image
+#   make downloads-image PLATFORM=linux/arm64
+#
+# Cross-compilation:
+#   Same shape as deploy/container/Containerfile — the builder runs on
+#   $BUILDPLATFORM (no QEMU on rustc, which is what makes a cross-arch Rust
+#   build tolerable on Apple Silicon) and cross-compiles to $TARGETPLATFORM
+#   with the matching gcc cross toolchain, sourced from the same
+#   deploy/container/cross-env.sh so the two images cannot drift. This crate
+#   has no C dependencies at all, so the cross toolchain is only ever the
+#   linker.
+#
+# Build caching:
+#   Deliberately no cargo-chef. The server image splits its ~1200-crate
+#   dependency graph into a published layer because a cold cook is tens of
+#   minutes; this binary's graph is ~60 crates and about a minute, which is
+#   less than the recipe/plan/cook machinery costs to maintain. If that stops
+#   being true, copy the pattern from deploy/container/Containerfile rather
+#   than inventing a second one.
+
+# ---------- Stage 1: builder (runs on BUILDPLATFORM) ----------
+FROM --platform=$BUILDPLATFORM docker.io/library/rust:1-slim-bookworm AS builder
+
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+ARG TARGETARCH
+# Empty = one job per core.
+ARG CARGO_BUILD_JOBS=""
+
+# Cross linkers plus the bits cargo needs to reach the registry and the
+# workspace's `[patch.crates-io]` git forks. No libssl, no clang, no cmake:
+# bv-downloads-server depends on nothing that compiles C.
+#
+# `libc6-dev-<arch>-cross` is not optional and not implied: with
+# --no-install-recommends, `gcc-<arch>-linux-gnu` alone gives you a compiler
+# driver whose linker then cannot find `Scrt1.o` / `crti.o` for the target.
+# The server image gets these transitively from its `g++-*-linux-gnu` packages,
+# which this build does not need; naming them directly is cheaper and says why.
+#
+# APT::Sandbox::User "root" disables apt's privilege drop, which a rootless
+# podman build in a nested user namespace blocks — same workaround, and same
+# reason, as deploy/container/Containerfile.
+RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/99-no-sandbox \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+        gcc-x86-64-linux-gnu libc6-dev-amd64-cross \
+        git \
+ && rm -rf /var/lib/apt/lists/*
+
+# Target triple + cross linker, resolved by the same script the server image
+# sources. One definition for both images.
+COPY --chmod=0755 deploy/container/cross-env.sh /usr/local/bin/bv-cross-env
+
+WORKDIR /src
+
+# The pinned toolchain, in a layer keyed on one file that no source edit
+# touches. rust-toolchain.toml pins `stable`, which is not what the base image
+# defaults to, so without this every build re-syncs the channel mid-compile.
+COPY rust-toolchain.toml ./
+RUN rustup show
+
+# The whole tree. `cargo build -p bv-downloads-server` still has to resolve the
+# entire workspace — every member manifest has to exist for the workspace to
+# parse — so a narrower COPY buys nothing but a longer file.
+COPY . .
+
+RUN set -eux; \
+    . /usr/local/bin/bv-cross-env; \
+    rustup target add "$RUST_TARGET"; \
+    cargo build --release --locked --target "$RUST_TARGET" -p bv-downloads-server; \
+    install -D "target/$RUST_TARGET/release/bv-downloads-server" /out/bv-downloads-server
+
+# The binary must be self-contained apart from glibc: the runtime stage below
+# has no package manager to install anything it turns out to need. `readelf`
+# rather than `ldd` because the binary is foreign-arch when cross-compiling.
+RUN if readelf -d /out/bv-downloads-server | grep -E 'NEEDED.*(libssl|libcrypto)'; then \
+        echo "ERROR: bv-downloads-server is linked against openssl. It has no TLS and no crypto deps that need one; some new dependency has pulled it in."; \
+        exit 1; \
+    fi
+
+# ---------- Stage 2: runtime (pulled for TARGETPLATFORM) ----------
+# Wolfi, the same base the server image runs on (cgr.dev/chainguard/wolfi-base)
+# — one base, one CVE cadence, one nonroot UID across both images we ship. The
+# roadmap's cross-cutting decision says "distroless base for both"; the server
+# image has since migrated to Wolfi, and matching what actually ships is what
+# that decision was for.
+#
+# Unlike the server image this one strips busybox and apk by default. The
+# server keeps a shell because its in-container Rustion bootstrap script needs
+# one; this container serves static files from a read-only volume and has
+# nothing to drop into. `--build-arg INCLUDE_SHELL=1` puts it back for
+# debugging.
+FROM --platform=$TARGETPLATFORM cgr.dev/chainguard/wolfi-base:latest AS runtime
+
+ARG INCLUDE_SHELL=0
+
+LABEL org.opencontainers.image.title="BastionVault Client Downloads" \
+      org.opencontainers.image.description="Static download site for signed BastionVault client installers" \
+      org.opencontainers.image.source="https://github.com/ffquintella/BastionVault" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.vendor="BastionVault" \
+      org.opencontainers.image.base.name="cgr.dev/chainguard/wolfi-base:latest"
+
+COPY --from=builder /out/bv-downloads-server /usr/local/bin/bv-downloads-server
+
+# The brand assets are compiled into the binary, so the page renders with this
+# directory empty or absent. This copy is the editable reference an operator
+# starts from: copy it out, edit it, mount it back, and point
+# BV_DOWNLOADS_STATIC at the mount. See deploy/downloads/README.md.
+COPY deploy/downloads/static/ /usr/share/bv-downloads/static/
+
+# One RUN, and the order inside it matters: `mkdir` and `chown` are busybox
+# applets, so stripping busybox has to be the last thing that happens.
+#
+# No ca-certificates are installed: this container makes no outbound
+# connections at all. It does not phone home, does not fetch anything, and
+# needs no allow-list in an air-gapped network
+# (features/packaging-distribution-website.md § Security Considerations).
+#
+# The artefact directory is pre-created and owned by the runtime UID so the
+# container can traverse it; it is expected to be mounted READ-ONLY (`:ro`) and
+# the server never opens it for writing.
+RUN set -eux; \
+    mkdir -p /srv/bv-downloads; \
+    chown -R 65532:65532 /srv/bv-downloads; \
+    if [ "${INCLUDE_SHELL}" = "0" ]; then \
+        rm -rf /bin/busybox /bin/sh /usr/bin/busybox \
+               /sbin/apk /usr/bin/apk /lib/apk /etc/apk /var/cache/apk; \
+    fi
+
+# nonroot UID shipped by the Wolfi base, same as the server image.
+USER 65532:65532
+
+VOLUME ["/srv/bv-downloads"]
+WORKDIR /srv/bv-downloads
+
+EXPOSE 8080
+
+# No HEALTHCHECK: with INCLUDE_SHELL=0 there is no shell and no curl to run
+# one. `GET /healthz` returns 200 `ok`; wire it up as a Kubernetes readiness
+# probe or a compose `healthcheck` that runs from outside the container.
+ENTRYPOINT ["/usr/local/bin/bv-downloads-server"]

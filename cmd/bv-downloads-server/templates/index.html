@@ -1,0 +1,109 @@
+{#- The whole landing page. Rendered once at startup; nothing here is
+    evaluated on the request path, and no request data reaches it. Askama
+    HTML-escapes every `{{ }}` by default — the three `|safe` uses below are
+    the inlined brand assets and the compile-time tab script, all of which
+    are pinned by the CSP hashes computed in render.rs. -#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>BastionVault Client Downloads {{ version }}</title>
+<style>{{ style|safe }}</style>
+</head>
+<body>
+<header class="head">
+  <div class="brand">{{ logo|safe }}</div>
+  <div>
+    <h1>BastionVault Client Downloads</h1>
+    <p class="sub">Version <strong>{{ version }}</strong> &middot; released {{ released }}</p>
+  </div>
+</header>
+
+<nav class="tabs" aria-label="Platforms">
+{%- for section in sections %}
+  <a class="tab" id="tab-{{ section.slug }}" href="#{{ section.slug }}">{{ section.label }}</a>
+{%- endfor %}
+</nav>
+
+<main>
+{%- for section in sections %}
+<section id="{{ section.slug }}">
+  <h2>{{ section.label }}</h2>
+  <table>
+    <thead>
+      <tr><th>Package</th><th>Arch</th><th>Size</th><th>SHA-256</th><th>Signature</th></tr>
+    </thead>
+    <tbody>
+    {%- for row in section.rows %}
+      <tr>
+        <td class="pkg">
+          <a href="{{ row.href }}" download>{{ row.name }}</a>
+          <span class="kind">{{ row.label }}</span>
+        </td>
+        <td>{{ row.arch }}</td>
+        <td class="num">{{ row.size }}</td>
+        <td><code class="hash">{{ row.sha256 }}</code></td>
+        <td class="sig">
+          {%- match row.signature_href %}
+          {%- when Some with (href) %}<a href="{{ href }}">.sig</a>
+          {%- when None %}<span class="none">none</span>
+          {%- endmatch %}
+          {%- match row.certificate_href %}
+          {%- when Some with (href) %}<a href="{{ href }}">.pem</a>
+          {%- when None %}
+          {%- endmatch %}
+        </td>
+      </tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+</section>
+{%- endfor %}
+
+{%- if sections.is_empty() %}
+<section id="empty">
+  <h2>No artefacts published</h2>
+  <p>The mounted manifest lists no files for this version.</p>
+</section>
+{%- endif %}
+
+<section id="verify">
+  <h2>Verify your download</h2>
+  <p>
+    Check the hash first, then the signature. The hashes on this page come
+    from <a href="/manifest.json">manifest.json</a>; this site does not verify
+    anything on your behalf.
+  </p>
+{%- match example %}
+{%- when Some with (row) %}
+  <pre><code>sha256sum {{ row.name }}
+# expect: {{ row.sha256 }}
+
+cosign verify-blob {{ row.name }} \
+    --signature {{ row.name }}.sig \
+    --certificate {{ row.name }}.pem \
+    --certificate-identity-regexp 'https://github.com/ffquintella/BastionVault/' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com</code></pre>
+{%- when None %}
+{%- endmatch %}
+</section>
+
+{%- match server_image %}
+{%- when Some with (image) %}
+<section id="server">
+  <h2>Matching server image</h2>
+  <pre><code>podman pull {{ image }}</code></pre>
+</section>
+{%- when None %}
+{%- endmatch %}
+</main>
+
+<footer>
+  <p>BastionVault {{ version }} &middot; served from a read-only volume &middot; no telemetry</p>
+</footer>
+
+<script>{{ script|safe }}</script>
+</body>
+</html>

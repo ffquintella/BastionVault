@@ -1,0 +1,87 @@
+{
+  "version": "0.4.0",
+  "released": "2026-06-01",
+  "server_image": "ghcr.io/ffquintella/bastionvault:v0.4.0",
+  "files": [
+    {
+      "platform": "linux",
+      "arch": "amd64",
+      "kind": "gui-deb",
+      "name": "bastionvault-gui_0.4.0_amd64.deb",
+      "size": 258,
+      "sha256": "e9147ce96e01f761603ab10225cf66a6a15fd5b1186725ef349db24d4bc83565",
+      "cosign_signature": "v0.4.0/bastionvault-gui_0.4.0_amd64.deb.sig",
+      "cosign_certificate": "v0.4.0/bastionvault-gui_0.4.0_amd64.deb.pem"
+    },
+    {
+      "platform": "linux",
+      "arch": "amd64",
+      "kind": "cli-deb",
+      "name": "bvault_0.4.0_amd64.deb",
+      "size": 248,
+      "sha256": "eeecd26aefd034e39ce8bb140dcfb112965d1483312aeb91981ed4f5f790592f",
+      "cosign_signature": "v0.4.0/bvault_0.4.0_amd64.deb.sig",
+      "cosign_certificate": "v0.4.0/bvault_0.4.0_amd64.deb.pem"
+    },
+    {
+      "platform": "linux",
+      "arch": "x86_64",
+      "kind": "gui-rpm",
+      "name": "bastionvault-gui-0.4.0-1.x86_64.rpm",
+      "size": 262,
+      "sha256": "09541c95e047072cd3273cbc78115d7bfcbb39e74c9e3aa48a4d958f7fa042d7",
+      "cosign_signature": "v0.4.0/bastionvault-gui-0.4.0-1.x86_64.rpm.sig",
+      "cosign_certificate": "v0.4.0/bastionvault-gui-0.4.0-1.x86_64.rpm.pem"
+    },
+    {
+      "platform": "linux",
+      "arch": "x86_64",
+      "kind": "cli-rpm",
+      "name": "bvault-0.4.0-1.x86_64.rpm",
+      "size": 252,
+      "sha256": "be14460544c3b203dc4f72d80ed19f158fd145500cf1eaae27edf9c9bfe74499",
+      "cosign_signature": "v0.4.0/bvault-0.4.0-1.x86_64.rpm.sig",
+      "cosign_certificate": "v0.4.0/bvault-0.4.0-1.x86_64.rpm.pem"
+    },
+    {
+      "platform": "macos",
+      "arch": "arm64",
+      "kind": "gui-pkg",
+      "name": "BastionVault-0.4.0-arm64.pkg",
+      "size": 254,
+      "sha256": "4edb2a708aa58d1650c7bade43a4faf59a72ce959d555c7fd2d89876d802c8f7",
+      "cosign_signature": "v0.4.0/BastionVault-0.4.0-arm64.pkg.sig",
+      "cosign_certificate": "v0.4.0/BastionVault-0.4.0-arm64.pkg.pem"
+    },
+    {
+      "platform": "macos",
+      "arch": "arm64",
+      "kind": "cli-pkg",
+      "name": "bvault-0.4.0-darwin-arm64.pkg",
+      "size": 255,
+      "sha256": "78c4f917289ab4da593f99a083f647568af923e1cc7b9382d4a71abd3eb167dc",
+      "cosign_signature": "v0.4.0/bvault-0.4.0-darwin-arm64.pkg.sig",
+      "cosign_certificate": "v0.4.0/bvault-0.4.0-darwin-arm64.pkg.pem"
+    },
+    {
+      "platform": "windows",
+      "arch": "amd64",
+      "kind": "gui-msi",
+      "name": "BastionVault-0.4.0-x64.msi",
+      "size": 254,
+      "sha256": "adfec8151dc62f587d14baac2373aaa0e7c21cd4d09b1b1003b3a370b33c7309",
+      "cosign_signature": "v0.4.0/BastionVault-0.4.0-x64.msi.sig",
+      "cosign_certificate": "v0.4.0/BastionVault-0.4.0-x64.msi.pem"
+    },
+    {
+      "platform": "windows",
+      "arch": "amd64",
+      "kind": "cli-msi",
+      "name": "bvault-0.4.0-windows-x64.msi",
+      "size": 256,
+      "sha256": "d2be85c7a59708fb185836b866c4af465f3b5d7be2dd8349bb09c27975628fb4",
+      "cosign_signature": "v0.4.0/bvault-0.4.0-windows-x64.msi.sig",
+      "cosign_certificate": "v0.4.0/bvault-0.4.0-windows-x64.msi.pem"
+    }
+  ]
+}

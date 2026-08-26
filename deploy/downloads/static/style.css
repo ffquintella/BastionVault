@@ -1,0 +1,150 @@
+/* BastionVault downloads page.
+ *
+ * Inlined into the generated index at startup (see
+ * cmd/bv-downloads-server/src/render.rs) and pinned by a CSP sha256 hash, so
+ * an operator who mounts their own copy over /usr/share/bv-downloads/static
+ * gets a page whose CSP still matches. No web fonts, no remote anything: the
+ * page must render identically in an air-gapped network.
+ */
+
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --line: #262d36;
+  --fg: #e6edf3;
+  --muted: #8b949e;
+  --accent: #4f9cf9;
+  --accent-dim: #1f6feb;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f8fa;
+    --panel: #ffffff;
+    --line: #d0d7de;
+    --fg: #1f2328;
+    --muted: #656d76;
+    --accent: #0969da;
+    --accent-dim: #0550ae;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 2rem 1.25rem 4rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, sans-serif;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  max-width: 68rem;
+  margin: 0 auto 1.5rem;
+}
+
+.brand svg { display: block; width: 48px; height: 48px; }
+
+h1 { font-size: 1.5rem; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 1.05rem; margin: 0 0 0.75rem; }
+.sub { margin: 0.2rem 0 0; color: var(--muted); }
+
+.tabs {
+  display: flex;
+  gap: 0.5rem;
+  max-width: 68rem;
+  margin: 0 auto 1.25rem;
+  flex-wrap: wrap;
+}
+
+.tab {
+  padding: 0.35rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--fg);
+  text-decoration: none;
+  font-size: 0.9rem;
+}
+
+.tab:hover { border-color: var(--accent); }
+
+/* Applied by the one inline script to the visitor's own platform. Purely
+ * cosmetic — every section is in the markup regardless. */
+.tab-current { border-color: var(--accent); color: var(--accent); }
+
+main { max-width: 68rem; margin: 0 auto; }
+
+section {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 1.1rem 1.25rem;
+  margin: 0 0 1rem;
+}
+
+table { width: 100%; border-collapse: collapse; }
+
+th {
+  text-align: left;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  font-weight: 600;
+  padding: 0 0.6rem 0.4rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+td {
+  padding: 0.6rem 0.6rem 0.6rem 0;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+tr:last-child td { border-bottom: none; }
+
+a { color: var(--accent); }
+a:hover { color: var(--accent-dim); }
+
+.pkg a { font-weight: 600; word-break: break-all; }
+.kind { display: block; color: var(--muted); font-size: 0.82rem; }
+.num { white-space: nowrap; color: var(--muted); }
+.sig a { margin-right: 0.5rem; }
+.none { color: var(--muted); }
+
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+.hash {
+  font-size: 0.72rem;
+  color: var(--muted);
+  word-break: break-all;
+  display: inline-block;
+  max-width: 22rem;
+}
+
+pre {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.8rem 0.9rem;
+  overflow-x: auto;
+  font-size: 0.82rem;
+  margin: 0;
+}
+
+footer {
+  max-width: 68rem;
+  margin: 1.5rem auto 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+@media (max-width: 640px) {
+  .hash { max-width: 10rem; }
+  th:nth-child(3), td:nth-child(3) { display: none; }
+}

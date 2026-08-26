@@ -1,0 +1,59 @@
+[package]
+name = "bv-downloads-server"
+# Brand new, never released. This is deliberately NOT the flat 0.41.0 the
+# rest of the workspace carries: per AGENTS.md § "Per-crate versioning" a
+# library number moves with the crate's *content*, and this crate has no
+# content history yet.
+version = "0.1.0"
+edition = "2021"
+description = "Static download site for signed BastionVault client artefacts (renders manifest.json, serves the files it lists)"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+# Not published to any registry. This is a bin-only Tier 4 assembly crate
+# whose distribution channel is the OCI image built from
+# `deploy/downloads/Containerfile` (or the standalone binary an operator
+# copies out of it), not the Cloudsmith cargo registry. `false` rather than
+# an omitted key so a bare `cargo publish` in this directory cannot reach
+# crates.io -- see AGENTS.md § "Per-crate versioning" rule 3.
+publish = false
+
+[[bin]]
+name = "bv-downloads-server"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP surface. axum (not actix, which the vault server uses) because this
+# binary must stay small and independent: it links none of the workspace and
+# axum + hyper is the lightest router that still gives us streaming bodies
+# for 100 MB installers. Already in Cargo.lock as a transitive dep.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+# Async runtime. `fs` for streaming artefact bodies, `signal` for the
+# container's SIGTERM shutdown.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "signal"] }
+# `ReaderStream`, which turns a `tokio::fs::File` into an axum body without
+# buffering the whole artefact in memory.
+tokio-util = { version = "0.7", features = ["io"] }
+# Compile-time HTML templating for the index page. Compile-time matters here:
+# the page shape is fixed and auditable in one file, and there is no
+# server-side rendering on the request path at all (the index is rendered
+# once at startup and then served as a static string).
+askama = "0.14"
+# manifest.json parsing. The closed enums (`platform`/`arch`/`kind`) are
+# serde-derived, so an unknown value is a parse error rather than something
+# the renderer has to defend against.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `--verify-hashes`: re-hash every artefact at startup and refuse to serve a
+# manifest whose sha256 does not match the bytes on disk. Also used to
+# compute the CSP hashes for the inline <style>/<script> blocks.
+sha2 = "0.10"
+# CLI parsing (--root/--addr/--static-dir).
+clap = { version = "4", features = ["derive", "env"] }
+# base64 for the CSP `'sha256-...'` source expressions.
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+# `ServiceExt::oneshot`, to drive the router in-process without binding a port.
+tower = { version = "0.5", features = ["util"] }

@@ -1,7 +1,12 @@
 # Connect-Only Access
 
-**Status:** Phase 1 (backend) + Phase 2a (GUI filtering) + Phase 2b (GUI
-Rustion credential-reference connect path) done.
+**Status:** every numbered phase is done — 1 (backend), 2a (GUI filtering),
+2b (GUI Rustion credential-reference connect path), 2c (the gate extended to
+the resource *list*) and 2d (gate parity + share awareness). Only the
+`Deferred` row below is outstanding: the RDP connect path, which waits on the
+bastion resolving `rdp-password` server-side, and server-side resolution for
+the `ldap` / `pki` kinds, which do not use the stored secret this feature
+exists to hide.
 
 ## Goal
 

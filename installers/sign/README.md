@@ -17,13 +17,38 @@ platform-native signatures, every artifact also gets a cross-platform
 collected and the run exits non-zero (a signing step must fail loud); Cosign
 is best-effort (never blocks native signing).
 
+## Authenticode and the EV token
+
+**Decided 2026-08-26:** the EV Authenticode key lives on a hardware token
+held by a release manager, not in a cloud HSM — custody stays with us. See
+[`roadmaps/packaging-and-distribution.md`](../../roadmaps/packaging-and-distribution.md)
+§ Decisions for the reasoning.
+
+Two consequences for anyone wiring this into CI:
+
+1. **Authenticode is optional and must never gate a build or release.** A
+   token cannot sign unattended, so CI has to be able to cut a complete
+   release with no one present. Omitting `BV_WIN_*` skips the `.msi`/`.exe`
+   artifacts, and an unsigned Windows artifact is a **supported** release
+   outcome — not a failure to chase. Cosign and `SHA256SUMS` still run
+   unattended, so those artifacts keep a verifiable provenance signature
+   regardless; Authenticode is the extra layer that suppresses the
+   SmartScreen interstitial, applied out-of-band when the token is on hand.
+2. **The EV key will not work with either key path above.** An EV key is
+   non-exportable by construction and cannot exist as a `.pfx` or a PEM on
+   disk, so `-pkcs12` and `-certs`/`-key` are both unusable with it. Driving
+   the token needs a third branch in `sign_authenticode()` using
+   `osslsigncode`'s PKCS#11 support (`-pkcs11engine` / `-pkcs11module` /
+   `-pkcs11cert`). **Not yet implemented.** The existing file-based paths
+   stay for throwaway test certs and for any non-EV signing.
+
 ## What signs what
 
 | Artifact | Mechanism | Tool | Provide |
 |---|---|---|---|
 | `.deb` | GPG (embedded if `dpkg-sig` present, else detached `.asc`) | `gpg` / `dpkg-sig` | `BV_GPG_KEY` |
 | `.rpm` | GPG (`rpm --addsign` if `rpmsign` present, else detached `.asc`) | `gpg` / `rpmsign` | `BV_GPG_KEY` |
-| `.msi`, `.exe` | Authenticode | `osslsigncode` (runs on macOS/Linux) | `BV_WIN_PFX` or `BV_WIN_CERT`+`BV_WIN_KEY` |
+| `.msi`, `.exe` | Authenticode | `osslsigncode` (runs on macOS/Linux) | `BV_WIN_PFX` or `BV_WIN_CERT`+`BV_WIN_KEY` — see § Authenticode and the EV token |
 | `.pkg` | Developer ID + optional notarization | `productsign` / `notarytool` | `BV_MACOS_INSTALLER_IDENTITY` |
 | `.nupkg` | NuGet signature (optional) | `nuget sign` | `BV_NUGET_CERT_FP` |
 | *(all)* | Cosign (`.cosign.bundle`, or `.sig`/`.pem` on cosign v2) | `cosign` | `BV_COSIGN_KEY` or `BV_COSIGN_KEYLESS=1` |

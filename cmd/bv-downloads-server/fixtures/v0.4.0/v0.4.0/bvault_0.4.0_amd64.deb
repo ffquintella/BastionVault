@@ -1,0 +1,5 @@
+PLACEHOLDER BastionVault 0.4.0 artefact fixture
+kind=cli-deb platform=linux arch=amd64
+name=bvault_0.4.0_amd64.deb
+Not a real package. Present so the downloads server has something to
+hash, list and serve in tests and in the container smoke check.

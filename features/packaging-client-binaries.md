@@ -138,7 +138,12 @@ CI matrix (Phase 4) remain open, as do the GUI installers.
   throwaway keys against the real artifacts.
 - Remaining Phase 4: the CI matrix + real release keys (GPG release subkey,
   EV Authenticode, Apple Developer ID) plugged into that step, the
-  `manifest.json` publish, and GitHub Releases. The `bv://` deep-link
+  `manifest.json` publish, and GitHub Releases. **The EV Authenticode key is
+  on a hardware token** (decided 2026-08-26 — see
+  [`roadmaps/packaging-and-distribution.md`](../roadmaps/packaging-and-distribution.md)
+  § Decisions), so Authenticode is an **optional, out-of-band** step that must
+  not gate CI, and driving the token needs a PKCS#11 branch in
+  `sign_authenticode()` that does not exist yet. The `bv://` deep-link
   handler (needs app-side support) is also still open.
 
 ## Design

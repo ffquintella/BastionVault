@@ -120,7 +120,7 @@ endif
 # affect cargo's own internal parallelism, which is where the cores actually go.
 .NOTPARALLEL:
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-integration test-doc test-cucumber test-hiqlite test-all test-release docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-deps-key container-deps-ref container-deps-image container-deps-push container-cache-clean container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-integration test-doc test-cucumber test-hiqlite test-all test-release docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test downloads-image downloads-image-run downloads-image-test container-deps-key container-deps-ref container-deps-image container-deps-push container-cache-clean container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -1032,6 +1032,62 @@ container-image-run: ## Build (linux/arm64) and run the server image locally (co
 		-p 8200:8200 \
 		-v $(PWD)/deploy/container/config:/etc/bvault/config:ro \
 		$(IMAGE_NAME):$(IMAGE_TAG)
+
+# ── Client downloads site image (Wave 3 / Phase 2) ─────────────────────
+#
+# A second, much smaller OCI image: the static download site that serves the
+# signed client installers inside an operator's network. It shares this file's
+# CONTAINER_TOOL / PLATFORM / CACHE plumbing and deploy/container/cross-env.sh
+# with the server image, and nothing else — different Containerfile, different
+# binary, different repository.
+#
+# Phase 2 is amd64 and unsigned. Cosign signing, the SBOM attestation, arm64
+# and TLS are Phase 3. See deploy/downloads/README.md and
+# features/packaging-distribution-website.md.
+#
+#   make downloads-image
+#   make downloads-image PLATFORM=linux/arm64
+#   make downloads-image-run      # serve the checked-in fixtures on :8080
+#   make downloads-image-test     # build + run + curl every route + tear down
+#
+# INCLUDE_SHELL defaults to 0 here, the opposite of the server image: this
+# container serves static files and has nothing to `exec` into. Pass
+# DOWNLOADS_INCLUDE_SHELL=1 to keep busybox for debugging.
+DOWNLOADS_IMAGE_NAME    ?= bastionvault-downloads
+DOWNLOADS_IMAGE_TAG     ?= $(VERSION)
+DOWNLOADS_INCLUDE_SHELL ?= 0
+DOWNLOADS_PORT          ?= 8080
+DOWNLOADS_FIXTURE       ?= $(PWD)/cmd/bv-downloads-server/fixtures/v0.4.0
+
+downloads-image: ## Build the client-downloads OCI image (PLATFORM= defaults to linux/amd64)
+	@command -v $(CONTAINER_TOOL) >/dev/null 2>&1 || { \
+		echo "ERROR: '$(CONTAINER_TOOL)' not found. Install podman or docker, or override with CONTAINER_TOOL=."; \
+		exit 1; \
+	}
+	@echo "==> Building $(DOWNLOADS_IMAGE_NAME):$(DOWNLOADS_IMAGE_TAG) ($(PLATFORM), INCLUDE_SHELL=$(DOWNLOADS_INCLUDE_SHELL)) with $(CONTAINER_TOOL)"
+	$(_BUILD_CMD) \
+		--build-arg INCLUDE_SHELL=$(DOWNLOADS_INCLUDE_SHELL) \
+		--build-arg CARGO_BUILD_JOBS=$(CARGO_BUILD_JOBS) \
+		-f deploy/downloads/Containerfile \
+		-t $(DOWNLOADS_IMAGE_NAME):$(DOWNLOADS_IMAGE_TAG) \
+		-t $(DOWNLOADS_IMAGE_NAME):latest \
+		.
+	@echo ""
+	@echo "==> Built $(DOWNLOADS_IMAGE_NAME):$(DOWNLOADS_IMAGE_TAG) and :latest"
+	@echo "    Run: make downloads-image-run"
+
+downloads-image-run: ## Build + run the downloads image over the checked-in fixture release
+	@$(MAKE) downloads-image
+	@echo "==> Serving $(DOWNLOADS_FIXTURE) on http://localhost:$(DOWNLOADS_PORT)/"
+	$(CONTAINER_TOOL) run --rm -it \
+		--platform $(PLATFORM) \
+		-p $(DOWNLOADS_PORT):8080 \
+		-v $(DOWNLOADS_FIXTURE):/srv/bv-downloads:ro \
+		$(DOWNLOADS_IMAGE_NAME):$(DOWNLOADS_IMAGE_TAG) --verify-hashes
+
+downloads-image-test: ## Build the downloads image, smoke every documented route against the fixtures, tear down
+	@$(MAKE) downloads-image
+	@bash deploy/downloads/test/smoke.sh
 
 # ── Linux CLI packages (Wave 2 / Phase 1) ──────────────────────────────
 #

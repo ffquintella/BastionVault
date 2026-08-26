@@ -18,6 +18,12 @@
       "runtimeExecutable": "/bin/zsh",
       "runtimeArgs": ["-i", "-c", "cd docs && npx docusaurus start"],
       "port": 3000
+    },
+    {
+      "name": "downloads-site",
+      "runtimeExecutable": "/bin/zsh",
+      "runtimeArgs": ["-l", "-c", "cargo run -p bv-downloads-server -- --root ./cmd/bv-downloads-server/fixtures/v0.4.0 --addr 127.0.0.1:8090 --verify-hashes"],
+      "port": 8090
     }
   ]
 }

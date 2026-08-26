@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.41.14"
+version = "0.41.15"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -82,6 +82,10 @@ members = [
     "crates/bv-plugin-pack",
     "crates/bv-plugin-manifest",
     "crates/bv_plugin_surface",
+    # Tier 4, and deliberately outside `crates/`: the downloads site is a
+    # standalone binary that links none of the workspace (see
+    # features/packaging-distribution-website.md § Module Architecture).
+    "cmd/bv-downloads-server",
     "gui/src-tauri",
 ]
 # `plugins-ext/` is a git submodule with its own Cargo workspace

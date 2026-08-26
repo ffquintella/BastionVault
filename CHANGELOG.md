@@ -45,6 +45,82 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.15] - 2026-08-26
+
+### Added
+
+#### Client Distribution Website -- Phases 1 + 2 (Wave 3)
+
+- **`bv-downloads-server`** (`cmd/bv-downloads-server/`) -- a small standalone
+  binary that serves your signed client installers from inside your own
+  network. It reads a mounted directory plus its `manifest.json`, renders one
+  branded landing page at startup, and serves that page, the manifest, and
+  exactly the files the manifest names. Six routes, no upload path, no admin
+  surface, no API, no per-user state, no telemetry. Links none of the
+  workspace -- it is a Tier 4 assembly crate with its own ~60-crate dependency
+  graph. (`features/packaging-distribution-website.md` Phase 1)
+- **`deploy/downloads/Containerfile`** -- two-stage `linux/amd64` OCI image
+  (19 MB) on the same Wolfi base and nonroot UID 65532 as the server image,
+  with busybox and `apk` stripped by default. The builder runs on the build
+  host's architecture and cross-compiles through the same
+  `deploy/container/cross-env.sh` the server image uses, so an amd64 image
+  builds at native speed on an Apple Silicon Mac. Deliberately no cargo-chef:
+  this graph is ~60 crates, not ~1200. (Phase 2)
+- **`make downloads-image` / `downloads-image-run` / `downloads-image-test`**
+  -- build the image, serve the checked-in fixture release on `:8080`, or
+  build and run `deploy/downloads/test/smoke.sh` against every documented
+  route and tear down.
+- **`deploy/downloads/README.md`** -- operator docs: directory layout, the
+  `manifest.json` field table and its closed enums, the route table, adding a
+  release, re-branding, the TLS contract, and the hardening posture.
+- **`.github/workflows/downloads-image.yml.disabled`** -- GHCR build + push on
+  a `v*.*.*` tag, with a post-push smoke run. `linux/amd64` and **explicitly
+  unsigned**; Cosign keyless signing, the CycloneDX SBOM and the `arm64` leg
+  are Phase 3. Carries the `.disabled` suffix like every other image workflow
+  in this repository (commit 8ba5d8c) -- re-enable by renaming.
+- **A checked-in fixture release** (`cmd/bv-downloads-server/fixtures/v0.4.0/`)
+  covering all eight artefact kinds, with a regenerator script. Placeholder
+  bodies, real SHA-256 digests.
+
+- **Failure modes are explicit, and startup is where they surface.** A
+  manifest naming a file that is not on disk, a digest that does not match the
+  bytes (`--verify-hashes`), an entry resolving to a symlink or outside the
+  served root, or an unknown `platform` / `arch` / `kind` all abort before the
+  listener binds, with one log line naming what to fix. A file on disk the
+  manifest does not name is a startup warning and is never served.
+- **Setting `BV_DOWNLOADS_TLS_CERT` or `BV_DOWNLOADS_TLS_KEY` refuses to
+  start.** Built-in TLS is Phase 3; until then an operator who believes they
+  configured HTTPS must not silently get plaintext on the port they asked to
+  be TLS.
+
+### Security
+
+#### Client Distribution Website
+
+- **Path traversal is structural, not filtered.** Every servable URL is
+  decided at startup from the manifest and matched byte-for-byte; request
+  paths are never percent-decoded, and manifest validation restricts file
+  names to `A-Za-z0-9._+-`. `..`, `%2e%2e`, directory paths and anything
+  else outside the manifest return `404` without touching the filesystem.
+  There is no `ServeDir` and no directory listing.
+- **Symlinks cannot escape the mounted root.** Manifest entries are resolved
+  with `symlink_metadata` and a canonical-prefix check at startup; the file
+  handler re-checks at open time, so a symlink swapped into the volume after
+  startup makes that path `404` rather than being followed.
+- **MIME types are pinned from the manifest `kind`**, not sniffed or guessed,
+  and every response carries `X-Content-Type-Options: nosniff` and
+  `Referrer-Policy: no-referrer`.
+- **The landing page ships a strict CSP with no `unsafe-inline`.** Its inline
+  `<style>` and `<script>` are pinned by `sha256-` source expressions
+  recomputed at startup, so operator-supplied branding works without
+  weakening the policy. `default-src 'none'`, `frame-ancestors 'none'`.
+- **`/manifest.json` is echoed byte-for-byte** rather than re-serialised, so a
+  detached signature over the operator's manifest still verifies.
+- **No write path and no outbound connections.** `POST`/`PUT`/`DELETE`/`PATCH`
+  reach the same read-only handler and get `404`; no CA bundle is installed,
+  nothing is fetched and nothing phones home, so the container runs unchanged
+  in an air-gapped network.
+
 ## [0.41.14] - 2026-08-24
 
 ### Added
