@@ -69,8 +69,8 @@ pub struct IssuerHandle {
 /// whether clamping occurred (useful for logging / debugging).
 ///
 /// An issuer with `not_after_unix <= now` is considered expired; trying
-/// to issue from it returns `ErrPkiCaNotConfig` so the caller gets a
-/// clear "this CA can't sign" rather than a 0-second TTL.
+/// to issue from it fails with [`issuer_expired_error`] (a 400 naming the
+/// issuer and its expiry) rather than yielding a 0-second TTL.
 pub fn clamp_ttl_to_issuer(
     issuer: &IssuerHandle,
     requested: std::time::Duration,
@@ -80,7 +80,7 @@ pub fn clamp_ttl_to_issuer(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     if issuer.meta.not_after_unix <= now_unix {
-        return Err(RvError::ErrPkiCaNotConfig);
+        return Err(issuer_expired_error(&issuer.name, issuer.meta.not_after_unix));
     }
     let issuer_remaining = (issuer.meta.not_after_unix - now_unix).max(1) as u64;
     let cap = std::time::Duration::from_secs(issuer_remaining);
@@ -165,7 +165,7 @@ pub async fn build_issuer_chain(req: &Request, leaf: &IssuerHandle) -> Result<Ve
 pub async fn load_default_issuer(req: &Request) -> Result<IssuerHandle, RvError> {
     migrate_legacy_if_needed(req).await?;
     let cfg: Option<IssuersConfig> = storage::get_json(req, KEY_CONFIG_ISSUERS).await?;
-    let cfg = cfg.ok_or(RvError::ErrPkiCaNotConfig)?;
+    let cfg = cfg.ok_or_else(no_ca_configured_error)?;
     load_issuer_by_id(req, &cfg.default_id).await
 }
 
@@ -175,7 +175,7 @@ pub async fn load_default_issuer(req: &Request) -> Result<IssuerHandle, RvError>
 pub async fn load_issuer(req: &Request, reference: &str) -> Result<IssuerHandle, RvError> {
     migrate_legacy_if_needed(req).await?;
     let index: IssuersIndex = storage::get_json(req, KEY_ISSUERS_INDEX).await?.unwrap_or_default();
-    let id = index.resolve(reference).ok_or(RvError::ErrPkiCaNotConfig)?;
+    let id = index.resolve(reference).ok_or_else(|| issuer_not_found_error(reference))?;
     load_issuer_by_id(req, &id).await
 }
 
@@ -183,10 +183,10 @@ pub async fn load_issuer(req: &Request, reference: &str) -> Result<IssuerHandle,
 async fn load_issuer_by_id(req: &Request, id: &str) -> Result<IssuerHandle, RvError> {
     let cert_pem = storage::get_string(req, &storage::issuer_cert_key(id))
         .await?
-        .ok_or(RvError::ErrPkiCaNotConfig)?;
+        .ok_or_else(|| issuer_material_missing_error(id, "certificate"))?;
     let mut meta: CaMetadata = storage::get_json(req, &storage::issuer_meta_key(id))
         .await?
-        .ok_or(RvError::ErrPkiCaNotConfig)?;
+        .ok_or_else(|| issuer_material_missing_error(id, "metadata"))?;
     let index: IssuersIndex = storage::get_json(req, KEY_ISSUERS_INDEX).await?.unwrap_or_default();
     let name = index.by_id.get(id).cloned().unwrap_or_else(|| "default".to_string());
 
@@ -268,7 +268,7 @@ pub async fn set_issuer_usages(
     }
     migrate_legacy_if_needed(req).await?;
     let mut index: IssuersIndex = storage::get_json(req, KEY_ISSUERS_INDEX).await?.unwrap_or_default();
-    let id = index.resolve(reference).ok_or(RvError::ErrPkiCaNotConfig)?;
+    let id = index.resolve(reference).ok_or_else(|| issuer_not_found_error(reference))?;
     index.usages_by_id.insert(id, usages);
     storage::put_json(req, KEY_ISSUERS_INDEX, &index).await
 }
@@ -311,10 +311,9 @@ pub async fn add_issuer(
         // later without ambiguity. This used to share the generic
         // `ErrPkiCaNotConfig` ("PKI ca is not config"), which made the
         // import flows look broken when the real cause was a name
-        // collision; surface the actual reason now.
-        return Err(RvError::ErrString(format!(
-            "issuer name `{name}` already exists at this mount"
-        )));
+        // collision; surface the actual reason now, as a 409 rather than
+        // the 500 a bare `ErrString` maps to.
+        return Err(issuer_name_conflict_error(name));
     }
     let id = Uuid::new_v4().to_string();
     let now = std::time::SystemTime::now()
@@ -525,6 +524,78 @@ fn keyless_signing_error(issuer_name: &str) -> RvError {
     )
 }
 
+// ── Operator-facing issuer-lifecycle errors ───────────────────────
+//
+// Every condition below used to return the same `ErrPkiCaNotConfig`,
+// whose message is "PKI ca is not config." and whose status is 500
+// (`RvError::response_status` has no arm for it). A refused delete, a
+// mistyped issuer reference and a name collision therefore all reached
+// the operator as `HTTP 500: PKI ca is not config.` — indistinguishable
+// from an engine fault, and with no hint of what to do next. These
+// carry the status *and* the message, the same way
+// `keyless_signing_error` above already does.
+
+/// 404: the mount holds no CA at all — nothing has been generated or
+/// imported yet (or the last issuer was deleted).
+fn no_ca_configured_error() -> RvError {
+    RvError::ErrResponseStatus(
+        404,
+        "this PKI mount has no CA configured; \
+         generate a root (`root/generate/*`) or import one (`config/ca`) first"
+            .to_string(),
+    )
+}
+
+/// 404: the mount has issuers, but none matching this id or name.
+fn issuer_not_found_error(reference: &str) -> RvError {
+    RvError::ErrResponseStatus(
+        404,
+        format!("no issuer `{reference}` at this PKI mount; list `issuers/` to see the ones that exist"),
+    )
+}
+
+/// 409: an issuer already holds the requested name. Names are the
+/// operator-facing handle for an issuer, so they stay unique per mount.
+fn issuer_name_conflict_error(name: &str) -> RvError {
+    RvError::ErrResponseStatus(409, format!("issuer name `{name}` already exists at this mount"))
+}
+
+/// 409: deleting the mount's default issuer while others remain would
+/// leave every reference that omits `issuer_ref` pointing at nothing.
+/// Deleting the *only* issuer is allowed — that is a mount reset.
+fn default_issuer_delete_refused_error(name: &str) -> RvError {
+    RvError::ErrResponseStatus(
+        409,
+        format!(
+            "issuer `{name}` is this mount's default and other issuers exist; \
+             point `config/issuers` at another issuer first, then delete it"
+        ),
+    )
+}
+
+/// 400: the issuer's own certificate has expired, so it cannot sign a
+/// leaf with any positive TTL.
+fn issuer_expired_error(issuer_name: &str, not_after_unix: i64) -> RvError {
+    RvError::ErrResponseStatus(
+        400,
+        format!(
+            "issuer `{issuer_name}` expired at unix {not_after_unix} and cannot sign; \
+             renew or replace it, or select another issuer with `issuer_ref`"
+        ),
+    )
+}
+
+/// 500 (kept): the index lists the issuer but its stored material is
+/// gone. That is mount corruption rather than operator error — name the
+/// missing half and the id so it can be found in storage.
+fn issuer_material_missing_error(id: &str, what: &str) -> RvError {
+    log::warn!("pki/issuers: issuer {id} is listed in the index but its {what} is missing from storage");
+    RvError::ErrResponseStatus(
+        500,
+        format!("issuer `{id}` is registered at this mount but its {what} is missing from storage"),
+    )
+}
+
 #[maybe_async::maybe_async]
 pub async fn list_issuers(req: &Request) -> Result<IssuersIndex, RvError> {
     migrate_legacy_if_needed(req).await?;
@@ -565,7 +636,7 @@ pub async fn read_default_pointer(req: &Request) -> Result<IssuersConfig, RvErro
 pub async fn set_default_pointer(req: &Request, reference: &str) -> Result<(), RvError> {
     migrate_legacy_if_needed(req).await?;
     let index: IssuersIndex = storage::get_json(req, KEY_ISSUERS_INDEX).await?.unwrap_or_default();
-    let id = index.resolve(reference).ok_or(RvError::ErrPkiCaNotConfig)?;
+    let id = index.resolve(reference).ok_or_else(|| issuer_not_found_error(reference))?;
     storage::put_json(req, KEY_CONFIG_ISSUERS, &IssuersConfig { default_id: id }).await
 }
 
@@ -661,10 +732,10 @@ pub async fn rename_issuer(req: &Request, reference: &str, new_name: &str) -> Re
     }
     migrate_legacy_if_needed(req).await?;
     let mut index: IssuersIndex = storage::get_json(req, KEY_ISSUERS_INDEX).await?.unwrap_or_default();
-    let id = index.resolve(reference).ok_or(RvError::ErrPkiCaNotConfig)?;
+    let id = index.resolve(reference).ok_or_else(|| issuer_not_found_error(reference))?;
     if let Some(existing) = index.name_to_id(new_name) {
         if existing != id {
-            return Err(RvError::ErrPkiCaNotConfig);
+            return Err(issuer_name_conflict_error(new_name));
         }
     }
     index.by_id.insert(id, new_name.to_string());
@@ -686,11 +757,12 @@ pub async fn rename_issuer(req: &Request, reference: &str, new_name: &str) -> Re
 pub async fn delete_issuer(req: &Request, reference: &str) -> Result<(), RvError> {
     migrate_legacy_if_needed(req).await?;
     let mut index: IssuersIndex = storage::get_json(req, KEY_ISSUERS_INDEX).await?.unwrap_or_default();
-    let id = index.resolve(reference).ok_or(RvError::ErrPkiCaNotConfig)?;
+    let id = index.resolve(reference).ok_or_else(|| issuer_not_found_error(reference))?;
 
     let cfg: IssuersConfig = storage::get_json(req, KEY_CONFIG_ISSUERS).await?.unwrap_or_default();
     if cfg.default_id == id && index.by_id.len() > 1 {
-        return Err(RvError::ErrPkiCaNotConfig);
+        let name = index.by_id.get(&id).map(String::as_str).unwrap_or(reference);
+        return Err(default_issuer_delete_refused_error(name));
     }
 
     // Pull the issuer→key binding out of the managed-key refs file

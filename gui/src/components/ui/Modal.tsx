@@ -82,6 +82,10 @@ interface ConfirmModalProps {
   confirmLabel?: string;
   variant?: "primary" | "danger";
   loading?: boolean;
+  /** Blocks the confirm button when the caller already knows the action
+   *  cannot succeed, so `message` can explain why instead of the server
+   *  answering with an error toast. */
+  confirmDisabled?: boolean;
 }
 
 export function ConfirmModal({
@@ -93,6 +97,7 @@ export function ConfirmModal({
   confirmLabel = "Confirm",
   variant = "danger",
   loading,
+  confirmDisabled,
 }: ConfirmModalProps) {
   return (
     <Modal
@@ -104,7 +109,12 @@ export function ConfirmModal({
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant={variant} onClick={onConfirm} loading={loading}>
+          <Button
+            variant={variant}
+            onClick={onConfirm}
+            loading={loading}
+            disabled={confirmDisabled}
+          >
             {confirmLabel}
           </Button>
         </>

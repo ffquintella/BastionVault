@@ -14,7 +14,8 @@
 //!    `ca/pending/key` → `ca/key`, and the mount can now issue leaves.
 //!
 //! Until step 3 lands, the intermediate mount has no `ca/cert` and `issue`
-//! calls fail with `ErrPkiCaNotConfig` — the right behaviour.
+//! calls fail with a 404 ("this PKI mount has no CA configured") — the
+//! right behaviour.
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -125,7 +126,15 @@ impl PkiBackendInner {
         // operator who wants two intermediates in flight should land the
         // first via `set-signed` first.
         if storage::get_string(req, KEY_CA_PENDING_KEY).await?.is_some() {
-            return Err(RvError::ErrPkiCaNotConfig);
+            // Was `ErrPkiCaNotConfig` — a 500 reading "PKI ca is not
+            // config.", which told the operator nothing about the
+            // in-flight generation that is actually in the way.
+            return Err(RvError::ErrResponseStatus(
+                409,
+                "a pending intermediate generation already exists at this mount; \
+                 land it with `intermediate/set-signed` before generating another"
+                    .to_string(),
+            ));
         }
 
         let exported = req.get_data("exported")?.as_str().unwrap_or("").to_string();

@@ -45,6 +45,36 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.17] - 2026-08-26
+
+### Fixed
+
+#### PKI issuer lifecycle errors
+
+- **Issuer-lifecycle refusals are now 4xx with an actionable message instead of
+  `HTTP 500: PKI ca is not config.`** (`crates/bv-engine-pki/src/issuers.rs`,
+  `path_intermediate.rs`). Six distinct conditions shared one opaque
+  `ErrPkiCaNotConfig`, which the HTTP layer has no status arm for and therefore
+  reported as a server fault -- deleting the mount's default issuer while other
+  issuers existed looked identical to an engine crash in the GUI, and said
+  nothing about how to proceed. Each now carries its own status and text:
+  refusing to delete the default issuer or renaming onto a taken name is `409`
+  (and names `config/issuers` as the way out), an unknown issuer reference is
+  `404` echoing the reference, a mount with no CA is `404` pointing at
+  `root/generate/*` / `config/ca`, signing with an expired issuer is `400`
+  naming the expiry, and a second `intermediate/generate` while one is pending
+  is `409`. An issuer listed in the index whose stored certificate or metadata
+  is missing stays a `500` -- that is mount corruption -- but now says which
+  half is gone and logs it. Import name collisions, previously a bare
+  `ErrString` (also 500), are `409` too.
+- **The GUI's delete-issuer dialog explains the default-issuer rule up front**
+  (`gui/src/routes/PkiPage.tsx`, `gui/src/components/ui/Modal.tsx`). When the
+  target is the mount default and other issuers exist, the confirmation states
+  why the delete cannot proceed and the Delete button is disabled, instead of
+  sending a request that can only come back as an error toast. `ConfirmModal`
+  gains an optional `confirmDisabled` prop. Coverage in
+  `gui/src/test/pkiIssuerDelete.test.tsx` and `tests/test_pki_phase5_2.rs`.
+
 ## [0.41.16] - 2026-08-26
 
 ### Fixed

@@ -608,8 +608,15 @@ function IssuersTab({ mount }: { mount: string }) {
     }
   }
 
+  // The engine refuses to delete the mount's default issuer while other
+  // issuers exist — every call that omits `issuer_ref` would then resolve
+  // to nothing — and answers 409. We know both facts client-side, so say
+  // it in the dialog instead of firing a request that cannot succeed.
+  // Deleting the *only* issuer is allowed: that resets the mount.
+  const deleteBlocked = !!deleteTarget && deleteTarget.is_default && issuers.length > 1;
+
   async function handleDelete() {
-    if (!deleteTarget) return;
+    if (!deleteTarget || deleteBlocked) return;
     try {
       await api.pkiDeleteIssuer(mount, deleteTarget.id);
       toast("success", `Issuer ${deleteTarget.name} deleted`);
@@ -847,12 +854,15 @@ function IssuersTab({ mount }: { mount: string }) {
         onConfirm={handleDelete}
         title="Delete issuer?"
         message={
-          deleteTarget
-            ? `Delete issuer "${deleteTarget.name}"? Certs already issued by this issuer remain in the cert store and tidy will sweep them after expiry.`
-            : ""
+          !deleteTarget
+            ? ""
+            : deleteBlocked
+              ? `"${deleteTarget.name}" is this mount's default issuer and other issuers still exist. Select another issuer, use "Set as default", then delete this one.`
+              : `Delete issuer "${deleteTarget.name}"? Certs already issued by this issuer remain in the cert store and tidy will sweep them after expiry.`
         }
         confirmLabel="Delete"
         variant="danger"
+        confirmDisabled={deleteBlocked}
       />
       <ExportModal
         open={!!exportTarget}

@@ -201,7 +201,8 @@ pub enum CaKind {
 /// flight: the engine has produced a keypair, returned a CSR, and is
 /// waiting on `pki/intermediate/set-signed` to install the issuer's
 /// counter-signed cert. Until that arrives, `ca/cert` is absent and issue
-/// calls fail with `ErrPkiCaNotConfig`, which is the right behaviour.
+/// calls fail with a 404 ("this PKI mount has no CA configured"), which is
+/// the right behaviour.
 pub const KEY_CA_PENDING_KEY: &str = "ca/pending/key";
 pub const KEY_CA_PENDING_CSR: &str = "ca/pending/csr";
 pub const KEY_CA_PENDING_META: &str = "ca/pending/meta";

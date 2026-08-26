@@ -34,6 +34,7 @@ use std::{collections::HashMap, env, fs};
 
 use bastion_vault::{
     core::{Core, SealConfig},
+    errors::RvError,
     logical::{Operation, Request},
     storage, BastionVault,
 };
@@ -82,6 +83,23 @@ async fn delete(core: &Core, token: &str, path: &str) -> Result<(), String> {
     req.operation = Operation::Delete;
     req.client_token = token.to_string();
     core.handle_request(&mut req).await.map(|_| ()).map_err(|e| format!("{e:?}"))
+}
+
+/// Like [`delete`], but returns the HTTP status the server would send
+/// (`RvError::response_status`, plus the status `ErrResponseStatus`
+/// carries) and the operator-facing message. Used to pin down that
+/// issuer-lifecycle refusals are 4xx with an actionable message rather
+/// than the old blanket `500 PKI ca is not config.`.
+#[maybe_async::maybe_async]
+async fn delete_err(core: &Core, token: &str, path: &str) -> (u16, String) {
+    let mut req = Request::new(path);
+    req.operation = Operation::Delete;
+    req.client_token = token.to_string();
+    match core.handle_request(&mut req).await {
+        Ok(_) => panic!("delete {path} unexpectedly succeeded"),
+        Err(RvError::ErrResponseStatus(status, text)) => (status, text),
+        Err(other) => (other.response_status(), other.to_string()),
+    }
 }
 
 fn boot() -> (BastionVault, std::path::PathBuf) {
@@ -364,12 +382,20 @@ async fn test_pki_phase5_2_rename_and_delete() {
     assert_eq!(after_rename["issuer_id"].as_str().unwrap(), secondary_id);
     assert_eq!(after_rename["issuer_name"].as_str().unwrap(), "uat-root");
 
-    // Refuse to delete the default while another issuer exists.
-    let err = delete(&core, &token, "pki/issuer/default").await;
+    // Refuse to delete the default while another issuer exists — with a
+    // 409 and an actionable message, not the old `500 PKI ca is not
+    // config.` that read as an engine fault in the GUI.
+    let (status, msg) = delete_err(&core, &token, "pki/issuer/default").await;
+    assert_eq!(status, 409, "refusing the default-issuer delete must be a conflict, got: {msg}");
     assert!(
-        err.is_err(),
-        "deleting the default issuer with siblings present must be rejected"
+        msg.contains("default") && msg.contains("config/issuers"),
+        "message must name the cause and the way out, got: {msg}"
     );
+
+    // An unknown issuer reference is a 404 naming the reference, not a 500.
+    let (status, msg) = delete_err(&core, &token, "pki/issuer/no-such-issuer").await;
+    assert_eq!(status, 404, "unknown issuer reference must be a 404, got: {msg}");
+    assert!(msg.contains("no-such-issuer"), "message must echo the reference, got: {msg}");
 
     // Deleting the non-default works.
     delete(&core, &token, "pki/issuer/uat-root").await.unwrap();
