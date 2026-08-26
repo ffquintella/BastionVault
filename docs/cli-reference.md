@@ -42,7 +42,16 @@ bvault status
 bvault status --format=json
 ~~~
 
-Returns the sealed state, number of key shares, threshold, and unseal progress.
+Returns the sealed state, number of key shares, threshold, and unseal
+progress, plus the storage cluster mode (`single` vs `clustered`), the
+storage backend kind and -- when clustered -- this node's Raft id, whether
+it is the leader, and cluster health.
+
+Servers up to and including 0.41.18 reported `Cluster Mode single` /
+`Storage Type file` even on a healthy hiqlite cluster, and
+`bvault cluster leader` reported `Is Leader: true` on every node: the
+cluster fields were compiled out of the shipped binary. Read those fields
+from 0.41.19 onward, or from the storage engine's own logs.
 
 ## operator init
 

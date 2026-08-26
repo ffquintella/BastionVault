@@ -82,9 +82,17 @@ serial_test = "3.4"
 
 [features]
 default = ["storage_hiqlite", "ssh_pqc"]
-storage_mysql = ["bastion_vault/storage_mysql"]
-storage_hiqlite = ["bastion_vault/storage_hiqlite"]
-cloud_targets = ["bastion_vault/cloud_targets"]
+# The storage backends. Every one of these has to reach `bv-server` as well
+# as the library: `bv-server`'s `sys/health`, `sys/info` and
+# `sys/cluster-status` handlers name the backend type behind a
+# `#[cfg(feature = ...)]` of their OWN, so a flag that stops at
+# `bastion_vault` leaves a real hiqlite cluster reporting
+# `cluster: false` / `storage_type: "file"` from a binary whose storage
+# layer is clustered. That is exactly the trap `sync_handler` below was
+# already written to avoid.
+storage_mysql = ["bastion_vault/storage_mysql", "bv-server/storage_mysql"]
+storage_hiqlite = ["bastion_vault/storage_hiqlite", "bv-server/storage_hiqlite"]
+cloud_targets = ["bastion_vault/cloud_targets", "bv-server/cloud_targets"]
 ssh_pqc = ["bastion_vault/ssh_pqc"]
 pki_pqc_composite = ["bastion_vault/pki_pqc_composite"]
 transit_byok = ["bastion_vault/transit_byok"]

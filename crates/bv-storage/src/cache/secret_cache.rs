@@ -118,10 +118,25 @@ impl CachingBackend {
     pub fn clear(&self) {
         self.cache.clear().ok();
     }
+
+    /// The backend this decorator wraps.
+    ///
+    /// Exposed for [`crate::physical_root`], which peels decorators so a
+    /// caller asking "is the physical backend hiqlite?" gets an answer that
+    /// does not change when the operator turns the read cache on.
+    pub fn inner(&self) -> &Arc<dyn Backend> {
+        &self.inner
+    }
 }
 
 #[maybe_async::maybe_async]
 impl Backend for CachingBackend {
+    /// The decorator is not a storage kind of its own -- report the
+    /// backend underneath, which is what an operator configured.
+    fn backend_kind(&self) -> &'static str {
+        self.inner.backend_kind()
+    }
+
     async fn list(&self, prefix: &str) -> Result<Vec<String>, RvError> {
         // Listing is not cached: results are small, change on every
         // adjacent write, and there is no cheap per-prefix invalidation

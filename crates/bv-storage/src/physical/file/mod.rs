@@ -258,6 +258,10 @@ impl FileBackend {
 
 #[maybe_async::maybe_async]
 impl Backend for FileBackend {
+    fn backend_kind(&self) -> &'static str {
+        "file"
+    }
+
     async fn list(&self, prefix: &str) -> Result<Vec<String>, RvError> {
         self.target.list(prefix).await
     }

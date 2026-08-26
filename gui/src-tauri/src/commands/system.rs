@@ -471,23 +471,12 @@ pub async fn get_server_info(state: State<'_, AppState>) -> CmdResult<ServerInfo
             let core = vault.core.load();
             let initialized = core.inited().await.unwrap_or(false);
             let sealed = core.sealed();
-            let storage_type = {
-                #[cfg(feature = "storage_hiqlite")]
-                {
-                    use bastion_vault::storage::hiqlite::HiqliteBackend;
-                    let backend_any =
-                        core.physical.as_ref() as &dyn std::any::Any;
-                    if backend_any.downcast_ref::<HiqliteBackend>().is_some() {
-                        "hiqlite".to_string()
-                    } else {
-                        "unknown".to_string()
-                    }
-                }
-                #[cfg(not(feature = "storage_hiqlite"))]
-                {
-                    "unknown".to_string()
-                }
-            };
+            use bastion_vault::storage::Backend as _;
+            // The backend names itself, so the label survives both a
+            // missing `storage_hiqlite` on this crate and the read-cache
+            // decorator wrapped around the physical layer -- the two ways
+            // this used to read "unknown" on a clustered node.
+            let storage_type = core.physical.backend_kind().to_string();
             return Ok(ServerInfo {
                 connection_kind: "embedded".to_string(),
                 endpoint: "embedded".to_string(),

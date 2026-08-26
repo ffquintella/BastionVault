@@ -189,6 +189,10 @@ impl<'a, 'r> From<&'a mut hiqlite::Row<'r>> for VaultRow {
 
 #[maybe_async::must_be_async]
 impl Backend for HiqliteBackend {
+    fn backend_kind(&self) -> &'static str {
+        "hiqlite"
+    }
+
     async fn list(&self, prefix: &str) -> Result<Vec<String>, RvError> {
         if prefix.starts_with('/') {
             return Err(RvError::ErrPhysicalBackendPrefixInvalid);
@@ -1126,6 +1130,48 @@ mod test {
 
         // Node ID should match config
         assert_eq!(backend.node_id(), 1);
+    }
+
+    /// Regression test for the cluster-reporting bug fixed in 0.41.19: a
+    /// live hiqlite node reported `storage_type: "file"`, `cluster: false`
+    /// and (on a follower) `standby: false` to every operator surface,
+    /// because the crates doing the reporting inferred the backend by
+    /// downcast -- behind a feature they were not compiled with, and
+    /// without peeling the read-cache decorator.
+    ///
+    /// Both halves are asserted here, on a real backend: the kind the
+    /// backend reports about itself, and the cluster view taken through
+    /// `crate::cluster`, bare and behind the cache decorator.
+    #[serial]
+    #[tokio::test]
+    async fn test_hiqlite_reports_itself_as_a_cluster() {
+        if !should_run() {
+            eprintln!("Skipping hiqlite test (set CARGO_TEST_HIQLITE=1 to enable)");
+            return;
+        }
+        use std::sync::Arc;
+
+        let conf = make_test_conf("test_hiqlite_cluster_reporting");
+        let backend: Arc<dyn Backend> = Arc::new(HiqliteBackend::new(&conf).unwrap());
+
+        assert_eq!(backend.backend_kind(), "hiqlite", "the backend must name itself");
+
+        let status = crate::cluster::status(backend.as_ref()).await.expect("a hiqlite backend is a cluster");
+        assert_eq!(status.node_id, 1);
+        assert!(status.is_leader, "single-node cluster is its own leader");
+        assert!(status.healthy);
+        assert!(status.raft_metrics.is_some(), "raft metrics must reach the operator surface");
+        assert_eq!(crate::cluster::node_id(backend.as_ref()), Some(1));
+
+        // Same answers behind the ciphertext read cache -- which is what
+        // `Core::physical` is whenever `cache.secret_cache_ttl_secs > 0`.
+        let cached: Arc<dyn Backend> = Arc::new(crate::cache::CachingBackend::new(backend, 16, 30).unwrap());
+        assert_eq!(cached.backend_kind(), "hiqlite");
+        let via_cache =
+            crate::cluster::status(cached.as_ref()).await.expect("the cache decorator must not hide the cluster");
+        assert_eq!(via_cache.node_id, 1);
+        assert!(via_cache.is_leader);
+        assert_eq!(crate::cluster::node_id(cached.as_ref()), Some(1));
     }
 
     #[serial]

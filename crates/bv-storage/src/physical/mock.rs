@@ -9,6 +9,10 @@ pub struct MockBackend(());
 
 #[maybe_async::maybe_async]
 impl Backend for MockBackend {
+    fn backend_kind(&self) -> &'static str {
+        "mock"
+    }
+
     async fn list(&self, _prefix: &str) -> Result<Vec<String>, RvError> {
         Ok(Vec::new())
     }

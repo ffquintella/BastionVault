@@ -42,6 +42,12 @@ pub mod hiqlite;
 #[cfg(not(feature = "sync_handler"))]
 pub mod migrate;
 
+/// The feature-independent cluster view of the physical backend. Always
+/// compiled: a caller must not need `storage_hiqlite` of its own to ask
+/// whether storage is clustered. See the module docs for the reporting bug
+/// that made this necessary.
+pub mod cluster;
+
 /// The read caches that sit in front of the physical layer. Folded into this
 /// crate rather than made its own: `CachingBackend` implements [`Backend`] and
 /// [`wrap_with_cache`] installs it, so the two are mutually dependent.
@@ -132,6 +138,23 @@ pub trait Backend: Send + Sync + std::any::Any {
         Ok(Box::new(true))
     }
 
+    /// Stable label for *which* backend this is -- the same strings
+    /// [`new_backend`] dispatches on (`file`, `mysql`, `hiqlite`, `mock`).
+    ///
+    /// Exists so an operator-facing surface (`sys/info`,
+    /// `sys/cluster-status`, `bvault status`) can report the storage kind
+    /// without a downcast, and therefore without depending on which
+    /// optional features the *reporting* crate happened to be compiled
+    /// with. Decorators delegate to the backend they wrap, so the label
+    /// always names the physical layer.
+    ///
+    /// The default is `"unknown"` rather than a guess: reporting a kind we
+    /// cannot establish would be exactly the silent fallback that hid a
+    /// live hiqlite cluster behind `storage_type: "file"`.
+    fn backend_kind(&self) -> &'static str {
+        "unknown"
+    }
+
     /// Physical-layer counterpart of [`Storage::scan`]: bulk-read every
     /// entry under `prefix` (recursively), optionally restricted to keys
     /// `>= start_key`. The default walks `list` + `get`; backends that
@@ -207,6 +230,40 @@ pub async fn new_backend_async(
         }
         _ => new_backend(t, conf),
     }
+}
+
+/// Peel every storage decorator off `backend` and hand back the physical
+/// backend underneath.
+///
+/// `Core::physical` is whatever [`wrap_with_cache`] returned, so on a
+/// deployment with `cache.secret_cache_ttl_secs > 0` it is a
+/// [`cache::CachingBackend`], not the backend the operator configured. Any
+/// caller that reaches for a concrete backend type by
+/// `Any::downcast_ref` must go through here first, or it silently sees
+/// "not that backend" the moment caching is switched on.
+pub fn physical_root(backend: &dyn Backend) -> &dyn Backend {
+    let mut current = backend;
+    // One decorator today; the loop keeps the invariant if another is added.
+    loop {
+        let as_any: &dyn Any = current;
+        match as_any.downcast_ref::<cache::CachingBackend>() {
+            Some(caching) => current = caching.inner().as_ref(),
+            None => return current,
+        }
+    }
+}
+
+/// The hiqlite backend behind `backend`, decorators peeled, or `None` when
+/// this deployment is not clustered.
+///
+/// Crate-private on purpose: [`cluster`] is the only caller, so exactly one
+/// module in the workspace names the concrete type behind the
+/// `storage_hiqlite` feature, and the peel in [`physical_root`] cannot be
+/// forgotten by a caller that reaches for the type itself.
+#[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
+pub(crate) fn as_hiqlite(backend: &dyn Backend) -> Option<&hiqlite::HiqliteBackend> {
+    let root: &dyn Any = physical_root(backend);
+    root.downcast_ref::<hiqlite::HiqliteBackend>()
 }
 
 pub fn new_barrier(barrier_type: BarrierType, backend: Arc<dyn Backend>) -> Arc<dyn barrier::SecurityBarrier> {

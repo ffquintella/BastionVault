@@ -1313,19 +1313,16 @@ async fn sys_health_request_handler(
 
     let sealed = core.sealed();
 
-    #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
-    let (standby, cluster_healthy) = {
-        use crate::storage::hiqlite::HiqliteBackend;
-        let physical = core.physical();
-        let backend_any = physical.as_ref() as &dyn std::any::Any;
-        if let Some(hiqlite_backend) = backend_any.downcast_ref::<HiqliteBackend>() {
-            (!hiqlite_backend.is_leader().await, hiqlite_backend.is_healthy().await)
-        } else {
-            (false, true)
-        }
+    // Asked through `storage::cluster` rather than by downcasting here: a
+    // load balancer routes writes on `standby`, so this must not depend on
+    // whether *this* crate was compiled with `storage_hiqlite` (it wasn't,
+    // in every shipped binary up to 0.41.18 -- see the module docs on
+    // `bv_storage::cluster`). A non-clustered backend has no standby role
+    // and no quorum to lose, hence the `(false, true)` default.
+    let (standby, cluster_healthy) = match crate::storage::cluster::status(core.physical().as_ref()).await {
+        Some(cluster) => (!cluster.is_leader, cluster.healthy),
+        None => (false, true),
     };
-    #[cfg(not(all(not(feature = "sync_handler"), feature = "storage_hiqlite")))]
-    let (standby, cluster_healthy) = (false, true);
 
     let resp = HealthResponse { initialized, sealed, standby, cluster_healthy };
 
@@ -1487,19 +1484,9 @@ pub(crate) fn cluster_peer_ips(core: &dyn VaultCtx) -> Arc<HashSet<IpAddr>> {
         }
     }
 
-    // Only the hiqlite build below writes to this, hence the allow.
-    #[allow(unused_mut)]
-    let mut addrs: Vec<String> = Vec::new();
-    #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
-    {
-        use crate::storage::hiqlite::HiqliteBackend;
-        let physical = core.physical();
-        let backend_any = physical.as_ref() as &dyn std::any::Any;
-        if let Some(hiqlite_backend) = backend_any.downcast_ref::<HiqliteBackend>() {
-            addrs = hiqlite_backend.peer_addrs().to_vec();
-        }
-    }
-    let _ = core;
+    // Empty for a non-clustered backend, which leaves loopback as the only
+    // cluster-local caller.
+    let addrs: Vec<String> = crate::storage::cluster::peer_addrs(core.physical().as_ref());
 
     let mut ips: HashSet<IpAddr> = HashSet::new();
     for addr in &addrs {
@@ -1555,19 +1542,10 @@ async fn sys_info_request_handler(
     };
 
     if caller_has_live_token(core.as_ref(), &req).await {
-        #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
-        let storage_type = {
-            use crate::storage::hiqlite::HiqliteBackend;
-            let physical = core.physical();
-        let backend_any = physical.as_ref() as &dyn std::any::Any;
-            if backend_any.downcast_ref::<HiqliteBackend>().is_some() {
-                "hiqlite"
-            } else {
-                "unknown"
-            }
-        };
-        #[cfg(not(all(not(feature = "sync_handler"), feature = "storage_hiqlite")))]
-        let storage_type = "unknown";
+        // The backend names itself (`Backend::backend_kind`), which keeps
+        // this label independent of this crate's feature set and of any
+        // decorator wrapped around the physical layer.
+        let storage_type = core.physical().backend_kind();
 
         resp.version = Some(bastion_vault::VERSION);
         resp.started_at = Some(crate::server_info::started_at().to_rfc3339());
@@ -1604,8 +1582,15 @@ async fn sys_cluster_status_request_handler(
         ));
     }
 
+    let physical = _core.physical();
+
+    // The backend reports its own kind. It used to be inferred here -- a
+    // successful downcast to the hiqlite type meant "hiqlite", and
+    // *anything else*, including a downcast that could not compile, was
+    // reported as "file". That fallback is what let a replicating two-node
+    // Raft cluster answer `{"storage_type":"file","cluster":false}`.
     let mut resp = ClusterStatusResponse {
-        storage_type: "unknown".to_string(),
+        storage_type: physical.backend_kind().to_string(),
         cluster: false,
         node_id: None,
         is_leader: None,
@@ -1613,22 +1598,12 @@ async fn sys_cluster_status_request_handler(
         raft_metrics: None,
     };
 
-    #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
-    {
-        use crate::storage::hiqlite::HiqliteBackend;
-        let backend_any = _core.physical.as_ref() as &dyn std::any::Any;
-        if let Some(hiqlite_backend) = backend_any.downcast_ref::<HiqliteBackend>() {
-            resp.storage_type = "hiqlite".to_string();
-            resp.cluster = true;
-            resp.node_id = Some(hiqlite_backend.node_id());
-            resp.is_leader = Some(hiqlite_backend.is_leader().await);
-            resp.cluster_healthy = Some(hiqlite_backend.is_healthy().await);
-            resp.raft_metrics = hiqlite_backend.cluster_metrics().await.ok();
-        }
-    }
-
-    if resp.storage_type == "unknown" {
-        resp.storage_type = "file".to_string();
+    if let Some(cluster) = crate::storage::cluster::status(physical.as_ref()).await {
+        resp.cluster = true;
+        resp.node_id = Some(cluster.node_id);
+        resp.is_leader = Some(cluster.is_leader);
+        resp.cluster_healthy = Some(cluster.healthy);
+        resp.raft_metrics = cluster.raft_metrics;
     }
 
     Ok(response_json_ok(None, resp))
@@ -1652,17 +1627,14 @@ async fn sys_cluster_remove_node_request_handler(
     let payload = serde_json::from_slice::<RemoveNodeRequest>(&body)?;
     body.clear();
 
-    #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
+    if let Some(result) =
+        crate::storage::cluster::remove_node(_core.physical().as_ref(), payload.node_id, payload.stay_as_learner)
+            .await
     {
-        use crate::storage::hiqlite::HiqliteBackend;
-        let backend_any = _core.physical.as_ref() as &dyn std::any::Any;
-        if let Some(hiqlite_backend) = backend_any.downcast_ref::<HiqliteBackend>() {
-            hiqlite_backend.remove_node(payload.node_id, payload.stay_as_learner)?;
-            return Ok(response_ok(None, None));
-        }
+        result?;
+        return Ok(response_ok(None, None));
     }
 
-    let _ = payload;
     Ok(response_error(StatusCode::BAD_REQUEST, "cluster operations require hiqlite storage backend"))
 }
 
@@ -1672,14 +1644,9 @@ async fn sys_cluster_leave_request_handler(
 ) -> Result<HttpResponse, HttpError> {
     authorize_sys_request(&_core, &req, "sys/cluster/leave", Operation::Write).await?;
 
-    #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
-    {
-        use crate::storage::hiqlite::HiqliteBackend;
-        let backend_any = _core.physical.as_ref() as &dyn std::any::Any;
-        if let Some(hiqlite_backend) = backend_any.downcast_ref::<HiqliteBackend>() {
-            hiqlite_backend.leave_cluster().await?;
-            return Ok(response_ok(None, None));
-        }
+    if let Some(result) = crate::storage::cluster::leave(_core.physical().as_ref()).await {
+        result?;
+        return Ok(response_ok(None, None));
     }
 
     Ok(response_error(StatusCode::BAD_REQUEST, "cluster operations require hiqlite storage backend"))
@@ -1691,14 +1658,9 @@ async fn sys_cluster_failover_request_handler(
 ) -> Result<HttpResponse, HttpError> {
     authorize_sys_request(&_core, &req, "sys/cluster/failover", Operation::Write).await?;
 
-    #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
-    {
-        use crate::storage::hiqlite::HiqliteBackend;
-        let backend_any = _core.physical.as_ref() as &dyn std::any::Any;
-        if let Some(hiqlite_backend) = backend_any.downcast_ref::<HiqliteBackend>() {
-            hiqlite_backend.trigger_failover().await?;
-            return Ok(response_ok(None, None));
-        }
+    if let Some(result) = crate::storage::cluster::failover(_core.physical().as_ref()).await {
+        result?;
+        return Ok(response_ok(None, None));
     }
 
     Ok(response_error(StatusCode::BAD_REQUEST, "cluster operations require hiqlite storage backend"))
@@ -4626,6 +4588,44 @@ mod cluster_status_disclosure_tests {
             "a tokenless request from the node itself must still be answered: {resp:?}"
         );
         assert!(resp["storage_type"].as_str().is_some(), "{resp:?}");
+    }
+
+    /// `storage_type` must be read off the backend, never inferred at the
+    /// route.
+    ///
+    /// It used to be inferred twice, differently: `sys/cluster-status`
+    /// reported "hiqlite" on a successful downcast and *"file" for
+    /// everything else*, while `sys/info` reported "unknown" for everything
+    /// else -- and in the shipped `bvault` binary the downcast was compiled
+    /// out entirely, so a replicating two-node cluster answered
+    /// `{"storage_type":"file","cluster":false}`. Asserting the two
+    /// surfaces agree, and that the label names the backend the harness
+    /// actually built, pins both halves.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn storage_type_names_the_real_backend_on_both_surfaces() {
+        let mut server = TestHttpServer::new("test_storage_type_reporting", true).await;
+        server.token = server.root_token.clone();
+        let token = server.root_token.clone();
+
+        let (status, cluster) = server.read("sys/cluster-status", Some(&token)).unwrap();
+        assert_eq!(status, 200, "{cluster:?}");
+        // The harness builds a file backend, so that is the only correct
+        // answer here — and it must come from the backend, not from a
+        // fallback that happens to spell the same word.
+        assert_eq!(cluster["storage_type"].as_str(), Some("file"), "{cluster:?}");
+        assert_eq!(cluster["cluster"].as_bool(), Some(false), "a file backend is not a cluster: {cluster:?}");
+        assert!(
+            cluster.get("node_id").is_none(),
+            "a non-clustered node must not claim a raft identity: {cluster:?}"
+        );
+
+        let (status, info) = server.read("sys/info", Some(&token)).unwrap();
+        assert_eq!(status, 200, "{info:?}");
+        assert_eq!(
+            info["storage_type"].as_str(),
+            cluster["storage_type"].as_str(),
+            "sys/info and sys/cluster-status must not disagree about storage: info={info:?} cluster={cluster:?}"
+        );
     }
 }
 

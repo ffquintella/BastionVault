@@ -39,19 +39,10 @@ pub use store::{ScheduleStore, STORE_PREFIX};
 /// Used to stamp catalog records at write time and to decide, at read time,
 /// whether a recorded backup lives on *this* node's filesystem.
 pub fn local_node(core: &dyn VaultCtx) -> NodeRef {
-    #[allow(unused_mut)]
-    let mut node_id = None;
-    #[cfg(feature = "storage_hiqlite")]
-    {
-        use crate::storage::hiqlite::HiqliteBackend;
-        let physical = core.physical();
-    let backend_any = physical.as_ref() as &dyn std::any::Any;
-        if let Some(hiqlite) = backend_any.downcast_ref::<HiqliteBackend>() {
-            node_id = Some(hiqlite.node_id());
-        }
-    }
-    #[cfg(not(feature = "storage_hiqlite"))]
-    let _ = core;
+    // `storage::cluster` peels the read-cache decorator before it looks, so
+    // a node stamps records with its Raft id whether or not
+    // `cache.secret_cache_ttl_secs` is set. `None` means "not clustered".
+    let node_id = crate::storage::cluster::node_id(core.physical().as_ref());
 
     NodeRef {
         node_id,

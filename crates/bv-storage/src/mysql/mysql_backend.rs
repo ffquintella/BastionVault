@@ -90,6 +90,10 @@ impl Drop for MysqlBackendLock {
 
 #[maybe_async::maybe_async]
 impl Backend for MysqlBackend {
+    fn backend_kind(&self) -> &'static str {
+        "mysql"
+    }
+
     async fn list(&self, prefix: &str) -> Result<Vec<String>, RvError> {
         if prefix.starts_with("/") {
             return Err(RvError::ErrPhysicalBackendPrefixInvalid);

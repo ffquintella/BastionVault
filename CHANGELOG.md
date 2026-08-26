@@ -45,6 +45,57 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+#### Cluster status reported a live Raft cluster as a single-node file backend
+
+- **`bvault status`, `bvault cluster status|members|leader`, `sys/health`,
+  `sys/info` and the GUI's storage chip told the truth about the storage
+  layer for the first time.** On a healthy two-node hiqlite cluster
+  (`0.41.17`, replicating, membership `{1,2}`, WALs in lockstep) every one
+  of them reported `Cluster Mode single` / `Storage Type file`, and
+  `bvault cluster leader` answered `Is Leader: true` on *both* nodes at
+  once -- which raft makes impossible. All three cluster-control routes
+  (`sys/cluster/remove-node`, `/leave`, `/failover`) refused with "cluster
+  operations require hiqlite storage backend" on a clustered node, and
+  `sys/health` reported `standby: false` on the follower, so a load
+  balancer routing on health could not tell leader from follower.
+- **Root cause: a feature flag that stopped one crate short.**
+  `bvault-cli`'s `storage_hiqlite` (a default feature) forwarded to
+  `bastion_vault` but not to `bv-server`, whose `sys` handlers each named
+  `HiqliteBackend` behind a `#[cfg(feature = "storage_hiqlite")]` of their
+  own. In every shipped `bvault` binary those branches were compiled out
+  while the storage layer itself was clustered, and the `else` arms
+  reported single-node values. Nothing failed to compile, and no test
+  covered it, because the feature *was* on for the crate that owns the
+  backend. The same manifest fixes `storage_mysql` and `cloud_targets`,
+  which had the identical gap.
+- **The class of bug is now unreachable, not just this instance.** A new
+  `bv_storage::cluster` module (always compiled) answers "is storage
+  clustered, and what is this node's raft role?" without the caller naming
+  the backend type, so the answer is decided by the crate that owns the
+  backend rather than by the feature set of whoever is asking. Every
+  operator surface -- `bv-server`, the GUI's embedded mode, the scheduled
+  export node stamp -- now asks through it, and no crate above the storage
+  layer downcasts to `HiqliteBackend` any more.
+- **Storage kind is reported by the backend itself**
+  (`Backend::backend_kind`), replacing two different inferences of it:
+  `sys/cluster-status` used to report `"file"` for anything that was not a
+  successful hiqlite downcast, and `sys/info` used to report `"unknown"`
+  for the same state. That silent fallback is what made the failure look
+  like a plausible answer instead of a missing one.
+- **Read-cache deployments were a second, independent path to the same
+  wrong answer.** With `cache.secret_cache_ttl_secs > 0`, `Core::physical`
+  is the `CachingBackend` decorator, so every downcast to the physical
+  backend answered "not clustered" regardless of features. All cluster
+  probes now peel decorators first (`bv_storage::physical_root`), and the
+  decorator delegates `backend_kind` to the backend it wraps.
+- Regression coverage: `bv-storage` asserts a real hiqlite node reports
+  itself as a cluster both bare and behind the read cache (runs under
+  `make test-hiqlite`), that a non-clustered backend reports no cluster
+  rather than a single-node guess, and `bv-server` asserts `sys/info` and
+  `sys/cluster-status` name the same, real backend.
+
 ## [0.41.18] - 2026-08-26
 
 <!--

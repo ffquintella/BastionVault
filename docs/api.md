@@ -446,6 +446,16 @@ Note that unlike `sys/info`, no field here is tiered for anonymous
 callers — `storage_type` is precisely what `sys/info` withholds, so
 returning it here would reopen that disclosure.
 
+`storage_type` is reported by the backend itself and is one of `file`,
+`mysql`, `hiqlite` or `mock`; `unknown` means a backend that does not name
+itself, never a guess. `cluster` is `true` only when the physical backend
+really is a Raft cluster, and `node_id` / `is_leader` / `cluster_healthy` /
+`raft_metrics` are **omitted** rather than defaulted when it is not. Up to
+and including 0.41.18 these fields were inferred from the reporting
+crate's own compile-time features, and a clustered node answered
+`{"storage_type": "file", "cluster": false}`; do not treat that response
+from an older server as ground truth about the storage layer.
+
 ### Identity Groups
 
 User-group and AppID-group records that fan policies out to every

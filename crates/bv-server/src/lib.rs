@@ -48,7 +48,7 @@ use serde_json::{json, Map, Value};
 // works, and the collision is a compile error, never a silent shadow.
 use bastion_vault::{
     audit, backup, config, core, errors, exchange, handler, kernel_api, logical, metrics, modules,
-    plugins, scheduled_exports, server_info,
+    plugins, scheduled_exports, server_info, storage,
 };
 
 // `bv_error_response_status!` and friends are `#[macro_export]`ed by

@@ -61,8 +61,27 @@ With hiqlite, a BastionVault cluster **is** the Raft cluster. Each vault node em
   Gated: needs a live token, or a request from a cluster machine (loopback, or an IP in the
   configured `nodes` list -- judged on the socket peer, never `X-Forwarded-For`). The second case
   is what keeps `bvault status` working on the server itself with no token. Otherwise 403.
-  `HiqliteBackend::peer_addrs()` supplies the peer list, re-resolved on a 30s cache so a peer
-  that restarts on a new address keeps qualifying.
+  `bv_storage::cluster::peer_addrs()` supplies the peer list, re-resolved on a 30s cache so a
+  peer that restarts on a new address keeps qualifying.
+
+**Post-0.41.18 -- how the reporting surfaces reach the cluster**:
+- Every surface that reports cluster state (`sys/health`, `sys/info`,
+  `sys/cluster-status`, the three `sys/cluster/*` control routes, the GUI's embedded-mode
+  storage chip, the scheduled-export node stamp) goes through `bv_storage::cluster`, which is
+  compiled unconditionally. No crate above `bv-storage` names `HiqliteBackend` or downcasts to
+  it any more.
+- That is a correctness requirement, not tidiness. Each of those sites used to carry its own
+  `#[cfg(feature = "storage_hiqlite")]`, and `bvault-cli` forwarded the feature to
+  `bastion_vault` but not to `bv-server` -- so every shipped `bvault` binary through 0.41.18
+  reported a replicating two-node cluster as `storage_type: "file"`, `cluster: false`,
+  `standby: false`, and refused all three control routes. Asking through the crate that owns
+  the backend makes the answer independent of the asking crate's feature set.
+- `storage_type` comes from `Backend::backend_kind()` -- the backend names itself. The old
+  inference reported `"file"` for "not a successful hiqlite downcast", which is what made the
+  failure look like a real answer.
+- Cluster probes peel storage decorators first (`bv_storage::physical_root`): with
+  `cache.secret_cache_ttl_secs > 0`, `Core::physical` is the `CachingBackend`, and a bare
+  downcast answered "not clustered" for that reason alone.
 - `POST /v1/sys/cluster/remove-node` -- remove a node from the Raft topology. ACL-gated on
   `sys/cluster/remove-node`.
 - `POST /v1/sys/cluster/leave` -- graceful cluster exit. ACL-gated on `sys/cluster/leave`.
