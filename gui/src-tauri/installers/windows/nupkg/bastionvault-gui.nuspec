@@ -1,15 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   Chocolatey package for the BastionVault desktop GUI. Built by
-  `make windows-gui-nupkg`, which builds the Tauri .msi (gui-windows-msi),
-  then stages this nuspec + tools/ + that .msi and assembles the .nupkg with
-  installers/cli/nupkg/build-nupkg.py (the <version> below is a placeholder
-  the build overrides).
+  `make windows-gui-nupkg`, which stages this nuspec + tools/ + one Tauri
+  installer and assembles the .nupkg with installers/cli/nupkg/build-nupkg.py
+  (the <version> below is a placeholder the build overrides).
 
-  Unlike the CLI package -- where Chocolatey auto-shims tools\bvault.exe and no
-  install script is needed -- the GUI is a windowed application with a Start
-  menu entry and an uninstall entry, so the package wraps the .msi and
-  tools\chocolateyInstall.ps1 hands it to msiexec.
+  EITHER bundle format may be the payload, because the two off-Windows build
+  paths produce different ones:
+
+    .msi  from `make gui-windows-msi`   (Windows host, or the Tart Win11 VM)
+    .exe  from `make gui-windows-nsis`  (Docker cross-build, no Windows host)
+
+  tools\chocolateyInstall.ps1 detects which one shipped and passes the right
+  silent flag, so `choco install bastionvault-gui` behaves identically either
+  way. That is what lets a Puppet manifest stay format-agnostic; see
+  installers/puppet/README.md for the unattended deployment chain.
+
+  The CLI package needs no install script (Chocolatey auto-shims
+  tools\bvault.exe). The GUI is a windowed application with a Start menu
+  entry and an uninstall entry, so this package wraps an installer and hands
+  it to msiexec or to the NSIS bundle's own silent mode.
+
+  Keep this comment free of double hyphens: XML forbids them inside a
+  comment, and a malformed nuspec fails when NuGet parses the package.
 -->
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>

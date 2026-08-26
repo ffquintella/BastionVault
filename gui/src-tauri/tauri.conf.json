@@ -61,6 +61,13 @@
     },
     "macOS": {
       "minimumSystemVersion": "10.15"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "languages": ["English"],
+        "displayLanguageSelector": false
+      }
     }
   }
 }

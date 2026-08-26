@@ -82,7 +82,12 @@ Linux build host runs the bundler against the staged scripts.
   **CLI half done** — `make windows-cli-packages` builds the `.msi` and
   `.nupkg` off-Windows: `cross` → `x86_64-pc-windows-gnu` in Docker, `wixl`
   for the msi, `build-nupkg.py` for the nupkg. GUI `.msi` builds in a
-  disposable ARM64 Win11 VM via Tart (`make gui-windows-msi`).
+  disposable ARM64 Win11 VM via Tart (`make gui-windows-msi`); the GUI also
+  has a **Docker-only** route that needs no Windows host or VM at all —
+  `make gui-windows-nsis` cross-compiles to `x86_64-pc-windows-msvc` with
+  `cargo-xwin` and bundles an x64 NSIS `.exe` with Linux `makensis`. The
+  `.exe`/`.msi` split is forced by Tauri: its WiX/MSI bundler is compiled in
+  on Windows hosts only, its NSIS bundler is not.
 - Client installers Phase 4 (Cosign signing on every artefact +
   `manifest.json` published to the GitHub release). **Local step done,
   publishing BLOCKED.** `make sign-packages` signs everything from
@@ -187,6 +192,20 @@ custody decisions require their own review.
 - GUI installers wired to Tauri's bundler — `make gui-linux-packages`
   (emulated amd64 Docker container), `make gui-windows-msi` (disposable ARM64
   Win11 VM via Tart, cross-compiling to x64), `make gui-macos-pkg`.
+- GUI Windows x64 installer from Docker alone — `make gui-windows-nsis`
+  (`gui/src-tauri/installers/windows/docker/`): `cargo-xwin` cross-compiles
+  the graph to `x86_64-pc-windows-msvc` and Tauri's NSIS bundler wraps it via
+  Linux `makensis`, so no Windows host, no Win11 ISO and no Tart are needed.
+  Unlike the Linux GUI path, nothing is emulated — the container runs at the
+  host's arch and cross-compiles. Produces an NSIS `.exe`, not an `.msi`, and
+  requires an explicit `XWIN_ACCEPT_LICENSE=1` for the MSVC CRT/SDK download.
+
+  **Open follow-up, if the `.msi` format itself is required off-Windows:** the
+  CLI already builds a genuine `.msi` on Linux/macOS with `wixl` (msitools)
+  from a hand-written `.wxs` (`installers/cli/msi/bvault.wxs`). The same trick
+  could wrap this cross-built GUI `.exe`, at the cost of hand-maintaining the
+  WiX authoring Tauri's bundler generates for us today (shortcuts, WebView2
+  bootstrapper, upgrade codes, uninstall). Not attempted.
 - Key-agnostic local signing — `make sign-packages`: GPG deb/rpm, Authenticode
   msi via `osslsigncode`, Developer ID + notarised pkg, optional NuGet, plus
   Cosign and a `SHA256SUMS` over every artifact, all from env-supplied keys.

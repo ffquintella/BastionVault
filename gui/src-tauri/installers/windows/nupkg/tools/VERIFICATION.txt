@@ -1,19 +1,30 @@
 VERIFICATION
 
-The .msi in this package is Tauri's WiX bundle, built from the BastionVault
-sources at https://github.com/ffquintella/BastionVault (tag v<version>) via
-`make gui-windows-msi` (`tauri build --bundles msi -- --features
-storage_hiqlite,ssh_pqc`) and packed by `make windows-gui-nupkg`.
+The installer in this package is a Tauri bundle built from the BastionVault
+sources at https://github.com/ffquintella/BastionVault (tag v<version>).
+Either format may be present, depending on which build path produced it:
 
-To verify, build the same tag from source and compare checksums:
+  BastionVault_<version>_x64_en-US.msi   -- Tauri's WiX bundle, from
+      `make gui-windows-msi` on a Windows host (or the Tart Win11 ARM64 VM)
+
+  BastionVault_<version>_x64-setup.exe   -- Tauri's NSIS bundle, from
+      `make gui-windows-nsis`, cross-compiled to x86_64-pc-windows-msvc in a
+      Linux container with no Windows host involved
+
+Both are `tauri build` output with --features storage_hiqlite,ssh_pqc, packed
+by `make windows-gui-nupkg`.
+
+To verify, build the same tag from source and compare:
 
     git checkout v<version>
-    make gui-windows-msi
-    Get-FileHash gui\src-tauri\target\release\bundle\msi\*.msi -Algorithm SHA256
+    make gui-windows-nsis          # or gui-windows-msi on Windows
+    Get-FileHash target\windows-docker\*.exe -Algorithm SHA256
 
-Note that a Tauri/WiX .msi is not bit-for-bit reproducible across hosts (the
-bundle embeds a build-time package GUID and compressed cab), so compare the
-installed BastionVault.exe rather than the .msi itself when reproducing.
+Note that neither a Tauri/WiX .msi nor an NSIS .exe is bit-for-bit
+reproducible across hosts (the MSI embeds a build-time package GUID and
+compressed cab; the NSIS bundle embeds compressed payload and timestamps), so
+compare the installed BastionVault.exe rather than the installer itself when
+reproducing.
 
 Release artefacts and their checksums are published on the GitHub
 Releases page of the repository.

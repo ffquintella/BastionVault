@@ -12,12 +12,24 @@ artifact is a normal x64 `.msi`.
 On a Windows host, `make gui-windows-msi` just runs Tauri's WiX bundler
 directly; this whole directory is only for the off-Windows (Mac) path.
 
+**No Windows ISO to hand?** There is a second off-Windows route that needs
+only Docker: `make gui-windows-nsis` cross-compiles to
+`x86_64-pc-windows-msvc` with `cargo-xwin` and bundles a Windows x64
+installer with Linux `makensis`. It produces an **NSIS `.exe`, not an
+`.msi`** — Tauri v2 compiles its WiX/MSI bundler in on Windows hosts only,
+so the `.msi` genuinely requires the VM below. See
+[docker/README.md](docker/README.md).
+
 ```
 gui/src-tauri/installers/windows/
 ├── README.md          (this file)
 ├── build-in-vm.sh     # orchestrator: clone → build → copy .msi out → destroy
 ├── provision.ps1      # bakes the toolchain into the base image (once)
 ├── build.ps1          # per-build: cross-compile x64 + bundle the .msi
+├── docker/            # Docker-only route: x64 NSIS .exe, no Windows host
+│   ├── README.md
+│   ├── Dockerfile     # cargo-xwin + makensis cross-build image
+│   └── build-in-docker.sh
 ├── nupkg/             # Chocolatey package wrapping the .msi
 │   ├── bastionvault-gui.nuspec   # package metadata (version injected at pack time)
 │   └── tools/

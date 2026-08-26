@@ -101,8 +101,12 @@ CI matrix (Phase 4) remain open, as do the GUI installers.
   `gui-linux-packages` (`.deb`+`.rpm`), `gui-windows-msi` (`.msi`), and
   `gui-macos-pkg` (Tauri `.app` wrapped into a `/Applications` `.pkg` by
   [build-gui-pkg.sh](../gui/src-tauri/installers/macos/build-gui-pkg.sh)).
-  A Tauri GUI cannot be *cross-compiled* (the WebView runtime is
-  platform-native: WebView2 / WebKitGTK / WebKit). The macOS GUI `.pkg` is
+  The Linux and macOS GUI bundles cannot be *cross-compiled* — their
+  WebView is a build-time dependency (WebKitGTK dev libs, the Apple SDK).
+  **Windows is the exception**: WebView2 is a *runtime* installed on the
+  target machine, so the build needs only its import libs from the Windows
+  SDK — which is why `make gui-windows-nsis` (below) can cross-compile the
+  Windows GUI from Linux. The macOS GUI `.pkg` is
   exercised on a Mac. The **Linux `.deb`/`.rpm` build off-Linux inside an
   emulated `linux/amd64` Docker container**
   ([installers/linux/Dockerfile](../gui/src-tauri/installers/linux/Dockerfile))
@@ -113,6 +117,37 @@ CI matrix (Phase 4) remain open, as do the GUI installers.
   ([installers/windows/](../gui/src-tauri/installers/windows/)) — no
   Windows host required, though it needs a one-time base image from a free
   Win11 ARM64 ISO and a first-run validation.
+- **A GUI Windows x64 installer also builds from Docker alone, with no
+  Windows host and no VM** — `make gui-windows-nsis`
+  ([installers/windows/docker/](../gui/src-tauri/installers/windows/docker/)).
+  `cargo-xwin` cross-compiles the whole graph to `x86_64-pc-windows-msvc`
+  (`clang-cl` + `lld-link` + `llvm-lib` against Microsoft's CRT/SDK) and
+  Tauri's NSIS bundler wraps it using Linux `makensis`. **The artefact is an
+  NSIS `.exe`, not an `.msi`**: Tauri v2 compiles its WiX/MSI bundler in on
+  Windows hosts only, while its NSIS bundler just resolves `makensis` from
+  `PATH`. Nothing is emulated — the container runs at the host's own arch and
+  cross-compiles, unlike the Linux path above. Requires an explicit
+  `XWIN_ACCEPT_LICENSE=1` (the MSVC CRT/SDK download is licence-gated).
+  **Verified 2026-08-26 on an Apple Silicon Mac**: `PE32+ x86-64` app binary,
+  `BastionVault_0.41.17_x64-setup.exe` (24 MB); ~2m20s to link on a warm
+  cache. Not yet install-tested on real Windows.
+- **The GUI Chocolatey package takes either bundle format**, so the fleet
+  deployment path does not depend on which build host was available:
+  `make windows-gui-nupkg` packs the `.msi` or the NSIS `.exe`, and
+  `chocolateyInstall.ps1` passes the matching silent flag. `choco install
+  bastionvault-gui` therefore behaves identically either way — which is what
+  lets the Puppet manifest stay format-agnostic. Chain verified end to end on
+  macOS: `bastionvault-gui.0.41.17.nupkg`, 24 MB, carrying the cross-built
+  x64 `.exe`.
+- **Unattended deployment is Puppet → Chocolatey**
+  ([installers/puppet/](../installers/puppet/)): the `chocolatey` provider
+  runs `choco install -y` and the package installs silently. The GUI bundle is
+  configured `installMode = perMachine` for this — Tauri's NSIS default is
+  `currentUser`, and Chocolatey under Puppet runs as SYSTEM, so the default
+  would install into SYSTEM's own profile. Two caveats are documented rather
+  than solved: WebView2's default `downloadBootstrapper` needs reachable
+  Microsoft CDN at install time (use `offlineInstaller`, +127 MB, on isolated
+  networks), and nothing in the off-Windows chain can Authenticode-sign.
 - **`make macos-client-install` builds and installs the whole macOS client
   on the developer's own Mac** — it runs `gui-macos-pkg` + `macos-cli-pkg`
   for the host arch, then hands both `.pkg`s to Apple's `installer(8)` via
@@ -405,6 +440,7 @@ macOS account — pending CI signing identity.
 | File | Purpose |
 |---|---|
 | `gui/src-tauri/tauri.conf.json` `bundle.windows` + `installers/windows/` (Tart VM) | GUI `.msi` via Tauri's default WiX bundler. **Wired 2026-07-10.** On Windows, `make gui-windows-msi` runs the bundler directly. Off-Windows it builds in a **disposable native ARM64 Windows 11 VM** (Tart, Apple Virtualization) and **cross-compiles to x64** (`x86_64-pc-windows-msvc`) — `installers/windows/{build-in-vm.sh,provision.ps1,build.ps1,packer/}`. Needs a one-time base image built from a free Win11 ARM64 ISO; validate on first run. Authenticode-sign in CI. |
+| [`gui/src-tauri/installers/windows/docker/`](../gui/src-tauri/installers/windows/docker/) | GUI Windows x64 installer with **no Windows host and no VM** — `make gui-windows-nsis`. `cargo-xwin` cross-compiles to `x86_64-pc-windows-msvc`; Tauri's NSIS bundler runs Linux `makensis`. Produces an NSIS `.exe`, **not** an `.msi` (Tauri's WiX bundler is Windows-host-only). Container runs at the host arch — no emulation. Needs `XWIN_ACCEPT_LICENSE=1`. **Done, build-verified 2026-08-26** (24 MB installer, `PE32+ x86-64` payload); not install-tested on Windows. |
 | `gui/src-tauri/installers/windows/main.wxs` (`bv://` URL handler) | **Deferred** — a custom WiX fragment for the `bv://` scheme is only useful once the GUI handles deep-link URLs (Tauri deep-link plugin + app-side handling), a separate feature. Left off the default build to avoid shipping an unverified, non-functional registry entry. |
 | [`installers/cli/msi/{bvault.wxs,License.rtf}`](../installers/cli/msi/bvault.wxs) | CLI WiX 3.x project; PATH entry; per-machine install. The WixUI license dialog is gated behind `WithUI=1` so the same .wxs builds under native WiX (`candle`/`light`) and under `wixl` (msitools). **Done (unsigned, x64 only).** |
 | [`installers/cli/nupkg/`](../installers/cli/nupkg/) | Chocolatey .nupkg. `build-nupkg.py` assembles the OPC package on any host (no Chocolatey); native Windows still uses `choco pack`. Addition to the original plan. **Done.** |

@@ -24,6 +24,7 @@ import re
 import sys
 import zipfile
 from pathlib import Path
+from xml.etree import ElementTree
 from xml.sax.saxutils import escape
 
 # A fixed timestamp keeps the archive reproducible. NuGet/Chocolatey do
@@ -111,6 +112,21 @@ def main():
 
     nuspec_path = Path(args.nuspec)
     nuspec_text = nuspec_path.read_text(encoding="utf-8")
+
+    # Fail here rather than ship a package NuGet cannot read. NuGet parses the
+    # nuspec as XML on install, so a malformed one breaks `choco install` at
+    # the client with a far less obvious error than this. The trap that
+    # motivated this check: a double hyphen inside an XML comment, which is
+    # illegal per the XML spec and easy to write in prose.
+    try:
+        ElementTree.fromstring(nuspec_text)
+    except ElementTree.ParseError as exc:
+        print(f"ERROR: {nuspec_path} is not well-formed XML: {exc}", file=sys.stderr)
+        print("       NuGet parses the nuspec on install, so this would fail at the client.",
+              file=sys.stderr)
+        print("       Note XML forbids '--' inside a comment.", file=sys.stderr)
+        return 1
+
     pkg_id = read_meta(nuspec_text, "id")
     if not pkg_id:
         print("ERROR: nuspec has no <id>", file=sys.stderr)

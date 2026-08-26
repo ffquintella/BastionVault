@@ -120,7 +120,7 @@ endif
 # affect cargo's own internal parallelism, which is where the cores actually go.
 .NOTPARALLEL:
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-integration test-doc test-cucumber test-hiqlite test-all test-release docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test downloads-image downloads-image-run downloads-image-test container-deps-key container-deps-ref container-deps-image container-deps-push container-cache-clean container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-integration test-doc test-cucumber test-hiqlite test-all test-release docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test downloads-image downloads-image-run downloads-image-test container-deps-key container-deps-ref container-deps-image container-deps-push container-cache-clean container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi gui-windows-nsis windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -1387,6 +1387,7 @@ endif
 #   Linux  : make gui-linux-packages   → .deb + .rpm (bundle/deb, bundle/rpm)
 #   macOS  : make gui-macos-pkg         → .app wrapped into a .pkg (target/pkg)
 #   Windows: make gui-windows-msi       → .msi (bundle/msi)
+#   Windows: make gui-windows-nsis      → x64 .exe (cross-built in Docker)
 
 GUI_BUNDLE_FEATURES ?= storage_hiqlite,ssh_pqc
 
@@ -1417,6 +1418,27 @@ else
 	 echo "       Build on a Windows host, or use the macOS Tart path."; exit 1
 endif
 
+# ── Windows GUI installer without Windows (Docker) ─────────────────────
+#
+# The .msi above needs a Windows host: Tauri v2 compiles its WiX/MSI
+# bundler in only on Windows (it drives candle.exe/light.exe), which is why
+# the off-Windows path is a Tart Win11 VM. Tauri's NSIS bundler has no such
+# gate — it resolves `makensis` from PATH — so a Linux container CAN produce
+# a Windows x64 installer, as an .exe rather than an .msi.
+#
+# cargo-xwin cross-compiles the graph to x86_64-pc-windows-msvc (clang-cl +
+# lld-link against Microsoft's CRT/SDK headers) and makensis wraps it. The
+# container runs at the HOST's native arch — nothing is emulated, unlike
+# gui-linux-packages — so this is fast on Apple Silicon.
+#
+# Requires XWIN_ACCEPT_LICENSE=1: cargo-xwin downloads Microsoft's CRT and
+# Windows SDK, which is only permitted under the Visual Studio licence
+# terms. That acceptance is the operator's to give, so it is not baked into
+# the script. See gui/src-tauri/installers/windows/docker/README.md.
+gui-windows-nsis: ## Build the GUI Windows x64 .exe installer in Docker (no Windows host; needs XWIN_ACCEPT_LICENSE=1)
+	@GUI_BUNDLE_FEATURES=$(GUI_BUNDLE_FEATURES) \
+	 bash gui/src-tauri/installers/windows/docker/build-in-docker.sh
+
 # ── Windows GUI Chocolatey package ─────────────────────────────────────
 #
 # Wraps the Tauri .msi in a Chocolatey/NuGet .nupkg so the desktop app can
@@ -1429,15 +1451,26 @@ endif
 # The .nupkg itself is assembled by installers/cli/nupkg/build-nupkg.py
 # (host-independent, no Chocolatey required), the same packer the CLI uses.
 #
-# On a Windows host this builds the .msi first. Off Windows, point it at an
-# .msi produced by the Tart VM path:
+# The package takes EITHER bundle format, because the two off-Windows build
+# paths produce different ones and Chocolatey abstracts the difference away
+# from callers (`choco install bastionvault-gui` behaves identically, which is
+# what lets a Puppet manifest stay format-agnostic):
 #
+#   .msi  from `make gui-windows-msi`   (Windows host, or the Tart Win11 VM)
+#   .exe  from `make gui-windows-nsis`  (Docker cross-build, no Windows host)
+#
+# With neither variable set, the newest installer found under any of the four
+# known output directories is packed. Otherwise name one explicitly:
+#
+#   make windows-gui-nupkg GUI_INSTALLER=target/windows-docker/BastionVault_0.41.17_x64-setup.exe
 #   make windows-gui-nupkg GUI_MSI=out/BastionVault_0.38.3_x64_en-US.msi
 GUI_NUPKG_DIR := gui/src-tauri/installers/windows/nupkg
 GUI_MSI       ?=
+# GUI_MSI is the older name and still works; GUI_INSTALLER is the format-neutral one.
+GUI_INSTALLER ?= $(GUI_MSI)
 PYTHON        ?= $(if $(filter Windows_NT,$(OS)),python,python3)
 
-windows-gui-nupkg: ## Build the GUI Chocolatey .nupkg wrapping the Tauri .msi (GUI_MSI=... to pack an existing one)
+windows-gui-nupkg: ## Build the GUI Chocolatey .nupkg wrapping the .msi or NSIS .exe (GUI_INSTALLER=... to pack an existing one)
 ifeq ($(OS),Windows_NT)
 	@if [ -z "$(GUI_MSI)" ]; then $(MAKE) gui-windows-msi; fi
 endif
@@ -1447,21 +1480,25 @@ endif
 		exit 1; \
 	}
 	@mkdir -p target/nupkg
-	@MSI="$(GUI_MSI)"; \
-	 if [ -z "$$MSI" ]; then \
-		MSI=$$(ls -1t gui/src-tauri/target/release/bundle/msi/*.msi \
+	@INSTALLER="$(GUI_INSTALLER)"; \
+	 if [ -z "$$INSTALLER" ]; then \
+		INSTALLER=$$(ls -1t target/windows-docker/*.exe \
+		               gui/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe \
+		               gui/src-tauri/target/release/bundle/nsis/*.exe \
+		               gui/src-tauri/target/release/bundle/msi/*.msi \
 		               target/release/bundle/msi/*.msi 2>/dev/null | head -1); \
 	 fi; \
-	 if [ -z "$$MSI" ]; then \
-		echo "ERROR: no GUI .msi found under */release/bundle/msi/."; \
-		echo "       Build it first ('make gui-windows-msi'), or pass GUI_MSI=<path>."; \
+	 if [ -z "$$INSTALLER" ]; then \
+		echo "ERROR: no GUI installer (.msi or .exe) found."; \
+		echo "       Build one first — 'make gui-windows-nsis' (Docker, no Windows host)"; \
+		echo "       or 'make gui-windows-msi' — or pass GUI_INSTALLER=<path>."; \
 		exit 1; \
 	 fi; \
-	 echo "==> packing $$MSI"; \
+	 echo "==> packing $$INSTALLER"; \
 	 $(PYTHON) installers/cli/nupkg/build-nupkg.py \
 		--nuspec $(GUI_NUPKG_DIR)/bastionvault-gui.nuspec \
 		--version $(VERSION) \
-		--tools "$$MSI" \
+		--tools "$$INSTALLER" \
 		--tools $(GUI_NUPKG_DIR)/tools/chocolateyInstall.ps1 \
 		--tools $(GUI_NUPKG_DIR)/tools/chocolateyUninstall.ps1 \
 		--tools $(GUI_NUPKG_DIR)/tools/LICENSE.txt \
