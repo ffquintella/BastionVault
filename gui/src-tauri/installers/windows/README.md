@@ -53,9 +53,20 @@ needs only Python 3 — no Chocolatey, no Windows host:
 # Windows host: builds the .msi first, then packs
 make windows-gui-nupkg
 
-# Anywhere: pack an .msi the Tart path already produced
-make windows-gui-nupkg GUI_MSI=out/BastionVault_0.38.3_x64_en-US.msi
+# Anywhere: pack whichever installer is newest on disk
+make windows-gui-nupkg
+
+# Anywhere: pack a specific one, either format
+make windows-gui-nupkg GUI_INSTALLER=target/windows-docker/BastionVault_0.41.17_x64-setup.exe
+make windows-gui-nupkg GUI_INSTALLER=out/BastionVault_0.38.3_x64_en-US.msi
 ```
+
+The package accepts **either** bundle format — the WiX `.msi` from the VM path
+or the NSIS `.exe` from the Docker path — and `chocolateyInstall.ps1` passes
+the matching silent flag, so `choco install bastionvault-gui` behaves
+identically either way. `GUI_MSI` still works as an alias for
+`GUI_INSTALLER`. For the unattended Puppet chain see
+[installers/puppet/README.md](../../../../installers/puppet/README.md).
 
 The result is `target/nupkg/bastionvault-gui.<version>.nupkg`. The CLI package
 needs no install script (Chocolatey auto-shims `tools\*.exe`); the GUI is a

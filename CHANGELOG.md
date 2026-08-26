@@ -144,6 +144,33 @@ EXAMPLE ENTRY:
   withholding policy bypass; `docs/policies/pki-readonly.hcl` grants
   read/list so an auditor can see the refusals.
 
+### Fixed
+
+#### Windows GUI installed into the SYSTEM profile under unattended deployment
+
+- **The GUI bundle now installs per-machine** --
+  `bundle.windows.nsis.installMode = "perMachine"`
+  (`gui/src-tauri/tauri.conf.json`, which previously carried no `windows`
+  stanza at all). Tauri's NSIS default is `currentUser`, and Chocolatey under
+  Puppet runs as SYSTEM, so an unattended install landed in
+  `C:\Windows\System32\config\systemprofile\AppData\Local` where no operator
+  could launch it -- and left no HKLM uninstall entry for Chocolatey's
+  auto-uninstaller or `ensure => absent` to find. Also pins one installer
+  language and drops the language-selector page, so no unattended install has
+  a UI decision to make. Verified in the generated `installer.nsi`:
+  `!define INSTALLMODE "perMachine"` -> `RequestExecutionLevel admin`.
+
+#### GUI Chocolatey package was not well-formed XML
+
+- **`bastionvault-gui.nuspec` was invalid XML** and would have failed when
+  NuGet parsed it on the client, i.e. `choco install bastionvault-gui` could
+  not have worked. Its leading comment contained `--`, which the XML spec
+  forbids inside a comment. Latent because the GUI package had never been
+  install-tested. The comment is rewritten and `build-nupkg.py` now
+  **validates the nuspec as XML before packing**, failing with the reason
+  (and naming the double-hyphen trap) rather than shipping a package that
+  breaks at install time. The CLI nuspec was unaffected and still packs.
+
 ### Changed
 
 #### PKI CSR signing: one decide-then-build pipeline

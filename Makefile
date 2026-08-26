@@ -1472,7 +1472,7 @@ PYTHON        ?= $(if $(filter Windows_NT,$(OS)),python,python3)
 
 windows-gui-nupkg: ## Build the GUI Chocolatey .nupkg wrapping the .msi or NSIS .exe (GUI_INSTALLER=... to pack an existing one)
 ifeq ($(OS),Windows_NT)
-	@if [ -z "$(GUI_MSI)" ]; then $(MAKE) gui-windows-msi; fi
+	@if [ -z "$(GUI_INSTALLER)" ]; then $(MAKE) gui-windows-msi; fi
 endif
 	@command -v $(PYTHON) >/dev/null 2>&1 || { \
 		echo "ERROR: $(PYTHON) not found — needed to assemble the .nupkg."; \

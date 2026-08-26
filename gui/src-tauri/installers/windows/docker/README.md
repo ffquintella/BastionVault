@@ -30,6 +30,30 @@ Both install to the same place with Start-menu and Add/Remove Programs
 entries; MSI matters when a deployment tool (Intune, GPO software install,
 `msiexec /qn` fleet rollout) requires that format specifically.
 
+## Why NSIS, and not Inno Setup or WiX
+
+Recorded so it is not re-litigated: **NSIS is the most multi-platform of the
+options, not a compromise.** Checked 2026-08-26.
+
+| Installer | Buildable off-Windows | How | Tauri bundler? |
+|---|---|---|---|
+| **NSIS** (chosen) | **yes, natively** | `makensis` — Debian `nsis`, Homebrew `makensis` 3.12. No Wine. | **built in** |
+| WiX v3 via `wixl` | yes, natively | `msitools` — emits a real `.msi`; the `bvault` CLI already does this | no — hand-written `.wxs` |
+| Inno Setup | only under Wine | `amake/innosetup` (multi-arch amd64 + arm64) | no — hand-written `.iss` |
+
+Inno Setup would be a step backwards on exactly the axis that matters here: it
+needs a Wine layer, and because Tauri has no Inno bundler it also needs a
+hand-maintained `.iss` duplicating what Tauri generates (shortcuts, WebView2
+bootstrap, uninstall registration, upgrade handling).
+
+`wixl` remains the interesting alternative *if the `.msi` format itself is
+ever required* off-Windows — same trade: a hand-written `.wxs` instead of a
+generated one. See the note in `roadmaps/packaging-and-distribution.md`.
+
+None of this changes the deployment story: the artefact is wrapped in a
+Chocolatey `.nupkg`, and `choco install` hides the format from Puppet
+entirely.
+
 ## How it works
 
 - **`cargo-xwin`** downloads Microsoft's Visual C++ CRT and Windows SDK
