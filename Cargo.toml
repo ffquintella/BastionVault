@@ -559,9 +559,6 @@ hsm_mock = ["bv-core/hsm_mock"]
 # compiles the result — nothing else in the workspace does.
 hsm_yubihsm2 = ["bv-core/hsm_yubihsm2"]
 
-[target.'cfg(unix)'.dependencies]
-daemonize = "0.5"
-
 
 # ── cargo-machete allowlist ────────────────────────────────────────
 #

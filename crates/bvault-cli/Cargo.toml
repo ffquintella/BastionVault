@@ -42,8 +42,6 @@ base64 = "0.22"
 better_default = "1.0.5"
 chacha20poly1305 = "0.10"
 clap = { version = "4.6", features = ["wrap_help", "derive", "env", "suggestions"] }
-# `bvault server --daemon` on unix.
-daemonize = "0.5"
 dashmap = "6.1"
 derive_more = "2.1.1"
 env_logger = "0.11"
@@ -67,6 +65,21 @@ sha2 = "0.11"
 sysexits = { version = "0.13", features = ["std"] }
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }
 zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
+
+# `bvault server --daemon`, which only exists on unix -- the call site in
+# `command::server` is `#[cfg(unix)]` and the Windows build runs the server in
+# the foreground under the service wrapper instead.
+#
+# This HAS to be target-gated rather than sitting in `[dependencies]`, because
+# a plain dependency is resolved and built for every target: daemonize 0.5 is
+# unconditionally unix-only source (libc::getpwnam, OsStringExt::into_vec,
+# AsRawFd) and fails with ~50 errors against libc's Windows shim, which is
+# exactly what broke the `nuget-package` Windows job. The root crate carried
+# the same gate while `src/cli` lived there; Phase 4 moved the call site here
+# but left the dependency ungated, and the root copy is now gone because
+# nothing under `src/` uses it any more.
+[target.'cfg(unix)'.dependencies]
+daemonize = "0.5"
 
 [dev-dependencies]
 # `#[maybe_async::maybe_async]` on a trait impl expands to `#[async_trait]`;

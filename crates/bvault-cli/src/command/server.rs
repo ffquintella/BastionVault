@@ -164,7 +164,11 @@ impl Server {
             fs::create_dir_all(work_dir.as_str())?;
         }
 
-        #[cfg(not(windows))]
+        // `cfg(unix)`, not `cfg(not(windows))`: this block's only dependency,
+        // `daemonize`, is declared under `[target.'cfg(unix)'.dependencies]`, so
+        // the two gates have to name the same set of targets or a target that is
+        // neither unix nor windows would compile the block without the crate.
+        #[cfg(unix)]
         if config.daemon {
             // start daemon
             let log_path = format!("{work_dir}/bastion_vault.log");
