@@ -45,6 +45,27 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.22] - 2026-08-31
+
+### Fixed
+
+#### Windows build: `daemonize` pulled in on a target that cannot compile it
+
+- **The `nuget-package` Windows job failed to build `bvault-cli`.** `daemonize`
+  was declared as a plain `[dependencies]` entry, so cargo resolved and built
+  it for every target -- and the crate is unconditionally unix-only source
+  (`libc::getpwnam`, `OsStringExt::into_vec`, `AsRawFd`), which produces ~50
+  errors against libc's Windows shim. It is now under
+  `[target.'cfg(unix)'.dependencies]`, matching the gate the root crate carried
+  while `src/cli` lived there; Phase 4 moved the call site into `bvault-cli`
+  and left the dependency ungated. The root crate's own copy is removed -- no
+  code under `src/` has used it since that move.
+  (`crates/bvault-cli/Cargo.toml`, `Cargo.toml`)
+- **The `--daemon` call site is gated on `cfg(unix)`, not `cfg(not(windows))`**
+  (`crates/bvault-cli/src/command/server.rs`). The two gates have to name the
+  same target set; a target that is neither unix nor windows would otherwise
+  compile the block without the crate being present.
+
 ## [0.41.21] - 2026-08-31
 
 ### Fixed
