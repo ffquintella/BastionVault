@@ -124,6 +124,7 @@ impl PkiBackend {
                 "issuer_ref": { field_type: FieldType::Str, default: "", description: "Issuer ID or name to sign with; empty = role pin or mount default." },
                 "key_ref": { field_type: FieldType::Str, default: "", description: "Managed key the CSR's SPKI must match. Requires role.allow_key_reuse." },
                 "upn_sans": { field_type: FieldType::Str, default: "", description: "UPN otherName SANs. Requires role.allow_upn_sans." },
+                "email_sans": { field_type: FieldType::Str, default: "", description: "rfc822Name SAN override, for roles with use_csr_sans=false. Requires role.allow_email_sans." },
                 "ad_sid": { field_type: FieldType::Str, default: "", description: "AD account SID for the strong-mapping extension. Requires role.allow_ad_sid." }
             },
             operations: [{op: Operation::Write, handler: r.sign_request_preflight}],
@@ -144,6 +145,7 @@ impl PkiBackend {
                 "issuer_ref": { field_type: FieldType::Str, default: "", description: "Issuer ID or name to sign with; empty = role pin or mount default." },
                 "key_ref": { field_type: FieldType::Str, default: "", description: "Managed key the CSR's SPKI must match. Requires role.allow_key_reuse." },
                 "upn_sans": { field_type: FieldType::Str, default: "", description: "UPN otherName SANs. Requires role.allow_upn_sans." },
+                "email_sans": { field_type: FieldType::Str, default: "", description: "rfc822Name SAN override, for roles with use_csr_sans=false. Requires role.allow_email_sans." },
                 "ad_sid": { field_type: FieldType::Str, default: "", description: "AD account SID for the strong-mapping extension. Requires role.allow_ad_sid." }
             },
             operations: [{op: Operation::Write, handler: r.sign_request_approve}],
@@ -261,6 +263,7 @@ impl PkiBackendInner {
             common_name,
             dns_sans: parsed.requested_dns_sans.clone(),
             ip_sans: parsed.requested_ip_sans.iter().map(|ip| ip.to_string()).collect(),
+            email_sans: parsed.requested_email_sans.clone(),
             key_description: csr::describe_spki(&parsed.spki_der),
             spki_sha256,
             requester,
@@ -627,6 +630,37 @@ impl PkiBackendInner {
                 "role `{role_name}` sets allow_upn_sans=false, so `upn_sans` is refused"
             ));
         }
+        // rfc822Name SANs: from the CSR when the role honours CSR SANs,
+        // from the body otherwise. Both are refused by a role that does
+        // not permit them — reported here so the dry run says why rather
+        // than the operator discovering it on approve.
+        let requested_emails = if role.use_csr_sans {
+            parsed.requested_email_sans.clone()
+        } else {
+            args.email_sans
+                .split(',')
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+                .collect()
+        };
+        if !requested_emails.is_empty() && !role.allow_email_sans {
+            hints.push(format!(
+                "role `{role_name}` sets allow_email_sans=false, so the {} rfc822Name SAN(s) requested are refused",
+                requested_emails.len()
+            ));
+        }
+        for addr in &requested_emails {
+            if role.allow_email_sans && super::email_san::validate_email(&role, addr).is_err() {
+                hints.push(format!(
+                    "rfc822Name SAN `{addr}` is not permitted by role `{role_name}`"
+                ));
+            }
+        }
+        if role.use_csr_sans && !args.email_sans.trim().is_empty() {
+            hints.push(format!(
+                "role `{role_name}` sets use_csr_sans=true, so the request's `email_sans` would be ignored and is refused"
+            ));
+        }
         hints
     }
 }
@@ -648,6 +682,7 @@ fn merge_plan(out: &mut Map<String, Value>, plan: &SignPlan) {
         json!(plan.ip_sans.iter().map(|ip| ip.to_string()).collect::<Vec<_>>()),
     );
     out.insert("upn_sans".into(), json!(plan.upn_sans));
+    out.insert("email_sans".into(), json!(plan.email_sans));
     out.insert("ad_sid".into(), json!(plan.ad_sid.clone().unwrap_or_default()));
     out.insert("ttl_seconds".into(), json!(plan.ttl.as_secs()));
     out.insert("ttl_clamped".into(), json!(plan.ttl_clamped));
@@ -670,6 +705,7 @@ fn record_summary(record: &SignRequestRecord) -> Map<String, Value> {
     data.insert("common_name".into(), json!(record.common_name));
     data.insert("dns_sans".into(), json!(record.dns_sans));
     data.insert("ip_sans".into(), json!(record.ip_sans));
+    data.insert("email_sans".into(), json!(record.email_sans));
     data.insert("key_description".into(), json!(record.key_description));
     data.insert("spki_sha256".into(), json!(record.spki_sha256));
     data.insert("requester".into(), json!(record.requester));
@@ -699,6 +735,7 @@ fn args_from_request(req: &Request, csr_pem: &str) -> Result<SignArgs, RvError> 
         issuer_ref: field(req, "issuer_ref")?,
         key_ref: field(req, "key_ref")?,
         upn_sans: field(req, "upn_sans")?,
+        email_sans: field(req, "email_sans")?,
         ad_sid: field(req, "ad_sid")?,
     })
 }

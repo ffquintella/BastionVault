@@ -33,6 +33,11 @@ pub struct SubjectInput {
     /// `allow_upn_sans` and validated by
     /// [`super::ad_ext::validate_upn`] before it lands here.
     pub upn_sans: Vec<String>,
+    /// S/MIME: addresses to emit as `subjectAltName` `rfc822Name`
+    /// entries. Gated by the role's `allow_email_sans` /
+    /// `allowed_email_domains` and validated by
+    /// [`super::email_san::validate_email`] before it lands here.
+    pub email_sans: Vec<String>,
     /// AD smart-card logon: the account SID to emit in the
     /// `szOID_NTDS_CA_SECURITY_EXT` extension for KB5014754 strong
     /// mapping. Gated by the role's `allow_ad_sid`; already normalised
@@ -79,6 +84,14 @@ fn params_for_subject(
 
     for ip in &subject.ip_sans {
         params.subject_alt_names.push(SanType::IpAddress(*ip));
+    }
+
+    // S/MIME: the mailbox rides in the same SAN extension as the DNS / IP
+    // names. `CertificateParams::new` only ever produces DnsName /
+    // IpAddress, so an address handed to `alt_names` would have become a
+    // dNSName with an `@` in it — hence the separate channel.
+    for addr in &subject.email_sans {
+        params.subject_alt_names.push(super::email_san::rcgen_rfc822_san(addr)?);
     }
 
     // AD smart-card logon: the UPN rides in the *same* SAN extension as
@@ -405,13 +418,18 @@ pub fn build_leaf_csr(
 ) -> Result<rcgen::CertificateSigningRequest, RvError> {
     // CSRs don't carry serial / validity bytes — the issuing CA assigns
     // both. Pass a throw-away serial through `params_for_subject` so we
-    // can reuse it for SAN/DN/EKU population. `serialize_request` only
-    // serialises the subject + extensions + pubkey, so the serial /
-    // validity drop on the floor.
+    // can reuse it for SAN/DN/EKU population, then clear it again: rcgen
+    // 0.14 does not merely ignore a serial in `serialize_request`, it
+    // refuses the whole call with `UnsupportedInCsr`. Leaving it set made
+    // every `pki/csr/generate` fail with "Certificate parameter
+    // unsupported in CSR" — the validity dates are ignored, but the
+    // serial is not.
     let serial_throwaway = random_serial_bytes();
     // No CDP in a generated CSR: rcgen refuses CRL-DP in a CSR, and the
     // upstream CA sets its own distribution points anyway.
-    let params = params_for_subject(role, subject, role.ttl, &serial_throwaway, &IssuanceUrls::default())?;
+    let mut params =
+        params_for_subject(role, subject, role.ttl, &serial_throwaway, &IssuanceUrls::default())?;
+    params.serial_number = None;
     params.serialize_request(signer.key_pair()).map_err(rcgen_err)
 }
 

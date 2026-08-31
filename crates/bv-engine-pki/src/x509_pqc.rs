@@ -473,7 +473,11 @@ fn resolve_ext_key_usage_oid(value: &str) -> Result<Option<ObjectIdentifier>, Rv
 }
 
 pub(super) fn build_subject_alt_name(subject: &SubjectInput) -> Result<Option<Extension>, RvError> {
-    if subject.alt_names.is_empty() && subject.ip_sans.is_empty() && subject.upn_sans.is_empty() {
+    if subject.alt_names.is_empty()
+        && subject.ip_sans.is_empty()
+        && subject.upn_sans.is_empty()
+        && subject.email_sans.is_empty()
+    {
         return Ok(None);
     }
     let mut names: GeneralNames = Vec::new();
@@ -488,8 +492,12 @@ pub(super) fn build_subject_alt_name(subject: &SubjectInput) -> Result<Option<Ex
         };
         names.push(GeneralName::IpAddress(OctetString::new(bytes).map_err(der_err)?));
     }
-    // AD smart-card logon: UPN otherNames share this one SAN extension
-    // with the DNS / IP names.
+    // S/MIME rfc822Names and AD smart-card UPN otherNames share this one
+    // SAN extension with the DNS / IP names — a second subjectAltName
+    // extension would make the certificate invalid.
+    for addr in &subject.email_sans {
+        names.push(super::email_san::rfc822_general_name(addr)?);
+    }
     for upn in &subject.upn_sans {
         names.push(super::ad_ext::upn_general_name(upn)?);
     }

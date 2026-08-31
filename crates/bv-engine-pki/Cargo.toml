@@ -1,6 +1,6 @@
 [package]
 name = "bv-engine-pki"
-version = "0.41.2"
+version = "0.41.3"
 edition = "2021"
 description = "BastionVault's PKI secret engine: X.509 issuance, issuers, CRLs, ACME and PQC"
 license = "Apache-2.0"

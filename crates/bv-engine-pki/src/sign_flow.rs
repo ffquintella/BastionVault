@@ -91,6 +91,10 @@ pub struct SignArgs {
     /// `role.allow_key_reuse`; rejected outright on verbatim.
     pub key_ref: String,
     pub upn_sans: String,
+    /// rfc822Name override, comma-separated. Consulted only when the role
+    /// sets `use_csr_sans = false`; ignored on verbatim (where the CSR's
+    /// own rfc822Names carry through instead).
+    pub email_sans: String,
     pub ad_sid: String,
 }
 
@@ -108,6 +112,7 @@ pub struct SignPlan {
     pub dns_sans: Vec<String>,
     pub ip_sans: Vec<IpAddr>,
     pub upn_sans: Vec<String>,
+    pub email_sans: Vec<String>,
     pub ad_sid: Option<String>,
     pub ttl: Duration,
     /// True when the issuer's own `NotAfter` cut the requested TTL short.
@@ -137,6 +142,7 @@ impl SignPlan {
             alt_names: self.dns_sans.clone(),
             ip_sans: self.ip_sans.clone(),
             upn_sans: self.upn_sans.clone(),
+            email_sans: self.email_sans.clone(),
             ad_sid: self.ad_sid.clone(),
         }
     }
@@ -218,20 +224,48 @@ impl PkiBackendInner {
         }
         x509::validate_common_name(&role, &common_name)?;
 
-        let (mut dns_sans, ip_sans) = if role.use_csr_sans {
-            (parsed.requested_dns_sans.clone(), parsed.requested_ip_sans.clone())
+        let (mut dns_sans, ip_sans, csr_email_sans) = if role.use_csr_sans {
+            (
+                parsed.requested_dns_sans.clone(),
+                parsed.requested_ip_sans.clone(),
+                parsed.requested_email_sans.clone(),
+            )
         } else {
-            let requested = parsed.requested_dns_sans.len() + parsed.requested_ip_sans.len();
+            let requested = parsed.requested_dns_sans.len()
+                + parsed.requested_ip_sans.len()
+                + parsed.requested_email_sans.len();
             if requested > 0 {
                 warnings.push(format!(
                     "role `{role_name}` sets use_csr_sans=false: {requested} SAN(s) requested by the CSR are dropped"
                 ));
             }
-            x509::split_alt_names(&args.alt_names)
+            let (dns, ips) = x509::split_alt_names(&args.alt_names);
+            (dns, ips, Vec::new())
         };
         if !role.allow_ip_sans && !ip_sans.is_empty() {
             return Err(RvError::ErrPkiDataInvalid);
         }
+
+        // rfc822Name SANs come from the CSR when the role honours CSR
+        // SANs and from the request body otherwise — never from both, so
+        // there is one answer to "where did this address come from".
+        // Either way the role decides, and an address it will not permit
+        // is an error: a CSR that asks for an S/MIME identity and gets
+        // back a certificate without one is the silent drop this gate
+        // exists to remove.
+        let email_sans = if role.use_csr_sans {
+            if !args.email_sans.trim().is_empty() {
+                return Err(RvError::ErrResponseStatus(
+                    400,
+                    format!(
+                        "sign: role `{role_name}` sets use_csr_sans=true, so rfc822Name SANs come from the CSR; the request's `email_sans` would be ignored"
+                    ),
+                ));
+            }
+            super::email_san::validate_email_list(&role, &csr_email_sans)?
+        } else {
+            super::email_san::resolve_email_sans(&role, &args.email_sans)?
+        };
         for dns in &dns_sans {
             x509::validate_dns_name(&role, dns)?;
         }
@@ -278,6 +312,7 @@ impl PkiBackendInner {
             dns_sans,
             ip_sans,
             upn_sans,
+            email_sans,
             ad_sid,
             ttl,
             ttl_clamped,
@@ -317,6 +352,12 @@ impl PkiBackendInner {
                 "sign: `upn_sans` / `ad_sid` need a role to authorise them; they are not accepted in verbatim mode".into(),
             ));
         }
+        if !args.email_sans.trim().is_empty() {
+            return Err(RvError::ErrResponseStatus(
+                400,
+                "sign: `email_sans` needs a role to authorise it (role.allow_email_sans); it is not accepted in verbatim mode — put the rfc822Name in the CSR instead".into(),
+            ));
+        }
 
         let requested_ttl = parse_ttl(&args.ttl)?;
         let ttl = match requested_ttl {
@@ -347,6 +388,10 @@ impl PkiBackendInner {
             key_type: "ec".to_string(),
             allow_any_name: true,
             allow_ip_sans: true,
+            // Verbatim carries whatever the CSR states; the SAN set was
+            // decided above, so this only documents that the synthetic
+            // role imposes no email policy of its own.
+            allow_email_sans: true,
             server_flag: true,
             client_flag: true,
             ..Default::default()
@@ -355,6 +400,11 @@ impl PkiBackendInner {
         let mut dns_sans = parsed.requested_dns_sans.clone();
         dns_sans.retain(|d| d != &common_name);
         let ip_sans = parsed.requested_ip_sans.clone();
+        // Verbatim means verbatim: an rfc822Name in the CSR reaches the
+        // certificate, as the DNS and IP names already did. Dropping it
+        // here while honouring the rest would be the one silent
+        // subtraction in a path whose contract is "as stated".
+        let email_sans = parsed.requested_email_sans.clone();
         let key_description = csr::describe_spki(&parsed.spki_der);
 
         self.finish_plan(FinishPlan {
@@ -370,6 +420,7 @@ impl PkiBackendInner {
             // unauthenticated identity claim is exactly what the SID
             // extension must never be.
             upn_sans: Vec::new(),
+            email_sans,
             ad_sid: None,
             ttl,
             ttl_clamped,
@@ -413,6 +464,7 @@ impl PkiBackendInner {
             dns_sans: p.dns_sans,
             ip_sans: p.ip_sans,
             upn_sans: p.upn_sans,
+            email_sans: p.email_sans,
             ad_sid: p.ad_sid,
             ttl: p.ttl,
             ttl_clamped: p.ttl_clamped,
@@ -540,6 +592,7 @@ struct FinishPlan {
     dns_sans: Vec<String>,
     ip_sans: Vec<IpAddr>,
     upn_sans: Vec<String>,
+    email_sans: Vec<String>,
     ad_sid: Option<String>,
     ttl: Duration,
     ttl_clamped: bool,

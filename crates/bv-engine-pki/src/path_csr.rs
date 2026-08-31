@@ -55,6 +55,7 @@ impl PkiBackend {
                 "common_name": { field_type: FieldType::Str, required: true, description: "Subject CN to put on the CSR." },
                 "alt_names": { field_type: FieldType::Str, default: "", description: "Comma-separated DNS / IP SANs to request." },
                 "ip_sans": { field_type: FieldType::Str, default: "", description: "Comma-separated IP SANs (in addition to anything in `alt_names`)." },
+                "email_sans": { field_type: FieldType::Str, default: "", description: "Comma-separated email addresses to request as rfc822Name SANs (S/MIME). Requires role.allow_email_sans=true." },
                 "key_ref": { field_type: FieldType::Str, default: "", description: "Optional: pin to an existing managed key (UUID or name) instead of generating a fresh one. Subject to the role's `allow_key_reuse` / `allowed_key_refs`." },
                 "exported": { field_type: FieldType::Bool, default: false, description: "When `true`, return the freshly generated PKCS#8 PEM in the response. Ignored when `key_ref` is set (the key already lives in the managed-key store)." },
                 "exportable": { field_type: FieldType::Bool, default: false, description: "Pin the backing managed key as exportable via `pki/cert/<serial>/export?include_private_key=true`. Read-only after creation. Default false." }
@@ -151,6 +152,17 @@ impl PkiBackendInner {
             x509::validate_dns_name(&role, dns)?;
         }
 
+        // rfc822Name SANs are gated by the role here exactly as they are
+        // on `pki/issue/:role`. The upstream CA will apply its own policy
+        // to the finished CSR, but a request this mount's own role would
+        // refuse should not leave the building.
+        let email_raw = req
+            .get_data_or_default("email_sans")?
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let email_sans = super::email_san::resolve_email_sans(&role, &email_raw)?;
+
         let role_alg = role.algorithm()?;
 
         // Optional `key_ref` reuses an existing managed key. Same
@@ -238,11 +250,15 @@ impl PkiBackendInner {
 
         // No AD smart-card material in generated CSRs: the upstream CA
         // decides the identity claims on the cert it issues, and a
-        // requested UPN / SID in a CSR is a hint at best.
+        // requested UPN / SID in a CSR is a hint at best. An rfc822Name
+        // *is* carried, because it is the subject's own identifier rather
+        // than a claim about a directory account, and an S/MIME CSR
+        // without one gives the upstream CA nothing to sign for.
         let subject = SubjectInput {
             common_name: common_name.clone(),
             alt_names: alt_dns,
             ip_sans: alt_ips,
+            email_sans,
             ..Default::default()
         };
         let csr = x509::build_leaf_csr(&role, &subject, classical)?;

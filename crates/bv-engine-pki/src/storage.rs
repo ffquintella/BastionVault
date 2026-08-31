@@ -490,6 +490,11 @@ pub struct SignRequestRecord {
     pub dns_sans: Vec<String>,
     #[serde(default)]
     pub ip_sans: Vec<String>,
+    /// `rfc822Name` SANs the CSR asks for. `#[serde(default)]` keeps
+    /// records imported before the field existed readable — they simply
+    /// report none, which is what the engine could act on at the time.
+    #[serde(default)]
+    pub email_sans: Vec<String>,
     /// `rsa-2048` / `ec-p256` / `ml-dsa-65` / … — presentation only.
     #[serde(default)]
     pub key_description: String,

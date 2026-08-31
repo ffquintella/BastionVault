@@ -965,6 +965,9 @@ function bootstrapRoleConfig(
     allowed_domains: [],
     allow_glob_domains: false,
     acme_enabled: false,
+    // A bastion host certificate has no mailbox to assert.
+    allow_email_sans: false,
+    allowed_email_domains: [],
   };
 }
 

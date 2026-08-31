@@ -45,6 +45,80 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.20] - 2026-08-31
+
+### Added
+
+#### PKI: `rfc822Name` email SANs -- S/MIME person certificates
+
+- **The PKI engine can issue an S/MIME certificate.** It could not before:
+  there was no way to emit an `rfc822Name` `subjectAltName`, which is the
+  identifier RFC 8550 requires a mail client to bind a certificate to a
+  mailbox. An address typed into `alt_names` was emitted as a **dNSName
+  containing an `@`** -- accepted, plausible-looking, and matched by no
+  verifier. (`features/pki-email-sans.md`)
+- **New role knobs, closed by default** (`pki/roles/:name`):
+  `allow_email_sans` (default `false`) and `allowed_email_domains`, an
+  allow-list of mail domains matched case-insensitively and **exactly** --
+  `fgv.br` does not admit `mail.fgv.br`. Both are `serde(default)`, so
+  roles already in storage deserialise unchanged and keep issuing a
+  byte-identical certificate profile.
+- **New `email_sans` request field** on `pki/issue/:role`,
+  `pki/sign/:role`, `pki/csr/generate`, and the inbound sign-request
+  `preflight` / `approve` bodies. Comma-separated; validated for
+  encodability (`IA5String`, so ASCII only -- an IDN domain must be
+  supplied in A-label form), exactly one `@`, no whitespace or control
+  characters, 254-character cap, and de-duplicated.
+- **Emitted by every builder**: the classical rcgen path, the ML-DSA
+  hand-rolled DER path, the composite path, and the generated CSR. The
+  addresses ride in the *same* `subjectAltName` extension as the DNS, IP
+  and UPN entries.
+- **GUI**: `allow_email_sans` + `allowed_email_domains` on the role form;
+  an *Email SANs / rfc822Name* field on the Issue, Renew and Outgoing-CSR
+  tabs; the address list on the sign-request detail view. Renewing a
+  certificate now carries its existing `rfc822Name` forward instead of
+  dropping it.
+
+### Changed
+
+#### PKI: a CSR requesting an `rfc822Name` is answered, not ignored
+
+- **`pki/sign/:role` now refuses a CSR whose `rfc822Name` the role does not
+  permit, where it previously signed it and dropped the address.** Under
+  `use_csr_sans = true` (the default) the addresses now come from the CSR
+  and are gated by `allow_email_sans` / `allowed_email_domains`; under
+  `use_csr_sans = false` they come from the request body instead, and a
+  body `email_sans` sent to a role that reads SANs from the CSR is refused
+  rather than silently ignored. This mirrors the `allow_ip_sans` gate,
+  which has always refused rather than dropped. **Operators submitting
+  CSRs with email SANs to a strict role will see a new 400** -- the
+  certificate they were getting was not the one they asked for.
+- **`pki/sign-verbatim` carries the CSR's `rfc822Name` into the
+  certificate**, as it already did for the DNS and IP names. It remains
+  the only path with no role to consult, so it accepts no `email_sans`
+  request field.
+
+### Fixed
+
+#### PKI: `pki/csr/generate` failed on every call
+
+- **Generating an outgoing CSR returned `PKI: rcgen rejected key/cert:
+  Certificate parameter unsupported in CSR` for every role and every
+  input**, making the GUI's *Outgoing CSR* tab entirely non-functional.
+  The shared parameter builder sets a serial number, and rcgen 0.14 does
+  not ignore a serial in `serialize_request` -- it rejects the call. The
+  builder now clears it before serialising. Covered by
+  `tests/test_pki_email_sans.rs`.
+
+### Security
+
+- **PKI email SANs fail closed.** An organisation-trusted CA that emits an
+  unconstrained `rfc822Name` on request lets anyone holding issue rights on
+  the mount mint a signing certificate for anyone else's mailbox.
+  `allow_email_sans` therefore defaults to `false`, `allowed_email_domains`
+  narrows it to named domains with no subdomain implication, and every path
+  refuses an address it will not permit instead of omitting it.
+
 ## [0.41.19] - 2026-08-26
 
 ### Fixed

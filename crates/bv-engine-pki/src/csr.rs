@@ -57,6 +57,11 @@ pub struct ParsedCsr {
     pub algorithm_class: CsrAlgClass,
     pub requested_dns_sans: Vec<String>,
     pub requested_ip_sans: Vec<IpAddr>,
+    /// `rfc822Name` SANs the CSR asks for. Whether they reach the
+    /// certificate is the role's decision (`allow_email_sans` /
+    /// `allowed_email_domains`); they are surfaced here rather than
+    /// dropped so that decision can be made — and reported — explicitly.
+    pub requested_email_sans: Vec<String>,
 }
 
 /// Parse a CSR, verify its self-signature, and extract the bits the cert
@@ -100,7 +105,7 @@ pub fn parse_and_verify(pem_or_der: &str) -> Result<ParsedCsr, RvError> {
     let common_name = extract_common_name(&info.subject);
     let spki_der = info.subject_pki.raw.to_vec();
     let raw_public_key = info.subject_pki.subject_public_key.data.to_vec();
-    let (dns, ips) = extract_san_request(&csr);
+    let (dns, ips, emails) = extract_san_request(&csr);
 
     Ok(ParsedCsr {
         subject_dn,
@@ -110,6 +115,7 @@ pub fn parse_and_verify(pem_or_der: &str) -> Result<ParsedCsr, RvError> {
         algorithm_class: alg_class,
         requested_dns_sans: dns,
         requested_ip_sans: ips,
+        requested_email_sans: emails,
     })
 }
 
@@ -212,11 +218,20 @@ fn extract_common_name(subject: &x509_parser::x509::X509Name<'_>) -> Option<Stri
 
 /// Walk the CSR's `extensionRequest` attribute looking for SubjectAltName.
 /// CSRs frequently put their requested SANs there (per RFC 2986 §4.1).
+///
+/// The three name forms the engine can act on are extracted; anything
+/// else (URI, directoryName, otherName) is left behind because no
+/// issuance path can honour it. `rfc822Name` used to fall into that
+/// catch-all, which meant an S/MIME CSR was accepted and its address
+/// silently dropped — the caller of this function is responsible for
+/// gating the returned addresses on the role's `allow_email_sans`, and
+/// for refusing rather than omitting.
 fn extract_san_request(
     csr: &x509_parser::certification_request::X509CertificationRequest<'_>,
-) -> (Vec<String>, Vec<IpAddr>) {
+) -> (Vec<String>, Vec<IpAddr>, Vec<String>) {
     let mut dns = Vec::new();
     let mut ips = Vec::new();
+    let mut emails = Vec::new();
     if let Some(exts) = csr.requested_extensions() {
         for ext in exts {
             if let ParsedExtension::SubjectAlternativeName(san) = ext {
@@ -228,13 +243,14 @@ fn extract_san_request(
                                 ips.push(ip);
                             }
                         }
+                        GeneralName::RFC822Name(a) => emails.push(a.to_string()),
                         _ => {}
                     }
                 }
             }
         }
     }
-    (dns, ips)
+    (dns, ips, emails)
 }
 
 fn ip_from_bytes(b: &[u8]) -> Option<IpAddr> {

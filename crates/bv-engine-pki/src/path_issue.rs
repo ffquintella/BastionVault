@@ -42,6 +42,7 @@ impl PkiBackend {
                 "issuer_ref": { field_type: FieldType::Str, default: "", description: "Issuer ID or name to sign with; empty = role pin or mount default." },
                 "key_ref": { field_type: FieldType::Str, default: "", description: "Managed key ID or name to pin (Phase L2). Requires role.allow_key_reuse=true." },
                 "upn_sans": { field_type: FieldType::Str, default: "", description: "Comma-separated UPNs emitted as otherName SANs for AD smart-card logon. Requires role.allow_upn_sans=true." },
+                "email_sans": { field_type: FieldType::Str, default: "", description: "Comma-separated email addresses emitted as rfc822Name SANs (S/MIME). Requires role.allow_email_sans=true." },
                 "ad_sid": { field_type: FieldType::Str, default: "", description: "AD account SID for the strong-mapping extension (KB5014754). Empty = role default. Requires role.allow_ad_sid=true." }
             },
             operations: [{op: Operation::Write, handler: r.issue_cert}],
@@ -62,6 +63,7 @@ impl PkiBackend {
                 "issuer_ref": { field_type: FieldType::Str, default: "", description: "Issuer ID or name to sign with; empty = role pin or mount default." },
                 "key_ref": { field_type: FieldType::Str, default: "", description: "Managed key ID or name the CSR's SPKI must match (Phase L2). Requires role.allow_key_reuse=true." },
                 "upn_sans": { field_type: FieldType::Str, default: "", description: "Comma-separated UPNs emitted as otherName SANs for AD smart-card logon. Requires role.allow_upn_sans=true." },
+                "email_sans": { field_type: FieldType::Str, default: "", description: "rfc822Name SAN override, for roles with use_csr_sans=false. Requires role.allow_email_sans=true." },
                 "ad_sid": { field_type: FieldType::Str, default: "", description: "AD account SID for the strong-mapping extension (KB5014754). Empty = role default. Requires role.allow_ad_sid=true." }
             },
             operations: [{op: Operation::Write, handler: r.sign_csr_role}],
@@ -175,8 +177,13 @@ impl PkiBackendInner {
         };
 
         let (upn_sans, ad_sid) = resolve_ad_smartcard_input(req, &role)?;
+        // S/MIME rfc822Name SANs. Closed by default and refused loudly
+        // rather than dropped, same as the AD knobs above.
+        let email_raw = req.get_data_or_default("email_sans")?.as_str().unwrap_or("").to_string();
+        let email_sans = super::email_san::resolve_email_sans(&role, &email_raw)?;
         let urls = load_issuance_urls(req).await?;
-        let subject = SubjectInput { common_name, alt_names: alt_dns, ip_sans: alt_ips, upn_sans, ad_sid };
+        let subject =
+            SubjectInput { common_name, alt_names: alt_dns, ip_sans: alt_ips, upn_sans, email_sans, ad_sid };
         let (cert_pem, serial_bytes) = match (role_alg.class(), &ca_signer, &leaf_signer) {
             (AlgorithmClass::Classical, Signer::Classical(ca), Signer::Classical(leaf)) => {
                 let (cert, serial) = x509::build_leaf(&role, &subject, ttl, leaf, ca, &ca_cert_pem, &urls)?;
@@ -448,6 +455,7 @@ fn sign_args_from_request(req: &Request) -> Result<SignArgs, RvError> {
         issuer_ref: optional_str_field(req, "issuer_ref")?,
         key_ref: optional_str_field(req, "key_ref")?,
         upn_sans: optional_str_field(req, "upn_sans")?,
+        email_sans: optional_str_field(req, "email_sans")?,
         ad_sid: optional_str_field(req, "ad_sid")?,
     })
 }

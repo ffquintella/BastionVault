@@ -216,6 +216,8 @@ function defaultRoleConfig(): PkiRoleConfig {
     allowed_domains: [],
     allow_glob_domains: false,
     acme_enabled: true,
+    allow_email_sans: false,
+    allowed_email_domains: [],
   };
 }
 
@@ -1793,6 +1795,12 @@ function RoleEditor({
             onChange={(b) => set({ allow_key_reuse: b })}
             disabled={!editing}
           />
+          <Toggle
+            label="allow_email_sans (rfc822Name / S/MIME)"
+            checked={config.allow_email_sans}
+            onChange={(b) => set({ allow_email_sans: b })}
+            disabled={!editing}
+          />
         </div>
       )}
 
@@ -1811,6 +1819,20 @@ function RoleEditor({
             }
             disabled={!editing}
             placeholder="example.com,*.svc.cluster.local"
+          />
+          <Input
+            label="allowed_email_domains (comma-separated; needs allow_email_sans)"
+            value={config.allowed_email_domains.join(",")}
+            onChange={(e) =>
+              set({
+                allowed_email_domains: e.target.value
+                  .split(",")
+                  .map((s) => s.trim())
+                  .filter((s) => s.length > 0),
+              })
+            }
+            disabled={!editing || !config.allow_email_sans}
+            placeholder="fgv.br,example.com — exact match, subdomains not implied"
           />
           <Input
             label="allowed_key_refs (comma-separated; needs allow_key_reuse)"
@@ -2476,6 +2498,7 @@ function IssueTab({ mount }: { mount: string }) {
   const [commonName, setCommonName] = useState("");
   const [altNames, setAltNames] = useState("");
   const [ipSans, setIpSans] = useState("");
+  const [emailSans, setEmailSans] = useState("");
   const [ttl, setTtl] = useState("");
   const [issuerRef, setIssuerRef] = useState("");
   const [keyRef, setKeyRef] = useState("");
@@ -2503,6 +2526,7 @@ function IssueTab({ mount }: { mount: string }) {
         common_name: commonName.trim(),
         alt_names: altNames.trim() || undefined,
         ip_sans: ipSans.trim() || undefined,
+        email_sans: emailSans.trim() || undefined,
         ttl: ttl.trim() || undefined,
         issuer_ref: issuerRef.trim() || undefined,
         key_ref: keyRef.trim() || undefined,
@@ -2559,6 +2583,12 @@ function IssueTab({ mount }: { mount: string }) {
           label="Extra IP SANs (comma-separated)"
           value={ipSans}
           onChange={(e) => setIpSans(e.target.value)}
+        />
+        <Input
+          label="Email SANs / rfc822Name (comma-separated)"
+          value={emailSans}
+          onChange={(e) => setEmailSans(e.target.value)}
+          placeholder="felipe@fgv.br — needs allow_email_sans on the role"
         />
         <Input
           label="TTL (optional)"
@@ -2690,6 +2720,7 @@ function RenewCertModal({
   const [commonName, setCommonName] = useState("");
   const [altNames, setAltNames] = useState("");
   const [ipSans, setIpSans] = useState("");
+  const [emailSans, setEmailSans] = useState("");
   const [ttl, setTtl] = useState("");
   const [issuerRef, setIssuerRef] = useState("");
   const [keyRef, setKeyRef] = useState("");
@@ -2719,6 +2750,10 @@ function RenewCertModal({
     setCommonName(cert.common_name || "");
     setAltNames((cert.san_dns ?? []).join(", "));
     setIpSans((cert.san_ip ?? []).join(", "));
+    // Carry the rfc822Name forward: a renewal that quietly drops the
+    // mailbox produces a certificate the operator's mail client will
+    // refuse, with nothing on screen to say why.
+    setEmailSans((cert.san_email ?? []).join(", "));
     setIssuerRef(cert.issuer_id || "");
     setTtl("");
     setKeyRef("");
@@ -2744,6 +2779,7 @@ function RenewCertModal({
         common_name: commonName.trim(),
         alt_names: altNames.trim() || undefined,
         ip_sans: ipSans.trim() || undefined,
+        email_sans: emailSans.trim() || undefined,
         ttl: ttl.trim() || undefined,
         issuer_ref: issuerRef.trim() || undefined,
         key_ref: keyRef.trim() || undefined,
@@ -2851,6 +2887,13 @@ function RenewCertModal({
             label="Extra IP SANs (comma-separated)"
             value={ipSans}
             onChange={(e) => setIpSans(e.target.value)}
+            disabled={!!result}
+          />
+          <Input
+            label="Email SANs / rfc822Name (comma-separated)"
+            value={emailSans}
+            onChange={(e) => setEmailSans(e.target.value)}
+            placeholder="needs allow_email_sans on the role"
             disabled={!!result}
           />
           <Input
@@ -4674,6 +4717,7 @@ function ExternalCsrTab({ mount }: { mount: string }) {
   const [genCn, setGenCn] = useState("");
   const [genAltNames, setGenAltNames] = useState("");
   const [genIpSans, setGenIpSans] = useState("");
+  const [genEmailSans, setGenEmailSans] = useState("");
   const [genKeyRef, setGenKeyRef] = useState("");
   const [genExported, setGenExported] = useState(false);
   const [generated, setGenerated] = useState<api.PkiCsrGenerateResult | null>(null);
@@ -4728,6 +4772,7 @@ function ExternalCsrTab({ mount }: { mount: string }) {
         common_name: genCn.trim(),
         alt_names: genAltNames.trim() || undefined,
         ip_sans: genIpSans.trim() || undefined,
+        email_sans: genEmailSans.trim() || undefined,
         key_ref: genKeyRef.trim() || undefined,
         exported: genExported,
       });
@@ -4737,6 +4782,7 @@ function ExternalCsrTab({ mount }: { mount: string }) {
       setGenCn("");
       setGenAltNames("");
       setGenIpSans("");
+      setGenEmailSans("");
       setGenKeyRef("");
       setGenExported(false);
       await loadPending();
@@ -4844,6 +4890,12 @@ function ExternalCsrTab({ mount }: { mount: string }) {
               value={genIpSans}
               onChange={(e) => setGenIpSans(e.target.value)}
               placeholder="10.0.0.1,10.0.0.2"
+            />
+            <Input
+              label="Email SANs / rfc822Name"
+              value={genEmailSans}
+              onChange={(e) => setGenEmailSans(e.target.value)}
+              placeholder="felipe@fgv.br — needs allow_email_sans"
             />
             <Input
               label="Reuse managed key (optional)"
@@ -5827,6 +5879,7 @@ function SignRequestsTab({ mount }: { mount: string }) {
               <Field label="Public key SHA-256" value={selected.spki_sha256} mono />
               <Field label="DNS SANs" value={selected.dns_sans.join(", ")} />
               <Field label="IP SANs" value={selected.ip_sans.join(", ")} />
+              <Field label="Email SANs" value={(selected.email_sans ?? []).join(", ")} />
               <Field label="Suggested role" value={selected.suggested_role} />
               <Field label="Requester" value={selected.requester} />
               <Field label="Imported by" value={selected.imported_by} />

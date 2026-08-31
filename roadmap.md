@@ -8,11 +8,11 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 
 | State | Count |
 |---|---|
-| Done | 60 |
+| Done | 62 |
 | In progress | 8 |
 | Todo | 6 |
 | Removed | 1 |
-| **Total tracked features** | **75** |
+| **Total tracked features** | **77** |
 
 Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-and-distribution.md)) — sequenced into four release waves; Waves 1 + 2 shipped (with Linux GUI bundler caveat), Wave 3 part-shipped (CLI installers on every platform, GUI installers wired to the Tauri bundler, and the downloads website's Phases 1 + 2 done; the release-signing CI and `manifest.json` publish remain).
 
@@ -117,6 +117,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | `[x]` Done | PKI: ACME server endpoints | [spec](features/pki-acme.md) — RFC-8555 feature-complete, HTTP-01 + DNS-01 + EAB. |
 | `[x]` Done | PKI: Inbound sign requests | [spec](features/pki-inbound-sign-requests.md) — Phases 1–5. `pki/sign-request/*`: import a CSR generated elsewhere, inspect what it actually asks for, dry-run it against verbatim plus every role on the mount (effective CN / SANs / TTL / issuer, or the refusal with a hint naming the value the role rejected), then approve under a role or refuse it with a recorded reason. Decisions are terminal and keep the deciding identity, mode, serial and reason for the audit trail. Verbatim approval is a **separate path** (`approve-verbatim`), so a policy can grant role-approval without granting a policy-free signature. Backed by a new `sign_flow.rs` that splits the pre-existing `sign/:role` + `sign-verbatim` handlers into `plan_sign` (every policy check, no signing key) and `execute_sign` (mint from the plan, no policy) — which is what makes the dry run truthful rather than a second implementation that can drift. GUI: PKI → **Sign Requests**. Phase 6 (two-person rule, notification hook) is Todo. |
 | `[x]` Done | PKI: Key Management + Cert Lifecycle | [spec](features/pki-key-management-and-lifecycle.md) — 7 phases incl. `CertDeliveryPlugin` trait. |
+| `[x]` Done | PKI: `rfc822Name` email SANs (S/MIME person certs) | [spec](features/pki-email-sans.md) — the engine could not emit an `rfc822Name` at all, and silently dropped one present in a caller's CSR, so no BastionVault-issued certificate could be used for S/MIME. Adds `allow_email_sans` + `allowed_email_domains` (closed by default) on the role, an `email_sans` field on `issue` / `sign` / `csr/generate` / sign-request `preflight` + `approve`, emission across all four builders (classical, ML-DSA, composite, generated CSR), and CSR `rfc822Name` preservation — refuse-don't-drop, matching the existing `allow_ip_sans` gate. |
 | `[x]` Done | Transit | [spec](features/transit-secret-engine.md) — Phases 1–4: AEAD + HMAC + sign/verify + ML-KEM + ML-DSA + BYOK + hybrid. |
 | `[x]` Done | TOTP | [spec](features/totp-secret-engine.md) — Phases 1–4: HOTP / TOTP + GUI. |
 | `[x]` Done | SSH | [spec](features/ssh-secret-engine.md) — Phases 1–4: CA Ed25519 + OTP + ML-DSA-65. |

@@ -2266,6 +2266,8 @@ export interface PkiCsrGenerateRequest {
   common_name: string;
   alt_names?: string;
   ip_sans?: string;
+  /** rfc822Name SANs to request. Requires `role.allow_email_sans`. */
+  email_sans?: string;
   key_ref?: string;
   exported?: boolean;
 }
@@ -2329,6 +2331,10 @@ export interface PkiSignRequest {
   common_name: string;
   dns_sans: string[];
   ip_sans: string[];
+  /** rfc822Name SANs the CSR asks for. Optional: a vault older than the
+   *  S/MIME work omits it, and the field is absent from records imported
+   *  before it existed. */
+  email_sans?: string[];
   /** `rsa-2048` | `ec-p256` | `ml-dsa-65` | … — presentation only. */
   key_description: string;
   /** SHA-256 of the DER SubjectPublicKeyInfo, lower-case hex. */
@@ -2375,6 +2381,8 @@ export interface PkiSignRequestDecideRequest {
   issuer_ref?: string;
   key_ref?: string;
   upn_sans?: string;
+  /** rfc822Name SAN override, for roles with `use_csr_sans = false`. */
+  email_sans?: string;
   ad_sid?: string;
 }
 
@@ -2390,6 +2398,7 @@ export interface PkiSignVerdict {
   dns_sans: string[];
   ip_sans: string[];
   upn_sans: string[];
+  email_sans?: string[];
   ad_sid: string;
   ttl_seconds: number;
   ttl_clamped: boolean;

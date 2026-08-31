@@ -49,6 +49,7 @@ pub mod ad_ext;
 pub mod composite;
 pub mod crypto;
 pub mod csr;
+pub mod email_san;
 pub mod export;
 pub mod issuers;
 pub mod keys;

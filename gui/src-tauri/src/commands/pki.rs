@@ -502,6 +502,8 @@ pub struct PkiCsrGenerateRequest {
     pub common_name: String,
     pub alt_names: Option<String>,
     pub ip_sans: Option<String>,
+    /// rfc822Name SANs to request. Gated by the role's `allow_email_sans`.
+    pub email_sans: Option<String>,
     pub key_ref: Option<String>,
     pub exported: Option<bool>,
 }
@@ -531,6 +533,9 @@ pub async fn pki_csr_generate(
     }
     if let Some(s) = request.ip_sans.filter(|s| !s.is_empty()) {
         body.insert("ip_sans".into(), json!(s));
+    }
+    if let Some(s) = request.email_sans.filter(|s| !s.is_empty()) {
+        body.insert("email_sans".into(), json!(s));
     }
     if let Some(k) = request.key_ref.filter(|s| !s.is_empty()) {
         body.insert("key_ref".into(), json!(k));
@@ -1024,6 +1029,11 @@ pub struct PkiRoleConfig {
     pub allow_glob_domains: bool,
     #[serde(default = "default_acme_enabled")]
     pub acme_enabled: bool,
+    // S/MIME — rfc822Name SANs
+    #[serde(default)]
+    pub allow_email_sans: bool,
+    #[serde(default)]
+    pub allowed_email_domains: Vec<String>,
 }
 
 fn default_acme_enabled() -> bool {
@@ -1061,6 +1071,8 @@ impl Default for PkiRoleConfig {
             allowed_domains: Vec::new(),
             allow_glob_domains: false,
             acme_enabled: true,
+            allow_email_sans: false,
+            allowed_email_domains: Vec::new(),
         }
     }
 }
@@ -1112,6 +1124,8 @@ pub async fn pki_read_role(
         // pre-L4 roles deserialise without `acme_enabled` — default true
         // matches the engine's serde default.
         acme_enabled: map.get("acme_enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+        allow_email_sans: val_bool(&map, "allow_email_sans"),
+        allowed_email_domains: val_str_array(&map, "allowed_email_domains"),
     })
 }
 
@@ -1154,6 +1168,8 @@ pub async fn pki_write_role(
     body.insert("allowed_domains".into(), json!(config.allowed_domains.join(",")));
     body.insert("allow_glob_domains".into(), json!(config.allow_glob_domains));
     body.insert("acme_enabled".into(), json!(config.acme_enabled));
+    body.insert("allow_email_sans".into(), json!(config.allow_email_sans));
+    body.insert("allowed_email_domains".into(), json!(config.allowed_email_domains.join(",")));
     make_request(&state, Operation::Write, format!("{mount}/roles/{name}"), Some(body)).await?;
     Ok(())
 }
@@ -1178,6 +1194,8 @@ pub struct PkiIssueRequest {
     pub common_name: String,
     pub alt_names: Option<String>,
     pub ip_sans: Option<String>,
+    /// rfc822Name SANs for S/MIME. Gated by the role's `allow_email_sans`.
+    pub email_sans: Option<String>,
     pub ttl: Option<String>,
     pub issuer_ref: Option<String>,
     /// Phase L2: pin issuance to a managed key from `pki/keys/*`.
@@ -1214,6 +1232,9 @@ pub async fn pki_issue_cert(
     if let Some(i) = request.ip_sans {
         body.insert("ip_sans".into(), json!(i));
     }
+    if let Some(e) = request.email_sans.filter(|s| !s.is_empty()) {
+        body.insert("email_sans".into(), json!(e));
+    }
     if let Some(t) = request.ttl {
         body.insert("ttl".into(), json!(t));
     }
@@ -1245,6 +1266,9 @@ pub struct PkiSignCsrRequest {
     pub csr: String,
     pub common_name: Option<String>,
     pub alt_names: Option<String>,
+    /// rfc822Name SAN override, honoured only when the role sets
+    /// `use_csr_sans = false`.
+    pub email_sans: Option<String>,
     pub ttl: Option<String>,
     pub issuer_ref: Option<String>,
     /// Phase L2: assert the CSR's SPKI matches a managed key.
@@ -1276,6 +1300,9 @@ pub async fn pki_sign_csr(
     }
     if let Some(a) = request.alt_names {
         body.insert("alt_names".into(), json!(a));
+    }
+    if let Some(e) = request.email_sans.filter(|s| !s.is_empty()) {
+        body.insert("email_sans".into(), json!(e));
     }
     if let Some(t) = request.ttl {
         body.insert("ttl".into(), json!(t));
@@ -2737,6 +2764,9 @@ pub struct PkiSignRequest {
     pub common_name: String,
     pub dns_sans: Vec<String>,
     pub ip_sans: Vec<String>,
+    /// rfc822Name SANs the CSR asks for.
+    #[serde(default)]
+    pub email_sans: Vec<String>,
     pub key_description: String,
     pub spki_sha256: String,
     pub requester: String,
@@ -2767,6 +2797,7 @@ fn sign_request_from_map(map: &Map<String, Value>) -> PkiSignRequest {
         common_name: val_str(map, "common_name"),
         dns_sans: val_str_array(map, "dns_sans"),
         ip_sans: val_str_array(map, "ip_sans"),
+        email_sans: val_str_array(map, "email_sans"),
         key_description: val_str(map, "key_description"),
         spki_sha256: val_str(map, "spki_sha256"),
         requester: val_str(map, "requester"),
@@ -2892,6 +2923,7 @@ pub struct PkiSignRequestDecideRequest {
     pub issuer_ref: Option<String>,
     pub key_ref: Option<String>,
     pub upn_sans: Option<String>,
+    pub email_sans: Option<String>,
     pub ad_sid: Option<String>,
 }
 
@@ -2911,6 +2943,7 @@ impl PkiSignRequestDecideRequest {
         put("issuer_ref", &self.issuer_ref);
         put("key_ref", &self.key_ref);
         put("upn_sans", &self.upn_sans);
+        put("email_sans", &self.email_sans);
         put("ad_sid", &self.ad_sid);
         body
     }
@@ -2932,6 +2965,7 @@ pub struct PkiSignVerdict {
     pub dns_sans: Vec<String>,
     pub ip_sans: Vec<String>,
     pub upn_sans: Vec<String>,
+    pub email_sans: Vec<String>,
     pub ad_sid: String,
     pub ttl_seconds: u64,
     pub ttl_clamped: bool,
@@ -2981,6 +3015,7 @@ pub async fn pki_sign_request_preflight(
                     dns_sans: val_str_array(row, "dns_sans"),
                     ip_sans: val_str_array(row, "ip_sans"),
                     upn_sans: val_str_array(row, "upn_sans"),
+                    email_sans: val_str_array(row, "email_sans"),
                     ad_sid: val_str(row, "ad_sid"),
                     ttl_seconds: val_u64(row, "ttl_seconds"),
                     ttl_clamped: val_bool(row, "ttl_clamped"),

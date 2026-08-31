@@ -121,6 +121,20 @@ pub struct RoleEntry {
     /// `allow_upn_sans = true` means "any realm".
     #[serde(default)]
     pub allowed_upn_domains: Vec<String>,
+    /// S/MIME: allow `email_sans` on issue/sign/csr-generate, emitting the
+    /// address as an `rfc822Name` `subjectAltName`. This is the identifier
+    /// a mail client binds to a mailbox, so an organisation-trusted CA
+    /// that emits one on request can mint a signing certificate for
+    /// anyone's address — closed by default. `#[serde(default)]` keeps
+    /// roles persisted before this field readable.
+    #[serde(default)]
+    pub allow_email_sans: bool,
+    /// Optional allow-list of mail domains this role may issue for (the
+    /// part after the `@`). Matched case-insensitively and exactly;
+    /// subdomains are *not* implied. Empty list with
+    /// `allow_email_sans = true` means "any domain".
+    #[serde(default)]
+    pub allowed_email_domains: Vec<String>,
     /// Extra Extended Key Usage OIDs in dotted-decimal form, appended to
     /// whatever `ext_key_usage` / `server_flag` / `client_flag` produce.
     /// Needed for Windows smart-card logon
@@ -204,6 +218,8 @@ impl PkiBackend {
                 "acme_enabled": { field_type: FieldType::Bool, default: true, description: "Phase L4: per-role ACME kill-switch. Default true." },
                 "allow_upn_sans": { field_type: FieldType::Bool, default: false, description: "Allow UPN otherName SANs (OID 1.3.6.1.4.1.311.20.2.3) for AD smart-card logon. Default false (closed)." },
                 "allowed_upn_domains": { field_type: FieldType::CommaStringSlice, default: "", description: "Allow-list of UPN realms (the part after `@`). Empty + allow_upn_sans=true means any realm." },
+                "allow_email_sans": { field_type: FieldType::Bool, default: false, description: "Allow rfc822Name (email) SANs for S/MIME. Default false (closed)." },
+                "allowed_email_domains": { field_type: FieldType::CommaStringSlice, default: "", description: "Allow-list of mail domains (the part after `@`), matched exactly and case-insensitively. Empty + allow_email_sans=true means any domain." },
                 "ext_key_usage_oids": { field_type: FieldType::CommaStringSlice, default: "", description: "Extra EKU OIDs in dotted-decimal form, e.g. 1.3.6.1.4.1.311.20.2.2 (Smart Card Logon). Validated at write time." },
                 "allow_ad_sid": { field_type: FieldType::Bool, default: false, description: "Allow the AD SID extension (OID 1.3.6.1.4.1.311.25.2) required for KB5014754 strong mapping. Default false (closed)." },
                 "ad_sid": { field_type: FieldType::Str, default: "", description: "Default SID emitted when a request omits `ad_sid` (e.g. S-1-5-21-...-512). Requires allow_ad_sid=true." }
@@ -349,6 +365,11 @@ impl PkiBackendInner {
             allow_upn_sans: bool_or(req, "allow_upn_sans", false)?,
             allowed_upn_domains: req
                 .get_data_or_default("allowed_upn_domains")?
+                .as_comma_string_slice()
+                .unwrap_or_default(),
+            allow_email_sans: bool_or(req, "allow_email_sans", false)?,
+            allowed_email_domains: req
+                .get_data_or_default("allowed_email_domains")?
                 .as_comma_string_slice()
                 .unwrap_or_default(),
             ext_key_usage_oids,

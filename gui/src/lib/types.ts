@@ -1393,6 +1393,13 @@ export interface PkiRoleConfig {
   allow_glob_domains: boolean;
   /** Phase L4: per-role kill-switch for the ACME server endpoints. */
   acme_enabled: boolean;
+  /** Permit rfc822Name (email) SANs for S/MIME. Closed by default: an
+   *  unconstrained email SAN on a trusted CA lets any caller with issue
+   *  rights mint a signing certificate for anyone's mailbox. */
+  allow_email_sans: boolean;
+  /** Allow-list of mail domains (the part after `@`), matched exactly and
+   *  case-insensitively. Empty + `allow_email_sans=true` means any domain. */
+  allowed_email_domains: string[];
 }
 
 export interface PkiIssueRequest {
@@ -1401,6 +1408,8 @@ export interface PkiIssueRequest {
   common_name: string;
   alt_names?: string;
   ip_sans?: string;
+  /** rfc822Name SANs for S/MIME. Requires `role.allow_email_sans`. */
+  email_sans?: string;
   ttl?: string;
   issuer_ref?: string;
   /** Phase L2: pin issuance to a managed key. Requires `role.allow_key_reuse`. */
@@ -1426,6 +1435,9 @@ export interface PkiSignCsrRequest {
   csr: string;
   common_name?: string;
   alt_names?: string;
+  /** rfc822Name SAN override, honoured only when the role sets
+   *  `use_csr_sans = false`. Otherwise the CSR's own rfc822Names apply. */
+  email_sans?: string;
   ttl?: string;
   issuer_ref?: string;
   /** Phase L2: assert the CSR's SubjectPublicKeyInfo matches a managed key. */
