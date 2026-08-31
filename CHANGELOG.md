@@ -45,6 +45,33 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.21] - 2026-08-31
+
+### Fixed
+
+#### RDP through a Rustion bastion: ticket sent in the wrong X.224 slot
+
+- **Every bastion-routed RDP session failed to authenticate.** The session
+  ticket was written into the X.224 **routing-token** slot
+  (`Cookie: msts=mstshash=tkt_...`) instead of the **cookie** slot
+  (`Cookie: mstshash=tkt_...`). Both are legal in a Connection Request per
+  MS-RDPBCGR, but Rustion's gateway scans only for `Cookie: mstshash=`, so it
+  saw no ticket at all, rejected the connection as `user=unknown,
+  method=rdp-cookie, reason=invalid username or password`, and dropped the
+  socket without an RDP error PDU. The operator saw nothing but
+  `connect_finalize: ... peer closed connection`. Regression tests now assert
+  the encoded Connection Request bytes.
+  (`gui/src-tauri/src/session/rdp.rs`, `gui/src-tauri/src/commands/connect.rs`)
+- **The bastion-EOF hint no longer claims the ticket was accepted.** It cannot
+  know that -- a rejected ticket and a failed bastion->target dial are
+  indistinguishable from this side. It now points at the `AUTH_FAILURE` /
+  `RDP session error` pair in the bastion's log instead.
+- **Long error toasts no longer overflow the window** (`gui/src/components/ui/Toast.tsx`).
+  A single unbreakable token -- a cargo checkout path or a docs.rs URL, both
+  verbatim in ironrdp connector errors -- set the flex row's min-content width
+  and pushed the toast past the right edge of the window, cutting every line
+  off mid-sentence. The stack now has a pinned width and the message wraps.
+
 ## [0.41.20] - 2026-08-31
 
 ### Added

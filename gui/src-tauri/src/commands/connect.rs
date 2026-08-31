@@ -547,8 +547,8 @@ pub async fn session_open_rdp(
     // Phase 7.4 — consult the Rustion policy resolver. Mirrors the SSH
     // path: when transport requires (or prefers) a bastion AND the
     // credential is rdp-password, route session/open at Rustion and
-    // dial the bastion with `mstshash=<ticket>` as the X.224 routing
-    // token. Smartcard credentials under `rustion-required` fail closed
+    // dial the bastion with the ticket in the X.224 `mstshash=`
+    // cookie. Smartcard credentials under `rustion-required` fail closed
     // (the bastion's `rdp-cert` PKINIT path is tracked separately).
     let primary_target_host = host_candidates.first().cloned().unwrap_or_default();
     let route = resolve_rdp_connect_route(
@@ -569,7 +569,7 @@ pub async fn session_open_rdp(
         username_for_dial,
         credential_for_dial,
         domain_for_dial,
-        routing_token,
+        ticket_cookie,
         rustion_label,
         tls_pin_for_dial,
     ) = match &route {
@@ -614,7 +614,10 @@ pub async fn session_open_rdp(
                 // can fill its Credentials slot.
                 session::rdp::RdpCredential::Password(Zeroizing::new(String::new())),
                 None,
-                Some(format!("mstshash={ticket}")),
+                // Bare ticket: ironrdp writes the `Cookie: mstshash=`
+                // prefix itself. Prefixing it here produced
+                // `mstshash=mstshash=tkt_…` on the wire.
+                Some(ticket.clone()),
                 Some(bastion_name.clone()),
                 (!bastion_pin.is_empty()).then(|| bastion_pin.clone()),
             )
@@ -645,7 +648,7 @@ pub async fn session_open_rdp(
                     label,
                     on_close: on_close.clone(),
                     aggressive_performance,
-                    routing_token: routing_token.clone(),
+                    ticket_cookie: ticket_cookie.clone(),
                     tls_pin_sha256: tls_pin_for_dial.clone(),
                 },
             )

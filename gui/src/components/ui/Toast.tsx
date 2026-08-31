@@ -51,13 +51,21 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={{ toast: addToast }}>
       {children}
-      <div className="fixed bottom-4 right-4 z-[100] space-y-2 max-w-sm">
+      {/* `w-` pins the stack's width instead of letting it shrink-to-fit:
+          with only `max-w-sm` the flex row's min-content width wins (a
+          flex item defaults to `min-width: auto`), so one unbreakable
+          token — a cargo checkout path, a docs.rs URL, both of which
+          appear verbatim in RDP connector errors — pushed the toast
+          past the right edge of the window and cut every line off
+          mid-sentence. `min-w-0` + `break-words` on the message let
+          those tokens wrap instead. */}
+      <div className="fixed bottom-4 right-4 z-[100] space-y-2 w-[min(24rem,calc(100vw-2rem))]">
         {toasts.map((t) => (
           <div
             key={t.id}
             className={`flex items-start gap-2 px-4 py-3 rounded-lg border text-sm shadow-lg backdrop-blur-sm ${typeStyles[t.type]}`}
           >
-            <span className="flex-1">{t.message}</span>
+            <span className="flex-1 min-w-0 break-words">{t.message}</span>
             <button
               onClick={() => removeToast(t.id)}
               className="opacity-60 hover:opacity-100 shrink-0"

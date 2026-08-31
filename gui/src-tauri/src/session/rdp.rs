@@ -82,13 +82,20 @@ pub struct RdpOpenArgs {
     /// `false` keeps the visual fidelity defaults; `true` trades a
     /// blander desktop for less repaint bandwidth.
     pub aggressive_performance: bool,
-    /// Optional X.224 routing-token cookie. Set to
-    /// `Some("mstshash=tkt_<hex>")` when the session is being routed
-    /// through a Rustion bastion — the bastion looks the ticket up at
+    /// Optional X.224 ticket cookie — the bare `tkt_<32 hex>` value,
+    /// with no `mstshash=` prefix. Set when the session is being routed
+    /// through a Rustion bastion: the bastion looks the ticket up at
     /// the X.224 stage and skips local auth + client-side CredSSP.
     /// When `None`, ironrdp's default (a cookie with the username) is
     /// used. Phase 7.4 of the Rustion integration.
-    pub routing_token: Option<String>,
+    ///
+    /// This goes in the **cookie** slot (`Cookie: mstshash=`), not the
+    /// routing-token slot (`Cookie: msts=`). MS-RDPBCGR allows either
+    /// in the Connection Request and Rustion's
+    /// `extract_username_from_cookie` parses only the former, so a
+    /// `msts=` token is silently invisible to it — see
+    /// [`super::rdp::describe_finalize_error`].
+    pub ticket_cookie: Option<String>,
     /// Optional pinned SHA-256 of the server's TLS leaf certificate
     /// (`sha256:<hex>`). Set when dialling a Rustion bastion whose TLS
     /// fingerprint was discovered via `GET /v1/listeners`. The RDP TLS
@@ -368,10 +375,19 @@ fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
         platform: MajorPlatformType::UNIX,
         enable_server_pointer: false,
         // Phase 7.4: Rustion-routed sessions carry the ticket in the
-        // X.224 routing-token slot; the bastion consumes it at the
-        // Connection Request stage and skips local auth. None on the
-        // direct path keeps ironrdp's default behaviour (username cookie).
-        request_data: args.routing_token.as_ref().map(|t| NegoRequestData::routing_token(t.clone())),
+        // X.224 cookie slot; the bastion consumes it at the Connection
+        // Request stage and skips local auth. None on the direct path
+        // keeps ironrdp's default behaviour (username cookie).
+        //
+        // `cookie`, not `routing_token`: the two write different
+        // prefixes — `Cookie: mstshash=` vs `Cookie: msts=` — and
+        // Rustion's gateway only scans for `mstshash=`. Sending the
+        // ticket as a routing token made every bastion-routed RDP
+        // session fail with `user=unknown, method=rdp-cookie,
+        // reason=invalid username or password`, observable only in the
+        // bastion's log because it drops the socket without an RDP
+        // error PDU.
+        request_data: args.ticket_cookie.as_ref().map(|t| NegoRequestData::cookie(t.clone())),
         autologon: false,
         enable_audio_playback: false,
         pointer_software_rendering: true,
@@ -927,13 +943,14 @@ fn cert_der_sha256(der: &[u8]) -> String {
 /// closed connection, say so and point at the hop that actually broke.
 fn describe_finalize_error(args: &RdpOpenArgs, e: &ironrdp::connector::ConnectorError) -> String {
     let report = format!("rdp: connect_finalize: {}", e.report());
-    if args.routing_token.is_some() && peer_hung_up(e) {
+    if args.ticket_cookie.is_some() && peer_hung_up(e) {
         format!(
-            "{report} — the Rustion bastion at {}:{} accepted the session ticket and \
-             completed the TLS handshake, then closed the connection without answering \
-             the RDP exchange. The break is on the bastion→target hop, not on this \
-             client. Check the bastion's log for the `RDP BV-ticket consumed at X.224 \
-             stage` line and the error logged after it.",
+            "{report} — the Rustion bastion at {}:{} closed the connection without \
+             answering the RDP exchange. The bastion never reports why on the wire, so \
+             the reason is only in its log: look for the `AUTH_FAILURE` / `RDP session \
+             error` pair for this peer address. A rejected ticket (`user=unknown`, \
+             `reason=invalid username or password`) and a failed bastion→target dial \
+             both surface here as a bare EOF.",
             args.host, args.port
         )
     } else {
@@ -1025,5 +1042,84 @@ mod pin_tests {
         // would silently disable pinning.
         assert!(!tls_pin_matches(obs, ""));
         assert!(!tls_pin_matches(obs, "sha256:"));
+    }
+}
+
+/// The X.224 Connection Request is the only place a Rustion-routed
+/// session identifies itself, and getting the slot wrong is invisible
+/// from this side: the bastion drops the socket without an RDP error
+/// PDU, so the client sees nothing but EOF. These tests assert the
+/// bytes on the wire.
+#[cfg(test)]
+mod nego_cookie_tests {
+    use super::{build_connector_config, RdpCredential, RdpOpenArgs};
+    use ironrdp::pdu::nego::{ConnectionRequest, RequestFlags, SecurityProtocol};
+    use ironrdp::pdu::x224::X224;
+    use ironrdp_core::{encode_buf, WriteBuf};
+    use zeroize::Zeroizing;
+
+    const TICKET: &str = "tkt_0123456789abcdef0123456789abcdef";
+
+    fn args(ticket_cookie: Option<String>) -> RdpOpenArgs {
+        RdpOpenArgs {
+            host: "apldc1vhm0069.fgv.br".to_owned(),
+            port: 3389,
+            username: "rustion-operator".to_owned(),
+            credential: RdpCredential::Password(Zeroizing::new(String::new())),
+            domain: None,
+            label: "test".to_owned(),
+            on_close: None,
+            aggressive_performance: false,
+            ticket_cookie,
+            tls_pin_sha256: None,
+        }
+    }
+
+    /// Encode the Connection Request the connector would send for
+    /// these args and return it as a lossy string.
+    fn connection_request(args: &RdpOpenArgs) -> String {
+        let config = build_connector_config(args);
+        let request = ConnectionRequest {
+            nego_data: config.request_data.clone(),
+            flags: RequestFlags::empty(),
+            protocol: SecurityProtocol::SSL,
+        };
+        let mut buf = WriteBuf::new();
+        encode_buf(&X224(request), &mut buf).expect("encode connection request");
+        String::from_utf8_lossy(buf.filled()).into_owned()
+    }
+
+    #[test]
+    fn ticket_goes_in_the_mstshash_cookie() {
+        let pdu = connection_request(&args(Some(TICKET.to_owned())));
+        assert!(
+            pdu.contains(&format!("Cookie: mstshash={TICKET}\r\n")),
+            "ticket must ride in the cookie slot Rustion parses; got {pdu:?}"
+        );
+    }
+
+    #[test]
+    fn ticket_is_not_sent_as_a_routing_token() {
+        let pdu = connection_request(&args(Some(TICKET.to_owned())));
+        // `Cookie: msts=` is the routing-token slot. It is equally
+        // legal per MS-RDPBCGR and equally invisible to Rustion's
+        // `extract_username_from_cookie`, which scans only for
+        // `Cookie: mstshash=`.
+        assert!(
+            !pdu.contains("Cookie: msts="),
+            "routing-token slot is not read by the bastion; got {pdu:?}"
+        );
+        // The bare ticket must not be double-prefixed either.
+        assert!(!pdu.contains("mstshash=mstshash="), "double prefix; got {pdu:?}");
+    }
+
+    #[test]
+    fn direct_sessions_leave_the_slot_to_ironrdp() {
+        let mut a = args(None);
+        a.username = "alice".to_owned();
+        // `request_data: None` is what hands the slot back to the
+        // connector, which fills it with `Cookie: mstshash=<username>`.
+        // Setting it here would override that default.
+        assert!(build_connector_config(&a).request_data.is_none());
     }
 }
