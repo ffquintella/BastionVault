@@ -2,27 +2,28 @@
  * Resource Connect — RDP session window (Phase 4).
  *
  * Loaded into a fresh Tauri WebviewWindow spawned by the
- * `session_open_rdp` command. Subscribes to per-session frame
- * events (full-frame RGBA snapshots) and forwards keyboard /
- * mouse events back via dedicated input commands. Phase 4
- * limitations — no NLA / CredSSP, full-frame snapshots only — are
- * documented in `gui/src-tauri/src/session/rdp.rs`.
+ * `session_open_rdp` command. Hands the host a binary IPC
+ * `Channel` for canvas frames and forwards keyboard / mouse events
+ * back via dedicated input commands.
+ *
+ * The frame path is deliberately *not* a Tauri event. Events
+ * serialize their payload to JSON and reach the webview as an
+ * `eval`'d script, so a full-desktop repaint used to arrive as a
+ * multi-megabyte base64 string literal that this file then decoded
+ * one `charCodeAt` at a time. A `Channel` carrying a raw body
+ * travels over the `ipc://` custom protocol as real binary and
+ * lands here as an `ArrayBuffer` we can view directly as
+ * `ImageData`. See `gui/src-tauri/src/session/rdp.rs` for the wire
+ * format and `../lib/rdpFrames` for the parse.
  */
 
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import { RustionSessionChip } from "../components/RustionSessionChip";
-
-interface FramePayload {
-  bytes_b64: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+import { decodeFrame } from "../lib/rdpFrames";
 
 interface ResizePayload {
   width: number;
@@ -35,21 +36,9 @@ interface ResizePayload {
 /// channel on a slow drag.
 const RESIZE_DEBOUNCE_MS = 250;
 
-function b64ToBytes(b64: string): Uint8ClampedArray {
-  const bin = atob(b64);
-  // Allocate a fresh ArrayBuffer so the Uint8ClampedArray's buffer
-  // is unambiguously `ArrayBuffer` (not `SharedArrayBuffer`) — the
-  // ImageData constructor's TS signature requires that exact type.
-  const ab = new ArrayBuffer(bin.length);
-  const out = new Uint8ClampedArray(ab);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
 export function SessionRdpWindow() {
   const [params] = useSearchParams();
   const token = params.get("token") ?? "";
-  const frameEvent = params.get("frame") ?? "";
   const closedEvent = params.get("closed") ?? "";
   const resizeEvent = params.get("resize") ?? "";
   const label = params.get("label") ?? "rdp session";
@@ -76,25 +65,73 @@ export function SessionRdpWindow() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    // Subscribe to frame events first so we don't miss the very
-    // first paint (the active-stage pump can fire a frame as soon
-    // as the deactivate-all sequence finishes).
-    const unlistenFrame = listen<FramePayload>(frameEvent, (ev) => {
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      const { bytes_b64, x, y, width, height } = ev.payload;
-      const bytes = b64ToBytes(bytes_b64);
-      // Phase 4 emits full-frame snapshots — width/height match the
-      // canvas. Once the dirty-rect optimization lands, the same
-      // putImageData call writes only the changed region. Cast the
-      // typed array to satisfy `ImageDataArray` — TS infers
-      // `ArrayBufferLike` because of the Tauri payload's lifetime
-      // story, but the underlying ArrayBuffer we allocated above
-      // is concrete.
-      const image = new ImageData(bytes as unknown as Uint8ClampedArray<ArrayBuffer>, width, height);
-      ctx.putImageData(image, x, y);
-      if (status !== "open") setStatus("open");
-    });
+    // `alpha: false` — RDP framebuffers are opaque, and telling the
+    // 2D context so lets the compositor skip per-pixel blending on
+    // every putImageData.
+    const ctx = canvas.getContext("2d", { alpha: false });
+    if (!ctx) {
+      setStatus("error");
+      setErrorMessage("could not acquire a 2D canvas context");
+      return;
+    }
+
+    // Frame channel. Created here and handed to the host below;
+    // until `session_attach_rdp_frames` resolves, the pump has
+    // nowhere to send frames and simply keeps painting into its own
+    // framebuffer, so the first frame we receive is always a
+    // complete desktop.
+    // Cleared by the effect teardown so a frame still in flight when
+    // the window unmounts cannot write to a detached canvas or set
+    // state on a dead component.
+    let attached = true;
+    const frames = new Channel<ArrayBuffer>();
+    frames.onmessage = (buffer) => {
+      if (!attached) return;
+      let frame;
+      try {
+        frame = decodeFrame(buffer);
+      } catch (e) {
+        // A parse failure is a version skew between this bundle and
+        // the host binary, not a transient glitch. Say so instead of
+        // painting a partially-decoded desktop.
+        setStatus("error");
+        setErrorMessage(e instanceof Error ? e.message : String(e));
+        return;
+      }
+      // Resize off the frame header rather than waiting for the
+      // `resize` event — separate transports, and the event can
+      // arrive after the first frame at the new size. Reallocating
+      // the backing store also clears it, which is fine: a frame
+      // that changes the size is always a full repaint.
+      if (frame.width !== canvas.width || frame.height !== canvas.height) {
+        canvas.width = frame.width;
+        canvas.height = frame.height;
+        sizeRef.current = { w: frame.width, h: frame.height };
+      }
+      for (const rect of frame.rects) {
+        // The Uint8ClampedArray is a view into `buffer`, which is a
+        // concrete ArrayBuffer; the cast only restates that for TS,
+        // whose ImageData signature rejects `ArrayBufferLike`.
+        const image = new ImageData(
+          rect.data as unknown as Uint8ClampedArray<ArrayBuffer>,
+          rect.width,
+          rect.height,
+        );
+        ctx.putImageData(image, rect.x, rect.y);
+      }
+      setStatus((prev) => (prev === "connecting" ? "open" : prev));
+    };
+    void invoke("session_attach_rdp_frames", { request: { token }, channel: frames }).then(
+      () => {
+        if (attached) setStatus((prev) => (prev === "connecting" ? "open" : prev));
+      },
+      (e: unknown) => {
+        if (!attached) return;
+        setStatus("error");
+        setErrorMessage(`could not attach the frame channel: ${String(e)}`);
+      },
+    );
+
     const unlistenClosed = listen(closedEvent, () => {
       setStatus("closed");
     });
@@ -198,7 +235,11 @@ export function SessionRdpWindow() {
       canvas.removeEventListener("contextmenu", onContextMenu);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
-      void unlistenFrame.then((u) => u());
+      attached = false;
+      // No explicit detach command: the host drops the channel the
+      // first time a send fails (the webview is gone by then) and
+      // re-arms a full repaint, which is exactly what a reattaching
+      // window needs.
       void unlistenClosed.then((u) => u());
       void unlistenResize.then((u) => u());
       observer.disconnect();
@@ -211,7 +252,7 @@ export function SessionRdpWindow() {
       // the user-driven close path explicitly.
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, frameEvent, closedEvent, resizeEvent]);
+  }, [token, closedEvent, resizeEvent]);
 
   async function handleDisconnect() {
     try {

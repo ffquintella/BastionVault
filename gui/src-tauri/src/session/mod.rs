@@ -26,8 +26,8 @@ pub enum SessionState {
     Ssh(SshSessionState),
     /// RDP session — owns the active-stage pump task's tx side.
     /// The pump translates control messages into fast-path PDUs
-    /// and forwards bitmap updates back to the WebviewWindow as
-    /// per-session Tauri events.
+    /// and forwards bitmap updates back to the WebviewWindow over
+    /// a binary IPC channel the window installs on mount.
     Rdp(RdpSessionState),
 }
 
@@ -36,6 +36,10 @@ pub struct RdpSessionState {
     /// commands push control messages here; the spawned task awaits
     /// on the rx side and translates to fast-path PDUs.
     pub input_tx: tokio::sync::mpsc::Sender<rdp::RdpControl>,
+    /// Where the pump sends packed canvas frames. Empty until the
+    /// session window calls `session_attach_rdp_frames` with the IPC
+    /// channel it created; see [`rdp::FrameSink`].
+    pub frames: std::sync::Arc<std::sync::Mutex<rdp::FrameSink>>,
     /// Operator-visible window title + future audit close-event
     /// payload.
     #[allow(dead_code)]

@@ -471,7 +471,6 @@ pub async fn get_server_info(state: State<'_, AppState>) -> CmdResult<ServerInfo
             let core = vault.core.load();
             let initialized = core.inited().await.unwrap_or(false);
             let sealed = core.sealed();
-            use bastion_vault::storage::Backend as _;
             // The backend names itself, so the label survives both a
             // missing `storage_hiqlite` on this crate and the read-cache
             // decorator wrapped around the physical layer -- the two ways

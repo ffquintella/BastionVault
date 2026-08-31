@@ -1,0 +1,424 @@
+name: Standalone desktop release
+
+# Builds and publishes the STANDALONE BastionVault desktop client for all
+# three desktop platforms, from one tag.
+#
+# "Standalone" is a feature selection, not a separate crate: the Tauri GUI
+# with the embedded vault on the plain **file** storage backend —
+#
+#   --no-default-features --features embedded_vault,ssh_pqc
+#
+# which drops `storage_hiqlite` (embedded Raft/SQLite cluster) and
+# `cloud_targets` (S3 / OneDrive / GDrive / Dropbox vault profiles). The
+# file backend needs no feature of its own; it is unconditional in
+# `bv-storage` and is what the GUI selects when `BASTION_EMBEDDED_STORAGE`
+# is unset. See the `make release` section of the Makefile.
+#
+# A "release" in this repo is a tag under the `releases/` namespace — e.g.
+# `releases/0.41.22`. Pushing one triggers this workflow. `make release`
+# does the tagging (and checks the version agrees in Cargo.toml and
+# tauri.conf.json first).
+#
+# Each installer is built by the same `make release-*` target a developer
+# would run on that OS, so a locally built artefact is comparable to the
+# published one. Tauri cannot cross-compile — the WebView is a native
+# build-time dependency (WebKitGTK / WebKit / WebView2) — which is why
+# this is a three-runner matrix rather than one job.
+#
+# Published assets:
+#
+#   BastionVault-<version>-standalone-x86_64.AppImage   Linux   x86_64 (glibc 2.39+)
+#   BastionVault-<version>-standalone-arm64.pkg         macOS   Apple Silicon
+#   BastionVault-<version>-standalone-x64.msi           Windows x64
+#   SHA256SUMS-standalone.txt
+#
+# The `-standalone-` infix and the `-standalone` suffix on SHA256SUMS are
+# load-bearing: `macos-release.yml` publishes `BastionVault-<version>-arm64.pkg`
+# and `SHA256SUMS` to the SAME release tag (the Homebrew-cask channel), and
+# un-infixed names would clobber it.
+#
+# Signing is optional and off until the secrets exist. An unsigned
+# release still installs; macOS users need `--no-quarantine` / right-click
+# → Open, and Windows shows a SmartScreen warning. See "Apple signing" in
+# macos-release.yml for the secret names, which are shared.
+
+on:
+  push:
+    tags:
+      - "releases/*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing releases/* tag to (re)build, e.g. releases/0.41.22"
+        required: true
+      linux_runner:
+        description: "Runner for the AppImage job. Older = lower glibc floor = runs on more distros."
+        required: false
+        default: "ubuntu-24.04"
+        type: choice
+        options:
+          - "ubuntu-24.04"
+          - "ubuntu-22.04"
+
+# Never cancel a release build half way through — a partially uploaded
+# release is worse than a slow one.
+concurrency:
+  group: standalone-release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # A release build has no use for incremental artefacts, and they cost
+  # cache space and upload time.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # Parsed once, before any runner spends a minute compiling, so a
+  # malformed tag or a version mismatch fails in seconds.
+  meta:
+    name: Resolve release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      linux_runner: ${{ steps.meta.outputs.linux_runner }}
+    steps:
+      - name: Resolve tag and version
+        id: meta
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          case "$TAG" in
+            releases/*) ;;
+            *) echo "::error::expected a tag under releases/, got '$TAG'"; exit 1 ;;
+          esac
+          VERSION="${TAG#releases/}"
+          VERSION="${VERSION#v}"
+          case "$VERSION" in
+            [0-9]*.[0-9]*) ;;
+            *) echo "::error::'$TAG' does not carry an x.y.z version"; exit 1 ;;
+          esac
+          echo "tag=$TAG"                                            >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"                                    >> "$GITHUB_OUTPUT"
+          echo "linux_runner=${{ github.event.inputs.linux_runner || 'ubuntu-24.04' }}" >> "$GITHUB_OUTPUT"
+          echo "==> tag=$TAG version=$VERSION"
+
+      - name: Checkout ${{ steps.meta.outputs.tag }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.tag }}
+          submodules: false
+
+      # Catches "tagged a release but forgot `make bump-patch`" before it
+      # produces artefacts labelled with a version nobody can reproduce.
+      # Same check as `make release-version-check`, repeated here because a
+      # dispatch can target a tag that was pushed by hand.
+      - name: Check the tag matches the tree
+        run: |
+          set -euo pipefail
+          WANT="${{ steps.meta.outputs.version }}"
+          CARGO_VERSION="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')"
+          GUI_VERSION="$(grep -m1 '"version"' gui/src-tauri/tauri.conf.json | sed 's/.*"\([0-9][^"]*\)".*/\1/')"
+          fail=0
+          [ "$CARGO_VERSION" = "$WANT" ] || { echo "::error::Cargo.toml says $CARGO_VERSION, tag says $WANT"; fail=1; }
+          [ "$GUI_VERSION"   = "$WANT" ] || { echo "::error::tauri.conf.json says $GUI_VERSION, tag says $WANT"; fail=1; }
+          if [ "$fail" -ne 0 ]; then
+            echo "Run 'make bump-patch' (or bump-minor/major), commit, then retag." >&2
+            exit 1
+          fi
+          echo "==> versions agree on $WANT"
+
+  # ── Linux: .AppImage ──────────────────────────────────────────────────
+  linux:
+    name: Linux .AppImage (x86_64)
+    needs: meta
+    runs-on: ${{ needs.meta.outputs.linux_runner }}
+    # A full release build of this tree (aws-lc-rs, russh, IronRDP, actix,
+    # wasmtime) plus the Vite frontend. Generous, but under the 6h cap.
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # No submodules on purpose: plugins-ext, IronRDP and
+          # third_party/hiqlite are submodules for local editing only — the
+          # build consumes them as *git* dependencies (see [patch.crates-io]
+          # in Cargo.toml and the ironrdp entries in gui/src-tauri/Cargo.toml).
+          ref: ${{ needs.meta.outputs.tag }}
+          submodules: false
+
+      # The list mirrors gui/src-tauri/installers/linux/Dockerfile, which is
+      # the authoritative one (it is what `make gui-linux-packages` builds
+      # in). Extras here are AppImage-only: patchelf and squashfs-tools are
+      # what linuxdeploy uses to rewrite rpaths and pack the image.
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config file curl wget git ca-certificates \
+            perl libssl-dev nasm cmake \
+            libudev-dev libpcsclite-dev \
+            libwebkit2gtk-4.1-dev librsvg2-dev \
+            libayatana-appindicator3-dev libxdo-dev \
+            patchelf squashfs-tools desktop-file-utils
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: standalone-linux-x86_64
+          cache-on-failure: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+
+      - name: Build the .AppImage
+        env:
+          # linuxdeploy ships as an AppImage itself and needs FUSE to
+          # self-mount, which GitHub runners do not provide. This makes it
+          # extract and exec instead. Also set inside the make target, so
+          # this is belt-and-braces for anything Tauri spawns.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          set -euo pipefail
+          # `npm ci` up front so the tree matches gui/package-lock.json
+          # exactly; the `npm install` that gui-deps then runs is a no-op
+          # revalidation.
+          (cd gui && npm ci)
+          make release-linux-appimage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: standalone-linux-${{ needs.meta.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+
+  # ── macOS: .pkg ───────────────────────────────────────────────────────
+  #
+  # Apple Silicon only, matching macos-release.yml: the macos-15 runners are
+  # arm64, so the GUI builds natively with no cross-compilation and no
+  # universal2 lipo step. Intel Macs are out of scope for this channel.
+  macos:
+    name: macOS .pkg (arm64)
+    needs: meta
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+          submodules: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: standalone-macos-arm64
+          cache-on-failure: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+
+      # Every variable below may legitimately be absent. Tauri and the pkg
+      # script both branch on "is this set?", but a GitHub Actions `env:`
+      # entry backed by a missing secret is set-to-empty rather than unset,
+      # which that code reads as "yes, sign with the identity ''". So the
+      # empties are stripped here and re-exported through $GITHUB_ENV, where
+      # an absent secret genuinely means an absent variable. Same mechanism
+      # (and same secrets) as macos-release.yml — see its comments for what
+      # each one is.
+      - name: Configure Apple signing
+        env:
+          IN_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          IN_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IN_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          IN_APPLE_ID: ${{ secrets.APPLE_ID }}
+          IN_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          IN_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          IN_INSTALLER_IDENTITY: ${{ secrets.APPLE_INSTALLER_IDENTITY }}
+        run: |
+          set -euo pipefail
+          promote() {
+            local name="$1" value="$2"
+            if [ -z "$value" ]; then
+              echo "  $name: not configured"
+              return
+            fi
+            # Heredoc form so multi-line values (the base64 .p12) survive.
+            {
+              echo "$name<<__BV_EOF__"
+              printf '%s\n' "$value"
+              echo "__BV_EOF__"
+            } >> "$GITHUB_ENV"
+            echo "  $name: set"
+          }
+          promote APPLE_CERTIFICATE          "$IN_APPLE_CERTIFICATE"
+          promote APPLE_CERTIFICATE_PASSWORD "$IN_APPLE_CERTIFICATE_PASSWORD"
+          promote APPLE_SIGNING_IDENTITY     "$IN_APPLE_SIGNING_IDENTITY"
+          promote APPLE_ID                   "$IN_APPLE_ID"
+          promote APPLE_PASSWORD             "$IN_APPLE_PASSWORD"
+          promote APPLE_TEAM_ID              "$IN_APPLE_TEAM_ID"
+          # Read by gui/src-tauri/installers/macos/build-gui-pkg.sh.
+          promote INSTALLER_IDENTITY         "$IN_INSTALLER_IDENTITY"
+
+      - name: Build the .pkg
+        run: |
+          set -euo pipefail
+          (cd gui && npm ci)
+          make release-macos-pkg
+
+      # Report what Gatekeeper will make of the .app, so an unsigned
+      # release shows up in the log rather than as a surprise on someone's
+      # Mac. An ad-hoc signature passes `codesign --verify`, so the verdict
+      # that matters is spctl's. `|| true` on find: it exits non-zero when a
+      # starting path is missing, and gui/src-tauri/target never exists here
+      # (the GUI is a workspace member, so artefacts land in the root
+      # target/). Under `set -euo pipefail` that status used to kill the step
+      # after a perfectly good build.
+      - name: Report the signing verdict
+        run: |
+          set -euo pipefail
+          APP="$(find target gui/src-tauri/target -type d -name 'BastionVault.app' \
+                   -path '*/bundle/macos/*' 2>/dev/null | head -1 || true)"
+          if [ -z "$APP" ]; then
+            echo "::warning::BastionVault.app not found — skipping the signing report"
+            exit 0
+          fi
+          codesign --verify --deep --strict --verbose=2 "$APP" || \
+            echo "::warning::BastionVault.app has no valid code signature"
+          spctl --assess --type exec --verbose=4 "$APP" || \
+            echo "::warning::BastionVault.app is not notarised — users will need to right-click → Open"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: standalone-macos-${{ needs.meta.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+
+  # ── Windows: .msi ─────────────────────────────────────────────────────
+  windows:
+    name: Windows .msi (x64)
+    needs: meta
+    runs-on: windows-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        # Git-Bash, so the `make release-windows-msi` recipe's shell syntax
+        # is the same one it gets on a developer's Windows box (the Makefile
+        # branches on $(OS)=Windows_NT, which is set here too).
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+          submodules: false
+
+      # The windows-latest image has no `make`. Installing it keeps CI and a
+      # developer's Windows box on one build recipe instead of duplicating
+      # the tauri invocation here.
+      - name: Install make
+        shell: pwsh
+        run: choco install make --no-progress -y
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: standalone-windows-x64
+          cache-on-failure: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+
+      # Tauri's WiX bundler downloads WiX 3.x itself on first use; nothing
+      # to install. Strawberry Perl is preinstalled at C:\Strawberry, which
+      # is what the Makefile's OPENSSL_SRC_PERL default points at.
+      - name: Build the .msi
+        run: |
+          set -euo pipefail
+          (cd gui && npm ci)
+          make release-windows-msi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: standalone-windows-${{ needs.meta.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+
+  # ── Publish ───────────────────────────────────────────────────────────
+  #
+  # A separate job so a single failing platform leaves the release
+  # untouched rather than publishing two thirds of it. This is the only job
+  # with write access to the repo.
+  publish:
+    name: Publish to the GitHub release
+    needs: [meta, linux, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+          submodules: false
+
+      - name: Download the platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: staged
+          pattern: standalone-*-${{ needs.meta.outputs.version }}
+          merge-multiple: true
+
+      - name: Stage and checksum
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find staged -type f -print0 | xargs -0 -I{} cp {} dist/
+          # `make release-checksums` writes SHA256SUMS-standalone.txt over
+          # exactly what is in dist/ — the same command a developer runs.
+          make release-checksums
+          echo ""
+          ls -lh dist/
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "==> release $TAG exists — replacing its standalone assets"
+            gh release upload "$TAG" --clobber dist/*
+          else
+            echo "==> creating release $TAG"
+            gh release create "$TAG" \
+              --title "BastionVault $VERSION" \
+              --generate-notes \
+              dist/*
+          fi
+          gh release view "$TAG"

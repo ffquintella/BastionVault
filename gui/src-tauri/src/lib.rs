@@ -555,6 +555,7 @@ pub fn run() {
             commands::connect::session_open_ssh,
             commands::connect::session_open_rdp,
             commands::connect::session_input,
+            commands::connect::session_attach_rdp_frames,
             commands::connect::session_input_rdp_mouse,
             commands::connect::session_input_rdp_key,
             commands::connect::session_input_rdp_resize,

@@ -98,6 +98,21 @@ Linux build host runs the bundler against the staged scripts.
   2026-08-26 — hardware token, Authenticode optional and never a build gate
   (§ Decisions) — which leaves one concrete engineering task: a PKCS#11 branch
   in `sign_authenticode()`, since an EV key cannot exist as a file.
+- Client installers Phase 4, **first CI slice shipped 2026-08-31** — the
+  *standalone desktop* channel. `make release` tags `releases/<version>`;
+  [`standalone-release.yml`](../.github/workflows/standalone-release.yml)
+  builds the GUI in its standalone shape (embedded vault, plain **file**
+  storage backend: `--no-default-features --features embedded_vault,ssh_pqc`)
+  on three runners and publishes to the GitHub release — an `.AppImage`
+  (`ubuntu-24.04`), an arm64 `.pkg` (`macos-15`), an x64 `.msi`
+  (`windows-latest`) and `SHA256SUMS-standalone.txt`. The build jobs call the
+  same host-gated `make release-*` targets a developer runs, and publishing
+  is a separate job so one failing platform cannot ship a partial release.
+  This is deliberately narrower than the six-job matrix Phase 4 describes:
+  GUI only (no CLI — that channel is `macos-release.yml` and the `cli-*`
+  targets), one arch per OS, and no signing beyond the optional Apple
+  secrets. `manifest.json` and the PKCS#11 Authenticode branch are still
+  open, so Phase 4 stays part-shipped rather than done.
 - Downloads website Phase 1 (the static-server binary). **Done.**
   `cmd/bv-downloads-server/` — `manifest.rs` / `render.rs` / `serve.rs`, 39
   tests, acceptance run against `cmd/bv-downloads-server/fixtures/v0.4.0/`.

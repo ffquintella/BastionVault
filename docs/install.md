@@ -19,6 +19,52 @@ BastionVault works on the following operating systems:
 
 BastionVault is written in [Rust](https://rust-lang.org), so Rust must be installed before building. Read [this](https://www.rust-lang.org/tools/install) to install Rust.
 
+## Desktop App — Prebuilt Installers
+
+Each release publishes prebuilt installers for the **standalone desktop
+client**: the BastionVault GUI with an embedded vault on the local **file**
+storage backend. No server to run, no cluster to join — the vault lives in
+your home directory.
+
+Download them from the
+[Releases page](https://github.com/ffquintella/BastionVault/releases), under
+the `releases/<version>` tag:
+
+| Platform | Asset |
+|---|---|
+| Linux (x86_64) | `BastionVault-<version>-standalone-x86_64.AppImage` |
+| macOS (Apple Silicon) | `BastionVault-<version>-standalone-arm64.pkg` |
+| Windows (x64) | `BastionVault-<version>-standalone-x64.msi` |
+
+Verify what you downloaded against `SHA256SUMS-standalone.txt` from the same
+release before installing:
+
+~~~bash
+sha256sum -c SHA256SUMS-standalone.txt --ignore-missing
+~~~
+
+Then:
+
+* **Linux** — `chmod +x BastionVault-*.AppImage && ./BastionVault-*.AppImage`.
+  Tauri bundles WebKitGTK into the image, so there is nothing to install
+  first; two host requirements remain. The AppImage self-mounts via **FUSE
+  2** — if your distro ships only FUSE 3, either install `libfuse2` or run
+  it as `./BastionVault-*.AppImage --appimage-extract-and-run`. And the
+  image is built on Ubuntu 24.04, so it needs **glibc 2.39 or newer** —
+  Ubuntu 24.04+, Debian 13+, Fedora 40+, RHEL 10+. On anything older it
+  will refuse to start; build from source there instead.
+  `.deb` and `.rpm` packages exist as `make gui-linux-packages` targets but
+  are not published to the Releases page.
+* **macOS** — open the `.pkg`; it installs to `/Applications/BastionVault.app`.
+  Until the release is notarised, Gatekeeper will block the first launch —
+  right-click the app and choose **Open**.
+* **Windows** — run the `.msi`. Until the release is Authenticode-signed,
+  SmartScreen will warn; choose **More info → Run anyway**.
+
+These installers omit the hiqlite cluster backend and the cloud storage
+targets. If you need a clustered vault, a cloud-backed vault profile, or the
+`bvault` CLI, build from source below or use the server container image.
+
 ## Build from Source
 
 Clone the repository from GitHub:

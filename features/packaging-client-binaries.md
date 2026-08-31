@@ -180,6 +180,31 @@ CI matrix (Phase 4) remain open, as do the GUI installers.
   not gate CI, and driving the token needs a PKCS#11 branch in
   `sign_authenticode()` that does not exist yet. The `bv://` deep-link
   handler (needs app-side support) is also still open.
+- **The standalone desktop channel ships (2026-08-31).** The first slice of
+  the Phase 4 CI matrix is real, narrowed to one product shape:
+  `make release` tags `releases/<version>` and
+  [`.github/workflows/standalone-release.yml`](../.github/workflows/standalone-release.yml)
+  builds the *standalone* GUI — embedded vault on the plain **file**
+  backend, `--no-default-features --features embedded_vault,ssh_pqc`, so no
+  hiqlite cluster and no cloud vault profiles — on three runners and
+  publishes to the GitHub release:
+  `BastionVault-<v>-standalone-x86_64.AppImage` (`ubuntu-24.04`),
+  `BastionVault-<v>-standalone-arm64.pkg` (`macos-15`),
+  `BastionVault-<v>-standalone-x64.msi` (`windows-latest`), plus
+  `SHA256SUMS-standalone.txt`. The three build jobs call the same
+  `make release-linux-appimage` / `release-macos-pkg` /
+  `release-windows-msi` targets a developer runs, so a local artefact is
+  comparable to the published one, and a separate `publish` job means one
+  failing platform does not publish a partial release.
+
+  Three deltas from the matrix in § Build matrix below, which describes the
+  full six-job plan this does *not* yet replace: **AppImage** is a new
+  format for the Linux GUI (previously `.deb`/`.rpm` only); macOS is
+  **arm64 only**, matching `macos-release.yml`; and no arm64 Windows,
+  aarch64 Linux, or universal2 slice is built. Signing is the same
+  optional-secrets arrangement as `macos-release.yml` — nothing is
+  Authenticode- or GPG-signed by this workflow yet, so `sign-packages` and
+  the `manifest.json` publish remain open.
 
 ## Design
 

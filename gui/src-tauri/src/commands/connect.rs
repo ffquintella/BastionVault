@@ -479,7 +479,6 @@ pub struct RdpOpenRequest {
 #[derive(Serialize)]
 pub struct RdpOpenResponse {
     pub token: String,
-    pub frame_event: String,
     pub closed_event: String,
     pub resize_event: String,
     pub window_label: String,
@@ -543,6 +542,17 @@ pub async fn session_open_rdp(
     let credential = resolved.credential;
     let domain = resolved.domain;
     let aggressive_performance = profile.get("rdp_aggressive_performance").and_then(|v| v.as_bool()).unwrap_or(false);
+    // Graphics Pipeline opt-in. Off unless the profile asks for it:
+    // it needs a separately-installed OpenH264 and is the newest,
+    // least-exercised graphics path.
+    let enable_egfx = profile.get("rdp_egfx").and_then(|v| v.as_bool()).unwrap_or(false);
+    let bulk_compression = match profile.get("rdp_bulk_compression").and_then(|v| v.as_str()) {
+        None => session::rdp::DEFAULT_BULK_COMPRESSION,
+        Some(other) => match session::rdp::parse_bulk_compression(other) {
+            Ok(ct) => ct,
+            Err(e) => return Err(CommandError::from(e)),
+        },
+    };
 
     // Phase 7.4 — consult the Rustion policy resolver. Mirrors the SSH
     // path: when transport requires (or prefers) a bastion AND the
@@ -648,6 +658,8 @@ pub async fn session_open_rdp(
                     label,
                     on_close: on_close.clone(),
                     aggressive_performance,
+                    enable_egfx,
+                    bulk_compression,
                     ticket_cookie: ticket_cookie.clone(),
                     tls_pin_sha256: tls_pin_for_dial.clone(),
                 },
@@ -712,9 +724,8 @@ pub async fn session_open_rdp(
 
     let window_label = format!("rdp-{}", outcome.token);
     let url = format!(
-        "index.html#/session/rdp?token={}&frame={}&closed={}&resize={}&label={}&w={}&h={}",
+        "index.html#/session/rdp?token={}&closed={}&resize={}&label={}&w={}&h={}",
         urlencoding::encode(&outcome.token),
-        urlencoding::encode(&outcome.frame_event),
         urlencoding::encode(&outcome.closed_event),
         urlencoding::encode(&outcome.resize_event),
         urlencoding::encode(&label),
@@ -749,7 +760,6 @@ pub async fn session_open_rdp(
 
     Ok(RdpOpenResponse {
         token: outcome.token,
-        frame_event: outcome.frame_event,
         closed_event: outcome.closed_event,
         resize_event: outcome.resize_event,
         window_label,
@@ -816,6 +826,55 @@ pub async fn session_input_rdp_resize(state: State<'_, AppState>, request: RdpIn
     )
     .await
     .map_err(CommandError::from)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RdpAttachFramesRequest {
+    pub token: String,
+}
+
+/// Install the session window's frame channel on the pump.
+///
+/// Called once by `SessionRdpWindow` after its canvas is mounted,
+/// passing a `Channel` it created. Everything about the frame path
+/// after this point is binary over the `ipc://` custom protocol —
+/// no JSON, no base64, no `eval` of a multi-megabyte string
+/// literal, which is what the previous `app.emit` route cost per
+/// repaint.
+///
+/// Idempotent by design: a reloaded window calls it again with a
+/// fresh channel, which replaces the stale one and re-arms a
+/// full-desktop repaint.
+#[tauri::command]
+pub async fn session_attach_rdp_frames(
+    state: State<'_, AppState>,
+    request: RdpAttachFramesRequest,
+    channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> CmdResult<()> {
+    {
+        let sessions = state.connect_sessions.lock().await;
+        let frames = match sessions.get(&request.token) {
+            Some(session::SessionState::Rdp(s)) => std::sync::Arc::clone(&s.frames),
+            Some(_) => {
+                return Err(CommandError::from(format!(
+                    "session `{}` is not an RDP session (cannot attach a frame channel)",
+                    request.token
+                )))
+            }
+            None => return Err(CommandError::from(format!("session token `{}` not found", request.token))),
+        };
+        drop(sessions);
+        match frames.lock() {
+            Ok(mut sink) => sink.attach(channel),
+            Err(poisoned) => poisoned.into_inner().attach(channel),
+        };
+    }
+    // Wake the pump so an idle desktop paints immediately instead of
+    // waiting for the server's next update.
+    session::rdp::send_control(&state, &request.token, session::rdp::RdpControl::Repaint)
+        .await
+        .map_err(CommandError::from)
 }
 
 struct ResolvedRdpCredential {

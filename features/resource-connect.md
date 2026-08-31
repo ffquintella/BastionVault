@@ -527,6 +527,40 @@ Credential-source matrix after this phase:
 | `default-account` | ✅ | ✅ |
 | `fido2` | ✅ | ✗ (no FIDO2 auth method in RDP; use `pki` + `require_mfa`) |
 
+### Phase 7.6 — RDP session performance — **Done** (EGFX partial)
+
+Split into its own roadmap:
+[roadmaps/rdp-performance.md](../roadmaps/rdp-performance.md).
+
+Phase 4 shipped a correct RDP client; this phase makes it fast. The RDP
+library was never the bottleneck — ironrdp already advertises RemoteFX by
+default. The cost was the transport around it.
+
+| Deliverable | Location | Status |
+|---|---|---|
+| Per-session throughput telemetry (`PumpStats`) | [gui/src-tauri/src/session/rdp.rs](../gui/src-tauri/src/session/rdp.rs) | ✅ |
+| Bulk compression advertised (MPPC-64K), `rdp_bulk_compression` profile key | [gui/src-tauri/src/session/rdp.rs](../gui/src-tauri/src/session/rdp.rs) | ✅ |
+| Bulk decompressor survives a DisplayControl resize | `run_reactivation` | ✅ |
+| Binary `ipc::Channel` frame transport + `session_attach_rdp_frames` | [gui/src-tauri/src/session/rdp.rs](../gui/src-tauri/src/session/rdp.rs), [gui/src/lib/rdpFrames.ts](../gui/src/lib/rdpFrames.ts), [gui/src/routes/SessionRdpWindow.tsx](../gui/src/routes/SessionRdpWindow.tsx) | ✅ |
+| Time-based dirty-rect coalescing (`Dirty`, 16 ms) | [gui/src-tauri/src/session/rdp.rs](../gui/src-tauri/src/session/rdp.rs) | ✅ |
+| EGFX / H.264 client behind `rdp_egfx` | [gui/src-tauri/src/session/rdp.rs](../gui/src-tauri/src/session/rdp.rs) | ⚠️ inert |
+
+**Current state.** The frame path is binary end to end: the session window
+creates a `tauri::ipc::Channel` and installs it on the pump, which packs
+accumulated damage into one `ArrayBuffer` per flush (header + rect table +
+row-packed RGBA) at most every 16 ms. This is the "binary Tauri channel" the
+original Phase 4 scope called for; the base64-over-events shape it shipped
+with was the stopgap. Bulk compression is advertised and per-profile
+selectable. Every session logs a throughput line whose `codec` ratio tells an
+operator whether the server chose a bitmap codec at all.
+
+EGFX is implemented, unit-tested and **not usable yet**: a server only opens
+the graphics channel when the client sets
+`RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL`, which the pinned ironrdp connector
+does not. The connector change is written but unpushed — four remaining steps
+are listed in the roadmap. It is also untested against a live Windows
+Graphics Pipeline, and cannot be until the flag lands.
+
 ### Phase 8 — Future / deferred
 
 - Session recording (keystroke + bitmap capture; storage tier; replay viewer).

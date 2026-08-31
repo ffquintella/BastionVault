@@ -45,6 +45,133 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.23] - 2026-08-31
+
+### Added
+
+#### Standalone desktop release: one tag, three installers
+
+- **`make release`** cuts a release of the *standalone* desktop client --
+  the Tauri GUI with the embedded vault on the plain **file** storage
+  backend. It checks that `Cargo.toml` and `tauri.conf.json` agree on the
+  version and that the worktree is committed, then tags `releases/<version>`
+  and pushes it; GitHub Actions does the building. `DRY_RUN=1` prints the
+  tag and push without performing them, `ALLOW_DIRTY=1` overrides the
+  clean-tree gate, and `make release-dispatch` re-runs the build for a tag
+  that already exists.
+- **[`.github/workflows/standalone-release.yml`](.github/workflows/standalone-release.yml)** --
+  triggered by a `releases/*` tag (or dispatched with a `tag` input). A
+  `meta` job validates the tag and the tree's version once, three build
+  jobs then produce one installer each, and a separate `publish` job
+  uploads them to the GitHub release. Splitting publish out means one
+  failing platform leaves the release untouched instead of publishing two
+  thirds of it.
+
+  | Runner | Asset |
+  |---|---|
+  | `ubuntu-24.04` (input-selectable) | `BastionVault-<version>-standalone-x86_64.AppImage` |
+  | `macos-15` | `BastionVault-<version>-standalone-arm64.pkg` |
+  | `windows-latest` | `BastionVault-<version>-standalone-x64.msi` |
+  | `ubuntu-latest` | `SHA256SUMS-standalone.txt` |
+
+  The `-standalone-` infix is load-bearing: `macos-release.yml` publishes
+  `BastionVault-<version>-arm64.pkg` and `SHA256SUMS` to the *same* release
+  tag (the Homebrew-cask channel), so un-infixed names would clobber it.
+- **New per-platform `make` targets, which CI itself calls** so a locally
+  built installer is comparable to the published one:
+  `release-linux-appimage`, `release-macos-pkg`, `release-windows-msi`
+  (each host-gated -- Tauri cannot cross-compile, the WebView is a native
+  build-time dependency), plus `release-local` to build whichever one this
+  host can, `release-checksums`, and `release-version-check`. All stage
+  into `dist/`, which is now git-ignored.
+- **AppImage is a new bundle format for this repo** -- the GUI previously
+  shipped `.deb`/`.rpm` on Linux. `APPIMAGE_EXTRACT_AND_RUN=1` is set for
+  the build because `linuxdeploy` ships as an AppImage itself and GitHub
+  runners provide no FUSE.
+- **"Standalone" is a feature selection, not a separate crate:**
+  `--no-default-features --features embedded_vault,ssh_pqc`, which drops
+  `storage_hiqlite` (embedded Raft/SQLite cluster) and `cloud_targets`
+  (S3 / OneDrive / GDrive / Dropbox vault profiles). The file backend needs
+  no feature of its own -- it is unconditional in `bv-storage` and is what
+  `embedded::storage_kind()` selects when `BASTION_EMBEDDED_STORAGE` is
+  unset. Override with `STANDALONE_FEATURES=...`.
+  (`features/packaging-client-binaries.md`,
+  `roadmaps/packaging-and-distribution.md` Wave 3)
+
+#### RDP session performance
+
+Frames, not pixels, were the problem. See
+[roadmaps/rdp-performance.md](roadmaps/rdp-performance.md).
+
+- **Binary frame transport for RDP sessions.** Canvas updates now travel
+  over a `tauri::ipc::Channel` as raw bytes, replacing a per-PDU
+  `app.emit` of base64-inside-JSON. Tauri turns an event payload into a
+  JavaScript `eval` string, so a full 1024x600 repaint used to reach the
+  webview as a ~3.2 MB string literal that the frontend then decoded one
+  character at a time; it now arrives as an `ArrayBuffer` the canvas reads
+  through without a copy. The session window installs the channel itself
+  via the new `session_attach_rdp_frames` command once its canvas mounts,
+  and the first frame after attach is always a full desktop.
+  ([gui/src/lib/rdpFrames.ts](gui/src/lib/rdpFrames.ts) carries the wire
+  format and its tests.)
+- **Time-based dirty-rect coalescing.** The pump accumulates damage and
+  flushes at most once per 16 ms instead of emitting one IPC message per
+  server PDU. Rects are clamped and deduplicated by containment, and
+  collapse to a bounding union past eight of them. A blinking caret no
+  longer costs one round trip per blink.
+- **Per-session RDP throughput telemetry.** One log line every 10 s and at
+  session close, reporting wire bytes in, pixels painted, frames and rects
+  sent, coalescing savings and frames per second. The `codec` ratio (wire
+  bytes / painted bytes) is what tells an operator whether the server
+  actually chose a bitmap codec: ~1.0 means raw bitmaps, ~0.05-0.20 means
+  RemoteFX is working. `RUST_LOG=ironrdp_connector=debug` additionally logs
+  the server's `BitmapCodecs` capability set.
+- **Graphics Pipeline (MS-RDPEGFX) client with H.264 AVC420 decode**,
+  behind the off-by-default `rdp_egfx` cargo feature and the per-profile
+  `rdp_egfx` key. OpenH264 is loaded at run time from
+  `BASTION_RDP_OPENH264` and never compiled in, so no H.264 decoder enters
+  the default build's trusted computing base. **Currently inert**: a server
+  only opens the graphics channel when the client advertises
+  `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL`, which the pinned ironrdp
+  connector does not do. The connector change is written but unpushed; the
+  four remaining steps are in the roadmap, and a build asked for EGFX today
+  logs a warning saying so.
+
+### Known limitations
+
+- The Add Local Vault modal still offers **"hiqlite"** as a storage engine
+  in a standalone build, where that backend is not compiled in. Choosing it
+  fails at vault-open time with a backend-not-found error rather than being
+  greyed out.
+- The macOS asset is **Apple Silicon only**, matching `macos-release.yml`.
+  No Intel or universal2 slice.
+- Installers are **unsigned** until the Apple / Authenticode secrets are
+  set. The macOS job promotes the same optional secrets `macos-release.yml`
+  uses and logs the Gatekeeper verdict either way.
+
+### Changed
+
+#### RDP session performance
+
+- **Advertise bulk compression on RDP sessions** (MPPC with a 64 KB
+  history buffer, the RDP 5.0 baseline). Previously hardcoded off. This is
+  negotiated, not imposed -- the server echoes what it will use -- and the
+  connection-profile key `rdp_bulk_compression` selects `off`, `mppc8k`,
+  `mppc64k`, `rdp6` or `rdp61`. An unrecognised value is rejected rather
+  than silently falling back, so a typo cannot quietly change a session's
+  wire behaviour.
+
+### Fixed
+
+#### RDP session performance
+
+- **Restore the bulk decompressor after a DisplayControl resize.**
+  `run_reactivation` rebuilt the fast-path processor with
+  `bulk_decompressor: None`, discarding it on every server-confirmed
+  resize. Latent while bulk compression was hardcoded off; with it on, the
+  first resize would have corrupted every subsequent frame. It now rebuilds
+  from the negotiated compression type.
+
 ## [0.41.22] - 2026-08-31
 
 ### Fixed

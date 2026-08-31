@@ -1,6 +1,6 @@
 [package]
 name = "bastion-vault-gui"
-version = "0.41.22"
+version = "0.41.23"
 edition = "2021"
 description = "BastionVault Desktop GUI"
 # Shipped as a signed installer (see roadmaps/packaging-and-distribution.md),
@@ -128,6 +128,24 @@ ironrdp = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps",
 ironrdp-async = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
 ironrdp-tls = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps", features = ["rustls"] }
 ironrdp-core = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
+# Named directly only so `session::rdp` can construct a
+# `BulkCompressor` for `fast_path::ProcessorBuilder`, whose
+# `bulk_decompressor` field is public but whose type
+# `ironrdp-session` does not re-export. Needed to rebuild the
+# decompressor after a Deactivation-Reactivation; see
+# `run_reactivation`.
+ironrdp-bulk = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
+# Graphics Pipeline (MS-RDPEGFX) client — H.264 AVC420 decode,
+# surface management, frame ack. Optional and off by default: see
+# the `rdp_egfx` feature below.
+#
+# `openh264-libloading`, never `openh264-bundled`: the bundled
+# variant compiles Cisco's C decoder into our binary, which puts a
+# codec parsing server-controlled bitstreams inside every install.
+# The libloading variant instead verifies a Cisco *release* binary
+# against known hashes at load time, keeps the C out of our build,
+# and is the form Cisco's patent grant actually covers.
+ironrdp-egfx = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps", features = ["openh264-libloading"], optional = true }
 ironrdp-tokio = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
 # Direct dep on sspi so we can pull `ReqwestNetworkClient` for the
 # CredSSP smartcard path. The transitive sspi via ironrdp-connector
@@ -202,6 +220,25 @@ cloud_targets = ["bastion_vault/cloud_targets"]
 # selects ML-DSA-65 pays no runtime cost.
 ssh_pqc = ["bastion_vault/ssh_pqc"]
 mcp_local_dev = ["dep:tauri-plugin-mcp-bridge"]
+# RDP Graphics Pipeline (MS-RDPEGFX) with H.264 AVC420 decode.
+#
+# OFF by default and deliberately so. Two reasons, both about the
+# trusted computing base (AGENTS.md §7):
+#
+#   1. It pulls an H.264 decoder into the RDP path, parsing
+#      bitstreams that come from the remote server. Even loaded at
+#      run time, that is a large new attack surface for a session
+#      broker to carry by default.
+#   2. It is the newest and least-exercised graphics path in the
+#      IronRDP fork; the RemoteFX / bitmap path is what is proven
+#      against our targets.
+#
+# With the feature on, EGFX is still per-session opt-in (the profile
+# key `rdp_egfx`) and still requires the operator to point
+# `BASTION_RDP_OPENH264` at a Cisco OpenH264 release binary. Absent
+# either, the session silently keeps using the RemoteFX path — the
+# fallback is logged, not hidden.
+rdp_egfx = ["dep:ironrdp-egfx"]
 
 [dev-dependencies]
 # `wat` lets the plugin_hooks tests assemble small WAT fixtures

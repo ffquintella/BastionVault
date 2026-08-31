@@ -74,3 +74,9 @@ node_modules/
 # deleted on the way out; this catches the run that was interrupted between
 # the two.
 /.crates-plan.json
+
+# Staging directory for the standalone desktop release artefacts
+# (`make release-local` / `make release-linux-appimage` / -macos-pkg /
+# -windows-msi, and the `standalone-release` workflow's publish job).
+# Installers, not sources — never committed.
+/dist/

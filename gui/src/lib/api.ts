@@ -2711,7 +2711,6 @@ export type SessionOpenRdpRequest = {
 
 export type SessionOpenRdpResponse = {
   token: string;
-  frame_event: string;
   closed_event: string;
   window_label: string;
   width: number;
