@@ -1196,12 +1196,58 @@ The replay window, the WASM module slot, and the signed-URL plumbing are all in 
   - `ControlPlaneState.recording_url_signing_secret: Option<Arc<[u8; 32]>>` — `None` returns `503 signed_url_disabled` on both routes. Production wires a per-Rustion 32-byte secret at startup.
   - `hmac` workspace dep added to rustion-control-plane.
 
-### Phase 8.4 — RDP bitmap-update visual codec — **Done** (BV 0.7.36)
+### Phase 8.4 — RDP bitmap-update visual codec — **Blocked on the recorder** (BV 0.7.36; decoder corrected in [Unreleased])
 
-In-tree bitmap decoder for `.rdp-rec` recordings; the replay window now shows live canvas playback instead of a text summary.
+In-tree bitmap decoder for `.rdp-rec` recordings; the replay window routes to a canvas player instead of a text summary.
+
+> **Current state: RDP replay renders nothing, and the remaining cause is on
+> the Rustion side.** Verified against a production recording
+> (`rec_1a1c7d52`, evdc400.fgv.br:3389, 1920×1080, 868,905 bytes, 424
+> graphics events, 0 rendered). Two separate defects, one per side:
+>
+> **BastionVault (fixed, see CHANGELOG [Unreleased]).** The decoder parsed
+> `TS_BITMAP_DATA` at payload offset 0, but Rustion writes its own 8-byte
+> `x/y/w/h` rectangle header first (`docs/session-recording-format.md`).
+> It therefore read the recorder header as
+> `destLeft/destTop/destRight/destBottom` and then re-read the *same four
+> bytes* as `width`/`height`. It now consumes the recorder header and parses
+> the bitmap from offset 8, validates geometry against the header's
+> `screen_width`/`screen_height` before allocating, and surfaces an explicit
+> "no video" state instead of a silently black canvas.
+>
+> **Rustion (open).** `crates/rustion-rdp/src/channel.rs` does not capture
+> usable bitmaps:
+>
+> - `scan_for_bitmap_update` (slow-path) locates a "bitmap update" by
+>   scanning for the byte pair `0x01 0x00` from index 10 of *any* TPKT
+>   payload and treating `i + 4` as a rectangle, with no validation of the
+>   result. It fires on non-bitmap PDUs — event #1 of this recording is the
+>   MCS Connect Response (GCC ConnectData, `McDn`, SC_CORE/SC_NET/
+>   SC_SECURITY). All 424 events match `parse_bitmap_update`'s arithmetic
+>   exactly, and **410 of them describe rectangles outside the declared
+>   1920×1080 desktop**. Not one payload contains a valid `TS_BITMAP_DATA`
+>   at any offset in its first 256 bytes.
+> - `parse_bitmap_update` sets `width = dest_right - dest_left`;
+>   MS-RDPBCGR § 2.2.9.1.1.3.1.2.2 defines it as `dest_right - dest_left + 1`.
+> - `parse_bitmap_update` also stores `data.to_vec()` — the slice *including*
+>   the rectangle header it just parsed — so the recorder header's `w`/`h`
+>   and the bitmap's own are duplicated, and the two entry points disagree
+>   about where the copied slice starts: the slow-path scanner passes a
+>   slice beginning at `destLeft`, while `extract_fastpath_output_events`
+>   passes one beginning at `numberRectangles`, two bytes earlier.
+> - The session recorded here negotiated a codec that does not use slow-path
+>   bitmap updates at all (SC_CORE `earlyCapabilityFlags = 0x0c`; the ~2 KB
+>   high-entropy payloads are consistent with EGFX/RemoteFX). RDP-level
+>   encryption is off (SC_SECURITY method/level both 0), so the bytes are
+>   compressed, not encrypted — a real capture path exists, it is just not
+>   the one being tapped.
+>
+> Until the recorder emits validated rectangles, replay of RDP sessions
+> shows the "no video" banner with `invalid-geometry` as the dominant
+> reason. Asciicast (SSH) replay is unaffected.
 
 - **`gui/wasm/rdp-replay/`** decoder grew the full TS_BITMAP_DATA path. `decode_rdp_rec(bytes) → DecodeOutput` exposes per-rectangle `Frame { timestamp_ms, x, y, w, h, bpp, compressed, decoder, rgba, error }` records ready for canvas blitting, plus a `decoder_counts` BTreeMap keyed by `"uncompressed" | "rle16" | "rle24" | "unsupported" | "error"`. Implements:
-  - **MS-RDPBCGR § 2.2.9.1.1.3.1.2.2 `TS_BITMAP_DATA`** parsing — single-rectangle per event because `rustion-recording`'s `parse_bitmap_update` strips the outer `numberRectangles` header and emits one rectangle per `EVENT_GRAPHICS` event.
+  - **Recorder rect header** (`x:u16 | y:u16 | w:u16 | h:u16`, 8 bytes) followed by **MS-RDPBCGR § 2.2.9.1.1.3.1.2.2 `TS_BITMAP_DATA`** — one rectangle per `EVENT_GRAPHICS` event. The rect is validated against the recording header's `screen_width`/`screen_height` before any `w * h * 4` allocation; failures are counted as `invalid-geometry`, distinct from codec failures.
   - **Uncompressed 16/24/32 bpp** with RDP's bottom-up→top-down flip handled by the decoder so the GUI doesn't need to.
   - **RLE16 / RLE24** per MS-RDPEGDI § 3.1.9 — BgRun, FgRun, ColorRun, FOM, SetFgFom, Setfg, Pixels, White/Black runs, plus MegaMega forms.
   - Per-frame error reporting: unsupported codecs surface as `Frame.error` with `decoder: "none"` rather than failing the whole stream — the canvas keeps blitting later frames.

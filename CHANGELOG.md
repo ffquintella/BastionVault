@@ -45,6 +45,58 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+#### RDP session replay (`.rdp-rec`)
+
+- **Read the graphics payload at the right offset.** The decoder
+  ([`gui/src/lib/rdpDecoder.ts`](gui/src/lib/rdpDecoder.ts) and its Rust
+  twin [`gui/wasm/rdp-replay/src/lib.rs`](gui/wasm/rdp-replay/src/lib.rs))
+  parsed each graphics event as an MS-RDPBCGR `TS_BITMAP_DATA` starting at
+  offset 0. Rustion actually writes its own 8-byte rectangle header first
+  -- `x:u16 | y:u16 | w:u16 | h:u16`, per Rustion
+  `docs/session-recording-format.md` -- and only then the bytes it copied
+  off the wire. Reading at offset 0 mistook that header for
+  `destLeft/destTop/destRight/destBottom` and then re-read the *same four
+  bytes* as `width`/`height`, so every field from `bitsPerPixel` on was
+  garbage and no frame ever decoded. Replay showed a black canvas.
+  Both decoders now consume the recorder header, then parse
+  `TS_BITMAP_DATA` from offset 8.
+
+- **Reject rectangles that cannot fit the recorded desktop, before
+  allocating.** Frame dimensions were fed straight into a `w * h * 4`
+  RGBA allocation. A production recording produced rects up to
+  63426x63193 (~16 GB) and took the replay window down with an
+  allocation failure. Geometry is now validated against the recording
+  header's `screen_width`/`screen_height` (falling back to an
+  8192x8192-pixel cap when the header carries no size), and rejected
+  frames are counted separately as `invalid-geometry` so an operator can
+  tell "the recorder wrote nonsense" apart from "we cannot decode this
+  codec". Recording bytes come from the bastion, so these fields are
+  attacker-influenced input.
+
+- **Say so when nothing decodes.** A recording in which no frame renders
+  previously left the canvas silently black -- indistinguishable from a
+  session that happened to start on a dark screen, on an audit surface.
+  [`RdpReplayCanvas`](gui/src/components/RdpReplayCanvas.tsx) now shows an
+  explicit "no video" banner naming the dominant failure reason, the
+  per-reason counts, and the first decoder error. Canvas auto-sizing also
+  ignores rejected frames, so a bad recording can no longer size the
+  backing store.
+
+- **Test against the recorder's real payload shape.** The existing unit
+  tests built fixtures with the same (wrong) layout the decoder read, so
+  they round-tripped cleanly while every real recording failed. Fixtures
+  now include the recorder rect header, and both suites gained a
+  regression built from a graphics event captured verbatim from a
+  production recording -- an event whose payload is in fact the RDP
+  connection sequence (GCC ConnectData, `McDn`, SC_CORE/SC_NET/SC_SECURITY),
+  not a bitmap at all.
+
+  Note: this fixes the BastionVault side only. Recordings produced by
+  Rustion <= the version in use still contain no decodable bitmaps --
+  see `features/rustion-integration.md` for the recorder-side defect.
+
 ## [0.42.1] - 2026-09-01
 
 ### Security

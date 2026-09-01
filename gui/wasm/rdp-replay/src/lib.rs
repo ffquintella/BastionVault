@@ -10,9 +10,11 @@
 //!
 //! - Frame-stream walker (`parse_rdp_rec` from Phase 8.3 — kept).
 //! - `decode_rdp_rec(bytes)` — full frame-by-frame decoder.
-//! - `TS_BITMAP_DATA` parser (single-rectangle per event; the
-//!   recorder's `parse_bitmap_update` strips the outer
-//!   `numberRectangles` header and emits one rectangle per event).
+//! - Recorder rect header (`x/y/w/h`, 8 bytes) + `TS_BITMAP_DATA`
+//!   parser for the bytes that follow it — see `decode_graphics` for
+//!   the layout and why the two must not be conflated.
+//! - Geometry validation against the recording header's
+//!   `screen_width`/`screen_height` *before* any pixel allocation.
 //! - **Uncompressed** 16/24/32 bpp paths. RDP is bottom-up by
 //!   convention; we flip on emit so the GUI doesn't need to.
 //! - **RLE-compressed** 16 bpp / 24 bpp paths per MS-RDPEGDI
@@ -49,6 +51,16 @@ const BITMAP_COMPRESSION: u16 = 0x0001;
 /// is NOT present and `bitmapLength` already names the compressed body
 /// length directly. Defined in MS-RDPBCGR § 2.2.9.1.1.3.1.2.2.
 const NO_BITMAP_COMPRESSION_HDR: u16 = 0x0400;
+
+/// Size of the recorder's own `x/y/w/h` rectangle header that precedes
+/// the pixel data in every graphics event payload. See
+/// `decode_graphics` for why this is not part of MS-RDPBCGR.
+const REC_RECT_HEADER_LEN: usize = 8;
+
+/// Ceiling on a single rectangle's pixel count when the recording
+/// header carries no usable screen size. 8192×8192 is far above any
+/// real RDP desktop and caps the RGBA allocation at 256 MiB.
+const MAX_RECT_PIXELS: u64 = 8192 * 8192;
 
 // ─── Public types ───────────────────────────────────────────────────
 
@@ -169,6 +181,7 @@ pub fn decode(bytes: &[u8]) -> DecodeOutput {
             };
         }
     };
+    let (screen_w, screen_h) = parse_screen_size(&header);
     let mut frames = Vec::new();
     let mut keyboard = 0u64;
     let mut mouse = 0u64;
@@ -178,10 +191,12 @@ pub fn decode(bytes: &[u8]) -> DecodeOutput {
         last_ts = ts;
         match kind {
             EVENT_GRAPHICS => {
-                let frame = decode_graphics(ts, payload);
-                let key = if frame.error.is_some() {
-                    if frame.error.as_ref().unwrap().starts_with("unsupported") {
+                let frame = decode_graphics(ts, payload, screen_w, screen_h);
+                let key = if let Some(err) = frame.error.as_ref() {
+                    if err.starts_with("unsupported") {
                         "unsupported".to_string()
+                    } else if err.starts_with("invalid geometry") {
+                        "invalid-geometry".to_string()
                     } else {
                         "error".to_string()
                     }
@@ -207,6 +222,60 @@ pub fn decode(bytes: &[u8]) -> DecodeOutput {
         duration_ms: last_ts,
         decoder_counts: counts,
     }
+}
+
+/// Pull `screen_width` / `screen_height` out of the recording's JSON
+/// header without taking a JSON dependency — this crate ships as wasm
+/// in the GUI bundle and two integers do not justify pulling
+/// `serde_json` into it. Returns `(0, 0)` when either field is absent
+/// or unparsable; callers then fall back to `MAX_RECT_PIXELS`.
+fn parse_screen_size(header: &str) -> (u32, u32) {
+    fn field(header: &str, name: &str) -> u32 {
+        let key = format!("\"{name}\"");
+        let Some(at) = header.find(&key) else {
+            return 0;
+        };
+        let rest = &header[at + key.len()..];
+        let Some(colon) = rest.find(':') else {
+            return 0;
+        };
+        rest[colon + 1..]
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0)
+    }
+    (field(header, "screen_width"), field(header, "screen_height"))
+}
+
+/// Validate a recorder rectangle against the recorded desktop size.
+/// Returns `None` when the rect is usable, or an `"invalid geometry: …"`
+/// message otherwise.
+///
+/// Runs *before* any `w * h * 4` allocation: a rectangle whose
+/// dimensions decode to garbage (63426 × 63193 has been observed in
+/// the field) would otherwise ask the allocator for ~16 GB. Recording
+/// bytes come from the bastion, so these fields are attacker-influenced.
+fn check_geometry(x: u16, y: u16, w: u16, h: u16, screen_w: u32, screen_h: u32) -> Option<String> {
+    if w == 0 || h == 0 {
+        return Some(format!("invalid geometry: zero-size rect {w}×{h}"));
+    }
+    if screen_w > 0 && screen_h > 0 {
+        if u32::from(x) + u32::from(w) > screen_w || u32::from(y) + u32::from(h) > screen_h {
+            return Some(format!(
+                "invalid geometry: rect {w}×{h} at ({x},{y}) falls outside the recorded {screen_w}×{screen_h} desktop"
+            ));
+        }
+        return None;
+    }
+    if u64::from(w) * u64::from(h) > MAX_RECT_PIXELS {
+        return Some(format!(
+            "invalid geometry: rect {w}×{h} exceeds the {MAX_RECT_PIXELS}-pixel cap"
+        ));
+    }
+    None
 }
 
 fn header_and_start(bytes: &[u8]) -> Result<(String, usize), String> {
@@ -260,9 +329,17 @@ fn summary_err(msg: &str) -> Summary {
 
 // ─── TS_BITMAP_DATA parser + decode dispatcher ──────────────────────
 
-fn decode_graphics(timestamp_ms: u64, payload: &[u8]) -> Frame {
-    // The recorder emits one rectangle per GraphicsUpdate event,
-    // starting from destLeft. Layout per MS-RDPBCGR § 2.2.9.1.1.3.1.2.2:
+fn decode_graphics(timestamp_ms: u64, payload: &[u8], screen_w: u32, screen_h: u32) -> Frame {
+    // Graphics event payload layout, per Rustion's
+    // `docs/session-recording-format.md` and
+    // `rustion-recording::rdp_recorder::record_event`:
+    //
+    //     x:u16 LE | y:u16 LE | w:u16 LE | h:u16 LE | pixel data
+    //
+    // The leading 8 bytes are the *recorder's* rectangle header, not
+    // part of MS-RDPBCGR. Everything from offset 8 is the slice the
+    // recorder's `parse_bitmap_update` copied out of the wire PDU,
+    // which it takes to begin at a TS_BITMAP_DATA rectangle:
     //   destLeft        u16
     //   destTop         u16
     //   destRight       u16
@@ -275,20 +352,38 @@ fn decode_graphics(timestamp_ms: u64, payload: &[u8]) -> Frame {
     //   [compressed header 8 bytes if flags & BITMAP_COMPRESSION and
     //    not NO_BITMAP_COMPRESSION_HDR]
     //   bitmapDataStream bytes (bitmapLength bytes)
-    if payload.len() < 18 {
-        return frame_err(timestamp_ms, 0, 0, 0, 0, "TS_BITMAP_DATA header truncated");
+    //
+    // Reading TS_BITMAP_DATA at offset 0 instead silently misreads the
+    // recorder header as destLeft/destTop/destRight/destBottom and then
+    // re-reads the *same* four bytes as width/height, because
+    // `parse_bitmap_update` copies the rectangle it just parsed.
+    // Every field from `bitsPerPixel` on is then garbage.
+    if payload.len() < REC_RECT_HEADER_LEN {
+        return frame_err(timestamp_ms, 0, 0, 0, 0, "recorder rect header truncated");
     }
-    let _dest_left = u16::from_le_bytes([payload[0], payload[1]]);
-    let _dest_top = u16::from_le_bytes([payload[2], payload[3]]);
-    let _dest_right = u16::from_le_bytes([payload[4], payload[5]]);
-    let _dest_bottom = u16::from_le_bytes([payload[6], payload[7]]);
-    let width = u16::from_le_bytes([payload[8], payload[9]]);
-    let height = u16::from_le_bytes([payload[10], payload[11]]);
+    let x = u16::from_le_bytes([payload[0], payload[1]]);
+    let y = u16::from_le_bytes([payload[2], payload[3]]);
+    let width = u16::from_le_bytes([payload[4], payload[5]]);
+    let height = u16::from_le_bytes([payload[6], payload[7]]);
+
+    if let Some(msg) = check_geometry(x, y, width, height, screen_w, screen_h) {
+        return frame_err(timestamp_ms, x, y, width, height, &msg);
+    }
+
+    let payload = &payload[REC_RECT_HEADER_LEN..];
+    if payload.len() < 18 {
+        return frame_err(
+            timestamp_ms,
+            x,
+            y,
+            width,
+            height,
+            "TS_BITMAP_DATA header truncated",
+        );
+    }
     let bpp = u16::from_le_bytes([payload[12], payload[13]]);
     let flags = u16::from_le_bytes([payload[14], payload[15]]);
     let bitmap_len = u16::from_le_bytes([payload[16], payload[17]]) as usize;
-    let x = _dest_left;
-    let y = _dest_top;
 
     let mut cursor = 18;
     let compressed = (flags & BITMAP_COMPRESSION) != 0;
@@ -314,10 +409,6 @@ fn decode_graphics(timestamp_ms: u64, payload: &[u8]) -> Frame {
         );
     }
     let body = &payload[cursor..cursor + bitmap_len];
-
-    if width == 0 || height == 0 {
-        return frame_err(timestamp_ms, x, y, width, height, "zero-size bitmap");
-    }
 
     if !compressed {
         return match decode_uncompressed(bpp, width, height, body) {
@@ -844,10 +935,36 @@ fn decode_rle24(width: u16, height: u16, body: &[u8]) -> Result<Vec<u8>, String>
 mod tests {
     use super::*;
 
+    const SCREEN_W: u16 = 1920;
+    const SCREEN_H: u16 = 1080;
+
+    /// The 8-byte rectangle header Rustion's `RdpRecorder` writes ahead
+    /// of the pixel data on every graphics event
+    /// (`x:u16 | y:u16 | w:u16 | h:u16`, per Rustion
+    /// `docs/session-recording-format.md`). Fixtures must include it or
+    /// they test a payload shape the recorder never produces.
+    fn rec_rect_header(x: u16, y: u16, w: u16, h: u16) -> Vec<u8> {
+        let mut v = Vec::with_capacity(REC_RECT_HEADER_LEN);
+        v.extend_from_slice(&x.to_le_bytes());
+        v.extend_from_slice(&y.to_le_bytes());
+        v.extend_from_slice(&w.to_le_bytes());
+        v.extend_from_slice(&h.to_le_bytes());
+        v
+    }
+
     fn build_record(events: &[(u64, u8, Vec<u8>)]) -> Vec<u8> {
+        build_record_with_header(
+            events,
+            &format!(
+                "{{\"version\":1,\"screen_width\":{SCREEN_W},\"screen_height\":{SCREEN_H}}}\n"
+            ),
+        )
+    }
+
+    fn build_record_with_header(events: &[(u64, u8, Vec<u8>)], header: &str) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(MAGIC);
-        out.extend_from_slice(b"{\"version\":1}\n");
+        out.extend_from_slice(header.as_bytes());
         for (ts, kind, payload) in events {
             out.extend_from_slice(&ts.to_le_bytes());
             out.push(*kind);
@@ -864,9 +981,9 @@ mod tests {
         h: u16,
         pixels: &[(u8, u8, u8)],
     ) -> Vec<u8> {
-        // The recorder strips the outer numberRectangles; we emit one
-        // TS_BITMAP_DATA starting at destLeft.
-        let mut p = Vec::new();
+        // Recorder rect header, then the TS_BITMAP_DATA the recorder
+        // copies out of the wire PDU starting at destLeft.
+        let mut p = rec_rect_header(x, y, w, h);
         let right = x + w;
         let bottom = y + h;
         p.extend_from_slice(&x.to_le_bytes());
@@ -922,7 +1039,7 @@ mod tests {
 
     #[test]
     fn truncated_bitmap_body_reports_error_not_panic() {
-        let mut p = Vec::new();
+        let mut p = rec_rect_header(0, 0, 10, 10);
         p.extend_from_slice(&0u16.to_le_bytes()); // destLeft
         p.extend_from_slice(&0u16.to_le_bytes()); // destTop
         p.extend_from_slice(&10u16.to_le_bytes()); // destRight
@@ -960,7 +1077,7 @@ mod tests {
     #[test]
     fn unsupported_compressed_bpp_reports_unsupported() {
         // 8 bpp compressed → unsupported in Phase 8.4
-        let mut p = Vec::new();
+        let mut p = rec_rect_header(0, 0, 1, 1);
         p.extend_from_slice(&0u16.to_le_bytes()); // dest
         p.extend_from_slice(&0u16.to_le_bytes());
         p.extend_from_slice(&1u16.to_le_bytes());
@@ -984,7 +1101,7 @@ mod tests {
     fn rle24_bg_run_paints_black() {
         // Build a 4x1 RLE24 stream: one regular BG run of length 4.
         // Opcode byte: 0b000_00100 = 0x04 = "BgRun(4)"
-        let mut p = Vec::new();
+        let mut p = rec_rect_header(0, 0, 4, 1);
         p.extend_from_slice(&0u16.to_le_bytes()); // dest
         p.extend_from_slice(&0u16.to_le_bytes());
         p.extend_from_slice(&4u16.to_le_bytes());
@@ -1013,7 +1130,7 @@ mod tests {
     #[test]
     fn decoder_counts_split_by_path() {
         let g_ok = build_graphics_uncompressed_24(0, 0, 1, 1, &[(1, 2, 3)]);
-        let mut g_bad = Vec::new();
+        let mut g_bad = rec_rect_header(0, 0, 1, 1);
         g_bad.extend_from_slice(&0u16.to_le_bytes());
         g_bad.extend_from_slice(&0u16.to_le_bytes());
         g_bad.extend_from_slice(&1u16.to_le_bytes());
@@ -1033,5 +1150,98 @@ mod tests {
         let out = decode(&rec);
         assert_eq!(*out.decoder_counts.get("uncompressed").unwrap_or(&0), 1);
         assert_eq!(*out.decoder_counts.get("unsupported").unwrap_or(&0), 1);
+    }
+
+    // ── Regressions from rec_1a1c7d52 (a real 1920×1080 recording in
+    // which all 424 graphics events were false positives from the
+    // bastion's bitmap-update scanner) ──────────────────────────────
+
+    #[test]
+    fn rejects_rect_outside_recorded_desktop() {
+        // 63426×63193 at (63426, 63193) — the exact shape observed in
+        // the field. Must be refused on geometry, before any
+        // allocation: w*h*4 here is ~16 GB.
+        let mut p = rec_rect_header(63426, 63193, 63426, 63193);
+        p.extend_from_slice(&[0xab; 64]);
+        let rec = build_record(&[(0, EVENT_GRAPHICS, p)]);
+        let out = decode(&rec);
+        assert!(out.ok);
+        let err = out.frames[0].error.as_ref().unwrap();
+        assert!(err.starts_with("invalid geometry"), "got: {err}");
+        assert!(out.frames[0].rgba.is_empty());
+        assert_eq!(*out.decoder_counts.get("invalid-geometry").unwrap_or(&0), 1);
+        // Not lumped in with genuine decoder failures — an operator
+        // needs to tell "the recorder wrote nonsense" apart from
+        // "we can't decode this codec".
+        assert_eq!(*out.decoder_counts.get("error").unwrap_or(&0), 0);
+    }
+
+    #[test]
+    fn caps_rect_size_without_screen_size_in_header() {
+        let mut p = rec_rect_header(0, 0, u16::MAX, u16::MAX);
+        p.extend_from_slice(&[0u8; 64]);
+        let rec = build_record_with_header(
+            &[(0, EVENT_GRAPHICS, p)],
+            "{\"version\":1}\n",
+        );
+        let out = decode(&rec);
+        let err = out.frames[0].error.as_ref().unwrap();
+        assert!(err.contains("cap"), "got: {err}");
+        assert!(out.frames[0].rgba.is_empty());
+    }
+
+    #[test]
+    fn classifies_real_graphics_event_from_rec_1a1c7d52() {
+        // Captured verbatim from a production recording
+        // (evdc400.fgv.br:3389, 1920×1080). The bastion tagged this as
+        // a graphics update, but the bytes from offset 8 are the RDP
+        // *connection sequence* — GCC ConnectData `00 05 00 14 7c 00 01`,
+        // the "McDn" h221 key, then SC_CORE / SC_NET / SC_SECURITY.
+        // There is no bitmap here.
+        //
+        // Read as a recorder rect header it claims 63230×255 at
+        // (513,3), which cannot fit a 1920×1080 desktop.
+        let ev1: Vec<u8> = vec![
+            0x01, 0x02, 0x03, 0x00, 0xfe, 0xf6, 0xff, 0x00, 0x01, 0x02, 0x03, 0x00,
+            0xff, 0xf8, 0x02, 0x01, 0x02, 0x04, 0x3e, 0x00, 0x05, 0x00, 0x14, 0x7c,
+            0x00, 0x01, 0x2a, 0x14, 0x76, 0x0a, 0x01, 0x01, 0x00, 0x01, 0xc0, 0x00,
+            0x4d, 0x63, 0x44, 0x6e, 0x28, 0x01, 0x0c, 0x10, 0x00, 0x11, 0x00, 0x08,
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x03, 0x0c, 0x0c,
+            0x00, 0xeb, 0x03, 0x01, 0x00, 0xec, 0x03, 0x00, 0x00, 0x02, 0x0c, 0x0c,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let out = decode(&build_record(&[(7, EVENT_GRAPHICS, ev1)]));
+        let f = &out.frames[0];
+        assert_eq!((f.x, f.y, f.width, f.height), (513, 3, 63230, 255));
+        let err = f.error.as_ref().unwrap();
+        assert!(err.starts_with("invalid geometry"), "got: {err}");
+        assert!(f.rgba.is_empty());
+        assert_eq!(*out.decoder_counts.get("invalid-geometry").unwrap_or(&0), 1);
+    }
+
+    #[test]
+    fn bitmap_data_is_read_after_the_recorder_rect_header() {
+        // Guards the actual bug: parsing at offset 0 makes the
+        // recorder's x/y/w/h masquerade as
+        // destLeft/destTop/destRight/destBottom and pushes every later
+        // field 8 bytes out of place, so bpp comes from the wrong bytes.
+        let g = build_graphics_uncompressed_24(
+            10, 20, 2, 2,
+            &[(0xff, 0, 0), (0, 0xff, 0), (0, 0, 0xff), (0xff, 0xff, 0xff)],
+        );
+        assert_eq!(&g[..REC_RECT_HEADER_LEN], &rec_rect_header(10, 20, 2, 2)[..]);
+        let out = decode(&build_record(&[(0, EVENT_GRAPHICS, g)]));
+        assert!(out.frames[0].error.is_none(), "{:?}", out.frames[0].error);
+        assert_eq!(out.frames[0].bits_per_pixel, 24);
+    }
+
+    #[test]
+    fn parse_screen_size_reads_header_fields() {
+        assert_eq!(
+            parse_screen_size("{\"version\":1,\"screen_width\":1920,\"screen_height\":1080}"),
+            (1920, 1080)
+        );
+        assert_eq!(parse_screen_size("{\"version\":1}"), (0, 0));
+        assert_eq!(parse_screen_size("not json"), (0, 0));
     }
 }

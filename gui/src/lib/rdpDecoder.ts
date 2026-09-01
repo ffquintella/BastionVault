@@ -6,9 +6,26 @@
 // browser without a wasm-bindgen build step. If you change one, change
 // the other; the Rust tests are the spec.
 //
+// Graphics event payload layout, per Rustion's
+// `docs/session-recording-format.md` and `rustion-recording::
+// rdp_recorder::record_event`:
+//
+//     x:u16 LE | y:u16 LE | w:u16 LE | h:u16 LE | pixel data
+//
+// The leading 8 bytes are the *recorder's* own rectangle header — not
+// part of MS-RDPBCGR. Everything from offset 8 is the bytes the
+// recorder's `parse_bitmap_update` copied out of the wire PDU, which
+// it takes to start at a TS_BITMAP_DATA rectangle.
+//
+// Reading TS_BITMAP_DATA at offset 0 (as this decoder did before)
+// silently misreads the recorder header as destLeft/destTop/destRight/
+// destBottom and then re-reads the *same* four bytes as width/height,
+// because `parse_bitmap_update` copies the rectangle it just parsed.
+// Every field from `bitsPerPixel` on is then garbage.
+//
 // Implements per MS-RDPBCGR § 2.2.9.1.1.3.1.2.2 + MS-RDPEGDI § 3.1.9:
-//   • TS_BITMAP_DATA parser (single-rect per event — recorder strips
-//     the outer numberRectangles)
+//   • TS_BITMAP_DATA parser (single-rect per event — recorder emits
+//     one rectangle per graphics event)
 //   • Uncompressed 16/24/32 bpp → RGBA, top-down
 //   • RLE16 / RLE24 compressed paths (Bg/Fg/Color/FOM/SetFgFom/Setfg/
 //     Pixels/White/Black + mega-mega forms)
@@ -26,6 +43,21 @@ const EVENT_MOUSE = 0x03;
 
 const BITMAP_COMPRESSION = 0x0001;
 const NO_BITMAP_COMPRESSION_HDR = 0x0400;
+
+/// Size of the recorder's own `x/y/w/h` rectangle header that precedes
+/// the pixel data in every graphics event payload.
+const REC_RECT_HEADER_LEN = 8;
+
+/// Ceiling on a single rectangle's pixel count when the recording
+/// header carries no usable screen size. 8192×8192 is far above any
+/// real RDP desktop and caps the RGBA allocation at 256 MiB.
+///
+/// Without a bound, a rectangle whose dimensions decode to garbage
+/// (63426 × 63193 has been observed in the field) makes the decoder
+/// ask for ~16 GB and take down the replay window with an allocation
+/// failure. Recording bytes come from the bastion, so these fields are
+/// attacker-influenced input.
+const MAX_RECT_PIXELS = 8192 * 8192;
 
 export interface DecodedFrame {
   timestampMs: number;
@@ -66,6 +98,7 @@ export function decodeRdpRec(bytes: Uint8Array): DecodeResult {
     };
   }
   const { header, start } = headerOut;
+  const { screenW, screenH } = parseScreenSize(header);
   const frames: DecodedFrame[] = [];
   let keyboard = 0,
     mouse = 0,
@@ -81,12 +114,14 @@ export function decodeRdpRec(bytes: Uint8Array): DecodeResult {
     const payload = bytes.subarray(pos + 13, next);
     lastTs = ts;
     if (kind === EVENT_GRAPHICS) {
-      const f = decodeGraphics(ts, payload);
+      const f = decodeGraphics(ts, payload, screenW, screenH);
       const key =
         f.error !== null
           ? f.error.startsWith("unsupported")
             ? "unsupported"
-            : "error"
+            : f.error.startsWith("invalid geometry")
+              ? "invalid-geometry"
+              : "error"
           : f.decoder;
       counts[key] = (counts[key] ?? 0) + 1;
       frames.push(f);
@@ -132,6 +167,20 @@ function parseHeader(
   return { header, start: nl + 1 };
 }
 
+/// Screen size from the recording's JSON header. Returns 0/0 when the
+/// header is absent or malformed — callers then fall back to
+/// MAX_RECT_PIXELS rather than rejecting every rectangle.
+function parseScreenSize(header: string): { screenW: number; screenH: number } {
+  try {
+    const h = JSON.parse(header) as Record<string, unknown>;
+    const w = typeof h.screen_width === "number" ? h.screen_width : 0;
+    const y = typeof h.screen_height === "number" ? h.screen_height : 0;
+    return { screenW: w, screenH: y };
+  } catch {
+    return { screenW: 0, screenH: 0 };
+  }
+}
+
 function readU64Le(b: Uint8Array, p: number): number {
   // JS numbers are safe to 2^53; rec timestamps are ms since start
   // and easily fit. Use a BigInt path then narrow.
@@ -152,37 +201,52 @@ function readU16Le(b: Uint8Array, p: number): number {
   return b[p] | (b[p + 1] << 8);
 }
 
-function decodeGraphics(timestampMs: number, payload: Uint8Array): DecodedFrame {
-  if (payload.length < 18) {
-    return frameErr(timestampMs, 0, 0, 0, 0, "TS_BITMAP_DATA header truncated");
+function decodeGraphics(
+  timestampMs: number,
+  payload: Uint8Array,
+  screenW: number,
+  screenH: number,
+): DecodedFrame {
+  // ── Recorder rectangle header (8 bytes, Rustion's own framing) ──
+  if (payload.length < REC_RECT_HEADER_LEN) {
+    return frameErr(timestampMs, 0, 0, 0, 0, "recorder rect header truncated");
   }
-  const destLeft = readU16Le(payload, 0);
-  const destTop = readU16Le(payload, 2);
-  // dest right/bottom at offsets 4/6, not needed
-  const width = readU16Le(payload, 8);
-  const height = readU16Le(payload, 10);
-  const bpp = readU16Le(payload, 12);
-  const flags = readU16Le(payload, 14);
-  const bitmapLen = readU16Le(payload, 16);
-  const x = destLeft;
-  const y = destTop;
+  const x = readU16Le(payload, 0);
+  const y = readU16Le(payload, 2);
+  const width = readU16Le(payload, 4);
+  const height = readU16Le(payload, 6);
+
+  // Reject impossible rectangles before allocating anything. A
+  // graphics event whose rect does not fit the recorded desktop did
+  // not come from a real bitmap update; decoding it would at best
+  // paint noise and at worst request gigabytes of RGBA.
+  const geomErr = checkGeometry(x, y, width, height, screenW, screenH);
+  if (geomErr !== null) {
+    return frameErr(timestampMs, x, y, width, height, geomErr);
+  }
+
+  // ── TS_BITMAP_DATA, which the recorder copies verbatim from the
+  // wire PDU starting at destLeft (MS-RDPBCGR § 2.2.9.1.1.3.1.2.2) ──
+  const bmp = payload.subarray(REC_RECT_HEADER_LEN);
+  if (bmp.length < 18) {
+    return frameErr(timestampMs, x, y, width, height, "TS_BITMAP_DATA header truncated");
+  }
+  const bpp = readU16Le(bmp, 12);
+  const flags = readU16Le(bmp, 14);
+  const bitmapLen = readU16Le(bmp, 16);
 
   let cursor = 18;
   const compressed = (flags & BITMAP_COMPRESSION) !== 0;
   if (compressed && (flags & NO_BITMAP_COMPRESSION_HDR) === 0) {
-    if (cursor + 8 > payload.length) {
+    if (cursor + 8 > bmp.length) {
       return frameErr(timestampMs, x, y, width, height, "compressed bitmap header truncated");
     }
     cursor += 8;
   }
-  if (cursor + bitmapLen > payload.length) {
+  if (cursor + bitmapLen > bmp.length) {
     return frameErr(timestampMs, x, y, width, height, "bitmap body truncated");
   }
-  const body = payload.subarray(cursor, cursor + bitmapLen);
-
-  if (width === 0 || height === 0) {
-    return frameErr(timestampMs, x, y, width, height, "zero-size bitmap");
-  }
+  const body = bmp.subarray(cursor, cursor + bitmapLen);
 
   if (!compressed) {
     try {
@@ -226,6 +290,35 @@ function decodeGraphics(timestampMs: number, payload: Uint8Array): DecodedFrame 
     rgba: new Uint8ClampedArray(0),
     error: `unsupported compressed bpp=${bpp} (Phase 8.4: 16/24 only; 8 bpp + NSCodec + RemoteFX deferred)`,
   };
+}
+
+/// Validate a recorder rectangle against the recorded desktop size.
+/// Returns null when the rect is usable, or an `"invalid geometry: …"`
+/// message the caller turns into a distinct `invalid-geometry` count.
+///
+/// Kept separate from the pixel decoders so the check runs *before*
+/// any `w * h * 4` allocation.
+function checkGeometry(
+  x: number, y: number, w: number, h: number,
+  screenW: number, screenH: number,
+): string | null {
+  if (w === 0 || h === 0) {
+    return `invalid geometry: zero-size rect ${w}×${h}`;
+  }
+  if (screenW > 0 && screenH > 0) {
+    if (x + w > screenW || y + h > screenH) {
+      return (
+        `invalid geometry: rect ${w}×${h} at (${x},${y}) falls outside ` +
+        `the recorded ${screenW}×${screenH} desktop`
+      );
+    }
+    return null;
+  }
+  // No usable screen size in the header — fall back to the hard cap.
+  if (w * h > MAX_RECT_PIXELS) {
+    return `invalid geometry: rect ${w}×${h} exceeds the ${MAX_RECT_PIXELS}-pixel cap`;
+  }
+  return null;
 }
 
 function frameErr(ts: number, x: number, y: number, w: number, h: number, msg: string): DecodedFrame {

@@ -21,10 +21,25 @@ function le64(n: number): number[] {
   return [...le32(lo), ...le32(hi)];
 }
 
-function buildRecord(events: Array<{ ts: number; kind: number; payload: number[] }>): Uint8Array {
+const SCREEN_W = 1920;
+const SCREEN_H = 1080;
+
+/// The 8-byte rectangle header Rustion's `RdpRecorder` writes ahead of
+/// the pixel data on every graphics event
+/// (`x:u16 | y:u16 | w:u16 | h:u16`, per Rustion
+/// `docs/session-recording-format.md`). Fixtures must include it or
+/// they test a payload shape the recorder never produces.
+function recRectHeader(x: number, y: number, w: number, h: number): number[] {
+  return [...le16(x), ...le16(y), ...le16(w), ...le16(h)];
+}
+
+function buildRecord(
+  events: Array<{ ts: number; kind: number; payload: number[] }>,
+  header = `{"version":1,"screen_width":${SCREEN_W},"screen_height":${SCREEN_H}}\n`,
+): Uint8Array {
   const out: number[] = [];
   MAGIC.forEach((b) => out.push(b));
-  '{"version":1}\n'.split("").forEach((c) => out.push(c.charCodeAt(0)));
+  header.split("").forEach((c) => out.push(c.charCodeAt(0)));
   for (const e of events) {
     out.push(...le64(e.ts));
     out.push(e.kind);
@@ -39,7 +54,7 @@ function buildGraphicsUncompressed24(
   pixels: Array<[number, number, number]>,
 ): number[] {
   const right = x + w, bottom = y + h;
-  const p: number[] = [];
+  const p: number[] = recRectHeader(x, y, w, h);
   p.push(...le16(x), ...le16(y), ...le16(right), ...le16(bottom));
   p.push(...le16(w), ...le16(h), ...le16(24));
   p.push(...le16(0));
@@ -78,7 +93,7 @@ describe("rdpDecoder", () => {
   });
 
   it("truncated bitmap body reports error not panic", () => {
-    const p: number[] = [];
+    const p: number[] = recRectHeader(0, 0, 10, 10);
     p.push(...le16(0), ...le16(0), ...le16(10), ...le16(10));
     p.push(...le16(10), ...le16(10));
     p.push(...le16(24));
@@ -107,7 +122,7 @@ describe("rdpDecoder", () => {
   });
 
   it("reports unsupported compressed bpp", () => {
-    const p: number[] = [];
+    const p: number[] = recRectHeader(0, 0, 1, 1);
     p.push(...le16(0), ...le16(0), ...le16(1), ...le16(1));
     p.push(...le16(1), ...le16(1));
     p.push(...le16(8)); // bpp=8
@@ -122,7 +137,7 @@ describe("rdpDecoder", () => {
   });
 
   it("RLE24 BG run paints black across the row", () => {
-    const p: number[] = [];
+    const p: number[] = recRectHeader(0, 0, 4, 1);
     p.push(...le16(0), ...le16(0), ...le16(4), ...le16(1));
     p.push(...le16(4), ...le16(1));
     p.push(...le16(24));
@@ -143,7 +158,7 @@ describe("rdpDecoder", () => {
 
   it("decoder_counts split by path", () => {
     const ok = buildGraphicsUncompressed24(0, 0, 1, 1, [[1, 2, 3]]);
-    const bad: number[] = [];
+    const bad: number[] = recRectHeader(0, 0, 1, 1);
     bad.push(...le16(0), ...le16(0), ...le16(1), ...le16(1));
     bad.push(...le16(1), ...le16(1));
     bad.push(...le16(8));
@@ -157,5 +172,88 @@ describe("rdpDecoder", () => {
     const out = decodeRdpRec(rec);
     expect(out.decoderCounts["uncompressed"]).toBe(1);
     expect(out.decoderCounts["unsupported"]).toBe(1);
+  });
+
+  // ── Regressions from rec_1a1c7d52 (a real 1920×1080 recording in
+  // which all 424 graphics events were false positives from the
+  // bastion's bitmap-update scanner) ──────────────────────────────
+
+  it("rejects a rect that does not fit the recorded desktop", () => {
+    // 63426×63193 at (63426, 63193) — the exact shape observed in the
+    // field. Must be refused on geometry, before any allocation.
+    const p: number[] = recRectHeader(63426, 63193, 63426, 63193);
+    p.push(...new Array(64).fill(0xab));
+    const rec = buildRecord([{ ts: 0, kind: EVENT_GRAPHICS, payload: p }]);
+    const out = decodeRdpRec(rec);
+    expect(out.ok).toBe(true);
+    expect(out.frames[0].error).toMatch(/^invalid geometry/);
+    expect(out.frames[0].rgba.length).toBe(0);
+    expect(out.decoderCounts["invalid-geometry"]).toBe(1);
+    // Not lumped in with genuine decoder failures — an operator needs
+    // to tell "the recorder wrote nonsense" apart from "we can't
+    // decode this codec".
+    expect(out.decoderCounts["error"]).toBeUndefined();
+  });
+
+  it("caps rect size when the header carries no screen size", () => {
+    const p: number[] = recRectHeader(0, 0, 0xffff, 0xffff);
+    p.push(...new Array(64).fill(0));
+    const rec = buildRecord(
+      [{ ts: 0, kind: EVENT_GRAPHICS, payload: p }],
+      '{"version":1}\n',
+    );
+    const out = decodeRdpRec(rec);
+    expect(out.frames[0].error).toMatch(/exceeds the .* cap/);
+    expect(out.frames[0].rgba.length).toBe(0);
+  });
+
+  it("classifies the real graphics event #1 from rec_1a1c7d52", () => {
+    // Captured verbatim from a production recording (evdc400.fgv.br:3389,
+    // 1920×1080). The bastion tagged this as a graphics update, but the
+    // bytes from offset 8 are the RDP *connection sequence* — GCC
+    // ConnectData `00 05 00 14 7c 00 01`, the "McDn" h221 key, then
+    // SC_CORE / SC_NET / SC_SECURITY. There is no bitmap here.
+    //
+    // Read as a recorder rect header, it claims 63230×255 at (513,3),
+    // which cannot fit a 1920×1080 desktop. The decoder must say so
+    // rather than allocating for it or reporting a codec failure.
+    const ev1 = [
+      0x01, 0x02, 0x03, 0x00, 0xfe, 0xf6, 0xff, 0x00, 0x01, 0x02, 0x03, 0x00,
+      0xff, 0xf8, 0x02, 0x01, 0x02, 0x04, 0x3e, 0x00, 0x05, 0x00, 0x14, 0x7c,
+      0x00, 0x01, 0x2a, 0x14, 0x76, 0x0a, 0x01, 0x01, 0x00, 0x01, 0xc0, 0x00,
+      0x4d, 0x63, 0x44, 0x6e, 0x28, 0x01, 0x0c, 0x10, 0x00, 0x11, 0x00, 0x08,
+      0x00, 0x01, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x03, 0x0c, 0x0c,
+      0x00, 0xeb, 0x03, 0x01, 0x00, 0xec, 0x03, 0x00, 0x00, 0x02, 0x0c, 0x0c,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    const out = decodeRdpRec(
+      buildRecord([{ ts: 7, kind: EVENT_GRAPHICS, payload: ev1 }]),
+    );
+    const f = out.frames[0];
+    expect(f.x).toBe(513);
+    expect(f.y).toBe(3);
+    expect(f.width).toBe(63230);
+    expect(f.height).toBe(255);
+    expect(f.error).toMatch(/^invalid geometry/);
+    expect(f.rgba.length).toBe(0);
+    expect(out.decoderCounts["invalid-geometry"]).toBe(1);
+  });
+
+  it("reads TS_BITMAP_DATA after the recorder rect header, not at offset 0", () => {
+    // Guards the actual bug: parsing at offset 0 makes the recorder's
+    // x/y/w/h masquerade as destLeft/destTop/destRight/destBottom and
+    // pushes every later field 8 bytes out of place. Here the recorder
+    // header says 2×2 at (10,20) while the bitmap header that follows
+    // carries the bpp/flags/length — a decoder reading offset 0 gets
+    // bpp from the wrong bytes and fails.
+    const g = buildGraphicsUncompressed24(10, 20, 2, 2, [
+      [0xff, 0, 0], [0, 0xff, 0], [0, 0, 0xff], [0xff, 0xff, 0xff],
+    ]);
+    expect(g.slice(0, 8)).toEqual(recRectHeader(10, 20, 2, 2));
+    const out = decodeRdpRec(
+      buildRecord([{ ts: 0, kind: EVENT_GRAPHICS, payload: g }]),
+    );
+    expect(out.frames[0].error).toBeNull();
+    expect(out.frames[0].bitsPerPixel).toBe(24);
   });
 });

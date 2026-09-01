@@ -50,7 +50,12 @@ export function RdpReplayCanvas({ bytes }: Props) {
     let w = typeof header?.width === "number" ? header.width : 0;
     let h = typeof header?.height === "number" ? header.height : 0;
     if (w === 0 || h === 0) {
+      // Only frames that actually decoded get a vote — a rejected
+      // frame's rect is exactly the garbage geometry we refused to
+      // trust, and letting it size the canvas turns a bad recording
+      // into a multi-gigabyte backing store.
       for (const f of decoded.frames) {
+        if (f.error !== null) continue;
         w = Math.max(w, f.x + f.width);
         h = Math.max(h, f.y + f.height);
       }
@@ -215,8 +220,20 @@ export function RdpReplayCanvas({ bytes }: Props) {
     (decoded.decoderCounts["rle24"] ?? 0);
   const skipped =
     (decoded.decoderCounts["unsupported"] ?? 0) +
+    (decoded.decoderCounts["invalid-geometry"] ?? 0) +
     (decoded.decoderCounts["error"] ?? 0);
   const totalGraphics = decoded.frames.length;
+  // Nothing decodable at all. The canvas would otherwise sit black
+  // with no indication that this is a failure rather than a session
+  // that happened to start on a dark screen — a silent downgrade on
+  // an audit surface. Name the dominant reason instead.
+  const nothingRendered = totalGraphics > 0 && drawn === 0;
+  const dominantFailure = nothingRendered
+    ? Object.entries(decoded.decoderCounts).sort((a, b) => b[1] - a[1])[0]
+    : null;
+  const firstError = nothingRendered
+    ? (decoded.frames.find((f) => f.error !== null)?.error ?? null)
+    : null;
 
   return (
     <div className="space-y-3">
@@ -277,6 +294,31 @@ export function RdpReplayCanvas({ bytes }: Props) {
           />
         )}
       </div>
+
+      {nothingRendered && (
+        <div className="p-3 text-sm text-amber-200 bg-amber-950/40 border border-amber-900 rounded space-y-1">
+          <div className="font-semibold">
+            No video: none of the {totalGraphics} graphics events could be
+            decoded.
+          </div>
+          <div className="text-xs text-amber-200/80">
+            The canvas below stays black because nothing was drawn — this is a
+            decode failure, not a dark session.
+            {dominantFailure &&
+              ` Dominant reason: ${dominantFailure[0]} (${dominantFailure[1]} of ${totalGraphics}).`}
+          </div>
+          {firstError && (
+            <div className="text-xs font-mono break-all text-amber-200/70">
+              first: {firstError}
+            </div>
+          )}
+          <div className="text-xs text-amber-200/80">
+            Download the raw <code>.rdp-rec</code> and check the recorder on the
+            bastion — a recording with no decodable rectangles usually means the
+            capture tap emitted events that were never bitmap updates.
+          </div>
+        </div>
+      )}
 
       <div className="bg-black rounded border border-[var(--color-border)] overflow-auto">
         <canvas
