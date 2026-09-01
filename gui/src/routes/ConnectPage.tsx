@@ -395,8 +395,20 @@ export function ConnectPage() {
    * the cached token validated against the newly-opened vault and
    * we've navigated straight to the dashboard; `false` otherwise
    * (no cache for this vault, or the cached token was rejected).
+   *
+   * `requireMachine` short-circuits the attempt. A cached session predating
+   * the requirement holds a plain user token, which the server's token-store
+   * chokepoint refuses — `restoreSession` validates via `lookup-self`, so it
+   * fails closed and the session is never installed. But it fails by
+   * *discarding* the cache entry as if the token were stale, and the operator
+   * gets an unexplained login screen. Skipping the doomed round-trip sends
+   * them straight to user login, which mints a properly machine-bound session.
    */
-  async function tryResumeSession(vaultId: string): Promise<boolean> {
+  async function tryResumeSession(
+    vaultId: string,
+    requireMachine = false,
+  ): Promise<boolean> {
+    if (requireMachine) return false;
     const ok = await restoreSession(vaultId);
     if (!ok) return false;
     // Best-effort entity reload — mirrors the post-login code path in
@@ -444,6 +456,13 @@ export function ConnectPage() {
       return true;
     }
     if (r.authenticated) return false; // machine approved → proceed
+    // Combined machine+user mount (`require_user_token`): the machine half is
+    // already proven — the server only emits this from its approved arm, after
+    // verifying the child token — but the user half can only be supplied at
+    // user login. Proceed there instead of dead-ending the connect flow behind
+    // a gate no standalone machine login can ever satisfy. `finalizeLogin`
+    // performs the real combined bind with the user token in hand.
+    if (r.enrolment === "user-token-required") return false;
     setMachineGate({
       targetId,
       audience,
@@ -456,9 +475,11 @@ export function ConnectPage() {
   }
 
   /** Continue the connect flow once the machine gate is satisfied: restore a
-   *  cached user session if present, else send the operator to user login. */
+   *  cached user session if present, else send the operator to user login.
+   *  Only reached on a machine-identity connection, so a cached (non-bound)
+   *  session can never be resumed here — go straight to login. */
   async function proceedAfterGate(targetId: string) {
-    if (await tryResumeSession(targetId)) return;
+    if (await tryResumeSession(targetId, true)) return;
     navigate("/login");
   }
 
@@ -476,7 +497,9 @@ export function ConnectPage() {
         undefined,
         machineGate.environment,
       );
-      if (r.authenticated) {
+      // Approved, or approved-but-awaiting-the-user-factor: either way the
+      // machine gate is satisfied and the flow moves on to user login.
+      if (r.authenticated || r.enrolment === "user-token-required") {
         const targetId = machineGate.targetId;
         setMachineGate(null);
         await proceedAfterGate(targetId);
@@ -623,7 +646,7 @@ export function ConnectPage() {
           if (required) {
             if (await runMachineGate(effectiveProfile, targetId)) return;
           }
-          if (await tryResumeSession(targetId)) return;
+          if (await tryResumeSession(targetId, required)) return;
           navigate("/login");
           return;
         }

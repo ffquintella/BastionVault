@@ -128,20 +128,40 @@ pub struct FerroGateRequirement {
     /// `mia-<env>.toml` for the local MIA dial); empty when unset.
     #[serde(default)]
     pub mia_environment: String,
+    /// True only when the server actually answered. False when the read failed
+    /// (no `ferrogate` mount, route absent, transport hiccup) and the other
+    /// fields are therefore defaults rather than the server's declaration.
+    ///
+    /// Without this, a caller cannot tell "the server says machine identity is
+    /// off" from "we could not ask", and a transport blip silently downgrades a
+    /// security requirement. Callers that already hold a known-good value must
+    /// keep it when this is false rather than treating the default as an answer.
+    /// Never sent to the server — set locally by this command.
+    #[serde(default, skip_deserializing)]
+    pub advertised: bool,
 }
 
 /// Ask the connected server whether it requires FerroGate machine identity.
 /// Unauthenticated (the endpoint is in the mount's `unauth_paths`). A server
-/// with no `ferrogate` mount — or any read failure — is treated as "not
-/// required", so this never blocks connecting to a non-FerroGate server.
+/// with no `ferrogate` mount — or any read failure — is reported as "not
+/// required" with `advertised: false`, so this never blocks connecting to a
+/// non-FerroGate server while still letting callers see that the answer is a
+/// fallback rather than the server's own declaration.
 #[tauri::command]
 pub async fn ferrogate_requirement(state: State<'_, AppState>) -> CmdResult<FerroGateRequirement> {
     match make_request(&state, Operation::Read, "auth/ferrogate/requirement".into(), None).await {
         Ok(resp) => match resp.and_then(|r| r.data) {
-            Some(data) => Ok(serde_json::from_value(Value::Object(data)).unwrap_or_default()),
+            Some(data) => {
+                let mut req: FerroGateRequirement =
+                    serde_json::from_value(Value::Object(data)).unwrap_or_default();
+                req.advertised = true;
+                Ok(req)
+            }
+            // The route answered but carried no data — nothing was declared.
             None => Ok(FerroGateRequirement::default()),
         },
-        // No ferrogate mount / route absent / transport hiccup ⇒ not required.
+        // No ferrogate mount / route absent / transport hiccup ⇒ not required,
+        // and explicitly not an answer.
         Err(_) => Ok(FerroGateRequirement::default()),
     }
 }
@@ -323,6 +343,13 @@ fn classify_enrolment_error(text: &str) -> Option<&'static str> {
         Some("rejected")
     } else if text.starts_with("machine_revoked") {
         Some("revoked")
+    } else if text.starts_with("user_token_required") {
+        // NOT a failure. The server only reaches this rejection inside its
+        // `status == approved` arm, after the child token has verified — so it
+        // means "this machine is attested and approved; the mount also wants a
+        // user factor, which a standalone machine login cannot supply". The
+        // caller defers the gate to the user-login step, which binds both.
+        Some("user-token-required")
     } else {
         None
     }

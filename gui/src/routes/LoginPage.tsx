@@ -50,32 +50,61 @@ export function LoginPage() {
     // Combined machine+user auth: when this connection requires machine
     // identity, bind the just-obtained user token to a fresh machine assertion.
     // The server intersects policies, revokes the user token, and returns the
-    // combined session token, which becomes the actual session. The machine
-    // was already proven approved by the connect-time gate, so a non-approved
-    // result here is exceptional — surface it and abort (throwing skips the
-    // caller's navigate).
+    // combined session token, which becomes the actual session.
     //
     // Root tokens skip the binding: the server's token-store chokepoint
     // exempts them from the machine requirement (break-glass admin), so the
     // binding adds nothing — and attempting it would dead-end the recovery
     // login when the local MIA is exactly what's broken.
-    if (
-      mode === "Remote" &&
-      remoteProfile?.require_machine_identity &&
-      !policies.includes("root")
-    ) {
-      // Sign the DPoP proof with the server's advertised `expected_audience`
-      // (captured on the profile at connect time), matching the connect-time
-      // machine gate. Using `address` here would re-introduce the htu mismatch
-      // ("DPoP proof does not match the request") on the user-login step.
-      const audience = remoteProfile.expected_audience || remoteProfile.address;
+    //
+    // The requirement is re-read from the server HERE rather than taken from
+    // the connect-time snapshot on `remoteProfile`. An operator who enables
+    // `require_machine_identity` on a live connection never re-runs the connect
+    // flow, so that snapshot still said `false` — the binding was skipped, a
+    // plain user token became the session, and the server's chokepoint then
+    // refused every request. The login looked like it worked and the vault
+    // looked broken. The server is the only authority on this flag; ask it.
+    let requireMachine = remoteProfile?.require_machine_identity ?? false;
+    let audience = remoteProfile?.expected_audience || remoteProfile?.address || "";
+    let miaEnvironment = remoteProfile?.mia_environment;
+    if (mode === "Remote" && !policies.includes("root")) {
+      const fresh = await api.ferrogateRequirement();
+      // Only an answer overrides what we hold. A failed read comes back as
+      // `advertised: false` with default fields — treating that as "not
+      // required" would let a transport blip silently downgrade the
+      // requirement, so we keep the connect-time value instead.
+      if (fresh.advertised) {
+        requireMachine = fresh.require_machine_identity;
+        audience = fresh.expected_audience || remoteProfile?.address || "";
+        // A profile-pinned MIA environment is the operator's deliberate
+        // override and still wins; the server's value only fills a blank.
+        miaEnvironment = remoteProfile?.mia_environment || fresh.mia_environment;
+        // Fold the fresh answer back into the in-memory profile so the rest of
+        // the app (and any later login on this connection) stops reading the
+        // stale snapshot.
+        if (remoteProfile) {
+          setRemoteProfile({
+            ...remoteProfile,
+            require_machine_identity: requireMachine,
+            expected_audience: fresh.expected_audience,
+            mia_environment: miaEnvironment,
+          });
+        }
+      }
+    }
+
+    if (mode === "Remote" && requireMachine && !policies.includes("root")) {
+      // Sign the DPoP proof with the server's advertised `expected_audience`,
+      // matching the connect-time machine gate. Using `address` here would
+      // re-introduce the htu mismatch ("DPoP proof does not match the
+      // request") on the user-login step.
       const r = await api.ferrogateMachineLogin(
         audience,
         "",
         "ferrogate",
         300,
         token,
-        remoteProfile.mia_environment,
+        miaEnvironment,
       );
       if (!r.authenticated || !r.client_token) {
         throw new Error(r.message || "Machine identity binding failed");
@@ -115,6 +144,7 @@ export function LoginPage() {
   }
   const mode = useVaultStore((s) => s.mode);
   const remoteProfile = useVaultStore((s) => s.remoteProfile);
+  const setRemoteProfile = useVaultStore((s) => s.setRemoteProfile);
   const setStatus = useVaultStore((s) => s.setStatus);
   const [tab, setTab] = useState<Tab>(breakGlass ? "token" : "login");
   const [error, setError] = useState<string | null>(null);

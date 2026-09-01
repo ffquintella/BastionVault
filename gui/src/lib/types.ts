@@ -879,6 +879,14 @@ export interface FerroGateRequirement {
   trust_domain: string;
   /** MIA environment the client should dial (`mia-<env>.toml`); empty = default. */
   mia_environment: string;
+  /**
+   * True only when the server actually answered. False means the read failed
+   * (no `ferrogate` mount / transport error) and every other field is a
+   * default, NOT the server's declaration — so a caller holding a
+   * previously-confirmed `require_machine_identity: true` must keep it rather
+   * than downgrading on a blip.
+   */
+  advertised: boolean;
 }
 
 export interface FerroGateMachine {
@@ -906,7 +914,17 @@ export interface FerroGateMachine {
 }
 
 // Result of a MIA self-bootstrap / machine-login attempt.
-export type FerroGateEnrolment = "approved" | "pending" | "rejected" | "revoked";
+//
+// `user-token-required` is a *satisfied* machine gate, not a denial: the server
+// verified the child token and found the machine approved, but the mount also
+// enforces `require_user_token`, which a standalone machine login cannot
+// supply. The connect flow proceeds to user login, which binds both factors.
+export type FerroGateEnrolment =
+  | "approved"
+  | "pending"
+  | "rejected"
+  | "revoked"
+  | "user-token-required";
 
 export interface FerroGateLoginResult {
   spiffe_id: string;

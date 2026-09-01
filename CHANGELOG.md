@@ -45,6 +45,58 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.24] - 2026-09-01
+
+### Fixed
+
+#### Machine identity requirement locked operators out of the GUI
+
+Enabling `require_machine_identity` on the FerroGate mount made every
+non-root sign-in fail. Four distinct defects, all client-side or
+diagnostic -- the server's enforcement was correct throughout.
+(`features/machine-authentication.md`)
+
+- **Connect gate could never be satisfied on a combined machine+user
+  mount.** With `require_user_token` also set, the connect-time gate ran a
+  standalone machine login -- no user token -- so the server answered
+  `user_token_required` and the GUI treated it as a hard attestation
+  failure, dead-ending behind the break-glass prompt. The server only
+  emits that rejection from its *approved* arm, after verifying the child
+  token, so it means "machine attested and approved, user factor still
+  needed": the gate is satisfied. It now classifies as
+  `user-token-required` and proceeds to user login, which performs the
+  real combined bind. This was the blocking failure.
+- **The login page bound against a stale requirement snapshot.**
+  `finalizeLogin` read `require_machine_identity` from the profile
+  captured at connect time, so an operator who enabled the flag on a live
+  connection got no machine binding: login succeeded, a plain user token
+  became the session, and the server's token-store chokepoint then refused
+  every request -- a working login on a vault that looked broken. The
+  requirement is now re-read from the server at login and folded back into
+  the in-memory profile.
+- **A failed requirement read silently downgraded the requirement.**
+  `ferrogate_requirement` collapsed "no FerroGate mount" and "the read
+  failed" into the same "not required" answer, so a transport blip could
+  turn the gate off client-side. It now reports `advertised`, and callers
+  holding a confirmed `true` keep it rather than downgrading on a blip.
+- **Cached-session resume made a doomed round-trip.** Resuming a session
+  that predated the requirement always failed at `lookup-self` (correctly
+  -- the token is not machine-bound) but discarded the cache entry as if
+  the token were stale and dropped the operator on an unexplained login
+  screen. The resume is now skipped when machine identity is required.
+
+### Security
+
+- **Machine-identity denials are no longer mislabelled as policy
+  rejections.** `denial_reason` classified every authenticated denial as
+  `reason=policy`, and the machine-identity chokepoint runs after
+  `req.auth` is set -- so arming the gate produced an audit trail blaming
+  policy for denials no policy change could fix, sending operators to
+  audit ACLs instead of the machine gate. Such denials now report
+  `reason=machine-identity`. Regression test also pins the root exemption,
+  without which an operator who arms the gate cannot disarm it.
+  (`crates/bv-kernel/src/modules/system/denial_audit_store.rs`)
+
 ## [0.41.23] - 2026-08-31
 
 ### Added

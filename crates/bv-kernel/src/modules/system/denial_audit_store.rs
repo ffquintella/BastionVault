@@ -20,6 +20,7 @@
 //! view (no post_unseal wiring needed). The append is best-effort and
 //! never alters the request outcome — the caller already has its 403.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -69,8 +70,26 @@ pub struct DenialAuditEntry {
 /// — a wrong namespace assignment, a disabled account, a machine-identity or
 /// binding check. Labelling those `invalid-token` sent operators hunting for a
 /// bad token when the credential was fine and the *namespace* was the problem.
+///
+/// An authenticated denial is `policy` — *unless* the FerroGate
+/// machine-identity chokepoint is what refused it. That check lives in
+/// `TokenStore::pre_route`, which runs after `req.auth` is set but *before* any
+/// ACL evaluation, so a request matching its predicate cannot have reached a
+/// policy decision at all. Re-evaluating the predicate here is therefore exact,
+/// and it keeps the two enforcement kinds distinguishable in the trail: a
+/// machine-gate rejection reported as `reason=policy` sends operators auditing
+/// policies for a denial no policy change can fix.
 fn denial_reason(core: &dyn VaultCtx, req: &Request) -> &'static str {
-    if req.auth.is_some() {
+    if let Some(auth) = req.auth.as_ref() {
+        // Mirrors the `TokenStore::pre_route` predicate exactly — keep the two
+        // in step: root is exempt, and a machine-bound token is one carrying
+        // `spiffe_id` metadata (only the ferrogate login handler sets it).
+        if core.require_machine_identity().load(Ordering::Relaxed)
+            && !auth.policies.iter().any(|p| p == "root")
+            && !auth.metadata.contains_key("spiffe_id")
+        {
+            return "machine-identity";
+        }
         return "policy";
     }
     // `is_unauth_path` needs the full, mount-qualified path — which the router

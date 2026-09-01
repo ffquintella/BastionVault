@@ -7161,6 +7161,97 @@ mod mod_system_tests {
         );
     }
 
+    /// Regression: a denial raised by the FerroGate machine-identity
+    /// chokepoint must be labelled `reason=machine-identity`, not
+    /// `reason=policy`.
+    ///
+    /// The chokepoint (`TokenStore::pre_route`) runs after `req.auth` is set,
+    /// and `denial_reason` classified every authenticated denial as `policy` —
+    /// so enabling `require_machine_identity` made a valid, correctly-policied
+    /// session fail with an audit trail that blamed policy. Operators audited
+    /// ACLs for a denial no policy change could fix. Also pins the root
+    /// exemption: mislabelling aside, break-glass must keep working.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_machine_identity_denial_is_labelled_distinctly() {
+        let mut server =
+            TestHttpServer::new("test_machine_identity_denial_is_labelled_distinctly", true).await;
+        server.token = server.root_token.clone();
+
+        // A low-privilege user whose `default` policy DOES permit
+        // `auth/token/lookup-self` — so any denial on that path is the machine
+        // gate, never an ACL rejection.
+        let _ = server
+            .write("sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), None)
+            .unwrap();
+        let _ = server
+            .write(
+                "auth/pass/users/machineless",
+                serde_json::json!({ "password": "hunter22XX!", "token_policies": "default", "ttl": 0 })
+                    .as_object()
+                    .cloned(),
+                None,
+            )
+            .unwrap();
+        let token = server
+            .write(
+                "auth/pass/login/machineless",
+                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                None,
+            )
+            .unwrap()
+            .1
+            .get("auth")
+            .and_then(|a| a.get("client_token"))
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        // Baseline: the token works while machine identity is not required.
+        let before = server.read("auth/token/lookup-self", Some(&token)).unwrap();
+        assert_eq!(before.0, 200, "lookup-self must succeed before the gate is armed");
+
+        server.core.set_require_machine_identity(true).await.unwrap();
+
+        // The same request, same policies — now refused by the chokepoint
+        // because the token carries no `spiffe_id` metadata.
+        let denied = server.read("auth/token/lookup-self", Some(&token)).unwrap();
+        assert_eq!(denied.0, 403, "a non-machine-bound token must be refused when the gate is armed");
+
+        // Root stays exempt: the break-glass recovery path must survive, or an
+        // operator who arms the gate can never disarm it.
+        let as_root = server.read("auth/token/lookup-self", Some(&server.root_token)).unwrap();
+        assert_eq!(as_root.0, 200, "root tokens are exempt from the machine-identity gate");
+
+        server.core.set_require_machine_identity(false).await.unwrap();
+
+        // Proves the 403 above was the gate and not a policy change.
+        let after = server.read("auth/token/lookup-self", Some(&token)).unwrap();
+        assert_eq!(after.0, 200, "disarming the gate must restore the same token");
+
+        let ret = server.read("sys/audit/events", Some(&server.root_token)).unwrap().1;
+        let events = ret.get("events").and_then(|v| v.as_array()).expect("events array");
+        let gate_denial = events
+            .iter()
+            .filter(|e| e.get("op").and_then(|v| v.as_str()) == Some("denied"))
+            .find(|e| {
+                e.get("target").and_then(|v| v.as_str()) == Some("auth/token/lookup-self")
+            })
+            .unwrap_or_else(|| panic!("machine-identity denial missing from audit trail: {events:?}"));
+        let fields = gate_denial
+            .get("changed_fields")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|f| f.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert!(
+            fields.contains(&"reason=machine-identity"),
+            "a machine-gate denial must name the gate, not blame policy: {fields:?}"
+        );
+        assert!(
+            !fields.contains(&"reason=policy"),
+            "a machine-gate denial must not be labelled a policy rejection: {fields:?}"
+        );
+    }
+
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_system_internal_ui_mounts_default_policy_shareable_mounts() {
         let mut test_http_server =

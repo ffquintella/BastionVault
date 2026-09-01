@@ -305,6 +305,24 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   manifest is the pin and a verifier bump is still a reviewable commit. Cargo verifies the registry SHA-256
   on download. Bump procedure: [docs/ferrogate-machine-auth.md](../docs/ferrogate-machine-auth.md)
   § SDK dependency.
+- **Enforcement lockout fixed (Unreleased, 2026-09-01).** Turning on `require_machine_identity` made every
+  non-root sign-in fail. The server's chokepoint was correct throughout; the four defects were client-side or
+  diagnostic. (1) On a mount that also sets `require_user_token`, the connect-time gate ran a *standalone*
+  machine login, so the server answered `user_token_required` and the GUI read it as a hard attestation
+  failure — dead-ending behind break-glass. That response is only emitted from the server's **approved** arm,
+  after the child token verifies, so it means "machine attested and approved, user factor still needed": it is
+  now classified `user-token-required` and the flow proceeds to user login, which does the real combined bind.
+  (2) `finalizeLogin` decided whether to bind from the requirement snapshot captured at *connect* time, so an
+  operator enabling the flag on a live connection got a plain user token installed as the session and every
+  subsequent request refused — a successful login on a vault that looked broken. It now re-reads the
+  requirement from the server. (3) `ferrogate_requirement` collapsed "no ferrogate mount" and "the read
+  failed" into one "not required" answer, letting a transport blip downgrade the requirement client-side; it
+  now reports `advertised` and callers keep a confirmed `true`. (4) Resuming a cached session that predated
+  the requirement always failed at `lookup-self` and discarded the cache as if the token were stale; the
+  resume is now skipped when machine identity is required. Separately, machine-gate denials were audited as
+  `reason=policy` (the chokepoint runs after `req.auth` is set), sending operators to audit ACLs for a denial
+  no policy change could fix — they now report `reason=machine-identity`, with a regression test that also
+  pins the root exemption.
 - Caveats: `cmis_grpc` is async-build only (the `sync_handler` feature is independently broken repo-wide);
   child-token revocation on the `static_jwks` source relies on short token TTL (the CRL is enforced on the SVID
   path); audit events are structured log lines (no dedicated audit-store rows).
