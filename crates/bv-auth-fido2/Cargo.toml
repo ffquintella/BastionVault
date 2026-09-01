@@ -1,6 +1,6 @@
 [package]
 name = "bv-auth-fido2"
-version = "0.41.0"
+version = "0.41.1"
 edition = "2021"
 description = "BastionVault's FIDO2 / WebAuthn auth backend: passkey registration and login"
 license = "Apache-2.0"

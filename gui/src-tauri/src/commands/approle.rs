@@ -38,6 +38,8 @@ pub struct AppRoleInfo {
     pub token_num_uses: i64,
     pub secret_id_bound_cidrs: Vec<String>,
     pub token_bound_cidrs: Vec<String>,
+    pub bound_source_ips: Vec<String>,
+    pub bypass_machine_binding: bool,
     pub bound_machines: Vec<MachineBinding>,
 }
 
@@ -92,6 +94,11 @@ pub async fn read_approle(state: State<'_, AppState>, name: String) -> CmdResult
                 token_num_uses: data.and_then(|d| d.get("token_num_uses")).and_then(|v| v.as_i64()).unwrap_or(0),
                 secret_id_bound_cidrs: get_str_vec("secret_id_bound_cidrs"),
                 token_bound_cidrs: get_str_vec("token_bound_cidrs"),
+                bound_source_ips: get_str_vec("bound_source_ips"),
+                bypass_machine_binding: data
+                    .and_then(|d| d.get("bypass_machine_binding"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 bound_machines: data
                     .and_then(|d| d.get("bound_machines"))
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -113,9 +120,14 @@ pub async fn write_approle(
     secret_id_ttl: String,
     token_ttl: String,
     token_max_ttl: String,
+    bound_source_ips: String,
+    bypass_machine_binding: bool,
 ) -> CmdResult<()> {
     let mut body = Map::new();
     body.insert("bind_secret_id".into(), Value::Bool(bind_secret_id));
+    // Always sent: clearing the box must clear the filter / re-gate the ID.
+    body.insert("bound_source_ips".into(), Value::String(bound_source_ips));
+    body.insert("bypass_machine_binding".into(), Value::Bool(bypass_machine_binding));
     if !token_policies.is_empty() {
         body.insert("token_policies".into(), Value::String(token_policies));
     }

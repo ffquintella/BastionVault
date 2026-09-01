@@ -119,7 +119,7 @@ export function AppRolePage() {
   async function handleCreate() {
     if (!newName) return;
     try {
-      await api.writeAppRole(newName, newBindSecretId, newPolicies.join(","), 0, "", "", "");
+      await api.writeAppRole(newName, newBindSecretId, newPolicies.join(","), 0, "", "", "", "", false);
       // Persist the namespace login-restriction (empty ⇒ unrestricted).
       await api.setNsAssignment("approle/", newName, newNamespaces);
       toast("success", `ID ${newName} created`);
@@ -365,7 +365,7 @@ function RoleDetail({
 }: RoleDetailProps) {
   const [tab, setTab] = useState("overview");
   const [showEdit, setShowEdit] = useState(false);
-  const noMachines = roleInfo.bound_machines.length === 0;
+  const noMachines = roleInfo.bound_machines.length === 0 && !roleInfo.bypass_machine_binding;
 
   return (
     <>
@@ -374,6 +374,13 @@ function RoleDetail({
           This ID has no bound machines. AppID logins require a FerroGate machine token bound to
           the ID — until a machine is bound under the <strong>Machines</strong> tab, no client can
           authenticate with this ID.
+        </div>
+      )}
+      {roleInfo.bypass_machine_binding && (
+        <div className="p-3 bg-orange-500/10 border border-orange-500/30 rounded-lg text-orange-400 text-sm">
+          Machine binding is bypassed for this ID: logins are authenticated by the App ID and
+          Secret ID alone, with no FerroGate machine token. Restrict where it can be used with a
+          source IP filter.
         </div>
       )}
       <Card title={`ID: ${roleInfo.name}`}>
@@ -425,6 +432,7 @@ function RoleDetail({
               <ConfigRow label="Token TTL" value={roleInfo.token_ttl === 0 ? "System default" : `${roleInfo.token_ttl}s`} />
               <ConfigRow label="Token Max TTL" value={roleInfo.token_max_ttl === 0 ? "System default" : `${roleInfo.token_max_ttl}s`} />
               <ConfigRow label="Token Uses" value={roleInfo.token_num_uses === 0 ? "Unlimited" : String(roleInfo.token_num_uses)} />
+              <ConfigRow label="Machine Binding" value={roleInfo.bypass_machine_binding ? "Bypassed" : "Required"} />
             </div>
 
             {/* Policies */}
@@ -439,6 +447,24 @@ function RoleDetail({
                   ))
                 ) : (
                   <span className="text-sm text-[var(--color-text-muted)]">None</span>
+                )}
+              </div>
+            </div>
+
+            {/* Source IP filter */}
+            <div>
+              <label className="block text-xs font-medium text-[var(--color-text-muted)] mb-1">
+                Source IP Filter
+              </label>
+              <div className="flex flex-wrap gap-1">
+                {roleInfo.bound_source_ips.length > 0 ? (
+                  roleInfo.bound_source_ips.map((r) => (
+                    <Badge key={r} label={r} variant="neutral" />
+                  ))
+                ) : (
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    Any source address
+                  </span>
                 )}
               </div>
             </div>
@@ -520,6 +546,8 @@ function EditRoleModal({
   const [secretIdTtl, setSecretIdTtl] = useState(secondsToField(roleInfo.secret_id_ttl));
   const [tokenTtl, setTokenTtl] = useState(secondsToField(roleInfo.token_ttl));
   const [tokenMaxTtl, setTokenMaxTtl] = useState(secondsToField(roleInfo.token_max_ttl));
+  const [boundSourceIps, setBoundSourceIps] = useState(roleInfo.bound_source_ips.join(", "));
+  const [bypassMachine, setBypassMachine] = useState(roleInfo.bypass_machine_binding);
   const [namespaces, setNamespaces] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
 
@@ -533,6 +561,8 @@ function EditRoleModal({
     setSecretIdTtl(secondsToField(roleInfo.secret_id_ttl));
     setTokenTtl(secondsToField(roleInfo.token_ttl));
     setTokenMaxTtl(secondsToField(roleInfo.token_max_ttl));
+    setBoundSourceIps(roleInfo.bound_source_ips.join(", "));
+    setBypassMachine(roleInfo.bypass_machine_binding);
     api
       .getNsAssignment("approle/", roleInfo.name)
       .then((r) => setNamespaces(r.namespaces))
@@ -551,6 +581,12 @@ function EditRoleModal({
         secretIdTtl.trim(),
         tokenTtl.trim(),
         tokenMaxTtl.trim(),
+        boundSourceIps
+          .split(",")
+          .map((r) => r.trim())
+          .filter((r) => r !== "")
+          .join(","),
+        bypassMachine,
       );
       await api.setNsAssignment("approle/", roleInfo.name, namespaces);
       toast("success", `ID ${roleInfo.name} updated`);
@@ -597,6 +633,36 @@ function EditRoleModal({
           />
           <span className="text-[var(--color-text-muted)]">Require Secret ID for login</span>
         </label>
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={bypassMachine}
+            onChange={(e) => setBypassMachine(e.target.checked)}
+            className="rounded"
+          />
+          <span className="text-[var(--color-text-muted)]">
+            Bypass machine binding (log in with App ID only)
+          </span>
+        </label>
+        {bypassMachine && (
+          <p className="text-xs text-orange-400 -mt-1">
+            No FerroGate machine token is required for this ID, and its bound machines are
+            ignored — even while the server requires machine identity for every other ID.
+          </p>
+        )}
+        <div>
+          <Input
+            label="Source IP filter (empty = any source)"
+            value={boundSourceIps}
+            onChange={(e) => setBoundSourceIps(e.target.value)}
+            placeholder="10.0.0.5, 192.168.1.0/24, 172.16.0.0/255.255.0.0, 10.9.0.10-10.9.0.20"
+          />
+          <p className="text-xs text-[var(--color-text-muted)] mt-1.5">
+            Comma-separated list; entries may be a single IP, a CIDR block, an address with a
+            dotted netmask, or an inclusive start-end range, in any mix. A login from any other
+            address is refused.
+          </p>
+        </div>
         <div className="grid grid-cols-2 gap-3">
           <Input
             label="Secret ID Uses (0 = unlimited)"

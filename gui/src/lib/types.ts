@@ -788,6 +788,8 @@ export interface AppRoleInfo {
   token_num_uses: number;
   secret_id_bound_cidrs: string[];
   token_bound_cidrs: string[];
+  bound_source_ips: string[];
+  bypass_machine_binding: boolean;
   bound_machines: MachineBinding[];
 }
 
@@ -1061,6 +1063,13 @@ export interface EntityAliasInfo {
 export interface AuditEvent {
   ts: string;
   user: string;
+  /**
+   * SPIFFE id of the machine that attested the session, present only on
+   * rows produced by a FerroGate machine-bound token. The server sends
+   * the full id (that is what the audit store keeps); the table
+   * abbreviates it for display via `shortSpiffeId`.
+   */
+  machine?: string;
   /** "create" | "update" | "delete" */
   op: string;
   category: string;

@@ -68,9 +68,10 @@ function persist(namespaces: string[] | null, active: string | null) {
  * sudo-gated: a tenant principal is 403'd there, so the list stays exactly what
  * its own token reported and this can only add options for a caller that
  * already administers namespaces. Switching into a namespace the token cannot
- * operate in is a supported and *visible* state — `NamespaceGuardBanner`
- * explains the resulting read-only session instead of letting requests 403
- * unexplained.
+ * operate in is a supported, *visible* and *fixable* state —
+ * `NamespaceGuardBanner` names the missing allowed-namespace entry and offers
+ * to write it, which takes effect on the open session, instead of letting
+ * requests 403 unexplained or sending the operator back to the login page.
  *
  * Returns `null` only when there was nothing to add and nothing was fetched, so
  * a caller can still tell "no answer" from "genuinely empty".

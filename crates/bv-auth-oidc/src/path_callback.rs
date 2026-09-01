@@ -238,6 +238,31 @@ impl OidcBackendInner {
             .unwrap_or_else(|| claims.subject().as_str())
             .to_string();
 
+        // Multi-tenancy: bind the session to a namespace, exactly as `userpass/`
+        // does. The IdP redirect carries no `X-BastionVault-Namespace` header, so
+        // this resolves to the principal's *first assigned* namespace when one is
+        // recorded and to root otherwise. Without a binding the issued token read
+        // back as root-bound and non-child-visible, and — with no `mount_path`
+        // below — could not be widened by a namespace assignment either, so an
+        // SSO principal granted several namespaces could reach none of them.
+        let (ns_path, ns_uuid) = crate::kernel_api::namespace::login_namespace_for_principal(
+            &self.core,
+            req,
+            "oidc/",
+            &display_name,
+        )
+        .await?;
+
+        // Refuse the login if the principal's assignment excludes that namespace.
+        // No record ⇒ unrestricted; fails closed otherwise.
+        crate::kernel_api::namespace::enforce_login_assignment(
+            &self.core,
+            "oidc/",
+            &display_name,
+            &ns_path,
+        )
+        .await?;
+
         let mut metadata: HashMap<String, String> = HashMap::new();
         metadata.insert("role".to_string(), auth_state.role_name.clone());
         metadata.insert("subject".to_string(), claims.subject().as_str().to_string());
@@ -257,11 +282,28 @@ impl OidcBackendInner {
                 );
             }
         }
+        // The `(mount, name)` pair `NsAssignmentStore` is keyed by. Without it
+        // `token_operable_resolved` cannot identify the principal, so no
+        // assignment can widen the token and the holder is pinned to its login
+        // namespace for the life of the session. Written *after* the role's
+        // claim mappings so an IdP-supplied claim cannot rename the mount an
+        // assignment is looked up under.
+        metadata.insert("mount_path".to_string(), "oidc/".to_string());
 
         let mut auth = Auth::default();
         auth.display_name = display_name;
         auth.policies = role.policies.clone();
         auth.metadata = metadata;
+        // Stamp the namespace binding. `child_visible` follows the namespace's
+        // `child_visible_default` and fails safe to false.
+        let child_visible =
+            crate::kernel_api::namespace::login_child_visible(&self.core, &ns_path).await;
+        crate::kernel_api::namespace::stamp_binding(
+            &mut auth.metadata,
+            &ns_path,
+            &ns_uuid,
+            child_visible,
+        );
         auth.lease = Lease::default();
         if role.token_ttl_secs > 0 {
             auth.lease.ttl = Duration::from_secs(role.token_ttl_secs);

@@ -274,3 +274,53 @@ pub async fn logout(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdRes
     crate::plugin_apps::teardown_all(&app, &state).await;
     Ok(())
 }
+
+/// The `(mount, name)` pair the current session's token identifies its
+/// principal by — the same pair a namespace assignment is keyed on.
+///
+/// Read straight off `auth/token/lookup-self`, which every valid token may
+/// call. `userpass`/FIDO2 stamp the principal under `username`, `approle`
+/// under `role_name`; both stamp the mount under `mount_path`. A token that
+/// carries neither (a raw root token, a legacy token, or an auth backend that
+/// does not stamp them) reports `known: false` — the caller must then explain
+/// the situation rather than offer a fix that cannot be applied, because
+/// `token_operable_resolved` cannot match an assignment to such a token
+/// either.
+#[derive(Serialize)]
+pub struct SessionPrincipal {
+    /// Auth mount with its trailing slash (`"userpass/"`, `"approle/"`, …).
+    pub mount: String,
+    /// Principal name within that mount.
+    pub name: String,
+    /// Both fields are non-empty and usable as an assignment key.
+    pub known: bool,
+}
+
+#[tauri::command]
+pub async fn session_principal(state: State<'_, AppState>) -> CmdResult<SessionPrincipal> {
+    let resp = super::make_request_root(
+        &state,
+        Operation::Read,
+        "auth/token/lookup-self".to_string(),
+        None,
+    )
+    .await?;
+    let meta = resp
+        .and_then(|r| r.data)
+        .and_then(|d| d.get("meta").cloned())
+        .and_then(|v| match v {
+            Value::Object(m) => Some(m),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let str_at = |k: &str| -> String {
+        meta.get(k).and_then(|v| v.as_str()).unwrap_or("").trim().to_string()
+    };
+    let mount = str_at("mount_path");
+    let name = {
+        let username = str_at("username");
+        if username.is_empty() { str_at("role_name") } else { username }
+    };
+    let known = !mount.is_empty() && !name.is_empty();
+    Ok(SessionPrincipal { mount, name, known })
+}

@@ -46,6 +46,12 @@ use crate::{
 struct AuditEventBuilder {
     ts: String,
     user: String,
+    /// SPIFFE id of the machine that attested the session, for the rows
+    /// that have one (FerroGate machine+user sessions). Empty elsewhere,
+    /// and omitted from the serialized event when empty so the GUI can
+    /// treat "absent" as "not a machine session". Kept full-length here;
+    /// the GUI abbreviates it for display.
+    machine: String,
     op: String,
     category: String,
     target: String,
@@ -58,6 +64,9 @@ impl AuditEventBuilder {
         let mut m = Map::new();
         m.insert("ts".into(), Value::String(self.ts));
         m.insert("user".into(), Value::String(self.user));
+        if !self.machine.is_empty() {
+            m.insert("machine".into(), Value::String(self.machine));
+        }
         m.insert("op".into(), Value::String(self.op));
         m.insert("category".into(), Value::String(self.category));
         m.insert("target".into(), Value::String(self.target));
@@ -2015,6 +2024,7 @@ impl SystemBackend {
                                 events.push(AuditEventBuilder {
                                     ts: e.ts,
                                     user: e.user,
+                                    machine: String::new(),
                                     op: e.op,
                                     category: "policy".into(),
                                     target: name.clone(),
@@ -2049,6 +2059,7 @@ impl SystemBackend {
                                         events.push(AuditEventBuilder {
                                             ts: e.ts,
                                             user: e.user,
+                                            machine: String::new(),
                                             op: e.op,
                                             category: label.into(),
                                             target: name.clone(),
@@ -2081,6 +2092,7 @@ impl SystemBackend {
                                     events.push(AuditEventBuilder {
                                         ts: e.ts,
                                         user: e.user,
+                                        machine: String::new(),
                                         op: e.op,
                                         category: "asset-group".into(),
                                         target: name.clone(),
@@ -2125,6 +2137,7 @@ impl SystemBackend {
                             events.push(AuditEventBuilder {
                                 ts: e.ts,
                                 user: e.actor_entity_id,
+                                machine: String::new(),
                                 op: e.op,
                                 category: "share".into(),
                                 target,
@@ -2162,6 +2175,7 @@ impl SystemBackend {
                         events.push(AuditEventBuilder {
                             ts: e.ts,
                             user: e.actor_entity_id,
+                            machine: String::new(),
                             op: e.op,
                             category: "user".into(),
                             target: format!("{}{}", e.mount, e.target),
@@ -2202,6 +2216,7 @@ impl SystemBackend {
                     events.push(AuditEventBuilder {
                         ts: e.ts,
                         user: e.actor_entity_id,
+                        machine: String::new(),
                         op: e.op,
                         category: "file".into(),
                         target,
@@ -2242,6 +2257,7 @@ impl SystemBackend {
                         user: e.username.clone(),
                         // logout entries carry action="logout"; logins map
                         // to login / login-failed by success.
+                        machine: String::new(),
                         op: match e.action.as_str() {
                             "logout" => "logout".into(),
                             _ if e.success => "login".into(),
@@ -2294,6 +2310,7 @@ impl SystemBackend {
                     events.push(AuditEventBuilder {
                         ts: e.ts,
                         user: e.user,
+                        machine: e.machine,
                         op: "denied".into(),
                         category: "request".into(),
                         target: e.path,
@@ -2337,6 +2354,7 @@ impl SystemBackend {
                     events.push(AuditEventBuilder {
                         ts: e.ts,
                         user: e.user,
+                        machine: e.machine,
                         op: if e.operation.is_empty() {
                             "read".into()
                         } else {
@@ -2415,6 +2433,7 @@ impl SystemBackend {
                     events.push(AuditEventBuilder {
                         ts: e.ts,
                         user: e.actor_entity_id,
+                        machine: String::new(),
                         op: e.op,
                         category: "ssh-ca".into(),
                         target,
@@ -2462,6 +2481,7 @@ impl SystemBackend {
                     events.push(AuditEventBuilder {
                         ts: e.ts,
                         user: e.actor_entity_id,
+                        machine: String::new(),
                         op: e.op,
                         category: "ssh-sign".into(),
                         target,
@@ -5279,6 +5299,166 @@ mod mod_system_tests {
         );
     }
 
+    /// Reproduction of the operator-reported case: an admin whose *namespace
+    /// assignment* lists root plus two child namespaces logs in at root (the
+    /// GUI login page sends no namespace header), then uses the sidebar
+    /// namespace switcher to move to `dti/esi`. The switcher only sets the
+    /// active-namespace header — it does not re-authenticate — so the whole
+    /// question is whether the assignment widens the root-bound token's
+    /// operability. It must: otherwise the GUI shows its "Read-only here"
+    /// banner and the operator is told to sign in again.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_assigned_admin_switches_namespace_without_relogin() {
+        let mut server = TestHttpServer::new("test_assigned_admin_ns_switch", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        for path in ["dti", "dti/esi"] {
+            let (s, r) = server
+                .write(
+                    &format!("v1/sys/namespaces/{path}"),
+                    serde_json::json!({}).as_object().cloned(),
+                    Some(&root),
+                )
+                .unwrap();
+            assert!((200..300).contains(&s), "ns create {path}: {s} {r:?}");
+        }
+
+        server
+            .write(
+                "v1/sys/auth/userpass",
+                serde_json::json!({ "type": "userpass" }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        let (s, r) = server
+            .write(
+                "v1/auth/userpass/users/felipe",
+                serde_json::json!({
+                    "password": "hunter22XX!",
+                    "token_policies": "administrator",
+                    "ttl": 0
+                })
+                .as_object()
+                .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "user create: {s} {r:?}");
+
+        // Exactly what the GUI's "Allowed namespaces" chips write.
+        let (s, r) = server
+            .write(
+                "v1/sys/identity/ns-assignment/userpass/felipe",
+                serde_json::json!({ "namespaces": ["", "dti", "dti/esi"] }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "ns-assignment write: {s} {r:?}");
+        let (s, r) = server.read("v1/sys/identity/ns-assignment/userpass/felipe", Some(&root)).unwrap();
+        assert_eq!(s, 200, "ns-assignment read: {r:?}");
+        assert_eq!(
+            r["namespaces"],
+            serde_json::json!(["", "dti", "dti/esi"]),
+            "assignment must round-trip with root included: {r:?}"
+        );
+
+        // GUI login page: no namespace header → root-bound token.
+        let (s, r) = server
+            .write(
+                "v1/auth/userpass/login/felipe",
+                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(s, 200, "login: {r:?}");
+        let token = r["auth"]["client_token"].as_str().unwrap().to_string();
+        assert_eq!(r["auth"]["metadata"]["namespace_path"], serde_json::json!(""));
+        assert_eq!(r["auth"]["metadata"]["mount_path"], serde_json::json!("userpass/"));
+
+        // The switcher moved to dti/esi. capabilities-self is what paints the
+        // banner.
+        let (s, caps) = server
+            .request_with_headers(
+                "POST",
+                "v2/sys/capabilities-self",
+                serde_json::json!({ "paths": ["sys/mounts"] }).as_object().cloned(),
+                Some(&token),
+                None,
+                &[("X-BastionVault-Namespace", "dti/esi")],
+            )
+            .unwrap();
+        assert_eq!(s, 200, "capabilities-self: {caps:?}");
+        assert_eq!(
+            caps["namespace_operable"],
+            serde_json::json!(true),
+            "an assigned admin must be operable in dti/esi without re-login: {caps:?}"
+        );
+
+        // The operator's real sequence: the session is already open when the
+        // assignment is granted. The lookup is live, so the running session must
+        // pick it up without re-authenticating.
+        let (s, r) = server
+            .write(
+                "v1/sys/identity/ns-assignment/userpass/felipe",
+                serde_json::json!({ "namespaces": [] }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "assignment clear: {s} {r:?}");
+        let (_, caps) = server
+            .request_with_headers(
+                "POST",
+                "v2/sys/capabilities-self",
+                serde_json::json!({ "paths": ["sys/mounts"] }).as_object().cloned(),
+                Some(&token),
+                None,
+                &[("X-BastionVault-Namespace", "dti/esi")],
+            )
+            .unwrap();
+        assert_eq!(
+            caps["namespace_operable"],
+            serde_json::json!(false),
+            "clearing the assignment must revoke operability live: {caps:?}"
+        );
+        let (s, r) = server
+            .write(
+                "v1/sys/identity/ns-assignment/userpass/felipe",
+                serde_json::json!({ "namespaces": ["", "dti", "dti/esi"] }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "assignment re-grant: {s} {r:?}");
+        let (_, caps) = server
+            .request_with_headers(
+                "POST",
+                "v2/sys/capabilities-self",
+                serde_json::json!({ "paths": ["sys/mounts"] }).as_object().cloned(),
+                Some(&token),
+                None,
+                &[("X-BastionVault-Namespace", "dti/esi")],
+            )
+            .unwrap();
+        assert_eq!(
+            caps["namespace_operable"],
+            serde_json::json!(true),
+            "granting the assignment mid-session must take effect live: {caps:?}"
+        );
+
+        // And the switcher's own source of truth must offer the namespaces.
+        let (s, selfns) = server
+            .request_with_headers("GET", "v2/sys/namespaces-self", None, Some(&token), None, &[])
+            .unwrap();
+        assert_eq!(s, 200, "namespaces-self: {selfns:?}");
+        assert_eq!(
+            selfns["namespaces"],
+            serde_json::json!(["", "dti", "dti/esi"]),
+            "the switcher must list every assigned namespace: {selfns:?}"
+        );
+    }
+
+
     #[test]
     fn test_qualify_capability_path() {
         // Root-scoped callers: the pre-namespace hot path, untouched.
@@ -6998,6 +7178,7 @@ mod mod_system_tests {
                 .append(DenialAuditEntry {
                     ts: String::new(),
                     user: "peer-node-caller".into(),
+                    machine: String::new(),
                     path: path.into(),
                     operation: "read".into(),
                     authenticated: true,

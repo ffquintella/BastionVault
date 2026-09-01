@@ -72,12 +72,30 @@ pub struct RoleEntry {
     // A constraint, if set, specifies the CIDR blocks from which logins should be allowed
     pub secret_id_bound_cidrs: Vec<String>,
 
+    // A constraint, if set, restricts the source addresses a login against this
+    // role may come from. Unlike `secret_id_bound_cidrs` (CIDR blocks only),
+    // each entry may be a single address, a CIDR block, an address + dotted
+    // netmask, or an inclusive `start-end` range, and a list may mix them. See
+    // `bv_utils::ip_filter`.
+    #[serde(default)]
+    pub bound_source_ips: Vec<String>,
+
     // A constraint requiring the login to present a FerroGate machine token
     // bound to one of these machines. Machine binding is mandatory: a role with
     // no bound machines cannot authenticate. Each binding may scope the machine
     // to a set of environments (wildcards allowed; empty = all environments).
     #[serde(default)]
     pub bound_machines: Vec<MachineBinding>,
+
+    // Per-application escape hatch from the mandatory machine binding. When
+    // true, a login against this role is authenticated by the AppID credentials
+    // alone (role_id + secret_id, plus any CIDR constraints): no FerroGate
+    // machine token is required and `bound_machines` is not consulted, even
+    // while the server-wide `require_machine` gate is on. Off by default, set
+    // per role, and recorded in the role audit trail — it is intended for
+    // applications that cannot run a machine identity agent.
+    #[serde(default)]
+    pub bypass_machine_binding: bool,
 
     // Duration (less than the backend mount's max TTL) after which a secret_id generated against
     // the role will expire
@@ -125,8 +143,11 @@ impl RoleEntry {
         if self.bind_secret_id
             || !self.bound_cidr_list.is_empty()
             || !self.secret_id_bound_cidrs.is_empty()
+            || !self.bound_source_ips.is_empty()
             || !self.token_bound_cidrs.is_empty()
-            || !self.bound_machines.is_empty()
+            // A machine binding only counts as a constraint while it is
+            // actually enforced; a bypassed role is not constrained by it.
+            || (!self.bound_machines.is_empty() && !self.bypass_machine_binding)
         {
             return Ok(());
         }
@@ -184,6 +205,23 @@ impl AppRoleBackend {
                     required: false,
                     description: r#"Comma separated string or list of CIDR blocks.
                     If set, specifies the blocks of IP addresses which can perform the login operation."#
+                },
+                "bound_source_ips": {
+                    field_type: FieldType::CommaStringSlice,
+                    required: false,
+                    description: r#"Comma separated string or list of source address rules.
+                    Each entry is a single IP (10.0.0.5), a CIDR block (10.0.0.0/24), an address with a
+                    dotted netmask (10.0.0.0/255.255.255.0) or an inclusive range (10.0.0.5-10.0.0.50),
+                    and a list may mix them. If set, a login is refused unless the client address
+                    matches one of the entries."#
+                },
+                "bypass_machine_binding": {
+                    field_type: FieldType::Bool,
+                    default: false,
+                    description: r#"If true, logins against this ID are authenticated by the AppID
+                    credentials alone: no FerroGate machine token is required and any bound machines
+                    are not consulted, even while the server-wide `require_machine` gate is on.
+                    Defaults to 'false'."#
                 },
                 "secret_id_num_uses": {
                     field_type: FieldType::Int,
@@ -367,6 +405,79 @@ IP is not encompassed by it, login fails
 During login, the IP address of the client will be checked to see if it
 belongs to the CIDR blocks specified. If CIDR blocks were set and if the
 IP is not encompassed by it, login fails
+                "#
+        });
+
+        path
+    }
+
+    // role/<role_name>/bound-source-ips - For updating the param
+    pub fn role_bound_source_ips_path(&self) -> Path {
+        let approle_backend_ref1 = self.inner.clone();
+        let approle_backend_ref2 = self.inner.clone();
+        let approle_backend_ref3 = self.inner.clone();
+
+        let path = new_path!({
+            pattern: r"role/(?P<role_name>\w[\w-]+\w)/bound-source-ips$",
+            fields: {
+                "role_name": {
+                    field_type: FieldType::Str,
+                    required: true,
+                    description: "Name of the role."
+                },
+                "bound_source_ips": {
+                    field_type: FieldType::CommaStringSlice,
+                    description: r#"Comma separated string or list of source address rules: single IPs,
+        CIDR blocks, address + dotted netmask, or inclusive start-end ranges, in any mix."#
+                }
+            },
+            operations: [
+                {op: Operation::Read, handler: approle_backend_ref1.read_role_bound_source_ips},
+                {op: Operation::Write, handler: approle_backend_ref2.write_role_bound_source_ips},
+                {op: Operation::Delete, handler: approle_backend_ref3.delete_role_bound_source_ips}
+            ],
+            help: r#"
+During login, the IP address of the client is matched against these rules.
+Each rule is a single IP (10.0.0.5), a CIDR block (10.0.0.0/24), an address
+with a dotted netmask (10.0.0.0/255.255.255.0) or an inclusive range
+(10.0.0.5-10.0.0.50). If any rule is set and none matches, login fails.
+                "#
+        });
+
+        path
+    }
+
+    // role/<role_name>/bypass-machine-binding - For updating the param
+    pub fn role_bypass_machine_binding_path(&self) -> Path {
+        let approle_backend_ref1 = self.inner.clone();
+        let approle_backend_ref2 = self.inner.clone();
+        let approle_backend_ref3 = self.inner.clone();
+
+        let path = new_path!({
+            pattern: r"role/(?P<role_name>\w[\w-]+\w)/bypass-machine-binding$",
+            fields: {
+                "role_name": {
+                    field_type: FieldType::Str,
+                    required: true,
+                    description: "Name of the role."
+                },
+                "bypass_machine_binding": {
+                    field_type: FieldType::Bool,
+                    default: false,
+                    description: "If true, logins against this ID need no FerroGate machine token."
+                }
+            },
+            operations: [
+                {op: Operation::Read, handler: approle_backend_ref1.read_role_bypass_machine_binding},
+                {op: Operation::Write, handler: approle_backend_ref2.write_role_bypass_machine_binding},
+                {op: Operation::Delete, handler: approle_backend_ref3.delete_role_bypass_machine_binding}
+            ],
+            help: r#"
+Per-application escape hatch from mandatory machine binding. When enabled, a
+login against this ID is authenticated by the AppID credentials alone
+(role_id + secret_id, plus any source-address constraints) and the role's
+bound machines are not consulted. Deleting the value restores the default
+(false), i.e. the server-wide `require_machine` gate applies again.
                 "#
         });
 
@@ -1008,6 +1119,8 @@ binding may restrict the machine to a set of environments."#
             self.role_local_secret_ids_path(),
             self.role_bound_cidr_list_path(),
             self.role_secret_id_bound_cidrs_path(),
+            self.role_bound_source_ips_path(),
+            self.role_bypass_machine_binding_path(),
             self.role_token_bound_cidrs_path(),
             self.role_bind_secret_id_path(),
             self.role_secret_id_num_uses_path(),
@@ -1264,6 +1377,29 @@ impl AppRoleBackendInner {
             }
         }
 
+        if let Ok(bound_source_ips_value) = req.get_data("bound_source_ips") {
+            role_entry.bound_source_ips =
+                bound_source_ips_value.as_comma_string_slice().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
+
+        // Reject a malformed rule on write rather than letting it silently
+        // never match at login time.
+        if !role_entry.bound_source_ips.is_empty() {
+            utils::ip_filter::validate_entries(&role_entry.bound_source_ips)?;
+        }
+
+        if let Ok(bypass_value) = req.get_data("bypass_machine_binding") {
+            role_entry.bypass_machine_binding = bypass_value.as_bool_ex().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
+
+        if role_entry.bypass_machine_binding {
+            log::warn!(
+                target: "security",
+                "AppID role {} is configured to bypass machine binding: logins use the AppID credentials alone",
+                role_entry.name
+            );
+        }
+
         if let Ok(secret_id_num_uses_value) = req.get_data("secret_id_num_uses") {
             role_entry.secret_id_num_uses = secret_id_num_uses_value.as_int().ok_or(RvError::ErrRequestFieldInvalid)?;
         } else if create {
@@ -1298,7 +1434,12 @@ impl AppRoleBackendInner {
             req,
             if create { "create" } else { "update" },
             &role_entry.name,
-            &format!("policies={}", role_entry.policies.join(",")),
+            &format!(
+                "policies={} bypass_machine_binding={} bound_source_ips={}",
+                role_entry.policies.join(","),
+                role_entry.bypass_machine_binding,
+                role_entry.bound_source_ips.join(",")
+            ),
         )
         .await;
 
@@ -1315,6 +1456,8 @@ impl AppRoleBackendInner {
             let mut data = serde_json::json!({
                 "bind_secret_id": entry.bind_secret_id,
                 "secret_id_bound_cidrs": entry.secret_id_bound_cidrs,
+                "bound_source_ips": entry.bound_source_ips,
+                "bypass_machine_binding": entry.bypass_machine_binding,
                 "secret_id_num_uses": entry.secret_id_num_uses,
                 "secret_id_ttl": entry.secret_id_ttl.as_secs(),
                 "local_secret_ids": false,
@@ -1664,6 +1807,16 @@ impl AppRoleBackendInner {
                         "token_bound_cidrs": role.token_bound_cidrs,
                     })
                 }
+                "bound_source_ips" => {
+                    serde_json::json!({
+                        "bound_source_ips": role.bound_source_ips,
+                    })
+                }
+                "bypass_machine_binding" => {
+                    serde_json::json!({
+                        "bypass_machine_binding": role.bypass_machine_binding,
+                    })
+                }
                 "bind_secret_id" => {
                     serde_json::json!({
                         "bind_secret_id": role.bind_secret_id,
@@ -1735,8 +1888,16 @@ impl AppRoleBackendInner {
         };
 
         let mut cidr_list = Vec::new();
+        let mut source_ips = Vec::new();
 
         match field {
+            "bound_source_ips" => {
+                source_ips = field_value.as_comma_string_slice().ok_or(RvError::ErrRequestFieldInvalid)?;
+                if source_ips.is_empty() {
+                    return Err(RvError::ErrResponse(format!("missing {field}").to_string()));
+                }
+                utils::ip_filter::validate_entries(&source_ips)?;
+            }
             "bound_cidr_list" | "secret_id_bound_cidrs" | "token_bound_cidrs" => {
                 cidr_list = field_value.as_comma_string_slice().ok_or(RvError::ErrRequestFieldInvalid)?;
                 if cidr_list.is_empty() {
@@ -1766,6 +1927,13 @@ impl AppRoleBackendInner {
                         .iter()
                         .map(|s| SockAddrMarshaler::from_str(s))
                         .collect::<Result<Vec<SockAddrMarshaler>, _>>()?;
+                }
+                "bound_source_ips" => {
+                    role.bound_source_ips = source_ips;
+                }
+                "bypass_machine_binding" => {
+                    role.bypass_machine_binding =
+                        field_value.as_bool_ex().ok_or(RvError::ErrLogicalOperationUnsupported)?;
                 }
                 "bind_secret_id" => {
                     role.bind_secret_id = field_value.as_bool().ok_or(RvError::ErrLogicalOperationUnsupported)?;
@@ -1838,6 +2006,14 @@ impl AppRoleBackendInner {
                 }
                 "token_bound_cidrs" => {
                     role.token_bound_cidrs.clear();
+                }
+                "bound_source_ips" => {
+                    role.bound_source_ips.clear();
+                }
+                "bypass_machine_binding" => {
+                    // Deleting the value restores the secure default: the
+                    // server-wide `require_machine` gate applies again.
+                    role.bypass_machine_binding = false;
                 }
                 "bind_secret_id" => {
                     role.bind_secret_id = req
@@ -1936,6 +2112,54 @@ impl AppRoleBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         self.delete_role_field(req, "secret_id_bound_cidrs").await
+    }
+
+    pub async fn read_role_bound_source_ips(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        self.read_role_field(req, "bound_source_ips").await
+    }
+
+    pub async fn write_role_bound_source_ips(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        self.update_role_field(req, "bound_source_ips").await
+    }
+
+    pub async fn delete_role_bound_source_ips(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        self.delete_role_field(req, "bound_source_ips").await
+    }
+
+    pub async fn read_role_bypass_machine_binding(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        self.read_role_field(req, "bypass_machine_binding").await
+    }
+
+    pub async fn write_role_bypass_machine_binding(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        self.update_role_field(req, "bypass_machine_binding").await
+    }
+
+    pub async fn delete_role_bypass_machine_binding(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        self.delete_role_field(req, "bypass_machine_binding").await
     }
 
     pub async fn read_role_token_bound_cidrs(

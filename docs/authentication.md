@@ -144,9 +144,57 @@ curl --request POST \
 ~~~
 
 The login validates `role_id` and `secret_id` first (a wrong value returns
-`400`), then checks the machine binding and namespace assignment. A role with a
-correct `role_id`/`secret_id` that still returns `403 Permission denied` is
-failing one of these later checks — most often the namespace (below).
+`400`), then checks the source IP filter, the machine binding and the namespace
+assignment. A role with a correct `role_id`/`secret_id` that still returns `403
+Permission denied` is failing one of these later checks — most often the
+namespace (below).
+
+##### Per-application bypass
+
+An application that cannot run a machine identity agent can be exempted from
+machine binding on its own ID, without weakening the gate for anything else:
+
+~~~bash
+bvault write auth/approle/role/my-service bypass_machine_binding=true
+~~~
+
+That ID then logs in with `role_id` + `secret_id` alone; its bound machines are
+not consulted and no `machine_token` is accepted as proof of anything. Setting
+it back to `false` (or deleting
+`auth/approle/role/my-service/bypass-machine-binding`) re-gates the ID. Every
+write of the flag is recorded in the AppID audit trail and logged to the
+`security` target, and each bypassed login is logged too. Pair it with a source
+IP filter so the credential is only usable from where the application runs.
+
+> The server-wide FerroGate `require_machine_identity` flag is a **separate**
+> gate at the token layer: with it on, every authenticated request must ride a
+> machine-bound token, so a bypassed AppID token is refused on use even though
+> the login itself succeeds. Use the bypass with that flag off.
+
+#### Source IP filter
+
+`bound_source_ips` restricts where an ID may authenticate from. Unlike
+`secret_id_bound_cidrs` (CIDR blocks only), a list may mix four forms:
+
+| Form | Example |
+|---|---|
+| Single address | `10.0.0.5`, `2001:db8::1` |
+| CIDR block | `192.168.1.0/24`, `2001:db8::/64` |
+| Address + dotted netmask (IPv4) | `172.16.0.0/255.255.0.0` |
+| Inclusive range | `10.9.0.10-10.9.0.20` |
+
+~~~bash
+bvault write auth/approle/role/my-service \
+  bound_source_ips="10.0.0.5,192.168.1.0/24,172.16.0.0/255.255.0.0,10.9.0.10-10.9.0.20"
+
+# Or on its own sub-path, which also supports read and delete
+bvault write auth/approle/role/my-service/bound-source-ips bound_source_ips="10.0.0.5"
+bvault delete auth/approle/role/my-service/bound-source-ips
+~~~
+
+A login from any address outside the list is refused, and so is one the server
+cannot attribute a source address to. A malformed entry is rejected when the
+role is written, not silently ignored at login time.
 
 #### Namespace-scoped roles
 
@@ -188,6 +236,8 @@ curl -H "X-BastionVault-Namespace: dti/esi" \
 | `bind_secret_id` | Require secret ID for login (default: true) |
 | `token_bound_cidrs` | CIDR blocks that tokens can be used from |
 | `secret_id_bound_cidrs` | CIDR blocks that secret IDs can be generated from |
+| `bound_source_ips` | Source addresses a login may come from: single IPs, CIDR blocks, address + dotted netmask, or `start-end` ranges, mixed freely (empty = any) |
+| `bypass_machine_binding` | Log in with App ID credentials alone — no FerroGate machine token, bound machines ignored (default: false) |
 
 ### Recommended AppID Workflow
 

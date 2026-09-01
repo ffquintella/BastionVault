@@ -39,6 +39,7 @@
 // See roadmaps/workspace-decomposition.md § Phase 3.
 use bv_context as context;
 use bv_errors as errors;
+use bv_kernel_api as kernel_api;
 use bv_logical as logical;
 use bv_storage as storage;
 use bv_utils as utils;

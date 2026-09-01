@@ -1,6 +1,6 @@
 [package]
 name = "bv-logical"
-version = "0.41.0"
+version = "0.41.1"
 edition = "2021"
 description = "BastionVault's request/response types, field schema and backend traits"
 license = "Apache-2.0"

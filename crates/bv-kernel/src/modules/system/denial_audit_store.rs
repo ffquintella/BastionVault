@@ -39,10 +39,20 @@ const DENIAL_AUDIT_SUB_PATH: &str = "denial-audit/";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DenialAuditEntry {
     pub ts: String,
-    /// Display name of the caller when the token resolved to a valid
-    /// principal (an ACL denial), or `"(unauthenticated)"` when the
-    /// request carried a missing/invalid token. Never the token itself.
+    /// The *human* principal behind the denied request: the bound
+    /// username (or entity id) for a FerroGate machine+user session,
+    /// otherwise the token's display name. `"(unauthenticated)"` when
+    /// the request carried a missing/invalid token. Never the token
+    /// itself.
     pub user: String,
+    /// The attesting machine's SPIFFE id when the denied request rode a
+    /// FerroGate machine-bound token, else empty. Recorded separately so
+    /// a denial can be traced to both the human and the machine — the
+    /// machine-identity denial reason in particular is meaningless
+    /// without it. `serde(default)` so entries written before this field
+    /// read back with an empty machine.
+    #[serde(default)]
+    pub machine: String,
     /// The request path that was denied.
     pub path: String,
     /// The attempted operation (`read`, `write`, `list`, `delete`, …).
@@ -161,14 +171,29 @@ pub async fn record_denial(core: &dyn VaultCtx, req: &Request) {
             return;
         }
     };
-    let user = match req.auth.as_ref() {
-        Some(auth) if !auth.display_name.is_empty() => auth.display_name.clone(),
-        Some(_) => "(unnamed principal)".to_string(),
-        None => "(unauthenticated)".to_string(),
+    // A FerroGate machine+user token names the *machine* in
+    // display_name and the bound human in metadata; audit both, so a
+    // denial is attributable to the person as well as the host.
+    let (user, machine) = match req.auth.as_ref() {
+        Some(auth) => {
+            let meta = |k: &str| auth.metadata.get(k).map(String::as_str).unwrap_or_default();
+            let (mut user, machine) = bv_logical::split_principal(
+                &auth.display_name,
+                meta(bv_logical::SPIFFE_ID_META),
+                meta(bv_logical::USERNAME_META),
+                meta(bv_logical::ENTITY_ID_META),
+            );
+            if user.is_empty() {
+                user = "(unnamed principal)".to_string();
+            }
+            (user, machine)
+        }
+        None => ("(unauthenticated)".to_string(), String::new()),
     };
     let entry = DenialAuditEntry {
         ts: String::new(),
         user,
+        machine,
         path: req.path.clone(),
         operation: req.operation.to_string(),
         authenticated: req.auth.is_some(),

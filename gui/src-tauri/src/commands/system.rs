@@ -883,6 +883,12 @@ async fn read_ui_mounts(
 pub struct AuditEvent {
     pub ts: String,
     pub user: String,
+    /// SPIFFE id of the machine that attested the session. Present only
+    /// on rows from a FerroGate machine-bound token; the server omits
+    /// the key entirely otherwise, so this is `None` for every other
+    /// row. Passed through full-length — the table abbreviates it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
     pub op: String,
     pub category: String,
     pub target: String,
@@ -928,6 +934,11 @@ pub async fn list_audit_events(
             Some(AuditEvent {
                 ts: o.get("ts").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 user: o.get("user").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                machine: o
+                    .get("machine")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
                 op: o.get("op").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 category: o
                     .get("category")

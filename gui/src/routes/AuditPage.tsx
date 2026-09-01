@@ -109,7 +109,7 @@ export function AuditPage() {
       if (categoryFilter && e.category !== categoryFilter) return false;
       if (opFilter && e.op !== opFilter) return false;
       if (q) {
-        const hay = `${e.user} ${e.target} ${e.category} ${e.op} ${(e.changed_fields || []).join(" ")}`.toLowerCase();
+        const hay = `${e.user} ${e.machine ?? ""} ${e.target} ${e.category} ${e.op} ${(e.changed_fields || []).join(" ")}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -139,12 +139,28 @@ export function AuditPage() {
     {
       key: "user",
       header: "Who",
-      render: (e: AuditEvent) =>
-        looksLikeEntityId(e.user) ? (
-          <EntityLabel entityId={e.user} />
-        ) : (
-          <span className="text-sm">{e.user || "(unknown)"}</span>
-        ),
+      render: (e: AuditEvent) => (
+        <div className="min-w-0">
+          {looksLikeEntityId(e.user) ? (
+            <EntityLabel entityId={e.user} />
+          ) : (
+            <span className="text-sm">{e.user || "(unknown)"}</span>
+          )}
+          {/* The attesting machine, when the session rode a FerroGate
+              machine-bound token. Suppressed when it equals `user` (an
+              unbound machine session, where the machine *is* the actor)
+              so the cell never repeats itself. Abbreviated for width;
+              the full SPIFFE id is in the tooltip. */}
+          {e.machine && e.machine !== e.user ? (
+            <span
+              className="block font-mono text-[10px] text-[var(--color-text-muted)] truncate"
+              title={e.machine}
+            >
+              via {shortSpiffeId(e.machine)}
+            </span>
+          ) : null}
+        </div>
+      ),
     },
     {
       key: "op",
@@ -312,6 +328,29 @@ export function AuditPage() {
       </div>
     </Layout>
   );
+}
+
+/**
+ * Abbreviate a SPIFFE id so it fits a table cell.
+ *
+ * `ferrogate-spiffe://ferrogate-hml/host/5376139b-0117-8e2d-8049-1ab7b32e7d9a`
+ * renders as `ferrogate-hml/host/5376139b…e7d9a`: the scheme goes (every id
+ * on this page carries the same one), the trust domain and the final
+ * selector stay, and any extra middle segments collapse to an ellipsis.
+ * Display only — the store keeps the full id, and callers put it in a
+ * `title` so it stays copyable.
+ */
+export function shortSpiffeId(id: string): string {
+  const body = id.replace(/^[a-z0-9+.-]+:\/\//i, "");
+  const segs = body.split("/").filter(Boolean);
+  if (segs.length === 0) return id;
+  const last = segs[segs.length - 1];
+  const tail =
+    last.length > 14 ? `${last.slice(0, 8)}\u2026${last.slice(-5)}` : last;
+  if (segs.length === 1) return tail;
+  if (segs.length === 2) return `${segs[0]}/${tail}`;
+  const mid = segs.length > 3 ? "\u2026" : segs[segs.length - 2];
+  return `${segs[0]}/${mid}/${tail}`;
 }
 
 /** Cheap heuristic: Vault-style entity IDs are UUID-like. */

@@ -315,15 +315,24 @@ fn parse_ingestable(line: &str) -> Option<AccessAuditEntry> {
         return None;
     }
 
-    let user = if entry.auth.display_name.is_empty() {
-        "(unnamed principal)".to_string()
-    } else {
-        entry.auth.display_name.clone()
-    };
+    // A FerroGate machine+user token names the *machine* in
+    // display_name and the bound human in metadata, so audit the two
+    // separately rather than attributing the action to the machine.
+    let meta = |k: &str| entry.auth.metadata.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+    let (mut user, machine) = bv_logical::split_principal(
+        &entry.auth.display_name,
+        meta(bv_logical::SPIFFE_ID_META),
+        meta(bv_logical::USERNAME_META),
+        meta(bv_logical::ENTITY_ID_META),
+    );
+    if user.is_empty() {
+        user = "(unnamed principal)".to_string();
+    }
 
     Some(AccessAuditEntry {
         ts: entry.time,
         user,
+        machine,
         path: entry.request.path,
         operation: entry.request.operation,
         remote_addr: entry.request.remote_address,
@@ -436,6 +445,67 @@ mod tests {
         let line = response_line("secret/data/foo", "read", "", "");
         let out = parse_ingestable(&line).unwrap();
         assert_eq!(out.user, "(unnamed principal)");
+        assert_eq!(out.machine, "");
+    }
+
+    /// A machine-bound token names the machine in display_name; the
+    /// audit row must attribute the action to the bound human and keep
+    /// the machine in its own field.
+    #[test]
+    fn machine_bound_read_records_user_and_machine_separately() {
+        let spiffe = "ferrogate-spiffe://ferrogate-hml/host/5376139b";
+        let mut e = AuditEntry {
+            time: "2026-07-21T09:15:19Z".into(),
+            r#type: "response".into(),
+            ..Default::default()
+        };
+        e.request.path = "notifications/inbox/unread-count".into();
+        e.request.operation = "read".into();
+        e.auth.display_name = spiffe.into();
+        e.auth
+            .metadata
+            .insert("spiffe_id".into(), serde_json::Value::String(spiffe.into()));
+        e.auth
+            .metadata
+            .insert("username".into(), serde_json::Value::String("felipe".into()));
+        let line = crate::audit::entry::serialize_line(&e).unwrap();
+
+        let out = parse_ingestable(&line).expect("should ingest");
+        assert_eq!(out.user, "felipe");
+        assert_eq!(out.machine, spiffe);
+    }
+
+    /// No bound user: the machine is the actor, so it stays in `user`
+    /// and is also recorded as the machine.
+    #[test]
+    fn unbound_machine_read_keeps_the_machine_as_actor() {
+        let spiffe = "ferrogate-spiffe://ferrogate-hml/host/5376139b";
+        let mut e = AuditEntry {
+            time: "2026-07-21T09:15:19Z".into(),
+            r#type: "response".into(),
+            ..Default::default()
+        };
+        e.request.path = "secret/data/foo".into();
+        e.request.operation = "read".into();
+        e.auth.display_name = spiffe.into();
+        e.auth
+            .metadata
+            .insert("spiffe_id".into(), serde_json::Value::String(spiffe.into()));
+        let line = crate::audit::entry::serialize_line(&e).unwrap();
+
+        let out = parse_ingestable(&line).expect("should ingest");
+        assert_eq!(out.user, spiffe);
+        assert_eq!(out.machine, spiffe);
+    }
+
+    /// Rows persisted before the `machine` field existed must still
+    /// deserialize (read-old / write-new).
+    #[test]
+    fn legacy_access_entry_without_machine_deserializes() {
+        let legacy = r#"{"ts":"2026-07-21T09:15:19Z","user":"felipe","path":"secret/data/foo","operation":"read","remote_addr":"10.0.0.5","namespace":""}"#;
+        let e: AccessAuditEntry = serde_json::from_str(legacy).unwrap();
+        assert_eq!(e.user, "felipe");
+        assert_eq!(e.machine, "");
     }
 
     #[test]

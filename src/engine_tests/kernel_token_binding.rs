@@ -155,6 +155,95 @@ use crate::modules::namespace::token_binding::*;
         assert!(!token_operable_resolved(&core, &anon, "dti/esi").await);
     }
 
+    /// The identifying metadata contract every auth backend owes
+    /// [`token_operable_resolved`]: a token widens onto an assignment only when
+    /// it carries both `mount_path` and a principal name. `userpass`/FIDO2 and
+    /// the SSO backends stamp the name under `username`, `approle` under
+    /// `role_name`.
+    ///
+    /// This is written down here because the failure mode is silent and
+    /// backend-local: `oidc/`, `saml/` and the standalone `fido2/` mount used to
+    /// stamp neither key, so an operator could grant those principals three
+    /// namespaces on the Users page and watch every one of them stay read-only,
+    /// with nothing in the response saying why. A backend that drops the stamp
+    /// again reintroduces exactly that.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_assignment_widening_covers_every_principal_mount() {
+        use crate::logical::Auth;
+        use crate::modules::namespace::ns_assignment::NsAssignmentStore;
+        use crate::modules::namespace::store::NamespaceQuotas;
+        use crate::modules::namespace::{NamespaceModule, NAMESPACE_MODULE_NAME};
+        use crate::test_utils::new_unseal_test_bastion_vault;
+
+        let (_bvault, core, _root) =
+            new_unseal_test_bastion_vault("test_assignment_widening_mounts").await;
+        let ns_store = core
+            .module_manager()
+            .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+            .and_then(|m| m.store())
+            .unwrap();
+        ns_store.create("dti", NamespaceQuotas::default(), false).await.unwrap();
+        ns_store.create("dti/esi", NamespaceQuotas::default(), false).await.unwrap();
+        let store = NsAssignmentStore::new(&core).unwrap();
+
+        // A root-bound, non-child-visible token per auth mount, shaped exactly
+        // as that mount's login handler stamps it.
+        let bound = |mount: &str, name_key: &str, name: &str| {
+            let mut auth = Auth { policies: vec!["administrator".into()], ..Default::default() };
+            stamp_binding(&mut auth.metadata, "", "root-uuid", false);
+            auth.metadata.insert(MOUNT_PATH_META.into(), mount.into());
+            auth.metadata.insert(name_key.into(), name.into());
+            auth
+        };
+
+        for (mount, name_key, name) in [
+            ("userpass/", "username", "felipe"),
+            ("fido2/", "username", "felipe"),
+            ("oidc/", "username", "felipe@fgv.br"),
+            ("saml/", "username", "felipe@fgv.br"),
+            ("approle/", "role_name", "ci-deploy"),
+            ("ferrogate/", "username", "machine-1"),
+        ] {
+            let auth = bound(mount, name_key, name);
+
+            // No record: the strict binding verdict stands. Absence must never
+            // widen a bound token, whatever the mount.
+            assert!(
+                !token_operable_resolved(&core, &auth, "dti/esi").await,
+                "{mount}{name} must stay bound with no assignment"
+            );
+
+            store
+                .set(&ns_store, mount, name, vec!["dti/esi".into()])
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                token_operable_resolved(&core, &auth, "dti/esi").await,
+                "{mount}{name} must be widened by its assignment"
+            );
+            assert!(
+                token_operable_resolved(&core, &auth, "dti/esi/sub").await,
+                "{mount}{name} must reach descendants of an assigned namespace"
+            );
+            assert!(
+                !token_operable_resolved(&core, &auth, "dti").await,
+                "{mount}{name} must not reach the assigned namespace's parent"
+            );
+        }
+
+        // The regression the SSO backends used to be: the same principal, with
+        // the same assignment, but no `mount_path` on the token. Nothing can key
+        // the lookup, so the widening silently never happens.
+        let mut unstamped = Auth { policies: vec!["administrator".into()], ..Default::default() };
+        stamp_binding(&mut unstamped.metadata, "", "root-uuid", false);
+        unstamped.metadata.insert("username".into(), "felipe@fgv.br".into());
+        assert!(
+            !token_operable_resolved(&core, &unstamped, "dti/esi").await,
+            "a token without mount_path cannot be matched to an assignment"
+        );
+    }
+
     #[test]
     fn test_metadata_roundtrip() {
         let mut m = HashMap::new();

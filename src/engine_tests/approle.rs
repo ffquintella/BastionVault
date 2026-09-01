@@ -86,6 +86,28 @@ mod mod_test {
         (secret_id.to_string(), secret_id_accessor.to_string())
     }
 
+    /// Issue a fresh secret_id and log in with it from source address `ip`.
+    #[maybe_async::maybe_async]
+    pub async fn login_from_source_ip(
+        core: &dyn VaultCtx,
+        token: &str,
+        role_name: &str,
+        role_id: &str,
+        ip: &str,
+    ) -> Result<Option<Response>, RvError> {
+        let resp =
+            test_write_api(core, token, format!("auth/approle/role/{role_name}/secret-id").as_str(), true, None).await;
+        let secret_id = resp.unwrap().unwrap().data.unwrap()["secret_id"].as_str().unwrap().to_string();
+
+        let mut req = Request::new("auth/approle/login");
+        req.operation = Operation::Write;
+        req.body = json!({ "role_id": role_id, "secret_id": secret_id }).as_object().cloned();
+        req.connection =
+            Some(crate::logical::connection::Connection { peer_addr: ip.to_string(), ..Default::default() });
+
+        core.handle_request(&mut req).await
+    }
+
     #[maybe_async::maybe_async]
     pub async fn test_login(
         core: &dyn VaultCtx,
@@ -384,7 +406,7 @@ mod path_role_test {
 
     // `super::super::` inside the backend: the sibling helpers live in the
     // block lifted from `lib.rs`, the two items in the crate root.
-    use super::mod_test::{generate_secret_id, test_delete_role, test_login, test_write_role};
+    use super::mod_test::{generate_secret_id, login_from_source_ip, test_delete_role, test_login, test_write_role};
     use bv_kernel_api::VaultCtx;
 
     use crate::logical::field::FieldTrait;
@@ -1018,6 +1040,130 @@ mod path_role_test {
         let resp = core.handle_request(&mut req).await;
         assert!(resp.is_ok());
         assert!(resp.unwrap().unwrap().auth.is_some());
+    }
+
+    /// A role that opts out of machine binding logs in with the AppID
+    /// credentials alone, while the server-wide gate stays on for every other
+    /// role. The exemption is per role, persisted, and revocable.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_approle_bypass_machine_binding() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_approle_bypass_machine_binding").await;
+
+        test_mount_auth_api(&core, &root_token, "approle", "approle").await;
+
+        // Gate on (the default) + two roles: one exempt, one not.
+        assert!(core.approle_require_machine().load(std::sync::atomic::Ordering::Relaxed));
+        test_write_role(&core, &root_token, "approle", "exempt", "exempt-id", "a", true).await;
+        test_write_role(&core, &root_token, "approle", "gated", "gated-id", "a", true).await;
+
+        let cfg = json!({ "bypass_machine_binding": true }).as_object().cloned();
+        let _ = test_write_api(&core, &root_token, "auth/approle/role/exempt", true, cfg).await;
+
+        let resp = test_read_api(&core, &root_token, "auth/approle/role/exempt", true).await;
+        assert_eq!(resp.unwrap().unwrap().data.unwrap()["bypass_machine_binding"], Value::Bool(true));
+        let resp = test_read_api(&core, &root_token, "auth/approle/role/gated", true).await;
+        assert_eq!(resp.unwrap().unwrap().data.unwrap()["bypass_machine_binding"], Value::Bool(false));
+
+        let login = |role_id: &str, secret_id: &str| {
+            json!({ "role_id": role_id, "secret_id": secret_id }).as_object().cloned()
+        };
+
+        // The exempt role authenticates with role_id + secret_id only.
+        let resp = test_write_api(&core, &root_token, "auth/approle/role/exempt/secret-id", true, None).await;
+        let exempt_secret = resp.unwrap().unwrap().data.unwrap()["secret_id"].as_str().unwrap().to_string();
+
+        let mut req = Request::new("auth/approle/login");
+        req.operation = Operation::Write;
+        req.body = login("exempt-id", &exempt_secret);
+        let auth = core.handle_request(&mut req).await.unwrap().unwrap().auth.expect("bypassed login mints a token");
+        assert_eq!(auth.metadata.get("approle_machine_bypass").map(String::as_str), Some("true"));
+        assert!(!auth.metadata.contains_key("spiffe_id"), "no machine identity is stamped on a bypassed login");
+
+        // The other role is still refused without a machine token.
+        let resp = test_write_api(&core, &root_token, "auth/approle/role/gated/secret-id", true, None).await;
+        let gated_secret = resp.unwrap().unwrap().data.unwrap()["secret_id"].as_str().unwrap().to_string();
+
+        let mut req = Request::new("auth/approle/login");
+        req.operation = Operation::Write;
+        req.body = login("gated-id", &gated_secret);
+        assert!(core.handle_request(&mut req).await.is_err(), "the gate still applies to a non-exempt role");
+
+        // Sub-path read/write/delete, and revoking the exemption re-gates the role.
+        let resp = test_read_api(&core, &root_token, "auth/approle/role/exempt/bypass-machine-binding", true).await;
+        assert_eq!(resp.unwrap().unwrap().data.unwrap()["bypass_machine_binding"], Value::Bool(true));
+
+        let _ = test_delete_api(&core, &root_token, "auth/approle/role/exempt/bypass-machine-binding", true, None).await;
+        let resp = test_read_api(&core, &root_token, "auth/approle/role/exempt", true).await;
+        assert_eq!(resp.unwrap().unwrap().data.unwrap()["bypass_machine_binding"], Value::Bool(false));
+
+        let resp = test_write_api(&core, &root_token, "auth/approle/role/exempt/secret-id", true, None).await;
+        let exempt_secret = resp.unwrap().unwrap().data.unwrap()["secret_id"].as_str().unwrap().to_string();
+        let mut req = Request::new("auth/approle/login");
+        req.operation = Operation::Write;
+        req.body = login("exempt-id", &exempt_secret);
+        assert!(core.handle_request(&mut req).await.is_err(), "revoking the exemption re-gates the role");
+    }
+
+    /// The source-IP filter accepts a mixed list — single address, CIDR block,
+    /// dotted netmask and inclusive range — and refuses a login from anywhere
+    /// else. A malformed rule is rejected on write, not at login time.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_approle_bound_source_ips() {
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_bound_source_ips").await;
+
+        test_mount_auth_api(&core, &root_token, "approle", "approle").await;
+        test_write_role(&core, &root_token, "approle", "iprole", "ip-role-id", "a", true).await;
+
+        // Machine binding is out of scope here; this role authenticates on the
+        // AppID credentials plus the source filter.
+        let cfg = json!({
+            "bypass_machine_binding": true,
+            "bound_source_ips": "10.0.0.5,192.168.1.0/24,172.16.0.0/255.255.0.0,10.9.0.10-10.9.0.20",
+        })
+        .as_object()
+        .cloned();
+        let _ = test_write_api(&core, &root_token, "auth/approle/role/iprole", true, cfg).await;
+
+        let resp = test_read_api(&core, &root_token, "auth/approle/role/iprole", true).await;
+        let rules = resp.unwrap().unwrap().data.unwrap()["bound_source_ips"].as_array().unwrap().clone();
+        assert_eq!(rules.len(), 4);
+
+        // A malformed entry is refused on write and leaves the role untouched.
+        let bad = json!({ "bound_source_ips": "10.0.0.5,not-an-ip" }).as_object().cloned();
+        let _ = test_write_api(&core, &root_token, "auth/approle/role/iprole", false, bad).await;
+        let bad = json!({ "bound_source_ips": "10.0.0.50-10.0.0.5" }).as_object().cloned();
+        let _ = test_write_api(&core, &root_token, "auth/approle/role/iprole/bound-source-ips", false, bad).await;
+        let resp = test_read_api(&core, &root_token, "auth/approle/role/iprole", true).await;
+        assert_eq!(resp.unwrap().unwrap().data.unwrap()["bound_source_ips"].as_array().unwrap().len(), 4);
+
+        for allowed in ["10.0.0.5", "192.168.1.77", "172.16.9.9", "10.9.0.15", "10.9.0.10", "10.9.0.20"] {
+            let resp = login_from_source_ip(&core, &root_token, "iprole", "ip-role-id", allowed).await;
+            assert!(resp.is_ok(), "login from {allowed} must be allowed");
+        }
+        for denied in ["10.0.0.6", "192.168.2.1", "172.17.0.1", "10.9.0.21", "10.9.0.9"] {
+            let resp = login_from_source_ip(&core, &root_token, "iprole", "ip-role-id", denied).await;
+            assert!(resp.is_err(), "login from {denied} must be refused");
+        }
+
+        // No connection information at all fails closed.
+        let resp = test_write_api(&core, &root_token, "auth/approle/role/iprole/secret-id", true, None).await;
+        let secret_id = resp.unwrap().unwrap().data.unwrap()["secret_id"].as_str().unwrap().to_string();
+        let mut req = Request::new("auth/approle/login");
+        req.operation = Operation::Write;
+        req.body = json!({ "role_id": "ip-role-id", "secret_id": secret_id }).as_object().cloned();
+        assert!(core.handle_request(&mut req).await.is_err(), "a login with no source address is refused");
+
+        // Clearing the filter lifts the restriction.
+        let _ = test_delete_api(&core, &root_token, "auth/approle/role/iprole/bound-source-ips", true, None).await;
+        let resp = test_write_api(&core, &root_token, "auth/approle/role/iprole/secret-id", true, None).await;
+        let secret_id = resp.unwrap().unwrap().data.unwrap()["secret_id"].as_str().unwrap().to_string();
+        let mut req = Request::new("auth/approle/login");
+        req.operation = Operation::Write;
+        req.body = json!({ "role_id": "ip-role-id", "secret_id": secret_id }).as_object().cloned();
+        req.connection =
+            Some(crate::logical::connection::Connection { peer_addr: "203.0.113.9".to_string(), ..Default::default() });
+        assert!(core.handle_request(&mut req).await.unwrap().unwrap().auth.is_some());
     }
 
     /// Real end-to-end machine-bound AppRole login driven by the **local MIA
@@ -1713,6 +1859,8 @@ mod path_role_test {
             "token_bound_cidrs":     [],
             "token_policies":        ["p", "q", "r", "s"],
             "token_type":            "default",
+            "bound_source_ips":      [],
+            "bypass_machine_binding": false,
         });
         assert_eq!(expected.as_object().unwrap().clone(), resp_data);
 
@@ -1750,6 +1898,8 @@ mod path_role_test {
             "token_bound_cidrs":     [],
             "token_policies":        ["a", "b", "c", "d"],
             "token_type":            "default",
+            "bound_source_ips":      [],
+            "bypass_machine_binding": false,
         });
         assert_eq!(expected.as_object().unwrap().clone(), resp_data);
 
@@ -2044,6 +2194,8 @@ mod path_role_test {
             "token_explicit_max_ttl":0,
             "token_policies":        ["p", "q", "r", "s"],
             "token_type":            "default",
+            "bound_source_ips":      [],
+            "bypass_machine_binding": false,
         });
         assert_eq!(expected.as_object().unwrap().clone(), resp_data);
 
@@ -2078,6 +2230,8 @@ mod path_role_test {
             "token_bound_cidrs":     ["127.0.0.1", "127.0.0.1/16"],
             "token_policies":        ["a", "b", "c", "d"],
             "token_type":            "default",
+            "bound_source_ips":      [],
+            "bypass_machine_binding": false,
         });
         assert_eq!(expected.as_object().unwrap().clone(), resp_data);
 
@@ -2207,6 +2361,8 @@ mod path_role_test {
             "token_explicit_max_ttl":0,
             "token_policies":        ["p", "q", "r", "s"],
             "token_type":            "service",
+            "bound_source_ips":      [],
+            "bypass_machine_binding": false,
         });
         assert_eq!(expected.as_object().unwrap().clone(), resp_data);
 
@@ -2242,6 +2398,8 @@ mod path_role_test {
             "token_bound_cidrs":     [],
             "token_policies":        ["a", "b", "c", "d"],
             "token_type":            "service",
+            "bound_source_ips":      [],
+            "bypass_machine_binding": false,
         });
         assert_eq!(expected.as_object().unwrap().clone(), resp_data);
 
@@ -2290,6 +2448,8 @@ mod path_role_test {
             "token_explicit_max_ttl":0,
             "token_policies":        ["p", "q", "r", "s"],
             "token_type":            "default",
+            "bound_source_ips":      [],
+            "bypass_machine_binding": false,
         });
         assert_eq!(expected.as_object().unwrap().clone(), resp_data);
 
@@ -2326,6 +2486,8 @@ mod path_role_test {
             "token_bound_cidrs":     [],
             "token_policies":        ["a", "b", "c", "d"],
             "token_type":            "default",
+            "bound_source_ips":      [],
+            "bypass_machine_binding": false,
         });
         assert_eq!(expected.as_object().unwrap().clone(), resp_data);
 
@@ -2362,6 +2524,8 @@ mod path_role_test {
             "token_bound_cidrs":     [],
             "token_policies":        ["a", "b", "c", "d"],
             "token_type":            "service",
+            "bound_source_ips":      [],
+            "bypass_machine_binding": false,
         });
         assert_eq!(expected.as_object().unwrap().clone(), resp_data);
 

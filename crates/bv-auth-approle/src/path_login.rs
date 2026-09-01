@@ -15,7 +15,7 @@ use crate::{
     kernel_api::identity::GroupKind,
     new_fields, new_fields_internal, new_path, new_path_internal, bv_error_response, bv_error_string,
     storage::StorageEntry,
-    utils::cidr,
+    utils::{cidr, ip_filter},
 };
 
 /// Resolve or create the entity_id for an AppRole principal under the
@@ -310,6 +310,33 @@ impl AppRoleBackendInner {
             }
         }
 
+        // --- Source-address filter ---
+        // Richer than `secret_id_bound_cidrs`: each entry may be a single
+        // address, a CIDR block, an address + dotted netmask or an inclusive
+        // range, and the list may mix them. Fails closed — an unknown or
+        // unparsable client address refuses the login.
+        if !role_entry.bound_source_ips.is_empty() {
+            let conn = req
+                .connection
+                .as_ref()
+                .ok_or_else(|| RvError::ErrResponse("failed to get connection information".to_string()))?;
+            if conn.peer_addr.is_empty() {
+                return Err(RvError::ErrResponse("failed to get connection information".to_string()));
+            }
+
+            if !ip_filter::ip_matches_any(&conn.peer_addr, &role_entry.bound_source_ips)? {
+                log::warn!(
+                    target: "security",
+                    "AppID login refused: source address {} is outside the source IP filter of role {}",
+                    conn.peer_addr, role_entry.name
+                );
+                return Err(RvError::ErrResponse(format!(
+                    "source address {} unauthorized by the source IP filter on the ID",
+                    conn.peer_addr
+                )));
+            }
+        }
+
         // --- Mandatory machine binding ---
         // When the server gate `approle_require_machine` is on (the default),
         // every AppRole login must present a live FerroGate machine token whose
@@ -317,9 +344,19 @@ impl AppRoleBackendInner {
         // machine; we re-check approval (defense in depth) and intersect the
         // machine binding's environment scope with the secret_id's scope.
         // Operators can disable the gate to stage rollout (e.g. before binding
-        // machines to existing roles).
+        // machines to existing roles), and a single application can be exempted
+        // with the role's own `bypass_machine_binding` — that login is then
+        // authenticated by the AppID credentials alone.
         let mut machine_envs: Vec<String> = Vec::new();
-        if self.core.approle_require_machine().load(std::sync::atomic::Ordering::Relaxed) {
+        if role_entry.bypass_machine_binding {
+            log::warn!(
+                target: "security",
+                "AppID login for role {} bypassed machine binding (bypass_machine_binding=true): \
+                 authenticated by AppID credentials alone",
+                role_entry.name
+            );
+            metadata.insert("approle_machine_bypass".to_string(), "true".to_string());
+        } else if self.core.approle_require_machine().load(std::sync::atomic::Ordering::Relaxed) {
             let machine_token = req
                 .get_data("machine_token")
                 .ok()

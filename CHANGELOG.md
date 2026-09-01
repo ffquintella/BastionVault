@@ -45,6 +45,114 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-09-01
+
+### Fixed
+
+#### Audit trail attributed machine-bound actions to the machine, not the user
+
+- **A FerroGate machine+user session now audits the human principal, with the
+  attesting machine recorded in its own field.** The combined token carries the
+  machine's SPIFFE id in `display_name` and the bound user in token metadata, and
+  both the access and denial audit stores derived their `user` from
+  `display_name` alone -- so every action taken from an attested host was
+  attributed to `ferrogate-spiffe://.../host/<uuid>` and the person behind it was
+  not recorded anywhere. `bv_logical::split_principal` is now the single place
+  that rule lives; `AccessAuditEntry` and `DenialAuditEntry` each gained a
+  `machine` field (`serde(default)`, so pre-existing rows read back with an empty
+  machine -- no migration), and `sys/audit/events` emits a `machine` key on the
+  rows that have one. A machine token with no bound user keeps the SPIFFE id as
+  `user`: the machine is the actor there, and dropping it would lose the only
+  identity the request had. (`crates/bv-logical/src/auth.rs`,
+  `crates/bv-kernel/src/modules/system/{access_audit_store,access_audit_reconciler,denial_audit_store,mod}.rs`,
+  `features/audit-logging.md`)
+
+- **The Audit page shows the machine under the user, abbreviated.** A full SPIFFE
+  id is ~70 characters and crushed the table, so the Who column renders
+  `shortSpiffeId(...)` -- scheme dropped, trust domain and final selector kept,
+  extra middle segments collapsed -- with the full id in the cell's tooltip and
+  in the store. Search matches the full id. The machine line is suppressed when it
+  would merely repeat the user. (`gui/src/routes/AuditPage.tsx`,
+  `gui/src-tauri/src/commands/system.rs`)
+
+#### Cross-namespace navigation without re-login
+
+- **`oidc/`, `saml/` and the standalone `fido2/` auth backends now bind their
+  tokens to a namespace and identify their principal.** All three minted tokens
+  with no `namespace_path`/`child_visible` binding and no `mount_path`, so the
+  issued token read back as root-bound and non-child-visible *and* could not be
+  matched to a namespace assignment. The effect: an operator could grant an SSO
+  or security-key principal several namespaces under Admin -> Users -> Allowed
+  namespaces and every one of them stayed read-only, with re-authenticating no
+  help either -- those backends ignored `X-BastionVault-Namespace` at login.
+  They now mirror `userpass/`: resolve the login namespace (falling back to the
+  principal's first assigned namespace when the client names none), enforce the
+  login assignment, stamp `mount_path` + the binding, and follow the namespace's
+  `child_visible_default`. `bv-auth-cert` is unaffected -- it has no login path
+  in the OpenSSL-free build. (`crates/bv-auth-{oidc,saml,fido2}`)
+
+- **The read-only banner now names the missing grant and can write it.**
+  `NamespaceGuardBanner` told the operator to "sign in directly" to the
+  namespace, which does not help: a fresh login binds to whatever namespace it
+  names and the missing allowed-namespace entry is still missing. It now names
+  the session's principal and the entry it lacks, and -- for a caller who can
+  already write `sys/identity/ns-assignment/*` -- offers a one-click grant.
+  Operability is resolved per request, so the grant applies to the open session
+  with no new token. (`gui/src/components/NamespaceGuardBanner.tsx`)
+
+### Added
+
+#### AppID: per-application machine-binding bypass and source IP filter
+
+- **`bypass_machine_binding` on an AppID role** -- a per-application escape hatch
+  from mandatory machine binding. When set, a login against that ID is
+  authenticated by the App ID credentials alone (`role_id` + `secret_id`, plus
+  any source constraints): no FerroGate `machine_token` is required and the
+  role's bound machines are not consulted, while the server-wide
+  `require_machine` gate keeps applying to every other ID. Off by default,
+  readable/writable on `auth/approle/role/<name>` and its own
+  `role/<name>/bypass-machine-binding` sub-path (a `DELETE` restores the secure
+  default), recorded in the AppID audit trail, and logged to the `security`
+  target both when configured and on each bypassed login. The issued token
+  carries `approle_machine_bypass=true` metadata and no `spiffe_id` -- so the
+  separate FerroGate `require_machine_identity` token-layer gate, if enabled,
+  still refuses it. (`crates/bv-auth-approle/src/{path_role,path_login}.rs`)
+- **`bound_source_ips` on an AppID role** -- restricts the source addresses a
+  login may come from, as a list that may mix single addresses (`10.0.0.5`),
+  CIDR blocks (`192.168.1.0/24`), an address with a dotted netmask
+  (`172.16.0.0/255.255.0.0`) and inclusive ranges (`10.9.0.10-10.9.0.20`), IPv4
+  or IPv6. Malformed entries are rejected when the role is written rather than
+  silently never matching at login; a login from an unlisted address, or one the
+  server cannot attribute a source address to, is refused and logged. Available
+  on `auth/approle/role/<name>` and the `role/<name>/bound-source-ips` sub-path.
+  The matcher is new shared substrate in `bv_utils::ip_filter`
+  (`crates/bv-utils/src/ip_filter.rs`), which `bv_utils::cidr` (CIDR-only, a
+  Vault replica) does not cover.
+- **GUI** -- the AppID edit form gained a "Bypass machine binding" toggle and a
+  "Source IP filter" field; the overview shows both, and the "no bound machines"
+  warning is replaced by an explicit bypass notice on an exempted ID.
+  (`gui/src/routes/AppRolePage.tsx`, `gui/src-tauri/src/commands/approle.rs`)
+
+- **`session_principal` Tauri command** -- the `(mount, name)` pair the current
+  session's token identifies its principal by, read off
+  `auth/token/lookup-self`. Reports `known: false` for a token that stamps
+  neither, which is exactly the case where no assignment can be matched to the
+  session. (`gui/src-tauri/src/commands/auth.rs`)
+
+### Changed
+
+- **A namespace assignment on an `oidc/`, `saml/` or `fido2/` principal is now
+  enforced at login.** It previously existed in storage and was ignored by those
+  mounts. An operator who wrote one expecting it to have effect will now see it
+  take effect -- including denying a login into a namespace the record excludes.
+  Review existing `sys/identity/ns-assignment/{oidc,saml,fido2}/*` records before
+  upgrading.
+
+- **`{{auth.mount}}` policy templating now resolves for `oidc/`, `saml/` and
+  `fido2/` tokens.** A templated rule is dropped when `mount_path` is absent, so
+  rules written against those mounts silently matched nothing and now match.
+
+
 ## [0.41.25] - 2026-09-01
 
 ### Security

@@ -174,6 +174,42 @@ replicated system-view stores). Two pieces close the gap:
   (`read`/`write`/`list`/…). Aggregated by `collect_access_events`
   in `src/modules/system/mod.rs`.
 
+**Machine vs. user attribution (shipped)** — a FerroGate
+machine+user session issues a *combined* token: the machine's
+SPIFFE id is the token's `display_name`, while the bound human's
+login lives in the token metadata (`username` / `entity_id`, set by
+`bind_user_token` in `crates/bv-auth-ferrogate/src/path_machines.rs`).
+Both the access and denial stores derived their `user` from
+`display_name` alone, so every action taken through a machine-bound
+session was attributed to the *machine* and the human was not
+recorded at all — a real attribution gap, since the point of the
+combined token is that a person acted from an attested host.
+
+`bv_logical::split_principal` (`crates/bv-logical/src/auth.rs`) is
+now the single place that rule lives: it returns
+`(acting principal, attesting machine)` from a token's display name
+plus its `spiffe_id` / `username` / `entity_id` metadata.
+`AccessAuditEntry` and `DenialAuditEntry` each gained a
+`#[serde(default)] machine: String` alongside `user`, so entries
+written before the field read back with an empty machine
+(read-old / write-new; no migration needed). `AuditEventBuilder`
+carries it through to `sys/audit/events`, which emits the `machine`
+key only on rows that have one.
+
+A machine token with **no** bound user keeps the SPIFFE id as
+`user`: the machine genuinely is the actor there, so dropping it
+from "who" would lose the only identity the request had. The GUI
+suppresses the duplicate rendering in that case.
+
+The GUI keeps the full id in the store and in the row's `title`,
+and renders an abbreviation (`shortSpiffeId` in
+`gui/src/routes/AuditPage.tsx`) so a 70-character SPIFFE id does
+not crush the table: scheme dropped, trust domain and final
+selector kept, extra middle segments collapsed to an ellipsis —
+`ferrogate-spiffe://ferrogate-hml/host/5376139b-0117-8e2d-8049-1ab7b32e7d9a`
+renders as `ferrogate-hml/host/5376139b…e7d9a`. Search still
+matches the full id, so an operator can paste one and find its rows.
+
 **Dashboard counters read from these stores (shipped)** — the same
 per-node/not-replicated defect affected the dashboard summary
 itself, not just the Audit page. `handle_dashboard_summary`

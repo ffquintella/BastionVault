@@ -23,6 +23,57 @@ pub const NS_ID_META: &str = "namespace_id";
 /// Token metadata key: may this token see into child namespaces?
 pub const CHILD_VISIBLE_META: &str = "child_visible";
 
+/// Token metadata key holding the SPIFFE id of the machine that attested
+/// the session. Set only by the FerroGate login handler; its presence is
+/// what "machine-bound token" means throughout the kernel.
+pub const SPIFFE_ID_META: &str = "spiffe_id";
+
+/// Token metadata key holding the login name of the human principal.
+pub const USERNAME_META: &str = "username";
+
+/// Token metadata key holding the stable identity entity id of the human
+/// principal.
+pub const ENTITY_ID_META: &str = "entity_id";
+
+/// Split a token's identity into `(acting principal, attesting machine)`
+/// for the audit trail.
+///
+/// A FerroGate machine+user session carries the *machine's* SPIFFE id in
+/// [`Auth::display_name`] and the bound human's login in the token
+/// metadata, so auditing `display_name` alone attributed every action to
+/// the machine and never recorded the user. The rule here is:
+///
+/// * `machine` is the SPIFFE id, or empty for a non-machine-bound token;
+/// * `user` is the bound username (falling back to the entity id, which
+///   the GUI resolves back to a login) when the token is machine-bound
+///   and a user was in fact bound, and the display name otherwise.
+///
+/// The display-name fallback is deliberate: a machine token with no bound
+/// user has no human principal, and the machine *is* the actor, so the
+/// SPIFFE id remains the honest answer for "who" — recorded in both
+/// fields rather than silently dropped from one.
+///
+/// Both returned values may be empty; callers own the "(unnamed
+/// principal)" style of placeholder, which differs per store.
+pub fn split_principal(
+    display_name: &str,
+    spiffe_id: &str,
+    username: &str,
+    entity_id: &str,
+) -> (String, String) {
+    if spiffe_id.is_empty() {
+        return (display_name.to_string(), String::new());
+    }
+    let user = if !username.is_empty() {
+        username
+    } else if !entity_id.is_empty() {
+        entity_id
+    } else {
+        display_name
+    };
+    (user.to_string(), spiffe_id.to_string())
+}
+
 #[derive(Debug, Clone, Eq, Default, PartialEq, Serialize, Deserialize, Deref, DerefMut)]
 pub struct Auth {
     #[deref]
@@ -86,4 +137,40 @@ pub struct PolicyInfo {
     #[serde(rename = "type")]
     #[default("acl".into())]
     pub policy_type: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_principal;
+
+    #[test]
+    fn non_machine_token_keeps_display_name_and_has_no_machine() {
+        let (user, machine) = split_principal("felipe", "", "felipe", "e-1");
+        assert_eq!(user, "felipe");
+        assert_eq!(machine, "");
+    }
+
+    #[test]
+    fn machine_bound_session_attributes_the_bound_user() {
+        let (user, machine) =
+            split_principal("ferrogate-spiffe://hml/host/abc", "ferrogate-spiffe://hml/host/abc", "felipe", "e-1");
+        assert_eq!(user, "felipe");
+        assert_eq!(machine, "ferrogate-spiffe://hml/host/abc");
+    }
+
+    #[test]
+    fn machine_bound_session_falls_back_to_entity_id() {
+        let (user, machine) =
+            split_principal("ferrogate-spiffe://hml/host/abc", "ferrogate-spiffe://hml/host/abc", "", "e-1");
+        assert_eq!(user, "e-1");
+        assert_eq!(machine, "ferrogate-spiffe://hml/host/abc");
+    }
+
+    #[test]
+    fn unbound_machine_session_reports_the_machine_in_both_fields() {
+        let (user, machine) =
+            split_principal("ferrogate-spiffe://hml/host/abc", "ferrogate-spiffe://hml/host/abc", "", "");
+        assert_eq!(user, "ferrogate-spiffe://hml/host/abc");
+        assert_eq!(machine, "ferrogate-spiffe://hml/host/abc");
+    }
 }

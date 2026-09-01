@@ -41,7 +41,10 @@ pub mod response;
 pub mod secret;
 pub mod util;
 
-pub use auth::{Auth, CHILD_VISIBLE_META, NS_ID_META, NS_PATH_META};
+pub use auth::{
+    split_principal, Auth, CHILD_VISIBLE_META, ENTITY_ID_META, NS_ID_META, NS_PATH_META,
+    SPIFFE_ID_META, USERNAME_META,
+};
 pub use backend::{LogicalBackend, CTX_KEY_BACKEND_PATH};
 pub use connection::Connection;
 pub use field::{Field, FieldType};

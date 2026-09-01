@@ -21,7 +21,8 @@ The HTTP surface follows Vault Enterprise's: every endpoint accepts an `X-Bastio
 > registry (`mount_registry.rs`) with end-to-end mount creation + dispatch, the
 > idempotent **non-destructive** barrier re-root copy (`migrate.rs`),
 > namespace-bound tokens + `child_visible` (`token_binding.rs`), per-login
-> namespace binding across userpass/FIDO2/approle — with `child_visible`
+> namespace binding across userpass/FIDO2/approle/ferrogate **and the SSO and
+> standalone-security-key mounts (`oidc/`, `saml/`, `fido2/`)** — with `child_visible`
 > following the login namespace's `child_visible_default` flag
 > (`token_binding::login_child_visible`) rather than a hardcoded `false`, so an
 > operator can opt a namespace into minting child-visible admin tokens —
@@ -50,7 +51,13 @@ The HTTP surface follows Vault Enterprise's: every endpoint accepts an `X-Bastio
 > `active_namespace`. The GUI renders a persistent read-only banner
 > (`NamespaceGuardBanner`) from that flag, so switching the namespace picker to a
 > tenant your token can't operate in explains itself instead of failing with an
-> opaque 403 on the first write.
+> opaque 403 on the first write. The banner also *repairs* it: it names the
+> allowed-namespace entry the session's principal lacks and, for a caller who can
+> already write `sys/identity/ns-assignment/*`, writes it on one click.
+> Operability is resolved per request, so the grant lands on the open session —
+> no new token and no re-login. A token that stamps no principal (`mount_path` +
+> `username`/`role_name`) reports `known: false` and gets the explanation only,
+> because no assignment could be matched to it either.
 >
 > **In progress (Phase 5):** per-principal **namespace assignment**
 > (login-restriction) — restrict which namespaces a credential may authenticate
@@ -322,10 +329,12 @@ one exists and does not permit `ns_path`, the login fails with
 `namespace_allowed(allowed, request_ns) -> bool` (empty ⇒ `true`; otherwise
 exact-or-descendant match).
 
-Wiring sites: `credential/userpass/path_login.rs`,
-`credential/userpass/path_fido2_login.rs`, `credential/approle/path_login.rs`,
-the `cert` login path (`credential/cert/`), and standalone
-`credential/fido2/path_login.rs`.
+Wiring sites: `bv-auth-userpass/src/path_login.rs`,
+`bv-auth-userpass/src/path_fido2_login.rs`, `bv-auth-approle/src/path_login.rs`,
+`bv-auth-ferrogate/src/path_machines.rs`, `bv-auth-oidc/src/path_callback.rs`,
+`bv-auth-saml/src/path_callback.rs`, and standalone
+`bv-auth-fido2/src/path_login.rs`. The `cert` mount has no login path in the
+OpenSSL-free build, so there is nothing to wire.
 
 #### Unscoped login → the principal's default namespace
 
@@ -516,7 +525,7 @@ Land the data model and the routing path. No identity/policy/audit scoping yet �
 | `src/modules/identity/entity_store.rs` (extension) | Per-namespace alias keyspace + `namespace` tag on each entity record (entity UUIDs stay globally unique, so `get_entity(id)` callers are unchanged); `_ns` get/create/forget/list variants. The same external principal resolves to a distinct entity per namespace. | ✅ Done |
 | `src/modules/identity/group_store.rs` (extension) | Per-namespace group + group-history keyspaces; `_ns` CRUD + history + `expand_policies_ns` so login-time group→policy expansion is namespace-scoped. | ✅ Done |
 | `src/modules/identity/mod.rs` (extension) | Group-management + entity-alias HTTP handlers scope by the `X-BastionVault-Namespace` header; `identity/` is exempted from path-rewrite so it stays header-scoped like `sys/`. | ✅ Done |
-| Per-login namespace binding (`credential/userpass`, `credential/approle`) | Login resolves the namespace header (fails closed on an unknown namespace), provisions/loads the entity and expands groups *in that namespace*, and stamps the token's namespace binding. Covers userpass password + userpass-FIDO2 + approle. (`cert` login: follow-up.) | ✅ Done |
+| Per-login namespace binding (`credential/userpass`, `credential/approle`, `oidc`, `saml`, standalone `fido2`) | Login resolves the namespace header (fails closed on an unknown namespace), provisions/loads the entity and expands groups *in that namespace*, and stamps the token's namespace binding. Covers userpass password + userpass-FIDO2 + approle + ferrogate, and now `oidc/`, `saml/` and the standalone `fido2/` mount. (`cert` login: no login path exists.) | ✅ Done |
 | `src/modules/namespace/identity_link.rs` + `v2/sys/namespace-links` | Parent-visible cross-tenant identity correlation: a namespace may link entities only within its own subtree (one-way), stored partitioned by owner so siblings/children never see it. List/create/read/delete via the system backend, scoped by header. | ✅ Done |
 
 ### Phase 4 — Quotas + GUI
@@ -544,9 +553,11 @@ decisions and rationale.
 | `gui/src/stores/namespaceStore.ts` (`landSession`) + `gui/src/routes/LoginPage.tsx` + `gui/src/stores/authStore.ts` | Every login (and a session restored after a vault switch) lands on `token_namespace`, so a tenant token's first fetch carries the matching namespace header instead of 403ing at root. Falls back to root when discovery is unavailable. | ✅ Done |
 | `gui/src/components/NamespaceSwitcher.tsx` | Options come from `namespaces-self`, so the picker only offers namespaces the session can actually operate in (root included only when reachable) and hides itself when there is just one. | ✅ Done |
 | `gui/src/stores/namespaceStore.ts::widenWithAdminWalk` | **Admin fallback, so the picker cannot go dark.** `namespaces-self` is silent in two operator-visible cases: a server without the route (404 ⇒ empty list for the whole session), and a root-bound, non-child-visible token with no assignment record — operable only at root, so the answer collapses to one entry and the switcher hides itself even for an admin who lists `dti` / `dti/esi` on the Namespaces and Users pages. A missing or single-entry answer now unions in the `sys/namespaces` tree walk. Cannot widen a tenant: that walk is sudo-gated (403 ⇒ the list stays exactly what the token reported), and browsing a non-operable namespace still shows the `NamespaceGuardBanner` read-only strip. | ✅ Done |
-| `cert` / standalone `fido2/` backends | **Not gated yet, by necessity.** The legacy `cert` auth method is disabled in the OpenSSL-free default build (produces no `Auth`), and the standalone `fido2/` backend is not namespace-aware (it never resolves a login namespace). Assignment enforcement for these is contingent on the separate "`cert`-login namespace binding" follow-up; the assignment **store and endpoints already accept any mount**, so records can be authored ahead of that work. | ⏳ Deferred (prereq: namespace binding) |
+| `crates/bv-auth-oidc/src/path_callback.rs`, `crates/bv-auth-saml/src/path_callback.rs`, `crates/bv-auth-fido2/src/path_login.rs` | Same three steps as userpass: resolve the login namespace (an IdP redirect / ACS POST carries no namespace header, so this lands on the principal's first assigned namespace when one is recorded), `enforce_login_assignment`, then stamp `mount_path` + the binding with `child_visible` from the namespace's `child_visible_default`. Before this all three minted a token with **no binding and no `mount_path`**, which read back as root-bound *and* could not be matched to an assignment — so an SSO principal granted several namespaces could operate in none of them, and re-authenticating did not help. SAML keys the principal on the role's mapped `username` when it has one, else the NameID. | ✅ Done |
+| `cert` backend | **Not gated, by necessity.** The legacy `cert` auth method is disabled in the OpenSSL-free default build and has no login path at all (produces no `Auth`), so there is nothing to bind or enforce. Contingent on the separate "`cert`-login namespace binding" follow-up; the assignment **store and endpoints already accept any mount**, so records can be authored ahead of that work. | ⏳ Deferred (prereq: a cert login path) |
 | `src/modules/system/mod.rs` + `src/http/sys.rs` | `v2/sys/identity/ns-assignment/<mount>/<name>` Read/Write/Delete + `v2/sys/identity/ns-assignment` List, registered in `configure_sys_routes` so they serve over HTTP (not embedded-only). The mount segment is normalized to the trailing-slash form (`userpass/`) so API-written records match what the login paths key on. | ✅ Done |
 | `gui/src-tauri/src/commands/namespaces.rs` + `gui/src/lib/api.ts` | `get/set/delete_ns_assignment` Tauri commands (root-scoped via `make_request_root`) + api wrappers. | ✅ Done |
+| `gui/src-tauri/src/commands/auth.rs::session_principal` + `gui/src/components/NamespaceGuardBanner.tsx` | **Diagnose and repair, instead of "sign in again".** The banner reads the session's `(mount, name)` off `auth/token/lookup-self`, names the allowed-namespace entry that principal lacks, and offers a one-click grant that appends the active namespace to the principal's existing assignment. The write is the same root/sudo-gated route the Users page uses, so it creates no authority the caller did not already hold, and operability is resolved per request — the grant lands on the open session with no new token. A token that stamps no principal reports `known: false` and gets the explanation only, which is exactly the case where no assignment could be matched to it. | ✅ Done |
 | `gui/src/routes/UsersPage.tsx` + `gui/src/routes/AppRolePage.tsx` | "Allowed namespaces" multi-select (empty ⇒ unrestricted), shown only when child namespaces exist. Users page edits load/save the current assignment; AppRole page sets it at create. | ✅ Done |
 
 ### Not In Scope

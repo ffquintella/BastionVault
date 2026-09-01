@@ -256,6 +256,32 @@ impl Fido2BackendInner {
             .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
         self.set_user_credentials(req, &username, &user_entry).await?;
 
+        // Multi-tenancy: bind the session to the namespace named by the request
+        // header — or, unscoped, to the principal's first assigned namespace —
+        // exactly as `userpass/` does. Without this the issued token carried no
+        // binding at all, so it read back as root-bound and non-child-visible,
+        // and a principal assigned several namespaces could not reach any of
+        // them: the namespace header was ignored at login, and
+        // `token_operable_resolved` could not widen the token either because the
+        // `mount_path` stamped below was missing.
+        let (ns_path, ns_uuid) = crate::kernel_api::namespace::login_namespace_for_principal(
+            &self.core,
+            req,
+            "fido2/",
+            &username,
+        )
+        .await?;
+
+        // Refuse the login if this principal's namespace assignment excludes the
+        // login namespace. No record ⇒ unrestricted; fails closed otherwise.
+        crate::kernel_api::namespace::enforce_login_assignment(
+            &self.core,
+            "fido2/",
+            &username,
+            &ns_path,
+        )
+        .await?;
+
         // Union FIDO2 user's direct policies with any policies attached
         // through identity user-groups. FIDO2 shares the UserPass username
         // namespace, so the same group membership applies.
@@ -275,6 +301,22 @@ impl Fido2BackendInner {
             ..Default::default()
         };
         auth.metadata.insert("username".to_string(), username.to_string());
+        // The `(mount, name)` pair `NsAssignmentStore` is keyed by. Without it
+        // `token_operable_resolved` cannot identify the principal, so no
+        // namespace assignment can ever widen this token and the holder is
+        // pinned to its login namespace for the life of the session.
+        auth.metadata.insert("mount_path".to_string(), "fido2/".to_string());
+        // Stamp the namespace binding so the issued token may operate in its
+        // login namespace. `child_visible` follows the namespace's
+        // `child_visible_default`; it fails safe to false.
+        let child_visible =
+            crate::kernel_api::namespace::login_child_visible(&self.core, &ns_path).await;
+        crate::kernel_api::namespace::stamp_binding(
+            &mut auth.metadata,
+            &ns_path,
+            &ns_uuid,
+            child_visible,
+        );
 
         // Ensure token_policies mirrors effective policies before
         // populate_token_auth (which overwrites auth.policies with

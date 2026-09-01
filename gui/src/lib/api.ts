@@ -599,6 +599,19 @@ export const setNsAssignment = (mount: string, name: string, namespaces: string[
 export const deleteNsAssignment = (mount: string, name: string) =>
   invoke<void>("delete_ns_assignment", { mount, name });
 
+/** The `(mount, name)` pair the current session's token identifies its
+ *  principal by — the key a namespace assignment is stored under. `known` is
+ *  false for a token that stamps neither (a raw root token, or an auth backend
+ *  that does not identify its principal), in which case no assignment can be
+ *  matched to the session and the UI must not offer to write one. */
+export interface SessionPrincipal {
+  mount: string;
+  name: string;
+  known: boolean;
+}
+export const sessionPrincipal = () =>
+  invoke<SessionPrincipal>("session_principal");
+
 /** IP-based DoS / request-abuse protection (`v2/sys/dos/*`).
  *  Thresholds use 0 to mean "this rule disabled". */
 export interface DosConfig {
@@ -835,6 +848,8 @@ export const writeAppRole = (
   secretIdTtl: string,
   tokenTtl: string,
   tokenMaxTtl: string,
+  boundSourceIps: string,
+  bypassMachineBinding: boolean,
 ) =>
   invoke<void>("write_approle", {
     name,
@@ -844,6 +859,8 @@ export const writeAppRole = (
     secretIdTtl,
     tokenTtl,
     tokenMaxTtl,
+    boundSourceIps,
+    bypassMachineBinding,
   });
 export const deleteAppRole = (name: string) => invoke<void>("delete_approle", { name });
 export const readRoleId = (name: string) => invoke<RoleIdInfo>("read_role_id", { name });

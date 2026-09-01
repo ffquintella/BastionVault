@@ -211,6 +211,17 @@ impl SamlBackendInner {
             metadata.insert("name_id_format".into(), assertion.name_id_format.clone());
         }
         metadata.insert("role".into(), state.role_name.clone());
+        // The `(mount, name)` pair `NsAssignmentStore` is keyed by, so an
+        // operator can grant a SAML principal more than one namespace and have
+        // `token_operable_resolved` honor it. The principal name is the NameID
+        // unless the role's own attribute map already claimed `username` — an
+        // operator-authored mapping wins, since that is the name they will have
+        // written the assignment against.
+        metadata.insert("mount_path".into(), "saml/".into());
+        let principal = metadata
+            .entry("username".into())
+            .or_insert_with(|| assertion.name_id.clone())
+            .clone();
 
         // Role-level bound attributes + bound subjects were populated
         // by the admin; enforce them.
@@ -227,12 +238,47 @@ impl SamlBackendInner {
             &attributes_as_values,
         )?;
 
+        // Multi-tenancy: bind the session to a namespace, exactly as `userpass/`
+        // does. The IdP's POST to the ACS URL carries no
+        // `X-BastionVault-Namespace` header, so this resolves to the principal's
+        // *first assigned* namespace when one is recorded and to root otherwise.
+        // Without a binding the issued token read back as root-bound and
+        // non-child-visible, so an SSO principal granted several namespaces could
+        // reach none of them.
+        let (ns_path, ns_uuid) = crate::kernel_api::namespace::login_namespace_for_principal(
+            &self.core,
+            req,
+            "saml/",
+            &principal,
+        )
+        .await?;
+
+        // Refuse the login if the principal's assignment excludes that namespace.
+        // No record ⇒ unrestricted; fails closed otherwise.
+        crate::kernel_api::namespace::enforce_login_assignment(
+            &self.core,
+            "saml/",
+            &principal,
+            &ns_path,
+        )
+        .await?;
+
         // Build the Auth response. TTL handling mirrors OIDC: 0
         // means "use the token store's default."
         let mut auth = Auth::default();
         auth.policies = role.policies.clone();
         auth.metadata = metadata;
         auth.display_name = assertion.name_id.clone();
+        // `child_visible` follows the namespace's `child_visible_default` and
+        // fails safe to false.
+        let child_visible =
+            crate::kernel_api::namespace::login_child_visible(&self.core, &ns_path).await;
+        crate::kernel_api::namespace::stamp_binding(
+            &mut auth.metadata,
+            &ns_path,
+            &ns_uuid,
+            child_visible,
+        );
         auth.ttl = std::time::Duration::from_secs(role.token_ttl_secs);
         auth.period = std::time::Duration::from_secs(role.token_max_ttl_secs);
 

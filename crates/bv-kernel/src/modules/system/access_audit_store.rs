@@ -60,9 +60,20 @@ const ACCESS_AUDIT_SUB_PATH: &str = "access-audit/";
 pub struct AccessAuditEntry {
     /// RFC3339 timestamp copied from the source audit entry.
     pub ts: String,
-    /// Display name of the caller when the token resolved to a named
-    /// principal, else `"(unnamed principal)"`. Never the token itself.
+    /// The *human* principal behind the request when one is known:
+    /// the bound username (or entity id) for a FerroGate machine+user
+    /// session, otherwise the token's display name. Falls back to
+    /// `"(unnamed principal)"`. Never the token itself.
     pub user: String,
+    /// The attesting machine's SPIFFE id when the request rode a
+    /// FerroGate machine-bound token, else empty. Recorded separately
+    /// from `user` so an auditor can see *both* who acted and which
+    /// machine attested the session; before this field the machine id
+    /// occupied `user` and the human owner was not recorded at all.
+    /// `serde(default)` so entries written before this field read back
+    /// with an empty machine rather than failing to deserialize.
+    #[serde(default)]
+    pub machine: String,
     /// The request path that succeeded.
     pub path: String,
     /// The operation (`read`, `write`, `list`, `delete`, …).
@@ -150,6 +161,7 @@ mod tests {
         AccessAuditEntry {
             ts: ts.to_string(),
             user: "felipe".into(),
+            machine: String::new(),
             path: "secret/data/foo".into(),
             operation: "read".into(),
             remote_addr: "10.0.0.1".into(),

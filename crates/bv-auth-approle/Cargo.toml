@@ -1,6 +1,6 @@
 [package]
 name = "bv-auth-approle"
-version = "0.41.0"
+version = "0.41.1"
 edition = "2021"
 description = "BastionVault's AppRole auth backend: role IDs, secret IDs and machine binding"
 license = "Apache-2.0"
