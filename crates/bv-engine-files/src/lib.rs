@@ -1717,9 +1717,9 @@ impl FilesBackendInner {
                 #[cfg(feature = "files_ssh_sync")]
                 {
                     if kind == "sftp" {
-                        super::files::ssh_sync::validate_target_path_sftp(&target_path)?;
+                        crate::ssh_sync::validate_target_path_sftp(&target_path)?;
                     } else {
-                        super::files::ssh_sync::validate_target_path_scp(&target_path)?;
+                        crate::ssh_sync::validate_target_path_scp(&target_path)?;
                     }
                 }
                 // Same pattern as smb: configs round-trip across

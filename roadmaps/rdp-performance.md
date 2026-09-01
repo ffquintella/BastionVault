@@ -192,40 +192,45 @@ the session falls back to the RemoteFX path — logged, not hidden. A V8-only
 EGFX session would get RFX Progressive from Windows, which we cannot decode,
 so "no decoder" must mean "no EGFX" rather than "EGFX without AVC".
 
-#### What is left
+#### The early capability flag — done
 
 A Windows server only opens the `Microsoft::Windows::RDS::Graphics` DVC when
 the client sets `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` (0x0100) in the Client
-Core Data early capability flags. ironrdp's connector never sets it — the
-flag is defined in `ironrdp-pdu` and referenced nowhere else — so registering
-the channel is necessary but not sufficient, and the EGFX path is currently
-inert.
+Core Data early capability flags. Registering the channel is necessary but
+not sufficient without it, and for a long time ironrdp's connector had no
+option to set it, so the EGFX path was inert.
 
-The connector change is written and compiles. It adds
-`Config::enable_egfx: bool` (defaulting false, because advertising the flag
-can make a server abandon Bitmap Updates for a pipeline the client may not be
-able to decode) and sets the flag when it is on. It touches four files in the
-fork: the `Config` struct, the flag site in `connection.rs`, and the three
-`Config` literals in `ironrdp-viewer`, `ironrdp-web` and the `screenshot`
-example.
+**Resolved upstream by the IronRDP 0.17 bump.** The connector now carries
+`Config::support_dyn_vc_gfx_protocol: bool` (upstream's own version of the
+change that used to sit unpushed in our submodule working tree as
+`Config::enable_egfx`), so no fork delta is needed. In this repo:
 
-It is sitting **uncommitted in the `IronRDP/` submodule working tree**. To
-finish:
+- `EGFX_EARLY_CAPABILITY_AVAILABLE` in `session/rdp.rs` is `true`.
+- `build_connector_config` leaves `support_dyn_vc_gfx_protocol` at
+  `false` (the site marked `EGFX ACTIVATION SITE`), and the one branch
+  that registers the graphics DVC sets it to `true`. **The flag is
+  deliberately not driven from `args.enable_egfx` directly.** Channel
+  registration additionally requires the `rdp_egfx` feature and a
+  loaded OpenH264 decoder, and advertising the capability without a
+  decoder is worse than staying quiet: a Windows server that sees the
+  flag may abandon Bitmap Updates and send H.264 the client cannot
+  decode, which is a frozen desktop rather than a degraded one. Tying
+  the flag and the channel to one branch makes that divergence
+  unrepresentable.
 
-1. Review and commit it in `IronRDP/`, then push to
-   `ffquintella/IronRDP` branch `fix-deps`.
-2. `cargo update -p ironrdp-connector` in this repo.
-3. Add `enable_egfx: args.enable_egfx,` to `build_connector_config` — the
-   site is marked `EGFX ACTIVATION SITE`.
-4. Flip `EGFX_EARLY_CAPABILITY_AVAILABLE` to `true` in `session/rdp.rs`.
+The constant is kept rather than deleted: if a future pin ever loses the
+connector option again, flipping it back to `false` makes the `rdp_egfx`
+path log that it cannot work instead of silently doing nothing.
 
-Until step 4, a build with `rdp_egfx` that is asked for EGFX logs a warning
-saying exactly this, rather than failing to build or silently doing nothing.
+Defaulting the flag off still matters and is preserved — it is driven by the
+per-profile `enable_egfx`, because advertising EGFX can make a server abandon
+Bitmap Updates for a pipeline the client may not be able to decode.
 
-**Unverified.** The EGFX path has unit coverage for compositing, clipping,
-payload validation, the frame-source switch and `ResetGraphics` handling, but
-it has never run against a real Windows Graphics Pipeline — it cannot, until
-the flag lands. Treat it as untested against a live server.
+**Still unverified against a live server.** The EGFX path has unit coverage
+for compositing, clipping, payload validation, the frame-source switch and
+`ResetGraphics` handling, and the capability is now actually advertised, but
+it has not yet run against a real Windows Graphics Pipeline. Treat it as
+untested end-to-end until someone measures it against a Windows host.
 
 ## What was considered and rejected
 
@@ -250,8 +255,9 @@ the flag lands. Treat it as untested against a live server.
 
 ## Next
 
-- Finish the EGFX activation (four steps above) and measure against a real
-  Windows host.
+- Measure EGFX against a real Windows host. The early capability flag is now
+  advertised (see above), so the DVC should actually open; nothing about the
+  path has been observed live yet.
 - Consider RFX Progressive decode. `ironrdp-graphics` has the transform
   primitives (`progressive.rs`, `dwt_extrapolate.rs`, `rlgr.rs`) but no
   tile-level decoder, so a V8 EGFX session cannot be served today.

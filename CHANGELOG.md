@@ -45,6 +45,118 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.41.25] - 2026-09-01
+
+### Security
+
+#### Clear two hickory-proto DoS advisories and leave the RustCrypto pre-release line
+
+- **hickory-resolver / hickory-proto 0.25 -> 0.26.1** (`Cargo.toml`
+  `[patch.crates-io]`) -- clears RUSTSEC-2026-0118 (NSEC3 proof unbounded
+  loop) and RUSTSEC-2026-0119 (O(n^2) name compression CPU exhaustion).
+  hickory reaches the build only through sspi's `dns_resolver` feature,
+  which IronRDP's `ironrdp-connector` enables for KDC discovery on the
+  smartcard CredSSP path. Every published sspi still requires
+  `hickory ^0.25`, so the bump rides on the `ffquintella/sspi-rs`
+  `fix-deps-next` branch, now rebased onto upstream master (sspi 0.21.4)
+  with the `src/dns.rs` 0.26 resolver port as its *only* delta.
+- **The whole RustCrypto stack moves off pre-releases.**
+  `ed25519-dalek 3.0.0-pre.7 -> 3.0.0`, `curve25519-dalek 5.0.0-pre.6 ->
+  5.0.0`, `elliptic-curve 0.14.0-rc.32 -> 0.14.1`, `ecdsa 0.17.0-rc.18 ->
+  0.17.0`, `p256`/`p384`/`p521 0.14.0-rc.9 -> 0.14.0`, `aead 0.6.0-rc.10
+  -> 0.6.1`, `aes-gcm 0.11.0-rc.4 -> 0.11.1`. A secrets manager should
+  not ship release-candidate signature and key-agreement primitives.
+
+### Removed
+
+- **The `picky` / `picky-asn1*` / `picky-krb` `[patch.crates-io]` fork**
+  (`Cargo.toml`) -- five entries gone. The `ffquintella/picky-rs`
+  `fix-deps` branch existed only to bump picky rc.23's
+  `ed25519-dalek =3.0.0-pre.6` / `rsa =0.10.0-rc.17` pins to match russh
+  0.61.1. Published `picky 7.0.0-rc.26` requires `ed25519-dalek ^3` and
+  `rsa =0.10.0-rc.18`, which is the line russh 0.62.7 sits on, so the
+  fork is obsolete and the whole family resolves from the registry.
+- **The `ironrdp-bulk` dependency** (`gui/src-tauri/Cargo.toml`,
+  `gui/src-tauri/src/session/rdp.rs`) -- it existed solely so
+  `run_reactivation` could hand-build a `BulkCompressor` for
+  `fast_path::ProcessorBuilder::bulk_decompressor`. IronRDP 0.17 removed
+  that field and made `ActiveStage` own the decompressor, so the
+  `build_bulk_decompressor` helper is deleted too.
+
+### Changed
+
+#### IronRDP 0.15 -> 0.17 and the dependency realignment it forced
+
+The `IronRDP/` submodule bump alone could not build: the new
+`ironrdp-connector` pins `picky =7.0.0-rc.25`, whose
+`ed25519-dalek =3.0.0-rc.1` conflicted with russh 0.61.1's
+`=3.0.0-pre.7`. Because `Cargo.lock` is gitignored, a stale local lock
+masked this -- fresh clones and CI failed to resolve at all.
+
+- **russh `=0.61.1` -> `=0.62.7`** (`crates/bv-engine-files/Cargo.toml`,
+  `gui/src-tauri/Cargo.toml`), **russh-sftp `2` -> `2.4`**. The exact
+  version is forced from three sides: `russh-sftp 2.4.0` requires
+  `russh ^0.62.5` (and no earlier russh-sftp accepts 0.62.x at all),
+  russh 0.63.x is outside that range, and the 0.62.0..=0.62.2 releases
+  pin `ed25519-dalek =3.0.0-rc.1`, which cannot coexist with the stable
+  3.0.0 that picky rc.26 requires. No API changes were needed in
+  `bv-engine-files`.
+- **`IronRDP` fork gains two deltas** -- `picky` pinned to
+  `=7.0.0-rc.26` (upstream is still on rc.25, whose pre-release dalek
+  pin is what blocked the tree), and sspi 0.21.4's newly-fallible
+  `credssp::TsRequest::buffer_len` propagated as a connector error
+  rather than unwrapped.
+- **RDP session ported to the 0.17 API**
+  (`gui/src-tauri/src/session/rdp.rs`) -- `ActiveStage::new` ->
+  `ActiveStageBuilder`; the reactivation sequence is minted from
+  `ConnectionResult::activation_factory` now that
+  `ActiveStageOutput::DeactivateAll` is a unit variant; `run_reactivation`
+  calls `ActiveStage::reactivate`, which rebuilds the fast-path
+  processor, re-applies share id and pointer settings, validates the
+  server's static virtual channel chunk size, and **retains** bulk
+  decompression history instead of restarting it; `KeyboardType::
+  IbmEnhanced` -> `KeyboardType::IBM_ENHANCED`; seven new
+  `connector::Config` fields set explicitly (`connection_type: Lan`,
+  `enable_audio_capture: false`, `enable_standard_rdp_security: false`,
+  `monitor_layout: None`, `remote_application_mode: false`,
+  `rail_support_level: empty()`, plus the EGFX flag below).
+- **x509-cert 0.3 cohabits with 0.2** (`gui/src-tauri/Cargo.toml`) --
+  added as `x509_cert_v03`, the same aliasing trick already used for
+  `rand_v10`. `ironrdp_tls::upgrade` returns an x509-cert **0.3**
+  `Certificate` and does not re-export the crate, so the bastion TLS pin
+  check was untypeable without it. The crate is not moved to 0.3
+  wholesale on purpose: `cms` (0.3.0-pre.2) and `yubikey` (0.9.0-pre.0)
+  would have to follow, and the YubiKey slot-9a cert-minting path should
+  not run on pre-release crates. Only the RDP path uses the alias.
+
+### Added
+
+- **Graphics Pipeline early capability is now actually advertised**
+  (`gui/src-tauri/src/session/rdp.rs`, `roadmaps/rdp-performance.md`) --
+  IronRDP 0.17 supplies `connector::Config::support_dyn_vc_gfx_protocol`,
+  so a client that registers the graphics channel also sets
+  `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` in the Client Core Data and the
+  server will open the `Microsoft::Windows::RDS::Graphics` DVC.
+  `EGFX_EARLY_CAPABILITY_AVAILABLE` flips to `true`; registering the
+  channel was previously necessary but not sufficient, and the whole
+  `rdp_egfx` path was inert. The flag is set by the same branch that
+  registers the DVC rather than from the profile's `enable_egfx`, so a
+  build without the `rdp_egfx` feature or without a loaded OpenH264
+  decoder cannot advertise a pipeline it has no decoder for -- which
+  would cost a frozen desktop, not a degraded one. Still unverified
+  against a live Windows Graphics Pipeline.
+
+### Fixed
+
+- **`files_ssh_sync` did not compile** (`crates/bv-engine-files/src/lib.rs`)
+  -- the SFTP/SCP target-path validators were still called through
+  `super::files::ssh_sync::`, the module path from before the engine was
+  extracted into its own crate (commit `a12e1cb6`, when this code lived
+  at `src/modules/files/mod.rs`). Now `crate::ssh_sync::`, matching the
+  two call sites that were already correct. The feature is off by
+  default and `--all-features` is banned, so no build had gone through
+  this path since the workspace decomposition.
+
 ## [0.41.24] - 2026-09-01
 
 ### Fixed

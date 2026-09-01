@@ -34,8 +34,19 @@ serde_json = "^1.0"
 sha2 = "0.11"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "io-util"] }
 
-russh = { version = "=0.61.1", optional = true, default-features = true }
-russh-sftp = { version = "2", optional = true }
+# `=0.62.7` is pinned rather than caret-ranged, and the exact value is
+# forced from two sides. Below: `russh-sftp 2.4.0` requires
+# `russh ^0.62.5`, and no earlier russh-sftp accepts 0.62.x at all
+# (2.3.0 wants `^0.61.0`). Above: russh 0.63.x is outside that range.
+# Sideways: IronRDP's `ironrdp-connector` pins `picky =7.0.0-rc.26`,
+# which requires `ed25519-dalek ^3` -- the stable 3.0.0 line that
+# russh 0.62.5.. also uses. The 0.62.0..=0.62.2 releases pin
+# `ed25519-dalek =3.0.0-rc.1` instead, and cargo cannot hold both a
+# pre-release and stable 3.0.0, so that range is unusable here even
+# though russh publishes it. See `[patch.crates-io]` in the workspace
+# root for the sspi/picky half of the same constraint.
+russh = { version = "=0.62.7", optional = true, default-features = true }
+russh-sftp = { version = "2.4", optional = true }
 smolder-smb-core = { version = "0.3", optional = true }
 
 [features]

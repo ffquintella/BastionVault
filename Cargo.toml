@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.41.24"
+version = "0.41.25"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -683,21 +683,30 @@ split-debuginfo = "unpacked"
 debug = false
 
 [patch.crates-io]
-# russh 0.61 / sspi 0.21 rc-pin alignment (see the russh dependency comment).
-# Published sspi 0.21.0 exact-pins `rsa =0.10.0-rc.17` + `ed25519-dalek
-# =3.0.0-pre.6`, which conflict with russh 0.61.1's `rsa =rc.18` /
-# `ed25519-dalek =pre.7`. The sspi fork bumps those pins; the picky fork
-# (Devolutions master + ed25519-dalek pre.7) supplies the matching
-# elliptic-curve rc.32 / rsa rc.18 chain. The whole picky family is
-# patched so sspi/winscard/ironrdp all resolve one source for the
-# picky-asn1 types that cross their public APIs. Drop these patches once
-# Devolutions publishes sspi/picky releases on the post-rc.17 chain.
-sspi = { git = "https://github.com/ffquintella/sspi-rs", branch = "fix-deps" }
-picky = { git = "https://github.com/ffquintella/picky-rs", branch = "fix-deps", version = "=7.0.0-rc.23" }
-picky-asn1 = { git = "https://github.com/ffquintella/picky-rs", branch = "fix-deps" }
-picky-asn1-der = { git = "https://github.com/ffquintella/picky-rs", branch = "fix-deps" }
-picky-asn1-x509 = { git = "https://github.com/ffquintella/picky-rs", branch = "fix-deps" }
-picky-krb = { git = "https://github.com/ffquintella/picky-rs", branch = "fix-deps" }
+# sspi: hickory-resolver / hickory-proto 0.25 -> 0.26
+# (RUSTSEC-2026-0118 NSEC3 proof unbounded loop, RUSTSEC-2026-0119
+# O(n^2) name compression CPU exhaustion). Every published sspi still
+# requires `hickory ^0.25`, so the advisories cannot be cleared by
+# version choice alone. The fork is upstream master (sspi 0.21.4) plus
+# exactly one commit porting `src/dns.rs` to the 0.26 resolver API --
+# no pin deltas, no other code. Drop this patch once Devolutions
+# releases an sspi on hickory 0.26.
+#
+# hickory reaches us only through sspi's `dns_resolver` feature, which
+# IronRDP's `ironrdp-connector` enables for KDC discovery on the
+# smartcard CredSSP path.
+#
+# The picky family is deliberately NOT patched any more. It used to be,
+# because picky rc.23 pinned `ed25519-dalek =3.0.0-pre.6` / `rsa
+# =0.10.0-rc.17` while russh 0.61.1 wanted `pre.7` / `rc.18`, and the
+# picky-asn1 types cross sspi's and ironrdp's public APIs so the whole
+# family had to resolve to one source. Published `picky 7.0.0-rc.26`
+# requires `ed25519-dalek ^3` and `rsa =0.10.0-rc.18`, which is the
+# same line russh 0.62.7 sits on, so the tree now resolves against the
+# *stable* ed25519-dalek 3.0.0 with no fork at all. See the russh
+# comment in `crates/bv-engine-files/Cargo.toml` for why 0.62.7 in
+# particular.
+sspi = { git = "https://github.com/ffquintella/sspi-rs", branch = "fix-deps-next" }
 
 # hiqlite raft-client socket-leak fix. Stock hiqlite leaks one ESTABLISHED
 # TCP socket per openraft client rebuild: aborting the parent `ws_handler`

@@ -1,6 +1,6 @@
 [package]
 name = "bastion-vault-gui"
-version = "0.41.24"
+version = "0.41.25"
 edition = "2021"
 description = "BastionVault Desktop GUI"
 # Shipped as a signed installer (see roadmaps/packaging-and-distribution.md),
@@ -92,6 +92,20 @@ yubikey = "0.8"
 # minted into slot 9a when the operator picks an empty-slot card
 # from the Add-Local-Vault modal).
 x509-cert = { version = "0.2", features = ["builder"] }
+# x509-cert 0.3, alongside 0.2 above, same cohabitation trick as
+# `rand_v10`. `ironrdp_tls::upgrade` returns an
+# `x509_cert::Certificate` and `extract_tls_server_public_key` takes
+# one, both from 0.3, and ironrdp-tls does not re-export the crate —
+# so the bastion TLS pin check in `session::rdp::verify_tls_pin` is
+# untypeable without naming 0.3 here.
+#
+# Only the RDP path uses this alias; the YubiKey and PKI paths stay on
+# 0.2 and the two types never meet. Moving the whole crate to 0.3 is
+# not currently possible: `cms` needs 0.3.0-pre.2 and `yubikey` needs
+# 0.9.0-pre.0 to follow, and the YubiKey slot-9a cert-minting path
+# should not run on pre-release crates. Collapse to one version once
+# both ship stable releases on x509-cert 0.3.
+x509_cert_v03 = { package = "x509-cert", version = "0.3", default-features = false, features = ["std"] }
 # Cert extension parsing for the Certificates tab detail panel —
 # SubjectAltName (DNS / IP / email / URI), KeyUsage, ExtendedKeyUsage.
 # Mirrors the workspace pin in the host crate.
@@ -104,9 +118,10 @@ uuid = { version = "1", features = ["v4"] }
 # Pure-Rust SSH client for the Resource Connect SSH session window.
 # Same crate the host's files_ssh_sync feature uses for SFTP/SCP
 # pushes — no `libssh2-sys` C dep, no OpenSSL footprint.
-# `=0.61.1` mirrors the host crate's pin — see the russh comment in the
-# workspace root Cargo.toml (RUSTSEC-2026-0153/0154 + rc-line alignment).
-russh = { version = "=0.61.1", default-features = true }
+# `=0.62.7` mirrors the pin in `crates/bv-engine-files/Cargo.toml` —
+# see the russh comment there for why that exact version, and
+# `[patch.crates-io]` in the workspace root for the sspi/picky side.
+russh = { version = "=0.62.7", default-features = true }
 async-trait = "0.1"
 log = "0.4"
 env_logger = "0.11"
@@ -115,26 +130,32 @@ urlencoding = "2"
 # Resource Connect RDP transport (Phase 4) — IronRDP via the
 # `IronRDP/` git submodule, which is excluded from the host
 # workspace and lives on its own `fix-deps` branch. The fork tracks
-# Devolutions master (sspi 0.21 / picky rc.23) plus two local deltas:
+# Devolutions master plus three local deltas:
 #
 #   - `ironrdp-connector` accepts PKCS#8 private keys for the
 #     smartcard CredSSP path (BastionVault's PKI engine emits PKCS#8)
 #   - sspi's `network_client` / `dns_resolver` features stay enabled
+#   - `picky` pinned to `=7.0.0-rc.26` instead of upstream's rc.25,
+#     because rc.25 requires `ed25519-dalek =3.0.0-rc.1` and that
+#     pre-release cannot coexist with the stable 3.0.0 that russh
+#     0.62.7 pulls in. Drop once upstream moves to rc.26.
 #
-# The sspi/picky crates themselves are redirected to BastionVault's
-# forks via the workspace root `[patch.crates-io]` so they sit on the
-# same RustCrypto rc line as russh 0.61 (see root Cargo.toml).
+# sspi is still redirected to a BastionVault fork via the workspace
+# root `[patch.crates-io]`, but only for a hickory 0.26 security bump —
+# the picky family is no longer forked. See root Cargo.toml.
 ironrdp = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps", default-features = false, features = ["connector", "session", "graphics", "input", "pdu", "core", "dvc", "displaycontrol"] }
 ironrdp-async = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
 ironrdp-tls = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps", features = ["rustls"] }
 ironrdp-core = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
-# Named directly only so `session::rdp` can construct a
-# `BulkCompressor` for `fast_path::ProcessorBuilder`, whose
-# `bulk_decompressor` field is public but whose type
-# `ironrdp-session` does not re-export. Needed to rebuild the
-# decompressor after a Deactivation-Reactivation; see
-# `run_reactivation`.
-ironrdp-bulk = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
+# NOTE: `ironrdp-bulk` was a direct dependency here only so
+# `session::rdp` could hand-build a `BulkCompressor` for
+# `fast_path::ProcessorBuilder::bulk_decompressor`. IronRDP 0.17
+# removed that field and made `ActiveStage` own the decompressor,
+# building it from the negotiated compression type and retaining its
+# history across a Deactivation-Reactivation. There is nothing left
+# to construct, so the dependency is gone — do not add it back
+# without a reason that is not "reactivation".
+
 # Graphics Pipeline (MS-RDPEGFX) client — H.264 AVC420 decode,
 # surface management, frame ack. Optional and off by default: see
 # the `rdp_egfx` feature below.

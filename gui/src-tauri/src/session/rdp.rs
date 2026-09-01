@@ -52,18 +52,16 @@ use ironrdp::connector::{
 use ironrdp::displaycontrol::client::DisplayControlClient;
 use ironrdp::displaycontrol::pdu::MonitorLayoutEntry;
 use ironrdp::dvc::DrdynvcClient;
-use ironrdp::pdu::gcc::KeyboardType;
+use ironrdp::pdu::gcc::{ConnectionType, KeyboardType};
 use ironrdp::pdu::geometry::InclusiveRectangle;
 use ironrdp::pdu::input::fast_path::{FastPathInput, FastPathInputEvent, KeyboardFlags};
 use ironrdp::pdu::input::mouse::{MousePdu, PointerFlags};
 use ironrdp::pdu::nego::NegoRequestData;
-use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
+use ironrdp::pdu::rdp::capability_sets::{MajorPlatformType, RailSupportLevel};
 use ironrdp::pdu::rdp::client_info::{CompressionType, PerformanceFlags, TimezoneInfo};
-use ironrdp::session::fast_path;
 use ironrdp::session::image::DecodedImage;
-use ironrdp::session::{ActiveStage, ActiveStageOutput};
+use ironrdp::session::{ActiveStage, ActiveStageBuilder, ActiveStageOutput};
 use ironrdp_async::{single_sequence_step_read, FramedWrite, NetworkClient};
-use ironrdp_bulk::BulkCompressor;
 use ironrdp_core::{encode_buf, WriteBuf};
 use ironrdp_tokio::TokioFramed;
 use serde::Serialize;
@@ -133,31 +131,30 @@ pub const DEFAULT_BULK_COMPRESSION: Option<CompressionType> = Some(CompressionTy
 /// A Windows server only opens the
 /// `Microsoft::Windows::RDS::Graphics` DVC when the client sets
 /// `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` (0x0100) in the early
-/// capability flags. ironrdp's connector has no such option at the
-/// currently pinned revision, so registering the EGFX channel is
-/// necessary but not sufficient and the whole path is inert.
+/// capability flags. Registering the EGFX channel is necessary but
+/// not sufficient without it.
 ///
-/// The connector change is written and compiles — it is sitting in
-/// the `IronRDP/` submodule working tree, unpushed. To finish the
-/// job:
+/// As of the IronRDP 0.17 pin the connector exposes this as
+/// `Config::support_dyn_vc_gfx_protocol`, so the path is live and
+/// this constant is `true`.
 ///
-///   1. push the submodule change to `ffquintella/IronRDP` `fix-deps`
-///   2. `cargo update -p ironrdp-connector` here
-///   3. add `enable_egfx: args.enable_egfx,` to
-///      [`build_connector_config`] (the site is marked)
-///   4. flip this constant to `true`
+/// The flag is *not* set from the profile's `enable_egfx` directly.
+/// [`build_connector_config`] leaves it `false` and the single branch
+/// that registers the graphics DVC turns it on, so advertising the
+/// capability and having an H.264 decoder are the same decision.
+/// Advertising without a decoder is worse than not advertising: the
+/// server may drop Bitmap Updates for a pipeline we cannot decode.
 ///
-/// Kept as a constant rather than a `#[cfg]` so a build with the
-/// `rdp_egfx` feature still compiles against the current pin and
-/// says out loud that it cannot work, instead of failing to build or
-/// — worse — silently doing nothing. See
-/// `roadmaps/rdp-performance.md`.
+/// Kept as a constant rather than deleted so the warning below it
+/// stays a single source of truth: if a future pin ever loses the
+/// connector option again, flip this to `false` and the `rdp_egfx`
+/// path says out loud that it cannot work instead of silently doing
+/// nothing. See `roadmaps/rdp-performance.md`.
 ///
 /// Only read on the `rdp_egfx` path, so a default build sees it as
-/// dead — it stays here rather than behind a `#[cfg]` because its
-/// doc comment is the record of what is left to do.
+/// dead.
 #[cfg_attr(not(feature = "rdp_egfx"), allow(dead_code))]
-const EGFX_EARLY_CAPABILITY_AVAILABLE: bool = false;
+const EGFX_EARLY_CAPABILITY_AVAILABLE: bool = true;
 
 /// Parse the `rdp_bulk_compression` profile value.
 ///
@@ -585,7 +582,13 @@ pub async fn open_rdp_session(
     let local = tcp.local_addr().map_err(|e| format!("rdp: local_addr: {e}"))?;
 
     // Stage 2: ironrdp connector — phase one (pre-TLS).
-    let cfg = build_connector_config(&args);
+    //
+    // `mut` only so the EGFX branch below can turn
+    // `support_dyn_vc_gfx_protocol` on once it knows the graphics
+    // channel was really registered; nothing mutates it in a build
+    // without the `rdp_egfx` feature.
+    #[cfg_attr(not(feature = "rdp_egfx"), allow(unused_mut))]
+    let mut cfg = build_connector_config(&args);
     let (width, height) = (cfg.desktop_size.width, cfg.desktop_size.height);
     let mut framed = TokioFramed::new(tcp);
     // Register the DisplayControl dynamic virtual channel so the
@@ -603,15 +606,17 @@ pub async fn open_rdp_session(
     // NOTE: registering the DVC is necessary but not sufficient. A
     // Windows server only opens the graphics channel when the client
     // sets `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` (0x0100) in the
-    // Client Core Data early-capability flags, and ironrdp's
-    // connector does not currently set it. Until the IronRDP fork
-    // carries that flag, this channel is advertised and never used —
-    // harmless, but not yet the win it will be. Tracked in
-    // `roadmaps/rdp-performance.md`.
+    // Client Core Data early-capability flags. As of the IronRDP 0.17
+    // pin the connector can set it, and this is the only place that
+    // asks it to — the flag and the channel are turned on by the same
+    // branch, so the client can never advertise a pipeline it has no
+    // decoder for. Tracked in `roadmaps/rdp-performance.md`.
     #[cfg(feature = "rdp_egfx")]
     let (drdynvc, egfx_rx) = match (args.enable_egfx, build_h264_decoder()) {
         (true, Some(decoder)) => {
-            if !EGFX_EARLY_CAPABILITY_AVAILABLE {
+            if EGFX_EARLY_CAPABILITY_AVAILABLE {
+                cfg.support_dyn_vc_gfx_protocol = true;
+            } else {
                 log::warn!(
                     "rdp/egfx: the graphics channel is being advertised, but this build's ironrdp pin \
                      does not set RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL in the Client Core Data, so the \
@@ -771,13 +776,40 @@ fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
         domain: args.domain.clone(),
         enable_tls: true,
         enable_credssp,
-        keyboard_type: KeyboardType::IbmEnhanced,
+        keyboard_type: KeyboardType::IBM_ENHANCED,
         keyboard_subtype: 0,
         keyboard_layout: 0,
         keyboard_functional_keys_count: 12,
         ime_file_name: String::new(),
         dig_product_id: String::new(),
         desktop_size: DesktopSize { width: 1024, height: 600 },
+        // Single logical monitor: `desktop_size` above already
+        // describes it, and the DisplayControl resize path sends its
+        // own monitor layout per activation.
+        monitor_layout: None,
+        // Standard RDP Security (`PROTOCOL_RDP`, no enhanced flags)
+        // stays off. It only takes effect when both `enable_tls` and
+        // `enable_credssp` are false; `enable_tls` is unconditionally
+        // true above, so this is belt-and-braces. ironrdp only
+        // implements the ENCRYPTION_LEVEL_NONE variant, which has no
+        // business on a TCP session to a bastion-reached host.
+        enable_standard_rdp_security: false,
+        // LAN profile. The GUI's own transport is either a local
+        // socket or a Rustion-brokered tunnel, and this only tunes
+        // the server's bandwidth heuristics; `Autodetect` would let
+        // the server run its own probe and pick worse defaults on a
+        // brokered link that looks lossy.
+        connection_type: ConnectionType::Lan,
+        // No microphone redirection. `enable_audio_playback` is
+        // already false below; capture is the one that would push
+        // client-side audio *to* the server, so it stays off
+        // explicitly rather than by omission.
+        enable_audio_capture: false,
+        // No RemoteApp/RAIL: this is a full-desktop session. The
+        // support level must stay empty while the mode is off — the
+        // connector requires SUPPORTED only when it is on.
+        remote_application_mode: false,
+        rail_support_level: RailSupportLevel::empty(),
         bitmap: None,
         client_build: 0,
         client_name: "BastionVault".to_owned(),
@@ -833,9 +865,19 @@ fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
         } else {
             PerformanceFlags::default()
         },
-        // EGFX ACTIVATION SITE — see [`EGFX_EARLY_CAPABILITY_AVAILABLE`].
-        // Once the connector carries the field, add:
-        //     enable_egfx: args.enable_egfx,
+        // EGFX ACTIVATION SITE — the connector carries the flag as of
+        // IronRDP 0.17. Deliberately `false` here and turned on by the
+        // caller *only* in the branch that actually registers the
+        // graphics channel, which additionally requires the
+        // `rdp_egfx` feature and a loaded OpenH264 decoder.
+        //
+        // Advertising `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` from
+        // `args.enable_egfx` alone would be a trap: a Windows server
+        // that sees it may abandon Bitmap Updates and send H.264 we
+        // cannot decode, which is a frozen desktop rather than a
+        // degraded one. See `build_h264_decoder` and
+        // [`EGFX_EARLY_CAPABILITY_AVAILABLE`].
+        support_dyn_vc_gfx_protocol: false,
         desktop_scale_factor: 0,
         hardware_id: None,
         license_cache: None,
@@ -912,10 +954,26 @@ async fn active_stage_loop<S>(
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
 {
     let mut image = DecodedImage::new(ironrdp::graphics::image_processing::PixelFormat::RgbA32, width, height);
-    // Captured before `ActiveStage` consumes the result: needed to
-    // rebuild the bulk decompressor after a reactivation.
-    let compression_type = connection_result.compression_type;
-    let mut active_stage = ActiveStage::new(connection_result);
+    // Captured before the builder consumes the rest of the result:
+    // the reactivation sequence is now minted from a factory the
+    // connection result carries, rather than being handed to us
+    // inside the `DeactivateAll` output.
+    let activation_factory = connection_result.activation_factory;
+    let mut active_stage = ActiveStageBuilder {
+        static_channels: connection_result.static_channels,
+        user_channel_id: connection_result.user_channel_id,
+        io_channel_id: connection_result.io_channel_id,
+        message_channel_id: connection_result.message_channel_id,
+        share_id: connection_result.share_id,
+        // ironrdp now owns the bulk decompressor and builds it from
+        // this, keeping its history across a reactivation. That is
+        // why this crate no longer depends on `ironrdp-bulk`: there
+        // is nothing left for us to construct by hand.
+        compression_type: connection_result.compression_type,
+        enable_server_pointer: connection_result.enable_server_pointer,
+        pointer_software_rendering: connection_result.pointer_software_rendering,
+    }
+    .build();
 
     // EGFX compositing target. Allocated regardless so
     // `current_surface` always has something to point at; it stays
@@ -1053,14 +1111,16 @@ async fn active_stage_loop<S>(
                             dirty.add(rect, width, height);
                         }
                         ActiveStageOutput::ResponseFrame(frame) => response_frames.push(frame),
-                        ActiveStageOutput::DeactivateAll(seq) => {
+                        ActiveStageOutput::DeactivateAll => {
                             // The server replies with DeactivateAll
                             // after every successful resize request.
-                            // Capture the sequence; after we've flushed
-                            // any pending response frames we drive it
-                            // to Finalized, swap in the new framebuffer
-                            // and tell the frontend the new size.
-                            reactivation = Some(seq);
+                            // The variant no longer carries the
+                            // sequence, so mint one from the factory;
+                            // after we've flushed any pending response
+                            // frames we drive it to Finalized, swap in
+                            // the new framebuffer and tell the frontend
+                            // the new size.
+                            reactivation = Some(Box::new(activation_factory.create()));
                         }
                         ActiveStageOutput::Terminate(_) => {
                             log::info!("rdp: server initiated disconnect");
@@ -1090,7 +1150,7 @@ async fn active_stage_loop<S>(
                 // this round targets the old framebuffer and is
                 // replaced by a full repaint.
                 if let Some(mut seq) = reactivation {
-                    match run_reactivation(&mut framed, &mut active_stage, &mut seq, compression_type).await {
+                    match run_reactivation(&mut framed, &mut active_stage, &mut seq).await {
                         Ok(new_size) => {
                             width = new_size.width;
                             height = new_size.height;
@@ -1260,30 +1320,27 @@ fn rect_dims(rect: &InclusiveRectangle) -> (u16, u16) {
 
 /// Drive the connection-activation state machine to `Finalized`
 /// after a DeactivateAll, then return the new desktop size and
-/// swap the fastpath processor / share_id / pointer settings into
-/// `active_stage`. Mirrors the reference client's reactivation
-/// handler in `ironrdp-client/src/rdp.rs`.
+/// hand the renegotiated channel/pointer settings to
+/// `ActiveStage::reactivate`. Mirrors the reference client's
+/// reactivation handler in `ironrdp-client/src/rdp.rs`.
 ///
-/// `compression_type` is the bulk compression the *original*
-/// connect negotiated. It has to be threaded through here because
-/// `set_fastpath_processor` replaces the processor wholesale, and
-/// the replacement owns the bulk decompressor: building one with
-/// `bulk_decompressor: None` silently dropped it, so every
-/// fast-path update after the first resize would arrive compressed
-/// and be handed to a decoder that no longer knew how to inflate
-/// it. Harmless while `compression_type` was hardcoded to `None`;
-/// a corrupt screen the moment it wasn't.
+/// The bulk decompressor is no longer our problem. `reactivate`
+/// rebuilds the fast-path processor internally from the
+/// compression type the original connect negotiated, and *retains*
+/// the decompression history rather than starting a fresh one —
+/// the server signals any reset per update with `PACKET_FLUSHED` /
+/// `PACKET_AT_FRONT`. Before IronRDP 0.17 this function had to
+/// build a `BulkCompressor` by hand and pass it to
+/// `set_fastpath_processor`, which is what the `ironrdp-bulk`
+/// dependency existed for; both are gone.
 ///
-/// A fresh `BulkCompressor` starts with an empty history buffer.
-/// That is correct here rather than merely convenient: MS-RDPBCGR
-/// has the server reset its own history across a
-/// Deactivation-Reactivation and flag the first packet
-/// `PACKET_AT_FRONT`, so there is no history to carry over.
+/// `reactivate` also re-validates the server's negotiated static
+/// virtual channel chunk size and returns `false` rather than
+/// installing a processor built on a bad one.
 async fn run_reactivation<S>(
     framed: &mut TokioFramed<S>,
     active_stage: &mut ActiveStage,
     seq: &mut ironrdp::connector::connection_activation::ConnectionActivationSequence,
-    compression_type: Option<CompressionType>,
 ) -> Result<DesktopSize, String>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
@@ -1297,56 +1354,42 @@ where
             framed.write_all(buf.filled()).await.map_err(|e| format!("reactivation write: {e:?}"))?;
         }
         if let ConnectionActivationState::Finalized {
-            io_channel_id,
-            user_channel_id,
             desktop_size,
             share_id,
             enable_server_pointer,
             pointer_software_rendering,
+            static_channel_chunk_size,
+            window_support_level,
+            ..
         } = seq.connection_activation_state()
         {
-            active_stage.set_fastpath_processor(
-                fast_path::ProcessorBuilder {
-                    io_channel_id,
-                    user_channel_id,
-                    share_id,
-                    enable_server_pointer,
-                    pointer_software_rendering,
-                    bulk_decompressor: build_bulk_decompressor(compression_type),
-                }
-                .build(),
-            );
-            active_stage.set_share_id(share_id);
-            active_stage.set_enable_server_pointer(enable_server_pointer);
+            // The channel ids come off the sequence now rather than
+            // out of the `Finalized` payload, which no longer carries
+            // them. `reactivate` rebuilds the fast-path processor,
+            // re-applies the share id and the pointer setting, and
+            // keeps the bulk decompression history.
+            if !active_stage.reactivate(
+                seq.io_channel_id(),
+                seq.user_channel_id(),
+                share_id,
+                enable_server_pointer,
+                pointer_software_rendering,
+                static_channel_chunk_size,
+            ) {
+                // Refuse the resize rather than run on a processor
+                // built from a chunk size the server mis-declared:
+                // every subsequent static-channel PDU would be framed
+                // wrongly. AGENTS.md §7 — fail explicitly.
+                return Err(format!(
+                    "reactivation: server negotiated an invalid static channel chunk size \
+                     ({static_channel_chunk_size})"
+                ));
+            }
+            // Renegotiated per activation, and not covered by
+            // `reactivate`: a server may change Window List support
+            // across a Deactivation-Reactivation.
+            active_stage.set_window_support_level(window_support_level);
             return Ok(desktop_size);
-        }
-    }
-}
-
-/// Build the fast-path bulk decompressor for a negotiated
-/// compression type, mirroring `ActiveStage::new`'s own mapping.
-///
-/// A construction failure is logged and degrades to `None` — the
-/// same thing ironrdp does — because the alternative is refusing a
-/// resize on a session that is otherwise healthy. It is loud, not
-/// silent: without a decompressor the screen will visibly corrupt,
-/// and this line is what explains why.
-fn build_bulk_decompressor(compression_type: Option<CompressionType>) -> Option<BulkCompressor> {
-    let ct = compression_type?;
-    let bulk_ct = match ct {
-        CompressionType::K8 => ironrdp_bulk::CompressionType::Rdp4,
-        CompressionType::K64 => ironrdp_bulk::CompressionType::Rdp5,
-        CompressionType::Rdp6 => ironrdp_bulk::CompressionType::Rdp6,
-        CompressionType::Rdp61 => ironrdp_bulk::CompressionType::Rdp61,
-    };
-    match BulkCompressor::new(bulk_ct) {
-        Ok(c) => Some(c),
-        Err(e) => {
-            log::error!(
-                "rdp: could not rebuild the {bulk_ct} bulk decompressor after reactivation ({e}); \
-                 graphics will corrupt until the session is reopened"
-            );
-            None
         }
     }
 }
@@ -1957,8 +2000,11 @@ fn peer_hung_up(e: &ironrdp::connector::ConnectorError) -> bool {
 /// mismatch or if the cert can't be re-encoded. The comparison tolerates
 /// an optional `sha256:` prefix and is case-insensitive on the hex so an
 /// operator-pasted pin in either form still matches.
-fn verify_tls_pin(server_cert: &x509_cert::Certificate, pin: &str) -> Result<(), String> {
-    use x509_cert::der::Encode as _;
+// `x509_cert_v03`, not the crate's default `x509_cert` (0.2): this is
+// the certificate `ironrdp_tls::upgrade` handed back, and ironrdp-tls
+// is built on x509-cert 0.3. See the dependency comment in Cargo.toml.
+fn verify_tls_pin(server_cert: &x509_cert_v03::Certificate, pin: &str) -> Result<(), String> {
+    use x509_cert_v03::der::Encode as _;
     let der = server_cert.to_der().map_err(|e| format!("rdp: re-encode server cert for pin check: {e}"))?;
     let observed = cert_der_sha256(&der);
     if tls_pin_matches(&observed, pin) {
@@ -2058,6 +2104,11 @@ mod nego_cookie_tests {
             nego_data: config.request_data.clone(),
             flags: RequestFlags::empty(),
             protocol: SecurityProtocol::SSL,
+            // None keeps the encoding byte-identical to what this
+            // test asserted before IronRDP 0.17 added the field:
+            // `Some(..)` would set CORRELATION_INFO_PRESENT and append
+            // a payload, changing the bytes the cookie assertions read.
+            correlation_info: None,
         };
         let mut buf = WriteBuf::new();
         encode_buf(&X224(request), &mut buf).expect("encode connection request");

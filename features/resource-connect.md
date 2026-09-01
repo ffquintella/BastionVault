@@ -540,10 +540,10 @@ default. The cost was the transport around it.
 |---|---|---|
 | Per-session throughput telemetry (`PumpStats`) | [gui/src-tauri/src/session/rdp.rs](../gui/src-tauri/src/session/rdp.rs) | ✅ |
 | Bulk compression advertised (MPPC-64K), `rdp_bulk_compression` profile key | [gui/src-tauri/src/session/rdp.rs](../gui/src-tauri/src/session/rdp.rs) | ✅ |
-| Bulk decompressor survives a DisplayControl resize | `run_reactivation` | ✅ |
+| Bulk decompressor survives a DisplayControl resize | `run_reactivation` | ✅ (IronRDP 0.17 owns it; history now retained across reactivation rather than restarted) |
 | Binary `ipc::Channel` frame transport + `session_attach_rdp_frames` | [gui/src-tauri/src/session/rdp.rs](../gui/src-tauri/src/session/rdp.rs), [gui/src/lib/rdpFrames.ts](../gui/src/lib/rdpFrames.ts), [gui/src/routes/SessionRdpWindow.tsx](../gui/src/routes/SessionRdpWindow.tsx) | ✅ |
 | Time-based dirty-rect coalescing (`Dirty`, 16 ms) | [gui/src-tauri/src/session/rdp.rs](../gui/src-tauri/src/session/rdp.rs) | ✅ |
-| EGFX / H.264 client behind `rdp_egfx` | [gui/src-tauri/src/session/rdp.rs](../gui/src-tauri/src/session/rdp.rs) | ⚠️ inert |
+| EGFX / H.264 client behind `rdp_egfx` | [gui/src-tauri/src/session/rdp.rs](../gui/src-tauri/src/session/rdp.rs) | ⚠️ advertised, unverified live — IronRDP 0.17 supplies the `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` flag, so the DVC should open; never yet run against a real Windows Graphics Pipeline (`roadmaps/rdp-performance.md`) |
 
 **Current state.** The frame path is binary end to end: the session window
 creates a `tauri::ipc::Channel` and installs it on the pump, which packs
