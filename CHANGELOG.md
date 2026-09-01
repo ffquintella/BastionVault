@@ -45,6 +45,26 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.42.1] - 2026-09-01
+
+### Security
+
+#### Dependencies
+
+- **Bump `chacha20` 0.10.1 -> 0.10.2 (yanked upstream)** -- 0.10.1 was yanked
+  from crates.io because its SSE2 backend calls the SSE4.1 intrinsic
+  `_mm_extract_epi32` from a function gated only on `target_feature = "sse2"`
+  (RustCrypto/stream-ciphers#579, fixed by #580). This is undefined behaviour
+  on the RNG and legacy 64-bit-counter code paths -- i.e. exactly the
+  `ChaCha12` core behind `rand 0.10`'s default RNG, which BastionVault uses for
+  salts, nonces, tokens, PKI key generation and Shamir shares in 18 crates. It
+  is a soundness/portability defect, not a weakness in the generated stream: on
+  x86_64 CPUs predating SSE4.1 the emitted `pextrd` is an illegal instruction,
+  and Miri rejects the call everywhere. `chacha20` is transitive only (via
+  `rand 0.10` and `ssh-cipher 0.3`), so this is a lockfile bump with no
+  manifest change; `Cargo.lock` is not tracked, so fresh resolutions already
+  avoid the yanked version.
+
 ## [0.42.0] - 2026-09-01
 
 ### Fixed
