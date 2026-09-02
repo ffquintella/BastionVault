@@ -1,6 +1,6 @@
 [package]
 name = "bastion-vault-gui"
-version = "0.42.2"
+version = "0.42.3"
 edition = "2021"
 description = "BastionVault Desktop GUI"
 # Shipped as a signed installer (see roadmaps/packaging-and-distribution.md),
@@ -262,6 +262,14 @@ mcp_local_dev = ["dep:tauri-plugin-mcp-bridge"]
 rdp_egfx = ["dep:ironrdp-egfx"]
 
 [dev-dependencies]
+# The embedded seal's authorization gate (`commands/system.rs`) is tested
+# against a real `Core` — a real token store to mint tokens in, a real policy
+# store to evaluate them against — because a mock would not catch a change in
+# `check_token` or `PolicyStore::can_operate`, which is exactly the class of
+# break this test exists for. `test-support` is the feature that exposes
+# `bastion_vault::test_utils`; the crate is already a path dependency above, so
+# this adds a feature to the graph, not a package.
+bastion_vault = { path = "../..", default-features = false, features = ["test-support"] }
 # `wat` lets the plugin_hooks tests assemble small WAT fixtures
 # without dragging the wasmtime `wat` feature into the runtime
 # build (which would balloon the GUI binary).

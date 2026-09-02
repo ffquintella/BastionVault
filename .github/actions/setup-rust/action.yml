@@ -29,19 +29,27 @@ inputs:
 # keys Phase 5 originally sketched would be far worse: 33 keys for a substrate
 # change.
 #
-# So there are TWO keys, and each has exactly ONE writer:
+# So there are THREE keys, and each has exactly ONE writer:
 #
-#   check   `cargo check` artefacts. Written by the `check` gate; restored by
-#           the per-crate `isolation` job.
-#   build   real codegen artefacts. Written by `unit-full`, which on main runs
-#           `nextest --workspace --lib --bins` and so compiles every dependency
-#           AND every dev-dependency for real. Restored by every test job.
+#   check    `cargo check` artefacts. Written by the `check` gate; restored by
+#            the per-crate `isolation` job.
+#   build    real codegen artefacts. Written by `unit-full`, which on main runs
+#            `nextest --workspace --lib --bins` and so compiles every dependency
+#            AND every dev-dependency for real. Restored by every test job.
+#   gui-host `cargo check` artefacts for the Tauri desktop host, which the
+#            `check` gate excludes. Written and restored by `gui-host` alone.
+#            It is a third claim on the same 10 GB, and it is separate rather
+#            than folded into `check` because the two graphs barely overlap
+#            above Tier 4: tauri, wry, webkit2gtk, IronRDP and the GUI's own
+#            wasmtime variant appear in no other job, so sharing the `check`
+#            key would leave whichever job wrote it last with a cache missing
+#            the expensive half of its graph.
 #
-# Two rather than one because `cargo check` emits `.rmeta` and `cargo build`
-# emits `.rlib`, under different metadata hashes. They do not share artefacts in
-# either direction, so a single key would mean whichever job wrote it left the
-# other half of CI with a useless cache. That is easy to get wrong and invisible
-# when you do — the jobs still pass, just slowly.
+# `check` and `build` are separate because `cargo check` emits `.rmeta` and
+# `cargo build` emits `.rlib`, under different metadata hashes. They do not
+# share artefacts in either direction, so a single key would mean whichever job
+# wrote it left the other half of CI with a useless cache. That is easy to get
+# wrong and invisible when you do — the jobs still pass, just slowly.
 #
 # Two more consequences worth knowing before changing this:
 #

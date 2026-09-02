@@ -7,10 +7,11 @@
 //! with `attestation_expired` (a Rustion-side check the spec calls
 //! out, even though the in-memory store doesn't enforce it yet).
 //!
-//! Same scheduling shape as `rustion::poller::start_poller` —
-//! detached `tokio::time::interval` loop. Per-tick failures don't
-//! short-circuit the sweep (one offline bastion shouldn't drop
-//! everyone else's attestation window).
+//! Detached sleep loop: one sweep shortly after unseal, then every
+//! `TICK_INTERVAL`, with shorter retries while sealed or after a
+//! failure (`next_delay`). Per-tick failures don't short-circuit the
+//! sweep (one offline bastion shouldn't drop everyone else's
+//! attestation window).
 
 #![deny(unsafe_code)]
 
@@ -26,6 +27,42 @@ use crate::enrolment;
 /// (also ~weekly) so a single missed tick doesn't expire anyone.
 pub const TICK_INTERVAL: Duration = Duration::from_secs(60 * 60 * 24 * 6);
 
+/// Delay before the *first* sweep after unseal. The loop used to skip
+/// its immediate tick outright, which made the first attestation land
+/// at uptime + `TICK_INTERVAL` — unreachable for any process that does
+/// not stay up for six days, so the desktop GUI's embedded vault never
+/// attested at all and its authority lapsed into
+/// `403 attestation_expired` fourteen days after approval. Sweeping at
+/// boot instead makes the schedule independent of process lifetime; the
+/// short grace lets the mount table and the PKI mount that mints the
+/// master keypair settle first, since `start_background` runs inside
+/// `post_unseal`.
+pub const STARTUP_DELAY: Duration = Duration::from_secs(60);
+
+/// Retry delay while the vault is sealed. Skipping straight to the next
+/// `TICK_INTERVAL` spent a whole six-day window on a seal that may have
+/// lasted a minute.
+pub const SEALED_RETRY: Duration = Duration::from_secs(5 * 60);
+
+/// Retry delay after a sweep that failed, wholly or for one bastion. An
+/// unreachable bastion must not have to wait a full interval for its
+/// next chance — two consecutive misses is already 12 of Rustion's 14
+/// days.
+pub const FAILURE_RETRY: Duration = Duration::from_secs(60 * 60);
+
+/// How long to wait before the next sweep, given what this one did.
+/// Split out from the loop so the schedule is testable without running
+/// a six-day timer.
+fn next_delay(sealed: bool, failed: usize) -> Duration {
+    if sealed {
+        SEALED_RETRY
+    } else if failed > 0 {
+        FAILURE_RETRY
+    } else {
+        TICK_INTERVAL
+    }
+}
+
 /// Spawn the background attest-timer. Same shape as
 /// `rustion::poller::start_poller` — fire-and-forget; tokio detaches
 /// when the parent terminates.
@@ -35,19 +72,24 @@ pub fn start_attest_timer(
 ) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         log::info!(
-            "rustion/attest: started (tick every {}d)",
+            "rustion/attest: started (first sweep in {}s, then every {}d)",
+            STARTUP_DELAY.as_secs(),
             TICK_INTERVAL.as_secs() / 86_400
         );
-        let mut interval = tokio::time::interval(TICK_INTERVAL);
-        interval.tick().await; // skip immediate first tick
+        let mut delay = STARTUP_DELAY;
         loop {
-            interval.tick().await;
+            tokio::time::sleep(delay).await;
             if core.sealed() {
+                delay = next_delay(true, 0);
                 continue;
             }
-            if let Err(e) = tick(&stores).await {
-                log::warn!("rustion/attest: tick failed: {e}");
-            }
+            delay = match tick(&stores).await {
+                Ok(r) => next_delay(false, r.failed),
+                Err(e) => {
+                    log::warn!("rustion/attest: tick failed: {e}");
+                    next_delay(false, 1)
+                }
+            };
         }
     })
 }
@@ -114,4 +156,45 @@ async fn tick(stores: &super::RustionStores) -> Result<enrolment::AttestAllResul
         r.failed
     );
     Ok(r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_sweep_does_not_wait_a_full_interval() {
+        // The regression: a process that lives less than TICK_INTERVAL
+        // must still attest. Anything on the order of the tick interval
+        // here means the desktop GUI never attests again.
+        assert!(STARTUP_DELAY < TICK_INTERVAL);
+        assert!(STARTUP_DELAY <= Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn sealed_retries_soon_not_next_interval() {
+        assert_eq!(next_delay(true, 0), SEALED_RETRY);
+        assert_eq!(next_delay(true, 3), SEALED_RETRY);
+        assert!(SEALED_RETRY < TICK_INTERVAL);
+    }
+
+    #[test]
+    fn partial_failure_retries_before_the_next_interval() {
+        assert_eq!(next_delay(false, 1), FAILURE_RETRY);
+        assert!(FAILURE_RETRY < TICK_INTERVAL);
+    }
+
+    #[test]
+    fn clean_sweep_waits_the_full_interval() {
+        assert_eq!(next_delay(false, 0), TICK_INTERVAL);
+    }
+
+    #[test]
+    fn retry_cadence_fits_inside_rustions_renew_window() {
+        // Rustion's ATTESTATION_WINDOW is 14 days. Two consecutive
+        // clean intervals (12 days) must still land inside it, and a
+        // failing sweep must get several attempts before the deadline.
+        assert!(TICK_INTERVAL.as_secs() * 2 < 60 * 60 * 24 * 14);
+        assert!(FAILURE_RETRY.as_secs() * 24 <= TICK_INTERVAL.as_secs());
+    }
 }

@@ -1325,6 +1325,17 @@ The Phase 9.1 in-memory authority projections now have on-disk YAML mirrors, an 
   - `deenrol_bastion(target, master, operator, reason) -> DeenrolResult` — tolerant of 404/410 (Rustion already forgot us → success).
   - `RustionStore::list_targets()` helper added in `store.rs` (was only `list_target_ids`).
 - **`src/modules/rustion/attest_timer.rs`** new module — `start_attest_timer(core)` spawns a detached tokio interval task ticking every 6 days (safety margin against the ~weekly Rustion-side renew window). Same lifecycle pattern as `probe::start_pinger` / `poller::start_poller`. Wired into `core.rs` boot alongside the existing rustion timers.
+
+  **Corrected 2026-09-02.** The interval's immediate first tick was swallowed, so
+  the first sweep landed at *uptime* + 6 days and any vault restarting more often
+  than that never attested at all — the desktop GUI's embedded vault lapsed into
+  `403 attestation_expired` 14 days after approval while its health pinger and
+  telemetry pull still reported the bastion up. The loop now sweeps
+  `STARTUP_DELAY` (60 s) after unseal and retries on `SEALED_RETRY` (5 min) /
+  `FAILURE_RETRY` (1 h) instead of deferring a whole interval; `next_delay` holds
+  the schedule and is unit-tested against Rustion's 14-day window. Any timer
+  whose first action is deferred by a full period is only correct for a process
+  that outlives the period — the GUI's embedded vault does not.
 - **Two new HTTP routes** in `rustion/mod.rs`:
   - `POST rustion/authority/attest` — `bastion_id` optional (one or all). Emits `rustion.master.attest` per success.
   - `POST rustion/target/deenrol` — sends the signed deenrol envelope. Emits `rustion.target.deenrolled`.
@@ -1395,6 +1406,7 @@ Two strands land together: the BastionVault-side **multi-instance failover** sto
 | Deployment-id mismatch | Approve enrolment, then re-submit with same pubkey + different deployment id | `403 attestation_mismatch`; chain shows `authority.attestation_mismatch` |
 | Tombstone resurrection | Delete an authority, re-submit | Refused with `authority_tombstoned`; only `untombstone` action unblocks |
 | Periodic re-attestation lapse | Stop BV's attest timer; let `attestation_renew_at` expire | Next envelope refused with `attestation_expired`; manual `rustion authority refresh-attestation` re-approves |
+| Attest on a short-lived process | Restart BV (or the GUI) repeatedly, never leaving it up for `TICK_INTERVAL` | A sweep still lands `STARTUP_DELAY` after each unseal; `attestation_renew_at` keeps moving forward |
 | Live sessions de-dupe | Two Rustion instances mediate concurrent sessions for the same operator | GUI's Live sessions page shows two rows, not four; session_id uniqueness holds |
 
 ## Open questions

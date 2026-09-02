@@ -308,11 +308,16 @@ that pass the flags down.
 
 CI (`.github/workflows/tests.yml`) runs **everything except
 `tests/e2e/rustion-ssh`** — unit, doctests, `tests/`, hiqlite, cucumber, the
-per-crate isolation check, the HSM seal backends, and the GUI. A push to `main`
+per-crate isolation check, the HSM seal backends, the Tauri host's
+`cargo check` and the GUI frontend. A push to `main`
 runs the lot; a pull request runs only the packages the change can reach,
 derived from the same
-`cargo metadata` graph `make test-changed` uses. `make ci-plan` prints that plan
-locally without building anything:
+`cargo metadata` graph `make test-changed` uses. The one exception is the
+`gui-host` job (`cargo check -p bastion-vault-gui --all-targets`): it is
+deliberately unplanned and runs on every push and pull request, because the
+change that last broke that crate was three tiers below it in `bv-kernel` and
+any package-scoped trigger would have skipped it. `make ci-plan` prints that
+plan locally without building anything:
 
 ```bash
 make ci-plan BASE=main          # what CI will do with this branch

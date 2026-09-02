@@ -104,15 +104,63 @@ pub struct SealOutcome {
     pub nodes: Vec<crate::commands::connection::NodeSealResult>,
 }
 
+/// Decide whether `token` may seal the embedded vault.
+///
+/// This is the **only** authorization gate on the embedded seal path.
+/// `embedded::seal_vault` calls `Core::seal` directly, so no `Request` is
+/// ever built and the dispatcher — and with it `pre_route` / `post_auth`,
+/// which is where every HTTP caller's `sys/seal` grant is checked — never
+/// runs. Nothing downstream re-checks what this function decides: a caller
+/// that gets past it seals the vault.
+///
+/// Two steps, in order:
+///
+/// 1. `check_token` resolves the token to an `Auth`. The client address is
+///    `""` — the caller is this very process over Tauri's IPC, not a socket,
+///    so there is no address to attribute the request to. Per `check_token`'s
+///    contract that fails a token carrying a `bound_cidrs` restriction
+///    closed: an address we cannot observe cannot be shown to satisfy the
+///    rule. Do **not** substitute a plausible-looking `"127.0.0.1"` to make
+///    such a token work — that fabricates the one fact the binding exists to
+///    check, and reopens the hole for every token bound to a loopback CIDR.
+/// 2. `PolicyStore::can_operate` replays the same per-target resolution the
+///    request pipeline uses in `post_auth`, for `sys/seal` Write. `sys/` is
+///    root-owned and never namespace-rewritten, so there is no namespace to
+///    qualify the probe with.
+///
+/// Takes the two stores rather than a `Core` so the decision is reachable
+/// from a test without a Tauri `AppHandle`; see the tests at the bottom of
+/// this file.
+#[cfg(feature = "embedded_vault")]
+async fn authorize_embedded_seal(
+    token_store: &bastion_vault::modules::auth::TokenStore,
+    policy_store: &bastion_vault::modules::policy::PolicyStore,
+    token: &str,
+) -> CmdResult<()> {
+    use bastion_vault::logical::Operation as ServerOp;
+
+    let auth = token_store
+        .check_token("sys/seal", token, "")
+        .await
+        .map_err(CommandError::from)?
+        .ok_or("invalid or expired token")?;
+
+    if !policy_store.can_operate(&auth, "sys/seal", ServerOp::Write, None).await {
+        return Err("Permission denied: caller lacks `update` on sys/seal".into());
+    }
+
+    Ok(())
+}
+
 /// Seal the vault. Backend-gated: the caller must hold a policy
 /// granting `update` on `sys/seal`, which in the shipped policy set
 /// is only the `root` token. Before this gate was added, any
 /// authenticated user could seal the vault from the dashboard.
 ///
-/// The authorization check routes through `PolicyStore::can_operate`,
-/// which replays the same per-target resolution the request pipeline
-/// uses in `post_auth`. It is not a UI-only hide: even a hand-crafted
-/// Tauri call with a low-privilege token is rejected here.
+/// In embedded mode the gate is [`authorize_embedded_seal`], which is not a
+/// UI-only hide and not a client-side optimisation: it is the whole check.
+/// Even a hand-crafted Tauri call with a low-privilege token is rejected
+/// there.
 ///
 /// In remote mode seal state is per-node, so the command is fanned out
 /// to *every* node of the connected cluster (mirroring
@@ -123,7 +171,6 @@ pub struct SealOutcome {
 pub async fn seal_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdResult<SealOutcome> {
     #[cfg(feature = "embedded_vault")]
     {
-        use bastion_vault::logical::Operation as ServerOp;
         use bastion_vault::modules::{auth::AuthModule, policy::PolicyModule};
 
         let vault_guard = state.vault.lock().await;
@@ -134,12 +181,10 @@ pub async fn seal_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Cm
                 return Err("Authentication required to seal the vault".into());
             }
 
-            // Resolve the token → Auth, then probe `sys/seal` Write.
-            // This is an embedded-only optimisation: it short-circuits
-            // an unauthorized seal client-side rather than letting the
-            // request travel through the dispatcher only to be rejected.
-            // Even a hand-crafted Tauri call with a low-privilege token
-            // is rejected here.
+            // Resolving the stores is this command's business; the decision
+            // they feed is `authorize_embedded_seal`, which is what the tests
+            // drive and the only thing standing between this token and
+            // `Core::seal`.
             let auth_module = core
                 .module_manager
                 .get_module::<AuthModule>("auth")
@@ -148,32 +193,13 @@ pub async fn seal_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Cm
                 .token_store
                 .load_full()
                 .ok_or("token store unavailable")?;
-
-            // No connection to attribute this to: the caller is this very
-            // process, over Tauri's IPC, not a socket. Per `check_token`'s
-            // contract that is spelled `""`, which fails a token carrying a
-            // `bound_cidrs` restriction closed — an address we cannot observe
-            // cannot be shown to satisfy the rule.
-            let auth = token_store
-                .check_token("sys/seal", &token, "")
-                .await
-                .map_err(CommandError::from)?
-                .ok_or("invalid or expired token")?;
-
             let policy_module = core
                 .module_manager
                 .get_module::<PolicyModule>("policy")
                 .ok_or("policy module unavailable")?;
-            let policy_store = policy_module.policy_store.load();
+            let policy_store = policy_module.policy_store.load_full();
 
-            // `sys/` is root-owned and never namespace-rewritten, so there is
-            // no namespace to qualify this probe with.
-            if !policy_store
-                .can_operate(&auth, "sys/seal", ServerOp::Write, None)
-                .await
-            {
-                return Err("Permission denied: caller lacks `update` on sys/seal".into());
-            }
+            authorize_embedded_seal(&token_store, &policy_store, &token).await?;
 
             embedded::seal_vault(vault).await?;
             *state.backend.lock().await = None;
@@ -1170,4 +1196,152 @@ fn mount_map_to_info(map: &serde_json::Map<String, Value>) -> Vec<MountInfo> {
         .collect();
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out
+}
+
+/// Tests for the embedded seal's authorization gate.
+///
+/// `seal_vault` itself needs a Tauri `AppHandle` and an `AppState`, neither of
+/// which can be built outside a running app — so the decision it delegates to
+/// lives in [`authorize_embedded_seal`], and that is what is exercised here
+/// against a real `Core`: a real token store to mint tokens in, and a real
+/// policy store to evaluate them against. Nothing is mocked; a change to
+/// `check_token` or to `PolicyStore::can_operate` is visible here.
+#[cfg(all(test, feature = "embedded_vault"))]
+mod seal_authz_tests {
+    use bastion_vault::kernel_api::VaultCtx;
+    use bastion_vault::modules::auth::token_store::TokenEntry;
+    use bastion_vault::modules::auth::TokenStore;
+    use bastion_vault::modules::policy::PolicyStore;
+    use bastion_vault::modules::{auth::AuthModule, policy::PolicyModule};
+    use bastion_vault::test_utils::{new_unseal_test_bastion_vault, test_write_api};
+    use bastion_vault::BastionVault;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    use super::authorize_embedded_seal;
+
+    /// What the GUI's "seal" button needs. Deliberately narrow: `update` on
+    /// `sys/seal` and nothing else.
+    const SEAL_POLICY: &str = r#"path "sys/seal" { capabilities = ["update"] }"#;
+
+    /// A normal logged-in operator: can read secrets, cannot seal.
+    const READER_POLICY: &str = r#"path "secret/*" { capabilities = ["read", "list"] }"#;
+
+    /// Stand up an unsealed vault and hand back the two stores
+    /// `authorize_embedded_seal` takes, plus the root token.
+    ///
+    /// The `BastionVault` is returned so the caller keeps it alive: it owns
+    /// the storage backend the stores read through.
+    async fn setup(name: &str) -> (BastionVault, Arc<TokenStore>, Arc<PolicyStore>, String) {
+        let (bvault, core, root_token) = new_unseal_test_bastion_vault(name).await;
+
+        for (policy_name, policy) in [("seal-op", SEAL_POLICY), ("reader", READER_POLICY)] {
+            let data = json!({ "policy": policy }).as_object().cloned();
+            test_write_api(core.as_ref(), &root_token, &format!("sys/policy/{policy_name}"), true, data)
+                .await
+                .unwrap();
+        }
+
+        let token_store = core
+            .module_manager
+            .get_module::<AuthModule>("auth")
+            .unwrap()
+            .token_store
+            .load_full()
+            .unwrap();
+        let policy_store = core.module_manager.get_module::<PolicyModule>("policy").unwrap().policy_store.load_full();
+
+        (bvault, token_store, policy_store, root_token)
+    }
+
+    /// Mint a token directly in the store, bypassing `auth/token/create` so a
+    /// test can stamp `bound_cidrs` without going through an auth backend.
+    /// The returned string is the token the GUI would hold.
+    async fn mint(token_store: &TokenStore, policies: &[&str], bound_cidrs: &[&str]) -> String {
+        let mut entry = TokenEntry {
+            policies: policies.iter().map(|p| p.to_string()).collect(),
+            bound_cidrs: bound_cidrs.iter().map(|c| c.to_string()).collect(),
+            display_name: "test".to_string(),
+            ..Default::default()
+        };
+        token_store.create(&mut entry).await.unwrap();
+        entry.id
+    }
+
+    /// A token without `update` on `sys/seal` cannot seal, even though it is
+    /// a perfectly valid token that `check_token` resolves happily.
+    #[tokio::test]
+    async fn test_seal_denied_without_sys_seal_update() {
+        let (_bvault, token_store, policy_store, _root) = setup("gui_seal_authz_unprivileged").await;
+        let token = mint(&token_store, &["reader"], &[]).await;
+
+        let err = authorize_embedded_seal(&token_store, &policy_store, &token)
+            .await
+            .expect_err("a token holding only `reader` must not be able to seal");
+        assert!(err.message.contains("Permission denied"), "unexpected error: {}", err.message);
+    }
+
+    /// A token carrying `bound_cidrs` cannot seal through this path, because
+    /// the GUI has no client address to present and passes `""`.
+    ///
+    /// This is the behaviour ee747cd chose deliberately, and the fixture is
+    /// built to keep it that way. The token is bound to **`127.0.0.0/8`** on
+    /// purpose: a refactor that decides the empty string is inconvenient and
+    /// substitutes a fabricated `"127.0.0.1"` — the address a same-process
+    /// caller looks like it "should" have — makes this token pass, and this
+    /// assertion is what goes red when it does. A fixture bound to some
+    /// unrelated range (`10.0.0.0/24`) would stay green through exactly that
+    /// change, which is why the loopback case is the one asserted first.
+    ///
+    /// The control assertions matter as much: the *same* token, the *same*
+    /// policy, resolves fine the moment an address inside its CIDR is
+    /// supplied. So the refusal comes from the empty address and nothing else
+    /// — not from a broken fixture that could never have sealed anyway.
+    #[tokio::test]
+    async fn test_seal_denied_for_cidr_bound_token_with_no_client_address() {
+        let (_bvault, token_store, policy_store, _root) = setup("gui_seal_authz_bound_cidrs").await;
+        let loopback_bound = mint(&token_store, &["seal-op"], &["127.0.0.0/8"]).await;
+
+        authorize_embedded_seal(&token_store, &policy_store, &loopback_bound)
+            .await
+            .expect_err("a loopback-bound token must not seal: the GUI observes no client address, it must not invent one");
+
+        // Not a loopback quirk — a token bound anywhere is refused, because
+        // `""` matches no CIDR at all.
+        let lan_bound = mint(&token_store, &["seal-op"], &["10.0.0.0/24"]).await;
+        authorize_embedded_seal(&token_store, &policy_store, &lan_bound)
+            .await
+            .expect_err("a CIDR-bound token must not seal through a path with no observable client address");
+
+        // The binding is the only thing that refused them: presented from an
+        // address inside the CIDR, the very same tokens resolve and carry the
+        // seal grant.
+        for (token, addr) in [(&loopback_bound, "127.0.0.1"), (&lan_bound, "10.0.0.7")] {
+            let auth = token_store
+                .check_token("sys/seal", token, addr)
+                .await
+                .expect("an address inside the bound CIDR must satisfy the binding")
+                .expect("the token exists");
+            assert!(
+                policy_store.can_operate(&auth, "sys/seal", bastion_vault::logical::Operation::Write, None).await,
+                "the fixture token must actually hold `update` on sys/seal, or the assertions above prove nothing"
+            );
+        }
+    }
+
+    /// The positive case, end to end: an authorized, unbound token passes the
+    /// gate and the vault really does seal behind it.
+    #[tokio::test]
+    async fn test_seal_allowed_for_authorized_unbound_token() {
+        let (bvault, token_store, policy_store, _root) = setup("gui_seal_authz_authorized").await;
+        let token = mint(&token_store, &["seal-op"], &[]).await;
+
+        authorize_embedded_seal(&token_store, &policy_store, &token)
+            .await
+            .expect("a token holding `update` on sys/seal and bound to nothing must be able to seal");
+
+        assert!(!bvault.core.load().sealed(), "the fixture vault starts unsealed");
+        crate::embedded::seal_vault(&bvault).await.expect("seal");
+        assert!(bvault.core.load().sealed(), "the vault must be sealed once the gate has been passed");
+    }
 }

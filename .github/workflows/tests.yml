@@ -30,6 +30,10 @@ name: Tests
 #     unification makes it strictly weaker, and Phase 4.5 shipped a `bv-server`
 #     that could not build on its own while the workspace check stayed green
 #   * GUI type-check + vitest
+#   * `cargo check -p bastion-vault-gui --all-targets` — the Tauri desktop
+#     host, which every other cargo invocation here excludes. It was covered by
+#     nothing until 0.42.2 shipped a GUI that did not compile; see the
+#     `gui-host` job.
 #
 # NOT RUN HERE, and why:
 #
@@ -38,7 +42,12 @@ name: Tests
 #     it has no tests of its own: it is `-p bastion-plugin-testkit --lib`,
 #     `--test test_plugin_testkit_parity` and the root crate's `plugins::*` lib
 #     tests, all three of which are covered above.
-#   * release builds, packaging, and the desktop host's Rust build.
+#   * release builds and packaging — including the desktop host's real
+#     (codegen + bundle) build. `gui-host` type-checks that crate; it does not
+#     link it, build the frontend, or produce an installer.
+#   * the desktop host's own unit tests. `gui-host` checks them but runs
+#     nothing: `cargo test -p bastion-vault-gui` links the whole graph for
+#     real, and that cost has not been taken on yet.
 #
 # ── SCOPING ───────────────────────────────────────────────────────
 #
@@ -514,6 +523,83 @@ jobs:
       - name: Run tests
         run: cd gui && npx vitest run
 
+  # ── The Tauri desktop host, which nothing else here compiles ────
+  #
+  # `--exclude bastion-vault-gui` on every cargo invocation above is a
+  # deliberate cost decision, and it is kept — but it left the crate
+  # type-checked by NOTHING on a push or a pull request. The only workflows
+  # that build it, macos-release.yml and standalone-release.yml, trigger solely
+  # on `releases/*` tags. So 0.42.2 shipped a GUI that did not compile:
+  # enforcing `token_bound_cidrs` added a `client_ip` parameter to
+  # `TokenStore::check_token` and updated every caller except the embedded seal
+  # path in `gui/src-tauri/src/commands/system.rs`. It surfaced ~16 minutes
+  # into a downstream repo's Windows packaging job (E0061), and only there.
+  #
+  # NOT gated on the plan, unlike every other job in this file. The change that
+  # broke it was in `bv-kernel`, three tiers down and nowhere near `gui/`, so a
+  # path- or package-scoped trigger would have skipped exactly the run that
+  # mattered. Any workspace change can break this crate; this runs on every
+  # push and every pull request.
+  #
+  # Front end only (`cargo check`), and the package list below is deliberately
+  # narrower than the release workflows':
+  #
+  #   * no Node and no `npm run build`. `generate_context!` embeds
+  #     `frontendDist` only when tauri's `custom-protocol` feature is on, which
+  #     only `tauri build` passes; a plain cargo check takes the `devUrl` path
+  #     and never reads `gui/dist` (which is gitignored and absent in CI).
+  #     Verified by checking the crate with the directory removed.
+  #   * no patchelf, no librsvg2-dev — AppImage bundling and icon generation,
+  #     not compilation.
+  #   * no libayatana-appindicator3-dev, no libxdo-dev — nothing in this
+  #     crate's Linux dependency tree pulls `tray-icon`, `libappindicator-sys`
+  #     or `xdo` (tauri is used without the tray feature).
+  #
+  # What is left is exactly the crates whose build scripts pkg-config a system
+  # library, and `cargo check` runs build scripts: webkit2gtk-sys +
+  # javascriptcore-rs-sys (libwebkit2gtk-4.1-dev), the gtk3 stack — gtk/gdk/atk/
+  # pango/cairo/gdk-pixbuf/gio/glib-sys (libgtk-3-dev), soup3-sys
+  # (libsoup-3.0-dev), libdbus-sys via tao (libdbus-1-dev), libudev-sys via
+  # `authenticator` (libudev-dev) and pcsc-sys via `yubikey` (libpcsclite-dev).
+  # Re-derive with `cargo tree -p bastion-vault-gui --target
+  # x86_64-unknown-linux-gnu` before adding to this list.
+  gui-host:
+    name: GUI Tauri host (cargo check)
+    runs-on: ubuntu-latest
+    # `--all-targets` over this crate is the workspace plus the webkit/wry,
+    # IronRDP and wasmtime stacks. Sized like the `check` gate, for the same
+    # reason: a cold run is slow, a hang should still be cut off.
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        # IronRDP is a git dependency, not a submodule, so cargo fetches it.
+        with:
+          submodules: false
+
+      # Its own key, not `check`: the `check` gate excludes this crate, so the
+      # tauri / wry / IronRDP half of this job's graph is not in that cache and
+      # never would be. See the key table in the action.
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: gui-host
+          save-cache: "true"
+          nextest: "false"
+
+      - name: Install the Tauri host's system dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libdbus-1-dev libudev-dev libpcsclite-dev
+
+      # `--all-targets`, so the crate's own #[cfg(test)] modules are checked
+      # too — including the embedded seal's authorization test, which is the
+      # one place `authorize_embedded_seal` is exercised.
+      - name: cargo check -p bastion-vault-gui --all-targets
+        run: cargo check -p bastion-vault-gui --all-targets
+
   # Advisory only. Phase 0 of roadmaps/workspace-decomposition.md added this to
   # stop the dependency graph quietly re-growing the slack that pass removed
   # (five dead direct deps across four manifests). It must never block a merge:
@@ -574,6 +660,7 @@ jobs:
       - isolation
       - hsm
       - gui
+      - gui-host
       - deps
     runs-on: ubuntu-latest
     timeout-minutes: 5

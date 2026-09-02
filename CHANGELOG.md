@@ -45,6 +45,89 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.42.3] - 2026-09-02
+
+### Added
+
+#### CI: the Tauri desktop host is type-checked on every push and pull request
+
+- **New `gui-host` job**
+  ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) running
+  `cargo check -p bastion-vault-gui --all-targets`. Every other cargo
+  invocation in that workflow passes `--exclude bastion-vault-gui`, and the two
+  workflows that do build the GUI trigger only on `releases/*` tags — so the
+  desktop host was type-checked by nothing on an ordinary push, and 0.42.2
+  shipped a GUI that did not compile (`check_token`'s new `client_ip` parameter
+  reached every caller except the embedded seal path; E0061 surfaced ~16
+  minutes into a downstream repo's Windows packaging job). The job is
+  deliberately *not* gated on the change plan: the break originated in
+  `bv-kernel`, three tiers below `gui/`. The `--exclude` flags are unchanged.
+- Installs only the system libraries the crate's build scripts actually
+  pkg-config — webkit2gtk, gtk3, soup3, dbus, udev, pcsclite — and no Node:
+  `generate_context!` reads `frontendDist` only under tauri's
+  `custom-protocol` feature, which only `tauri build` passes. No patchelf,
+  librsvg2 or appindicator (bundling and tray, neither compiled here). Writes
+  its own `gui-host` rust-cache key; see the key table in
+  [`.github/actions/setup-rust/action.yml`](.github/actions/setup-rust/action.yml).
+
+#### Regression coverage for the embedded seal's authorization gate
+
+- **Three tests over `authorize_embedded_seal`**
+  ([`gui/src-tauri/src/commands/system.rs`](gui/src-tauri/src/commands/system.rs)),
+  driven against a real `Core`: a token without `update` on `sys/seal` cannot
+  seal, a token carrying `bound_cidrs` cannot seal through this path (the GUI
+  observes no client address and passes `""`), and an authorized unbound token
+  can. The CIDR fixture is bound to `127.0.0.0/8` on purpose, so a later
+  refactor that substitutes a fabricated `"127.0.0.1"` for the empty address
+  fails the test instead of quietly reopening the hole.
+
+### Changed
+
+- **Extract the embedded seal's authorization decision into
+  `authorize_embedded_seal(token_store, policy_store, token)`**
+  ([`gui/src-tauri/src/commands/system.rs`](gui/src-tauri/src/commands/system.rs)).
+  Behaviour is unchanged; `seal_vault` resolves the two stores and calls it.
+  The comment above the old call site described the check as an embedded-only
+  optimisation that "short-circuits" a request the dispatcher would reject
+  anyway — it is nothing of the kind: `embedded::seal_vault` calls
+  `Core::seal` directly, so no request is ever dispatched and this check is the
+  only authorization gate on the embedded seal. Corrected, and the function is
+  now reachable from a test without a Tauri `AppHandle`.
+
+### Fixed
+
+#### Rustion re-attestation never ran in a short-lived vault process
+
+- **Sweep once shortly after unseal instead of only at uptime + 6 days**
+  ([`crates/bv-engine-rustion/src/attest_timer.rs`](crates/bv-engine-rustion/src/attest_timer.rs)).
+  The timer built a `tokio::time::interval(TICK_INTERVAL)` and deliberately
+  swallowed its immediate first tick, so the first `attest` envelope was only
+  ever sent after six days of *continuous* uptime. Any vault that restarts more
+  often than that -- notably the desktop GUI's embedded vault -- therefore
+  attested exactly never, and its Rustion authority record lapsed 14 days after
+  approval: every `session/open`, `session/renew` and `session/kill` was then
+  refused with `HTTP 502 bastion_rejected: ... 403 attestation_expired`, while
+  the 30 s health pinger and 60 s telemetry pull kept reporting the bastion
+  healthy. The loop now sleeps `STARTUP_DELAY` (60 s, enough for the mount table
+  and the PKI mount that mints the master keypair to settle, since
+  `start_background` runs inside `post_unseal`) before its first sweep, making
+  the schedule independent of process lifetime.
+
+- **Retry sooner than the next interval when a sweep cannot complete.** A sealed
+  vault used to burn a whole six-day window on a seal that may have lasted a
+  minute, and a sweep that failed for one bastion got no further attempt for six
+  days -- two consecutive misses is already 12 of Rustion's 14-day
+  `ATTESTATION_WINDOW`. `next_delay` now returns `SEALED_RETRY` (5 min) while
+  sealed and `FAILURE_RETRY` (1 h) when any bastion in the pass failed, with
+  unit tests pinning the cadence inside the renew window.
+
+- Recovery from an already-lapsed record is unchanged and deadlock-free: Rustion
+  exempts `op = "attest"` from the expiry gate, so a single
+  `rustion_authority_attest` (or `POST rustion/authority/attest`) re-stamps the
+  deadline. Note there is still no GUI control bound to it --
+  `attestAuthority` in [`gui/src/lib/rustion.ts`](gui/src/lib/rustion.ts) has no
+  caller, and `bvault-cli` has no `attest` subcommand.
+
 ## [0.42.2] - 2026-09-02
 
 ### Security
