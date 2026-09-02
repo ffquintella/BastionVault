@@ -149,8 +149,13 @@ pub async fn seal_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Cm
                 .load_full()
                 .ok_or("token store unavailable")?;
 
+            // No connection to attribute this to: the caller is this very
+            // process, over Tauri's IPC, not a socket. Per `check_token`'s
+            // contract that is spelled `""`, which fails a token carrying a
+            // `bound_cidrs` restriction closed — an address we cannot observe
+            // cannot be shown to satisfy the rule.
             let auth = token_store
-                .check_token("sys/seal", &token)
+                .check_token("sys/seal", &token, "")
                 .await
                 .map_err(CommandError::from)?
                 .ok_or("invalid or expired token")?;
