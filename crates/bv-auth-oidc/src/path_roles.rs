@@ -23,7 +23,10 @@ use super::{OidcBackend, OidcBackendInner};
 use crate::{
     context::Context,
     errors::RvError,
-    logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
+    logical::{
+        is_reserved_token_meta_key, Backend, Field, FieldType, Operation, Path, PathOperation, Request,
+        Response,
+    },
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
 };
@@ -340,6 +343,13 @@ impl OidcBackendInner {
             role.user_claim = "sub".to_string();
         }
 
+        // Reject a mapping onto a backend-owned metadata key before it is
+        // persisted, rather than dropping it at login: the operator gets an
+        // error naming the key, matching what `auth/token/create` does with a
+        // reserved `meta` key. `path_callback` drops any that a role persisted
+        // before this check still carries.
+        reject_reserved_mapping_targets(&role.claim_mappings)?;
+
         let bytes = serde_json::to_vec(&role)?;
         req.storage_put(&StorageEntry {
             key: format!("{ROLE_PREFIX}{name}"),
@@ -367,6 +377,63 @@ impl OidcBackendInner {
         let names = req.storage_list(ROLE_PREFIX).await?;
         Ok(Some(Response::list_response(&names)))
     }
+}
+
+/// May a role's `claim_mappings` project a claim onto `meta_key`?
+///
+/// The target set is `bv_logical::auth::RESERVED_TOKEN_META_KEYS` — the same
+/// list `auth/token/create` refuses in a caller-supplied `meta` map, and for
+/// the same reason: those keys are stamped by the auth backend and read back
+/// by authorization and audit code as trusted input. A `claim_mappings` entry
+/// is the *second* write point for that set, and the value it writes is
+/// supplied by the IdP, so an operator who wrote
+/// `claim_mappings = {"dept": "spiffe_id"}` would hand the IdP the ability to
+/// mint tokens that satisfy the server-wide `require_machine_identity` gate
+/// with no machine attestation at all.
+///
+/// Unlike SAML, OIDC allows no exceptions: `user_claim` already names the
+/// claim that becomes the principal, and it is `display_name` — derived from
+/// `user_claim` — that `enforce_login_assignment` checks the login against. A
+/// claim mapped onto `username` would be checked as one principal and then
+/// widened by a namespace assignment as another.
+pub(crate) fn reserved_mapping_target(meta_key: &str) -> bool {
+    is_reserved_token_meta_key(meta_key)
+}
+
+/// Refuse a role whose `claim_mappings` target a reserved metadata key.
+///
+/// Validated against the role as it will be *persisted*, not against the
+/// fields this request happened to carry, so the invariant is the strong one:
+/// no stored role passes this check and still carries a reserved target. An
+/// operator updating an unrelated field on a legacy role that does carry one
+/// gets the error too, which is the point — the mapping has to be fixed rather
+/// than silently kept.
+///
+/// Names every offending pair, sorted, so one round trip shows the whole
+/// problem and the same body always produces the same message.
+fn reject_reserved_mapping_targets(mappings: &HashMap<String, String>) -> Result<(), RvError> {
+    let mut offenders: Vec<(&str, &str)> = mappings
+        .iter()
+        .filter(|(_, meta_key)| reserved_mapping_target(meta_key))
+        .map(|(claim, meta_key)| (claim.as_str(), meta_key.as_str()))
+        .collect();
+    if offenders.is_empty() {
+        return Ok(());
+    }
+    offenders.sort_unstable();
+
+    let listed = offenders
+        .iter()
+        .map(|(claim, meta_key)| format!("`{claim}` -> `{meta_key}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(RvError::ErrString(format!(
+        "oidc: claim_mappings may not target reserved token metadata key(s): {listed}. Those keys \
+         are set by the auth backend that authenticated the principal and are read back as \
+         authorization input, so mapping an IdP-supplied claim onto one lets the IdP forge it. Use \
+         `user_claim` to choose the claim that names the principal, `groups_claim` for group \
+         membership, and an unreserved key for anything else"
+    )))
 }
 
 fn parse_string_list(v: &Value) -> Vec<String> {
@@ -532,5 +599,86 @@ mod tests {
             &Value::Bool(true),
             &["true".to_string()]
         ));
+    }
+}
+
+#[cfg(test)]
+mod reserved_mapping_tests {
+    use super::*;
+
+    fn mappings(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn unreserved_targets_are_accepted() {
+        reject_reserved_mapping_targets(&mappings(&[
+            ("email", "email"),
+            ("employee_id", "employee_id"),
+            ("department", "dept"),
+        ]))
+        .unwrap();
+    }
+
+    #[test]
+    fn spiffe_id_target_is_refused() {
+        // The escalation this closes: `spiffe_id` is the whole of what the
+        // server-wide `require_machine_identity` gate reads as proof of
+        // machine attestation.
+        let err = reject_reserved_mapping_targets(&mappings(&[("dept", "spiffe_id")])).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("reserved token metadata key"), "{msg}");
+        assert!(msg.contains("`dept` -> `spiffe_id`"), "{msg}");
+    }
+
+    #[test]
+    fn username_target_is_refused_use_user_claim_instead() {
+        // OIDC allows no exception here: `enforce_login_assignment` checks the
+        // login against `display_name`, which comes from `user_claim`, so a
+        // claim mapped onto `username` would be checked as one principal and
+        // widened by a namespace assignment as another.
+        let err =
+            reject_reserved_mapping_targets(&mappings(&[("preferred_username", "username")])).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("`preferred_username` -> `username`"), "{msg}");
+        assert!(msg.contains("user_claim"), "{msg}");
+    }
+
+    #[test]
+    fn every_offender_is_named_and_the_order_is_stable() {
+        let bad = mappings(&[
+            ("dept", "spiffe_id"),
+            ("aud", "mount_path"),
+            ("email", "email"),
+            ("env", "approle_env_scoped"),
+        ]);
+        let first = format!("{}", reject_reserved_mapping_targets(&bad).unwrap_err());
+        let second = format!("{}", reject_reserved_mapping_targets(&bad).unwrap_err());
+        assert_eq!(first, second, "message must not depend on HashMap order");
+        assert!(first.contains("`aud` -> `mount_path`"), "{first}");
+        assert!(first.contains("`dept` -> `spiffe_id`"), "{first}");
+        assert!(first.contains("`env` -> `approle_env_scoped`"), "{first}");
+        assert!(!first.contains("`email`"), "{first}");
+    }
+
+    #[test]
+    fn namespace_binding_targets_are_refused() {
+        for key in ["namespace_path", "namespace_id", "child_visible"] {
+            let err = reject_reserved_mapping_targets(&mappings(&[("x", key)])).unwrap_err();
+            assert!(format!("{err}").contains(key));
+        }
+    }
+
+    #[test]
+    fn login_time_predicate_matches_the_write_time_check() {
+        // `path_callback` drops what `write_role` would have refused; the two
+        // must not be able to disagree.
+        for key in ["spiffe_id", "username", "mount_path", "approle_env_scoped", "role"] {
+            assert!(reserved_mapping_target(key), "{key}");
+            assert!(reject_reserved_mapping_targets(&mappings(&[("x", key)])).is_err(), "{key}");
+        }
+        for key in ["email", "dept", "ticket"] {
+            assert!(!reserved_mapping_target(key), "{key}");
+        }
     }
 }

@@ -194,13 +194,12 @@ impl SamlBackendInner {
         // configured. Everything else stays in the IdP's response
         // and is not exposed to vault policies.
         let mut metadata: HashMap<String, String> = HashMap::new();
-        for (saml_attr, vault_key) in &role.attribute_mappings {
-            if let Some(vals) = assertion.attributes.get(saml_attr) {
-                if let Some(first) = vals.first() {
-                    metadata.insert(vault_key.clone(), first.clone());
-                }
-            }
-        }
+        project_attribute_mappings(
+            &state.role_name,
+            &role.attribute_mappings,
+            &assertion.attributes,
+            &mut metadata,
+        );
         if !role.groups_attribute.is_empty() {
             if let Some(groups) = assertion.attributes.get(&role.groups_attribute) {
                 metadata.insert("groups".into(), groups.join(","));
@@ -333,6 +332,49 @@ impl SamlBackendInner {
     }
 }
 
+/// Project a role's `attribute_mappings` onto the token's metadata, dropping
+/// any mapping whose target is a reserved (backend-owned) key.
+///
+/// Read-old/write-new: `path_roles::write_role` refuses a reserved target, so
+/// no role written after that check carries one — but a role persisted *before*
+/// it can, and its stored JSON still deserializes. Dropping the mapping is the
+/// fail-closed half: the IdP's value never reaches a backend-owned key, the
+/// login still succeeds with the rest of the role intact, and the operator gets
+/// a `security` record naming the role and the key so the role can be
+/// rewritten. Refusing the login instead would lock out an SSO tenant on
+/// upgrade for a role that is, in the common case, misconfigured by accident.
+///
+/// `username` is the one reserved key this does *not* drop — see
+/// `path_roles::MAPPABLE_RESERVED_META_KEYS` for why SAML has that exception
+/// and OIDC does not.
+///
+/// Only key names are logged. The attribute's *value* is not: it is IdP-
+/// supplied and these keys name principals.
+fn project_attribute_mappings(
+    role_name: &str,
+    mappings: &HashMap<String, String>,
+    attributes: &HashMap<String, Vec<String>>,
+    metadata: &mut HashMap<String, String>,
+) {
+    for (saml_attr, vault_key) in mappings {
+        if crate::path_roles::reserved_mapping_target(vault_key) {
+            log::warn!(
+                target: "security",
+                "saml: role `{role_name}` maps attribute `{saml_attr}` onto reserved token \
+                 metadata key `{vault_key}`; dropping the mapping. That key is set by the auth \
+                 backend and read back as authorization input — rewrite the role's \
+                 attribute_mappings"
+            );
+            continue;
+        }
+        if let Some(vals) = attributes.get(saml_attr) {
+            if let Some(first) = vals.first() {
+                metadata.insert(vault_key.clone(), first.clone());
+            }
+        }
+    }
+}
+
 /// Expected IdP entity id for validation. IdPs vary:
 ///   * Some set `Issuer` to the same URL as `idp_sso_url`'s origin
 ///   * Some use a dedicated entity id configured separately
@@ -345,5 +387,106 @@ fn idp_entity_id(cfg: &SamlConfig) -> &str {
         &cfg.idp_sso_url
     } else {
         &cfg.entity_id
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+
+    fn mappings(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    fn attributes(pairs: &[(&str, &str)]) -> HashMap<String, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), vec![v.to_string()]))
+            .collect()
+    }
+
+    #[test]
+    fn unreserved_mappings_are_projected() {
+        let mut metadata = HashMap::new();
+        project_attribute_mappings(
+            "user",
+            &mappings(&[("email", "email"), ("displayName", "name")]),
+            &attributes(&[("email", "a@example.com"), ("displayName", "Alice")]),
+            &mut metadata,
+        );
+        assert_eq!(metadata.get("email").map(String::as_str), Some("a@example.com"));
+        assert_eq!(metadata.get("name").map(String::as_str), Some("Alice"));
+    }
+
+    #[test]
+    fn an_old_role_record_with_a_reserved_target_has_that_mapping_dropped() {
+        // A role persisted before `write_role` learned to refuse a reserved
+        // target: the stored JSON still deserializes, so the login path is
+        // what has to fail closed.
+        let role: crate::path_roles::SamlRoleEntry = serde_json::from_str(
+            r#"{"attribute_mappings":{"dept":"spiffe_id","email":"email"},
+                "policies":["default"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            role.attribute_mappings.len(),
+            2,
+            "the old record still carries the reserved target"
+        );
+
+        let mut metadata = HashMap::new();
+        project_attribute_mappings(
+            "legacy",
+            &role.attribute_mappings,
+            &attributes(&[("dept", "engineering"), ("email", "a@example.com")]),
+            &mut metadata,
+        );
+
+        // The whole point: an IdP attribute must not be able to satisfy the
+        // server-wide `require_machine_identity` gate.
+        assert!(!metadata.contains_key("spiffe_id"), "{metadata:?}");
+        // The rest of the role still works — dropping is per-mapping.
+        assert_eq!(metadata.get("email").map(String::as_str), Some("a@example.com"));
+    }
+
+    #[test]
+    fn username_is_still_projected() {
+        // SAML's one exception: the attribute map is how an operator names the
+        // principal, and `login_callback` enforces the namespace assignment
+        // against that same value.
+        let mut metadata = HashMap::new();
+        project_attribute_mappings(
+            "user",
+            &mappings(&[("uid", "username")]),
+            &attributes(&[("uid", "alice")]),
+            &mut metadata,
+        );
+        assert_eq!(metadata.get("username").map(String::as_str), Some("alice"));
+    }
+
+    #[test]
+    fn a_reserved_target_cannot_pre_empt_what_the_backend_writes() {
+        // `mount_path`, `name_id` and `role` were protected only by being
+        // written after the loop; now the mapping never lands at all.
+        let mut metadata = HashMap::new();
+        project_attribute_mappings(
+            "legacy",
+            &mappings(&[("iss", "mount_path"), ("uid", "name_id"), ("grp", "role")]),
+            &attributes(&[("iss", "ferrogate/"), ("uid", "root"), ("grp", "admin")]),
+            &mut metadata,
+        );
+        assert!(metadata.is_empty(), "{metadata:?}");
+    }
+
+    #[test]
+    fn a_missing_attribute_projects_nothing() {
+        let mut metadata = HashMap::new();
+        project_attribute_mappings(
+            "user",
+            &mappings(&[("email", "email")]),
+            &attributes(&[]),
+            &mut metadata,
+        );
+        assert!(metadata.is_empty());
     }
 }

@@ -199,6 +199,12 @@ impl TokenParams {
         auth.policies.clone_from(&self.token_policies);
         auth.no_default_policy = self.token_no_default_policy;
         auth.renewable = true;
+        // Carry the source-address restriction onto the Auth so
+        // `TokenStore::post_route` can stamp it on the token entry, where
+        // `check_token` enforces it on every later use. Serialized through
+        // `SockAddrMarshaler`'s `Display`, the same form `populate_token_data`
+        // echoes back on a role read.
+        auth.bound_cidrs = self.token_bound_cidrs.iter().map(|c| c.to_string()).collect();
     }
 }
 

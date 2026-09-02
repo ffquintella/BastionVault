@@ -648,6 +648,8 @@ function EditRoleModal({
           <p className="text-xs text-orange-400 -mt-1">
             No FerroGate machine token is required for this ID, and its bound machines are
             ignored — even while the server requires machine identity for every other ID.
+            The exemption is stamped on the token at login, so a change here applies to the
+            next login, not to tokens already issued.
           </p>
         )}
         <div>

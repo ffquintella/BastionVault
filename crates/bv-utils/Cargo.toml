@@ -1,6 +1,6 @@
 [package]
 name = "bv-utils"
-version = "0.41.1"
+version = "0.41.2"
 edition = "2021"
 description = "BastionVault's shared helpers: salts, seal boxes, socket addresses, TLS and cert utilities"
 license = "Apache-2.0"

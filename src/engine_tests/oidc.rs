@@ -66,7 +66,7 @@ mod integration_tests {
         let role_body = json!({
             "bound_audiences": "cid",
             "bound_claims": r#"{"hd":["example.com"]}"#,
-            "claim_mappings": r#"{"email":"email","preferred_username":"username"}"#,
+            "claim_mappings": r#"{"email":"email","employee_id":"employee_id"}"#,
             "user_claim": "preferred_username",
             "groups_claim": "groups",
             "policies": "default,readonly",
@@ -124,6 +124,55 @@ mod integration_tests {
             .await
             .unwrap();
         assert!(deleted.is_none());
+    }
+
+    /// A role may not map an IdP claim onto a reserved (backend-owned) token
+    /// metadata key. Same list `auth/token/create` refuses in a caller-supplied
+    /// `meta` map — see `RESERVED_TOKEN_META_KEYS` in `bv-logical` — enforced at
+    /// the second write point, through the real routing/field path rather than
+    /// the unit-level check in `path_roles`.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn oidc_role_refuses_reserved_claim_mapping_target() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_oidc_reserved_mapping").await;
+
+        test_mount_auth_api(&core, &root_token, "oidc", "oidc").await;
+
+        // `spiffe_id` is the whole of what the server-wide FerroGate
+        // `require_machine_identity` gate reads as proof of attestation.
+        let body = json!({
+            "bound_audiences": "cid",
+            "claim_mappings": r#"{"dept":"spiffe_id"}"#,
+            "policies": "default"
+        })
+        .as_object()
+        .cloned();
+        let err = test_write_api(&core, &root_token, "auth/oidc/role/machiney", false, body)
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("reserved token metadata key"), "{msg}");
+        assert!(msg.contains("spiffe_id"), "{msg}");
+
+        // Refused, not partially written.
+        assert!(test_read_api(&core, &root_token, "auth/oidc/role/machiney", true)
+            .await
+            .unwrap()
+            .is_none());
+
+        // `username` too: OIDC names the principal with `user_claim`, and it is
+        // that name the login's namespace-assignment check runs against.
+        let body = json!({
+            "bound_audiences": "cid",
+            "claim_mappings": r#"{"preferred_username":"username"}"#,
+            "policies": "default"
+        })
+        .as_object()
+        .cloned();
+        let err = test_write_api(&core, &root_token, "auth/oidc/role/renamer", false, body)
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("user_claim"), "{err}");
     }
 
     /// Auth-URL generation requires a reachable discovery endpoint,

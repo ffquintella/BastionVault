@@ -91,12 +91,11 @@ pub struct DenialAuditEntry {
 /// policies for a denial no policy change can fix.
 fn denial_reason(core: &dyn VaultCtx, req: &Request) -> &'static str {
     if let Some(auth) = req.auth.as_ref() {
-        // Mirrors the `TokenStore::pre_route` predicate exactly — keep the two
-        // in step: root is exempt, and a machine-bound token is one carrying
-        // `spiffe_id` metadata (only the ferrogate login handler sets it).
+        // The gate's own predicate, called rather than restated, so the label
+        // cannot drift from the enforcement (see
+        // `token_store::machine_identity_satisfied`).
         if core.require_machine_identity().load(Ordering::Relaxed)
-            && !auth.policies.iter().any(|p| p == "root")
-            && !auth.metadata.contains_key("spiffe_id")
+            && !crate::modules::auth::token_store::machine_identity_satisfied(auth)
         {
             return "machine-identity";
         }

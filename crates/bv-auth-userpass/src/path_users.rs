@@ -133,6 +133,18 @@ impl UserPassBackend {
                     default: 0,
                     description: "TTL for this user."
                 },
+                // Legacy alias for `token_bound_cidrs`, the fourth of the four
+                // pre-`token_*` field names this path still accepts. Its
+                // declaration was missing while `policies`, `ttl` and
+                // `max_ttl` had theirs, which made `req.get_data("bound_cidrs")`
+                // in `handle_write` — and both read-side mirrors — dead code:
+                // a write naming only `bound_cidrs` was silently discarded and
+                // the user ended up with no source-address binding at all.
+                "bound_cidrs": {
+                    field_type: FieldType::CommaStringSlice,
+                    required: false,
+                    description: "CIDR blocks the issued token may be used from (legacy alias for token_bound_cidrs)."
+                },
                 "disabled": {
                     field_type: FieldType::Bool,
                     required: false,

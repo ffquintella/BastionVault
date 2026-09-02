@@ -26,7 +26,7 @@ use crate::{
         response_error,
         response_json_ok,
         response_ok,
-    logical::{Operation, Request},
+    logical::{Connection as ReqConnection, Operation, Request},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1392,6 +1392,35 @@ async fn caller_has_live_token(core: &dyn VaultCtx, req: &HttpRequest) -> bool {
     matches!(tokens.lookup(&token).await, Ok(Some(_)))
 }
 
+/// The logical `Connection` for an inline `sys` handler, resolved the same way
+/// [`crate::logical_routes`] resolves it for a routed request: the socket peer
+/// from the on-connect hook (falling back to actix's `peer_addr` when that hook
+/// did not run, as in the test harness), plus the trusted-proxy-aware derived
+/// client IP.
+///
+/// Returns `None` only when no peer address can be determined at all, which
+/// `TokenStore::check_token` treats as a refusal for any token that carries a
+/// source-address binding.
+fn sys_request_connection(req: &HttpRequest) -> Option<ReqConnection> {
+    let hook_conn = req.conn_data::<crate::Connection>();
+    let socket_peer = hook_conn.map(|c| c.peer).or_else(|| req.peer_addr())?;
+
+    let default_trusted;
+    let trusted = match req.app_data::<web::Data<crate::client_ip::TrustedProxies>>() {
+        Some(d) => d.get_ref(),
+        None => {
+            default_trusted = crate::client_ip::TrustedProxies::default();
+            &default_trusted
+        }
+    };
+
+    Some(ReqConnection {
+        peer_addr: socket_peer.to_string(),
+        peer_addr_derived: crate::client_ip::ClientIp::resolve(socket_peer, req, trusted).derived.to_string(),
+        peer_tls_cert: hook_conn.and_then(|c| c.tls.as_ref()).and_then(|tls| tls.client_cert_chain.clone()),
+    })
+}
+
 /// Run the real authentication + ACL gate for `path` / `operation` without
 /// dispatching a logical request.
 ///
@@ -1421,6 +1450,15 @@ async fn authorize_sys_request(
     // Namespaced callers must be judged in their own namespace, exactly as the
     // handle_request-backed siblings are.
     copy_namespace_header(req, &mut r);
+    // ...and from the same source address, so a token carrying a
+    // `token_bound_cidrs` restriction is judged against the address it
+    // actually arrived from. `request_auth` builds a bare `Request` with no
+    // connection, and `check_token` fails closed on an unknown address — so
+    // without this a legitimately bound token would be refused on every
+    // route that authorizes through this helper (`sys/backup`, `sys/seal`,
+    // plugin uploads, filesystem exports, cluster membership). Mirrors the
+    // resolution in `logical_routes::logical_request_handler_inner`.
+    r.connection = sys_request_connection(req);
 
     let auth_module = core
         .module_manager()

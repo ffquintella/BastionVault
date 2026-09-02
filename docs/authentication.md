@@ -31,6 +31,76 @@ bvault read secret/my-app
 - **Service tokens** — standard tokens with a TTL, renewable
 - **Batch tokens** — lightweight, non-renewable, not persisted to storage
 
+### Reserved Token Metadata
+
+`auth/token/create` accepts a `meta` map of free-form annotations that ride on
+the child token and appear in the audit log. A set of keys is **reserved**: the
+ones an auth backend stamps to record *how* the principal authenticated, and
+which the server then reads back as authorization input. A create request that
+supplies any of them is refused with ``meta key(s) `<k>` are reserved`` (naming
+every offending key), and the attempt is logged to the `security` target.
+
+| Reserved key | Why |
+|---|---|
+| `spiffe_id`, `machine_id` | `spiffe_id` **is** what machine-bound means to the server-wide FerroGate `require_machine_identity` gate, and (with `mount_path`) is what makes a token usable as the `machine_token` of an AppID machine-bound login |
+| `username`, `entity_id`, `mount_path`, `role_name`, `role` | Substituted into templated policy paths; used to resolve the principal's namespace assignment and identity entity |
+| `approle_env_*` | The AppID environment scope the KV v2 engine enforces |
+| `namespace_path`, `namespace_id`, `child_visible` | The token's namespace binding — set from the request's `X-BastionVault-Namespace` header, never from `meta` |
+| `auth_method`, `groups`, `subject`, `name_id`, `name_id_format`, `ferrogate_kid`, `session_id` | Login provenance; audit attribution |
+| `approle_machine_bypass`, `machine_identity_exempt` | Not read from metadata at all — the AppID machine-binding exemption is a typed field on the token precisely so it cannot be forged. Refused so the metadata spelling cannot be mistaken for it |
+
+Any other key is yours. Reserving them is a security boundary, not a
+namespacing convention: a caller that could write `spiffe_id` could mint itself
+a token that passes the machine-identity gate with no attestation, and one that
+could write `username` or `entity_id` could redirect a templated policy at
+another principal's paths. Note that the built-in `default` policy does not
+grant `auth/token/create`, so only an explicitly privileged token can reach
+this path at all.
+
+The same list is enforced at a second write point: an **OIDC or SAML role may
+not map a claim or attribute onto a reserved key**. The value there comes from
+the identity provider, so a role configured with `claim_mappings = {"dept" =
+"spiffe_id"}` would hand the IdP the machine-identity gate. The role write is
+refused, validated against the role as it will be stored — so an existing role
+carrying such a mapping has to be corrected on its next write rather than kept.
+SAML permits one exception, `username`, because its attribute mapping is how
+the principal gets named; OIDC allows none, since `user_claim` already does
+that job there.
+
+A role written *before* this check existed still loads, so login enforces the
+same list a second time: a mapping onto a reserved key is dropped — only that
+mapping, the rest of the role still applies and the login still succeeds — and
+a `security`-target warning names the role and the key so it can be found and
+corrected. Grep the server log for `dropping the mapping`.
+
+#### What a child token keeps, and what it cannot shed
+
+Refusing a forged key stops a child token *gaining* one. The reverse matters
+too, because the child's `meta` comes from the request body — so a key the
+parent carries would otherwise be simply absent on the child. For a key that
+names an identity that is harmless. For one that carries a **restriction** it
+would be an escape, so those are inherited:
+
+- **`approle_env_*`** — the AppID environment scope. Without inheritance a
+  scoped AppID with a grant on `auth/token/create` minted itself a child that
+  read every environment, including the base (non-env) secrets a scoped token
+  is barred from.
+- **The namespace binding** — clamped to the parent's. An absent
+  `X-BastionVault-Namespace` header inherits the parent's namespace instead of
+  defaulting to root, a namespace the parent may not operate in is refused, and
+  `child_visible` is refused (not silently dropped) when the parent lacks it.
+- **`token_bound_cidrs`** and the AppID **machine-binding exemption** — both
+  typed fields on the token rather than metadata, inherited for the same
+  reason.
+
+The identities are deliberately *not* inherited: a child of a machine-bound
+token does **not** carry `spiffe_id`, so it does not satisfy
+`require_machine_identity` by descent, and it does not inherit `username`,
+`entity_id`, `role_name` or `mount_path` — which would attribute its actions to
+the parent's principal and hand it the parent's namespace grants. The rule is
+"does the key's presence take access away?" — inherited if so, never
+otherwise.
+
 ### Using Tokens in API Calls
 
 ~~~bash
@@ -166,10 +236,22 @@ write of the flag is recorded in the AppID audit trail and logged to the
 `security` target, and each bypassed login is logged too. Pair it with a source
 IP filter so the credential is only usable from where the application runs.
 
-> The server-wide FerroGate `require_machine_identity` flag is a **separate**
-> gate at the token layer: with it on, every authenticated request must ride a
-> machine-bound token, so a bypassed AppID token is refused on use even though
-> the login itself succeeds. Use the bypass with that flag off.
+The bypass covers the token as well as the login. The server-wide FerroGate
+`require_machine_identity` flag is a separate gate at the token layer — with it
+on, every authenticated request must ride a machine-bound token — and a token
+minted by a bypassed AppID login is exempt from it. Without that the escape
+hatch was decorative on any server with the flag on: the login succeeded and
+then every request the token made was refused, audited as
+`reason=machine-identity`.
+
+The exemption is a property of the token, stamped at issuance from the role's
+flag. It is not carried in token metadata, so it cannot be forged by a caller
+that supplies `meta` to `auth/token/create` (which also refuses the metadata
+spelling outright — see [Reserved Token Metadata](#reserved-token-metadata)); a
+child token inherits it from its parent and can never acquire one its parent
+lacks. Clearing the role flag
+re-gates the ID at the next login — tokens already issued keep the exemption
+until they expire, so revoke them if that matters.
 
 #### Source IP filter
 
@@ -195,6 +277,67 @@ bvault delete auth/approle/role/my-service/bound-source-ips
 A login from any address outside the list is refused, and so is one the server
 cannot attribute a source address to. A malformed entry is rejected when the
 role is written, not silently ignored at login time.
+
+The address matched is the **client** IP, not the socket peer. When
+`BASTIONVAULT_TRUSTED_PROXIES` is set and the request arrives through one of
+those proxies, the rule is evaluated against the address resolved from the
+`X-Forwarded-For` / `Forwarded` chain; with no trusted proxies configured
+(the default) it is the socket peer's IP, with its source port stripped.
+`secret_id_bound_cidrs` and a secret ID's own `cidr_list` are matched the
+same way.
+
+#### Token source-address binding
+
+`bound_source_ips`, `secret_id_bound_cidrs` and a secret ID's `cidr_list`
+constrain the **login**. `token_bound_cidrs` constrains the **issued token**:
+it is stamped onto the token at login and checked on every subsequent request
+the token is presented on. The two are independent — a login from anywhere may
+mint a token that is only usable from inside the block, and a token bound to a
+block it is never presented from is simply unusable.
+
+~~~bash
+bvault write auth/approle/role/my-service token_bound_cidrs="10.0.0.0/24"
+
+# Or on its own sub-path, which also supports read and delete
+bvault write auth/approle/role/my-service/token-bound-cidrs \
+  token_bound_cidrs="10.0.0.0/24"
+bvault delete auth/approle/role/my-service/token-bound-cidrs
+~~~
+
+An entry may be a single address (`10.0.0.5`), a CIDR block
+(`10.0.0.0/24`, `2001:db8::/64`), or an address with a port
+(`10.0.0.5:8200` — the port is recorded but ignored when matching, so the
+client's ephemeral source port can never make the rule unmatchable). The same
+client IP resolution as above applies: behind a configured trusted proxy the
+derived client address is what is matched.
+
+A request carrying a bound token is refused with `403 Permission denied` when
+it arrives from outside the block, and also when the server cannot determine a
+source address for it — an address that is unknown cannot be shown to satisfy
+the rule. The refusal is logged to the `security` target and does **not**
+consume one of a use-limited token's remaining uses.
+
+Two properties are worth knowing before you rely on it:
+
+- **A secret ID may narrow it.** `token_bound_cidrs` on a secret ID
+  (`auth/approle/role/<name>/secret-id`) replaces the role's list for tokens
+  minted with that secret ID. It is validated to be a subset of the role's
+  list when the secret ID is issued, so it can only narrow, never widen.
+- **A child token inherits it.** A bound token cannot mint an unbound child
+  via `auth/token/create`; the binding is copied onto the child, so the
+  restriction cannot be escaped by chaining a token.
+
+The same field is available on UserPass users
+(`auth/<mount>/users/<name>`), where the pre-`token_*` alias `bound_cidrs`
+is also accepted and kept in sync with it.
+
+> **Enforcement is new — see `CHANGELOG.md`.** Every release up to and
+> including 0.42.1 parsed, stored and echoed back
+> `token_bound_cidrs` without ever evaluating it. If you set it on a role
+> before upgrading, it did nothing — audit your roles and confirm the blocks
+> name the addresses your clients actually reach the vault from. Tokens issued
+> before the upgrade are unaffected and stay unrestricted; only tokens minted
+> afterwards carry a binding.
 
 #### Namespace-scoped roles
 
@@ -234,7 +377,7 @@ curl -H "X-BastionVault-Namespace: dti/esi" \
 | `policies` | Comma-separated list of policies to attach |
 | `secret_id_num_uses` | Max number of times a secret ID can be used |
 | `bind_secret_id` | Require secret ID for login (default: true) |
-| `token_bound_cidrs` | CIDR blocks that tokens can be used from |
+| `token_bound_cidrs` | CIDR blocks the issued token may be used from, enforced on every request it is presented on (empty = any) |
 | `secret_id_bound_cidrs` | CIDR blocks that secret IDs can be generated from |
 | `bound_source_ips` | Source addresses a login may come from: single IPs, CIDR blocks, address + dotted netmask, or `start-end` ranges, mixed freely (empty = any) |
 | `bypass_machine_binding` | Log in with App ID credentials alone — no FerroGate machine token, bound machines ignored (default: false) |

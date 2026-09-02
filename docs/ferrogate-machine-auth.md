@@ -57,6 +57,16 @@ Configure the trust anchor (root/sudo-gated) at `auth/ferrogate/config`:
 > one machine is approved (and the admin host's MIA is reachable), or only a **root** token will be able
 > to log in. Root is the break-glass path to turn it back off.
 
+What "machine-bound" means to the gate is a non-empty `spiffe_id` on the
+token's metadata, which only a backend that verified an attestation writes.
+`spiffe_id` is a [reserved token metadata key][reserved-meta], so
+`auth/token/create` refuses a request that supplies one: a privileged token
+cannot mint itself a child that satisfies the gate. The only other ways past it
+are a **root** token and an AppID with `bypass_machine_binding` set — both by
+design, both explicit, both audited.
+
+[reserved-meta]: authentication.md#reserved-token-metadata
+
 ### Computing a CMIS SPKI pin
 
 The CMIS server certificate is pinned by the SHA-384 of its SubjectPublicKeyInfo:

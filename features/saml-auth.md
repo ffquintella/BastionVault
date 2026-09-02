@@ -58,7 +58,14 @@ Follows the same Module/Backend pattern as `userpass` and `approle`.
 - `bound_attributes` -- map of attribute_name to allowed values for validation
 - `bound_subjects` -- allowed NameID values
 - `bound_subjects_type` -- NameID format filter
-- `attribute_mappings` -- map of SAML attribute to vault token metadata key
+- `attribute_mappings` -- map of SAML attribute to vault token metadata key. The
+  target key may not be one of the reserved, backend-owned keys (`spiffe_id`,
+  `entity_id`, `mount_path`, `name_id`, `namespace_*`, `approle_env_*`, ...):
+  the value comes from the IdP, and those keys are read back as authorization
+  input. `username` is the one exception, since mapping it is how a SAML role
+  names the principal. Write is refused; a mapping on a role stored before that
+  check is dropped at login with a `security` warning. See
+  `docs/authentication.md` § Reserved Token Metadata
 - `groups_attribute` -- SAML attribute containing group membership list
 - `policies` -- vault policies to attach to the token
 - `token_params` -- TTL, max_ttl, period, etc.

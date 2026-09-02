@@ -45,7 +45,348 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.42.2] - 2026-09-02
+
+### Security
+
+#### `token_bound_cidrs` is now enforced
+
+- **Evaluate a token's source-address binding on every request, instead of
+  only storing it.** `token_bound_cidrs` was parsed
+  ([`crates/bv-utils/src/token_util.rs`](crates/bv-utils/src/token_util.rs)),
+  persisted on AppRole roles (with its own
+  `auth/approle/role/<name>/token-bound-cidrs` sub-path) and on UserPass
+  users, echoed back on a read, and documented as "CIDR blocks that tokens
+  can be used from" — but **nothing ever compared it to the address a token
+  was presented from**. The chain was broken at four points: it was dropped
+  by `TokenParams::populate_token_auth`, absent from `Auth`, absent from
+  `TokenEntry`, and never consulted by `TokenStore::check_token`. The
+  Vault-replica matcher `cidr::remote_addr_is_ok` had no production caller
+  at all. An operator who set the field got no restriction and no warning.
+
+  The value now flows role/user → `Auth::bound_cidrs` → `TokenEntry` →
+  [`TokenStore::check_token`](crates/bv-kernel/src/modules/auth/token_store.rs),
+  which refuses the request with `403 Permission denied` when the client IP
+  is outside the block, logging to the `security` target. Enforcement sits
+  in `check_token` rather than in `pre_route` because
+  `sys/internal/ui/mounts`, `sys/capabilities`, `sys/policy` and `/metrics`
+  resolve a token directly instead of routing through
+  `Core::handle_request`; a check one layer up would have left those paths
+  unbound.
+
+- **Fail closed on an unknown client address.** A request whose source
+  address cannot be determined is refused for any token that carries a
+  binding — an unknown address cannot be shown to satisfy the rule. The
+  address matched is
+  [`Connection::client_ip()`](crates/bv-logical/src/connection.rs), so the
+  binding is evaluated against the trusted-proxy-derived client IP and never
+  against a raw `ip:port` socket string. `/metrics` is not a routed logical
+  path and has no `Connection`, so it resolves the same client IP the
+  operator allowlist there already uses.
+
+- **A refused request does not consume a token use.** The binding is checked
+  before `use_token`, so a caller from a blocked address cannot burn down a
+  use-limited token's remaining uses.
+
+- **A bound token cannot mint an unbound child.** `auth/token/create` copies
+  the parent's binding onto the child, closing the one-request escape.
+
+- **A secret ID's `token_cidr_list` is enforced too**, and narrows the
+  role's list for tokens minted with that secret ID. Write-time validation
+  (`verify_cidr_role_secret_id_subset`) already guaranteed it is a subset of
+  the role's blocks, so it can only narrow, never widen.
+
+- **Accept UserPass's `bound_cidrs` alias, which was silently discarded.**
+  `auth/<mount>/users/<name>` carries four pre-`token_*` field aliases, and
+  [`path_users.rs`](crates/bv-auth-userpass/src/path_users.rs) declared the
+  path fields for three of them (`policies`, `ttl`, `max_ttl`) but not for
+  `bound_cidrs`. An undeclared field cannot be read back out of a request,
+  so `req.get_data("bound_cidrs")` in the write handler always failed and
+  both read-side mirrors were unreachable: **a user written with only
+  `bound_cidrs` was stored with no source-address binding at all**, and the
+  write reported success. Declaring the field makes the three existing
+  code paths that were written to support the alias actually run.
+
+  **Operator action before upgrading.** Enabling a restriction that was
+  never honoured can lock out a working client. Audit your roles and users
+  for a non-empty `token_bound_cidrs` (and UserPass's legacy `bound_cidrs`
+  alias, which is kept in sync with it) and confirm each block names the
+  address clients actually reach the vault from — behind a reverse proxy
+  that is the derived client IP, not the proxy:
+
+  ~~~bash
+  bvault read auth/approle/role/<name>/token-bound-cidrs
+  ~~~
+
+  A value that names the wrong network will refuse every request from the
+  affected client. Clear the field to restore the previous (unrestricted)
+  behaviour for a role.
+
+  No staged rollout or opt-out flag is provided, and none is needed for
+  already-issued tokens: the binding is stamped onto the token entry at
+  issuance, and `TokenEntry::bound_cidrs` is `#[serde(default)]`, so a token
+  persisted before the upgrade decodes as unrestricted and keeps working.
+  Only tokens minted after the upgrade carry a binding — the exposure
+  window closes as tokens turn over, and no token in circulation is
+  retroactively revoked.
+
+#### Token metadata is no longer a caller-writable authorization channel
+
+Four fixes to one root cause: `Auth::metadata` is read as **trusted
+authorization input** by the kernel and the engines above it, while two write
+points let something other than an auth backend put keys there. The built-in
+`default` policy grants none of the paths involved, so each needed a
+privileged grant or operator misconfiguration — they are still bypasses of
+security gates rather than hardening niceties.
+
+The shared list is `bv_logical::auth::RESERVED_TOKEN_META_KEYS` /
+`RESERVED_TOKEN_META_PREFIXES` behind one predicate,
+`is_reserved_token_meta_key`
+([`crates/bv-logical/src/auth.rs`](crates/bv-logical/src/auth.rs)). It lives
+there because it is built from the key constants already in that module and
+because both write points — the kernel's token store and the OIDC/SAML role
+handlers — are in tiers that cannot see each other. The rule for the set is
+**every key an auth backend stamps, plus every key authorization or audit code
+reads back off it**, including keys nothing reads yet (`ferrogate_kid`,
+`name_id`, `subject`): "backend-owned" is the property enforced, so a future
+reader is protected on the day the key is written rather than the day someone
+remembers the list.
+
+- **`auth/token/create` now refuses a reserved `meta` key instead of copying
+  it onto the new token.** The body's `meta` map was documented as free-form
+  annotation but landed verbatim on the child's `TokenEntry`
+  ([`crates/bv-kernel/src/modules/auth/token_store.rs`](crates/bv-kernel/src/modules/auth/token_store.rs)),
+  so a holder of a grant on that path could mint itself a token that:
+
+  - **passed the server-wide FerroGate `require_machine_identity` gate with no
+    machine attestation of any kind** — `machine_identity_satisfied` treats a
+    token as machine-bound purely because its metadata carries `spiffe_id`,
+    and nothing checked who wrote it;
+  - **replayed as a FerroGate machine token**: AppRole's machine-bound login
+    accepts any token whose `meta` says `mount_path = "ferrogate/"` and
+    carries a `spiffe_id`, so a forged pair reached any role with a matching
+    `bound_machines` entry
+    ([`crates/bv-auth-approle/src/path_login.rs`](crates/bv-auth-approle/src/path_login.rs));
+  - **redirected a templated policy at another principal's paths** —
+    `policy_store::substitute_path` substitutes `username`, `entity_id`,
+    `mount_path` and `namespace_*` straight out of the token's metadata;
+  - **widened its namespace reach** through the operator-authored assignment
+    record `namespace::token_binding::assignment_principal` looks up by
+    `mount_path` + `username`/`role_name`;
+  - **forged the `machine` and principal columns of the denial and access
+    audit trails**, which resolve "who" through `bv_logical::split_principal`
+    from the same three keys.
+
+  `reject_reserved_meta` is checked before the copy and fails with
+  ``meta key(s) `<k>` are reserved`` — naming every offender, sorted, so the
+  same body always produces the same message — plus a `security`-target warn
+  that logs the keys but never their caller-controlled values. Rejected rather
+  than stripped: a silently dropped field on an authn path is the kind of
+  implicit downgrade this codebase does not do (AGENTS.md §7). Any unreserved
+  key is still accepted and still rides on the token.
+
+- **A child token no longer sheds the restrictions its parent carries in
+  metadata.** Refusing a forged key stops a child *gaining* a backend-owned
+  key; it does nothing about the opposite escape, because `handle_create`
+  builds the child's `meta` from the request body, so a key the parent carries
+  is simply absent on the child. For a key that names an identity that is
+  harmless; for one that carries a **restriction** it is a bypass. AppRole
+  stamps `approle_env_scoped` / `_secret` / `_machine` on an
+  environment-scoped login and `bv-engine-kv`'s `enforce_env_scope` *passes
+  through unchanged when `approle_env_scoped` is absent* — so a scoped AppID
+  with a grant on `auth/token/create` minted itself a child that read every
+  environment, including the base (non-env) secrets a scoped token is
+  explicitly barred from. `INHERITED_TOKEN_META_PREFIXES` +
+  `inherit_restriction_meta` now copy those keys from the parent.
+
+  Deliberately **not** "inherit everything reserved": inheriting an identity
+  widens. `spiffe_id` would let every child of a machine-bound token satisfy
+  `require_machine_identity` by descent instead of by proof; `mount_path` =
+  `"ferrogate/"` would make any child of a FerroGate token replayable as a
+  machine credential; `username`/`entity_id`/`role_name` would attribute the
+  child's actions to the parent's principal and hand it the parent's namespace
+  grants. The narrower rule: **does the key's presence take access away?**
+  Inherit it if so, never otherwise — fail closed in both directions.
+
+- **A namespace-bound token can no longer mint a child outside its own
+  namespace.** `auth/` is header-scoped
+  (`namespace::router::is_header_scoped_path`), so
+  `enforce_request_token_binding` never checked the create request itself
+  against the parent's binding — and `handle_create` took the child's
+  namespace from the `X-BastionVault-Namespace` header, defaulting to **root**
+  when absent. A `tenant-a`-bound token with a grant on `auth/token/create`
+  could therefore mint a child bound to the root namespace (send no header) or
+  to a sibling tenant (send any header), and a parent that is not
+  child-visible could mint a `child_visible` child reaching every descendant
+  namespace the parent itself cannot.
+
+  The binding is now clamped to the parent's: an absent or empty header
+  inherits the parent's namespace rather than widening to root, a requested
+  namespace the parent may not operate in is refused, and `child_visible` is
+  refused outright (not silently dropped) when the parent lacks it. Root stays
+  exempt because a root token already operates in every namespace.
+
+- **OIDC and SAML roles may no longer map an IdP-controlled claim onto a
+  reserved metadata key.** `role.claim_mappings` /
+  `attribute_mappings` inserted an operator-chosen `meta_key` with an
+  IdP-supplied value and validated neither, so a role configured with
+  `{"dept": "spiffe_id"}` handed the IdP the ability to mint tokens that
+  satisfy `require_machine_identity` with no attestation. Both backends now
+  refuse a reserved target when the role is **written**
+  ([`crates/bv-auth-oidc/src/path_roles.rs`](crates/bv-auth-oidc/src/path_roles.rs),
+  [`crates/bv-auth-saml/src/path_roles.rs`](crates/bv-auth-saml/src/path_roles.rs)),
+  validated against the role as it will be *persisted* rather than against the
+  fields the request happened to carry — so no stored role passes the check and
+  still carries a reserved target, and an operator updating an unrelated field
+  on a legacy role that does carry one is made to fix it.
+
+  Write-time rejection cannot reach a role that is **already stored**, whose
+  JSON still deserializes, so login is the fail-closed half: the callback
+  projects the mappings through `project_claim_mappings` /
+  `project_attribute_mappings`, which drop a reserved target and emit a
+  `security`-target warn naming the role and the key (never the IdP-supplied
+  value). Per-mapping, so the rest of the role still applies and the login
+  still succeeds — refusing the login would lock out an SSO tenant on upgrade
+  over a role that is, in the common case, misconfigured by accident.
+
+  SAML permits exactly one exception, `username`: its attribute mapping is how
+  the principal gets named. OIDC allows none, because `user_claim` already
+  names the principal and `enforce_login_assignment` checks the login against
+  `display_name` derived from it — a claim mapped onto `username` there would
+  be checked as one principal and then widened by a namespace assignment as
+  another.
+
+- **An empty `spiffe_id` no longer satisfies the machine-identity gate.**
+  `machine_identity_satisfied` tested `contains_key`, so `"spiffe_id": ""`
+  passed the gate while `bv_logical::split_principal` audited the same token as
+  *not* machine-bound — enforcement and the audit trail disagreed about one
+  token. The predicate now requires a non-empty value and reads the key through
+  `bv_logical::SPIFFE_ID_META` rather than a second copy of the literal.
+
+**Compatibility.** No shipped caller supplies a reserved key on
+`auth/token/create` — the GUI and CLI do not call the path at all, and no test
+or e2e script passes `meta` — so nothing legitimate starts failing. Tokens
+already minted with a forged key keep it until they expire; audit for a
+`spiffe_id` on a token whose `path` is `auth/token/create` if the gate was
+armed. An OIDC or SAML role already carrying a reserved mapping target keeps
+working, minus that one mapping, and is refused on its next write until it is
+corrected — grep the server log for `oidc: role` / `saml: role` with
+`dropping the mapping` to find them.
+
+**Coverage.** `test_token_create_refuses_reserved_metadata_keys` walks the
+whole reserved set (plus a not-yet-existent `approle_env_*` key) through the
+real create handler and asserts the end state, not just the error — the forged
+`spiffe_id` never reaches a token, and a token minted from `auth/token/create`
+does not satisfy the gate. Alongside it:
+`test_child_token_inherits_the_approle_environment_scope` (with the negative
+half — `spiffe_id`, `username`, `mount_path` are *not* inherited),
+`test_child_token_cannot_escape_the_parents_namespace_binding`, the empty-value
+arm of `test_machine_identity_predicate`, and the mapping-target tests in the
+two auth backends: write-time rejection of every reserved target (`path_roles`)
+and the login-time drop against an **old role record deserialized with a
+reserved target still in it** (`path_callback`), which is the read-old half.
+End to end,
+`test_approle_env_scope_survives_token_create`
+([`src/engine_tests/approle.rs`](src/engine_tests/approle.rs)) logs a scoped
+AppID in for real, mints a child through `auth/token/create`, and asserts the
+child is refused both the base (non-env) secret and an out-of-scope
+environment — the denial the metadata exists for, not just the metadata.
+
 ### Fixed
+
+#### AppID machine-binding bypass, and which AppID an audit row names
+
+- **A bypassed AppID's token is now exempt from the server-wide
+  machine-identity gate, not just from the login check.** `bypass_machine_binding`
+  exempted the *login* from AppRole's own machine requirement but stamped
+  nothing on the issued token, so
+  [`TokenStore::pre_route`](crates/bv-kernel/src/modules/auth/token_store.rs)
+  -- which refuses any non-root token without `spiffe_id` metadata while
+  FerroGate `require_machine_identity` is armed -- denied **every request that
+  token then made**. On a server with the flag on (the deployment case the
+  escape hatch exists for) the feature was decorative: the login returned a
+  token that could not read anything, and the denial trail read
+  `reason=machine-identity` for an ID the operator had explicitly exempted.
+
+  The AppRole login now sets `Auth::machine_identity_exempt`
+  ([`crates/bv-logical/src/auth.rs`](crates/bv-logical/src/auth.rs)) from the
+  role flag; `post_route` stamps it onto the token entry, `check_token`
+  surfaces it, and the gate's predicate is now the one shared function
+  `token_store::machine_identity_satisfied` -- root, machine-bound, **or**
+  exempt -- which the denial-audit classifier calls instead of restating, so
+  the label can no longer drift from the enforcement.
+
+  Deliberately a typed field and not a token metadata key: `auth/token/create`
+  copies its caller-supplied `meta` map onto the new token verbatim, so a
+  metadata-keyed exemption would be mintable by any holder of a grant on that
+  path. Nothing in a request body maps to it. A child token inherits the
+  parent's exemption and can never acquire one its parent lacks, and a token
+  entry persisted before the field existed reads back as *not* exempt, so the
+  gate keeps applying to it (fails closed; the ID picks the exemption up at
+  its next login). Clearing the role flag likewise re-gates the ID at the next
+  login -- tokens already issued keep the exemption until they expire.
+
+- **AppID sessions audit as the application, not as `approle`.** The AppRole
+  login never set `Auth::display_name`, so `post_route`'s
+  `<mount>-<display_name>` produced the bare mount name. Every audit surface
+  resolves "who" through `bv_logical::split_principal`, which falls back to the
+  display name for a token with no bound human -- so **every AppID in the
+  deployment appeared on the Audit page as `approle`**, with no way to tell
+  which application had been refused. The login now passes the role name, as
+  userpass has always passed its username, giving `approle-<id>`. The
+  machine-identity `security` warn also names `role_name`.
+
+  Existing audit rows are unchanged; only sessions established after the
+  upgrade carry the application name.
+
+  Tests: `test_bypassed_appid_survives_the_server_machine_identity_gate`
+  ([`src/engine_tests/approle.rs`](src/engine_tests/approle.rs)) drives both
+  defects end to end -- gate armed, exempt AppID admitted, non-exempt AppID
+  refused, and the resulting denial row asserted to name `approle-plain` with
+  `reason=machine-identity`. `test_machine_identity_predicate` and
+  `test_child_token_inherits_the_machine_identity_exemption` pin the predicate,
+  the inheritance, the pre-upgrade decode and the metadata-forgery case.
+  (`features/approle-machine-env.md`)
+
+#### AppRole source-address restrictions
+
+- **Evaluate source-address rules against the client IP, not the socket
+  address.** `Connection::peer_addr` carries what `getpeername` returned
+  -- `10.60.64.212:41222`, IP *plus* ephemeral source port -- and all four
+  AppRole login checks
+  ([`crates/bv-auth-approle/src/path_login.rs`](crates/bv-auth-approle/src/path_login.rs))
+  handed it straight to an IP/CIDR parser. Both helpers fail closed on an
+  unparsable address, so the rule was never evaluated: **every role with a
+  non-empty `bound_source_ips` or `secret_id_bound_cidrs` was unloginnable
+  from any address**, refused with
+  `invalid source IP address "10.60.64.212:41222": invalid IP address
+  syntax`. The checks now read the new
+  [`Connection::client_ip()`](crates/bv-logical/src/connection.rs), which
+  prefers the post-`X-Forwarded-For` `peer_addr_derived` and otherwise
+  takes the address portion of `peer_addr`, handling `ip:port`,
+  `[ipv6]:port`, `[ipv6]` and bare IPv4/IPv6 literals without ever
+  splitting an IPv6 literal on a colon. Refusal messages and the
+  `target: "security"` warn now quote the bare client address.
+
+  Operator-visible consequence: behind a trusted reverse proxy these rules
+  are now matched against the *derived* client IP rather than silently
+  refusing everything. Rules written against the proxy's own address --
+  which could never have matched before, since nothing matched -- must name
+  the client.
+
+- **Keep failing closed on an unknown address.** The guard that refuses a
+  login with no connection information is now based on the resolved client
+  IP being empty, so a `Connection` that carries no usable address is
+  refused rather than parsed.
+
+- **Fold Rustion's `operator_src_ip` onto the same helper**
+  ([`crates/bv-engine-rustion/src/lib.rs`](crates/bv-engine-rustion/src/lib.rs)).
+  It open-coded the same prefer-derived-then-strip-port logic with a
+  `rsplit_once(':')` that mangled a bare IPv6 literal into its own prefix
+  before stamping it into a Rustion envelope's `src_ip`.
+
+  Audit and login-audit records are unchanged: they keep recording raw
+  `peer_addr` beside `peer_addr_derived` on purpose.
 
 #### RDP session replay (`.rdp-rec`)
 
@@ -96,6 +437,35 @@ EXAMPLE ENTRY:
   Note: this fixes the BastionVault side only. Recordings produced by
   Rustion <= the version in use still contain no decodable bitmaps --
   see `features/rustion-integration.md` for the recorder-side defect.
+
+#### `test_sys_metrics` no longer races the metrics collector
+
+- **Poll the scrape until every system gauge is populated, instead of sleeping
+  once for 20 seconds**
+  ([`src/metrics/system_metrics_tests.rs`](src/metrics/system_metrics_tests.rs)).
+  `SystemMetrics::collect_metrics` needs over ten seconds on a loaded host --
+  `System::refresh_all` plus a full `Disks::new_with_refreshed_list()` -- and
+  sets `load_average` **last**, after the disk loop. A scrape landing mid-pass
+  saw every gauge after that point still holding its `Gauge::default()` zero
+  and tripped `assert!(value != 0.0)`. Which gauge tripped it depended on
+  `HashMap` iteration order, so the failure read as a `load_average` platform
+  quirk rather than the timing bug it was.
+
+  It is **not** a platform difference, and was deliberately not "fixed" by
+  exempting macOS: `sysinfo`'s Apple path calls `libc::getloadavg`, and a probe
+  against a real registry encoded `load_average 9.5517578125` there. Exempting
+  the platform would have hidden a live race behind a false claim about the OS,
+  for a gauge operators read on a dashboard. Reordering `collect_metrics` was
+  likewise rejected -- it would only move the race to whichever gauge ended up
+  last.
+
+  The test now finishes when the first collection pass does (~17-22 s, faster
+  than the sleep it replaces) and still fails deterministically, after a 120 s
+  deadline, if a gauge is genuinely dead. The Windows `load_average` exemption
+  moved into an `expected_gauge_count()` helper so the gauge-count assertion is
+  evaluated after the removal rather than before it. Worth having beyond the
+  flake: without `--no-fail-fast` this one test's failure cancelled 548 of 705
+  tests in a `bastion_vault --lib` run, hiding every other result.
 
 ## [0.42.1] - 2026-09-01
 
@@ -223,7 +593,6 @@ EXAMPLE ENTRY:
 - **`{{auth.mount}}` policy templating now resolves for `oidc/`, `saml/` and
   `fido2/` tokens.** A templated rule is dropped when `mount_path` is absent, so
   rules written against those mounts silently matched nothing and now match.
-
 
 ## [0.41.25] - 2026-09-01
 
@@ -836,7 +1205,6 @@ Frames, not pixels, were the problem. See
   key as `rsa-2048` / `ec-p256` / `ml-dsa-65` and fingerprint its SPKI, for
   the queue's list view and duplicate detection.
 
-
 ## [0.41.17] - 2026-08-26
 
 ### Fixed
@@ -1287,7 +1655,6 @@ Frames, not pixels, were the problem. See
   is explicitly out of scope.
 - Registered as Todo in [roadmap.md](roadmap.md) and cross-referenced from
   `features/resource-connect.md`'s deferred list.
-
 
 ## [0.41.8] - 2026-08-18
 
@@ -1849,7 +2216,6 @@ Frames, not pixels, were the problem. See
   serially, which made `make plugins-test` both correct and ~7x faster (153s
   with 3-6 failures to 21s with none). The 30-second plugin invoke timeout
   itself is unchanged -- it is an operational bound, not a test knob.
-
 
 #### Agent instructions: one authoritative file
 - **`AGENTS.md` is now the single source of truth for AI-agent instructions**, and
@@ -8756,9 +9122,7 @@ both repos.
 
 - **FIDO2 PIN retry silently cancels the ceremony** (`gui/src-tauri/src/commands/fido2_native.rs`) — `fido2_submit_pin` now clones the PIN sender instead of `.take()`-ing it, so the slot stays populated across multiple PIN prompts in the same ceremony (e.g. when the authenticator responds with `InvalidPin` and asks again). Previously the second PIN entry was silently dropped, the status handler blocked on `recv_timeout`, and the authenticator's callback channel was dropped — surfacing as "Statemachine was cancelled" with no user-visible error. The ceremony cleanup at the end of register/sign still clears the slot.
 
-
 - **FIDO2 attestation/assertion field name mismatch with WebAuthn spec** (`src/modules/credential/fido2/rp/proto.rs`) — `AuthenticatorAttestationResponse::client_data_json` and `AuthenticatorAssertionResponse::client_data_json` now deserialize from the spec-compliant `clientDataJSON` (capital JSON) instead of the serde-camelCase-default `clientDataJson`. Every spec-compliant client (browsers, the native authenticator crate) sends `clientDataJSON`, so the old name silently rejected all real-world FIDO2 registrations and authentications with `missing field 'clientDataJson'`. The legacy `clientDataJson` form is retained as a deserialization alias so any in-flight clients still work.
-
 
 - **FIDO2 "not configured" error on Register Security Key** (`gui/src-tauri/src/commands/fido2_native.rs`) — `read_fido2_config` now backfills mode-appropriate defaults when the userpass mount has no FIDO2 config entry, then retries the read. Embedded vaults get `rp_id=localhost`/`rp_origin=https://localhost`; remote vaults derive `rp_id` (host) and `rp_origin` (`scheme://host[:port]`) from the connected remote profile's address, mirroring the SettingsPage `deriveDefaults` logic so admins can register keys without visiting Settings first. The write is best-effort: non-admin tokens fall through to the original "not configured" marker so login flows still recognise it and fall back to password entry.
 
@@ -10850,8 +11214,6 @@ Outstanding Phase 5 work tracked separately (deferred — both genuinely large):
 - **Two seeded baseline policies** (`src/modules/policy/policy_store.rs`): `standard-user-readonly` (read+list on KV + resources they own/are shared) and `secret-author` (full CRUD on KV + resources they own/are shared). Both ship alongside the existing broadly-scoped `standard-user` so operators can opt into ownership-aware ACLs without a migration. `load_default_acl_policy` seeds all three.
 - **3 new integration tests** in `src/modules/identity/mod.rs`: alice-writes-bob-denied, secret-author full CRUD on owned secret, and list-filter narrows `secret/metadata/` to caller-owned keys for a user with `secret-author`.
 - Updated 4 existing policy-listing tests to expect the two new seeded baselines in the default policy list.
-
-
 
 #### Resource Groups (`features/resource-groups.md`)
 - **Resource-group module** (`src/modules/resource_group/`) -- new logical backend mounted at `resource-group/` that manages named collections of resources. Each group holds a description and a list of resource names; membership is canonicalized (lowercased, trimmed, deduped, sorted) on every write.

@@ -78,6 +78,76 @@ mod test {
         resp
     }
 
+    /// A user's `token_bound_cidrs` restricts where the issued token may be
+    /// used. Also covers the legacy `bound_cidrs` alias, which `path_users`
+    /// keeps in sync with the canonical field — both must reach the token.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_userpass_token_bound_cidrs_restrict_token_use() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_userpass_token_bound_cidrs_restrict_token_use").await;
+
+        test_mount_auth_api(&core, &root_token, "userpass", "pass").await;
+
+        // Canonical field.
+        let user_data = json!({ "password": "pw", "token_bound_cidrs": ["10.0.0.0/24"] }).as_object().cloned();
+        let resp = test_write_api(&core, &root_token, "auth/pass/users/bound", true, user_data).await;
+        assert!(resp.is_ok());
+
+        let resp = test_login(&core, "pass", "bound", "pw", true).await.unwrap().unwrap();
+        let auth = resp.auth.unwrap();
+        assert_eq!(
+            auth.bound_cidrs,
+            vec!["10.0.0.0/24".to_string()],
+            "the user's token_bound_cidrs must reach the issued Auth"
+        );
+
+        let token = auth.client_token;
+        assert!(use_token_from(&core, &token, "10.0.0.7:41222").await.is_ok(), "usable from inside the block");
+        assert!(
+            matches!(use_token_from(&core, &token, "203.0.113.9:41222").await, Err(RvError::ErrPermissionDenied)),
+            "must be refused from outside the block"
+        );
+        assert!(
+            matches!(use_token_from(&core, &token, "").await, Err(RvError::ErrPermissionDenied)),
+            "must fail closed on an unknown source address"
+        );
+
+        // Legacy alias: `bound_cidrs` is mirrored onto `token_bound_cidrs`.
+        let user_data = json!({ "password": "pw", "bound_cidrs": ["10.9.0.0/24"] }).as_object().cloned();
+        let resp = test_write_api(&core, &root_token, "auth/pass/users/legacy", true, user_data).await;
+        assert!(resp.is_ok());
+
+        let resp = test_login(&core, "pass", "legacy", "pw", true).await.unwrap().unwrap();
+        let token = resp.auth.unwrap().client_token;
+        assert!(use_token_from(&core, &token, "10.9.0.7:41222").await.is_ok(), "legacy alias must bind the token");
+        assert!(
+            matches!(use_token_from(&core, &token, "10.0.0.7:41222").await, Err(RvError::ErrPermissionDenied)),
+            "legacy alias must be enforced, not just stored"
+        );
+
+        // A user with no binding is unrestricted.
+        test_write_user(&core, &root_token, "pass", "free", "pw", 0).await;
+        let resp = test_login(&core, "pass", "free", "pw", true).await.unwrap().unwrap();
+        let token = resp.auth.unwrap().client_token;
+        for peer in ["10.0.0.7:41222", "203.0.113.9:41222", ""] {
+            assert!(use_token_from(&core, &token, peer).await.is_ok(), "an unbound token must be usable from {peer:?}");
+        }
+    }
+
+    /// Present `token` on an authenticated route from socket address
+    /// `peer_addr` (pass `""` for a request with no connection information).
+    #[maybe_async::maybe_async]
+    async fn use_token_from(core: &dyn VaultCtx, token: &str, peer_addr: &str) -> Result<(), RvError> {
+        let mut req = Request::new("auth/token/lookup-self");
+        req.operation = Operation::Read;
+        req.client_token = token.to_string();
+        req.connection = Some(crate::logical::connection::Connection {
+            peer_addr: peer_addr.to_string(),
+            ..Default::default()
+        });
+        core.handle_request(&mut req).await.map(|_| ())
+    }
+
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_userpass_module() {
         let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_userpass_module").await;

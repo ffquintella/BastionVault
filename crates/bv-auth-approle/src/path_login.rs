@@ -168,6 +168,12 @@ impl AppRoleBackendInner {
         // Environment scope carried by the secret_id used at login (empty = all).
         let mut secret_envs: Vec<String> = Vec::new();
 
+        // The secret_id's own token source-address restriction (empty = defer
+        // to the role's `token_bound_cidrs`). Write-time validation in
+        // `path_role` already guarantees it is a subset of the role's list, so
+        // a non-empty value here simply replaces it.
+        let mut secret_token_cidrs: Vec<String> = Vec::new();
+
         let storage = Arc::as_ref(req.storage.as_ref().unwrap());
 
         if role_entry.bind_secret_id {
@@ -218,15 +224,16 @@ impl AppRoleBackendInner {
                         .connection
                         .as_ref()
                         .ok_or_else(|| RvError::ErrResponse("failed to get connection information".to_string()))?;
-                    if conn.peer_addr.is_empty() {
+                    let client_ip = conn.client_ip();
+                    if client_ip.is_empty() {
                         return Err(RvError::ErrResponse("failed to get connection information".to_string()));
                     }
 
                     let cidr_list_ref: Vec<&str> = secret_id_entry.cidr_list.iter().map(AsRef::as_ref).collect();
-                    if !cidr::ip_belongs_to_cidrs(&conn.peer_addr, &cidr_list_ref)? {
+                    if !cidr::ip_belongs_to_cidrs(&client_ip, &cidr_list_ref)? {
                         return Err(RvError::ErrResponse(format!(
                             "source address {} unauthorized through CIDR restrictions on the secret ID",
-                            conn.peer_addr
+                            client_ip
                         )));
                     }
                 }
@@ -274,21 +281,23 @@ impl AppRoleBackendInner {
                         .connection
                         .as_ref()
                         .ok_or_else(|| RvError::ErrResponse("failed to get connection information".to_string()))?;
-                    if conn.peer_addr.is_empty() {
+                    let client_ip = conn.client_ip();
+                    if client_ip.is_empty() {
                         return Err(RvError::ErrResponse("failed to get connection information".to_string()));
                     }
 
                     let cidr_list_ref: Vec<&str> = secret_id_entry.cidr_list.iter().map(AsRef::as_ref).collect();
-                    if !cidr::ip_belongs_to_cidrs(&conn.peer_addr, &cidr_list_ref)? {
+                    if !cidr::ip_belongs_to_cidrs(&client_ip, &cidr_list_ref)? {
                         return Err(RvError::ErrResponse(format!(
                             "source address {} unauthorized through CIDR restrictions on the secret ID",
-                            conn.peer_addr
+                            client_ip
                         )));
                     }
                 }
             }
 
             secret_envs = secret_id_entry.environments.clone();
+            secret_token_cidrs = secret_id_entry.token_cidr_list.clone();
             metadata = secret_id_entry.metadata;
         }
 
@@ -297,15 +306,16 @@ impl AppRoleBackendInner {
                 .connection
                 .as_ref()
                 .ok_or_else(|| RvError::ErrResponse("failed to get connection information".to_string()))?;
-            if conn.peer_addr.is_empty() {
+            let client_ip = conn.client_ip();
+            if client_ip.is_empty() {
                 return Err(RvError::ErrResponse("failed to get connection information".to_string()));
             }
 
             let bound_cidrs_ref: Vec<&str> = role_entry.secret_id_bound_cidrs.iter().map(AsRef::as_ref).collect();
-            if !cidr::ip_belongs_to_cidrs(&conn.peer_addr, &bound_cidrs_ref)? {
+            if !cidr::ip_belongs_to_cidrs(&client_ip, &bound_cidrs_ref)? {
                 return Err(RvError::ErrResponse(format!(
                     "source address {} unauthorized by CIDR restrictions on the secret ID",
-                    conn.peer_addr
+                    client_ip
                 )));
             }
         }
@@ -320,19 +330,20 @@ impl AppRoleBackendInner {
                 .connection
                 .as_ref()
                 .ok_or_else(|| RvError::ErrResponse("failed to get connection information".to_string()))?;
-            if conn.peer_addr.is_empty() {
+            let client_ip = conn.client_ip();
+            if client_ip.is_empty() {
                 return Err(RvError::ErrResponse("failed to get connection information".to_string()));
             }
 
-            if !ip_filter::ip_matches_any(&conn.peer_addr, &role_entry.bound_source_ips)? {
+            if !ip_filter::ip_matches_any(&client_ip, &role_entry.bound_source_ips)? {
                 log::warn!(
                     target: "security",
                     "AppID login refused: source address {} is outside the source IP filter of role {}",
-                    conn.peer_addr, role_entry.name
+                    client_ip, role_entry.name
                 );
                 return Err(RvError::ErrResponse(format!(
                     "source address {} unauthorized by the source IP filter on the ID",
-                    conn.peer_addr
+                    client_ip
                 )));
             }
         }
@@ -473,7 +484,26 @@ impl AppRoleBackendInner {
             metadata.insert("entity_id".to_string(), entity_id);
         }
 
-        let mut auth = Auth { metadata, ..Default::default() };
+        // `display_name` is what every audit surface reports as "who": the
+        // denial trail, the access trail and the login trail all resolve the
+        // principal through `bv_logical::split_principal`, which falls back to
+        // it for a token with no bound human. Left unset, `post_route` produced
+        // the bare mount name — every AppID in the deployment audited as
+        // "approle", with no way to tell which application was refused. Mirrors
+        // userpass, which has always passed its username here; `post_route`
+        // prefixes the mount, giving `approle-<id>`.
+        let mut auth = Auth {
+            metadata,
+            display_name: role_entry.name.clone(),
+            // A bypassed AppID authenticates on its credentials alone, so its
+            // token can never carry `spiffe_id` and the server-wide
+            // `require_machine_identity` gate in `TokenStore::pre_route` would
+            // refuse every request it made — the login succeeded and the ID was
+            // still unusable. Carry the decision onto the token so the gate
+            // honours the same exemption the login did.
+            machine_identity_exempt: role_entry.bypass_machine_binding,
+            ..Default::default()
+        };
         auth.internal_data.insert("role_name".to_string(), role_entry.name.clone());
         // child_visible follows the login namespace's `child_visible_default`
         // flag (see the userpass login for the rationale); default false.
@@ -499,6 +529,14 @@ impl AppRoleBackendInner {
             )
             .await;
         effective_role.populate_token_auth(&mut auth);
+
+        // A secret_id may carry its own, narrower token binding. It is
+        // verified to be a subset of the role's `token_bound_cidrs` when the
+        // secret_id is issued (`verify_cidr_role_secret_id_subset` in
+        // `path_role`), so replacing rather than unioning is the intersection.
+        if !secret_token_cidrs.is_empty() {
+            auth.bound_cidrs = secret_token_cidrs;
+        }
 
         let resp = Response { auth: Some(auth), ..Response::default() };
 

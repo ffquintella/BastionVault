@@ -36,8 +36,8 @@ use crate::{
     errors::RvError,
     handler::{AuthHandler, HandlePhase, Handler},
     logical::{
-        lease::calculate_ttl, Auth, Backend, Field, FieldType, Lease, LogicalBackend, Operation, Path, PathOperation,
-        Request, Response,
+        is_reserved_token_meta_key, lease::calculate_ttl, Auth, Backend, Field, FieldType, Lease, LogicalBackend,
+        Operation, Path, PathOperation, Request, Response, SPIFFE_ID_META,
     },
     modules::policy::policy_store::NON_ASSIGNABLE_POLICIES,
     new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
@@ -45,7 +45,7 @@ use crate::{
     bv_error_response, bv_error_string,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
     utils::{
-        default_system_time, deserialize_duration, deserialize_system_time, generate_uuid, is_str_subset,
+        cidr, default_system_time, deserialize_duration, deserialize_system_time, generate_uuid, is_str_subset,
         policy::sanitize_policies,
         serialize_duration, serialize_system_time, sha1,
         token_util::{DEFAULT_LEASE_TTL, MAX_LEASE_TTL},
@@ -63,6 +63,123 @@ TODO
 
 lazy_static! {
     static ref DISPLAY_NAME_SANITIZE: Regex = Regex::new(r"[^a-zA-Z0-9-]").unwrap();
+}
+
+// The reserved-metadata list itself lives in `bv_logical::auth` — beside the
+// key constants it is built from, and where the OIDC and SAML backends (which
+// project an IdP-controlled claim onto an operator-chosen metadata key, the
+// second write point for the same set) can also see it. See
+// [`RESERVED_TOKEN_META_KEYS`] for the rule and the reasoning; the enforcement
+// for *this* write point is `reject_reserved_meta` below.
+
+/// Metadata key prefixes a child token **inherits** from its parent on
+/// `auth/token/create`.
+///
+/// Refusing a forged key ([`RESERVED_TOKEN_META_KEYS`]) stops a child from
+/// *gaining* a backend-owned key. It does nothing about the opposite escape:
+/// `handle_create` builds the child's `meta` from the request body, so a key
+/// the parent carries is simply *absent* on the child. For a key that names an
+/// identity that is harmless. For a key that carries a **restriction** it is a
+/// bypass — the restriction is escapable by one `auth/token/create`, which is
+/// exactly the reasoning already recorded for `bound_cidrs` a few lines into
+/// the [`TokenEntry`] literal below.
+///
+/// `approle_env_` is such a restriction: AppRole stamps `approle_env_scoped` /
+/// `_secret` / `_machine` on an environment-scoped login and
+/// `bv-engine-kv`'s `enforce_env_scope` refuses any KV v2 data operation
+/// outside the allowed environments — *and passes through unchanged when
+/// `approle_env_scoped` is absent*. A scoped AppID with a grant on
+/// `auth/token/create` therefore minted itself a child that read every
+/// environment, including the base (non-env) secrets a scoped token is
+/// explicitly barred from. The prefix (rather than the three key names) is
+/// deliberate, for the same reason it is a prefix in
+/// `bv_logical::auth::RESERVED_TOKEN_META_PREFIXES`: a fourth `approle_env_*`
+/// key added later is inherited on the day it is written, not the day someone
+/// remembers this list.
+///
+/// **Why this is not simply "inherit everything in
+/// [`RESERVED_TOKEN_META_KEYS`]".** That set is "backend-owned", which is the
+/// right property to *refuse* and the wrong one to *inherit*, because most of
+/// it names an identity rather than a restriction, and inheriting an identity
+/// **widens**:
+///
+/// * `spiffe_id` is the whole of what "machine-bound" means to
+///   [`machine_identity_satisfied`], so inheriting it would make every child of
+///   a machine-bound token pass the server-wide `require_machine_identity`
+///   gate with no attestation of its own — the gate would be satisfied by
+///   descent instead of by proof.
+/// * `mount_path` = `"ferrogate/"` is what `bv-auth-approle`'s login checks
+///   before accepting a token as a `machine_token`; inheriting it would make
+///   any child of a FerroGate token replayable as a machine credential.
+/// * `username` / `entity_id` / `role_name` drive policy templating, the
+///   namespace assignment lookup in
+///   `namespace::token_binding::assignment_principal`, and the principal
+///   columns of both audit trails. Inheriting them would attribute the child's
+///   actions to the parent's principal and hand it the parent's
+///   operator-authored namespace grants.
+///
+/// So the rule for *this* set is narrower and stated as a question: **does the
+/// key's presence take access away?** If yes, inherit it — dropping it is a
+/// bypass. If it grants, identifies or attributes, do not — inheriting it is
+/// the bypass. Fail closed in both directions.
+///
+/// The namespace binding (`namespace_path`, `child_visible`) is the other
+/// restriction on a token's metadata and is *not* handled here: it is written
+/// explicitly further down `handle_create`, from the request header, and is
+/// clamped to the parent's binding there.
+///
+/// Unlike the reserved list, this one stays in `bv-kernel`: the reserved list
+/// has two write points (this path, and the OIDC/SAML claim projection) and
+/// moved to `bv-logical` to be visible to both. Inheritance has exactly one
+/// write point -- `handle_create` -- so putting it in the contract crate would
+/// advertise a rule no one else can apply.
+const INHERITED_TOKEN_META_PREFIXES: &[&str] = &["approle_env_"];
+
+/// Copy the restriction-bearing backend-owned keys of `parent_meta` onto a
+/// child token's metadata map. See [`INHERITED_TOKEN_META_PREFIXES`].
+///
+/// Overwrites rather than skipping an existing entry. `reject_reserved_meta`
+/// has already refused every one of these keys in a caller-supplied `meta`, so
+/// there is nothing to overwrite today; overwriting is what keeps that true if
+/// the two lists ever diverge.
+fn inherit_restriction_meta(parent_meta: &HashMap<String, String>, child_meta: &mut HashMap<String, String>) {
+    for (key, value) in parent_meta {
+        if INHERITED_TOKEN_META_PREFIXES.iter().any(|p| key.starts_with(p)) {
+            child_meta.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+/// Reject any backend-owned key in a caller-supplied `auth/token/create`
+/// `meta` map.
+///
+/// Names *every* offending key, sorted, so an operator hitting this with a
+/// legitimate integration sees the whole list in one round trip and the same
+/// body always produces the same message — `meta` is a `HashMap`, so reporting
+/// the first key encountered would name an arbitrary one of several. The
+/// values are not logged: a caller controls them, and these keys name
+/// principals.
+fn reject_reserved_meta(meta: &HashMap<String, String>, display_name: &str) -> Result<(), RvError> {
+    let mut offenders: Vec<&str> = meta
+        .keys()
+        .map(String::as_str)
+        .filter(|key| is_reserved_token_meta_key(key))
+        .collect();
+    if offenders.is_empty() {
+        return Ok(());
+    }
+    offenders.sort_unstable();
+
+    let keys = offenders.join("`, `");
+    log::warn!(
+        target: "security",
+        "token create refused: reserved metadata key(s) `{keys}` may only be set by an auth backend \
+         (parent display_name={display_name})"
+    );
+    Err(bv_error_response!(&format!(
+        "meta key(s) `{keys}` are reserved: they are set by the auth backend that authenticated the \
+         principal and may not be supplied on token create"
+    )))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -118,6 +235,71 @@ pub struct TokenEntry {
     pub period: Duration,
     #[serde(default, serialize_with = "serialize_duration", deserialize_with = "deserialize_duration")]
     pub explicit_max_ttl: Duration,
+    /// The set of CIDR blocks this token may be used from, in the canonical
+    /// string form `SockAddrMarshaler` serializes to. Empty means
+    /// unrestricted.
+    ///
+    /// Stamped at issuance from the auth backend's `token_bound_cidrs` (via
+    /// [`Auth::bound_cidrs`]) and enforced by
+    /// [`TokenStore::check_token`] against the request's client IP.
+    ///
+    /// `#[serde(default)]` is load-bearing for upgrades: a token entry
+    /// persisted before this field existed deserializes to an empty list and
+    /// stays unrestricted, so enabling enforcement cannot retroactively lock
+    /// out a token that is already in circulation. Only tokens minted after
+    /// the upgrade carry a binding.
+    #[serde(default)]
+    pub bound_cidrs: Vec<String>,
+    /// This token is exempt from the server-wide FerroGate
+    /// `require_machine_identity` gate (see [`TokenStore::pre_route`]).
+    ///
+    /// Stamped at issuance from [`Auth::machine_identity_exempt`], which
+    /// only an auth backend that authenticated the principal *without*
+    /// machine attestation sets -- today AppRole's per-role
+    /// `bypass_machine_binding`. Deliberately not a metadata key: the
+    /// `auth/token/create` body's `meta` map is copied onto the new token, so a
+    /// metadata-keyed exemption would be forgeable by any holder of a grant on
+    /// that path. [`RESERVED_TOKEN_META_KEYS`] now refuses that spelling too,
+    /// but the typed field is what makes the exemption unforgeable by
+    /// construction rather than by a check someone has to remember to keep.
+    ///
+    /// `#[serde(default)]` means every token persisted before this field
+    /// existed reads back as *not* exempt, i.e. the gate keeps applying to
+    /// it. Failing closed is the right direction here: the worst case is a
+    /// bypassed AppID having to log in again to pick up the exemption.
+    #[serde(default)]
+    pub machine_identity_exempt: bool,
+}
+
+/// Does this token satisfy the server-wide FerroGate machine-identity
+/// requirement?
+///
+/// The single predicate behind the `require_machine_identity` gate in
+/// [`TokenStore::pre_route`]. `SystemModule`'s denial-audit classifier
+/// re-evaluates it to label a 403 `reason=machine-identity`, so it lives here
+/// as one function rather than two copies that can drift.
+///
+/// Three ways to satisfy it:
+///
+/// * **Root.** Keeps the bootstrap/approval chain and break-glass admin
+///   working while the gate is on.
+/// * **Machine-bound.** The token carries a non-empty `spiffe_id` metadata
+///   value. Only an auth backend that verified a machine attestation emits it
+///   -- the FerroGate login handler, and AppRole on a machine-bound login --
+///   and [`RESERVED_TOKEN_META_KEYS`] is what keeps a caller on
+///   `auth/token/create` from writing it directly. The emptiness check is not
+///   redundant: `contains_key` alone accepted `"spiffe_id": ""`, which
+///   [`bv_logical::split_principal`] then audits as *not* machine-bound, so the
+///   gate and the audit trail disagreed about the same token.
+/// * **Exempt.** [`Auth::machine_identity_exempt`], set by an auth backend that
+///   authenticated this principal without machine attestation on purpose --
+///   today AppRole's per-role `bypass_machine_binding`. Without this arm the
+///   per-AppID bypass was decorative on any server with the gate on: the login
+///   succeeded and then every request the token made was refused here.
+pub fn machine_identity_satisfied(auth: &Auth) -> bool {
+    auth.policies.iter().any(|p| p == "root")
+        || auth.metadata.get(SPIFFE_ID_META).is_some_and(|id| !id.is_empty())
+        || auth.machine_identity_exempt
 }
 
 /// Manages the storage and handling of tokens.
@@ -443,7 +625,22 @@ impl TokenStore {
     }
 
     /// Checks the validity of a token and returns the associated authentication data.
-    pub async fn check_token(&self, _path: &str, token: &str) -> Result<Option<Auth>, RvError> {
+    ///
+    /// `client_ip` is the bare source address the token is being presented
+    /// from — [`bv_logical::Connection::client_ip`], never `peer_addr`
+    /// verbatim. It is what the token's [`TokenEntry::bound_cidrs`] are
+    /// evaluated against. Pass `""` only when there genuinely is no
+    /// connection to attribute the request to; a token that carries a
+    /// source-address restriction is then refused, because an unknown
+    /// address cannot be shown to satisfy the rule.
+    ///
+    /// The restriction is enforced here rather than in `pre_route` on
+    /// purpose: this is the one function every authenticated path resolves a
+    /// token through, including the `sys/internal/ui/*` and `/metrics`
+    /// callers that build an ACL directly instead of going through
+    /// `Core::handle_request`. Enforcing it a layer up would leave those
+    /// paths unbound.
+    pub async fn check_token(&self, path: &str, token: &str, client_ip: &str) -> Result<Option<Auth>, RvError> {
         if token.is_empty() {
             return Err(RvError::ErrRequestClientTokenMissing);
         }
@@ -456,6 +653,20 @@ impl TokenStore {
 
         let mut entry = te.unwrap();
 
+        // Source-address binding, before `use_token`: a refused request must
+        // not burn one of a use-limited token's uses.
+        if !entry.bound_cidrs.is_empty() && !cidr::remote_addr_in_bound_cidrs(client_ip, &entry.bound_cidrs) {
+            log::warn!(
+                target: "security",
+                "request denied: token is bound to {:?} but was presented from {} (path={}, display_name={})",
+                entry.bound_cidrs,
+                if client_ip.is_empty() { "an unknown address" } else { client_ip },
+                path,
+                entry.display_name
+            );
+            return Err(RvError::ErrPermissionDenied);
+        }
+
         self.use_token(&mut entry).await?;
 
         let mut auth = Auth {
@@ -464,6 +675,8 @@ impl TokenStore {
             token_policies: entry.policies.clone(),
             policies: entry.policies.clone(),
             metadata: entry.meta,
+            bound_cidrs: entry.bound_cidrs,
+            machine_identity_exempt: entry.machine_identity_exempt,
             ..Auth::default()
         };
 
@@ -624,26 +837,117 @@ impl TokenStore {
 
         let mut data: TokenReqData = serde_json::from_value(Value::Object(req.body.as_ref().unwrap().clone()))?;
 
+        // Before the map is copied onto the new entry: the caller may annotate
+        // a token, but may not write the backend-owned keys the kernel and the
+        // engines read as authorization input.
+        reject_reserved_meta(&data.meta, &parent.display_name)?;
+
+        // Caller-supplied annotations (`reject_reserved_meta` above has already
+        // refused every backend-owned key, so none of these is read as
+        // authorization input), plus the restriction-bearing keys the child
+        // must not be able to shed by omitting them from the body -- today the
+        // AppRole environment scope. See `INHERITED_TOKEN_META_PREFIXES` for
+        // why only the restrictions are inherited and the identities are not.
+        let mut child_meta = data.meta.clone();
+        inherit_restriction_meta(&parent.meta, &mut child_meta);
+
         let mut te = TokenEntry {
             parent: req.client_token.clone(),
             path: "auth/token/create".into(),
-            meta: data.meta.clone(),
+            meta: child_meta,
             display_name: "token".into(),
             num_uses: data.num_uses,
+            // Inherit the parent's source-address binding. A bound token must
+            // not be able to mint an unbound child, which would make the
+            // restriction trivially escapable by one `auth/token/create`.
+            bound_cidrs: parent.bound_cidrs.clone(),
+            // Inherit the machine-identity exemption, which is a property of
+            // how the parent authenticated. Inheriting cannot escalate -- an
+            // exempt parent could already reach every path the child can --
+            // and without it a bypassed AppID's child token would be refused
+            // by a gate its parent is exempt from.
+            machine_identity_exempt: parent.machine_identity_exempt,
             ..TokenEntry::default()
         };
 
         // Multi-tenancy: bind the new token to the namespace it is issued in
-        // (named by the X-BastionVault-Namespace header; root by default).
-        // The binding rides in the token metadata so it flows into
-        // `Auth.metadata` on lookup and is enforced on every routed request.
+        // (named by the X-BastionVault-Namespace header; the parent's own
+        // namespace by default). The binding rides in the token metadata so it
+        // flows into `Auth.metadata` on lookup and is enforced on every routed
+        // request.
+        //
+        // The binding is a *restriction*, so the same rule as `bound_cidrs`
+        // applies: it is clamped to the parent's. `auth/` is header-scoped
+        // (`namespace::router::is_header_scoped_path`), so
+        // `enforce_request_token_binding` never checked *this* request against
+        // the parent's binding -- which meant a `tenant-a`-bound token holding
+        // a grant on `auth/token/create` could mint a child bound to the root
+        // namespace (no header) or to a sibling tenant (any header), and a
+        // parent that is not child-visible could mint a `child_visible` child
+        // that reaches every descendant namespace the parent cannot. Root is
+        // exempt because a root token already operates in every namespace
+        // (`token_binding::token_operable`).
         {
             use crate::modules::namespace::{
-                router::namespace_header_from_map, store::normalize_path, token_binding,
+                router::{namespace_header_from_map, NAMESPACE_HEADER},
+                store::normalize_path,
+                token_binding,
             };
-            let ns_path = namespace_header_from_map(req.headers.as_ref())
-                .and_then(|h| normalize_path(&h).ok())
-                .unwrap_or_default();
+            let (parent_ns_path, parent_child_visible) = token_binding::binding_from_metadata(&parent.meta);
+
+            // An absent (or empty) header inherits the parent's namespace
+            // rather than defaulting to root: the previous default silently
+            // *widened* every child of a namespace-bound token. A *malformed*
+            // header is an error rather than a fall back to either -- this is
+            // the one place a namespace header decides a credential's binding
+            // instead of where a single request lands, so the caller must get
+            // the binding it named or nothing.
+            let requested_ns = match namespace_header_from_map(req.headers.as_ref())
+                .map(|h| h.trim().to_string())
+                .filter(|h| !h.is_empty())
+            {
+                None => None,
+                Some(header) => Some(normalize_path(&header).map_err(|e| {
+                    bv_error_response!(&format!("invalid {} header on token create: {e}", NAMESPACE_HEADER))
+                })?),
+            };
+
+            let ns_path = match requested_ns {
+                None => parent_ns_path.clone(),
+                Some(ns) => {
+                    if !is_root && !token_binding::token_may_operate(&parent_ns_path, parent_child_visible, &ns) {
+                        log::warn!(
+                            target: "security",
+                            "token create refused: parent bound to namespace {parent_ns_path:?} \
+                             (child_visible={parent_child_visible}) may not mint a token in {ns:?} \
+                             (parent display_name={})",
+                            parent.display_name
+                        );
+                        return Err(bv_error_response!(&format!(
+                            "cannot create a token in namespace {ns:?}: the parent token is bound to \
+                             {parent_ns_path:?} and may not operate there"
+                        )));
+                    }
+                    ns
+                }
+            };
+
+            // Refused, not silently downgraded (AGENTS.md §7): a caller that
+            // asked for a reach it cannot have gets an error, not a token that
+            // quietly lacks the flag it requested.
+            if data.child_visible && !is_root && !parent_child_visible {
+                log::warn!(
+                    target: "security",
+                    "token create refused: child_visible requested by a parent that is not itself \
+                     child-visible (parent namespace={parent_ns_path:?}, display_name={})",
+                    parent.display_name
+                );
+                return Err(bv_error_response!(
+                    "cannot set child_visible: the parent token is not child-visible, so the child \
+                     would reach descendant namespaces the parent cannot"
+                ));
+            }
+
             te.meta.insert(token_binding::NS_PATH_META.to_string(), ns_path);
             te.meta
                 .insert(token_binding::CHILD_VISIBLE_META.to_string(), data.child_visible.to_string());
@@ -1021,7 +1325,8 @@ impl Handler for TokenStore {
         }
 
         if auth.is_none() {
-            auth = self.check_token(&req.path, &req.client_token).await?;
+            let client_ip = req.connection.as_ref().map(|c| c.client_ip()).unwrap_or_default();
+            auth = self.check_token(&req.path, &req.client_token, &client_ip).await?;
         }
 
         if auth.is_none() {
@@ -1032,22 +1337,21 @@ impl Handler for TokenStore {
         req.auth = auth;
 
         // Server-enforced machine identity: when the FerroGate mount requires
-        // it, every authenticated request must ride a FerroGate machine-bound
-        // token. Such tokens carry `spiffe_id` in their metadata (set only by
-        // the ferrogate login handler — no other backend emits it). Root tokens
-        // are exempt so the bootstrap/approval chain and break-glass admin keep
-        // working; unauth paths already returned above. This is the single
-        // chokepoint every authenticated request crosses, so it covers all auth
-        // backends uniformly and cannot be bypassed by a non-cooperating client.
+        // it, every authenticated request must ride a token that satisfies
+        // `machine_identity_satisfied` — machine-bound, root, or explicitly
+        // exempted by the auth backend that issued it. Unauth paths already
+        // returned above. This is the single chokepoint every authenticated
+        // request crosses, so it covers all auth backends uniformly and cannot
+        // be bypassed by a non-cooperating client.
         if self.require_machine_identity.load(Ordering::Relaxed) {
             let a = req.auth.as_ref().unwrap();
-            let is_root = a.policies.iter().any(|p| p == "root");
-            let is_machine_bound = a.metadata.contains_key("spiffe_id");
-            if !is_root && !is_machine_bound {
+            if !machine_identity_satisfied(a) {
                 log::warn!(
                     target: "security",
-                    "request denied: server requires FerroGate machine identity but token is not machine-bound (path={}, display_name={})",
-                    req.path, a.display_name
+                    "request denied: server requires FerroGate machine identity but token is not machine-bound (path={}, display_name={}, role_name={})",
+                    req.path,
+                    a.display_name,
+                    a.metadata.get("role_name").map(String::as_str).unwrap_or("-")
                 );
                 return Err(RvError::ErrPermissionDenied);
             }
@@ -1152,6 +1456,14 @@ impl Handler for TokenStore {
                 policies: auth.token_policies.clone(),
                 explicit_max_ttl: auth.explicit_max_ttl,
                 period: auth.period,
+                // The auth backend's `token_bound_cidrs`, carried here on the
+                // Auth by `TokenParams::populate_token_auth`. Without this the
+                // field is parsed, persisted on the role and echoed back on a
+                // read, but never reaches the token it is supposed to restrict.
+                bound_cidrs: auth.bound_cidrs.clone(),
+                // Set by an auth backend that authenticated this principal
+                // without machine attestation (AppRole `bypass_machine_binding`).
+                machine_identity_exempt: auth.machine_identity_exempt,
                 ..Default::default()
             };
 
@@ -1172,6 +1484,10 @@ impl Handler for TokenStore {
 #[cfg(test)]
 mod mod_token_store_tests {
     use super::*;
+    // Metadata keys only the tests name: the production paths reach the
+    // namespace pair through `token_binding`, and the reserved list itself is
+    // consumed via `is_reserved_token_meta_key`.
+    use crate::logical::{CHILD_VISIBLE_META, NS_PATH_META, RESERVED_TOKEN_META_KEYS, USERNAME_META};
     use crate::{
         context::Context,
         logical::{Backend, Request, Response, Secret},
@@ -1400,5 +1716,578 @@ mod mod_token_store_tests {
         let auth = resp.auth.unwrap();
         assert_eq!(auth.display_name, "token-test-token");
         assert_eq!(auth.policies, vec!["default".to_owned()]);
+    }
+
+    /// `token_bound_cidrs`, once stamped on a token entry, is enforced by
+    /// `check_token` against the client IP the token is presented from.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_token_bound_cidrs_are_enforced_on_use() {
+        let token_store = mock_token_store!();
+
+        let mut entry = TokenEntry {
+            policies: vec!["default".to_string()],
+            path: "auth/approle/login".to_string(),
+            display_name: "bound-token".to_string(),
+            bound_cidrs: vec!["10.0.0.0/24".to_string()],
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut entry).await.unwrap();
+
+        // Allowed: inside the bound block.
+        let auth = token_store.check_token("kv/data/x", &entry.id, "10.0.0.7").await.unwrap();
+        assert!(auth.is_some(), "a client inside the bound CIDR must be admitted");
+        // The binding is surfaced on the Auth so a caller can see why.
+        assert_eq!(auth.unwrap().bound_cidrs, vec!["10.0.0.0/24".to_string()]);
+
+        // Denied: outside the bound block.
+        let err = token_store.check_token("kv/data/x", &entry.id, "10.0.1.7").await.unwrap_err();
+        assert!(
+            matches!(err, RvError::ErrPermissionDenied),
+            "a client outside the bound CIDR must be denied, got: {err}"
+        );
+
+        // Denied: unknown client address. An address we cannot determine
+        // cannot be shown to satisfy the rule, so it fails closed.
+        let err = token_store.check_token("kv/data/x", &entry.id, "").await.unwrap_err();
+        assert!(
+            matches!(err, RvError::ErrPermissionDenied),
+            "an unknown client address must be denied, got: {err}"
+        );
+
+        // Denied: the raw `ip:port` socket address is not silently trusted as
+        // a different host — the network still decides, so this one is inside.
+        assert!(token_store.check_token("kv/data/x", &entry.id, "10.0.0.7:41222").await.is_ok());
+    }
+
+    /// A token with no binding is unrestricted, including one persisted before
+    /// the field existed (which deserializes to an empty list). This is what
+    /// keeps enabling enforcement from locking out tokens already in
+    /// circulation at upgrade time.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_unbound_token_is_unrestricted_from_any_address() {
+        let token_store = mock_token_store!();
+
+        let mut entry = TokenEntry {
+            policies: vec!["default".to_string()],
+            path: "auth/token/create".to_string(),
+            display_name: "unbound".to_string(),
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut entry).await.unwrap();
+
+        for ip in ["10.0.0.7", "203.0.113.9", ""] {
+            assert!(
+                token_store.check_token("kv/data/x", &entry.id, ip).await.unwrap().is_some(),
+                "an unbound token must be usable from {ip:?}"
+            );
+        }
+
+        // A record written before `bound_cidrs` existed has no such key at
+        // all; it must deserialize to "unrestricted" rather than fail.
+        let legacy = r#"{"id":"legacy-token","parent":"","policies":["default"],"path":"auth/token/create",
+            "meta":{},"display_name":"legacy","num_uses":0,"ttl":0}"#;
+        let decoded: TokenEntry = serde_json::from_str(legacy).unwrap();
+        assert!(decoded.bound_cidrs.is_empty(), "a pre-upgrade token entry must decode as unrestricted");
+    }
+
+    /// A bound token must not be able to mint an unbound child, which would
+    /// make the restriction escapable with one `auth/token/create`.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_child_token_inherits_the_parent_binding() {
+        let token_store = mock_token_store!();
+        let mock_backend = MockBackend(());
+
+        let mut parent = TokenEntry {
+            policies: vec!["default".to_string()],
+            path: "auth/approle/login".to_string(),
+            display_name: "bound-parent".to_string(),
+            bound_cidrs: vec!["10.0.0.0/24".to_string()],
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut parent).await.unwrap();
+
+        let mut req = Request {
+            client_token: parent.id.clone(),
+            body: json!({ "policies": ["default"], "display_name": "child" }).as_object().cloned(),
+            ..Request::default()
+        };
+
+        let resp = token_store.handle_create(&mock_backend, &mut req).await.unwrap().unwrap();
+        let child_token = resp.auth.unwrap().client_token;
+        let child = token_store.lookup(&child_token).await.unwrap().unwrap();
+
+        assert_eq!(
+            child.bound_cidrs,
+            vec!["10.0.0.0/24".to_string()],
+            "the child must inherit the parent's source-address binding"
+        );
+        let err = token_store.check_token("kv/data/x", &child_token, "203.0.113.9").await.unwrap_err();
+        assert!(matches!(err, RvError::ErrPermissionDenied), "the inherited binding must be enforced, got: {err}");
+    }
+
+    /// The machine-identity gate's predicate: root, machine-bound, or an
+    /// explicit backend-set exemption satisfies it — and nothing a caller can
+    /// put in a token's metadata does.
+    ///
+    /// The last case is why the exemption is a typed field: `handle_create`
+    /// copies the request body's `meta` map onto the new token, so an exemption
+    /// keyed on metadata would be mintable by any holder of a grant on
+    /// `auth/token/create` — which is now refused outright by
+    /// [`RESERVED_TOKEN_META_KEYS`], but must not be the only thing standing
+    /// between a caller and the gate.
+    #[test]
+    fn test_machine_identity_predicate() {
+        let plain = Auth { policies: vec!["default".into()], ..Auth::default() };
+        assert!(!machine_identity_satisfied(&plain));
+
+        let root = Auth { policies: vec!["root".into()], ..Auth::default() };
+        assert!(machine_identity_satisfied(&root), "root must stay exempt for break-glass");
+
+        let mut bound = plain.clone();
+        bound.metadata.insert("spiffe_id".into(), "spiffe://td/host/abc".into());
+        assert!(machine_identity_satisfied(&bound));
+
+        let exempt = Auth { machine_identity_exempt: true, ..plain.clone() };
+        assert!(machine_identity_satisfied(&exempt), "a backend-set exemption must satisfy the gate");
+
+        // Metadata a caller could supply on `auth/token/create` must not.
+        let mut forged = plain.clone();
+        forged.metadata.insert("approle_machine_bypass".into(), "true".into());
+        forged.metadata.insert("machine_identity_exempt".into(), "true".into());
+        assert!(!machine_identity_satisfied(&forged), "the exemption must not be forgeable through token metadata");
+
+        // An empty `spiffe_id` is not a machine identity. `contains_key` alone
+        // accepted it, while `split_principal` audited the same token as not
+        // machine-bound.
+        let mut blank = plain.clone();
+        blank.metadata.insert(SPIFFE_ID_META.into(), String::new());
+        assert!(!machine_identity_satisfied(&blank), "an empty spiffe_id must not satisfy the gate");
+    }
+
+    /// A caller holding a grant on `auth/token/create` must not be able to
+    /// write any backend-owned metadata key onto the token it mints.
+    ///
+    /// The `spiffe_id` case is the one with teeth: it is the whole of what
+    /// "machine-bound" means to [`machine_identity_satisfied`], so before this
+    /// was refused, one `auth/token/create` call minted a token that passed the
+    /// server-wide `require_machine_identity` gate with no attestation of any
+    /// kind — and, via `meta.mount_path = "ferrogate/"`, could then be replayed
+    /// as the `machine_token` of an AppRole machine-bound login.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_token_create_refuses_reserved_metadata_keys() {
+        let token_store = mock_token_store!();
+        let mock_backend = MockBackend(());
+
+        let mut parent = TokenEntry {
+            policies: vec!["default".to_string()],
+            path: "auth/userpass/login".to_string(),
+            display_name: "userpass-alice".to_string(),
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut parent).await.unwrap();
+
+        // Every reserved key, plus one from each reserved prefix, and the
+        // fourth `approle_env_*` key nobody has added yet.
+        let forgeries: Vec<String> = RESERVED_TOKEN_META_KEYS
+            .iter()
+            .map(|k| (*k).to_string())
+            .chain(
+                ["approle_env_scoped", "approle_env_secret", "approle_env_machine", "approle_env_future"]
+                    .map(String::from),
+            )
+            .collect();
+
+        for key in &forgeries {
+            let mut req = Request::new("auth/token/create");
+            req.client_token = parent.id.clone();
+            req.body = json!({ "policies": ["default"], "meta": { key.as_str(): "forged" } })
+                .as_object()
+                .cloned();
+
+            let err = token_store
+                .handle_create(&mock_backend, &mut req)
+                .await
+                .expect_err(&format!("`meta.{key}` must be refused on token create"));
+            match err {
+                RvError::ErrResponse(msg) => assert!(
+                    msg.contains(key.as_str()) && msg.contains("are reserved"),
+                    "the error must name the refused key, got: {msg}"
+                ),
+                other => panic!("expected a response error naming `{key}`, got: {other}"),
+            }
+        }
+
+        // The forged `spiffe_id` never reaches a token, so it can never reach
+        // the gate: assert the end state, not just the error.
+        let mut req = Request::new("auth/token/create");
+        req.client_token = parent.id.clone();
+        req.body = json!({
+            "policies": ["default"],
+            "meta": { SPIFFE_ID_META: "spiffe://forged/host/attacker" },
+        })
+        .as_object()
+        .cloned();
+        assert!(token_store.handle_create(&mock_backend, &mut req).await.is_err());
+
+        // And a caller-supplied annotation that is *not* reserved still works,
+        // still lands on the token, and still does not satisfy the gate.
+        let mut req = Request::new("auth/token/create");
+        req.client_token = parent.id.clone();
+        req.body = json!({ "policies": ["default"], "meta": { "ticket": "CHG-4417" } }).as_object().cloned();
+        let resp = token_store.handle_create(&mock_backend, &mut req).await.unwrap().unwrap();
+        let child_token = resp.auth.unwrap().client_token;
+        let child = token_store.lookup(&child_token).await.unwrap().unwrap();
+        assert_eq!(child.meta.get("ticket").map(String::as_str), Some("CHG-4417"));
+        assert!(!child.meta.contains_key(SPIFFE_ID_META));
+
+        let auth = token_store.check_token("kv/data/x", &child_token, "10.0.0.7").await.unwrap().unwrap();
+        assert!(
+            !machine_identity_satisfied(&auth),
+            "a token minted from `auth/token/create` must not satisfy the machine-identity gate"
+        );
+    }
+
+    /// The exemption is a property of how the parent authenticated, so a child
+    /// inherits it — and a child of a non-exempt parent cannot acquire one,
+    /// whatever it puts in `meta`. (The metadata spellings of the exemption are
+    /// refused outright now; see `test_token_create_refuses_reserved_metadata_keys`.
+    /// This test covers what is left: that the typed field, and only the typed
+    /// field, decides.)
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_child_token_inherits_the_machine_identity_exemption() {
+        let token_store = mock_token_store!();
+        let mock_backend = MockBackend(());
+
+        let create_child = |parent_id: &str| {
+            let mut req = Request::new("auth/token/create");
+            req.client_token = parent_id.to_string();
+            req.body = json!({ "policies": ["default"], "meta": { "ticket": "CHG-4417" } })
+                .as_object()
+                .cloned();
+            req
+        };
+
+        for (exempt, expected) in [(true, true), (false, false)] {
+            let mut parent = TokenEntry {
+                policies: vec!["default".to_string()],
+                path: "auth/approle/login".to_string(),
+                display_name: "approle-app".to_string(),
+                machine_identity_exempt: exempt,
+                ..TokenEntry::default()
+            };
+            token_store.create(&mut parent).await.unwrap();
+
+            let mut req = create_child(&parent.id);
+            let resp = token_store.handle_create(&mock_backend, &mut req).await.unwrap().unwrap();
+            let child_token = resp.auth.unwrap().client_token;
+            let child = token_store.lookup(&child_token).await.unwrap().unwrap();
+
+            assert_eq!(
+                child.machine_identity_exempt, expected,
+                "a child of an exempt={exempt} parent must be exempt={expected}; only the typed field decides"
+            );
+            // And it round-trips onto the Auth the gate reads.
+            let auth = token_store.check_token("kv/data/x", &child_token, "10.0.0.7").await.unwrap().unwrap();
+            assert_eq!(auth.machine_identity_exempt, expected);
+        }
+
+        // A token entry persisted before the field existed reads back as not
+        // exempt, i.e. the gate keeps applying to it.
+        let legacy = r#"{"id":"legacy-token","parent":"","policies":["default"],"path":"auth/approle/login",
+            "meta":{},"display_name":"legacy","num_uses":0,"ttl":0}"#;
+        let decoded: TokenEntry = serde_json::from_str(legacy).unwrap();
+        assert!(!decoded.machine_identity_exempt, "a pre-upgrade token entry must decode as not exempt");
+    }
+
+    /// Every prefix in [`INHERITED_TOKEN_META_PREFIXES`] must also be
+    /// reserved. The two lists live in different crates -- inheritance in
+    /// `bv-kernel` because `handle_create` is its only write point, the
+    /// reserved set in `bv-logical` because it has two -- so nothing but this
+    /// keeps them in step.
+    ///
+    /// An inherited-but-unreserved prefix would be the worst of both: the
+    /// caller could supply the key in the body, and `inherit_restriction_meta`
+    /// would then silently overwrite whatever they sent with the parent's
+    /// value. Asserted through `is_reserved_token_meta_key` rather than
+    /// against either list, so the invariant holds however the reserved set is
+    /// spelled.
+    #[test]
+    fn test_inherited_meta_prefixes_are_all_reserved() {
+        for prefix in INHERITED_TOKEN_META_PREFIXES {
+            assert!(
+                is_reserved_token_meta_key(&format!("{prefix}anything")),
+                "`{prefix}` is inherited from the parent but not refused in the request body: a \
+                 caller could set it, and the inherit pass would then overwrite their value"
+            );
+        }
+    }
+
+    /// A *restriction* carried in a token's metadata must survive
+    /// `auth/token/create`, and an *identity* must not be inherited by it.
+    ///
+    /// `handle_create` builds the child's `meta` from the request body, so
+    /// before this a restriction the parent carried was simply absent on the
+    /// child. `bv-engine-kv`'s `enforce_env_scope` passes a token through
+    /// unchanged when `approle_env_scoped` is absent, so an env-scoped AppID
+    /// with a grant on `auth/token/create` minted itself a child that read
+    /// every environment -- including the base (non-env) secrets a scoped
+    /// token is explicitly barred from. Rejecting the forged spelling (see
+    /// `test_token_create_refuses_reserved_metadata_keys`) closed the "gain a
+    /// key" direction and left this one open.
+    ///
+    /// The negative half is not incidental: inheriting `spiffe_id` would make
+    /// every child of a machine-bound token satisfy the server-wide
+    /// `require_machine_identity` gate by descent instead of by attestation,
+    /// and inheriting `username` would attribute the child's actions to the
+    /// parent's principal. See `INHERITED_TOKEN_META_PREFIXES`.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_child_token_inherits_the_approle_environment_scope() {
+        let token_store = mock_token_store!();
+        let mock_backend = MockBackend(());
+
+        let mut parent = TokenEntry {
+            policies: vec!["default".to_string()],
+            path: "auth/approle/login".to_string(),
+            display_name: "approle-payments".to_string(),
+            meta: HashMap::from([
+                // The restriction: inherited.
+                ("approle_env_scoped".to_string(), "true".to_string()),
+                ("approle_env_secret".to_string(), "prod,staging".to_string()),
+                ("approle_env_machine".to_string(), "prod".to_string()),
+                // A key nobody has added yet, covered by the prefix rule.
+                ("approle_env_future".to_string(), "whatever".to_string()),
+                // The identities: not inherited.
+                (SPIFFE_ID_META.to_string(), "spiffe://td/host/payments".to_string()),
+                (USERNAME_META.to_string(), "payments-api".to_string()),
+                ("mount_path".to_string(), "approle/".to_string()),
+            ]),
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut parent).await.unwrap();
+
+        let mut req = Request::new("auth/token/create");
+        req.client_token = parent.id.clone();
+        req.body = json!({ "policies": ["default"], "meta": { "ticket": "CHG-4417" } }).as_object().cloned();
+        let resp = token_store.handle_create(&mock_backend, &mut req).await.unwrap().unwrap();
+        let child_token = resp.auth.unwrap().client_token;
+        let child = token_store.lookup(&child_token).await.unwrap().unwrap();
+
+        for (key, expected) in [
+            ("approle_env_scoped", "true"),
+            ("approle_env_secret", "prod,staging"),
+            ("approle_env_machine", "prod"),
+            ("approle_env_future", "whatever"),
+        ] {
+            assert_eq!(
+                child.meta.get(key).map(String::as_str),
+                Some(expected),
+                "the child must inherit the parent's `{key}`; dropping it escapes the environment scope"
+            );
+        }
+
+        // The caller's own annotation still lands.
+        assert_eq!(child.meta.get("ticket").map(String::as_str), Some("CHG-4417"));
+
+        // Identity keys stay with the parent.
+        for key in [SPIFFE_ID_META, USERNAME_META, "mount_path"] {
+            assert!(
+                !child.meta.contains_key(key),
+                "`{key}` names a principal, not a restriction: inheriting it would widen the child"
+            );
+        }
+        let auth = token_store.check_token("kvenv/data/svc", &child_token, "10.0.0.7").await.unwrap().unwrap();
+        assert_eq!(
+            auth.metadata.get("approle_env_scoped").map(String::as_str),
+            Some("true"),
+            "the inherited scope must reach the `Auth` the KV engine reads"
+        );
+        assert!(
+            !machine_identity_satisfied(&auth),
+            "a child of a machine-bound token must not satisfy the machine-identity gate by descent"
+        );
+
+        // An unscoped parent's child stays unscoped: this inherits a
+        // restriction, it does not invent one.
+        let mut plain = TokenEntry {
+            policies: vec!["default".to_string()],
+            path: "auth/userpass/login".to_string(),
+            display_name: "userpass-alice".to_string(),
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut plain).await.unwrap();
+
+        let mut req = Request::new("auth/token/create");
+        req.client_token = plain.id.clone();
+        req.body = json!({ "policies": ["default"] }).as_object().cloned();
+        let resp = token_store.handle_create(&mock_backend, &mut req).await.unwrap().unwrap();
+        let child = token_store.lookup(&resp.auth.unwrap().client_token).await.unwrap().unwrap();
+        assert!(
+            !child.meta.keys().any(|k| k.starts_with("approle_env_")),
+            "a child of an unscoped parent must not acquire an environment scope"
+        );
+    }
+
+    /// The namespace binding is a restriction too, and `auth/` is
+    /// header-scoped -- so `enforce_request_token_binding` never checked an
+    /// `auth/token/create` request against the parent's binding. A
+    /// `tenant-a`-bound token could therefore mint a child bound to the root
+    /// namespace (by omitting the header) or to a sibling tenant (by naming
+    /// it), and a parent that is not child-visible could mint a
+    /// `child_visible` child that reaches descendants the parent cannot.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_child_token_cannot_escape_the_parents_namespace_binding() {
+        let token_store = mock_token_store!();
+        let mock_backend = MockBackend(());
+
+        let bound_parent = |ns: &str, child_visible: bool| TokenEntry {
+            policies: vec!["default".to_string()],
+            path: "auth/userpass/login".to_string(),
+            display_name: "userpass-alice".to_string(),
+            meta: HashMap::from([
+                (NS_PATH_META.to_string(), ns.to_string()),
+                (CHILD_VISIBLE_META.to_string(), child_visible.to_string()),
+            ]),
+            ..TokenEntry::default()
+        };
+
+        let create = |parent_id: &str, ns_header: Option<&str>, child_visible: bool| {
+            let mut req = Request::new("auth/token/create");
+            req.client_token = parent_id.to_string();
+            req.body = json!({ "policies": ["default"], "child_visible": child_visible }).as_object().cloned();
+            if let Some(ns) = ns_header {
+                req.headers =
+                    Some(HashMap::from([("X-BastionVault-Namespace".to_string(), ns.to_string())]));
+            }
+            req
+        };
+
+        let mut parent = bound_parent("tenant-a", false);
+        token_store.create(&mut parent).await.unwrap();
+
+        // No header: inherit the parent's namespace, not root.
+        let mut req = create(&parent.id, None, false);
+        let resp = token_store.handle_create(&mock_backend, &mut req).await.unwrap().unwrap();
+        let child = token_store.lookup(&resp.auth.unwrap().client_token).await.unwrap().unwrap();
+        assert_eq!(
+            child.meta.get(NS_PATH_META).map(String::as_str),
+            Some("tenant-a"),
+            "an absent namespace header must inherit the parent's binding, not default to root"
+        );
+
+        // Naming the parent's own namespace is fine.
+        let mut req = create(&parent.id, Some("tenant-a/"), false);
+        let resp = token_store.handle_create(&mock_backend, &mut req).await.unwrap().unwrap();
+        let child = token_store.lookup(&resp.auth.unwrap().client_token).await.unwrap().unwrap();
+        assert_eq!(child.meta.get(NS_PATH_META).map(String::as_str), Some("tenant-a"));
+
+        // An explicitly *empty* header reads as "unset" -- the same reading
+        // `namespace::token_binding::resolve_login_namespace` gives it -- so it
+        // inherits too rather than naming root.
+        let mut req = create(&parent.id, Some("  "), false);
+        let resp = token_store.handle_create(&mock_backend, &mut req).await.unwrap().unwrap();
+        let child = token_store.lookup(&resp.auth.unwrap().client_token).await.unwrap().unwrap();
+        assert_eq!(
+            child.meta.get(NS_PATH_META).map(String::as_str),
+            Some("tenant-a"),
+            "an empty namespace header must inherit the parent's binding, not name root"
+        );
+
+        // A sibling tenant is refused, as is a descendant the parent cannot
+        // itself reach, and so is root -- named as `/`, which normalizes to the
+        // root path rather than reading as an unset header.
+        for ns in ["tenant-b", "tenant-a/sub", "/"] {
+            let mut req = create(&parent.id, Some(ns), false);
+            let err = token_store
+                .handle_create(&mock_backend, &mut req)
+                .await
+                .expect_err(&format!("a tenant-a-bound parent must not mint a token in {ns:?}"));
+            match err {
+                RvError::ErrResponse(msg) => {
+                    assert!(msg.contains("may not operate there"), "expected a namespace refusal, got: {msg}")
+                }
+                other => panic!("expected a response error for {ns:?}, got: {other}"),
+            }
+        }
+
+        // A malformed header is an error, not a silent fall back to the
+        // parent's namespace (or, as before, to root): `..` used to normalize
+        // away and leave the child bound wherever the fallback pointed.
+        for ns in ["tenant-a/../tenant-b", "tenant-*", "tenant-a/ sub"] {
+            let mut req = create(&parent.id, Some(ns), false);
+            let err = token_store
+                .handle_create(&mock_backend, &mut req)
+                .await
+                .expect_err(&format!("a malformed namespace header {ns:?} must be refused"));
+            match err {
+                RvError::ErrResponse(msg) => {
+                    assert!(msg.contains("invalid"), "expected a malformed-header refusal, got: {msg}")
+                }
+                other => panic!("expected a response error for {ns:?}, got: {other}"),
+            }
+        }
+
+        // `child_visible` cannot be acquired by a parent that lacks it.
+        let mut req = create(&parent.id, Some("tenant-a"), true);
+        let err = token_store.handle_create(&mock_backend, &mut req).await.expect_err(
+            "a parent that is not child-visible must not mint a child-visible child",
+        );
+        match err {
+            RvError::ErrResponse(msg) => {
+                assert!(msg.contains("child_visible"), "expected a child_visible refusal, got: {msg}")
+            }
+            other => panic!("expected a response error, got: {other}"),
+        }
+
+        // A child-visible parent may reach a descendant, and pass the flag on.
+        let mut visible = bound_parent("tenant-a", true);
+        token_store.create(&mut visible).await.unwrap();
+        let mut req = create(&visible.id, Some("tenant-a/sub"), true);
+        let resp = token_store.handle_create(&mock_backend, &mut req).await.unwrap().unwrap();
+        let child = token_store.lookup(&resp.auth.unwrap().client_token).await.unwrap().unwrap();
+        assert_eq!(child.meta.get(NS_PATH_META).map(String::as_str), Some("tenant-a/sub"));
+        assert_eq!(child.meta.get(CHILD_VISIBLE_META).map(String::as_str), Some("true"));
+
+        // Root operates in every namespace, so it keeps minting anywhere.
+        let mut root = TokenEntry {
+            policies: vec!["root".to_string()],
+            path: "auth/token/root".to_string(),
+            display_name: "root".to_string(),
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut root).await.unwrap();
+        let mut req = create(&root.id, Some("tenant-b"), true);
+        let resp = token_store.handle_create(&mock_backend, &mut req).await.unwrap().unwrap();
+        let child = token_store.lookup(&resp.auth.unwrap().client_token).await.unwrap().unwrap();
+        assert_eq!(child.meta.get(NS_PATH_META).map(String::as_str), Some("tenant-b"));
+        assert_eq!(child.meta.get(CHILD_VISIBLE_META).map(String::as_str), Some("true"));
+    }
+
+    /// A denied request must not consume one of a use-limited token's uses,
+    /// or an attacker from a blocked address could burn a token remotely.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_denied_bound_cidr_does_not_burn_a_use() {
+        let token_store = mock_token_store!();
+
+        let mut entry = TokenEntry {
+            policies: vec!["default".to_string()],
+            path: "auth/approle/login".to_string(),
+            display_name: "bound-limited".to_string(),
+            bound_cidrs: vec!["10.0.0.0/24".to_string()],
+            num_uses: 3,
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut entry).await.unwrap();
+
+        for _ in 0..5 {
+            assert!(token_store.check_token("kv/data/x", &entry.id, "203.0.113.9").await.is_err());
+        }
+
+        let after = token_store.lookup(&entry.id).await.unwrap().unwrap();
+        assert_eq!(after.num_uses, 3, "a refused request must not decrement num_uses");
+
+        // The token is still good for its three uses from an allowed address.
+        assert!(token_store.check_token("kv/data/x", &entry.id, "10.0.0.7").await.is_ok());
+        let after = token_store.lookup(&entry.id).await.unwrap().unwrap();
+        assert_eq!(after.num_uses, 2);
     }
 }

@@ -42,7 +42,8 @@ pub mod secret;
 pub mod util;
 
 pub use auth::{
-    split_principal, Auth, CHILD_VISIBLE_META, ENTITY_ID_META, NS_ID_META, NS_PATH_META,
+    is_reserved_token_meta_key, split_principal, Auth, CHILD_VISIBLE_META, ENTITY_ID_META,
+    NS_ID_META, NS_PATH_META, RESERVED_TOKEN_META_KEYS, RESERVED_TOKEN_META_PREFIXES,
     SPIFFE_ID_META, USERNAME_META,
 };
 pub use backend::{LogicalBackend, CTX_KEY_BACKEND_PATH};

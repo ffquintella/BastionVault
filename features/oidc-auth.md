@@ -59,7 +59,13 @@ Follows the same Module/Backend pattern as `userpass` and `approle`.
 **OidcRoleEntry** (stored at `role/<name>`):
 - `bound_audiences` -- allowed `aud` claim values
 - `bound_claims` -- map of claim_name to allowed values for validation
-- `claim_mappings` -- map of OIDC claim to vault token metadata key
+- `claim_mappings` -- map of OIDC claim to vault token metadata key. The target
+  key may not be one of the reserved, backend-owned keys (`spiffe_id`,
+  `username`, `entity_id`, `mount_path`, `namespace_*`, `approle_env_*`, ...):
+  the value comes from the IdP, and those keys are read back as authorization
+  input. Write is refused; a mapping on a role stored before that check is
+  dropped at login with a `security` warning. See `docs/authentication.md`
+  § Reserved Token Metadata
 - `user_claim` -- claim used for display_name (default: `sub`)
 - `groups_claim` -- claim containing group membership list
 - `oidc_scopes` -- role-specific additional scopes

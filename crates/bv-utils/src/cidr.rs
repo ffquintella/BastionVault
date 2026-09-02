@@ -32,6 +32,45 @@ pub fn remote_addr_is_ok(remote_addr: &str, bound_cidrs: &[Box<dyn SockAddr>]) -
     false
 }
 
+/// Whether `remote_addr` falls inside one of `bound_cidrs`, where the bound
+/// list is held as the canonical strings
+/// [`SockAddrMarshaler`](super::sock_addr::SockAddrMarshaler) serializes to.
+///
+/// This is the string-keyed form of [`remote_addr_is_ok`], for callers that
+/// carry the bound list across a crate boundary that cannot name
+/// `dyn SockAddr` — `Auth` and `TokenEntry` hold `Vec<String>` for exactly
+/// that reason. Matching semantics are identical: the entry's network is
+/// what decides, and a port on an entry (`10.0.0.1:80`, a form
+/// `token_bound_cidrs` accepts) is ignored rather than being required to
+/// match the client's source port.
+///
+/// An empty `bound_cidrs` means "unrestricted" and returns `true`; deciding
+/// whether an empty list is legitimate is the caller's business. Every other
+/// path fails closed: an empty `remote_addr` is refused, and so is a stored
+/// entry that no longer parses, rather than being dropped from the list and
+/// silently widening or narrowing the rule.
+pub fn remote_addr_in_bound_cidrs(remote_addr: &str, bound_cidrs: &[String]) -> bool {
+    if bound_cidrs.is_empty() {
+        return true;
+    }
+
+    if remote_addr.is_empty() {
+        return false;
+    }
+
+    let mut parsed: Vec<Box<dyn SockAddr>> = Vec::with_capacity(bound_cidrs.len());
+    for cidr in bound_cidrs.iter() {
+        match new_sock_addr(cidr) {
+            Ok(addr) => parsed.push(addr),
+            // Unparsable stored entry: refuse rather than evaluate a rule
+            // that is not the one the operator wrote.
+            Err(_) => return false,
+        }
+    }
+
+    remote_addr_is_ok(remote_addr, &parsed)
+}
+
 pub fn ip_belongs_to_cidr(ip_addr: &str, cidr: &str) -> Result<bool, RvError> {
     if ip_addr.is_empty() {
         return Err(RvError::ErrResponse("missing IP address".to_string()));
@@ -300,5 +339,67 @@ mod test {
         let bound_cidrs = vec![addr.unwrap()];
         assert!(!remote_addr_is_ok("123.0.0.1", &bound_cidrs));
         assert!(remote_addr_is_ok("127.0.0.1", &bound_cidrs));
+    }
+
+    fn cidrs(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn remote_addr_in_bound_cidrs_matches_a_network() {
+        let bound = cidrs(&["10.0.0.0/24", "192.168.5.7"]);
+        assert!(remote_addr_in_bound_cidrs("10.0.0.7", &bound));
+        assert!(remote_addr_in_bound_cidrs("10.0.0.255", &bound));
+        assert!(remote_addr_in_bound_cidrs("192.168.5.7", &bound));
+        assert!(!remote_addr_in_bound_cidrs("10.0.1.7", &bound));
+        assert!(!remote_addr_in_bound_cidrs("192.168.5.8", &bound));
+    }
+
+    #[test]
+    fn remote_addr_in_bound_cidrs_treats_an_empty_list_as_unrestricted() {
+        assert!(remote_addr_in_bound_cidrs("10.0.0.7", &[]));
+        // ...but still refuses an unknown address once a rule exists.
+        assert!(!remote_addr_in_bound_cidrs("", &cidrs(&["10.0.0.0/24"])));
+        assert!(!remote_addr_in_bound_cidrs("", &cidrs(&["0.0.0.0/0"])));
+    }
+
+    #[test]
+    fn remote_addr_in_bound_cidrs_ignores_a_port_on_an_entry() {
+        // `token_bound_cidrs` accepts `ip:port`; the network is what decides,
+        // so the client's ephemeral source port cannot make a rule unmatchable.
+        let bound = cidrs(&["10.0.0.1:80", "192.168.1.1:8080"]);
+        assert!(remote_addr_in_bound_cidrs("10.0.0.1", &bound));
+        assert!(remote_addr_in_bound_cidrs("192.168.1.1", &bound));
+        assert!(!remote_addr_in_bound_cidrs("10.0.0.2", &bound));
+    }
+
+    #[test]
+    fn remote_addr_in_bound_cidrs_handles_ipv6() {
+        let bound = cidrs(&["2001:db8::/32"]);
+        assert!(remote_addr_in_bound_cidrs("2001:db8::1", &bound));
+        assert!(!remote_addr_in_bound_cidrs("2001:db9::1", &bound));
+        // A v4 client against a v6-only rule does not match, and does not panic.
+        assert!(!remote_addr_in_bound_cidrs("10.0.0.7", &bound));
+    }
+
+    #[test]
+    fn remote_addr_in_bound_cidrs_fails_closed_on_a_bad_entry() {
+        // A stored entry that no longer parses must refuse the request rather
+        // than be dropped, which would evaluate a rule the operator never wrote.
+        let bound = cidrs(&["10.0.0.0/24", "not-an-address"]);
+        assert!(!remote_addr_in_bound_cidrs("10.0.0.7", &bound));
+        // An unparsable client address is refused too.
+        assert!(!remote_addr_in_bound_cidrs("garbage", &cidrs(&["10.0.0.0/24"])));
+        assert!(!remote_addr_in_bound_cidrs("runner.example", &cidrs(&["10.0.0.0/24"])));
+    }
+
+    #[test]
+    fn remote_addr_in_bound_cidrs_tolerates_a_port_on_the_client_address() {
+        // Unlike `ip_belongs_to_cidrs`, this matcher parses `ip:port` and
+        // compares only the network, so a caller that forgets to strip the
+        // port is not silently locked out. Callers should still pass
+        // `Connection::client_ip()`; this is a safety net, not a licence.
+        assert!(remote_addr_in_bound_cidrs("10.0.0.7:41222", &cidrs(&["10.0.0.0/24"])));
+        assert!(!remote_addr_in_bound_cidrs("10.0.1.7:41222", &cidrs(&["10.0.0.0/24"])));
     }
 }

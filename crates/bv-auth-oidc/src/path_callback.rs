@@ -269,11 +269,12 @@ impl OidcBackendInner {
         metadata.insert("username".to_string(), display_name.clone());
         metadata.insert("auth_method".to_string(), "oidc".to_string());
 
-        for (claim_name, meta_key) in &role.claim_mappings {
-            if let Some(v) = claims_map.get(claim_name) {
-                metadata.insert(meta_key.clone(), claim_to_string(v));
-            }
-        }
+        project_claim_mappings(
+            &auth_state.role_name,
+            &role.claim_mappings,
+            &claims_map,
+            &mut metadata,
+        );
         if !role.groups_claim.is_empty() {
             if let Some(v) = claims_map.get(&role.groups_claim) {
                 metadata.insert(
@@ -369,6 +370,42 @@ impl OidcBackendInner {
     }
 }
 
+/// Project a role's `claim_mappings` onto the token's metadata, dropping any
+/// mapping whose target is a reserved (backend-owned) key.
+///
+/// Read-old/write-new: `path_roles::write_role` refuses a reserved target, so
+/// no role written after that check carries one — but a role persisted *before*
+/// it can, and its stored JSON still deserializes. Dropping the mapping is the
+/// fail-closed half: the IdP's value never reaches a backend-owned key, the
+/// login still succeeds with the rest of the role intact, and the operator gets
+/// a `security` record naming the role and the key so the role can be
+/// rewritten. Refusing the login instead would lock out an SSO tenant on
+/// upgrade for a role that is, in the common case, misconfigured by accident.
+///
+/// Only key names are logged. The claim's *value* is not: it is IdP-supplied
+/// and these keys name principals.
+fn project_claim_mappings(
+    role_name: &str,
+    mappings: &HashMap<String, String>,
+    claims: &Map<String, Value>,
+    metadata: &mut HashMap<String, String>,
+) {
+    for (claim_name, meta_key) in mappings {
+        if crate::path_roles::reserved_mapping_target(meta_key) {
+            log::warn!(
+                target: "security",
+                "oidc: role `{role_name}` maps claim `{claim_name}` onto reserved token metadata \
+                 key `{meta_key}`; dropping the mapping. That key is set by the auth backend and \
+                 read back as authorization input — rewrite the role's claim_mappings"
+            );
+            continue;
+        }
+        if let Some(v) = claims.get(claim_name) {
+            metadata.insert(meta_key.clone(), claim_to_string(v));
+        }
+    }
+}
+
 /// Flatten a claim value into a single string suitable for Vault
 /// token metadata. Arrays become comma-separated lists; objects
 /// serialize to JSON (unusual but not catastrophic — the caller
@@ -413,5 +450,78 @@ mod tests {
     fn claim_to_string_serializes_objects() {
         let v: Value = serde_json::from_str(r#"{"k":"v"}"#).unwrap();
         assert_eq!(claim_to_string(&v), r#"{"k":"v"}"#);
+    }
+
+    fn mappings(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    fn claims(pairs: &[(&str, &str)]) -> Map<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+            .collect()
+    }
+
+    #[test]
+    fn unreserved_mappings_are_projected() {
+        let mut metadata = HashMap::new();
+        project_claim_mappings(
+            "user",
+            &mappings(&[("email", "email"), ("employee_id", "employee_id")]),
+            &claims(&[("email", "a@example.com"), ("employee_id", "42")]),
+            &mut metadata,
+        );
+        assert_eq!(metadata.get("email").map(String::as_str), Some("a@example.com"));
+        assert_eq!(metadata.get("employee_id").map(String::as_str), Some("42"));
+    }
+
+    #[test]
+    fn an_old_role_record_with_a_reserved_target_has_that_mapping_dropped() {
+        // A role persisted before `write_role` learned to refuse a reserved
+        // target: the stored JSON still deserializes, so the login path is
+        // what has to fail closed.
+        let role: crate::path_roles::OidcRoleEntry = serde_json::from_str(
+            r#"{"claim_mappings":{"dept":"spiffe_id","email":"email"},
+                "user_claim":"sub","policies":["default"]}"#,
+        )
+        .unwrap();
+        assert_eq!(role.claim_mappings.len(), 2, "the old record still carries the reserved target");
+
+        let mut metadata = HashMap::new();
+        project_claim_mappings(
+            "legacy",
+            &role.claim_mappings,
+            &claims(&[("dept", "engineering"), ("email", "a@example.com")]),
+            &mut metadata,
+        );
+
+        // The whole point: an IdP claim must not be able to satisfy the
+        // server-wide `require_machine_identity` gate.
+        assert!(!metadata.contains_key("spiffe_id"), "{metadata:?}");
+        // The rest of the role still works — dropping is per-mapping.
+        assert_eq!(metadata.get("email").map(String::as_str), Some("a@example.com"));
+    }
+
+    #[test]
+    fn a_reserved_target_cannot_overwrite_what_the_backend_wrote() {
+        let mut metadata = HashMap::new();
+        metadata.insert("username".to_string(), "alice".to_string());
+        metadata.insert("mount_path".to_string(), "oidc/".to_string());
+        project_claim_mappings(
+            "legacy",
+            &mappings(&[("dept", "username"), ("iss", "mount_path")]),
+            &claims(&[("dept", "engineering"), ("iss", "ferrogate/")]),
+            &mut metadata,
+        );
+        assert_eq!(metadata.get("username").map(String::as_str), Some("alice"));
+        assert_eq!(metadata.get("mount_path").map(String::as_str), Some("oidc/"));
+    }
+
+    #[test]
+    fn a_missing_claim_projects_nothing() {
+        let mut metadata = HashMap::new();
+        project_claim_mappings("user", &mappings(&[("email", "email")]), &claims(&[]), &mut metadata);
+        assert!(metadata.is_empty());
     }
 }

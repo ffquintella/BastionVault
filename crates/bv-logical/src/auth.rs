@@ -35,6 +35,104 @@ pub const USERNAME_META: &str = "username";
 /// principal.
 pub const ENTITY_ID_META: &str = "entity_id";
 
+/// Token metadata keys that only an auth backend may write.
+///
+/// Everything above the token store reads a token's `meta` map as trusted
+/// *input*, not as the caller-supplied annotation the Vault API calls it:
+///
+/// * [`SPIFFE_ID_META`] is what "machine-bound" means to
+///   `machine_identity_satisfied`, i.e. to the server-wide
+///   `require_machine_identity` gate;
+/// * [`USERNAME_META`], [`ENTITY_ID_META`], `mount_path` and `namespace_*`
+///   are substituted into templated policy paths by
+///   `policy_store::substitute_path`, so a forged value bends which paths a
+///   policy grants;
+/// * `mount_path` + `username`/`role_name` name the principal whose
+///   operator-authored namespace assignment
+///   `namespace::token_binding::assignment_principal` will widen access with;
+/// * `approle_env_*` is the AppRole environment scope `bv-engine-kv`'s
+///   `enforce_env_scope` applies;
+/// * `spiffe_id`, `username` and `entity_id` are also what
+///   [`split_principal`] attributes denial- and access-audit records to.
+///
+/// The rule for the set: **every key an auth backend stamps onto
+/// [`Auth::metadata`], plus every key authorization or audit code reads back
+/// off it.** Keeping unread keys (`ferrogate_kid`, `name_id`, `subject`) in the
+/// list is deliberate — it makes "backend-owned" the property being enforced,
+/// so a future reader of one of them is protected on the day it is written
+/// rather than the day someone remembers this list.
+///
+/// # Why this lives in `bv-logical`
+///
+/// The list has more than one write point, and every one of them is a place
+/// where something *outside* the auth backend chooses a metadata key:
+///
+/// * `auth/token/create` (`bv-kernel`'s token store) copies the request
+///   body's `meta` map onto the new token, so a holder of a grant on that
+///   path could otherwise mint itself a token that passes the
+///   machine-identity gate with no attestation, impersonate another
+///   principal in a templated policy, and forge the `machine` and user
+///   columns of both audit trails;
+/// * the OIDC `claim_mappings` and SAML `attribute_mappings` role fields
+///   (`bv-auth-oidc`, `bv-auth-saml`) project an **IdP-controlled** claim
+///   value onto an operator-chosen metadata key, which hands the IdP the
+///   same forgery if the key is backend-owned.
+///
+/// Those crates are in different tiers and cannot see each other, so the set
+/// lives here — beside the key constants it is built from, which are in this
+/// module for the same reason. A second copy would drift, and the two copies
+/// would disagree about exactly the keys a gate is read off; that is the
+/// failure the shared `machine_identity_satisfied` predicate was introduced
+/// to avoid.
+///
+/// Deliberately *not* the way `machine_identity_exempt` is carried — that one
+/// is a typed field on the kernel's token entry for exactly this reason. It
+/// is listed here only so a caller who tries the metadata spelling gets an
+/// error instead of a token with a meaningless key on it.
+pub const RESERVED_TOKEN_META_KEYS: &[&str] = &[
+    // Machine identity — the `require_machine_identity` gate.
+    SPIFFE_ID_META,
+    "machine_id",
+    "approle_machine_bypass",
+    "machine_identity_exempt",
+    // Principal identity — policy templating, audit attribution.
+    USERNAME_META,
+    ENTITY_ID_META,
+    "mount_path",
+    "role_name",
+    "role",
+    "auth_method",
+    "groups",
+    "subject",
+    "name_id",
+    "name_id_format",
+    "ferrogate_kid",
+    "session_id",
+    // Namespace binding.
+    NS_PATH_META,
+    NS_ID_META,
+    CHILD_VISIBLE_META,
+];
+
+/// Reserved metadata key *prefixes*, for the same reason as
+/// [`RESERVED_TOKEN_META_KEYS`].
+///
+/// `approle_env_` covers the three keys AppRole stamps today
+/// (`approle_env_scoped`, `approle_env_secret`, `approle_env_machine`) and any
+/// fourth added later, which is the point: an environment scope that a caller
+/// can name is an environment scope a caller can rewrite.
+pub const RESERVED_TOKEN_META_PREFIXES: &[&str] = &["approle_env_"];
+
+/// Is `key` a backend-owned token metadata key?
+///
+/// The one predicate every write point asks, so that no call site has to
+/// re-implement the prefix half of the rule. See
+/// [`RESERVED_TOKEN_META_KEYS`].
+pub fn is_reserved_token_meta_key(key: &str) -> bool {
+    RESERVED_TOKEN_META_KEYS.contains(&key)
+        || RESERVED_TOKEN_META_PREFIXES.iter().any(|prefix| key.starts_with(prefix))
+}
+
 /// Split a token's identity into `(acting principal, attesting machine)`
 /// for the audit trail.
 ///
@@ -121,6 +219,38 @@ pub struct Auth {
     // explicit_max_ttl is the max TTL that constrains periodic tokens. For normal tokens,
     // this value is constrained by the configured max ttl.
     pub explicit_max_ttl: Duration,
+
+    /// Source-address restriction to stamp onto the issued token: the set of
+    /// CIDR blocks the token may subsequently be *used* from, in the
+    /// canonical string form `SockAddrMarshaler` serializes to.
+    ///
+    /// Set by an auth backend from its role/user `token_bound_cidrs` (see
+    /// `bv_utils::token_util::TokenParams::populate_token_auth`) and copied
+    /// onto the token entry by `TokenStore::post_route`. Empty means
+    /// unrestricted. This is a restriction on *later* use of the token, not
+    /// on the login that mints it — AppRole's `bound_source_ips` and
+    /// `secret_id_bound_cidrs` are the login-time checks.
+    #[serde(default)]
+    pub bound_cidrs: Vec<String>,
+
+    /// Exempts the issued token from the server-wide FerroGate
+    /// `require_machine_identity` gate enforced in
+    /// `TokenStore::pre_route`.
+    ///
+    /// Set only by an auth backend that has *already* decided this
+    /// principal authenticates without machine attestation -- today that
+    /// is AppRole's per-role `bypass_machine_binding`. It is a typed
+    /// field rather than a metadata key on purpose: `auth/token/create`
+    /// copies its caller-supplied `meta` map onto the new token verbatim,
+    /// so keying the exemption on metadata would let any holder of a
+    /// grant on that path mint itself an exempt token. Nothing in the
+    /// request body maps to this field.
+    ///
+    /// Copied onto the token entry by `TokenStore::post_route` and
+    /// inherited by child tokens (a child can never be more exempt than
+    /// its parent).
+    #[serde(default)]
+    pub machine_identity_exempt: bool,
 }
 
 #[derive(Debug, Clone, Eq, Default, PartialEq, Serialize, Deserialize)]
@@ -172,5 +302,41 @@ mod tests {
             split_principal("ferrogate-spiffe://hml/host/abc", "ferrogate-spiffe://hml/host/abc", "", "");
         assert_eq!(user, "ferrogate-spiffe://hml/host/abc");
         assert_eq!(machine, "ferrogate-spiffe://hml/host/abc");
+    }
+}
+
+#[cfg(test)]
+mod reserved_meta_tests {
+    use super::*;
+
+    #[test]
+    fn every_key_constant_in_this_module_is_reserved() {
+        // The list is built from these constants; this fails if one is
+        // renamed out of the list rather than in it.
+        for key in [SPIFFE_ID_META, USERNAME_META, ENTITY_ID_META, NS_PATH_META, NS_ID_META, CHILD_VISIBLE_META] {
+            assert!(is_reserved_token_meta_key(key), "{key} must be reserved");
+        }
+    }
+
+    #[test]
+    fn approle_env_scope_is_reserved_by_prefix() {
+        assert!(is_reserved_token_meta_key("approle_env_scoped"));
+        assert!(is_reserved_token_meta_key("approle_env_secret"));
+        // The point of the prefix: a key nobody has written yet.
+        assert!(is_reserved_token_meta_key("approle_env_something_new"));
+    }
+
+    #[test]
+    fn free_form_annotations_are_not_reserved() {
+        for key in ["email", "department", "requested_by", "ticket", "approle", "usernames", "spiffe"] {
+            assert!(!is_reserved_token_meta_key(key), "{key} must stay caller-writable");
+        }
+    }
+
+    #[test]
+    fn reservation_is_exact_not_substring() {
+        // `username` is reserved; `username_upn` is a different, free key.
+        assert!(is_reserved_token_meta_key(USERNAME_META));
+        assert!(!is_reserved_token_meta_key("username_upn"));
     }
 }

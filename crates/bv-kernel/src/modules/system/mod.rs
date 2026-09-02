@@ -3176,7 +3176,8 @@ impl SystemBackend {
         let Some(token_store) = auth_module.token_store.load_full() else {
             return Err(RvError::ErrPermissionDenied);
         };
-        let acl: Option<ACL> = match token_store.check_token(&req.path, &req.client_token).await? {
+        let client_ip = req.connection.as_ref().map(|c| c.client_ip()).unwrap_or_default();
+        let acl: Option<ACL> = match token_store.check_token(&req.path, &req.client_token, &client_ip).await? {
             Some(auth) if !auth.policies.is_empty() => Some(
                 policy_module
                     .policy_store
@@ -3397,7 +3398,8 @@ impl SystemBackend {
 
         let mut is_authed = false;
 
-        let acl: Option<ACL> = if let Some(auth) = token_store.check_token(&req.path, &req.client_token).await? {
+        let client_ip = req.connection.as_ref().map(|c| c.client_ip()).unwrap_or_default();
+        let acl: Option<ACL> = if let Some(auth) = token_store.check_token(&req.path, &req.client_token, &client_ip).await? {
             if auth.policies.is_empty() {
                 None
             } else {
@@ -3544,8 +3546,14 @@ impl SystemBackend {
             return Err(RvError::ErrPermissionDenied);
         }
 
-        let acl = if let Some(auth) =
-            auth_module.token_store.load().as_ref().unwrap().check_token(&req.path, &req.client_token).await?
+        let client_ip = req.connection.as_ref().map(|c| c.client_ip()).unwrap_or_default();
+        let acl = if let Some(auth) = auth_module
+            .token_store
+            .load()
+            .as_ref()
+            .unwrap()
+            .check_token(&req.path, &req.client_token, &client_ip)
+            .await?
         {
             if auth.policies.is_empty() {
                 return Err(RvError::ErrPermissionDenied);
@@ -4435,8 +4443,9 @@ impl SystemBackend {
         let Some(token_store) = auth_module.token_store.load_full() else {
             return Err(RvError::ErrPermissionDenied);
         };
+        let client_ip = req.connection.as_ref().map(|c| c.client_ip()).unwrap_or_default();
         let auth = token_store
-            .check_token(&req.path, &req.client_token)
+            .check_token(&req.path, &req.client_token, &client_ip)
             .await?
             .ok_or(RvError::ErrPermissionDenied)?;
 

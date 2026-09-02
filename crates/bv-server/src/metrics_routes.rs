@@ -160,7 +160,7 @@ async fn authorize_scrape(req: &HttpRequest, core: &Arc<Core>) -> Result<(), Htt
         }
     };
 
-    match token_grants_scrape(core, &token).await {
+    match token_grants_scrape(core, &token, &scrape_client_ip(req)).await {
         Ok(true) => Ok(()),
         Ok(false) => {
             // A real token that lacks the grant. Worth surfacing: it is
@@ -236,12 +236,41 @@ fn allowlisted_source(req: &HttpRequest, core: &Arc<Core>) -> bool {
     access.cidrs_allow(ClientIp::resolve(socket_peer, req, trusted).derived)
 }
 
+/// The trusted-proxy-aware client IP for a scrape, as a bare address string,
+/// for matching a token's `token_bound_cidrs`.
+///
+/// `/metrics` is not a routed logical path, so there is no `Connection` on a
+/// `Request` to read `client_ip()` off — this resolves the same address
+/// `allowlisted_source` matches its operator allowlist against. Returns an
+/// empty string when the peer cannot be determined, which `check_token`
+/// treats as a refusal for any token that carries a binding.
+fn scrape_client_ip(req: &HttpRequest) -> String {
+    let Some(socket_peer) = req
+        .conn_data::<Connection>()
+        .map(|c| c.peer)
+        .or_else(|| req.peer_addr())
+    else {
+        return String::new();
+    };
+
+    let default_trusted;
+    let trusted = match req.app_data::<web::Data<TrustedProxies>>() {
+        Some(d) => d.get_ref(),
+        None => {
+            default_trusted = TrustedProxies::default();
+            &default_trusted
+        }
+    };
+
+    ClientIp::resolve(socket_peer, req, trusted).derived.to_string()
+}
+
 /// Validate the token and evaluate the ACL for a read of
 /// [`METRICS_ACL_PATH`]. Mirrors what the token store's `pre_route` and
 /// the policy store's `post_auth` do for a routed request; `/metrics` is
 /// not a routed logical path, so the two steps are performed here rather
 /// than by going through `Core::handle_request`.
-async fn token_grants_scrape(core: &Arc<Core>, token: &str) -> Result<bool, RvError> {
+async fn token_grants_scrape(core: &Arc<Core>, token: &str, client_ip: &str) -> Result<bool, RvError> {
     let auth_module = core
         .module_manager()
         .get_module::<AuthModule>("auth")
@@ -250,7 +279,7 @@ async fn token_grants_scrape(core: &Arc<Core>, token: &str) -> Result<bool, RvEr
         .token_store
         .load_full()
         .ok_or(RvError::ErrPermissionDenied)?;
-    let Some(auth) = token_store.check_token(METRICS_ACL_PATH, token).await? else {
+    let Some(auth) = token_store.check_token(METRICS_ACL_PATH, token, client_ip).await? else {
         return Ok(false);
     };
 

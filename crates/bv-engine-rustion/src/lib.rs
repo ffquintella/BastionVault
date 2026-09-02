@@ -3452,8 +3452,9 @@ fn issue_outcome_to_map(outcome: &master::IssueOutcome) -> Map<String, Value> {
 }
 
 /// Extract the operator's source IP for stamping into a Rustion
-/// envelope. Prefers `peer_addr_derived` (the post-X-Forwarded-For
-/// walk computed by the HTTP layer) over `peer_addr` (the raw socket
+/// envelope. Delegates to `bv_logical::Connection::client_ip`, which prefers
+/// `peer_addr_derived` (the post-X-Forwarded-For walk computed by the
+/// HTTP layer) over the address portion of `peer_addr` (the raw socket
 /// peer, which collapses to the reverse-proxy IP when one is in
 /// front). Returns an empty string when no `Connection` is attached
 /// to the request (embedded callers, unit tests); Rustion's
@@ -3466,19 +3467,7 @@ fn issue_outcome_to_map(outcome: &master::IssueOutcome) -> Map<String, Value> {
 /// source-IP binding (the token never matches the actual TCP peer
 /// the operator dials from).
 fn operator_src_ip(req: &Request) -> String {
-    let Some(conn) = req.connection.as_ref() else {
-        return String::new();
-    };
-    if !conn.peer_addr_derived.is_empty() {
-        return conn.peer_addr_derived.clone();
-    }
-    // peer_addr may carry a port suffix (`1.2.3.4:54321`); strip it.
-    if let Some((host, _)) = conn.peer_addr.rsplit_once(':') {
-        if !host.is_empty() {
-            return host.to_string();
-        }
-    }
-    conn.peer_addr.clone()
+    req.connection.as_ref().map(|conn| conn.client_ip()).unwrap_or_default()
 }
 
 fn target_response(t: &RustionTarget) -> Response {
