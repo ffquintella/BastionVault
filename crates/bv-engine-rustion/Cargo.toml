@@ -1,6 +1,6 @@
 [package]
 name = "bv-engine-rustion"
-version = "0.41.3"
+version = "0.41.4"
 edition = "2021"
 description = "BastionVault's Rustion engine: PQC bastion fleet targets, master cert, recordings and policy"
 license = "Apache-2.0"
