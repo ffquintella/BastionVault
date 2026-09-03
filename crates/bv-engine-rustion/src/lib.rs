@@ -50,6 +50,7 @@ use crate::{
 
 pub mod attest_timer;
 pub mod audit;
+pub mod blob_cache;
 pub mod config;
 pub mod dispatcher;
 pub mod enrolment;
@@ -170,6 +171,12 @@ pub struct RustionStores {
     pub keystrokes: ArcSwap<Option<Arc<keystroke_index::KeystrokeIndexStore>>>,
     pub policy: ArcSwap<Option<Arc<policy::PolicyStore>>>,
     pub telemetry: ArcSwap<Option<Arc<telemetry::TelemetryCache>>>,
+    /// Read-through cache of recording artifacts, so a chunked
+    /// playback costs one fetch from the bastion instead of one per
+    /// chunk. Not late-bound like the stores above — it holds no
+    /// storage handle — but it *is* cleared on seal, because it holds
+    /// recording plaintext. See `blob_cache`.
+    pub blobs: Arc<blob_cache::BlobCache>,
 }
 
 impl RustionStores {
@@ -197,6 +204,10 @@ impl RustionStores {
         self.telemetry.load().as_ref().clone()
     }
 
+    pub fn blobs(&self) -> Arc<blob_cache::BlobCache> {
+        self.blobs.clone()
+    }
+
     /// Drop every store. Called on seal.
     pub fn clear(&self) {
         self.store.store(Arc::new(None));
@@ -205,6 +216,8 @@ impl RustionStores {
         self.keystrokes.store(Arc::new(None));
         self.policy.store(Arc::new(None));
         self.telemetry.store(Arc::new(None));
+        // Recording plaintext must not survive a seal.
+        self.blobs.clear();
     }
 }
 
@@ -268,6 +281,7 @@ impl RustionBackend {
         let h_recording_pull = self.inner.clone();
         let h_recordings_reconcile = self.inner.clone();
         let h_recording_blob = self.inner.clone();
+        let h_recording_blob_chunk = self.inner.clone();
         let h_recording_replay_log = self.inner.clone();
         let h_recording_keystrokes = self.inner.clone();
         let h_keystrokes_index = self.inner.clone();
@@ -737,6 +751,20 @@ impl RustionBackend {
                         {op: Operation::Read, handler: h_recording_blob.handle_recording_blob}
                     ],
                     help: "Phase 6.5 — fetch a recording artifact's bytes (base64) for in-GUI playback."
+                },
+                {
+                    // GET rustion/recordings/<rid>/blob/chunk/<n> —
+                    // one slice of the artifact, so playback works at
+                    // any recording size. A sibling of `/blob` and
+                    // under the same `rustion/recordings/*` glob, so it
+                    // is granted by exactly the policies that already
+                    // grant the bytes — deliberately not a new
+                    // capability surface for the same data.
+                    pattern: r"recordings/(?P<rid>rec_[A-Za-z0-9_\-]+)/blob/chunk/(?P<n>\d+)$",
+                    operations: [
+                        {op: Operation::Read, handler: h_recording_blob_chunk.handle_recording_blob_chunk}
+                    ],
+                    help: "Fetch one 4 MiB chunk of a recording artifact (base64). Read chunk 0, then keep reading until `eof`; every chunk carries `size_bytes`, `chunk_count` and the whole-artifact `sha256`. Size-independent replacement for `/blob`."
                 },
                 {
                     // GET rustion/recordings/<rid>/keystrokes — Phase 8.6.
@@ -2766,13 +2794,105 @@ impl RustionBackendInner {
         if rid.is_empty() {
             return Err(bv_error_response_status!(400, "recording_id is required"));
         }
-        let (bytes, format, sha256) = recordings::fetch_blob(&store, &recordings, &rid).await?;
+        // Whole artifact in one response. Kept for compatibility with
+        // clients written before the chunk route (and it is the
+        // cheaper path for a small recording), but every byte lands in
+        // one JSON body: a client with a response-size limit — ureq
+        // defaults to 10 MB — cannot read a large recording this way.
+        // `blob/chunk/<n>` is the size-independent route.
+        //
+        // Both routes go through `fetch_blob_cached`, which refuses
+        // (409) an artifact whose bytes do not hash to the digest on
+        // record for that recording.
+        let artifact =
+            recordings::fetch_blob_cached(&store, &recordings, &self.stores.blobs, &rid).await?;
         let mut data = Map::new();
         data.insert("recording_id".into(), Value::String(rid));
-        data.insert("format".into(), Value::String(format));
-        data.insert("sha256".into(), Value::String(sha256));
-        data.insert("bytes_b64".into(), Value::String(STANDARD.encode(&bytes)));
-        data.insert("size_bytes".into(), Value::Number((bytes.len() as u64).into()));
+        data.insert("format".into(), Value::String(artifact.format.clone()));
+        data.insert("sha256".into(), Value::String(artifact.sha256.clone()));
+        data.insert("digest_verified".into(), Value::Bool(artifact.digest_verified));
+        data.insert("bytes_b64".into(), Value::String(STANDARD.encode(artifact.bytes.as_slice())));
+        data.insert("size_bytes".into(), Value::Number((artifact.bytes.len() as u64).into()));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// `GET rustion/recordings/<rid>/blob/chunk/<n>` — one fixed-size
+    /// slice of a recording artifact.
+    ///
+    /// The size-independent replacement for `/blob`. A caller reads
+    /// chunk 0, learns `chunk_count` / `size_bytes` from the response,
+    /// and keeps reading until `eof` — so playback of an arbitrarily
+    /// large recording never depends on one response being small
+    /// enough to buffer. Each chunk is
+    /// [`CHUNK_BYTES`](crate::blob_cache::CHUNK_BYTES) of artifact
+    /// (~5.6 MB base64), deliberately under the 10 MB default read
+    /// limit of a stock ureq client.
+    ///
+    /// `sha256` is the digest of the **whole** artifact on every chunk,
+    /// so a caller verifies the assembled bytes exactly as it did with
+    /// the single-shot route. The vault has already verified them: the
+    /// artifact was checked against the digest on record before it was
+    /// cached, so no chunk of a corrupted artifact is ever served (see
+    /// `recordings::fetch_blob_cached`). `digest_verified` says whether
+    /// there was a digest on record to check against at all; the
+    /// caller's own check remains worthwhile as a check of the
+    /// vault→caller leg.
+    ///
+    /// Same ACL surface as `/blob`: it sits under
+    /// `rustion/recordings/*`, which is the glob that grants recording
+    /// *bytes* (`rustion/recordings/+` remains metadata-only).
+    pub async fn handle_recording_blob_chunk(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use crate::blob_cache::{chunk_count, chunk_range, CHUNK_BYTES};
+
+        let store = self.resolve_store()?;
+        let recordings = self.resolve_recordings_store()?;
+        // `recordings/<rid>/blob/chunk/<n>` after the mount strip. The
+        // route regex has already proven the shape; parse defensively
+        // anyway so a direct in-process call can't index out of range.
+        let rest = req.path.strip_prefix("recordings/").unwrap_or("");
+        let (rid, index) = match rest.split_once("/blob/chunk/") {
+            Some((rid, n)) => match n.parse::<usize>() {
+                Ok(n) => (rid.to_string(), n),
+                Err(_) => return Err(bv_error_response_status!(400, "chunk index must be a non-negative integer")),
+            },
+            None => return Err(bv_error_response_status!(400, "expected recordings/<rid>/blob/chunk/<n>")),
+        };
+        if rid.is_empty() {
+            return Err(bv_error_response_status!(400, "recording_id is required"));
+        }
+
+        let artifact =
+            recordings::fetch_blob_cached(&store, &recordings, &self.stores.blobs, &rid).await?;
+        let total = artifact.bytes.len();
+        let count = chunk_count(total);
+        let Some((start, end)) = chunk_range(total, index) else {
+            // 416 rather than 404: the recording exists, the range
+            // does not. A client that lost track of `chunk_count` can
+            // read it off this message and correct itself.
+            return Err(bv_error_response_status!(
+                416,
+                &format!("chunk {index} is past the end of `{rid}`: {count} chunk(s), {total} bytes")
+            ));
+        };
+
+        let mut data = Map::new();
+        data.insert("recording_id".into(), Value::String(rid));
+        data.insert("format".into(), Value::String(artifact.format.clone()));
+        data.insert("sha256".into(), Value::String(artifact.sha256.clone()));
+        data.insert("digest_verified".into(), Value::Bool(artifact.digest_verified));
+        data.insert("size_bytes".into(), Value::Number((total as u64).into()));
+        data.insert("chunk_index".into(), Value::Number((index as u64).into()));
+        data.insert("chunk_count".into(), Value::Number((count as u64).into()));
+        data.insert("chunk_size".into(), Value::Number((CHUNK_BYTES as u64).into()));
+        data.insert("offset".into(), Value::Number((start as u64).into()));
+        data.insert("chunk_len".into(), Value::Number(((end - start) as u64).into()));
+        data.insert("eof".into(), Value::Bool(index + 1 >= count));
+        data.insert("bytes_b64".into(), Value::String(STANDARD.encode(&artifact.bytes[start..end])));
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -3942,6 +4062,12 @@ impl RustionModule {
 
     pub fn telemetry_cache(&self) -> Option<Arc<telemetry::TelemetryCache>> {
         self.stores.telemetry()
+    }
+
+    /// The read-through artifact cache. Not late-bound like the stores
+    /// above, so this never returns `None`.
+    pub fn blob_cache(&self) -> Arc<blob_cache::BlobCache> {
+        self.stores.blobs()
     }
 }
 

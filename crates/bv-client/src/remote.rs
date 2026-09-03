@@ -64,10 +64,29 @@ fn encode_path(path: &str) -> String {
     out
 }
 
+/// Cap on a single response body, in bytes.
+///
+/// ureq's own default is 10 MB, which is fine for the JSON control
+/// surface and far too small for the payload-bearing reads that share
+/// it: `rustion/recordings/<id>/blob` returns a session recording
+/// base64-wrapped inside the JSON envelope, so a 17.8 MB artifact
+/// arrives as ~23.7 MB of body and was rejected before it could be
+/// played back.
+///
+/// The whole body is buffered in RAM (and, for a recording, copied
+/// again into the webview), so this stays a bounded number rather than
+/// `u64::MAX`: it is the memory-exhaustion guard against a malicious or
+/// broken server, and 128 MiB of body is ~96 MiB of artifact. Callers
+/// that need a different trade-off set it explicitly via
+/// [`RemoteBackendBuilder::with_max_response_bytes`]. Exceeding it is a
+/// hard, named error ([`ClientError::ResponseTooLarge`]) — never a
+/// truncated body.
+pub const DEFAULT_MAX_RESPONSE_BYTES: u64 = 128 * 1024 * 1024;
+
 use crate::{
     backend::Backend,
     discovery::{self, DiscoveryConfig, SrvCandidate, SrvLookup, SystemResolver},
-    error::{classify_node_failure, ClientError},
+    error::{classify_node_failure, map_body_read, ClientError},
     health::{self, HealthConfig, Selected},
     tls::ClientTlsConfig,
     types::{JsonResponse, Operation},
@@ -203,6 +222,8 @@ struct RemoteInner {
     /// failover (single-node / literal-URL backends — nothing to fail
     /// over to).
     failover: Option<Failover>,
+    /// Per-response body cap. See [`DEFAULT_MAX_RESPONSE_BYTES`].
+    max_response_bytes: u64,
 }
 
 #[derive(Clone, Default)]
@@ -233,6 +254,8 @@ pub struct RemoteBackendBuilder {
     /// cleared in `build()` so a stray proxy never silently reroutes
     /// traffic.
     use_system_proxy: Option<bool>,
+    /// Per-response body cap; `None` uses [`DEFAULT_MAX_RESPONSE_BYTES`].
+    max_response_bytes: Option<u64>,
 }
 
 impl RemoteBackendBuilder {
@@ -267,6 +290,15 @@ impl RemoteBackendBuilder {
 
     pub fn with_timeout_global(mut self, d: Duration) -> Self {
         self.timeout_global = Some(d);
+        self
+    }
+
+    /// Override the per-response body cap (bytes). Raise it for a
+    /// consumer that legitimately reads large payloads — session
+    /// recordings, plugin assets — and lower it to tighten the
+    /// memory-exhaustion guard. See [`DEFAULT_MAX_RESPONSE_BYTES`].
+    pub fn with_max_response_bytes(mut self, bytes: u64) -> Self {
+        self.max_response_bytes = Some(bytes);
         self
     }
 
@@ -448,6 +480,9 @@ impl RemoteBackendBuilder {
                 agent,
                 input_label,
                 failover,
+                max_response_bytes: self
+                    .max_response_bytes
+                    .unwrap_or(DEFAULT_MAX_RESPONSE_BYTES),
             }),
         }
     }
@@ -598,10 +633,18 @@ impl RemoteBackend {
                 // line 1 column 0" that masks the real status code,
                 // so treat empty as Null and let the status branch
                 // below produce a sensible message.
+                // Explicit limit rather than `read_to_vec()`'s 10 MB
+                // default: this path also carries payload reads (a
+                // base64 recording blob), and an oversized body must
+                // come back as `ResponseTooLarge`, not as a transport
+                // error the failover path would retry.
+                let limit = inner.max_response_bytes;
                 let bytes = response
                     .body_mut()
+                    .with_config()
+                    .limit(limit)
                     .read_to_vec()
-                    .map_err(ClientError::from)?;
+                    .map_err(|e| map_body_read(e, limit))?;
                 let json = if bytes.iter().all(|b| b.is_ascii_whitespace()) {
                     Value::Null
                 } else {
@@ -852,7 +895,13 @@ impl RemoteBackend {
                 .get("ETag")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.trim_matches('"').to_string());
-            let bytes = resp.body_mut().read_to_vec().map_err(ClientError::from)?;
+            let limit = inner.max_response_bytes;
+            let bytes = resp
+                .body_mut()
+                .with_config()
+                .limit(limit)
+                .read_to_vec()
+                .map_err(|e| map_body_read(e, limit))?;
             Ok::<_, ClientError>((status, bytes, etag_hdr))
         })
         .await
@@ -922,7 +971,14 @@ impl RemoteBackend {
             let req = builder.body(()).map_err(ClientError::from)?;
             let mut resp = inner.agent.run(req).map_err(ClientError::from)?;
             let status = resp.status().as_u16();
-            let bytes = resp.body_mut().read_to_vec().map_err(ClientError::from)?;
+            // Plugin assets are binaries; the same explicit cap applies.
+            let limit = inner.max_response_bytes;
+            let bytes = resp
+                .body_mut()
+                .with_config()
+                .limit(limit)
+                .read_to_vec()
+                .map_err(|e| map_body_read(e, limit))?;
             Ok::<_, ClientError>((status, bytes))
         })
         .await

@@ -15,10 +15,10 @@ import { RdpReplayCanvas } from "../components/RdpReplayCanvas";
 import { decodeRdpRec } from "../lib/rdpDecoder";
 import { extractError } from "../lib/error";
 import {
-  rustionRecordingBlob,
+  fetchRecordingBytes,
   rustionRecordingRead,
   rustionRecordingReplayLog,
-  type RustionRecordingBlob,
+  type RecordingBytes,
   type RustionRecordingEntry,
 } from "../lib/rustion";
 
@@ -31,25 +31,32 @@ export function SessionReplayWindow() {
   const seekMs = Number.parseInt(params.get("at") ?? "", 10);
   const initialSeekMs = Number.isFinite(seekMs) && seekMs > 0 ? seekMs : undefined;
   const [entry, setEntry] = useState<RustionRecordingEntry | null>(null);
-  const [blob, setBlob] = useState<RustionRecordingBlob | null>(null);
+  const [blob, setBlob] = useState<RecordingBytes | null>(null);
   const [bytes, setBytes] = useState<Uint8Array | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [progress, setProgress] = useState<{ received: number; total: number } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    const abort = new AbortController();
     document.title = `BastionVault — Replay ${recordingId}`;
     (async () => {
       try {
         const e = await rustionRecordingRead(recordingId);
         if (cancelled) return;
         setEntry(e);
-        const b = await rustionRecordingBlob(recordingId);
+        // Chunked fetch: playback must not depend on the whole
+        // artifact fitting in one response.
+        const b = await fetchRecordingBytes(recordingId, {
+          signal: abort.signal,
+          onProgress: (received, total) => {
+            if (!cancelled) setProgress({ received, total });
+          },
+        });
         if (cancelled) return;
         setBlob(b);
-        const bin = atob(b.bytesB64);
-        const arr = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+        const arr = b.bytes;
         setBytes(arr);
         // Phase 8.2 audit-log emission with sha256 integrity check.
         try {
@@ -77,6 +84,7 @@ export function SessionReplayWindow() {
     })();
     return () => {
       cancelled = true;
+      abort.abort();
     };
   }, [recordingId]);
 
@@ -90,7 +98,9 @@ export function SessionReplayWindow() {
   if (loading) {
     return (
       <div className="p-6 text-sm text-[var(--color-text-muted)]">
-        Loading recording…
+        {progress && progress.total > 0
+          ? `Loading recording… ${Math.floor((progress.received / progress.total) * 100)}%`
+          : "Loading recording…"}
       </div>
     );
   }

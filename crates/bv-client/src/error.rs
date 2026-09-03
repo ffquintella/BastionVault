@@ -48,6 +48,17 @@ pub enum ClientError {
     #[error("node `{host}` is unavailable: {reason}")]
     NodeUnavailable { host: String, reason: String },
 
+    /// The response body was larger than the client's configured
+    /// read limit (see `RemoteBackendBuilder::with_max_response_bytes`).
+    /// Deliberately *not* a `NodeUnavailable`: the node answered
+    /// correctly, and neither retrying it nor failing over to a
+    /// sibling can change the outcome — the body is simply too big
+    /// for this client to buffer. Keeping the two apart is what stops
+    /// an oversized response from lighting up the reconnect UX and
+    /// re-downloading the body from a second node.
+    #[error("response body is larger than the client limit of {limit} bytes")]
+    ResponseTooLarge { limit: u64 },
+
     /// Discovery + health probing found zero healthy candidates.
     /// Distinct from `NodeUnavailable` (which signals an in-session
     /// failure of a previously-good node) so the connect path can
@@ -83,6 +94,12 @@ impl ClientError {
         }
     }
 
+    /// True when the error is an oversized response body rather than
+    /// a node or protocol failure.
+    pub fn is_response_too_large(&self) -> bool {
+        matches!(self, ClientError::ResponseTooLarge { .. })
+    }
+
     /// True when the error indicates the previously-pinned cluster
     /// node went away (transport failure, TLS issue, etc.). Callers
     /// use this to decide whether to surface a "reconnect" UX rather
@@ -92,12 +109,37 @@ impl ClientError {
     }
 }
 
+/// Map a body-read failure into a [`ClientError`], translating ureq's
+/// `BodyExceedsLimit` into the explicit [`ClientError::ResponseTooLarge`].
+/// Every body read in this crate goes through here so an oversized
+/// response reports the limit it hit instead of masquerading as a
+/// transport error (which `classify_node_failure` would then fold into
+/// `NodeUnavailable`).
+pub fn map_body_read(err: ureq::Error, limit: u64) -> ClientError {
+    match err {
+        // The payload carries the limit ureq was handed, which is the
+        // same value we configured — report ours so the message names
+        // the knob the operator can change.
+        ureq::Error::BodyExceedsLimit(_) => ClientError::ResponseTooLarge { limit },
+        other => ClientError::Ureq(other),
+    }
+}
+
 /// Classify a transport-level error and an HTTP response body as
 /// either "the node went away" (yielding `NodeUnavailable`) or
 /// something else (passthrough). Used by `RemoteBackend::handle` to
 /// enforce the sticky-session failure contract from the feature spec.
 pub fn classify_node_failure(host: &str, raw: ClientError) -> ClientError {
     match &raw {
+        // An oversized body is the node answering *correctly* with
+        // more bytes than we agreed to buffer. Defensive: read sites
+        // already translate this via `map_body_read`, but a raw
+        // `Ureq(BodyExceedsLimit)` reaching here must never become
+        // `NodeUnavailable` — that would trigger a failover retry that
+        // re-downloads the same too-large body from another node.
+        ClientError::Ureq(ureq::Error::BodyExceedsLimit(limit)) => {
+            ClientError::ResponseTooLarge { limit: *limit }
+        }
         // ureq transport failures are the textbook "node went away":
         // connection refused, TLS handshake fail, DNS hiccup, etc.
         ClientError::Ureq(_) | ClientError::Io(_) => {
@@ -153,6 +195,36 @@ mod tests {
         let raw = ClientError::server(403, "permission denied");
         let mapped = classify_node_failure("vault.example", raw);
         assert!(!mapped.is_node_unavailable());
+    }
+
+    /// Regression: a recording larger than the read limit used to be
+    /// classified as `NodeUnavailable`, so the GUI reported "node
+    /// `https://…:5200` is unavailable" for a node that was perfectly
+    /// healthy — and the failover path then re-fetched the same body
+    /// from a sibling.
+    #[test]
+    fn body_exceeds_limit_is_not_node_unavailable() {
+        let raw = ClientError::Ureq(ureq::Error::BodyExceedsLimit(10 * 1024 * 1024));
+        let mapped = classify_node_failure("vault.example", raw);
+        assert!(!mapped.is_node_unavailable());
+        assert!(mapped.is_response_too_large());
+        assert!(matches!(
+            mapped,
+            ClientError::ResponseTooLarge { limit } if limit == 10 * 1024 * 1024
+        ));
+    }
+
+    #[test]
+    fn map_body_read_reports_configured_limit() {
+        let mapped = map_body_read(ureq::Error::BodyExceedsLimit(7), 128 * 1024 * 1024);
+        assert!(matches!(
+            mapped,
+            ClientError::ResponseTooLarge { limit } if limit == 128 * 1024 * 1024
+        ));
+        // Anything else stays a transport error, so the sticky-session
+        // classification still sees it.
+        let other = map_body_read(ureq::Error::HostNotFound, 1);
+        assert!(classify_node_failure("vault.example", other).is_node_unavailable());
     }
 
     #[test]

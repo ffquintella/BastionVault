@@ -78,3 +78,18 @@ export function isPermissionDenied(e: unknown): boolean {
   return msg.includes("403") || /permission denied/i.test(msg);
 }
 
+
+/**
+ * True when the server does not have the route the GUI just asked for
+ * — the logical router matched the mount but no path pattern, which
+ * both the HTTP and embedded backends report as "Logical backend path
+ * not supported." (`RvError::ErrLogicalPathUnsupported`).
+ *
+ * This is version skew, not a malformed request: a newer GUI reaching
+ * an older server build. Distinct from `isMountNotFound`, where the
+ * whole mount is absent. Callers use it to fall back to the older
+ * route they know the server has.
+ */
+export function isRouteUnsupported(e: unknown): boolean {
+  return /path not supported/i.test(extractError(e));
+}

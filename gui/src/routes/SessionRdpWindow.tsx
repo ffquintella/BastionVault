@@ -24,6 +24,7 @@ import { listen } from "@tauri-apps/api/event";
 
 import { RustionSessionChip } from "../components/RustionSessionChip";
 import { decodeFrame } from "../lib/rdpFrames";
+import { createWheelAccumulator } from "../lib/rdpWheel";
 
 interface ResizePayload {
   width: number;
@@ -174,18 +175,26 @@ export function SessionRdpWindow() {
     });
     if (containerRef.current) observer.observe(containerRef.current);
 
+    // Viewport coords → canvas-relative coords, clamped to
+    // [0, width-1] / [0, height-1]. The canvas CSS-scales, so the
+    // ratio between its backing store and its box matters.
+    const canvasPoint = (ev: { clientX: number; clientY: number }) => {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      return {
+        x: Math.max(0, Math.min(canvas.width - 1, Math.round((ev.clientX - rect.left) * scaleX))),
+        y: Math.max(0, Math.min(canvas.height - 1, Math.round((ev.clientY - rect.top) * scaleY))),
+      };
+    };
+
     // Mouse forwarding. The button index follows JS MouseEvent
-    // semantics (0=left, 1=middle, 2=right). canvas-relative
-    // coordinates are clamped to [0, width-1] / [0, height-1].
+    // semantics (0=left, 1=middle, 2=right).
     const sendMouse = (
       ev: MouseEvent,
       kind: "move" | "down" | "up",
     ) => {
-      const rect = canvas.getBoundingClientRect();
-      const scaleX = canvas.width / rect.width;
-      const scaleY = canvas.height / rect.height;
-      const x = Math.max(0, Math.min(canvas.width - 1, Math.round((ev.clientX - rect.left) * scaleX)));
-      const y = Math.max(0, Math.min(canvas.height - 1, Math.round((ev.clientY - rect.top) * scaleY)));
+      const { x, y } = canvasPoint(ev);
       void invoke("session_input_rdp_mouse", {
         request: {
           token,
@@ -204,6 +213,29 @@ export function SessionRdpWindow() {
     };
     const onMouseUp = (ev: MouseEvent) => sendMouse(ev, "up");
     const onContextMenu = (ev: Event) => ev.preventDefault();
+
+    // Wheel forwarding. Registered non-passive so preventDefault
+    // actually suppresses the webview's own scroll — otherwise the
+    // window rubber-bands while the remote desktop stays put. The
+    // accumulator carries sub-notch remainders, which is what makes a
+    // trackpad scroll at all: its deltas are a few pixels per event.
+    const accumulateWheel = createWheelAccumulator();
+    const onWheel = (ev: WheelEvent) => {
+      ev.preventDefault();
+      const { vertical, horizontal } = accumulateWheel(ev);
+      if (vertical === 0 && horizontal === 0) return;
+      const { x, y } = canvasPoint(ev);
+      // Two axes are two PDUs — MS-RDPBCGR has no combined event.
+      for (const [units, isHorizontal] of [
+        [vertical, false],
+        [horizontal, true],
+      ] as const) {
+        if (units === 0) continue;
+        void invoke("session_input_rdp_wheel", {
+          request: { token, x, y, units, horizontal: isHorizontal },
+        }).catch(() => undefined);
+      }
+    };
 
     const onKeyDown = (ev: KeyboardEvent) => {
       // The host's `js_code_to_ps2_scancode` doesn't recognise
@@ -225,6 +257,7 @@ export function SessionRdpWindow() {
     canvas.addEventListener("mousedown", onMouseDown);
     canvas.addEventListener("mouseup", onMouseUp);
     canvas.addEventListener("contextmenu", onContextMenu);
+    canvas.addEventListener("wheel", onWheel, { passive: false });
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
 
@@ -233,6 +266,7 @@ export function SessionRdpWindow() {
       canvas.removeEventListener("mousedown", onMouseDown);
       canvas.removeEventListener("mouseup", onMouseUp);
       canvas.removeEventListener("contextmenu", onContextMenu);
+      canvas.removeEventListener("wheel", onWheel);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       attached = false;

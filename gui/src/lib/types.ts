@@ -653,11 +653,13 @@ export interface ConnectionProfile {
    * attached at all, so the remote desktop sees a client with no
    * clipboard redirection.
    *
-   * The clipboard is a data channel into *and* out of a privileged
-   * session, so the direction is explicit and the default is off:
-   * `"host-to-session"` lets the operator paste into the target,
-   * `"session-to-host"` lets them carry content out of it, and
-   * `"bidirectional"` allows both. Text only today, size-capped, with
+   * Absent means `"bidirectional"`: copy and paste works between the
+   * operator's machine and the target unless this resource narrows it.
+   * `"host-to-session"` allows only pasting into the target,
+   * `"session-to-host"` only carrying content out of it, and `"off"`
+   * attaches no `CLIPRDR` channel at all. Ingress and egress are
+   * separately expressible because they are different risks on a
+   * privileged session. Text only today, size-capped, with
    * per-session counters on the session window. See
    * features/rdp-clipboard-redirection.md.
    */

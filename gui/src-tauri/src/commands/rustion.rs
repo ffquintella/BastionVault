@@ -778,6 +778,63 @@ pub async fn rustion_recording_blob(
     })
 }
 
+/// One chunk of a recording artifact. The frontend loops these (see
+/// `fetchRecordingBytes` in `gui/src/lib/rustion.ts`) instead of
+/// pulling the whole artifact in one response, which is what makes
+/// playback independent of recording size.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionRecordingChunk {
+    pub recording_id: String,
+    pub format: String,
+    /// Digest of the **whole** artifact, repeated on every chunk, so
+    /// the caller verifies the assembled bytes end to end.
+    pub sha256: String,
+    /// Total artifact size — known from the first chunk, so the caller
+    /// can allocate once and report progress.
+    pub size_bytes: u64,
+    pub chunk_index: u64,
+    pub chunk_count: u64,
+    /// Server-chosen chunk size. Read, never assumed: the caller uses
+    /// `chunk_count` to loop and `offset` to place the bytes.
+    pub chunk_size: u64,
+    pub offset: u64,
+    pub chunk_len: u64,
+    pub eof: bool,
+    /// Base64 of this chunk only. Same rationale as
+    /// [`RustionRecordingBlob::bytes_b64`].
+    pub bytes_b64: String,
+}
+
+#[tauri::command]
+pub async fn rustion_recording_blob_chunk(
+    state: State<'_, AppState>,
+    recording_id: String,
+    chunk_index: u64,
+) -> CmdResult<RustionRecordingChunk> {
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{RUSTION_MOUNT}recordings/{recording_id}/blob/chunk/{chunk_index}"),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(RustionRecordingChunk {
+        recording_id: s(&data, "recording_id"),
+        format: s(&data, "format"),
+        sha256: s(&data, "sha256"),
+        size_bytes: u64_field(&data, "size_bytes"),
+        chunk_index: u64_field(&data, "chunk_index"),
+        chunk_count: u64_field(&data, "chunk_count"),
+        chunk_size: u64_field(&data, "chunk_size"),
+        offset: u64_field(&data, "offset"),
+        chunk_len: u64_field(&data, "chunk_len"),
+        eof: data.get("eof").and_then(|v| v.as_bool()).unwrap_or(false),
+        bytes_b64: s(&data, "bytes_b64"),
+    })
+}
+
 // ─── Phase 7: policy + bastion groups ────────────────────────────
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -681,6 +681,7 @@ server-side today. v1 `POST /v1/rustion/session/open` (raw
 GET  /v1/rustion/recordings
 GET  /v1/rustion/recordings/{rid}
 GET  /v1/rustion/recordings/{rid}/blob
+GET  /v1/rustion/recordings/{rid}/blob/chunk/{n}
 GET  /v1/rustion/recordings/{rid}/keystrokes
 POST /v1/rustion/recordings/pull
 POST /v1/rustion/recordings/reconcile
@@ -699,6 +700,62 @@ only, while `rustion/recordings/*` grants the bytes and the transcript
 together — which is the intended coupling, because a transcript is a record
 of everything the operator typed and belongs with playback rather than with
 "list sessions".
+
+**`GET .../blob/chunk/{n}`** is the size-independent way to read a
+recording's bytes, and the one the GUI player uses. It returns chunk `n`
+of the artifact (4 MiB each) plus the geometry needed to keep going:
+`size_bytes`, `chunk_index`, `chunk_count`, `chunk_size`, `offset`,
+`chunk_len`, `eof`, and `bytes_b64` for that chunk only. `sha256` is the
+digest of the **whole** artifact and repeats on every chunk, so a caller
+verifies the assembled bytes exactly as it would from `/blob`. Read chunk
+0, then read until `eof`; an index past the end is a `416`, and the error
+states the real `chunk_count`. An empty artifact is one empty chunk, not
+zero chunks.
+
+**Both artifact routes verify the artifact before returning any of it.**
+BastionVault hashes the bytes the bastion returned and compares them with
+the digest on record for that recording — the sidecar's `sha256`, which
+arrived over the signed `recording.ready` webhook, in preference to the
+response's own `x-recording-sha256` header, which is supplied by the same
+party as the bytes and so cannot vouch for them. A mismatch is a **`409`**
+naming both digests; nothing is served and nothing is cached, so a chunked
+read cannot be answered from a corrupted cache entry one slice at a time.
+The `409` is deliberately not the `502` an unreachable or erroring bastion
+produces: a digest mismatch is deterministic, a retry is not the remedy,
+and the two need different operator responses. Refusals emit
+`recording.artifact.rejected`, which is *not* `recording.replayed` — no
+artifact reached a caller.
+
+**`digest_verified`** (boolean, on `/blob` and every chunk) says whether
+there was a digest to check against. `false` means the recording's sidecar
+carries no `sha256`, so the bytes are served unverified and say so; it
+never means "checked and failed", which is the `409` above. Recordings
+whose sidecar landed without a digest therefore keep playing — the hard
+failure is limited to recordings where a digest is known and the bytes
+contradict it. A client is still expected to verify the artifact it
+assembled against `sha256`: that check covers the vault-to-client leg,
+which the server-side gate cannot.
+
+`GET .../blob` (the whole artifact in one response) is unchanged and
+still supported, but it cannot serve a recording larger than the
+client's response-size limit — 4 MiB of artifact base64-expands to ~5.6
+MB of body, and a 17.8 MB recording to ~23.7 MB, past the 10 MB default
+of a stock ureq client. Prefer the chunk route for anything operator-
+facing. Both routes sit under `rustion/recordings/*` and are granted by
+the same policies; the chunk route is not a new capability surface for
+the same data.
+
+A GUI newer than its server falls back to `/blob` when the chunk route
+is missing (the router reports `Logical backend path not supported.`),
+so replay keeps working against an un-upgraded vault; it logs that it
+did so, and a recording past the response limit still needs the server
+upgrade.
+
+Chunk reads of one recording are served from a bounded in-memory cache
+in the engine (4 artifacts / 512 MiB, 180 s idle), because the bastion's
+own blob endpoint serves whole files and honours no `Range` — without it
+each chunk would re-download the artifact. The cache holds recording
+plaintext, so it is dropped on seal and never written to disk.
 
 **`GET .../keystrokes`** returns the `.rdp-rec` version-4 keystroke
 transcript from BastionVault's index. Redacted runs come back withheld —

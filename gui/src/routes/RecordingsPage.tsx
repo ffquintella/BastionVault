@@ -51,7 +51,7 @@ import {
   rustionKeystrokeSearch,
   rustionKeystrokesIndex,
   rustionOpenReplayWindow,
-  rustionRecordingBlob,
+  fetchRecordingBytes,
   rustionRecordingPull,
   rustionRecordingsReconcile,
   rustionRecordingRead,
@@ -60,7 +60,7 @@ import {
   rustionTargetList,
   type RustionKeystrokeHit,
   type RustionKeystrokeSearchReport,
-  type RustionRecordingBlob,
+  type RecordingBytes,
   type RustionRecordingEntry,
   type RustionTargetSummary,
 } from "../lib/rustion";
@@ -423,22 +423,29 @@ function RecordingPlayerModal({
   onClose: () => void;
 }) {
   const toast = useToast();
-  const [blob, setBlob] = useState<RustionRecordingBlob | null>(null);
+  const [blob, setBlob] = useState<RecordingBytes | null>(null);
   const [loading, setLoading] = useState(true);
+  const [progress, setProgress] = useState<{ received: number; total: number } | null>(null);
   const [bytes, setBytes] = useState<Uint8Array | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    const abort = new AbortController();
     (async () => {
       setLoading(true);
+      setProgress(null);
       try {
-        const b = await rustionRecordingBlob(entry.recordingId);
+        // Chunked: a recording is fetched in fixed slices, so a large
+        // one is not rejected for being a single oversized response.
+        const b = await fetchRecordingBytes(entry.recordingId, {
+          signal: abort.signal,
+          onProgress: (received, total) => {
+            if (!cancelled) setProgress({ received, total });
+          },
+        });
         if (cancelled) return;
         setBlob(b);
-        // base64 → Uint8Array
-        const bin = atob(b.bytesB64);
-        const arr = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+        const arr = b.bytes;
         setBytes(arr);
         // Phase 8.2 — sha256 integrity check + recording.replayed
         // audit event. Hash the bytes locally and report a mismatch
@@ -470,13 +477,17 @@ function RecordingPlayerModal({
           console.warn("recording replay-log failed:", e);
         }
       } catch (e) {
-        toast.toast("error", `Failed to fetch recording: ${extractError(e)}`);
+        // An abort is the modal closing mid-fetch, not a failure.
+        if (!cancelled) {
+          toast.toast("error", `Failed to fetch recording: ${extractError(e)}`);
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
     })();
     return () => {
       cancelled = true;
+      abort.abort();
     };
   }, [entry.recordingId]);
 
@@ -533,7 +544,9 @@ function RecordingPlayerModal({
 
         {loading ? (
           <div className="py-8 text-center text-neutral-400 text-sm">
-            Loading recording bytes…
+            {progress && progress.total > 0
+              ? `Loading recording bytes… ${formatBytes(progress.received)} of ${formatBytes(progress.total)} (${Math.floor((progress.received / progress.total) * 100)}%)`
+              : "Loading recording bytes…"}
           </div>
         ) : bytes && blob ? (
           <>

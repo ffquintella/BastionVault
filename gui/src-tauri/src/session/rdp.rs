@@ -236,10 +236,12 @@ pub struct RdpOpenArgs {
     /// advertised no fingerprint).
     pub tls_pin_sha256: Option<String>,
     /// Clipboard redirection (MS-RDPECLIP) for this session, from the
-    /// profile key `rdp_clipboard`. [`ClipboardDirection::Off`] — the
-    /// default — does not attach the `CLIPRDR` channel at all, so the
-    /// server sees a client with no clipboard redirection rather than
-    /// one that advertises the capability and refuses every transfer.
+    /// profile key `rdp_clipboard`, defaulting to
+    /// [`rdp_clipboard::PROFILE_DEFAULT_DIRECTION`].
+    /// [`ClipboardDirection::Off`] does not attach the `CLIPRDR`
+    /// channel at all, so the server sees a client with no clipboard
+    /// redirection rather than one that advertises the capability and
+    /// refuses every transfer.
     /// See [`super::rdp_clipboard`] and
     /// `features/rdp-clipboard-redirection.md`.
     pub clipboard: ClipboardDirection,
@@ -309,6 +311,13 @@ pub enum RdpControl {
     /// Mouse-button press/release. `button_index` is the JS
     /// `MouseEvent.button` value: 0=left, 1=middle, 2=right.
     PointerButton { button_index: u8, pressed: bool, x: u16, y: u16 },
+    /// Mouse-wheel rotation at the current pointer position.
+    /// `units` is in RDP wheel-rotation units, where one physical
+    /// notch is [`WHEEL_UNITS_PER_NOTCH`]; positive is up (vertical)
+    /// or right (horizontal). The frontend converts DOM pixel deltas
+    /// and carries the fractional remainder, so a trackpad scrolls
+    /// smoothly instead of in whole notches.
+    PointerWheel { units: i32, horizontal: bool, x: u16, y: u16 },
     /// Keyboard key down/up. `js_code` is the JS
     /// `KeyboardEvent.code` string (e.g. `"KeyA"`, `"Enter"`).
     Key { js_code: String, pressed: bool },
@@ -2019,7 +2028,59 @@ struct ResizePayload {
     height: u16,
 }
 
+/// RDP wheel-rotation units in one physical notch (MS-RDPBCGR's
+/// equivalent of Windows' `WHEEL_DELTA`).
+pub const WHEEL_UNITS_PER_NOTCH: i32 = 120;
+
+/// Largest rotation magnitude a single `MousePdu` can carry: the
+/// wire field is 9-bit two's complement, so [-256, 255]. We split a
+/// larger scroll across several events rather than clamping it,
+/// which would silently swallow a fast flick.
+const MAX_WHEEL_UNITS_PER_PDU: i32 = 255;
+
+/// Ceiling on one DOM wheel event's rotation, in notches. Bounds the
+/// split at 16 `MousePdu`s, well under `FastPathInput::MAX_EVENTS`
+/// (255) — that limit is a hard reject, so an unbounded split would
+/// turn a wild flick into no scroll at all. 32 notches in a single
+/// event is already past any real gesture.
+const MAX_WHEEL_NOTCHES_PER_EVENT: i32 = 32;
+
+/// Split a wheel rotation into as many `MousePdu`s as the 9-bit
+/// wire field needs, all at the same pointer position.
+///
+/// `units` is signed: positive is up / right. The sign bit is set by
+/// `MousePdu::encode` from the value itself, so we only pick the
+/// axis flag here.
+fn wheel_events(units: i32, horizontal: bool, x: u16, y: u16) -> Vec<FastPathInputEvent> {
+    let axis =
+        if horizontal { PointerFlags::HORIZONTAL_WHEEL } else { PointerFlags::VERTICAL_WHEEL };
+    let ceiling = WHEEL_UNITS_PER_NOTCH * MAX_WHEEL_NOTCHES_PER_EVENT;
+    let mut remaining = units.clamp(-ceiling, ceiling);
+    let mut events = Vec::new();
+    while remaining != 0 {
+        let chunk = remaining.clamp(-MAX_WHEEL_UNITS_PER_PDU, MAX_WHEEL_UNITS_PER_PDU);
+        remaining -= chunk;
+        events.push(FastPathInputEvent::MouseEvent(MousePdu {
+            flags: axis,
+            // `chunk` is clamped to +/-255, so the cast cannot truncate.
+            number_of_wheel_rotation_units: chunk as i16,
+            x_position: x,
+            y_position: y,
+        }));
+    }
+    events
+}
+
 fn control_to_fastpath(ctl: RdpControl) -> Option<FastPathInput> {
+    if let RdpControl::PointerWheel { units, horizontal, x, y } = ctl {
+        let events = wheel_events(units, horizontal, x, y);
+        if events.is_empty() {
+            return None;
+        }
+        // `wheel_events` clamps the rotation to 16 PDUs' worth, well
+        // under `FastPathInput::MAX_EVENTS`, so `new` cannot reject.
+        return FastPathInput::new(events).ok();
+    }
     let event = match ctl {
         RdpControl::PointerMove { x, y } => FastPathInputEvent::MouseEvent(MousePdu {
             flags: PointerFlags::MOVE,
@@ -2053,7 +2114,10 @@ fn control_to_fastpath(ctl: RdpControl) -> Option<FastPathInput> {
             }
             FastPathInputEvent::KeyboardEvent(flags, scancode)
         }
-        RdpControl::Resize { .. } | RdpControl::Repaint | RdpControl::Close => return None,
+        RdpControl::PointerWheel { .. }
+        | RdpControl::Resize { .. }
+        | RdpControl::Repaint
+        | RdpControl::Close => return None,
     };
     FastPathInput::new(vec![event]).ok()
 }
@@ -2825,5 +2889,101 @@ mod clipboard_inbox_tests {
         }
 
         assert_eq!(pdu_rx.recv().await, Some(7), "the PDU sat unread the whole time");
+    }
+}
+
+/// Wheel rotation is the one input event with a wire field narrower
+/// than its Rust type: 9-bit two's complement, so [-256, 255]. A
+/// value outside that range panics `MousePdu::encode`'s debug assert
+/// and silently wraps in release — a fast flick would scroll the
+/// wrong way. These tests pin the split.
+#[cfg(test)]
+mod wheel_tests {
+    use super::{control_to_fastpath, wheel_events, RdpControl, WHEEL_UNITS_PER_NOTCH};
+    use ironrdp::pdu::input::mouse::{MousePdu, PointerFlags};
+    use ironrdp::pdu::input::fast_path::FastPathInputEvent;
+
+    fn mouse(ev: &FastPathInputEvent) -> MousePdu {
+        match ev {
+            FastPathInputEvent::MouseEvent(m) => *m,
+            other => panic!("expected a mouse event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn one_notch_up_is_a_single_positive_vertical_event() {
+        let events = wheel_events(WHEEL_UNITS_PER_NOTCH, false, 10, 20);
+        assert_eq!(events.len(), 1);
+        let m = mouse(&events[0]);
+        assert_eq!(m.number_of_wheel_rotation_units, 120);
+        assert!(m.flags.contains(PointerFlags::VERTICAL_WHEEL));
+        assert!(!m.flags.contains(PointerFlags::HORIZONTAL_WHEEL));
+        assert_eq!((m.x_position, m.y_position), (10, 20));
+    }
+
+    #[test]
+    fn a_negative_rotation_keeps_its_sign_for_the_encoder() {
+        // The WHEEL_NEGATIVE bit is set by `MousePdu::encode` from the
+        // value, so the flag must NOT be pre-set here — doing both
+        // would encode the sign twice.
+        let events = wheel_events(-WHEEL_UNITS_PER_NOTCH, true, 1, 2);
+        let m = mouse(&events[0]);
+        assert_eq!(m.number_of_wheel_rotation_units, -120);
+        assert!(m.flags.contains(PointerFlags::HORIZONTAL_WHEEL));
+        assert!(!m.flags.contains(PointerFlags::WHEEL_NEGATIVE));
+    }
+
+    #[test]
+    fn a_rotation_wider_than_the_wire_field_splits_instead_of_clamping() {
+        let events = wheel_events(600, false, 5, 5);
+        assert_eq!(events.len(), 3, "255 + 255 + 90");
+        let units: Vec<i16> = events.iter().map(|e| mouse(e).number_of_wheel_rotation_units).collect();
+        assert_eq!(units, vec![255, 255, 90]);
+        assert_eq!(units.iter().map(|u| i32::from(*u)).sum::<i32>(), 600, "no rotation is lost");
+        assert!(units.iter().all(|u| MousePdu::WHEEL_ROTATION_RANGE.contains(u)));
+    }
+
+    #[test]
+    fn a_large_negative_rotation_splits_the_same_way() {
+        let events = wheel_events(-600, false, 5, 5);
+        let units: Vec<i16> = events.iter().map(|e| mouse(e).number_of_wheel_rotation_units).collect();
+        assert_eq!(units, vec![-255, -255, -90]);
+        assert!(units.iter().all(|u| MousePdu::WHEEL_ROTATION_RANGE.contains(u)));
+    }
+
+    #[test]
+    fn a_zero_rotation_emits_no_pdu() {
+        assert!(wheel_events(0, false, 1, 1).is_empty());
+        assert!(
+            control_to_fastpath(RdpControl::PointerWheel { units: 0, horizontal: false, x: 1, y: 1 }).is_none(),
+            "an event that carried only a fractional carry must not reach the wire"
+        );
+    }
+
+    #[test]
+    fn control_to_fastpath_routes_a_wheel_control() {
+        for units in [WHEEL_UNITS_PER_NOTCH, -WHEEL_UNITS_PER_NOTCH, 4000, -4000] {
+            assert!(
+                control_to_fastpath(RdpControl::PointerWheel { units, horizontal: false, x: 3, y: 4 }).is_some(),
+                "a {units}-unit rotation must encode, not silently vanish"
+            );
+        }
+    }
+
+    #[test]
+    fn an_absurd_rotation_is_clamped_rather_than_dropped() {
+        // FastPathInput::new rejects a vector longer than 255 events,
+        // which would turn a wild flick into no scroll at all.
+        let events = wheel_events(i32::MAX, false, 0, 0);
+        assert!(events.len() <= 16, "{} events", events.len());
+        assert!(events.iter().all(|e| MousePdu::WHEEL_ROTATION_RANGE
+            .contains(&mouse(e).number_of_wheel_rotation_units)));
+        assert!(control_to_fastpath(RdpControl::PointerWheel {
+            units: i32::MIN,
+            horizontal: true,
+            x: 0,
+            y: 0
+        })
+        .is_some());
     }
 }

@@ -5,6 +5,8 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
+import { isRouteUnsupported } from "./error";
+
 export type RustionHealthStatus = "up" | "degraded" | "down" | "unknown" | "";
 
 export interface RustionTargetSummary {
@@ -400,6 +402,136 @@ export interface RustionRecordingBlob {
 
 export const rustionRecordingBlob = (recordingId: string) =>
   invoke<RustionRecordingBlob>("rustion_recording_blob", { recordingId });
+
+/** One chunk of a recording artifact. `sha256` and `sizeBytes`
+ *  describe the whole artifact and repeat on every chunk. */
+export interface RustionRecordingChunk {
+  recordingId: string;
+  format: string;
+  sha256: string;
+  sizeBytes: number;
+  chunkIndex: number;
+  chunkCount: number;
+  chunkSize: number;
+  offset: number;
+  chunkLen: number;
+  eof: boolean;
+  /** Base64 of this chunk only. */
+  bytesB64: string;
+}
+
+export const rustionRecordingBlobChunk = (
+  recordingId: string,
+  chunkIndex: number,
+) =>
+  invoke<RustionRecordingChunk>("rustion_recording_blob_chunk", {
+    recordingId,
+    chunkIndex,
+  });
+
+/** Assembled recording artifact, plus the sidecar fields the player
+ *  and the integrity check need. */
+export interface RecordingBytes {
+  recordingId: string;
+  format: string;
+  /** Whole-artifact digest, for the caller's integrity check. */
+  sha256: string;
+  bytes: Uint8Array;
+}
+
+/** Fetch a recording artifact of any size, one chunk at a time.
+ *
+ *  The single-shot `rustionRecordingBlob` puts the whole artifact in
+ *  one response, which fails outright once that response exceeds the
+ *  client's read limit — a 17.8 MB recording base64-expands past the
+ *  10 MB default. This walks `blob/chunk/<n>` instead: the first chunk
+ *  reports `sizeBytes` and `chunkCount`, the buffer is allocated once,
+ *  and each chunk is decoded straight into place. Nothing here scales
+ *  with recording size except the buffer the player was always going
+ *  to need.
+ *
+ *  `onProgress(received, total)` is called after each chunk. `signal`
+ *  aborts between chunks — a closed modal must not keep pulling
+ *  megabytes.
+ *
+ *  Throws on a truncated or over-long transfer rather than handing back
+ *  a partial artifact: a short read would surface as a corrupt
+ *  recording, and playback failures must not be ambiguous about their
+ *  cause. */
+export async function fetchRecordingBytes(
+  recordingId: string,
+  opts: {
+    onProgress?: (received: number, total: number) => void;
+    signal?: AbortSignal;
+  } = {},
+): Promise<RecordingBytes> {
+  const { onProgress, signal } = opts;
+  let first: RustionRecordingChunk;
+  try {
+    first = await rustionRecordingBlobChunk(recordingId, 0);
+  } catch (e) {
+    // Version skew: a server that predates the chunk route. Fall back
+    // to the single-shot read so replay keeps working against an
+    // un-upgraded vault — small recordings play exactly as before, and
+    // a large one still fails there with the response-size error,
+    // which is the server upgrade this route exists to deliver.
+    // Announced in the console rather than silently: the operator's
+    // playback just took a different path than the one documented.
+    if (!isRouteUnsupported(e)) throw e;
+    console.warn(
+      `recording ${recordingId}: server has no blob/chunk route; ` +
+        "falling back to the single-response read (upgrade the server " +
+        "to play recordings larger than its response limit)",
+    );
+    const whole = await rustionRecordingBlob(recordingId);
+    const bin = atob(whole.bytesB64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    onProgress?.(bytes.length, bytes.length);
+    return {
+      recordingId: whole.recordingId || recordingId,
+      format: whole.format,
+      sha256: whole.sha256,
+      bytes,
+    };
+  }
+  const total = first.sizeBytes;
+  const bytes = new Uint8Array(total);
+  let received = 0;
+
+  const place = (chunk: RustionRecordingChunk) => {
+    const bin = atob(chunk.bytesB64);
+    if (chunk.offset + bin.length > total) {
+      throw new Error(
+        `recording ${recordingId}: chunk ${chunk.chunkIndex} runs past the ` +
+          `reported size (${chunk.offset} + ${bin.length} > ${total})`,
+      );
+    }
+    for (let i = 0; i < bin.length; i++) {
+      bytes[chunk.offset + i] = bin.charCodeAt(i);
+    }
+    received += bin.length;
+    onProgress?.(received, total);
+  };
+
+  place(first);
+  for (let i = 1; i < first.chunkCount; i++) {
+    if (signal?.aborted) throw new DOMException("aborted", "AbortError");
+    place(await rustionRecordingBlobChunk(recordingId, i));
+  }
+
+  if (received !== total) {
+    throw new Error(
+      `recording ${recordingId}: expected ${total} bytes, assembled ${received}`,
+    );
+  }
+  return {
+    recordingId: first.recordingId || recordingId,
+    format: first.format,
+    sha256: first.sha256,
+    bytes,
+  };
+}
 
 // ─── Keystroke transcripts + search (Phase 8.6) ───────────────────
 //

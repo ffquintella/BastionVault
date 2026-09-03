@@ -45,6 +45,153 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.43.3] - 2026-09-03
+
+### Added
+
+#### Chunked recording playback -- replay works at any recording size
+
+- **`GET rustion/recordings/<rid>/blob/chunk/<n>`**
+  (`crates/bv-engine-rustion/src/lib.rs`,
+  `crates/bv-engine-rustion/src/blob_cache.rs`) -- reads one 4 MiB slice of
+  a recording artifact and reports the geometry to continue with
+  (`size_bytes`, `chunk_index`, `chunk_count`, `chunk_size`, `offset`,
+  `chunk_len`, `eof`). Playback no longer depends on the whole artifact
+  fitting in a single response: a 17.8 MB recording base64-expanded to
+  ~23.7 MB and was rejected outright before it could be played. `sha256`
+  is the whole-artifact digest on every chunk, so the assembled bytes are
+  verified exactly as before. An index past the end is a `416` that states
+  the real `chunk_count`; an empty artifact is one empty chunk. Same
+  `rustion/recordings/*` policy glob as `/blob` -- deliberately not a new
+  capability surface for the same data.
+- **Bounded artifact cache in the engine** -- 4 artifacts / 512 MiB / 180 s
+  idle, LRU. The bastion's own blob endpoint serves whole files and honours
+  no `Range`, so without a cache each chunk would re-download the artifact
+  (O(n^2) upstream traffic). The bytes are recording plaintext: held in
+  `Zeroizing`, never written to disk, and dropped on seal with the rest of
+  the decrypted state. An artifact over the whole budget is served but not
+  cached, with a warning naming the cost.
+- **GUI player streams chunks with progress**
+  (`gui/src/lib/rustion.ts`, `gui/src/routes/RecordingsPage.tsx`,
+  `gui/src/routes/SessionReplayWindow.tsx`, new Tauri command
+  `rustion_recording_blob_chunk`) -- `fetchRecordingBytes` allocates once
+  from the first chunk, decodes each chunk into place, reports percentage
+  while loading, and aborts remaining chunks when the modal or window
+  closes. A truncated or over-long transfer throws instead of handing the
+  player a partial artifact.
+- `GET rustion/recordings/<rid>/blob` (whole artifact, one response) is
+  unchanged and still supported for existing clients. A GUI newer than
+  its server detects the missing chunk route and falls back to it (with a
+  console warning), so replay keeps working against an un-upgraded vault.
+  (`features/rustion-integration.md`, `docs/api.md`)
+
+#### RDP mouse-wheel forwarding
+
+- **Scrolling in an RDP session window now reaches the target**
+  (`gui/src/lib/rdpWheel.ts`, `gui/src/routes/SessionRdpWindow.tsx`,
+  `gui/src-tauri/src/session/rdp.rs`) -- the window forwarded moves, clicks
+  and keystrokes but never registered a `wheel` listener, so a scroll did
+  nothing on the remote desktop (and rubber-banded the webview instead).
+  A new `session_input_rdp_wheel` command carries signed rotation in RDP
+  wheel units to the pump, which emits `MousePdu` fast-path events on the
+  vertical or horizontal axis. Both axes are supported; a diagonal trackpad
+  gesture sends one PDU per axis, as MS-RDPBCGR has no combined event.
+- DOM pixel deltas are converted at 120 units per notch with a **per-axis
+  fractional carry**, so a trackpad's stream of one- and two-pixel deltas
+  accumulates into movement instead of rounding to zero on every event.
+  `deltaMode` line and page units are normalised to pixels first.
+- The wire field is 9-bit two's complement ([-256, 255]), so a rotation
+  larger than one PDU can hold is **split across several events rather than
+  clamped**, and the split is itself bounded at 32 notches per DOM event so
+  it can never exceed `FastPathInput::MAX_EVENTS` and be rejected whole.
+
+### Fixed
+
+#### Oversized responses no longer masquerade as a dead node
+
+- **`bv-client` reported a healthy node as unavailable when a response was
+  too large** (`crates/bv-client/src/error.rs`,
+  `crates/bv-client/src/remote.rs`) -- ureq's body-read limit surfaced as a
+  bare transport error, which the sticky-session classifier folded into
+  `NodeUnavailable`. Fetching a 17.8 MB recording therefore produced
+  ``node `https://...:5200` is unavailable`` for a node that had answered
+  correctly, and the read-failover path then re-downloaded the same
+  too-large body from a second node. It is now a distinct
+  `ClientError::ResponseTooLarge { limit }`, which names the limit it hit
+  and is never retried or failed over.
+- **The read limit is explicit and configurable** -- every response body in
+  `bv-client` is read with a stated cap
+  (`DEFAULT_MAX_RESPONSE_BYTES`, 128 MiB, overridable via
+  `RemoteBackendBuilder::with_max_response_bytes`) instead of ureq's 10 MB
+  default. It stays a bounded number on purpose: the body is buffered in
+  RAM, so this is the memory-exhaustion guard against a malicious or broken
+  server, and exceeding it is a hard error rather than a truncated body.
+
+### Changed
+
+#### RDP clipboard redirection is on by default
+
+- **A resource that says nothing about `rdp_clipboard` now gets a
+  bidirectional clipboard** (`gui/src-tauri/src/session/rdp_clipboard.rs`,
+  `gui/src-tauri/src/commands/connect.rs`) -- previously the default was
+  `off`, so copy and paste between the operator's machine and the target
+  did not work unless the resource opted in. An operator who cannot paste a
+  command or carry an error message back out routes around the bastion,
+  which is the worse outcome. The direction is resolved in one place,
+  `rdp_clipboard::direction_from_profile`, whose default is the new
+  `PROFILE_DEFAULT_DIRECTION` constant.
+- **To withhold it, set `rdp_clipboard` on the resource**: `off` attaches no
+  `CLIPRDR` channel at all, `host-to-session` allows only paste-in and
+  `session-to-host` only copy-out. The RDP profile editor's *Clipboard
+  redirection* select now leads with "Both directions (default)" and
+  explains what each narrowing buys.
+- Unchanged: a *present but unrecognised* value still fails the connect
+  rather than falling back in either direction, and every transfer remains
+  text-only, capped at 1 MiB, never logged, and counted per session.
+  (`features/rdp-clipboard-redirection.md`)
+
+### Security
+
+#### Recording artifacts are verified before the vault serves or caches them
+
+- **Add a server-side digest gate to the playback path**
+  (`crates/bv-engine-rustion/src/recordings.rs`) --
+  `fetch_blob_cached` now hashes the bytes the bastion returned and
+  refuses them unless they match the digest on record for that recording.
+  Until now only the GUI checked, *after* assembling the whole artifact,
+  and a mismatch merely raised a toast; the vault would serve the bytes,
+  cache them, and hand them to a player. The playback path now does what
+  the keystroke indexer has always done before persisting derived text
+  (`digest-mismatch`), so the two agree on what a trustworthy artifact is.
+- **The gate runs before the artifact enters the blob cache**, which is
+  what makes a chunked read safe: chunk 0 pays for the check and every
+  later chunk is served from an entry that has already passed it, so
+  there is no path by which a corrupted artifact is handed out one 4 MiB
+  slice at a time. A cache hit is not re-hashed -- that would hash the
+  whole artifact once per chunk to re-check something already checked.
+- **The sidecar's `sha256` is the authority, not the response header.**
+  The sidecar arrived over the signed `recording.ready` webhook; the
+  `x-recording-sha256` header is supplied by the same party, in the same
+  response, as the bytes it describes. When the two disagree the sidecar
+  wins and there is no fallback -- otherwise the serving side would choose
+  which digest it is checked against.
+- **A mismatch is a `409`, deliberately not the `502` an unreachable
+  bastion produces.** It is deterministic, so a retry is not the remedy
+  and the operator response is different (go look at the artifact on the
+  bastion). It emits `recording.artifact.rejected`, distinct from
+  `recording.replayed` with `sha256_mismatch=true`: the latter says a
+  caller received an artifact and found it wrong, this one says the bytes
+  never left the vault.
+- **Migration: a recording with no digest on record still plays.** The
+  hard failure is limited to recordings whose digest is known and
+  non-empty, so sidecars that landed without one are not newly
+  unplayable. Both artifact routes gained a **`digest_verified`** boolean
+  saying which of the two happened, so "the vault checked" and "there was
+  nothing to check against" are distinguishable rather than being blurred
+  into a silent pass. The GUI's own check is kept as defence in depth for
+  the vault-to-GUI leg.
+  (`features/rustion-integration.md`, `docs/api.md`)
+
 ## [0.43.2] - 2026-09-03
 
 ### Fixed

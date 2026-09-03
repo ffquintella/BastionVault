@@ -48,6 +48,15 @@ pub const SESSION_RENEW: &str = "session.renew";
 pub const SESSION_TERMINATE: &str = "session.terminate";
 pub const RECORDING_LINKED: &str = "recording.linked";
 pub const RECORDING_REPLAYED: &str = "recording.replayed";
+/// The vault refused to serve or cache a recording artifact because the
+/// bytes the bastion returned did not hash to the digest on record for
+/// that recording.
+///
+/// Distinct from `recording.replayed` with `sha256_mismatch=true`, which
+/// the GUI reports *after* it received and assembled an artifact: this
+/// one says the bytes never left the vault. An auditor querying "who
+/// watched what" must not have refused reads folded into the answer.
+pub const RECORDING_ARTIFACT_REJECTED: &str = "recording.artifact.rejected";
 pub const RUSTION_AUDIT_WITNESS: &str = "rustion.audit.witness";
 /// Phase 9.1 — fired by `rustion_enrol_submit` when the operator
 /// submits a fresh enrolment request to a bastion.

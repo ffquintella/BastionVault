@@ -1003,6 +1003,209 @@ mod recordings_namespace_scope_tests {
         assert_eq!(data.get("considered").and_then(|v| v.as_u64()), Some(1));
         assert_eq!(data.get("skipped_format").and_then(|v| v.as_u64()), Some(1));
     }
+
+    /// `recordings/<rid>/blob/chunk/<n>` — the size-independent
+    /// playback route — resolves to the chunk handler, and is reached
+    /// under the same `recordings/` prefix that has shadowed siblings
+    /// before (see the keystroke-routes test above).
+    ///
+    /// No bastion is enrolled in a test vault, so the deepest an
+    /// artifact read can get is the upstream fetch. That is exactly the
+    /// discriminator this test needs: reaching "bastion not enrolled"
+    /// proves the request routed into the blob handler, whereas an
+    /// unrouted path fails earlier with a router/operation error. The
+    /// two are asserted apart rather than treated as "it errored".
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_recording_blob_chunk_route_resolves() {
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_recording_blob_chunk").await;
+
+        let call = |path: &str| {
+            let core = core.clone();
+            let token = root.clone();
+            let path = path.to_string();
+            async move {
+                let mut req = Request::new(&path);
+                req.operation = Operation::Read;
+                req.client_token = token;
+                core.handle_request(&mut req).await
+            }
+        };
+
+        let module = core.module_manager().get_module::<RustionModule>("rustion").unwrap();
+        let store = module.recordings_store().expect("recordings store initialized");
+        let mut entry = rec("rec_chunk", "evdc400");
+        entry.format = "rdp-rec".into();
+        entry.size_bytes = 17_800_000;
+        store.put(&entry).await.unwrap();
+
+        // The chunk route lands in the blob handler: it resolves the
+        // index entry, then fails on the un-enrolled bastion.
+        let err = call("rustion/recordings/rec_chunk/blob/chunk/0")
+            .await
+            .expect_err("no bastion is enrolled, so the artifact fetch must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not enrolled"),
+            "expected the un-enrolled-bastion failure from the blob handler, got: {msg}"
+        );
+
+        // Same handler, same failure, for the single-shot route — the
+        // chunk route is an addition, not a replacement.
+        let err = call("rustion/recordings/rec_chunk/blob")
+            .await
+            .expect_err("no bastion is enrolled");
+        assert!(err.to_string().contains("not enrolled"));
+
+        // An unknown recording is refused before any fetch.
+        let err = call("rustion/recordings/rec_nope/blob/chunk/0")
+            .await
+            .expect_err("unknown recording must not be served");
+        assert!(
+            err.to_string().contains("not in index"),
+            "expected the index miss, got: {err}"
+        );
+
+        // A non-numeric chunk index does not match the route at all, so
+        // it must fail in routing rather than reaching a handler that
+        // then has to guess what was meant.
+        let err = call("rustion/recordings/rec_chunk/blob/chunk/abc")
+            .await
+            .expect_err("a non-numeric chunk index is not a route");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("not enrolled") && !msg.contains("not in index"),
+            "a malformed chunk index must not reach the artifact fetch, got: {msg}"
+        );
+    }
+
+    /// Both artifact routes report whether the bytes they are serving
+    /// were checked against the digest on record, and a chunk served
+    /// from the cache reports the same verdict the first read did.
+    ///
+    /// The gate itself — bytes that contradict their digest are refused
+    /// — is unit-tested in `recordings::tests`, because reaching it
+    /// through a route needs a bastion to serve wrong bytes and a test
+    /// vault has none enrolled. What a route test *can* prove, and what
+    /// this one does, is the half that lives above the gate: an
+    /// artifact only ever reaches a caller through the cache, so the
+    /// verification state has to survive that trip and land in the
+    /// response. Pre-populating the cache is also the discriminator —
+    /// no bastion is enrolled here, so any read that did not come from
+    /// the cache would fail with "not enrolled" instead of answering.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_recording_blob_reports_digest_verification() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use crate::modules::rustion::blob_cache::Artifact;
+
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_recording_blob_verified").await;
+
+        let call = |path: &str| {
+            let core = core.clone();
+            let token = root.clone();
+            let path = path.to_string();
+            async move {
+                let mut req = Request::new(&path);
+                req.operation = Operation::Read;
+                req.client_token = token;
+                core.handle_request(&mut req).await
+            }
+        };
+
+        let module = core.module_manager().get_module::<RustionModule>("rustion").unwrap();
+        let store = module.recordings_store().expect("recordings store initialized");
+        let cache = module.blob_cache();
+
+        let bytes = b"rdp-rec artifact bytes".to_vec();
+        let digest = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(&bytes))
+        };
+
+        // ── A verified artifact ────────────────────────────────────
+        let mut entry = rec("rec_ok", "evdc400");
+        entry.format = "rdp-rec".into();
+        entry.sha256 = digest.clone();
+        entry.size_bytes = bytes.len() as u64;
+        store.put(&entry).await.unwrap();
+        cache.put(
+            "rec_ok",
+            &Artifact {
+                bytes: std::sync::Arc::new(zeroize::Zeroizing::new(bytes.clone())),
+                format: "rdp-rec".into(),
+                sha256: digest.clone(),
+                digest_verified: true,
+            },
+        );
+
+        let data = call("rustion/recordings/rec_ok/blob")
+            .await
+            .expect("the cached artifact is served without touching the bastion")
+            .and_then(|r| r.data)
+            .expect("blob response has data");
+        assert_eq!(data.get("sha256").and_then(|v| v.as_str()), Some(digest.as_str()));
+        assert_eq!(
+            data.get("digest_verified").and_then(|v| v.as_bool()),
+            Some(true),
+            "a verified artifact must say so on the single-shot route"
+        );
+        let served = STANDARD
+            .decode(data.get("bytes_b64").and_then(|v| v.as_str()).unwrap_or_default())
+            .expect("bytes_b64 decodes");
+        assert_eq!(served, bytes, "the served bytes are the ones that were verified");
+
+        // The chunk route reports the same verdict and the same
+        // whole-artifact digest: a caller must not have to choose a
+        // route to learn whether the vault checked.
+        let data = call("rustion/recordings/rec_ok/blob/chunk/0")
+            .await
+            .expect("chunk 0 is served from the cache")
+            .and_then(|r| r.data)
+            .expect("chunk response has data");
+        assert_eq!(data.get("digest_verified").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(data.get("sha256").and_then(|v| v.as_str()), Some(digest.as_str()));
+        assert_eq!(data.get("chunk_count").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(data.get("eof").and_then(|v| v.as_bool()), Some(true));
+        let served = STANDARD
+            .decode(data.get("bytes_b64").and_then(|v| v.as_str()).unwrap_or_default())
+            .expect("bytes_b64 decodes");
+        assert_eq!(served, bytes);
+
+        // ── An artifact with no digest on record ───────────────────
+        //
+        // It still plays — that is the compatibility half of this
+        // change — but the response must not imply the vault vouched
+        // for it. `rec()` leaves `sha256` empty, which is exactly the
+        // sidecar shape this case exists for.
+        let mut entry = rec("rec_nodigest", "evdc400");
+        entry.format = "rdp-rec".into();
+        assert!(entry.sha256.is_empty());
+        store.put(&entry).await.unwrap();
+        cache.put(
+            "rec_nodigest",
+            &Artifact {
+                bytes: std::sync::Arc::new(zeroize::Zeroizing::new(bytes.clone())),
+                format: "rdp-rec".into(),
+                sha256: String::new(),
+                digest_verified: false,
+            },
+        );
+
+        for route in ["rustion/recordings/rec_nodigest/blob", "rustion/recordings/rec_nodigest/blob/chunk/0"] {
+            let data = call(route)
+                .await
+                .unwrap_or_else(|e| panic!("{route} must still serve an unverifiable artifact: {e}"))
+                .and_then(|r| r.data)
+                .expect("response has data");
+            assert_eq!(
+                data.get("digest_verified").and_then(|v| v.as_bool()),
+                Some(false),
+                "{route} must not claim a verification it could not perform"
+            );
+            assert_eq!(data.get("sha256").and_then(|v| v.as_str()), Some(""));
+        }
+    }
 }
 mod namespace_credential_scope_tests {
     use std::collections::HashMap;

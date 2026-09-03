@@ -457,6 +457,15 @@ pub async fn reconcile_from_bastion(
 /// `GET /v1/recordings/{rid}/blob` endpoint. Returns the raw bytes
 /// + the format string from the `X-Recording-Format` header so the
 /// caller (the GUI) can route to the right player.
+///
+/// **These bytes are unverified.** This function performs the transfer
+/// and nothing else: the digest it returns is whatever the bastion
+/// claimed (falling back to the sidecar's), and it is never checked
+/// against the body. Every caller that hands the bytes onwards — to a
+/// player, to a cache, to a derived index — must run them through
+/// [`verify_artifact_digest`] first. [`fetch_blob_cached`] does;
+/// `keystroke_index` does its own equivalent gate because it needs to
+/// report a mismatch as an index *state* rather than as an error.
 #[maybe_async::maybe_async]
 pub async fn fetch_blob(
     targets: &super::store::RustionStore,
@@ -521,9 +530,296 @@ pub async fn fetch_blob(
     Ok((bytes.to_vec(), format, sha256))
 }
 
+/// The digest an artifact is required to hash to, given what the index
+/// entry and the response claim. `None` when nothing on record claims
+/// one.
+///
+/// The sidecar's `sha256` wins whenever it is present. It arrived over
+/// the signed `recording.ready` webhook — verified against the
+/// originating bastion's pinned key before it was persisted — whereas
+/// the `x-recording-sha256` header is supplied by the same party, in
+/// the same response, as the bytes it describes, and so cannot vouch
+/// for them on its own. Falling back to the header when the sidecar
+/// disagrees would let the serving side choose which digest it is
+/// checked against, which is the silent downgrade this gate exists to
+/// prevent.
+fn expected_artifact_digest<'a>(sidecar: &'a str, response: &'a str) -> Option<&'a str> {
+    let sidecar = sidecar.trim();
+    if !sidecar.is_empty() {
+        return Some(sidecar);
+    }
+    let response = response.trim();
+    if response.is_empty() {
+        None
+    } else {
+        Some(response)
+    }
+}
+
+/// Verify artifact bytes against the digest on record for that
+/// recording. The gate the playback path runs before it serves or
+/// caches anything, mirroring the one `keystroke_index` runs before it
+/// persists derived text.
+///
+/// * `Ok(Some(digest))` — the bytes hash to the digest on record. The
+///   returned value is the *computed* digest (lowercase hex), which is
+///   what the vault then reports for the artifact: it is the only one
+///   of the three candidate strings that is demonstrably a fact about
+///   the bytes being served.
+/// * `Ok(None)` — nothing on record claims a digest, so there is
+///   nothing to check against. The bytes are served, and the caller is
+///   told they are unverified rather than being left to assume
+///   otherwise. This is the compatibility case: recordings whose
+///   sidecar predates the digest, or landed without one, keep playing.
+/// * `Err(..)` — the bytes contradict the digest on record. Nothing is
+///   served and nothing is cached.
+///
+/// The mismatch is a **409**, deliberately not the 502 that a failed
+/// upstream fetch produces. 502 says "the bastion could not answer,
+/// try again"; this is deterministic — the same bytes will fail the
+/// same way on every retry — and it is a different operator response
+/// (go look at the artifact on the bastion) than an unreachable
+/// bastion. The status is what lets those two be told apart without
+/// parsing a message.
+pub fn verify_artifact_digest(
+    recording_id: &str,
+    bytes: &[u8],
+    sidecar_sha256: &str,
+    response_sha256: &str,
+) -> Result<Option<String>, RvError> {
+    use sha2::{Digest, Sha256};
+
+    let Some(expected) = expected_artifact_digest(sidecar_sha256, response_sha256) else {
+        log::warn!(
+            "rustion: recording `{recording_id}` has no digest on record ({} bytes); serving it \
+             unverified — `digest_verified` is false on the response",
+            bytes.len()
+        );
+        return Ok(None);
+    };
+    let got = hex::encode(Sha256::digest(bytes));
+    if !got.eq_ignore_ascii_case(expected) {
+        log::warn!(
+            "{}: recording_id={recording_id} sha256_mismatch=true size_bytes={} served=false",
+            crate::audit::RECORDING_ARTIFACT_REJECTED,
+            bytes.len()
+        );
+        return Err(crate::bv_error_response_status!(
+            409,
+            &format!(
+                "recording `{recording_id}`: artifact digest {}… does not match the recorded \
+                 {}…; refusing to serve",
+                &got[..got.len().min(12)],
+                &expected[..expected.len().min(12)]
+            )
+        ));
+    }
+    Ok(Some(got))
+}
+
+/// Fetch a recording artifact through the [`BlobCache`], so a chunked
+/// playback pays for one upstream fetch rather than one per chunk.
+///
+/// A cache miss delegates to [`fetch_blob`], runs the fetched bytes
+/// through [`verify_artifact_digest`], and only then stores the
+/// result; a hit returns the resident copy. Because the gate sits
+/// *before* the insert, the cache holds no artifact that failed its
+/// digest, and a chunked read — which serves from the cache for every
+/// chunk after the first — cannot hand out corrupted bytes one slice
+/// at a time. A cache hit is not re-hashed: re-verifying per chunk
+/// would hash the whole artifact once per chunk, and the entry it
+/// would be re-checking was already verified on the way in.
+///
+/// The format reported is the one that came with the artifact,
+/// unchanged. The digest reported is the verified one when there was a
+/// digest to verify against, and `digest_verified` on the returned
+/// [`Artifact`] says which of those two happened — the vault never
+/// reports a digest it computed itself as though it were an
+/// independent attestation.
+///
+/// Concurrent misses for the same recording may both fetch; the second
+/// insert simply replaces the first. Left as a benign race on purpose:
+/// a player reads its chunks in order, so the window only opens when
+/// two operators start the *same* recording within one fetch of each
+/// other, and closing it would mean holding a lock across an await in
+/// a module that also compiles under `sync_handler`.
+///
+/// [`BlobCache`]: crate::blob_cache::BlobCache
+/// [`Artifact`]: crate::blob_cache::Artifact
+#[maybe_async::maybe_async]
+pub async fn fetch_blob_cached(
+    targets: &super::store::RustionStore,
+    recordings: &RecordingsStore,
+    cache: &crate::blob_cache::BlobCache,
+    recording_id: &str,
+) -> Result<crate::blob_cache::Artifact, RvError> {
+    if let Some(hit) = cache.get(recording_id) {
+        log::debug!(
+            "rustion: recording `{recording_id}` served from the blob cache ({} bytes)",
+            hit.bytes.len()
+        );
+        return Ok(hit);
+    }
+    // The sidecar digest, read before the fetch so the check below is
+    // against the chain-of-custody value rather than against whatever
+    // the response carried. `fetch_blob` re-reads the same entry; one
+    // extra decrypted read of a small record, once per cache miss, is
+    // the price of not widening `fetch_blob`'s return type for the one
+    // caller that needs both digests separately.
+    let sidecar_sha256 = recordings
+        .get(recording_id)
+        .await?
+        .map(|e| e.sha256)
+        .unwrap_or_default();
+    let (bytes, format, response_sha256) = fetch_blob(targets, recordings, recording_id).await?;
+    // Into `Zeroizing` before the gate, so bytes that fail it are wiped
+    // on the way out rather than left in the allocator.
+    let bytes: crate::blob_cache::ArtifactBytes = Arc::new(zeroize::Zeroizing::new(bytes));
+    let verified =
+        verify_artifact_digest(recording_id, bytes.as_slice(), &sidecar_sha256, &response_sha256)?;
+    let artifact = crate::blob_cache::Artifact {
+        bytes,
+        format,
+        digest_verified: verified.is_some(),
+        sha256: verified.unwrap_or(response_sha256),
+    };
+    cache.put(recording_id, &artifact);
+    Ok(artifact)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    /// Bytes that hash to the sidecar's digest pass, and what comes
+    /// back is the *computed* digest in lowercase hex — not whichever
+    /// of the input strings happened to be echoed.
+    #[test]
+    fn matching_bytes_verify_and_report_the_computed_digest() {
+        let bytes = b"rdp-rec artifact";
+        let digest = sha256_hex(bytes);
+        let verified = verify_artifact_digest("rec_1", bytes, &digest, "")
+            .expect("matching bytes verify");
+        assert_eq!(verified.as_deref(), Some(digest.as_str()));
+
+        // Sidecars have been seen carrying upper-case hex and stray
+        // whitespace; neither is a mismatch.
+        let shouty = format!("  {}  ", digest.to_uppercase());
+        let verified = verify_artifact_digest("rec_1", bytes, &shouty, "")
+            .expect("case and padding are not a mismatch");
+        assert_eq!(
+            verified.as_deref(),
+            Some(digest.as_str()),
+            "the reported digest is normalized to computed lowercase hex"
+        );
+    }
+
+    /// The gate. Bytes that contradict the digest on record are refused
+    /// outright — the caller gets an error, not the bytes with a
+    /// warning attached.
+    #[test]
+    fn mismatching_bytes_are_refused_with_a_distinguishable_status() {
+        let err = verify_artifact_digest("rec_1", b"tampered", &"ab".repeat(32), "")
+            .expect_err("bytes that contradict the digest must not be served");
+        // 409, not the 502 an unreachable bastion produces: a retry
+        // cannot fix this, and an operator has to tell the two apart.
+        let RvError::ErrResponseStatus(status, msg) = &err else {
+            panic!("a digest mismatch must carry an HTTP status, got: {err:?}");
+        };
+        assert_eq!(
+            *status, 409,
+            "a digest mismatch must be distinguishable from an upstream fetch failure"
+        );
+        assert!(
+            msg.contains("does not match the recorded"),
+            "the message must name the failure, got: {msg}"
+        );
+        assert!(msg.contains("rec_1"), "the message must name the recording, got: {msg}");
+    }
+
+    /// The migration case, and the reason this is not simply "hard-fail
+    /// always": a recording whose sidecar carries no digest keeps
+    /// playing, and the response says the bytes were not verified
+    /// rather than implying they were.
+    #[test]
+    fn an_artifact_with_no_digest_on_record_is_served_unverified() {
+        let verified = verify_artifact_digest("rec_1", b"anything", "", "")
+            .expect("nothing to check against is not a failure");
+        assert!(verified.is_none(), "an unverifiable artifact reports no verified digest");
+
+        // Whitespace-only is "no digest", not a digest that never matches.
+        let verified = verify_artifact_digest("rec_1", b"anything", "   ", "  ")
+            .expect("a blank digest is no digest");
+        assert!(verified.is_none());
+    }
+
+    /// With no sidecar digest, the response header is still a digest
+    /// and is still enforced — a bastion that contradicts its own
+    /// header is caught even when BV has nothing of its own on record.
+    #[test]
+    fn the_response_digest_is_enforced_when_the_sidecar_has_none() {
+        let bytes = b"rdp-rec artifact";
+        let digest = sha256_hex(bytes);
+        assert_eq!(
+            verify_artifact_digest("rec_1", bytes, "", &digest).unwrap().as_deref(),
+            Some(digest.as_str())
+        );
+        verify_artifact_digest("rec_1", bytes, "", &"cd".repeat(32))
+            .expect_err("a response digest that the body contradicts is still a mismatch");
+    }
+
+    /// The sidecar wins, and there is no fallback to the response
+    /// header when the two disagree. Otherwise the party serving the
+    /// bytes would get to pick the digest it is checked against, which
+    /// is the whole failure mode this gate exists for.
+    #[test]
+    fn the_sidecar_digest_wins_and_the_response_cannot_override_it() {
+        let bytes = b"rdp-rec artifact";
+        let sidecar = sha256_hex(bytes);
+
+        // Sidecar right, header wrong: the bytes are the sidecar's, so
+        // they are served, and the digest reported is the true one.
+        let verified = verify_artifact_digest("rec_1", bytes, &sidecar, &"ef".repeat(32))
+            .expect("bytes matching the sidecar are served");
+        assert_eq!(verified.as_deref(), Some(sidecar.as_str()));
+
+        // Header "right", sidecar wrong: refused. The bastion agreeing
+        // with itself proves nothing.
+        let other = sha256_hex(b"different bytes");
+        verify_artifact_digest("rec_1", bytes, &other, &sidecar)
+            .expect_err("a matching response header must not excuse a sidecar mismatch");
+
+        assert_eq!(expected_artifact_digest("side", "resp"), Some("side"));
+        assert_eq!(expected_artifact_digest(" ", "resp"), Some("resp"));
+        assert_eq!(expected_artifact_digest("", ""), None);
+    }
+
+    /// A verified artifact keeps its verification state across the
+    /// cache, so a chunk served from a hit reports what chunk 0
+    /// reported. The cache is the only place these bytes are reachable
+    /// from after the fetch, so this flag has to survive the round
+    /// trip.
+    #[test]
+    fn the_cache_round_trips_the_verification_state() {
+        let cache = crate::blob_cache::BlobCache::new();
+        for verified in [true, false] {
+            let art = crate::blob_cache::Artifact {
+                bytes: Arc::new(zeroize::Zeroizing::new(vec![1u8; 32])),
+                format: "rdp-rec".into(),
+                sha256: "aa".repeat(32),
+                digest_verified: verified,
+            };
+            cache.put("rec_1", &art);
+            let hit = cache.get("rec_1").expect("cached");
+            assert_eq!(hit.digest_verified, verified);
+            assert_eq!(hit.sha256, art.sha256);
+        }
+    }
 
     /// A `RecordingEntry` written before Phase 8.6 must still decode.
     ///

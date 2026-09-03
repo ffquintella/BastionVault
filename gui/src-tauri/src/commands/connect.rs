@@ -553,17 +553,14 @@ pub async fn session_open_rdp(
             Err(e) => return Err(CommandError::from(e)),
         },
     };
-    // Clipboard redirection (MS-RDPECLIP). Off unless the profile asks
-    // for it and says which way: the clipboard is a data channel into
-    // and out of a privileged session, so nobody gets one by accident
-    // on upgrade. See features/rdp-clipboard-redirection.md.
-    let clipboard = match profile.get("rdp_clipboard").and_then(|v| v.as_str()) {
-        None => session::rdp_clipboard::ClipboardDirection::Off,
-        Some(other) => match session::rdp_clipboard::parse_clipboard_direction(other) {
-            Ok(dir) => dir,
-            Err(e) => return Err(CommandError::from(e)),
-        },
-    };
+    // Clipboard redirection (MS-RDPECLIP). Bidirectional unless the
+    // resource says otherwise — see `PROFILE_DEFAULT_DIRECTION` for
+    // why the default is on and what the resource can set instead.
+    // A present-but-unrecognised value is still an error, never a
+    // silent fallback. See features/rdp-clipboard-redirection.md.
+    let clipboard =
+        session::rdp_clipboard::direction_from_profile(profile.get("rdp_clipboard").and_then(|v| v.as_str()))
+            .map_err(CommandError::from)?;
 
     // Phase 7.4 — consult the Rustion policy resolver. Mirrors the SSH
     // path: when transport requires (or prefers) a bastion AND the
@@ -802,6 +799,34 @@ pub async fn session_input_rdp_mouse(state: State<'_, AppState>, request: RdpInp
         _ => session::rdp::RdpControl::PointerMove { x: request.x, y: request.y },
     };
     session::rdp::send_control(&state, &request.token, ctl).await.map_err(CommandError::from)
+}
+
+#[derive(Deserialize)]
+pub struct RdpInputWheelRequest {
+    pub token: String,
+    pub x: u16,
+    pub y: u16,
+    /// Rotation in RDP wheel units (120 per physical notch), already
+    /// accumulated from DOM pixel deltas by the session window.
+    /// Positive is up (vertical) / right (horizontal).
+    pub units: i32,
+    pub horizontal: bool,
+}
+
+#[tauri::command]
+pub async fn session_input_rdp_wheel(state: State<'_, AppState>, request: RdpInputWheelRequest) -> CmdResult<()> {
+    session::rdp::send_control(
+        &state,
+        &request.token,
+        session::rdp::RdpControl::PointerWheel {
+            units: request.units,
+            horizontal: request.horizontal,
+            x: request.x,
+            y: request.y,
+        },
+    )
+    .await
+    .map_err(CommandError::from)
 }
 
 #[derive(Deserialize)]

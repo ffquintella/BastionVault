@@ -12,20 +12,27 @@ clipboard inside the Tauri host.
 
 ---
 
-## 1. Why this is not simply "on"
+## 1. On by default, disallowable per resource
 
 BastionVault is a privileged-access product and the clipboard is a
-**bidirectional data channel into and out of a privileged session**. Turning it
-on unconditionally would:
+**bidirectional data channel into and out of a privileged session**:
 
-- give every RDP session an unlogged egress path for whatever the operator can
-  see on the target (the exact thing a session recording exists to make
-  accountable), and
-- give every session an ingress path into a production host.
+- it is an egress path for whatever the operator can see on the target (the
+  exact thing a session recording exists to make accountable), and
+- an ingress path into a production host.
 
-So the channel is **opt-in per connection profile and off by default**, with an
-explicit direction, a size cap, and observable counters. An operator who wants
-it says so; nobody gets it by accident on upgrade.
+Phase 1 shipped it **off by default**, opt-in per profile. That was reversed
+after operator feedback: a session where you cannot paste a command in or
+carry an error message back out pushes people onto a direct RDP client that
+the bastion never sees, which is the worse outcome. So the channel is now
+**on in both directions unless the resource disallows it**, and the controls
+that made the opt-in defensible all stay: explicit direction, text only, a
+size cap, no logging of content, and per-session counters.
+
+**Disallowing it is a per-resource setting** — `rdp_clipboard` on the
+connection profile, in the RDP profile editor's *Clipboard redirection*
+select. `off` withholds the channel entirely; the two single directions
+withhold one side. §2 is the table.
 
 This does not conflict with the existing "credentials never reach the
 clipboard" property in [resource-connect.md](resource-connect.md) §Security:
@@ -44,7 +51,8 @@ the existing `rdp_bulk_compression` key exactly.
 
 | Value | Meaning |
 |---|---|
-| `off`, `none`, `""` (absent) | **Default.** The `CLIPRDR` channel is not attached at all — nothing is advertised to the server, so the remote desktop sees a client with no clipboard redirection. |
+| *absent* | **Default** — same as `bidirectional`. `rdp_clipboard::PROFILE_DEFAULT_DIRECTION`, resolved in `direction_from_profile`. |
+| `off`, `none`, `""` | The `CLIPRDR` channel is not attached at all — nothing is advertised to the server, so the remote desktop sees a client with no clipboard redirection. |
 | `host-to-session`, `in` | Host clipboard → session only. The remote may *request* our clipboard; remote copies are ignored and never touch the host clipboard. |
 | `session-to-host`, `out` | Session clipboard → host only. Remote copies land on the host clipboard; our own clipboard is never advertised or served to the remote. |
 | `bidirectional`, `both`, `on` | Both directions. |
@@ -155,7 +163,7 @@ a rate limit of its own, and is tracked as Phase 4 below rather than bolted on.
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | `CF_UNICODETEXT` both directions, `rdp_clipboard` profile key, bridge + backend + pump wiring, loop detector, size cap, counters | **In Progress** |
+| 1 | `CF_UNICODETEXT` both directions, `rdp_clipboard` profile key (bidirectional unless the resource disallows it — see §1), bridge + backend + pump wiring, loop detector, size cap, counters | **In Progress** |
 | 2 | Images (`CF_DIB` / `CF_DIBV5`) | Todo |
 | 3 | File copy (`CF_HDROP` + `FileContents`), gated by its own policy value — not folded into `bidirectional` | Todo |
 | 4 | Per-transfer audit rows (batched, rate-limited) + a four-tier lockable policy matching the transport policy tiers, so an admin can pin clipboard off for a resource type / asset group / global | Todo |
@@ -165,7 +173,11 @@ a rate limit of its own, and is tracked as Phase 4 below rather than bolted on.
 
 ## 7. Security notes
 
-- Off by default. Upgrading changes no session's behaviour.
+- On by default, and **a resource can disallow it** (`rdp_clipboard: off`) or
+  narrow it to one direction. Absent means bidirectional; a present but
+  unrecognised value is a connect-time error, never a fallback in either
+  direction. Note the consequence of the reversal: an existing profile with no
+  `rdp_clipboard` key gains a clipboard on upgrade, where before it did not.
 - Direction is explicit; `host-to-session` and `session-to-host` are separately
   expressible because they are different risks (ingress vs egress).
 - Size-capped, never truncated.

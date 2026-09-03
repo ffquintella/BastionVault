@@ -82,10 +82,15 @@ const TEXT_FORMAT: ClipboardFormatId = ClipboardFormatId::CF_UNICODETEXT;
 
 /// Which way clipboard content may travel. Ingress and egress are
 /// separately expressible because they are different risks.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+///
+/// Deliberately no `Default` impl: the value an RDP profile gets when
+/// it says nothing is [`PROFILE_DEFAULT_DIRECTION`], and a second,
+/// differently-valued `default()` sitting next to it is how a caller
+/// ends up silently opening or closing a clipboard channel it did not
+/// mean to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClipboardDirection {
-    /// The `CLIPRDR` channel is not attached. Default.
-    #[default]
+    /// The `CLIPRDR` channel is not attached.
     Off,
     /// Host clipboard → session only. The remote may request ours;
     /// remote copies never touch the host clipboard.
@@ -121,6 +126,20 @@ impl ClipboardDirection {
     }
 }
 
+/// What a profile with no `rdp_clipboard` key gets.
+///
+/// Copy and paste between the operator's machine and the target works
+/// unless the resource turns it off — an operator who cannot paste a
+/// command or carry an error message back out routes around the
+/// bastion, and that is the worse outcome. Set `rdp_clipboard` to
+/// `off` on the resource to withhold the channel entirely, or to one
+/// of the single directions to allow only ingress or only egress.
+///
+/// This is a *posture*, not an oversight: everything the channel
+/// carries is still text-only, capped at [`MAX_CLIPBOARD_BYTES`],
+/// never logged, and counted per session.
+pub const PROFILE_DEFAULT_DIRECTION: ClipboardDirection = ClipboardDirection::Bidirectional;
+
 /// Parse the `rdp_clipboard` profile value.
 ///
 /// Rejects anything unrecognised rather than falling back to a
@@ -138,6 +157,20 @@ pub fn parse_clipboard_direction(value: &str) -> Result<ClipboardDirection, Stri
             "rdp: unknown rdp_clipboard `{other}` (expected one of: off, \
              host-to-session, session-to-host, bidirectional)"
         )),
+    }
+}
+
+/// Resolve the session's clipboard direction from the profile's
+/// `rdp_clipboard` value, absent or not.
+///
+/// The two cases are deliberately different: *absent* means the
+/// resource never said anything and gets [`PROFILE_DEFAULT_DIRECTION`];
+/// *present but unrecognised* is a misconfiguration and fails the
+/// connect rather than resolving to anything in either direction.
+pub fn direction_from_profile(value: Option<&str>) -> Result<ClipboardDirection, String> {
+    match value {
+        None => Ok(PROFILE_DEFAULT_DIRECTION),
+        Some(raw) => parse_clipboard_direction(raw),
     }
 }
 
@@ -580,6 +613,31 @@ pub fn channel() -> (PumpProxy, tokio_mpsc::UnboundedReceiver<ClipboardMessage>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_resource_that_says_nothing_gets_a_working_clipboard() {
+        let dir = direction_from_profile(None).expect("absent is not an error");
+        assert_eq!(dir, PROFILE_DEFAULT_DIRECTION);
+        assert!(dir.allows_host_to_session(), "the operator must be able to paste into the target");
+        assert!(dir.allows_session_to_host(), "and to carry content back out");
+    }
+
+    #[test]
+    fn a_resource_can_withhold_the_clipboard_entirely() {
+        assert_eq!(direction_from_profile(Some("off")), Ok(ClipboardDirection::Off));
+        assert!(!ClipboardDirection::Off.enabled(), "`off` attaches no CLIPRDR channel");
+        // And each direction can be withheld on its own.
+        let ingress = direction_from_profile(Some("host-to-session")).unwrap();
+        assert!(ingress.allows_host_to_session() && !ingress.allows_session_to_host());
+        let egress = direction_from_profile(Some("session-to-host")).unwrap();
+        assert!(egress.allows_session_to_host() && !egress.allows_host_to_session());
+    }
+
+    #[test]
+    fn a_typo_fails_the_connect_instead_of_defaulting_to_on() {
+        let err = direction_from_profile(Some("bidrectional")).expect_err("a typo must not resolve");
+        assert!(err.contains("unknown rdp_clipboard"), "{err}");
+    }
 
     #[test]
     fn direction_parsing_is_strict() {

@@ -2625,35 +2625,38 @@ function ConnectionProfileEditor({
             <span className="font-medium">Clipboard redirection</span>
             <select
               className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-sm"
-              value={profile.rdp_clipboard ?? "off"}
+              value={profile.rdp_clipboard ?? "bidirectional"}
               onChange={(e) =>
                 update(
                   "rdp_clipboard",
-                  e.target.value === "off"
+                  e.target.value === "bidirectional"
                     ? undefined
                     : (e.target.value as RdpClipboardDirection),
                 )
               }
             >
-              <option value="off">Off (default)</option>
+              <option value="bidirectional">Both directions (default)</option>
               <option value="host-to-session">
-                Host → session (paste into the target)
+                Host → session only (paste into the target)
               </option>
               <option value="session-to-host">
-                Session → host (copy out of the target)
+                Session → host only (copy out of the target)
               </option>
-              <option value="bidirectional">Both directions</option>
+              <option value="off">Off (no clipboard channel)</option>
             </select>
             <span className="text-xs text-[var(--color-text-muted)]">
-              Ctrl+C on one side, paste on the other. Off by default because
-              the clipboard is a data channel into <em>and</em> out of a
-              privileged session: &ldquo;session → host&rdquo; is an egress
-              path for anything the operator can see on the target, and
-              &ldquo;host → session&rdquo; an ingress path into it. Text only,
-              capped at 1&nbsp;MiB per transfer, with per-session counters on
-              the session window. Content is never logged.
+              Ctrl+C on one side, paste on the other. On in both directions
+              unless this resource says otherwise, because an operator who
+              cannot paste a command or carry an error message back out
+              routes around the bastion. Narrow it where the target warrants
+              it: &ldquo;session → host&rdquo; is an egress path for anything
+              the operator can see on the target, &ldquo;host → session&rdquo;
+              an ingress path into it, and &ldquo;off&rdquo; attaches no
+              channel at all. Text only, capped at 1&nbsp;MiB per transfer,
+              with per-session counters on the session window. Content is
+              never logged.
             </span>
-            {(profile.rdp_clipboard ?? "off") !== "off" && (
+            {(profile.rdp_clipboard ?? "bidirectional") !== "off" && (
               <span className="text-xs text-[var(--color-text-muted)]">
                 <strong className="text-[var(--color-text)]">
                   Bastion-brokered sessions:
