@@ -1196,9 +1196,18 @@ The replay window, the WASM module slot, and the signed-URL plumbing are all in 
   - `ControlPlaneState.recording_url_signing_secret: Option<Arc<[u8; 32]>>` — `None` returns `503 signed_url_disabled` on both routes. Production wires a per-Rustion 32-byte secret at startup.
   - `hmac` workspace dep added to rustion-control-plane.
 
-### Phase 8.4 — RDP bitmap-update visual codec — **Blocked on the recorder** (BV 0.7.36; decoder corrected in [Unreleased])
+### Phase 8.4 — RDP bitmap-update visual codec — **Superseded by Phase 8.5** (BV 0.7.36)
 
 In-tree bitmap decoder for `.rdp-rec` recordings; the replay window routes to a canvas player instead of a text summary.
+
+> **Resolved by Phase 8.5.** The Rustion-side defects catalogued below are
+> fixed and released, and the producer now runs a full client-side graphics
+> decode, recording *decoded pixels* as a new `0x07` event type in format
+> version 3. The BastionVault-side conclusion in this section still stands
+> and is worth keeping: its rejection of those 1779 events was correct —
+> the recordings genuinely contained nothing decodable. The legacy `0x01`
+> path is unchanged and still the only path for version-2 recordings.
+> The analysis below is retained as the historical record.
 
 > **Current state: RDP replay renders nothing, and the remaining cause is on
 > the Rustion side.** Verified against a production recording
@@ -1245,6 +1254,11 @@ In-tree bitmap decoder for `.rdp-rec` recordings; the replay window routes to a 
 > Until the recorder emits validated rectangles, replay of RDP sessions
 > shows the "no video" banner with `invalid-geometry` as the dominant
 > reason. Asciicast (SSH) replay is unaffected.
+>
+> *(Historical: both sides are now fixed. The recorder emits validated
+> rectangles — or, on a target that never uses the legacy bitmap path,
+> nothing at all — and format version 3 carries decoded pixels. See
+> Phase 8.5.)*
 
 - **`gui/wasm/rdp-replay/`** decoder grew the full TS_BITMAP_DATA path. `decode_rdp_rec(bytes) → DecodeOutput` exposes per-rectangle `Frame { timestamp_ms, x, y, w, h, bpp, compressed, decoder, rgba, error }` records ready for canvas blitting, plus a `decoder_counts` BTreeMap keyed by `"uncompressed" | "rle16" | "rle24" | "unsupported" | "error"`. Implements:
   - **Recorder rect header** (`x:u16 | y:u16 | w:u16 | h:u16`, 8 bytes) followed by **MS-RDPBCGR § 2.2.9.1.1.3.1.2.2 `TS_BITMAP_DATA`** — one rectangle per `EVENT_GRAPHICS` event. The rect is validated against the recording header's `screen_width`/`screen_height` before any `w * h * 4` allocation; failures are counted as `invalid-geometry`, distinct from codec failures.
@@ -1262,6 +1276,215 @@ In-tree bitmap decoder for `.rdp-rec` recordings; the replay window routes to a 
 - NSCodec — separate large codec.
 - RemoteFX — separate large codec.
 - Bitmap-cache references (cached glyph bitmaps). Frames that hit any of these paths show in the "skipped" counter; the operator can still see the surrounding session and download the raw `.rdp-rec` for an external player.
+
+### Phase 8.5 — `.rdp-rec` version 3: decoded-pixel replay — **Done** ([Unreleased])
+
+RDP session replay renders again. The producer side (Rustion) is released and
+unchanged by this phase; this is the consumer half.
+
+**Why version 3 exists.** Two findings came out of the Phase 8.4
+investigation. First, the recording tap's framing and `TS_UPDATE_BITMAP_DATA`
+parser were broken, and a session with no bitmap updates now records **zero**
+graphics events instead of thousands of junk ones. Second, and decisively:
+the target (`evdc400`, a modern Windows host) does not use the legacy
+`TS_UPDATE_BITMAP` path **at all** — it draws over surface commands or the
+RDP 8+ EGFX pipeline — so even a perfect legacy parser records nothing.
+Rustion therefore now runs a full client-side graphics decode (`ironrdp`
+`ActiveStage` plus the EGFX pipeline over `drdynvc`, including zgfx and the
+RemoteFX / planar / NSCodec / progressive codecs) over a copy of the relayed
+stream, and records the **decoded pixels**. The artifact holds pixels, not
+compressed graphics commands — deliberately, so a consumer needs no codec
+stack and the recording stays readable years from now. **Replay on this side
+is an inflate and a blit; do not add an RDP codec here.**
+
+**Format, in one table.** Version 3 is purely additive over version 2 — no
+existing event type or field changed.
+
+| version | geometry | `0x01` | `0x07` | Behaviour |
+|---|---|---|---|---|
+| 1 | hardcoded `1920x1080`, not a measurement | undelimited raw stream slice | — | metadata only, explicit user-visible state |
+| 2 | negotiated desktop, `0` = unknown | one `TS_BITMAP_DATA` | — | unchanged |
+| 3 | as version 2 | as version 2 | decoded RGBA8888 pixels | both paths decoded |
+| >3 | — | — | — | decode what is understood, skip the rest by `payload_len`, say the file came from a newer bastion |
+
+`0x07` payload: `x:u16 y:u16 w:u16 h:u16 format:u8 encoding:u8` + data.
+`format = 1` is RGBA8888 — R,G,B,A order, row-major, **top-down**, no row
+padding. `encoding = 0` is raw, `encoding = 1` is an RFC 1950 zlib stream
+inflating to exactly `width * height * 4` bytes. Both encodings appear in the
+same file (the producer stores raw under 512 bytes or when compression did not
+shrink the region). Full spec + recommended consumer behaviour:
+[`docs/rustion-integration.md` §5.1](../docs/rustion-integration.md).
+
+| Deliverable | Location |
+|---|---|
+| Version dispatch on the header `version`; version 1 becomes an explicit "metadata only, graphics undecodable" state instead of an accidental consequence of validation rejecting everything | [gui/src/lib/rdpDecoder.ts](../gui/src/lib/rdpDecoder.ts), [gui/wasm/rdp-replay/src/lib.rs](../gui/wasm/rdp-replay/src/lib.rs) |
+| `0x07` parse + inflate + length validation + bounds check + RGBA8888 top-down blit | same |
+| `0x06` desktop-size events applied in file order: rectangles validate against the most recent `0x06` and fall back to the header; a differing size resizes and clears the canvas | same |
+| Ordered `timeline` (bitmap / surface / desktop) so a `0x06` cannot be applied out of order relative to the paints around it | same |
+| Lazy `0x07` inflate — the index carries offsets, `renderSurfaceUpdate` / `decode_surface_update` inflates one region at the moment of the blit | same |
+| Skip-reason taxonomy extended: `version-1-undecodable`, `surface-unexpected-version`, `surface-truncated`, `surface-unknown-format`, `surface-unknown-encoding`, `surface-length-mismatch`, `surface-inflate-failed`, `unknown-event`, alongside the existing `invalid-geometry` / `unsupported` / `error` | same |
+| Truncated-final-record reporting: the complete prefix still replays, the partial record produces no event, and the player says so | same |
+| "This session's graphics were not recordable" state for a version-3 file with zero `0x01` and zero `0x07` events, pointing at the bastion's `recording_graphics_unrepresentable` audit entry | [gui/src/components/RdpReplayCanvas.tsx](../gui/src/components/RdpReplayCanvas.tsx) |
+| Player walks the timeline, reports per-bucket skip reasons in a breakdown, and names the format version | same |
+| Both `.rdp-rec` summary views now call the shared decoder instead of two hand-rolled event walkers that counted only `0x01`/`0x02`/`0x03` — a version-3 recording no longer reports "0 graphics frames" | [gui/src/routes/RecordingsPage.tsx](../gui/src/routes/RecordingsPage.tsx), [gui/src/routes/SessionReplayWindow.tsx](../gui/src/routes/SessionReplayWindow.tsx) |
+| `fflate` (GUI) and `miniz_oxide` (reference crate) for the zlib inflate. Both are given an output bound of `w * h * 4 + 1` so a stream that inflates past what the region claims is an error rather than a silent truncation | [gui/package.json](../gui/package.json), [gui/wasm/rdp-replay/Cargo.toml](../gui/wasm/rdp-replay/Cargo.toml) |
+| 28 vitest + 31 Rust tests, fixtures built from the format spec with zlib streams from independent implementations (Node's zlib; hand-rolled RFC 1950 stored blocks + a CPython-zlib blob on the Rust side) | [gui/src/test/rdpDecoder.test.ts](../gui/src/test/rdpDecoder.test.ts), [gui/wasm/rdp-replay/src/lib.rs](../gui/wasm/rdp-replay/src/lib.rs) |
+
+**Validation is unchanged in strictness.** Every pre-existing rejection path
+survives, including the geometry check that made the black-canvas bug
+diagnosable, and `0x07` regions go through the same `check_geometry` as
+`0x01`. A region outside the desktop is skipped and counted, never clamped.
+There is a regression test asserting exactly that, because "make the error go
+away" would be the wrong fix here.
+
+**Ingestion is untouched.** The recording sidecar (`recording_id`,
+`session_id`, `authority`, `format` — still `"rdp-rec"`, `sha256`,
+`size_bytes`, `started_at`, `finished_at`, `target_host`, `target_user`,
+`correlation_id`) means exactly what it meant before, so the `recording.ready`
+webhook and the 24 h pull fallback needed no change.
+
+**Known gap, on the Rustion side.** When the bastion cannot represent a
+session's graphics — the remaining known cause is AVC420 / AVC444 (H.264)
+over EGFX, which it counts but does not decode — it records the reason as a
+`RECORDING_GRAPHICS_CENSUS` log event and a `recording_graphics_unrepresentable`
+audit entry, but **not** in the sidecar BastionVault imports. So the player
+names the state and points at the bastion audit chain rather than inventing a
+cause it cannot see. Carrying that signal in the sidecar is an open item on
+the Rustion roadmap; when it lands, the notice can name the codec directly.
+
+### Phase 8.6 — `.rdp-rec` version 4: searchable keystroke transcripts — **Done** ([Unreleased])
+
+An auditor asking *"which session typed `net user /add`?"* previously had to
+replay every candidate recording and read the screen with their own eyes. From
+version 4 the bastion records a **keystroke transcript** — the typed text,
+decoded from scancodes through the session's own keyboard layout, grouped into
+runs, adjudicated for secrets, and summarised in a trailer at the end of the
+same `.rdp-rec`. This is the consumer half: decode, index, search, render.
+
+**No new fetch path, and that is the point.** The transcript is inside the
+artifact BastionVault already pulls, so it is already covered by the sidecar's
+`sha256` and by the existing chain of custody. There is no `<sid>.keys.jsonl`,
+no new endpoint on the bastion, and no second integrity story to build. A
+second file would have had neither. Rustion's authoritative specification is
+`docs/rdp-keystroke-metadata.md`; the operator-facing summary is
+[`docs/rustion-integration.md` §5.2](../docs/rustion-integration.md).
+
+**Additive over version 3, and asserted to be.** Version 4 adds two record
+types — `0x08` text input and a `0x7F` trailer — and changes nothing about
+graphics. Both are skipped by `payload_len` on an older player, which is the
+container's forward-compatibility contract and the same mechanism version 3
+used to add `0x07`. Three suites assert the compatibility rather than assuming
+it: a version-4 file's canvas is compared byte-for-byte against a version-3
+file built from the same graphics records, and the existing version 1/2/3
+tests are unchanged.
+
+| version | `0x01` | `0x07` | `0x08` | `0x7F` | ordering |
+|---|---|---|---|---|---|
+| 1 | undecodable | — | — | — | monotonic |
+| 2 | one `TS_BITMAP_DATA` | — | — | — | monotonic |
+| 3 | as 2 | decoded pixels | — | — | monotonic |
+| 4 | as 2 | as 3 | keystroke run text | transcript trailer | **not monotonic** |
+
+**The trailer's tail-seek is the whole design.** `0x7F` is written as an
+ordinary record so the file still tiles, it is always last, and its payload
+ends in a self-locating 8-byte footer (`record_len:u32 LE` + `"RKTR"`). A
+consumer reads the last 8 bytes, checks the magic, seeks back `record_len` and
+parses one record — the entire transcript without touching a graphics byte.
+Both readers carry a test that grows the graphics ahead of the trailer from
+1 KiB to 4 MiB and asserts the examined byte count does not change.
+
+**Ordering is the one behavioural break.** From version 4, `timestamp_ms` is
+not monotonic across records: `0x02` and `0x08` are buffered until their run
+closes, so they are written after graphics records bearing later timestamps,
+bounded by the header's `max_reorder_ms`. `0x01`/`0x03`/`0x06`/`0x07` remain
+monotonic among themselves, so the playback timeline — which holds only those
+— needed no change. Two things did: `durationMs` is now the *maximum*
+timestamp rather than the last one read, and nothing anywhere asserts
+monotonicity. The header comments say not to add such an assertion, because it
+would fire on a valid file.
+
+| Deliverable | Location |
+|---|---|
+| Server-side transcript reader: header fields, `0x08` decode, `0x7F` tail-seek with a `record_len` cap, and the `0x08`-scan fallback for a truncated tail. 29 unit tests | [crates/bv-engine-rustion/src/rdp_keystrokes.rs](../crates/bv-engine-rustion/src/rdp_keystrokes.rs) |
+| Index + search: a **cold** `rustion/recordings_keystrokes/<rid>` view for the transcript, hot counters on `RecordingEntry`, digest verification before persisting, per-run case-insensitive search with bounded excerpts, and namespace scoping applied before any transcript is opened | [crates/bv-engine-rustion/src/keystroke_index.rs](../crates/bv-engine-rustion/src/keystroke_index.rs) |
+| `GET rustion/recordings/<rid>/keystrokes`, `POST rustion/recordings/keystrokes/index`, `POST rustion/recordings/keystroke-search` | [crates/bv-engine-rustion/src/lib.rs](../crates/bv-engine-rustion/src/lib.rs) |
+| Batched background indexing on the recordings poller's hourly tick — deliberately *not* in the webhook path, which must stay a fast signature-verifying write | [crates/bv-engine-rustion/src/poller.rs](../crates/bv-engine-rustion/src/poller.rs) |
+| Read-old/write-new migration: nine `#[serde(default)]` keystroke fields on `RecordingEntry`, with a regression test that a pre-8.6 entry decodes as *"not indexed"* rather than as *"not enabled"* | [crates/bv-engine-rustion/src/recordings.rs](../crates/bv-engine-rustion/src/recordings.rs) |
+| Three audit events — `recording.transcript.indexed`, `.accessed`, `.searched` — all counts-only | [crates/bv-engine-rustion/src/audit.rs](../crates/bv-engine-rustion/src/audit.rs) |
+| GUI transcript reader (1:1 port of the server module) + 33 vitest cases | [gui/src/lib/rdpKeystrokes.ts](../gui/src/lib/rdpKeystrokes.ts), [gui/src/test/rdpKeystrokes.test.ts](../gui/src/test/rdpKeystrokes.test.ts) |
+| Decoder: `MAX_SUPPORTED_VERSION` 3 → 4, the two new event types counted rather than filed as unknown, version-4 header fields, `durationMs` as a maximum, and a `keystroke-unexpected-version` bucket for a keystroke record in a file whose header predates it. 7 new vitest cases | [gui/src/lib/rdpDecoder.ts](../gui/src/lib/rdpDecoder.ts), [gui/src/test/rdpDecoder.test.ts](../gui/src/test/rdpDecoder.test.ts) |
+| Transcript pane: runs anchored at `t`, withheld runs as a rule-labelled masked placeholder sized from `n`, per-run `approximate` / `composed` / `truncated` marks, a banner each for `text_decoding != exact` / `rebuilt` / scan-recovered, a labelled display-only `text_applied` view, and the recorder census | [gui/src/components/RdpTranscriptPane.tsx](../gui/src/components/RdpTranscriptPane.tsx) |
+| Player: real seek (clear + replay every region up to *T*, then resume — there is no cheaper correct seek when a `0x07` is a dirty rectangle with no key frames), the transcript pane wired to it, and the reorder bound reported | [gui/src/components/RdpReplayCanvas.tsx](../gui/src/components/RdpReplayCanvas.tsx) |
+| Keystroke-search card, per-row transcript badge with four distinct states, and "open replay at *T*" from a hit | [gui/src/routes/RecordingsPage.tsx](../gui/src/routes/RecordingsPage.tsx) |
+| `?at=<ms>` on the replay window so a search hit lands on the moment the text was typed. A numeric offset only — the query and the matched text never travel in a URL | [gui/src-tauri/src/commands/rustion.rs](../gui/src-tauri/src/commands/rustion.rs), [gui/src/routes/SessionReplayWindow.tsx](../gui/src/routes/SessionReplayWindow.tsx) |
+| Reference crate: version-4 event recognition, the reorder-safe duration, `keystroke_metadata` / `max_reorder_ms`, and 5 new tests. Deliberately **not** a third copy of the transcript parser — see below | [gui/wasm/rdp-replay/src/lib.rs](../gui/wasm/rdp-replay/src/lib.rs) |
+
+**Security posture, all of it load-bearing.**
+
+- **A redacted run is never reconstructed.** It has no `0x02` scancode records
+  and no per-key timestamps, because the recorder drops both deliberately —
+  inter-keystroke timing is itself a password-recovery channel (Song, Wagner &
+  Tian, USENIX Security 2001). No code path infers a redacted run's content
+  from its neighbours, from the framebuffer, or from its length. It renders as
+  a masked placeholder with its rule and its `n`.
+- **The searchable text is derived, not trusted.** Both readers rebuild the
+  newline join from the runs whose `redacted` flag is false rather than taking
+  the producer's `search_text` on faith, so a producer bug cannot leak withheld
+  text into a BastionVault index. When the two disagree, ours wins and the
+  transcript carries a warning. Two tests cover it: a `search_text` containing
+  a redacted run's content, and a run flagged `redacted` whose `text` is
+  populated anyway.
+- **`text_applied` is never indexed.** The server module does not deserialize
+  it at all, so the guarantee is structural rather than a convention. The GUI
+  shows it in a labelled display-only pane.
+- **The transcript is gated with playback.** `rustion/recordings/+` reads
+  metadata; `/blob` and `/keystrokes` are both a segment deeper, so
+  `rustion/recordings/*` grants them together.
+- **No transcript text in a URL, a query string, a log line or an error.** The
+  search route is a `Write` with the query in the body. Two leaks were found
+  and fixed while writing the tests: V8's `SyntaxError` quotes the offending
+  JSON source, so a malformed trailer would have put transcript bytes into an
+  error string — the TS reader now reports a length and nothing else, with a
+  test asserting the message does not contain the content.
+- **The digest is verified before anything is persisted.** Indexing derives
+  durable, searchable state from bastion-supplied bytes, so the bytes must
+  match the sidecar's `sha256` first. A mismatch reports `digest-mismatch` and
+  stores nothing.
+- **Three states, never collapsed.** *Not indexed* (BastionVault has not
+  looked), *not enabled* (the bastion had the feature off), and *indexed with
+  zero runs* are different facts, and none of them means "nobody typed". The
+  list badge, the transcript pane and the API's `state` field all keep them
+  apart.
+- **Redaction upstream is best-effort and every surface says so.** A
+  transcript with no withheld runs is never presented as verified free of
+  secrets.
+
+**Why BastionVault persists the text when Rustion does not.** Rustion's own
+search re-reads each candidate artifact's tail at query time — bounded work
+per candidate. BastionVault cannot: the bastion's
+`GET /v1/recordings/{rid}/blob` serves whole files and honours no `Range`, so
+a query-time tail read would mean downloading every candidate artifact in
+full. So the derived `search_text` is persisted once, at index time, into the
+barrier-encrypted store. The two-view split (hot counters, cold transcript)
+and the playback-level gating exist *because* of that decision, not in spite
+of it.
+
+**Why the reference crate does not get a third parser.** The transcript reader
+exists twice, both copies unit-tested in CI: the server module (which builds
+the index) and the TS port (which the player runs). `gui/wasm/rdp-replay` is
+the graphics reference and no CI job builds it. A third copy of the rule that
+a redacted run is never reconstructed, in a crate nothing verifies, would be a
+liability rather than a reference — so the crate learned version 4's *event
+types* and its ordering change, and its module docs say where the transcript
+reader lives and why it is not here.
+
+**Producer status.** As of writing, `docs/rdp-keystroke-metadata.md` is marked
+*specified, not implemented* on the Rustion side, so this consumer half has
+been validated against fixtures built from the specification rather than
+against artifacts from a live recorder. Every fixture in all three suites is
+constructed from the format document, which is the right way round: a producer
+bug cannot silently become the expectation. First contact with a real
+version-4 artifact is the outstanding validation step.
 
 ### Phase 8 — Telemetry pull + in-GUI session replay (original spec table)
 

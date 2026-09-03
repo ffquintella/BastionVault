@@ -56,11 +56,13 @@ pub mod enrolment;
 pub mod envelope;
 pub mod health;
 pub mod http;
+pub mod keystroke_index;
 pub mod listeners;
 pub mod master;
 pub mod policy;
 pub mod poller;
 pub mod probe;
+pub mod rdp_keystrokes;
 pub mod recordings;
 pub mod telemetry;
 
@@ -162,6 +164,10 @@ pub struct RustionStores {
     pub store: ArcSwap<Option<Arc<RustionStore>>>,
     pub master: ArcSwap<Option<Arc<MasterStore>>>,
     pub recordings: ArcSwap<Option<Arc<recordings::RecordingsStore>>>,
+    /// Phase 8.6 — the cold keystroke-transcript store. Separate from
+    /// `recordings` because a transcript must not sit in the store the
+    /// Recordings list reads end to end.
+    pub keystrokes: ArcSwap<Option<Arc<keystroke_index::KeystrokeIndexStore>>>,
     pub policy: ArcSwap<Option<Arc<policy::PolicyStore>>>,
     pub telemetry: ArcSwap<Option<Arc<telemetry::TelemetryCache>>>,
 }
@@ -179,6 +185,10 @@ impl RustionStores {
         self.recordings.load().as_ref().clone()
     }
 
+    pub fn keystrokes(&self) -> Option<Arc<keystroke_index::KeystrokeIndexStore>> {
+        self.keystrokes.load().as_ref().clone()
+    }
+
     pub fn policy(&self) -> Option<Arc<policy::PolicyStore>> {
         self.policy.load().as_ref().clone()
     }
@@ -192,6 +202,7 @@ impl RustionStores {
         self.store.store(Arc::new(None));
         self.master.store(Arc::new(None));
         self.recordings.store(Arc::new(None));
+        self.keystrokes.store(Arc::new(None));
         self.policy.store(Arc::new(None));
         self.telemetry.store(Arc::new(None));
     }
@@ -258,6 +269,9 @@ impl RustionBackend {
         let h_recordings_reconcile = self.inner.clone();
         let h_recording_blob = self.inner.clone();
         let h_recording_replay_log = self.inner.clone();
+        let h_recording_keystrokes = self.inner.clone();
+        let h_keystrokes_index = self.inner.clone();
+        let h_keystroke_search = self.inner.clone();
         let h_policy_global_read = self.inner.clone();
         let h_policy_global_write = self.inner.clone();
         let h_bastion_groups_list = self.inner.clone();
@@ -725,6 +739,25 @@ impl RustionBackend {
                     help: "Phase 6.5 — fetch a recording artifact's bytes (base64) for in-GUI playback."
                 },
                 {
+                    // GET rustion/recordings/<rid>/keystrokes — Phase 8.6.
+                    //
+                    // The `.rdp-rec` version-4 keystroke transcript.
+                    // Deliberately a sibling of `/blob` rather than of
+                    // the bare `recordings/<rid>` metadata route: a
+                    // transcript is a record of everything the operator
+                    // typed, so it must be gated with *playback*, not
+                    // with "list sessions". A policy granting
+                    // `rustion/recordings/+` reads metadata only; one
+                    // granting `rustion/recordings/*` grants the bytes
+                    // and the transcript together, which is the
+                    // intended coupling.
+                    pattern: r"recordings/(?P<rid>rec_[A-Za-z0-9_\-]+)/keystrokes$",
+                    operations: [
+                        {op: Operation::Read, handler: h_recording_keystrokes.handle_recording_keystrokes}
+                    ],
+                    help: "Phase 8.6 — read one recording's `.rdp-rec` version-4 keystroke transcript. Redacted runs come back withheld, with their rule and character count. Emits recording.transcript.accessed."
+                },
+                {
                     // GET/PUT rustion/policy/global — Phase 7. Root-gated.
                     pattern: r"policy/global$",
                     fields: {
@@ -913,6 +946,42 @@ impl RustionBackend {
                         {op: Operation::Write, handler: h_recordings_reconcile.handle_recordings_reconcile}
                     ],
                     help: "Phase 6.5 — actively reconcile the recordings index against a bastion's `/v1/recordings` list. Idempotent; imports anything missing with delivery_mode=reconcile."
+                },
+                {
+                    // POST rustion/recordings/keystrokes/index — Phase 8.6.
+                    // Reads the keystroke trailer out of the artifact
+                    // and stores the derived transcript. Idempotent
+                    // against the artifact digest.
+                    pattern: r"recordings/keystrokes/index$",
+                    fields: {
+                        "recording_id": { field_type: FieldType::Str, default: "", description: "Recording to index. Empty sweeps every rdp-rec recording that has no current transcript, up to the batch cap." },
+                        "force": { field_type: FieldType::Bool, default: false, description: "Re-read an artifact whose digest already matches the stored index (for when the parser itself changed)." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_keystrokes_index.handle_keystrokes_index}
+                    ],
+                    help: "Phase 8.6 — build or refresh the keystroke-transcript index for one recording, or sweep the recordings that have none. Each recording costs one full artifact fetch from its bastion, so the sweep is batched."
+                },
+                {
+                    // POST rustion/recordings/keystroke-search — Phase 8.6.
+                    //
+                    // A **Write** with the query in the body, not a
+                    // Read with it in the path. A keystroke query is
+                    // user input describing a secret-bearing corpus;
+                    // putting it in a URL would place it in access
+                    // logs, proxy logs and browser history. It is not
+                    // logged here either — the audit event records
+                    // that a search ran and how many hits it produced,
+                    // never what it searched for.
+                    pattern: r"recordings/keystroke-search$",
+                    fields: {
+                        "query": { field_type: FieldType::Str, default: "", description: "Substring to look for in typed text. Case-insensitive. Never logged." },
+                        "limit": { field_type: FieldType::Int, default: 0, description: "Maximum hits to return (default 200, max 1000)." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_keystroke_search.handle_keystroke_search}
+                    ],
+                    help: "Phase 8.6 — search indexed keystroke transcripts for typed text. Matches per run, so a hit can never come from a redacted run. Emits recording.transcript.searched with counts only."
                 }
             ],
             secrets: [{
@@ -962,6 +1031,14 @@ impl RustionBackendInner {
             Some(hint) => format!("{detail} — {hint}"),
             None => detail.to_string(),
         }
+    }
+
+    fn resolve_keystroke_store(
+        &self,
+    ) -> Result<Arc<keystroke_index::KeystrokeIndexStore>, RvError> {
+        self.stores
+            .keystrokes()
+            .ok_or_else(|| bv_error_string!("rustion keystroke index not initialized"))
     }
 
     fn resolve_recordings_store(&self) -> Result<Arc<recordings::RecordingsStore>, RvError> {
@@ -2699,6 +2776,295 @@ impl RustionBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
+    // ─── Phase 8.6 — keystroke transcripts ──────────────────────────
+
+    /// `GET rustion/recordings/<rid>/keystrokes` — one recording's
+    /// version-4 keystroke transcript.
+    ///
+    /// Reads the stored (cold) index rather than re-fetching the
+    /// artifact: the transcript was derived once, after the artifact's
+    /// digest was checked against the sidecar. A recording with no
+    /// index yet comes back as an explicit `state` the GUI renders as
+    /// "not indexed", never as an empty transcript.
+    ///
+    /// Redacted runs are returned withheld — `text: null` plus their
+    /// `reason` and character count. There is no code path here or
+    /// below that tries to reconstruct one.
+    ///
+    /// Emits `recording.transcript.accessed`, distinct from
+    /// `recording.replayed`: watching the screen and reading what was
+    /// typed are different acts and an auditor needs to tell them
+    /// apart.
+    pub async fn handle_recording_keystrokes(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let recordings = self.resolve_recordings_store()?;
+        let keystrokes = self.resolve_keystroke_store()?;
+        let rid = req
+            .path
+            .strip_prefix("recordings/")
+            .and_then(|s| s.strip_suffix("/keystrokes"))
+            .unwrap_or("")
+            .to_string();
+        if rid.is_empty() {
+            return Err(bv_error_response_status!(400, "recording_id is required"));
+        }
+        let Some(entry) = recordings.get(&rid).await? else {
+            return Err(bv_error_response_status!(
+                404,
+                &format!("recording `{rid}` not found")
+            ));
+        };
+
+        let mut data = Map::new();
+        data.insert("recording_id".into(), Value::String(rid.clone()));
+        data.insert("session_id".into(), Value::String(entry.session_id.clone()));
+        data.insert("format".into(), Value::String(entry.format.clone()));
+        // The hot entry's verdict, so a caller that gets no transcript
+        // still learns *why*: not indexed yet, versus the feature
+        // having been off for that session.
+        data.insert(
+            "state".into(),
+            Value::String(if entry.keystroke_state.is_empty() {
+                "not-indexed".to_string()
+            } else {
+                entry.keystroke_state.clone()
+            }),
+        );
+        data.insert(
+            "keystroke_metadata".into(),
+            Value::Bool(entry.keystroke_metadata),
+        );
+
+        let stored = keystrokes.get(&rid).await?;
+        match &stored {
+            Some(index) => {
+                let json = serde_json::to_value(index).map_err(|e| {
+                    bv_error_string!(&format!("encode keystroke transcript: {e}"))
+                })?;
+                if let Some(obj) = json.as_object() {
+                    for (k, v) in obj {
+                        data.insert(k.clone(), v.clone());
+                    }
+                }
+                // Never presentable as "verified free of secrets":
+                // redaction on the bastion is best-effort by
+                // specification and every consumer has to say so.
+                data.insert(
+                    "redaction_disclaimer".into(),
+                    Value::String(
+                        "Redaction is best-effort on the recording bastion. A transcript \
+                         without redacted runs has not been verified free of secrets."
+                            .into(),
+                    ),
+                );
+            }
+            None => {
+                data.insert("runs".into(), Value::Array(Vec::new()));
+                data.insert("search_text".into(), Value::String(String::new()));
+            }
+        }
+
+        let actor = req
+            .auth
+            .as_ref()
+            .and_then(|a| a.metadata.get("username").cloned())
+            .unwrap_or_else(|| "(unauthenticated)".into());
+        // Counts and verdicts only. Not a character of typed text.
+        log::info!(
+            "{}: recording_id={rid} session_id={} actor={actor} state={} runs={} \
+             redacted_runs={} chars={} text_decoding={} rebuilt={} source={}",
+            audit::RECORDING_TRANSCRIPT_ACCESSED,
+            entry.session_id,
+            if entry.keystroke_state.is_empty() {
+                "not-indexed"
+            } else {
+                entry.keystroke_state.as_str()
+            },
+            stored.as_ref().map(|i| i.runs.len()).unwrap_or(0),
+            stored
+                .as_ref()
+                .map(|i| i.runs.iter().filter(|r| r.redacted).count())
+                .unwrap_or(0),
+            stored.as_ref().map(|i| i.chars_indexed).unwrap_or(0),
+            stored
+                .as_ref()
+                .map(|i| i.text_decoding.as_str())
+                .unwrap_or(""),
+            stored.as_ref().map(|i| i.rebuilt).unwrap_or(false),
+            stored.as_ref().map(|i| i.source.as_str()).unwrap_or(""),
+        );
+
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// `POST rustion/recordings/keystrokes/index` — build or refresh
+    /// the transcript index.
+    ///
+    /// With a `recording_id`, indexes that one. Without, sweeps every
+    /// `rdp-rec` recording that has no current transcript, bounded by
+    /// [`keystroke_index::SWEEP_BATCH`] — each recording costs a full
+    /// artifact fetch, because the bastion's blob endpoint serves
+    /// whole files and honours no `Range`.
+    pub async fn handle_keystrokes_index(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_store()?;
+        let recordings = self.resolve_recordings_store()?;
+        let keystrokes = self.resolve_keystroke_store()?;
+        let recording_id = req
+            .get_data("recording_id")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+            .unwrap_or_default();
+        let force = req
+            .get_data("force")
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let mut data = Map::new();
+        if recording_id.is_empty() {
+            let report = keystroke_index::index_sweep(
+                &store,
+                &recordings,
+                &keystrokes,
+                keystroke_index::SWEEP_BATCH,
+            )
+            .await?;
+            let json = serde_json::to_value(&report)
+                .map_err(|e| bv_error_string!(&format!("encode sweep report: {e}")))?;
+            if let Some(obj) = json.as_object() {
+                for (k, v) in obj {
+                    data.insert(k.clone(), v.clone());
+                }
+            }
+        } else {
+            let report = keystroke_index::index_recording(
+                &store,
+                &recordings,
+                &keystrokes,
+                &recording_id,
+                force,
+            )
+            .await?;
+            let json = serde_json::to_value(&report)
+                .map_err(|e| bv_error_string!(&format!("encode index report: {e}")))?;
+            if let Some(obj) = json.as_object() {
+                for (k, v) in obj {
+                    data.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// `POST rustion/recordings/keystroke-search` — find sessions by
+    /// what was typed in them.
+    ///
+    /// The query travels in the request body and is **never logged**,
+    /// never echoed into an error and never placed in a URL. Matching
+    /// runs per-run over non-redacted text, so a hit cannot come from
+    /// a withheld run.
+    ///
+    /// The response states `scanned` and `unindexed` alongside the
+    /// hits: a search that found nothing must not read as "nobody
+    /// typed that" when the reason is that half the corpus has no
+    /// transcript index yet.
+    pub async fn handle_keystroke_search(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let recordings = self.resolve_recordings_store()?;
+        let keystrokes = self.resolve_keystroke_store()?;
+        let query = req
+            .get_data("query")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        if query.trim().is_empty() {
+            return Err(bv_error_response_status!(400, "query is required"));
+        }
+        let limit = req
+            .get_data("limit")
+            .ok()
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .filter(|n| *n > 0)
+            .unwrap_or(keystroke_index::DEFAULT_SEARCH_LIMIT);
+
+        // Namespace scoping, same rule as the recordings list: in a
+        // non-root namespace only recordings whose `target_host`
+        // matches a resource that namespace owns are searchable.
+        // Applied by narrowing the candidate set *before* any
+        // transcript is opened, so a namespaced operator's query never
+        // touches another namespace's typed text.
+        let candidates = match self.namespace_resource_hosts(req).await? {
+            None => None,
+            Some(hosts) => {
+                let mut allowed = std::collections::HashSet::new();
+                for id in recordings.list_ids().await? {
+                    if let Some(entry) = recordings.get(&id).await? {
+                        let host = entry.target_host.trim().to_lowercase();
+                        let bare = host.split(':').next().unwrap_or(host.as_str());
+                        if hosts.contains(host.as_str()) || hosts.contains(bare) {
+                            allowed.insert(id);
+                        }
+                    }
+                }
+                Some(allowed)
+            }
+        };
+
+        let report = keystroke_index::search_transcripts(
+            &recordings,
+            &keystrokes,
+            &query,
+            limit,
+            candidates.as_ref(),
+        )
+        .await?;
+
+        let actor = req
+            .auth
+            .as_ref()
+            .and_then(|a| a.metadata.get("username").cloned())
+            .unwrap_or_else(|| "(unauthenticated)".into());
+        // Counts only. `query` is deliberately absent — logging what
+        // an auditor searched for would put typed-text fragments in
+        // the log pipeline, which is precisely what the transcript
+        // rules forbid. `query_chars` is enough to tell a real search
+        // from an empty one without describing it.
+        log::info!(
+            "{}: actor={actor} query_chars={} hits={} scanned={} unindexed={} truncated={}",
+            audit::RECORDING_TRANSCRIPT_SEARCHED,
+            query.trim().chars().count(),
+            report.hits.len(),
+            report.scanned,
+            report.unindexed,
+            report.truncated,
+        );
+
+        let json = serde_json::to_value(&report)
+            .map_err(|e| bv_error_string!(&format!("encode search report: {e}")))?;
+        let mut data = json.as_object().cloned().unwrap_or_default();
+        data.insert(
+            "redaction_disclaimer".into(),
+            Value::String(
+                "Redacted runs carry no text and are unmatchable. Redaction is best-effort \
+                 on the recording bastion, so a match list is not a complete account of \
+                 what was typed."
+                    .into(),
+            ),
+        );
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
     pub async fn handle_recording_replay_log(
         &self,
         _b: &dyn Backend,
@@ -3566,6 +3932,10 @@ impl RustionModule {
         self.stores.recordings()
     }
 
+    pub fn keystroke_store(&self) -> Option<Arc<keystroke_index::KeystrokeIndexStore>> {
+        self.stores.keystrokes()
+    }
+
     pub fn policy_store(&self) -> Option<Arc<policy::PolicyStore>> {
         self.stores.policy()
     }
@@ -3604,6 +3974,8 @@ impl Module for RustionModule {
         self.stores.master.store(Arc::new(Some(master)));
         let recs = recordings::RecordingsStore::new(&self.core).await?;
         self.stores.recordings.store(Arc::new(Some(recs)));
+        let keystrokes = keystroke_index::KeystrokeIndexStore::new(&self.core).await?;
+        self.stores.keystrokes.store(Arc::new(Some(keystrokes)));
         let pol = policy::PolicyStore::new(&self.core).await?;
         self.stores.policy.store(Arc::new(Some(pol)));
         let tel = std::sync::Arc::new(telemetry::TelemetryCache::new());

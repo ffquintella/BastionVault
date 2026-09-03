@@ -767,6 +767,7 @@ mod recordings_namespace_scope_tests {
             bastion_id: "rt_test".into(),
             received_at: now,
             delivery_mode: "webhook".into(),
+            ..Default::default()
         }
     }
 
@@ -855,6 +856,152 @@ mod recordings_namespace_scope_tests {
             !ns_ids.contains(&"rec_other".to_string()),
             "namespace must not see a recording matching none of its resources"
         );
+    }
+
+    /// Phase 8.6 — the three keystroke routes resolve, and each one
+    /// reports its own state rather than collapsing into a 404 or a
+    /// blank success.
+    ///
+    /// This is a **routing** guard first. The `rustion/recordings/`
+    /// prefix has shadowed a sibling before: the catch-all
+    /// `recordings/<rid>` used to swallow `recordings/pull`, which
+    /// surfaced as "Logical backend operation not supported" because
+    /// the catch-all declared only `Read`. Phase 8.6 adds three more
+    /// siblings — `recordings/<rid>/keystrokes` (Read),
+    /// `recordings/keystrokes/index` (Write) and
+    /// `recordings/keystroke-search` (Write) — under a prefix that
+    /// already had five, so each needs to be reached by an actual
+    /// request rather than by reading the regexes.
+    ///
+    /// The state assertions matter too. "No transcript index yet" and
+    /// "keystroke recording was not enabled for this session" are
+    /// different facts, and neither means nobody typed; the API keeps
+    /// them apart via `state`, and the GUI renders three distinct
+    /// things off it.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_keystroke_routes_resolve_and_report_their_state() {
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_keystroke_routes").await;
+
+        let call = |op: Operation,
+                    path: &str,
+                    body: Option<serde_json::Map<String, serde_json::Value>>| {
+            let core = core.clone();
+            let token = root.clone();
+            let path = path.to_string();
+            async move {
+                let mut req = Request::new(&path);
+                req.operation = op;
+                req.client_token = token;
+                req.body = body;
+                core.handle_request(&mut req).await
+            }
+        };
+
+        let module = core.module_manager().get_module::<RustionModule>("rustion").unwrap();
+        let store = module.recordings_store().expect("recordings store initialized");
+        let mut entry = rec("rec_ks", "evdc400");
+        entry.format = "rdp-rec".into();
+        store.put(&entry).await.unwrap();
+
+        // ── GET recordings/<rid>/keystrokes ────────────────────────
+        //
+        // Reaches its own handler rather than the `recordings/<rid>`
+        // catch-all, and reports "not-indexed" — the recording exists,
+        // BastionVault has simply not read its transcript yet.
+        let resp = call(Operation::Read, "rustion/recordings/rec_ks/keystrokes", None)
+            .await
+            .expect("keystrokes route resolves");
+        let data = resp.and_then(|r| r.data).expect("keystrokes response has data");
+        assert_eq!(data.get("recording_id").and_then(|v| v.as_str()), Some("rec_ks"));
+        assert_eq!(
+            data.get("state").and_then(|v| v.as_str()),
+            Some("not-indexed"),
+            "an unindexed recording must say so, not return an empty transcript"
+        );
+        assert_eq!(
+            data.get("runs").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(0)
+        );
+
+        // An unknown recording is a 404, not an empty transcript.
+        let missing = call(Operation::Read, "rustion/recordings/rec_nope/keystrokes", None).await;
+        assert!(missing.is_err(), "unknown recording must not 200 with no transcript");
+
+        // ── POST recordings/keystroke-search ───────────────────────
+        //
+        // The sibling literal route is reached even though a `Read`-only
+        // catch-all sits next to it, and an empty query is refused
+        // rather than sweeping every transcript.
+        let empty = call(
+            Operation::Write,
+            "rustion/recordings/keystroke-search",
+            json!({ "query": "" }).as_object().cloned(),
+        )
+        .await;
+        assert!(empty.is_err(), "an empty keystroke query must be refused");
+
+        let resp = call(
+            Operation::Write,
+            "rustion/recordings/keystroke-search",
+            json!({ "query": "net user /add" }).as_object().cloned(),
+        )
+        .await
+        .expect("keystroke-search route resolves");
+        let data = resp.and_then(|r| r.data).expect("search response has data");
+        assert_eq!(data.get("hits").and_then(|v| v.as_array()).map(|a| a.len()), Some(0));
+        // The corpus is unindexed, and the report has to say so: "no
+        // hits" over an unindexed corpus is not a negative finding.
+        assert_eq!(data.get("unindexed").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(data.get("scanned").and_then(|v| v.as_u64()), Some(0));
+        assert!(
+            data.get("redaction_disclaimer")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("best-effort")),
+            "the response must state that upstream redaction is best-effort"
+        );
+
+        // ── POST recordings/keystrokes/index ───────────────────────
+        //
+        // Resolves as a Write. The sweep finds our one rdp-rec
+        // recording pending; it cannot fetch the artifact (no bastion
+        // is enrolled in this test vault), so it reports a failure
+        // rather than claiming success.
+        let resp = call(
+            Operation::Write,
+            "rustion/recordings/keystrokes/index",
+            json!({}).as_object().cloned(),
+        )
+        .await
+        .expect("keystrokes/index route resolves");
+        let data = resp.and_then(|r| r.data).expect("index response has data");
+        assert_eq!(
+            data.get("considered").and_then(|v| v.as_u64()),
+            Some(1),
+            "the one rdp-rec recording must be considered for indexing"
+        );
+        assert_eq!(data.get("indexed").and_then(|v| v.as_u64()), Some(0));
+        assert_eq!(
+            data.get("failed").and_then(|v| v.as_u64()),
+            Some(1),
+            "an artifact that cannot be fetched is a reported failure, not a silent skip"
+        );
+
+        // A non-rdp-rec recording is never considered: no other format
+        // can carry a keystroke track.
+        let asciicast = rec("rec_ssh", "web01");
+        assert_eq!(asciicast.format, "asciicast");
+        store.put(&asciicast).await.unwrap();
+        let resp = call(
+            Operation::Write,
+            "rustion/recordings/keystrokes/index",
+            json!({}).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+        let data = resp.and_then(|r| r.data).unwrap();
+        assert_eq!(data.get("considered").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(data.get("skipped_format").and_then(|v| v.as_u64()), Some(1));
     }
 }
 mod namespace_credential_scope_tests {

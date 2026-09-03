@@ -1,6 +1,6 @@
 [package]
 name = "bastion-vault-gui"
-version = "0.42.3"
+version = "0.43.0"
 edition = "2021"
 description = "BastionVault Desktop GUI"
 # Shipped as a signed installer (see roadmaps/packaging-and-distribution.md),
@@ -143,7 +143,11 @@ urlencoding = "2"
 # sspi is still redirected to a BastionVault fork via the workspace
 # root `[patch.crates-io]`, but only for a hickory 0.26 security bump —
 # the picky family is no longer forked. See root Cargo.toml.
-ironrdp = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps", default-features = false, features = ["connector", "session", "graphics", "input", "pdu", "core", "dvc", "displaycontrol"] }
+# `cliprdr` adds the MS-RDPECLIP static virtual channel used by
+# `session/rdp_clipboard.rs` for clipboard redirection. The channel is
+# only attached when a connection profile asks for it — see
+# features/rdp-clipboard-redirection.md.
+ironrdp = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps", default-features = false, features = ["connector", "session", "graphics", "input", "pdu", "core", "dvc", "displaycontrol", "cliprdr"] }
 ironrdp-async = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
 ironrdp-tls = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps", features = ["rustls"] }
 ironrdp-core = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
@@ -168,6 +172,18 @@ ironrdp-core = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-d
 # and is the form Cisco's patent grant actually covers.
 ironrdp-egfx = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps", features = ["openh264-libloading"], optional = true }
 ironrdp-tokio = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
+# Host OS clipboard, for RDP clipboard redirection. Pure-Rust platform
+# bindings (no C toolchain, no OpenSSL, no aws-lc), and the only
+# maintained cross-platform option that covers macOS, Windows and
+# X11/Wayland behind one API. Used exclusively from the dedicated
+# `rdp-clipboard` thread in `session/rdp_clipboard.rs`: platform
+# clipboard handles carry thread affinity, and an X11 read can block
+# for as long as the owning application takes to answer.
+# `default-features = false` drops the `image-data` feature and with it
+# the `image` / `tiff` / `half` stack: Phase 1 carries text only, and a
+# clipboard image decoder is dependency surface this build has no use
+# for. Turn it back on with Phase 2 (CF_DIB), not before.
+arboard = { version = "3", default-features = false }
 # Direct dep on sspi so we can pull `ReqwestNetworkClient` for the
 # CredSSP smartcard path. The transitive sspi via ironrdp-connector
 # would compile without the `network_client` feature here, so we

@@ -38,7 +38,7 @@ const PENDING_SUB_PATH: &str = "rustion/recordings_pending/";
 /// One recording entry. Mirrors `RecordingSidecar` on the Rustion
 /// side plus the BV-only fields that record the chain-of-custody at
 /// receive time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RecordingEntry {
     pub recording_id: String,
     pub session_id: String,
@@ -62,6 +62,58 @@ pub struct RecordingEntry {
     /// `webhook` if BV received it via the signed webhook; `pull`
     /// once the 24h fallback poller lands in Phase 6.3.
     pub delivery_mode: String,
+
+    // ─── Phase 8.6: keystroke-transcript summary ────────────────────
+    //
+    // The transcript itself lives in the cold
+    // `rustion/recordings_keystrokes/<rid>` view (see
+    // `keystroke_index`); only counters and flags live here, because
+    // this record is read for every row of the Recordings page.
+    //
+    // Every field is `#[serde(default)]`: entries written before
+    // Phase 8.6 decode with these at their zero value, which reads as
+    // "no transcript index yet" — the read-old/write-new migration
+    // this persisted format needs. An empty `keystroke_state` means
+    // *not indexed*, which the UI must not render as "nothing was
+    // typed".
+    /// `""` (not indexed) | `indexed` | `not-enabled` |
+    /// `digest-mismatch` | `failed`. See
+    /// `keystroke_index::IndexStatus`.
+    #[serde(default)]
+    pub keystroke_state: String,
+    /// Digest of the artifact the current keystroke verdict was
+    /// derived from. When it stops matching `sha256` the index is
+    /// stale and the sweep re-reads it.
+    #[serde(default)]
+    pub keystroke_artifact_sha256: String,
+    /// The artifact header's `keystroke_metadata`. `false` means the
+    /// feature was off on that bastion — **not** that nobody typed.
+    #[serde(default)]
+    pub keystroke_metadata: bool,
+    /// A transcript with at least one non-redacted character exists.
+    #[serde(default)]
+    pub keystroke_text: bool,
+    /// Non-redacted characters, i.e. what the search index covers.
+    #[serde(default)]
+    pub keystroke_chars: u64,
+    #[serde(default)]
+    pub keystroke_runs: u64,
+    #[serde(default)]
+    pub keystroke_redacted_runs: u64,
+    /// `exact` | `approximate` | `none` | `unknown`. Anything but
+    /// `exact` must be surfaced in the UI.
+    #[serde(default)]
+    pub keystroke_decoding: String,
+    /// The bastion rebuilt the trailer after a crash: the session's
+    /// final unclosed run is missing.
+    #[serde(default)]
+    pub keystroke_rebuilt: bool,
+    /// False when the transcript is a rebuilt trailer or a `0x08`
+    /// scan, both of which are incomplete by construction.
+    #[serde(default)]
+    pub keystroke_complete: bool,
+    #[serde(default)]
+    pub keystroke_indexed_at: Option<DateTime<Utc>>,
 }
 
 /// One "pending recording" entry — BV expects this recording to land
@@ -261,6 +313,11 @@ pub async fn pull_recording(
         bastion_id: bastion_id.to_string(),
         received_at: chrono::Utc::now(),
         delivery_mode: "pull".into(),
+        // Phase 8.6: a freshly-ingested recording has no transcript
+        // index yet. The poller's sweep (or an explicit index call)
+        // fills these in; leaving them at their zero value is the
+        // "not indexed" state, distinct from "not enabled".
+        ..Default::default()
     };
     recordings.put(&entry).await?;
     // Clear the pending-recording marker so the 24h poller doesn't
@@ -387,6 +444,7 @@ pub async fn reconcile_from_bastion(
             bastion_id: bastion_id.to_string(),
             received_at: Utc::now(),
             delivery_mode: "reconcile".into(),
+            ..Default::default()
         };
         recordings.put(&entry).await?;
         let _ = recordings.pending_remove(&entry.session_id).await;
@@ -461,4 +519,88 @@ pub async fn fetch_blob(
         .await
         .map_err(|e| bv_error_string!(&format!("read body: {e}")))?;
     Ok((bytes.to_vec(), format, sha256))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `RecordingEntry` written before Phase 8.6 must still decode.
+    ///
+    /// This is the read-old half of the read-old/write-new migration
+    /// the keystroke fields introduce: every one of them is
+    /// `#[serde(default)]`, and the zero values have to land on the
+    /// *"not indexed yet"* reading rather than on "not enabled" or
+    /// "nothing was typed". Those three states are distinguishable in
+    /// the API and the GUI precisely because this default is `""`.
+    #[test]
+    fn a_pre_phase_8_6_entry_decodes_as_not_indexed() {
+        let legacy = r#"{
+            "recording_id": "rec_deadbeef",
+            "session_id": "sess_deadbeef",
+            "authority": "bastion-vault",
+            "format": "rdp-rec",
+            "sha256": "aa",
+            "size_bytes": 4096,
+            "started_at": "2026-01-02T03:04:05Z",
+            "finished_at": "2026-01-02T03:14:05Z",
+            "target_host": "evdc400",
+            "target_user": "administrator",
+            "correlation_id": "corr_1",
+            "bastion_id": "rt_1",
+            "received_at": "2026-01-02T03:15:00Z",
+            "delivery_mode": "webhook"
+        }"#;
+        let entry: RecordingEntry = serde_json::from_str(legacy).expect("legacy entry decodes");
+        assert_eq!(entry.recording_id, "rec_deadbeef");
+        assert_eq!(entry.delivery_mode, "webhook");
+        // `""` is "not indexed". It is deliberately not the string
+        // `not-enabled`, which is a *verdict* about the artifact.
+        assert_eq!(entry.keystroke_state, "");
+        assert!(!entry.keystroke_metadata);
+        assert!(!entry.keystroke_text);
+        assert_eq!(entry.keystroke_chars, 0);
+        assert_eq!(entry.keystroke_runs, 0);
+        assert!(entry.keystroke_indexed_at.is_none());
+        assert_eq!(entry.keystroke_artifact_sha256, "");
+    }
+
+    /// Write-new: a re-serialized entry carries the new fields, and
+    /// the old fields are untouched in name and meaning.
+    #[test]
+    fn a_round_tripped_entry_keeps_both_generations_of_fields() {
+        let now = Utc::now();
+        let entry = RecordingEntry {
+            recording_id: "rec_1".into(),
+            session_id: "sess_1".into(),
+            format: "rdp-rec".into(),
+            sha256: "bb".repeat(32),
+            started_at: now,
+            finished_at: now,
+            received_at: now,
+            delivery_mode: "webhook".into(),
+            keystroke_state: "indexed".into(),
+            keystroke_artifact_sha256: "bb".repeat(32),
+            keystroke_metadata: true,
+            keystroke_text: true,
+            keystroke_chars: 42,
+            keystroke_runs: 5,
+            keystroke_redacted_runs: 1,
+            keystroke_decoding: "exact".into(),
+            keystroke_complete: true,
+            keystroke_indexed_at: Some(now),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: RecordingEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.delivery_mode, "webhook");
+        assert_eq!(back.keystroke_state, "indexed");
+        assert_eq!(back.keystroke_chars, 42);
+        assert_eq!(back.keystroke_redacted_runs, 1);
+        assert!(back.keystroke_complete);
+        // The hot entry holds counters, never the transcript itself.
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v.get("search_text").is_none());
+        assert!(v.get("runs").is_none());
+    }
 }

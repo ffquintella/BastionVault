@@ -43,6 +43,7 @@ import type {
   FileMeta,
   ConnectionProfile,
   CredentialSource,
+  RdpClipboardDirection,
   SessionProtocol,
   RecentSession,
 } from "../lib/types";
@@ -125,12 +126,12 @@ function ResourceCard({
   onPickGroup: (group: string) => void;
   onContextMenu: (ev: ReactMouseEvent, meta: api.ResourceCardEntry) => void;
 }) {
-  // The card-shaped projection from the search endpoint omits
-  // `os_type` and `connection_profiles`. The card-level Connect
-  // button therefore doesn't dispatch a session directly — it opens
-  // the resource detail on the Connection tab where the per-profile
-  // launcher has the full metadata. Keeps the list payload small
-  // while restoring a one-click path to Connect.
+  // The card-shaped projection from the search endpoint omits `os_type`
+  // and `connection_profiles`, so the Connect click reads the resource
+  // first (`connectResource`) and then dispatches the session itself.
+  // Keeps the list payload small without costing the operator a detour
+  // through the detail view: the Connection tab is opened only when
+  // there is a choice one click cannot make.
   const td = getTypeDef(typeConfig, meta.type);
   // Connect is server-only (matches the detail view's tab gating) and
   // honours the per-type connect toggle.
@@ -251,6 +252,36 @@ function pushRecent(name: string): string[] {
   return next;
 }
 
+/**
+ * Does this profile need an interactive credential typed before the session
+ * can open? Async because one case can't be decided from the profile alone:
+ * an RDP `default-account` connect logs in as the operator's Windows default
+ * account, and the host uses that account's *stored* password when there is
+ * one — so it needs a prompt only when there isn't. `needsOperatorPrompt`
+ * is pure and has to answer "yes" for the whole combination; this is the
+ * server-informed refinement of it.
+ *
+ * The single source of truth for "would one click be enough?", shared by the
+ * resource-card quick-Connect and the Connection-tab launcher — they used to
+ * disagree here, and the card sent an already-configured RDP default-account
+ * profile to the detail view that the tab would have launched outright.
+ *
+ * A failed probe answers "prompt": typing a password the host then ignores
+ * is recoverable, silently dialling without one is a failed session.
+ */
+async function operatorPromptRequired(
+  profile: ConnectionProfile,
+): Promise<boolean> {
+  if (
+    profile.credential_source.kind === "default-account" &&
+    profile.protocol === "rdp"
+  ) {
+    const self = await api.getDefaultAccountSelf().catch(() => null);
+    return !self?.has_windows_password;
+  }
+  return needsOperatorPrompt(profile);
+}
+
 export function ResourcesPage() {
   const { toast } = useToast();
   // Connect-time MFA gate for the card-level quick-Connect.
@@ -270,6 +301,13 @@ export function ResourcesPage() {
   // Name of the resource currently being cloned (drives a toast + guards
   // against a double-fire while the read/write round-trip is in flight).
   const [cloning, setCloning] = useState<string | null>(null);
+  // Credential prompt for a card-level Connect whose profile needs one
+  // typed (LDAP operator bind, RDP default account without a stored
+  // password). Set instead of opening the detail view, so the shortcut
+  // stays one modal deep.
+  const [cardPrompt, setCardPrompt] = useState<
+    { resource: string; profile: ConnectionProfile } | null
+  >(null);
   const [detailTab, setDetailTab] = useState<
     "info" | "secrets" | "files" | "connection" | "sharing" | "history"
   >("info");
@@ -578,13 +616,12 @@ export function ResourcesPage() {
     }
   }
 
-  // Card-level Connect: read the resource, pick its default profile,
-  // and launch it directly. Falls back to opening the Connection tab
-  // (so the operator can pick / add one) when:
-  //   - there's no launchable default (zero profiles, or 2+ with none
-  //     flagged default — genuine ambiguity), or
-  //   - the default needs an interactive operator credential prompt
-  //     (LDAP operator-bind) which the card can't satisfy inline.
+  // Card-level Connect: read the resource, pick its default profile, and
+  // launch it — a shortcut past the detail view, not a link to it. A
+  // profile that needs a credential typed prompts here (see `cardPrompt`);
+  // the Connection tab is opened only when there is no launchable default
+  // (zero profiles, or 2+ with none flagged default — genuine ambiguity),
+  // because that is a choice one click cannot make.
   async function connectResource(name: string) {
     let info: ResourceMetadata;
     try {
@@ -620,14 +657,16 @@ export function ResourcesPage() {
           .catch(() => false)
       : false;
     const target = pickDefaultProfile(profiles, connectOnly, brokeredByPolicy);
-    // Ambiguous or nothing launchable, or needs a prompt → hand off to
-    // the Connection tab where the full launcher lives.
-    if (!target || needsOperatorPrompt(target)) {
+    // Ambiguous or nothing launchable → hand off to the Connection tab,
+    // where the picker and the profile editor live. This is the only
+    // reason the card opens the detail view: there is a decision here
+    // that one click cannot make.
+    if (!target) {
       setSelected(name);
       setResourceInfo(info);
       setDetailTab("connection");
       setRecent(pushRecent(name));
-      if (!target && profiles.length > 1) {
+      if (profiles.length > 1) {
         toast(
           "info",
           "Multiple connection profiles — pick one, or mark a default.",
@@ -635,18 +674,45 @@ export function ResourcesPage() {
       }
       return;
     }
-    // One-click launch of the default profile.
     setRecent(pushRecent(name));
+    // A profile that needs a typed credential (LDAP operator bind, or an
+    // RDP default account with no stored password) gets the same inline
+    // prompt the Connection tab shows — one modal, not a detour through
+    // the detail view to click Connect a second time.
+    if (await operatorPromptRequired(target)) {
+      setCardPrompt({ resource: name, profile: target });
+      return;
+    }
+    await launchProfile(name, target, undefined);
+  }
+
+  /**
+   * Fire the session for one (resource, profile) pair. Mirrors the
+   * Connection tab's `runConnect` — same MFA gate, same two commands, same
+   * `operator_credential` slot — so the card-level shortcut and the tab
+   * launch identically.
+   */
+  async function launchProfile(
+    name: string,
+    profile: ConnectionProfile,
+    operatorCredential: { username: string; password: string } | undefined,
+  ) {
     try {
       // Server-side gate first: on a profile marked `require_mfa` nothing
       // opens until the operator re-proves a factor. Returns `{}` when the
       // profile is ungated, so the spread below is a no-op in that case.
-      const mfa = await gateConnect(name, target.id, target.name);
+      const mfa = await gateConnect(name, profile.id, profile.name);
       if (!mfa) return; // operator cancelled the prompt
-      if (target.protocol === "ssh") {
-        await api.sessionOpenSsh({ resource_name: name, profile_id: target.id, ...mfa });
+      const req = {
+        resource_name: name,
+        profile_id: profile.id,
+        operator_credential: operatorCredential,
+        ...mfa,
+      };
+      if (profile.protocol === "ssh") {
+        await api.sessionOpenSsh(req);
       } else {
-        await api.sessionOpenRdp({ resource_name: name, profile_id: target.id, ...mfa });
+        await api.sessionOpenRdp(req);
       }
     } catch (e: unknown) {
       toast("error", extractError(e));
@@ -1073,6 +1139,21 @@ export function ResourcesPage() {
               if (selected === renameTarget) void selectResource(newName);
             }}
             toast={toast}
+          />
+        )}
+
+        {/* Credential prompt for the card-level Connect. Same modal the
+            Connection tab uses, so the shortcut asks for exactly what the
+            tab would have asked for and nothing more. */}
+        {cardPrompt && (
+          <OperatorBindPrompt
+            profile={cardPrompt.profile}
+            onCancel={() => setCardPrompt(null)}
+            onSubmit={async (oc) => {
+              const pending = cardPrompt;
+              setCardPrompt(null);
+              await launchProfile(pending.resource, pending.profile, oc);
+            }}
           />
         )}
         {mfaPrompt}
@@ -1599,22 +1680,10 @@ function ConnectionProfilesPanel({
   const { gateConnect, mfaPrompt } = useConnectMfa();
 
   async function handleConnect(profile: ConnectionProfile) {
-    // RDP default-account: the host uses the operator's *stored* Windows
-    // password when one is set, so only prompt when there isn't one.
-    if (
-      profile.credential_source.kind === "default-account" &&
-      profile.protocol === "rdp"
-    ) {
-      const self = await api.getDefaultAccountSelf().catch(() => null);
-      if (self?.has_windows_password) {
-        await runConnect(profile, undefined);
-      } else {
-        setOperatorPrompt(profile);
-      }
-      return;
-    }
-    // LDAP operator-bind needs an interactive credential before opening.
-    if (needsOperatorPrompt(profile)) {
+    // LDAP operator-bind, and an RDP default account with no stored Windows
+    // password, need an interactive credential before opening. Shared with
+    // the card-level quick-Connect so both ask for the same thing.
+    if (await operatorPromptRequired(profile)) {
       setOperatorPrompt(profile);
       return;
     }
@@ -2548,6 +2617,52 @@ function ConnectionProfileEditor({
                 slow links; the remote desktop looks blander. Off by default.
               </span>
             </span>
+          </label>
+        )}
+
+        {profile.protocol === "rdp" && (
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="font-medium">Clipboard redirection</span>
+            <select
+              className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-sm"
+              value={profile.rdp_clipboard ?? "off"}
+              onChange={(e) =>
+                update(
+                  "rdp_clipboard",
+                  e.target.value === "off"
+                    ? undefined
+                    : (e.target.value as RdpClipboardDirection),
+                )
+              }
+            >
+              <option value="off">Off (default)</option>
+              <option value="host-to-session">
+                Host → session (paste into the target)
+              </option>
+              <option value="session-to-host">
+                Session → host (copy out of the target)
+              </option>
+              <option value="bidirectional">Both directions</option>
+            </select>
+            <span className="text-xs text-[var(--color-text-muted)]">
+              Ctrl+C on one side, paste on the other. Off by default because
+              the clipboard is a data channel into <em>and</em> out of a
+              privileged session: &ldquo;session → host&rdquo; is an egress
+              path for anything the operator can see on the target, and
+              &ldquo;host → session&rdquo; an ingress path into it. Text only,
+              capped at 1&nbsp;MiB per transfer, with per-session counters on
+              the session window. Content is never logged.
+            </span>
+            {(profile.rdp_clipboard ?? "off") !== "off" && (
+              <span className="text-xs text-[var(--color-text-muted)]">
+                <strong className="text-[var(--color-text)]">
+                  Bastion-brokered sessions:
+                </strong>{" "}
+                the channel has to survive the bastion hop, which is not yet
+                verified. If the counters never report the channel as ready,
+                the bastion is not forwarding it.
+              </span>
+            )}
           </label>
         )}
       </div>

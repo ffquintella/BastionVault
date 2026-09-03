@@ -558,6 +558,27 @@ pub struct RustionRecordingEntry {
     pub bastion_id: String,
     pub received_at: String,
     pub delivery_mode: String,
+
+    // Phase 8.6 — keystroke-transcript summary. Counters and flags
+    // only; the transcript lives behind
+    // `rustion_recording_keystrokes`, which is gated with playback
+    // and audited separately.
+    /// `""` (not indexed yet) | `indexed` | `not-enabled` |
+    /// `digest-mismatch` | `failed`. `""` and `not-enabled` are
+    /// different states and the UI must not collapse them.
+    pub keystroke_state: String,
+    /// The artifact header's `keystroke_metadata`. `false` means the
+    /// feature was off on that bastion, **not** that nobody typed.
+    pub keystroke_metadata: bool,
+    pub keystroke_text: bool,
+    pub keystroke_chars: u64,
+    pub keystroke_runs: u64,
+    pub keystroke_redacted_runs: u64,
+    /// `exact` | `approximate` | `none` | `unknown`.
+    pub keystroke_decoding: String,
+    pub keystroke_rebuilt: bool,
+    pub keystroke_complete: bool,
+    pub keystroke_indexed_at: String,
 }
 
 fn recording_from_map(data: &Map<String, Value>) -> RustionRecordingEntry {
@@ -576,6 +597,16 @@ fn recording_from_map(data: &Map<String, Value>) -> RustionRecordingEntry {
         bastion_id: s(data, "bastion_id"),
         received_at: s(data, "received_at"),
         delivery_mode: s(data, "delivery_mode"),
+        keystroke_state: s(data, "keystroke_state"),
+        keystroke_metadata: b(data, "keystroke_metadata"),
+        keystroke_text: b(data, "keystroke_text"),
+        keystroke_chars: u64_field(data, "keystroke_chars"),
+        keystroke_runs: u64_field(data, "keystroke_runs"),
+        keystroke_redacted_runs: u64_field(data, "keystroke_redacted_runs"),
+        keystroke_decoding: s(data, "keystroke_decoding"),
+        keystroke_rebuilt: b(data, "keystroke_rebuilt"),
+        keystroke_complete: b(data, "keystroke_complete"),
+        keystroke_indexed_at: s(data, "keystroke_indexed_at"),
     }
 }
 
@@ -690,7 +721,15 @@ pub async fn rustion_recording_replay_log(
 /// new window calls `rustion_recording_blob` itself; we don't pass
 /// the bytes via the spawn channel because they can be many MB.
 #[tauri::command]
-pub async fn rustion_open_replay_window(app: tauri::AppHandle, recording_id: String) -> CmdResult<()> {
+pub async fn rustion_open_replay_window(
+    app: tauri::AppHandle,
+    recording_id: String,
+    /// Phase 8.6 — seek offset in ms, set from a keystroke-search
+    /// hit's `t` so the operator lands on the moment the text was
+    /// typed. A **numeric offset only**: the searched-for text never
+    /// travels in this URL, and neither does any transcript content.
+    at_ms: Option<u64>,
+) -> CmdResult<()> {
     use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
     if recording_id.is_empty() {
         return Err(crate::error::CommandError::from("recording_id is required".to_string()));
@@ -702,7 +741,12 @@ pub async fn rustion_open_replay_window(app: tauri::AppHandle, recording_id: Str
         let _ = existing.set_focus();
         return Ok(());
     }
-    let url = format!("index.html#/session-replay?recording={}", urlencoding::encode(&recording_id),);
+    let at = match at_ms {
+        Some(ms) if ms > 0 => format!("&at={ms}"),
+        _ => String::new(),
+    };
+    let url =
+        format!("index.html#/session-replay?recording={}{at}", urlencoding::encode(&recording_id));
     WebviewWindowBuilder::new(&app, &window_label, WebviewUrl::App(url.into()))
         .title(format!("BastionVault — Replay {recording_id}"))
         .inner_size(1200.0, 800.0)
@@ -1453,6 +1497,347 @@ pub async fn rustion_master_pubkey_export(state: State<'_, AppState>) -> CmdResu
     })
 }
 
+// ─── Phase 8.6: keystroke transcripts ──────────────────────────────
+
+/// One keystroke run as the transcript records it.
+///
+/// `text` is `None` exactly when `redacted` is true. Nothing in the
+/// GUI reconstructs a redacted run — it is rendered as withheld, with
+/// its rule and its character count.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionKeystrokeRun {
+    /// Elapsed ms of the run's first keystroke — the player's seek
+    /// offset.
+    pub t: u64,
+    pub d: u64,
+    pub n: u64,
+    pub text: Option<String>,
+    pub redacted: bool,
+    /// `known_secret` | `masked_field` | `deny_pattern` |
+    /// `credential_pair`, on a redacted run.
+    pub reason: String,
+    /// The `field_epoch` correlation **hint**. Not a field identity —
+    /// a pass-through RDP proxy cannot see the remote UI's focus — so
+    /// the UI must not label it "field".
+    pub epoch: u32,
+    pub composed: bool,
+    pub approximate: bool,
+    pub truncated: bool,
+}
+
+fn keystroke_run_from_value(v: &Value) -> RustionKeystrokeRun {
+    let Some(o) = v.as_object() else {
+        return RustionKeystrokeRun::default();
+    };
+    let redacted = o.get("redacted").and_then(|v| v.as_bool()).unwrap_or(false);
+    RustionKeystrokeRun {
+        t: o.get("t").and_then(|v| v.as_u64()).unwrap_or(0),
+        d: o.get("d").and_then(|v| v.as_u64()).unwrap_or(0),
+        n: o.get("n").and_then(|v| v.as_u64()).unwrap_or(0),
+        // A redacted run's text is dropped here too, so a malformed
+        // upstream payload cannot put withheld text on screen.
+        text: if redacted {
+            None
+        } else {
+            o.get("text").and_then(|v| v.as_str()).map(String::from)
+        },
+        redacted,
+        reason: o.get("reason").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        epoch: o.get("epoch").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        composed: o.get("composed").and_then(|v| v.as_bool()).unwrap_or(false),
+        approximate: o.get("approximate").and_then(|v| v.as_bool()).unwrap_or(false),
+        truncated: o.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionKeystrokeCensus {
+    pub keys_total: u64,
+    pub chars_decoded: u64,
+    pub unicode_events: u64,
+    pub named_keys: u64,
+    pub composed: u64,
+    pub undecodable_scancodes: u64,
+    pub redacted_runs: u64,
+    pub redacted_chars: u64,
+    pub slowpath_input_pdus: u64,
+    pub truncated_runs: u64,
+}
+
+/// One recording's transcript, or the reason there is none.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionKeystrokeTranscript {
+    pub recording_id: String,
+    pub session_id: String,
+    pub format: String,
+    /// `not-indexed` | `indexed` | `not-enabled` | `digest-mismatch`
+    /// | `failed`. Three of these mean "no transcript" for different
+    /// reasons and the UI renders each differently.
+    pub state: String,
+    /// The artifact header's `keystroke_metadata`.
+    pub keystroke_metadata: bool,
+    pub format_version: u32,
+    /// The bound on how far out of order a keystroke record may
+    /// appear. The player buffers by this before anchoring runs.
+    pub max_reorder_ms: u64,
+    /// `trailer-footer` | `text-record-scan`.
+    pub source: String,
+    /// False for a rebuilt trailer or a scanned fallback — both are
+    /// missing the session's final unclosed run.
+    pub complete: bool,
+    pub trailer_version: u32,
+    pub rebuilt: bool,
+    /// `exact` | `approximate` | `none` | `unknown`. Anything other
+    /// than `exact` must show a caveat.
+    pub text_decoding: String,
+    pub keyboard_layout: String,
+    pub keyboard_layout_source: String,
+    pub runs: Vec<RustionKeystrokeRun>,
+    pub census: RustionKeystrokeCensus,
+    pub chars_indexed: u64,
+    pub indexed_at: String,
+    pub warnings: Vec<String>,
+    /// Server-supplied statement that upstream redaction is
+    /// best-effort. Rendered verbatim; never suppressed.
+    pub redaction_disclaimer: String,
+}
+
+/// Read one recording's `.rdp-rec` version-4 keystroke transcript.
+///
+/// Gated on the server with recording *playback*, not with metadata
+/// reads, and audited as `recording.transcript.accessed`.
+#[tauri::command]
+pub async fn rustion_recording_keystrokes(
+    state: State<'_, AppState>,
+    recording_id: String,
+) -> CmdResult<RustionKeystrokeTranscript> {
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{RUSTION_MOUNT}recordings/{recording_id}/keystrokes"),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    let census = data
+        .get("census")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let cn = |k: &str| -> u64 { census.get(k).and_then(|v| v.as_u64()).unwrap_or(0) };
+    Ok(RustionKeystrokeTranscript {
+        recording_id: s(&data, "recording_id"),
+        session_id: s(&data, "session_id"),
+        format: s(&data, "format"),
+        state: s(&data, "state"),
+        keystroke_metadata: b(&data, "keystroke_metadata"),
+        format_version: u32_field(&data, "format_version"),
+        max_reorder_ms: u64_field(&data, "max_reorder_ms"),
+        source: s(&data, "source"),
+        complete: b(&data, "complete"),
+        trailer_version: u32_field(&data, "trailer_version"),
+        rebuilt: b(&data, "rebuilt"),
+        text_decoding: s(&data, "text_decoding"),
+        keyboard_layout: s(&data, "keyboard_layout"),
+        keyboard_layout_source: s(&data, "keyboard_layout_source"),
+        runs: data
+            .get("runs")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().map(keystroke_run_from_value).collect())
+            .unwrap_or_default(),
+        census: RustionKeystrokeCensus {
+            keys_total: cn("keys_total"),
+            chars_decoded: cn("chars_decoded"),
+            unicode_events: cn("unicode_events"),
+            named_keys: cn("named_keys"),
+            composed: cn("composed"),
+            undecodable_scancodes: cn("undecodable_scancodes"),
+            redacted_runs: cn("redacted_runs"),
+            redacted_chars: cn("redacted_chars"),
+            slowpath_input_pdus: cn("slowpath_input_pdus"),
+            truncated_runs: cn("truncated_runs"),
+        },
+        chars_indexed: u64_field(&data, "chars_indexed"),
+        indexed_at: s(&data, "indexed_at"),
+        warnings: data
+            .get("warnings")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        redaction_disclaimer: s(&data, "redaction_disclaimer"),
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionKeystrokeIndexReport {
+    /// Single-recording form.
+    pub recording_id: String,
+    pub status: String,
+    pub detail: String,
+    pub runs: u64,
+    pub redacted_runs: u64,
+    pub chars_indexed: u64,
+    pub text_decoding: String,
+    pub rebuilt: bool,
+    pub source: String,
+    /// Sweep form.
+    pub considered: u64,
+    pub indexed: u64,
+    pub not_enabled: u64,
+    pub unchanged: u64,
+    pub failed: u64,
+    pub remaining: u64,
+}
+
+/// Build or refresh the keystroke-transcript index.
+///
+/// With a `recordingId`, indexes that one. Without, sweeps the
+/// recordings that have no current transcript — each one costs a full
+/// artifact fetch from its bastion, so the server caps the batch and
+/// reports what is left.
+#[tauri::command]
+pub async fn rustion_keystrokes_index(
+    state: State<'_, AppState>,
+    recording_id: Option<String>,
+    force: Option<bool>,
+) -> CmdResult<RustionKeystrokeIndexReport> {
+    let mut body = Map::new();
+    body.insert("recording_id".into(), Value::String(recording_id.unwrap_or_default()));
+    body.insert("force".into(), Value::Bool(force.unwrap_or(false)));
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}recordings/keystrokes/index"),
+        Some(body),
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(RustionKeystrokeIndexReport {
+        recording_id: s(&data, "recording_id"),
+        status: s(&data, "status"),
+        detail: s(&data, "detail"),
+        runs: u64_field(&data, "runs"),
+        redacted_runs: u64_field(&data, "redacted_runs"),
+        chars_indexed: u64_field(&data, "chars_indexed"),
+        text_decoding: s(&data, "text_decoding"),
+        rebuilt: b(&data, "rebuilt"),
+        source: s(&data, "source"),
+        considered: u64_field(&data, "considered"),
+        indexed: u64_field(&data, "indexed"),
+        not_enabled: u64_field(&data, "not_enabled"),
+        unchanged: u64_field(&data, "unchanged"),
+        failed: u64_field(&data, "failed"),
+        remaining: u64_field(&data, "remaining"),
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionKeystrokeHit {
+    pub recording_id: String,
+    pub session_id: String,
+    pub target_host: String,
+    pub target_user: String,
+    pub authority: String,
+    pub bastion_id: String,
+    pub started_at: String,
+    pub run_index: u64,
+    /// Seek offset into the recording, in ms.
+    pub t_ms: u64,
+    pub d_ms: u64,
+    pub n: u64,
+    pub epoch: u32,
+    pub excerpt: String,
+    pub approximate: bool,
+    pub text_decoding: String,
+    pub rebuilt: bool,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionKeystrokeSearchReport {
+    pub scanned: u64,
+    /// Recordings with no transcript index. A negative result does
+    /// **not** speak for these, and the UI has to say so.
+    pub unindexed: u64,
+    pub truncated: bool,
+    pub hits: Vec<RustionKeystrokeHit>,
+    pub redaction_disclaimer: String,
+}
+
+/// Search indexed transcripts for typed text.
+///
+/// The query travels in the request body — never a URL, a query
+/// string or a log line. The server matches per run over non-redacted
+/// text, so a hit cannot come from a withheld run.
+#[tauri::command]
+pub async fn rustion_keystroke_search(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<u64>,
+) -> CmdResult<RustionKeystrokeSearchReport> {
+    let mut body = Map::new();
+    body.insert("query".into(), Value::String(query));
+    body.insert("limit".into(), Value::Number(limit.unwrap_or(0).into()));
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}recordings/keystroke-search"),
+        Some(body),
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    let hits = data
+        .get("hits")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_object())
+                .map(|o| {
+                    let gs = |k: &str| -> String {
+                        o.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+                    };
+                    let gn = |k: &str| -> u64 { o.get(k).and_then(|v| v.as_u64()).unwrap_or(0) };
+                    let gb = |k: &str| -> bool {
+                        o.get(k).and_then(|v| v.as_bool()).unwrap_or(false)
+                    };
+                    RustionKeystrokeHit {
+                        recording_id: gs("recording_id"),
+                        session_id: gs("session_id"),
+                        target_host: gs("target_host"),
+                        target_user: gs("target_user"),
+                        authority: gs("authority"),
+                        bastion_id: gs("bastion_id"),
+                        started_at: gs("started_at"),
+                        run_index: gn("run_index"),
+                        t_ms: gn("t_ms"),
+                        d_ms: gn("d_ms"),
+                        n: gn("n"),
+                        epoch: gn("epoch") as u32,
+                        excerpt: gs("excerpt"),
+                        approximate: gb("approximate"),
+                        text_decoding: gs("text_decoding"),
+                        rebuilt: gb("rebuilt"),
+                        complete: gb("complete"),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(RustionKeystrokeSearchReport {
+        scanned: u64_field(&data, "scanned"),
+        unindexed: u64_field(&data, "unindexed"),
+        truncated: b(&data, "truncated"),
+        hits,
+        redaction_disclaimer: s(&data, "redaction_disclaimer"),
+    })
+}
+
 // ─── helpers ───────────────────────────────────────────────────────
 
 fn s(data: &Map<String, Value>, key: &str) -> String {
@@ -1465,6 +1850,10 @@ fn u32_field(data: &Map<String, Value>, key: &str) -> u32 {
 
 fn u64_field(data: &Map<String, Value>, key: &str) -> u64 {
     data.get(key).and_then(|v| v.as_u64()).unwrap_or(0)
+}
+
+fn b(data: &Map<String, Value>, key: &str) -> bool {
+    data.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
 fn target_summary_from_map(data: &Map<String, Value>) -> RustionTargetSummary {

@@ -154,6 +154,12 @@ async fn recording_ready(
         bastion_id: bastion_id.clone(),
         received_at: chrono::Utc::now(),
         delivery_mode: "webhook".into(),
+        // Phase 8.6: a freshly-ingested recording carries no
+        // keystroke-transcript index yet. Zero values are the "not
+        // indexed" state, which the GUI renders distinctly from "not
+        // enabled" and from "nothing was typed"; the poller's sweep
+        // fills them in.
+        ..Default::default()
     };
 
     let store = recordings::RecordingsStore::new(core.get_ref()).await?;

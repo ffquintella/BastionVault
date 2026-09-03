@@ -12,6 +12,7 @@ import { useSearchParams } from "react-router";
 
 import { Badge, Button } from "../components/ui";
 import { RdpReplayCanvas } from "../components/RdpReplayCanvas";
+import { decodeRdpRec } from "../lib/rdpDecoder";
 import { extractError } from "../lib/error";
 import {
   rustionRecordingBlob,
@@ -24,6 +25,11 @@ import {
 export function SessionReplayWindow() {
   const [params] = useSearchParams();
   const recordingId = params.get("recording") ?? "";
+  // Phase 8.6 — `?at=<ms>` seeks the player, set from a
+  // keystroke-search hit. A numeric offset and nothing else: the
+  // query and the matched text never travel in a URL.
+  const seekMs = Number.parseInt(params.get("at") ?? "", 10);
+  const initialSeekMs = Number.isFinite(seekMs) && seekMs > 0 ? seekMs : undefined;
   const [entry, setEntry] = useState<RustionRecordingEntry | null>(null);
   const [blob, setBlob] = useState<RustionRecordingBlob | null>(null);
   const [bytes, setBytes] = useState<Uint8Array | null>(null);
@@ -125,7 +131,9 @@ export function SessionReplayWindow() {
       </header>
       <main className="p-4">
         {blob.format === "asciicast" && <ReplayAsciicast bytes={bytes} />}
-        {blob.format === "rdp-rec" && <ReplayRdp bytes={bytes} />}
+        {blob.format === "rdp-rec" && (
+          <ReplayRdp bytes={bytes} initialSeekMs={initialSeekMs} />
+        )}
         {blob.format === "smb-log" && <ReplaySmbSummary bytes={bytes} />}
       </main>
       <footer className="px-4 py-2 border-t border-[var(--color-border)] flex justify-between items-center text-xs text-[var(--color-text-muted)]">
@@ -251,11 +259,17 @@ function ReplayAsciicast({ bytes }: { bytes: Uint8Array }) {
 
 // ─── RDP playback (full screen) ─────────────────────────────────────
 
-function ReplayRdp({ bytes }: { bytes: Uint8Array }) {
+function ReplayRdp({
+  bytes,
+  initialSeekMs,
+}: {
+  bytes: Uint8Array;
+  initialSeekMs?: number;
+}) {
   const [showDetails, setShowDetails] = useState(false);
   return (
     <div className="space-y-4 max-w-[1600px] mx-auto">
-      <RdpReplayCanvas bytes={bytes} />
+      <RdpReplayCanvas bytes={bytes} initialSeekMs={initialSeekMs} />
       <div>
         <Button
           size="sm"
@@ -271,122 +285,128 @@ function ReplayRdp({ bytes }: { bytes: Uint8Array }) {
 }
 
 function ReplayRdpSummary({ bytes }: { bytes: Uint8Array }) {
-  const summary = useMemo(() => walkRdpRec(bytes), [bytes]);
+  // The same decoder the canvas above uses. Indexing only — no 0x07
+  // pixels are inflated to render a summary.
+  const decoded = useMemo(() => decodeRdpRec(bytes), [bytes]);
+  const header = useMemo(() => {
+    if (!decoded.headerJson) return null;
+    try {
+      return JSON.parse(decoded.headerJson) as unknown;
+    } catch {
+      return null;
+    }
+  }, [decoded.headerJson]);
+  const graphics = decoded.frames.length + decoded.surfaceUpdates.length;
   return (
     <div className="space-y-4">
       <div className="bg-neutral-900/60 border border-neutral-800 rounded p-3 text-xs text-[var(--color-text-muted)]">
-        <strong>Phase 8.4 bitmap codec:</strong> uncompressed 16/24/32 bpp +
-        RLE16/RLE24 are rendered to canvas. NSCodec, RemoteFX, 8 bpp RLE, and
-        bitmap-cache references remain out of scope — frames that hit those
-        paths show in the "skipped" counter above.
+        <strong>Keystroke track:</strong> version-4 recordings add a{" "}
+        <code>0x08</code> text-input record per keystroke run and a{" "}
+        <code>0x7F</code> trailer holding the whole transcript, located by
+        reading the last 8 bytes of the artifact rather than scanning it.
+        Neither touches the graphics, and both are skipped by their declared
+        length on older players. From version 4 the record stream is no longer
+        monotonic in <code>timestamp_ms</code> — keystroke records are buffered
+        until their run closes, bounded by the header&apos;s{" "}
+        <code>max_reorder_ms</code> — but graphics records stay monotonic among
+        themselves, so the video is unaffected.
+      </div>
+      <div className="bg-neutral-900/60 border border-neutral-800 rounded p-3 text-xs text-[var(--color-text-muted)]">
+        <strong>Graphics paths:</strong> version-3 recordings carry{" "}
+        <code>0x07</code> surface updates — pixels the bastion decoded
+        client-side over a copy of the relayed stream — which are inflated and
+        blitted directly. Version-2 recordings carry <code>0x01</code> wire
+        bitmaps, decoded here for uncompressed 16/24/32 bpp and RLE16/RLE24;
+        8 bpp RLE, NSCodec, RemoteFX and bitmap-cache references are not
+        decoded on that path. Version-1 recordings carry no decodable graphics
+        at all. Anything not painted is named in the skip-reason breakdown
+        above.
       </div>
       <div className="bg-neutral-900/60 border border-neutral-800 rounded p-3 text-xs">
         <div className="font-semibold mb-2 text-neutral-300">Header</div>
-        {summary.header ? (
+        {header ? (
           <pre className="text-[10px] overflow-x-auto">
-            {JSON.stringify(summary.header, null, 2)}
+            {JSON.stringify(header, null, 2)}
           </pre>
         ) : (
-          <div className="text-red-300">{summary.error ?? "no header"}</div>
+          <div className="text-red-300">{decoded.error ?? "no header"}</div>
         )}
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
-        <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded p-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
+        <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded p-3 min-w-0">
           <div className="text-[var(--color-text-muted)] text-xs">
-            Graphics frames
+            Surface updates (0x07)
           </div>
-          <div className="text-2xl font-semibold">{summary.graphics}</div>
+          <div className="text-2xl font-semibold">
+            {decoded.surfaceUpdates.length}
+          </div>
         </div>
-        <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded p-3">
+        <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded p-3 min-w-0">
+          <div className="text-[var(--color-text-muted)] text-xs">
+            Wire bitmaps (0x01)
+          </div>
+          <div className="text-2xl font-semibold">{decoded.frames.length}</div>
+        </div>
+        <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded p-3 min-w-0">
           <div className="text-[var(--color-text-muted)] text-xs">
             Keyboard events
           </div>
-          <div className="text-2xl font-semibold">{summary.keyboard}</div>
+          <div className="text-2xl font-semibold">
+            {decoded.keyboardEvents}
+          </div>
         </div>
-        <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded p-3">
+        <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded p-3 min-w-0">
           <div className="text-[var(--color-text-muted)] text-xs">
             Mouse events
           </div>
-          <div className="text-2xl font-semibold">{summary.mouse}</div>
+          <div className="text-2xl font-semibold">{decoded.mouseEvents}</div>
+        </div>
+        <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded p-3 min-w-0">
+          <div className="text-[var(--color-text-muted)] text-xs">
+            Keystroke runs (0x08)
+          </div>
+          <div className="text-2xl font-semibold">
+            {decoded.version >= 4 && decoded.keystrokeMetadata
+              ? decoded.textInputEvents
+              : "—"}
+          </div>
+          <div className="text-[var(--color-text-muted)] text-xs">
+            {decoded.version < 4
+              ? "predates the keystroke track"
+              : !decoded.keystrokeMetadata
+                ? "not enabled for this session"
+                : decoded.keystrokeTrailer
+                  ? "trailer present"
+                  : "no trailer — recovered by scan"}
+          </div>
+        </div>
+        <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded p-3 min-w-0">
+          <div className="text-[var(--color-text-muted)] text-xs">
+            Keyboard layout
+          </div>
+          <div className="text-sm font-semibold font-mono truncate">
+            {decoded.keyboardLayout ?? "—"}
+          </div>
+          <div className="text-[var(--color-text-muted)] text-xs truncate">
+            {decoded.keyboardLayoutSource ?? "not recorded"}
+          </div>
         </div>
       </div>
       <div className="text-xs text-[var(--color-text-muted)]">
-        Duration: {(summary.durationMs / 1000).toFixed(1)}s · Total events:{" "}
-        {summary.graphics + summary.keyboard + summary.mouse}
+        Format version {decoded.version || "?"} · Duration:{" "}
+        {(decoded.durationMs / 1000).toFixed(1)}s · Total events:{" "}
+        {graphics +
+          decoded.keyboardEvents +
+          decoded.mouseEvents +
+          decoded.desktopSizes.length +
+          decoded.unknownEvents}
+        {decoded.unknownEvents > 0 &&
+          ` · ${decoded.unknownEvents} unknown event type(s) skipped by declared length`}
+        {decoded.desktopSizes.length > 0 &&
+          ` · ${decoded.desktopSizes.length} desktop-size change(s)`}
       </div>
     </div>
   );
-}
-
-function walkRdpRec(bytes: Uint8Array): {
-  header: unknown | null;
-  error?: string;
-  graphics: number;
-  keyboard: number;
-  mouse: number;
-  durationMs: number;
-} {
-  // Reuses the same TS parser as RdpRecSummary. Phase 8.3 also ships
-  // a wasm version with the same exit shape — see gui/wasm/rdp-replay.
-  if (bytes.length < 4 || String.fromCharCode(...bytes.slice(0, 4)) !== "RREC") {
-    return {
-      header: null,
-      error: "magic mismatch (expected RREC)",
-      graphics: 0,
-      keyboard: 0,
-      mouse: 0,
-      durationMs: 0,
-    };
-  }
-  let nl = -1;
-  for (let i = 4; i < bytes.length; i++) {
-    if (bytes[i] === 0x0a) {
-      nl = i;
-      break;
-    }
-  }
-  if (nl < 0) {
-    return {
-      header: null,
-      error: "no header newline",
-      graphics: 0,
-      keyboard: 0,
-      mouse: 0,
-      durationMs: 0,
-    };
-  }
-  let header: unknown = null;
-  try {
-    header = JSON.parse(new TextDecoder().decode(bytes.slice(4, nl)));
-  } catch (e) {
-    return {
-      header: null,
-      error: `header parse failed: ${e}`,
-      graphics: 0,
-      keyboard: 0,
-      mouse: 0,
-      durationMs: 0,
-    };
-  }
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let pos = nl + 1;
-  let graphics = 0,
-    keyboard = 0,
-    mouse = 0,
-    lastTs = 0;
-  while (pos + 13 <= bytes.length) {
-    const ts = Number(view.getBigUint64(pos, true));
-    const type = bytes[pos + 8];
-    const len = view.getUint32(pos + 9, true);
-    const next = pos + 13 + len;
-    if (next > bytes.length) break;
-    if (type === 0x01) graphics++;
-    else if (type === 0x02) keyboard++;
-    else if (type === 0x03) mouse++;
-    lastTs = ts;
-    pos = next;
-  }
-  return { header, graphics, keyboard, mouse, durationMs: lastTs };
 }
 
 // ─── SMB log (full screen) ──────────────────────────────────────────

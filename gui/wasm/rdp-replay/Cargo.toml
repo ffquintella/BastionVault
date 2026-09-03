@@ -8,13 +8,19 @@ name = "rustion-rdp-replay-wasm"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "WASM frame walker for Rustion `.rdp-rec` recordings — Phase 8.3 of features/rustion-integration.md. Build with `wasm-pack build --target web`. The visual MS-RDPBCGR bitmap decoder is a separate codec project — this crate only parses the .rdp-rec frame stream + reports event counts so the GUI can show metadata without re-implementing the parser in JS."
+description = "Reference decoder for Rustion `.rdp-rec` session recordings — see features/rustion-integration.md. Build with `wasm-pack build --target web`. Walks the event stream, decodes version-2 TS_BITMAP_DATA graphics events and version-3 `0x07` surface updates (decoded RGBA8888 pixels, raw or zlib), and reports a per-bucket skip taxonomy. The 1:1 TypeScript port in gui/src/lib/rdpDecoder.ts is what the GUI runs; this crate is the unit-tested reference the port mirrors."
 publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# `0x07` surface updates store their pixels as an RFC 1950 zlib stream
+# (encoding = 1). miniz_oxide is a pure-Rust inflate with no C
+# dependency and a `_with_limit` entry point, which is what lets the
+# decoder cap the allocation at exactly what the region's geometry
+# claims instead of trusting the stream's own length.
+miniz_oxide = "0.8"
 wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"

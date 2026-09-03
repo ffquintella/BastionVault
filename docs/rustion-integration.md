@@ -350,12 +350,234 @@ Two consequences worth knowing:
 **Recordings** (Rustion → Recordings) lists every recording BV knows about — webhook-delivered ones land within seconds of session end, fallback-pulled ones land within 24 hours. **Open in window** spawns a separate Tauri WebviewWindow for replay:
 
 - `asciicast` (SSH) → `asciinema`-player style scrubbing.
-- `rdp-rec` (RDP) → in-tree WASM bitmap decoder rendered onto an HTML5 canvas. Uncompressed 16/24/32 bpp + RLE16/RLE24 are fully supported; NSCodec / RemoteFX / 8-bpp RLE / bitmap-cache references show in a "skipped" counter and the canvas keeps blitting later frames.
+- `rdp-rec` (RDP) → in-tree decoder rendered onto an HTML5 canvas. What renders depends on the recording's **format version** — see §5.1.
 - `smb-log` (SMB) → file-operation log.
 
 Every in-GUI playback emits a `recording.replayed` audit row with operator id + recording id + sha256 mismatch flag (the player checks integrity against the sidecar hash before rendering).
 
+### 5.1 `.rdp-rec` format versions and what replays
+
+A `.rdp-rec` file is `RREC` + a one-line JSON header + `(ts:u64 LE, type:u8, len:u32 LE, payload)` records that tile the file exactly. The header's `version` decides what the player can paint:
+
+| version | geometry | `0x01` graphics | `0x07` surface updates | Replays? |
+|---|---|---|---|---|
+| 1 | header always says `1920x1080` — a hardcoded constant, not a measurement | an undelimited slice of the raw byte stream | — | **No.** Metadata only |
+| 2 | the negotiated desktop, `0` for unknown | exactly one `TS_BITMAP_DATA` | — | Legacy wire bitmaps |
+| 3 | as version 2 | as version 2 | decoded RGBA8888 pixels | **Yes** — this is where the screen is |
+| 4 | as version 2 | as version 2 | as version 3 | **Yes**, plus a searchable keystroke transcript — see §5.2 |
+
+- **Version 1 recordings never render, and that is correct.** They came from a recording tap that parsed unframed TCP chunks with a frame gate accepting about a quarter of all bytes. Forensics on three real recordings found **0 of 1779** graphics events carrying a self-consistent `TS_BITMAP_DATA`, at a median payload entropy of 7.75 bits/byte — compressed codec bytes, not pixels. The player says "metadata only, graphics undecodable" rather than showing a black canvas. Recordings made before the bastion's recording upgrade are all version 1.
+- **Version 3 carries pixels, not graphics commands.** The bastion runs a full client-side graphics decode (`ironrdp` `ActiveStage` plus the EGFX pipeline over `drdynvc`, including zgfx and the RemoteFX / planar / NSCodec / progressive codecs) over a copy of the relayed stream and records the decoded pixels. **BastionVault therefore needs no RDP codec** — replay is an inflate and a blit — and the artifact stays readable years from now. A modern Windows target does not use the legacy `TS_UPDATE_BITMAP` path at all, which is why version 2's `0x01` path finds nothing on `evdc400`-class hosts.
+- **`0x07` payload**: `x:u16 y:u16 w:u16 h:u16 format:u8 encoding:u8` then the data. `format = 1` is RGBA8888 — 4 bytes per pixel in R, G, B, A order, row-major, **top-down**, no row padding (not BGRA, not bottom-up). `encoding = 0` is raw, `encoding = 1` is an RFC 1950 zlib stream (not raw deflate, not gzip) that must inflate to exactly `width * height * 4` bytes. The producer stores raw when a region is under 512 bytes or compression did not shrink it, so **both encodings appear in the same file**.
+- **Each `0x07` event is the coalesced dirty region** of the decoded desktop at that moment — no key-frame/delta distinction, and no full-frame event at the start. The canvas begins blank and fills in as regions arrive, at the producer's interval (default 1000 ms), so a recording is roughly 1 frame/s of dirty rectangles rather than a video stream. Showing a correct canvas at time *T* means replaying every region from the start, which is why the player offers Restart rather than a backwards seek.
+- **`0x06` desktop-size events** are emitted when the negotiated desktop is learned or changes mid-session. Graphics rectangles are validated against the most recent `0x06`, falling back to the header; a `0x06` that differs from the current canvas resizes it and clears it.
+- **Unknown event types are skipped by their declared `payload_len`.** That is the format's forward-compatibility contract — it is how version 3 added `0x07` without breaking older players. A file whose header version is above 3 replays what this build understands, skips the rest, and says it came from a newer bastion.
+
+#### Recommended consumer behaviour
+
+1. Read the header `version` **before** anything else and dispatch on it. Treat a missing or non-numeric version as version 1 (undecodable), not as the newest.
+2. Treat `screen_width`/`screen_height` of `0` as "no bound available", never as a valid desktop size.
+3. Validate every rectangle against the desktop in force *before* allocating pixels for it, and keep an absolute per-rectangle cap for the no-desktop-size case. A rectangle of 63426 x 63193 has been seen in the field; decoding it unchecked asks the allocator for ~16 GB.
+4. Skip unknown `event_type`, `format` and `encoding` values by length and **count** them. Do not guess, and do not clamp a bad rectangle into range.
+5. Require the inflated length to equal `width * height * 4` exactly. Both a short and an over-long stream are rejections — several inflate implementations truncate silently against a fixed output buffer, so size the buffer one byte past the expected length and compare.
+6. Index `0x07` regions lazily. A 454 s session is ~450 regions; eagerly inflating full-desktop regions at 1920x1080x4 retains gigabytes.
+7. Report *which* bucket every skipped event landed in. The counters are `uncompressed`, `rle16`, `rle24`, `surface-rgba8888` (painted) and `version-1-undecodable`, `unsupported`, `invalid-geometry`, `error`, `surface-unexpected-version`, `surface-truncated`, `surface-unknown-format`, `surface-unknown-encoding`, `surface-length-mismatch`, `surface-inflate-failed`, `keystroke-unexpected-version`, `unknown-event`. A bare "N skipped" is what made the black-canvas bug invisible for as long as it was.
+8. **Do not assume `timestamp_ms` is monotonic across records.** It is, up to version 3; from version 4 it is not. See §5.2 *Ordering*. If your player asserts monotonicity, that assertion fires on a valid version-4 file. Derive a recording's duration from the *maximum* timestamp, not the last one read.
+
+#### When a version-3 file has no graphics at all
+
+Zero `0x01` **and** zero `0x07` events in a version-3 file is a real state, not a bug: the session's graphics could not be decoded on the bastion. The remaining known cause is **AVC420 / AVC444 (H.264) over EGFX**, which the bastion counts but does not decode (no H.264 decoder is linked). The player says "this session's graphics were not recordable" and points at the bastion, which records the reason in two places:
+
+- a structured log event `RECORDING_GRAPHICS_CENSUS` (target `rustion::usage`), and
+- when content was lost and nothing was recorded, an entry in the tamper-proof audit chain with type tag `recording_graphics_unrepresentable`, carrying `protocol`, `recorded_rectangles`, `unrepresentable_updates` and a byte-free `census` string.
+
+That signal is **not** currently in the recording sidecar BastionVault imports — carrying it there is an open item on the Rustion roadmap — so the player names the state without inventing a cause it cannot see.
+
+**Sidecar unchanged.** `recording_id`, `session_id`, `authority`, `format` (still `"rdp-rec"`), `size_bytes`, `started_at`, `finished_at`, `target_host`, `target_user`, `correlation_id` and the SHA-256 mean exactly what they always meant. Ingestion, the `recording.ready` webhook and the 24 h pull fallback are untouched by the version-3 work.
+
 **Audit witness** — Rustion's per-bastion hash chain is pulled every minute. Every entry's signature is re-verified against the authority's pubkey before being re-witnessed into BV's chain as `rustion.audit.witness`. A tampered entry surfaces in a `tampered_audit` red banner; the chain refuses to advance past it.
+
+### 5.2 `.rdp-rec` version 4 — the keystroke transcript
+
+Version 4 puts a searchable **keystroke transcript** inside the same
+`.rdp-rec`. There is **no new file, no new endpoint and no second fetch
+path**: the transcript is inside the artifact BastionVault already pulls, so
+it is already covered by the sidecar's `sha256` and by the existing chain of
+custody. Rustion's authoritative specification is
+`docs/rdp-keystroke-metadata.md`.
+
+Everything about graphics is unchanged. A version-4 file renders its screen
+byte-for-byte the same as a version-3 file with the same graphics records —
+there is a regression test asserting exactly that in both the TypeScript and
+the reference-crate suites.
+
+#### Header additions
+
+```json
+{
+  "version": 4,
+  "keystroke_metadata": true,
+  "keyboard_layout": "0x00000416",
+  "keyboard_layout_source": "client_core",
+  "max_reorder_ms": 2000
+}
+```
+
+- `keystroke_metadata` — whether a keystroke track and trailer are present.
+  **`false` does not mean nobody typed.** It means the feature was off on
+  that bastion for that session. A missing key (every version ≤ 3 file) reads
+  as `false`. BastionVault renders this as *"keystroke recording was not
+  enabled for this session"*, never as an empty transcript.
+- `keyboard_layout` — the resolved Windows KLID as a hex string, or `null`.
+- `keyboard_layout_source` — `client_core` (read from the session's own
+  `TS_UD_CS_CORE`), `config` (operator override) or `fallback`.
+- `max_reorder_ms` — the ordering bound below. `0` when `keystroke_metadata`
+  is `false`.
+
+#### Two new records
+
+`0x08` **text input**, one or more per keystroke run:
+
+```
+flags:u8  field_epoch:u32 LE  char_count:u16 LE  text_len:u16 LE  text[text_len]
+```
+
+`flags` bits: `0x01 REDACTED` (text withheld, `text_len == 0`, `char_count`
+is the number of characters suppressed), `0x02 COMPOSED` (contains a dead-key
+composition), `0x04 APPROXIMATE` (decoded through a fallback layout),
+`0x08 RUN_END` (closes the run), `0x10 TRUNCATED` (hit the per-run cap). The
+record's `timestamp_ms` is the run's **first** keystroke, not its last.
+Non-character keys appear inside `text` as bracketed tokens — `[Enter]`,
+`[Tab]`, `[Backspace]`, `[Ctrl+C]`, `[F5]`, `[Ctrl+Alt+Del]`.
+
+`field_epoch` is a **correlation hint, not a field identity** — a
+pass-through RDP proxy has no access to the remote UI's focus. BastionVault
+uses it only to draw a separator between run groups, never labels it "field",
+and depends on nothing about its accuracy.
+
+`0x7F` **keystroke trailer**, always the last record, written as an ordinary
+record so the file still tiles and older consumers skip it:
+
+```
+[timestamp_ms:u64 LE][0x7F][payload_len:u32 LE]
+[payload:]  trailer JSON (payload_len - 8 bytes)
+            record_len:u32 LE    # == 13 + payload_len
+            "RKTR"
+```
+
+**Locate it by tail-seek, never by scanning.** Read the last 8 bytes, check
+the `RKTR` magic, read `record_len`, seek to `EOF - record_len`, parse that
+one record. That yields the entire transcript without touching a single
+graphics byte, and its cost does not scale with the artifact — which is the
+whole reason the footer exists. Both BastionVault readers have a test
+asserting the read size is unchanged when the graphics ahead of the trailer
+grow from 1 KiB to 4 MiB.
+
+Trailer JSON carries `trailer_version`, `rebuilt`, `keyboard_layout`,
+`keyboard_layout_source`, `text_decoding`, `runs[]`, `search_text`,
+`text_applied` and a `census`. Per run: `t` (elapsed ms of the first
+keystroke), `d` (duration), `n` (character count), `text` (`null` when
+redacted), `redacted`, `reason` and `epoch`.
+
+- `text_decoding` — `exact` (a layout table matched the session's KLID),
+  `approximate` (fallback table) or `none` (captured but not decoded).
+  **Anything other than `exact` raises a visible caveat in the GUI.**
+- `rebuilt` — `true` when the bastion reconstructed the trailer after a crash
+  rather than writing it live. A rebuilt trailer is **missing the session's
+  final unclosed run**, so it is never presented as a complete transcript.
+- `search_text` — the newline join of the non-redacted runs. This is the only
+  field BastionVault indexes.
+- `text_applied` — the same content with `[Backspace]`/`[Delete]` applied and
+  other named keys stripped. **Derived and lossy.** BastionVault shows it as
+  a clearly-labelled display pane and **never indexes it**; the server side
+  does not even deserialize it.
+
+#### Ordering — the one behavioural break
+
+From version 4, **records are not monotonic in `timestamp_ms`.** `0x02` and
+`0x08` records are buffered by the recorder until their run closes, so they
+are written after graphics records bearing later timestamps. The disorder is
+bounded and the header declares the bound in `max_reorder_ms`.
+
+`0x01`, `0x03`, `0x06` and `0x07` remain monotonic **among themselves**, so
+the video path needs no change: BastionVault's playback timeline holds only
+those. What did change is that `duration_ms` is now the maximum timestamp
+rather than the last one read, and that nothing anywhere asserts
+monotonicity. If your own consumer does, that assertion will fire on a valid
+file.
+
+#### Degradation
+
+| Artifact state | What BastionVault shows |
+|---|---|
+| Version ≤ 3 | "Keystroke recording was not enabled for this session" + the version that predates the track |
+| Version 4, `keystroke_metadata: false` | "…not enabled" + that the bastion had the feature switched off. Distinguishable in the UI from an empty transcript |
+| Version 4, trailer readable | The transcript, runs anchored at `t`, clickable to seek the player |
+| Version 4, trailer truncated or absent | Falls back to scanning `0x08` records, yields every **completed** run, and says the transcript was recovered rather than read — missing per-run durations, the final unclosed run, and each withheld run's rule |
+| `rebuilt: true` | The transcript plus a banner that it was reconstructed after a crash and is incomplete |
+| `text_decoding != "exact"` | The transcript plus a banner naming the fidelity |
+
+The `0x08` fallback is sound because a `0x08` is only ever written *after* its
+run's redaction verdict, so everything in a crashed file is already
+adjudicated. What is lost is the final unclosed run — the safe direction to
+fail, since an un-adjudicated run is dropped rather than written unredacted.
+
+#### How BastionVault stores and searches it
+
+The bastion's `GET /v1/recordings/{rid}/blob` serves whole files and honours
+no `Range`, so BastionVault cannot do Rustion's query-time tail read without
+downloading every candidate artifact in full. It therefore reads each
+transcript **once**, at index time, and persists the derived `search_text`
+into the barrier-encrypted store:
+
+- **Hot** — `rustion/recordings/<rid>` gains only counters and flags
+  (`keystroke_state`, `keystroke_text`, `keystroke_chars`, `keystroke_runs`,
+  `keystroke_redacted_runs`, `keystroke_decoding`, `keystroke_rebuilt`,
+  `keystroke_complete`, `keystroke_indexed_at`). Every one is
+  `#[serde(default)]`, so entries written before this feature decode with
+  them at zero — which reads as *"not indexed yet"*, a third state distinct
+  from both "not enabled" and "nothing typed".
+- **Cold** — `rustion/recordings_keystrokes/<rid>` holds the runs, the
+  `search_text` and the census. Read only when an operator opens or searches
+  a transcript, never when listing recordings.
+
+Indexing runs on the recordings poller's hourly tick, batched (each
+recording costs one full artifact fetch), and can be forced per-recording.
+The artifact's digest is verified against the sidecar's `sha256` **before**
+anything is persisted; a mismatch refuses to index and reports
+`digest-mismatch` rather than indexing best-effort.
+
+#### Security rules BastionVault enforces
+
+1. **A redacted run is never reconstructed.** It has no `0x02` scancode
+   records and no per-key timestamps — the recorder drops both deliberately,
+   because inter-keystroke timing is itself a password-recovery channel. No
+   code path infers a redacted run's content from its neighbours, from the
+   framebuffer, or from its length. It renders as a masked placeholder with
+   its rule and its character count.
+2. **The searchable text is derived, not trusted.** BastionVault rebuilds the
+   newline join from the runs whose `redacted` flag is false rather than
+   taking the producer's `search_text` on faith, so a producer bug cannot put
+   withheld text into a BastionVault index. When the two disagree it keeps its
+   own and records a warning on the transcript.
+3. **The transcript is gated with playback, not with metadata.** A policy
+   granting `rustion/recordings/+` reads sidecar metadata only; the bytes
+   (`.../blob`) and the transcript (`.../keystrokes`) both sit one segment
+   deeper, so `rustion/recordings/*` grants them together.
+4. **No transcript text in a URL, a query string, a log line or an error.** A
+   search *query* is subject to the same rule: it travels in a POST body (the
+   search route is a `Write`, not a `Read`), and the audit event records that
+   a search ran and how many hits it produced — never what it searched for.
+5. **Reading a transcript is its own audit event.** `recording.replayed` says
+   an operator watched the screen; `recording.transcript.accessed` says an
+   operator read what was typed. They are separate rows.
+6. **Redaction upstream is best-effort and the UI says so.** A transcript
+   with no withheld runs is never presented as verified free of secrets — it
+   means no redaction rule fired.
+
+An empty search result is reported alongside how many recordings were
+actually searched and how many have no transcript index yet. "No hits" over
+an unindexed corpus is not a negative finding and is not shown as one.
 
 ---
 
@@ -371,6 +593,9 @@ Every in-GUI playback emits a `recording.replayed` audit row with operator id + 
 | `session.replicated`               | BV      | Telemetry-derived from bastion's history endpoint                                              |
 | `recording.linked`                 | BV      | Recording sidecar lands (webhook or pull)                                                      |
 | `recording.replayed`               | BV      | In-GUI playback opens; integrity check + replay-log emitted                                    |
+| `recording.transcript.indexed`     | BV      | A `.rdp-rec` v4 keystroke transcript was read and stored. Counts, `text_decoding`, `rebuilt` — never typed text |
+| `recording.transcript.accessed`    | BV      | An operator read one recording's keystroke transcript. Separate from `recording.replayed` on purpose |
+| `recording.transcript.searched`    | BV      | A keystroke search ran. Records hit/scanned/unindexed counts and the query's **length** — never the query |
 | `authority.approval_pending`       | Rustion | Pending YAML observed                                                                          |
 | `authority.approved` / `.rejected` | Rustion | CLI approve/reject                                                                             |
 | `authority.attested`               | Rustion | Verified `attest` envelope refreshes `attestation_renew_at`                                    |
@@ -403,7 +628,9 @@ For deeper protocol-level troubleshooting and the original phased-rollout histor
 ## 8. Limits + roadmap notes
 
 - **`rdp-cert` (smart-card PKINIT)** is tracked separately; today the bastion-driven CredSSP path handles `rdp-password` only.
-- **NSCodec / RemoteFX / 8-bpp RLE / bitmap-cache references** in `.rdp-rec` recordings are out-of-scope for the integration's visual replay codec; affected frames show in the "skipped" counter on the canvas player.
+- **Version-1 `.rdp-rec` recordings never replay.** Their graphics events are raw stream slices, not pixels in any encoding (see §5.1). Only sessions recorded after the bastion's recording upgrade carry decodable graphics.
+- **NSCodec / RemoteFX / 8-bpp RLE / bitmap-cache references** on the *legacy* `0x01` bitmap path are out of scope for the replay decoder; affected events show in the skip-reason breakdown. This does not limit version-3 recordings, whose `0x07` events carry pixels the bastion already decoded through those codecs.
+- **AVC420 / AVC444 (H.264) over EGFX** is the one graphics path the bastion cannot represent, so those sessions record zero graphics events. The gap is on the bastion (no H.264 decoder linked), and the reason is only visible in the bastion's audit chain — the recording sidecar does not yet carry it.
 - **Live Windows VM transport hookup** for the CredSSP injection driver is queued for the next available CI VM. The protocol logic is wire-complete and covered by an in-process Windows responder simulator (Rustion's `tests/credssp_e2e.rs`).
 - **Rustion admin web UI** — not in scope; the CLI is the supported approval interface.
 - **`attestation_renew_at` enforcement** at envelope-verify time (refuse stale records with `attestation_expired`) is a one-line follow-up once the operator team picks a default expiry window. The field is recorded and the BV-side attest timer keeps it fresh; the gate is the missing piece.

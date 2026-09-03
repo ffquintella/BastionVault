@@ -61,3 +61,27 @@ pub const TARGET_DEENROLLED: &str = "rustion.target.deenrolled";
 /// Phase 9.2 — weekly re-attestation timer + on-demand
 /// `rustion_authority_attest` Tauri command.
 pub const MASTER_ATTEST: &str = "rustion.master.attest";
+
+// ─── Phase 8.6 — keystroke transcripts ──────────────────────────────
+//
+// A `.rdp-rec` version-4 transcript is the highest-value artifact in a
+// recording, so reading one is auditable **separately** from viewing
+// the recording it came from: `recording.replayed` says an operator
+// watched the screen, and these say an operator read what was typed.
+// Every payload is counts and verdicts only — never a character of
+// typed text, and never a search query.
+
+/// A transcript was read out of a `.rdp-rec` and stored in the
+/// keystroke index. Carries run/character counts, `text_decoding` and
+/// the `rebuilt` flag.
+pub const RECORDING_TRANSCRIPT_INDEXED: &str = "recording.transcript.indexed";
+
+/// An operator read one recording's keystroke transcript. Distinct
+/// from `recording.replayed` on purpose.
+pub const RECORDING_TRANSCRIPT_ACCESSED: &str = "recording.transcript.accessed";
+
+/// An operator ran a keystroke search. Records that a search happened
+/// and how many recordings and hits it touched — **never the query**,
+/// which is user-supplied text about a secret-bearing corpus and is
+/// treated with the same care as the transcript itself.
+pub const RECORDING_TRANSCRIPT_SEARCHED: &str = "recording.transcript.searched";

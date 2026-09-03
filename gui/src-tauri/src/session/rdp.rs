@@ -45,6 +45,8 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ironrdp::cliprdr::backend::ClipboardMessage;
+use ironrdp::cliprdr::{Cliprdr, CliprdrClient};
 use ironrdp::connector::connection_activation::ConnectionActivationState;
 use ironrdp::connector::{
     ClientConnector, Config as ConnectorConfig, ConnectionResult, Credentials, DesktopSize, SmartCardIdentity,
@@ -64,6 +66,7 @@ use ironrdp::session::{ActiveStage, ActiveStageBuilder, ActiveStageOutput};
 use ironrdp_async::{single_sequence_step_read, FramedWrite, NetworkClient};
 use ironrdp_core::{encode_buf, WriteBuf};
 use ironrdp_tokio::TokioFramed;
+use super::rdp_clipboard::{self, ClipboardDirection, ClipboardStats, SharedClipboardStats};
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
@@ -232,6 +235,14 @@ pub struct RdpOpenArgs {
     /// prior unpinned behaviour (direct dials, or a bastion that
     /// advertised no fingerprint).
     pub tls_pin_sha256: Option<String>,
+    /// Clipboard redirection (MS-RDPECLIP) for this session, from the
+    /// profile key `rdp_clipboard`. [`ClipboardDirection::Off`] — the
+    /// default — does not attach the `CLIPRDR` channel at all, so the
+    /// server sees a client with no clipboard redirection rather than
+    /// one that advertises the capability and refuses every transfer.
+    /// See [`super::rdp_clipboard`] and
+    /// `features/rdp-clipboard-redirection.md`.
+    pub clipboard: ClipboardDirection,
 }
 
 /// What kind of credential the operator picked for this session.
@@ -632,7 +643,48 @@ pub async fn open_rdp_session(
         _ => (drdynvc, None),
     };
 
+    // Clipboard redirection (MS-RDPECLIP). The channel is attached
+    // only when the profile asked for it: `Off` must advertise
+    // nothing, so that a server sees a client without clipboard
+    // redirection rather than one that offers the capability and then
+    // refuses every transfer.
+    let (clipboard_proxy, clipboard_rx) = rdp_clipboard::channel();
+    let clipboard_stats: SharedClipboardStats = Arc::new(Mutex::new(ClipboardStats::default()));
+    let clipboard_backend = if args.clipboard.enabled() {
+        if args.ticket_cookie.is_some() {
+            // A brokered session dials the bastion's RDP listener, and
+            // whether CLIPRDR survives that hop depends on the bastion
+            // forwarding the channel — which is unverified. Say so now
+            // rather than letting the operator read an inert channel as
+            // a broken clipboard. The `ready` counter is the check:
+            // it stays false if the channel never negotiates.
+            log::warn!(
+                "rdp clipboard [{}]: redirection is enabled ({}) on a bastion-brokered session. \
+                 The channel only works if the bastion forwards CLIPRDR; watch the session's \
+                 clipboard counters for `ready`. See features/rdp-clipboard-redirection.md § Phase 5.",
+                args.label,
+                args.clipboard.label()
+            );
+        }
+        log::info!(
+            "rdp clipboard [{}]: attaching CLIPRDR, direction {}",
+            args.label,
+            args.clipboard.label()
+        );
+        Some(rdp_clipboard::spawn(
+            args.clipboard,
+            clipboard_proxy,
+            Arc::clone(&clipboard_stats),
+            args.label.clone(),
+        ))
+    } else {
+        None
+    };
+
     let mut connector = ClientConnector::new(cfg, local).with_static_channel(drdynvc);
+    if let Some(backend) = clipboard_backend {
+        connector = connector.with_static_channel(Cliprdr::new(Box::new(backend)));
+    }
     let should_upgrade = ironrdp_async::connect_begin(&mut framed, &mut connector)
         .await
         .map_err(|e| format!("rdp: connect_begin: {}", e.report()))?;
@@ -724,6 +776,9 @@ pub async fn open_rdp_session(
         height,
         label_for_task,
         egfx_rx,
+        clipboard_rx,
+        Arc::clone(&clipboard_stats),
+        args.clipboard,
     ));
 
     {
@@ -950,6 +1005,13 @@ async fn active_stage_loop<S>(
     mut height: u16,
     label: String,
     mut egfx_rx: Option<mpsc::UnboundedReceiver<EgfxEvent>>,
+    // Always present, even with clipboard redirection off: an
+    // always-there receiver nobody writes to keeps the `select!`
+    // branch below free of an `Option` borrow, and the branch is a
+    // no-op when the `CLIPRDR` processor was never attached.
+    mut clipboard_rx: mpsc::UnboundedReceiver<ClipboardMessage>,
+    clipboard_stats: SharedClipboardStats,
+    clipboard_direction: ClipboardDirection,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
 {
@@ -1079,8 +1141,59 @@ async fn active_stage_loop<S>(
             _ = tokio::time::sleep_until(stats_at) => {
                 let now = tokio::time::Instant::now();
                 stats.log_delta(&mut stats_baseline, &label, (now - stats_since).as_secs_f64());
+                if clipboard_direction.enabled() {
+                    log_clipboard_stats(&clipboard_stats, &label, clipboard_direction);
+                    // Piggybacks on this tick rather than arming a
+                    // timer of its own: `drive_timeouts` only expires
+                    // stale file-contents transfers, and a text-only
+                    // backend never starts one. Kept because the
+                    // processor owns that state, not us.
+                    if let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() {
+                        match cliprdr.drive_timeouts() {
+                            Ok(messages) => {
+                                match active_stage.process_svc_processor_messages(messages) {
+                                    Ok(frame) if !frame.is_empty() => {
+                                        if let Err(e) = framed.write_all(&frame).await {
+                                            log::warn!("rdp clipboard: write timeout cleanup: {e:?}");
+                                            break;
+                                        }
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => log::warn!("rdp clipboard: encode timeout cleanup: {e:?}"),
+                                }
+                            }
+                            Err(e) => log::warn!("rdp clipboard: timeout cleanup failed: {e:?}"),
+                        }
+                    }
+                }
                 stats_since = now;
                 stats_at = now + STATS_INTERVAL;
+            }
+            msg = clipboard_rx.recv() => {
+                // The bridge thread and the backend both post here.
+                // `None` means the session's clipboard bridge is gone,
+                // which is not a reason to end the session — the
+                // desktop keeps working without a clipboard.
+                let Some(msg) = msg else {
+                    continue;
+                };
+                match encode_clipboard_message(&mut active_stage, msg) {
+                    Ok(Some(frame)) => {
+                        if let Err(e) = framed.write_all(&frame).await {
+                            log::warn!("rdp clipboard: write: {e:?}");
+                            break;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        // A clipboard protocol error must not take the
+                        // session down with it.
+                        log::warn!("rdp clipboard: {e}");
+                        if let Ok(mut s) = clipboard_stats.lock() {
+                            s.errors += 1;
+                        }
+                    }
+                }
             }
             pdu = framed.read_pdu() => {
                 let (action, payload) = match pdu {
@@ -1472,6 +1585,77 @@ impl EgfxFramebuffer {
 /// Fold one EGFX event into the compositing framebuffer and the
 /// damage set.
 ///
+/// Turn one [`ClipboardMessage`] into a frame for the wire.
+///
+/// `Ok(None)` means there was nothing to send — including the case
+/// where `CLIPRDR` was never attached, which is what a clipboard
+/// message arriving on a session with redirection off would be.
+fn encode_clipboard_message(
+    active_stage: &mut ActiveStage,
+    message: ClipboardMessage,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() else {
+        // Not an error worth a counter: the channel is simply not
+        // attached on this session.
+        log::debug!("rdp clipboard: message received but CLIPRDR is not attached");
+        return Ok(None);
+    };
+    let messages = match message {
+        ClipboardMessage::SendInitiateCopy(formats) => cliprdr
+            .initiate_copy(&formats)
+            .map_err(|e| format!("initiate_copy: {e}"))?,
+        ClipboardMessage::SendInitiatePaste(format) => cliprdr
+            .initiate_paste(format)
+            .map_err(|e| format!("initiate_paste: {e}"))?,
+        ClipboardMessage::SendFormatData(response) => cliprdr
+            .submit_format_data(response)
+            .map_err(|e| format!("submit_format_data: {e}"))?,
+        // Phase 1 is text only: the backend never asks for a file
+        // transfer, so these can only come from a future backend and
+        // are refused rather than half-handled.
+        ClipboardMessage::SendInitiateFileCopy(_)
+        | ClipboardMessage::SendFileContentsRequest(_)
+        | ClipboardMessage::SendFileContentsResponse(_) => {
+            log::warn!("rdp clipboard: file-transfer message ignored (text-only backend)");
+            return Ok(None);
+        }
+        ClipboardMessage::Error(e) => {
+            return Err(format!("backend error: {e}"));
+        }
+    };
+    let frame = active_stage
+        .process_svc_processor_messages(messages)
+        .map_err(|e| format!("encode CLIPRDR messages: {e}"))?;
+    Ok(Some(frame))
+}
+
+/// One line per stats interval, only while something moved. Byte
+/// counts and outcomes — never clipboard content.
+fn log_clipboard_stats(stats: &SharedClipboardStats, label: &str, direction: ClipboardDirection) {
+    let Ok(s) = stats.lock() else {
+        return;
+    };
+    let moved = s.in_transfers + s.out_transfers;
+    let refused = s.dropped_oversize + s.refused_direction + s.errors;
+    if moved == 0 && refused == 0 {
+        return;
+    }
+    log::info!(
+        "rdp clipboard [{label}]: direction={} ready={} in={}x/{}B out={}x/{}B \
+         oversize={} wrong-direction={} loops-suppressed={} errors={}",
+        direction.label(),
+        s.ready,
+        s.in_transfers,
+        s.in_bytes,
+        s.out_transfers,
+        s.out_bytes,
+        s.dropped_oversize,
+        s.refused_direction,
+        s.suppressed_loop,
+        s.errors,
+    );
+}
+
 /// Kept out of the `select!` arm so the pump body stays readable,
 /// and free of `AppHandle` so it is unit-testable without a Tauri
 /// runtime: a size change is *returned* for the caller to emit
@@ -2071,7 +2255,7 @@ mod pin_tests {
 /// bytes on the wire.
 #[cfg(test)]
 mod nego_cookie_tests {
-    use super::{build_connector_config, RdpCredential, RdpOpenArgs, DEFAULT_BULK_COMPRESSION};
+    use super::{build_connector_config, ClipboardDirection, RdpCredential, RdpOpenArgs, DEFAULT_BULK_COMPRESSION};
     use ironrdp::pdu::nego::{ConnectionRequest, RequestFlags, SecurityProtocol};
     use ironrdp::pdu::x224::X224;
     use ironrdp_core::{encode_buf, WriteBuf};
@@ -2091,6 +2275,7 @@ mod nego_cookie_tests {
             aggressive_performance: false,
             enable_egfx: false,
             bulk_compression: DEFAULT_BULK_COMPRESSION,
+            clipboard: ClipboardDirection::Off,
             ticket_cookie,
             tls_pin_sha256: None,
         }

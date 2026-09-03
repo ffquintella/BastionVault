@@ -27,6 +27,7 @@ use chrono::Utc;
 
 use crate::kernel_api::VaultCtx;
 use crate::errors::RvError;
+use crate::keystroke_index;
 use crate::recordings;
 
 /// How often the poller ticks. 1 h by default — much slower than the
@@ -81,6 +82,45 @@ async fn tick(stores: &super::RustionStores) -> Result<(), RvError> {
     let Some(recs) = stores.recordings() else {
         return Ok(());
     };
+
+    // Phase 8.6 — keystroke-transcript indexing rides this tick.
+    //
+    // It is not part of ingestion: the `recording.ready` webhook must
+    // stay a fast, signature-verifying write, and indexing a
+    // transcript costs a **full artifact download** because the
+    // bastion's `GET /v1/recordings/{rid}/blob` serves whole files and
+    // honours no `Range`. So the sweep is deferred to here and capped
+    // at `SWEEP_BATCH` artifacts per tick; an operator who wants a
+    // specific recording indexed now can POST
+    // `rustion/recordings/keystrokes/index` with its id. A failure
+    // here must not stop the pull-fallback pass below, which is the
+    // reason this recording index exists at all.
+    if let Some(keystrokes) = stores.keystrokes() {
+        match keystroke_index::index_sweep(
+            &store,
+            &recs,
+            &keystrokes,
+            keystroke_index::SWEEP_BATCH,
+        )
+        .await
+        {
+            Ok(report) => {
+                if report.indexed > 0 || report.failed > 0 || report.remaining > 0 {
+                    log::info!(
+                        "rustion/poller: keystroke sweep — considered={} indexed={} \
+                         not_enabled={} unchanged={} failed={} remaining={}",
+                        report.considered,
+                        report.indexed,
+                        report.not_enabled,
+                        report.unchanged,
+                        report.failed,
+                        report.remaining
+                    );
+                }
+            }
+            Err(e) => log::warn!("rustion/poller: keystroke sweep failed: {e}"),
+        }
+    }
 
     let pending = recs.pending_list().await?;
     if pending.is_empty() {

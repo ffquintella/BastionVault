@@ -329,6 +329,35 @@ export interface RustionRecordingEntry {
   receivedAt: string;
   /** "webhook" (delivered) or "pull" (fetched via the 24h fallback). */
   deliveryMode: string;
+
+  // ─── Phase 8.6: keystroke-transcript summary ───────────────────
+  // Counters and flags only. The transcript itself is behind
+  // `rustionRecordingKeystrokes`, which the server gates with
+  // recording *playback* and audits separately.
+  /** `""` (no transcript index yet) | `indexed` | `not-enabled` |
+   *  `digest-mismatch` | `failed`.
+   *
+   *  `""` and `not-enabled` are **different states** and the UI must
+   *  not collapse them: the first means BastionVault has not looked
+   *  yet, the second means the bastion had keystroke recording
+   *  switched off for that session. Neither means nobody typed. */
+  keystrokeState: string;
+  /** The artifact header's `keystroke_metadata`. */
+  keystrokeMetadata: boolean;
+  /** A transcript with at least one non-redacted character exists. */
+  keystrokeText: boolean;
+  /** Non-redacted characters, i.e. what the search covers. */
+  keystrokeChars: number;
+  keystrokeRuns: number;
+  keystrokeRedactedRuns: number;
+  /** `exact` | `approximate` | `none` | `unknown`. Anything other
+   *  than `exact` must be surfaced. */
+  keystrokeDecoding: string;
+  /** The bastion rebuilt the trailer after a crash — the session's
+   *  final unclosed run is missing. */
+  keystrokeRebuilt: boolean;
+  keystrokeComplete: boolean;
+  keystrokeIndexedAt: string;
 }
 
 export const rustionRecordingsList = () =>
@@ -371,6 +400,172 @@ export interface RustionRecordingBlob {
 
 export const rustionRecordingBlob = (recordingId: string) =>
   invoke<RustionRecordingBlob>("rustion_recording_blob", { recordingId });
+
+// ─── Keystroke transcripts + search (Phase 8.6) ───────────────────
+//
+// `.rdp-rec` version 4 carries a searchable keystroke transcript
+// inside the artifact BastionVault already pulls — no new fetch path
+// and no new integrity story, because the sidecar's `sha256` already
+// covers it. Format spec: Rustion `docs/rdp-keystroke-metadata.md`.
+//
+// Three rules the UI has to honour, not just the API:
+//   1. A redacted run is rendered as withheld with its rule and its
+//      character count. Nothing reconstructs one.
+//   2. `keystrokeState === ""` (not indexed) and `"not-enabled"`
+//      (recording was off) are different, and neither is an empty
+//      transcript.
+//   3. `textDecoding !== "exact"`, `rebuilt`, and a
+//      `text-record-scan` source each need a visible caveat.
+
+/** One keystroke run. `text` is `null` exactly when `redacted`. */
+export interface RustionKeystrokeRun {
+  /** Elapsed ms of the run's first keystroke — the player's seek
+   *  offset. */
+  t: number;
+  /** Duration in ms. `0` on a scanned transcript, which has none. */
+  d: number;
+  /** Character count. Retained on a redacted run so an auditor sees
+   *  that N characters were withheld. */
+  n: number;
+  text: string | null;
+  redacted: boolean;
+  /** `known_secret` | `masked_field` | `deny_pattern` |
+   *  `credential_pair` on a redacted run. */
+  reason: string;
+  /** The `field_epoch` correlation **hint**. A pass-through RDP proxy
+   *  cannot see the remote UI's focus, so this groups runs visually —
+   *  do not label it "field" and do not depend on it. */
+  epoch: number;
+  composed: boolean;
+  approximate: boolean;
+  truncated: boolean;
+}
+
+export interface RustionKeystrokeCensus {
+  keysTotal: number;
+  charsDecoded: number;
+  unicodeEvents: number;
+  namedKeys: number;
+  composed: number;
+  undecodableScancodes: number;
+  redactedRuns: number;
+  redactedChars: number;
+  slowpathInputPdus: number;
+  truncatedRuns: number;
+}
+
+export interface RustionKeystrokeTranscript {
+  recordingId: string;
+  sessionId: string;
+  format: string;
+  /** `not-indexed` | `indexed` | `not-enabled` | `digest-mismatch` |
+   *  `failed`. */
+  state: string;
+  keystrokeMetadata: boolean;
+  formatVersion: number;
+  /** Bound on how far out of order a keystroke record may appear. */
+  maxReorderMs: number;
+  /** `trailer-footer` | `text-record-scan`. */
+  source: string;
+  /** False for a rebuilt trailer or a scanned fallback. */
+  complete: boolean;
+  trailerVersion: number;
+  rebuilt: boolean;
+  textDecoding: string;
+  keyboardLayout: string;
+  keyboardLayoutSource: string;
+  runs: RustionKeystrokeRun[];
+  census: RustionKeystrokeCensus;
+  charsIndexed: number;
+  indexedAt: string;
+  warnings: string[];
+  /** Server-supplied statement that upstream redaction is
+   *  best-effort. Render it; never suppress it. */
+  redactionDisclaimer: string;
+}
+
+/** Read one recording's keystroke transcript. Gated on the server
+ *  with recording playback and audited as
+ *  `recording.transcript.accessed` — a separate event from
+ *  `recording.replayed`. */
+export const rustionRecordingKeystrokes = (recordingId: string) =>
+  invoke<RustionKeystrokeTranscript>("rustion_recording_keystrokes", {
+    recordingId,
+  });
+
+export interface RustionKeystrokeIndexReport {
+  recordingId: string;
+  status: string;
+  detail: string;
+  runs: number;
+  redactedRuns: number;
+  charsIndexed: number;
+  textDecoding: string;
+  rebuilt: boolean;
+  source: string;
+  considered: number;
+  indexed: number;
+  notEnabled: number;
+  unchanged: number;
+  failed: number;
+  remaining: number;
+}
+
+/** Build or refresh the transcript index. Omit `recordingId` to
+ *  sweep the recordings that have none — each costs a full artifact
+ *  fetch from its bastion, so the server caps the batch and reports
+ *  what is left. */
+export const rustionKeystrokesIndex = (
+  recordingId?: string,
+  force?: boolean,
+) =>
+  invoke<RustionKeystrokeIndexReport>("rustion_keystrokes_index", {
+    recordingId: recordingId ?? null,
+    force: force ?? null,
+  });
+
+export interface RustionKeystrokeHit {
+  recordingId: string;
+  sessionId: string;
+  targetHost: string;
+  targetUser: string;
+  authority: string;
+  bastionId: string;
+  startedAt: string;
+  runIndex: number;
+  /** Seek offset into the recording, in ms. */
+  tMs: number;
+  dMs: number;
+  n: number;
+  epoch: number;
+  excerpt: string;
+  approximate: boolean;
+  textDecoding: string;
+  rebuilt: boolean;
+  complete: boolean;
+}
+
+export interface RustionKeystrokeSearchReport {
+  scanned: number;
+  /** Recordings with no transcript index. A negative result does not
+   *  speak for these, and the UI has to say so. */
+  unindexed: number;
+  truncated: boolean;
+  hits: RustionKeystrokeHit[];
+  redactionDisclaimer: string;
+}
+
+/** Search indexed transcripts for typed text.
+ *
+ *  The query travels in the request body over the Tauri IPC and then
+ *  in a POST body — never a URL, a query string or a log line. The
+ *  server matches per run over non-redacted text, so a hit cannot
+ *  come from a withheld run. */
+export const rustionKeystrokeSearch = (query: string, limit?: number) =>
+  invoke<RustionKeystrokeSearchReport>("rustion_keystroke_search", {
+    query,
+    limit: limit ?? null,
+  });
 
 // ─── Phase 7: policy + bastion groups ─────────────────────────────
 
@@ -624,8 +819,16 @@ export const rustionDeploymentIdRead = () =>
 
 /** Phase 8.3 — spawn a separate WebviewWindow for full-screen
  *  replay of one recording. Resolves once the window is open. */
-export const rustionOpenReplayWindow = (recordingId: string) =>
-  invoke<void>("rustion_open_replay_window", { recordingId });
+/** Open the full-screen replay window.
+ *
+ *  `atMs` seeks the player to that offset — set it from a
+ *  keystroke-search hit's `tMs`. Only the offset travels in the
+ *  window URL; the query and the matched text never do. */
+export const rustionOpenReplayWindow = (recordingId: string, atMs?: number) =>
+  invoke<void>("rustion_open_replay_window", {
+    recordingId,
+    atMs: atMs ?? null,
+  });
 
 export const rustionTelemetryList = () =>
   invoke<RustionTelemetryTarget[]>("rustion_telemetry_list");

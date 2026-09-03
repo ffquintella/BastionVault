@@ -49,6 +49,18 @@ The Resources page is the operator-facing inventory of infrastructure: hosts, da
 
 Filters at the top of the list let you scope by resource type, asset group, or free-text search. The "Import from PMP" button surfaces the PMP migration helper (see `features/pmp-import.md`).
 
+#### RDP clipboard redirection
+
+An RDP connection profile carries a **Clipboard redirection** setting: `Off` (the default), `Host → session`, `Session → host`, or `Both directions`. With it on, `Ctrl+C` on one side pastes on the other.
+
+It is off by default and the direction is explicit on purpose: the clipboard is a data channel *into and out of* a privileged session. `Session → host` is an egress path for anything the operator can see on the target — the thing a session recording exists to make accountable — and `Host → session` an ingress path into a production host. Enabling it is a deliberate act per profile; upgrading changes no existing session's behaviour.
+
+Current limits:
+
+- **Text only.** `CF_UNICODETEXT`, capped at 1 MiB per transfer. An oversize payload is dropped and counted, never truncated. Images and file copy are separate phases with their own switch — see [`features/rdp-clipboard-redirection.md`](https://github.com/ffquintella/BastionVault/blob/main/features/rdp-clipboard-redirection.md).
+- **Clipboard content is never logged**, at any level, in either direction. The session's log line and the session window carry direction, byte counts and outcomes only.
+- **Bastion-brokered sessions are unverified.** A brokered session dials the bastion's RDP listener, and whether `CLIPRDR` survives that hop depends on the bastion forwarding the channel. Enabling clipboard on a `rustion-required` profile logs a warning at connect time, and the session's clipboard counters report `ready=false` if the channel never negotiates.
+
 > **Visibility note.** The Resources list is filtered server-side to entries the caller **owns** (authored) or has been **shared** on. With the per-user-scoping baseline (`standard-user` policy in 0.5.22+), a userpass identity will not see resources owned by another user unless an explicit share or asset-group share is in place.
 
 ### Secrets (KV v2)

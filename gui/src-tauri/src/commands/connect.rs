@@ -553,6 +553,17 @@ pub async fn session_open_rdp(
             Err(e) => return Err(CommandError::from(e)),
         },
     };
+    // Clipboard redirection (MS-RDPECLIP). Off unless the profile asks
+    // for it and says which way: the clipboard is a data channel into
+    // and out of a privileged session, so nobody gets one by accident
+    // on upgrade. See features/rdp-clipboard-redirection.md.
+    let clipboard = match profile.get("rdp_clipboard").and_then(|v| v.as_str()) {
+        None => session::rdp_clipboard::ClipboardDirection::Off,
+        Some(other) => match session::rdp_clipboard::parse_clipboard_direction(other) {
+            Ok(dir) => dir,
+            Err(e) => return Err(CommandError::from(e)),
+        },
+    };
 
     // Phase 7.4 — consult the Rustion policy resolver. Mirrors the SSH
     // path: when transport requires (or prefers) a bastion AND the
@@ -660,6 +671,7 @@ pub async fn session_open_rdp(
                     aggressive_performance,
                     enable_egfx,
                     bulk_compression,
+                    clipboard,
                     ticket_cookie: ticket_cookie.clone(),
                     tls_pin_sha256: tls_pin_for_dial.clone(),
                 },

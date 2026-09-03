@@ -14,6 +14,21 @@
 //
 // Common controls live in RecordingPlayer; the protocol-specific
 // renderers are mounted underneath it.
+//
+// Phase 8.6 adds keystroke search over `.rdp-rec` version-4
+// transcripts. Three things about that card are deliberate:
+//
+//   - The query goes over the Tauri IPC in a request *body* and then
+//     into a POST body. It never lands in a URL, a query string, a
+//     log line or an error message — it is user-supplied text
+//     describing a secret-bearing corpus.
+//   - The server matches per run over non-redacted text, so a hit can
+//     never come from a withheld run. This page does not filter for
+//     that; the data model guarantees it.
+//   - An empty result is reported alongside how many recordings were
+//     actually searched and how many have no transcript index yet.
+//     "No hits" over an unindexed corpus is not a negative finding
+//     and must not read as one.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -29,8 +44,12 @@ import {
   Table,
   useToast,
 } from "../components/ui";
+import { RdpTranscriptPane, formatOffset } from "../components/RdpTranscriptPane";
+import { decodeRdpRec } from "../lib/rdpDecoder";
 import { extractError } from "../lib/error";
 import {
+  rustionKeystrokeSearch,
+  rustionKeystrokesIndex,
   rustionOpenReplayWindow,
   rustionRecordingBlob,
   rustionRecordingPull,
@@ -39,6 +58,8 @@ import {
   rustionRecordingReplayLog,
   rustionRecordingsList,
   rustionTargetList,
+  type RustionKeystrokeHit,
+  type RustionKeystrokeSearchReport,
   type RustionRecordingBlob,
   type RustionRecordingEntry,
   type RustionTargetSummary,
@@ -244,10 +265,12 @@ export function RecordingsPage() {
           </div>
         </Card>
 
+        <KeystrokeSearchCard />
+
         <Card className="p-4">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
             <Input
-              label="Search"
+              label="Metadata search"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="recording id, session id, host, user…"
@@ -350,6 +373,11 @@ export function RecordingsPage() {
                       label={r.deliveryMode}
                     />
                   ),
+                },
+                {
+                  key: "typed",
+                  header: "Typed",
+                  render: (r) => <KeystrokeBadge entry={r} />,
                 },
                 {
                   key: "received",
@@ -512,7 +540,18 @@ function RecordingPlayerModal({
             {blob.format === "asciicast" && (
               <AsciicastPlayer bytes={bytes} />
             )}
-            {blob.format === "rdp-rec" && <RdpRecSummary bytes={bytes} />}
+            {blob.format === "rdp-rec" && (
+              <>
+                <RdpRecSummary bytes={bytes} />
+                {/* Read straight out of the artifact bytes above, so
+                    the transcript is here whether or not the server
+                    has indexed this recording for search yet. The
+                    pane renders its own explicit "not enabled"
+                    notice for a version <= 3 file — an absent pane
+                    would read as "nothing was typed". */}
+                <RdpTranscriptPane bytes={bytes} />
+              </>
+            )}
             {blob.format === "smb-log" && <SmbLogSummary bytes={bytes} />}
             <div className="flex justify-end gap-2">
               <Button
@@ -654,120 +693,73 @@ function AsciicastPlayer({ bytes }: { bytes: Uint8Array }) {
 // ─── RDP-rec summary (no inline visual replay) ─────────────────────
 
 function RdpRecSummary({ bytes }: { bytes: Uint8Array }) {
-  const summary = useMemo(() => parseRdpRec(bytes), [bytes]);
+  // Same decoder the canvas player uses, so the counts here and the
+  // counts there cannot disagree. `decodeRdpRec` only *indexes* the
+  // 0x07 surface updates — no pixels are inflated for a summary.
+  const decoded = useMemo(() => decodeRdpRec(bytes), [bytes]);
+  const header = useMemo(() => {
+    if (!decoded.headerJson) return null;
+    try {
+      return JSON.parse(decoded.headerJson) as unknown;
+    } catch {
+      return null;
+    }
+  }, [decoded.headerJson]);
+  const graphics = decoded.frames.length + decoded.surfaceUpdates.length;
   return (
     <div className="space-y-3">
       <div className="bg-neutral-900/60 border border-neutral-800 rounded p-3 text-xs">
         <div className="font-semibold mb-2 text-neutral-300">
           RDP recording header
         </div>
-        {summary.header ? (
+        {header ? (
           <pre className="text-[10px] overflow-x-auto">
-            {JSON.stringify(summary.header, null, 2)}
+            {JSON.stringify(header, null, 2)}
           </pre>
         ) : (
-          <div className="text-red-300">{summary.error ?? "no header"}</div>
+          <div className="text-red-300">{decoded.error ?? "no header"}</div>
         )}
       </div>
       <div className="grid grid-cols-3 gap-3 text-xs">
         <Card className="p-3">
-          <div className="text-neutral-500">Graphics frames</div>
-          <div className="text-lg font-semibold">{summary.graphics}</div>
+          <div className="text-neutral-500">Graphics events</div>
+          <div className="text-lg font-semibold">{graphics}</div>
+          <div className="text-neutral-500">
+            {decoded.frames.length} bitmap · {decoded.surfaceUpdates.length}{" "}
+            surface
+          </div>
         </Card>
         <Card className="p-3">
           <div className="text-neutral-500">Keyboard events</div>
-          <div className="text-lg font-semibold">{summary.keyboard}</div>
+          <div className="text-lg font-semibold">{decoded.keyboardEvents}</div>
         </Card>
         <Card className="p-3">
           <div className="text-neutral-500">Mouse events</div>
-          <div className="text-lg font-semibold">{summary.mouse}</div>
+          <div className="text-lg font-semibold">{decoded.mouseEvents}</div>
         </Card>
       </div>
       <div className="text-xs text-neutral-400">
-        Duration: {(summary.durationMs / 1000).toFixed(1)}s · Events:{" "}
-        {summary.graphics + summary.keyboard + summary.mouse}
+        Format version {decoded.version || "?"} · Duration:{" "}
+        {(decoded.durationMs / 1000).toFixed(1)}s · Events:{" "}
+        {graphics +
+          decoded.keyboardEvents +
+          decoded.mouseEvents +
+          decoded.unknownEvents}
+        {decoded.screenWidth > 0 &&
+          ` · ${decoded.screenWidth}×${decoded.screenHeight}`}
       </div>
+      {decoded.truncated && (
+        <div className="text-xs text-amber-300">{decoded.truncated}</div>
+      )}
       <div className="text-xs text-neutral-500 leading-relaxed">
-        Inline visual playback of RDP recordings requires decoding the upstream's
-        raw RDP bitmap-update payloads (MS-RDPBCGR). The downloaded{" "}
-        <code className="font-mono">.rdp-rec</code> file can be opened in an
-        external player; a native in-GUI replayer is tracked as a future
-        enhancement (it's a multi-week protocol-decoder engineering task on its
-        own track).
+        {decoded.graphicsUndecodable
+          ? "This is a version-1 recording: its graphics events are undelimited slices of the raw byte stream and cannot be rendered. Open in a window for the full explanation, or download the artifact."
+          : decoded.graphicsNotRecordable
+            ? "This version-3 recording contains no graphics events — the bastion could not represent this session's graphics. Check the bastion audit chain for recording_graphics_unrepresentable."
+            : "Open in a window to replay this recording on a canvas. Version-3 recordings carry pixels the bastion decoded client-side; version-2 recordings carry wire bitmaps decoded here."}
       </div>
     </div>
   );
-}
-
-function parseRdpRec(bytes: Uint8Array): {
-  header: any | null;
-  error?: string;
-  graphics: number;
-  keyboard: number;
-  mouse: number;
-  durationMs: number;
-} {
-  if (bytes.length < 4 || String.fromCharCode(...bytes.slice(0, 4)) !== "RREC") {
-    return {
-      header: null,
-      error: "magic mismatch (expected RREC)",
-      graphics: 0,
-      keyboard: 0,
-      mouse: 0,
-      durationMs: 0,
-    };
-  }
-  // Find the newline after the JSON header.
-  let nl = -1;
-  for (let i = 4; i < bytes.length; i++) {
-    if (bytes[i] === 0x0a) {
-      nl = i;
-      break;
-    }
-  }
-  if (nl < 0) {
-    return {
-      header: null,
-      error: "no header newline",
-      graphics: 0,
-      keyboard: 0,
-      mouse: 0,
-      durationMs: 0,
-    };
-  }
-  let header: any = null;
-  try {
-    header = JSON.parse(new TextDecoder().decode(bytes.slice(4, nl)));
-  } catch (e) {
-    return {
-      header: null,
-      error: `header parse failed: ${e}`,
-      graphics: 0,
-      keyboard: 0,
-      mouse: 0,
-      durationMs: 0,
-    };
-  }
-  // Walk events: timestamp:u64le + type:u8 + len:u32le + payload[len]
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let pos = nl + 1;
-  let graphics = 0,
-    keyboard = 0,
-    mouse = 0,
-    lastTs = 0;
-  while (pos + 13 <= bytes.length) {
-    const ts = Number(view.getBigUint64(pos, true));
-    const type = bytes[pos + 8];
-    const len = view.getUint32(pos + 9, true);
-    const next = pos + 13 + len;
-    if (next > bytes.length) break;
-    if (type === 0x01) graphics++;
-    else if (type === 0x02) keyboard++;
-    else if (type === 0x03) mouse++;
-    lastTs = ts;
-    pos = next;
-  }
-  return { header, graphics, keyboard, mouse, durationMs: lastTs };
 }
 
 // ─── SMB-log summary ───────────────────────────────────────────────
@@ -786,6 +778,274 @@ function SmbLogSummary({ bytes }: { bytes: Uint8Array }) {
         {lines.slice(0, 200).join("\n")}
         {lines.length > 200 ? `\n… (${lines.length - 200} more)` : ""}
       </pre>
+    </div>
+  );
+}
+
+// ─── Keystroke search (Phase 8.6) ──────────────────────────────────
+
+/// Search recordings by what was typed in them.
+///
+/// The query is sent in a request body, never a URL, and the server
+/// does not log it. Matching happens per keystroke run over
+/// non-redacted text, so a hit can never come from a withheld run.
+function KeystrokeSearchCard() {
+  const toast = useToast();
+  const [query, setQuery] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [indexing, setIndexing] = useState(false);
+  const [report, setReport] = useState<RustionKeystrokeSearchReport | null>(
+    null,
+  );
+
+  const run = async () => {
+    const q = query.trim();
+    if (!q) {
+      toast.toast("error", "Enter some text to search for");
+      return;
+    }
+    setSearching(true);
+    try {
+      setReport(await rustionKeystrokeSearch(q));
+    } catch (e) {
+      // `extractError` surfaces the server's message, which by
+      // design never echoes the query back.
+      toast.toast("error", `Keystroke search failed: ${extractError(e)}`);
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const buildIndex = async () => {
+    setIndexing(true);
+    try {
+      const rep = await rustionKeystrokesIndex();
+      toast.toast(
+        rep.indexed > 0 ? "success" : "info",
+        `Transcript index: ${rep.indexed} indexed, ${rep.notEnabled} without keystroke recording, ` +
+          `${rep.unchanged} already current, ${rep.failed} failed` +
+          (rep.remaining > 0
+            ? ` — ${rep.remaining} still queued (each costs a full artifact fetch, so the sweep is batched)`
+            : ""),
+      );
+    } catch (e) {
+      toast.toast("error", `Indexing failed: ${extractError(e)}`);
+    } finally {
+      setIndexing(false);
+    }
+  };
+
+  return (
+    <Card className="p-4">
+      <h2 className="text-sm font-semibold mb-1">Search keystrokes</h2>
+      <p className="text-xs text-neutral-500 mb-3">
+        Finds RDP sessions by the text typed in them, from the keystroke
+        transcript inside each <code>.rdp-rec</code> version-4 artifact.
+        Non-character keys appear as bracketed tokens — search{" "}
+        <code>[Enter]</code>, <code>[Ctrl+C]</code>, <code>[F5]</code>.
+      </p>
+      <div className="grid grid-cols-2 gap-3">
+        <Input
+          label="Typed text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void run();
+          }}
+          placeholder="net user /add"
+        />
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Button onClick={run} loading={searching} variant="primary">
+          Search
+        </Button>
+        <Button onClick={buildIndex} loading={indexing} variant="secondary">
+          Build transcript index
+        </Button>
+        <span className="text-xs text-neutral-500 min-w-0">
+          Transcripts are indexed in the background as recordings arrive; this
+          forces a batch now.
+        </span>
+      </div>
+
+      {report && <KeystrokeResults report={report} />}
+    </Card>
+  );
+}
+
+function KeystrokeResults({
+  report,
+}: {
+  report: RustionKeystrokeSearchReport;
+}) {
+  return (
+    <div className="mt-4 space-y-3">
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="font-semibold">
+          {report.hits.length} match{report.hits.length === 1 ? "" : "es"}
+        </span>
+        <span className="text-neutral-500">
+          in {report.scanned} indexed recording
+          {report.scanned === 1 ? "" : "s"}
+        </span>
+        {report.truncated && (
+          <Badge variant="warning" label="results truncated" />
+        )}
+      </div>
+
+      {report.unindexed > 0 && (
+        <div className="p-3 text-sm text-amber-200 bg-amber-950/40 border border-amber-900 rounded space-y-1">
+          <div className="font-semibold">
+            This search did not cover every recording.
+          </div>
+          <div className="text-xs text-amber-200/80">
+            {report.unindexed} recording
+            {report.unindexed === 1 ? " has" : "s have"} no transcript index
+            yet, so {report.hits.length === 0 ? "this empty result" : "these results"}{" "}
+            {report.hits.length === 0 ? "is" : "are"} not a complete answer.
+            Run <strong>Build transcript index</strong> and search again.
+          </div>
+        </div>
+      )}
+
+      {report.hits.length === 0 ? (
+        <div className="text-xs text-neutral-500">
+          No run in an indexed transcript contains that text. Redacted runs
+          carry no text and are unmatchable by design, so a secret that was
+          withheld will never appear here.
+        </div>
+      ) : (
+        <ul className="space-y-2 max-h-96 overflow-auto pr-1">
+          {report.hits.map((h) => (
+            <KeystrokeHitRow key={`${h.recordingId}-${h.runIndex}`} hit={h} />
+          ))}
+        </ul>
+      )}
+
+      {report.redactionDisclaimer && (
+        <div className="text-xs text-neutral-500">
+          {report.redactionDisclaimer}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function KeystrokeHitRow({ hit }: { hit: RustionKeystrokeHit }) {
+  const toast = useToast();
+  return (
+    <li className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 min-w-0">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs min-w-0">
+        <span className="font-mono truncate">{hit.recordingId}</span>
+        <span className="text-neutral-500">·</span>
+        <span className="font-mono truncate">
+          {hit.targetUser}@{hit.targetHost}
+        </span>
+        <span className="text-neutral-500">·</span>
+        <span className="font-mono tabular-nums">{formatOffset(hit.tMs)}</span>
+        <span className="text-neutral-500">
+          {hit.n} char{hit.n === 1 ? "" : "s"}
+        </span>
+        {hit.approximate && (
+          <Badge variant="warning" label="approximate" />
+        )}
+        {hit.textDecoding !== "exact" && (
+          <Badge variant="warning" label={`decoding: ${hit.textDecoding}`} />
+        )}
+        {hit.rebuilt && <Badge variant="warning" label="trailer rebuilt" />}
+        {!hit.complete && !hit.rebuilt && (
+          <Badge variant="warning" label="transcript incomplete" />
+        )}
+      </div>
+      <div className="mt-1 font-mono text-xs whitespace-pre-wrap break-all">
+        {hit.excerpt}
+      </div>
+      <div className="mt-1">
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={async () => {
+            try {
+              // Only the offset travels in the replay window's URL —
+              // never the query or the matched text.
+              await rustionOpenReplayWindow(hit.recordingId, hit.tMs);
+            } catch (e) {
+              toast.toast("error", `Open replay window: ${extractError(e)}`);
+            }
+          }}
+        >
+          Open replay at {formatOffset(hit.tMs)}
+        </Button>
+      </div>
+    </li>
+  );
+}
+
+/// The Recordings list's per-row transcript state.
+///
+/// Four distinct states, and collapsing any two of them would be a
+/// false statement on an audit surface:
+///   - not an `.rdp-rec`: no keystroke track is possible at all;
+///   - not indexed: BastionVault has not looked yet;
+///   - not enabled: the bastion had keystroke recording off;
+///   - indexed: N characters, M of them withheld.
+function KeystrokeBadge({ entry }: { entry: RustionRecordingEntry }) {
+  if (entry.format !== "rdp-rec") {
+    return <span className="text-neutral-600 text-xs">n/a</span>;
+  }
+  if (entry.keystrokeState === "") {
+    return (
+      <span
+        className="text-neutral-500 text-xs"
+        title="No transcript index yet. This says nothing about whether anything was typed — run Build transcript index."
+      >
+        not indexed
+      </span>
+    );
+  }
+  if (entry.keystrokeState === "not-enabled") {
+    return (
+      <span
+        className="text-neutral-400 text-xs"
+        title="Keystroke recording was not enabled for this session (version <= 3, or version 4 with keystroke_metadata false). Not a statement that nothing was typed."
+      >
+        not recorded
+      </span>
+    );
+  }
+  if (entry.keystrokeState !== "indexed") {
+    return (
+      <Badge
+        variant="warning"
+        label={entry.keystrokeState}
+      />
+    );
+  }
+  return (
+    <div className="flex flex-col gap-0.5 min-w-0">
+      <span className="text-xs">
+        {entry.keystrokeChars} char{entry.keystrokeChars === 1 ? "" : "s"}
+        {entry.keystrokeRedactedRuns > 0 && (
+          <span className="text-amber-300">
+            {" "}
+            · {entry.keystrokeRedactedRuns} withheld
+          </span>
+        )}
+      </span>
+      {(entry.keystrokeDecoding !== "exact" ||
+        entry.keystrokeRebuilt ||
+        !entry.keystrokeComplete) && (
+        <span
+          className="text-[10px] text-amber-300/90"
+          title="Anything other than an exact, live-written trailer means the transcript is approximate or incomplete."
+        >
+          {entry.keystrokeRebuilt
+            ? "rebuilt"
+            : !entry.keystrokeComplete
+              ? "incomplete"
+              : entry.keystrokeDecoding}
+        </span>
+      )}
     </div>
   );
 }

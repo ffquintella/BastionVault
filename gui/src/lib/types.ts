@@ -592,6 +592,17 @@ export interface ConnectProfileHint {
   };
 }
 
+/**
+ * Which way clipboard content may travel in an RDP session. Ingress
+ * and egress are separately expressible because they are different
+ * risks. See `ConnectionProfile.rdp_clipboard`.
+ */
+export type RdpClipboardDirection =
+  | "off"
+  | "host-to-session"
+  | "session-to-host"
+  | "bidirectional";
+
 export interface ConnectionProfile {
   /** Stable per-resource id, generated client-side on create. */
   id: string;
@@ -636,6 +647,21 @@ export interface ConnectionProfile {
    * traffic. Has no effect for SSH profiles.
    */
   rdp_aggressive_performance?: boolean;
+  /**
+   * RDP only — clipboard redirection (MS-RDPECLIP) for this profile's
+   * sessions. Absent or `"off"` means the `CLIPRDR` channel is not
+   * attached at all, so the remote desktop sees a client with no
+   * clipboard redirection.
+   *
+   * The clipboard is a data channel into *and* out of a privileged
+   * session, so the direction is explicit and the default is off:
+   * `"host-to-session"` lets the operator paste into the target,
+   * `"session-to-host"` lets them carry content out of it, and
+   * `"bidirectional"` allows both. Text only today, size-capped, with
+   * per-session counters on the session window. See
+   * features/rdp-clipboard-redirection.md.
+   */
+  rdp_clipboard?: RdpClipboardDirection;
   /**
    * Require the connecting operator to re-prove a second factor (TOTP code
    * or FIDO2 security key) immediately before the session opens. Applies to

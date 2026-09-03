@@ -675,6 +675,67 @@ Only the `secret` credential kind (ssh-password shape) is resolved
 server-side today. v1 `POST /v1/rustion/session/open` (raw
 `credential_material`) is unchanged.
 
+### Session Recordings + Keystroke Transcripts
+
+~~~
+GET  /v1/rustion/recordings
+GET  /v1/rustion/recordings/{rid}
+GET  /v1/rustion/recordings/{rid}/blob
+GET  /v1/rustion/recordings/{rid}/keystrokes
+POST /v1/rustion/recordings/pull
+POST /v1/rustion/recordings/reconcile
+POST /v1/rustion/recordings/replay-log
+POST /v1/rustion/recordings/keystrokes/index
+POST /v1/rustion/recordings/keystroke-search
+~~~
+
+`{rid}` is always `rec_<hex>`.
+
+**Authorization tiers matter here, and they are path-shaped.** The bare
+`recordings/{rid}` route returns sidecar metadata; the recording's *bytes*
+(`/blob`) and its *keystroke transcript* (`/keystrokes`) sit one segment
+deeper. A policy granting `rustion/recordings/+` therefore reads metadata
+only, while `rustion/recordings/*` grants the bytes and the transcript
+together — which is the intended coupling, because a transcript is a record
+of everything the operator typed and belongs with playback rather than with
+"list sessions".
+
+**`GET .../keystrokes`** returns the `.rdp-rec` version-4 keystroke
+transcript from BastionVault's index. Redacted runs come back withheld —
+`text: null` plus their `reason` and `n` character count — and nothing in the
+stack reconstructs one. The response's `state` distinguishes `not-indexed`,
+`indexed`, `not-enabled` (keystroke recording was off for that session),
+`digest-mismatch` and `failed`; **`not-enabled` is not a statement that
+nothing was typed.** Emits `recording.transcript.accessed`, a separate audit
+event from `recording.replayed`.
+
+**`POST .../keystrokes/index`** — `{"recording_id": "rec_…", "force": false}`.
+An empty `recording_id` sweeps every `rdp-rec` recording with no current
+transcript, batched: each one costs a full artifact fetch from its bastion,
+because the bastion's blob endpoint serves whole files and honours no
+`Range`. The artifact digest is verified against the sidecar's `sha256`
+before anything is persisted. Also runs automatically on the recordings
+poller's hourly tick.
+
+**`POST .../keystroke-search`** — `{"query": "net user /add", "limit": 200}`.
+A `Write` with the query in the **body**, deliberately: a keystroke query is
+user-supplied text describing a secret-bearing corpus, and putting it in a
+URL would place it in access logs, proxy logs and browser history. It is not
+logged server-side either — `recording.transcript.searched` records the
+query's *length* and the hit/scanned/unindexed counts, never its content.
+
+Matching is per keystroke run over non-redacted text, so a hit can never come
+from a withheld run. The response reports `scanned` and `unindexed` alongside
+`hits`: an empty result over a partly-unindexed corpus is not a negative
+finding. Each hit carries `t_ms`, the run's first-keystroke offset, so a
+player can seek there.
+
+Namespace scoping matches the recordings list: in a non-root namespace only
+recordings whose `target_host` matches a resource that namespace owns are
+searchable, applied before any transcript is opened.
+
+Format reference: [docs/rustion-integration.md](rustion-integration.md) §5.2.
+
 ### Asset Groups (resource bundles)
 
 Asset groups bundle resources and KV secrets under a single name so

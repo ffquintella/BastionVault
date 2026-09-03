@@ -45,6 +45,308 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-09-03
+
+### Added
+
+#### Rustion integration — Phase 8.6: searchable keystroke transcripts (`.rdp-rec` version 4)
+
+An auditor asking "which session typed `net user /add`?" had to replay every
+candidate recording and read the screen. The bastion now records a keystroke
+transcript — typed text decoded through the session's own keyboard layout,
+grouped into runs, adjudicated for secrets, and summarised in a trailer at
+the end of the same `.rdp-rec`. This is the consumer half. There is **no new
+fetch path**: the transcript is inside the artifact BastionVault already
+pulls, covered by the `sha256` it already verifies. See
+[features/rustion-integration.md](features/rustion-integration.md) Phase 8.6
+and [docs/rustion-integration.md](docs/rustion-integration.md) §5.2.
+
+- **Decode `.rdp-rec` version 4** — the header's `keystroke_metadata`,
+  `keyboard_layout`, `keyboard_layout_source` and `max_reorder_ms`; the
+  `0x08` text-input record; and the `0x7F` keystroke trailer, located by
+  reading the last 8 bytes of the artifact and seeking back `record_len`
+  rather than scanning the file. A truncated or absent trailer falls back to
+  scanning `0x08` records, which yields every completed run. Version 1–3
+  handling is unchanged, with regression tests asserting it.
+  (`crates/bv-engine-rustion/src/rdp_keystrokes.rs`,
+  `gui/src/lib/rdpKeystrokes.ts`, `gui/src/lib/rdpDecoder.ts`)
+- **Search recordings by typed text** — `POST
+  /v1/rustion/recordings/keystroke-search` matches per keystroke run over
+  non-redacted text and returns each hit with the run's first-keystroke
+  offset, so the player can seek there. Namespace-scoped like the recordings
+  list. A search that finds nothing reports how many recordings were actually
+  searched and how many have no transcript index yet — "no hits" over an
+  unindexed corpus is not a negative finding.
+- **Read one recording's transcript** — `GET
+  /v1/rustion/recordings/{rid}/keystrokes`. Gated with recording *playback*,
+  not with metadata reads: `rustion/recordings/+` reads sidecar metadata,
+  while `/blob` and `/keystrokes` sit one segment deeper so
+  `rustion/recordings/*` grants them together.
+- **Transcript index** — `POST /v1/rustion/recordings/keystrokes/index`
+  builds or refreshes it, and the recordings poller sweeps a batch every
+  hour. The artifact's digest is verified against the sidecar's `sha256`
+  before anything is persisted. The transcript lives in a cold
+  `rustion/recordings_keystrokes/<rid>` view; the recordings index gains only
+  counters and flags, because it is read for every row of the Recordings
+  page.
+- **GUI** — a transcript pane beside the video with runs anchored at their
+  own timestamps, clickable to seek; a keystroke-search card on the
+  Recordings page; a per-row transcript badge; and "open replay at *T*" from
+  a search hit. The player gained a real seek (clear and replay every region
+  up to *T*, then resume — a `0x07` region is a dirty rectangle with no key
+  frames, so there is no cheaper correct seek).
+  (`gui/src/components/RdpTranscriptPane.tsx`,
+  `gui/src/components/RdpReplayCanvas.tsx`,
+  `gui/src/routes/RecordingsPage.tsx`)
+- **Three audit events, counts only** — `recording.transcript.indexed`,
+  `recording.transcript.accessed` and `recording.transcript.searched`.
+  Reading a transcript is auditable separately from watching the screen:
+  `recording.replayed` says an operator watched, these say an operator read
+  what was typed.
+- **67 new tests** — 29 Rust in the server reader, 8 in the index store, 2
+  migration tests on the recordings record, 33 vitest in the GUI reader, 7 in
+  the graphics decoder and 5 in the reference crate. Every fixture is built
+  from the format specification rather than captured from a recorder, so a
+  producer bug cannot silently become the expectation.
+
+#### Rustion integration — Phase 8.5: RDP session replay renders again (`.rdp-rec` version 3)
+
+RDP replay had been a black canvas for every session. BastionVault was not at
+fault and its rejection was correct — the recordings genuinely contained
+nothing decodable — but the bastion now records **decoded pixels** as a new
+event type in a new format version, and this is the consumer half. Replay on
+this side is an inflate and a blit; there is deliberately no RDP codec here.
+See [features/rustion-integration.md](features/rustion-integration.md) Phase
+8.5 and [docs/rustion-integration.md](docs/rustion-integration.md) §5.1.
+
+- **Decode `.rdp-rec` header version 3 and its `0x07` surface-update event**
+  ([gui/src/lib/rdpDecoder.ts](gui/src/lib/rdpDecoder.ts),
+  [gui/wasm/rdp-replay/src/lib.rs](gui/wasm/rdp-replay/src/lib.rs)). Payload
+  is `x:u16 y:u16 w:u16 h:u16 format:u8 encoding:u8` + data; `format = 1` is
+  RGBA8888 in R,G,B,A order, row-major, top-down, no row padding;
+  `encoding = 0` is raw and `encoding = 1` is an RFC 1950 zlib stream that
+  must inflate to exactly `width * height * 4` bytes. Both encodings occur in
+  the same file — the producer stores raw for regions under 512 bytes or when
+  compression did not shrink them. Each event is the coalesced dirty region of
+  the desktop at that moment: no key frames, no full-frame event at the start,
+  so the canvas fills in as regions arrive and a correct view at time *T*
+  means replaying from the beginning.
+- **Version dispatch on the header `version`**, with version 1 now an
+  explicit, user-visible "metadata only — graphics undecodable" state rather
+  than an accidental consequence of validation rejecting every event. Version
+  1 graphics events are undelimited slices of the raw byte stream from a
+  recording tap that accepted roughly a quarter of all bytes as frames
+  (forensics: 0 of 1779 events carried a self-consistent `TS_BITMAP_DATA`, at
+  a median payload entropy of 7.75 bits/byte). They are not pixels in any
+  encoding, so they are no longer decoded at all. A header with no numeric
+  version reads the same way — conservatively — rather than as the newest.
+  Version 2 is unchanged. A version above 3 decodes what this build
+  understands, skips the rest by `payload_len`, and says the file came from a
+  newer bastion.
+- **`0x06` desktop-size events are applied in file order.** Graphics
+  rectangles validate against the most recent `0x06`, falling back to the
+  header; a `0x06` that differs from the current canvas resizes and clears it,
+  because the desktop renegotiated and nothing painted against the old one is
+  still valid. Decoding now yields one ordered timeline (bitmap / surface /
+  desktop) so a geometry change cannot be applied out of order relative to the
+  paints around it.
+- **`0x07` pixels are inflated lazily**, one region at the moment of its blit,
+  and dropped afterwards. A 454 s session is ~450 dirty regions at the
+  producer's default 1000 ms interval; eagerly inflating full-desktop regions
+  at 1920x1080x4 would retain about 3.7 GB.
+- **"This session's graphics were not recordable"** is now a named state for a
+  version-3 file with zero `0x01` and zero `0x07` events
+  ([gui/src/components/RdpReplayCanvas.tsx](gui/src/components/RdpReplayCanvas.tsx)).
+  That is real, not a parse failure: the remaining known cause is AVC420 /
+  AVC444 (H.264) over EGFX, which the bastion counts but does not decode. The
+  notice points at the bastion's `recording_graphics_unrepresentable` audit
+  entry and `RECORDING_GRAPHICS_CENSUS` log event, because that signal is not
+  yet carried in the recording sidecar BastionVault imports — so the player
+  names the state without inventing a cause it cannot see.
+- **Skip reasons are itemised.** The `0 rendered / N skipped` report now says
+  *which* bucket each skipped event landed in, with new counters for unknown
+  `event_type`, unknown `format`, unknown `encoding`, inflate failure,
+  length mismatch, out-of-bounds region, a `0x07` in a file whose version
+  predates it, and version-1 undecodable events. That reporting is what turned
+  the black-canvas bug from invisible into diagnosable.
+- **A truncated final record is reported, not painted.** The complete prefix
+  still replays — a truncated recording must replay what it has, loudly — the
+  partial record produces no event, and the player names the trailing byte
+  count and points at the sidecar's `size_bytes` and SHA-256.
+- **Dependencies:** `fflate` (GUI, MIT, zero transitive deps) and
+  `miniz_oxide` (reference crate, pure Rust, no C) for the zlib inflate. Both
+  are given an output bound of `w * h * 4 + 1`: several inflate
+  implementations silently truncate against a fixed output buffer, so the
+  sentinel byte is what lets a stream that inflates past what its region
+  claims be an error instead of a silent downgrade.
+
+### Changed
+
+#### Rustion integration — Phase 8.6
+
+- **`.rdp-rec` records are no longer monotonic in `timestamp_ms`.** From
+  version 4 the recorder buffers `0x02` and `0x08` until their run closes, so
+  they are written after graphics records bearing later timestamps, bounded
+  by the header's `max_reorder_ms`. Graphics records stay monotonic among
+  themselves, so the video path is unchanged — but a recording's duration is
+  now derived from the *maximum* timestamp rather than the last one read, and
+  nothing in the decoders asserts monotonicity. Any external consumer that
+  does will trip on a valid version-4 file.
+- **`RecordingEntry` gains nine keystroke-summary fields**, all
+  `#[serde(default)]`. Entries written before this release decode with them
+  at zero, which reads as *"no transcript index yet"* — deliberately a third
+  state, distinct from *"keystroke recording was not enabled for this
+  session"* and from *"nothing was typed"*. The GUI keeps all three apart.
+- **`MAX_SUPPORTED_VERSION` is 4** in both decoders, so a version-4 file no
+  longer raises the "produced by a newer bastion" notice.
+
+#### Rustion integration — Phase 8.5
+
+- **Both `.rdp-rec` summary views call the shared decoder** instead of two
+  hand-rolled event walkers that counted only `0x01`/`0x02`/`0x03`
+  ([gui/src/routes/RecordingsPage.tsx](gui/src/routes/RecordingsPage.tsx),
+  [gui/src/routes/SessionReplayWindow.tsx](gui/src/routes/SessionReplayWindow.tsx)).
+  A version-3 recording no longer reports "0 graphics frames" for a session
+  full of surface updates, and the summary can no longer disagree with the
+  player. Both now show the format version, the surface/bitmap split, and any
+  truncation note.
+
+### Security
+
+#### Rustion integration — Phase 8.6: keystroke transcript handling
+
+A keystroke transcript is the highest-value artifact in a recording. These
+are constraints on the implementation, not advice:
+
+- **A redacted run is never reconstructed.** It carries no `0x02` scancode
+  records and no per-key timestamps — the recorder drops both deliberately,
+  because inter-keystroke timing is itself a password-recovery channel. No
+  code path infers a redacted run's content from neighbouring records, from
+  the framebuffer, or from its length. It renders as a masked placeholder
+  with its redaction rule and its character count.
+- **The indexed text is derived, not trusted.** Both readers rebuild the
+  newline join from the runs whose `redacted` flag is false rather than
+  taking the producer's `search_text` on faith, so a producer bug cannot put
+  withheld text into a BastionVault index. A disagreement keeps the derived
+  value and records a warning on the transcript.
+- **`text_applied` is never indexed.** The server module does not deserialize
+  it, making the guarantee structural rather than a convention someone has to
+  remember; the GUI shows it only as a clearly-labelled derived view.
+- **No transcript text in a URL, a query string, a log line or an error
+  message.** A search query is subject to the same rule: the search route is
+  a `Write` with the query in the body, and the audit event records the
+  query's length and the result counts, never its content. Fixed while
+  testing: V8's `SyntaxError` message quotes the offending JSON source, so a
+  malformed trailer would have put transcript bytes into an error string —
+  the GUI reader now reports a length only, with a test asserting the message
+  does not contain the content.
+- **The artifact digest is verified before any derived state is persisted.**
+  Indexing turns bastion-supplied bytes into durable, searchable state, so a
+  digest mismatch refuses to index and reports it rather than indexing
+  best-effort.
+- **Redaction on the bastion is best-effort and every surface says so.** A
+  transcript with no withheld runs is never presented as verified free of
+  secrets — it means no redaction rule fired.
+- **The trailer's `record_len` is attacker-influenced input** and is bounded
+  (32 MiB) and range-checked against the file before any allocation, as is
+  the fallback scan's run count.
+
+#### RDP clipboard redirection (host ⇄ session), off by default
+
+`Ctrl+C` in the remote Windows desktop and paste locally, or the reverse.
+MS-RDPECLIP (`CLIPRDR`) driven by `ironrdp-cliprdr`, bridged to the host OS
+clipboard inside the Tauri host. Phase 1 carries text.
+See [features/rdp-clipboard-redirection.md](features/rdp-clipboard-redirection.md).
+
+- **New profile key `rdp_clipboard`** with an explicit direction: `off`
+  (default), `host-to-session`, `session-to-host`, `bidirectional`. Exposed on
+  the RDP connection-profile editor
+  ([gui/src/routes/ResourcesPage.tsx](gui/src/routes/ResourcesPage.tsx)) and
+  parsed strictly — an unrecognised value is a connect-time error, not a silent
+  fall back to a default, matching `rdp_bulk_compression`.
+- **Off by default, and `off` means not attached.** The `CLIPRDR` channel is
+  only registered when a profile asks for it, so a server sees a client with no
+  clipboard redirection rather than one that advertises the capability and
+  refuses every transfer. Upgrading changes no existing session's behaviour.
+  Ingress and egress are separately expressible because they are different
+  risks: `session-to-host` is an egress path for anything the operator can see
+  on a privileged target, `host-to-session` an ingress path into it.
+- **Text only, size-capped, never truncated**
+  ([gui/src-tauri/src/session/rdp_clipboard.rs](gui/src-tauri/src/session/rdp_clipboard.rs)).
+  `CF_UNICODETEXT` on the wire (UTF-16LE, CRLF, NUL-terminated per MS-RDPECLIP
+  2.2.5.2), folded to the host's line endings on arrival. A payload over 1 MiB
+  in either direction is dropped and counted — a half-pasted credential or
+  config file is worse than a failed paste. `CF_TEXT`/`CF_OEMTEXT` are not
+  offered (every Windows target converts from `CF_UNICODETEXT`, and a code-page
+  format invites mojibake); images and file copy are later phases with their
+  own switch, so no file capability is advertised.
+- **The host clipboard is read and written on its own thread.** An X11 or
+  Wayland clipboard call blocks for as long as the *owning* application takes
+  to answer, and a blocked pump is a frozen session; platform clipboard handles
+  also carry thread affinity a `tokio` worker cannot promise. Host-side changes
+  are polled at 500 ms because no cross-platform clipboard change notification
+  exists.
+- **Feedback loops are broken explicitly**, via
+  `ironrdp_cliprdr::loop_detector` with content hashing: remote text written to
+  the host clipboard is recorded as remote-sourced, so the poller recognises it
+  as our own paste instead of advertising it back forever.
+- **Content is never logged**, at any level, in either direction. The
+  per-session line and the counters carry direction, byte counts, format ids
+  and outcomes only (`ready`, transfers and bytes each way, oversize drops,
+  wrong-direction refusals, suppressed loops, errors). A refusal is explicit —
+  a request the direction forbids gets a `CB_RESPONSE_FAIL`, not silence.
+- **Brokered sessions say so.** A `rustion-required` session dials the
+  bastion's RDP listener and whether `CLIPRDR` survives that hop depends on the
+  bastion forwarding the channel, which is unverified. Enabling clipboard on
+  such a profile logs a warning at connect time and the `ready` counter stays
+  false if the channel never negotiates, rather than looking enabled and doing
+  nothing.
+- **Dependencies:** `ironrdp`'s `cliprdr` feature, and `arboard` with
+  `default-features = false` — the `image-data` feature and its `image` /
+  `tiff` / `half` stack are dependency surface a text-only phase has no use
+  for.
+- 14 unit tests covering strict parsing, the asymmetric direction gates, the
+  wire round trip (including non-ASCII and astral-plane characters), CRLF
+  normalisation, the cap applying to the wire length, oversize drops,
+  direction refusals, and loop suppression.
+
+- **Geometry validation is unchanged in strictness, deliberately.** Every
+  pre-existing rejection path survives, and `0x07` regions go through the same
+  bounds check as `0x01` — against the most recent `0x06` if one has been
+  seen, the header otherwise, and the absolute per-rectangle pixel cap when
+  neither gives a bound (a rectangle of 63426 x 63193 has been observed in the
+  field; decoding it unchecked asks the allocator for ~16 GB, and recording
+  bytes come from the bastion). A region outside the desktop is skipped and
+  counted, never clamped, with a regression test asserting exactly that:
+  relaxing the check to make the black canvas go away would have destroyed the
+  signal that diagnosed the bug. Unknown `format`/`encoding` values and any
+  length disagreement are rejected rather than guessed at.
+
+### Fixed
+
+#### Resources: the card's Connect button connects
+
+- **A configured resource now dials from the list, instead of opening its
+  detail view** ([gui/src/routes/ResourcesPage.tsx](gui/src/routes/ResourcesPage.tsx)).
+  The card-level quick-Connect refused any profile `needsOperatorPrompt`
+  reported as needing a typed credential, which includes every RDP
+  `default-account` profile — so a server with one profile, flagged default,
+  answered a Connect click with the Connection tab, where clicking Connect
+  again opened the session with no prompt at all. The tab's launcher had
+  always resolved that case against the server
+  (`get_default_account_self` → `has_windows_password`, the rule
+  [features/default-resource-account.md](features/default-resource-account.md)
+  documents); the card never asked. Both paths now share one decision, so the
+  button on the card is the shortcut it looks like.
+- **A profile that genuinely needs a credential prompts on the card**, with
+  the same modal the Connection tab shows — LDAP operator-bind, or an RDP
+  default account with no stored Windows password. Previously the card sent
+  the operator to the detail view to click Connect a second time and get that
+  modal there.
+- The detail view is now opened by a Connect click for one reason only: a
+  choice one click cannot make (no launchable profile, or several with none
+  marked default).
+
 ## [0.42.3] - 2026-09-02
 
 ### Added
