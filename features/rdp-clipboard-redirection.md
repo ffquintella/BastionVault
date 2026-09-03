@@ -117,6 +117,16 @@ which is the attacker-influenced side.
   unbounded channel, mirroring `ironrdp-client`'s reason for keeping clipboard
   off the bounded input channel: backpressure meant for keyboard and pointer
   input would desynchronize the clipboard protocol state machine.
+- **That branch must be gated on the channel still having senders**, and the
+  receiver is wrapped in `ClipboardInbox` to make that impossible to forget.
+  `UnboundedReceiver::recv()` does not park once the last sender is dropped —
+  it resolves to `None` immediately, and on every poll after. The pump's
+  `select!` is `biased` with `read_pdu` *below* this branch, so an ungated
+  branch is not an idle no-op: it wins every iteration and the session never
+  reads a single PDU. With redirection `Off` — the default — no sender is ever
+  created, so this hit every session, and it read as a graphics fault (black
+  desktop, input accepted, nothing painted, `0 pdus` in the session log line,
+  100 % CPU) rather than as a stalled reader. Fixed in `[Unreleased]`.
 
 ---
 

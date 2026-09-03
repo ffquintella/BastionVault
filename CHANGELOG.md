@@ -45,6 +45,27 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.43.2] - 2026-09-03
+
+### Fixed
+
+- **RDP sessions connected to a permanently black desktop and pinned a CPU
+  core** (`gui/src-tauri/src/session/rdp.rs`) -- the active-stage pump's
+  `select!` is `biased`, and the clipboard branch sits ahead of
+  `framed.read_pdu()`. With clipboard redirection off -- the default --
+  nothing holds a sender for that channel, and `UnboundedReceiver::recv()`
+  resolves to `None` immediately and on every subsequent poll rather than
+  parking. The branch was therefore ready on every iteration and `read_pdu`
+  was never polled at all: sessions logged `0 pdus` for their whole lifetime,
+  painted nothing, never consumed the server's DisplayControl reply to a
+  window resize, and spun at 100 % CPU until the server gave up and the
+  socket sat in `CLOSE_WAIT`. Operator input still reached the wire (it is
+  the branch above), which is what made this look like a rendering fault
+  rather than a stalled reader. The clipboard receiver is now wrapped in
+  `ClipboardInbox`, which latches closed the first time it yields `None` and
+  gates the branch out of the `select!` from then on -- a clipboard bridge
+  that goes away mid-session still does not end the session.
+
 ## [0.43.1] - 2026-09-03
 
 ### Fixed

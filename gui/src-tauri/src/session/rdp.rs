@@ -984,6 +984,59 @@ impl NetworkClient for CredSspNetworkClient {
     }
 }
 
+/// The pump's clipboard inbox: an `UnboundedReceiver` that knows
+/// when it has stopped being a valid `select!` branch.
+///
+/// `UnboundedReceiver::recv()` resolves to `None` *immediately, and
+/// on every subsequent poll*, once the last sender is dropped — it
+/// does not park. The pump's `select!` is `biased`, and this branch
+/// sits ahead of `framed.read_pdu()`, so an ungated branch is not a
+/// harmless no-op: it is ready on every iteration, and `read_pdu` is
+/// never polled at all. That starves the session outright. The
+/// desktop stays black because no graphics PDU is ever read, the
+/// DisplayControl reply to a resize is never consumed, the operator's
+/// keystrokes still reach the wire (input is the branch *above* this
+/// one) but nothing comes back, and the task spins a core at 100 %
+/// until the server gives up and the socket sits in `CLOSE_WAIT`.
+/// The session log line for such a session reads `0 pdus`.
+///
+/// Every session hits this, not just an unlucky one: with redirection
+/// off — the default — nothing ever holds a sender, so the inbox is
+/// closed before the pump's first iteration.
+///
+/// So: close the inbox the first time it yields `None`, and gate the
+/// branch on [`Self::is_open`] from then on. A clipboard bridge that
+/// goes away mid-session is not a reason to end the session, which is
+/// why this is a gate rather than a `break`.
+struct ClipboardInbox {
+    rx: mpsc::UnboundedReceiver<ClipboardMessage>,
+    open: bool,
+}
+
+impl ClipboardInbox {
+    fn new(rx: mpsc::UnboundedReceiver<ClipboardMessage>) -> Self {
+        Self { rx, open: true }
+    }
+
+    /// False once the channel has no senders left. The pump copies
+    /// this out before the `select!` and uses it as the branch's
+    /// precondition, the same way it copies `flush_at` into
+    /// `deadline`.
+    fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// Cancel safe: delegates to `UnboundedReceiver::recv`, which is,
+    /// and only touches `open` after the inner future has resolved.
+    async fn recv(&mut self) -> Option<ClipboardMessage> {
+        let msg = self.rx.recv().await;
+        if msg.is_none() {
+            self.open = false;
+        }
+        msg
+    }
+}
+
 /// The active-stage pump.
 ///
 /// One tokio task per session. Three things race in the `select!`:
@@ -1005,16 +1058,22 @@ async fn active_stage_loop<S>(
     mut height: u16,
     label: String,
     mut egfx_rx: Option<mpsc::UnboundedReceiver<EgfxEvent>>,
-    // Always present, even with clipboard redirection off: an
-    // always-there receiver nobody writes to keeps the `select!`
-    // branch below free of an `Option` borrow, and the branch is a
-    // no-op when the `CLIPRDR` processor was never attached.
-    mut clipboard_rx: mpsc::UnboundedReceiver<ClipboardMessage>,
+    // Always present, even with clipboard redirection off, so the
+    // `select!` branch below stays free of an `Option` borrow.
+    //
+    // With redirection off nothing ever holds a sender — `channel()`
+    // hands the `PumpProxy` to `rdp_clipboard::spawn` only on the
+    // enabled path, so the proxy dies with `open_rdp_session`'s frame.
+    // The branch is therefore *permanently ready* with `None` from the
+    // first poll, which is why it is gated on `clipboard_open` below.
+    // See [`ClipboardInbox`].
+    clipboard_rx: mpsc::UnboundedReceiver<ClipboardMessage>,
     clipboard_stats: SharedClipboardStats,
     clipboard_direction: ClipboardDirection,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
 {
+    let mut clipboard_rx = ClipboardInbox::new(clipboard_rx);
     let mut image = DecodedImage::new(ironrdp::graphics::image_processing::PixelFormat::RgbA32, width, height);
     // Captured before the builder consumes the rest of the result:
     // the reactivation sequence is now minted from a factory the
@@ -1065,6 +1124,10 @@ async fn active_stage_loop<S>(
         // Copied out so the `select!` branches below can reassign
         // `flush_at` without holding a borrow across the await.
         let deadline = flush_at;
+        // Same reason, and the branch *must* be gated: see
+        // [`ClipboardInbox`]. Without this the clipboard branch is
+        // ready on every iteration and `read_pdu` below it never runs.
+        let clipboard_live = clipboard_rx.is_open();
         tokio::select! {
             biased;
             ctl = rx.recv() => {
@@ -1169,11 +1232,14 @@ async fn active_stage_loop<S>(
                 stats_since = now;
                 stats_at = now + STATS_INTERVAL;
             }
-            msg = clipboard_rx.recv() => {
+            msg = clipboard_rx.recv(), if clipboard_live => {
                 // The bridge thread and the backend both post here.
                 // `None` means the session's clipboard bridge is gone,
                 // which is not a reason to end the session — the
-                // desktop keeps working without a clipboard.
+                // desktop keeps working without a clipboard. The
+                // `recv` above has already latched the inbox closed,
+                // so `clipboard_live` disables this branch from the
+                // next iteration on and `read_pdu` gets polled again.
                 let Some(msg) = msg else {
                     continue;
                 };
@@ -2665,5 +2731,99 @@ mod egfx_tests {
         .is_none());
         assert_eq!((w, h), (8, 4), "the desktop size must survive a malformed ResetGraphics");
         assert!(dirty.is_empty());
+    }
+}
+
+/// Regression coverage for the frozen-desktop bug: a clipboard inbox
+/// with no senders left is *permanently ready*, and the pump's
+/// `select!` is `biased` with `read_pdu` below the clipboard branch.
+/// Before [`ClipboardInbox`] gated that branch, every session with
+/// clipboard redirection off — the default — read exactly `0 pdus`,
+/// painted a black desktop forever and spun a core at 100 %.
+#[cfg(test)]
+mod clipboard_inbox_tests {
+    use super::{ClipboardInbox, ClipboardMessage};
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    /// The tokio semantic the original code got wrong: `recv()` on a
+    /// receiver whose senders are gone does not park, it resolves —
+    /// and keeps resolving.
+    #[tokio::test]
+    async fn an_inbox_parks_while_a_sender_lives_and_latches_closed_when_none_do() {
+        let (tx, rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+        let mut inbox = ClipboardInbox::new(rx);
+        assert!(inbox.is_open());
+
+        let idle = tokio::time::timeout(Duration::from_millis(50), inbox.recv()).await;
+        assert!(idle.is_err(), "a channel with a live sender must park, not resolve");
+        assert!(inbox.is_open(), "parking is not closing");
+
+        drop(tx);
+        assert!(inbox.recv().await.is_none());
+        assert!(!inbox.is_open(), "the inbox must latch closed so the pump can gate its branch");
+        // Still `None`, immediately, on every subsequent poll — which
+        // is exactly why the branch has to be gated rather than
+        // merely `continue`d.
+        assert!(inbox.recv().await.is_none());
+        assert!(!inbox.is_open());
+    }
+
+    /// The pump's `select!` shape, gated. The PDU branch must be
+    /// reached, and within one wasted iteration.
+    #[tokio::test]
+    async fn a_gated_clipboard_branch_lets_the_pdu_branch_run() {
+        let (clip_tx, clip_rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+        // Redirection off: `open_rdp_session` never hands the proxy to
+        // the bridge, so the sender dies with its stack frame.
+        drop(clip_tx);
+        let mut clipboard_rx = ClipboardInbox::new(clip_rx);
+
+        let (pdu_tx, mut pdu_rx) = mpsc::unbounded_channel::<u8>();
+        pdu_tx.send(7).expect("the server has a PDU waiting");
+
+        let mut iterations = 0usize;
+        let pdu = loop {
+            iterations += 1;
+            assert!(iterations <= 8, "the pump spun {iterations} times without polling read_pdu");
+            let clipboard_live = clipboard_rx.is_open();
+            tokio::select! {
+                biased;
+                msg = clipboard_rx.recv(), if clipboard_live => {
+                    if msg.is_none() {
+                        continue;
+                    }
+                }
+                pdu = pdu_rx.recv() => break pdu,
+            }
+        };
+
+        assert_eq!(pdu, Some(7));
+        assert_eq!(iterations, 2, "one iteration to latch the inbox closed, one to read the PDU");
+        assert!(!clipboard_rx.is_open());
+    }
+
+    /// The same shape *without* the gate — the bug as shipped. Kept
+    /// as an executable statement of why the gate exists: the PDU
+    /// branch is never polled, so a `continue` on `None` is a hot
+    /// loop, not a no-op.
+    #[tokio::test]
+    async fn an_ungated_clipboard_branch_starves_the_pdu_branch() {
+        let (clip_tx, mut clip_rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+        drop(clip_tx);
+        let (pdu_tx, mut pdu_rx) = mpsc::unbounded_channel::<u8>();
+        pdu_tx.send(7).expect("the server has a PDU waiting");
+
+        for _ in 0..64 {
+            tokio::select! {
+                biased;
+                msg = clip_rx.recv() => {
+                    assert!(msg.is_none(), "a senderless channel yields None, forever");
+                }
+                _ = pdu_rx.recv() => panic!("unreachable: the clipboard branch is always ready first"),
+            }
+        }
+
+        assert_eq!(pdu_rx.recv().await, Some(7), "the PDU sat unread the whole time");
     }
 }
