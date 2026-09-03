@@ -720,14 +720,15 @@ pub async fn rustion_recording_replay_log(
 /// Tauri WebviewWindow pointed at the SessionReplayWindow route. The
 /// new window calls `rustion_recording_blob` itself; we don't pass
 /// the bytes via the spawn channel because they can be many MB.
+///
+/// `at_ms` is the Phase 8.6 seek offset in ms, set from a
+/// keystroke-search hit's `t` so the operator lands on the moment the
+/// text was typed. A **numeric offset only**: the searched-for text
+/// never travels in this URL, and neither does any transcript content.
 #[tauri::command]
 pub async fn rustion_open_replay_window(
     app: tauri::AppHandle,
     recording_id: String,
-    /// Phase 8.6 — seek offset in ms, set from a keystroke-search
-    /// hit's `t` so the operator lands on the moment the text was
-    /// typed. A **numeric offset only**: the searched-for text never
-    /// travels in this URL, and neither does any transcript content.
     at_ms: Option<u64>,
 ) -> CmdResult<()> {
     use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};

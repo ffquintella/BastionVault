@@ -45,6 +45,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.43.1] - 2026-09-03
+
+### Fixed
+
+- **Tauri GUI host failed to compile** (`gui/src-tauri/src/commands/rustion.rs`) --
+  the Phase 8.6 `at_ms` note on `rustion_open_replay_window` was written as a
+  doc comment on the function parameter, which rustc rejects outright ("allow,
+  cfg, cfg_attr, deny, expect, forbid, and warn are the only allowed built-in
+  attributes in function parameters"). Moved into the function's own doc
+  comment. The IPC contract is unchanged. Broke the Windows NuGet package
+  build in `esi/bv-build`; introduced in 0.43.0.
+
 ## [0.43.0] - 2026-09-03
 
 ### Added

@@ -1,6 +1,6 @@
 [package]
 name = "bastion-vault-gui"
-version = "0.43.0"
+version = "0.43.1"
 edition = "2021"
 description = "BastionVault Desktop GUI"
 # Shipped as a signed installer (see roadmaps/packaging-and-distribution.md),
