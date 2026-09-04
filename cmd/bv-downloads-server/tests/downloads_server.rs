@@ -21,6 +21,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::thread::JoinHandle;
 
 /// The fixture root, in the layout the container expects.
 fn fixture_root() -> PathBuf {
@@ -31,12 +32,24 @@ fn fixture_root() -> PathBuf {
 struct Server {
     child: Child,
     addr: String,
+    /// Drains the child's piped stdout for as long as the server lives. The
+    /// server prints more than the one startup line — `--verify-hashes` adds a
+    /// second, and shutdown adds a third — and dropping the read end of the
+    /// pipe after the startup line would make the child's next `println!` fail
+    /// with EPIPE, panic, and reset any in-flight connection. Draining on a
+    /// thread also means a chatty server can never block on a full pipe.
+    stdout: Option<JoinHandle<()>>,
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // The child is gone, so the drain thread has hit EOF; join it so the
+        // pipe is closed before the test process exits.
+        if let Some(drain) = self.stdout.take() {
+            let _ = drain.join();
+        }
     }
 }
 
@@ -61,6 +74,13 @@ impl Server {
         let mut line = String::new();
         reader.read_line(&mut line).expect("startup line");
 
+        // Keep reading for as long as the server runs, on a thread: the read
+        // end of this pipe must outlive the child's later `println!`s.
+        let drain = std::thread::spawn(move || {
+            let mut sink = Vec::new();
+            let _ = reader.read_to_end(&mut sink);
+        });
+
         let addr = line
             .split("http://")
             .nth(1)
@@ -68,7 +88,11 @@ impl Server {
             .unwrap_or_else(|| panic!("no bound address in startup line: {line:?}"))
             .to_string();
 
-        Server { child, addr }
+        Server {
+            child,
+            addr,
+            stdout: Some(drain),
+        }
     }
 
     fn get(&self, path: &str) -> HttpResponse {
