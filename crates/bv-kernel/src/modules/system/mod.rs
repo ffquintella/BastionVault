@@ -4879,14 +4879,12 @@ fn sanitize_path(path: &str) -> String {
 ///     the router is deliberate: if one grows a mount the other must too.
 ///   - **Already-qualified paths** — a caller that passed `<ns>/…` itself, which
 ///     the router also leaves alone rather than double-prefixing.
-fn qualify_capability_path(ns_prefix: &str, path: &str) -> String {
-    use crate::modules::namespace::router::is_header_scoped_path;
-
-    if ns_prefix.is_empty() || is_header_scoped_path(path) || path.starts_with(ns_prefix) {
-        return path.to_string();
-    }
-    format!("{ns_prefix}{path}")
-}
+///
+/// The implementation moved to
+/// [`crate::modules::namespace::router::qualify_path_for_namespace`] so the
+/// policy dry-run shares it verbatim; this alias keeps the name every caller
+/// and test here already uses.
+use crate::modules::namespace::router::qualify_path_for_namespace as qualify_capability_path;
 
 #[cfg(test)]
 mod mod_system_tests {

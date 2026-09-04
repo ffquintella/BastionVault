@@ -664,6 +664,28 @@ impl ACL {
         acl_cap_given
     }
 
+    /// Scope-gated rules whose *path* matches `path` but whose scope gate did
+    /// not pass for this request, so they contributed nothing.
+    ///
+    /// Diagnostics only, and only worth computing on a denial. A rule like
+    /// `default`'s `secret/data/*` with `scopes = ["shared"]` grants access
+    /// exclusively when an active `SecretShare` exists for the (target,
+    /// caller) pair; with no share it matches and grants nothing, which in the
+    /// audit trail was indistinguishable from no rule at all. An operator
+    /// reading `reason=policy` had no way to tell "your policy does not cover
+    /// this path" from "your policy covers it but the share expired".
+    pub fn scope_gated_non_contributors(&self, req: &Request) -> Vec<String> {
+        let path = ensure_no_leading_slash(&req.path);
+        self.scoped_rules
+            .iter()
+            .filter(|rule| scoped_rule_matches(rule, &path) && !scope_passes(rule, req))
+            .map(|rule| {
+                let shape = if rule.is_prefix { "*" } else { "" };
+                format!("{}{} (scopes = [{}])", rule.path, shape, rule.permissions.scopes.join(", "))
+            })
+            .collect()
+    }
+
     /// Stateless dry-run: does this ACL grant `capability` on `path`?
     ///
     /// The verdict (`allowed`, `denied_by_deny`, `is_root`) is produced by
@@ -1640,6 +1662,90 @@ path "kv/deny" {
             let result = acl.allow_operation(&req, false).unwrap();
             assert_eq!(case.2, result.allowed);
             assert_eq!(case.3, result.root_privs);
+        }
+    }
+
+
+    /// Rule shape × request shape, against the canonical (namespace-prefixed)
+    /// path space.
+    ///
+    /// The incident's policy is the second block: three prefixed rules, one of
+    /// which (`docker/hub/*`) is a descendant of another (`docker/*`). The
+    /// report suspected the descendant rule of shadowing its parent and
+    /// swallowing the request for the parent path itself; it does not, and
+    /// this table is what says so. The divergence was upstream of the
+    /// matcher — in which policies reached the ACL and which string was
+    /// matched against it — so the matcher's behaviour is pinned here to keep
+    /// the next investigation from re-deriving it.
+    #[test]
+    fn rule_shape_against_request_shape() {
+        // (label, policy HCL, request path, expected `read`)
+        struct Case(&'static str, &'static str, &'static str, bool);
+
+        const PREFIXED: &str = r#"
+path "dti/esi/secret/data/github/*"     { capabilities = ["read"] }
+path "dti/esi/secret/data/docker/*"     { capabilities = ["read"] }
+path "dti/esi/secret/data/docker/hub/*" { capabilities = ["read"] }
+"#;
+        // The same rules written mount-relative — the shape a tenant cannot
+        // author (`refuse_cross_namespace_paths` rejects it) and which the
+        // router's rewriting makes unreachable.
+        const RELATIVE: &str = r#"
+path "secret/data/github/*"     { capabilities = ["read"] }
+path "secret/data/docker/*"     { capabilities = ["read"] }
+path "secret/data/docker/hub/*" { capabilities = ["read"] }
+"#;
+        // A lone descendant rule with no parent rule above it.
+        const LEAF_ONLY: &str = r#"
+path "secret/data/docker/hub/*" { capabilities = ["read"] }
+"#;
+
+        let cases = [
+            // --- Prefixed rule + prefixed (post-router) request: the
+            //     production combination. -------------------------------------
+            Case("prefixed rule, prefixed request", PREFIXED, "dti/esi/secret/data/docker/hub", true),
+            Case("prefixed rule, prefixed child", PREFIXED, "dti/esi/secret/data/docker/hub/nested", true),
+            Case("prefixed rule, prefixed sibling", PREFIXED, "dti/esi/secret/data/github/nessus", true),
+            Case("prefixed rule, unmatched leaf", PREFIXED, "dti/esi/secret/data/gitlab/token", false),
+            // --- Prefixed rule + mount-relative request: what the request
+            //     would look like if the router had NOT rewritten it. Nothing
+            //     matches, which is why the prefix is mandatory. --------------
+            Case("prefixed rule, relative request", PREFIXED, "secret/data/docker/hub", false),
+            // --- Relative rule + relative request: correct at root, and the
+            //     reason a root-authored policy works there unchanged. --------
+            Case("relative rule, relative request", RELATIVE, "secret/data/docker/hub", true),
+            // --- Relative rule + prefixed request: the dead combination. A
+            //     rule authored without the prefix inside a namespace can
+            //     never match, because the router always prefixes. -----------
+            Case("relative rule, prefixed request", RELATIVE, "dti/esi/secret/data/docker/hub", false),
+            // --- A trailing `/*` rule against the parent path itself. The
+            //     report flagged this as matching nothing; it is correct that
+            //     `docker/hub/*` alone does not cover `docker/hub`, and
+            //     equally correct that in the shipped policy the parent rule
+            //     `docker/*` covers it. --------------------------------------
+            Case("leaf glob does not cover its own parent", LEAF_ONLY, "secret/data/docker/hub", false),
+            Case("leaf glob covers its children", LEAF_ONLY, "secret/data/docker/hub/nested", true),
+            Case("parent glob covers the leaf path", RELATIVE, "secret/data/docker/hub", true),
+        ];
+
+        for Case(label, hcl, path, want) in cases {
+            let policy = create_test_policy("under-test", hcl);
+            let acl = ACL::new(&[Arc::new(policy)]).unwrap();
+
+            // The advisory dry-run and the production matcher must agree, on
+            // every row, for the same ACL and the same string. `explain_*`
+            // delegates its verdict to `allow_operation`, and this keeps that
+            // delegation honest.
+            let explained = acl.explain_capability(path, Capability::Read);
+            let req = Request { operation: Operation::Read, path: path.to_string(), ..Default::default() };
+            let live = acl.allow_operation(&req, false).unwrap();
+
+            assert_eq!(explained.allowed, want, "{label}: explain_capability on {path:?}");
+            assert_eq!(live.allowed, want, "{label}: allow_operation on {path:?}");
+            assert_eq!(
+                explained.allowed, live.allowed,
+                "{label}: the dry-run and the production matcher disagree on {path:?}"
+            );
         }
     }
 

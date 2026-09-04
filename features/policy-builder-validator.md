@@ -26,6 +26,55 @@ The two are complementary: the builder reduces the chance of writing a bad polic
 - Client: [`gui/src/lib/policyHcl.ts`](../gui/src/lib/policyHcl.ts) (parser/serializer/lint/multi-policy preview, 31 `vitest` cases in [`policyHcl.test.ts`](../gui/src/test/policyHcl.test.ts)); [`PolicyBlockEditor.tsx`](../gui/src/components/PolicyBlockEditor.tsx) and [`PolicyValidatorPanel.tsx`](../gui/src/components/PolicyValidatorPanel.tsx); Tauri commands `policy_test` / `read_policy_tests` / `write_policy_tests`.
 - The Policies page now has four tabs: **Visual builder**, **HCL source**, **Validate & test**, **History**. Interactive (live-app) verification requires `make run-dev-gui` — the browser preview has no Tauri `invoke` bridge.
 
+### Parity with the request pipeline (fixed)
+
+The dry-run's whole value is that its answer is the pipeline's answer. For
+namespaced policies it was not, and the gap shipped a policy that linted
+clean, tested `allowed`, and 403'd on every real request:
+
+- **Path space.** The dry-run matched `case.path` verbatim; the pipeline
+  matches the path *after* `rewrite_request_for_namespace` has prefixed it
+  with the namespace. Both spellings of one target therefore produced two
+  verdicts, and the namespace-prefixed one — which is exactly what the Secrets
+  page's **Policy path** control hands the operator, and the only shape
+  `refuse_cross_namespace_paths` lets a tenant author — reported `allowed`
+  for a request the pipeline refused. Every case path is now normalised
+  through `namespace::router::qualify_path_for_namespace`, the single
+  definition of the canonical (namespace-prefixed) path space, shared with
+  `sys/capabilities-self`. The row reports the normalised string as
+  `resolved_path` alongside the `path` as typed.
+- **Policy set.** The dry-run resolved attached policies itself, from the
+  *request's* namespace, and rendered a verdict no matter what was missing.
+  It now builds its ACL through `PolicyStore::build_acl` — the same function
+  the request pipeline uses — so the two cannot drift again.
+- **Fail closed.** A named policy that does not resolve makes the modelled ACL
+  narrower than the token it represents, so the row now carries
+  `verdict_available: false`, `allowed: null` and an `error` naming the
+  policy, instead of an `allowed: false` that reads like a real deny.
+- **Effective default.** A namespace has no stored `default`; its implicit
+  `namespace-self` / `namespace-shared` pair is the equivalent, and is now
+  evaluated and listed in `evaluated_policies` rather than reported as
+  `no such policy: default`.
+- **Lint.** A rule authored inside a namespace without that namespace's prefix
+  can never match and is now a lint **error**. Header-scoped mounts (`sys/`,
+  `auth/`, `identity/`, `rustion/`, `notifications/`) are exempt, in step with
+  `is_header_scoped_path`.
+
+Coverage: `tester_pipeline_parity_tests` (`policy/mod.rs`) holds the general
+invariant — tester ≡ pipeline, and the tester's verdict must not depend on
+which spelling was typed — plus the fail-closed and effective-default cases;
+`rule_shape_against_request_shape` (`policy/acl.rs`) is the rule-shape ×
+request-shape table; `qualify_path_tests` (`namespace/router.rs`) pins the
+canonical path space; `gui/src/lib/policyHcl.lint.test.ts` covers the lint.
+
+**Not changed:** authorization itself. No deny became an allow. One asymmetry
+the divergence had been masking is pinned but deliberately left alone — a
+root-bound principal reaching a namespace by cross-namespace assignment
+resolves its named policies from the *root* keyspace, so a policy authored
+inside the tenant is invisible to it. See
+`named_namespace_policy_reaches_only_namespace_bound_tokens` and the
+`SHARED_ACCESS_POLICY` comment in `policy_store.rs`.
+
 ### Original draft note
 
 - The companion [roadmap](../roadmaps/policy-builder-validator.md) was drafted alongside this spec.

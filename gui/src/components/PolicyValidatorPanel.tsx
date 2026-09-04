@@ -4,6 +4,7 @@ import { parsePolicyHcl, lintPolicyModel, CAPABILITIES, type LintFinding } from 
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import type { PolicyTestCase, PolicyTestResultRow } from "../lib/types";
+import { useNamespaceStore } from "../stores/namespaceStore";
 
 interface Props {
   /** Policy name (used to persist test cases). */
@@ -80,6 +81,10 @@ function policyPathToKvRead(policyPath: string): { mount: string; path: string }
  * matched rule. Saved cases double as a regression gate on every save.
  */
 export function PolicyValidatorPanel({ name, hcl, savedCases, onSavedCasesChange, toast }: Props) {
+  // The namespace the policy is authored in. Inside a namespace the router
+  // rewrites request paths to `<ns>/…` before authorization, so a rule
+  // written without that prefix can never match — the linter needs to know.
+  const activeNamespace = useNamespaceStore((s) => s.active);
   const [rows, setRows] = useState<Row[]>([]);
   const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -91,7 +96,7 @@ export function PolicyValidatorPanel({ name, hcl, savedCases, onSavedCasesChange
 
   // Client-side lint (non-authoritative; instant feedback).
   const parsed = parsePolicyHcl(hcl);
-  const findings: LintFinding[] = parsed.ok ? lintPolicyModel(parsed.model) : [];
+  const findings: LintFinding[] = parsed.ok ? lintPolicyModel(parsed.model, activeNamespace) : [];
   const parseErrors = parsed.ok ? [] : parsed.errors;
 
   function update(i: number, patch: Partial<Row>) {

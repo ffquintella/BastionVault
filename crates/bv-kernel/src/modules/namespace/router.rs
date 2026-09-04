@@ -120,6 +120,56 @@ pub fn is_header_scoped_path(path: &str) -> bool {
         || path.starts_with("notifications/")
 }
 
+/// Rewrite a caller-supplied path into the path the request router would
+/// actually authorize inside `ns_prefix` (a namespace path with a trailing
+/// slash, or empty for root).
+///
+/// This is the single answer to "does an ACL path include the namespace
+/// prefix?", and every surface that has to predict authorization must go
+/// through it rather than re-deriving the rule:
+///
+///   * the request pipeline produces this form in
+///     [`rewrite_request_for_namespace`], before the ACL sees the path;
+///   * a namespace policy is authored in this form and can be authored in no
+///     other — [`super::policy_scope::refuse_cross_namespace_paths`] rejects a
+///     rule whose owning namespace is not the writer's, and
+///     `NAMESPACE_SHARED_POLICY` templates `{{namespace.path}}/` onto its own
+///     rules for the same reason;
+///   * `sys/capabilities-self` probes it;
+///   * the policy dry-run (`sys/policies/acl/test`) evaluates against it.
+///
+/// The dry-run was the one that did not, and the divergence is what let an
+/// operator confirm a policy in the tester that the pipeline then refused:
+/// typed namespace-prefixed the case matched, typed mount-relative — the
+/// spelling the client actually sends — it matched nothing, and both were
+/// reported as verdicts.
+///
+/// Three cases pass through unchanged:
+///   - **Root-scoped callers** (`ns_prefix` empty) — the pre-namespace hot
+///     path, byte-for-byte.
+///   - **Header-scoped mounts** (`sys/`, `auth/`, `identity/`, `rustion/`,
+///     `notifications/`) — the router exempts them from rewriting because they
+///     live only in the root mount table, so raw *is* the authorized form.
+///     Sharing [`is_header_scoped_path`] is deliberate: if one grows a mount
+///     the other must too.
+///   - **Already-qualified paths** — a caller that passed `<ns>/…` itself,
+///     which the router also leaves alone rather than double-prefixing.
+pub fn qualify_path_for_namespace(ns_prefix: &str, path: &str) -> String {
+    if ns_prefix.is_empty() || is_header_scoped_path(path) || path.starts_with(ns_prefix) {
+        return path.to_string();
+    }
+    format!("{ns_prefix}{path}")
+}
+
+/// Convenience wrapper for callers holding a bare namespace path (no trailing
+/// slash, empty for root) rather than a prefix.
+pub fn qualify_path_in_namespace(ns_path: &str, path: &str) -> String {
+    if ns_path.is_empty() {
+        return path.to_string();
+    }
+    qualify_path_for_namespace(&format!("{}/", ns_path.trim_end_matches('/')), path)
+}
+
 pub fn namespace_header_from_map(
     headers: Option<&std::collections::HashMap<String, String>>,
 ) -> Option<String> {
@@ -280,5 +330,63 @@ mod header_scoped_path_tests {
         ] {
             assert!(!is_header_scoped_path(p), "{p} must be namespace-rewritten");
         }
+    }
+}
+
+#[cfg(test)]
+mod qualify_path_tests {
+    use super::{qualify_path_for_namespace, qualify_path_in_namespace};
+
+    /// The canonical path space, stated as a table.
+    ///
+    /// BastionVault's answer to "does a policy path include the namespace
+    /// prefix?" is **yes, for anything the router rewrites**. A namespace
+    /// policy can be authored in no other form
+    /// (`refuse_cross_namespace_paths`), the pipeline produces that form
+    /// before the ACL sees the request, and every surface that predicts
+    /// authorization must normalise through this function to agree with it.
+    #[test]
+    fn canonical_path_space() {
+        // (namespace, caller-supplied path, authorized path)
+        let cases: &[(&str, &str, &str)] = &[
+            // --- Root namespace: no prefix is in play at all. -------------
+            ("", "secret/data/docker/hub", "secret/data/docker/hub"),
+            ("", "sys/mounts", "sys/mounts"),
+            // --- Mount-relative request inside a namespace: the router
+            //     prefixes it, so the rule must be prefixed too. -----------
+            ("dti/esi", "secret/data/docker/hub", "dti/esi/secret/data/docker/hub"),
+            ("dti/esi", "resources/secrets/db/", "dti/esi/resources/secrets/db/"),
+            // --- Already-prefixed request: left alone, never doubled. -----
+            ("dti/esi", "dti/esi/secret/data/docker/hub", "dti/esi/secret/data/docker/hub"),
+            // --- Header-scoped mounts are never rewritten, in either
+            //     direction: they live only in the root mount table. -------
+            ("dti/esi", "sys/capabilities-self", "sys/capabilities-self"),
+            ("dti/esi", "auth/token/lookup-self", "auth/token/lookup-self"),
+            ("dti/esi", "identity/entity/self", "identity/entity/self"),
+            ("dti/esi", "rustion/policy/effective", "rustion/policy/effective"),
+            ("dti/esi", "notifications/inbox", "notifications/inbox"),
+            // --- A sibling tenant's path is not this caller's prefix, and
+            //     prefixing rewrites one tenant's probe into another's
+            //     space; that is the router's behaviour and must be
+            //     reproduced rather than second-guessed here. --------------
+            ("dti/esi", "dti/other/secret/data/x", "dti/esi/dti/other/secret/data/x"),
+            // --- Trailing slash on the namespace is accepted. -------------
+            ("dti/esi/", "secret/data/x", "dti/esi/secret/data/x"),
+        ];
+
+        for (ns, path, want) in cases {
+            assert_eq!(
+                qualify_path_in_namespace(ns, path),
+                *want,
+                "namespace {ns:?}, path {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prefix_form_matches_bare_form() {
+        assert_eq!(qualify_path_for_namespace("", "secret/x"), "secret/x");
+        assert_eq!(qualify_path_for_namespace("dti/esi/", "secret/x"), "dti/esi/secret/x");
+        assert_eq!(qualify_path_in_namespace("dti/esi", "secret/x"), "dti/esi/secret/x");
     }
 }

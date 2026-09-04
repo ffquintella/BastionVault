@@ -2214,6 +2214,34 @@ impl PolicyStore {
         verdict.allowed || verdict.is_root
     }
 
+    /// The effective policy set for a hypothetical token in `ns_path`, built
+    /// exactly the way [`Self::new_acl_inner`] builds it for a real request:
+    /// same keyspace resolution, same implicit-policy injection, same
+    /// templating. Returns the ACL alongside the names that did **not**
+    /// resolve in that namespace.
+    ///
+    /// This exists so the policy dry-run (`sys/policies/acl/test`) cannot
+    /// model a policy set the pipeline would never build. It used to resolve
+    /// attached policies itself, from the *request's* namespace, and render a
+    /// verdict regardless of what was missing — which is how a policy could be
+    /// confirmed by the tester and refused by every real request. Callers must
+    /// decide what an unresolved name means for them; this function only
+    /// reports it.
+    pub async fn new_acl_in_namespace(
+        &self,
+        policy_names: &[String],
+        additional_policies: Option<Vec<Arc<Policy>>>,
+        auth: &crate::logical::Auth,
+        request_ns: Option<&str>,
+        ns_path: &str,
+    ) -> Result<(ACL, Vec<String>), RvError> {
+        let mut unresolved = Vec::new();
+        let acl = self
+            .build_acl(policy_names, additional_policies, Some(auth), request_ns, ns_path, &mut unresolved)
+            .await?;
+        Ok((acl, unresolved))
+    }
+
     async fn new_acl_inner(
         &self,
         policy_names: &[String],
@@ -2225,16 +2253,54 @@ impl PolicyStore {
         // token is bound to. Root-bound tokens (and every non-auth caller)
         // resolve `ns_path == ""`, which delegates to the global keyspace and
         // preserves the pre-namespace hot path exactly.
+        //
+        // Note this is the token's *binding* namespace, not the namespace the
+        // request is addressed to. The two differ for a root-bound principal
+        // operating inside a tenant through a cross-namespace assignment, and
+        // then a policy authored in that tenant does not resolve at all — see
+        // the warning below and `SHARED_ACCESS_POLICY`, which is the supported
+        // way to grant such a principal reach into a namespace.
         let ns_path = auth
             .map(|a| crate::modules::namespace::token_binding::binding_from_metadata(&a.metadata).0)
             .unwrap_or_default();
+        let mut unresolved = Vec::new();
+        self.build_acl(policy_names, additional_policies, auth, request_ns, &ns_path, &mut unresolved).await
+    }
+
+    /// The one place a policy set becomes an [`ACL`]. Shared by the request
+    /// pipeline and by the dry-run so the two cannot drift.
+    async fn build_acl(
+        &self,
+        policy_names: &[String],
+        additional_policies: Option<Vec<Arc<Policy>>>,
+        auth: Option<&crate::logical::Auth>,
+        request_ns: Option<&str>,
+        ns_path: &str,
+        unresolved: &mut Vec<String>,
+    ) -> Result<ACL, RvError> {
+        let ns_path = ns_path.to_string();
         let mut all_policies: Vec<Arc<Policy>> = vec![];
         for policy_name in policy_names.iter() {
-            if let Some(policy) = self
-                .get_policy_ns(policy_name.as_str(), PolicyType::Token, &ns_path)
-                .await?
-            {
-                all_policies.push(policy);
+            match self.get_policy_ns(policy_name.as_str(), PolicyType::Token, &ns_path).await? {
+                Some(policy) => all_policies.push(policy),
+                None => {
+                    // Previously silent, and the silence is what made the
+                    // incident undiagnosable: a token can carry a policy name
+                    // that resolves to nothing in its own namespace, and every
+                    // rule the operator wrote is then unreachable with no
+                    // error, no audit line and no lint finding. `default` in a
+                    // non-root namespace is the expected case — the implicit
+                    // `namespace-self` / `namespace-shared` pair injected below
+                    // is that namespace's effective default — so it is not
+                    // worth a warning.
+                    if !(ns_path.is_empty() || policy_name == DEFAULT_POLICY_NAME) {
+                        log::warn!(
+                            "policy {policy_name:?} named by this token does not exist in namespace \
+                             {ns_path:?}; every rule it contains is unreachable for this caller"
+                        );
+                    }
+                    unresolved.push(policy_name.clone());
+                }
             }
         }
 
@@ -3301,6 +3367,7 @@ impl AuthHandler for PolicyStore {
         }
 
         let mut acl_result = ACLResults::default();
+        let mut deny_diagnostics: Option<DenyDiagnostics> = None;
 
         if let Some(auth) = &req.auth {
             if auth.policies.is_empty() {
@@ -3328,10 +3395,34 @@ impl AuthHandler for PolicyStore {
             // has expired.
             req.target_shared_caps = resolve_target_shared_caps(&self.core, req).await;
 
+            // Built through `build_acl` directly rather than
+            // `new_acl_for_request` so a name that does not resolve in this
+            // token's namespace can be reported on the denial path. The
+            // resolution rule itself is unchanged: the token's *binding*
+            // namespace, exactly as before.
+            let binding_ns =
+                crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata).0;
+            let mut unresolved: Vec<String> = Vec::new();
             let acl = self
-                .new_acl_for_request(&auth.policies, None, auth, req.namespace_path.as_deref())
+                .build_acl(
+                    &auth.policies,
+                    None,
+                    Some(auth),
+                    req.namespace_path.as_deref(),
+                    &binding_ns,
+                    &mut unresolved,
+                )
                 .await?;
             acl_result = acl.allow_operation(req, false)?;
+            if !acl_result.allowed {
+                // Denial diagnostics. Computed only when the request is being
+                // refused, so the allow path pays nothing.
+                deny_diagnostics = Some(DenyDiagnostics {
+                    binding_ns,
+                    unresolved,
+                    scope_gated: acl.scope_gated_non_contributors(req),
+                });
+            }
         }
 
         // Stash the list-filter groups + scopes on the request so the
@@ -3350,16 +3441,75 @@ impl AuthHandler for PolicyStore {
             auth.policy_results = Some(PolicyResults { allowed, granting_policies: acl_result.granting_policies });
 
             if !allowed {
+                // Say *why*, not just "denied". `reason=policy` on its own
+                // cost an operator five reproductions over thirteen minutes to
+                // learn that a policy their token named did not exist in the
+                // namespace their token was bound to — a fact the server knew
+                // the whole time and never said.
+                let d = deny_diagnostics.unwrap_or_default();
+                let mut detail = String::new();
+                detail.push_str(&format!(
+                    " (authorized path \"{}\"; token bound to namespace {}; request addressed to {}; \
+                     policies carried: [{}]",
+                    req.path,
+                    ns_label(&d.binding_ns),
+                    ns_label(req.namespace_path.as_deref().unwrap_or("")),
+                    auth.policies.join(", "),
+                ));
+                if !d.unresolved.is_empty() {
+                    detail.push_str(&format!(
+                        "; NOT FOUND in namespace {}: [{}] — every rule in those policies is \
+                         unreachable for this token",
+                        ns_label(&d.binding_ns),
+                        d.unresolved.join(", "),
+                    ));
+                }
+                if !d.scope_gated.is_empty() {
+                    detail.push_str(&format!(
+                        "; matched but granted nothing because their scope gate did not pass \
+                         (no active share / not the owner): [{}]",
+                        d.scope_gated.join(", "),
+                    ));
+                }
+                detail.push(')');
                 log::warn!(
                     "preflight capability check returned 403, please ensure client's policies grant access to path \
-                     \"{}\"",
-                    req.path
+                     \"{}\"{}",
+                    req.path,
+                    detail,
                 );
                 return Err(RvError::ErrPermissionDenied);
             }
         }
 
         Ok(())
+    }
+}
+
+/// Why a request was refused, gathered on the denial path only.
+///
+/// `reason=policy` in the audit trail says a policy check failed and nothing
+/// else — not which rule won, not that the winning rule was share-scoped and
+/// contributed nothing, and not that a policy the token names does not exist
+/// in the namespace it resolves from. All three are the difference between a
+/// five-second diagnosis and a five-reproduction one.
+#[derive(Debug, Default)]
+struct DenyDiagnostics {
+    /// The namespace the token is bound to, which is where its named policies
+    /// are resolved from.
+    binding_ns: String,
+    /// Names the token carries that resolved to no policy document there.
+    unresolved: Vec<String>,
+    /// Scope-gated rules that matched the path but whose gate did not pass.
+    scope_gated: Vec<String>,
+}
+
+/// Render a namespace path for an operator: root is `(root)`, not `""`.
+fn ns_label(ns: &str) -> String {
+    if ns.is_empty() {
+        "(root)".to_string()
+    } else {
+        format!("{ns:?}")
     }
 }
 

@@ -47,6 +47,78 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Policy tester disagreed with the request pipeline
+
+- **The policy dry-run (`sys/policies/acl/test`) now evaluates the same policy
+  set, in the same path space, as the request pipeline**
+  (`crates/bv-kernel/src/modules/policy/mod.rs`,
+  `crates/bv-kernel/src/modules/policy/policy_store.rs`,
+  `crates/bv-kernel/src/modules/namespace/router.rs`). A policy could be
+  written, linted clean, confirmed `allowed` by the built-in tester, and then
+  refused with `403 Permission denied.` by every real request it was supposed
+  to permit. Two divergences produced that:
+  - The tester matched the case path **verbatim**, while the pipeline matches
+    the path *after* `rewrite_request_for_namespace` has prefixed it with the
+    namespace. So `dti/esi/secret/data/docker/hub` (the string the Secrets
+    page's **Policy path** field hands the operator) reported `allowed`, and
+    `secret/data/docker/hub` (the string a client actually sends) reported
+    `denied — no rule matched`. Both are now normalised through the router's
+    own `qualify_path_for_namespace`, which is the single definition of the
+    canonical path space; the row reports it as `resolved_path`.
+  - The tester resolved attached policies **by hand from the request's
+    namespace**, so it modelled a policy set no real token carries. It now
+    builds its ACL through `PolicyStore::build_acl` — the same function the
+    pipeline uses, with the same keyspace resolution, implicit-policy
+    injection and templating.
+  Authorization behaviour is **unchanged**: no deny became an allow. The
+  canonical path space was already namespace-prefixed (enforced at write time
+  by `refuse_cross_namespace_paths`, produced at request time by the router,
+  and already honoured by `sys/capabilities-self`); only the surfaces that
+  *predict* authorization were out of step with it.
+
+- **The tester refuses to render a verdict it cannot compute.** A named policy
+  that does not resolve in the namespace makes the modelled ACL strictly
+  narrower than the token it represents. Such a row now carries
+  `verdict_available: false`, a null `allowed`, and an `error` naming the
+  policy, instead of an `allowed: false` indistinguishable from a real deny.
+
+- **`default` in a non-root namespace resolves to that namespace's effective
+  default.** A namespace has no stored `default`; the implicit
+  `namespace-self` / `namespace-shared` pair is its equivalent, and the tester
+  now evaluates and reports it rather than annotating every verdict with
+  `no such policy: default` and answering anyway.
+
+- **Unreachable policy rules are a lint error** (`gui/src/lib/policyHcl.ts`).
+  Inside a namespace, a rule not prefixed with that namespace can never match,
+  because the router prefixes the request path before authorization. That
+  shape previously produced "No lint findings — the policy looks well-formed".
+  Header-scoped mounts (`sys/`, `auth/`, `identity/`, `rustion/`,
+  `notifications/`) are exempt, matching `is_header_scoped_path`.
+
+- **403s say why** (`crates/bv-kernel/src/modules/policy/policy_store.rs`,
+  `.../policy/acl.rs`). The denial log carried only the path. It now also
+  names the token's binding namespace, the namespace the request was addressed
+  to, the policies carried, any that **did not resolve** in that namespace (so
+  every rule in them is unreachable — previously silent), and any scope-gated
+  rule that matched the path but granted nothing because no active share or
+  ownership backed it. A share-scoped rule contributing nothing was
+  indistinguishable from no rule at all.
+
+### Known gaps
+
+- **A root-bound principal reaching a namespace through a cross-namespace
+  assignment does not resolve policies authored inside that namespace.**
+  `PolicyStore::build_acl` resolves a token's named policies from the token's
+  *binding* namespace, so the same principal is authorized differently
+  depending on whether it bound to the namespace at login or reached it by
+  assignment. This is existing, deliberate behaviour — the supported way to
+  grant such a principal reach into a tenant is a root-authored
+  `{{request.namespace}}`-templated policy (`SHARED_ACCESS_POLICY`) — and it is
+  now pinned by
+  `named_namespace_policy_reaches_only_namespace_bound_tokens` so it cannot
+  change unnoticed. Changing it would widen authorization for every existing
+  deployment and needs its own review.
+
 #### Downloads-server test flake
 
 - **`bv-downloads-server`'s end-to-end test no longer races the server's own

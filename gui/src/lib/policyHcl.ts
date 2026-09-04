@@ -546,10 +546,46 @@ const TTL_RE = /^\d+(\.\d+)?\s*(ns|us|µs|ms|s|m|h|d)?$/;
  * errors come from {@link parsePolicyHcl} / the backend — this operates on
  * an already-parsed model.
  */
-export function lintPolicyModel(model: PolicyModel): LintFinding[] {
+/**
+ * Mounts the request router never rewrites: they live only in the root mount
+ * table and scope themselves by the `X-BastionVault-Namespace` header, so a
+ * rule naming them is authored bare in every namespace. Kept in step with
+ * `is_header_scoped_path` in `crates/bv-kernel/src/modules/namespace/router.rs`.
+ */
+const HEADER_SCOPED_PREFIXES = ["sys/", "auth/", "identity/", "rustion/", "notifications/"];
+
+function isHeaderScopedPath(path: string): boolean {
+  return HEADER_SCOPED_PREFIXES.some((p) => path.startsWith(p));
+}
+
+/**
+ * @param activeNamespace The namespace the policy is being authored in
+ *   (`""` for root). Supplied so the linter can catch rules that can never
+ *   match: inside a namespace the router rewrites `secret/data/x` to
+ *   `<ns>/secret/data/x` *before* the ACL sees it, so a rule written without
+ *   the prefix is dead on arrival. That is the shape that produced a policy
+ *   which linted clean, tested "allowed", and 403'd on every real request.
+ */
+export function lintPolicyModel(model: PolicyModel, activeNamespace = ""): LintFinding[] {
   const findings: LintFinding[] = [];
+  const ns = activeNamespace.replace(/^\/+|\/+$/g, "");
   for (const b of model.blocks) {
     const caps = b.capabilities ?? [];
+
+    // Unreachable rule: authored inside a namespace without that namespace's
+    // prefix (or with a different one). An error, not a warning — the rule
+    // grants nothing at all, and the server refuses the write for the
+    // cross-namespace case anyway (`refuse_cross_namespace_paths`).
+    if (ns && b.path && !isHeaderScopedPath(b.path) && !b.path.startsWith(`${ns}/`) && b.path !== ns) {
+      findings.push({
+        severity: "error",
+        message:
+          `unreachable rule: inside namespace "${ns}" the request path is rewritten to ` +
+          `"${ns}/${b.path}" before authorization, so this rule can never match. ` +
+          `Write it as "${ns}/${b.path}".`,
+        path: b.path,
+      });
+    }
 
     if (b.path.includes("+*")) {
       findings.push({ severity: "error", message: `'+*' is a forbidden wildcard combination`, path: b.path });
