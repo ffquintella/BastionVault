@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.43.4] - 2026-09-04
+
 ### Fixed
 
 #### Security keys are detected again on Windows
