@@ -1,13 +1,26 @@
 //! Windows-native FIDO2/WebAuthn ceremonies via `webauthn.dll`.
 //!
 //! Since Windows 10 1903 the OS claims exclusive access to FIDO/CTAP2 USB
-//! HID interfaces on behalf of its own WebAuthn stack. A process that opens
-//! those interfaces directly — which is what the Mozilla `authenticator`
-//! crate's Windows transport does — cannot enumerate a security key at all,
-//! so the ceremony never leaves the "waiting for a device" state. The only
-//! supported way for a Windows application to run a WebAuthn ceremony is to
-//! call the platform API in `webauthn.dll`, which owns the device and drives
-//! its own presence/PIN UI.
+//! HID interfaces on behalf of its own WebAuthn stack, and the raw-HID
+//! transport the Mozilla `authenticator` crate uses everywhere else cannot
+//! get past it. Note the precise shape of that failure, because it does not
+//! look like a permission error from the outside and it is not something a
+//! retry can fix:
+//!
+//! 1. Enumeration still works — the key is found. What fails is *opening*
+//!    it: `hidclass` denies read/write handles to FIDO usage-page (0xF1D0)
+//!    devices, so the crate's `Device::new` gets `ERROR_ACCESS_DENIED`.
+//! 2. The crate logs that at `info!` and reports the device to its selector
+//!    as `NotAToken` — "not a security key". Nothing reaches the caller.
+//! 3. Its monitor keeps the device in the `current` set, so it is never
+//!    retried, and the ceremony blocks for its whole timeout without ever
+//!    emitting `PresenceRequired`.
+//!
+//! So do not reach for enumerate-and-retry, or for a shorter timeout: the
+//! device is visible and permanently unusable. The only supported way for a
+//! Windows application to run a WebAuthn ceremony is to call the platform
+//! API in `webauthn.dll`, which owns the device and drives its own
+//! presence/PIN UI.
 //!
 //! `webauthn.dll` is resolved at run time rather than linked, so a Windows
 //! build still starts on an installation that does not ship it (pre-1809);

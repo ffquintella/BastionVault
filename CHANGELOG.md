@@ -45,6 +45,21 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+#### Downloads-server test flake
+
+- **`bv-downloads-server`'s end-to-end test no longer races the server's own
+  stdout** (`cmd/bv-downloads-server/tests/downloads_server.rs`) -- the test
+  harness read the one startup line off the child's piped stdout and then
+  dropped the reader, closing the read end of the pipe. The server prints more
+  than that line (`--verify-hashes` adds a second, shutdown a third), so its
+  next `println!` failed with EPIPE, panicked, and reset the in-flight
+  connection; `index_lists_every_fixture_file_with_its_hash_and_signature_link`
+  is the only test that passes `--verify-hashes` and was the only one that
+  failed. The harness now drains the pipe on a thread for the server's
+  lifetime.
+
 ## [0.43.4] - 2026-09-04
 
 ### Fixed
@@ -56,10 +71,13 @@ EXAMPLE ENTRY:
   `gui/src-tauri/src/commands/fido2_native.rs`) -- the desktop GUI's FIDO2
   login, credential registration and Connect MFA step-up never detected an
   inserted security key on Windows: the sign-in screen sat on "Insert your
-  security key..." until it timed out. Windows 10 1903 and newer hold FIDO
-  USB HID interfaces open exclusively for the OS WebAuthn stack, so the
-  Mozilla `authenticator` crate's raw-HID transport cannot enumerate a key
-  at all. On Windows the ceremony is now handed to `webauthn.dll`
+  security key..." until it timed out. Windows 10 1903 and newer claim FIDO
+  USB HID interfaces exclusively for the OS WebAuthn stack: the Mozilla
+  `authenticator` crate's raw-HID transport still *finds* the key but is
+  refused a handle to it (`hidclass` denies read/write on FIDO usage-page
+  devices), which the crate reports internally as "not a security key" and
+  never surfaces — so the ceremony blocked for its whole timeout with no
+  error and no progress event. On Windows the ceremony is now handed to `webauthn.dll`
   (`WebAuthNAuthenticatorMakeCredential` / `WebAuthNAuthenticatorGetAssertion`),
   which owns the device and renders the OS insert/tap/PIN dialog. Other
   platforms keep the raw-HID CTAP2 path unchanged. Challenge parsing, the
@@ -10077,6 +10095,7 @@ Three deliverables shipped under the [Wave 2 sequencing](roadmaps/packaging-and-
 
 - [`Cargo.toml`](Cargo.toml) Dropped the windows-only `openssl = { version = "0.10", features = ["vendored"] }` dependency. It had no direct callers in `src/` and was a vestigial defensive add — `cargo tree -i openssl-sys --target x86_64-pc-windows-msvc` now returns empty across the entire workspace.
 - [`gui/src-tauri/Cargo.toml`](gui/src-tauri/Cargo.toml) `authenticator 0.5` switched from `crypto_openssl` → `crypto_rust` (pure-Rust AES/CBC/HMAC/p256 backend that ships with the same crate). The Windows FIDO2 transport still works; no behavior change at the API surface.
+  <br>**Correction (0.43.4):** "the Windows FIDO2 transport still works" was wrong, and was not true before this change either — the crate's raw-HID transport has never been able to reach a security key on Windows 10 1903+. The crypto-backend swap was unrelated and is accurately described. See the 0.43.4 entry.
 - [`gui/src-tauri/Cargo.toml`](gui/src-tauri/Cargo.toml) Removed the vendored OpenSSL dep that backed `pki_import_ca_pkcs12`. Replaced with `p12-keystore = "0.2.1"` (`pbes1` feature for the legacy 3DES / RC2 cipher modes Windows-minted .p12 files use) plus `pem 3.0` for PEM encoding.
 - [`gui/src-tauri/src/commands/pki.rs`](gui/src-tauri/src/commands/pki.rs) `pki_import_ca_pkcs12` rewritten on top of `p12_keystore::KeyStore::from_pkcs12`. The library normalises private keys to PKCS#8 DER regardless of the inner key type (RSA / EC / Ed25519), so the existing server-side `pem_bundle` splitter at `pki/config/ca` accepts the resulting PEM block under the standard `PRIVATE KEY` header without changes. Cert chain handling now iterates `chain()[1..]` instead of the openssl `parsed.ca` slot.
 - Net result: no more `openssl-src` Perl-driven build step on Windows, the workspace's TLS surface is now exclusively `rustls + aws-lc-rs`, and no C-side OpenSSL ABI is required to build either the server or the GUI.

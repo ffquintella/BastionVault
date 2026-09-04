@@ -8,9 +8,11 @@
 //! The transport is platform-dependent, and deliberately so:
 //!
 //! - **Windows** calls the OS WebAuthn platform API (`webauthn.dll`) via
-//!   [`super::fido2_windows`]. Since Windows 10 1903 the OS holds FIDO USB
-//!   HID interfaces open exclusively, so a process that talks raw HID cannot
-//!   see a security key at all.
+//!   [`super::fido2_windows`]. Since Windows 10 1903 the OS claims FIDO USB
+//!   HID interfaces exclusively: a process that talks raw HID can still
+//!   *find* a security key but is refused a handle to it, which the
+//!   `authenticator` crate reports internally as "not a security key" and
+//!   never surfaces. See that module's docs — the failure is not retryable.
 //! - **Everywhere else** talks CTAP2 over raw USB HID via the Mozilla
 //!   `authenticator` crate.
 //!
