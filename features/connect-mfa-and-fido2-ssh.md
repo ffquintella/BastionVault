@@ -298,6 +298,19 @@ bastion (the bastion's russh client would need the same signer, and the
 authenticator is on the operator's desk, not the bastion's), and step-up for
 non-userpass principals.
 
+**`sk-` keys do not work on Windows, and cannot be fixed the way the MFA
+ceremony was.** Windows 10 1903+ holds FIDO USB HID interfaces open
+exclusively for the OS WebAuthn stack, so the raw-HID CTAP2 signer
+(`gui/src-tauri/src/session/sk_signer.rs`) and the enrollment path
+(`gui/src-tauri/src/commands/ssh_security_key.rs`) never see the key. The
+connect-time MFA step-up escaped this by routing through `webauthn.dll`
+(`gui/src-tauri/src/commands/fido2_windows.rs`), but that API takes
+`pbClientDataJSON` and hashes it itself — it has no way to accept the
+arbitrary `client_data_hash` that step 1 above requires, which is the SSH
+signed data rather than a JSON document. A Windows `sk-` path therefore needs
+a different mechanism (a WebAuthn-shaped `clientDataJSON` the target agrees
+to reconstruct, or a Windows Hello-brokered agent), not a transport swap.
+
 ## Security Considerations
 
 - **The ticket is a bearer artifact.** It is single-use, expires in 120 seconds,

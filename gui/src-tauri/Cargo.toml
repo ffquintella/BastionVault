@@ -235,7 +235,14 @@ winapi = { version = "0.3", features = ["std"] }
 # would otherwise persist typed secret values to Chromium's Web Data cache.
 # Version pinned to match the transitive dep pulled in by Tauri/wry.
 webview2-com = "0.38"
-windows = { version = "0.61", features = ["Win32_Foundation"] }
+# `Win32_System_LibraryLoader` is for `commands/fido2_windows.rs`, which
+# resolves `webauthn.dll` at run time (LoadLibraryW + GetProcAddress) rather
+# than linking it, so a Windows build still starts where the OS WebAuthn API
+# is absent. windows-rs carries no WebAuthn bindings — `webauthn.h` is not in
+# win32metadata — so the structs and entry points are hand-written there.
+# Pinned to 0.61 to match the version tauri-runtime-wry/wry resolve, so
+# `WebviewWindow::hwnd()` hands back an `HWND` of the same type.
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
 
 [features]
 # Cloud storage targets are on by default in the desktop GUI build so

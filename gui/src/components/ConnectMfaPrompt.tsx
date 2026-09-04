@@ -60,6 +60,11 @@ export function ConnectMfaPrompt({ pending }: { pending: PendingPrompt | null })
         case "insert-key":
           setKeyStatus("Insert your security key\u2026");
           break;
+        // On Windows the OS dialog drives insert / tap / PIN itself, so this
+        // is the last progress step we hear about before the result.
+        case "os-prompt":
+          setKeyStatus("Follow the Windows security prompt\u2026");
+          break;
         case "tap-key":
           setKeyStatus("Tap your security key now\u2026");
           break;

@@ -1,25 +1,45 @@
 //! Native FIDO2/CTAP2 support for Tauri.
 //!
-//! Bypasses the browser `navigator.credentials` API by talking directly to
-//! USB security keys via the Mozilla `authenticator` crate, then submitting
-//! the result to the vault backend in the same JSON format that webauthn-rs
-//! expects.
+//! Bypasses the browser `navigator.credentials` API — unavailable inside the
+//! Tauri webview — and runs the ceremony against the operator's security key
+//! directly, then submits the result to the vault backend in the same JSON
+//! format that webauthn-rs expects.
+//!
+//! The transport is platform-dependent, and deliberately so:
+//!
+//! - **Windows** calls the OS WebAuthn platform API (`webauthn.dll`) via
+//!   [`super::fido2_windows`]. Since Windows 10 1903 the OS holds FIDO USB
+//!   HID interfaces open exclusively, so a process that talks raw HID cannot
+//!   see a security key at all.
+//! - **Everywhere else** talks CTAP2 over raw USB HID via the Mozilla
+//!   `authenticator` crate.
+//!
+//! Everything either side of the ceremony — challenge parsing, the
+//! `clientDataJSON` the relying party hashes, and the credential JSON sent
+//! back to the vault — is shared, so the two transports cannot drift in any
+//! way the RP would notice.
 
+#[cfg(not(windows))]
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::time::Duration;
 
+#[cfg(not(windows))]
 use authenticator::authenticatorservice::AuthenticatorService;
+#[cfg(not(windows))]
+use authenticator::authenticatorservice::{RegisterArgs, SignArgs};
+#[cfg(not(windows))]
 use authenticator::ctap2::server::{
     AuthenticationExtensionsClientInputs, PublicKeyCredentialDescriptor,
     PublicKeyCredentialParameters, PublicKeyCredentialUserEntity, RelyingParty,
     ResidentKeyRequirement, Transport, UserVerificationRequirement,
 };
+#[cfg(not(windows))]
 use authenticator::statecallback::StateCallback;
 use authenticator::{Pin, StatusPinUv, StatusUpdate};
-use authenticator::authenticatorservice::{RegisterArgs, SignArgs};
 use base64urlsafedata::Base64UrlSafeData;
 use serde::Serialize;
 use serde_json::{Map, Value};
+#[cfg(not(windows))]
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State};
 
@@ -215,6 +235,7 @@ async fn read_fido2_config(state: &State<'_, AppState>) -> Result<(String, Strin
     Ok((rp_id, rp_origin, rp_name))
 }
 
+#[cfg(not(windows))]
 fn parse_cose_alg(alg: i64) -> authenticator::crypto::COSEAlgorithm {
     match alg {
         -7 => authenticator::crypto::COSEAlgorithm::ES256,
@@ -226,12 +247,324 @@ fn parse_cose_alg(alg: i64) -> authenticator::crypto::COSEAlgorithm {
     }
 }
 
+#[cfg(not(windows))]
 fn parse_uv_requirement(s: &str) -> UserVerificationRequirement {
     match s {
         "required" => UserVerificationRequirement::Required,
         "discouraged" => UserVerificationRequirement::Discouraged,
         _ => UserVerificationRequirement::Preferred,
     }
+}
+
+#[cfg(not(windows))]
+fn parse_resident_key_requirement(s: &str) -> ResidentKeyRequirement {
+    match s {
+        "required" => ResidentKeyRequirement::Required,
+        "preferred" => ResidentKeyRequirement::Preferred,
+        _ => ResidentKeyRequirement::Discouraged,
+    }
+}
+
+// ── Platform-neutral ceremony contract ───────────────────────────────
+
+/// Everything one registration ceremony needs, parsed out of the server's
+/// `CreationChallengeResponse` and independent of how the authenticator is
+/// reached. Plain owned data so it can cross onto a blocking thread.
+pub(crate) struct RegisterCeremonyArgs {
+    pub(crate) rp_id: String,
+    pub(crate) rp_name: String,
+    /// Only the raw-HID path passes this to the authenticator; the Windows
+    /// API takes the origin implicitly through `client_data_json`.
+    #[cfg_attr(windows, allow(dead_code))]
+    pub(crate) rp_origin: String,
+    pub(crate) user_id: Vec<u8>,
+    pub(crate) user_name: String,
+    pub(crate) user_display_name: String,
+    pub(crate) cose_algorithms: Vec<i64>,
+    pub(crate) exclude_credential_ids: Vec<Vec<u8>>,
+    pub(crate) user_verification: String,
+    pub(crate) resident_key: String,
+    /// WebAuthn `attestation` conveyance preference. Only the Windows path
+    /// forwards it; the raw-HID path never requests attestation.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) attestation: String,
+    /// The exact bytes the relying party will hash. Never rebuilt per
+    /// platform — a divergence here is an authentication failure.
+    pub(crate) client_data_json: Vec<u8>,
+    pub(crate) timeout_ms: u64,
+}
+
+pub(crate) struct RegisterCeremonyOutput {
+    pub(crate) credential_id: Vec<u8>,
+    /// CBOR `attestationObject`, ready for `response.attestationObject`.
+    pub(crate) attestation_object: Vec<u8>,
+}
+
+/// Assertion counterpart of [`RegisterCeremonyArgs`].
+pub(crate) struct AssertCeremonyArgs {
+    pub(crate) rp_id: String,
+    #[cfg_attr(windows, allow(dead_code))]
+    pub(crate) rp_origin: String,
+    pub(crate) allow_credential_ids: Vec<Vec<u8>>,
+    pub(crate) user_verification: String,
+    pub(crate) client_data_json: Vec<u8>,
+    pub(crate) timeout_ms: u64,
+}
+
+pub(crate) struct AssertCeremonyOutput {
+    pub(crate) credential_id: Vec<u8>,
+    pub(crate) authenticator_data: Vec<u8>,
+    pub(crate) signature: Vec<u8>,
+    pub(crate) user_handle: Option<Vec<u8>>,
+}
+
+/// The window the OS security dialog is parented to.
+///
+/// Returned as a raw `isize` rather than an `HWND` because the ceremony runs
+/// on a blocking thread and `HWND` is not `Send`.
+#[cfg(windows)]
+fn os_dialog_parent(app_handle: &AppHandle) -> Result<isize, CommandError> {
+    use tauri::Manager;
+    let window = app_handle
+        .get_webview_window("main")
+        .or_else(|| app_handle.webview_windows().into_values().next())
+        .ok_or("No application window to parent the Windows security prompt to")?;
+    let hwnd = window
+        .hwnd()
+        .map_err(|e| CommandError::from(format!("Window handle unavailable: {e}")))?;
+    Ok(hwnd.0 as isize)
+}
+
+// ── Registration ceremony, per platform ──────────────────────────────
+
+/// Windows: hand the ceremony to the OS WebAuthn API, which owns the device
+/// and renders its own insert/tap/PIN dialog. No `fido2-pin-request` is
+/// emitted on this path — Windows collects the PIN itself.
+#[cfg(windows)]
+async fn run_register_ceremony(
+    _state: &State<'_, AppState>,
+    app_handle: &AppHandle,
+    args: RegisterCeremonyArgs,
+) -> CmdResult<RegisterCeremonyOutput> {
+    let hwnd = os_dialog_parent(app_handle)?;
+    let _ = app_handle.emit("fido2-status", "os-prompt");
+    tokio::task::spawn_blocking(move || super::fido2_windows::make_credential(hwnd, &args))
+        .await
+        .map_err(|e| CommandError::from(format!("Task join error: {e}")))?
+}
+
+/// Everywhere else: CTAP2 over raw USB HID.
+#[cfg(not(windows))]
+async fn run_register_ceremony(
+    state: &State<'_, AppState>,
+    app_handle: &AppHandle,
+    args: RegisterCeremonyArgs,
+) -> CmdResult<RegisterCeremonyOutput> {
+    let client_data_hash: [u8; 32] = Sha256::digest(&args.client_data_json).into();
+
+    let pub_cred_params: Vec<PublicKeyCredentialParameters> = args
+        .cose_algorithms
+        .iter()
+        .map(|alg| PublicKeyCredentialParameters { alg: parse_cose_alg(*alg) })
+        .collect();
+
+    let exclude_list: Vec<PublicKeyCredentialDescriptor> = args
+        .exclude_credential_ids
+        .iter()
+        .map(|id| PublicKeyCredentialDescriptor {
+            id: id.clone(),
+            transports: vec![Transport::USB],
+        })
+        .collect();
+
+    let register_args = RegisterArgs {
+        client_data_hash,
+        relying_party: RelyingParty {
+            id: args.rp_id.clone(),
+            name: Some(args.rp_name.clone()),
+        },
+        origin: args.rp_origin.clone(),
+        user: PublicKeyCredentialUserEntity {
+            id: args.user_id.clone(),
+            name: Some(args.user_name.clone()),
+            display_name: Some(args.user_display_name.clone()),
+        },
+        pub_cred_params,
+        exclude_list,
+        user_verification_req: parse_uv_requirement(&args.user_verification),
+        resident_key_req: parse_resident_key_requirement(&args.resident_key),
+        extensions: AuthenticationExtensionsClientInputs::default(),
+        pin: None,
+        use_ctap1_fallback: false,
+    };
+
+    let timeout_ms = args.timeout_ms;
+
+    // Set up the PIN communication channel
+    let (pin_tx, pin_rx) = channel::<String>();
+    {
+        let mut guard = state.pin_sender.lock().unwrap();
+        *guard = Some(pin_tx);
+    }
+
+    let handle = app_handle.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let mut service = AuthenticatorService::new()
+            .map_err(|e| CommandError::from(format!("Failed to init authenticator: {e:?}")))?;
+        service.add_detected_transports();
+
+        let (status_tx, status_rx) = channel::<StatusUpdate>();
+        let (result_tx, result_rx) = channel();
+
+        // Status update thread with full PIN handling
+        let handle_clone = handle.clone();
+        std::thread::spawn(move || {
+            handle_status_updates(status_rx, handle_clone, pin_rx);
+        });
+
+        let callback = StateCallback::new(Box::new(move |rv| {
+            let _ = result_tx.send(rv);
+        }));
+
+        let _ = handle.emit("fido2-status", "insert-key");
+
+        service.register(timeout_ms, register_args, status_tx, callback)
+            .map_err(CommandError::from)?;
+
+        match result_rx.recv_timeout(Duration::from_millis(timeout_ms + 5000)) {
+            Ok(Ok(register_result)) => Ok(register_result),
+            Ok(Err(e)) => Err(CommandError::from(e)),
+            Err(RecvTimeoutError::Timeout) => Err(CommandError::from("Registration timed out")),
+            Err(e) => Err(CommandError::from(format!("Registration channel error: {e}"))),
+        }
+    })
+    .await
+    .map_err(|e| CommandError::from(format!("Task join error: {e}")))??;
+
+    // Clean up PIN channel
+    let _ = state.pin_sender.lock().unwrap().take();
+
+    let mut attestation_object = Vec::new();
+    ciborium::into_writer(&result.att_obj, &mut attestation_object)
+        .map_err(|e| CommandError::from(format!("CBOR serialize error: {e}")))?;
+
+    let credential_id = result
+        .att_obj
+        .auth_data
+        .credential_data
+        .as_ref()
+        .map(|cd| cd.credential_id.clone())
+        .unwrap_or_default();
+
+    Ok(RegisterCeremonyOutput {
+        credential_id,
+        attestation_object,
+    })
+}
+
+// ── Assertion ceremony, per platform ─────────────────────────────────
+
+/// Windows: see [`run_register_ceremony`].
+#[cfg(windows)]
+async fn run_assert_ceremony(
+    _state: &State<'_, AppState>,
+    app_handle: &AppHandle,
+    args: AssertCeremonyArgs,
+) -> CmdResult<AssertCeremonyOutput> {
+    let hwnd = os_dialog_parent(app_handle)?;
+    let _ = app_handle.emit("fido2-status", "os-prompt");
+    tokio::task::spawn_blocking(move || super::fido2_windows::get_assertion(hwnd, &args))
+        .await
+        .map_err(|e| CommandError::from(format!("Task join error: {e}")))?
+}
+
+/// Everywhere else: CTAP2 over raw USB HID.
+#[cfg(not(windows))]
+async fn run_assert_ceremony(
+    state: &State<'_, AppState>,
+    app_handle: &AppHandle,
+    args: AssertCeremonyArgs,
+) -> CmdResult<AssertCeremonyOutput> {
+    let client_data_hash: [u8; 32] = Sha256::digest(&args.client_data_json).into();
+
+    let allow_list: Vec<PublicKeyCredentialDescriptor> = args
+        .allow_credential_ids
+        .iter()
+        .map(|id| PublicKeyCredentialDescriptor {
+            id: id.clone(),
+            transports: vec![Transport::USB],
+        })
+        .collect();
+
+    let sign_args = SignArgs {
+        client_data_hash,
+        origin: args.rp_origin.clone(),
+        relying_party_id: args.rp_id.clone(),
+        allow_list,
+        user_verification_req: parse_uv_requirement(&args.user_verification),
+        user_presence_req: true,
+        extensions: AuthenticationExtensionsClientInputs::default(),
+        pin: None,
+        use_ctap1_fallback: false,
+    };
+
+    let timeout_ms = args.timeout_ms;
+
+    // Set up PIN communication channel
+    let (pin_tx, pin_rx) = channel::<String>();
+    {
+        let mut guard = state.pin_sender.lock().unwrap();
+        *guard = Some(pin_tx);
+    }
+
+    let handle = app_handle.clone();
+    let sign_result = tokio::task::spawn_blocking(move || {
+        let mut service = AuthenticatorService::new()
+            .map_err(|e| CommandError::from(format!("Failed to init authenticator: {e:?}")))?;
+        service.add_detected_transports();
+
+        let (status_tx, status_rx) = channel::<StatusUpdate>();
+        let (result_tx, result_rx) = channel();
+
+        // Status update thread with full PIN handling
+        let handle_clone = handle.clone();
+        std::thread::spawn(move || {
+            handle_status_updates(status_rx, handle_clone, pin_rx);
+        });
+
+        let callback = StateCallback::new(Box::new(move |rv| {
+            let _ = result_tx.send(rv);
+        }));
+
+        let _ = handle.emit("fido2-status", "insert-key");
+
+        service.sign(timeout_ms, sign_args, status_tx, callback)
+            .map_err(CommandError::from)?;
+
+        match result_rx.recv_timeout(Duration::from_millis(timeout_ms + 5000)) {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(e)) => Err(CommandError::from(e)),
+            Err(RecvTimeoutError::Timeout) => Err(CommandError::from("Authentication timed out")),
+            Err(e) => Err(CommandError::from(format!("Authentication channel error: {e}"))),
+        }
+    })
+    .await
+    .map_err(|e| CommandError::from(format!("Task join error: {e}")))??;
+
+    // Clean up PIN channel
+    let _ = state.pin_sender.lock().unwrap().take();
+
+    let assertion = &sign_result.assertion;
+    Ok(AssertCeremonyOutput {
+        credential_id: assertion
+            .credentials
+            .as_ref()
+            .map(|c| c.id.clone())
+            .unwrap_or_default(),
+        authenticator_data: assertion.auth_data.to_vec(),
+        signature: assertion.signature.clone(),
+        user_handle: assertion.user.as_ref().map(|u| u.id.clone()),
+    })
 }
 
 /// Collect a PIN from the frontend by emitting a request event, then waiting
@@ -377,31 +710,26 @@ pub async fn fido2_native_register(
     let user_display = user_obj.get("displayName").and_then(|v| v.as_str()).unwrap_or(user_name);
 
     // Parse pubKeyCredParams
-    let pub_cred_params: Vec<PublicKeyCredentialParameters> = public_key
+    let cose_algorithms: Vec<i64> = public_key
         .get("pubKeyCredParams")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
                 .filter_map(|p| p.get("alg").and_then(|a| a.as_i64()))
-                .map(|alg| PublicKeyCredentialParameters { alg: parse_cose_alg(alg) })
                 .collect()
         })
-        .unwrap_or_else(|| vec![
-            PublicKeyCredentialParameters { alg: authenticator::crypto::COSEAlgorithm::ES256 },
-        ]);
+        .filter(|algs: &Vec<i64>| !algs.is_empty())
+        .unwrap_or_else(|| vec![-7]); // ES256
 
     // Parse excludeCredentials
-    let exclude_list: Vec<PublicKeyCredentialDescriptor> = public_key
+    let exclude_credential_ids: Vec<Vec<u8>> = public_key
         .get("excludeCredentials")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
                 .filter_map(|c| {
                     let id = c.get("id").and_then(|v| v.as_str())?;
-                    Some(PublicKeyCredentialDescriptor {
-                        id: base64url_decode(id).ok()?,
-                        transports: vec![Transport::USB],
-                    })
+                    base64url_decode(id).ok()
                 })
                 .collect()
         })
@@ -417,108 +745,51 @@ pub async fn fido2_native_register(
         .and_then(|s| s.get("residentKey"))
         .and_then(|v| v.as_str())
         .unwrap_or("discouraged");
+    let attestation = public_key
+        .get("attestation")
+        .and_then(|v| v.as_str())
+        .unwrap_or("none");
 
-    let resident_key_req = match rk_req {
-        "required" => ResidentKeyRequirement::Required,
-        "preferred" => ResidentKeyRequirement::Preferred,
-        _ => ResidentKeyRequirement::Discouraged,
-    };
-
-    // 4. Build clientDataJSON and hash
+    // 4. Build clientDataJSON — the RP hashes these exact bytes.
     let client_data_json = build_client_data_json("webauthn.create", challenge_b64, &rp_origin);
-    let client_data_hash: [u8; 32] = Sha256::digest(&client_data_json).into();
 
-    // 5. Build RegisterArgs
-    let register_args = RegisterArgs {
-        client_data_hash,
-        relying_party: RelyingParty {
-            id: rp_id.clone(),
-            name: Some(rp_name),
-        },
-        origin: rp_origin.clone(),
-        user: PublicKeyCredentialUserEntity {
-            id: user_id,
-            name: Some(user_name.to_string()),
-            display_name: Some(user_display.to_string()),
-        },
-        pub_cred_params,
-        exclude_list,
-        user_verification_req: parse_uv_requirement(uv_req),
-        resident_key_req,
-        extensions: AuthenticationExtensionsClientInputs::default(),
-        pin: None,
-        use_ctap1_fallback: false,
-    };
-
-    // 6. Run authenticator ceremony in blocking thread
     let timeout_ms = public_key.get("timeout")
         .and_then(|v| v.as_u64())
         .unwrap_or(60000);
 
-    // Set up the PIN communication channel
-    let (pin_tx, pin_rx) = channel::<String>();
-    {
-        let mut guard = state.pin_sender.lock().unwrap();
-        *guard = Some(pin_tx);
-    }
-
-    let handle = app_handle.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let mut service = AuthenticatorService::new()
-            .map_err(|e| CommandError::from(format!("Failed to init authenticator: {e:?}")))?;
-        service.add_detected_transports();
-
-        let (status_tx, status_rx) = channel::<StatusUpdate>();
-        let (result_tx, result_rx) = channel();
-
-        // Status update thread with full PIN handling
-        let handle_clone = handle.clone();
-        std::thread::spawn(move || {
-            handle_status_updates(status_rx, handle_clone, pin_rx);
-        });
-
-        let callback = StateCallback::new(Box::new(move |rv| {
-            let _ = result_tx.send(rv);
-        }));
-
-        let _ = handle.emit("fido2-status", "insert-key");
-
-        service.register(timeout_ms, register_args, status_tx, callback)
-            .map_err(CommandError::from)?;
-
-        match result_rx.recv_timeout(Duration::from_millis(timeout_ms + 5000)) {
-            Ok(Ok(register_result)) => Ok(register_result),
-            Ok(Err(e)) => Err(CommandError::from(e)),
-            Err(RecvTimeoutError::Timeout) => Err(CommandError::from("Registration timed out")),
-            Err(e) => Err(CommandError::from(format!("Registration channel error: {e}"))),
-        }
-    })
-    .await
-    .map_err(|e| CommandError::from(format!("Task join error: {e}")))??;
-
-    // Clean up PIN channel
-    let _ = state.pin_sender.lock().unwrap().take();
+    // 5-6. Run the registration ceremony against the authenticator.
+    let ceremony = run_register_ceremony(
+        &state,
+        &app_handle,
+        RegisterCeremonyArgs {
+            rp_id,
+            rp_name,
+            rp_origin,
+            user_id,
+            user_name: user_name.to_string(),
+            user_display_name: user_display.to_string(),
+            cose_algorithms,
+            exclude_credential_ids,
+            user_verification: uv_req.to_string(),
+            resident_key: rk_req.to_string(),
+            attestation: attestation.to_string(),
+            client_data_json: client_data_json.clone(),
+            timeout_ms,
+        },
+    )
+    .await?;
 
     let _ = app_handle.emit("fido2-status", "processing");
 
     // 7. Construct RegisterPublicKeyCredential for webauthn-rs
-    let mut att_obj_cbor = Vec::new();
-    ciborium::into_writer(&result.att_obj, &mut att_obj_cbor)
-        .map_err(|e| CommandError::from(format!("CBOR serialize error: {e}")))?;
-
-    let cred_id = result.att_obj.auth_data.credential_data
-        .as_ref()
-        .map(|cd| cd.credential_id.clone())
-        .unwrap_or_default();
-
-    let cred_id_b64 = base64url_encode(&cred_id);
+    let cred_id_b64 = base64url_encode(&ceremony.credential_id);
 
     let credential_json = serde_json::json!({
         "id": cred_id_b64,
         "rawId": cred_id_b64,
         "type": "public-key",
         "response": {
-            "attestationObject": base64url_encode(&att_obj_cbor),
+            "attestationObject": base64url_encode(&ceremony.attestation_object),
             "clientDataJSON": base64url_encode(&client_data_json),
         },
         "extensions": {}
@@ -573,17 +844,14 @@ pub(crate) async fn assert_webauthn(
         .unwrap_or(&cfg_rp_id);
 
     // Parse allowCredentials
-    let allow_list: Vec<PublicKeyCredentialDescriptor> = public_key
+    let allow_credential_ids: Vec<Vec<u8>> = public_key
         .get("allowCredentials")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
                 .filter_map(|c| {
                     let id = c.get("id").and_then(|v| v.as_str())?;
-                    Some(PublicKeyCredentialDescriptor {
-                        id: base64url_decode(id).ok()?,
-                        transports: vec![Transport::USB],
-                    })
+                    base64url_decode(id).ok()
                 })
                 .collect()
         })
@@ -593,95 +861,44 @@ pub(crate) async fn assert_webauthn(
         .and_then(|v| v.as_str())
         .unwrap_or("preferred");
 
-    // 4. Build clientDataJSON and hash
+    // 4. Build clientDataJSON — the RP hashes these exact bytes.
     let client_data_json = build_client_data_json("webauthn.get", challenge_b64, &rp_origin);
-    let client_data_hash: [u8; 32] = Sha256::digest(&client_data_json).into();
-
-    // 5. Build SignArgs
-    let sign_args = SignArgs {
-        client_data_hash,
-        origin: rp_origin.clone(),
-        relying_party_id: rp_id.to_string(),
-        allow_list,
-        user_verification_req: parse_uv_requirement(uv_req),
-        user_presence_req: true,
-        extensions: AuthenticationExtensionsClientInputs::default(),
-        pin: None,
-        use_ctap1_fallback: false,
-    };
 
     let timeout_ms = public_key.get("timeout")
         .and_then(|v| v.as_u64())
         .unwrap_or(60000);
 
-    // Set up PIN communication channel
-    let (pin_tx, pin_rx) = channel::<String>();
-    {
-        let mut guard = state.pin_sender.lock().unwrap();
-        *guard = Some(pin_tx);
-    }
-
-    // 6. Run authenticator ceremony
-    let handle = app_handle.clone();
-    let sign_result = tokio::task::spawn_blocking(move || {
-        let mut service = AuthenticatorService::new()
-            .map_err(|e| CommandError::from(format!("Failed to init authenticator: {e:?}")))?;
-        service.add_detected_transports();
-
-        let (status_tx, status_rx) = channel::<StatusUpdate>();
-        let (result_tx, result_rx) = channel();
-
-        // Status update thread with full PIN handling
-        let handle_clone = handle.clone();
-        std::thread::spawn(move || {
-            handle_status_updates(status_rx, handle_clone, pin_rx);
-        });
-
-        let callback = StateCallback::new(Box::new(move |rv| {
-            let _ = result_tx.send(rv);
-        }));
-
-        let _ = handle.emit("fido2-status", "insert-key");
-
-        service.sign(timeout_ms, sign_args, status_tx, callback)
-            .map_err(CommandError::from)?;
-
-        match result_rx.recv_timeout(Duration::from_millis(timeout_ms + 5000)) {
-            Ok(Ok(result)) => Ok(result),
-            Ok(Err(e)) => Err(CommandError::from(e)),
-            Err(RecvTimeoutError::Timeout) => Err(CommandError::from("Authentication timed out")),
-            Err(e) => Err(CommandError::from(format!("Authentication channel error: {e}"))),
-        }
-    })
-    .await
-    .map_err(|e| CommandError::from(format!("Task join error: {e}")))??;
-
-    // Clean up PIN channel
-    let _ = state.pin_sender.lock().unwrap().take();
+    // 5-6. Run the assertion ceremony against the authenticator.
+    let ceremony = run_assert_ceremony(
+        state,
+        app_handle,
+        AssertCeremonyArgs {
+            rp_id: rp_id.to_string(),
+            rp_origin,
+            allow_credential_ids,
+            user_verification: uv_req.to_string(),
+            client_data_json: client_data_json.clone(),
+            timeout_ms,
+        },
+    )
+    .await?;
 
     let _ = app_handle.emit("fido2-status", "processing");
 
     // 7. Construct PublicKeyCredential for webauthn-rs
-    let assertion = &sign_result.assertion;
-    let cred_id = assertion.credentials
-        .as_ref()
-        .map(|c| c.id.clone())
-        .unwrap_or_default();
-    let cred_id_b64 = base64url_encode(&cred_id);
-
-    let auth_data_bytes = assertion.auth_data.to_vec();
-    let user_handle = assertion.user
-        .as_ref()
-        .map(|u| base64url_encode(&u.id));
+    let cred_id_b64 = base64url_encode(&ceremony.credential_id);
 
     let mut response_obj = serde_json::json!({
-        "authenticatorData": base64url_encode(&auth_data_bytes),
+        "authenticatorData": base64url_encode(&ceremony.authenticator_data),
         "clientDataJSON": base64url_encode(&client_data_json),
-        "signature": base64url_encode(&assertion.signature),
+        "signature": base64url_encode(&ceremony.signature),
     });
 
-    if let Some(uh) = user_handle {
-        response_obj.as_object_mut().unwrap().insert("userHandle".to_string(), Value::String(uh));
+    if let Some(uh) = ceremony.user_handle {
+        response_obj.as_object_mut().unwrap().insert(
+            "userHandle".to_string(),
+            Value::String(base64url_encode(&uh)),
+        );
     }
 
     let credential_json = serde_json::json!({

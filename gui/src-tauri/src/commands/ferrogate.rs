@@ -442,19 +442,26 @@ pub async fn ferrogate_autoconfig(_audience: String, _environment: Option<String
 /// server's advertised `mia_environment` so the client dials the MIA that
 /// belongs to the deployment it is connecting to. An invalid environment name
 /// (e.g. path syntax) is refused rather than silently falling back.
+///
+/// Unix-only, like its three callers: the MIA is a unix-socket peer, so the
+/// `cfg(not(unix))` builds of `ferrogate_machine_login` / `_status` /
+/// `_whoami` reject the call outright rather than normalising a socket path
+/// they could not dial anyway.
+#[cfg(unix)]
 fn norm_socket(socket: String, environment: Option<String>) -> Result<String, String> {
     let s = socket.trim();
     if !s.is_empty() {
         return Ok(s.to_string());
     }
     let env = environment.as_deref().map(str::trim).filter(|e| !e.is_empty());
-    #[cfg(unix)]
     if let Some(e) = env {
         bastion_vault::modules::credential::ferrogate::mia::validate_environment(e)?;
     }
     Ok(ferrogate_default_socket(env.map(str::to_string)))
 }
 
+/// Unix-only, for the same reason as [`norm_socket`].
+#[cfg(unix)]
 fn norm_mount(mount: String) -> String {
     let m = mount.trim().trim_matches('/');
     if m.is_empty() { "ferrogate".to_string() } else { m.to_string() }

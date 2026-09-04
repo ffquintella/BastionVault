@@ -5,9 +5,12 @@ import type { Fido2LoginResponse } from "../lib/types";
 /**
  * Hook for FIDO2/WebAuthn operations.
  *
- * Uses native Tauri CTAP2 commands that talk directly to USB security keys
- * via the Mozilla `authenticator` crate, bypassing the browser's
- * `navigator.credentials` API (which is unavailable in Tauri's WebView).
+ * Uses native Tauri commands rather than the browser's `navigator.credentials`
+ * API, which is unavailable in Tauri's WebView. The backend picks the
+ * transport per platform: the Windows WebAuthn platform API on Windows (the
+ * OS holds FIDO USB devices open exclusively there), CTAP2 over raw USB HID
+ * everywhere else. On Windows the OS renders its own insert/tap/PIN dialog,
+ * so the only progress event is `os-prompt`.
  */
 export function useWebAuthn() {
   const register = useCallback(async (username: string): Promise<void> => {

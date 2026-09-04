@@ -122,6 +122,8 @@ export function UsersPage() {
     const unlisten = listen<string>("fido2-status", (event) => {
       const s = event.payload;
       if (s === "insert-key") setFido2Status("Insert your security key...");
+      // On Windows the OS dialog drives insert / tap / PIN itself.
+      else if (s === "os-prompt") setFido2Status("Follow the Windows security prompt...");
       else if (s === "tap-key") setFido2Status("Tap your security key now...");
       else if (s === "pin-required") setFido2Status("PIN required...");
       else if (s.startsWith("invalid-pin")) setFido2Status("Wrong PIN...");

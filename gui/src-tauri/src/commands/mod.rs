@@ -94,6 +94,10 @@ pub mod auth;
 pub mod fido2;
 pub mod connect_mfa;
 pub mod fido2_native;
+/// Windows-only: the OS WebAuthn platform API that `fido2_native` delegates
+/// its ceremonies to. See that module's docs for why raw HID cannot work here.
+#[cfg(windows)]
+pub mod fido2_windows;
 pub mod ssh_security_key;
 pub mod files;
 pub mod groups;

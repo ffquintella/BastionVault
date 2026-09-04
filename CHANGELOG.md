@@ -45,6 +45,47 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+#### Security keys are detected again on Windows
+
+- **Windows FIDO2 ceremonies now go through the OS WebAuthn API**
+  (`gui/src-tauri/src/commands/fido2_windows.rs`,
+  `gui/src-tauri/src/commands/fido2_native.rs`) -- the desktop GUI's FIDO2
+  login, credential registration and Connect MFA step-up never detected an
+  inserted security key on Windows: the sign-in screen sat on "Insert your
+  security key..." until it timed out. Windows 10 1903 and newer hold FIDO
+  USB HID interfaces open exclusively for the OS WebAuthn stack, so the
+  Mozilla `authenticator` crate's raw-HID transport cannot enumerate a key
+  at all. On Windows the ceremony is now handed to `webauthn.dll`
+  (`WebAuthNAuthenticatorMakeCredential` / `WebAuthNAuthenticatorGetAssertion`),
+  which owns the device and renders the OS insert/tap/PIN dialog. Other
+  platforms keep the raw-HID CTAP2 path unchanged. Challenge parsing, the
+  `clientDataJSON` the relying party hashes and the credential JSON sent to
+  the vault are shared by both transports, so no server-side change is
+  needed and no ceremony semantics differ: registrations stay restricted to
+  roaming USB authenticators (never Windows Hello) and attestation
+  conveyance still follows the server's request.
+- **New `os-prompt` progress event** (`gui/src/routes/LoginPage.tsx`,
+  `gui/src/routes/UsersPage.tsx`, `gui/src/components/ConnectMfaPrompt.tsx`)
+  -- reports "Follow the Windows security prompt..." while the OS dialog is
+  up, since Windows collects presence and the PIN itself and the app's own
+  `insert-key` / `tap-key` / `pin-required` steps never fire there.
+- **Windows builds are warning-free again**
+  (`gui/src-tauri/src/commands/ferrogate.rs`) -- `norm_socket` / `norm_mount`
+  are now `#[cfg(unix)]`, matching the only three callers
+  (`ferrogate_machine_login` / `_status` / `_whoami`, all unix-only because
+  the MIA is a unix-socket peer) and the gating `mia_mint` and
+  `classify_enrolment_error` already carry. They were reported as dead code
+  on every Windows build.
+- `webauthn.dll` is resolved at run time rather than linked, so a Windows
+  build still starts where the OS WebAuthn API is missing (pre-1809); the
+  ceremony then fails with an explicit error instead of the process failing
+  to load. Note the SSH security-key paths
+  (`gui/src-tauri/src/commands/ssh_security_key.rs`,
+  `gui/src-tauri/src/session/sk_signer.rs`) still use the raw-HID transport
+  and remain affected by the same Windows limitation.
+
 ## [0.43.3] - 2026-09-03
 
 ### Added

@@ -227,6 +227,10 @@ export function LoginPage() {
     const unlistenStatus = listen<string>("fido2-status", (event) => {
       const status = event.payload;
       if (status === "insert-key") setFido2Status("Insert your security key...");
+      // Windows runs the ceremony through its own WebAuthn dialog, which
+      // handles insert / tap / PIN itself — there is nothing for us to
+      // narrate past this point.
+      else if (status === "os-prompt") setFido2Status("Follow the Windows security prompt...");
       else if (status === "tap-key") setFido2Status("Tap your security key now...");
       else if (status === "pin-required") setFido2Status("PIN required...");
       else if (status.startsWith("invalid-pin")) setFido2Status("Wrong PIN...");
