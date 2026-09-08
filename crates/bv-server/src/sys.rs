@@ -884,10 +884,66 @@ async fn sys_audit_disable_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// Percent-decode one query key or value from `sys/audit/events`.
+///
+/// Deliberately *not* `bv_logical::util`'s decoder, which implements
+/// `application/x-www-form-urlencoded` semantics and so turns `+` into a
+/// space. The values here are RFC3339 timestamps, where `+` introduces a
+/// UTC offset: form semantics rewrite `2026-01-01T00:00:00+02:00` into
+/// `...00:00 02:00`, which fails to parse and — because the handler
+/// ignores an unparseable bound rather than erroring — used to drop the
+/// filter silently. `%2B` (what `bv-client`'s `encode_query` emits for a
+/// literal `+`) and a raw `+` therefore both decode to `+`. Invalid
+/// escapes pass through verbatim.
+fn decode_audit_query_component(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = |b: u8| match b {
+                    b'0'..=b'9' => Some(b - b'0'),
+                    b'a'..=b'f' => Some(b - b'a' + 10),
+                    b'A'..=b'F' => Some(b - b'A' + 10),
+                    _ => None,
+                };
+                match (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                    (Some(h), Some(l)) => {
+                        out.push(h * 16 + l);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Unified admin audit trail. GET reads the aggregated log; optional
-/// `from` / `to` / `limit` are accepted as query-string-style fields
-/// via the request body so the same handler works over the internal
-/// logical pipeline too (the Tauri command path).
+/// `from` / `to` / `limit` bound the window, on the query string or in
+/// the request body.
+///
+/// This endpoint has its own shim precisely so that both forms work: the
+/// generic `logical_routes` handler parses a request body for POST/PUT
+/// only and lifts just the `env`/`version` query keys, which is what
+/// silently dropped the kv-v2 `version` read and the PKI export
+/// parameters. Nothing here is allowlisted and the body is parsed
+/// regardless of method, so a filter reaches the handler either way.
+/// Prefer the query string: a GET body has no defined meaning in HTTP
+/// and intermediaries are free to strip it, so it is the more fragile of
+/// the two even though `bv-client` does send one. The body still wins
+/// when both are present, and is the only form the embedded Tauri
+/// backend can use — its `split_path_query` drops these three keys
+/// through the logical query allowlist.
 async fn sys_audit_events_request_handler(
     req: HttpRequest,
     payload: web::Bytes,
@@ -899,27 +955,32 @@ async fn sys_audit_events_request_handler(
 
     let mut body = serde_json::Map::new();
 
-    // Query string (`?from=...&to=...&limit=...`) — used by curl and any
-    // caller that puts the filters on the URL.
+    // Query string (`?from=...&to=...&limit=...`) — what the GUI and curl
+    // send. Both key and value are percent-decoded: `bv-client` encodes
+    // reserved characters on the way out, so an RFC3339 offset arrives as
+    // `%2B02:00` and would otherwise be stored (and rejected) verbatim.
     if let Some(qs) = req.uri().query() {
         for pair in qs.split('&') {
             let Some((k, v)) = pair.split_once('=') else { continue };
+            let k = decode_audit_query_component(k);
+            let v = decode_audit_query_component(v);
             if k == "limit" {
-                if let Ok(n) = v.parse::<u64>() {
-                    body.insert(k.into(), serde_json::Value::Number(n.into()));
-                }
+                // A non-numeric limit is forwarded verbatim rather than
+                // dropped, so the handler rejects it with a 400. Dropping
+                // it here would resurrect the silent-default behaviour
+                // this endpoint was just fixed for.
+                match v.parse::<u64>() {
+                    Ok(n) => body.insert(k, serde_json::Value::Number(n.into())),
+                    Err(_) => body.insert(k, serde_json::Value::String(v)),
+                };
             } else {
-                body.insert(k.into(), serde_json::Value::String(v.to_string()));
+                body.insert(k, serde_json::Value::String(v));
             }
         }
     }
 
-    // JSON request body. The `bv-client` remote backend sends a GET with
-    // its `from`/`to`/`limit` in the JSON body, NOT on the query string,
-    // so without this merge those filters (and the limit) are silently
-    // dropped in remote mode — the dashboard then shows an unwindowed,
-    // unbounded event list. Body values take precedence over the query
-    // string when both are present.
+    // JSON request body, when the caller managed to send one. Body values
+    // take precedence over the query string when both are present.
     if !payload.is_empty() {
         if let Ok(serde_json::Value::Object(m)) = serde_json::from_slice::<serde_json::Value>(&payload)
         {

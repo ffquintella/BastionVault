@@ -45,6 +45,135 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.43.9] - 2026-09-08
+
+### Fixed
+
+#### PKI certificate export ignored the requested format, and the PKCS#12 it produced was unreadable
+
+Three separate defects on the same path — the GUI's **Export certificate**
+modal offered PKCS#12, and every one of them had to be fixed before a `.p12`
+came out the other end.
+
+- **`format`, `include_private_key`, `mode` and `password` were dropped on
+  the way in** (`crates/bv-engine-pki/src/path_export.rs`,
+  `gui/src-tauri/src/commands/pki.rs`). Both export routes only accepted
+  `Read`, and the GUI sent its parameters in the body of a `GET`. The HTTP
+  boundary parses a request body for POST/PUT only, and lifts just the
+  `env`/`version` query keys into the request — so the engine saw no
+  parameters at all and fell back to its defaults: a plaintext PEM of the
+  public material, with no error anywhere. Picking PKCS#12 and checking
+  *Include private key* produced a PEM bundle labelled `pem`. Both routes now
+  also accept `Write`, and the GUI sends a parameterised export as a POST;
+  the parameterless default (PEM, public material) stays a `Read` so
+  read-only export policies keep working. `password` never travels as a
+  query parameter — it would land in every access log on the way. Embedded
+  (GUI-opened vault) mode was unaffected, which is why this only ever
+  reproduced against a server.
+- **The PKCS#12 MAC named the wrong algorithm**
+  (`crates/bv-engine-pki/src/export.rs`). `MacData.mac` is a `DigestInfo`
+  and RFC 7292 §4 puts the *digest* OID in it; we wrote
+  `hmacWithSHA256` (1.2.840.113549.2.9) instead of `id-sha256`. OpenSSL 3
+  read the salt and iteration count, then failed with
+  `unknown digest algorithm` and `Mac verify error: invalid password?` —
+  pointing the operator at a password that was never wrong. Every `.p12`
+  ever exported was affected.
+- **The private key was not bound to its certificate**
+  (`crates/bv-engine-pki/src/export.rs`). The bags carried no
+  `localKeyId` attribute, so nothing said the key and the leaf belonged
+  together: OpenSSL filed every certificate under `-cacerts` and found
+  nothing for `-clcerts`, and the Windows / macOS / Java importers land a
+  certificate with no usable private key. The leaf's cert bag and the
+  shrouded-key bag now carry a matching `localKeyId`; chain certificates
+  deliberately do not, so they stay in the CA bucket on import.
+
+The sample `pki-exporter` policy ([docs/policies/pki-exporter.hcl](docs/policies/pki-exporter.hcl))
+now grants `read` **and** `update` on both export paths. **Operators with a
+hand-rolled export policy must add `update`**, or a PKCS#12 export is refused
+with a 403 — the plain PEM export keeps working on `read` alone. The
+`pki-readonly` / `pki-issuer` deny stanzas are unaffected: `deny` covers every
+verb.
+
+Verified against OpenSSL 3.6 (`pkcs12 -info` verifies the MAC, `-clcerts`
+returns the leaf, the extracted key's public half matches the leaf's, and
+`-cacerts` holds only the issuer) and the JDK keystore reader (one
+`PrivateKeyEntry` with a 2-certificate chain).
+
+#### Reading a historical KV-v2 secret version returned the latest one
+
+- **The GUI's version selector now travels as a query parameter**
+  (`gui/src-tauri/src/commands/secrets.rs`). `read_secret_version` sent
+  `{"version": N}` in the body of a `GET`. The HTTP boundary parses a request
+  body for POST/PUT only, and lifts just the allowlisted `env`/`version`
+  query keys into the request — so the version never reached the KV engine,
+  which fell back to `current_version`. Opening any historical version from
+  the secret's **Versions** panel showed the *current* secret's values, with
+  the requested version number still in the header and no error anywhere.
+  The read now appends `?version=<n>` to the path, the same `path?selector`
+  convention the `?env=<name>` KV selector already uses. Embedded
+  (GUI-opened vault) mode was unaffected — its backend sets the request body
+  for reads — which is why this only ever reproduced against a server.
+  Regression coverage runs over a real HTTP server
+  (`src/engine_tests/kv_version_read.rs`); an in-process test cannot observe
+  this class of bug. Same root cause as the PKI export fix above.
+
+#### An audit-event filter the operator supplied could be silently ignored
+
+- **A malformed `from` / `to` bound, or a non-numeric `limit`, now fails
+  with a 400** (`crates/bv-kernel/src/modules/system/mod.rs`). The
+  `sys/audit/events` handler discarded a filter it could not parse and
+  answered with its unfiltered default — the 500 newest events — which is
+  indistinguishable from a working filter at the call site. Admin → Audit
+  takes free-text RFC3339, so the common case is an operator typing
+  `2026-01-01` (no time) into the **From** box, getting every event back,
+  and concluding the date pickers do not work. The bounds and the limit are
+  now validated up front and refused by name, and an empty box still means
+  "no bound". Applies to both entry paths, so the embedded (GUI-opened
+  vault) backend cannot keep the lenient behaviour.
+- **A percent-encoded RFC3339 offset is decoded on the query string**
+  (`crates/bv-server/src/sys.rs`). The endpoint’s HTTP shim parsed the
+  query string without decoding it, so `+02:00` — which any client must
+  encode as `%2B02:00` — arrived verbatim, failed to parse, and (before the
+  fix above) was dropped in silence. Decoding here deliberately does *not*
+  use form-urlencoded semantics: `+` is a UTC offset on this path, not a
+  space.
+- **The GUI also sends the window on the query string**
+  (`gui/src-tauri/src/commands/system.rs`) — hardening, not a fix. A GET
+  body has no defined meaning in HTTP and any intermediary may strip it, so
+  `list_audit_events` now puts `from` / `to` / `limit` on the path as well
+  (`sys/audit/events?from=…`, the same `path?selector` convention as the
+  kv-v2 `?version=` read). The body is still sent, because it is the only
+  form the embedded backend can read; the server merges body over query, so
+  the two cannot disagree. Regression coverage over a real HTTP server in
+  `src/engine_tests/audit_events_window.rs`.
+
+  **The "known limitation" noted here previously was a misdiagnosis, and no
+  operator action is needed.** It claimed the remote GUI’s audit filters
+  never reached the server, by analogy with the two fixes above. They do:
+  `sys/audit/events` is one of the few paths with its own HTTP shim, which
+  parses a request body regardless of method (`logical_routes`, which does
+  not, is what broke the KV and PKI reads), and `ureq::Agent::run` attaches
+  a body to a `GET` whenever one is present. The pre-existing
+  `test_audit_events_filters_from_json_body` had been asserting exactly that
+  the whole time. No route gained `Write`, no capability changed, and
+  `ALLOWED_QUERY_KEYS` is untouched — the widening and the policy migration
+  both turned out to be unnecessary.
+
+### Changed
+
+#### PKCS#12 export asks where to save the file
+
+- **The GUI's export modal now opens a save dialog for PKCS#12**
+  (`gui/src/routes/PkiPage.tsx`, `gui/src-tauri/src/commands/pki.rs`) —
+  **Choose file & export…** picks the destination first, then the new
+  `pki_export_cert_to_path` / `pki_export_issuer_to_path` commands run the
+  export and write the decoded DER straight to that file (`0600` on unix).
+  PKCS#12 is binary, so there was never anything to preview and Copy would
+  only have yielded the base64 envelope; routing it through the host also
+  keeps the bag — and any private key in it — out of the webview entirely.
+  PEM and PKCS#7 keep the preview + Copy + Download they had.
+
+
 ## [0.43.8] - 2026-09-08
 
 ### Fixed

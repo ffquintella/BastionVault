@@ -2506,10 +2506,41 @@ export interface PkiExportResult {
   issuer_name?: string;
 }
 
+export interface PkiExportFileResult {
+  format: string;
+  path: string;
+  bytes_written: number;
+  includes_private_key: boolean;
+  backup_mode: boolean;
+}
+
 export const pkiExportCert = (request: PkiExportCertRequest) =>
   invoke<PkiExportResult>("pki_export_cert", { request });
 export const pkiExportIssuer = (request: PkiExportIssuerRequest) =>
   invoke<PkiExportResult>("pki_export_issuer", { request });
+
+/**
+ * Export straight to a file the operator picked, without the payload
+ * passing through the webview. Used for PKCS#12: the bag is raw DER
+ * (nothing to preview, nothing useful to copy) and may carry the bound
+ * private key.
+ */
+export const pkiExportCertToPath = (
+  request: PkiExportCertRequest,
+  targetPath: string,
+) =>
+  invoke<PkiExportFileResult>("pki_export_cert_to_path", {
+    request,
+    targetPath,
+  });
+export const pkiExportIssuerToPath = (
+  request: PkiExportIssuerRequest,
+  targetPath: string,
+) =>
+  invoke<PkiExportFileResult>("pki_export_issuer_to_path", {
+    request,
+    targetPath,
+  });
 export const pkiImportCaBundle = (request: PkiImportCaBundleRequest) =>
   invoke<PkiCaImportResult>("pki_import_ca_bundle", { request });
 export const pkiImportCaPkcs12 = (request: PkiImportCaPkcs12Request) =>

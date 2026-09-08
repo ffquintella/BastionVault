@@ -466,6 +466,8 @@ pub fn run() {
             commands::pki::pki_csr_set_signed,
             commands::pki::pki_export_cert,
             commands::pki::pki_export_issuer,
+            commands::pki::pki_export_cert_to_path,
+            commands::pki::pki_export_issuer_to_path,
             commands::pki::pki_import_ca_bundle,
             commands::pki::pki_import_ca_pkcs12,
             commands::pki::pki_parse_chain,

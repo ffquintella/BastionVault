@@ -333,11 +333,17 @@ pub async fn read_secret_version(
     if mt != "kv-v2" {
         return Err("Versioning is only available on kv-v2 mounts".into());
     }
-    let actual_path = adjust_kv_path(&path, m, mt, "data");
+    // Carry the version selector as a query param, not a request body. A GET
+    // body is dropped by `bv-server::logical_routes` (it only parses a body
+    // for POST/PUT), so a body-borne `version` reached the KV engine as
+    // nothing at all and the read silently returned the latest version. The
+    // `version` key is on the server's query allowlist and is lifted into
+    // `Request::data`, which the KV v2 handler reads before the body — so
+    // this works against both the remote and the embedded backend, exactly
+    // like the `?env=<name>` selector in `read_secret`.
+    let actual_path = format!("{}?version={version}", adjust_kv_path(&path, m, mt, "data"));
 
-    let mut body = Map::new();
-    body.insert("version".to_string(), Value::from(version));
-    let resp = make_request(&state, Operation::Read, actual_path, Some(body)).await?;
+    let resp = make_request(&state, Operation::Read, actual_path, None).await?;
 
     let raw = resp.and_then(|r| r.data).ok_or("Version not found")?;
     let data_map = raw

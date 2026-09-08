@@ -934,27 +934,48 @@ pub async fn list_audit_events(
     to: String,
     limit: Option<u32>,
 ) -> CmdResult<Vec<AuditEvent>> {
-    // The handler parses these from `req.data` after field resolution;
-    // for Read it populates from the body, so stuff them there.
+    // The window travels on the query string *and* in the body, on
+    // purpose — one form per backend.
+    //
+    // Remote: the query string. `sys/audit/events` is one of the few
+    // paths with its own HTTP shim, which parses a request body
+    // regardless of method, so the body form does reach the server today
+    // (unlike a read through `logical_routes`, which parses a body for
+    // POST/PUT only — that is what silently dropped the kv-v2
+    // `?version=` read and the PKI export parameters). But a GET body
+    // has no defined meaning in HTTP and any intermediary may strip it,
+    // so the filters go on the path as well: the same `path?selector`
+    // convention as the kv-v2 read, split and percent-encoded by
+    // `RemoteBackend::build_url_with`.
+    //
+    // Embedded (GUI-opened vault): the body, which is the only form that
+    // works there — `split_path_query` drops these three keys through
+    // the logical query allowlist (`env`/`version` only).
+    //
+    // Both carry the same values and the server merges body over query,
+    // so the two can never disagree.
     let mut body = serde_json::Map::new();
+    let mut query: Vec<String> = Vec::new();
     if !from.is_empty() {
+        query.push(format!("from={from}"));
         body.insert("from".into(), Value::String(from));
     }
     if !to.is_empty() {
+        query.push(format!("to={to}"));
         body.insert("to".into(), Value::String(to));
     }
     if let Some(l) = limit {
+        query.push(format!("limit={l}"));
         body.insert("limit".into(), Value::Number(l.into()));
     }
+    let path = if query.is_empty() {
+        "sys/audit/events".to_string()
+    } else {
+        format!("sys/audit/events?{}", query.join("&"))
+    };
     let body = if body.is_empty() { None } else { Some(body) };
 
-    let resp = crate::commands::make_request(
-        &state,
-        Operation::Read,
-        "sys/audit/events".to_string(),
-        body,
-    )
-    .await?;
+    let resp = crate::commands::make_request(&state, Operation::Read, path, body).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     let arr = data.get("events").and_then(|v| v.as_array()).cloned();
     let out = arr

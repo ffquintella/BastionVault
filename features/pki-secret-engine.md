@@ -218,12 +218,28 @@ POST   /v1/pki/revoke
 POST   /v1/pki/tidy
 GET    /v1/pki/cert/:serial[/pem]
 GET    /v1/pki/cert/ca_chain
+GET    /v1/pki/cert/:serial/export          # PEM of the public material
+POST   /v1/pki/cert/:serial/export          # parameterised: format / include_private_key / mode / password
+GET    /v1/pki/issuer/:ref/export           # PEM of the public material
+POST   /v1/pki/issuer/:ref/export           # parameterised: format / include_chain / password
 GET    /v1/pki/crl[/pem]
 POST   /v1/pki/crl/rotate
 POST   /v1/pki/config/ca
 POST   /v1/pki/config/urls
 POST   /v1/pki/config/crl
 ```
+
+**Why the export routes take both verbs.** The HTTP layer parses a request
+body for POST/PUT only, and lifts just the `env`/`version` query keys into
+the logical request — so a `GET` reaches the engine with no `format`,
+`include_private_key`, `mode` or `password` and gets the defaults (a
+plaintext PEM of the public material). Anything parameterised is therefore a
+POST; the `GET` stays for the bare default so a read-only export policy keeps
+working. `password` is never accepted as a query parameter: it would be
+logged by every hop between the caller and the vault. PKCS#12 requires a
+non-empty `password`, and `mode=backup` — the one way past a managed key's
+`exportable=false` — requires `format=pkcs12`, so key material bypassing the
+flag is always encrypted before it leaves.
 
 ## Implementation Scope
 

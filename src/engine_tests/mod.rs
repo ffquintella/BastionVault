@@ -10,11 +10,14 @@
 //! `src/dos/store_tests.rs`. See roadmaps/workspace-decomposition.md § Phase 3.
 
 mod approle;
+mod audit_events_window;
 mod ferrogate;
 mod files;
+mod kv_version_read;
 mod notifications;
 mod resource;
 mod oidc;
+mod pki_export;
 mod rustion;
 mod saml;
 mod userpass;

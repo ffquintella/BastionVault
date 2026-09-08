@@ -1,9 +1,22 @@
 //! `pki/cert/<serial>/export` and `pki/issuer/<ref>/export`.
 //!
-//! Two destination formats today: PEM bundle and PKCS#7. Both encode
-//! the cert + chain; PEM additionally supports inlining the bound
-//! managed key when the operator asks for it AND the key was minted
-//! `exportable=true` AND the caller's policy permits the export path.
+//! Three destination formats: PEM bundle, PKCS#7 and PKCS#12. All
+//! three encode the cert + chain; PEM and PKCS#12 additionally support
+//! inlining the bound managed key when the operator asks for it AND
+//! the key was minted `exportable=true` AND the caller's policy
+//! permits the export path.
+//!
+//! **Both routes accept `Read` and `Write`, and a parameterised export
+//! must use `Write`.** The HTTP boundary only parses a request body for
+//! POST/PUT (`bv-server::logical_routes`), and only the `env`/`version`
+//! query keys are lifted into `Request::data`. A `GET` therefore reaches
+//! the handler with no `format`, `include_private_key`, `mode` or
+//! `password` at all and silently falls back to a plaintext PEM of the
+//! public material — which is exactly what the GUI's PKCS#12 export used
+//! to produce. `Read` stays wired for the bare default (PEM, no key) so
+//! read-only export policies keep working; anything else is a POST.
+//! `password` must never travel as a query parameter — it would land in
+//! every access log between the caller and the vault.
 //!
 //! Export gating layers (in order of evaluation):
 //!
@@ -13,9 +26,9 @@
 //! 2. `KeyEntry.exportable` — pinned at create / import time and
 //!    *read-only*. Even root cannot flip it. The single override is
 //!    `mode=backup`, which bypasses the flag but forces the response
-//!    payload to be encrypted at the format level (PKCS#12 only,
-//!    follow-up PR — for now `mode=backup` is rejected with PEM /
-//!    PKCS#7 because they're plaintext).
+//!    payload to be encrypted at the format level (PKCS#12 only —
+//!    `mode=backup` is rejected with PEM / PKCS#7 because they're
+//!    plaintext).
 //! 3. Issuer rule — `pki/issuer/<ref>/export` *never* emits the
 //!    private key, regardless of `exportable` or `mode`. The API
 //!    just doesn't accept `include_private_key` here.
@@ -26,9 +39,6 @@
 //!     including non-exportable ones).
 //!   * Refuses any `format` that doesn't carry encryption — today
 //!     only PKCS#12 qualifies, so PEM / PKCS#7 reject `mode=backup`.
-//!     Until PKCS#12 lands, `mode=backup` is wired but always errors;
-//!     the route shape stays stable so the GUI doesn't break on the
-//!     follow-up.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -49,7 +59,8 @@ use crate::{
 
 impl PkiBackend {
     pub fn cert_export_path(&self) -> Path {
-        let r = self.inner.clone();
+        let r1 = self.inner.clone();
+        let r2 = self.inner.clone();
         new_path!({
             pattern: r"cert/(?P<serial>[0-9a-fA-F:\-]+)/export$",
             fields: {
@@ -59,13 +70,17 @@ impl PkiBackend {
                 "mode": { field_type: FieldType::Str, default: "normal", description: "`normal` (default) honours the per-key `exportable` flag. `backup` bypasses the flag but requires an encrypted format (PKCS#12)." },
                 "password": { field_type: FieldType::Str, default: "", description: "PKCS#12 envelope password. Required when `format=pkcs12` (also serves as the file's encryption key on import)." }
             },
-            operations: [{op: Operation::Read, handler: r.export_cert}],
+            operations: [
+                {op: Operation::Read, handler: r1.export_cert},
+                {op: Operation::Write, handler: r2.export_cert}
+            ],
             help: "Export a leaf certificate (and optionally its bound managed key) in PEM, PKCS#7, or PKCS#12 format."
         })
     }
 
     pub fn issuer_export_path(&self) -> Path {
-        let r = self.inner.clone();
+        let r1 = self.inner.clone();
+        let r2 = self.inner.clone();
         new_path!({
             pattern: r"issuer/(?P<issuer_ref>[\w\-]+)/export$",
             fields: {
@@ -74,7 +89,10 @@ impl PkiBackend {
                 "include_chain": { field_type: FieldType::Bool, default: true, description: "When true (default), include the issuer's parent chain in the output." },
                 "password": { field_type: FieldType::Str, default: "", description: "PKCS#12 envelope password. Required when `format=pkcs12`." }
             },
-            operations: [{op: Operation::Read, handler: r.export_issuer}],
+            operations: [
+                {op: Operation::Read, handler: r1.export_issuer},
+                {op: Operation::Write, handler: r2.export_issuer}
+            ],
             help: "Export the issuer certificate (public material). The private key is never included on this route — even with the right policy and even in backup mode."
         })
     }

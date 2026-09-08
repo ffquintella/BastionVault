@@ -45,7 +45,7 @@ impl PkiBackend {
                 "key_type": { field_type: FieldType::Str, default: "ec", description: "rsa | ec | ed25519 | ml-dsa-44 | ml-dsa-65 | ml-dsa-87." },
                 "key_bits": { field_type: FieldType::Int, default: 0, description: "Key size in bits (0 = default)." },
                 "name": { field_type: FieldType::Str, default: "", description: "Optional human-friendly alias for this key." },
-                "exportable": { field_type: FieldType::Bool, default: false, description: "Pin whether this key may be exported via `pki/cert/<serial>/export?include_private_key=true`. Read-only after creation. Default false." }
+                "exportable": { field_type: FieldType::Bool, default: false, description: "Pin whether this key may be exported via `POST pki/cert/<serial>/export` with `include_private_key=true`. Read-only after creation. Default false." }
             },
             operations: [{op: Operation::Write, handler: r.generate_key}],
             help: "Generate and persist a managed private key."
@@ -59,7 +59,7 @@ impl PkiBackend {
             fields: {
                 "private_key": { field_type: FieldType::Str, required: true, description: "PEM-encoded private key (PKCS#8 or BV PQC envelope)." },
                 "name": { field_type: FieldType::Str, default: "", description: "Optional human-friendly alias for this key." },
-                "exportable": { field_type: FieldType::Bool, default: false, description: "Pin whether this key may be exported via `pki/cert/<serial>/export?include_private_key=true`. Read-only after creation. Default false." }
+                "exportable": { field_type: FieldType::Bool, default: false, description: "Pin whether this key may be exported via `POST pki/cert/<serial>/export` with `include_private_key=true`. Read-only after creation. Default false." }
             },
             operations: [{op: Operation::Write, handler: r.import_key}],
             help: "Import an externally-generated private key into the managed key store."

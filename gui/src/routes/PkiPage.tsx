@@ -5113,8 +5113,12 @@ function ExternalCsrTab({ mount }: { mount: string }) {
 //     for root (read-only flag pinned at create time).
 //   * `pki/issuer/<ref>/export` never emits private keys.
 //   * `mode=backup` bypasses the exportable flag but requires an
-//     encrypted format (PKCS#12 — landing in a follow-up; today the
-//     host returns the gating error and the modal surfaces it).
+//     encrypted format (PKCS#12).
+//
+// PEM / PKCS#7 come back as text and get a preview + Copy + Download.
+// PKCS#12 does not: it is raw DER and may carry the private key, so the
+// modal asks for a destination up front and `pki_export_*_to_path` has
+// the host write the file. That also keeps the bag out of this window.
 
 type ExportFormatId = "pem" | "pkcs7" | "pkcs12";
 
@@ -5137,6 +5141,14 @@ function ExportModal({
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<api.PkiExportResult | null>(null);
+  const [fileResult, setFileResult] = useState<api.PkiExportFileResult | null>(
+    null,
+  );
+
+  // PKCS#12 is raw DER and may carry the private key, so it is written
+  // straight to a file the operator picks — never previewed, never
+  // copied, never held in this window's state.
+  const isBinary = format === "pkcs12";
 
   // Reset on open so a previous export doesn't bleed across sessions.
   useEffect(() => {
@@ -5145,6 +5157,7 @@ function ExportModal({
       setIncludeKey(false);
       setPassword("");
       setResult(null);
+      setFileResult(null);
     }
   }, [open]);
 
@@ -5154,6 +5167,13 @@ function ExportModal({
   useEffect(() => {
     if (format === "pkcs7" && includeKey) setIncludeKey(false);
   }, [format, includeKey]);
+
+  // A previous export's output describes the format it was made with —
+  // drop it when the operator picks a different one.
+  useEffect(() => {
+    setResult(null);
+    setFileResult(null);
+  }, [format]);
 
   async function handleExport() {
     if (!mount || !target) {
@@ -5184,6 +5204,74 @@ function ExportModal({
             });
       setResult(res);
       toast("success", `Exported (${res.format}).`);
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // PKCS#12 path: pick the destination first, then let the host write
+  // the decoded DER to it. Nothing comes back but a byte count, so the
+  // bag (and any private key in it) never lands in the webview.
+  async function handleExportToFile() {
+    if (!mount || !target) {
+      toast("error", "Missing mount or target.");
+      return;
+    }
+    if (!password.trim()) {
+      toast("error", "PKCS#12 requires a password.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const suggested =
+        kind === "cert"
+          ? `cert-${target.slice(0, 12)}.p12`
+          : `${target}.p12`;
+      const targetPath = await save({
+        title:
+          kind === "cert"
+            ? "Save certificate as PKCS#12"
+            : "Save issuer certificate as PKCS#12",
+        defaultPath: suggested,
+        filters: [
+          { name: "PKCS#12", extensions: ["p12", "pfx"] },
+          { name: "All files", extensions: ["*"] },
+        ],
+      });
+      // Operator cancelled the dialog — no export, no error.
+      if (typeof targetPath !== "string" || targetPath.length === 0) {
+        return;
+      }
+      const res =
+        kind === "cert"
+          ? await api.pkiExportCertToPath(
+              {
+                mount,
+                serial: target,
+                format,
+                include_private_key: includeKey,
+                password,
+              },
+              targetPath,
+            )
+          : await api.pkiExportIssuerToPath(
+              {
+                mount,
+                issuer_ref: target,
+                format,
+                include_chain: true,
+                password,
+              },
+              targetPath,
+            );
+      setFileResult(res);
+      toast(
+        "success",
+        `Saved ${res.bytes_written.toLocaleString()} bytes to ${res.path}`,
+      );
     } catch (e) {
       toast("error", extractError(e));
     } finally {
@@ -5263,6 +5351,14 @@ function ExportModal({
               </Button>
               <Button onClick={handleDownload}>Download</Button>
             </>
+          ) : isBinary ? (
+            <Button onClick={handleExportToFile} disabled={busy || !target}>
+              {busy
+                ? "Exporting…"
+                : fileResult
+                  ? "Save again…"
+                  : "Choose file & export…"}
+            </Button>
           ) : (
             <Button onClick={handleExport} disabled={busy || !target}>
               {busy ? "Exporting…" : "Export"}
@@ -5301,13 +5397,38 @@ function ExportModal({
           </p>
         )}
         {format === "pkcs12" && (
-          <Input
-            label="PKCS#12 password"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="Required — encrypts the .p12 file"
-          />
+          <>
+            <Input
+              label="PKCS#12 password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Required — encrypts the .p12 file"
+            />
+            <p className="text-xs text-[var(--color-text-muted)]">
+              PKCS#12 is a binary file — <strong>Choose file &amp; export</strong>{" "}
+              asks where to save it and the vault writes the bytes straight
+              there. There is no preview: the bag is DER, and it may carry the
+              private key.
+            </p>
+          </>
+        )}
+        {fileResult && (
+          <div className="rounded border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-2 space-y-1">
+            <p className="text-xs text-[var(--color-text-muted)]">
+              Wrote <code>{fileResult.format}</code> ·{" "}
+              {fileResult.bytes_written.toLocaleString()} bytes
+              {fileResult.includes_private_key ? (
+                <>
+                  {" "}· includes <strong>private key</strong>
+                </>
+              ) : null}
+              {fileResult.backup_mode ? <> · backup mode</> : null}
+            </p>
+            <p className="text-xs font-mono break-all min-w-0">
+              {fileResult.path}
+            </p>
+          </div>
         )}
         {result && (
           <div className="space-y-2">

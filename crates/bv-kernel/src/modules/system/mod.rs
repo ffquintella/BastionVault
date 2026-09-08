@@ -1868,9 +1868,15 @@ impl SystemBackend {
     /// log we already maintain — ACL policies, identity user/app
     /// groups, and asset groups (resource-group store) — and presents
     /// them as a flat newest-first list. Admin-only (gated by the ACL
-    /// on `sys/audit/events`). Optional `from` / `to` query params
-    /// bound the time window; `limit` caps response size (default
-    /// 500).
+    /// on `sys/audit/events`). Optional `from` / `to` bound the time
+    /// window and `limit` caps response size (default 500). Over HTTP
+    /// all three may travel on the query string or in the request body
+    /// — the endpoint's shim in `bv-server::sys` merges both, body
+    /// winning — and on the embedded and in-process paths they arrive
+    /// in the body. A filter that is present but unusable (a bound that
+    /// is not RFC3339, a non-numeric limit) is a 400; it is never
+    /// downgraded to an unfiltered read, which is indistinguishable
+    /// from a working one at the call site.
     ///
     /// Resource-metadata history lives in the resource mount's own
     /// barrier view (`hist/<name>/…`), which isn't reachable from the
@@ -1882,27 +1888,74 @@ impl SystemBackend {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let from = req
-            .get_data("from")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .filter(|s| !s.is_empty());
-        let to = req
-            .get_data("to")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .filter(|s| !s.is_empty());
-        let limit = req
-            .get_data("limit")
-            .ok()
-            .and_then(|v| v.as_u64())
-            .unwrap_or(500) as usize;
+        // A filter the caller *did* supply but that cannot be used is
+        // rejected, not ignored. Ignoring it is what makes the Admin →
+        // Audit date pickers look inert: the operator asks for a window,
+        // gets the unfiltered 500 newest events back, and has no way to
+        // tell the difference. Those inputs are free-text RFC3339, so a
+        // half-typed bound (`2026-01-01`, no time) is the common case,
+        // not an exotic one.
+        //
+        // `get_data` distinguishes the two situations for us:
+        // `ErrRequestFieldInvalid` means the key was present with the
+        // wrong JSON type, anything else means it was absent.
+        let supplied = |name: &str| -> Result<Option<Value>, RvError> {
+            match req.get_data(name) {
+                Ok(v) => Ok(Some(v)),
+                Err(RvError::ErrRequestFieldInvalid) => Err(bv_error_response_status!(
+                    400,
+                    "`{}` has the wrong type",
+                    name
+                )),
+                Err(_) => Ok(None),
+            }
+        };
 
-        // When the caller supplies a `from` bound, push it into the
-        // collection so the append-only stores range-scan only the
-        // recent tail instead of reading all history. A malformed or
-        // absent `from` falls back to the full scan (the `to`/in-memory
-        // filters below still apply).
+        let parse_bound = |name: &str| -> Result<Option<String>, RvError> {
+            let Some(raw) = supplied(name)?
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .filter(|s| !s.is_empty())
+            else {
+                return Ok(None);
+            };
+            if chrono::DateTime::parse_from_rfc3339(&raw).is_err() {
+                return Err(bv_error_response_status!(
+                    400,
+                    "`{}` must be an RFC3339 timestamp (e.g. 2026-01-01T00:00:00Z), got `{}`",
+                    name,
+                    raw
+                ));
+            }
+            Ok(Some(raw))
+        };
+        let from = parse_bound("from")?;
+        let to = parse_bound("to")?;
+
+        // `limit` is a JSON number from a body-bearing caller and a
+        // numeric string from the HTTP query shim; both are accepted, and
+        // a present-but-unusable value is refused rather than quietly
+        // becoming the 500 default.
+        let limit = match supplied("limit")? {
+            None | Some(Value::Null) => 500,
+            Some(v) => match v
+                .as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                .filter(|n| *n > 0)
+            {
+                Some(n) => n,
+                None => {
+                    return Err(bv_error_response_status!(
+                        400,
+                        "`limit` must be a positive integer"
+                    ))
+                }
+            },
+        } as usize;
+
+        // Push the `from` bound into the collection so the append-only
+        // stores range-scan only the recent tail instead of reading all
+        // history. Validated above, so a parse failure here is
+        // impossible; `None` means no bound was supplied.
         let since = from
             .as_deref()
             .and_then(|f| chrono::DateTime::parse_from_rfc3339(f).ok())
@@ -1913,9 +1966,11 @@ impl SystemBackend {
         // lexicographic order matches chronological for that format.
         events.sort_by(|a, b| b.ts.cmp(&a.ts));
 
-        // Apply from/to bounds (string comparison, which is fine for
-        // RFC3339). Malformed filters are ignored rather than
-        // surfacing errors — the GUI always passes well-formed values.
+        // Apply from/to bounds. String comparison is fine for RFC3339
+        // in a common offset, which is what every producer in-tree
+        // writes (`Utc::now().to_rfc3339()`); the bounds themselves were
+        // validated as RFC3339 above, so a caller supplying a different
+        // offset compares lexicographically rather than chronologically.
         let filtered: Vec<_> = events
             .into_iter()
             .filter(|e| {

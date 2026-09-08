@@ -13,8 +13,9 @@
 #      create / import time. Even root cannot flip it. If the key was
 #      minted `exportable=false`, the export refuses unless …
 #   3. … `mode=backup` is set, which bypasses (2) but only allows
-#      encrypted formats (PKCS#12; lands in a follow-up). Today
-#      backup mode + PEM / PKCS#7 is rejected by the host.
+#      encrypted formats — i.e. PKCS#12, with a password. Backup mode
+#      + PEM / PKCS#7 is rejected by the host, so a key that got past
+#      (2) is always encrypted before it leaves.
 #
 # Issuer keys are *always* refused for export — the
 # `pki/issuer/<ref>/export` route doesn't accept `include_private_key`
@@ -55,11 +56,17 @@ path "pki/issuer/+/crl" {
 }
 
 # Export endpoints — the differentiator vs pki-readonly / pki-issuer.
-# Both routes are GET-shaped (`Operation::Read` server-side), so
-# `read` is the right capability.
+#
+# Both capabilities are needed, because both routes take both verbs. A
+# bare `GET` (capability `read`) exports the default: a PEM of the public
+# material. Anything parameterised — `format=pkcs12`, a password,
+# `include_private_key`, `mode=backup` — must be a POST (capability
+# `update`), because the HTTP layer only parses a request body for
+# POST/PUT and a password must never travel in a query string. Grant
+# `read` alone and a PKCS#12 export is refused with a 403.
 path "pki/cert/+/export" {
-  capabilities = ["read"]
+  capabilities = ["read", "update"]
 }
 path "pki/issuer/+/export" {
-  capabilities = ["read"]
+  capabilities = ["read", "update"]
 }

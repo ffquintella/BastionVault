@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 
 use bv_client::{JsonResponse, Operation};
+use zeroize::Zeroize as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::State;
@@ -1996,28 +1997,67 @@ pub struct PkiExportResult {
     pub issuer_name: String,
 }
 
+/// Build the export request body, dropping every value that already
+/// matches the route's own default. An empty body means the export needs
+/// no parameters at all.
+///
+/// `format=pem` and `include_private_key=false` are the route defaults,
+/// so omitting them keeps the plain public-material export a parameterless
+/// request — see [`export_operation`] for why that matters.
+fn cert_export_body(request: &PkiExportCertRequest) -> Map<String, Value> {
+    let mut body = Map::new();
+    match request.format.as_deref().map(str::trim).unwrap_or("") {
+        "" | "pem" => {}
+        f => {
+            body.insert("format".into(), json!(f));
+        }
+    }
+    if request.include_private_key == Some(true) {
+        body.insert("include_private_key".into(), json!(true));
+    }
+    match request.mode.as_deref().map(str::trim).unwrap_or("") {
+        "" | "normal" => {}
+        m => {
+            body.insert("mode".into(), json!(m));
+        }
+    }
+    if let Some(p) = request.password.as_deref().filter(|s| !s.is_empty()) {
+        body.insert("password".into(), json!(p));
+    }
+    body
+}
+
+/// Pick the operation an export request has to go out as.
+///
+/// The HTTP boundary only parses a request body for POST/PUT
+/// (`bv-server::logical_routes`) and only lifts the `env`/`version` query
+/// keys into `Request::data`. A parameterised export sent as a `GET`
+/// therefore arrives at the engine with no `format`, `include_private_key`
+/// or `password` and silently falls back to a plaintext PEM of the public
+/// material — the bug behind "asked for PKCS#12, got PEM". Anything with
+/// parameters goes out as a `Write`; the parameterless default stays a
+/// `Read` so read-only export policies keep working.
+///
+/// `password` is never a query parameter: it would land in every access
+/// log between here and the vault.
+fn export_operation(body: &Map<String, Value>) -> Operation {
+    if body.is_empty() {
+        Operation::Read
+    } else {
+        Operation::Write
+    }
+}
+
 #[tauri::command]
 pub async fn pki_export_cert(
     state: State<'_, AppState>,
     request: PkiExportCertRequest,
 ) -> CmdResult<PkiExportResult> {
     let mount = mount_prefix(&request.mount);
-    let mut body = Map::new();
-    if let Some(f) = request.format.filter(|s| !s.is_empty()) {
-        body.insert("format".into(), json!(f));
-    }
-    if let Some(b) = request.include_private_key {
-        body.insert("include_private_key".into(), json!(b));
-    }
-    if let Some(m) = request.mode.filter(|s| !s.is_empty()) {
-        body.insert("mode".into(), json!(m));
-    }
-    if let Some(p) = request.password.filter(|s| !s.is_empty()) {
-        body.insert("password".into(), json!(p));
-    }
+    let body = cert_export_body(&request);
     let resp = make_request(
         &state,
-        Operation::Read,
+        export_operation(&body),
         format!("{mount}/cert/{}/export", request.serial),
         Some(body),
     )
@@ -2048,25 +2088,35 @@ pub struct PkiExportIssuerRequest {
     pub password: Option<String>,
 }
 
+/// Issuer counterpart of [`cert_export_body`]. `include_chain` defaults
+/// to `true` on the route, so only an explicit `false` has to travel.
+fn issuer_export_body(request: &PkiExportIssuerRequest) -> Map<String, Value> {
+    let mut body = Map::new();
+    match request.format.as_deref().map(str::trim).unwrap_or("") {
+        "" | "pem" => {}
+        f => {
+            body.insert("format".into(), json!(f));
+        }
+    }
+    if request.include_chain == Some(false) {
+        body.insert("include_chain".into(), json!(false));
+    }
+    if let Some(p) = request.password.as_deref().filter(|s| !s.is_empty()) {
+        body.insert("password".into(), json!(p));
+    }
+    body
+}
+
 #[tauri::command]
 pub async fn pki_export_issuer(
     state: State<'_, AppState>,
     request: PkiExportIssuerRequest,
 ) -> CmdResult<PkiExportResult> {
     let mount = mount_prefix(&request.mount);
-    let mut body = Map::new();
-    if let Some(f) = request.format.filter(|s| !s.is_empty()) {
-        body.insert("format".into(), json!(f));
-    }
-    if let Some(b) = request.include_chain {
-        body.insert("include_chain".into(), json!(b));
-    }
-    if let Some(p) = request.password.filter(|s| !s.is_empty()) {
-        body.insert("password".into(), json!(p));
-    }
+    let body = issuer_export_body(&request);
     let resp = make_request(
         &state,
-        Operation::Read,
+        export_operation(&body),
         format!("{mount}/issuer/{}/export", request.issuer_ref),
         Some(body),
     )
@@ -2082,6 +2132,137 @@ pub async fn pki_export_issuer(
         serial_number: String::new(),
         issuer_id: val_str(&map, "issuer_id"),
         issuer_name: val_str(&map, "issuer_name"),
+    })
+}
+
+/// Outcome of an export written straight to a file the operator picked.
+///
+/// Deliberately carries no payload. A PKCS#12 bag can hold the bound
+/// private key, and the point of this route is that those bytes travel
+/// host → disk without ever entering the webview (where they would sit in
+/// a React state field, the DOM and every devtools heap snapshot).
+#[derive(Serialize)]
+pub struct PkiExportFileResult {
+    pub format: String,
+    pub path: String,
+    pub bytes_written: u64,
+    pub includes_private_key: bool,
+    pub backup_mode: bool,
+}
+
+/// Decode an export body per its wire encoding and write it to
+/// `target_path`, replacing whatever is there.
+///
+/// Binary formats (PKCS#12) arrive base64'd and must be decoded before
+/// they hit the disk, or the `.p12` is unreadable by every tool that
+/// matters. On unix the file is created `0600`: the bag is
+/// password-encrypted, but a private key has no business being
+/// world-readable while the operator decides where to put it.
+fn write_export_file(
+    target_path: &str,
+    body: &str,
+    body_encoding: &str,
+) -> CmdResult<u64> {
+    use std::io::Write as _;
+
+    let mut bytes: Vec<u8> = if body_encoding == "base64" {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .decode(body)
+            .map_err(|e| format!("export: malformed base64 payload: {e}"))?
+    } else {
+        body.as_bytes().to_vec()
+    };
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let written = {
+        let mut f = opts.open(target_path)?;
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+        bytes.len() as u64
+    };
+    // The plaintext key never left the host, but don't leave it in the
+    // host's heap either.
+    bytes.zeroize();
+    Ok(written)
+}
+
+/// Export a leaf certificate directly to a file the operator picked.
+///
+/// The GUI uses this for every binary format: PKCS#12 is raw DER, so
+/// there is nothing to preview and nothing useful to copy, and the bag
+/// may carry the private key. See [`export_operation`] for why this goes
+/// out as a `Write`.
+#[tauri::command]
+pub async fn pki_export_cert_to_path(
+    state: State<'_, AppState>,
+    request: PkiExportCertRequest,
+    target_path: String,
+) -> CmdResult<PkiExportFileResult> {
+    let mount = mount_prefix(&request.mount);
+    let serial = request.serial.clone();
+    let body = cert_export_body(&request);
+    let resp = make_request(
+        &state,
+        export_operation(&body),
+        format!("{mount}/cert/{serial}/export"),
+        Some(body),
+    )
+    .await?;
+    let map = data_to_map(resp);
+    let bytes_written = write_export_file(
+        &target_path,
+        &val_str(&map, "body"),
+        &val_str(&map, "body_encoding"),
+    )?;
+    Ok(PkiExportFileResult {
+        format: val_str(&map, "format"),
+        path: target_path,
+        bytes_written,
+        includes_private_key: map
+            .get("includes_private_key")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        backup_mode: map.get("backup_mode").and_then(|v| v.as_bool()).unwrap_or(false),
+    })
+}
+
+/// Issuer counterpart of [`pki_export_cert_to_path`]. The issuer route
+/// never emits a private key, so the file holds public material only.
+#[tauri::command]
+pub async fn pki_export_issuer_to_path(
+    state: State<'_, AppState>,
+    request: PkiExportIssuerRequest,
+    target_path: String,
+) -> CmdResult<PkiExportFileResult> {
+    let mount = mount_prefix(&request.mount);
+    let issuer_ref = request.issuer_ref.clone();
+    let body = issuer_export_body(&request);
+    let resp = make_request(
+        &state,
+        export_operation(&body),
+        format!("{mount}/issuer/{issuer_ref}/export"),
+        Some(body),
+    )
+    .await?;
+    let map = data_to_map(resp);
+    let bytes_written = write_export_file(
+        &target_path,
+        &val_str(&map, "body"),
+        &val_str(&map, "body_encoding"),
+    )?;
+    Ok(PkiExportFileResult {
+        format: val_str(&map, "format"),
+        path: target_path,
+        bytes_written,
+        includes_private_key: false,
+        backup_mode: false,
     })
 }
 
