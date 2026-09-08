@@ -64,6 +64,54 @@ fn encode_path(path: &str) -> String {
     out
 }
 
+/// Characters that must be percent-encoded inside a query-string key or
+/// value. Same base set as [`PATH_SEGMENT`], plus the characters that carry
+/// structural meaning in a query (`&`, `=`) and `+` (which the server decodes
+/// back to a space). `/` is *not* encoded — it is legal in a query and
+/// encoding it would corrupt values that contain one.
+const QUERY_COMPONENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'&')
+    .add(b'+')
+    .add(b'<')
+    .add(b'=')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'\\')
+    .add(b'^')
+    .add(b'{')
+    .add(b'}')
+    .add(b'|')
+    .add(b'[')
+    .add(b']');
+
+/// Percent-encode a raw query string pair-wise, keeping `&` and `=` as
+/// structure and encoding whatever sits inside each key and value. Callers
+/// glue selectors onto a logical path unencoded (`secret/data/app?env=us
+/// west`), and the server percent-decodes each component again
+/// (`bv_logical::parse_query_allowlist`), so this round-trips exactly.
+fn encode_query(query: &str) -> String {
+    let mut out = String::with_capacity(query.len());
+    for (i, pair) in query.split('&').enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        match pair.split_once('=') {
+            Some((k, v)) => {
+                out.extend(utf8_percent_encode(k, QUERY_COMPONENT));
+                out.push('=');
+                out.extend(utf8_percent_encode(v, QUERY_COMPONENT));
+            }
+            None => out.extend(utf8_percent_encode(pair, QUERY_COMPONENT)),
+        }
+    }
+    out
+}
+
 /// Cap on a single response body, in bytes.
 ///
 /// ureq's own default is 10 MB, which is fine for the JSON control
@@ -546,8 +594,17 @@ impl RemoteBackend {
     /// than re-reading the active address (which a racing request may
     /// already be swapping).
     fn build_url_with(&self, address: &str, path: &str) -> String {
-        let encoded = encode_path(path);
-        if path.starts_with('/') {
+        // Callers may glue a query selector onto the logical path
+        // (`secret/data/app?env=prod` — the KV-v2 environment read). Split it
+        // off before encoding: `?` is in `PATH_SEGMENT`, so leaving it in the
+        // path turns the whole selector into part of the secret's name and the
+        // read 404s.
+        let (raw_path, query) = match path.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (path, None),
+        };
+        let encoded = encode_path(raw_path);
+        let url = if raw_path.starts_with('/') {
             format!("{}{}", address, encoded)
         } else {
             format!(
@@ -556,6 +613,10 @@ impl RemoteBackend {
                 self.api_prefix().trim_start_matches('/'),
                 encoded
             )
+        };
+        match query.filter(|q| !q.is_empty()) {
+            Some(q) => format!("{url}?{}", encode_query(q)),
+            None => url,
         }
     }
 }
@@ -1136,6 +1197,37 @@ mod failover_tests {
         assert_eq!(
             be.build_url_with("https://node:5200", "resources/"),
             "https://node:5200/v1/resources/"
+        );
+    }
+
+    #[test]
+    fn build_url_keeps_a_glued_query_as_a_query() {
+        let be = RemoteBackend::builder()
+            .with_address("https://a.example:5200")
+            .with_api_version(1)
+            .build();
+        // The KV-v2 environment selector arrives glued onto the logical path.
+        // It must stay a query string: percent-encoding the `?` folds it into
+        // the secret's name and the read 404s.
+        assert_eq!(
+            be.build_url_with("https://node:5200", "secret/data/trend/api-netrisk-dsv?env=development"),
+            "https://node:5200/v1/secret/data/trend/api-netrisk-dsv?env=development"
+        );
+        // Path segments are still encoded; the query is encoded pair-wise,
+        // with `&`/`=` preserved as structure.
+        assert_eq!(
+            be.build_url_with("https://node:5200", "secret/data/db 01?env=us west&version=2"),
+            "https://node:5200/v1/secret/data/db%2001?env=us%20west&version=2"
+        );
+        // An empty query is dropped rather than emitting a bare `?`.
+        assert_eq!(
+            be.build_url_with("https://node:5200", "secret/data/app?"),
+            "https://node:5200/v1/secret/data/app"
+        );
+        // A value that would otherwise inject structure is encoded.
+        assert_eq!(
+            be.build_url_with("https://node:5200", "secret/data/app?env=a&b=c#x"),
+            "https://node:5200/v1/secret/data/app?env=a&b=c%23x"
         );
     }
 }

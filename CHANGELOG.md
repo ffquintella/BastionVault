@@ -45,6 +45,25 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.43.7] - 2026-09-08
+
+### Fixed
+
+#### KV-v2 environment selector 404 against a remote server
+
+- **Selecting an environment on the Secrets page no longer fails with
+  `HTTP 404 (no body)`** (`crates/bv-client/src/remote.rs`). The GUI and the
+  CLI carry the KV-v2 selector glued onto the logical path
+  (`secret/data/app?env=development`), but `RemoteBackend::build_url_with`
+  percent-encoded every character `PATH_SEGMENT` lists — including `?` — so
+  the whole selector became part of the secret's name and the read missed.
+  The builder now splits the query off before encoding the path and encodes
+  it pair-wise (`&`/`=` kept as structure, values encoded so they cannot
+  inject any), which is what the server's query allowlist
+  (`bv_logical::parse_query_allowlist`) decodes. Only the embedded backend
+  handled this path before, so environment reads worked in the desktop app's
+  embedded mode and 404'd against a remote server.
+
 ## [0.43.6] - 2026-09-08
 
 ### Fixed
