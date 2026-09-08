@@ -51,6 +51,40 @@ fn val_bool(map: &Map<String, Value>, key: &str) -> bool {
     map.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
+/// Read a duration-shaped response field as the suffixed string the
+/// forms edit. The PKI engine serialises a role's `ttl` / `max_ttl` as
+/// integer seconds (`bv_utils::serialize_duration`), while the rest of
+/// the mount's duration surfaces return an already-suffixed string.
+/// Accept both: read through `val_str` alone, a numeric field lands as
+/// `""`, the form shows its placeholder, and saving the role writes an
+/// empty `ttl` back — which the engine reads as "unset" and silently
+/// resets to its own 30d/90d default.
+fn val_duration_str(map: &Map<String, Value>, key: &str) -> String {
+    match map.get(key) {
+        Some(Value::String(s)) => s.clone(),
+        // 0 stays empty: it means the engine default applies, and that is
+        // exactly what an empty field round-trips as on write.
+        Some(Value::Number(n)) => match n.as_i64() {
+            Some(secs) if secs > 0 => format_duration_secs(secs),
+            _ => String::new(),
+        },
+        _ => String::new(),
+    }
+}
+
+/// Largest unit that divides evenly, so 2_592_000 renders as `720h`
+/// rather than `2592000s`. Both forms parse, but only one is readable
+/// in a role form.
+fn format_duration_secs(secs: i64) -> String {
+    if secs % 3600 == 0 {
+        format!("{}h", secs / 3600)
+    } else if secs % 60 == 0 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 fn val_str_array(map: &Map<String, Value>, key: &str) -> Vec<String> {
     map.get(key)
         .and_then(|v| v.as_array())
@@ -1094,8 +1128,8 @@ pub async fn pki_read_role(
     let resp = make_request(&state, Operation::Read, format!("{mount}/roles/{name}"), None).await?;
     let map = data_to_map(resp);
     Ok(PkiRoleConfig {
-        ttl: val_str(&map, "ttl"),
-        max_ttl: val_str(&map, "max_ttl"),
+        ttl: val_duration_str(&map, "ttl"),
+        max_ttl: val_duration_str(&map, "max_ttl"),
         key_type: val_str(&map, "key_type"),
         key_bits: val_u64(&map, "key_bits"),
         allow_localhost: val_bool(&map, "allow_localhost"),
@@ -2745,6 +2779,43 @@ mod tests {
         let out = extract_cert_pems("pkcs12", &der, "pw").unwrap();
         assert_eq!(out.len(), 1);
         assert!(out[0].contains("BEGIN CERTIFICATE"));
+    }
+
+    // ── Duration-shaped response fields ──────────────────────────
+
+    /// The shape `pki/roles/:name` actually returns: seconds, not a
+    /// suffixed string. Regression guard — reading these with `val_str`
+    /// left the role form empty and a save reset the role's TTLs.
+    #[test]
+    fn role_ttl_seconds_render_as_hours() {
+        let mut map = Map::new();
+        map.insert("ttl".into(), json!(2_592_000_i64)); // 30d
+        map.insert("max_ttl".into(), json!(7_776_000_i64)); // 90d
+        assert_eq!(val_duration_str(&map, "ttl"), "720h");
+        assert_eq!(val_duration_str(&map, "max_ttl"), "2160h");
+    }
+
+    #[test]
+    fn duration_string_passes_through_unchanged() {
+        let mut map = Map::new();
+        map.insert("interval".into(), json!("43200s"));
+        assert_eq!(val_duration_str(&map, "interval"), "43200s");
+    }
+
+    #[test]
+    fn duration_zero_and_missing_stay_empty() {
+        let mut map = Map::new();
+        map.insert("ttl".into(), json!(0_i64));
+        assert_eq!(val_duration_str(&map, "ttl"), "");
+        assert_eq!(val_duration_str(&map, "absent"), "");
+    }
+
+    #[test]
+    fn duration_picks_the_largest_exact_unit() {
+        assert_eq!(format_duration_secs(3600), "1h");
+        assert_eq!(format_duration_secs(5400), "90m");
+        assert_eq!(format_duration_secs(90), "90s");
+        assert_eq!(format_duration_secs(1), "1s");
     }
 }
 

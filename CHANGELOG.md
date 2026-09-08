@@ -45,6 +45,21 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.43.8] - 2026-09-08
+
+### Fixed
+
+#### PKI role TTLs read back empty in the GUI
+
+- **The PKI Roles form now shows a role's stored `ttl` / `max_ttl`**
+  (`gui/src-tauri/src/commands/pki.rs`). `pki/roles/:name` serialises both
+  as integer seconds, but `pki_read_role` projected them with `val_str`,
+  which yields `""` for a number — so every role rendered with its
+  placeholder (`720h` / `2160h`) regardless of what was configured, and
+  saving the role wrote an empty `ttl` back, which the engine reads as
+  "unset" and resets to its own 30d/90d default. The projection now accepts
+  either shape and renders seconds in the largest exact unit.
+
 ## [0.43.7] - 2026-09-08
 
 ### Fixed
