@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.43.6] - 2026-09-08
+
 ### Fixed
 
 #### FIDO2 security key unselectable in the connection-profile editor
@@ -58,6 +60,10 @@ EXAMPLE ENTRY:
   mapping is now the exhaustive `blankCredentialSource()` helper with a
   declared return type, so a future `CredentialSource` variant fails `tsc`
   instead of silently reaching the dropdown unselectable.
+
+## [0.43.5] - 2026-09-04
+
+### Fixed
 
 #### Policy tester disagreed with the request pipeline
 
@@ -115,6 +121,17 @@ EXAMPLE ENTRY:
   rule that matched the path but granted nothing because no active share or
   ownership backed it. A share-scoped rule contributing nothing was
   indistinguishable from no rule at all.
+
+### Security
+
+#### Dependencies
+
+- **Bump the GUI's `fflate` pin from 0.8.2 to 0.8.3** (`gui/package.json`) --
+  clears GHSA-px8p-9vwx-vf98, an infinite loop in `unzipSync` on malformed
+  ZIP64 archives. The GUI only calls `unzlibSync` (RDP session replay,
+  `gui/src/lib/rdpDecoder.ts`) and never the ZIP reader, so the advisory was
+  not reachable here; the bump keeps `npm audit` clean rather than fixing an
+  exploitable path.
 
 ### Known gaps
 
