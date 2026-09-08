@@ -47,6 +47,18 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### FIDO2 security key unselectable in the connection-profile editor
+
+- **The profile editor's "Connecting user's FIDO2 security key" credential
+  source can now actually be picked** (`gui/src/routes/ResourcesPage.tsx`,
+  `gui/src/lib/connectionProfiles.ts`). The editor's kind-change handler was a
+  `switch` with no `fido2` case, so selecting that option left
+  `credential_source` untouched and the controlled `<Select>` immediately
+  snapped back to the previous kind — the option was listed, and inert. The
+  mapping is now the exhaustive `blankCredentialSource()` helper with a
+  declared return type, so a future `CredentialSource` variant fails `tsc`
+  instead of silently reaching the dropdown unselectable.
+
 #### Policy tester disagreed with the request pipeline
 
 - **The policy dry-run (`sys/policies/acl/test`) now evaluates the same policy

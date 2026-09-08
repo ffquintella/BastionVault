@@ -49,6 +49,7 @@ import type {
 } from "../lib/types";
 import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig, getTypeDef, inferOsType } from "../lib/resourceTypes";
 import {
+  blankCredentialSource,
   blankProfile,
   defaultPort,
   detectSecretShape,
@@ -2319,43 +2320,9 @@ function ConnectionProfileEditor({
   }
 
   function handleCredKindChange(kind: CredentialSource["kind"]) {
-    switch (kind) {
-      case "secret":
-        updateCredentialSource({ kind: "secret", secret_id: "" });
-        break;
-      case "ldap":
-        updateCredentialSource({
-          kind: "ldap",
-          ldap_mount: "",
-          bind_mode: "operator",
-        });
-        break;
-      case "ssh-engine":
-        updateCredentialSource({
-          kind: "ssh-engine",
-          ssh_mount: "",
-          ssh_role: "",
-          mode: "ca",
-        });
-        break;
-      case "pki":
-        updateCredentialSource({
-          kind: "pki",
-          pki_mount: "",
-          pki_role: "",
-        });
-        break;
-      case "default-account":
-        // SSH brokers via the engine (mount/role/mode); RDP ignores the
-        // ssh_* fields (password is prompted at connect).
-        updateCredentialSource({
-          kind: "default-account",
-          ssh_mount: "",
-          ssh_role: "",
-          mode: "ca",
-        });
-        break;
-    }
+    // `blankCredentialSource` is exhaustive over the union, so a new kind
+    // can't reach the dropdown without a state shape to switch to.
+    updateCredentialSource(blankCredentialSource(kind));
   }
 
   const validationError =

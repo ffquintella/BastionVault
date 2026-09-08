@@ -320,6 +320,44 @@ export function profileConnectHints(
 }
 
 /**
+ * The empty `CredentialSource` the profile editor should switch to when the
+ * operator picks a different kind in the dropdown.
+ *
+ * Lives here, with an explicit return type and no `default` branch, so that
+ * adding a variant to `CredentialSource` fails `tsc` instead of silently
+ * leaving the new kind unselectable — which is exactly what happened to
+ * `fido2`: the editor's inline switch had no case for it, the controlled
+ * `<Select>` never saw the state change, and the option snapped back.
+ */
+export function blankCredentialSource(
+  kind: CredentialSource["kind"],
+): CredentialSource {
+  switch (kind) {
+    case "secret":
+      return { kind: "secret", secret_id: "" };
+    case "ldap":
+      return { kind: "ldap", ldap_mount: "", bind_mode: "operator" };
+    case "ssh-engine":
+      return { kind: "ssh-engine", ssh_mount: "", ssh_role: "", mode: "ca" };
+    case "pki":
+      return { kind: "pki", pki_mount: "", pki_role: "" };
+    case "default-account":
+      // SSH brokers via the engine (mount/role/mode); RDP ignores the
+      // ssh_* fields (the password is prompted at connect).
+      return {
+        kind: "default-account",
+        ssh_mount: "",
+        ssh_role: "",
+        mode: "ca",
+      };
+    case "fido2":
+      // Carries no fields — the key is resolved at connect time from the
+      // connecting operator's own enrolment, never pinned on the profile.
+      return { kind: "fido2" };
+  }
+}
+
+/**
  * Brokered login-class gate for the profile editor. Given the resolved
  * effective login class for the resource, returns whether the `secret`
  * SSH source must be disabled (brokered forbids a static credential) and

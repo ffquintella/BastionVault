@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  blankCredentialSource,
   blankProfile,
   defaultPort,
   detectSecretShape,
@@ -622,5 +623,45 @@ describe("profileConnectHints", () => {
         profiles.map((p) => isLaunchableForCaller(p, connectOnly)),
       );
     }
+  });
+});
+
+describe("blankCredentialSource", () => {
+  // Regression: the profile editor's inline switch had no `fido2` case, so
+  // picking "Connecting user's FIDO2 security key" left the state unchanged
+  // and the controlled <Select> snapped back to the previous kind. Every
+  // kind the editor offers must yield a source of that kind.
+  const kinds = [
+    "secret",
+    "ldap",
+    "ssh-engine",
+    "pki",
+    "default-account",
+    "fido2",
+  ] as const;
+
+  for (const kind of kinds) {
+    it(`returns a \`${kind}\` source for \`${kind}\``, () => {
+      expect(blankCredentialSource(kind).kind).toBe(kind);
+    });
+  }
+
+  it("produces a source every offered kind can be saved from or explains why not", () => {
+    // A blank source is either immediately valid (fido2 carries no fields)
+    // or fails with the editor's own field-level message — never silently.
+    for (const kind of kinds) {
+      const p: ConnectionProfile = {
+        ...secretProfile(),
+        credential_source: blankCredentialSource(kind),
+      };
+      const err = validateProfile(p);
+      if (kind === "fido2") expect(err).toBeNull();
+      else expect(typeof err).toBe("string");
+    }
+  });
+
+  it("offers fido2 on a non-brokered resource", () => {
+    expect(loginClassGate("shared-credential").allowedKinds).toContain("fido2");
+    expect(loginClassGate("brokered").allowedKinds).not.toContain("fido2");
   });
 });
