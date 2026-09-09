@@ -45,6 +45,104 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.43.12] - 2026-09-09
+
+### Added
+
+#### XCA import wizard: per-key passwords for `ptPrivate` keys
+
+XCA marks a key `ptPrivate` when it is encrypted under a password of
+its own; the database password will not open it, and the wizard had no
+way to supply anything else. That is not a rare corner: on the two
+production files measured, 443 of 551 and 172 of 194 keys are
+`ptPrivate`. Those keys failed the import with "password does not
+match" and the desktop app offered no repair.
+
+`Settings -> PKI -> Import XCA` now surfaces and fixes it
+(`gui/src/routes/PkiPage.tsx`):
+
+- **Keys with their own password** section after the first preview,
+  listing every key the plugin reported as `has_own_pass` or as failing
+  on a password, locked ones first, each with its own masked field.
+- **One password for all remaining locked keys** — the common case is a
+  batch delivered as PFX files sharing one password. Applies to every
+  key still locked, leaving the ones already open alone.
+- **Re-preview with passwords** sends the `per_key_passwords` map
+  (keyed by item name, what `xca-import` 0.1.22+ expects) and reports
+  which keys moved from locked to decrypted and how many are left, so
+  the operator can iterate password by password.
+- The import table now says what happens to a key it cannot open: a
+  locked key is flagged and left unchecked (skipped), a certificate
+  whose key is locked is flagged as importing **cert only**, and a CA
+  whose key is locked is flagged as **will be skipped**. Each carries
+  an "Enter password" link to the field for that key. The
+  decryption-failure list is capped at 20 entries — at 443 it buried
+  the table.
+
+Passwords are held in component state only: never written to disk,
+never logged, never sent anywhere but the `preview` invocation, and
+dropped when the preview is cancelled, the file changes, or the import
+finishes. (`features/xca-import.md`)
+
+### Fixed
+
+#### XCA import: keys from XCA 2.4 and older arrived as ciphertext (`xca-import` 0.1.22)
+
+`bastion-plugin-xca` knew two private-key encodings -- the OpenSSL
+`Salted__` envelope and PKCS#8 PBES2 -- and neither is what XCA wrote
+before 2.5. `pki_evp::encryptKey` in those versions produced
+`salt(8) || 3DES-EDE3-CBC(key DER)`: no magic, no header, no integrity
+tag. `detect_format` returned `None` for it and `try_decrypt_key`
+treated `None` as "already plaintext", wrapping the raw ciphertext in a
+`-----BEGIN PRIVATE KEY-----` armour and handing it to the host. The
+GUI showed those keys as **not encrypted**, and `pki/keys/import`
+rejected them with "password does not match", which sent operators off
+to re-enter passwords that were never the problem. A `.xdb` that has
+been in use across XCA upgrades holds a mix of encodings, so the
+symptom was a subset of keys failing while the rest imported --
+measured on one production file, 444 of 551.
+
+- Add the XCA <= 2.4 envelope (`crypto::decrypt_xca_tripledes`):
+  `EVP_BytesToKey` with SHA-1, one iteration, 24-byte key, salt reused
+  as the CBC IV. Read-only compatibility; the plugin never writes it.
+  New dependency `des` 0.9 (RustCrypto).
+- Classify plaintext DER explicitly instead of inferring it from a
+  failed sniff, and refuse anything matching no known encoding. An
+  unrecognised blob is now a reported failure, never a pass-through.
+  Token-backed (smartcard) rows land here with a message saying so.
+- Recognise a plaintext key that starts with `0x30`. The old tag-only
+  test read every such key as a PBKDF2 envelope and failed to
+  "decrypt" it.
+- Strengthen the post-decrypt sanity check from "first byte is `0x30`"
+  to "a DER SEQUENCE opening on an INTEGER and spanning the whole
+  plaintext". None of XCA's envelopes carries a MAC, so this is what
+  stands between a wrong password and random bytes reaching the host.
+- Read `private_keys.ownPass` as the INTEGER it is
+  (`pki_key::passType`). It was fetched as `Option<String>`, which
+  fails on an integer column, and the error was swallowed -- so
+  `has_own_pass` was always false and the GUI never asked for a
+  per-key password. `ptBogus` rows now use the literal password XCA
+  encrypts them with. The companion `ownPass != ''` query compared an
+  integer to a string, which SQLite makes unconditionally true, so it
+  returned every key; it now tests `ownPass = 1`.
+- Golden-vector tests for the 3DES and PBES2 envelopes, generated with
+  the OpenSSL CLI driven through XCA's key schedule, plus a
+  wrong-password test asserting no wrong password can yield something
+  the caller would accept as a key.
+
+### Security
+
+#### Stop logging raw private-key bytes on PKI key-import failures
+
+`bv-engine-pki`'s import diagnostics dumped the first 64 bytes of the
+key DER at INFO and the first 32 at WARN whenever a payload was neither
+RSA nor SEC1 EC. For the compact key formats that is the key itself: an
+Ed25519 `PrivateKeyInfo` is a 16-byte header followed by the 32-byte
+seed, so the 64-byte dump wrote the whole private key to the operator's
+log. Both sites now log the structural sketch (which is what the shape
+questions actually needed), the length, and a truncated SHA-256 as a
+correlation handle.
+
 ## [0.43.11] - 2026-09-09
 
 ### Added

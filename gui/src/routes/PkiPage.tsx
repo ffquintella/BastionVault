@@ -4208,6 +4208,13 @@ interface XcaPreview {
   ownpass_keys: string[];
 }
 
+/** DOM id of the per-key password field. Keyed by the xdb item id
+ *  rather than the key name: names carry spaces and punctuation and are
+ *  operator-supplied, so they make poor element ids. */
+function keyPasswordInputId(key: XcaPreviewItem): string {
+  return `xca-key-pw-${key.meta.id}`;
+}
+
 function XcaImportTab({
   mount,
   pluginVersion,
@@ -4221,6 +4228,23 @@ function XcaImportTab({
   const [preview, setPreview] = useState<XcaPreview | null>(null);
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<Record<number, boolean>>({});
+  // Per-key passwords for XCA rows marked `ptPrivate` (`has_own_pass`):
+  // those are encrypted under a password of their own and the database
+  // password will not open them. Keyed by item name, which is what the
+  // plugin's `per_key_passwords` map expects.
+  //
+  // SECURITY: component state only. Never persisted, never logged, never
+  // sent anywhere but the `preview` invocation. Cleared when the preview
+  // is dropped, the file changes, or the import completes.
+  const [keyPasswords, setKeyPasswords] = useState<Record<string, string>>({});
+  const [bulkKeyPassword, setBulkKeyPassword] = useState<string>("");
+  // Result of the last re-preview: which locked keys opened, and how many
+  // are still locked. Shown so the operator can iterate password by
+  // password without diffing the table by eye.
+  const [unlockDiff, setUnlockDiff] = useState<{
+    unlocked: string[];
+    stillLocked: number;
+  } | null>(null);
 
   function decode(b64: string): string {
     // base64 → utf-8 string
@@ -4251,6 +4275,7 @@ function XcaImportTab({
       if (typeof picked === "string" && picked.length > 0) {
         setFilePath(picked);
         setPreview(null);
+        clearKeyPasswords();
       }
     } catch (e) {
       toast("error", extractError(e));
@@ -4279,11 +4304,29 @@ function XcaImportTab({
     return parsed;
   }
 
-  async function handlePreview() {
+  /** A private-key row the plugin could not open. `unsupported` is not
+   *  a password problem (unknown container / algorithm), so it is
+   *  reported but never offered a password field. */
+  function isLockedKey(it: XcaPreviewItem): boolean {
+    return (
+      it.meta.item_type === "private_key" &&
+      it.pem === null &&
+      (it.decrypt === "missing_password" || it.decrypt === "wrong_password")
+    );
+  }
+
+  /** Names of the keys still needing a password in a given preview. */
+  function lockedKeyNames(p: XcaPreview | null): string[] {
+    if (!p) return [];
+    return p.items.filter(isLockedKey).map((it) => it.meta.name);
+  }
+
+  async function runPreview(perKey: Record<string, string>) {
     if (!filePath) {
       toast("error", "Pick an XCA file first.");
       return;
     }
+    const wasLocked = new Set(lockedKeyNames(preview));
     setBusy(true);
     try {
       // The XCA file lives on the user's machine, but the plugin runs
@@ -4291,15 +4334,28 @@ function XcaImportTab({
       // local path. Read the bytes here and ship them inline as
       // `file_b64` so the same flow works embedded and remote.
       const fileB64 = await api.readLocalFileB64(filePath);
+      // Drop blank entries so the plugin does not try an empty password
+      // for a key the operator left alone.
+      const perKeyClean: Record<string, string> = {};
+      for (const [name, pw] of Object.entries(perKey)) {
+        if (pw !== "") perKeyClean[name] = pw;
+      }
       const out = (await invokeXca({
         op: "preview",
         file_b64: fileB64,
         master_password: password || undefined,
+        ...(Object.keys(perKeyClean).length > 0
+          ? { per_key_passwords: perKeyClean }
+          : {}),
       })) as XcaPreview;
       setPreview(out);
       // Default-select every item that has usable content. CA certs
       // get imported as issuers (with their paired key); leaf certs
-      // get indexed via `pki/certs/import` as orphan certs.
+      // get indexed via `pki/certs/import` as orphan certs. A re-preview
+      // recomputes this from scratch — newly unlocked keys come in
+      // selected, and any row the operator had unchecked returns to its
+      // default, which is why the table is the last thing to review
+      // before Apply.
       const next: Record<number, boolean> = {};
       for (const it of out.items) {
         next[it.meta.id] =
@@ -4308,18 +4364,58 @@ function XcaImportTab({
             it.meta.item_type === "private_key");
       }
       setSelected(next);
-      if (out.decryption_failures.length > 0) {
+      const stillLocked = lockedKeyNames(out);
+      const stillLockedSet = new Set(stillLocked);
+      const unlocked = [...wasLocked].filter((n) => !stillLockedSet.has(n));
+      if (wasLocked.size > 0) {
+        setUnlockDiff({ unlocked, stillLocked: stillLocked.length });
         toast(
-          "info",
-          `${out.decryption_failures.length} key(s) couldn't be decrypted — supply the password and re-preview.`,
+          unlocked.length > 0 ? "success" : "info",
+          `${unlocked.length} key(s) unlocked; ${stillLocked.length} still locked.`,
         );
+      } else {
+        setUnlockDiff(null);
+        if (stillLocked.length > 0) {
+          toast(
+            "info",
+            `${stillLocked.length} key(s) couldn't be decrypted — supply a password per key below and re-preview.`,
+          );
+        }
       }
     } catch (e) {
       toast("error", extractError(e));
       setPreview(null);
+      setUnlockDiff(null);
     } finally {
       setBusy(false);
     }
+  }
+
+  async function handlePreview() {
+    await runPreview(keyPasswords);
+  }
+
+  /** Forget every typed password. Called whenever the preview is
+   *  dropped, the file changes, or an import finishes — the passwords
+   *  must not outlive the wizard step that needed them. */
+  function clearKeyPasswords() {
+    setKeyPasswords({});
+    setBulkKeyPassword("");
+    setUnlockDiff(null);
+  }
+
+  /** "Apply to all remaining": assign the bulk password to every key
+   *  that is still locked. The common real-world case is a batch of
+   *  keys delivered as PFX files that all share one password. */
+  function applyBulkPassword() {
+    const locked = lockedKeyNames(preview);
+    if (locked.length === 0 || bulkKeyPassword === "") return;
+    setKeyPasswords((prev) => {
+      const next = { ...prev };
+      for (const name of locked) next[name] = bulkKeyPassword;
+      return next;
+    });
+    setBulkKeyPassword("");
   }
 
   /** Decide whether a cert preview row should land on the issuers
@@ -4548,12 +4644,48 @@ function XcaImportTab({
       }
       setPreview(null);
       setSelected({});
+      clearKeyPasswords();
     } catch (e) {
       toast("error", extractError(e));
     } finally {
       setBusy(false);
     }
   }
+
+  // Rows the operator may have to act on: every key XCA marked
+  // `ptPrivate` (`has_own_pass`) plus anything else that failed on a
+  // password. Locked ones sort first so a 443-key database still opens
+  // on the work that is left.
+  const passwordKeyRows = (preview?.items ?? [])
+    .filter(
+      (it) =>
+        it.meta.item_type === "private_key" &&
+        (it.has_own_pass || isLockedKey(it)),
+    )
+    .sort((a, b) => {
+      const la = isLockedKey(a) ? 0 : 1;
+      const lb = isLockedKey(b) ? 0 : 1;
+      if (la !== lb) return la - lb;
+      return a.meta.name.localeCompare(b.meta.name);
+    });
+  const lockedCount = passwordKeyRows.filter(isLockedKey).length;
+  const itemsById = new Map((preview?.items ?? []).map((it) => [it.meta.id, it]));
+  /** The paired private key of a cert row, when the plugin matched one. */
+  const pairedKey = (it: XcaPreviewItem): XcaPreviewItem | null => {
+    if (it.meta.item_type !== "cert" || it.paired_item_id == null) return null;
+    const k = itemsById.get(it.paired_item_id);
+    return k && k.meta.item_type === "private_key" ? k : null;
+  };
+  /** Move the focus to a key's password field in the section above —
+   *  the table row only signals the problem, it does not duplicate the
+   *  input. */
+  const focusKeyPassword = (key: XcaPreviewItem) => {
+    const el = document.getElementById(
+      keyPasswordInputId(key),
+    ) as HTMLInputElement | null;
+    el?.scrollIntoView({ block: "center" });
+    el?.focus();
+  };
 
   return (
     <div className="space-y-3">
@@ -4605,6 +4737,7 @@ function XcaImportTab({
               onClick={() => {
                 setPreview(null);
                 setSelected({});
+                clearKeyPasswords();
               }}
               variant="secondary"
               disabled={busy}
@@ -4614,6 +4747,131 @@ function XcaImportTab({
           )}
         </div>
       </Card>
+
+      {preview && passwordKeyRows.length > 0 && (
+        <Card
+          title="Keys with their own password"
+          actions={
+            <Badge
+              label={
+                lockedCount === 0
+                  ? `${passwordKeyRows.length} unlocked`
+                  : `${lockedCount} of ${passwordKeyRows.length} locked`
+              }
+              variant={lockedCount === 0 ? "success" : "warning"}
+            />
+          }
+        >
+          <p className="text-sm text-[var(--color-text-muted)] mb-3">
+            XCA marked these keys <code className="font-mono">ptPrivate</code>:
+            each is encrypted under a password of its own, and the database
+            password will not open it. Supply the passwords you have and
+            re-preview — keys that stay locked are simply left out of the
+            import, and their certificates still import without a key.
+            Passwords are held in this window only: never written to disk,
+            never logged, and dropped when you leave the preview.
+          </p>
+
+          {unlockDiff && (
+            <div
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-hover)] p-2 text-xs mb-3"
+              data-testid="xca-unlock-diff"
+            >
+              <strong>{unlockDiff.unlocked.length} key(s) unlocked</strong> on
+              the last preview; {unlockDiff.stillLocked} still locked.
+              {unlockDiff.unlocked.length > 0 && (
+                <ul className="mt-1 ml-4 list-disc">
+                  {unlockDiff.unlocked.slice(0, 20).map((n) => (
+                    <li key={n} className="min-w-0 truncate">
+                      {n}
+                    </li>
+                  ))}
+                  {unlockDiff.unlocked.length > 20 && (
+                    <li>and {unlockDiff.unlocked.length - 20} more…</li>
+                  )}
+                </ul>
+              )}
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              id="xca-bulk-key-password"
+              label="Password for all remaining locked keys"
+              type="password"
+              value={bulkKeyPassword}
+              onChange={(e) => setBulkKeyPassword(e.target.value)}
+              hint="Keys delivered together (one PFX batch) usually share one password."
+              disabled={busy || lockedCount === 0}
+            />
+            <div className="flex items-end">
+              <Button
+                onClick={applyBulkPassword}
+                variant="secondary"
+                disabled={busy || lockedCount === 0 || bulkKeyPassword === ""}
+              >
+                Apply to {lockedCount} remaining
+              </Button>
+            </div>
+          </div>
+
+          <div className="mt-3 max-h-96 overflow-y-auto divide-y divide-[var(--color-border)]">
+            {passwordKeyRows.map((it) => {
+              const locked = isLockedKey(it);
+              return (
+                <div
+                  key={it.meta.id}
+                  className="grid grid-cols-2 gap-3 items-center py-2"
+                >
+                  <div className="min-w-0">
+                    <div className="min-w-0 truncate text-sm" title={it.meta.name}>
+                      {it.meta.name}
+                    </div>
+                    <div className="mt-1">
+                      <Badge
+                        label={locked ? `locked — ${it.decrypt}` : "unlocked"}
+                        variant={locked ? "error" : "success"}
+                        dot
+                      />
+                    </div>
+                  </div>
+                  <Input
+                    id={keyPasswordInputId(it)}
+                    aria-label={`Password for ${it.meta.name}`}
+                    type="password"
+                    value={keyPasswords[it.meta.name] ?? ""}
+                    onChange={(e) =>
+                      setKeyPasswords((prev) => ({
+                        ...prev,
+                        [it.meta.name]: e.target.value,
+                      }))
+                    }
+                    placeholder={locked ? "Key password" : "Unlocked"}
+                    disabled={busy}
+                  />
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="flex justify-end gap-2 mt-3">
+            <Button
+              onClick={clearKeyPasswords}
+              variant="secondary"
+              disabled={busy || Object.keys(keyPasswords).length === 0}
+            >
+              Clear passwords
+            </Button>
+            <Button
+              onClick={() => runPreview(keyPasswords)}
+              loading={busy}
+              disabled={busy}
+            >
+              Re-preview with passwords
+            </Button>
+          </div>
+        </Card>
+      )}
 
       {preview && (
         <Card title="Preview">
@@ -4633,22 +4891,44 @@ function XcaImportTab({
 
           {preview.decryption_failures.length > 0 && (
             <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs mb-3">
-              <strong>Decryption failures:</strong>
+              <strong>
+                Decryption failures ({preview.decryption_failures.length}):
+              </strong>
               <ul className="mt-1 ml-4 list-disc">
-                {preview.decryption_failures.map((f, i) => (
-                  <li key={i}>
+                {/* Real databases fail on hundreds of `ptPrivate` keys at
+                    once; the full list would bury the table. */}
+                {preview.decryption_failures.slice(0, 20).map((f, i) => (
+                  <li key={i} className="min-w-0 truncate">
                     {f.name}: {f.reason}
                   </li>
                 ))}
+                {preview.decryption_failures.length > 20 && (
+                  <li>
+                    and {preview.decryption_failures.length - 20} more — see the
+                    key list above.
+                  </li>
+                )}
               </ul>
             </div>
+          )}
+
+          {lockedCount > 0 && (
+            <p
+              className="text-xs text-[var(--color-text-muted)] mb-3"
+              data-testid="xca-locked-note"
+            >
+              {lockedCount} key(s) are locked and unchecked: leave them
+              unchecked to skip, or supply a password above and re-preview.
+              Certificates whose key is locked still import — as certificates
+              only, without the key.
+            </p>
           )}
 
           <Table
             columns={[
               {
                 key: "select",
-                header: "",
+                header: "Import",
                 render: (it: XcaPreviewItem) => (
                   <input
                     type="checkbox"
@@ -4662,7 +4942,15 @@ function XcaImportTab({
                   />
                 ),
               },
-              { key: "name", header: "Name", render: (it) => it.meta.name },
+              {
+                key: "name",
+                header: "Name",
+                render: (it) => (
+                  <span className="block min-w-0 truncate" title={it.meta.name}>
+                    {it.meta.name}
+                  </span>
+                ),
+              },
               {
                 key: "type",
                 header: "Type",
@@ -4676,10 +4964,67 @@ function XcaImportTab({
               {
                 key: "subject",
                 header: "Subject / detail",
-                render: (it) =>
-                  it.subject || it.meta.comment || "—",
+                render: (it) => (
+                  <span
+                    className="block min-w-0 truncate"
+                    title={it.subject || it.meta.comment || ""}
+                  >
+                    {it.subject || it.meta.comment || "—"}
+                  </span>
+                ),
               },
-              { key: "decrypt", header: "Decrypt", render: (it) => it.decrypt },
+              {
+                key: "decrypt",
+                header: "Key / decrypt",
+                render: (it) => {
+                  // A key we can't open: say so, say what happens on
+                  // Apply, and offer the one repair that exists.
+                  if (isLockedKey(it)) {
+                    return (
+                      <div className="flex items-center gap-2">
+                        <Badge label={`locked — ${it.decrypt}`} variant="error" dot />
+                        <button
+                          type="button"
+                          className="text-xs underline text-[var(--color-primary)]"
+                          onClick={() => focusKeyPassword(it)}
+                        >
+                          Enter password
+                        </button>
+                      </div>
+                    );
+                  }
+                  // A cert whose key is locked still imports, but as a
+                  // cert only — and a CA without its key can't become an
+                  // issuer at all, so it gets skipped outright.
+                  const key = pairedKey(it);
+                  if (key && isLockedKey(key)) {
+                    return (
+                      <div className="flex items-center gap-2">
+                        <Badge
+                          label={
+                            isEmitter(it)
+                              ? "key locked — will be skipped"
+                              : "key locked — cert only"
+                          }
+                          variant="warning"
+                          dot
+                        />
+                        <button
+                          type="button"
+                          className="text-xs underline text-[var(--color-primary)]"
+                          onClick={() => focusKeyPassword(key)}
+                        >
+                          Enter password
+                        </button>
+                      </div>
+                    );
+                  }
+                  if (it.meta.item_type === "private_key" && it.pem === null) {
+                    return <Badge label={it.decrypt} variant="warning" dot />;
+                  }
+                  return it.decrypt;
+                },
+              },
             ]}
             data={preview.items}
             rowKey={(it) => String(it.meta.id)}

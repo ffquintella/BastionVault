@@ -188,39 +188,110 @@ selection so the password fields render only when needed.
 
 ## XCA encryption (what the plugin needs to handle)
 
-When the XCA database has a master password set, sensitive blobs
-in `private_keys.private` are encrypted. Two formats coexist
-across XCA versions; the plugin sniffs the magic and dispatches:
+**Current state (plugin 0.1.22).** A `private_keys.private` column
+holds one of four things, and a single database routinely holds more
+than one: XCA re-encrypts a key into the current format only when the
+key is touched, so a `.xdb` carried across XCA upgrades accumulates
+generations. Only two of the four are self-describing.
 
-1. **EVP_BytesToKey envelope** (XCA ≤ 2.0) —
-   `Salted__` + 8-byte salt + AES-256-CBC ciphertext.
-   Key/IV derivation: `EVP_BytesToKey(MD5, salt, password,
-   count=1, key_len=32, iv_len=16)`. The OpenSSL `enc -salt`
-   default; trivially implementable with `md-5` + `aes` + `cbc`.
-2. **PBKDF2-HMAC-SHA512 header** (XCA ≥ 2.4) — header
-   `{magic, version, kdf, iter, salt_len, salt, iv_len, iv}`
-   followed by AES-256-CBC ciphertext. Iteration count is read
-   from the header (typically 200k+).
+1. **Plaintext DER** — no database password. Bare `PrivateKeyInfo`,
+   `RSAPrivateKey` or `ECPrivateKey`. Recognised by structure: a DER
+   SEQUENCE opening on an INTEGER and spanning the whole blob.
+2. **XCA's own envelope** (XCA ≤ 2.4, `pki_evp::encryptKey`) —
+   salt/IV (8 bytes) + 3DES-EDE3-CBC ciphertext, PKCS#7-padded. Key
+   from `EVP_BytesToKey(SHA-1, salt, password, count=1, key_len=24)`;
+   the CBC IV is the same 8 bytes, because XCA passes NULL for the IV
+   out-parameter. No magic, no header, no integrity tag — recognised
+   by shape alone (8 bytes plus a whole number of DES blocks).
+3. **PKCS#8 `EncryptedPrivateKeyInfo`** (XCA ≥ 2.5) — PBES2 with
+   PBKDF2 + AES-CBC, written by `i2d_PKCS8PrivateKey_bio`. Salt,
+   iteration count, PRF and IV all come from the header.
+4. **`Salted__` envelope** — the OpenSSL `enc -salt` default, for
+   blobs that reached the column by way of the OpenSSL CLI.
+   `EVP_BytesToKey(MD5, salt, password, count=1, 32, 16)`.
 
-`private_keys.ownPass` lets an XCA operator pin a per-key
-password that overrides the database master password for that one
-row. The plugin's `preview` reports which rows have `ownPass` set;
-the GUI surfaces a per-key password input for each.
+A blob matching none of the four is **refused**, with the length and
+first byte in the message. It is never passed through as if it were
+plaintext: doing that is what put raw 3DES ciphertext in front of the
+host's `pki/keys/import` and made a decode failure look like a wrong
+password. Token-backed (smartcard) rows land here legitimately —
+their key material is not in the file.
+
+None of the envelopes carries a MAC, so a wrong password can clear
+PKCS#7 unpadding by chance (~1 in 256). Every decrypt is therefore
+followed by a DER shape check on the plaintext, and a failure is
+reported as a wrong password rather than handed on.
+
+`private_keys.ownPass` is an INTEGER holding XCA's
+`pki_key::passType`: `ptCommon` (0, database password), `ptPrivate`
+(1, a password of this key's own), `ptBogus` (2, encrypted under the
+literal string `"Bogus"`), `ptPin` (3, token-backed). The plugin's
+`preview` reports the `ptPrivate` rows; the GUI surfaces a per-key
+password input for each.
 
 ## GUI
 
-`Settings → PKI → Import XCA` — three-step wizard, hidden when the
+`Settings → PKI → Import XCA` — four-step wizard, hidden when the
 plugin isn't registered:
 
 1. **Pick file + password.** Native file picker (`*.xdb`), masked
-   password input, optional "Per-key passwords" expander populated
-   from the plugin's `validate` response.
-2. **Review.** Tree view of the parsed items grouped by issuer.
-   Per-row checkbox for inclusion; renaming + collision-policy
-   dropdown (`Skip` | `Overwrite` | `Rename`).
-3. **Run.** Streams progress as the GUI walks the plan and issues
-   one PKI / KV write per item. Final summary with a "view in PKI
-   page" link.
+   database-password input. The file is read locally and shipped to
+   the plugin inline as `file_b64`, so the same flow works whether the
+   vault is embedded or remote.
+2. **Per-key passwords.** Shown after the first preview whenever the
+   response carries keys with `has_own_pass` (XCA's `ptPrivate`) or
+   keys that failed on a password. Implemented — see below.
+3. **Review.** Table of the parsed items with a per-row **Import**
+   checkbox, the plugin's issuer/leaf routing, and the key state of
+   each row. Renaming + collision policy are still to come; today the
+   importer auto-suffixes on name collision.
+4. **Run.** Walks the selection and issues one PKI / KV write per
+   item, then reports imported / skipped / failed counts.
+
+### Per-key passwords (`ptPrivate` keys)
+
+The database password does not open a `ptPrivate` key — each has one
+of its own. This is the majority case on real files, not a corner: 443
+of 551 keys in one production `.xdb` and 172 of 194 in another. Before
+plugin 0.1.22 the flag was never reported (the INTEGER `ownPass`
+column was read as `Option<String>` and the error swallowed), so the
+GUI could not have asked.
+
+The **Keys with their own password** section renders after the first
+preview and holds:
+
+- One masked field per key, locked keys sorted first, each labelled
+  with the key's name and a badge carrying its decrypt state
+  (`locked — wrong_password`, `locked — missing_password`, or
+  `unlocked`). `unsupported` is not a password problem and gets no
+  field.
+- A **password for all remaining locked keys** field with an "Apply to
+  N remaining" button — the realistic case is a batch of keys imported
+  from PFX files in one delivery, all sharing a password. It fills
+  every still-locked key and leaves the already-open ones untouched.
+- **Re-preview with passwords**, which re-invokes `preview` with
+  `per_key_passwords` (keyed by item name) and then reports which keys
+  moved from locked to decrypted and how many remain, so the operator
+  converges batch by batch instead of diffing the table by eye.
+- **Clear passwords**, which drops everything typed so far.
+
+The import table states the consequence of leaving a key locked
+rather than letting it fail at Apply time: a locked key is flagged and
+left unchecked (skip), a certificate whose paired key is locked is
+flagged **key locked — cert only** (it still imports, without the
+key), and a CA in the same state is flagged **key locked — will be
+skipped**, because an issuer without its key cannot be installed.
+Each flag carries an "Enter password" link that focuses that key's
+field.
+
+**Handling of the passwords themselves.** They live in React component
+state and nowhere else: not persisted, not logged, not put in a store,
+and sent only in the `preview` invocation. They are dropped when the
+preview is cancelled, when a different file is picked, and when an
+import completes. The fields inherit the GUI's global autofill/
+spellcheck opt-out, so the WebView never caches them either.
+
+Regression coverage: `gui/src/test/pkiXcaPerKeyPasswords.test.tsx`.
 
 The GUI checks for the plugin's presence by listing
 `/v1/sys/plugins` and looking for `name = "xca-import"`. If

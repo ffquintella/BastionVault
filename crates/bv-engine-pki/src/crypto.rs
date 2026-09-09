@@ -386,14 +386,13 @@ fn normalise_to_pkcs8_pem(pem: &str) -> String {
     // returned error string further down picks this up.
     if let Ok(parsed) = pem::parse(trimmed) {
         let der = parsed.contents();
-        let head: Vec<String> = der.iter().take(64).map(|b| format!("{b:02x}")).collect();
         let sketch = sketch_der(der);
         log::info!(
             "pki: normalise_to_pkcs8_pem — input is neither RSA nor SEC1 EC; \
-             passing through (pem_label={:?}, len={}, head={}, sketch={})",
+             passing through (pem_label={:?}, len={}, fp={}, sketch={})",
             pem_label,
             der.len(),
-            head.join(""),
+            payload_fingerprint(der),
             sketch
         );
     } else {
@@ -410,6 +409,25 @@ fn normalise_to_pkcs8_pem(pem: &str) -> String {
 /// items. Used in the diagnostic log so we can recognise the
 /// structure (PKCS#8 header / PKCS#1 RSA / SEC1 EC / DSA / Ed25519
 /// raw) without having to inspect the byte dump by hand.
+/// A correlation handle for a key payload we are about to complain
+/// about, safe to write to an operator's log.
+///
+/// The obvious diagnostic — a hex dump of the first N bytes — cannot
+/// be used here. This code path fires on any key that is neither RSA
+/// nor SEC1 EC, and for the compact formats that includes real key
+/// material: an Ed25519 `PrivateKeyInfo` is a 16-byte header followed
+/// immediately by the 32-byte seed, so a 64-byte head dump is the
+/// whole private key in the log file. `sketch_der` already reports
+/// the structure, which is what the shape questions actually need;
+/// this adds an identity so two log lines can be tied to the same
+/// payload without reproducing it.
+fn payload_fingerprint(der: &[u8]) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(der);
+    let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    format!("sha256:{hex}")
+}
+
 fn sketch_der(der: &[u8]) -> String {
     let Some((outer, _)) = take_tlv(der, 0x30) else {
         return format!("not-a-SEQUENCE(top_byte=0x{:02x})", der.first().copied().unwrap_or(0));
@@ -869,15 +887,12 @@ impl Signer {
                         if let Ok(parsed) = pem::parse(normalised.trim()) {
                             let der = parsed.contents();
                             let sketch = sketch_der(der);
-                            let head: String = der
-                                .iter()
-                                .take(32)
-                                .map(|b| format!("{b:02x}"))
-                                .collect();
+                            let fp = payload_fingerprint(der);
                             log::warn!(
                                 "pki: key payload is not a recognised private-key DER \
-                                 (sketch={sketch}, head32={head}) — likely a \
-                                 wrong-password decrypt"
+                                 (sketch={sketch}, len={}, fp={fp}) — likely a \
+                                 wrong-password decrypt",
+                                der.len()
                             );
                             if der.first() != Some(&0x30) {
                                 return Err(RvError::ErrString(
