@@ -1106,7 +1106,7 @@ export interface AuditEvent {
   summary: string;
 }
 
-export type ShareTargetKind = "kv-secret" | "resource" | "asset-group";
+export type ShareTargetKind = "kv-secret" | "resource" | "asset-group" | "file";
 
 export interface OwnerInfo {
   target_kind: string;

@@ -26,18 +26,32 @@ interface TargetPickerProps {
  *   path directly; the input is free-form.
  * - `asset-group`: (not surfaced on the manage-target tab today, but
  *   cheap to support) loads asset group names.
+ * - `file`: loads file ids and reads each one's metadata so the
+ *   dropdown can show the display name. The *value* is always the
+ *   server-assigned UUID — that is what the share record and the ACL
+ *   evaluator key on; names are editable and not unique.
  *
  * Lookup fails open — if the relevant list endpoint is denied, the
  * picker silently degrades to a plain text input. Matches the
  * behavior of `EntityPicker` so operator experience is consistent.
  */
+/** Options whose display text is the value itself. */
+function plain(vals: string[]): { value: string; label: string }[] {
+  return vals.map((v) => ({ value: v, label: v }));
+}
+
 export function TargetPicker({
   kind,
   value,
   onChange,
   label,
 }: TargetPickerProps) {
-  const [options, setOptions] = useState<string[] | null>(null);
+  // `value` is what a selection writes back; `label` is what the row
+  // shows. They differ only for `file`, where the target is a UUID but
+  // the operator thinks in file names.
+  const [options, setOptions] = useState<
+    { value: string; label: string }[] | null
+  >(null);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -53,7 +67,18 @@ export function TargetPicker({
     try {
       if (kind === "resource") {
         const r = await api.listResources();
-        setOptions(r.resources ?? []);
+        setOptions(plain(r.resources ?? []));
+      } else if (kind === "file") {
+        const r = await api.listFiles();
+        const metas = await Promise.all(
+          (r.ids ?? []).map((id) => api.readFileMeta(id).catch(() => null)),
+        );
+        setOptions(
+          (r.ids ?? []).map((id, i) => {
+            const name = metas[i]?.name;
+            return { value: id, label: name ? `${name} — ${id}` : id };
+          }),
+        );
       } else if (kind === "kv-secret") {
         // Enumerate paths already referenced by asset groups — cheap
         // and covers the "known secrets" set. Operators can still type
@@ -69,10 +94,10 @@ export function TargetPicker({
           if (!g) continue;
           for (const s of g.secrets ?? []) paths.add(s);
         }
-        setOptions(Array.from(paths).sort());
+        setOptions(plain(Array.from(paths).sort()));
       } else if (kind === "asset-group") {
         const r = await api.listAssetGroups();
-        setOptions(r.groups ?? []);
+        setOptions(plain(r.groups ?? []));
       } else {
         setOptions([]);
       }
@@ -101,7 +126,11 @@ export function TargetPicker({
     const q = value.trim().toLowerCase();
     if (!q) return options.slice(0, 25);
     return options
-      .filter((o) => o.toLowerCase().includes(q))
+      .filter(
+        (o) =>
+          o.value.toLowerCase().includes(q) ||
+          o.label.toLowerCase().includes(q),
+      )
       .slice(0, 25);
   }, [options, value]);
 
@@ -110,11 +139,15 @@ export function TargetPicker({
       ? "server-01"
       : kind === "kv-secret"
       ? "secret/foo/bar"
+      : kind === "file"
+      ? "file id (UUID)"
       : "asset group name";
 
   const hint =
     kind === "kv-secret"
       ? "Type any KV path; suggestions are drawn from existing asset groups."
+      : kind === "file"
+      ? "Search by file name; the share is stored against the file's id."
       : undefined;
 
   return (
@@ -154,17 +187,17 @@ export function TargetPicker({
           ) : (
             filtered.map((o) => (
               <button
-                key={o}
+                key={o.value}
                 type="button"
                 onClick={() => {
-                  onChange(o);
+                  onChange(o.value);
                   setOpen(false);
                 }}
                 className={`w-full text-left px-3 py-2 text-sm font-mono hover:bg-[var(--color-surface-hover)] ${
-                  o === value ? "bg-[var(--color-surface-hover)]" : ""
+                  o.value === value ? "bg-[var(--color-surface-hover)]" : ""
                 }`}
               >
-                {o}
+                {o.label}
               </button>
             ))
           )}

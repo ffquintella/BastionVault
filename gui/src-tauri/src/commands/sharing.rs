@@ -195,6 +195,22 @@ pub async fn get_resource_owner(
     Ok(parse_owner(&data))
 }
 
+#[tauri::command]
+pub async fn get_file_owner(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<OwnerInfo> {
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("identity/owner/file/{id}"),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(parse_owner(&data))
+}
+
 // ── Sharing ────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -497,6 +513,31 @@ pub async fn transfer_asset_group_owner(
         &state,
         Operation::Write,
         "sys/asset-group-owner/transfer".into(),
+        Some(body),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Admin-only: overwrite the owner record of a file resource. There is
+/// no `claim` endpoint for files (unlike KV), so the Files page rides
+/// this one to claim by naming the caller's own entity.
+#[tauri::command]
+pub async fn transfer_file_owner(
+    state: State<'_, AppState>,
+    id: String,
+    new_owner_entity_id: String,
+) -> CmdResult<()> {
+    let mut body = Map::new();
+    body.insert("id".into(), Value::String(id));
+    body.insert(
+        "new_owner_entity_id".into(),
+        Value::String(new_owner_entity_id),
+    );
+    make_request(
+        &state,
+        Operation::Write,
+        "sys/file-owner/transfer".into(),
         Some(body),
     )
     .await?;

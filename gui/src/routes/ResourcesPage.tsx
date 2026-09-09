@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, type MouseEvent as ReactMouseEvent } from "react";
 import { Link } from "react-router";
 import { Layout } from "../components/Layout";
+import { ObjectSharingCard } from "../components/ObjectSharingCard";
 import {
   Button,
   Card,
@@ -16,8 +17,6 @@ import {
   Modal,
   ConfirmModal,
   EmptyState,
-  EntityLabel,
-  EntityPicker,
   GroupsSection,
   SecretPairsEditor,
   SecretHistoryPanel,
@@ -38,8 +37,6 @@ import type {
   ResourceTypeDef,
   ResourceFieldDef,
   ResourceHistoryEntry,
-  ShareEntry,
-  OwnerInfo,
   FileMeta,
   ConnectionProfile,
   CredentialSource,
@@ -71,8 +68,6 @@ import type { EffectiveLoginClass } from "../lib/types";
 import * as api from "../lib/api";
 import { useConnectMfa } from "../components/ConnectMfaPrompt";
 import { extractError } from "../lib/error";
-import { isAdminUser } from "../lib/access";
-import { useAuthStore } from "../stores/authStore";
 import { useNamespaceStore } from "../stores/namespaceStore";
 import { useAssetGroupMap } from "../hooks/useAssetGroupMap";
 import { useCanWriteResource } from "../hooks/useCanWriteResource";
@@ -3687,7 +3682,6 @@ function ResourceFilesPanel({
     </Card>
   );
 }
-
 // ── Resource Sharing Card ──────────────────────────────────────────
 //
 // Displays the resource's owner record plus every active share and
@@ -3695,10 +3689,8 @@ function ResourceFilesPanel({
 // admin policy, also offers Claim-ownership (transfer to self) and a
 // Transfer-ownership form.
 //
-// `openGrant` lets the detail header's Share button drive this card: it
-// opens the Grant modal (or explains why the caller can't grant), so the
-// permission model lives in one place, then calls `onGrantHandled` so the
-// request isn't replayed the next time the tab is opened.
+// Everything but the resource-specific bindings below lives in
+// `ObjectSharingCard`, shared with file resources and KV secrets.
 export function ResourceSharingCard({
   resourceName,
   toast,
@@ -3710,367 +3702,34 @@ export function ResourceSharingCard({
   openGrant?: boolean;
   onGrantHandled?: () => void;
 }) {
-  const [owner, setOwner] = useState<OwnerInfo | null>(null);
-  const [shares, setShares] = useState<ShareEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  const policies = useAuthStore((s) => s.policies);
-  const entityId = useAuthStore((s) => s.entityId);
-  // Same admin set the sidebar and dashboard use — a delegated admin
-  // policy (e.g. `super-admin`) must see the ownership controls too,
-  // not only a literal `root`/`admin` token.
-  const isAdmin = isAdminUser(policies);
-  const isOwner =
-    owner?.owned === true && owner.entity_id === entityId && entityId !== "";
-  const canGrant = isOwner || isAdmin;
-
-  // Grant modal state
-  const [showGrant, setShowGrant] = useState(false);
-  const [grantee, setGrantee] = useState("");
-  const [caps, setCaps] = useState<string[]>(["read"]);
-  const [expires, setExpires] = useState("");
-
-  // Transfer modal state
-  const [showTransfer, setShowTransfer] = useState(false);
-  const [newOwner, setNewOwner] = useState("");
-
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resourceName]);
-
-  // Share button in the detail header. Waits for the owner lookup so a
-  // resource the caller owns doesn't get a spurious "not allowed".
-  useEffect(() => {
-    if (!openGrant || loading) return;
-    if (canGrant) {
-      setShowGrant(true);
-    } else {
-      toast("error", "Only the owner or an admin can share this resource.");
-    }
-    onGrantHandled?.();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openGrant, loading]);
-
-  async function load() {
-    setLoading(true);
-    try {
-      const [o, s] = await Promise.all([
-        api.getResourceOwner(resourceName).catch(() => null),
-        api.listSharesForTarget("resource", resourceName).catch(() => [] as ShareEntry[]),
-      ]);
-      setOwner(o);
-      setShares(s);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function handleGrant() {
-    try {
-      await api.putShare("resource", resourceName, grantee.trim(), caps, expires.trim());
-      toast("success", "Share granted");
-      setShowGrant(false);
-      setGrantee("");
-      setCaps(["read"]);
-      setExpires("");
-      load();
-    } catch (e: unknown) {
-      toast("error", extractError(e));
-    }
-  }
-
-  async function handleRevoke(share: ShareEntry) {
-    try {
-      await api.deleteShare("resource", share.target_path, share.grantee_entity_id);
-      toast("success", "Share revoked");
-      load();
-    } catch (e: unknown) {
-      toast("error", extractError(e));
-    }
-  }
-
-  async function handleTransfer() {
-    try {
-      await api.transferResourceOwner(resourceName, newOwner.trim());
-      toast("success", "Ownership transferred");
-      setShowTransfer(false);
-      setNewOwner("");
-      load();
-    } catch (e: unknown) {
-      toast("error", extractError(e));
-    }
-  }
-
-  // Claim = transfer the owner record to the caller's own entity. There
-  // is no `sys/resource-owner/claim` endpoint (unlike KV), so this rides
-  // the admin transfer endpoint and is offered to admins only.
-  async function handleClaim() {
-    if (!entityId) {
-      toast(
-        "error",
-        "Your token has no entity_id — use Assign owner to name one explicitly.",
-      );
-      return;
-    }
-    try {
-      await api.transferResourceOwner(resourceName, entityId);
-      toast("success", "Ownership claimed");
-      load();
-    } catch (e: unknown) {
-      toast("error", extractError(e));
-    }
-  }
-
-  function toggleCap(c: string) {
-    setCaps((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]));
-  }
-
-  if (loading) {
-    return (
-      <Card>
-        <p className="text-sm text-[var(--color-text-muted)]">Loading sharing info...</p>
-      </Card>
-    );
-  }
-
   return (
-    <>
-      <Card
-        title="Owner"
-        actions={
-          isAdmin ? (
-            <>
-              {!owner?.owned && (
-                <Button size="sm" variant="secondary" onClick={handleClaim}>
-                  Claim ownership
-                </Button>
-              )}
-              <Button size="sm" variant="ghost" onClick={() => setShowTransfer(true)}>
-                {owner?.owned ? "Transfer" : "Assign owner"}
-              </Button>
-            </>
-          ) : null
-        }
-      >
-        {owner?.owned ? (
-          <div className="space-y-1 text-sm">
-            <div className="flex items-center gap-2">
-              <span className="text-[var(--color-text-muted)] text-xs">owner</span>
-              <EntityLabel
-                entityId={owner.entity_id}
-                callerEntityId={entityId}
-              />
-              {owner.entity_id === entityId && entityId !== "" && (
-                <Badge label="You" variant="success" />
-              )}
-            </div>
-            {owner.created_at && (
-              <div className="flex items-center gap-2">
-                <span className="text-[var(--color-text-muted)] text-xs">since</span>
-                <span className="text-xs">{new Date(owner.created_at).toLocaleString()}</span>
-              </div>
-            )}
-          </div>
-        ) : (
-          <EmptyState
-            title="Unowned"
-            description={
-              isAdmin
-                ? "No entity has claimed this resource yet. Claim it for yourself, assign an owner, or let the next authenticated write capture it."
-                : "No entity has claimed this resource yet. The next write by an authenticated caller will capture ownership."
-            }
-          />
-        )}
-      </Card>
-
-      <Card
-        title="Shares"
-        actions={
-          canGrant ? (
-            <Button size="sm" onClick={() => setShowGrant(true)}>
-              Grant access
-            </Button>
-          ) : null
-        }
-      >
-        {shares.length === 0 ? (
-          <EmptyState
-            title="No shares"
-            description={
-              canGrant
-                ? "Nobody else has access through an explicit share yet."
-                : "Only the owner or an admin can grant new shares on this resource."
-            }
-          />
-        ) : (
-          <Table
-            columns={[
-              {
-                key: "grantee",
-                header: "Grantee",
-                render: (s: ShareEntry) => (
-                  <EntityLabel entityId={s.grantee_entity_id} />
-                ),
-              },
-              {
-                key: "caps",
-                header: "Capabilities",
-                render: (s: ShareEntry) => (
-                  <div className="flex flex-wrap gap-1">
-                    {s.capabilities.map((c) => (
-                      <Badge key={c} label={c} variant="info" />
-                    ))}
-                  </div>
-                ),
-              },
-              {
-                key: "granted_at",
-                header: "Granted",
-                render: (s: ShareEntry) => (
-                  <span className="text-xs text-[var(--color-text-muted)]">
-                    {s.granted_at ? new Date(s.granted_at).toLocaleString() : "-"}
-                  </span>
-                ),
-              },
-              {
-                key: "expires",
-                header: "Expires",
-                render: (s: ShareEntry) =>
-                  s.expires_at ? (
-                    <span
-                      className={`text-xs ${s.expired ? "text-[var(--color-danger)]" : "text-[var(--color-text-muted)]"}`}
-                    >
-                      {s.expires_at}
-                      {s.expired && " (expired)"}
-                    </span>
-                  ) : (
-                    <span className="text-xs text-[var(--color-text-muted)]">never</span>
-                  ),
-              },
-              {
-                key: "revoke",
-                header: "",
-                className: "text-right w-24",
-                render: (s: ShareEntry) =>
-                  canGrant ? (
-                    <Button variant="danger" size="sm" onClick={() => handleRevoke(s)}>
-                      Revoke
-                    </Button>
-                  ) : null,
-              },
-            ]}
-            data={shares}
-            rowKey={(s: ShareEntry) => s.grantee_entity_id}
-          />
-        )}
-      </Card>
-
-      <Modal
-        open={showGrant}
-        onClose={() => setShowGrant(false)}
-        title={`Grant access to ${resourceName}`}
-        actions={
-          <>
-            <Button variant="ghost" onClick={() => setShowGrant(false)}>
-              Cancel
-            </Button>
-            <Button onClick={handleGrant} disabled={!grantee.trim() || caps.length === 0}>
-              Grant
-            </Button>
-          </>
-        }
-      >
-        <div className="space-y-3">
-          <EntityPicker
-            label="Grantee"
-            value={grantee}
-            onChange={(id) => setGrantee(id)}
-            placeholder="Search by login or paste entity_id"
-            hint="Type part of a username, mount, or UUID."
-          />
-          <div>
-            <label className="block text-xs font-medium text-[var(--color-text-muted)] mb-1">
-              Capabilities
-            </label>
-            <div className="flex flex-wrap gap-2">
-              {/*
-                `connect` is a resource-only capability and is never implied
-                by `read` — a grantee who should open sessions gets it
-                explicitly. Granting `connect` without `read` is the useful
-                shape: they can dial the target, but the credential itself
-                stays hidden.
-              */}
-              {(["read", "list", "update", "delete", "create", "connect"] as const).map((c) => {
-                const selected = caps.includes(c);
-                return (
-                  <button
-                    key={c}
-                    type="button"
-                    onClick={() => toggleCap(c)}
-                    className={`px-2.5 py-1 rounded-full text-xs border transition-colors ${
-                      selected
-                        ? "bg-[var(--color-primary)] border-[var(--color-primary)] text-white"
-                        : "bg-[var(--color-bg)] border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-text-muted)]"
-                    }`}
-                  >
-                    {c}
-                  </button>
-                );
-              })}
-            </div>
-            <p className="text-xs text-[var(--color-text-muted)] mt-1.5">
-              <code className="font-mono">connect</code> lets the grantee open
-              a session against this resource. It is not implied by{" "}
-              <code className="font-mono">read</code> — grant it on its own to
-              let them connect without exposing the credential.
-            </p>
-          </div>
-          <Input
-            label="Expires at (optional)"
-            value={expires}
-            onChange={(e) => setExpires(e.target.value)}
-            placeholder="2026-12-31T23:59:59Z"
-            hint="RFC3339 timestamp. Leave empty for no expiry."
-          />
-        </div>
-      </Modal>
-
-      <Modal
-        open={showTransfer}
-        onClose={() => setShowTransfer(false)}
-        title={
-          owner?.owned
-            ? `Transfer ownership of ${resourceName}`
-            : `Assign an owner for ${resourceName}`
-        }
-        actions={
-          <>
-            <Button variant="ghost" onClick={() => setShowTransfer(false)}>
-              Cancel
-            </Button>
-            <Button variant="danger" onClick={handleTransfer} disabled={!newOwner.trim()}>
-              Transfer
-            </Button>
-          </>
-        }
-      >
-        <div className="space-y-3">
-          <p className="text-sm text-[var(--color-text-muted)]">
-            Overwrite the owner record for this resource. Admin-only. The new entity
-            will pass the <code>scopes = ["owner"]</code> check on every subsequent
-            request; the previous owner loses owner-scoped access unless a share is
-            also created for them.
-          </p>
-          <Input
-            label="New owner entity_id"
-            value={newOwner}
-            onChange={(e) => setNewOwner(e.target.value)}
-            placeholder="Target entity UUID"
-          />
-        </div>
-      </Modal>
-    </>
+    <ObjectSharingCard
+      kind="resource"
+      target={resourceName}
+      noun="resource"
+      // No `sys/resource-owner/claim` endpoint (unlike KV), so Claim
+      // rides the admin transfer endpoint — see `OwnerAdapter`.
+      owner={{
+        read: api.getResourceOwner,
+        transfer: api.transferResourceOwner,
+      }}
+      // `connect` is a resource-only capability and is never implied by
+      // `read` — a grantee who should open sessions gets it explicitly.
+      // Granting `connect` without `read` is the useful shape: they can
+      // dial the target, but the credential itself stays hidden.
+      capabilities={["read", "list", "update", "delete", "create", "connect"]}
+      capabilityHint={
+        <>
+          <code className="font-mono">connect</code> lets the grantee open a
+          session against this resource. It is not implied by{" "}
+          <code className="font-mono">read</code> — grant it on its own to let
+          them connect without exposing the credential.
+        </>
+      }
+      toast={toast}
+      openGrant={openGrant}
+      onGrantHandled={onGrantHandled}
+    />
   );
 }
 

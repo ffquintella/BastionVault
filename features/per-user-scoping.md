@@ -234,9 +234,17 @@ Decisions:
   owner / sudo-equivalent policies.
 - `delete` propagates: `cascade_delete_target` clears every share on a
   target when the target itself is deleted, including group shares.
-- GUI flow: per-target Sharing tab on Resources / KV pages, plus a
-  per-user `/sharing` route with `Shared with me` and `Manage target`
-  tabs (`gui/src/routes/SharingPage.tsx`).
+- GUI flow: per-target Sharing tab on Resources / KV / Files pages,
+  plus a per-user `/sharing` route with `Shared with me` and
+  `Manage target` tabs (`gui/src/routes/SharingPage.tsx`).
+- A file share targets the file's server-assigned UUID, never its
+  display name: names are editable and not unique, and the evaluator
+  keys on the id when matching `files/files/<id>` and its
+  sub-endpoints.
+- A file share does not grant enumeration — the list path carries no
+  id, so it is outside the share. The Files page falls back to
+  `identity/sharing/for-me` when `list_files` is denied, which is what
+  makes a shared file reachable for a grantee who owns nothing.
 
 ### 6. Baseline seeded policies
 
@@ -324,6 +332,8 @@ owner/share stores the same way.
 | 9 | Sharing GUI: share dialog, "shared with me" section, revoke flow | Done |
 | 10 | Admin ownership-transfer endpoints + GUI | Done |
 | 11 | Self-service `kv-owner/claim` endpoint + Claim button + owner-badge in secrets list | Done |
+| 12 | File-resource sharing GUI: Sharing tab + Share action on the Files page, `file` kind on `/sharing`, share-pointer fallback for grantees | Done |
+| 13 | One GUI sharing surface (`ObjectSharingCard`) behind all four kinds; group grantees revocable everywhere | Done |
 
 Phases 1–6 deliver the two baseline roles the operator asked for
 (`standard-user-readonly` and `secret-author`).
@@ -372,7 +382,22 @@ legacy broadly-scoped `standard-user` policy — `load_default_acl_policy`
 installs all three so operators can opt into ownership-aware ACLs
 without forcing a migration. Policy templating (Phase 2), the owner
 backfill admin endpoint (migration story from the *Testing Plan*), and
-the GUI for sharing + owner transfer are all live.
+the GUI for sharing + owner transfer are all live. The `file` target
+kind — present in the store, the evaluator and the cascade-delete path
+since the file-resource work — is now surfaced in the GUI too (Phase
+12), so all four kinds are shareable from the desktop app.
+
+All four GUI surfaces are one component (Phase 13,
+`gui/src/components/ObjectSharingCard.tsx`); the per-kind cards are
+bindings over it — share kind, target key, owner adapter, capability
+list, and which grantee kinds the grant form offers. Asset groups pass
+their owner in from the record the detail page already loaded
+(`ownerOverride` / `onOwnerChange`) rather than through an owner
+endpoint, because there is none. Grantee kind is now honoured on
+**revoke** for every kind, not just asset groups: a `group_user` /
+`group_app` share created through the API or CLI on a resource, file or
+KV path used to be un-revokable from the GUI, which sent a hardcoded
+`entity` kind and cleared nothing while reporting success.
 
 ### Which entity a share names
 

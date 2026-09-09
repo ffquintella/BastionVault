@@ -1035,6 +1035,9 @@ export const getKvOwner = (path: string) =>
   invoke<OwnerInfo>("get_kv_owner", { path });
 export const getResourceOwner = (name: string) =>
   invoke<OwnerInfo>("get_resource_owner", { name });
+/** Owner record for a file resource, keyed by its server-assigned UUID. */
+export const getFileOwner = (id: string) =>
+  invoke<OwnerInfo>("get_file_owner", { id });
 export const listSharesForGrantee = (grantee: string) =>
   invoke<SharePointer[]>("list_shares_for_grantee", { grantee });
 /** Caller-introspecting share list: direct entity shares + group
@@ -1075,6 +1078,8 @@ export const claimKvOwner = (path: string) =>
   invoke<void>("claim_kv_owner", { path });
 export const transferResourceOwner = (resource: string, newOwnerEntityId: string) =>
   invoke<void>("transfer_resource_owner", { resource, newOwnerEntityId });
+export const transferFileOwner = (id: string, newOwnerEntityId: string) =>
+  invoke<void>("transfer_file_owner", { id, newOwnerEntityId });
 export const transferAssetGroupOwner = (name: string, newOwnerEntityId: string) =>
   invoke<void>("transfer_asset_group_owner", { name, newOwnerEntityId });
 

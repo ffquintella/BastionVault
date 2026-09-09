@@ -208,11 +208,18 @@ export function SharingPage() {
                 options={[
                   { value: "resource", label: "Resource" },
                   { value: "kv-secret", label: "KV secret" },
+                  { value: "file", label: "File" },
                 ]}
               />
               <div className="flex-1">
                 <TargetPicker
-                  label={manageKind === "resource" ? "Resource name" : "KV path"}
+                  label={
+                    manageKind === "resource"
+                      ? "Resource name"
+                      : manageKind === "file"
+                      ? "File"
+                      : "KV path"
+                  }
                   kind={manageKind}
                   value={managePath}
                   onChange={setManagePath}
@@ -374,7 +381,13 @@ function ReceivedTable({ entries }: { entries: SharePointer[] }) {
       render: (p: SharePointer) => (
         <Badge
           label={p.target_kind}
-          variant={p.target_kind === "resource" ? "info" : "neutral"}
+          variant={
+            p.target_kind === "resource"
+              ? "info"
+              : p.target_kind === "file"
+              ? "success"
+              : "neutral"
+          }
         />
       ),
     },
@@ -394,6 +407,19 @@ function ReceivedTable({ entries }: { entries: SharePointer[] }) {
           return (
             <Link
               to={`/resources/${encodeURIComponent(p.target_path)}`}
+              className="text-xs text-[var(--color-primary)] hover:underline"
+            >
+              Open
+            </Link>
+          );
+        }
+        if (p.target_kind === "file") {
+          // Files have no per-id route; the list page falls back to the
+          // caller's share pointers when enumeration is denied, so it
+          // shows the shared file either way.
+          return (
+            <Link
+              to="/files"
               className="text-xs text-[var(--color-primary)] hover:underline"
             >
               Open

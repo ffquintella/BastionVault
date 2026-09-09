@@ -29,3 +29,15 @@ export const ADMIN_POLICIES = new Set<string>([
 export function isAdminUser(policies: readonly string[]): boolean {
   return policies.some((p) => ADMIN_POLICIES.has(p));
 }
+
+/**
+ * The narrower, literal `root`/`admin` check the sharing surfaces use
+ * to gate ownership transfer, as opposed to the delegated-admin set
+ * above. Long-standing behavior for KV secrets and asset groups: a
+ * delegated `exchange-admin` sees the admin GUI but does not get to
+ * overwrite an owner record. GUI gating only — the API authorizes
+ * every request server-side.
+ */
+export function hasLiteralAdminPolicy(policies: readonly string[]): boolean {
+  return policies.some((p) => p === "root" || p === "admin");
+}

@@ -648,6 +648,7 @@ pub fn run() {
             commands::sharing::list_entity_aliases,
             commands::sharing::get_kv_owner,
             commands::sharing::get_resource_owner,
+            commands::sharing::get_file_owner,
             commands::sharing::list_shares_for_grantee,
             commands::sharing::list_shares_for_me,
             commands::sharing::list_shares_for_target,
@@ -656,6 +657,7 @@ pub fn run() {
             commands::sharing::transfer_kv_owner,
             commands::sharing::claim_kv_owner,
             commands::sharing::transfer_resource_owner,
+            commands::sharing::transfer_file_owner,
             commands::sharing::transfer_asset_group_owner,
             commands::capabilities::capabilities_self,
             // FIDO2

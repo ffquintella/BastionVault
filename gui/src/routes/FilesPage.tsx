@@ -12,6 +12,7 @@ import {
   useToast,
 } from "../components/ui";
 import type { FileMeta, FileSyncTarget, FileVersionInfo } from "../lib/types";
+import { FileSharingCard } from "../components/FileSharingCard";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import { useNamespaceStore } from "../stores/namespaceStore";
@@ -33,27 +34,55 @@ export function FilesPage() {
   const { toast } = useToast();
   const [metas, setMetas] = useState<FileMeta[]>([]);
   const [selected, setSelected] = useState<FileMeta | null>(null);
+  // Which tab the detail modal opens on. The row's Share button routes
+  // through the same modal so the ownership/permission model lives in
+  // one place (FileSharingCard) rather than being duplicated per entry.
+  const [detailTab, setDetailTab] = useState("info");
+  // True when the list below came from the caller's share pointers
+  // rather than a full enumeration — worth saying so, otherwise the
+  // page looks like the vault only holds the shared files.
+  const [sharedOnly, setSharedOnly] = useState(false);
   const [editing, setEditing] = useState<FileMeta | null>(null);
   const [showUpload, setShowUpload] = useState(false);
   const [initialDropFile, setInitialDropFile] = useState<File | null>(null);
   const [pageDragOver, setPageDragOver] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<FileMeta | null>(null);
 
+  async function loadMetas(ids: string[]): Promise<FileMeta[]> {
+    const loaded: FileMeta[] = [];
+    for (const id of ids) {
+      try {
+        loaded.push(await api.readFileMeta(id));
+      } catch {
+        /* ignore individual read failures so the list still renders */
+      }
+    }
+    loaded.sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
+    return loaded;
+  }
+
   async function refresh() {
     try {
       const result = await api.listFiles();
-      const loaded: FileMeta[] = [];
-      for (const id of result.ids) {
-        try {
-          loaded.push(await api.readFileMeta(id));
-        } catch {
-          /* ignore individual read failures so the list still renders */
-        }
-      }
-      loaded.sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
-      setMetas(loaded);
+      setMetas(await loadMetas(result.ids));
+      setSharedOnly(false);
     } catch (e) {
-      toast("error", extractError(e));
+      // A grantee holds capabilities on `files/files/<id>` only — the
+      // list path itself is not covered by a file share, so enumeration
+      // 403s for anyone who is not the owner or an admin. Fall back to
+      // the caller's own share pointers so a shared file is still
+      // reachable in the GUI. Mirrors the resource list fallback.
+      try {
+        const mine = await api.listSharesForMe();
+        const ids = mine.entries
+          .filter((p) => p.target_kind === "file")
+          .map((p) => p.target_path);
+        if (ids.length === 0) throw e;
+        setMetas(await loadMetas(ids));
+        setSharedOnly(true);
+      } catch {
+        toast("error", extractError(e));
+      }
     }
   }
 
@@ -139,7 +168,14 @@ export function FilesPage() {
           </div>
         )}
 
-        <Card title="All Files">
+        <Card title={sharedOnly ? "Shared with me" : "All Files"}>
+          {sharedOnly && (
+            <p className="mb-3 text-xs text-[var(--color-text-muted)]">
+              Listing every file did not succeed for this token — usually
+              because a file share covers the file itself and not the list
+              path. Only the files explicitly shared with you are shown.
+            </p>
+          )}
           <Table<FileMeta>
             columns={[
               {
@@ -172,7 +208,10 @@ export function FilesPage() {
                     <Button
                       size="sm"
                       variant="secondary"
-                      onClick={() => setSelected(m)}
+                      onClick={() => {
+                        setDetailTab("info");
+                        setSelected(m);
+                      }}
                     >
                       Details
                     </Button>
@@ -182,6 +221,16 @@ export function FilesPage() {
                       onClick={() => setEditing(m)}
                     >
                       Edit
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => {
+                        setDetailTab("sharing");
+                        setSelected(m);
+                      }}
+                    >
+                      Share
                     </Button>
                     <Button
                       size="sm"
@@ -225,6 +274,7 @@ export function FilesPage() {
       {selected && (
         <FileDetailModal
           meta={selected}
+          initialTab={detailTab}
           onClose={() => setSelected(null)}
           onEdit={() => setEditing(selected)}
           onChanged={async () => {
@@ -453,18 +503,23 @@ function FileDetailModal({
   onClose,
   onEdit,
   onChanged,
+  initialTab = "info",
 }: {
   meta: FileMeta;
   onClose: () => void;
   onEdit: () => void;
   onChanged: () => void;
+  /** Tab to open on — "sharing" when the row's Share button opened us. */
+  initialTab?: string;
 }) {
-  const [active, setActive] = useState("info");
+  const { toast } = useToast();
+  const [active, setActive] = useState(initialTab);
   return (
     <Modal open={true} onClose={onClose} title={meta.name || meta.id} size="lg">
       <Tabs
         tabs={[
           { id: "info", label: "Info" },
+          { id: "sharing", label: "Sharing" },
           { id: "sync", label: "Sync" },
           { id: "versions", label: "Versions" },
         ]}
@@ -473,6 +528,13 @@ function FileDetailModal({
       />
       <div className="mt-4">
         {active === "info" && <InfoTab meta={meta} onEdit={onEdit} />}
+        {active === "sharing" && (
+          <FileSharingCard
+            fileId={meta.id}
+            fileName={meta.name}
+            toast={toast}
+          />
+        )}
         {active === "sync" && <SyncTab meta={meta} onChanged={onChanged} />}
         {active === "versions" && (
           <VersionsTab meta={meta} onChanged={onChanged} />

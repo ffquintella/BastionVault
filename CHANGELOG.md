@@ -45,6 +45,96 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.43.11] - 2026-09-09
+
+### Added
+
+#### Share a file resource from the GUI
+
+The Files page could not share. `ShareTargetKind::File` has existed in the
+share store, the ACL evaluator and the cascade-delete path since file
+resources shipped -- only the desktop app never offered it, so a file could
+be owned but never handed to anyone. The Files list gains a **Share** action
+per row and the detail modal a **Sharing** tab (`gui/src/components/
+FileSharingCard.tsx`): owner record, share list, grant with capabilities and
+an optional expiry, revoke, and admin claim/transfer of ownership. The
+`/sharing` page's Manage tab accepts the `file` kind, and its target picker
+searches by file name while storing the share against the file's id.
+(`features/per-user-scoping.md` Phase 12)
+
+Two things worth knowing about the shape of a file share:
+
+- It is keyed on the server-assigned UUID, not the display name -- names are
+  editable and not unique, and the evaluator matches `files/files/<id>`.
+- It does not grant enumeration. The list path carries no id, so it falls
+  outside the share and `list_files` still 403s for a pure grantee. The Files
+  page now falls back to the caller's own share pointers
+  (`identity/sharing/for-me`) when listing is denied and says so, which is
+  what makes a shared file reachable at all for someone who owns nothing.
+
+New Tauri commands: `get_file_owner`, `transfer_file_owner`.
+
+### Changed
+
+#### One sharing surface behind resources, files and KV secrets
+
+The GUI had three near-identical copies of the "owner card + shares table +
+grant / revoke + admin transfer" surface -- `ResourceSharingCard`,
+`SecretSharingPanel` and `FileSharingCard` -- so a change to share semantics
+had to be made three times and, in practice, drifted. They now share one
+implementation, `gui/src/components/ObjectSharingCard.tsx`, parameterized by
+the share kind, an owner adapter (`read` / `transfer` / optional `claim`) and
+the grantable capability list. The three wrappers keep their names and props;
+each is now a dozen lines of bindings.
+
+Two per-kind rules the extraction makes explicit rather than incidental:
+
+- **Claim-ownership** is offered to any caller when the kind has a real claim
+  endpoint (KV), because the server decides whether the target is still
+  unowned, and to admins only when claiming has to ride the admin transfer
+  endpoint (resources, files).
+- **`connect`** stays resource-only; it is never implied by `read`.
+
+Operator-visible: the KV share dialog now uses the same owner/shares cards and
+Grant modal as resources and files, and gains the **Granted** column its copy
+was missing. The KV ownership controls still key on a literal `root`/`admin`
+policy rather than the wider delegated-admin set the other two accept -- that
+divergence is preserved deliberately and now covered by a test
+(`gui/src/test/objectSharing.test.tsx`), so widening it is a decision of its
+own. GUI gating only; the API authorizes every request regardless.
+
+The fourth copy, `AssetGroupSharingCard`
+(`gui/src/routes/AssetGroupsPage.tsx`), now folds in as well. It was left out
+of the first pass because it is the one surface whose owner does not come
+from an owner endpoint -- there is no `sys/asset-group-owner/read`; the owner
+rides on the `AssetGroupInfo` the detail page already loaded. `ObjectSharingCard`
+gains an `ownerOverride` / `onOwnerChange` pair for exactly that shape: the
+call site keeps the value, the card renders it, and a transfer asks the parent
+to refetch instead of the card inventing a second source that can disagree
+with the page header.
+
+Asset groups are also the only kind that offers group grantees
+(`entity` / `group_user` / `group_app`) when granting, so the grantee-kind
+selector moved into `ObjectSharingCard` behind a `granteeKinds` prop that
+defaults to entity-only. Operator-visible on asset groups: an unowned group
+now offers admins **Claim ownership** beside **Assign owner**, and the empty
+state no longer implies a later write will capture ownership -- an asset group
+takes its owner on create and keeps it.
+
+### Fixed
+
+#### A group share on a resource, file or KV path could not be revoked from the GUI
+
+Revoke on those three surfaces sent a hardcoded `entity` grantee kind, so a
+share whose grantee is an identity group -- created through the API or the
+CLI, which have always accepted `group_user` / `group_app` -- addressed a
+record that does not exist. The request succeeded, the GUI reported "Share
+revoked", and the share stayed. `ObjectSharingCard` now passes the record's
+own `grantee_kind` on both revoke and the grantee column, which renders a
+group behind a kind badge instead of trying to resolve it as an entity.
+Behaviour is unchanged for entity shares. Regression test in
+`gui/src/test/objectSharing.test.tsx`.
+
 ## [0.43.10] - 2026-09-09
 
 ### Security
