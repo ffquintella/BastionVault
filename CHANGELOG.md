@@ -45,6 +45,24 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.43.10] - 2026-09-09
+
+### Security
+
+#### Unmounting a PKI engine now requires typing the mount path
+
+The unmount confirmation was a single red button next to the warning that
+unmounting "permanently destroys every issuer, key, role, and stored
+certificate under this mount" — one stray click on the wrong mount and the
+data was gone. `ConfirmModal` (`gui/src/components/ui/Modal.tsx`) gained an
+optional `confirmPhrase` / `confirmPhraseLabel` pair: when set, the operator
+must type that exact string before **Unmount** unlocks, and the field is
+cleared on every open so a previous match cannot carry over to the next
+target. The existing warning text is unchanged and still shown above the
+field. Wired up on the PKI page (`gui/src/routes/PkiPage.tsx`), which asks for
+the mount path; other destructive confirmations keep their current
+single-click behaviour until they opt in.
+
 ## [0.43.9] - 2026-09-08
 
 ### Fixed

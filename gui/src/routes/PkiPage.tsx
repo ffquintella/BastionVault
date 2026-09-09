@@ -512,6 +512,8 @@ export function PkiPage() {
         loading={unmounting}
         title="Unmount PKI engine"
         message={`Unmount the PKI engine at "${unmountTarget}/"? This permanently destroys every issuer, key, role, and stored certificate under this mount. This cannot be undone.`}
+        confirmPhrase={unmountTarget ?? ""}
+        confirmPhraseLabel={`Type the mount path "${unmountTarget}" to confirm`}
         confirmLabel="Unmount"
       />
     </Layout>

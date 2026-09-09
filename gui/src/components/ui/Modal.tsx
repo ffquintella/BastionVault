@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "./Button";
+import { Input } from "./Input";
 
 interface ModalProps {
   open: boolean;
@@ -86,6 +87,15 @@ interface ConfirmModalProps {
    *  cannot succeed, so `message` can explain why instead of the server
    *  answering with an error toast. */
   confirmDisabled?: boolean;
+  /** When set, the operator must type this exact string before the confirm
+   *  button unlocks. Use it for irreversible, destructive operations where a
+   *  misplaced click would destroy data (unmounting an engine, deleting a
+   *  namespace) — it forces the operator to name the specific object they are
+   *  about to destroy, so the wrong target is caught before the request. The
+   *  warning in `message` is still shown above the field. */
+  confirmPhrase?: string;
+  /** Label for the confirmation field. Defaults to naming `confirmPhrase`. */
+  confirmPhraseLabel?: string;
 }
 
 export function ConfirmModal({
@@ -98,7 +108,25 @@ export function ConfirmModal({
   variant = "danger",
   loading,
   confirmDisabled,
+  confirmPhrase,
+  confirmPhraseLabel,
 }: ConfirmModalProps) {
+  const [typed, setTyped] = useState("");
+
+  // This component stays mounted between confirmations (only the inner Modal
+  // unmounts), so clear the field on every open — otherwise a previous,
+  // matching entry would leave the button unlocked for the next target.
+  useEffect(() => {
+    if (open) setTyped("");
+  }, [open, confirmPhrase]);
+
+  const phraseMatched = confirmPhrase === undefined || typed === confirmPhrase;
+
+  function handleConfirm() {
+    if (!phraseMatched) return;
+    onConfirm();
+  }
+
   return (
     <Modal
       open={open}
@@ -111,16 +139,32 @@ export function ConfirmModal({
           </Button>
           <Button
             variant={variant}
-            onClick={onConfirm}
+            onClick={handleConfirm}
             loading={loading}
-            disabled={confirmDisabled}
+            disabled={confirmDisabled || !phraseMatched}
           >
             {confirmLabel}
           </Button>
         </>
       }
     >
-      <p className="text-sm text-[var(--color-text-muted)]">{message}</p>
+      <div className="space-y-4">
+        <p className="text-sm text-[var(--color-text-muted)]">{message}</p>
+        {confirmPhrase !== undefined && (
+          <Input
+            label={confirmPhraseLabel ?? `Type "${confirmPhrase}" to confirm`}
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            placeholder={confirmPhrase}
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && phraseMatched && !confirmDisabled && !loading) {
+                handleConfirm();
+              }
+            }}
+          />
+        )}
+      </div>
     </Modal>
   );
 }
