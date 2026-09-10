@@ -1600,6 +1600,105 @@ export interface PkiIssuerChain {
   certificate_bundle: string;
 }
 
+/**
+ * A point-in-time read of the server's change epochs (`sys/cache/version`).
+ *
+ * `topics` is keyed by mount path. A mount the caller may not read is
+ * **absent** rather than zero — an epoch is an activity signal, and the
+ * server declines to report one for a mount the caller cannot read.
+ */
+export interface CacheVersionSnapshot {
+  /** Aggregate counter, bumped by any change on the connected node. */
+  version: number;
+  topics: Record<string, number>;
+  /**
+   * True when the server stopped itemizing topics (more live topics than it
+   * will track). The only safe response is to drop the whole cache rather
+   * than trust a partial map.
+   */
+  coarse: boolean;
+}
+
+/**
+ * Page envelopes for the `<list>-info` bulk-metadata endpoints.
+ *
+ * Every one of them answers with the same shape — `records`, a `total` across
+ * all pages, and a `next` cursor that is empty on the last page — so the
+ * client's paging helper is written once. See
+ * `features/client-request-efficiency.md`.
+ */
+
+/** One admin Users row: the record plus its FIDO2 key count. */
+export interface UserRow extends UserInfo {
+  registered_keys: number;
+  fido2_enabled: boolean;
+}
+
+export interface UserPage {
+  records: UserRow[];
+  total: number;
+  next: string;
+}
+
+/** Every descendant namespace path plus a `path -> record` map. */
+export interface NamespaceTreeResult {
+  namespaces: string[];
+  details: Record<string, NamespaceInfo>;
+}
+
+/** One SSH role row: the config plus the name the stored entry omits. */
+export interface SshRoleEntry extends SshRoleConfig {
+  name: string;
+}
+
+export interface SshRolePage {
+  records: SshRoleEntry[];
+  total: number;
+  next: string;
+}
+
+/** One certificate-lifecycle row: the target and its renewer state. */
+export interface CertLifecycleTargetRow {
+  target: CertLifecycleTarget;
+  state: CertLifecycleState;
+}
+
+export interface CertLifecycleTargetPage {
+  records: CertLifecycleTargetRow[];
+  total: number;
+  next: string;
+}
+
+/**
+ * One row of the Certificates tab, as returned by `pki/certs-info`.
+ *
+ * A projection of `PkiCertRecord` without the PEM or the SAN buckets — those
+ * belong to the detail panel, which reads a single certificate. Fetching a
+ * page of these replaces the one-request-per-certificate fan-out that used
+ * to trip the server's abuse guard on a normal page load.
+ */
+export interface PkiCertSummary {
+  serial_number: string;
+  common_name: string;
+  issued_at: number;
+  not_after: number;
+  revoked_at?: number | null;
+  is_orphaned: boolean;
+  source: string;
+  issuer_id: string;
+  issuer_dn: string;
+  key_id: string;
+}
+
+/** One page of `PkiCertSummary` rows plus the cursor for the next. */
+export interface PkiCertSummaryPage {
+  records: PkiCertSummary[];
+  /** Total certificates on the mount, across all pages. */
+  total: number;
+  /** Cursor to pass back as `after`; empty when this was the last page. */
+  next: string;
+}
+
 export interface PkiCertRecord {
   serial_number: string;
   certificate: string;

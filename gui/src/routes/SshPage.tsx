@@ -22,7 +22,10 @@ import type {
   SshCredsResult,
 } from "../lib/types";
 import * as api from "../lib/api";
-import { extractError } from "../lib/error";
+import { extractError, isRouteUnsupported } from "../lib/error";
+import { cachedRead } from "../lib/cache";
+import { notifyLocalChange, watchTopic } from "../lib/changeWatcher";
+import { topicFor } from "../lib/topics";
 
 type TabId = "ca" | "roles" | "sign" | "creds";
 
@@ -373,6 +376,12 @@ function RolesTab({ mount }: { mount: string }) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
+    // The role pickers on the other tabs read a cached page of role
+    // configurations. This tab is where roles are written, so telling those
+    // watchers directly is what makes a role created in this window appear
+    // in this window's Sign / Creds pickers immediately, rather than on the
+    // change watcher's next poll.
+    notifyLocalChange(topicFor("ssh-roles", mount));
     try {
       const list = await api.sshListRoles(mount);
       setNames(list);
@@ -702,26 +711,74 @@ function RoleForm({
 // CA or OTP mode we read each one. Roles lists are small, so the N+1
 // is cheap; the payoff is dropdowns that never offer a role the engine
 // will reject (e.g. a CA-mode role under "Mint OTP" → HTTP 500).
+/** Roles fetched per request by {@link loadRoleModes}. The engine caps a page at 500. */
+const ROLE_FETCH_PAGE = 500;
+
+/**
+ * Every role's name and `key_type`, walking `ssh/roles-info` pages.
+ *
+ * Falls back to the pre-bulk shape (`ssh/roles` + one read each) against a
+ * server that predates the endpoint, so a newer client against an older
+ * vault degrades in speed rather than breaking.
+ */
+async function loadRoleModes(
+  mount: string,
+): Promise<Array<{ name: string; key_type: string }>> {
+  const out: Array<{ name: string; key_type: string }> = [];
+  let after: string | undefined;
+  try {
+    for (;;) {
+      const page = await api.sshListRolesInfo(mount, after, ROLE_FETCH_PAGE);
+      for (const r of page.records) {
+        out.push({ name: r.name, key_type: r.key_type });
+      }
+      if (!page.next) break;
+      after = page.next;
+    }
+    return out;
+  } catch (e) {
+    if (!isRouteUnsupported(e)) throw e;
+  }
+
+  // ── Version-skew fallback: server has no `ssh/roles-info` ──────────
+  const names = await api.sshListRoles(mount);
+  const configs = await Promise.all(
+    names.map((name) =>
+      api
+        .sshReadRole(mount, name)
+        .then((cfg) => ({ name, key_type: cfg.key_type }))
+        .catch(() => null),
+    ),
+  );
+  return configs.filter((c): c is { name: string; key_type: string } => c !== null);
+}
+
 function useRolesOfMode(mount: string, mode: "ca" | "otp") {
   const [roles, setRoles] = useState<string[]>([]);
+
+  const load = useCallback(async () => {
+    // One request per page of roles, not one per role: each tab mounts this
+    // hook, so the old `list + read each` shape cost `1 + N` requests *per
+    // tab* and was enough to trip the server's per-IP abuse guard on a mount
+    // with many roles.
+    //
+    // The cache does the rest: several tabs mounting at once share one
+    // in-flight load, and the filter runs client-side over the cached page,
+    // so asking for the CA roles and then the OTP roles is one request, not
+    // two.
+    return cachedRead(topicFor("ssh-roles", mount), "roles-info", () =>
+      loadRoleModes(mount),
+    );
+  }, [mount]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const names = await api.sshListRoles(mount);
-        const configs = await Promise.all(
-          names.map((name) =>
-            api
-              .sshReadRole(mount, name)
-              .then((cfg) => ({ name, key_type: cfg.key_type }))
-              .catch(() => null),
-          ),
-        );
+        const configs = await load();
         if (cancelled) return;
         setRoles(
           configs
-            .filter((c): c is { name: string; key_type: string } => c !== null)
             .filter((c) => c.key_type === mode)
             .map((c) => c.name),
         );
@@ -732,7 +789,20 @@ function useRolesOfMode(mount: string, mode: "ca" | "otp") {
     return () => {
       cancelled = true;
     };
-  }, [mount, mode]);
+  }, [load, mode]);
+
+  useEffect(() => {
+    // A role written by another operator (or by the Roles tab in this very
+    // window) changes which roles these pickers may offer.
+    if (!mount) return;
+    return watchTopic(mount, topicFor("ssh-roles", mount), () => {
+      void load()
+        .then((configs) => {
+          setRoles(configs.filter((c) => c.key_type === mode).map((c) => c.name));
+        })
+        .catch(() => setRoles([]));
+    });
+  }, [mount, mode, load]);
 
   return roles;
 }

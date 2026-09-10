@@ -7,6 +7,28 @@ import { useAuthStore } from "../stores/authStore";
 import { useNamespaceStore } from "../stores/namespaceStore";
 import { PkiPage } from "../routes/PkiPage";
 
+/**
+ * Project a `pki_read_cert` fixture into the `pki_certs_info` summary the
+ * Certificates tab now loads its rows from. Keeping the two derived from one
+ * fixture is deliberate: the endpoint is a projection of the per-cert read,
+ * and a test that let them drift would stop catching a real divergence.
+ */
+function certSummary(cert: Record<string, unknown>) {
+  return {
+    serial_number: cert.serial_number,
+    common_name: cert.common_name ?? "",
+    issued_at: cert.issued_at ?? 0,
+    not_after: cert.not_after ?? 0,
+    revoked_at: cert.revoked_at ?? null,
+    is_orphaned: cert.is_orphaned ?? false,
+    source: cert.source ?? "",
+    issuer_id: cert.issuer_id ?? "",
+    issuer_dn: cert.issuer_dn ?? "",
+    key_id: cert.key_id ?? "",
+  };
+}
+
+
 const mockInvoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
@@ -69,6 +91,12 @@ describe("PKI certificate renewal", () => {
         case "pki_list_issuers":
           return Promise.resolve({
             issuers: [{ id: "issuer-uuid-1", name: "Test Root CA", is_default: true }],
+          });
+        case "pki_list_certs_info":
+          return Promise.resolve({
+            records: [certSummary(CERT)],
+            total: 1,
+            next: "",
           });
         case "pki_list_certs":
           return Promise.resolve([SERIAL]);
@@ -171,6 +199,14 @@ describe("PKI certificate renewal", () => {
           return Promise.resolve([{ path: "pki/", mount_type: "pki" }]);
         case "pki_list_issuers":
           return Promise.resolve({ issuers: [] });
+        case "pki_list_certs_info":
+          return Promise.resolve({
+            records: [
+              certSummary({ ...CERT, is_orphaned: true, source: "pkcs12-import", issuer_id: "" }),
+            ],
+            total: 1,
+            next: "",
+          });
         case "pki_list_certs":
           return Promise.resolve([SERIAL]);
         case "pki_read_cert":

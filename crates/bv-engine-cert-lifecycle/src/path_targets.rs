@@ -10,13 +10,16 @@ use std::{collections::HashMap, sync::Arc};
 use serde_json::{json, Map, Value};
 
 use super::{
-    storage::{self, KeyPolicy, Target, TargetKind},
+    storage::{self, KeyPolicy, Target, TargetKind, TargetState},
     CertLifecycleBackend, CertLifecycleBackendInner,
 };
 use crate::{
     context::Context,
     errors::RvError,
-    logical::{field::FieldTrait, Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
+    logical::{
+        field::FieldTrait, page_response, paginate, Backend, Field, FieldType, Operation,
+        PageLimits, Path, PathOperation, Request, Response,
+    },
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
 
@@ -27,6 +30,36 @@ impl CertLifecycleBackend {
             pattern: r"targets/?$",
             operations: [{op: Operation::List, handler: r.list_targets}],
             help: "List managed cert-lifecycle target names."
+        })
+    }
+
+    /// `cert-lifecycle/targets-info` — one page of targets **with their
+    /// renewer state**.
+    ///
+    /// The lifecycle page needs both halves for every row, so it was
+    /// issuing a target read *and* a state read per target: `1 + 2N`
+    /// requests to render the table, which on any real inventory trips the
+    /// server's per-IP abuse guard. Merging them here is the largest single
+    /// saving of any endpoint in
+    /// `features/client-request-efficiency.md` — 2N becomes one page.
+    ///
+    /// A **Read**, so paging stays available to a read-only policy; the
+    /// cursor and page size therefore arrive as query parameters.
+    ///
+    /// `targets-info`, a sibling of `targets`, and not `targets/info`: the
+    /// item pattern `targets/(?P<name>\w[\w-]*\w)` matches `targets/info`,
+    /// so the nested form would depend on registration order and would make
+    /// `info` an unusable target name.
+    pub fn targets_list_info_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"targets-info$",
+            fields: {
+                "after": { field_type: FieldType::Str, default: "", description: "Cursor: return target names ordered after this one, exclusive. Omit for the first page." },
+                "limit": { field_type: FieldType::Int, default: 0, description: "Page size (default 100, max 500)." }
+            },
+            operations: [{op: Operation::Read, handler: r.list_targets_info}],
+            help: "One page of targets, each with the renewer state that `state/<name>` returns."
         })
     }
 
@@ -65,6 +98,51 @@ impl CertLifecycleBackendInner {
     pub async fn list_targets(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let names = req.storage_list("targets/").await?;
         Ok(Some(Response::list_response(&names)))
+    }
+
+    /// Handler for `cert-lifecycle/targets-info`. See
+    /// [`CertLifecycleBackend::targets_list_info_path`].
+    pub async fn list_targets_info(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let names = req.storage_list("targets/").await?;
+        let page = paginate(req, names, PageLimits::new(100, 500))?;
+        let mut records: Vec<Value> = Vec::with_capacity(page.keys.len());
+        for name in &page.keys {
+            let target: Option<Target> =
+                storage::get_json(req, &storage::target_storage_key(name)).await.unwrap_or(None);
+            let mut row = match &target {
+                // Reuse the same projection `targets/<name>` returns, so the
+                // table and the detail view cannot disagree about a field.
+                Some(t) => target_to_data(t),
+                // A target that fails to load still contributes a row
+                // carrying its name: silently omitting one hides a
+                // certificate nobody is renewing.
+                None => {
+                    let mut m: Map<String, Value> = Map::new();
+                    m.insert("name".into(), json!(name));
+                    m
+                }
+            };
+            // `state` is nested rather than flattened: the two records share
+            // a `name` field, and several callers pass the state straight to
+            // code that expects `state/<name>`'s shape.
+            let state: TargetState =
+                storage::get_json(req, &storage::state_storage_key(name))
+                    .await
+                    .unwrap_or(None)
+                    .unwrap_or_default();
+            row.insert("state".into(), json!({
+                "name": name,
+                "current_serial": state.current_serial,
+                "current_not_after": state.current_not_after_unix,
+                "last_renewal": state.last_renewal_unix,
+                "last_attempt": state.last_attempt_unix,
+                "last_error": state.last_error,
+                "next_attempt": state.next_attempt_unix,
+                "failure_count": state.failure_count,
+            }));
+            records.push(Value::Object(row));
+        }
+        Ok(Some(page_response(&page, records)))
     }
 
     pub async fn read_target(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {

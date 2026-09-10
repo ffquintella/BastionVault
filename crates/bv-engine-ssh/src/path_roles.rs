@@ -18,7 +18,10 @@ use super::{
 use crate::{
     context::Context,
     errors::RvError,
-    logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
+    logical::{
+        page_response, paginate, Backend, Field, FieldType, Operation, PageLimits, Path,
+        PathOperation, Request, Response,
+    },
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
 };
@@ -79,6 +82,38 @@ impl SshBackend {
             help: ROLES_LIST_HELP
         })
     }
+
+    /// `ssh/roles-info` — one page of full role configurations.
+    ///
+    /// The GUI needs each role's `key_type` just to decide which of the CA
+    /// and OTP tabs may offer it, so listing names and reading each role
+    /// cost `1 + N` requests *per tab* — see
+    /// `features/client-request-efficiency.md`. A role config is small, so
+    /// this returns the whole entry rather than a projection: one endpoint
+    /// then serves both the mode filter and the Roles tab, and there is no
+    /// second definition of "role summary" to drift.
+    ///
+    /// A **Read**, so paging stays available to a read-only policy; the
+    /// cursor and page size therefore arrive as query parameters.
+    ///
+    /// `roles-info`, a sibling of `roles`, and not `roles/info`: the item
+    /// pattern `roles/(?P<name>\w[\w-]*\w)` matches `roles/info`, so the
+    /// nested form would depend on registration order and would make `info`
+    /// an unusable role name.
+    pub fn roles_list_info_path(&self) -> Path {
+        let h = self.inner.clone();
+        new_path!({
+            pattern: r"roles-info$",
+            fields: {
+                "after": { field_type: FieldType::Str, default: "", description: "Cursor: return role names ordered after this one, exclusive. Omit for the first page." },
+                "limit": { field_type: FieldType::Int, default: 0, description: "Page size (default 100, max 500)." }
+            },
+            operations: [
+                {op: Operation::Read, handler: h.handle_roles_list_info}
+            ],
+            help: "One page of role configurations, keyed by name."
+        })
+    }
 }
 
 #[maybe_async::maybe_async]
@@ -115,6 +150,37 @@ impl SshBackendInner {
             }
             None => Ok(None),
         }
+    }
+
+    /// Handler for `ssh/roles-info`. See [`SshBackend::roles_list_info_path`].
+    pub async fn handle_roles_list_info(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let names = req.storage_list(ROLE_PREFIX).await?;
+        let page = paginate(req, names, PageLimits::new(100, 500))?;
+        let mut records: Vec<Value> = Vec::with_capacity(page.keys.len());
+        for name in &page.keys {
+            // A role that fails to load or parse still contributes a row
+            // carrying its name: a list that silently omits a role is worse
+            // than one showing a role the operator can drill into.
+            let role = self.get_role(req, name).await.ok().flatten();
+            records.push(match role {
+                Some(role) => {
+                    let mut obj = serde_json::to_value(&role)?
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default();
+                    // The stored entry does not carry its own key, and the
+                    // client correlates rows by name.
+                    obj.insert("name".into(), json!(name));
+                    Value::Object(obj)
+                }
+                None => json!({ "name": name }),
+            });
+        }
+        Ok(Some(page_response(&page, records)))
     }
 
     pub async fn handle_role_write(

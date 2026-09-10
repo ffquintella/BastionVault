@@ -18,7 +18,7 @@ use tauri::State;
 use crate::error::CmdResult;
 use crate::state::AppState;
 
-use super::make_request;
+use super::{make_request, paginated_path};
 
 /// Normalise an operator-supplied mount string into the form the router
 /// expects. We accept either `pki` or `pki/`; downstream code always
@@ -642,6 +642,64 @@ pub async fn pki_csr_read(
         csr: val_str(&map, "csr"),
         created_at: map.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
     }))
+}
+
+/// One row of the Outgoing CSR tab.
+///
+/// The CSR PEM is deliberately absent: only the row's "Copy CSR" action
+/// needs it, and one PEM per row was most of the payload. That action reads
+/// the single record on demand instead.
+#[derive(Serialize)]
+pub struct PkiCsrSummary {
+    pub csr_id: String,
+    pub role: String,
+    pub key_id: String,
+    pub common_name: String,
+    pub created_at: u64,
+}
+
+#[derive(Serialize)]
+pub struct PkiCsrSummaryPage {
+    pub records: Vec<PkiCsrSummary>,
+    pub total: u64,
+    pub next: String,
+}
+
+/// `pki/csr-info` — one page of pending-CSR summaries.
+///
+/// Replaces `pki_csr_list` followed by a `pki_csr_read` per ID.
+#[tauri::command]
+pub async fn pki_csr_list_info(
+    state: State<'_, AppState>,
+    mount: String,
+    after: Option<String>,
+    limit: Option<u64>,
+) -> CmdResult<PkiCsrSummaryPage> {
+    let mount = mount_prefix(&mount);
+    let path = paginated_path(&format!("{mount}/csr-info"), after, limit);
+    let resp = make_request(&state, Operation::Read, path, None).await?;
+    let map = data_to_map(resp);
+    let records = map
+        .get("records")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_object())
+                .map(|r| PkiCsrSummary {
+                    csr_id: val_str(r, "csr_id"),
+                    role: val_str(r, "role"),
+                    key_id: val_str(r, "key_id"),
+                    common_name: val_str(r, "common_name"),
+                    created_at: val_u64(r, "created_at"),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(PkiCsrSummaryPage {
+        records,
+        total: val_u64(&map, "total"),
+        next: val_str(&map, "next"),
+    })
 }
 
 #[tauri::command]
@@ -1402,6 +1460,85 @@ pub async fn pki_list_certs(state: State<'_, AppState>, mount: String) -> CmdRes
     let mount = mount_prefix(&mount);
     let resp = make_request(&state, Operation::List, format!("{mount}/certs"), None).await?;
     Ok(val_str_array(&data_to_map(resp), "keys"))
+}
+
+/// One row of the Certificates tab, as returned by `pki/certs-info`.
+///
+/// A projection of [`PkiCertRecord`] with the PEM and the SAN detail left
+/// out: those are what the detail panel reads a single certificate for, and
+/// shipping them per row is what made the list view expensive enough to trip
+/// the server's abuse guard.
+#[derive(Serialize)]
+pub struct PkiCertSummary {
+    pub serial_number: String,
+    pub common_name: String,
+    pub issued_at: u64,
+    pub not_after: u64,
+    pub revoked_at: Option<u64>,
+    pub is_orphaned: bool,
+    pub source: String,
+    pub issuer_id: String,
+    pub issuer_dn: String,
+    pub key_id: String,
+}
+
+/// One page of certificate summaries plus the cursor for the next.
+#[derive(Serialize)]
+pub struct PkiCertSummaryPage {
+    pub records: Vec<PkiCertSummary>,
+    /// Total certificates on the mount, so the UI can show progress
+    /// without walking every page.
+    pub total: u64,
+    /// Cursor to pass back as `after`. Empty when this was the last page.
+    pub next: String,
+}
+
+/// `pki/certs-info` — one page of certificate summaries in a single request.
+///
+/// Replaces the `pki_list_certs` + one `pki_read_cert` per serial pattern the
+/// Certificates tab used, which cost `1 + N` requests and transferred every
+/// PEM to render a name and an expiry. The common name and issuer DN are
+/// parsed server-side by the engine using the same crate this module does, so
+/// the rendered columns are unchanged.
+#[tauri::command]
+pub async fn pki_list_certs_info(
+    state: State<'_, AppState>,
+    mount: String,
+    after: Option<String>,
+    limit: Option<u64>,
+) -> CmdResult<PkiCertSummaryPage> {
+    let mount = mount_prefix(&mount);
+    let path = paginated_path(&format!("{mount}/certs-info"), after, limit);
+    let resp = make_request(&state, Operation::Read, path, None).await?;
+    let map = data_to_map(resp);
+    let records = map
+        .get("records")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_object())
+                .map(|r| PkiCertSummary {
+                    serial_number: val_str(r, "serial_number"),
+                    common_name: val_str(r, "common_name"),
+                    issued_at: val_u64(r, "issued_at"),
+                    not_after: val_u64(r, "not_after"),
+                    // Absent means "not revoked" — distinct from a
+                    // revocation recorded at epoch 0.
+                    revoked_at: r.get("revoked_at").and_then(|v| v.as_u64()),
+                    is_orphaned: val_bool(r, "is_orphaned"),
+                    source: val_str(r, "source"),
+                    issuer_id: val_str(r, "issuer_id"),
+                    issuer_dn: val_str(r, "issuer_dn"),
+                    key_id: val_str(r, "key_id"),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(PkiCertSummaryPage {
+        records,
+        total: val_u64(&map, "total"),
+        next: val_str(&map, "next"),
+    })
 }
 
 #[derive(Serialize)]
@@ -3141,6 +3278,48 @@ pub async fn pki_sign_request_read(
         return Ok(None);
     }
     Ok(Some(sign_request_from_map(&map)))
+}
+
+/// One page of sign-request summaries plus the cursor for the next.
+#[derive(Serialize)]
+pub struct PkiSignRequestPage {
+    pub records: Vec<PkiSignRequest>,
+    pub total: u64,
+    pub next: String,
+}
+
+/// `pki/sign-request-info` — one page of decision-queue summaries.
+///
+/// Replaces `pki_sign_request_list` followed by a `pki_sign_request_read`
+/// per ID. The rows carry the same fields the single read returns minus the
+/// CSR and certificate PEMs, which the review panel fetches when a request
+/// is actually opened.
+#[tauri::command]
+pub async fn pki_sign_request_list_info(
+    state: State<'_, AppState>,
+    mount: String,
+    after: Option<String>,
+    limit: Option<u64>,
+) -> CmdResult<PkiSignRequestPage> {
+    let mount = mount_prefix(&mount);
+    let path = paginated_path(&format!("{mount}/sign-request-info"), after, limit);
+    let resp = make_request(&state, Operation::Read, path, None).await?;
+    let map = data_to_map(resp);
+    let records = map
+        .get("records")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_object())
+                .map(sign_request_from_map)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(PkiSignRequestPage {
+        records,
+        total: val_u64(&map, "total"),
+        next: val_str(&map, "next"),
+    })
 }
 
 #[tauri::command]

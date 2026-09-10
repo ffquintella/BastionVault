@@ -151,6 +151,93 @@ pub async fn list_namespaces(state: State<'_, AppState>) -> CmdResult<NamespaceL
     Ok(NamespaceListResult { namespaces })
 }
 
+/// One level of the namespace tree: child leaf names plus their records.
+///
+/// Uses `sys/namespaces-info`, the bulk counterpart of the LIST
+/// [`list_direct_children`] performs, so a level costs one request instead of
+/// one plus a read per child.
+async fn list_direct_children_info(
+    state: &State<'_, AppState>,
+    token: &str,
+    parent: Option<&str>,
+) -> CmdResult<(Vec<String>, Vec<NamespaceInfo>)> {
+    let resp = dispatch_with_token_ns(
+        state,
+        Operation::Read,
+        "sys/namespaces-info".to_string(),
+        None,
+        token,
+        parent,
+    )
+    .await?;
+    let Some(data) = resp.and_then(|r| r.data) else {
+        return Ok((vec![], vec![]));
+    };
+    let leaves: Vec<String> = data
+        .get("keys")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let records: Vec<NamespaceInfo> = data
+        .get("records")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_object())
+                // `path` on the record is already the full slash-delimited
+                // path; the fallback is only reached for a child whose record
+                // failed to load server-side.
+                .map(|o| to_info(Some(o), ""))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((leaves, records))
+}
+
+/// Every descendant namespace **with its record**, in one request per tree
+/// level.
+///
+/// Replaces `list_namespaces` followed by a `read_namespace` per path, which
+/// cost `levels + N` requests to render the Namespaces page — the shape that
+/// trips the server's per-IP abuse guard. See
+/// `features/client-request-efficiency.md`.
+#[tauri::command]
+pub async fn list_namespaces_info(state: State<'_, AppState>) -> CmdResult<NamespaceTreeResult> {
+    let token = state.token.lock().await.clone().unwrap_or_default();
+    let mut namespaces = Vec::new();
+    let mut details: Map<String, Value> = Map::new();
+    let mut queue: VecDeque<Option<String>> = VecDeque::from([None]);
+    while let Some(parent) = queue.pop_front() {
+        let (leaves, records) = list_direct_children_info(&state, &token, parent.as_deref()).await?;
+        for leaf in leaves {
+            let full = match &parent {
+                Some(p) => format!("{p}/{leaf}"),
+                None => leaf,
+            };
+            queue.push_back(Some(full.clone()));
+            namespaces.push(full);
+        }
+        for rec in records {
+            // Keyed by the record's own path so the map matches what the page
+            // looks entries up by.
+            let path = rec.path.clone();
+            if let Ok(v) = serde_json::to_value(&rec) {
+                details.insert(path, v);
+            }
+        }
+    }
+    namespaces.sort();
+    Ok(NamespaceTreeResult { namespaces, details })
+}
+
+/// Every descendant path plus a `path -> record` map, as returned by
+/// [`list_namespaces_info`].
+#[derive(Serialize)]
+pub struct NamespaceTreeResult {
+    pub namespaces: Vec<String>,
+    pub details: Map<String, Value>,
+}
+
 /// The namespaces the session token may operate in. Unlike [`list_namespaces`]
 /// — which walks the root/sudo-gated `sys/namespaces` CRUD surface and therefore
 /// only works for an admin — this is granted to every authenticated token, so it

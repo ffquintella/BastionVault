@@ -18,7 +18,70 @@ import { usePasswordPolicyStore } from "../stores/passwordPolicyStore";
 import { useEntityDirectoryStore } from "../stores/entityDirectoryStore";
 import { checkPasswordPolicy, describePolicy } from "../lib/password";
 import * as api from "../lib/api";
-import { extractError } from "../lib/error";
+import { extractError, isRouteUnsupported } from "../lib/error";
+import { cachedRead, invalidateTopic } from "../lib/cache";
+import { watchTopic } from "../lib/changeWatcher";
+import { authMount, topicFor } from "../lib/topics";
+
+/** Users fetched per request. The engine caps a page at 500. */
+const USER_FETCH_PAGE = 500;
+
+/**
+ * Every user's record plus its FIDO2 key count, walking
+ * `auth/<mount>/users-info` pages.
+ *
+ * Falls back to the pre-bulk shape (list, then `getUser` and
+ * `fido2ListCredentials` each) against a server that predates the endpoint,
+ * so a newer client against an older vault degrades in speed rather than
+ * breaking.
+ */
+async function loadUserRows(mountPath: string): Promise<{
+  users: string[];
+  fido2: Record<string, number>;
+  flags: Record<string, { disabled: boolean; locked: boolean; mfa: boolean }>;
+}> {
+  const users: string[] = [];
+  const fido2: Record<string, number> = {};
+  const flags: Record<string, { disabled: boolean; locked: boolean; mfa: boolean }> = {};
+  let after: string | undefined;
+  try {
+    for (;;) {
+      const page = await api.listUsersInfo(mountPath, after, USER_FETCH_PAGE);
+      for (const r of page.records) {
+        users.push(r.username);
+        // Only record a count when there is one, matching the old shape:
+        // the badge is rendered from the presence of a key.
+        if (r.registered_keys > 0) fido2[r.username] = r.registered_keys;
+        flags[r.username] = {
+          disabled: r.disabled,
+          locked: r.locked,
+          mfa: r.totp_mfa_enabled,
+        };
+      }
+      if (!page.next) break;
+      after = page.next;
+    }
+    return { users, fido2, flags };
+  } catch (e) {
+    if (!isRouteUnsupported(e)) throw e;
+  }
+
+  // ── Version-skew fallback: server has no `users-info` ──────────────
+  const result = await api.listUsers(mountPath);
+  await Promise.all(
+    result.users.map(async (u) => {
+      try {
+        const cred = await api.fido2ListCredentials(u);
+        if (cred) fido2[u] = cred.registered_keys;
+      } catch { /* */ }
+      try {
+        const ui = await api.getUser(mountPath, u);
+        flags[u] = { disabled: ui.disabled, locked: ui.locked, mfa: ui.totp_mfa_enabled };
+      } catch { /* */ }
+    }),
+  );
+  return { users: result.users, fido2, flags };
+}
 
 export function UsersPage() {
   const { toast } = useToast();
@@ -112,6 +175,24 @@ export function UsersPage() {
     ensureMountAndLoad();
   }, [mountPath]);
 
+  useEffect(() => {
+    // Another admin creating, disabling or unlocking an account — or a
+    // lockout the server applied on its own — now shows up here. The mount
+    // the server keys its epochs by is the full `auth/<mount>/`, not the
+    // bare `<mount>/` this page carries.
+    if (!mountPath) return;
+    return watchTopic(
+      authMount(mountPath),
+      topicFor("userpass-users", mountPath),
+      () => {
+        void loadUsers({ cached: true });
+      },
+    );
+    // `loadUsers` is a plain function redefined every render; depending on it
+    // would resubscribe on each one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mountPath]);
+
   // Listen for FIDO2 status/PIN events
   useEffect(() => {
     if (!registering) {
@@ -181,7 +262,12 @@ export function UsersPage() {
     } catch (e) {
       toast("error", `Could not list auth methods: ${extractError(e)}`);
     }
-    await Promise.all([loadUsers(), loadPolicies(), loadNamespaces(), loadSecurityConfig()]);
+    await Promise.all([
+      loadUsers({ cached: true }),
+      loadPolicies(),
+      loadNamespaces(),
+      loadSecurityConfig(),
+    ]);
   }
 
   async function loadSecurityConfig() {
@@ -231,27 +317,27 @@ export function UsersPage() {
     }
   }
 
-  async function loadUsers() {
+  /**
+   * Reload the table.
+   *
+   * `cached` is for the initial load and for a change notification; every
+   * caller that has just written drops the topic first, so the reload cannot
+   * be served the pre-write answer.
+   */
+  async function loadUsers(opts?: { cached?: boolean }) {
+    const topic = topicFor("userpass-users", mountPath);
+    if (!opts?.cached) invalidateTopic(topic);
     setLoading(true);
     try {
-      const result = await api.listUsers(mountPath);
-      setUsers(result.users);
-      // Load FIDO2 info and status flags for each user.
-      const info: Record<string, number> = {};
-      const flags: Record<string, { disabled: boolean; locked: boolean; mfa: boolean }> = {};
-      await Promise.all(
-        result.users.map(async (u) => {
-          try {
-            const cred = await api.fido2ListCredentials(u);
-            if (cred) info[u] = cred.registered_keys;
-          } catch { /* */ }
-          try {
-            const ui = await api.getUser(mountPath, u);
-            flags[u] = { disabled: ui.disabled, locked: ui.locked, mfa: ui.totp_mfa_enabled };
-          } catch { /* */ }
-        }),
+      // One request per page, carrying the flags *and* the FIDO2 key count.
+      // Both used to be a read per user on top of the list — `1 + 2N`
+      // requests to render the table, and both come off the same stored
+      // record. See features/client-request-efficiency.md.
+      const { users, fido2, flags } = await cachedRead(topic, "users-info", () =>
+        loadUserRows(mountPath),
       );
-      setUserFido2Info(info);
+      setUsers(users);
+      setUserFido2Info(fido2);
       setUserFlags(flags);
     } catch {
       setUsers([]);

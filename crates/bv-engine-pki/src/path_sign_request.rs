@@ -49,7 +49,10 @@ use super::{
 use crate::{
     context::Context,
     errors::RvError,
-    logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
+    logical::{
+        page_response, paginate, Backend, Field, FieldType, Operation, PageLimits, Path,
+        PathOperation, Request, Response,
+    },
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
 
@@ -91,6 +94,27 @@ impl PkiBackend {
             pattern: r"sign-request/?$",
             operations: [{op: Operation::List, handler: r.sign_request_list}],
             help: "List inbound sign-request ids."
+        })
+    }
+
+    /// `pki/sign-request-info` — one page of queue summaries.
+    ///
+    /// Replaces listing the IDs and reading each record, `1 + N` requests
+    /// to render the decision queue. Returns exactly the projection the
+    /// single read returns, without the CSR and certificate PEMs.
+    ///
+    /// A **Read**: an approver with read-only policy on the queue must
+    /// still be able to page through it.
+    pub fn sign_request_list_info_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"sign-request-info$",
+            fields: {
+                "after": { field_type: FieldType::Str, default: "", description: "Cursor: return request IDs ordered after this one, exclusive. Omit for the first page." },
+                "limit": { field_type: FieldType::Int, default: 0, description: "Page size (default 100, max 500)." }
+            },
+            operations: [{op: Operation::Read, handler: r.sign_request_list_info}],
+            help: "One page of inbound sign-request summaries, without the CSR bodies."
         })
     }
 
@@ -292,6 +316,33 @@ impl PkiBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let ids = req.storage_list(storage::KEY_PREFIX_SIGN_REQUEST).await?;
         Ok(Some(Response::list_response(&ids)))
+    }
+
+    /// Handler for `pki/sign-request-info`. See
+    /// [`PkiBackend::sign_request_list_info_path`].
+    pub async fn sign_request_list_info(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let ids = req.storage_list(storage::KEY_PREFIX_SIGN_REQUEST).await?;
+        let page = paginate(req, ids, PageLimits::new(100, 500))?;
+        let mut records: Vec<Value> = Vec::with_capacity(page.keys.len());
+        for id in &page.keys {
+            // Reuse the projection the single read already returns, minus
+            // the CSR and certificate PEMs it adds on top. One definition
+            // of a summary means the queue list and the detail panel
+            // cannot disagree about a field.
+            records.push(match self.load_sign_request(req, id).await {
+                Ok(Some(record)) => Value::Object(record_summary(&record)),
+                // A record that fails to load or parse still contributes a
+                // row carrying its ID: this is a decision queue, and
+                // silently dropping an entry hides work the operator owes
+                // an answer to.
+                _ => json!({ "request_id": id }),
+            });
+        }
+        Ok(Some(page_response(&page, records)))
     }
 
     pub async fn sign_request_read(

@@ -864,6 +864,111 @@ Config fields: `enabled` (bool), `window_secs`, `max_requests`,
 `auth_max_requests`, `ban_secs`, `refresh_secs`. An optional startup
 `dos { ... }` config block seeds the initial values.
 
+### Bulk metadata listings (`<list>-info`)
+
+Every list-heavy view needs one summary per listed object. Reading them one at
+a time is `1 + N` requests per page load — enough, on a mount holding a few
+hundred objects, to cross the abuse guard's own ceiling above and ban the
+caller. These endpoints return a **page of summaries** instead.
+
+~~~
+GET /v2/{mount}/certs-info                 # PKI: issued certificates
+GET /v2/{mount}/csr-info                   # PKI: pending outgoing CSRs
+GET /v2/{mount}/sign-request-info          # PKI: inbound sign-request queue
+GET /v2/{mount}/roles-info                 # SSH: role configurations
+GET /v2/{mount}/targets-info               # cert-lifecycle: targets + renewer state
+GET /v2/auth/{mount}/users-info            # userpass: user records + FIDO2 key counts
+GET /v2/sys/namespaces-info                # child namespaces + their records
+~~~
+
+All seven share one contract:
+
+| Parameter | Meaning |
+|---|---|
+| `after` | Cursor: the `next` value from the previous page. Omit for the first. |
+| `limit` | Page size. Default 100, capped at 500. |
+
+~~~json
+{
+  "keys":      ["<name>", "..."],
+  "records":   [ { /* one summary per key, same order */ } ],
+  "total":     1200,
+  "next":      "<cursor>",
+  "truncated": true
+}
+~~~
+
+- **`after` is a key, not an offset.** The next page starts strictly after the
+  named key in lexicographic order, so creating or deleting an object between
+  two requests can neither re-serve a row nor skip one. A cursor naming a
+  since-deleted key still resumes in the right place.
+- **`next` is empty on the last page**, and `truncated` mirrors that. A cursor
+  past the end is an empty, non-truncated page — not an error.
+- **These are reads**, so paging a listing stays available to a read-only
+  policy, and each page is authorized exactly like the listing path it
+  replaces. A summary is a projection of records the caller can already read
+  individually; these endpoints grant nothing new.
+- **Records are the same projection the single read returns**, minus large
+  bodies: `certs-info` and `csr-info` omit PEMs, `sign-request-info` omits the
+  CSR and certificate. Fetch the single object when you need those.
+- `targets-info` nests the renewer state under `state` (both halves carry a
+  `name`); `users-info` rows add `registered_keys` and `fido2_enabled`.
+
+Against a server that predates one of these routes the response is
+`404 … path not supported`; clients fall back to the per-object reads. See
+[`features/client-request-efficiency.md`](../features/client-request-efficiency.md).
+
+### Cache coherence (`sys/cache/version`)
+
+Change epochs for the mounts a client names, so it can drop stale cached
+listings when *another* client writes instead of waiting out a local TTL.
+
+~~~
+GET /v2/sys/cache/version?topics=pki/,auth/userpass/
+GET /v2/sys/cache/version?topics=pki/&watch=1      # long-poll (~25 s)
+~~~
+
+~~~json
+{ "version": 412, "topics": { "pki/": 17, "auth/userpass/": 3 }, "coarse": false }
+~~~
+
+- `version` is a monotonic aggregate bumped by **any** change on the node, and
+  is also the response `ETag`. Send it back as `If-None-Match` and a quiet
+  vault answers `304` — a poll costs a header exchange, not a body.
+- `topics` maps mount path → epoch. An epoch that has **increased** since the
+  client's last observation means that mount was written to.
+- `watch=1` blocks until the aggregate changes or ~25 s elapses, then answers
+  normally (or `304` on timeout).
+- `coarse: true` means the server has more live topics than it will itemize.
+  Treat a `version` bump as global and drop the whole cache.
+
+Authorization and disclosure:
+
+- **The caller must name its topics.** There is no enumeration — the endpoint
+  will not list what mounts exist.
+- **Each named topic is authorized** against the caller's own capabilities for
+  that mount. A topic the caller may not read is **omitted** from `topics`,
+  not reported as zero: an epoch is an activity signal, and an absent key
+  makes no claim about the mount. At most 64 topics per request.
+- Epochs are scoped to the namespace the request is made in (the
+  `X-BastionVault-Namespace` header), so a snapshot never reveals activity in
+  another tenant.
+
+Operational notes:
+
+- Epochs are **in-memory and per node**, like the abuse guard's counters:
+  persisting a counter on every write would double the vault's write cost.
+  In an HA cluster two clients pinned to different nodes will not invalidate
+  each other, so a client cache must keep a TTL as its backstop.
+- Counters **reset on restart**, so treat only an *increase* as evidence of a
+  write. Acting on a decrease would clear caches on every failover.
+- A **login does not bump** its auth mount, even though it touches the stored
+  user record: waking every watcher on every sign-in would cost more than the
+  staleness it prevents. A `failed_login_count` in an admin listing can
+  therefore lag by one cache TTL.
+
+See [`features/client-request-efficiency.md`](../features/client-request-efficiency.md).
+
 ### Metrics
 
 ~~~

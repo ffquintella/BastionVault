@@ -41,7 +41,10 @@ use super::{
 use crate::{
     context::Context,
     errors::RvError,
-    logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
+    logical::{
+        page_response, paginate, Backend, Field, FieldType, Operation, PageLimits, Path,
+        PathOperation, Request, Response,
+    },
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
 
@@ -71,6 +74,28 @@ impl PkiBackend {
             pattern: r"csr/?$",
             operations: [{op: Operation::List, handler: r.csr_list}],
             help: "List pending external-signing CSR IDs."
+        })
+    }
+
+    /// `pki/csr-info` — one page of pending-CSR summaries.
+    ///
+    /// Replaces listing the IDs and then reading each record, which cost
+    /// `1 + N` requests to render the queue. The CSR PEM is omitted: only
+    /// the row's "Copy CSR" action needs it, and shipping one per row is
+    /// most of the payload for a column nobody reads.
+    ///
+    /// A **Read**, so paging stays available to a read-only policy; the
+    /// cursor and page size therefore arrive as query parameters.
+    pub fn csr_list_info_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"csr-info$",
+            fields: {
+                "after": { field_type: FieldType::Str, default: "", description: "Cursor: return CSR IDs ordered after this one, exclusive. Omit for the first page." },
+                "limit": { field_type: FieldType::Int, default: 0, description: "Page size (default 100, max 500)." }
+            },
+            operations: [{op: Operation::Read, handler: r.csr_list_info}],
+            help: "One page of pending external-signing CSR summaries, without the CSR bodies."
         })
     }
 
@@ -302,6 +327,35 @@ impl PkiBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let ids = req.storage_list(storage::KEY_PREFIX_CSR_PENDING).await?;
         Ok(Some(Response::list_response(&ids)))
+    }
+
+    /// Handler for `pki/csr-info`. See [`PkiBackend::csr_list_info_path`].
+    pub async fn csr_list_info(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let ids = req.storage_list(storage::KEY_PREFIX_CSR_PENDING).await?;
+        let page = paginate(req, ids, PageLimits::new(100, 500))?;
+        let mut records: Vec<Value> = Vec::with_capacity(page.keys.len());
+        for id in &page.keys {
+            let key = storage::pending_csr_storage_key(id);
+            let record: Option<PendingCsr> = storage::get_json(req, &key).await.unwrap_or(None);
+            // A record that fails to load still contributes a row carrying
+            // its ID: a queue that silently drops an entry is worse than
+            // one showing an entry the operator can investigate.
+            records.push(match record {
+                Some(r) => json!({
+                    "csr_id": r.id,
+                    "role": r.role_name,
+                    "key_id": r.key_id,
+                    "common_name": r.common_name,
+                    "created_at": r.created_at_unix,
+                }),
+                None => json!({ "csr_id": id }),
+            });
+        }
+        Ok(Some(page_response(&page, records)))
     }
 
     pub async fn csr_read(

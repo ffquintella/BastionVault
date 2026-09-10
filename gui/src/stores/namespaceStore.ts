@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import * as api from "../lib/api";
+import { clearCache } from "../lib/cache";
 
 // localStorage keys. `ACTIVE_KEY` mirrors the backend's session-active
 // namespace for display continuity; `LIST_KEY` caches the last-known
@@ -210,6 +211,11 @@ export const useNamespaceStore = create<NamespaceState>((set, get) => ({
 
   setActive: async (path: string) => {
     await api.setActiveNamespace(path);
+    // Every cached read was answered in the previous namespace's view.
+    // Cache topics are namespace-qualified, but the switch also changes what
+    // an unqualified mount path resolves to, so the safe move is to drop the
+    // lot rather than reason about which topics survive.
+    clearCache();
     set({ active: path });
     persist(null, path);
   },

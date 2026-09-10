@@ -9,7 +9,7 @@ use actix_web::{
     web,
     HttpRequest,
     HttpResponse,
-    http::{StatusCode},
+    http::{header, StatusCode},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -376,6 +376,28 @@ async fn sys_namespace_list_request_handler(
     let mut r = request_auth(&req);
     r.path = "sys/namespaces".to_string();
     r.operation = Operation::List;
+    copy_namespace_header(&req, &mut r);
+    handle_request(core, &mut r).await
+}
+
+/// GET `/sys/namespaces-info` — one page of child namespaces with their
+/// records, so a client does not read each child individually.
+///
+/// Needs its own shim for the same reason `/sys/namespaces` does: the `/v1/sys`
+/// scope 404s an unshimmed sys path before it reaches the logical catch-all,
+/// which is why the route would answer in embedded vault mode and nowhere else.
+///
+/// Unlike the other sys shims, this one lifts the query string: `after` and
+/// `limit` are the pagination cursor, and the allowlist lift that the logical
+/// catch-all performs (`logical_routes`) does not run on this path.
+async fn sys_namespaces_info_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/namespaces-info".to_string();
+    r.operation = Operation::Read;
+    r.data = crate::logical::parse_query_allowlist(req.query_string());
     copy_namespace_header(&req, &mut r);
     handle_request(core, &mut r).await
 }
@@ -2975,6 +2997,110 @@ async fn sys_plugins_surface_get_handler(
     result
 }
 
+/// GET `/v2/sys/cache/version` — change epochs for the mounts the caller
+/// names, with an optional long-poll.
+///
+/// Modeled on `sys_plugins_active_surfaces_handler` below, which is the
+/// existing ETag + `If-None-Match` + `?watch=1` channel in this file: same
+/// shape, already proven through `bv-client` and whatever proxy sits in front
+/// of it. The difference is the wakeup — this one waits on a
+/// `tokio::sync::Notify` that the request path fires, so an invalidation
+/// reaches a waiting client immediately instead of within a poll interval.
+///
+/// Needs its own shim because every `/v1|v2/sys` path does: the scope 404s an
+/// unshimmed sys route before it reaches the logical catch-all. It also lifts
+/// the query string, since the allowlist lift that `logical_routes` performs
+/// does not run here.
+///
+/// Authorization, topic filtering and the refusal to enumerate all live in
+/// the logical handler (`handle_cache_version`); this shim adds only the
+/// waiting and the caching headers. The long-poll re-runs the *whole* logical
+/// request after a wakeup, so the caller's capabilities are re-evaluated
+/// rather than trusted from before the wait.
+async fn sys_cache_version_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let query = req.query_string().to_string();
+    let watch_requested =
+        query.split('&').any(|kv| matches!(kv, "watch=1" | "watch=true"));
+    let if_none_match = req
+        .headers()
+        .get("If-None-Match")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim_matches('"').to_string());
+
+    let dispatch = |req: &HttpRequest| {
+        let mut r = request_auth(req);
+        r.path = "sys/cache/version".to_string();
+        r.operation = Operation::Read;
+        r.data = crate::logical::parse_query_allowlist(&query);
+        copy_namespace_header(req, &mut r);
+        r
+    };
+
+    // The ETag is the registry's aggregate version: one comparison answers
+    // "has anything at all changed?", which is what makes the wait cheap.
+    let etag_of = |core: &Core| core.change_epochs.version().to_string();
+
+    // Dispatch — and therefore authorize — *before* any short-circuit.
+    //
+    // Answering a bare `304` off the ETag alone would be cheaper, and wrong:
+    // this route is reachable without a usable token, so an unauthenticated
+    // caller comparing `If-None-Match` values would learn the vault's global
+    // write counter by binary search, without ever being authorized. Every
+    // exit from this handler now sits behind a real request.
+    let mut r = dispatch(&req);
+    let mut rendered = handle_request(core.clone(), &mut r).await?;
+    let mut etag = etag_of(&core);
+
+    if watch_requested && if_none_match.as_deref() == Some(etag.as_str()) {
+        // 25 s ceiling, leaving 5 s of slack before `bv-client`'s default 30 s
+        // `timeout_global` fires — the same budget the plugin-surface watcher
+        // uses. A timeout is a 304, not an error: the client re-polls.
+        let changed = core
+            .change_epochs
+            .wait_for_change(
+                etag.parse::<u64>().unwrap_or(0),
+                std::time::Duration::from_secs(25),
+            )
+            .await;
+        if !changed {
+            return Ok(HttpResponse::NotModified()
+                .insert_header(("ETag", format!("\"{etag}\"")))
+                .finish());
+        }
+        // Re-run the whole request rather than patching the body we already
+        // have: the caller's capabilities are re-evaluated after the wait
+        // instead of being trusted from before it, which matters when a
+        // policy or token changed during those 25 seconds.
+        let mut r = dispatch(&req);
+        rendered = handle_request(core.clone(), &mut r).await?;
+        etag = etag_of(&core);
+    }
+
+    if if_none_match.as_deref() == Some(etag.as_str()) {
+        return Ok(HttpResponse::NotModified()
+            .insert_header(("ETag", format!("\"{etag}\"")))
+            .finish());
+    }
+    Ok(add_etag(rendered, &etag))
+}
+
+/// Attach `ETag` / `Cache-Control` to an already-rendered response.
+///
+/// Mutates the existing response's headers rather than rebuilding it: the
+/// body is an opaque `BoxBody` by this point, and copying it into a new
+/// response would mean either buffering it or re-streaming it for no reason.
+fn add_etag(mut resp: HttpResponse, etag: &str) -> HttpResponse {
+    let headers = resp.headers_mut();
+    if let Ok(v) = header::HeaderValue::from_str(&format!("\"{etag}\"")) {
+        headers.insert(header::ETAG, v);
+    }
+    headers.insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-cache"));
+    resp
+}
+
 async fn sys_plugins_active_surfaces_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
@@ -4217,6 +4343,19 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
         .service(
             web::resource("/namespaces-self")
                 .route(web::get().to(sys_namespaces_self_request_handler)),
+        )
+        // Cache-coherence channel. `GET` only; the long-poll and the ETag
+        // live in the handler.
+        .service(
+            web::resource("/cache/version")
+                .route(web::get().to(sys_cache_version_handler)),
+        )
+        // Bulk counterpart to the LIST above. Same reasoning as `-self`: a
+        // distinct literal that `/namespaces/{path:.*}` cannot match, but
+        // registered before it so the intent stays obvious.
+        .service(
+            web::resource("/namespaces-info")
+                .route(web::get().to(sys_namespaces_info_request_handler)),
         )
         .service(
             web::resource("/namespaces/{path:.*}")

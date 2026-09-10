@@ -83,6 +83,7 @@ impl UserPassBackend {
 
         backend.paths.push(Arc::new(self.users_path()));
         backend.paths.push(Arc::new(self.user_list_path()));
+        backend.paths.push(Arc::new(self.user_list_info_path()));
         backend.paths.push(Arc::new(self.user_password_path()));
         backend.paths.push(Arc::new(self.user_unlock_path()));
         backend.paths.push(Arc::new(self.lockout_config_path()));

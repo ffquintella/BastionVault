@@ -20,7 +20,8 @@ use crate::{
     core::Core,
     errors::RvError,
     logical::{
-        field::FieldTrait, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation, Request, Response,
+        field::FieldTrait, optional_param, page_response, paginate, Backend, Field, FieldType,
+        LogicalBackend, Operation, PageLimits, Path, PathOperation, Request, Response,
     },
     modules::{
         auth::{AuthModule, AUTH_TABLE_TYPE},
@@ -169,6 +170,8 @@ impl SystemBackend {
         let sys_backend_sso_providers = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespace_list = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespaces_self = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_namespace_list_info = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_cache_version = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespace_self_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespace_self_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespace_read = self.self_ptr.upgrade().unwrap().clone();
@@ -823,6 +826,55 @@ impl SystemBackend {
                         {op: Operation::Read, handler: sys_backend_namespaces_self.handle_namespaces_self}
                     ],
                     help: "List the namespaces the calling token may operate in."
+                },
+                {
+                    // Cache coherence: the change epochs for the mounts the
+                    // caller names. A **Read** with the topics in the query
+                    // string, so a read-only session can subscribe; the HTTP
+                    // shim adds the `?watch=1` long-poll and the ETag. The
+                    // caller must name its topics — this route deliberately
+                    // cannot enumerate, so it never reveals a mount the
+                    // caller did not already know about — and each named
+                    // topic is checked against the caller's own capabilities
+                    // before its counter is reported.
+                    pattern: "cache/version$",
+                    fields: {
+                        "topics": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: r#"Comma-separated mount paths to report epochs for (e.g. `pki/,auth/userpass/`)."#
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_cache_version.handle_cache_version}
+                    ],
+                    help: "Change epochs for the named mounts, so a client can drop stale cached listings."
+                },
+                {
+                    // Bulk counterpart to `namespaces` LIST: one page of child
+                    // namespaces *with their records*, so a client does not read
+                    // each child individually. Same root/sudo gating as the CRUD
+                    // surface above — this is a projection of reads the caller can
+                    // already perform, not a new grant. Named `-info` for the same
+                    // reason `-self` is: `namespaces/(?P<path>.+)` would match
+                    // `namespaces/info`, making `info` an unusable namespace name.
+                    pattern: "namespaces-info$",
+                    fields: {
+                        "after": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Cursor: return child paths ordered after this one, exclusive. Omit for the first page."
+                        },
+                        "limit": {
+                            field_type: FieldType::Int,
+                            default: 0,
+                            description: "Page size (default 100, max 500)."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_namespace_list_info.handle_namespace_list_info}
+                    ],
+                    help: "One page of child namespaces, each with the record `namespaces/<path>` returns."
                 },
                 {
                     // Read / create-or-update / delete a namespace by path.
@@ -3028,6 +3080,88 @@ impl SystemBackend {
         Ok(None)
     }
 
+    /// `GET sys/cache/version` (exposed as `/v2/sys/cache/version`).
+    ///
+    /// Reports the change epoch for each mount the caller names, so a client
+    /// can drop the cached listings for whichever mounts moved instead of
+    /// waiting out a TTL. The HTTP shim adds the `?watch=1` long-poll and the
+    /// ETag; this handler answers the point-in-time question.
+    ///
+    /// # Why the caller must name its topics
+    ///
+    /// The registry is process-global: it holds a counter for every mount in
+    /// every namespace that has been written to. Returning it wholesale would
+    /// tell a tenant which mounts exist elsewhere, and tell any authenticated
+    /// caller which mounts in its own namespace it is not allowed to read.
+    /// So there is no enumeration: a caller learns only about mount names it
+    /// supplied, and a supplied name is reported only if the caller's own
+    /// capabilities cover reading it. A topic the caller cannot read is
+    /// **omitted**, not zeroed — a zero is a claim about the mount, and the
+    /// absence of a key is not.
+    ///
+    /// A counter is not secret material, but it is an activity signal: "the
+    /// `payroll/` mount was written to 40 times in the last hour" is worth
+    /// refusing to a caller who cannot read `payroll/`.
+    pub async fn handle_cache_version(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let auth = req.auth.clone().ok_or(RvError::ErrPermissionDenied)?;
+
+        let raw = optional_param(req, "topics").as_str().unwrap_or("").to_string();
+        let requested: Vec<String> = raw
+            .split(',')
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            // A topic is a mount path. Refuse anything that could only be an
+            // attempt to probe something else.
+            .filter(|t| t.len() <= MAX_CACHE_TOPIC_LEN && !t.contains(".."))
+            .take(MAX_CACHE_TOPICS)
+            .map(|t| match t.ends_with('/') {
+                true => t.to_string(),
+                // Mounts are stored with a trailing slash; accept either.
+                false => format!("{t}/"),
+            })
+            .collect();
+
+        // Same namespace resolution the capability probe uses: the epochs are
+        // keyed by namespace, and the answer must be for the namespace this
+        // request is actually scoped to.
+        let active_ns = self.resolve_request_namespace(req).await?.map(|(_, path)| path);
+        let ns = active_ns.clone().unwrap_or_default();
+
+        let allowed: Vec<String> = if requested.is_empty() {
+            Vec::new()
+        } else {
+            let policy_module = self.get_module::<PolicyModule>("policy")?;
+            let policy_store = policy_module.policy_store.load();
+            let acl: ACL = policy_store
+                .new_acl_for_request(&auth.policies, None, &auth, active_ns.as_deref())
+                .await?;
+            let ns_prefix = match active_ns.as_deref() {
+                Some(p) if !p.is_empty() => format!("{}/", p.trim_end_matches('/')),
+                _ => String::new(),
+            };
+            requested
+                .into_iter()
+                .filter(|mount| {
+                    // Probe the string the router would authorize, exactly as
+                    // `capabilities-self` does — a namespace-bound caller's
+                    // policy rules are `<ns>/`-prefixed.
+                    let probe = qualify_capability_path(&ns_prefix, mount);
+                    let caps = acl.capabilities(probe);
+                    caps.iter().any(|c| c == "root" || c == "read" || c == "list")
+                        && !caps.iter().any(|c| c == "deny")
+                })
+                .collect()
+        };
+
+        let snapshot = self.core.change_epochs.snapshot_for(&ns, &allowed);
+        let data = serde_json::to_value(&snapshot)?.as_object().cloned();
+        Ok(Some(Response::data_response(data)))
+    }
+
     /// `POST sys/capabilities-self` (exposed as `/v2/sys/capabilities-self`).
     ///
     /// Returns the calling token's effective capabilities on each requested
@@ -3707,9 +3841,14 @@ impl SystemBackend {
         }
     }
 
-    fn namespace_to_response(ns: &crate::modules::namespace::Namespace) -> Response {
+    /// The projection `sys/namespaces/<path>` returns for one namespace.
+    ///
+    /// Shared with the bulk `sys/namespaces-info` listing so the two cannot
+    /// drift — a namespace record read one at a time and read as part of a
+    /// page must describe the same quotas.
+    fn namespace_to_data(ns: &crate::modules::namespace::Namespace) -> Value {
         let q = &ns.quotas;
-        let data = json!({
+        json!({
             "uuid": ns.uuid,
             "path": ns.path,
             "parent_uuid": ns.parent_uuid,
@@ -3724,9 +3863,50 @@ impl SystemBackend {
                 "max_child_namespaces": q.max_child_namespaces,
             },
         })
-        .as_object()
-        .cloned();
-        Response::data_response(data)
+    }
+
+    fn namespace_to_response(ns: &crate::modules::namespace::Namespace) -> Response {
+        Response::data_response(Self::namespace_to_data(ns).as_object().cloned())
+    }
+
+    /// `GET sys/namespaces-info` — one page of child namespaces **with their
+    /// records**.
+    ///
+    /// `sys/namespaces` LIST returns child paths only, so the Namespaces page
+    /// read every child individually: `1 + N` requests to render the table,
+    /// which is exactly the shape that trips the server's per-IP abuse guard.
+    /// See `features/client-request-efficiency.md`.
+    ///
+    /// Authorization is unchanged: this is the same root/sudo-gated surface
+    /// as the LIST and the per-path READ it replaces, listing children of the
+    /// caller's own namespace. It cannot reveal a namespace the caller could
+    /// not already read one at a time.
+    pub async fn handle_namespace_list_info(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_namespace_store()?;
+        let parent = namespace_header_from_map(req.headers.as_ref()).unwrap_or_default();
+        let children = store.list_children(&parent).await?;
+        let page = paginate(req, children, PageLimits::new(100, 500))?;
+        let mut records: Vec<Value> = Vec::with_capacity(page.keys.len());
+        for child in &page.keys {
+            // Children are listed relative to the parent; the store is keyed
+            // by full path.
+            let full = match parent.is_empty() {
+                true => child.clone(),
+                false => format!("{}/{}", parent.trim_end_matches('/'), child),
+            };
+            records.push(match store.get_by_path(&full).await {
+                Ok(Some(ns)) => Self::namespace_to_data(&ns),
+                // A child that fails to load still contributes a row: a
+                // namespace missing from the list is a tenant the operator
+                // cannot see they have.
+                _ => json!({ "path": full }),
+            });
+        }
+        Ok(Some(page_response(&page, records)))
     }
 
     pub async fn handle_namespace_list(
@@ -4940,6 +5120,14 @@ fn sanitize_path(path: &str) -> String {
 /// policy dry-run shares it verbatim; this alias keeps the name every caller
 /// and test here already uses.
 use crate::modules::namespace::router::qualify_path_for_namespace as qualify_capability_path;
+
+/// Longest topic string accepted by `sys/cache/version`. A topic is a mount
+/// path; anything longer was never one.
+const MAX_CACHE_TOPIC_LEN: usize = 256;
+/// Most topics one `sys/cache/version` call may ask about. Each one costs a
+/// capability evaluation, and a client watching more mounts than this is not
+/// a client this endpoint is for.
+const MAX_CACHE_TOPICS: usize = 64;
 
 #[cfg(test)]
 mod mod_system_tests {

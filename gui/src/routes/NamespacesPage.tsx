@@ -12,7 +12,10 @@ import {
 } from "../components/ui";
 import type { NamespaceInfo, NamespaceQuotas } from "../lib/types";
 import * as api from "../lib/api";
-import { extractError } from "../lib/error";
+import { extractError, isRouteUnsupported } from "../lib/error";
+import { cachedRead, invalidateTopic } from "../lib/cache";
+import { watchTopic } from "../lib/changeWatcher";
+import { SYS_MOUNT, topicFor } from "../lib/topics";
 import { useNamespaceStore } from "../stores/namespaceStore";
 
 const EMPTY_QUOTAS: NamespaceQuotas = {
@@ -32,6 +35,39 @@ const QUOTA_FIELDS: { key: keyof NamespaceQuotas; label: string; hint: string }[
   { key: "max_leases", label: "Max leases", hint: "Accounting follow-up." },
   { key: "max_entities", label: "Max entities", hint: "Accounting follow-up." },
 ];
+
+/**
+ * Every descendant namespace plus its record, one request per tree level.
+ *
+ * Falls back to the pre-bulk shape (walk, then a read per path) against a
+ * server that predates `sys/namespaces-info`, so a newer client against an
+ * older vault degrades in speed rather than breaking.
+ */
+async function loadNamespaceTree(): Promise<{
+  namespaces: string[];
+  details: Record<string, NamespaceInfo>;
+}> {
+  try {
+    const tree = await api.listNamespacesInfo();
+    return { namespaces: tree.namespaces, details: tree.details ?? {} };
+  } catch (e) {
+    if (!isRouteUnsupported(e)) throw e;
+  }
+
+  // ── Version-skew fallback: server has no `sys/namespaces-info` ─────
+  const result = await api.listNamespaces();
+  const details: Record<string, NamespaceInfo> = {};
+  await Promise.all(
+    result.namespaces.map(async (p) => {
+      try {
+        details[p] = await api.readNamespace(p);
+      } catch {
+        /* ignore individual read failures */
+      }
+    }),
+  );
+  return { namespaces: result.namespaces, details };
+}
 
 export function NamespacesPage() {
   const { toast } = useToast();
@@ -56,11 +92,32 @@ export function NamespacesPage() {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    loadAll();
+    loadAll({ cached: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function loadAll() {
+  useEffect(() => {
+    // Namespace records live on the `sys/` backend, so that is the mount the
+    // server files their epochs under — a tenant created by another admin
+    // now appears here without a manual refresh.
+    return watchTopic(SYS_MOUNT, topicFor("namespaces", ""), () => {
+      void loadAll({ cached: true });
+    });
+    // `loadAll` is a plain function redefined every render; depending on it
+    // would resubscribe on each one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * Reload the tree.
+   *
+   * `cached` is for the initial load and for a change notification; every
+   * caller that has just written drops the topic first, so the reload cannot
+   * be served the pre-write answer.
+   */
+  async function loadAll(opts?: { cached?: boolean }) {
+    const topic = topicFor("namespaces", "");
+    if (!opts?.cached) invalidateTopic(topic);
     setLoading(true);
     try {
       // Root namespace config is fetched separately: it is not part of the
@@ -71,19 +128,16 @@ export function NamespacesPage() {
       } catch {
         setRootInfo(null);
       }
-      const result = await api.listNamespaces();
-      setNamespaces(result.namespaces);
-      const map: Record<string, NamespaceInfo> = {};
-      await Promise.all(
-        result.namespaces.map(async (p) => {
-          try {
-            map[p] = await api.readNamespace(p);
-          } catch {
-            /* ignore individual read failures */
-          }
-        }),
+      // One request per tree level, carrying each child's record — the old
+      // shape read every namespace individually on top of the walk. See
+      // features/client-request-efficiency.md.
+      const { namespaces, details } = await cachedRead(
+        topicFor("namespaces", ""),
+        "tree",
+        () => loadNamespaceTree(),
       );
-      setDetails(map);
+      setNamespaces(namespaces);
+      setDetails(details);
     } catch (e) {
       toast("error", extractError(e));
       setNamespaces([]);

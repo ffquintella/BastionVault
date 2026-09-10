@@ -79,6 +79,29 @@ pub async fn dispatch_with_token_ns(
         .map_err(CommandError::from)
 }
 
+/// Append the pagination cursor and page size to a `<list>-info` path.
+///
+/// Both travel in the query string rather than a body: these endpoints are
+/// **reads** (paging a listing has to stay available to a read-only policy)
+/// and a GET body does not survive the HTTP boundary. `bv_logical`'s query
+/// allowlist lifts `after` and `limit` back into the request on arrival.
+///
+/// An empty `after` or a zero `limit` is omitted rather than sent, so the
+/// server applies its own default page size.
+pub fn paginated_path(base: &str, after: Option<String>, limit: Option<u64>) -> String {
+    let mut query: Vec<String> = Vec::new();
+    if let Some(a) = after.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+        query.push(format!("after={a}"));
+    }
+    if let Some(n) = limit.filter(|n| *n > 0) {
+        query.push(format!("limit={n}"));
+    }
+    match query.is_empty() {
+        true => base.to_string(),
+        false => format!("{base}?{}", query.join("&")),
+    }
+}
+
 pub mod approle;
 pub mod asset_groups;
 pub mod backup;

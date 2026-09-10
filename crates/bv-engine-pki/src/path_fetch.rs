@@ -12,9 +12,13 @@ use super::{
     PkiBackend, PkiBackendInner,
 };
 use crate::{
+    bv_error_response_status,
     context::Context,
     errors::RvError,
-    logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
+    logical::{
+        optional_param, page_response, paginate, Backend, Field, FieldType, Operation,
+        PageLimits, Path, PathOperation, Request, Response,
+    },
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
 
@@ -82,6 +86,39 @@ impl PkiBackend {
             pattern: r"certs/?$",
             operations: [{op: Operation::List, handler: r.list_certs}],
             help: "List issued certificate serials."
+        })
+    }
+
+    /// `pki/certs-info` — one page of certificate *summaries*.
+    ///
+    /// The listing view needs a common name and an expiry per row, and
+    /// `pki/certs` returns bare serials, so a client had to read every
+    /// serial individually: `1 + N` requests, each carrying a full PEM, to
+    /// render two columns. On a mount with a few hundred certificates that
+    /// burst is indistinguishable from a flood and trips the server's own
+    /// abuse guard (see `features/client-request-efficiency.md`).
+    ///
+    /// A **Read**, not a Write-with-a-body: paging through a listing must
+    /// stay available to a read-only policy. `after` / `limit` therefore
+    /// arrive as query parameters, which `bv_logical`'s query allowlist
+    /// lifts into `req.data`.
+    ///
+    /// Named `certs-info`, a sibling of `certs`, rather than `certs/info`:
+    /// the item patterns these bulk endpoints sit beside match a bare name
+    /// (`roles/(?P<name>\w[\w-]*\w)`), so a nested `/info` would both
+    /// depend on registration order and make `info` an unaddressable object
+    /// name on every engine that adopts the shape. The sibling form cannot
+    /// collide — patterns are anchored at both ends.
+    pub fn list_certs_info_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"certs-info$",
+            fields: {
+                "after": { field_type: FieldType::Str, default: "", description: "Cursor: return serials ordered after this one, exclusive. Omit for the first page." },
+                "limit": { field_type: FieldType::Int, default: 0, description: "Page size (default 100, max 500)." }
+            },
+            operations: [{op: Operation::Read, handler: r.list_certs_info}],
+            help: "One page of certificate summaries (serial, CN, expiry, revocation, provenance) without the PEM bodies."
         })
     }
 
@@ -426,6 +463,123 @@ impl PkiBackendInner {
         let keys = req.storage_list("certs/").await?;
         Ok(Some(Response::list_response(&keys)))
     }
+
+    /// Handler for `pki/certs-info`. See [`PkiBackend::list_certs_info_path`].
+    pub async fn list_certs_info(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        // Serials have a known shape, so check the cursor before paging.
+        // `paginate` can only enforce what is true of every key; a cursor
+        // that is not hex was never a serial this mount produced, and
+        // reporting it beats silently rewinding to the first page — a
+        // paging loop that resets is far harder to diagnose than a 400.
+        let after = optional_param(req, "after").as_str().unwrap_or("").trim().to_string();
+        if !after.is_empty() && after.chars().any(|c| !c.is_ascii_hexdigit()) {
+            return Err(bv_error_response_status!(
+                400,
+                "`after` must be a certificate serial in lowercase hex"
+            ));
+        }
+
+        let keys = req.storage_list("certs/").await?;
+        let page = paginate(req, keys, CERT_PAGE_LIMITS)?;
+
+        let mut records: Vec<Value> = Vec::with_capacity(page.keys.len());
+        for serial in &page.keys {
+            let key = storage::cert_storage_key(serial);
+            // A record that fails to load is reported with its serial and
+            // empty metadata rather than dropped: a listing that silently
+            // omits a certificate is worse than one that shows a row the
+            // operator can drill into to find out why.
+            let record: Option<CertRecord> = storage::get_json(req, &key).await.unwrap_or(None);
+            records.push(cert_summary(serial, record.as_ref()));
+        }
+        Ok(Some(page_response(&page, records)))
+    }
+}
+
+/// Page bounds for `pki/certs-info`.
+const CERT_PAGE_LIMITS: PageLimits = PageLimits::new(100, 500);
+
+/// Project one stored certificate into the summary the listing view needs.
+///
+/// `common_name` and `issuer_dn` are not on [`CertRecord`] — they are parsed
+/// from the stored PEM. Doing that here rather than in the client is the
+/// point of the endpoint: it replaces N PEM transfers with N local parses.
+/// A record that fails to parse yields empty strings rather than an error,
+/// so one malformed certificate cannot blank the whole page.
+fn cert_summary(serial: &str, record: Option<&CertRecord>) -> Value {
+    let Some(record) = record else {
+        return json!({ "serial_number": serial });
+    };
+    let (common_name, issuer_dn) = parse_subject_and_issuer(&record.certificate_pem);
+    let mut out: Map<String, Value> = Map::new();
+    out.insert("serial_number".into(), json!(record.serial_hex));
+    out.insert("issued_at".into(), json!(record.issued_at_unix));
+    out.insert("common_name".into(), json!(common_name));
+    out.insert("issuer_dn".into(), json!(issuer_dn));
+    // The remaining fields mirror `read_cert`'s response, including its
+    // omit-when-absent behaviour, so a client can consume either shape.
+    if record.not_after_unix > 0 {
+        out.insert("not_after".into(), json!(record.not_after_unix));
+    }
+    if !record.issuer_id.is_empty() {
+        out.insert("issuer_id".into(), json!(record.issuer_id));
+    }
+    if record.is_orphaned {
+        out.insert("is_orphaned".into(), json!(true));
+    }
+    if !record.source.is_empty() {
+        out.insert("source".into(), json!(record.source));
+    }
+    if let Some(t) = record.revoked_at_unix {
+        out.insert("revoked_at".into(), json!(t));
+    }
+    if !record.key_id.is_empty() {
+        out.insert("key_id".into(), json!(record.key_id));
+    }
+    Value::Object(out)
+}
+
+/// `(subject_cn, issuer_dn)` from a PEM certificate; empty strings on any
+/// parse failure.
+///
+/// Uses `x509-cert` rather than the `x509-parser` the rest of this module
+/// reaches for, deliberately: the GUI renders `issuer_dn` today from
+/// `x509_cert::Name`'s RFC 4514 `Display`, and the two crates format a
+/// distinguished name differently. Parsing with the same crate keeps this
+/// endpoint's output byte-identical to the per-certificate read it replaces.
+fn parse_subject_and_issuer(pem: &str) -> (String, String) {
+    use x509_cert::der::Decode;
+    let Ok(der) = super::csr::decode_pem_or_der(pem) else {
+        return (String::new(), String::new());
+    };
+    let Ok(cert) = x509_cert::Certificate::from_der(&der) else {
+        return (String::new(), String::new());
+    };
+    let cn_oid: x509_cert::der::asn1::ObjectIdentifier =
+        "2.5.4.3".parse().expect("CN OID literal is valid");
+    let mut common_name = String::new();
+    'outer: for rdn in cert.tbs_certificate.subject.0.iter() {
+        for atv in rdn.0.iter() {
+            if atv.oid != cn_oid {
+                continue;
+            }
+            // A CN can be encoded as any of the directory string types;
+            // try each rather than assuming UTF-8.
+            if let Ok(s) = atv.value.decode_as::<x509_cert::der::asn1::PrintableStringRef<'_>>() {
+                common_name = s.as_str().to_string();
+                break 'outer;
+            }
+            if let Ok(s) = atv.value.decode_as::<x509_cert::der::asn1::Utf8StringRef<'_>>() {
+                common_name = s.as_str().to_string();
+                break 'outer;
+            }
+            if let Ok(s) = atv.value.decode_as::<x509_cert::der::asn1::Ia5StringRef<'_>>() {
+                common_name = s.as_str().to_string();
+                break 'outer;
+            }
+        }
+    }
+    (common_name, cert.tbs_certificate.issuer.to_string())
 }
 
 fn normalize_serial_hex(s: &str) -> String {

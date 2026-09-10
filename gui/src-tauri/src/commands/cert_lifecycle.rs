@@ -18,7 +18,7 @@ use tauri::State;
 use crate::error::CmdResult;
 use crate::state::AppState;
 
-use super::make_request;
+use super::{make_request, paginated_path};
 
 fn mount_prefix(mount: &str) -> String {
     let trimmed = mount.trim().trim_end_matches('/');
@@ -152,22 +152,28 @@ pub async fn cert_lifecycle_read_target(
 ) -> CmdResult<CertLifecycleTarget> {
     let mount = mount_prefix(&mount);
     let resp = make_request(&state, Operation::Read, format!("{mount}/targets/{name}"), None).await?;
-    let map = data_to_map(resp);
-    Ok(CertLifecycleTarget {
-        name: val_str(&map, "name"),
-        kind: val_str(&map, "kind"),
-        address: val_str(&map, "address"),
-        pki_mount: val_str(&map, "pki_mount"),
-        role_ref: val_str(&map, "role_ref"),
-        common_name: val_str(&map, "common_name"),
-        alt_names: val_str_array(&map, "alt_names"),
-        ip_sans: val_str_array(&map, "ip_sans"),
-        ttl: val_str(&map, "ttl"),
-        key_policy: val_str(&map, "key_policy"),
-        key_ref: val_str(&map, "key_ref"),
-        renew_before: val_str(&map, "renew_before"),
-        created_at: val_u64(&map, "created_at"),
-    })
+    Ok(target_from_map(&data_to_map(resp)))
+}
+
+/// One target, mapped out of a response data map. Shared by the single read
+/// and the bulk `cert_lifecycle_list_targets_info`, so a row rendered from a
+/// page and one rendered from its own read cannot differ.
+fn target_from_map(map: &Map<String, Value>) -> CertLifecycleTarget {
+    CertLifecycleTarget {
+        name: val_str(map, "name"),
+        kind: val_str(map, "kind"),
+        address: val_str(map, "address"),
+        pki_mount: val_str(map, "pki_mount"),
+        role_ref: val_str(map, "role_ref"),
+        common_name: val_str(map, "common_name"),
+        alt_names: val_str_array(map, "alt_names"),
+        ip_sans: val_str_array(map, "ip_sans"),
+        ttl: val_str(map, "ttl"),
+        key_policy: val_str(map, "key_policy"),
+        key_ref: val_str(map, "key_ref"),
+        renew_before: val_str(map, "renew_before"),
+        created_at: val_u64(map, "created_at"),
+    }
 }
 
 #[tauri::command]
@@ -226,16 +232,82 @@ pub async fn cert_lifecycle_read_state(
 ) -> CmdResult<CertLifecycleState> {
     let mount = mount_prefix(&mount);
     let resp = make_request(&state, Operation::Read, format!("{mount}/state/{name}"), None).await?;
+    Ok(state_from_map(&data_to_map(resp)))
+}
+
+/// One target's renewer state, mapped out of a response data map. Shared with
+/// the bulk listing for the same reason as [`target_from_map`].
+fn state_from_map(map: &Map<String, Value>) -> CertLifecycleState {
+    CertLifecycleState {
+        name: val_str(map, "name"),
+        current_serial: val_str(map, "current_serial"),
+        current_not_after: val_i64(map, "current_not_after"),
+        last_renewal: val_u64(map, "last_renewal"),
+        last_attempt: val_u64(map, "last_attempt"),
+        last_error: val_str(map, "last_error"),
+        next_attempt: val_u64(map, "next_attempt"),
+        failure_count: val_u64(map, "failure_count"),
+    }
+}
+
+/// One row of the Certificate Lifecycle table: a target and its state.
+#[derive(Serialize)]
+pub struct CertLifecycleTargetRow {
+    pub target: CertLifecycleTarget,
+    pub state: CertLifecycleState,
+}
+
+/// One page of rows plus the cursor for the next.
+#[derive(Serialize)]
+pub struct CertLifecycleTargetPage {
+    pub records: Vec<CertLifecycleTargetRow>,
+    pub total: u64,
+    pub next: String,
+}
+
+/// `cert-lifecycle/targets-info` — one page of targets with their state.
+///
+/// Replaces `cert_lifecycle_list_targets` followed by *two* reads per target
+/// (the target and its renewer state), which cost `1 + 2N` requests to render
+/// the table — the largest fan-out of any page in the app, and enough on any
+/// real inventory to trip the server's per-IP abuse guard.
+#[tauri::command]
+pub async fn cert_lifecycle_list_targets_info(
+    state: State<'_, AppState>,
+    mount: String,
+    after: Option<String>,
+    limit: Option<u64>,
+) -> CmdResult<CertLifecycleTargetPage> {
+    let mount = mount_prefix(&mount);
+    let path = paginated_path(&format!("{mount}/targets-info"), after, limit);
+    let resp = make_request(&state, Operation::Read, path, None).await?;
     let map = data_to_map(resp);
-    Ok(CertLifecycleState {
-        name: val_str(&map, "name"),
-        current_serial: val_str(&map, "current_serial"),
-        current_not_after: val_i64(&map, "current_not_after"),
-        last_renewal: val_u64(&map, "last_renewal"),
-        last_attempt: val_u64(&map, "last_attempt"),
-        last_error: val_str(&map, "last_error"),
-        next_attempt: val_u64(&map, "next_attempt"),
-        failure_count: val_u64(&map, "failure_count"),
+    let records = map
+        .get("records")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_object())
+                .map(|r| {
+                    // The state half is nested under `state`; both halves
+                    // carry a `name`, so flattening them would collide.
+                    let state_map = r
+                        .get("state")
+                        .and_then(|v| v.as_object())
+                        .cloned()
+                        .unwrap_or_default();
+                    CertLifecycleTargetRow {
+                        target: target_from_map(r),
+                        state: state_from_map(&state_map),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(CertLifecycleTargetPage {
+        records,
+        total: val_u64(&map, "total"),
+        next: val_str(&map, "next"),
     })
 }
 

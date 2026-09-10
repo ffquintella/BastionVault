@@ -111,11 +111,13 @@ impl PkiBackend {
             self.intermediate_set_signed_path(),
             self.csr_generate_path(),
             self.csr_list_path(),
+            self.csr_list_info_path(),
             self.csr_set_signed_path(),
             self.csr_item_path(),
             // ── Inbound sign-request queue ──
             self.sign_request_import_path(),
             self.sign_request_list_path(),
+            self.sign_request_list_info_path(),
             self.sign_request_preflight_path(),
             self.sign_request_approve_path(),
             self.sign_request_approve_verbatim_path(),
@@ -134,6 +136,7 @@ impl PkiBackend {
             self.fetch_ca_path(),
             self.fetch_ca_chain_path(),
             self.list_certs_path(),
+            self.list_certs_info_path(),
             self.import_cert_path(),
             // ── L1 managed key store ──
             self.keys_list_path(),

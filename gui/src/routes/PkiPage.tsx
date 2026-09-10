@@ -31,7 +31,10 @@ import type {
   PkiCertImportFormat,
 } from "../lib/types";
 import * as api from "../lib/api";
-import { extractError } from "../lib/error";
+import { extractError, isRouteUnsupported } from "../lib/error";
+import { cachedRead, invalidateTopic } from "../lib/cache";
+import { watchTopic } from "../lib/changeWatcher";
+import { topicFor } from "../lib/topics";
 import { useAuthStore } from "../stores/authStore";
 import { useNamespaceStore } from "../stores/namespaceStore";
 import { SUPER_ADMIN } from "../lib/access";
@@ -3503,9 +3506,108 @@ function CertDetail({
   );
 }
 
+/**
+ * Certificates fetched per request by {@link loadCertSummaries}.
+ *
+ * The engine caps a page at 500. Asking for the maximum means a 2,000-cert
+ * mount costs 4 requests where the old one-read-per-serial shape cost 2,001
+ * — enough, on a mount that size, to cross the server's 200-per-10s abuse
+ * ceiling and ban the operator for five minutes.
+ */
+const CERT_FETCH_PAGE = 500;
+
+/**
+ * Ceiling on rows loaded into the table.
+ *
+ * The filter and the table's own paging both run client-side over the loaded
+ * set, so the list is loaded whole rather than page-by-page — otherwise
+ * filtering would silently only search the visible page. This bound keeps
+ * that affordable: beyond it the table says so and reports the real total
+ * rather than quietly showing a subset.
+ */
+const CERT_MAX_ROWS = 5000;
+
+/**
+ * Load certificate summaries for a mount, walking `pki/certs/info` pages.
+ *
+ * Falls back to the pre-bulk shape (`pki/certs` + one `pki/cert/<serial>`
+ * read each) when the connected server predates the endpoint, so a newer GUI
+ * against an older vault degrades in speed rather than breaking. The
+ * fallback is the shape this endpoint exists to replace; it stays only for
+ * version skew.
+ */
+async function loadCertSummaries(
+  mount: string,
+): Promise<{ rows: CertSummary[]; total: number }> {
+  const rows: CertSummary[] = [];
+  let after: string | undefined;
+  let total = 0;
+  try {
+    for (;;) {
+      const page = await api.pkiListCertsInfo(mount, after, CERT_FETCH_PAGE);
+      total = page.total;
+      for (const r of page.records) {
+        rows.push({
+          serial: r.serial_number,
+          common_name: r.common_name || "",
+          not_after: r.not_after || 0,
+          revoked_at: r.revoked_at ?? null,
+          is_orphaned: r.is_orphaned ?? false,
+          source: r.source ?? "",
+          issuer_id: r.issuer_id ?? "",
+          issuer_dn: r.issuer_dn ?? "",
+        });
+      }
+      if (!page.next || rows.length >= CERT_MAX_ROWS) break;
+      after = page.next;
+    }
+    return { rows, total };
+  } catch (e) {
+    if (!isRouteUnsupported(e)) throw e;
+  }
+
+  // ── Version-skew fallback: server has no `pki/certs/info` ──────────
+  const list = await api.pkiListCerts(mount);
+  const sorted = [...list].sort().slice(0, CERT_MAX_ROWS);
+  const legacy = await Promise.all(
+    sorted.map(async (s) => {
+      try {
+        const c = await api.pkiReadCert(mount, s);
+        return {
+          serial: s,
+          common_name: c.common_name || "",
+          not_after: c.not_after || 0,
+          revoked_at: c.revoked_at ?? null,
+          is_orphaned: c.is_orphaned ?? false,
+          source: c.source ?? "",
+          issuer_id: c.issuer_id ?? "",
+          issuer_dn: c.issuer_dn ?? "",
+        } satisfies CertSummary;
+      } catch {
+        // A single read failure shouldn't blank the whole list — surface
+        // the serial with empty meta so the operator can still drill in.
+        return {
+          serial: s,
+          common_name: "",
+          not_after: 0,
+          revoked_at: null,
+          is_orphaned: false,
+          source: "",
+          issuer_id: "",
+          issuer_dn: "",
+        } satisfies CertSummary;
+      }
+    }),
+  );
+  return { rows: legacy, total: list.length };
+}
+
 function CertsTab({ mount }: { mount: string }) {
   const { toast } = useToast();
   const [summaries, setSummaries] = useState<CertSummary[]>([]);
+  /** Certificates on the mount, which exceeds `summaries.length` when the
+   *  inventory is larger than `CERT_MAX_ROWS`. */
+  const [inventoryTotal, setInventoryTotal] = useState(0);
   /** issuer UUID → human-readable name, used for the Emitter column.
    *  Loaded once per refresh alongside the cert list so the column
    *  can render names instead of UUIDs (and so an unknown issuer_id
@@ -3530,14 +3632,25 @@ function CertsTab({ mount }: { mount: string }) {
   } | null>(null);
   const [showImport, setShowImport] = useState(false);
 
-  const refresh = useCallback(async () => {
+  /**
+   * Reload the table.
+   *
+   * `cached` is for the mount effect: navigating back to this tab, or a
+   * remount from a parent re-render, should not re-walk the whole inventory
+   * seconds after the last walk. Every other caller — the Refresh button and
+   * each write handler — wants the current truth, so it drops the topic
+   * first. That ordering matters: invalidating *before* the load is what
+   * stops the reload after a write from being served the pre-write answer.
+   */
+  const refresh = useCallback(async (opts?: { cached?: boolean }) => {
+    if (!opts?.cached) invalidateTopic(topicFor("pki-certs", mount));
     setLoading(true);
     try {
-      // Load issuers + cert list in parallel. We use the issuers map
-      // to label engine-owned emitters in the table.
-      const [issuers, list] = await Promise.all([
+      // Load issuers + the cert summaries in parallel. The issuers map
+      // labels engine-owned emitters in the table.
+      const [issuers, firstPage] = await Promise.all([
         api.pkiListIssuers(mount).catch(() => null),
-        api.pkiListCerts(mount),
+        cachedRead(topicFor("pki-certs", mount), "certs-info", () => loadCertSummaries(mount)),
       ]);
       const nameMap: Record<string, string> = {};
       if (issuers) {
@@ -3546,44 +3659,8 @@ function CertsTab({ mount }: { mount: string }) {
         }
       }
       setIssuerNames(nameMap);
-
-      const sorted = [...list].sort();
-      // Fetch each cert's metadata in parallel. Each `pkiReadCert`
-      // call returns CN + not_after parsed server-side from the PEM,
-      // so the list view can show identity + expiration without the
-      // user having to click into each row.
-      const records = await Promise.all(
-        sorted.map(async (s) => {
-          try {
-            const c = await api.pkiReadCert(mount, s);
-            return {
-              serial: s,
-              common_name: c.common_name || "",
-              not_after: c.not_after || 0,
-              revoked_at: c.revoked_at ?? null,
-              is_orphaned: c.is_orphaned ?? false,
-              source: c.source ?? "",
-              issuer_id: c.issuer_id ?? "",
-              issuer_dn: c.issuer_dn ?? "",
-            } satisfies CertSummary;
-          } catch {
-            // A single read failure shouldn't blank the whole list —
-            // surface the serial with empty meta so the operator can
-            // still drill in to investigate.
-            return {
-              serial: s,
-              common_name: "",
-              not_after: 0,
-              revoked_at: null,
-              is_orphaned: false,
-              source: "",
-              issuer_id: "",
-              issuer_dn: "",
-            };
-          }
-        }),
-      );
-      setSummaries(records);
+      setSummaries(firstPage.rows);
+      setInventoryTotal(firstPage.total);
     } catch (e) {
       toast("error", extractError(e));
     } finally {
@@ -3593,8 +3670,21 @@ function CertsTab({ mount }: { mount: string }) {
   }, [mount]);
 
   useEffect(() => {
-    refresh();
+    // The mount effect may serve from cache; every explicit reload does not.
+    refresh({ cached: true });
   }, [refresh]);
+
+  useEffect(() => {
+    // Someone else — another operator, or this operator's CLI — issuing or
+    // revoking a certificate on this mount now refreshes the table instead of
+    // leaving it stale until the cache TTL expires. `watchTopic` invalidates
+    // the topic before calling back, so the reload cannot be served the
+    // pre-change answer.
+    if (!mount) return;
+    return watchTopic(mount, topicFor("pki-certs", mount), () => {
+      void refresh({ cached: true });
+    });
+  }, [mount, refresh]);
 
   async function selectSerial(serial: string) {
     try {
@@ -3703,7 +3793,7 @@ function CertsTab({ mount }: { mount: string }) {
           <Button variant="ghost" onClick={() => setShowImport(true)}>
             Import
           </Button>
-          <Button variant="ghost" onClick={refresh}>
+          <Button variant="ghost" onClick={() => void refresh()}>
             Refresh
           </Button>
           <Button variant="ghost" onClick={rotateCrl}>
@@ -3728,6 +3818,18 @@ function CertsTab({ mount }: { mount: string }) {
         />
       ) : (
         <div className={showDetail ? "grid grid-cols-1 lg:grid-cols-3 gap-4" : ""}>
+          {inventoryTotal > summaries.length && (
+            /* The filter and the row pager both work over the loaded set,
+               so a mount larger than the load ceiling would otherwise look
+               complete while hiding certificates. Say so, with the real
+               total. */
+            <div className="lg:col-span-3 mb-3 text-xs text-[var(--color-text-muted)]">
+              Showing the first {summaries.length.toLocaleString()} of{" "}
+              {inventoryTotal.toLocaleString()} certificates on this mount.
+              Narrow the inventory with Tidy, or use the CLI to work with the
+              full set.
+            </div>
+          )}
           {/* `min-h-[20rem]` keeps the list usable in a small window;
               `max-h-[calc(100vh-22rem)]` lets it expand to fill the
               available vertical space when the window is tall. The
@@ -5054,6 +5156,40 @@ function XcaImportTab({
 //   3. Submit the upstream-signed cert to install it under the
 //      orphan-cert index, bound to the backing managed key.
 
+/**
+ * Every pending outgoing CSR, walking `pki/csr-info` pages.
+ *
+ * The rows carry no CSR body: only the "Copy CSR" action needs it, and it
+ * reads the single record on demand. Falls back to the pre-bulk shape
+ * against a server that predates the endpoint.
+ */
+async function loadPendingCsrs(mount: string): Promise<api.PkiCsrPending[]> {
+  const rows: api.PkiCsrPending[] = [];
+  let after: string | undefined;
+  try {
+    for (;;) {
+      const page = await api.pkiCsrListInfo(mount, after, CERT_FETCH_PAGE);
+      for (const r of page.records) {
+        // `csr` is filled in on demand by the copy action; an empty string
+        // keeps the row's type honest without a second request per row.
+        rows.push({ ...r, csr: "" });
+      }
+      if (!page.next) break;
+      after = page.next;
+    }
+    return rows;
+  } catch (e) {
+    if (!isRouteUnsupported(e)) throw e;
+  }
+
+  // ── Version-skew fallback: server has no `pki/csr-info` ────────────
+  const ids = await api.pkiCsrList(mount);
+  const records = await Promise.all(
+    ids.map((id) => api.pkiCsrRead(mount, id).catch(() => null)),
+  );
+  return records.filter((r): r is api.PkiCsrPending => !!r);
+}
+
 function ExternalCsrTab({ mount }: { mount: string }) {
   const { toast } = useToast();
   const [roles, setRoles] = useState<string[]>([]);
@@ -5084,22 +5220,43 @@ function ExternalCsrTab({ mount }: { mount: string }) {
     }
   }, [mount, toast]);
 
-  const loadPending = useCallback(async () => {
+  /**
+   * Reload the queue.
+   *
+   * `cached` is for the mount effect — switching back to this tab should not
+   * re-walk the queue seconds after the last walk. Every other caller has
+   * just written, so it drops the topic first: invalidating *before* the load
+   * is what stops the reload from being served the pre-write answer.
+   */
+  const loadPending = useCallback(
+    async (opts?: { cached?: boolean }) => {
+      if (!mount) return;
+      const topic = topicFor("pki-csr", mount);
+      if (!opts?.cached) invalidateTopic(topic);
+      try {
+        // One request per page instead of one read per pending CSR. The rows
+        // carry no CSR body — the copy action fetches that on demand — which
+        // is most of the payload gone as well.
+        setPending(await cachedRead(topic, "csr-info", () => loadPendingCsrs(mount)));
+      } catch (e) {
+        toast("error", extractError(e));
+      }
+    },
+    [mount, toast],
+  );
+
+  useEffect(() => {
+    // Someone else generating or installing a CSR on this mount now refreshes
+    // the queue instead of leaving it stale until the cache TTL expires.
     if (!mount) return;
-    try {
-      const ids = await api.pkiCsrList(mount);
-      const records = await Promise.all(
-        ids.map((id) => api.pkiCsrRead(mount, id).catch(() => null)),
-      );
-      setPending(records.filter((r): r is api.PkiCsrPending => !!r));
-    } catch (e) {
-      toast("error", extractError(e));
-    }
-  }, [mount, toast]);
+    return watchTopic(mount, topicFor("pki-csr", mount), () => {
+      void loadPending({ cached: true });
+    });
+  }, [mount, loadPending]);
 
   useEffect(() => {
     loadRoles();
-    loadPending();
+    loadPending({ cached: true });
   }, [loadRoles, loadPending]);
 
   async function handleGenerate() {
@@ -5191,6 +5348,30 @@ function ExternalCsrTab({ mount }: { mount: string }) {
       toast("success", `${label} copied to clipboard.`);
     } catch (e) {
       toast("error", `Copy failed: ${extractError(e)}`);
+    }
+  }
+
+  /**
+   * Copy one row's CSR, fetching the PEM if the row does not carry it.
+   *
+   * The listing endpoint omits CSR bodies precisely because only this action
+   * wants one — a PEM per row was most of the page's payload for a column
+   * nobody reads. One request when the operator clicks beats N on every load.
+   */
+  async function copyCsr(p: api.PkiCsrPending) {
+    if (p.csr) {
+      await copyToClipboard(p.csr, "CSR");
+      return;
+    }
+    try {
+      const full = await api.pkiCsrRead(mount, p.csr_id);
+      if (!full?.csr) {
+        toast("error", "This CSR is no longer available.");
+        return;
+      }
+      await copyToClipboard(full.csr, "CSR");
+    } catch (e) {
+      toast("error", extractError(e));
     }
   }
 
@@ -5320,7 +5501,7 @@ function ExternalCsrTab({ mount }: { mount: string }) {
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-base font-semibold">Pending CSRs</h3>
-            <Button variant="ghost" onClick={loadPending} disabled={busy}>
+            <Button variant="ghost" onClick={() => void loadPending()} disabled={busy}>
               Refresh
             </Button>
           </div>
@@ -5372,7 +5553,7 @@ function ExternalCsrTab({ mount }: { mount: string }) {
                     <div className="flex gap-2 justify-end">
                       <Button
                         variant="ghost"
-                        onClick={() => copyToClipboard(p.csr, "CSR")}
+                        onClick={() => copyCsr(p)}
                       >
                         Copy CSR
                       </Button>
@@ -5859,6 +6040,37 @@ function ttlLabel(seconds: number): string {
   return `${Math.round(hours / 24)}d (${hours}h)`;
 }
 
+/**
+ * Every queued sign request, walking `pki/sign-request-info` pages.
+ *
+ * The rows carry every field the single read returns except the CSR and
+ * certificate bodies, which the review panel fetches when a request is
+ * opened. Falls back to the pre-bulk shape against a server that predates
+ * the endpoint.
+ */
+async function loadSignRequests(mount: string): Promise<api.PkiSignRequest[]> {
+  const rows: api.PkiSignRequest[] = [];
+  let after: string | undefined;
+  try {
+    for (;;) {
+      const page = await api.pkiSignRequestListInfo(mount, after, CERT_FETCH_PAGE);
+      rows.push(...page.records);
+      if (!page.next) break;
+      after = page.next;
+    }
+    return rows;
+  } catch (e) {
+    if (!isRouteUnsupported(e)) throw e;
+  }
+
+  // ── Version-skew fallback: server has no `pki/sign-request-info` ───
+  const ids = await api.pkiSignRequestList(mount);
+  const records = await Promise.all(
+    ids.map((id) => api.pkiSignRequestRead(mount, id).catch(() => null)),
+  );
+  return records.filter((r): r is api.PkiSignRequest => !!r);
+}
+
 function SignRequestsTab({ mount }: { mount: string }) {
   const { toast } = useToast();
   const [roles, setRoles] = useState<string[]>([]);
@@ -5899,24 +6111,37 @@ function SignRequestsTab({ mount }: { mount: string }) {
     }
   }, [mount, toast]);
 
-  const loadRequests = useCallback(async () => {
+  /** See `loadPending` in the outgoing-CSR tab for the `cached` contract. */
+  const loadRequests = useCallback(
+    async (opts?: { cached?: boolean }) => {
+      if (!mount) return;
+      const topic = topicFor("pki-sign-requests", mount);
+      if (!opts?.cached) invalidateTopic(topic);
+      try {
+        // One request per page instead of one read per queued request.
+        const rows = await cachedRead(topic, "sign-request-info", () =>
+          loadSignRequests(mount),
+        );
+        setRequests([...rows].sort((a, b) => b.created_at - a.created_at));
+      } catch (e) {
+        toast("error", extractError(e));
+      }
+    },
+    [mount, toast],
+  );
+
+  useEffect(() => {
+    // A queue is shared work: another approver importing, approving or
+    // rejecting a request must show up here without a manual refresh.
     if (!mount) return;
-    try {
-      const ids = await api.pkiSignRequestList(mount);
-      const records = await Promise.all(
-        ids.map((id) => api.pkiSignRequestRead(mount, id).catch(() => null)),
-      );
-      const rows = records.filter((r): r is api.PkiSignRequest => !!r);
-      rows.sort((a, b) => b.created_at - a.created_at);
-      setRequests(rows);
-    } catch (e) {
-      toast("error", extractError(e));
-    }
-  }, [mount, toast]);
+    return watchTopic(mount, topicFor("pki-sign-requests", mount), () => {
+      void loadRequests({ cached: true });
+    });
+  }, [mount, loadRequests]);
 
   useEffect(() => {
     loadRoles();
-    loadRequests();
+    loadRequests({ cached: true });
   }, [loadRoles, loadRequests]);
 
   const visible = useMemo(
@@ -6223,7 +6448,7 @@ function SignRequestsTab({ mount }: { mount: string }) {
                   { value: "all", label: "All" },
                 ]}
               />
-              <Button variant="ghost" onClick={loadRequests} disabled={busy}>
+              <Button variant="ghost" onClick={() => void loadRequests()} disabled={busy}>
                 Refresh
               </Button>
             </div>

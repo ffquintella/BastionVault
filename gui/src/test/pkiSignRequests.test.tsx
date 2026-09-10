@@ -135,7 +135,13 @@ function renderPage() {
   );
 }
 
-/** `requests` is what `pki_sign_request_list`/`_read` serve. */
+/**
+ * `requests` is what the queue serves.
+ *
+ * The tab loads its rows from `pki_sign_request_list_info` — one page instead
+ * of a read per queued request — and still reads a single request when one is
+ * opened for review, so both are mocked from the same fixture.
+ */
 function installMocks(requests: Array<typeof PENDING> = []) {
   mockInvoke.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
     switch (cmd) {
@@ -147,6 +153,12 @@ function installMocks(requests: Array<typeof PENDING> = []) {
         return Promise.resolve({ issuers: [] });
       case "pki_list_roles":
         return Promise.resolve(["open", "locked"]);
+      case "pki_sign_request_list_info":
+        return Promise.resolve({
+          records: requests,
+          total: requests.length,
+          next: "",
+        });
       case "pki_sign_request_list":
         return Promise.resolve(requests.map((r) => r.request_id));
       case "pki_sign_request_read": {

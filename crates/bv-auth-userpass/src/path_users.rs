@@ -8,7 +8,10 @@ use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
     errors::RvError,
-    logical::{field::FieldTrait, Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
+    logical::{
+        field::FieldTrait, page_response, paginate, Backend, Field, FieldType, Operation,
+        PageLimits, Path, PathOperation, Request, Response,
+    },
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
     utils::{
@@ -210,6 +213,40 @@ then the next renew will cause the lease to expire.
         path
     }
 
+    /// `auth/<mount>/users-info` — one page of user records.
+    ///
+    /// The admin Users page needs each account's disabled / locked / MFA
+    /// flags *and* its FIDO2 key count, which meant two reads per user on
+    /// every page load: `1 + 2N` requests, enough on any real user
+    /// directory to trip the server's per-IP abuse guard. Both come from the
+    /// same stored record, so one page now answers both. See
+    /// `features/client-request-efficiency.md`.
+    ///
+    /// A **Read**, so paging stays available to a read-only policy; the
+    /// cursor and page size therefore arrive as query parameters.
+    ///
+    /// `users-info`, a sibling of `users`, and not `users/info`: the item
+    /// pattern `users/(?P<username>\w[\w-]+\w)` matches `users/info`, so
+    /// the nested form would depend on registration order and would make
+    /// `info` an unusable username.
+    pub fn user_list_info_path(&self) -> Path {
+        let userpass_backend_ref = self.inner.clone();
+
+        let path = new_path!({
+            pattern: r"users-info$",
+            fields: {
+                "after": { field_type: FieldType::Str, default: "", description: "Cursor: return usernames ordered after this one, exclusive. Omit for the first page." },
+                "limit": { field_type: FieldType::Int, default: 0, description: "Page size (default 100, max 500)." }
+            },
+            operations: [
+                {op: Operation::Read, handler: userpass_backend_ref.list_user_info}
+            ],
+            help: r#"One page of user records, in the same shape `users/<name>` returns."#
+        });
+
+        path
+    }
+
     pub fn user_unlock_path(&self) -> Path {
         let userpass_backend_ref = self.inner.clone();
 
@@ -259,6 +296,48 @@ then the next renew will cause the lease to expire.
 }
 
 #[allow(clippy::assigning_clones)]
+/// The public projection of a stored user.
+///
+/// Both `auth/<mount>/users/<name>` and the bulk `users-info` listing render
+/// a user through this one function. That is deliberate rather than tidy: it
+/// is the single place `password_hash` and `credentials_json` are stripped,
+/// so a second listing endpoint cannot reintroduce either by forgetting to.
+///
+/// Also computes the two fields the stored entry does not carry — the count
+/// of registered FIDO2 keys, and whether the account is locked out *now* as
+/// opposed to `locked_until`'s raw timestamp — so a client does not do clock
+/// arithmetic to render a badge.
+fn user_public_data(user_entry: &UserEntry) -> Result<serde_json::Map<String, serde_json::Value>, RvError> {
+    let mut user_entry_data = serde_json::to_value(user_entry)?;
+    let data = user_entry_data.as_object_mut().ok_or(RvError::ErrRequestInvalid)?;
+    data.remove("password_hash");
+    data.remove("credentials_json"); // Never expose key material
+    let registered_keys = user_entry.get_passkeys().map(|v| v.len()).unwrap_or(0);
+    data.insert("registered_keys".to_string(), serde_json::Value::Number(registered_keys.into()));
+    let locked = user_entry.locked_until > now_secs();
+    data.insert("locked".to_string(), serde_json::Value::Bool(locked));
+
+    user_entry.populate_token_data(data);
+
+    if user_entry.ttl.as_secs() == 0 {
+        data.remove("ttl");
+    }
+
+    if user_entry.max_ttl.as_secs() == 0 {
+        data.remove("max_ttl");
+    }
+
+    if !user_entry.policies.is_empty() {
+        data["policies"] = data["token_policies"].clone();
+    }
+
+    if !user_entry.bound_cidrs.is_empty() {
+        data["bound_cidrs"] = data["token_bound_cidrs"].clone();
+    }
+
+    Ok(data.clone())
+}
+
 #[maybe_async::maybe_async]
 impl UserPassBackendInner {
     pub async fn get_user(&self, req: &mut Request, name: &str) -> Result<Option<UserEntry>, RvError> {
@@ -303,39 +382,28 @@ impl UserPassBackendInner {
         }
 
         let user_entry = entry.unwrap();
-        let mut user_entry_data = serde_json::to_value(&user_entry)?;
-        let data = user_entry_data.as_object_mut().unwrap();
-        data.remove("password_hash");
-        data.remove("credentials_json"); // Never expose key material
-        // Add computed field: number of registered FIDO2 keys
-        let registered_keys = user_entry.get_passkeys().map(|v| v.len()).unwrap_or(0);
-        data.insert("registered_keys".to_string(), serde_json::Value::Number(registered_keys.into()));
-        // Add computed field: whether the account is *currently* locked out
-        // (as opposed to `locked_until`, which is a raw timestamp). Lets the
-        // admin GUI show a lock badge and an Unlock action without doing the
-        // clock comparison itself.
-        let locked = user_entry.locked_until > now_secs();
-        data.insert("locked".to_string(), serde_json::Value::Bool(locked));
+        Ok(Some(Response::data_response(Some(user_public_data(&user_entry)?))))
+    }
 
-        user_entry.populate_token_data(data);
-
-        if user_entry.ttl.as_secs() == 0 {
-            data.remove("ttl");
+    /// Handler for `auth/<mount>/users-info`. See
+    /// [`UserPassBackend::user_list_info_path`].
+    pub async fn list_user_info(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let users = req.storage_list("user/").await?;
+        let page = paginate(req, users, PageLimits::new(100, 500))?;
+        let mut records: Vec<serde_json::Value> = Vec::with_capacity(page.keys.len());
+        for username in &page.keys {
+            let entry = self.get_user(req, username).await.ok().flatten();
+            records.push(match entry {
+                // Same projection as the single read, so no field — and in
+                // particular no redaction — can differ between the two.
+                Some(entry) => serde_json::Value::Object(user_public_data(&entry)?),
+                // A user whose record fails to load still contributes a row
+                // carrying the username: an admin list that silently omits
+                // an account hides a principal that can still log in.
+                None => serde_json::json!({ "username": username }),
+            });
         }
-
-        if user_entry.max_ttl.as_secs() == 0 {
-            data.remove("max_ttl");
-        }
-
-        if !user_entry.policies.is_empty() {
-            data["policies"] = data["token_policies"].clone();
-        }
-
-        if !user_entry.bound_cidrs.is_empty() {
-            data["bound_cidrs"] = data["token_bound_cidrs"].clone();
-        }
-
-        Ok(Some(Response::data_response(Some(data.clone()))))
+        Ok(Some(page_response(&page, records)))
     }
 
     pub async fn write_user(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {

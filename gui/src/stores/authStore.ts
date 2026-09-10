@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import * as api from "../lib/api";
 import { useNamespaceStore } from "./namespaceStore";
+import { clearCache } from "../lib/cache";
+import { stopChangeWatcher } from "../lib/changeWatcher";
 
 /**
  * Snapshot of the post-login auth state for a single vault. Kept in
@@ -113,7 +115,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       bootstrapping: false,
       sessionExpired: false,
     }),
-  clearAuth: () =>
+  clearAuth: () => {
+    // Cached listing metadata was read under the outgoing token's
+    // authorization; the next session must not be served any of it. The
+    // change watcher goes with it — its epochs belonged to that session's
+    // server, and polling with a dead token is pure noise.
+    clearCache();
+    stopChangeWatcher();
     set({
       token: null,
       policies: [],
@@ -122,11 +130,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       sessionExpired: false,
       entityId: "",
       principal: "",
-    }),
+    });
+  },
   expireSession: () => {
     // No-op if already signed out, so a stray poll after a manual
     // logout can't resurrect the "session expired" banner.
     if (!get().isAuthenticated) return;
+    clearCache();
+    stopChangeWatcher();
     set({
       token: null,
       policies: [],

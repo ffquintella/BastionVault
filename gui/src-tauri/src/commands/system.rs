@@ -1,6 +1,6 @@
 use bv_client::Operation;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tauri::State;
 
 use crate::embedded;
@@ -1365,4 +1365,54 @@ mod seal_authz_tests {
         crate::embedded::seal_vault(&bvault).await.expect("seal");
         assert!(bvault.core.load().sealed(), "the vault must be sealed once the gate has been passed");
     }
+}
+
+/// A point-in-time read of the server's change epochs.
+#[derive(Serialize)]
+pub struct CacheVersionSnapshot {
+    /// Aggregate counter, bumped by any change on the connected node.
+    pub version: u64,
+    /// `mount -> epoch` for the mounts asked about that the caller may read.
+    /// A mount the caller cannot read is **absent**, not zero.
+    pub topics: Map<String, Value>,
+    /// True when the server stopped itemizing (too many live topics). The
+    /// client must then treat a `version` bump as global and drop everything.
+    pub coarse: bool,
+}
+
+/// `sys/cache/version` — change epochs for the named mounts.
+///
+/// The client passes the mounts it has cached listings for and compares the
+/// returned epochs with what it saw last; a mount whose epoch moved was
+/// written to by *someone*, so its cached listings are dropped. This is what
+/// lets one operator's write invalidate another operator's cache instead of
+/// waiting out a TTL. See `features/client-request-efficiency.md`.
+///
+/// A point-in-time read, not a long-poll. The server supports `?watch=1`
+/// (see `sys_cache_version_handler`), but a desktop client polling this every
+/// few seconds costs one small request per interval, while a held request
+/// costs a connection per client for its whole duration — and the desktop app
+/// has a handful of operators, not thousands. The long-poll stays available
+/// for clients that prefer it.
+#[tauri::command]
+pub async fn cache_version(
+    state: State<'_, AppState>,
+    topics: Vec<String>,
+) -> CmdResult<CacheVersionSnapshot> {
+    // No topics means nothing to ask about; skip the round-trip entirely.
+    if topics.is_empty() {
+        return Ok(CacheVersionSnapshot { version: 0, topics: Map::new(), coarse: false });
+    }
+    let path = format!("sys/cache/version?topics={}", topics.join(","));
+    let resp = crate::commands::make_request(&state, Operation::Read, path, None).await?;
+    let map = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(CacheVersionSnapshot {
+        version: map.get("version").and_then(|v| v.as_u64()).unwrap_or(0),
+        topics: map
+            .get("topics")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default(),
+        coarse: map.get("coarse").and_then(|v| v.as_bool()).unwrap_or(false),
+    })
 }

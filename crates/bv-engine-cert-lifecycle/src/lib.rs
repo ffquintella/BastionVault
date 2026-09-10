@@ -96,6 +96,7 @@ impl CertLifecycleBackend {
     pub fn new_backend(&self) -> LogicalBackend {
         let paths: Vec<Path> = vec![
             self.targets_list_path(),
+            self.targets_list_info_path(),
             self.target_path(),
             self.target_state_path(),
             self.renew_path(),

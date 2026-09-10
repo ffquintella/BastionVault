@@ -14,7 +14,22 @@ use serde_json::{Map, Number, Value};
 /// Query keys we are willing to lift into `req.data`. Deliberately tiny: only
 /// parameters the logical layer understands. Everything else is dropped so a
 /// client can't smuggle arbitrary fields past the policy parameter checks.
-const ALLOWED_QUERY_KEYS: &[&str] = &["env", "version"];
+///
+/// `after` / `limit` are the cursor-pagination pair used by the `<list>/info`
+/// bulk-metadata endpoints (see `features/client-request-efficiency.md`). They
+/// belong here rather than in a request body because those endpoints are
+/// **reads** — a read-only policy must be able to page through a listing —
+/// and a GET body does not survive the HTTP boundary.
+/// `topics` is the comma-separated mount list `sys/cache/version` reports
+/// change epochs for. It belongs here for the same reason the pagination
+/// pair does: that endpoint is a read (a read-only session must be able to
+/// subscribe), so its parameters cannot travel in a body.
+const ALLOWED_QUERY_KEYS: &[&str] = &["env", "version", "after", "limit", "topics"];
+
+/// Allowlisted keys whose value is parsed as an unsigned integer. A
+/// non-numeric value is dropped rather than passed through as a string, so a
+/// handler reading the field can rely on its type.
+const NUMERIC_QUERY_KEYS: &[&str] = &["version", "limit"];
 
 /// Split a raw logical path that may carry a query string
 /// (`secret/data/app?env=prod`) into the clean path and an allowlisted
@@ -44,7 +59,7 @@ pub fn parse_query_allowlist(query: &str) -> Option<Map<String, Value>> {
             continue;
         }
         let raw_val = percent_decode(v);
-        let value = if key == "version" {
+        let value = if NUMERIC_QUERY_KEYS.contains(&key.as_str()) {
             match raw_val.parse::<u64>() {
                 Ok(n) => Value::Number(Number::from(n)),
                 Err(_) => continue,
@@ -132,6 +147,23 @@ mod tests {
     #[test]
     fn non_numeric_version_dropped() {
         assert!(parse_query_allowlist("version=latest").is_none());
+    }
+
+    #[test]
+    fn pagination_cursor_and_limit_are_lifted() {
+        let data = parse_query_allowlist("after=00ff&limit=250").unwrap();
+        assert_eq!(data.get("after").unwrap(), "00ff");
+        assert_eq!(data.get("limit").unwrap().as_u64(), Some(250));
+    }
+
+    #[test]
+    fn non_numeric_limit_dropped_rather_than_passed_as_string() {
+        // A handler reading `limit` must be able to trust the type; a
+        // string here would surface as a confusing field-type error
+        // instead of falling back to the default page size.
+        let data = parse_query_allowlist("after=aa&limit=all").unwrap();
+        assert_eq!(data.get("after").unwrap(), "aa");
+        assert!(data.get("limit").is_none());
     }
 
     #[test]

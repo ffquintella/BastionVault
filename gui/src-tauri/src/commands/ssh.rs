@@ -19,7 +19,7 @@ use tauri::State;
 use crate::error::CmdResult;
 use crate::state::AppState;
 
-use super::make_request;
+use super::{make_request, paginated_path};
 
 /// Normalise an operator-supplied mount string. Trailing slashes are
 /// stripped because the path-building code below always concatenates
@@ -206,8 +206,16 @@ pub async fn ssh_read_role(
 ) -> CmdResult<SshRoleConfig> {
     let path = format!("{}/roles/{}", mount_prefix(&mount), name);
     let resp = make_request(&state, Operation::Read, path, None).await?;
-    let map = data_to_map(resp);
+    Ok(role_config_from_map(&data_to_map(resp)))
+}
 
+/// One role's config, mapped out of a response data map.
+///
+/// Shared by `ssh_read_role` and the bulk `ssh_list_roles_info`, so a role
+/// rendered from a page and a role rendered from its own read cannot differ
+/// — including the duration formatting, which is easy to get subtly wrong
+/// in a second copy.
+fn role_config_from_map(map: &Map<String, Value>) -> SshRoleConfig {
     // Durations come back as raw seconds in the engine's serde
     // round-trip. Render them as `<n>s` so the form keeps round-tripping
     // through the same humantime parser the server uses on writes.
@@ -230,8 +238,8 @@ pub async fn ssh_read_role(
             .unwrap_or_default()
     };
 
-    Ok(SshRoleConfig {
-        key_type: val_str(&map, "key_type"),
+    SshRoleConfig {
+        key_type: val_str(map, "key_type"),
         algorithm_signer: val_str(&map, "algorithm_signer"),
         cert_type: val_str(&map, "cert_type"),
         allowed_users: val_str(&map, "allowed_users"),
@@ -243,11 +251,63 @@ pub async fn ssh_read_role(
         ttl: dur_str("ttl"),
         max_ttl: dur_str("max_ttl"),
         not_before_duration: dur_str("not_before_duration"),
-        key_id_format: val_str(&map, "key_id_format"),
-        cidr_list: val_str(&map, "cidr_list"),
-        exclude_cidr_list: val_str(&map, "exclude_cidr_list"),
-        port: val_u64(&map, "port") as u16,
-        pqc_only: val_bool(&map, "pqc_only"),
+        key_id_format: val_str(map, "key_id_format"),
+        cidr_list: val_str(map, "cidr_list"),
+        exclude_cidr_list: val_str(map, "exclude_cidr_list"),
+        port: val_u64(map, "port") as u16,
+        pqc_only: val_bool(map, "pqc_only"),
+    }
+}
+
+/// One role row: the config plus the name the stored entry does not carry.
+#[derive(Serialize)]
+pub struct SshRoleEntry {
+    pub name: String,
+    #[serde(flatten)]
+    pub config: SshRoleConfig,
+}
+
+/// One page of role rows plus the cursor for the next.
+#[derive(Serialize)]
+pub struct SshRolePage {
+    pub records: Vec<SshRoleEntry>,
+    pub total: u64,
+    pub next: String,
+}
+
+/// `ssh/roles-info` — one page of role configurations.
+///
+/// Replaces `ssh_list_roles` followed by an `ssh_read_role` per name. The
+/// GUI needs each role's `key_type` merely to decide which of the CA and OTP
+/// tabs may offer it, so that shape cost `1 + N` requests *per tab* — enough
+/// on a mount with many roles to trip the server's per-IP abuse guard.
+#[tauri::command]
+pub async fn ssh_list_roles_info(
+    state: State<'_, AppState>,
+    mount: String,
+    after: Option<String>,
+    limit: Option<u64>,
+) -> CmdResult<SshRolePage> {
+    let path = paginated_path(&format!("{}/roles-info", mount_prefix(&mount)), after, limit);
+    let resp = make_request(&state, Operation::Read, path, None).await?;
+    let map = data_to_map(resp);
+    let records = map
+        .get("records")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_object())
+                .map(|r| SshRoleEntry {
+                    name: val_str(r, "name"),
+                    config: role_config_from_map(r),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(SshRolePage {
+        records,
+        total: val_u64(&map, "total"),
+        next: val_str(&map, "next"),
     })
 }
 

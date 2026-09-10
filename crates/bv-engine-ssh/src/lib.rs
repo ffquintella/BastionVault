@@ -96,6 +96,7 @@ impl SshBackend {
             self.public_key_path(),
             self.roles_path(),
             self.roles_list_path(),
+            self.roles_list_info_path(),
             self.sign_path(),
             self.creds_path(),
             self.verify_path(),

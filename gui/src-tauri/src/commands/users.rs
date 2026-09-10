@@ -6,7 +6,7 @@ use tauri::State;
 use crate::error::CmdResult;
 use crate::state::AppState;
 
-use super::{make_request, make_request_root};
+use super::{make_request, make_request_root, paginated_path};
 
 #[derive(Serialize)]
 pub struct UserListResult {
@@ -85,53 +85,128 @@ pub async fn get_user(
     let resp = make_request(&state, Operation::Read, path, None).await?;
 
     match resp {
-        Some(r) => {
-            let policies = r
-                .data
-                .as_ref()
-                .and_then(|d| d.get("policies"))
-                .map(|v| match v {
-                    // Array of strings (from token_policies serialization)
-                    Value::Array(arr) => arr
-                        .iter()
-                        .filter_map(|item| item.as_str().map(|s| s.trim().to_string()))
-                        .filter(|s| !s.is_empty())
-                        .collect(),
-                    // Comma-separated string
-                    Value::String(s) => s
-                        .split(',')
-                        .map(|p| p.trim().to_string())
-                        .filter(|p| !p.is_empty())
-                        .collect(),
-                    _ => vec![],
-                })
-                .unwrap_or_default();
-            let data = r.data.as_ref();
-            let get_bool = |k: &str| {
-                data.and_then(|d| d.get(k)).and_then(|v| v.as_bool()).unwrap_or(false)
-            };
-            let get_str = |k: &str| {
-                data.and_then(|d| d.get(k)).and_then(|v| v.as_str()).unwrap_or("").to_string()
-            };
-            let failed_login_count = data
-                .and_then(|d| d.get("failed_login_count"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            Ok(UserInfo {
-                username,
-                policies,
-                disabled: get_bool("disabled"),
-                locked: get_bool("locked"),
-                failed_login_count,
-                totp_mfa_enabled: get_bool("totp_mfa_enabled"),
-                totp_mount: get_str("totp_mount"),
-                totp_key: get_str("totp_key"),
-                email: get_str("email"),
-                phone: get_str("phone"),
-            })
-        }
+        Some(r) => match r.data.as_ref() {
+            Some(data) => Ok(user_info_from_map(username, data)),
+            None => Err("User not found".into()),
+        },
         None => Err("User not found".into()),
     }
+}
+
+/// One user, mapped out of a response data map.
+///
+/// Shared by `get_user` and the bulk `list_users_info`, because the server
+/// returns the identical projection to both — the engine renders a user
+/// through one function precisely so the redactions cannot drift, and the
+/// client should not undo that by mapping the two shapes separately.
+fn user_info_from_map(username: String, data: &Map<String, Value>) -> UserInfo {
+    let policies = data
+        .get("policies")
+        .map(|v| match v {
+            // Array of strings (from token_policies serialization)
+            Value::Array(arr) => arr
+                .iter()
+                .filter_map(|item| item.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect(),
+            // Comma-separated string
+            Value::String(s) => s
+                .split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect(),
+            _ => vec![],
+        })
+        .unwrap_or_default();
+    let get_bool = |k: &str| data.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+    let get_str =
+        |k: &str| data.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    UserInfo {
+        username,
+        policies,
+        disabled: get_bool("disabled"),
+        locked: get_bool("locked"),
+        failed_login_count: data
+            .get("failed_login_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        totp_mfa_enabled: get_bool("totp_mfa_enabled"),
+        totp_mount: get_str("totp_mount"),
+        totp_key: get_str("totp_key"),
+        email: get_str("email"),
+        phone: get_str("phone"),
+    }
+}
+
+/// One row of the admin Users table: the record plus the FIDO2 key count
+/// that used to cost a second request per user.
+#[derive(Serialize)]
+pub struct UserRow {
+    #[serde(flatten)]
+    pub info: UserInfo,
+    pub registered_keys: u64,
+    pub fido2_enabled: bool,
+}
+
+/// One page of user rows plus the cursor for the next.
+#[derive(Serialize)]
+pub struct UserPage {
+    pub records: Vec<UserRow>,
+    pub total: u64,
+    pub next: String,
+}
+
+/// `auth/<mount>/users-info` — one page of user records.
+///
+/// Replaces `list_users` followed by *two* reads per user — `get_user` for
+/// the flags and `fido2_list_credentials` for the key count — which cost
+/// `1 + 2N` requests to render the admin table. Both come off the same
+/// stored record, so one page answers both.
+#[tauri::command]
+pub async fn list_users_info(
+    state: State<'_, AppState>,
+    mount_path: String,
+    after: Option<String>,
+    limit: Option<u64>,
+) -> CmdResult<UserPage> {
+    let path = paginated_path(&format!("auth/{mount_path}users-info"), after, limit);
+    let resp = make_request(&state, Operation::Read, path, None).await?;
+    let Some(r) = resp else {
+        return Ok(UserPage { records: vec![], total: 0, next: String::new() });
+    };
+    let map = r.data.unwrap_or_default();
+    let records = map
+        .get("records")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_object())
+                .map(|rec| {
+                    let username = rec
+                        .get("username")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    UserRow {
+                        info: user_info_from_map(username, rec),
+                        registered_keys: rec
+                            .get("registered_keys")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0),
+                        fido2_enabled: rec
+                            .get("fido2_enabled")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(UserPage {
+        records,
+        total: map.get("total").and_then(|v| v.as_u64()).unwrap_or(0),
+        next: map.get("next").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    })
 }
 
 #[tauri::command]

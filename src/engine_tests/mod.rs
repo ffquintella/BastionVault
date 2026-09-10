@@ -11,12 +11,15 @@
 
 mod approle;
 mod audit_events_window;
+mod bulk_info_endpoints;
+mod cache_version;
 mod ferrogate;
 mod files;
 mod kv_version_read;
 mod notifications;
 mod resource;
 mod oidc;
+mod pki_certs_info;
 mod pki_export;
 mod rustion;
 mod saml;

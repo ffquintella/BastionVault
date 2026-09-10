@@ -61,6 +61,7 @@
 //! root crate precisely because it is *not* part of that view.
 
 pub mod auth;
+pub mod change_epochs;
 pub mod ctx;
 pub mod dos;
 pub mod engines;
@@ -75,6 +76,7 @@ pub mod router;
 pub mod services;
 pub mod stats;
 
+pub use change_epochs::{ChangeEpochs, EpochSnapshot};
 pub use ctx::{LogicalBackendNewFunc, MountEntryHMACLevel, VaultCtx};
 pub use module::Module;
 pub use services::KernelServices;

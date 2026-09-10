@@ -1,4 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
+// Every command in this file goes through the rate-gated wrapper rather
+// than Tauri's `invoke` directly, so no page can fan out fast enough to
+// trip the server's IP abuse guard. See lib/invoke.ts.
+import { invoke } from "./invoke";
 import type {
   ConnectProfileHint,
   VaultMode,
@@ -103,6 +106,12 @@ import type {
   PkiSignVerbatimRequest,
   PkiSignResult,
   PkiCertRecord,
+  CacheVersionSnapshot,
+  PkiCertSummaryPage,
+  UserPage,
+  NamespaceTreeResult,
+  SshRolePage,
+  CertLifecycleTargetPage,
   PkiRevokeResult,
   PkiCaResult,
   PkiCrlResult,
@@ -169,6 +178,18 @@ export const loadPreferences = () => invoke<Preferences>("load_preferences");
 export const savePreferences = (mode: VaultMode, remoteProfile?: RemoteProfile) =>
   invoke<void>("save_preferences", { mode, remoteProfile: remoteProfile ?? null });
 export const getPasswordPolicy = () => invoke<PasswordPolicy>("get_password_policy");
+/**
+ * Change epochs for the named mounts — the signal that tells this client
+ * another client wrote something, so it can drop the affected cached listings
+ * instead of waiting out a TTL. Driven by `lib/changeWatcher.ts`; pages
+ * subscribe rather than calling this directly.
+ *
+ * A mount the caller may not read is absent from `topics` rather than zero:
+ * an epoch is an activity signal, and the server declines to give one for a
+ * mount the caller cannot read.
+ */
+export const cacheVersion = (topics: string[]) =>
+  invoke<CacheVersionSnapshot>("cache_version", { topics });
 export const setPasswordPolicy = (policy: PasswordPolicy) =>
   invoke<void>("set_password_policy", { policy });
 export const remoteLoginToken = (token: string) =>
@@ -452,6 +473,22 @@ export const listUsers = (mountPath: string) =>
   invoke<UserListResult>("list_users", { mountPath });
 export const getUser = (mountPath: string, username: string) =>
   invoke<UserInfo>("get_user", { mountPath, username });
+/**
+ * One page of user records. Replaces `listUsers` followed by a `getUser` and
+ * a `fido2ListCredentials` per user — `1 + 2N` requests to render the admin
+ * table, enough on a real directory to trip the server's per-IP abuse guard.
+ * Both extra reads came off the same stored record.
+ */
+export const listUsersInfo = (
+  mountPath: string,
+  after?: string,
+  limit?: number,
+) =>
+  invoke<UserPage>("list_users_info", {
+    mountPath,
+    after: after ?? null,
+    limit: limit ?? null,
+  });
 export const createUser = (
   mountPath: string,
   username: string,
@@ -544,6 +581,12 @@ export const writePolicyTests = (name: string, cases: PolicyTestCase[]) =>
 // Namespaces (multi-tenancy)
 export const listNamespaces = () =>
   invoke<NamespaceListResult>("list_namespaces");
+/**
+ * Every descendant namespace *with its record*, one request per tree level.
+ * Replaces `listNamespaces` followed by a `readNamespace` per path.
+ */
+export const listNamespacesInfo = () =>
+  invoke<NamespaceTreeResult>("list_namespaces_info");
 
 /** The namespaces the *session token* may operate in.
  *
@@ -2313,6 +2356,21 @@ export interface PkiCsrPending {
   created_at: number;
 }
 
+/** One page of pending-CSR summaries. The CSR PEM is fetched on demand. */
+export interface PkiCsrSummary {
+  csr_id: string;
+  role: string;
+  key_id: string;
+  common_name: string;
+  created_at: number;
+}
+
+export interface PkiCsrSummaryPage {
+  records: PkiCsrSummary[];
+  total: number;
+  next: string;
+}
+
 export interface PkiCsrSetSignedRequest {
   mount: string;
   csr_id: string;
@@ -2331,6 +2389,17 @@ export const pkiCsrGenerate = (request: PkiCsrGenerateRequest) =>
   invoke<PkiCsrGenerateResult>("pki_csr_generate", { request });
 export const pkiCsrList = (mount: string) =>
   invoke<string[]>("pki_csr_list", { mount });
+/**
+ * One page of pending-CSR summaries. Replaces `pkiCsrList` followed by a
+ * `pkiCsrRead` per ID. The CSR PEM is not included — the row's copy action
+ * reads the single record on demand.
+ */
+export const pkiCsrListInfo = (mount: string, after?: string, limit?: number) =>
+  invoke<PkiCsrSummaryPage>("pki_csr_list_info", {
+    mount,
+    after: after ?? null,
+    limit: limit ?? null,
+  });
 export const pkiCsrRead = (mount: string, csrId: string) =>
   invoke<PkiCsrPending | null>("pki_csr_read", { mount, csrId });
 export const pkiCsrDelete = (mount: string, csrId: string) =>
@@ -2461,8 +2530,30 @@ export interface PkiSignRequestRejectRequest {
  *  request unless `allow_duplicate` is set. */
 export const pkiSignRequestImport = (request: PkiSignRequestImportRequest) =>
   invoke<PkiSignRequest>("pki_sign_request_import", { request });
+/** One page of sign-request queue rows, without the CSR/certificate bodies. */
+export interface PkiSignRequestPage {
+  records: PkiSignRequest[];
+  total: number;
+  next: string;
+}
+
 export const pkiSignRequestList = (mount: string) =>
   invoke<string[]>("pki_sign_request_list", { mount });
+/**
+ * One page of sign-request summaries. Replaces `pkiSignRequestList` followed
+ * by a `pkiSignRequestRead` per ID; the rows carry every field the single
+ * read returns except the CSR and certificate bodies.
+ */
+export const pkiSignRequestListInfo = (
+  mount: string,
+  after?: string,
+  limit?: number,
+) =>
+  invoke<PkiSignRequestPage>("pki_sign_request_list_info", {
+    mount,
+    after: after ?? null,
+    limit: limit ?? null,
+  });
 export const pkiSignRequestRead = (mount: string, requestId: string) =>
   invoke<PkiSignRequest | null>("pki_sign_request_read", { mount, requestId });
 export const pkiSignRequestDelete = (mount: string, requestId: string) =>
@@ -2571,6 +2662,24 @@ export const pkiSignVerbatim = (request: PkiSignVerbatimRequest) =>
   invoke<PkiSignResult>("pki_sign_verbatim", { request });
 
 export const pkiListCerts = (mount: string) => invoke<string[]>("pki_list_certs", { mount });
+/**
+ * One page of certificate summaries. Replaces `pkiListCerts` followed by a
+ * `pkiReadCert` per serial: that shape cost `1 + N` requests and shipped
+ * every PEM to render two columns, which is enough to trip the server's
+ * per-IP abuse guard on a mount with a few hundred certificates.
+ *
+ * `after` is the `next` cursor from the previous page; omit it for the first.
+ */
+export const pkiListCertsInfo = (
+  mount: string,
+  after?: string,
+  limit?: number,
+) =>
+  invoke<PkiCertSummaryPage>("pki_list_certs_info", {
+    mount,
+    after: after ?? null,
+    limit: limit ?? null,
+  });
 export const pkiReadCert = (mount: string, serial: string) =>
   invoke<PkiCertRecord>("pki_read_cert", { mount, serial });
 export const pkiImportCert = (request: PkiImportCertRequest) =>
@@ -2642,6 +2751,21 @@ export const certLifecycleEnableMount = (path: string) =>
   invoke<void>("cert_lifecycle_enable_mount", { path });
 export const certLifecycleListTargets = (mount: string) =>
   invoke<string[]>("cert_lifecycle_list_targets", { mount });
+/**
+ * One page of targets *with their renewer state*. Replaces
+ * `certLifecycleListTargets` followed by two reads per target, which was the
+ * largest fan-out in the app at `1 + 2N` requests.
+ */
+export const certLifecycleListTargetsInfo = (
+  mount: string,
+  after?: string,
+  limit?: number,
+) =>
+  invoke<CertLifecycleTargetPage>("cert_lifecycle_list_targets_info", {
+    mount,
+    after: after ?? null,
+    limit: limit ?? null,
+  });
 export const certLifecycleReadTarget = (mount: string, name: string) =>
   invoke<CertLifecycleTarget>("cert_lifecycle_read_target", { mount, name });
 export const certLifecycleWriteTarget = (mount: string, target: CertLifecycleTarget) =>
@@ -2676,6 +2800,17 @@ export const sshDeleteCa = (mount: string) =>
 
 export const sshListRoles = (mount: string) =>
   invoke<string[]>("ssh_list_roles", { mount });
+/**
+ * One page of role configurations. Replaces `sshListRoles` followed by an
+ * `sshReadRole` per name — a cost the page paid once per tab, since each tab
+ * filters the list by `key_type`.
+ */
+export const sshListRolesInfo = (mount: string, after?: string, limit?: number) =>
+  invoke<SshRolePage>("ssh_list_roles_info", {
+    mount,
+    after: after ?? null,
+    limit: limit ?? null,
+  });
 export const sshReadRole = (mount: string, name: string) =>
   invoke<SshRoleConfig>("ssh_read_role", { mount, name });
 export const sshWriteRole = (mount: string, name: string, config: SshRoleConfig) =>

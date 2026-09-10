@@ -420,7 +420,11 @@ impl TestHttpServer {
         match response_result {
             Ok(mut response) => {
                 let status = response.status().as_u16();
-                if status == 204 {
+                // `204 No Content` and `304 Not Modified` carry no body by
+                // definition; parsing one as JSON would fail with a
+                // confusing EOF that masks the status the caller wants to
+                // assert on.
+                if status == 204 || status == 304 {
                     return Ok((status, json!("")));
                 }
                 let json: Value = response.body_mut().read_json()?;

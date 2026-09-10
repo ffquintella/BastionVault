@@ -684,8 +684,18 @@ impl RemoteBackend {
 
             result.and_then(|mut response| {
                 let status = response.status().as_u16();
+                // Capture `Retry-After` before the body is consumed. The
+                // header itself never reaches the GUI (the Tauri command
+                // layer only carries a message string), so a 429 that
+                // does not preserve the wait here becomes an error the
+                // client cannot back off from intelligently.
+                let retry_after = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<u64>().ok());
                 if status == 204 {
-                    return Ok((status, Value::Null));
+                    return Ok((status, Value::Null, retry_after));
                 }
                 // Read raw bytes first — some server paths reply with
                 // an empty body (notably error responses without an
@@ -711,7 +721,7 @@ impl RemoteBackend {
                 } else {
                     serde_json::from_slice(&bytes).map_err(ClientError::from)?
                 };
-                Ok((status, json))
+                Ok((status, json, retry_after))
             })
         })
         .await
@@ -722,7 +732,7 @@ impl RemoteBackend {
         // error toast. Non-node errors pass through unchanged.
         .map_err(|e| classify_node_failure(&host_for_err, e))?;
 
-        let (status, json) = response_result;
+        let (status, json, retry_after) = response_result;
 
         if status == 204 {
             return Ok(None);
@@ -757,6 +767,13 @@ impl RemoteBackend {
                     .or_else(|| obj.get("error").and_then(|v| v.as_str().map(String::from)))
                     .unwrap_or_else(|| json.to_string()),
                 _ => json.to_string(),
+            };
+            // Append the server's retry window to the message so the
+            // caller can back off by the amount actually asked for. The
+            // GUI's request gate parses this `(retry after Ns)` suffix.
+            let message = match retry_after {
+                Some(secs) if status == 429 => format!("{message} (retry after {secs}s)"),
+                _ => message,
             };
             Err(classify_node_failure(
                 &host_for_err,

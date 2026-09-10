@@ -7,6 +7,8 @@ import { useAuthStore } from "../stores/authStore";
 import { useNamespaceStore } from "../stores/namespaceStore";
 import { PkiPage } from "../routes/PkiPage";
 
+
+
 const mockInvoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
@@ -117,6 +119,8 @@ function installMocks(previews: unknown[]) {
         return Promise.resolve([{ path: "pki/", mount_type: "pki" }]);
       case "pki_list_issuers":
         return Promise.resolve({ issuers: [] });
+      case "pki_list_certs_info":
+        return Promise.resolve({ records: [], total: 0, next: "" });
       case "pki_list_certs":
         return Promise.resolve([]);
       case "pki_list_keys":

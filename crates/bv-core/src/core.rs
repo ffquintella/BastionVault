@@ -164,6 +164,48 @@ pub struct Core {
     /// are ephemeral per node. Always present; enforcement is a no-op until
     /// configured/enabled.
     pub dos_guard: Arc<crate::dos::DosGuard>,
+    /// Process-local per-topic change epochs. Bumped by
+    /// [`Core::record_change_epoch`] on every successful mutating request and
+    /// read (with a long-poll) by `sys/cache/version`, so a client learns that
+    /// *another* client wrote something instead of serving a stale listing
+    /// until its cache TTL expires. Ephemeral per node by design — see
+    /// `bv_kernel_api::change_epochs` for why persisting the counters would be
+    /// the wrong trade, and what that costs in an HA cluster.
+    pub change_epochs: Arc<bv_kernel_api::ChangeEpochs>,
+}
+
+/// The mount a request path belongs to, as a change-epoch topic component.
+///
+/// `req.path` at the point this runs is the caller's full view with the
+/// namespace prefix applied (see `rewrite_request_for_namespace`), so the
+/// prefix is stripped first — otherwise `acme/pki/issue/web` would be filed
+/// under a mount called `acme/`.
+///
+/// Auth mounts take two segments (`auth/userpass/`), because `auth/` is not a
+/// mount: filing every credential backend under one topic would make a
+/// userpass write invalidate an AppRole listing.
+///
+/// Returns `None` for a path with no mount component, which is every `sys/`
+/// route whose first segment *is* the whole thing. `sys/` is deliberately
+/// included as a topic otherwise: policies, mounts and namespaces are all
+/// listings a client caches.
+fn change_topic_mount(namespace: &str, path: &str) -> Option<String> {
+    let rel = match namespace.is_empty() {
+        true => path,
+        false => path
+            .strip_prefix(namespace.trim_end_matches('/'))
+            .map(|r| r.trim_start_matches('/'))
+            .unwrap_or(path),
+    };
+    let rel = rel.trim_start_matches('/');
+    let mut segments = rel.split('/');
+    let first = segments.next().filter(|s| !s.is_empty())?;
+    if first != "auth" {
+        return Some(format!("{first}/"));
+    }
+    // `auth/<mount>/...`; an `auth` with nothing after it is not a mount.
+    let second = segments.next().filter(|s| !s.is_empty())?;
+    Some(format!("auth/{second}/"))
 }
 
 impl Default for CoreState {
@@ -206,6 +248,7 @@ impl Default for Core {
             stats: Arc::new(crate::stats::DashboardStats::default()),
             seal_provider_swap: std::sync::RwLock::new(None),
             dos_guard: Arc::new(crate::dos::DosGuard::new(crate::dos::DosConfig::default())),
+            change_epochs: Arc::new(bv_kernel_api::ChangeEpochs::new()),
         }
     }
 }
@@ -1175,6 +1218,11 @@ impl Core {
         // Request-outcome statistics for the operational dashboard.
         self.record_request_stats(req, &resp, err.as_ref(), now);
 
+        // Cache coherence: tell watchers which mount just changed.
+        if err.is_none() {
+            self.record_change_epoch(req);
+        }
+
         // Persist permission denials to the audit trail so they show up
         // on the Audit page (the in-memory counter above is per-node and
         // lost on restart). Best-effort — the 403 is returned unchanged
@@ -1190,6 +1238,40 @@ impl Core {
         }
 
         Ok(resp)
+    }
+
+    /// Bump the change epoch for the mount this request just mutated.
+    ///
+    /// One hook on the successful-write path rather than a call in every
+    /// engine: this is the only place that sees every mutation, so a future
+    /// engine cannot forget to invalidate. Clients long-poll the counters
+    /// through `sys/cache/version`; see `bv_kernel_api::change_epochs`.
+    ///
+    /// Cheap enough for the request path — a prefix check and, for a write,
+    /// one uncontended mutex. Reads and lists do nothing at all.
+    ///
+    /// Two deliberate exclusions:
+    ///
+    /// * **Non-mutating operations.** Only `Write` and `Delete` invalidate a
+    ///   cached listing. Lease `Renew`/`Revoke` do not change one.
+    /// * **Login paths.** A login *does* touch the stored user record (the
+    ///   failed-attempt counter), but bumping on it would wake every watcher
+    ///   on every sign-in — turning a login storm into a refetch storm across
+    ///   every connected client, which costs more than the problem this
+    ///   solves. The consequence is a `failed_login_count` that can lag by one
+    ///   cache TTL in an admin listing.
+    fn record_change_epoch(&self, req: &Request) {
+        if !matches!(req.operation, crate::logical::Operation::Write | crate::logical::Operation::Delete) {
+            return;
+        }
+        if req.path.contains("/login") {
+            return;
+        }
+        let namespace = req.namespace_path.clone().unwrap_or_default();
+        let Some(mount) = change_topic_mount(&namespace, &req.path) else {
+            return;
+        };
+        self.change_epochs.bump(&bv_kernel_api::ChangeEpochs::topic(&namespace, &mount));
     }
 
     /// Tally one request's outcome into the in-memory dashboard
@@ -1335,3 +1417,66 @@ impl Core {
     }
 }
 
+#[cfg(test)]
+mod change_topic_tests {
+    use super::change_topic_mount;
+
+    #[test]
+    fn a_root_path_files_under_its_first_segment() {
+        assert_eq!(change_topic_mount("", "pki/issue/web"), Some("pki/".into()));
+        assert_eq!(change_topic_mount("", "secret/data/app"), Some("secret/".into()));
+    }
+
+    #[test]
+    fn the_namespace_prefix_is_stripped() {
+        // `req.path` carries the namespace prefix by the time the hook runs.
+        // Without stripping it, every namespaced write would file under a
+        // mount named after the namespace.
+        assert_eq!(change_topic_mount("acme", "acme/pki/issue/web"), Some("pki/".into()));
+        assert_eq!(
+            change_topic_mount("dti/esi", "dti/esi/pki/issue/web"),
+            Some("pki/".into())
+        );
+        // A trailing slash on the namespace must not change the answer.
+        assert_eq!(change_topic_mount("acme/", "acme/pki/issue/web"), Some("pki/".into()));
+    }
+
+    #[test]
+    fn auth_mounts_take_two_segments() {
+        // `auth/` is not a mount. Filing every credential backend under one
+        // topic would make a userpass write invalidate an AppRole listing.
+        assert_eq!(
+            change_topic_mount("", "auth/userpass/users/alice"),
+            Some("auth/userpass/".into())
+        );
+        assert_eq!(
+            change_topic_mount("acme", "acme/auth/approle/role/ci"),
+            Some("auth/approle/".into())
+        );
+    }
+
+    #[test]
+    fn sys_is_a_topic_of_its_own() {
+        // Policies, mounts and namespaces are all listings a client caches.
+        assert_eq!(change_topic_mount("", "sys/policy/admin"), Some("sys/".into()));
+    }
+
+    #[test]
+    fn a_path_with_no_mount_component_yields_nothing() {
+        assert_eq!(change_topic_mount("", ""), None);
+        assert_eq!(change_topic_mount("", "/"), None);
+        // `auth` with nothing after it names no mount.
+        assert_eq!(change_topic_mount("", "auth"), None);
+        assert_eq!(change_topic_mount("", "auth/"), None);
+    }
+
+    #[test]
+    fn a_path_that_does_not_carry_its_namespace_prefix_is_left_alone() {
+        // Header-scoped paths keep an unprefixed path while still recording
+        // `namespace_path`; they must still resolve to their real mount.
+        assert_eq!(
+            change_topic_mount("acme", "identity/share/resource/db"),
+            Some("identity/".into())
+        );
+    }
+}

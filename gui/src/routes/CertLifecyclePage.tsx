@@ -35,7 +35,10 @@ import type {
   CertLifecycleState,
   CertLifecycleTarget,
 } from "../lib/types";
-import { extractError } from "../lib/error";
+import { extractError, isRouteUnsupported } from "../lib/error";
+import { cachedRead, invalidateTopic } from "../lib/cache";
+import { watchTopic } from "../lib/changeWatcher";
+import { topicFor } from "../lib/topics";
 
 type TabId = "targets" | "scheduler";
 
@@ -166,6 +169,62 @@ function DeliverersBanner({ mount }: { mount: string }) {
 
 // ── Targets tab ───────────────────────────────────────────────────
 
+/** Targets fetched per request. The engine caps a page at 500. */
+const TARGET_FETCH_PAGE = 500;
+
+/**
+ * Every target and its renewer state, walking `cert-lifecycle/targets-info`
+ * pages.
+ *
+ * Falls back to the pre-bulk shape (list, then a target read and a state
+ * read each) against a server that predates the endpoint, so a newer client
+ * against an older vault degrades in speed rather than breaking.
+ */
+async function loadTargetsWithState(mount: string): Promise<{
+  names: string[];
+  targets: Record<string, CertLifecycleTarget>;
+  states: Record<string, CertLifecycleState>;
+}> {
+  const names: string[] = [];
+  const targets: Record<string, CertLifecycleTarget> = {};
+  const states: Record<string, CertLifecycleState> = {};
+  let after: string | undefined;
+  try {
+    for (;;) {
+      const page = await api.certLifecycleListTargetsInfo(
+        mount,
+        after,
+        TARGET_FETCH_PAGE,
+      );
+      for (const row of page.records) {
+        const name = row.target.name;
+        names.push(name);
+        targets[name] = row.target;
+        states[name] = row.state;
+      }
+      if (!page.next) break;
+      after = page.next;
+    }
+    return { names, targets, states };
+  } catch (e) {
+    if (!isRouteUnsupported(e)) throw e;
+  }
+
+  // ── Version-skew fallback: server has no `targets-info` ────────────
+  const list = await api.certLifecycleListTargets(mount);
+  await Promise.all(
+    list.map(async (n) => {
+      const [t, st] = await Promise.all([
+        api.certLifecycleReadTarget(mount, n).catch(() => undefined),
+        api.certLifecycleReadState(mount, n).catch(() => undefined),
+      ]);
+      if (t !== undefined) targets[n] = t; // skip rows that fail to read
+      if (st !== undefined) states[n] = st; // state missing on never-renewed targets
+    }),
+  );
+  return { names: list, targets, states };
+}
+
 function TargetsTab({ mount }: { mount: string }) {
   const { toast } = useToast();
   const [names, setNames] = useState<string[]>([]);
@@ -176,40 +235,54 @@ function TargetsTab({ mount }: { mount: string }) {
   const [editing, setEditing] = useState<CertLifecycleTarget | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
-  const reload = useCallback(async () => {
-    setLoading(true);
-    try {
-      const list = await api.certLifecycleListTargets(mount);
-      setNames(list);
-      const tmap: Record<string, CertLifecycleTarget> = {};
-      const smap: Record<string, CertLifecycleState> = {};
-      // Each target needs a target-read and a state-read, all mutually
-      // independent. Reading them serially is 2×N round-trips, which on
-      // a remote cluster (≈50 ms each) is painfully slow for a list of
-      // any size. Fan every read out concurrently and collect what
-      // succeeds — failures still skip their row exactly as before.
-      await Promise.all(
-        list.map(async (n) => {
-          const [t, s] = await Promise.all([
-            api.certLifecycleReadTarget(mount, n).catch(() => undefined),
-            api.certLifecycleReadState(mount, n).catch(() => undefined),
-          ]);
-          if (t !== undefined) tmap[n] = t; // skip rows that fail to read
-          if (s !== undefined) smap[n] = s; // state missing on never-renewed targets
-        }),
-      );
-      setTargets(tmap);
-      setStates(smap);
-    } catch (e) {
-      toast("error", extractError(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [mount, toast]);
+  /**
+   * Reload the table.
+   *
+   * `cached` is for the mount effect and for a change notification; every
+   * other caller has just written, so it drops the topic first. Invalidating
+   * *before* the load is what stops the reload from being served the
+   * pre-write answer.
+   */
+  const reload = useCallback(
+    async (opts?: { cached?: boolean }) => {
+      const topic = topicFor("cert-lifecycle-targets", mount);
+      if (!opts?.cached) invalidateTopic(topic);
+      setLoading(true);
+      try {
+        // One request per page, carrying each target *and* its renewer state.
+        // Every row needs both, so the old shape was a target read plus a
+        // state read per target — `1 + 2N` requests, the largest fan-out in
+        // the app and enough to trip the server's per-IP abuse guard.
+        const { names: list, targets: tmap, states: smap } = await cachedRead(
+          topic,
+          "targets-info",
+          () => loadTargetsWithState(mount),
+        );
+        setNames(list);
+        setTargets(tmap);
+        setStates(smap);
+      } catch (e) {
+        toast("error", extractError(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [mount, toast],
+  );
 
   useEffect(() => {
-    void reload();
+    void reload({ cached: true });
   }, [reload]);
+
+  useEffect(() => {
+    // The renewer itself writes state as certificates roll over, and it is
+    // not this client — so without a notification the "last renewal" column
+    // is stale exactly when an operator is watching it.
+    if (!mount) return;
+    return watchTopic(mount, topicFor("cert-lifecycle-targets", mount), () => {
+      void reload({ cached: true });
+    });
+  }, [mount, reload]);
 
   async function renew(name: string) {
     try {
