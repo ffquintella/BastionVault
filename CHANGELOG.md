@@ -45,7 +45,138 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-09-10
+
+### Added
+
+#### Cross-client cache invalidation (`sys/cache/version`)
+
+A client can invalidate its own cache when it writes; it could not know that
+*another* operator — or the same operator's CLI — changed something, so it
+served stale listings until a TTL expired. It now learns.
+(`features/client-request-efficiency.md`, Phase 5)
+
+- **Change-epoch registry** (`crates/bv-kernel-api/src/change_epochs.rs`) — a
+  per-topic counter plus a monotonic aggregate, held on `Core` beside the DoS
+  guard and bumped from **one** hook on the successful-write path
+  (`Core::record_change_epoch`). One chokepoint rather than a call in each
+  engine, so a future engine cannot forget to invalidate. Topics are
+  `<namespace>` + `<mount>`; `auth/` mounts take two segments, so a userpass
+  write does not invalidate an AppRole listing. Reads and lists cost nothing.
+- **`GET /v2/sys/cache/version`** — change epochs for the mounts the caller
+  names, with `ETag` / `If-None-Match` and an optional `?watch=1` long-poll
+  that blocks until something changes. Modeled on the existing
+  `sys/plugins/active-surfaces` channel.
+- **The caller must name its topics, and each one is authorized.** There is no
+  enumeration: returning the registry wholesale would tell a tenant which
+  mounts exist elsewhere, and tell any authenticated caller which mounts in
+  its own namespace it cannot read. A topic is reported only if the caller's
+  capabilities cover reading that mount, and a refused topic is *omitted*
+  rather than zeroed — an epoch is an activity signal, so "the `payroll/`
+  mount was written 40 times this hour" is refused to someone who cannot read
+  `payroll/`.
+- **Logins deliberately do not bump.** A login touches the stored user record,
+  but bumping on it would wake every watcher on every sign-in and turn a login
+  storm into a refetch storm. The cost is a `failed_login_count` that can lag
+  by one cache TTL in an admin listing.
+- **Client watcher** (`gui/src/lib/changeWatcher.ts`) — one shared, refcounted
+  poller, so five components watching a mount cost one request per interval.
+  Failures are silent by design: an older server or a token without the
+  capability must not raise a toast, and the TTL still bounds staleness.
+- **Every page with a fan-out now reads through the cache and subscribes** —
+  PKI certificates, PKI outgoing CSRs, the PKI sign-request queue, SSH roles,
+  cert-lifecycle targets, userpass users and namespaces. Another operator
+  issuing a certificate, approving a sign request, creating a role or a
+  tenant, or the renewer rolling a certificate over, now refreshes the open
+  page instead of leaving it stale. Cache topics are `<kind>|<mount>`
+  (`gui/src/lib/topics.ts`): fine enough that a local certificate write does
+  not drop this client's pending-CSR queue, while every topic watching a
+  mount is invalidated together when its epoch moves.
+- **Known limitation, documented rather than papered over:** epochs are
+  per-node in-memory state (persisting a counter on every write would double
+  the vault's write cost), and `bv-client` pins a session to one node, so two
+  operators on different nodes of an HA cluster do not invalidate each other.
+  The cache TTL is the backstop. This also narrows — without closing — the
+  multi-node staleness `features/caching.md` records as a non-goal.
+
 ### Fixed
+
+#### Desktop client no longer trips the server's own abuse guard
+
+Opening the PKI Certificates tab on a mount with a few hundred
+certificates banned the operator from their own vault for five minutes,
+with a stack of `HTTP 429: request temporarily blocked by DoS
+protection: request rate exceeded: >200 req/10s` toasts. The client was
+issuing one request per listed certificate — `1 + N` in a single burst,
+each carrying a whole PEM to render a name and an expiry column — which
+is indistinguishable from a flood. Server thresholds are unchanged; the
+client no longer produces the traffic.
+(`features/client-request-efficiency.md`, Phases 1-2)
+
+- **Rate gate on every client request** (`gui/src/lib/invoke.ts`) — a
+  token bucket (8 req/s sustained, 16 burst) between `lib/api.ts` and
+  Tauri's `invoke`, so no page can exceed a bounded request rate. Worst
+  case in any 10-second window is 96 requests against a 200 ceiling,
+  leaving headroom for a second client on the same source IP. Queued
+  callers are served FIFO, so a fan-out degrades into a steady stream
+  rather than starving whatever the operator clicks next. A 429 parks
+  the queue for the advertised `Retry-After` (capped at 30 s) instead of
+  letting every queued call raise its own toast.
+- **`Retry-After` now reaches the client** (`crates/bv-client/src/remote.rs`)
+  — the header was dropped when the status and body were folded into a
+  message string, so a client had nothing to back off by. A 429 message
+  now carries a `(retry after Ns)` suffix.
+- **`pki/certs-info`** (`crates/bv-engine-pki/src/path_fetch.rs`) — one
+  page of certificate summaries per request: serial, common name,
+  expiry, revocation, provenance and issuer, with the common name and
+  issuer DN parsed server-side and the PEM omitted. Cursor pagination
+  via `after` / `limit` (default 100, max 500); an `after` cursor rather
+  than an offset, so issuing or revoking a certificate between two pages
+  cannot shift the boundary. A 1,200-certificate mount now costs 3
+  requests instead of 1,201.
+- **`after` / `limit` query parameters** (`crates/bv-logical/src/util.rs`)
+  — added to the query allowlist so cursor pagination works on endpoints
+  that must stay **reads**: paging through a listing has to remain
+  available to a read-only policy, and a GET body does not survive the
+  HTTP boundary.
+- **Certificates tab loads pages** (`gui/src/routes/PkiPage.tsx`) — walks
+  `pki/certs-info` at 500 rows per request. Filtering and row paging
+  still run over the whole loaded set, and a mount larger than the
+  5,000-row load ceiling now says so with the real total instead of
+  silently showing a subset. Falls back to the per-certificate read
+  against a server that predates the endpoint.
+- **Six more bulk endpoints, one cursor contract** — the same treatment for
+  every remaining listing whose cost scaled with inventory:
+  `pki/csr-info`, `pki/sign-request-info`, `ssh/roles-info`,
+  `cert-lifecycle/targets-info`, `auth/<mount>/users-info` and
+  `sys/namespaces-info`. The last two merge what used to be *two* reads per
+  row — a target plus its renewer state, and a user's flags plus its FIDO2
+  key count — so those pages went from `1 + 2N` requests to one.
+  `crates/bv-logical/src/page.rs` holds the shared `paginate` /
+  `page_response`, so all seven endpoints agree on the envelope, the clamping
+  and the handling of a cursor whose key has since been deleted.
+  Each bulk handler renders records through the *same* projection function as
+  the single read it replaces (`read_user`, `namespace_to_response`,
+  `target_to_data`, `record_summary`), which is what keeps the userpass
+  listing's `password_hash` / `credentials_json` redactions from drifting.
+  Every page falls back to the per-object reads against a server that
+  predates its endpoint. AppRole and Resources were assessed and skipped —
+  neither fans out (see the feature file).
+- **Endpoints are named `<list>-info`, not `<list>/info`** — the item patterns
+  they sit beside match a bare name, so `roles/(?P<name>\w[\w-]*\w)` matches
+  `roles/info`: the nested form would have depended on route registration
+  order and would have made `info` an unusable role, target, user or
+  namespace name. Follows the existing `sys/namespaces-self` convention.
+- **Client read cache** (`gui/src/lib/cache.ts`) — opt-in, topic-scoped
+  (`<namespace>|<mount>`) TTL cache for listing and metadata reads, with
+  in-flight coalescing so two components mounting at once share one
+  request. Metadata only; secret values are never cached client-side.
+  A write drops its topic *before* the reload that follows, so a client
+  always sees its own writes, and the cache is dropped entirely on
+  logout, session expiry and namespace switch — cached answers belong to
+  the authorization context that produced them. Wired into the PKI
+  Certificates tab: returning to the tab serves from cache, while the
+  Refresh button and every write handler reload for real.
 
 #### Plugin builds
 
