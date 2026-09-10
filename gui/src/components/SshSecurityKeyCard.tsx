@@ -12,12 +12,12 @@
  * here does not change how they log in to BastionVault.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
-import { Badge, Button, Card, ConfirmModal, Input, useToast } from "./ui";
+import { Badge, Button, Card, ConfirmModal, Input, Modal, useToast } from "./ui";
 
 export function SshSecurityKeyCard() {
   const { toast } = useToast();
@@ -27,6 +27,10 @@ export function SshSecurityKeyCard() {
   const [status, setStatus] = useState<string | null>(null);
   const [comment, setComment] = useState("");
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [pinOpen, setPinOpen] = useState(false);
+  const [pin, setPin] = useState("");
+  const [pinError, setPinError] = useState<string | null>(null);
+  const pinInputRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -48,30 +52,88 @@ export function SshSecurityKeyCard() {
   // gives the operator no idea which.
   useEffect(() => {
     const unlisten = listen<string>("fido2-status", (event) => {
-      switch (event.payload) {
-        case "insert-key":
-          setStatus("Insert your security key…");
-          break;
-        case "tap-key":
-          setStatus("Tap your security key now…");
-          break;
-        case "pin-required":
-          setStatus("Your key is asking for its PIN…");
-          break;
-        case "processing":
-          setStatus("Saving the enrolment…");
-          break;
-        case "complete":
-          setStatus(null);
-          break;
-        default:
-          setStatus(null);
-      }
+      const s = event.payload;
+      if (s === "insert-key") setStatus("Insert your security key…");
+      // On Windows the OS dialog drives insert / tap / PIN itself, so no
+      // in-app PIN modal will ever open.
+      else if (s === "os-prompt") setStatus("Follow the Windows security prompt…");
+      else if (s === "tap-key") setStatus("Tap your security key now…");
+      else if (s === "pin-required") setStatus("Your key is asking for its PIN…");
+      else if (s.startsWith("invalid-pin")) setStatus("Wrong PIN…");
+      // Blocked states end the ceremony: say so rather than leaving the
+      // operator staring at "Working…" until the 60 s timeout.
+      else if (s === "pin-auth-blocked")
+        setStatus("Too many wrong PINs — unplug the key and retry.");
+      else if (s === "pin-blocked")
+        setStatus("Key locked — it must be reset before it can be enrolled.");
+      else if (s === "pin-not-set")
+        setStatus("This key has no PIN set — set one in your authenticator first.");
+      else if (s === "processing") {
+        setStatus("Saving the enrolment…");
+        setPinOpen(false);
+      } else if (s === "complete") {
+        setStatus(null);
+        setPinOpen(false);
+      } else setStatus(null);
     });
     return () => {
       void unlisten.then((fn) => fn());
     };
   }, []);
+
+  // The ceremony blocks on this: `request_pin_from_frontend` emits
+  // `fido2-pin-request` and then waits up to two minutes for
+  // `fido2_submit_pin`. Without this listener the enrolment silently stalls
+  // on any PIN-protected authenticator.
+  useEffect(() => {
+    const unlisten = listen<string>("fido2-pin-request", (event) => {
+      const payload = event.payload;
+      setPin("");
+      if (payload.startsWith("invalid-pin")) {
+        const attempts = payload.split(":")[1];
+        setPinError(
+          attempts
+            ? `Wrong PIN. ${attempts} attempts remaining.`
+            : "Wrong PIN. Try again.",
+        );
+      } else {
+        setPinError(null);
+      }
+      setPinOpen(true);
+      setTimeout(() => pinInputRef.current?.focus(), 50);
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  async function submitPin() {
+    if (!pin) return;
+    setPinOpen(false);
+    setPinError(null);
+    const value = pin;
+    setPin("");
+    // A relay failure means the ceremony already gave up; it surfaces as the
+    // enrolment error rather than a second toast here.
+    try {
+      await api.fido2SubmitPin(value);
+    } catch {
+      /* ceremony reports */
+    }
+  }
+
+  // Cancelling relays an empty PIN, which drops the CTAP sender and aborts
+  // the ceremony immediately instead of letting it sit for two minutes.
+  async function cancelPin() {
+    setPinOpen(false);
+    setPinError(null);
+    setPin("");
+    try {
+      await api.fido2SubmitPin("");
+    } catch {
+      /* ignore */
+    }
+  }
 
   async function enroll() {
     setBusy(true);
@@ -220,6 +282,48 @@ export function SshSecurityKeyCard() {
           </div>
         )}
       </div>
+
+      <Modal
+        open={pinOpen}
+        onClose={cancelPin}
+        title="Security key PIN"
+        size="sm"
+        actions={
+          <>
+            <Button variant="ghost" onClick={cancelPin}>
+              Cancel
+            </Button>
+            <Button onClick={submitPin} disabled={!pin}>
+              Submit
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-[var(--color-text-muted)]">
+            Your security key requires its PIN before it will create the SSH
+            credential. The PIN is verified by the authenticator itself &mdash;
+            it is not sent to the server or stored.
+          </p>
+          {pinError && (
+            <p className="text-sm font-medium text-[var(--color-danger)]">
+              {pinError}
+            </p>
+          )}
+          <input
+            ref={pinInputRef}
+            type="password"
+            value={pin}
+            onChange={(e) => setPin(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && pin) void submitPin();
+            }}
+            placeholder="Enter PIN"
+            autoComplete="off"
+            className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+          />
+        </div>
+      </Modal>
 
       <ConfirmModal
         open={confirmRemove}

@@ -26,7 +26,6 @@ import { UnsealModal } from "../components/UnsealModal";
 import { RustionBastionsTab } from "../components/RustionBastionsTab";
 import { RustionPolicyPanel } from "../components/RustionPolicyPanel";
 import { DosProtectionPanel } from "../components/DosProtectionPanel";
-import { SshSecurityKeyCard } from "../components/SshSecurityKeyCard";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
@@ -546,6 +545,12 @@ export function SettingsPage() {
           )}
         </Card>
 
+        {/* The operator's own SSH security-key enrolment used to sit here.
+            It is a per-operator credential, and this page is
+            administrator-only (`rootOnly` in Layout, plus sys/ writes), so
+            an ordinary operator could never reach it. It now lives on
+            My Profile — see gui/src/routes/ProfilePage.tsx. */}
+
         {/* YubiKey failsafe — additional / alternative unlock paths
             for the machine-level vault-keys file. Distinct from the
             vault's own FIDO2 auth backend (which authenticates USERS
@@ -553,8 +558,6 @@ export function SettingsPage() {
             unlock the local keystore so a spare YubiKey becomes a
             recovery path if the OS keychain is wiped or the primary
             card is lost. See docs/docs/security-structure.md. */}
-        <SshSecurityKeyCard />
-
         <Card title="YubiKey Failsafe">
           <div className="space-y-4">
             <p className="text-xs text-[var(--color-text-muted)]">

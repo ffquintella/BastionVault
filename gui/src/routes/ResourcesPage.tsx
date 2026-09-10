@@ -3068,9 +3068,10 @@ function SecurityKeyCredentialEditor() {
       <p>
         Each operator enrols their own key under{" "}
         <strong className="text-[var(--color-text)]">
-          Settings &rarr; Security key
-        </strong>
-        , then adds the generated public key to this host&rsquo;s{" "}
+          My Profile &rarr; SSH security key
+        </strong>{" "}
+        (the account link at the bottom of the sidebar), then adds the
+        generated public key to this host&rsquo;s{" "}
         <code>~/.ssh/authorized_keys</code>. Connecting without an enrolment
         fails with a clear error rather than falling back to another
         credential.

@@ -87,7 +87,11 @@ they prove different things to different verifiers.
   `clientDataHash` = `SHA-256(ssh_to_sign)`, then emits the PROTOCOL.u2f
   signature blob.
 - **GUI**: the profile-editor toggle, a connect-time MFA prompt, the enrollment
-  flow, and the `fido2` source in the credential-source picker.
+  flow, and the `fido2` source in the credential-source picker. The enrollment
+  card lives on **My Profile**, not Settings — it enrolls the signed-in
+  operator's own credential, and Settings is administrator-only and hidden
+  outside the root namespace. It collects the authenticator's PIN through the
+  same `fido2-pin-request` / `fido2_submit_pin` relay as FIDO2 login.
 
 ### Out of scope (explicit)
 
@@ -268,6 +272,7 @@ as an opaque connection reset.
 | `gui/src-tauri/src/commands/connect_mfa.rs` | Step-up ceremony driver (TOTP prompt / CTAP2 assertion) |
 | `gui/src-tauri/src/commands/ssh_security_key.rs` | Enrollment (CTAP2 `makeCredential` → OpenSSH public key) |
 | `gui/src/components/ConnectMfaPrompt.tsx` | Connect-time factor prompt |
+| `gui/src/components/SshSecurityKeyCard.tsx` | Self-service `sk-` enrollment card (rendered by `routes/ProfilePage.tsx`) |
 
 ## Phases
 

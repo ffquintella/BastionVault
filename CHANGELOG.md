@@ -45,6 +45,24 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.1] - 2026-09-10
+
+### Fixed
+
+#### SSH security-key enrolment (`features/connect-mfa-and-fido2-ssh.md`)
+
+- Prompt for the authenticator's PIN during SSH security-key enrolment. The
+  enrolment ceremony blocks waiting for a PIN, but the card never listened for
+  the request, so enrolling a PIN-protected key sat on "Your key is asking for
+  its PIN…" with nowhere to type it and then failed with a timeout. Wrong-PIN
+  attempts now report the remaining tries, and the locked / blocked / no-PIN-set
+  states are named instead of stalling.
+- Move the **SSH security key** card from Settings to **My Profile**. It enrols
+  the signed-in operator's own credential, but Settings is administrator-only
+  and hidden outside the root namespace, so the operators who need to enrol
+  could not reach it. The connection-profile editor's instructions pointed at a
+  "Settings → Security key" screen that never existed.
+
 ## [0.44.0] - 2026-09-10
 
 ### Added

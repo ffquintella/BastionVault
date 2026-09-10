@@ -4,6 +4,7 @@ import { Badge, Button, Card, Input, SecretInput, useToast } from "../components
 import * as api from "../lib/api";
 import type { MyProfile } from "../lib/api";
 import { extractError } from "../lib/error";
+import { SshSecurityKeyCard } from "../components/SshSecurityKeyCard";
 import { checkPasswordPolicy, describePolicy } from "../lib/password";
 import { usePasswordPolicyStore } from "../stores/passwordPolicyStore";
 
@@ -11,7 +12,7 @@ import { usePasswordPolicyStore } from "../stores/passwordPolicyStore";
  * My Profile — everything the signed-in operator can change about their own
  * account without an administrator.
  *
- * Three independent sections, each saving on its own so a failure in one does
+ * Four independent sections, each saving on its own so a failure in one does
  * not roll back another:
  *
  *  1. **Contact details** — email / phone. Informational only; the server
@@ -23,6 +24,10 @@ import { usePasswordPolicyStore } from "../stores/passwordPolicyStore";
  *  3. **Default resource accounts** — the per-OS login names used by
  *     connection profiles whose credential source is "connecting user's
  *     default account", plus the optional stored Windows RDP password.
+ *  4. **SSH security key** — the operator's own FIDO2 `sk-` enrolment, used
+ *     by profiles whose credential source is "connecting user's FIDO2
+ *     security key". Lives here rather than under Settings because it is a
+ *     per-operator credential and Settings is administrator-only.
  *
  * Every call is caller-scoped server-side (`sys/identity/…/self`), so this
  * page cannot reach anyone else's record — it takes no username anywhere.
@@ -396,6 +401,10 @@ export function ProfilePage() {
                 )}
               </div>
             </Card>
+
+            {/* 4. The operator's own SSH security-key enrolment. Caller-scoped
+                server-side exactly like the cards above. */}
+            <SshSecurityKeyCard />
           </>
         )}
       </div>
