@@ -45,6 +45,22 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+#### Plugin builds
+
+- `make plugins-process` / `make plugins-sign`: cross-compiled process
+  plugins now build again. The container build runs out of the
+  `plugins-ext/` workspace, so neither the repo-root `Cross.toml` nor
+  `.cargo/config.toml` was on cargo's config-discovery path: the build
+  aborted while parsing the SDK manifest with `registry index was not
+  found in any configuration: uox-bastionvault`. The recipe now points
+  `CROSS_CONFIG` at the repo-root `Cross.toml` and forwards both
+  Cloudsmith registry indexes into the container. This also restores the
+  glibc 2.17 image pin the plugin builds had been silently missing —
+  the shipped plugin binaries now require at most `GLIBC_2.16` instead
+  of the default image's 2.39, so they run on RHEL 8/9 again.
+
 ## [0.43.12] - 2026-09-09
 
 ### Added

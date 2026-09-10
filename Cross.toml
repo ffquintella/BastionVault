@@ -27,3 +27,23 @@ image = "ghcr.io/rust-cross/manylinux2014-cross:x86_64"
 pre-build = [
     "apt-get update && apt-get install --assume-yes --no-install-recommends nasm cmake clang libclang-dev",
 ]
+
+# ── Cargo registry definitions inside the container ───────────────
+#
+# `crates/bastion-plugin-sdk` (and every other publishable crate) declares
+# its internal deps with `registry = "uox-bastionvault"`. That name is
+# defined in this repo's `.cargo/config.toml`, which cargo finds by walking
+# up from the cwd — on the host. Inside a `cross` container the build runs
+# out of a mounted project dir with no such parent, so parsing the SDK
+# manifest fails with:
+#
+#   registry index was not found in any configuration: `uox-bastionvault`
+#
+# Cargo reads the same setting from `CARGO_REGISTRIES_<NAME>_INDEX`, so the
+# Makefile exports both indexes and cross forwards them into the container.
+# Keep this list in sync with `[registries]` in `.cargo/config.toml`.
+[build.env]
+passthrough = [
+    "CARGO_REGISTRIES_UOX_BASTIONVAULT_INDEX",
+    "CARGO_REGISTRIES_UOX_FERROGATE_INDEX",
+]

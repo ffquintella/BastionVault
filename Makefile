@@ -2136,6 +2136,32 @@ _target_dir := $(if $(PLUGINS_PROCESS_TARGET),target/$(PLUGINS_PROCESS_TARGET)/r
 _is_windows_target := $(if $(PLUGINS_PROCESS_TARGET),$(findstring pc-windows,$(PLUGINS_PROCESS_TARGET)),$(filter Windows_NT,$(OS)))
 _exe := $(if $(_is_windows_target),.exe,)
 
+# Environment for container builds of the process plugins.
+#
+# `cd plugins-ext && cross build` runs cargo inside a container whose
+# project root is the plugins-ext workspace, so neither this repo's
+# `Cross.toml` nor its `.cargo/config.toml` is on the config-discovery
+# path any more. Two things break:
+#
+#   - the SDK manifest (`crates/bastion-plugin-sdk`) declares its deps
+#     with `registry = "uox-bastionvault"`, and the container has no
+#     such registry, so the build dies before compiling anything with
+#     `registry index was not found in any configuration`;
+#   - `Cross.toml`'s glibc 2.17 image pin is ignored, so plugins would
+#     silently link against the default image's glibc 2.39 and refuse
+#     to start on RHEL 8/9 — the exact trap that pin exists to avoid.
+#
+# `CROSS_CONFIG` points cross back at the repo-root `Cross.toml`, whose
+# `[build.env] passthrough` forwards the two registry indexes into the
+# container. The indexes are read out of `.cargo/config.toml` so this
+# stays a single source of truth. Harmless when the runner is bare
+# `cargo`: the values match what it reads from the file anyway.
+_registry_index = $(shell sed -n 's/^$(1) = { index = "\(.*\)" }.*/\1/p' .cargo/config.toml)
+_plugins_cross_env := \
+	CROSS_CONFIG=$(CURDIR)/Cross.toml \
+	CARGO_REGISTRIES_UOX_BASTIONVAULT_INDEX=$(call _registry_index,uox-bastionvault) \
+	CARGO_REGISTRIES_UOX_FERROGATE_INDEX=$(call _registry_index,uox-ferrogate)
+
 plugins-init: ## Initialise the BastionVault-Plugins submodule (first-time setup)
 	@if [ ! -f "$(PLUGINS_DIR)/Cargo.toml" ]; then \
 		echo "==> initialising plugins-ext submodule"; \
@@ -2300,13 +2326,13 @@ plugins-process: plugins-init plugins-process-target ## Compile the process-runt
 		echo ""; \
 	fi
 	@echo "==> building bastion-plugin-postgres ($(if $(PLUGINS_PROCESS_TARGET),$(PLUGINS_PROCESS_TARGET),native)) via $(PLUGINS_CARGO)"
-	cd $(PLUGINS_DIR) && $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-postgres
+	cd $(PLUGINS_DIR) && $(_plugins_cross_env) $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-postgres
 	@echo "==> building bastion-plugin-xca ($(if $(PLUGINS_PROCESS_TARGET),$(PLUGINS_PROCESS_TARGET),native)) via $(PLUGINS_CARGO)"
-	cd $(PLUGINS_DIR) && $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-xca
+	cd $(PLUGINS_DIR) && $(_plugins_cross_env) $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-xca
 	@echo "==> building bastion-plugin-pmp ($(if $(PLUGINS_PROCESS_TARGET),$(PLUGINS_PROCESS_TARGET),native)) via $(PLUGINS_CARGO)"
-	cd $(PLUGINS_DIR) && $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-pmp
+	cd $(PLUGINS_DIR) && $(_plugins_cross_env) $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-pmp
 	@echo "==> building bastion-plugin-email ($(if $(PLUGINS_PROCESS_TARGET),$(PLUGINS_PROCESS_TARGET),native)) via $(PLUGINS_CARGO)"
-	cd $(PLUGINS_DIR) && $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-email
+	cd $(PLUGINS_DIR) && $(_plugins_cross_env) $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-email
 	@mkdir -p $(PLUGINS_OUT)
 	@cp $(PLUGINS_DIR)/$(_target_dir)/bastion-plugin-postgres$(_exe) $(PLUGINS_OUT)/
 	@cp $(PLUGINS_DIR)/$(_target_dir)/bastion-plugin-xca$(_exe)      $(PLUGINS_OUT)/
