@@ -822,3 +822,101 @@ mod gate_tests {
         );
     }
 }
+
+mod broker_namespace_scope_tests {
+    use std::collections::HashMap;
+
+    use serde_json::json;
+
+    use crate::logical::{Operation, Request};
+    use crate::modules::namespace::store::NamespaceQuotas;
+    use crate::modules::namespace::{NamespaceModule, NAMESPACE_MODULE_NAME};
+    use crate::test_utils::new_unseal_test_bastion_vault;
+    use crate::kernel_api::VaultCtx;
+
+    /// `ssh-broker/` is a deployment-global mount that exists only in the root
+    /// mount table (it is deliberately absent from
+    /// `SystemBackendInner::DEFAULT_NAMESPACE_MOUNTS`), so the namespace router
+    /// must leave its paths un-rewritten — `is_header_scoped_path`.
+    ///
+    /// Regression for a production report: every Connect made with a namespace
+    /// selected logged
+    /// `ssh-broker/policy/effective unavailable (HTTP 404: Router mount not
+    /// found); defaulting login_class to shared-credential`. The request had
+    /// been rewritten to `<ns>/ssh-broker/policy/effective`, which no mount
+    /// serves, and the GUI read that error as "brokering is not configured" —
+    /// so a resource an admin had pinned `brokered` was dialled with its
+    /// shared credential resolved onto the operator's machine. The login class
+    /// was invisible, and therefore unenforced client-side, for every tenant.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_ssh_broker_resolver_is_reachable_with_a_namespace_header() {
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_broker_ns_header_scope").await;
+
+        let ns_store = core
+            .module_manager()
+            .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+            .and_then(|m| m.store())
+            .expect("namespace store");
+        ns_store.create("dti", NamespaceQuotas::default(), false).await.unwrap();
+        ns_store.create("dti/esi", NamespaceQuotas::default(), false).await.unwrap();
+
+        let call = |path: &str, ns: &str, body: Option<serde_json::Map<String, serde_json::Value>>| {
+            let core = core.clone();
+            let token = root.clone();
+            let path = path.to_string();
+            let ns = ns.to_string();
+            async move {
+                let mut req = Request::new(&path);
+                req.operation = Operation::Write;
+                req.client_token = token;
+                req.body = body;
+                if !ns.is_empty() {
+                    let mut h = HashMap::new();
+                    h.insert("x-bastionvault-namespace".to_string(), ns);
+                    req.headers = Some(h);
+                }
+                core.handle_request(&mut req).await
+            }
+        };
+
+        // Admin-authored, at root: the only place the login-class tiers live.
+        call(
+            "ssh-broker/policy/resource/db01",
+            "",
+            json!({ "login_class": "brokered" }).as_object().cloned(),
+        )
+        .await
+        .expect("root must be able to pin a resource's login class");
+
+        // The resolver, called the way the GUI calls it — mount-relative path,
+        // namespace in the header. It must reach the global mount and report
+        // the pinned class, not 404 and not the `shared-credential` default.
+        let resp = call(
+            "ssh-broker/policy/effective",
+            "dti/esi",
+            json!({ "resource_id": "db01", "resource_type": "server" }).as_object().cloned(),
+        )
+        .await
+        .expect("a namespaced caller must reach the deployment-global resolver")
+        .and_then(|r| r.data)
+        .expect("resolver response carries data");
+        assert_eq!(
+            resp.get("login_class").and_then(|v| v.as_str()),
+            Some("brokered"),
+            "the namespaced caller must see the resource tier, not the default: {resp:?}"
+        );
+
+        // And the root caller is unchanged.
+        let at_root = call(
+            "ssh-broker/policy/effective",
+            "",
+            json!({ "resource_id": "db01", "resource_type": "server" }).as_object().cloned(),
+        )
+        .await
+        .expect("root resolve")
+        .and_then(|r| r.data)
+        .expect("resolver response carries data");
+        assert_eq!(at_root.get("login_class").and_then(|v| v.as_str()), Some("brokered"));
+    }
+}

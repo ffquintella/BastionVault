@@ -118,6 +118,19 @@ pub fn is_header_scoped_path(path: &str) -> bool {
         // the rewritten path. Every namespace-bound principal got a 403 on
         // their own inbox and an unread-count that never loaded.
         || path.starts_with("notifications/")
+        // `ssh-broker/` is the same shape as `rustion/`, for the same reason:
+        // its login-class tiers (global → type → asset-group → resource) are
+        // one deployment-wide `PolicyStore` with no namespace in its keys, and
+        // the mount is a root-only core default deliberately excluded from
+        // `DEFAULT_NAMESPACE_MOUNTS`. Rewriting a tenant's
+        // `ssh-broker/policy/effective` into `<ns>/ssh-broker/policy/effective`
+        // aimed at a mount that does not exist, and the connect path read the
+        // 404 (`Router mount not found`) as "brokering not configured" and
+        // defaulted `login_class` to `shared-credential` — resolving the
+        // target's static credential onto the operator's machine for a
+        // resource an admin had marked `brokered`. The login class was
+        // invisible, and therefore unenforced client-side, for every tenant.
+        || path.starts_with("ssh-broker/")
 }
 
 /// Rewrite a caller-supplied path into the path the request router would
@@ -148,7 +161,8 @@ pub fn is_header_scoped_path(path: &str) -> bool {
 ///   - **Root-scoped callers** (`ns_prefix` empty) — the pre-namespace hot
 ///     path, byte-for-byte.
 ///   - **Header-scoped mounts** (`sys/`, `auth/`, `identity/`, `rustion/`,
-///     `notifications/`) — the router exempts them from rewriting because they
+///     `notifications/`, `ssh-broker/`) — the router exempts them from
+///     rewriting because they
 ///     live only in the root mount table, so raw *is* the authorized form.
 ///     Sharing [`is_header_scoped_path`] is deliberate: if one grows a mount
 ///     the other must too.
@@ -311,6 +325,12 @@ mod header_scoped_path_tests {
             // matching — a tenant got 403 on their own inbox.
             "notifications/inbox",
             "notifications/inbox/unread-count",
+            // `ssh-broker/` joined for the `rustion/` reason: one global
+            // login-class policy store, a root-only mount, and a connect path
+            // that read the resulting 404 as "not brokered" and dialled
+            // direct with the shared credential.
+            "ssh-broker/policy/effective",
+            "ssh-broker/policy/global",
         ] {
             assert!(is_header_scoped_path(p), "{p} must be header-scoped");
         }

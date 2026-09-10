@@ -85,6 +85,19 @@ round-trip, GUI gating helpers) and a host integration test
 (`brokered_enforcement_tests`: `409` attach guard, effective resolution,
 `403` lock violation).
 
+**Namespaces (fixed 2026-09-10).** `ssh-broker/` is a deployment-global mount
+that lives only in the root mount table, so its paths are **header-scoped**
+(`namespace::router::is_header_scoped_path`) and never rewritten to
+`<ns>/ssh-broker/…` — which no mount serves. Until that landed, every Connect
+made with a namespace selected got `404 Router mount not found` from
+`policy/effective` and the GUI defaulted `login_class` to
+`shared-credential`, dialling direct with the stored credential for a
+`brokered` resource. The read-only resolver is granted in the `default`,
+`namespace-self` and `administrator` baselines for the same reason the Rustion
+resolvers are; the four write tiers stay admin-only. Covered by
+`broker_namespace_scope_tests` (routing) and
+`namespace_self_grants_the_ssh_login_class_resolver` (the grant).
+
 **Not yet implemented:** the Rustion-side `ssh-otp` session materialiser
 (tracked cross-repo — `ssh-cert` already works against Rustion v0.11.0;
 brokered OTP over Rustion fails closed with `ssh_otp_rustion_unsupported`);

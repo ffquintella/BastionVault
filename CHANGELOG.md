@@ -45,6 +45,30 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.2] - 2026-09-10
+
+### Security
+
+#### SSH login class was invisible inside a namespace (`features/ssh-resource-login-brokering.md`)
+
+- Stop the namespace router rewriting `ssh-broker/…` request paths. The
+  login-class engine is one deployment-global policy store mounted only in the
+  root mount table -- deliberately absent from a namespace's seeded mounts --
+  so a request made with a namespace selected was rewritten to
+  `<ns>/ssh-broker/policy/effective`, which no mount serves. Every Connect from
+  such a session logged `Router mount not found` and fell back to
+  `login_class = shared-credential`, dialling direct with the target's stored
+  credential for a resource an admin had pinned `brokered`. `ssh-broker/` is now
+  header-scoped exactly like `rustion/`.
+- Grant the read-only resolver `ssh-broker/policy/effective` in the `default`
+  and implicit `namespace-self` baselines (and restate it in `administrator`,
+  which `default`'s narrow rules would otherwise out-specify). Without it a
+  namespace-bound token could not learn the login class at all: `ssh-broker/`
+  is root-owned, so `refuse_cross_namespace_paths` rejects any tenant-authored
+  rule naming it. Only the resolver is granted -- the four write tiers
+  (`policy/global`, `policy/type/+`, `policy/asset-group/+`,
+  `policy/resource/+`) stay admin-only.
+
 ## [0.44.1] - 2026-09-10
 
 ### Fixed

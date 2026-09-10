@@ -377,6 +377,25 @@ path "rustion/policy/effective"   { capabilities = ["update"] }
 path "rustion/dispatcher/preview" { capabilities = ["update"] }
 path "rustion/targets/+"          { capabilities = ["read"] }
 
+# --- SSH login-class visibility (read-only resolver) -----------------------
+#
+# The `ssh-broker/` sibling of the resolver above, and withheld it fails the
+# same way: `read_effective_login_class` (gui/src-tauri/src/commands/connect.rs)
+# treats an error from this endpoint as "brokering not configured" and dials
+# with `login_class = shared-credential`, resolving the target's static
+# credential onto the operator's machine for a resource an admin had marked
+# `brokered`. Granting it is what makes the login class visible to the client
+# that has to obey it.
+#
+# Endpoint-level and not share-scoped, for the same reason as the Rustion
+# resolvers: this is a pure function over admin-authored login-class tiers for
+# a resource id the caller names. It mints no credential, opens no session, and
+# reveals nothing about a resource beyond "would a Connect to it use a shared
+# credential or a brokered login". The writes (`policy/global`,
+# `policy/type/+`, `policy/asset-group/+`, `policy/resource/+`) stay withheld --
+# only the resolver is granted.
+path "ssh-broker/policy/effective" { capabilities = ["update"] }
+
 # --- Connect-time gates (endpoint-level) -----------------------------------
 #
 # The pre-flight every Connect runs before a session exists. `mfa/begin` asks
@@ -420,8 +439,8 @@ path "resources/v2/connect/authorize"  { capabilities = ["update"] }
 // for any authenticated principal regardless of tenant. The one exception is the
 // `rustion/` block at the end, which is not caller-scoped by shape: it is scoped
 // by the endpoints' own per-resource gates, and carries its rationale inline.
-// These paths are `sys/` / `auth/` / `identity/` / `rustion/` (global, never
-// namespace-rewritten — see `is_header_scoped_path`), so the bare path rules
+// These paths are `sys/` / `auth/` / `identity/` / `rustion/` / `ssh-broker/`
+// (global, never namespace-rewritten — see `is_header_scoped_path`), so the bare path rules
 // match the un-rewritten request paths exactly. Root tokens are unaffected: this
 // is only added when the bound namespace path is non-empty, and root already
 // grants the equivalent set via its own `default` policy.
@@ -510,6 +529,17 @@ path "sys/tools/hash/*" { capabilities = ["update"] }
 path "rustion/policy/effective"   { capabilities = ["update"] }
 path "rustion/dispatcher/preview" { capabilities = ["update"] }
 path "rustion/targets/+"          { capabilities = ["read"] }
+
+# --- The SSH login class for a resource the caller names ---
+# `ssh-broker/` is root-owned and header-scoped for exactly the reasons above
+# (`is_header_scoped_path`): one deployment-global login-class store, and a
+# mount that exists only in the root table, so `<ns>/ssh-broker/...` 404s and
+# no tenant-authored policy may name the bare path either. Until this landed, a
+# namespace-bound token got `Router mount not found` here and the connect path
+# read that as "not brokered", dialling direct with the shared credential for a
+# resource an admin had marked `brokered`. Read-only resolver over
+# admin-authored policy; the four write tiers stay withheld.
+path "ssh-broker/policy/effective" { capabilities = ["update"] }
 
 # Session lifecycle. Both open endpoints run their OWN per-resource ACL check
 # (`RustionModuleInner::may_connect_resource`): the caller must hold `connect` /
@@ -777,6 +807,7 @@ path "resource-group/groups"              { capabilities = ["create", "read", "u
 path "rustion/policy/effective"           { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "rustion/dispatcher/preview"         { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "rustion/targets/+"                  { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "ssh-broker/policy/effective"        { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "resources/v2/connect/mfa/begin"     { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "resources/v2/connect/mfa/verify"    { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "resources/v2/connect/authorize"     { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
@@ -4083,6 +4114,42 @@ mod implicit_rustion_grant_tests {
         assert!(rule(p, "rustion/targets/*").is_none());
     }
 
+    /// The `ssh-broker/` resolver, for the same reason and with the same
+    /// failure mode: root-owned and header-scoped, so no tenant-authored
+    /// policy can name it, and without the grant a namespace-bound token got
+    /// `Router mount not found` / 403 here — which the connect path read as
+    /// "brokering not configured" and dialled direct with the target's shared
+    /// credential for a resource marked `brokered`.
+    #[test]
+    fn namespace_self_grants_the_ssh_login_class_resolver() {
+        let p = &*NAMESPACE_SELF_POLICY_PARSED;
+
+        let r = rule(p, "ssh-broker/policy/effective")
+            .expect("ssh-broker/policy/effective must be granted");
+        assert!(
+            r.capabilities.contains(&Capability::Update),
+            "it is a POST endpoint, so it needs `update`"
+        );
+
+        // The four write tiers stay withheld, and no wildcard may reach them:
+        // a tenant reads the resolved class, it does not author the policy.
+        for path in [
+            "ssh-broker/policy/global",
+            "ssh-broker/policy/type/linux",
+            "ssh-broker/policy/asset-group/g1",
+            "ssh-broker/policy/resource/host1",
+        ] {
+            assert!(rule(p, path).is_none(), "{path} must not be granted");
+        }
+        assert!(
+            !p.paths.iter().any(|r| r.path.starts_with("ssh-broker") && r.is_prefix),
+            "no prefix rule over `ssh-broker/` — the resolver is the only grant"
+        );
+        for r in p.paths.iter().filter(|r| r.path.starts_with("ssh-broker")) {
+            assert!(!r.capabilities.contains(&Capability::Sudo), "{} must not carry sudo", r.path);
+        }
+    }
+
     #[test]
     fn namespace_self_grants_the_gated_session_lifecycle() {
         let p = &*NAMESPACE_SELF_POLICY_PARSED;
@@ -4136,11 +4203,23 @@ mod implicit_rustion_grant_tests {
     fn default_policy_grants_the_read_only_resolvers_only() {
         let p = Policy::from_str(DEFAULT_POLICY).expect("built-in default policy must parse");
 
-        for path in ["rustion/policy/effective", "rustion/dispatcher/preview"] {
+        for path in
+            ["rustion/policy/effective", "rustion/dispatcher/preview", "ssh-broker/policy/effective"]
+        {
             let r = rule(&p, path).unwrap_or_else(|| panic!("{path} must be granted"));
             assert!(r.capabilities.contains(&Capability::Update));
         }
         assert!(rule(&p, "rustion/targets/+").is_some());
+
+        // Only the resolver: the login-class write tiers are admin surface.
+        for path in [
+            "ssh-broker/policy/global",
+            "ssh-broker/policy/type/linux",
+            "ssh-broker/policy/asset-group/g1",
+            "ssh-broker/policy/resource/host1",
+        ] {
+            assert!(rule(&p, path).is_none(), "{path} must not be in the baseline");
+        }
 
         // Session endpoints are NOT in the root-namespace baseline: an operator
         // there grants those explicitly (see features/connect-only-access.md).
