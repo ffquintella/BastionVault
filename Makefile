@@ -1396,8 +1396,8 @@ ifeq ($(shell uname -s),Linux)
 	@$(MAKE) gui-deps prune-stale
 	cd gui && $(GUI_TAURI) build --bundles deb,rpm -- --features $(GUI_BUNDLE_FEATURES)
 	@echo ""
-	@echo "==> GUI bundles under gui/src-tauri/target/release/bundle/:"
-	@ls -lh gui/src-tauri/target/release/bundle/deb/*.deb gui/src-tauri/target/release/bundle/rpm/*.rpm 2>/dev/null || true
+	@echo "==> GUI bundles under target/release/bundle/:"
+	@ls -lh target/release/bundle/deb/*.deb target/release/bundle/rpm/*.rpm \n	        gui/src-tauri/target/release/bundle/deb/*.deb \n	        gui/src-tauri/target/release/bundle/rpm/*.rpm 2>/dev/null || true
 else
 	@echo "==> not on Linux — building the GUI .deb/.rpm in an emulated amd64 Docker container"
 	@GUI_BUNDLE_FEATURES=$(GUI_BUNDLE_FEATURES) bash gui/src-tauri/installers/linux/build-in-docker.sh
@@ -1408,8 +1408,8 @@ ifeq ($(OS),Windows_NT)
 	@$(MAKE) gui-deps prune-stale
 	cd gui && $(GUI_TAURI) build --bundles msi -- --features $(GUI_BUNDLE_FEATURES)
 	@echo ""
-	@echo "==> GUI .msi under gui/src-tauri/target/release/bundle/msi/:"
-	@ls -lh gui/src-tauri/target/release/bundle/msi/*.msi 2>/dev/null || true
+	@echo "==> GUI .msi under target/release/bundle/msi/:"
+	@ls -lh target/release/bundle/msi/*.msi \n	        gui/src-tauri/target/release/bundle/msi/*.msi 2>/dev/null || true
 else ifeq ($(shell uname -s),Darwin)
 	@echo "==> not on Windows — building the GUI .msi (x64) in a disposable Tart Win11 ARM64 VM"
 	@GUI_BUNDLE_FEATURES=$(GUI_BUNDLE_FEATURES) bash gui/src-tauri/installers/windows/build-in-vm.sh
