@@ -17,6 +17,7 @@ import { useNotificationsStore } from "../stores/notificationsStore";
 import { listen } from "@tauri-apps/api/event";
 import { useToast } from "./ui/Toast";
 import { SUPER_ADMIN, isAdminUser } from "../lib/access";
+import { revalidateConnectAccess } from "../lib/connectValidation";
 
 // localStorage key for the persisted expanded/collapsed state of the
 // Admin section in the sidebar. Default (no key set) is expanded so
@@ -421,6 +422,18 @@ export function Layout({ children }: LayoutProps) {
    * the state intact and letting ConnectPage + openProfile handle
    * the transition is both the correct UX and race-free.
    */
+  /**
+   * Drop every cached connect-access verdict and re-probe whatever is on
+   * screen. The verdicts behind the resource cards' Connect buttons are held
+   * for 10 minutes (`lib/connectValidation.ts`) because their inputs — a
+   * share, a Rustion transport tier — change rarely; this is the operator's
+   * escape hatch for the moment one of them just changed.
+   */
+  function handleRevalidateConnectivity() {
+    revalidateConnectAccess();
+    toast("info", "Re-checking which resources you can connect to…");
+  }
+
   function handleSwitchVault() {
     navigate("/connect?choose=1");
   }
@@ -438,6 +451,7 @@ export function Layout({ children }: LayoutProps) {
         onSignOut={handleSignOut}
         onBackupExport={canBackup ? () => setBackupMode("export") : undefined}
         onBackupRestore={canBackup ? () => setBackupMode("restore") : undefined}
+        onRevalidateConnectivity={handleRevalidateConnectivity}
         onAbout={() => setAboutOpen(true)}
         title={`BastionVault — ${subtitle}`}
       />

@@ -14,6 +14,11 @@ interface AppMenuProps {
   onBackupExport?: () => void;
   /** Backup → Restore. Auth-gated; omit to hide. */
   onBackupRestore?: () => void;
+  /**
+   * Drop every cached connect-access verdict and re-probe. Auth-gated —
+   * omit on unauth routes and the item is hidden.
+   */
+  onRevalidateConnectivity?: () => void;
   /** About modal. Always shown. */
   onAbout: () => void;
 }
@@ -27,13 +32,14 @@ interface AppMenuProps {
  * Items are grouped into sections separated by dividers — same
  * structure the previous native menu had:
  *   File: Backup ▸ (Export / Restore), Sign Out, Quit
- *   App:  Reload, Toggle Fullscreen
+ *   App:  Reload, Toggle Fullscreen, Revalidate Connectivity
  *   About: About BastionVault, Open Repository
  */
 export function AppMenu({
   onSignOut,
   onBackupExport,
   onBackupRestore,
+  onRevalidateConnectivity,
   onAbout,
 }: AppMenuProps) {
   const { toast } = useToast();
@@ -210,6 +216,16 @@ export function AppMenu({
             label="Toggle Fullscreen"
             shortcut="F11"
           />
+          {/* Connect-access verdicts are cached for 10 minutes (see
+              `lib/connectValidation.ts`); this is the operator's way to make
+              a share or a transport-tier change show up right away instead
+              of waiting out the TTL. */}
+          {onRevalidateConnectivity && (
+            <MenuButton
+              onClick={() => pick(onRevalidateConnectivity)}
+              label="Revalidate Connectivity"
+            />
+          )}
           <Divider />
 
           {/* About section */}

@@ -2,7 +2,8 @@
 
 **Status:** every numbered phase is done — 1 (backend), 2a (GUI filtering),
 2b (GUI Rustion credential-reference connect path), 2c (the gate extended to
-the resource *list*) and 2d (gate parity + share awareness). Only the
+the resource *list*), 2d (gate parity + share awareness) and 2e (the list gate
+turned into a cached, force-refreshable connect-access validator). Only the
 `Deferred` row below is outstanding: the RDP connect path, which waits on the
 bastion resolving `rdp-password` server-side, and server-side resolution for
 the `ldap` / `pki` kinds, which do not use the stored secret this feature
@@ -75,6 +76,7 @@ in play.
 | 2c | GUI: extend the connect-only gate to the *list* — card / context-menu / quick-Connect share `isLaunchableForCaller`, `connect_profiles` on the card projection, batched capability probe, and the read-only + connect-only notices collapsed into one. | **Done** |
 | 2b | GUI: the SSH Rustion connect path sends a credential reference to `rustion/v2/session/open` for `secret`-backed profiles (no client-side read). See below. `default-account` joins `secret` / `ssh-engine` on that path — it is an `ssh-engine` mint whose principal is the operator's own account, resolved from the self-service `sys/identity/default-account/self`. | **Done** |
 | 2d | Gate parity + share awareness: v1 `session/open` gains the same per-resource gate (its unbound shape now needs `sudo`), the gate itself learns ownership- and share-derived access via `PolicyStore::readable_targets`, the read-only resolvers gate their `resource_id` with the broader `may_view_resource`, and the GUI launch gate keys off the *effective transport tier* rather than the profile's stored `kind`. | **Done** |
+| 2e | GUI: the list gate becomes a *validator* — `lib/connectValidation.ts` resolves profiles + connect-only status + effective transport for every card on screen in parallel, disables Connect only on a provable no, caches verdicts for 10 minutes, and exposes "Revalidate Connectivity" in the app menu. | **Done** |
 | Deferred | RDP Rustion connect path (`session_open_rdp`) — same rewiring once the bastion supports rdp-password server-side resolution. Server-side resolution for `ldap` / `ssh-engine` / `pki` kinds (those use the operator's own typed creds or mint ephemeral certs — not the stored secret connect-only protects). | Not started |
 
 ### Phase 2b — GUI Rustion connect path (done)
@@ -92,8 +94,48 @@ v2 paths share `parse_rustion_ticket_bundle`, so the downstream SSH dial is
 identical. RDP is deferred (the bastion's rdp-password server-side path is not
 wired yet).
 
+### Phase 2e — GUI connect-access validator (done)
+
+`gui/src/lib/connectValidation.ts` + `gui/src/hooks/useConnectAccess.ts`.
+Phase 2c/2d gated the card on the hints the card projection carries plus a
+batched capability probe; whether a connect-only caller can launch also
+depends on the resource's **effective transport tier**, which that projection
+deliberately omits. The card therefore stayed live and the operator found out
+only after a click.
+
+The validator resolves all three launcher inputs — profile hints, connect-only
+status, effective transport — for every card on screen: one batched
+`capabilities-self` call, then one `rustion_policy_effective` per connect-only
+resource, in parallel. `ResourcesPage` disables the Connect chip (and hides the
+context-menu item) only when the verdict is a *provable* no.
+
+Three invariants, all load-bearing:
+
+- **Gating, not authorization.** `connectResource` still re-checks
+  authoritatively on click and the server authorizes every session open, so a
+  stale-permissive verdict costs a click, not a boundary.
+- **Fails open.** A failed capability probe, a resolver 403, or a card with no
+  hints yields `indeterminate: true` with `allowed: true`. Failing closed would
+  hide access the operator actually has, across a whole page, on one transient
+  error.
+- **Cached 10 minutes, force-refreshable.** Verdicts are scoped to
+  `entityId@namespace` and keyed by a fingerprint of the profile hints (a
+  profile edit invalidates its own verdict), dropped on logout and on a
+  namespace switch, and cleared wholesale by the app menu's **Revalidate
+  Connectivity** item for the moment a share or a transport tier changes out
+  of band.
+
 ## Tests
 
+- `gui/src/test/connectValidation.test.ts` — verdict matrix (readable caller,
+  connect-only + direct-only, connect-only + `rustion-required`), fail-open on
+  a failed probe and on a refused resolver, one capabilities call per page,
+  cache hit / TTL expiry / scope separation / hint-change invalidation, forced
+  revalidation.
+- `gui/src/test/resourceConnectGate.test.tsx` — the card chip itself: live for
+  a readable caller, `aria-disabled` for a connect-only caller with direct-only
+  profiles, live when the tier brokers the session, disabled with no profiles,
+  and re-enabled after a forced revalidation.
 - `src/modules/policy/policy.rs` — `connect` round-trips (string/bit/HCL),
   connect-only grant does not imply read.
 - `src/modules/policy/acl.rs` — `ACL::capabilities` returns `connect` (not

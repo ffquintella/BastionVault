@@ -45,6 +45,39 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.5] - 2026-09-15
+
+### Added
+
+#### GUI: connect-access validator on the resource cards (`gui/src/lib/connectValidation.ts`)
+
+- Validate, for every resource card on screen and in parallel, whether one
+  click on **Connect** could actually launch a session, and disable the button
+  when it could not. One batched `capabilities-self` call resolves connect-only
+  status for the whole page; a `rustion_policy_effective` call per connect-only
+  resource then resolves the effective transport tier — the input the card
+  projection deliberately omits, and the reason a connect-only operator used to
+  learn "you can't launch this" only after clicking.
+  (`features/connect-only-access.md`, Phase 2e)
+- Gating only, and it fails open: a failed capability probe, a refused policy
+  resolver, or a card that carries no profile hints leaves Connect live and
+  marks the verdict indeterminate. The click path still re-checks
+  authoritatively and the server authorizes every session open, so a
+  stale-permissive verdict costs a click, never a boundary.
+- Verdicts are cached for 10 minutes, scoped to identity + namespace, keyed by
+  a fingerprint of the resource's connection profiles (so editing them
+  invalidates the verdict at once), and dropped on sign-out and on a namespace
+  switch.
+
+### Changed
+
+#### GUI: app menu gains **Revalidate Connectivity** (`gui/src/components/AppMenu.tsx`)
+
+- New item in the hamburger menu's Application section: drops every cached
+  connect-access verdict and re-probes whatever is on screen, for the moment a
+  share or a Rustion transport tier changes out of band and the operator does
+  not want to wait out the 10-minute TTL.
+
 ## [0.44.4] - 2026-09-15
 
 ### Fixed

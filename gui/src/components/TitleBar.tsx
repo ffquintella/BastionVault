@@ -22,6 +22,8 @@ interface TitleBarProps {
   onSignOut?: () => void;
   onBackupExport?: () => void;
   onBackupRestore?: () => void;
+  /** Forced connect-access revalidation. Omit on unauth routes. */
+  onRevalidateConnectivity?: () => void;
   onAbout: () => void;
   /** Optional override for the title text. Defaults to "BastionVault". */
   title?: string;
@@ -41,6 +43,7 @@ export function TitleBar({
   onSignOut,
   onBackupExport,
   onBackupRestore,
+  onRevalidateConnectivity,
   onAbout,
   title = "BastionVault",
 }: TitleBarProps) {
@@ -104,6 +107,7 @@ export function TitleBar({
           onSignOut={onSignOut}
           onBackupExport={onBackupExport}
           onBackupRestore={onBackupRestore}
+          onRevalidateConnectivity={onRevalidateConnectivity}
           onAbout={onAbout}
         />
       </div>

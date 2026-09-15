@@ -2,6 +2,7 @@ import { create } from "zustand";
 import * as api from "../lib/api";
 import { useNamespaceStore } from "./namespaceStore";
 import { clearCache } from "../lib/cache";
+import { clearConnectAccessCache } from "../lib/connectValidation";
 import { stopChangeWatcher } from "../lib/changeWatcher";
 
 /**
@@ -121,6 +122,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // change watcher goes with it — its epochs belonged to that session's
     // server, and polling with a dead token is pure noise.
     clearCache();
+    // Same reasoning for the connect-access verdicts: they were resolved
+    // against the outgoing token's grants.
+    clearConnectAccessCache();
     stopChangeWatcher();
     set({
       token: null,
@@ -137,6 +141,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // logout can't resurrect the "session expired" banner.
     if (!get().isAuthenticated) return;
     clearCache();
+    // Same reasoning for the connect-access verdicts: they were resolved
+    // against the outgoing token's grants.
+    clearConnectAccessCache();
     stopChangeWatcher();
     set({
       token: null,

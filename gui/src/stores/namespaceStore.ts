@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import * as api from "../lib/api";
 import { clearCache } from "../lib/cache";
+import { clearConnectAccessCache } from "../lib/connectValidation";
 
 // localStorage keys. `ACTIVE_KEY` mirrors the backend's session-active
 // namespace for display continuity; `LIST_KEY` caches the last-known
@@ -216,6 +217,7 @@ export const useNamespaceStore = create<NamespaceState>((set, get) => ({
     // an unqualified mount path resolves to, so the safe move is to drop the
     // lot rather than reason about which topics survive.
     clearCache();
+    clearConnectAccessCache();
     set({ active: path });
     persist(null, path);
   },

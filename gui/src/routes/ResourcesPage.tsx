@@ -50,7 +50,6 @@ import {
   blankProfile,
   defaultPort,
   detectSecretShape,
-  hasLaunchableProfile,
   isLaunchableForCaller,
   isLaunchableProfile,
   loginClassGate,
@@ -72,6 +71,13 @@ import { useNamespaceStore } from "../stores/namespaceStore";
 import { useAssetGroupMap } from "../hooks/useAssetGroupMap";
 import { useCanWriteResource } from "../hooks/useCanWriteResource";
 import { useEffectivePolicy } from "../hooks/useEffectivePolicy";
+import { useConnectAccess } from "../hooks/useConnectAccess";
+import {
+  invalidateConnectAccess,
+  staticVerdict,
+  type ConnectCandidate,
+  type ConnectVerdict,
+} from "../lib/connectValidation";
 import { brokersThroughBastion, rustionPolicyEffective } from "../lib/rustion";
 import { RustionPolicyTierEditor } from "../components/RustionPolicyTierEditor";
 import { RustionDispatcherPreview } from "../components/RustionDispatcherPreview";
@@ -106,7 +112,7 @@ function ResourceCard({
   meta,
   typeConfig,
   assetGroups,
-  connectOnly,
+  verdict,
   onSelect,
   onConnect,
   onPickGroup,
@@ -115,8 +121,12 @@ function ResourceCard({
   meta: api.ResourceCardEntry;
   typeConfig: ResourceTypeConfig;
   assetGroups: string[];
-  /** Caller can't read this resource's credentials — see `useConnectOnlyMap`. */
-  connectOnly: boolean;
+  /**
+   * Connect-access verdict for this card, or `undefined` while the
+   * validation pass is still in flight — see `lib/connectValidation.ts`.
+   * Absent and indeterminate verdicts both leave Connect live.
+   */
+  verdict: ConnectVerdict | undefined;
   onSelect: (name: string) => void;
   onConnect: (name: string) => void;
   onPickGroup: (group: string) => void;
@@ -134,28 +144,34 @@ function ResourceCard({
   const canConnect =
     String(meta.type || "") === "server" && td.connect?.enabled !== false;
   // …and agrees with the Connection tab on whether one click could launch
-  // anything. `connect_profiles` is absent only on a card built by a path
-  // that doesn't carry the hints — we can't prove Connect is useless there,
-  // so it stays live and the Connection tab does the explaining.
+  // anything. Two sources, in order:
   //
-  // For a connect-only caller launchability also depends on the resource's
-  // effective transport tier, which the card projection doesn't carry: a
-  // `rustion-required` resource brokers every session through a bastion, so
-  // its profiles ARE launchable even though none of them is tagged
-  // `kind: "rustion"`. Greying the button off the hints alone refused exactly
-  // the callers the brokered transport exists to protect. So leave it live and
-  // let `connectResource` resolve the transport on click — it either launches
-  // the brokered profile or opens the Connection tab, and never fires a dial
-  // the server would refuse.
-  const hints = meta.connect_profiles;
-  const blocked =
-    hints !== undefined &&
-    (hints.length === 0 ||
-      (!connectOnly && !hasLaunchableProfile(hints, connectOnly)));
+  //  * `staticVerdict` — the part decidable from the card alone (no profiles
+  //    at all, Connect disabled for the type). Computed inline so the first
+  //    paint is already right instead of flashing an enabled chip.
+  //  * the async verdict from the validator, which additionally resolves the
+  //    caller's connect-only status and the resource's effective transport
+  //    tier — the two inputs the card projection can't carry. A connect-only
+  //    caller on a `rustion-required` resource CAN launch profiles that
+  //    aren't tagged `kind: "rustion"`, so deciding this off the hints alone
+  //    used to refuse exactly the callers brokered transport exists for.
+  //
+  // Either source may answer "don't know", and both then leave the chip live:
+  // `connectResource` re-checks authoritatively on click and never fires a
+  // dial the server would refuse.
+  const local = staticVerdict({
+    name: meta.name,
+    type: String(meta.type || ""),
+    connectEnabled: td.connect?.enabled !== false,
+    hints: meta.connect_profiles,
+    assetGroupIds: assetGroups,
+  });
+  const effectiveVerdict =
+    verdict ?? (local && !local.indeterminate ? local : undefined);
+  const blocked = effectiveVerdict?.allowed === false;
   const blockedTitle =
-    hints?.length === 0
-      ? "No connection profile on this resource yet — open it to add one."
-      : "None of this resource's profiles can be launched by this client yet.";
+    effectiveVerdict?.reason ??
+    "None of this resource's profiles can be launched by this client yet.";
   return (
     <button
       onClick={() => onSelect(meta.name)}
@@ -326,17 +342,30 @@ export function ResourcesPage() {
   const [recentCards, setRecentCards] = useState<api.ResourceCardEntry[]>([]);
   const assetGroups = useAssetGroupMap();
 
-  // Connect-only status for every card on screen, resolved in one batched
-  // capabilities call. Feeds the card-level Connect gate so the list agrees
-  // with what the Connection tab will actually let the caller launch.
-  const visibleNames = useMemo(
-    () =>
-      Array.from(
-        new Set([...cards, ...recentCards].map((c) => c.name)),
-      ).sort(),
-    [cards, recentCards],
-  );
-  const connectOnlyByName = useConnectOnlyMap(visibleNames);
+  // Connect-access validation for every card on screen: one batched
+  // capabilities call plus a parallel transport resolution per connect-only
+  // resource, cached for 10 minutes and force-refreshable from the app menu.
+  // Feeds the card-level Connect gate so the list agrees with what the
+  // Connection tab will actually let the caller launch, before the click.
+  const connectCandidates = useMemo<ConnectCandidate[]>(() => {
+    const seen = new Set<string>();
+    const out: ConnectCandidate[] = [];
+    for (const c of [...cards, ...recentCards]) {
+      if (seen.has(c.name)) continue;
+      seen.add(c.name);
+      const td = getTypeDef(typeConfig, c.type);
+      out.push({
+        name: c.name,
+        type: String(c.type || ""),
+        connectEnabled: td.connect?.enabled !== false,
+        hints: c.connect_profiles,
+        assetGroupIds: assetGroups.map.byResource[c.name] || [],
+      });
+    }
+    out.sort((a, b) => a.name.localeCompare(b.name));
+    return out;
+  }, [cards, recentCards, typeConfig, assetGroups.map.byResource]);
+  const connectAccess = useConnectAccess(connectCandidates);
 
   // Each fetch run is tagged with a token. When the user changes a
   // filter while a fetch is in flight, we bump the token; the stale
@@ -904,7 +933,13 @@ export function ResourcesPage() {
                 assetGroupIds={
                   assetGroups.map.byResource[String(resourceInfo.name)] || []
                 }
-                onUpdated={() => selectResource(selected)}
+                onUpdated={() => {
+                  // The resource's profile set just changed, so its cached
+                  // connect verdict is stale in a way the TTL shouldn't
+                  // outlive.
+                  invalidateConnectAccess(selected);
+                  void selectResource(selected);
+                }}
                 toast={toast}
               />
               {/* Phase 7.3 — per-resource Rustion policy override.
@@ -1023,7 +1058,7 @@ export function ResourcesPage() {
                       meta={meta}
                       typeConfig={typeConfig}
                       assetGroups={assetGroups.map.byResource[meta.name] || []}
-                      connectOnly={connectOnlyByName[meta.name] === true}
+                      verdict={connectAccess.byName[meta.name]}
                       onSelect={selectResource}
                       onConnect={connectResource}
                       onPickGroup={(g) => setFilterGroup((cur) => (cur === g ? "" : g))}
@@ -1041,7 +1076,7 @@ export function ResourcesPage() {
                   meta={meta}
                   typeConfig={typeConfig}
                   assetGroups={assetGroups.map.byResource[meta.name] || []}
-                  connectOnly={connectOnlyByName[meta.name] === true}
+                  verdict={connectAccess.byName[meta.name]}
                   onSelect={selectResource}
                   onConnect={connectResource}
                   onPickGroup={(g) => setFilterGroup((cur) => (cur === g ? "" : g))}
@@ -1066,14 +1101,14 @@ export function ResourcesPage() {
         {cardMenu && (() => {
           const entry = cardMenu.entry;
           const td = getTypeDef(typeConfig, entry.type);
-          // Same gate as the card's own Connect chip: hide the item rather
-          // than offer a launch that resolves to "you can't".
-          const hints = entry.connect_profiles;
+          // Same gate as the card's own Connect chip — the validator's
+          // verdict, so the menu and the chip can't disagree. Hide the item
+          // rather than offer a launch that resolves to "you can't"; an
+          // unresolved verdict keeps it, for the same fail-open reason.
           const canConnect =
             String(entry.type || "") === "server" &&
             td.connect?.enabled !== false &&
-            (hints === undefined ||
-              hasLaunchableProfile(hints, connectOnlyByName[entry.name] === true));
+            connectAccess.byName[entry.name]?.allowed !== false;
           const items: ContextMenuItem[] = [
             {
               label: "Open",
@@ -1557,53 +1592,6 @@ function useCanReadSecrets(resourceName: string): boolean | null {
     };
   }, [resourceName]);
   return canRead;
-}
-
-/**
- * Batched sibling of `useCanReadSecrets` for the resource *list*: resolves
- * connect-only status for every visible card in a single capabilities-self
- * call, so the card-level Connect button can honour the same boundary the
- * Connection tab does without one request per card.
- *
- * Unlike the single-resource hook this does *not* fail closed on error, and
- * a name missing from the map means "not known yet". Both resolve to "assume
- * readable", which only ever leaves the button enabled — clicking it re-checks
- * authoritatively (see `connectResource`) before anything is dialled, so an
- * in-flight or failed probe can't turn into a credential leak. Failing closed
- * here would instead grey out Connect across the whole list on one transient
- * error.
- */
-function useConnectOnlyMap(names: string[]): Record<string, boolean> {
-  const [map, setMap] = useState<Record<string, boolean>>({});
-  // Serialise to a primitive so the effect doesn't re-run on a fresh
-  // array with identical contents.
-  const key = JSON.stringify(names);
-  useEffect(() => {
-    const wanted: string[] = JSON.parse(key);
-    if (wanted.length === 0) return;
-    let cancelled = false;
-    const paths = wanted.map((n) => `resources/secrets/${n}/`);
-    api
-      .capabilitiesSelf(paths)
-      .then((res) => {
-        if (cancelled) return;
-        setMap((prev) => {
-          const next = { ...prev };
-          wanted.forEach((n, i) => {
-            const caps = res.paths[paths[i]] ?? [];
-            next[n] = !(caps.includes("read") || caps.includes("root"));
-          });
-          return next;
-        });
-      })
-      .catch(() => {
-        /* leave unknown — see the note above */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [key]);
-  return map;
 }
 
 function ConnectionProfilesPanel({
