@@ -61,4 +61,48 @@ describe("createWheelAccumulator", () => {
       horizontal: WHEEL_UNITS_PER_NOTCH,
     });
   });
+
+  it("prefers wheelDelta, which is already in RDP rotation units", () => {
+    const acc = createWheelAccumulator();
+    // WebKit on macOS reports a notch as a handful of pixels, but
+    // wheelDeltaY as a full 120. The pixel value must be ignored.
+    expect(
+      acc({ deltaX: 0, deltaY: 4, wheelDeltaX: 0, wheelDeltaY: -WHEEL_UNITS_PER_NOTCH }),
+    ).toEqual({ vertical: -WHEEL_UNITS_PER_NOTCH, horizontal: 0 });
+  });
+
+  it("negates wheelDeltaX, which counts leftwards", () => {
+    const acc = createWheelAccumulator();
+    expect(
+      acc({ deltaX: 4, deltaY: 0, wheelDeltaX: -WHEEL_UNITS_PER_NOTCH, wheelDeltaY: 0 }),
+    ).toEqual({ vertical: 0, horizontal: WHEEL_UNITS_PER_NOTCH });
+  });
+
+  it("reads a zero wheelDelta axis as a real zero, not a missing field", () => {
+    const acc = createWheelAccumulator();
+    // A purely horizontal gesture: wheelDeltaY is 0 and deltaY may be
+    // 0 too, but the presence of both fields must still take the
+    // wheelDelta path rather than falling back to pixels.
+    expect(
+      acc({ deltaX: 100, deltaY: 0, wheelDeltaX: -120, wheelDeltaY: 0 }),
+    ).toEqual({ vertical: 0, horizontal: 120 });
+  });
+
+  it("accumulates sub-notch wheelDelta values", () => {
+    const acc = createWheelAccumulator();
+    expect(acc({ deltaX: 0, deltaY: 0, wheelDeltaX: 0, wheelDeltaY: 0.4 })).toEqual({
+      vertical: 0,
+      horizontal: 0,
+    });
+    expect(
+      acc({ deltaX: 0, deltaY: 0, wheelDeltaX: 0, wheelDeltaY: 0.7 }).vertical,
+    ).toBe(1);
+  });
+
+  it("falls back to pixels when wheelDelta is absent", () => {
+    const acc = createWheelAccumulator();
+    expect(acc({ deltaX: 0, deltaY: PIXELS_PER_NOTCH }).vertical).toBe(
+      -WHEEL_UNITS_PER_NOTCH,
+    );
+  });
 });

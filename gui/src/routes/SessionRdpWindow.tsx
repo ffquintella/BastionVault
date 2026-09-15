@@ -217,8 +217,12 @@ export function SessionRdpWindow() {
     // Wheel forwarding. Registered non-passive so preventDefault
     // actually suppresses the webview's own scroll — otherwise the
     // window rubber-bands while the remote desktop stays put. The
-    // accumulator carries sub-notch remainders, which is what makes a
-    // trackpad scroll at all: its deltas are a few pixels per event.
+    // accumulator reads the event's 120-per-notch `wheelDelta*` where
+    // the engine has it (WKWebView's pixel deltas are on a different
+    // scale entirely, which is why scrolling did nothing on macOS)
+    // and carries sub-notch remainders, which is what makes a
+    // trackpad scroll at all: its gestures are a fraction of a notch
+    // per event.
     const accumulateWheel = createWheelAccumulator();
     const onWheel = (ev: WheelEvent) => {
       ev.preventDefault();

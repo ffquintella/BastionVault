@@ -45,6 +45,25 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.3] - 2026-09-15
+
+### Fixed
+
+#### RDP scrolling on macOS (`gui/src/lib/rdpWheel.ts`)
+
+- Read wheel rotation from the event's `wheelDeltaX` / `wheelDeltaY` -- which
+  every WebKit and Chromium engine reports in RDP's own units of 120 per notch
+  -- instead of converting `deltaX` / `deltaY` at a fixed 100 px per notch.
+  The pixel magnitude a wheel event carries is platform-dependent and on Apple
+  systems is computed from the accelerated scroll amount, not from a
+  notch-sized constant, so the fixed conversion turned a real gesture in the
+  macOS WKWebView into a few units of rotation -- far below the `WHEEL_DELTA`
+  an application on the remote desktop divides by, i.e. no scrolling at all.
+  Engines without the legacy fields (Firefox) keep the pixel path, including
+  its `deltaMode` line and page normalisation; on Chromium the two agree
+  exactly, so nothing changes there. The per-axis fractional carry is
+  unchanged, and is still what lets a sub-notch trackpad gesture scroll.
+
 ## [0.44.2] - 2026-09-10
 
 ### Security
