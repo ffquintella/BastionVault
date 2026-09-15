@@ -111,18 +111,47 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
         .menu(|app_handle| {
-            // Window-level menu. The "Server" submenu hosts the
-            // "Server Info" entry that posts an
-            // `open-server-info` event the frontend listens for to
-            // open the corresponding modal. Built once at startup
-            // and attached to every window the harness opens.
-            use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+            // Application menu. We start from Tauri's default menu
+            // rather than building one from scratch: that default
+            // carries the macOS App / File / Edit / View / Window /
+            // Help submenus, and dropping them cost us the Window
+            // submenu — which is the only place macOS lists an
+            // app's open windows. Without it the RDP / SSH session
+            // windows could not be enumerated or raised from the
+            // menu bar. The "Server" submenu hosts the "Server
+            // Info" entry that posts an `open-server-info` event
+            // the frontend listens for to open the corresponding
+            // modal. Built once at startup and attached to every
+            // window the harness opens.
+            use tauri::menu::{Menu, MenuItemBuilder, SubmenuBuilder, WINDOW_SUBMENU_ID};
+            let menu = Menu::default(app_handle)?;
             let server_info = MenuItemBuilder::with_id("server_info", "Server Info...")
                 .build(app_handle)?;
             let server_menu = SubmenuBuilder::new(app_handle, "Server")
                 .item(&server_info)
                 .build()?;
-            MenuBuilder::new(app_handle).item(&server_menu).build()
+            // Slot "Server" just before "Window" so the two OS-owned
+            // trailing submenus keep their conventional position;
+            // fall back to appending if the default menu ever stops
+            // carrying a Window submenu.
+            let window_pos = menu
+                .items()?
+                .iter()
+                .position(|item| item.id().as_ref() == WINDOW_SUBMENU_ID);
+            match window_pos {
+                Some(pos) => menu.insert(&server_menu, pos)?,
+                None => menu.append(&server_menu)?,
+            }
+            // Registering the submenu as NSApp's windows menu is what
+            // makes AppKit append every open titled window to it, so
+            // each session window becomes listable and selectable.
+            // Tauri's default menu builds the submenu but does not
+            // register it.
+            #[cfg(target_os = "macos")]
+            if let Some(tauri::menu::MenuItemKind::Submenu(window_menu)) = menu.get(WINDOW_SUBMENU_ID) {
+                window_menu.set_as_windows_menu_for_nsapp()?;
+            }
+            Ok(menu)
         })
         .on_menu_event(|app_handle, event| {
             if event.id().as_ref() == "server_info" {

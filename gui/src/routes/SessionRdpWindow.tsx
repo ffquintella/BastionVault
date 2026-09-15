@@ -23,6 +23,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import { RustionSessionChip } from "../components/RustionSessionChip";
+import { canvasRgbaEncoder, cursorCssValue, type RdpCursorUpdate } from "../lib/rdpCursor";
 import { decodeFrame } from "../lib/rdpFrames";
 import { createWheelAccumulator } from "../lib/rdpWheel";
 
@@ -42,6 +43,7 @@ export function SessionRdpWindow() {
   const token = params.get("token") ?? "";
   const closedEvent = params.get("closed") ?? "";
   const resizeEvent = params.get("resize") ?? "";
+  const cursorEvent = params.get("cursor") ?? "";
   const label = params.get("label") ?? "rdp session";
   const initWidth = parseInt(params.get("w") ?? "1024", 10) || 1024;
   const initHeight = parseInt(params.get("h") ?? "600", 10) || 600;
@@ -146,6 +148,17 @@ export function SessionRdpWindow() {
           sizeRef.current = { w: width, h: height };
           canvas.width = width;
           canvas.height = height;
+        })
+      : Promise.resolve(() => undefined);
+
+    // Remote pointer shape. The canvas keeps its local cursor
+    // position — only the sprite crosses the network — so shape
+    // changes the remote desktop drives (resize arrows on a window
+    // edge, I-beam over a text field) show up without adding a round
+    // trip to every mouse move.
+    const unlistenCursor = cursorEvent
+      ? listen<RdpCursorUpdate>(cursorEvent, (ev) => {
+          canvas.style.cursor = cursorCssValue(ev.payload, canvasRgbaEncoder);
         })
       : Promise.resolve(() => undefined);
 
@@ -280,6 +293,7 @@ export function SessionRdpWindow() {
       // window needs.
       void unlistenClosed.then((u) => u());
       void unlistenResize.then((u) => u());
+      void unlistenCursor.then((u) => u());
       observer.disconnect();
       if (resizeTimer !== undefined) window.clearTimeout(resizeTimer);
       // Host-side teardown is owned by the Tauri WindowEvent::
@@ -290,7 +304,7 @@ export function SessionRdpWindow() {
       // the user-driven close path explicitly.
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, closedEvent, resizeEvent]);
+  }, [token, closedEvent, resizeEvent, cursorEvent]);
 
   async function handleDisconnect() {
     try {
@@ -382,6 +396,9 @@ export function SessionRdpWindow() {
           style={{
             display: "block",
             background: "#0a0d18",
+            // Placeholder until the first Pointer Update arrives —
+            // replaced imperatively by the `cursorEvent` listener,
+            // and left in place for a server that sends none.
             cursor: "crosshair",
             outline: "1px solid #1f2030",
             // Fill the container until the server confirms a resize.

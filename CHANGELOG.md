@@ -45,6 +45,39 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.4] - 2026-09-15
+
+### Fixed
+
+#### Session windows are listable in the Dock and the menu bar on macOS (`gui/src-tauri/src/lib.rs`)
+
+- Build the application menu from Tauri's default menu and slot the "Server"
+  submenu into it, instead of replacing the whole menu bar with a one-item
+  menu, and register the resulting Window submenu as NSApp's windows menu
+  (`set_as_windows_menu_for_nsapp`). That registration is what makes AppKit
+  list an app's open titled windows -- both in the Window menu and at the top
+  of the Dock icon's context menu. Neither carried any entry before, so an RDP
+  or SSH session window could not be enumerated or raised once it sat behind
+  another window; the windows themselves were always ordinary titled windows.
+- Tauri's default menu builds a Window submenu but never registers it, so
+  restoring the default alone would still have listed nothing.
+
+#### RDP remote pointer shape (`gui/src-tauri/src/session/rdp.rs`, `gui/src/lib/rdpCursor.ts`)
+
+- Show the cursor the remote desktop actually chose -- the resize arrows on a
+  window edge, the I-beam over a text field, the busy spinner -- instead of a
+  fixed crosshair. The session connected with ironrdp's `enable_server_pointer`
+  off, so every Pointer Update PDU the server sent was decoded and then
+  discarded; the Pointer capability set was advertised regardless, so the
+  updates were already on the wire and the fix costs no extra bandwidth.
+- The sprite is applied as a CSS `cursor:` on the session canvas rather than
+  composited into the framebuffer (`pointer_software_rendering` stays off): only
+  the shape crosses the network, so the operator's pointer keeps moving at local
+  speed. Sprites larger than 128x128, or ones that fail to decode, fall back to
+  the local default cursor rather than leaving a stale shape installed.
+- Server-initiated pointer warps (`PointerPosition`) are still ignored -- a
+  webview cannot move the host cursor.
+
 ## [0.44.3] - 2026-09-15
 
 ### Fixed

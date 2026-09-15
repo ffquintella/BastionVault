@@ -304,6 +304,103 @@ pub fn resize_event_name(token: &str) -> String {
     format!("session-resize-{token}")
 }
 
+/// Per-session event carrying the *remote* pointer shape.
+///
+/// Deliberately not part of the frame channel: MS-RDPBCGR delivers
+/// the cursor out of band as Pointer Update PDUs and never paints it
+/// into the framebuffer, so there is nothing in a frame to carry.
+/// Compositing it into one ourselves (ironrdp's
+/// `pointer_software_rendering`) would also tie every pointer move to
+/// a server round trip; applying the sprite as a CSS `cursor:` on the
+/// canvas instead keeps the operator's pointer moving at local speed
+/// and still shows the shape the remote desktop chose — the resize
+/// arrows on a window edge, the I-beam over a text field, the busy
+/// spinner.
+pub fn cursor_event_name(token: &str) -> String {
+    format!("session-cursor-{token}")
+}
+
+/// Largest pointer sprite we forward to the session window.
+///
+/// We advertise `UP_TO_384X384_PIXELS` because declining large
+/// pointers makes a high-DPI server fall back to a blocky 32×32
+/// sprite, but a CSS `cursor: url(...)` is capped far below that —
+/// Chromium ignores images past 128×128 outright, which would leave
+/// the operator with *no* cursor at all. Anything larger degrades to
+/// the local default: wrong-looking, but always visible.
+const MAX_CURSOR_EDGE: u16 = 128;
+
+/// Remote pointer state pushed to the session window on
+/// [`cursor_event_name`].
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CursorUpdate {
+    /// The server hid the pointer entirely (full-screen video, some
+    /// games). The canvas shows no cursor at all.
+    Hidden,
+    /// Fall back to the local default pointer. Also what we send for
+    /// a sprite we could not forward, so a decode or size failure is
+    /// never silent on screen.
+    Default,
+    /// A decoded sprite to install as the canvas cursor.
+    Bitmap {
+        width: u16,
+        height: u16,
+        hotspot_x: u16,
+        hotspot_y: u16,
+        /// Row-packed, top-down, **non-premultiplied** RGBA, base64
+        /// (standard alphabet). Non-premultiplied is what the
+        /// `Accelerated` decode target produces and what a canvas
+        /// `ImageData` expects; the software target's premultiplied
+        /// form would darken every antialiased edge pixel.
+        rgba_b64: String,
+    },
+}
+
+/// Convert one decoded sprite into a [`CursorUpdate`], or `None` when
+/// it cannot be represented as a CSS cursor — the caller sends
+/// [`CursorUpdate::Default`] in that case rather than leaving the
+/// previous shape installed.
+fn cursor_update_from(pointer: &ironrdp::graphics::pointer::DecodedPointer) -> Option<CursorUpdate> {
+    use base64::Engine as _;
+
+    if pointer.width == 0 || pointer.height == 0 {
+        return None;
+    }
+    if pointer.width > MAX_CURSOR_EDGE || pointer.height > MAX_CURSOR_EDGE {
+        log::debug!(
+            "rdp: pointer sprite {}x{} exceeds the {MAX_CURSOR_EDGE}px CSS cursor limit; \
+             falling back to the local default",
+            pointer.width,
+            pointer.height
+        );
+        return None;
+    }
+    // Belt and braces: the frontend builds an `ImageData` of exactly
+    // this size, and a short buffer would throw there instead of
+    // here, where the mismatch is diagnosable.
+    let expected = usize::from(pointer.width) * usize::from(pointer.height) * 4;
+    if pointer.bitmap_data.len() != expected {
+        log::warn!(
+            "rdp: pointer sprite {}x{} carries {} bytes, expected {expected}; ignoring",
+            pointer.width,
+            pointer.height,
+            pointer.bitmap_data.len()
+        );
+        return None;
+    }
+    Some(CursorUpdate::Bitmap {
+        width: pointer.width,
+        height: pointer.height,
+        // Clamp into the sprite: a CSS `cursor: url(u) x y` whose
+        // hotspot falls outside the image is an invalid declaration
+        // and the whole rule — sprite included — is dropped.
+        hotspot_x: pointer.hotspot_x.min(pointer.width - 1),
+        hotspot_y: pointer.hotspot_y.min(pointer.height - 1),
+        rgba_b64: base64::engine::general_purpose::STANDARD.encode(&pointer.bitmap_data),
+    })
+}
+
 #[derive(Debug, Clone)]
 pub enum RdpControl {
     /// Pointer movement in canvas-relative coords.
@@ -769,6 +866,7 @@ pub async fn open_rdp_session(
     let app_for_task = app.clone();
     let closed_event_for_task = closed_event.clone();
     let resize_event_for_task = resize_event.clone();
+    let cursor_event_for_task = cursor_event_name(&token);
     let frames_for_task = Arc::clone(&frames);
     let label_for_task = args.label.clone();
     #[cfg(not(feature = "rdp_egfx"))]
@@ -781,6 +879,7 @@ pub async fn open_rdp_session(
         frames_for_task,
         closed_event_for_task,
         resize_event_for_task,
+        cursor_event_for_task,
         width,
         height,
         label_for_task,
@@ -895,7 +994,15 @@ fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
         platform: MajorPlatformType::WINDOWS,
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         platform: MajorPlatformType::UNIX,
-        enable_server_pointer: false,
+        // Process the server's Pointer Update PDUs. The Pointer
+        // capability set is advertised either way — ironrdp sends a
+        // non-zero pointer cache size unconditionally — so the
+        // updates were already on the wire and being dropped in
+        // `process_pointer_update`, which is why the canvas cursor
+        // never changed shape on a window edge. Turning this on costs
+        // no extra bandwidth; it only stops us discarding what the
+        // server already sends.
+        enable_server_pointer: true,
         // Phase 7.4: Rustion-routed sessions carry the ticket in the
         // X.224 cookie slot; the bastion consumes it at the Connection
         // Request stage and skips local auth. None on the direct path
@@ -912,7 +1019,15 @@ fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
         request_data: args.ticket_cookie.as_ref().map(|t| NegoRequestData::cookie(t.clone())),
         autologon: false,
         enable_audio_playback: false,
-        pointer_software_rendering: true,
+        // Accelerated, not software. Software rendering composites the
+        // sprite into the `DecodedImage`, which would make the cursor
+        // travel in the frame stream — one round trip of lag per move,
+        // and it only redraws when the *server* sends a pointer
+        // position, which it does not do for ordinary mouse motion.
+        // Accelerated hands us the sprite as an `UpdateKind::
+        // PointerBitmap` with non-premultiplied alpha, which is what
+        // [`cursor_update_from`] forwards to the canvas.
+        pointer_software_rendering: false,
         // Default off: ironrdp's default already disables full-
         // window-drag + menu animations and enables font smoothing.
         // Operators can opt in per-profile to *also* disable
@@ -1063,6 +1178,7 @@ async fn active_stage_loop<S>(
     frames: Arc<Mutex<FrameSink>>,
     closed_event: String,
     resize_event: String,
+    cursor_event: String,
     mut width: u16,
     mut height: u16,
     label: String,
@@ -1299,6 +1415,28 @@ async fn active_stage_loop<S>(
                             dirty.add(rect, width, height);
                         }
                         ActiveStageOutput::ResponseFrame(frame) => response_frames.push(frame),
+                        // Pointer shape, out of band from the frame
+                        // stream. ironrdp emits these in order —
+                        // `Hidden` immediately followed by the sprite
+                        // for a cache hit — and Tauri preserves event
+                        // order per window, so the canvas ends on the
+                        // right shape either way.
+                        ActiveStageOutput::PointerBitmap(pointer) => {
+                            let update = cursor_update_from(&pointer).unwrap_or(CursorUpdate::Default);
+                            let _ = app.emit(&cursor_event, update);
+                        }
+                        ActiveStageOutput::PointerHidden => {
+                            let _ = app.emit(&cursor_event, CursorUpdate::Hidden);
+                        }
+                        ActiveStageOutput::PointerDefault => {
+                            let _ = app.emit(&cursor_event, CursorUpdate::Default);
+                        }
+                        // Server-initiated pointer warp (snap-to-
+                        // default-button and friends). A webview
+                        // cannot move the host cursor, so there is
+                        // nothing honest to do with it; the shape
+                        // updates above are what the operator sees.
+                        ActiveStageOutput::PointerPosition { .. } => {}
                         ActiveStageOutput::DeactivateAll => {
                             // The server replies with DeactivateAll
                             // after every successful resize request.

@@ -733,10 +733,11 @@ pub async fn session_open_rdp(
 
     let window_label = format!("rdp-{}", outcome.token);
     let url = format!(
-        "index.html#/session/rdp?token={}&closed={}&resize={}&label={}&w={}&h={}",
+        "index.html#/session/rdp?token={}&closed={}&resize={}&cursor={}&label={}&w={}&h={}",
         urlencoding::encode(&outcome.token),
         urlencoding::encode(&outcome.closed_event),
         urlencoding::encode(&outcome.resize_event),
+        urlencoding::encode(&session::rdp::cursor_event_name(&outcome.token)),
         urlencoding::encode(&label),
         outcome.width,
         outcome.height,
