@@ -10,9 +10,9 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 |---|---|
 | Done | 62 |
 | In progress | 8 |
-| Todo | 6 |
+| Todo | 7 |
 | Removed | 1 |
-| **Total tracked features** | **77** |
+| **Total tracked features** | **78** |
 
 Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-and-distribution.md)) — sequenced into four release waves; Waves 1 + 2 shipped (with Linux GUI bundler caveat), Wave 3 part-shipped (CLI installers on every platform, GUI installers wired to the Tauri bundler, and the downloads website's Phases 1 + 2 done; the release-signing CI and `manifest.json` publish remain).
 
@@ -145,6 +145,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | `[x]` Done | GUI Dashboard Redesign (operational PAM landing view) | [spec](features/gui-dashboard-redesign.md) — replaced the static mounts/auth listing with KPI tiles + session-activity chart + live sessions + recent-audit feed + needs-attention panel, modelled on CyberArk / Delinea / Vault / Teleport landing views. All 5 phases shipped: `GET /v1/sys/dashboard/summary` (ACL- + namespace-scoped logical route + actix shim + `Backend`-trait Tauri command) feeds the GUI, `Promise.allSettled` graceful degradation, 5s live-session poll. Plus a request-level **stats aggregator** (`src/stats.rs`, hourly-bucket ring on `Core`, incremented in `handle_request`) surfacing `audit_write_failures` in the summary. `denied` and `failed_logins_1h` were later moved off this per-node ring to range-scan the replicated `sys/denial-audit/` + `sys/login-audit/` stores so the counts are identical on every HA node (the ring still backs `write_failures`, which has no store). Certs-expiring / credentials-due rows still deferred (data exists; per-load enumeration cost open). +17 tests. |
 | `[x]` Done | Graphical Policy Builder & Validator | [spec](features/policy-builder-validator.md), [roadmap](roadmaps/policy-builder-validator.md) — visual block editor + effectivity validator beside the textual HCL editor; hybrid engine (instant client lint + authoritative stateless backend dry-run `POST /v2/sys/policies/acl/test`), savable test cases gating save. All 5 phases implemented with Rust + `vitest` coverage. Effectivity cases also carry an optional **environment** (fed to the matcher as the `env` request param so env-restriction rules are exercised — `ACL::explain_capability_with_params`), an optional **value assertion** (`expect_key`=`expect_value`, checked against a live read at Run time, not gated), and an optional **attached-policy set** (`policies`, defaulting to `["default"]`) so the ACL is built from every policy a real token carries — the response names the policy that contributed the winning rule (`granting_policies`) and the verdict the draft alone would give (`draft_only_allowed`), which is what makes cross-policy narrowing visible. |
 | `[ ]` Todo | Compliance Reporting | [spec](features/compliance-reporting.md) |
+| `[ ]` Todo | MCP Access (authenticated, permission-scoped Model Context Protocol server — local + network) | [spec](features/mcp-access.md) — **Phase 0 (spec + security research) done, 2026-09-21.** MCP-bound tokens (typed, unforgeable binding; accepted only by `/v2/mcp`), app accounts = AppID role + `sys/mcp/apps` record (tool allow-list, path scope, reveal/destructive off by default, shares to the app entity), FerroGate machine auth required with a two-key, sudo-gated, expiring waiver; network mode over the existing rustls listener (hybrid `X25519MLKEM768` preferred by default, `require_hybrid_kex` to mandate); local mode loopback/UDS/stdio only with per-client pairing consent + per-call confirmation; every tool call on the audit chain. Targets MCP spec 2026-07-28 (stateless). |
 
 ### Packaging & Distribution
 
@@ -172,6 +173,7 @@ Next-up `Todo` rows once Packaging & Distribution lands:
 - Compliance Reporting
 - Rustion Bastion Integration (delegated PAM transport + recording)
 - Machine Authentication (FerroGate-attested machine identity, admin-approval gated, first-machine root bootstrap)
+- MCP Access ([spec](features/mcp-access.md)) — Phases 1–3 (`bv-mcp` core, kernel binding + app registry + token exchange, `/v2/mcp` transport) are the minimum network-mode release; 4–5 (CLI `bvault mcp serve` + GUI pairing/consent) the minimum local-mode release; 7 waits on Identity Provider
 
 ## Completed Initiatives
 

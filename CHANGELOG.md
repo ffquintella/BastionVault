@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### MCP Access — specification
+
+- **Feature specification for MCP access** (`features/mcp-access.md`) -- design for an authenticated, permission-scoped Model Context Protocol server in two shapes: a network endpoint (`POST /v2/mcp`) and a local server (`bvault mcp serve`, GUI *AI Assistants* panel). Written against MCP spec revision 2026-07-28 after a security research pass (spec normative rules, OWASP MCP Top 10, NSA/CISA agentic guidance, published MCP CVEs and attack write-ups, competing secrets-manager MCP servers). Key decisions: MCP-bound tokens as a typed `TokenEntry` field accepted only by the MCP endpoint; app accounts as an AppID role plus a `sys/mcp/apps` record with tool allow-list, path scope, and reveal/destructive switches that default off; FerroGate machine authentication required with a two-key, sudo-gated, expiring waiver; hybrid post-quantum TLS via the existing rustls listener (preferred by default, `require_hybrid_kex` to mandate); local mode bound to loopback/UDS/stdio only with per-client pairing consent and per-call confirmation; every tool call recorded on the existing audit chain. Phase 0 only -- no code. Roadmap row added under Infrastructure.
+
 ## [0.44.5] - 2026-09-15
 
 ### Added
