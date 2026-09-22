@@ -93,7 +93,7 @@ export PATH := $(RUSTUP_CARGO_BIN):$(PATH)
 # override (not merge with) the `/PDBPAGESIZE:8192` linker flag that
 # .cargo/config.toml sets for the *-pc-windows-msvc targets, bringing
 # back the GUI link failure `LNK1318` that flag exists to prevent.
-FAST_BUILD_TARGETS := build run-dev run-dev-gui run-dev-gui-hiqlite run-dev-gui-only bootstrap
+FAST_BUILD_TARGETS := build install run-dev run-dev-gui run-dev-gui-hiqlite run-dev-gui-only bootstrap
 ifneq ($(OS),Windows_NT)
 # `getconf` is POSIX and present on macOS and every Linux distro we build on;
 # `sysctl -n hw.ncpu` covers the BSDs, and 8 is the last-resort fallback so a
@@ -120,7 +120,7 @@ endif
 # affect cargo's own internal parallelism, which is where the cores actually go.
 .NOTPARALLEL:
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-integration test-doc test-cucumber test-hiqlite test-all test-release docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test downloads-image downloads-image-run downloads-image-test container-deps-key container-deps-ref container-deps-image container-deps-push container-cache-clean container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi gui-windows-nsis windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings release release-version-check release-dispatch release-linux-appimage release-macos-pkg release-windows-msi release-local release-checksums
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-integration test-doc test-cucumber test-hiqlite test-all test-release docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test downloads-image downloads-image-run downloads-image-test container-deps-key container-deps-ref container-deps-image container-deps-push container-cache-clean container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all install uninstall gui-linux-packages gui-windows-msi gui-windows-nsis windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings release release-version-check release-dispatch release-linux-appimage release-macos-pkg release-windows-msi release-local release-checksums
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -1370,6 +1370,105 @@ ifeq ($(shell uname -s),Darwin)
 	@$(MAKE) macos-cli-pkg
 else
 	@echo "==> skipping macOS .pkg (not on a Mac; .pkg needs Apple's pkgbuild)"
+endif
+
+# ── Install from source onto this machine ─────────────────────────────
+#
+# `make install` builds the release `bvault` binary and drops it, plus
+# the manpage and the shell completions, under $(PREFIX) — the same file
+# set the .pkg/.deb/.rpm packages install, minus the package database
+# entry. Use it when you build from source and want the server on PATH
+# without producing an installer first.
+#
+# Like the CLI packages, this bestows NO privileges and registers NO
+# service: it is a plain file drop (features/packaging-client-binaries.md).
+# There is no systemd unit or launchd job in this repo; run the server
+# with `bvault server --config <file>`.
+#
+#   make install                       # /usr/local, sudo only if needed
+#   make install PREFIX=$$HOME/.local  # no sudo at all
+#   make install DESTDIR=/tmp/stage    # stage into a fake root
+#   make install NO_BUILD=1            # install whatever is in target/release
+#   make uninstall                     # remove exactly what install wrote
+#
+# DESTDIR is prepended to every path and is for staging only — it is not
+# baked into anything, so a staged tree is relocatable to /.
+
+PREFIX  ?= /usr/local
+DESTDIR ?=
+NO_BUILD ?=
+
+INSTALL_BIN_SRC ?= target/release/bvault
+INSTALL_CLI_DIR := installers/cli
+
+# Paths written, in the order the recipe writes them. `uninstall` removes
+# this same list, so keep the two in step.
+INSTALL_BIN_DST  := $(DESTDIR)$(PREFIX)/bin/bvault
+INSTALL_MAN_DST  := $(DESTDIR)$(PREFIX)/share/man/man1/bvault.1.gz
+INSTALL_BASH_DST := $(DESTDIR)$(PREFIX)/etc/bash_completion.d/bvault
+INSTALL_ZSH_DST  := $(DESTDIR)$(PREFIX)/share/zsh/site-functions/_bvault
+INSTALL_FISH_DST := $(DESTDIR)$(PREFIX)/share/fish/vendor_completions.d/bvault.fish
+
+install: ## Build and install bvault + manpage + completions under $(PREFIX) (default /usr/local)
+ifeq ($(OS),Windows_NT)
+	@echo "ERROR: 'make install' is Unix-only (it writes a POSIX file layout)."; \
+	 echo "       On Windows build an installer instead: make windows-cli-packages"; exit 1
+else
+ifneq ($(NO_BUILD),1)
+	@$(MAKE) prune-stale
+	cargo build -p bvault-cli --release --bin bvault
+endif
+	@[ -f "$(INSTALL_BIN_SRC)" ] || { \
+	   echo "ERROR: $(INSTALL_BIN_SRC) not found — drop NO_BUILD=1, or point INSTALL_BIN_SRC at a binary."; exit 1; }
+	@# Only escalate when the destination actually needs it. A PREFIX the
+	@# user owns ($$HOME/.local, a DESTDIR staging root) installs with no
+	@# sudo at all; /usr/local on a fresh machine needs it for the mkdir.
+	@SUDO=; \
+	 if [ "$$(id -u)" != 0 ]; then \
+	   probe="$(DESTDIR)$(PREFIX)"; \
+	   while [ -n "$$probe" ] && [ ! -d "$$probe" ]; do probe="$$(dirname "$$probe")"; done; \
+	   if [ ! -w "$$probe" ]; then \
+	     command -v sudo >/dev/null 2>&1 || { echo "ERROR: $(DESTDIR)$(PREFIX) is not writable and sudo is not available."; exit 1; }; \
+	     echo "==> $(DESTDIR)$(PREFIX) is not writable — using sudo"; \
+	     SUDO=sudo; \
+	   fi; \
+	 fi; \
+	 set -e; \
+	 $$SUDO install -d -m 0755 "$(dir $(INSTALL_BIN_DST))" "$(dir $(INSTALL_MAN_DST))" \
+	                           "$(dir $(INSTALL_BASH_DST))" "$(dir $(INSTALL_ZSH_DST))" \
+	                           "$(dir $(INSTALL_FISH_DST))"; \
+	 $$SUDO install -m 0755 "$(INSTALL_BIN_SRC)" "$(INSTALL_BIN_DST)"; \
+	 gzip -9 -c "$(INSTALL_CLI_DIR)/manpage/bvault.1" | $$SUDO tee "$(INSTALL_MAN_DST)" >/dev/null; \
+	 $$SUDO chmod 0644 "$(INSTALL_MAN_DST)"; \
+	 $$SUDO install -m 0644 "$(INSTALL_CLI_DIR)/completions/bvault.bash" "$(INSTALL_BASH_DST)"; \
+	 $$SUDO install -m 0644 "$(INSTALL_CLI_DIR)/completions/_bvault"     "$(INSTALL_ZSH_DST)"; \
+	 $$SUDO install -m 0644 "$(INSTALL_CLI_DIR)/completions/bvault.fish" "$(INSTALL_FISH_DST)"
+	@echo ""
+	@echo "==> Installed BastionVault $(VERSION):"
+	@echo "    $(INSTALL_BIN_DST)"
+	@echo "    $(INSTALL_MAN_DST)"
+	@echo "    $(INSTALL_BASH_DST)"
+	@echo "    $(INSTALL_ZSH_DST)"
+	@echo "    $(INSTALL_FISH_DST)"
+	@echo ""
+	@echo "    No service was registered and no config was written."
+	@echo "    Start a local server with:  bvault server --config config/dev.hcl"
+	@echo "    Production config shapes:   config/single-node.hcl, config/ha-cluster.hcl"
+	@command -v bvault >/dev/null 2>&1 || \
+	   echo "    NOTE: $(PREFIX)/bin is not on your PATH — add it to use 'bvault' unqualified."
+endif
+
+uninstall: ## Remove the files `make install` wrote under $(PREFIX)
+ifeq ($(OS),Windows_NT)
+	@echo "ERROR: 'make uninstall' is Unix-only."; exit 1
+else
+	@SUDO=; \
+	 if [ "$$(id -u)" != 0 ] && [ ! -w "$(dir $(INSTALL_BIN_DST))" ]; then SUDO=sudo; fi; \
+	 for f in "$(INSTALL_BIN_DST)" "$(INSTALL_MAN_DST)" "$(INSTALL_BASH_DST)" \
+	          "$(INSTALL_ZSH_DST)" "$(INSTALL_FISH_DST)"; do \
+	   if [ -e "$$f" ]; then $$SUDO rm -f "$$f" && echo "    removed $$f"; fi; \
+	 done
+	@echo "==> Vault data and config were NOT touched (this target never created any)."
 endif
 
 # ── GUI installers (Tauri bundler) ─────────────────────────────────────

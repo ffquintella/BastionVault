@@ -88,6 +88,49 @@ cargo build --release
 
 After a successful build, the `bvault` executable will be in `target/release/` (or `target/debug/` for debug builds).
 
+## Install It on This Machine
+
+`make install` puts the built binary on your PATH, together with the manpage
+and the bash/zsh/fish completions — the same file set the `.pkg`, `.deb` and
+`.rpm` packages install, without building an installer first:
+
+~~~bash
+make install
+~~~
+
+| Installed path | Contents |
+|---|---|
+| `$PREFIX/bin/bvault` | the server + CLI binary |
+| `$PREFIX/share/man/man1/bvault.1.gz` | manpage |
+| `$PREFIX/etc/bash_completion.d/bvault` | bash completions |
+| `$PREFIX/share/zsh/site-functions/_bvault` | zsh completions |
+| `$PREFIX/share/fish/vendor_completions.d/bvault.fish` | fish completions |
+
+`PREFIX` defaults to `/usr/local`. The target escalates with `sudo` only when
+that destination is not writable, so an install into a directory you own needs
+no privileges at all:
+
+~~~bash
+make install PREFIX=$HOME/.local
+~~~
+
+Other knobs:
+
+~~~bash
+make install DESTDIR=/tmp/stage   # stage into a fake root (packaging)
+make install NO_BUILD=1           # install the existing target/release/bvault
+make uninstall                    # remove exactly the five paths above
+~~~
+
+Like the CLI packages, this installs **no service and no configuration** and
+grants no privileges — it is a plain file drop. There is no systemd unit or
+launchd job: start the server yourself with
+`bvault server --config <file>`, using `config/single-node.hcl` or
+`config/ha-cluster.hcl` as the starting shape. `make uninstall` removes only
+what it installed; vault data and config are never touched.
+
+On Windows, build an installer instead — `make windows-cli-packages`.
+
 ## Verify BastionVault
 
 Run the following command:

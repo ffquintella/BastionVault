@@ -51,6 +51,10 @@ EXAMPLE ENTRY:
 
 - **Feature specification for MCP access** (`features/mcp-access.md`) -- design for an authenticated, permission-scoped Model Context Protocol server in two shapes: a network endpoint (`POST /v2/mcp`) and a local server (`bvault mcp serve`, GUI *AI Assistants* panel). Written against MCP spec revision 2026-07-28 after a security research pass (spec normative rules, OWASP MCP Top 10, NSA/CISA agentic guidance, published MCP CVEs and attack write-ups, competing secrets-manager MCP servers). Key decisions: MCP-bound tokens as a typed `TokenEntry` field accepted only by the MCP endpoint; app accounts as an AppID role plus a `sys/mcp/apps` record with tool allow-list, path scope, and reveal/destructive switches that default off; FerroGate machine authentication required with a two-key, sudo-gated, expiring waiver; hybrid post-quantum TLS via the existing rustls listener (preferred by default, `require_hybrid_kex` to mandate); local mode bound to loopback/UDS/stdio only with per-client pairing consent and per-call confirmation; every tool call recorded on the existing audit chain. Phase 0 only -- no code. Roadmap row added under Infrastructure.
 
+#### Build: `make install` / `make uninstall`
+
+- **Install from source without building an installer** (`Makefile`) -- `make install` builds the release `bvault` binary and drops it, the manpage and the bash/zsh/fish completions under `$(PREFIX)` (default `/usr/local`), the same file set the `.pkg` / `.deb` / `.rpm` packages lay down. Honours `DESTDIR` for staging, `NO_BUILD=1` to install an already-built `target/release/bvault`, and `INSTALL_BIN_SRC=` to install some other binary. It escalates with `sudo` only when the destination is genuinely not writable, so `make install PREFIX=$HOME/.local` needs no privileges at all. Like the CLI packages it bestows no privileges, registers no service and writes no config -- a plain file drop. `make uninstall` removes exactly the five paths `install` wrote and touches no vault data.
+
 ## [0.44.5] - 2026-09-15
 
 ### Added
