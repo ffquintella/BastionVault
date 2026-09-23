@@ -133,6 +133,33 @@ pub fn closed_event_name(token: &str) -> String {
     format!("session-closed-{token}")
 }
 
+/// Render an SSH auth rejection into something an operator can act on.
+///
+/// `attempted` is the method we offered; `offered` is the server's
+/// `remaining_methods` hint. Naming both separates a *wrong*
+/// credential (server still offers that method) from one of the
+/// *wrong kind* — a stored password against a `PasswordAuthentication
+/// no` target, where the server replies offering only `publickey`.
+fn auth_failure_message(attempted: &str, offered: &[&str], partial_success: bool) -> String {
+    let server_accepts = if offered.is_empty() {
+        "server offered no further methods".to_string()
+    } else {
+        format!("server accepts: {}", offered.join(", "))
+    };
+    if partial_success {
+        // The credential *was* accepted and the server wants a second
+        // factor we can't present — not a bad credential, so don't
+        // blame one.
+        format!(
+            "ssh: `{attempted}` accepted but the server requires further \
+             authentication ({server_accepts}) — BastionVault can't chain \
+             a second SSH auth method"
+        )
+    } else {
+        format!("ssh: authentication rejected (offered `{attempted}`; {server_accepts})")
+    }
+}
+
 /// Open the russh connection, request a PTY + interactive shell,
 /// spawn the per-session pump task, and register the session on
 /// `AppState`. Returns the metadata the spawned WebviewWindow
@@ -162,6 +189,15 @@ pub async fn open_ssh_session(
     // russh ≥ 0.51 returns `AuthResult` (carrying success +
     // remaining-method hints) instead of a plain bool, and
     // `authenticate_publickey` takes a `PrivateKeyWithHashAlg`.
+    //
+    // Recorded before the match consumes `args.credential`, so a
+    // rejection can name the method we actually offered.
+    let attempted = match &args.credential {
+        SshCredential::Password(_) => "password",
+        SshCredential::PrivateKey { .. } => "publickey",
+        SshCredential::Cert { .. } => "publickey (openssh certificate)",
+        SshCredential::SecurityKey { .. } => "publickey (security key)",
+    };
     let auth_result = match args.credential {
         SshCredential::Password(pw) => session
             .authenticate_password(&args.username, pw.as_str())
@@ -200,8 +236,16 @@ pub async fn open_ssh_session(
                 .map_err(|e| format!("security-key auth: {e}"))?
         }
     };
-    if !auth_result.success() {
-        return Err("ssh: authentication rejected".into());
+    // Name the method we offered and the ones the server is still
+    // willing to take. Without the `remaining_methods` hint a
+    // credential of the wrong *kind* (a stored password against a
+    // `PasswordAuthentication no` target) is indistinguishable from a
+    // wrong password, and the operator has no way to tell from the
+    // GUI which one they are looking at.
+    if let client::AuthResult::Failure { remaining_methods, partial_success } = &auth_result {
+        let offered: Vec<&'static str> =
+            remaining_methods.iter().map(<&'static str>::from).collect();
+        return Err(auth_failure_message(attempted, &offered, *partial_success));
     }
 
     // TOFU log if no pin was supplied.
@@ -649,3 +693,53 @@ pub async fn drop_session(
 /// give up and report a clear timeout to the operator. 30s lines
 /// up with the SMB transport's posture.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[cfg(test)]
+mod auth_failure_message_tests {
+    use super::auth_failure_message;
+
+    /// The apldc1vds0045 case: a password-shaped resource secret
+    /// dialled at a target with `PasswordAuthentication no`. The
+    /// server replies offering only `publickey`, and the message has
+    /// to make the kind mismatch readable.
+    #[test]
+    fn names_the_mismatch_between_offered_and_accepted_methods() {
+        let msg = auth_failure_message("password", &["publickey"], false);
+        assert_eq!(
+            msg,
+            "ssh: authentication rejected (offered `password`; server accepts: publickey)"
+        );
+    }
+
+    /// Same method back from the server means the credential itself
+    /// was wrong, not its kind — the operator should not be sent
+    /// hunting for a key.
+    #[test]
+    fn same_method_back_reads_as_a_bad_credential() {
+        let msg = auth_failure_message("password", &["publickey", "password"], false);
+        assert!(msg.contains("offered `password`"), "{msg}");
+        assert!(msg.contains("server accepts: publickey, password"), "{msg}");
+    }
+
+    /// A server that closes the door entirely still gets a message
+    /// that says so rather than an empty method list.
+    #[test]
+    fn empty_method_list_does_not_render_a_dangling_accepts_clause() {
+        let msg = auth_failure_message("publickey", &[], false);
+        assert_eq!(
+            msg,
+            "ssh: authentication rejected (offered `publickey`; server offered no further methods)"
+        );
+        assert!(!msg.contains("server accepts"), "{msg}");
+    }
+
+    /// Partial success is not a rejected credential — the wording
+    /// must not blame it, or the operator rotates a working secret.
+    #[test]
+    fn partial_success_reports_a_second_factor_not_a_bad_credential() {
+        let msg = auth_failure_message("publickey", &["keyboard-interactive"], true);
+        assert!(msg.contains("accepted but the server requires further authentication"), "{msg}");
+        assert!(msg.contains("server accepts: keyboard-interactive"), "{msg}");
+        assert!(!msg.contains("authentication rejected"), "{msg}");
+    }
+}

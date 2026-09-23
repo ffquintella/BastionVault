@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.6] - 2026-09-23
+
 ### Added
 
 #### MCP Access — specification
@@ -54,6 +56,25 @@ EXAMPLE ENTRY:
 #### Build: `make install` / `make uninstall`
 
 - **Install from source without building an installer** (`Makefile`) -- `make install` builds the release `bvault` binary and drops it, the manpage and the bash/zsh/fish completions under `$(PREFIX)` (default `/usr/local`), the same file set the `.pkg` / `.deb` / `.rpm` packages lay down. Honours `DESTDIR` for staging, `NO_BUILD=1` to install an already-built `target/release/bvault`, and `INSTALL_BIN_SRC=` to install some other binary. It escalates with `sudo` only when the destination is genuinely not writable, so `make install PREFIX=$HOME/.local` needs no privileges at all. Like the CLI packages it bestows no privileges, registers no service and writes no config -- a plain file drop. `make uninstall` removes exactly the five paths `install` wrote and touches no vault data.
+
+### Fixed
+
+#### GUI: SSH auth rejections name the method mismatch (`gui/src-tauri/src/session/ssh.rs`)
+
+- **Report which auth method was offered and which ones the server still
+  accepts** instead of a bare `ssh: authentication rejected`. russh hands back
+  the server's `remaining_methods` hint from the `SSH_MSG_USERAUTH_FAILURE`
+  packet and the session driver was discarding it, so a credential of the wrong
+  *kind* was indistinguishable from a wrong password. A profile bound to a
+  password-shaped resource secret, dialling a target with
+  `PasswordAuthentication no`, now reports `ssh: authentication rejected
+  (offered ``password``; server accepts: publickey)` -- which names the fix
+  (bind an SSH-certificate or private-key credential source) rather than
+  sending the operator to rotate a secret that was never consulted.
+- **Partial success no longer reads as a rejected credential.** When the server
+  accepts the credential but demands a second factor BastionVault cannot chain,
+  the message says so explicitly, so the operator does not rotate a working
+  secret chasing a multi-factor requirement.
 
 ## [0.44.5] - 2026-09-15
 
