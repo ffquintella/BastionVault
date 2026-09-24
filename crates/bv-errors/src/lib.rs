@@ -439,7 +439,16 @@ impl RvError {
             | RvError::ErrPkiCertIsNotCA
             | RvError::ErrPkiCertChainIncorrect => 400,
             RvError::ErrModuleKvV2VersionDestroyed
-            | RvError::ErrModuleKvV2VersionNotFound => 404,
+            | RvError::ErrModuleKvV2VersionNotFound
+            // A path that resolves to a real mount but matches no route
+            // *inside* it is a client addressing mistake, not a server
+            // fault. `LIST resources/` (the bare mount root, whose only
+            // list route is `resources/resources/`) used to surface as a
+            // 500, which made a typo indistinguishable from an engine
+            // crash in logs and in the GUI. The message text is load-
+            // bearing: the GUI's `isRouteUnsupported` version-skew
+            // fallback matches /path not supported/i on it.
+            | RvError::ErrLogicalPathUnsupported => 404,
             RvError::ErrBarrierSealed
             | RvError::ErrClusterNoLeader
             | RvError::ErrClusterQuorumLost

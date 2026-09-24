@@ -234,3 +234,45 @@ pub fn init_logical_service(cfg: &mut web::ServiceConfig) {
 fn default_logical_body_limit() -> usize {
     32 * 1024 * 1024
 }
+
+#[cfg(test)]
+mod tests {
+    //! Regression coverage for the status a *resolved* mount returns when the
+    //! mount-relative path matches none of its routes.
+    //!
+    //! `resources/` is a default core mount whose list route is
+    //! `resources/resources/?$`, so a bare `LIST resources/` leaves an empty
+    //! mount-relative path and matches no route entry. That miss used to
+    //! travel out as `RvError::ErrLogicalPathUnsupported` -> 500, which is
+    //! indistinguishable from an engine fault in logs and in the GUI. It is a
+    //! 404 now.
+
+    use crate::test_utils::TestHttpServer;
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_unrouted_path_in_existing_mount_is_404() {
+        let mut server = TestHttpServer::new("test_unrouted_mount_path_404", true).await;
+        server.token = server.root_token.clone();
+        let root = server.root_token.clone();
+
+        // The mount exists and the correct route under it still works, so the
+        // 404 below is about the route miss and not about a broken mount.
+        let (status, resp) = server.list("resources/resources/", Some(&root)).unwrap();
+        assert_eq!(status, 200, "the real list route must still serve: {resp:?}");
+
+        let (status, resp) = server.list("resources/", Some(&root)).unwrap();
+        assert_eq!(status, 404, "a mount-root LIST with no matching route must be 404, not 500: {resp:?}");
+    }
+
+    /// The ACL check runs in the pre-route phase, before the backend ever sees
+    /// the path, so the not-found above must not have turned any denial into a
+    /// 404. A request with a token that cannot be resolved still fails closed.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_denied_request_still_403_not_404() {
+        let mut server = TestHttpServer::new("test_denied_not_404", true).await;
+        server.token = server.root_token.clone();
+
+        let (status, resp) = server.list("resources/", Some("not-a-real-token")).unwrap();
+        assert_eq!(status, 403, "a denied request must stay a denial, not become a not-found: {resp:?}");
+    }
+}

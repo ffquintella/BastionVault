@@ -45,6 +45,29 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.7] - 2026-09-24
+
+### Fixed
+
+#### HTTP: an unrouted path inside an existing mount is 404, not 500
+
+- **`RvError::ErrLogicalPathUnsupported` now maps to 404**
+  (`crates/bv-errors/src/lib.rs`, `crates/bv-server/src/batch.rs`) -- a request
+  whose path resolves to a real mount but matches no route *within* that mount
+  fell through the status table's `_ => 500`. `LIST /v1/resources/` is the
+  reachable case: the resource engine is mounted at `resources/` and its list
+  route is `resources/resources/?$`, so the bare mount root leaves an empty
+  mount-relative path and matches no route entry. Operators saw a 500 with a
+  47-byte body and could not tell a mistyped path from an engine fault. The
+  same mapping is added to the `sys/batch` per-operation status table so a
+  batched op and the same op on its own do not disagree. The error text is
+  unchanged on purpose -- the GUI's `isRouteUnsupported` version-skew fallback
+  (`gui/src/lib/error.ts`) matches `/path not supported/i` on it. No change on
+  the auth path: the ACL check runs in `Core::handle_request`'s pre-route
+  phase, before any backend dispatch, so a denial is still a 403 and never
+  reaches the route table. Regression coverage in
+  `crates/bv-server/src/logical_routes.rs` pins both halves.
+
 ## [0.44.6] - 2026-09-23
 
 ### Added

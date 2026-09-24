@@ -257,6 +257,13 @@ async fn run_one(
                 RvError::ErrRouterMountNotFound => {
                     (StatusCode::NOT_FOUND, "mount not found".to_string())
                 }
+                // A resolved mount with no matching route inside it is a
+                // not-found, exactly as on the individual-call surface
+                // (`RvError::response_status`). Kept in step here so a
+                // batched op and the same op on its own do not disagree.
+                RvError::ErrLogicalPathUnsupported => {
+                    (StatusCode::NOT_FOUND, e.to_string())
+                }
                 RvError::ErrBarrierSealed => {
                     (StatusCode::SERVICE_UNAVAILABLE, "vault is sealed".to_string())
                 }
