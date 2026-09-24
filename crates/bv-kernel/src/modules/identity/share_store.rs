@@ -707,6 +707,33 @@ impl ShareStore {
         Ok(share.capabilities.clone())
     }
 
+    /// Whether `grantee` holds a live share on a target of `kind` under
+    /// `prefix` — a canonical folder path with a trailing `/`
+    /// (`"dti/esi/secret/trend/"`). Walks the caller's own by-grantee
+    /// index, so the cost is their share count, not the vault's size;
+    /// candidates are re-checked through `shared_capabilities` so an
+    /// expired share never counts.
+    pub async fn has_share_under(
+        &self,
+        kind: ShareTargetKind,
+        prefix: &str,
+        grantee: &str,
+    ) -> Result<bool, RvError> {
+        if prefix.is_empty() || grantee.trim().is_empty() {
+            return Ok(false);
+        }
+        let want_kind = kind.as_str();
+        for ptr in self.list_shares_for_grantee(grantee).await? {
+            if ptr.target_kind != want_kind || !ptr.target_path.starts_with(prefix) {
+                continue;
+            }
+            if !self.shared_capabilities(kind, &ptr.target_path, grantee).await?.is_empty() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Drop every share on `target`. Called from `PolicyStore::post_route`
     /// on successful delete of a KV secret or a resource so dangling
     /// share rows do not outlive the target. Failures are logged by

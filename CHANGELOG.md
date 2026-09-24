@@ -45,6 +45,33 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.9] - 2026-09-24
+
+### Fixed
+
+#### Scope-filtered LIST hid every shared or owned secret in a subfolder
+
+- **A folder key now survives the ownership/share list filter when the caller
+  can see something inside it**
+  (`crates/bv-kernel/src/modules/policy/policy_store.rs`) -- the filter behind
+  `scopes = ["owner", "shared"]` dropped every key ending in `/` on the
+  grounds that a folder has no owner or share record of its own. A secret
+  shared at `secret/trend/api-netrisk-dsv` was therefore invisible: listing
+  `secret/metadata/` returned only top-level entries, so the grantee had no
+  way to learn that `trend/` was worth descending into, even though a LIST of
+  `secret/metadata/trend/` returned the secret correctly all along. Reading
+  the secret was never blocked -- only discovering it. Folders whose subtree
+  holds nothing visible to the caller are still dropped, so no structure is
+  disclosed that the filter did not already permit. (`features/per-user-scoping.md`)
+- **`ShareStore::has_share_under` / `OwnerStore::has_owned_kv_under`**
+  (`crates/bv-kernel/src/modules/identity/`) -- the subtree probes the filter
+  needs. The share side walks the caller's own by-grantee index (bounded by
+  the shares granted to them, not by the size of the vault) and re-checks each
+  candidate through `shared_capabilities`, so an expired share cannot
+  resurrect a folder; the owner side reads the KV owner view's keys, which are
+  base64url of the canonical path, and fetches only the records that decode
+  under the folder.
+
 ## [0.44.8] - 2026-09-24
 
 ### Fixed

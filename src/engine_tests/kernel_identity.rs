@@ -1050,6 +1050,129 @@ use serde_json::json;
         assert!(!keys.contains(&"a2"), "bob should not see a2 in {keys:?}");
     }
 
+    /// Regression: a scope-filtered LIST used to drop every folder key,
+    /// which hid a share on a nested secret completely. Listing
+    /// `secret/` returned `[]` even though `secret/trend/api-x` was
+    /// shared, so the grantee could never discover the path they had
+    /// been granted. Folders whose subtree holds nothing visible must
+    /// still be dropped.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_list_filter_keeps_folders_holding_visible_entries() {
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault(
+            "test_list_filter_keeps_folders_holding_visible_entries",
+        )
+        .await;
+
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "sys/auth/pass",
+            true,
+            json!({ "type": "userpass" }).as_object().cloned(),
+        )
+        .await;
+        for name in ["alice", "bob"] {
+            let _ = test_write_api(
+                &core,
+                &root_token,
+                &format!("auth/pass/users/{name}"),
+                true,
+                json!({
+                    "password": "hunter22XX!",
+                    "token_policies": "secret-author",
+                    "ttl": 0,
+                })
+                .as_object()
+                .cloned(),
+            )
+            .await;
+        }
+
+        // Alice owns one secret in each of two folders; only the first
+        // is shared with bob.
+        let alice_token = login_pass(&core, "alice").await;
+        for k in ["trend/api-x", "private/api-y"] {
+            let _ = test_write_api(
+                &core,
+                &alice_token,
+                &format!("secret/data/{k}"),
+                true,
+                json!({ "data": { "v": "x" } }).as_object().cloned(),
+            )
+            .await;
+        }
+
+        // Bob owns one secret of his own, also nested.
+        let bob_token = login_pass(&core, "bob").await;
+        let _ = test_write_api(
+            &core,
+            &bob_token,
+            "secret/data/mine/b1",
+            true,
+            json!({ "data": { "v": "x" } }).as_object().cloned(),
+        )
+        .await;
+
+        let entities = EntityStore::new(&core).await.unwrap();
+        let bob = entities
+            .get_by_alias_ns("userpass/", "bob", "")
+            .await
+            .unwrap()
+            .expect("bob must have an entity after login");
+
+        let share_store = ShareStore::new(&core).await.unwrap();
+        share_store
+            .set_share(SecretShare {
+                target_kind: "kv-secret".into(),
+                target_path: "secret/trend/api-x".into(),
+                grantee_kind: String::new(),
+                grantee_entity_id: bob.id.clone(),
+                granted_by_entity_id: "alice".into(),
+                capabilities: vec!["read".into()],
+                granted_at: String::new(),
+                expires_at: String::new(),
+            })
+            .await
+            .unwrap();
+
+        let keys = list_keys(&core, &bob_token, "secret/metadata/").await;
+        assert!(
+            keys.contains(&"trend/".to_string()),
+            "the folder holding bob's shared secret must survive the filter: {keys:?}"
+        );
+        assert!(
+            keys.contains(&"mine/".to_string()),
+            "the folder holding bob's own secret must survive the filter: {keys:?}"
+        );
+        assert!(
+            !keys.contains(&"private/".to_string()),
+            "a folder with nothing visible in it must stay hidden: {keys:?}"
+        );
+
+        // And the folder is worth descending into: the shared leaf is there.
+        let nested = list_keys(&core, &bob_token, "secret/metadata/trend/").await;
+        assert_eq!(
+            nested,
+            vec!["api-x".to_string()],
+            "the shared secret must be listed one level down: {nested:?}"
+        );
+    }
+
+    /// Helper: LIST `path` as `token` and return the `keys` array.
+    #[cfg(test)]
+    async fn list_keys(core: &dyn VaultCtx, token: &str, path: &str) -> Vec<String> {
+        let resp = test_list_api(core, token, path, true)
+            .await
+            .unwrap()
+            .unwrap();
+        resp.data
+            .unwrap()
+            .get("keys")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    }
+
     /// Regression for a bug where root-created resources showed as
     /// `Unowned` forever in the GUI. The owner-capture hook used to
     /// gate on `entity_id` only, which is empty for the root token, so

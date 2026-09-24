@@ -212,6 +212,40 @@ impl OwnerStore {
         if rec.entity_id.is_empty() { Ok(None) } else { Ok(Some(rec)) }
     }
 
+    /// Whether `entity_id` owns any KV secret under `prefix` — a
+    /// canonical path with a trailing `/` (`"dti/esi/secret/trend/"`).
+    /// Answers "is this folder worth listing?" for the scope-filtered
+    /// LIST pass. Keys in the KV owner view are base64url of the
+    /// canonical path, so the prefix test needs no read: only the
+    /// candidates that decode under `prefix` are fetched.
+    pub async fn has_owned_kv_under(
+        &self,
+        prefix: &str,
+        entity_id: &str,
+    ) -> Result<bool, RvError> {
+        if prefix.is_empty() || entity_id.trim().is_empty() {
+            return Ok(false);
+        }
+        for key in self.kv_view.list("").await? {
+            let key = key.trim_end_matches('/');
+            let Ok(raw) = URL_SAFE_NO_PAD.decode(key.as_bytes()) else {
+                continue;
+            };
+            let Ok(canonical) = String::from_utf8(raw) else {
+                continue;
+            };
+            if !canonical.starts_with(prefix) {
+                continue;
+            }
+            if let Some(rec) = self.get_kv_owner(&canonical).await? {
+                if rec.entity_id == entity_id {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Record `entity_id` as the owner of `path` *only if no owner
     /// entry exists yet*. Silently no-ops when the secret is already
     /// owned — prevents a subsequent write from "stealing" ownership.

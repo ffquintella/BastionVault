@@ -505,6 +505,20 @@ ownership/share") is implemented by `PolicyStore::post_route` for `LIST`, via
 `list_filter_scopes` / `list_filter_groups` stashed on the request by
 `post_auth`. That covers `LIST`, and only `LIST`.
 
+**Folder keys are kept when their subtree holds something visible.** A KV LIST
+returns leaves (`test1`) and folders (`trend/`), and a folder has no owner or
+share record of its own. The filter used to drop them all, which silently hid
+every nested grant: a share on `secret/trend/api-netrisk-dsv` left the listing
+of `secret/` empty, so the grantee could not discover the path they had been
+given, even though listing `secret/trend/` returned it and reading it worked.
+`filter_list_by_ownership` now probes the subtree
+(`OwnerStore::has_owned_kv_under`, `ShareStore::has_share_under`) and keeps the
+folder only when the caller owns or is granted something under it — a folder
+with nothing visible in it is still dropped, so the filter discloses no
+structure it did not already permit. The asset-group filter
+(`filter_list_response`) still drops folders outright; group membership has no
+subtree semantics to probe.
+
 An endpoint that returns a *set* of objects under a different operation is not
 covered by it — `resources/resources/search` is an `Operation::Write` returning
 an `items` array, so neither the pre-route check (which authorizes the endpoint

@@ -3946,9 +3946,9 @@ async fn filter_list_response(
 ///   separately required, matching how `list_shares_for_grantee`
 ///   surfaces "what is shared with me?".
 ///
-/// Folder keys (trailing `/`) are dropped since they have no single
-/// owner or share record. A key surviving *any* active scope is kept
-/// (scopes OR together).
+/// Folder keys (trailing `/`) are kept when the caller owns or is
+/// granted something under them. A key surviving *any* active scope is
+/// kept (scopes OR together).
 async fn filter_list_by_ownership(
     response: &mut Response,
     list_path: &str,
@@ -3971,10 +3971,48 @@ async fn filter_list_by_ownership(
         format!("{list_path}/")
     };
 
+    // No entity, no scope can match: every key drops out.
+    if caller_entity_id.is_empty() {
+        *keys_val = Value::Array(Vec::new());
+        return;
+    }
+
     let mut kept: Vec<Value> = Vec::with_capacity(keys_arr.len());
     for v in keys_arr.iter() {
         let Some(k) = v.as_str() else { continue };
         if k.ends_with('/') {
+            // A folder has no record of its own, so it is kept only when
+            // something visible lives beneath it. Dropping folders outright
+            // made a share on `secret/trend/api-netrisk-dsv` unreachable:
+            // listing `secret/` returned nothing, and the grantee had no way
+            // to learn `trend/` was worth descending into.
+            let full = format!("{prefix}{k}");
+            let Some(dir) = OwnerStore::canonicalize_kv_path_scoped(&full, ns_path) else {
+                continue;
+            };
+            let dir_prefix = format!("{dir}/");
+            let mut included = false;
+            if want_owner {
+                included = store
+                    .has_owned_kv_under(&dir_prefix, caller_entity_id)
+                    .await
+                    .unwrap_or(false);
+            }
+            if !included && want_shared {
+                if let Some(sstore) = share_store {
+                    included = sstore
+                        .has_share_under(
+                            ShareTargetKind::KvSecret,
+                            &dir_prefix,
+                            caller_entity_id,
+                        )
+                        .await
+                        .unwrap_or(false);
+                }
+            }
+            if included {
+                kept.push(v.clone());
+            }
             continue;
         }
         let full = format!("{prefix}{k}");
@@ -3983,10 +4021,6 @@ async fn filter_list_by_ownership(
         // stamped by `post_route` / `create_share`.
         let scoped = OwnerStore::canonicalize_kv_path_scoped(&full, ns_path)
             .unwrap_or_else(|| full.clone());
-
-        if caller_entity_id.is_empty() {
-            continue;
-        }
 
         let mut included = false;
 
