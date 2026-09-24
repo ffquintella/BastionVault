@@ -491,6 +491,19 @@ impl RemoteBackendBuilder {
             }
         }
 
+        // Debug-only: an explicit interception proxy overrides both the
+        // routing decided above and, when the operator supplied a CA or
+        // asked for verification off, the TLS configuration. Compiled out
+        // unless the `debug_proxy` feature is on; inert unless
+        // `BASTION_DEBUG_PROXY` is set. See `bv_client::debug_proxy`.
+        #[cfg(feature = "debug_proxy")]
+        if let Some(dbg) = crate::debug_proxy::active() {
+            config_builder = config_builder.proxy(Some(dbg.proxy.clone()));
+            if let Some(tls) = dbg.tls.clone() {
+                config_builder = config_builder.tls_config(tls);
+            }
+        }
+
         let agent = config_builder.build().new_agent();
 
         // Strip trailing slashes so `build_url` never emits a double

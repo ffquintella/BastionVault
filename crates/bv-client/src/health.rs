@@ -228,6 +228,16 @@ fn build_probe_agent(
             Err(e) => log::warn!("ignoring unparseable system proxy '{uri}': {e}"),
         }
     }
+    // Debug-only interception proxy: probes must take the same route as
+    // the data-plane client, or discovery would pick a node the proxied
+    // requests then cannot reach. See `crate::debug_proxy`.
+    #[cfg(feature = "debug_proxy")]
+    if let Some(dbg) = crate::debug_proxy::active() {
+        cfg = cfg.proxy(Some(dbg.proxy.clone()));
+        if let Some(tls) = dbg.tls.clone() {
+            cfg = cfg.tls_config(tls);
+        }
+    }
     cfg.build().new_agent()
 }
 

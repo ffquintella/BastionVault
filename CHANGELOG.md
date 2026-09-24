@@ -45,6 +45,35 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.10] - 2026-09-24
+
+### Added
+
+#### Debug proxy for the desktop GUI (Charles-compatible)
+
+- **`make run-dev-gui-proxy` routes every outbound vault HTTP(S) request
+  through an intercepting proxy** (`docs/debug-proxy.md`) -- for reading the
+  GUI/server API stream in Charles Proxy, mitmproxy, Fiddler or Burp while
+  diagnosing a problem. Defaults to Charles on `http://127.0.0.1:8888`;
+  override with `PROXY=`, `PROXY_CA=` or `PROXY_INSECURE=1`.
+- **New `debug_proxy` Cargo feature** on `bv-client`, `bastion_vault` and the
+  GUI host, implementing the override in
+  `crates/bv-client/src/debug_proxy.rs`. All three of the GUI's HTTP clients
+  honour it -- the legacy `api::Client`, `bv_client::RemoteBackend`, and the
+  cluster-discovery health probes -- so no part of the traffic is missing from
+  the capture. Configured by `BASTION_DEBUG_PROXY`, plus
+  `BASTION_DEBUG_PROXY_CA` (trust the proxy's root CA) or
+  `BASTION_DEBUG_PROXY_INSECURE` (skip verification).
+- **Development-only by construction.** The feature is off in every default,
+  release and packaged build, so the code is not compiled into anything an
+  operator installs; even with it on, the override stays inert until
+  `BASTION_DEBUG_PROXY` is set -- the same feature-plus-environment gate the
+  local Tauri MCP bridge uses. An intercepting proxy reads session tokens and
+  secret payloads in cleartext, so activation logs a WARN banner naming the
+  proxy and the TLS posture, an unusable CA path disables the override rather
+  than being ignored, and an HTTPS target with no CA and no insecure flag
+  fails the handshake instead of silently downgrading.
+
 ## [0.44.9] - 2026-09-24
 
 ### Fixed

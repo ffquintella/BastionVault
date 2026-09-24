@@ -12,6 +12,11 @@
 //! Cargo feature gate, so the two implementations stay isolated.
 
 pub mod backend;
+// Debug-only proxy override for HTTP interception (Charles, mitmproxy,
+// Fiddler, Burp). Off in every default and packaged build; see the
+// module docs for the feature-plus-environment gate.
+#[cfg(feature = "debug_proxy")]
+pub mod debug_proxy;
 pub mod discovery;
 pub mod error;
 pub mod health;

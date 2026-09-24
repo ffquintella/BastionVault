@@ -1,6 +1,6 @@
 [package]
 name = "bastion-vault-gui"
-version = "0.44.9"
+version = "0.44.10"
 edition = "2021"
 description = "BastionVault Desktop GUI"
 # Shipped as a signed installer (see roadmaps/packaging-and-distribution.md),
@@ -264,6 +264,15 @@ cloud_targets = ["bastion_vault/cloud_targets"]
 # selects ML-DSA-65 pays no runtime cost.
 ssh_pqc = ["bastion_vault/ssh_pqc"]
 mcp_local_dev = ["dep:tauri-plugin-mcp-bridge"]
+# Development-only HTTP interception proxy. Routes every outbound
+# vault request — legacy `Client`, `RemoteBackend` and the discovery
+# health probes — through the proxy named by `BASTION_DEBUG_PROXY`, so
+# a developer can read the API stream in Charles Proxy / mitmproxy /
+# Fiddler / Burp. OFF by default and never built into a packaged
+# installer: the proxy sees session tokens and secret payloads in
+# cleartext. Entry point: `make run-dev-gui-proxy`. See
+# `docs/debug-proxy.md`.
+debug_proxy = ["bastion_vault/debug_proxy", "bv-client/debug_proxy"]
 # RDP Graphics Pipeline (MS-RDPEGFX) with H.264 AVC420 decode.
 #
 # OFF by default and deliberately so. Two reasons, both about the

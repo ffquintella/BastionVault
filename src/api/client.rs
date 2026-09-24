@@ -243,6 +243,19 @@ impl Client {
             }
         }
 
+        // Debug-only interception proxy, overriding the routing and TLS
+        // decided above. Compiled out unless the `debug_proxy` feature is
+        // on; inert unless `BASTION_DEBUG_PROXY` is set. The GUI drives
+        // both this legacy client and `bv_client::RemoteBackend`, so both
+        // have to honour it or only half the traffic would be visible.
+        #[cfg(feature = "debug_proxy")]
+        if let Some(dbg) = bv_client::debug_proxy::active() {
+            config_builder = config_builder.proxy(Some(dbg.proxy.clone()));
+            if let Some(tls) = dbg.tls.clone() {
+                config_builder = config_builder.tls_config(tls);
+            }
+        }
+
         let config = config_builder.build();
         self.http_client = match self.override_socket_addr {
             Some(addr) => ureq::Agent::with_parts(

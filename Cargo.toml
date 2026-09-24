@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.44.9"
+version = "0.44.10"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -417,6 +417,11 @@ default = ["storage_hiqlite", "ssh_pqc"]
 # compiled in exactly when the backend is.
 storage_mysql = ["bv-errors/storage_mysql", "bv-storage/storage_mysql"]
 storage_hiqlite = ["bv-storage/storage_hiqlite"]
+# Debug-only outbound proxy override for the legacy `api::Client`,
+# forwarded to `bv-client`. Never in a default, release or packaged
+# build — it lets an intercepting HTTP debugger read vault tokens and
+# secrets in cleartext. See `docs/debug-proxy.md`.
+debug_proxy = ["bv-client/debug_proxy"]
 # Exposes `test_utils` — `new_test_bastion_vault`, the seal helpers and the
 # `test_*_api` request helpers — to `bv-server`, which builds its own HTTP
 # harness on top of them. Off by default: these fixtures create vaults on

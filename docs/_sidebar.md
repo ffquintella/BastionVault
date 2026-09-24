@@ -20,6 +20,7 @@
 - Desktop GUI
   - [Overview & tour](gui.md)
   - [Policy builder & validator](policy-builder-validator.md)
+  - [Debug proxy (Charles)](debug-proxy.md)
 
 - Contributing
   - [Publishing crates](publishing-crates.md)
