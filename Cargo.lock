@@ -1710,7 +1710,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-userpass"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "async-trait",
  "bcrypt",
@@ -2155,7 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "bv-kernel"
-version = "0.41.8"
+version = "0.41.9"
 dependencies = [
  "actix-rt",
  "arc-swap",
