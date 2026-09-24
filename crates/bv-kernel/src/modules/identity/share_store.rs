@@ -790,18 +790,29 @@ impl ShareStore {
     /// Full share audit trail, newest-first. Consumed by the admin
     /// audit aggregator in the system backend.
     pub async fn list_all_history(&self) -> Result<Vec<ShareHistoryEntry>, RvError> {
-        let mut keys = self.history_view.get_keys().await?;
-        keys.sort();
-        keys.reverse();
-        let mut out = Vec::with_capacity(keys.len());
-        for k in keys {
-            if let Some(raw) = self.history_view.get(&k).await? {
-                if let Ok(e) = serde_json::from_slice::<ShareHistoryEntry>(&raw.value) {
-                    out.push(e);
-                }
-            }
-        }
-        Ok(out)
+        Ok(Self::decode(self.history_view.get_entries("").await?))
+    }
+
+    /// Share audit trail from `since_key` onward (inclusive), newest-first.
+    ///
+    /// Keys are the bare zero-padded nanoseconds of [`hist_seq`], so a time
+    /// bound is a key bound: the scan reads only the recent tail instead of
+    /// the whole trail.
+    pub async fn list_history_since(
+        &self,
+        since_key: &str,
+    ) -> Result<Vec<ShareHistoryEntry>, RvError> {
+        Ok(Self::decode(self.history_view.get_entries_since("", since_key).await?))
+    }
+
+    /// Sort newest-first (keys are monotonic nanoseconds) and decode,
+    /// skipping rows that fail to parse.
+    fn decode(mut entries: Vec<StorageEntry>) -> Vec<ShareHistoryEntry> {
+        entries.sort_by(|a, b| b.key.cmp(&a.key));
+        entries
+            .into_iter()
+            .filter_map(|e| serde_json::from_slice::<ShareHistoryEntry>(&e.value).ok())
+            .collect()
     }
 }
 

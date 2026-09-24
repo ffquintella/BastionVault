@@ -45,6 +45,27 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.11] - 2026-09-24
+
+### Changed
+
+#### Dashboard summary latency
+
+- **Read policy, identity-group and asset-group change-history with one bulk
+  subtree scan per source** instead of one `list_history` call per named
+  object. The per-name form costs a storage round-trip per history row, each a
+  separate linearizable read on the hiqlite backend, so `sys/dashboard/summary`
+  and `sys/audit/events` scaled with total history rather than with the window
+  they report. History of a deleted object stays excluded, as before.
+- **Bound the share-history scan by time.** The share audit trail is keyed by
+  nanoseconds, so a windowed aggregation now range-scans the recent tail
+  instead of reading the whole trail and filtering in memory.
+- **Derive `audit_24h.denied` and `attention.failed_logins_1h` from the
+  aggregation pass that already produced `audit_24h.total`**, dropping two
+  redundant scans of the denial and login stores per summary request. The
+  counters still come from replicated storage, not the per-node stats ring, so
+  every HA node reports the same totals.
+
 ## [0.44.10] - 2026-09-24
 
 ### Added

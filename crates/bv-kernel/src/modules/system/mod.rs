@@ -2054,12 +2054,12 @@ impl SystemBackend {
     /// it) and `handle_dashboard_summary` (which counts a 24h window).
     ///
     /// When `since` is set, restricts the result to events at or after
-    /// that instant. The append-only stores (user/file/login/SSH) push
-    /// the bound into a range scan over their timestamp-ordered keys, so
-    /// they read only the recent tail instead of all history; the
-    /// per-name history sources (policy/group/share) are small and
-    /// filtered by RFC3339 timestamp in memory. Pass `None` for the full
-    /// unbounded aggregation.
+    /// that instant. The flat timestamp-keyed stores (user/file/login/SSH/
+    /// denial/access/share) push the bound into a range scan over their
+    /// keys, so they read only the recent tail; the `{name}/{seq}` history
+    /// sources (policy/identity-group/asset-group) are read as one bulk
+    /// subtree scan each and filtered by RFC3339 timestamp in memory. Pass
+    /// `None` for the full unbounded aggregation.
     ///
     /// The independent per-subsystem reads run concurrently (each is its
     /// own storage round-trip), so the wall-clock cost is the slowest
@@ -2068,6 +2068,27 @@ impl SystemBackend {
         &self,
         since: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Vec<AuditEventBuilder> {
+        self.collect_audit_event_groups_since(since).await.into_iter().flatten().collect()
+    }
+
+    /// Index of the login-event group in
+    /// [`Self::collect_audit_event_groups_since`]'s result.
+    const AUDIT_GROUP_LOGINS: usize = 6;
+    /// Index of the denial-event group, likewise.
+    const AUDIT_GROUP_DENIALS: usize = 9;
+
+    /// The per-source form of [`Self::collect_audit_events_since`], before
+    /// the groups are flattened.
+    ///
+    /// The dashboard needs the denial and failed-login counts alongside the
+    /// total. Deriving them from the flattened Vec would mean re-matching
+    /// on category strings, and re-reading the two stores (what it used to
+    /// do) means two more linearizable scans for numbers this pass already
+    /// holds. Indexing the group is exact and free.
+    async fn collect_audit_event_groups_since(
+        &self,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> [Vec<AuditEventBuilder>; 11] {
         // RFC3339 cutoff for the in-memory-filtered history sources, and
         // the matching zero-padded-nanos key for the range-scanned append
         // logs (`hist_seq` keys are nanoseconds since the epoch).
@@ -2076,13 +2097,15 @@ impl SystemBackend {
         let cutoff = cutoff_rfc.as_deref();
         let skey = since_key.as_deref();
 
+        // Group order is the array order below; the two indexed by the
+        // dashboard are named so a reordering cannot silently repoint them.
         #[cfg(not(feature = "sync_handler"))]
         let groups: [Vec<AuditEventBuilder>; 11] = {
             let (policy, idgroups, assets, shares, users, files, logins, ssh_ca, ssh_sign, denials, access) = tokio::join!(
                 self.collect_policy_events(cutoff),
                 self.collect_identity_group_events(cutoff),
                 self.collect_asset_group_events(cutoff),
-                self.collect_share_events(cutoff),
+                self.collect_share_events(cutoff, skey),
                 self.collect_user_events(skey),
                 self.collect_file_events(skey),
                 self.collect_login_events(skey),
@@ -2102,7 +2125,7 @@ impl SystemBackend {
             self.collect_policy_events(cutoff),
             self.collect_identity_group_events(cutoff),
             self.collect_asset_group_events(cutoff),
-            self.collect_share_events(cutoff),
+            self.collect_share_events(cutoff, skey),
             self.collect_user_events(skey),
             self.collect_file_events(skey),
             self.collect_login_events(skey),
@@ -2112,33 +2135,43 @@ impl SystemBackend {
             self.collect_access_events(skey),
         ];
 
-        groups.into_iter().flatten().collect()
+        groups
     }
 
-    /// ACL policy change-history. Per-name histories are small, so the
-    /// `cutoff` (when set) is applied by RFC3339 timestamp in memory.
+    /// ACL policy change-history, read as one bulk subtree scan rather
+    /// than a `list_history` per policy — the per-name form costs a
+    /// storage round-trip per history row. The `cutoff` (when set) is
+    /// applied by RFC3339 timestamp in memory.
+    ///
+    /// Still restricted to policies that currently exist: history outlives
+    /// a deleted policy, and surfacing it here would change what the Audit
+    /// page reports.
     async fn collect_policy_events(&self, cutoff: Option<&str>) -> Vec<AuditEventBuilder> {
         use crate::modules::policy::PolicyModule;
+        use std::collections::HashMap;
 
         let mut events = Vec::new();
         if let Ok(policy_module) = self.get_module::<PolicyModule>("policy") {
             let store = policy_module.policy_store.load();
             if let Ok(names) = store.list_policy(crate::modules::policy::PolicyType::Acl).await {
-                for name in names {
-                    if let Ok(entries) = store.list_history(&name).await {
-                        for e in entries {
-                            if cutoff.map(|c| e.ts.as_str() >= c).unwrap_or(true) {
-                                events.push(AuditEventBuilder {
-                                    ts: e.ts,
-                                    user: e.user,
-                                    machine: String::new(),
-                                    op: e.op,
-                                    category: "policy".into(),
-                                    target: name.clone(),
-                                    changed_fields: Vec::new(),
-                                    summary: String::new(),
-                                });
-                            }
+                // History keys carry the sanitized (lowercased) name; the
+                // event's `target` keeps the listed spelling, as before.
+                let live: HashMap<String, String> =
+                    names.into_iter().map(|n| (n.to_lowercase(), n)).collect();
+                if let Ok(entries) = store.list_history_all().await {
+                    for (key_name, e) in entries {
+                        let Some(target) = live.get(&key_name) else { continue };
+                        if cutoff.map(|c| e.ts.as_str() >= c).unwrap_or(true) {
+                            events.push(AuditEventBuilder {
+                                ts: e.ts,
+                                user: e.user,
+                                machine: String::new(),
+                                op: e.op,
+                                category: "policy".into(),
+                                target: target.clone(),
+                                changed_fields: Vec::new(),
+                                summary: String::new(),
+                            });
                         }
                     }
                 }
@@ -2147,9 +2180,13 @@ impl SystemBackend {
         events
     }
 
-    /// Identity group change-history, both user and app kinds.
+    /// Identity group change-history, both user and app kinds. One bulk
+    /// subtree scan per kind rather than a `list_history` per group; see
+    /// [`Self::collect_policy_events`] for why, and for why history of a
+    /// deleted group stays out of the result.
     async fn collect_identity_group_events(&self, cutoff: Option<&str>) -> Vec<AuditEventBuilder> {
         use crate::modules::identity::{GroupKind, IdentityModule};
+        use std::collections::HashMap;
 
         let mut events = Vec::new();
         if let Ok(identity_module) = self.get_module::<IdentityModule>("identity") {
@@ -2159,50 +2196,19 @@ impl SystemBackend {
                     (GroupKind::App, "identity-group-app"),
                 ] {
                     if let Ok(names) = gs.list_groups(kind).await {
-                        for name in names {
-                            if let Ok(entries) = gs.list_history(kind, &name).await {
-                                for e in entries {
-                                    if cutoff.map(|c| e.ts.as_str() >= c).unwrap_or(true) {
-                                        events.push(AuditEventBuilder {
-                                            ts: e.ts,
-                                            user: e.user,
-                                            machine: String::new(),
-                                            op: e.op,
-                                            category: label.into(),
-                                            target: name.clone(),
-                                            changed_fields: e.changed_fields,
-                                            summary: String::new(),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        events
-    }
-
-    /// Asset-group (resource-group) change-history.
-    async fn collect_asset_group_events(&self, cutoff: Option<&str>) -> Vec<AuditEventBuilder> {
-        use crate::modules::resource_group::ResourceGroupModule;
-
-        let mut events = Vec::new();
-        if let Ok(module) = self.get_module::<ResourceGroupModule>("resource-group") {
-            if let Some(store) = module.store() {
-                if let Ok(names) = store.list_groups().await {
-                    for name in names {
-                        if let Ok(entries) = store.list_history(&name).await {
-                            for e in entries {
+                        let live: HashMap<String, String> =
+                            names.into_iter().map(|n| (n.to_lowercase(), n)).collect();
+                        if let Ok(entries) = gs.list_history_all(kind).await {
+                            for (key_name, e) in entries {
+                                let Some(target) = live.get(&key_name) else { continue };
                                 if cutoff.map(|c| e.ts.as_str() >= c).unwrap_or(true) {
                                     events.push(AuditEventBuilder {
                                         ts: e.ts,
                                         user: e.user,
                                         machine: String::new(),
                                         op: e.op,
-                                        category: "asset-group".into(),
-                                        target: name.clone(),
+                                        category: label.into(),
+                                        target: target.clone(),
                                         changed_fields: e.changed_fields,
                                         summary: String::new(),
                                     });
@@ -2216,17 +2222,65 @@ impl SystemBackend {
         events
     }
 
+    /// Asset-group (resource-group) change-history. One bulk subtree scan
+    /// rather than a `list_history` per group; see
+    /// [`Self::collect_policy_events`].
+    async fn collect_asset_group_events(&self, cutoff: Option<&str>) -> Vec<AuditEventBuilder> {
+        use crate::modules::resource_group::ResourceGroupModule;
+        use std::collections::HashMap;
+
+        let mut events = Vec::new();
+        if let Ok(module) = self.get_module::<ResourceGroupModule>("resource-group") {
+            if let Some(store) = module.store() {
+                if let Ok(names) = store.list_groups().await {
+                    let live: HashMap<String, String> =
+                        names.into_iter().map(|n| (n.to_lowercase(), n)).collect();
+                    if let Ok(entries) = store.list_history_all().await {
+                        for (key_name, e) in entries {
+                            let Some(target) = live.get(&key_name) else { continue };
+                            if cutoff.map(|c| e.ts.as_str() >= c).unwrap_or(true) {
+                                events.push(AuditEventBuilder {
+                                    ts: e.ts,
+                                    user: e.user,
+                                    machine: String::new(),
+                                    op: e.op,
+                                    category: "asset-group".into(),
+                                    target: target.clone(),
+                                    changed_fields: e.changed_fields,
+                                    summary: String::new(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        events
+    }
+
     /// Share events — grants, revokes, cascade-revokes — drawn from the
     /// flat share history view. The `actor_entity_id` is used as the
     /// event's `user` so the Audit page's EntityLabel turns it back into
     /// a login.
-    async fn collect_share_events(&self, cutoff: Option<&str>) -> Vec<AuditEventBuilder> {
+    ///
+    /// The share history view is keyed by bare nanoseconds, so `since_key`
+    /// bounds the scan to the recent tail; `cutoff` still filters by the
+    /// entry's own timestamp.
+    async fn collect_share_events(
+        &self,
+        cutoff: Option<&str>,
+        since_key: Option<&str>,
+    ) -> Vec<AuditEventBuilder> {
         use crate::modules::identity::IdentityModule;
 
         let mut events = Vec::new();
         if let Ok(identity_module) = self.get_module::<IdentityModule>("identity") {
             if let Some(store) = identity_module.share_store() {
-                if let Ok(entries) = store.list_all_history().await {
+                let res = match since_key {
+                    Some(k) => store.list_history_since(k).await,
+                    None => store.list_all_history().await,
+                };
+                if let Ok(entries) = res {
                     for e in entries {
                         if cutoff.map(|c| e.ts.as_str() >= c).unwrap_or(true) {
                             let target = format!("{}:{}", e.target_kind, e.target_path);
@@ -2484,35 +2538,6 @@ impl SystemBackend {
     fn hist_since_key(t: chrono::DateTime<chrono::Utc>) -> String {
         let nanos = t.timestamp_nanos_opt().unwrap_or(0).max(0) as u128;
         format!("{nanos:020}")
-    }
-
-    /// Count permission denials recorded at or after `since`, read from
-    /// the replicated denial store rather than the per-node in-memory
-    /// stats ring — so the count is identical on every HA node. A sealed
-    /// barrier or read error counts as zero (best-effort, like the other
-    /// dashboard sources).
-    async fn count_denials_since(&self, since: chrono::DateTime<chrono::Utc>) -> u64 {
-        let since_key = Self::hist_since_key(since);
-        match crate::modules::system::denial_audit_store::DenialAuditStore::from_core(&self.core) {
-            Ok(store) => store.list_since(&since_key).await.map(|v| v.len() as u64).unwrap_or(0),
-            Err(_) => 0,
-        }
-    }
-
-    /// Count failed authentication attempts recorded at or after `since`,
-    /// read from the replicated login-audit store (see
-    /// [`Self::count_denials_since`] for the HA rationale). A logout is
-    /// not a failed login; only rejected login attempts are counted.
-    async fn count_failed_logins_since(&self, since: chrono::DateTime<chrono::Utc>) -> u64 {
-        let since_key = Self::hist_since_key(since);
-        match crate::modules::credential::login_audit_store::LoginAuditStore::from_core(&self.core) {
-            Ok(store) => store
-                .list_since(&since_key)
-                .await
-                .map(|v| v.iter().filter(|e| !e.success && e.action != "logout").count() as u64)
-                .unwrap_or(0),
-            Err(_) => 0,
-        }
     }
 
     /// SSH CA lifecycle (create / delete of the signing CA) from the SSH
@@ -3482,17 +3507,28 @@ impl SystemBackend {
             .unwrap_or(false);
 
         let now = chrono::Utc::now();
+        // Change-history events from the last 24h. The bound is pushed into
+        // the collection: the timestamp-keyed stores range-scan only the
+        // recent tail, so this does not read (and decrypt) all history just
+        // to produce a count. One pass yields all three numbers — the total,
+        // the denial count and the failed-login count — instead of
+        // re-scanning the denial and login stores for the latter two.
         let audit_counters = if audit_visible {
-            // Count change-history events from the last 24h. The bound is
-            // pushed into the collection: append-only stores range-scan only
-            // the recent tail and the small history sources are filtered by
-            // timestamp, so this no longer reads (and decrypts) all history
-            // just to produce a count.
-            let audit_24h = self
-                .collect_audit_events_since(Some(now - chrono::Duration::hours(24)))
-                .await
-                .len();
-            Some(audit_24h)
+            let hour_cutoff = (now - chrono::Duration::hours(1)).to_rfc3339();
+            let groups = self
+                .collect_audit_event_groups_since(Some(now - chrono::Duration::hours(24)))
+                .await;
+            let audit_24h = groups.iter().map(|g| g.len()).sum::<usize>();
+            let denied_24h = groups[Self::AUDIT_GROUP_DENIALS].len() as u64;
+            // `op == "login-failed"` is exactly the store's
+            // `!success && action != "logout"` (see `collect_login_events`).
+            // The 1h edge is decided by the entry's own timestamp rather than
+            // its storage key; the two are stamped microseconds apart.
+            let failed_logins_1h = groups[Self::AUDIT_GROUP_LOGINS]
+                .iter()
+                .filter(|e| e.op == "login-failed" && e.ts.as_str() >= hour_cutoff.as_str())
+                .count() as u64;
+            Some((audit_24h, denied_24h, failed_logins_1h))
         } else {
             None
         };
@@ -3529,10 +3565,7 @@ impl SystemBackend {
 
         // Privileged blocks are added only for an audit-capable caller, so the
         // response shape itself carries the verdict (see `audit_visible`).
-        if let Some(audit_24h) = audit_counters {
-            let denied_24h = self.count_denials_since(now - chrono::Duration::hours(24)).await;
-            let failed_logins_1h =
-                self.count_failed_logins_since(now - chrono::Duration::hours(1)).await;
+        if let Some((audit_24h, denied_24h, failed_logins_1h)) = audit_counters {
             data.insert(
                 "audit_24h".to_string(),
                 json!({
@@ -7017,6 +7050,98 @@ mod mod_system_tests {
         });
         assert!(has_policy, "expected policy event in {events:?}");
         assert!(has_group, "expected identity-group-user event in {events:?}");
+    }
+
+    /// The policy / identity-group / asset-group collectors read their
+    /// whole history keyspace in one bulk scan, re-deriving the object
+    /// name from the `{name}/{seq}` key rather than calling
+    /// `list_history` per object.
+    ///
+    /// Pins the two properties that rewrite could break: every name's
+    /// rows survive, attributed to the right name, with multiple rows per
+    /// name; and history of an object that no longer exists stays out.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_audit_events_bulk_history_scan_covers_every_name() {
+        let mut server =
+            TestHttpServer::new("test_audit_events_bulk_history_scan_covers_every_name", true)
+                .await;
+        server.token = server.root_token.clone();
+
+        let policy_body = |caps: &str| {
+            serde_json::json!({
+                "policy": format!(r#"path "secret/*" {{ capabilities = [{caps}] }}"#)
+            })
+            .as_object()
+            .cloned()
+        };
+
+        // Two live policies, one written twice so it carries two history
+        // rows under the same name prefix.
+        let _ = server.write("sys/policies/acl/bulk-pol-a", policy_body(r#""read""#), None).unwrap();
+        let _ = server
+            .write("sys/policies/acl/bulk-pol-a", policy_body(r#""read", "list""#), None)
+            .unwrap();
+        let _ = server.write("sys/policies/acl/bulk-pol-b", policy_body(r#""read""#), None).unwrap();
+
+        // A third policy, then deleted: its history rows remain in storage
+        // but must not surface.
+        let _ =
+            server.write("sys/policies/acl/bulk-pol-gone", policy_body(r#""read""#), None).unwrap();
+        let _ = server.delete("sys/policies/acl/bulk-pol-gone", None, None).unwrap();
+
+        for name in ["bulk-grp-a", "bulk-grp-b"] {
+            let _ = server
+                .write(
+                    &format!("identity/group/user/{name}"),
+                    serde_json::json!({ "members": "alice" }).as_object().cloned(),
+                    None,
+                )
+                .unwrap();
+        }
+        let _ = server
+            .write(
+                "resource-group/groups/bulk-asset-a",
+                serde_json::json!({ "resources": "secret/data/x" }).as_object().cloned(),
+                None,
+            )
+            .unwrap();
+
+        let ret = server.read("sys/audit/events", None).unwrap().1;
+        let events = ret.get("events").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+
+        let count = |category: &str, target: &str| {
+            events
+                .iter()
+                .filter(|e| {
+                    e.get("category").and_then(|v| v.as_str()) == Some(category)
+                        && e.get("target").and_then(|v| v.as_str()) == Some(target)
+                })
+                .count()
+        };
+
+        assert_eq!(
+            count("policy", "bulk-pol-a"),
+            2,
+            "both history rows of the twice-written policy must survive: {events:?}"
+        );
+        assert_eq!(count("policy", "bulk-pol-b"), 1, "the second policy's row: {events:?}");
+        assert_eq!(
+            count("policy", "bulk-pol-gone"),
+            0,
+            "history of a deleted policy must stay out: {events:?}"
+        );
+        for name in ["bulk-grp-a", "bulk-grp-b"] {
+            assert_eq!(
+                count("identity-group-user", name),
+                1,
+                "group {name} must be attributed to its own name: {events:?}"
+            );
+        }
+        assert_eq!(
+            count("asset-group", "bulk-asset-a"),
+            1,
+            "the asset group's create row: {events:?}"
+        );
     }
 
     /// Regression: the `bv-client` remote backend sends a GET whose

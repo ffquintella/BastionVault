@@ -629,6 +629,29 @@ impl ResourceGroupStore {
         Ok(entries)
     }
 
+    /// Every history entry, paired with the group name, in one bulk
+    /// subtree read.
+    ///
+    /// The per-group [`list_history`](Self::list_history) costs a storage
+    /// round-trip per history row, so aggregating across all groups with it
+    /// scales with total history. The caller filters by name and timestamp
+    /// in memory. Order is unspecified; undecodable rows are skipped.
+    pub async fn list_history_all(
+        &self,
+    ) -> Result<Vec<(String, ResourceGroupHistoryEntry)>, RvError> {
+        let entries = self.history_view.get_entries("").await?;
+        Ok(entries
+            .into_iter()
+            .filter_map(|e| {
+                // Keys are `{name}/{20-digit-nanos}`; group names cannot
+                // contain `/` (see `sanitize_name`).
+                let (name, _seq) = e.key.rsplit_once('/')?;
+                let h = serde_json::from_slice::<ResourceGroupHistoryEntry>(&e.value).ok()?;
+                Some((name.to_string(), h))
+            })
+            .collect())
+    }
+
     /// Admin-only: overwrite the owner of a group. Distinct from
     /// `set_group` which preserves the existing owner to prevent
     /// privilege escalation via a regular write. Callers must gate

@@ -2591,6 +2591,32 @@ impl PolicyStore {
         Ok(entries)
     }
 
+    /// Every root-keyspace policy history entry, paired with the policy
+    /// name, in one bulk subtree read.
+    ///
+    /// [`list_history`](Self::list_history) is the per-policy form — a
+    /// `list` plus a `get` per row — so calling it once per policy costs a
+    /// storage round-trip per row, each a separate linearizable read on a
+    /// queryable backend. The caller filters by name and timestamp in
+    /// memory. Order is unspecified; undecodable rows are skipped.
+    pub async fn list_history_all(&self) -> Result<Vec<(String, PolicyHistoryEntry)>, RvError> {
+        let view = self
+            .history_view
+            .as_ref()
+            .ok_or_else(|| bv_error_string!("policy history view unavailable"))?;
+        let entries = view.get_entries("").await?;
+        Ok(entries
+            .into_iter()
+            .filter_map(|e| {
+                // Keys are `{name}/{20-digit-nanos}`: only the final segment
+                // is the sequence, so a name containing `/` round-trips.
+                let (name, _seq) = e.key.rsplit_once('/')?;
+                let h = serde_json::from_slice::<PolicyHistoryEntry>(&e.value).ok()?;
+                Some((name.to_string(), h))
+            })
+            .collect())
+    }
+
     /// Namespace-scoped variant of [`append_history`]. Root delegates to the
     /// global history keyspace; a non-root namespace keeps its own audit trail.
     pub async fn append_history_ns(

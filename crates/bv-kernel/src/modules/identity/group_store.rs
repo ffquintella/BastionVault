@@ -311,6 +311,31 @@ impl GroupStore {
         Ok(entries)
     }
 
+    /// Every root-keyspace history entry for the given `kind`, paired with
+    /// the group name, in one bulk subtree read.
+    ///
+    /// The per-group [`list_history`](Self::list_history) costs a storage
+    /// round-trip per history row, so aggregating across all groups with it
+    /// scales with total history. The caller filters by name and timestamp
+    /// in memory. Order is unspecified; undecodable rows are skipped.
+    pub async fn list_history_all(
+        &self,
+        kind: GroupKind,
+    ) -> Result<Vec<(String, GroupHistoryEntry)>, RvError> {
+        let view = self.history_view_for(kind, "");
+        let entries = view.get_entries("").await?;
+        Ok(entries
+            .into_iter()
+            .filter_map(|e| {
+                // Keys are `{name}/{20-digit-nanos}`; group names cannot
+                // contain `/` (see `sanitize_name`).
+                let (name, _seq) = e.key.rsplit_once('/')?;
+                let h = serde_json::from_slice::<GroupHistoryEntry>(&e.value).ok()?;
+                Some((name.to_string(), h))
+            })
+            .collect())
+    }
+
     /// Return the union of `direct_policies` with the policies of every group
     /// of the given `kind` that lists `member` in its `members` list. Names are
     /// compared case-insensitively (group names are lowercased on write).
