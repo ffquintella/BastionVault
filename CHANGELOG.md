@@ -45,6 +45,23 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.8] - 2026-09-24
+
+### Fixed
+
+#### Userpass: bulk user records carried no username
+
+- **`auth/<mount>/users-info` rows now include `username`**
+  (`crates/bv-auth-userpass/src/path_users.rs`) -- the shared projection was
+  built from the stored `UserEntry` alone, which has no username field: the
+  name is the storage key. The single read recovers it from the request path,
+  so only the bulk listing was affected, and it returned nameless rows. In the
+  desktop GUI's Users table that rendered as blank Username cells (the FIDO2
+  and state badges still appeared), every row collapsed onto the same React
+  key, and Edit/Delete acted on an empty username. Regression coverage in
+  `src/engine_tests/bulk_info_endpoints.rs` asserts each row names its
+  principal.
+
 ## [0.44.7] - 2026-09-24
 
 ### Fixed

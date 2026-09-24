@@ -912,7 +912,10 @@ All seven share one contract:
   bodies: `certs-info` and `csr-info` omit PEMs, `sign-request-info` omits the
   CSR and certificate. Fetch the single object when you need those.
 - `targets-info` nests the renewer state under `state` (both halves carry a
-  `name`); `users-info` rows add `registered_keys` and `fido2_enabled`.
+  `name`); `users-info` rows add `registered_keys` and `fido2_enabled`. A user
+  record carries `username` in both the single read and the listing — the name
+  is the storage key rather than a stored field, so the projection has to
+  restate it or a bulk row could not name its principal.
 
 Against a server that predates one of these routes the response is
 `404 … path not supported`; clients fall back to the per-object reads. See

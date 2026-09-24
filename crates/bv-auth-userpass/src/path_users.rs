@@ -303,15 +303,22 @@ then the next renew will cause the lease to expire.
 /// is the single place `password_hash` and `credentials_json` are stripped,
 /// so a second listing endpoint cannot reintroduce either by forgetting to.
 ///
-/// Also computes the two fields the stored entry does not carry — the count
-/// of registered FIDO2 keys, and whether the account is locked out *now* as
-/// opposed to `locked_until`'s raw timestamp — so a client does not do clock
-/// arithmetic to render a badge.
-fn user_public_data(user_entry: &UserEntry) -> Result<serde_json::Map<String, serde_json::Value>, RvError> {
+/// Also computes the three fields the stored entry does not carry — the
+/// `username`, which is the storage key rather than a field of `UserEntry`;
+/// the count of registered FIDO2 keys; and whether the account is locked out
+/// *now* as opposed to `locked_until`'s raw timestamp — so a client does not
+/// do clock arithmetic to render a badge. Without `username` in the record a
+/// bulk row cannot name its principal: the single read recovers the name from
+/// the request path, and a listing has no path to recover it from.
+fn user_public_data(
+    username: &str,
+    user_entry: &UserEntry,
+) -> Result<serde_json::Map<String, serde_json::Value>, RvError> {
     let mut user_entry_data = serde_json::to_value(user_entry)?;
     let data = user_entry_data.as_object_mut().ok_or(RvError::ErrRequestInvalid)?;
     data.remove("password_hash");
     data.remove("credentials_json"); // Never expose key material
+    data.insert("username".to_string(), serde_json::Value::String(username.to_string()));
     let registered_keys = user_entry.get_passkeys().map(|v| v.len()).unwrap_or(0);
     data.insert("registered_keys".to_string(), serde_json::Value::Number(registered_keys.into()));
     let locked = user_entry.locked_until > now_secs();
@@ -382,7 +389,7 @@ impl UserPassBackendInner {
         }
 
         let user_entry = entry.unwrap();
-        Ok(Some(Response::data_response(Some(user_public_data(&user_entry)?))))
+        Ok(Some(Response::data_response(Some(user_public_data(&username, &user_entry)?))))
     }
 
     /// Handler for `auth/<mount>/users-info`. See
@@ -396,7 +403,7 @@ impl UserPassBackendInner {
             records.push(match entry {
                 // Same projection as the single read, so no field — and in
                 // particular no redaction — can differ between the two.
-                Some(entry) => serde_json::Value::Object(user_public_data(&entry)?),
+                Some(entry) => serde_json::Value::Object(user_public_data(username, &entry)?),
                 // A user whose record fails to load still contributes a row
                 // carrying the username: an admin list that silently omits
                 // an account hides a principal that can still log in.

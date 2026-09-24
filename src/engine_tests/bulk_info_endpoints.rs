@@ -247,6 +247,14 @@ async fn userpass_users_info_carries_flags_and_key_counts_without_secrets() {
     assert_eq!(status, 200, "users-info failed: {body}");
     assert_envelope(&body, 2, 2);
 
+    // Every row names its principal. `UserEntry` stores no username — it is
+    // the storage key — so a projection built from the entry alone yields
+    // nameless rows, which rendered as blank cells in the admin table and
+    // made Edit/Delete act on an empty username.
+    let names: Vec<&str> =
+        body["data"]["records"].as_array().unwrap().iter().map(|r| r["username"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["alice", "bob"], "rows must carry their username: {body}");
+
     for rec in body["data"]["records"].as_array().unwrap() {
         // The two computed fields the client would otherwise derive, plus
         // the FIDO2 count that used to cost a second request per user.
