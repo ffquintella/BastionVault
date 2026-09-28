@@ -358,4 +358,4 @@ fips204   = "0.4.6"  # already present (PQC signing via Transit)
 
 ## Tracking
 
-When phases land, update [CHANGELOG.md](../CHANGELOG.md), [roadmap.md](../roadmap.md), and this file's "Current State" / phase markers.
+When phases land, update [CHANGELOG.md](../CHANGELOG.md), [ROADMAP.md](../ROADMAP.md), and this file's "Current State" / phase markers.

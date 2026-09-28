@@ -369,7 +369,7 @@ to reconstruct, or a Windows Hello-brokered agent), not a transport swap.
 ## Tracking
 
 - [CHANGELOG.md](../CHANGELOG.md) — `[Unreleased]`
-- [roadmap.md](../roadmap.md)
+- [ROADMAP.md](../ROADMAP.md)
 - [features/resource-connect.md](resource-connect.md) — credential-source matrix
 
 ## Notes on alternatives considered

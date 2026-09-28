@@ -395,4 +395,4 @@ Each plugin owns its own integration tests. The host CI runs the framework tests
 
 ## Tracking
 
-When phases land, update [CHANGELOG.md](../CHANGELOG.md), [roadmap.md](../roadmap.md), and this file's "Current State" / phase markers. Plugin releases under `dynamic-engine-plugins/` track their own versions; the host CHANGELOG records "framework supports plugin X starting at version Y," not the per-plugin release notes.
+When phases land, update [CHANGELOG.md](../CHANGELOG.md), [ROADMAP.md](../ROADMAP.md), and this file's "Current State" / phase markers. Plugin releases under `dynamic-engine-plugins/` track their own versions; the host CHANGELOG records "framework supports plugin X starting at version Y," not the per-plugin release notes.

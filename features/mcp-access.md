@@ -830,7 +830,7 @@ local-mode release. 6 is opt-in power; 7 is external.
 ## Tracking
 
 When phases land, update [CHANGELOG.md](../CHANGELOG.md),
-[roadmap.md](../roadmap.md) (row "MCP Access" under Infrastructure), this
+[ROADMAP.md](../ROADMAP.md) (row "MCP Access" under Infrastructure), this
 file's Status line and phase table, and `docs/mcp.md`. Any change to a tool
 description or schema is a `### Changed` CHANGELOG entry that quotes the new
 catalogue hash.

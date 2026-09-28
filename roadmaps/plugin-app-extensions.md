@@ -32,7 +32,7 @@ Each phase ships independently and leaves the system working.
 
 Land `features/plugin-app-extensions.md` + this roadmap. Decide the ABI story: manifests using `capabilities.app` declare `abi_version = "1.1"`; bump `HOST_ABI_MINOR` to 1 when Phase 1 lands (older hosts refuse cleanly via `check_abi_compatibility`).
 
-**Acceptance:** docs merged; roadmap.md row added.
+**Acceptance:** docs merged; ROADMAP.md row added.
 
 ### Phase 1 — Server: manifest + grants (1–1.5 weeks) — ✅ Complete
 

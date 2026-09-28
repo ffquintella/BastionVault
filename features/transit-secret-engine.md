@@ -334,5 +334,5 @@ Feature flags: `transit_pqc_hybrid`, `transit_byok`.
 When phases land, update:
 
 1. [CHANGELOG.md](../CHANGELOG.md) under `[Unreleased]` -- `Added` for new endpoints, key types, and PQC operations.
-2. [roadmap.md](../roadmap.md) -- move the "Secret Engine: Transit" row from `Todo` to `In Progress` (Phase 1 in flight) → `Done` once Phase 3 ships.
+2. [ROADMAP.md](../ROADMAP.md) -- move the "Secret Engine: Transit" row from `Todo` to `In Progress` (Phase 1 in flight) → `Done` once Phase 3 ships.
 3. This file (`features/transit-secret-engine.md`) -- mark phases Done and refresh "Current State".

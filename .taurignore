@@ -53,7 +53,7 @@ IronRDP/
 docs/_build/
 gui/dist/
 
-# Tracking / documentation markdown — CHANGELOG.md, roadmap.md, agent.md,
+# Tracking / documentation markdown — CHANGELOG.md, ROADMAP.md, agent.md,
 # features/*.md, roadmaps/*.md — is edited constantly as part of the
 # workflow (see agent.md's tracking rules) and never compiled into the
 # binary, so writes here must not wake the watcher and rebuild the GUI.

@@ -42,7 +42,7 @@ Recorded up front, per `agent.md`'s "explain assumptions clearly".
 
 | Brief said | Reality in this repo | Decision |
 |---|---|---|
-| **SQLx** for query hardening | `sqlx` was **removed** from the project (`libsqlite3-sys` link conflict — see `roadmap.md`, Storage: `[~] Removed`). Persistence is hiqlite (raw SQL + `Param` binding) and Diesel/MySQL (query builder + three `sql_query` sites). | Do **not** reintroduce `sqlx`. It would resurrect a known build break and violate `agent.md`'s dependency rules for zero gain — the existing drivers already parameterize values. Phase 2 targets the two real gaps: interpolated **identifiers** and `LIKE`-pattern semantics. |
+| **SQLx** for query hardening | `sqlx` was **removed** from the project (`libsqlite3-sys` link conflict — see `ROADMAP.md`, Storage: `[~] Removed`). Persistence is hiqlite (raw SQL + `Param` binding) and Diesel/MySQL (query builder + three `sql_query` sites). | Do **not** reintroduce `sqlx`. It would resurrect a known build break and violate `agent.md`'s dependency rules for zero gain — the existing drivers already parameterize values. Phase 2 targets the two real gaps: interpolated **identifiers** and `LIKE`-pattern semantics. |
 | **Axum** or Actix extractors | `actix-web 4.13` (`src/http/mod.rs`). | Actix `FromRequest` is the extractor mechanism. The witness pattern below is framework-idiomatic for both, so a future migration keeps the guarantee. |
 | **MIRAI** for taint analysis | MIRAI has had no release since 2023 and pins a specific old nightly. `agent.md` forbids components without vendor support; `03-codificacao-segura.md` §11 forbids discontinued dependencies outright. | **Rejected.** Taint analysis is replaced by *making the taint unrepresentable* (Phase 2 newtypes) plus a mechanical gate over the driver call sites. `dylint` (maintained, Trail of Bits) is the optional AST-precise tier. |
 | Kani on the permission engine directly | `ACL` holds `radix_trie::Trie<String, Permissions>` + `DashMap`, and `allow_operation` takes `&Request` — 25 fields including `Arc<dyn Storage>`, `Arc<dyn Handler>`, `Map<String, Value>`. Unbounded heap, trait objects, interior-mutability locks. | Kani cannot practically discharge that. Phase 3 **extracts a pure bounded core** (`agent.md`: "incremental extraction into `crates/`") and then makes production *use* it, so the proof is about shipped code. See §"The model-vs-code trap". |
@@ -908,7 +908,7 @@ Stated explicitly so the guarantee is not read more broadly than it is.
 
 Per `CLAUDE.md`:
 
-- `roadmap.md` — registered under Core as *Formal Verification & Type-Driven Security* (`[ ]` Todo), and listed as a next-up initiative.
+- `ROADMAP.md` — registered under Core as *Formal Verification & Type-Driven Security* (`[ ]` Todo), and listed as a next-up initiative.
 - `CHANGELOG.md` — the phase-0 fix PRs (F2–F5) shipped in **v0.38.6** with Security entries. No phase has landed yet, so nothing further is recorded; each phase adds its own entry on completion.
 - Update the Status table above as sub-phases complete. A phase is Done only when every sub-phase is — Phase 3 in particular is **not** Done at 3.2, however good the Kani output looks (see § The model-vs-code trap).
 - Every PR touching `Login`, `Auditoria`, `Permissionamento`, or `Método de autenticação` needs the `02` §6 change record and an ESI signal in its compliance report.

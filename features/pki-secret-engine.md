@@ -8,7 +8,7 @@ This feature replaces the retired legacy module at `src/modules/pki/` (currently
 
 ## Motivation
 
-- **OpenSSL-free build**: BastionVault's active migration is to remove every C-linked crypto dependency. The legacy PKI engine was the last subsystem that pulled OpenSSL in, which is why it was disabled in the default build (see [roadmap.md:46](roadmap.md:46) and the doc comment in [src/modules/pki/mod.rs:1](src/modules/pki/mod.rs:1)).
+- **OpenSSL-free build**: BastionVault's active migration is to remove every C-linked crypto dependency. The legacy PKI engine was the last subsystem that pulled OpenSSL in, which is why it was disabled in the default build (see [ROADMAP.md](../ROADMAP.md) and the doc comment in [src/modules/pki/mod.rs:1](src/modules/pki/mod.rs:1)).
 - **Post-quantum readiness**: BastionVault already ships ML-KEM-768 and ML-DSA-65 via `bv_crypto` ([crates/bv_crypto/Cargo.toml](crates/bv_crypto/Cargo.toml)). A PQC-capable PKI lets operators issue certificates whose signatures resist a future cryptanalytically relevant quantum computer, and lets BastionVault dogfood its own PQC primitives end-to-end.
 - **Vault API parity**: customers migrating from HashiCorp Vault expect the same `pki/roles/*`, `pki/issue/*`, `pki/sign/*`, `pki/revoke`, `pki/ca`, `pki/crl` paths. Reimplementing these on a Rust stack preserves drop-in compatibility while unblocking PQC roles.
 - **Auditability**: a pure-Rust ASN.1/X.509 path is easier to audit, easier to fuzz, and avoids the well-known footguns of OpenSSL's certificate parsing surface.
@@ -400,5 +400,5 @@ Coverage: [tests/test_pki_ad_smartcard.rs](../tests/test_pki_ad_smartcard.rs) â€
 When phases land, update:
 
 1. [CHANGELOG.md](CHANGELOG.md) under `[Unreleased]` -- `Added` for new endpoints and PQC roles, `Changed` for the route layout changes from the legacy engine.
-2. [roadmap.md:46](roadmap.md:46) -- move the row from `Partial` to `In Progress` (Phase 1 in flight) -> `Done` (Phase 2 shipped).
+2. [ROADMAP.md](../ROADMAP.md) -- move the row from `Partial` to `In Progress` (Phase 1 in flight) -> `Done` (Phase 2 shipped).
 3. This file (`features/pki-secret-engine.md`) -- mark phases Done and refresh "Current State".

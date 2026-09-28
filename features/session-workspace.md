@@ -564,7 +564,7 @@ to fight with Tailwind 4. The tree we need is 60 lines of reducer.
 ## Tracking
 
 When phases land, update [CHANGELOG.md](../CHANGELOG.md) (the isolation
-trade-off goes under **Security**), [roadmap.md](../roadmap.md), this file's
+trade-off goes under **Security**), [ROADMAP.md](../ROADMAP.md), this file's
 "Current State", and the Connect section of [docs/api.md](../docs/api.md) if the
 new Tauri commands get documented alongside the existing `session_*` set.
 

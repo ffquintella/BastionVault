@@ -246,4 +246,4 @@ See [`roadmaps/plugin-app-extensions.md`](../roadmaps/plugin-app-extensions.md).
 
 ## Tracking
 
-When phases land, update [CHANGELOG.md](../CHANGELOG.md), [roadmap.md](../roadmap.md), [`roadmaps/plugin-app-extensions.md`](../roadmaps/plugin-app-extensions.md), and this file's Status line.
+When phases land, update [CHANGELOG.md](../CHANGELOG.md), [ROADMAP.md](../ROADMAP.md), [`roadmaps/plugin-app-extensions.md`](../roadmaps/plugin-app-extensions.md), and this file's Status line.

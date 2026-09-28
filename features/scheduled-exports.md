@@ -10,7 +10,7 @@ The feature ships in five capabilities:
 2. **A scheduler runtime** — single-instance-elected (HA-safe via the existing Hiqlite Raft leader), tokio-driven, with per-schedule isolation and structured failure handling.
 3. **Retention** — count-based, age-based, and grandfather-father-son (GFS) policies.
 4. **Verification** — every Nth produced `.bvx` is round-tripped through a decrypt-and-validate step before retention is allowed to drop the prior verified backup.
-5. **Cloud-target integration** — schedules can write directly to the existing cloud-storage backends ([roadmap.md:32](roadmap.md:32)) so off-site backups are first-class.
+5. **Cloud-target integration** — schedules can write directly to the existing cloud-storage backends ([ROADMAP.md](../ROADMAP.md)) so off-site backups are first-class.
 
 A scheduled export is intentionally **not** a BVBK replacement. The two coexist: BVBK for fast, full-vault disaster recovery on the same binary; scheduled `.bvx` exports for portability, compliance evidence, off-site rotation, and "I lost the vault, can I rebuild from a file" workflows.
 
@@ -372,4 +372,4 @@ Add a roadmap row near the existing Backup row:
 | Scheduled Exports (cron-driven `.bvx` / BVBK with retention + verification) ([spec](features/scheduled-exports.md)) | Todo |
 ```
 
-When phases land, update [CHANGELOG.md](../CHANGELOG.md), [roadmap.md](../roadmap.md), and this file's "Current State" / phase markers.
+When phases land, update [CHANGELOG.md](../CHANGELOG.md), [ROADMAP.md](../ROADMAP.md), and this file's "Current State" / phase markers.

@@ -167,6 +167,6 @@ No new C-linked deps. ACME does not require any cryptographic primitive the exis
 
 This is a **future feature**, not in the current PKI roadmap row. When implementation starts:
 
-1. Add a row in `roadmap.md` under "Secret Engines" (or a new "PKI Add-ons" sub-section) referring back to this file.
+1. Add a row in `ROADMAP.md` under "Secret Engines" (or a new "PKI Add-ons" sub-section) referring back to this file.
 2. Update `features/pki-secret-engine.md`'s "Not In Scope" list to point here for ACME.
 3. Update `CHANGELOG.md` per phase, the same way the core PKI engine tracks Phases 1–4.1.

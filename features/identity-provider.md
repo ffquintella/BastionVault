@@ -453,5 +453,5 @@ revocable Linux admin access. RADIUS (4) unlocks FortiGate; 5/6 broaden coverage
 
 ## Tracking
 
-When phases land, update [CHANGELOG.md](../CHANGELOG.md), [roadmap.md](../roadmap.md),
+When phases land, update [CHANGELOG.md](../CHANGELOG.md), [ROADMAP.md](../ROADMAP.md),
 and this file's "Current State" / phase table.

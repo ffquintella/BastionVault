@@ -630,6 +630,6 @@ adding the project's repo + signing key.
 ## Tracking
 
 When phases land, update [CHANGELOG.md](../CHANGELOG.md),
-[roadmap.md](../roadmap.md) (Packaging & Distribution → Native Client
+[ROADMAP.md](../ROADMAP.md) (Packaging & Distribution → Native Client
 Installers row: `Todo` → `In Progress` (Phase 1) → `Done` (Phase 4 or
 Phase 5)), and this file's "Current State" / phase markers.

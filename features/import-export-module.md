@@ -408,4 +408,4 @@ Add a new roadmap row under **Operations** (or near "Import/Export & Backup/Rest
 | Import / Export Module (user-facing JSON + password-encrypted .bvx) ([spec](features/import-export-module.md)) | Todo |
 ```
 
-When phases land, update [CHANGELOG.md](../CHANGELOG.md), [roadmap.md](../roadmap.md), and this file's "Current State" / phase markers.
+When phases land, update [CHANGELOG.md](../CHANGELOG.md), [ROADMAP.md](../ROADMAP.md), and this file's "Current State" / phase markers.
