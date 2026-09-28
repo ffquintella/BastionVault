@@ -64,6 +64,8 @@ pub mod client_ip;
 /// `logical`, so `crate::logical` unambiguously means the library's
 /// request/response types — this crate needs both.
 pub mod logical_routes;
+/// The `/v2/mcp` + `/v2/mcp/token` MCP Access transport (features/mcp-access.md).
+pub mod mcp_routes;
 /// The `/metrics` Prometheus scrape endpoint. Named `metrics_routes` for the
 /// same reason `logical_routes` is: `crate::metrics` is the library's.
 pub mod metrics_routes;
@@ -169,6 +171,9 @@ pub fn init_service(cfg: &mut web::ServiceConfig) {
     // logical plumbing, which can neither recover the signed bytes nor
     // read the signature header.
     rustion_webhook::init_rustion_webhook_service(cfg);
+    // Must precede the `/v2/{path:.*}` logical catch-all for the same
+    // reason as the webhook above.
+    mcp_routes::init_mcp_service(cfg);
     logical_routes::init_logical_service(cfg);
     metrics_routes::init_metrics_service(cfg);
 }

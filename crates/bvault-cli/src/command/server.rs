@@ -340,6 +340,11 @@ impl Server {
             http::metrics_routes::METRICS_ACL_PATH,
         );
         let metrics_access = web::Data::new(metrics_access);
+        // MCP Access (features/mcp-access.md): `mcp { enabled = ... }`.
+        // Registered even when absent/disabled, so the routes exist and
+        // answer "not enabled" rather than 404ing in a way indistinguishable
+        // from a build that doesn't have them.
+        let mcp_config = web::Data::new(config.mcp.clone());
         // One store for the whole server: the preview token minted by one
         // worker must be redeemable by whichever worker handles the apply.
         let exchange_preview_store =
@@ -367,6 +372,7 @@ impl Server {
                 .app_data(web::Data::new(metrics_manager.clone()))
                 .app_data(trusted_proxies.clone())
                 .app_data(metrics_access.clone())
+                .app_data(mcp_config.clone())
                 .configure(http::init_service)
                 .default_service(web::to(HttpResponse::NotFound))
         })

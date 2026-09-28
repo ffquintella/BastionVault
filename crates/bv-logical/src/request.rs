@@ -100,6 +100,45 @@ pub struct Request {
     /// in charge exactly as before.
     #[default(None)]
     pub share_capability_override: Option<String>,
+    /// Set by the MCP dispatcher before calling `Core::handle_request`, so
+    /// `audit_request_data` can fold it into the entry's `data.mcp` block
+    /// the same way it already folds `env`. `None` for every non-MCP
+    /// request.
+    #[default(None)]
+    pub mcp_audit: Option<McpAuditContext>,
+    /// Set by the MCP dispatcher's `bv_client::Backend` before calling
+    /// `Core::handle_request`; `TokenStore::pre_route` reads it as the
+    /// `is_mcp_dispatcher` argument to `check_token`. A `tools/call`
+    /// necessarily reaches the token store through the *normal* pipeline
+    /// (the point is the standard audit entry), so this cannot be a
+    /// special call site the way the other five `check_token` callers are.
+    #[default(false)]
+    pub mcp_dispatch: bool,
+}
+
+/// The `mcp` sibling block `audit_request_data` attaches to a `tools/call`
+/// request's audit entry. Never carries a secret value, token or
+/// `requestState` — only the metadata spec §10 lists as auditable.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct McpAuditContext {
+    pub kind: String,
+    pub name: String,
+    pub client_name: String,
+    pub client_version: String,
+    pub transport: String,
+    pub tool: String,
+    pub catalogue_hash: String,
+    pub reveal_requested: bool,
+    pub reveal_granted: bool,
+    pub destructive: bool,
+    pub confirmed_by_operator: bool,
+    pub decision: String,
+    pub tls_kx_group: Option<String>,
+    pub waived: bool,
+    pub peer_uid: Option<u32>,
+    pub peer_pid: Option<u32>,
+    pub otel_traceparent: Option<String>,
+    pub otel_tracestate: Option<String>,
 }
 
 #[maybe_async::maybe_async]

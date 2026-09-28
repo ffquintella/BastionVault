@@ -134,6 +134,57 @@ pub struct Config {
     /// with `read` on `sys/metrics`.
     #[serde(default)]
     pub metrics: MetricsAccessConfig,
+    /// Optional `mcp { ... }` block (features/mcp-access.md). Absent ⇒
+    /// `/v2/mcp` and `/v2/mcp/token` are compiled in but refuse every
+    /// request (`enabled` defaults false).
+    #[serde(default)]
+    pub mcp: McpConfig,
+}
+
+/// `mcp { ... }` — transport settings for the `/v2/mcp` endpoint. These
+/// govern what the process binds and how it terminates TLS for that one
+/// route, so they belong with the listener rather than in the barrier-
+/// persisted runtime policy (`sys/mcp/config`, `crates/bv-kernel/.../mcp.rs`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct McpConfig {
+    #[serde(default, deserialize_with = "parse_bool_string")]
+    pub enabled: bool,
+    /// RFC 8707 resource identifier, e.g.
+    /// `https://vault.example.com:8200/v2/mcp`. Required when `enabled`;
+    /// advertised in the `/.well-known/oauth-protected-resource/v2/mcp`
+    /// PRM document.
+    #[serde(default)]
+    pub canonical_url: String,
+    /// Exact origins allowed to call `/v2/mcp` with a browser-style
+    /// `Origin` header. Empty means only non-browser clients (no `Origin`
+    /// header at all) are accepted.
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+    /// Refuse a connection whose negotiated TLS key-exchange group is not
+    /// the hybrid post-quantum group. Phase 3 note: the negotiated-group
+    /// capture this reads is not yet wired into the connection info this
+    /// route sees (see `bv-server`'s `TlsClientInfo`); until it is, this
+    /// flag is parsed but not enforced.
+    #[serde(default, deserialize_with = "parse_bool_string")]
+    pub require_hybrid_kex: bool,
+    /// Serve `/v2/mcp` over a `tls_disable = true` listener anyway, only
+    /// when that listener's bound address is loopback.
+    #[serde(default, deserialize_with = "parse_bool_string")]
+    pub allow_plaintext_loopback: bool,
+    /// Body size cap in bytes. `0` means use the built-in default
+    /// (256 KiB).
+    #[serde(default)]
+    pub max_request_bytes: usize,
+    /// Per-call timeout in seconds. `0` means use the built-in default
+    /// (30s). Phase 3 note: parsed but not yet enforced -- see the
+    /// dispatcher call site in `bv-server`'s `mcp_routes.rs`.
+    #[serde(default)]
+    pub tool_timeout_secs: u64,
+    /// RFC 9728 PRM `authorization_servers`. Unused until Phase 7
+    /// (external/enterprise authorization); declared now so the config
+    /// shape does not change shape later.
+    #[serde(default)]
+    pub authorization_servers: Vec<String>,
 }
 
 /// `metrics { ... }` — access control for the `/metrics` scrape endpoint.

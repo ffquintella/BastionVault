@@ -16,6 +16,7 @@ mod cache_version;
 mod ferrogate;
 mod files;
 mod kv_version_read;
+mod mcp_access;
 mod notifications;
 mod resource;
 mod oidc;

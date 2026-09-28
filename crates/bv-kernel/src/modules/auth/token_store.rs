@@ -37,7 +37,7 @@ use crate::{
     handler::{AuthHandler, HandlePhase, Handler},
     logical::{
         is_reserved_token_meta_key, lease::calculate_ttl, Auth, Backend, Field, FieldType, Lease, LogicalBackend,
-        Operation, Path, PathOperation, Request, Response, SPIFFE_ID_META,
+        McpBinding, Operation, Path, PathOperation, Request, Response, SPIFFE_ID_META,
     },
     modules::policy::policy_store::NON_ASSIGNABLE_POLICIES,
     new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
@@ -269,6 +269,13 @@ pub struct TokenEntry {
     /// bypassed AppID having to log in again to pick up the exemption.
     #[serde(default)]
     pub machine_identity_exempt: bool,
+    /// Marks this token as MCP-bound. `#[serde(default)]` for the same
+    /// fail-closed-on-upgrade reason as `machine_identity_exempt`: a token
+    /// persisted before this field existed reads back as `None`, i.e. not
+    /// MCP-bound, so `TokenStore::check_token`'s MCP-origin gate keeps
+    /// refusing it at the MCP dispatcher. See `bv_logical::McpBinding`.
+    #[serde(default)]
+    pub mcp_binding: Option<McpBinding>,
 }
 
 /// Does this token satisfy the server-wide FerroGate machine-identity
@@ -640,7 +647,13 @@ impl TokenStore {
     /// callers that build an ACL directly instead of going through
     /// `Core::handle_request`. Enforcing it a layer up would leave those
     /// paths unbound.
-    pub async fn check_token(&self, path: &str, token: &str, client_ip: &str) -> Result<Option<Auth>, RvError> {
+    pub async fn check_token(
+        &self,
+        path: &str,
+        token: &str,
+        client_ip: &str,
+        is_mcp_dispatcher: bool,
+    ) -> Result<Option<Auth>, RvError> {
         if token.is_empty() {
             return Err(RvError::ErrRequestClientTokenMissing);
         }
@@ -652,6 +665,21 @@ impl TokenStore {
         }
 
         let mut entry = te.unwrap();
+
+        // MCP-origin gate, before `use_token`: symmetric and structural.
+        // An MCP-bound token is refused everywhere except the MCP
+        // dispatcher; the MCP dispatcher refuses every token that isn't
+        // MCP-bound. See features/mcp-access.md § "Protects against —
+        // Token passthrough / audience confusion".
+        if entry.mcp_binding.is_some() != is_mcp_dispatcher {
+            log::warn!(
+                target: "security",
+                "request denied: MCP-origin mismatch (token mcp-bound={}, dispatcher={is_mcp_dispatcher}, path={path}, display_name={})",
+                entry.mcp_binding.is_some(),
+                entry.display_name
+            );
+            return Err(RvError::ErrPermissionDenied);
+        }
 
         // Source-address binding, before `use_token`: a refused request must
         // not burn one of a use-limited token's uses.
@@ -677,6 +705,7 @@ impl TokenStore {
             metadata: entry.meta,
             bound_cidrs: entry.bound_cidrs,
             machine_identity_exempt: entry.machine_identity_exempt,
+            mcp_binding: entry.mcp_binding.clone(),
             ..Auth::default()
         };
 
@@ -834,6 +863,14 @@ impl TokenStore {
         }
 
         let is_root = parent.policies.iter().any(|s| s.as_str() == "root");
+
+        // An MCP-bound token must not be able to mint a non-MCP-bound
+        // child: `auth/token/create` is never called by the MCP
+        // dispatcher, which is the only legitimate holder of one, so any
+        // caller presenting one here is already outside the contract.
+        if parent.mcp_binding.is_some() {
+            return Err(RvError::ErrPermissionDenied);
+        }
 
         let mut data: TokenReqData = serde_json::from_value(Value::Object(req.body.as_ref().unwrap().clone()))?;
 
@@ -1053,6 +1090,73 @@ impl TokenStore {
         let resp = Response { auth: Some(auth), ..Response::default() };
 
         Ok(Some(resp))
+    }
+
+    /// Mint an MCP-bound child token: the only path that ever sets
+    /// [`TokenEntry::mcp_binding`]. Called by the system module's
+    /// `mcp/token` exchange after it has run the non-token-store checks
+    /// (spec §4 checks 1-3). Policy intersection never a superset, same
+    /// rule as `handle_create`; refuses a root or already-MCP-bound parent.
+    pub async fn mint_mcp_token(
+        &self,
+        parent_token: &str,
+        requested_policies: &[String],
+        ttl_secs: u64,
+        display_name: String,
+        binding: McpBinding,
+    ) -> Result<Auth, RvError> {
+        let Some(parent) = self.lookup(parent_token).await? else {
+            return Err(RvError::ErrRequestInvalid);
+        };
+        if parent.mcp_binding.is_some() {
+            return Err(RvError::ErrPermissionDenied);
+        }
+        if parent.policies.iter().any(|p| p == "root") {
+            return Err(bv_error_response!("mcp/token may not be exchanged from a root token"));
+        }
+
+        let mut policies = requested_policies.to_vec();
+        if policies.is_empty() {
+            policies.clone_from(&parent.policies);
+        }
+        sanitize_policies(&mut policies, false);
+        if !is_str_subset(&policies, &parent.policies) {
+            return Err(bv_error_response!("requested policies must be a subset of the caller's own policies"));
+        }
+
+        let clamped_ttl = calculate_ttl(
+            MAX_LEASE_TTL,
+            DEFAULT_LEASE_TTL,
+            Duration::ZERO,
+            Duration::ZERO,
+            Duration::from_secs(ttl_secs),
+            Duration::ZERO,
+            Duration::ZERO,
+            SystemTime::now(),
+        )?
+        .as_secs();
+
+        let mut te = TokenEntry {
+            parent: parent_token.to_string(),
+            path: "mcp/token".into(),
+            display_name,
+            policies,
+            ttl: clamped_ttl,
+            num_uses: 0,
+            bound_cidrs: parent.bound_cidrs.clone(),
+            mcp_binding: Some(binding),
+            ..TokenEntry::default()
+        };
+        self.create(&mut te).await?;
+
+        Ok(Auth {
+            lease: Lease { ttl: Duration::from_secs(te.ttl), renewable: false, ..Lease::default() },
+            client_token: te.id.clone(),
+            display_name: te.display_name.clone(),
+            policies: te.policies.clone(),
+            mcp_binding: te.mcp_binding.clone(),
+            ..Default::default()
+        })
     }
 
     pub async fn handle_revoke_tree(
@@ -1326,7 +1430,7 @@ impl Handler for TokenStore {
 
         if auth.is_none() {
             let client_ip = req.connection.as_ref().map(|c| c.client_ip()).unwrap_or_default();
-            auth = self.check_token(&req.path, &req.client_token, &client_ip).await?;
+            auth = self.check_token(&req.path, &req.client_token, &client_ip, req.mcp_dispatch).await?;
         }
 
         if auth.is_none() {
@@ -1734,13 +1838,13 @@ mod mod_token_store_tests {
         token_store.create(&mut entry).await.unwrap();
 
         // Allowed: inside the bound block.
-        let auth = token_store.check_token("kv/data/x", &entry.id, "10.0.0.7").await.unwrap();
+        let auth = token_store.check_token("kv/data/x", &entry.id, "10.0.0.7", false).await.unwrap();
         assert!(auth.is_some(), "a client inside the bound CIDR must be admitted");
         // The binding is surfaced on the Auth so a caller can see why.
         assert_eq!(auth.unwrap().bound_cidrs, vec!["10.0.0.0/24".to_string()]);
 
         // Denied: outside the bound block.
-        let err = token_store.check_token("kv/data/x", &entry.id, "10.0.1.7").await.unwrap_err();
+        let err = token_store.check_token("kv/data/x", &entry.id, "10.0.1.7", false).await.unwrap_err();
         assert!(
             matches!(err, RvError::ErrPermissionDenied),
             "a client outside the bound CIDR must be denied, got: {err}"
@@ -1748,7 +1852,7 @@ mod mod_token_store_tests {
 
         // Denied: unknown client address. An address we cannot determine
         // cannot be shown to satisfy the rule, so it fails closed.
-        let err = token_store.check_token("kv/data/x", &entry.id, "").await.unwrap_err();
+        let err = token_store.check_token("kv/data/x", &entry.id, "", false).await.unwrap_err();
         assert!(
             matches!(err, RvError::ErrPermissionDenied),
             "an unknown client address must be denied, got: {err}"
@@ -1756,7 +1860,7 @@ mod mod_token_store_tests {
 
         // Denied: the raw `ip:port` socket address is not silently trusted as
         // a different host — the network still decides, so this one is inside.
-        assert!(token_store.check_token("kv/data/x", &entry.id, "10.0.0.7:41222").await.is_ok());
+        assert!(token_store.check_token("kv/data/x", &entry.id, "10.0.0.7:41222", false).await.is_ok());
     }
 
     /// A token with no binding is unrestricted, including one persisted before
@@ -1777,7 +1881,7 @@ mod mod_token_store_tests {
 
         for ip in ["10.0.0.7", "203.0.113.9", ""] {
             assert!(
-                token_store.check_token("kv/data/x", &entry.id, ip).await.unwrap().is_some(),
+                token_store.check_token("kv/data/x", &entry.id, ip, false).await.unwrap().is_some(),
                 "an unbound token must be usable from {ip:?}"
             );
         }
@@ -1821,7 +1925,7 @@ mod mod_token_store_tests {
             vec!["10.0.0.0/24".to_string()],
             "the child must inherit the parent's source-address binding"
         );
-        let err = token_store.check_token("kv/data/x", &child_token, "203.0.113.9").await.unwrap_err();
+        let err = token_store.check_token("kv/data/x", &child_token, "203.0.113.9", false).await.unwrap_err();
         assert!(matches!(err, RvError::ErrPermissionDenied), "the inherited binding must be enforced, got: {err}");
     }
 
@@ -1940,7 +2044,7 @@ mod mod_token_store_tests {
         assert_eq!(child.meta.get("ticket").map(String::as_str), Some("CHG-4417"));
         assert!(!child.meta.contains_key(SPIFFE_ID_META));
 
-        let auth = token_store.check_token("kv/data/x", &child_token, "10.0.0.7").await.unwrap().unwrap();
+        let auth = token_store.check_token("kv/data/x", &child_token, "10.0.0.7", false).await.unwrap().unwrap();
         assert!(
             !machine_identity_satisfied(&auth),
             "a token minted from `auth/token/create` must not satisfy the machine-identity gate"
@@ -1987,7 +2091,7 @@ mod mod_token_store_tests {
                 "a child of an exempt={exempt} parent must be exempt={expected}; only the typed field decides"
             );
             // And it round-trips onto the Auth the gate reads.
-            let auth = token_store.check_token("kv/data/x", &child_token, "10.0.0.7").await.unwrap().unwrap();
+            let auth = token_store.check_token("kv/data/x", &child_token, "10.0.0.7", false).await.unwrap().unwrap();
             assert_eq!(auth.machine_identity_exempt, expected);
         }
 
@@ -1997,6 +2101,109 @@ mod mod_token_store_tests {
             "meta":{},"display_name":"legacy","num_uses":0,"ttl":0}"#;
         let decoded: TokenEntry = serde_json::from_str(legacy).unwrap();
         assert!(!decoded.machine_identity_exempt, "a pre-upgrade token entry must decode as not exempt");
+    }
+
+    fn test_mcp_binding() -> McpBinding {
+        McpBinding {
+            kind: crate::logical::McpBindingKind::App("ci-secrets-reader".into()),
+            catalogue_hash: "test-hash".into(),
+            tool_allowlist: vec!["bv_kv_read_metadata".into()],
+            path_scope: vec!["secret/metadata/ai/*".into()],
+            reveal_allowed: false,
+            destructive_allowed: false,
+            client_name: "test-client".into(),
+            client_version: "1.0".into(),
+            waived_until: None,
+        }
+    }
+
+    /// A pre-Phase-2 `TokenEntry` JSON blob (no `mcp_binding` key at all)
+    /// must decode as `None`, i.e. not MCP-bound — read-old compatibility.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn legacy_token_entry_decodes_with_no_mcp_binding() {
+        let legacy = r#"{"id":"legacy-token","parent":"","policies":["default"],"path":"auth/approle/login",
+            "meta":{},"display_name":"legacy","num_uses":0,"ttl":0}"#;
+        let decoded: TokenEntry = serde_json::from_str(legacy).unwrap();
+        assert!(decoded.mcp_binding.is_none());
+    }
+
+    /// A freshly minted `mcp_binding` round-trips through storage and
+    /// through `Auth`, and the MCP-origin gate refuses it everywhere except
+    /// the MCP dispatcher (`is_mcp_dispatcher = true`).
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn mcp_bound_token_is_refused_off_the_mcp_dispatcher_and_accepted_on_it() {
+        let token_store = mock_token_store!();
+        let mut entry = TokenEntry {
+            policies: vec!["default".to_string()],
+            path: "mcp/token".to_string(),
+            display_name: "mcp-app-ci-secrets-reader".to_string(),
+            mcp_binding: Some(test_mcp_binding()),
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut entry).await.unwrap();
+
+        let denied = token_store.check_token("secret/metadata/ai/x", &entry.id, "10.0.0.7", false).await;
+        assert!(denied.is_err(), "an MCP-bound token must be refused off the MCP dispatcher");
+
+        let allowed =
+            token_store.check_token("secret/metadata/ai/x", &entry.id, "10.0.0.7", true).await.unwrap().unwrap();
+        assert_eq!(allowed.mcp_binding, Some(test_mcp_binding()));
+    }
+
+    /// The symmetric half: a plain (non-MCP-bound) token must be refused
+    /// when the caller is the MCP dispatcher.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn non_mcp_token_is_refused_on_the_mcp_dispatcher() {
+        let token_store = mock_token_store!();
+        let mut entry = TokenEntry {
+            policies: vec!["default".to_string()],
+            path: "auth/approle/login".to_string(),
+            display_name: "plain".to_string(),
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut entry).await.unwrap();
+
+        let denied = token_store.check_token("kv/data/x", &entry.id, "10.0.0.7", true).await;
+        assert!(denied.is_err(), "a non-MCP-bound token must be refused on the MCP dispatcher");
+    }
+
+    /// `meta.mcp_binding` (or any of its sibling spellings) on
+    /// `auth/token/create` must be refused outright -- the typed field is
+    /// the only legitimate way to set this, exactly like
+    /// `machine_identity_exempt`.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn token_create_refuses_the_mcp_binding_metadata_spelling() {
+        let token_store = mock_token_store!();
+        let mock_backend = MockBackend(());
+        let mut parent = TokenEntry { policies: vec!["default".to_string()], ..TokenEntry::default() };
+        token_store.create(&mut parent).await.unwrap();
+
+        let mut req = Request::new("auth/token/create");
+        req.client_token = parent.id.clone();
+        req.body = json!({ "policies": ["default"], "meta": { "mcp_binding": "app" } }).as_object().cloned();
+        let err = token_store.handle_create(&mock_backend, &mut req).await.unwrap_err();
+        assert!(matches!(err, RvError::ErrResponse(_)), "reserved mcp_* meta keys must be refused: {err:?}");
+    }
+
+    /// An MCP-bound token must not be able to mint a further child via
+    /// `auth/token/create` -- that path is never called by the MCP
+    /// dispatcher, which is the only legitimate holder of one.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn mcp_bound_token_cannot_mint_a_child_token() {
+        let token_store = mock_token_store!();
+        let mock_backend = MockBackend(());
+        let mut parent = TokenEntry {
+            policies: vec!["default".to_string()],
+            mcp_binding: Some(test_mcp_binding()),
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut parent).await.unwrap();
+
+        let mut req = Request::new("auth/token/create");
+        req.client_token = parent.id.clone();
+        req.body = json!({ "policies": ["default"] }).as_object().cloned();
+        let err = token_store.handle_create(&mock_backend, &mut req).await.unwrap_err();
+        assert!(matches!(err, RvError::ErrPermissionDenied));
     }
 
     /// Every prefix in [`INHERITED_TOKEN_META_PREFIXES`] must also be
@@ -2095,7 +2302,7 @@ mod mod_token_store_tests {
                 "`{key}` names a principal, not a restriction: inheriting it would widen the child"
             );
         }
-        let auth = token_store.check_token("kvenv/data/svc", &child_token, "10.0.0.7").await.unwrap().unwrap();
+        let auth = token_store.check_token("kvenv/data/svc", &child_token, "10.0.0.7", false).await.unwrap().unwrap();
         assert_eq!(
             auth.metadata.get("approle_env_scoped").map(String::as_str),
             Some("true"),
@@ -2279,14 +2486,14 @@ mod mod_token_store_tests {
         token_store.create(&mut entry).await.unwrap();
 
         for _ in 0..5 {
-            assert!(token_store.check_token("kv/data/x", &entry.id, "203.0.113.9").await.is_err());
+            assert!(token_store.check_token("kv/data/x", &entry.id, "203.0.113.9", false).await.is_err());
         }
 
         let after = token_store.lookup(&entry.id).await.unwrap().unwrap();
         assert_eq!(after.num_uses, 3, "a refused request must not decrement num_uses");
 
         // The token is still good for its three uses from an allowed address.
-        assert!(token_store.check_token("kv/data/x", &entry.id, "10.0.0.7").await.is_ok());
+        assert!(token_store.check_token("kv/data/x", &entry.id, "10.0.0.7", false).await.is_ok());
         let after = token_store.lookup(&entry.id).await.unwrap().unwrap();
         assert_eq!(after.num_uses, 2);
     }

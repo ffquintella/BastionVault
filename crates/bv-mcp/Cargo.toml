@@ -1,0 +1,39 @@
+[package]
+name = "bv-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault's MCP (Model Context Protocol) dispatcher: JSON-RPC types, the read-only tool catalogue, and the tools/call gates. See features/mcp-access.md."
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# A dispatcher, not an engine mounted at a `Path`: depends only on
+# `bv-logical` (the shared `McpBinding` type) and `bv-client` (the `Backend`
+# trait it dispatches through), so it is unit-testable with a mock
+# `Backend` and none of the vault stack. See features/mcp-access.md.
+
+[dependencies]
+bv-errors = { path = "../bv-errors", version = "0.41.1", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.41.3", registry = "uox-bastionvault" }
+bv-client = { path = "../bv-client", version = "0.42.3", registry = "uox-bastionvault" }
+
+serde = { version = "^1.0", features = ["derive"] }
+serde_json = "^1.0"
+base64 = "0.22"
+blake3 = "1.8"
+async-trait = "0.1"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Pulled in by `#[async_trait]`'s expansion, a token stream to a
+    # static `use` scan.
+    "async-trait",
+]
+
+[lints.clippy]
+too_many_arguments = "allow"

@@ -4438,6 +4438,133 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
             web::resource("/internal/ui/mounts/{name:.*}")
                 .route(web::get().to(sys_get_internal_ui_mount_request_handler)),
         )
+        // MCP Access (features/mcp-access.md): HTTP shims over the sys
+        // backend's `mcp/*` logical routes (`crates/bv-kernel/.../mcp.rs`).
+        // Same "without an explicit shim the sys scope 404s" reason as
+        // `kv-owner/claim` above.
+        .service(
+            web::resource("/mcp/config")
+                .route(web::get().to(sys_mcp_config_request_handler))
+                .route(web::post().to(sys_mcp_config_request_handler)),
+        )
+        .service(
+            web::resource("/mcp/apps")
+                .route(web::method(list_method()).to(sys_mcp_apps_list_request_handler))
+                .route(web::get().to(sys_mcp_apps_list_request_handler)),
+        )
+        .service(
+            web::resource("/mcp/apps/{name}")
+                .route(web::get().to(sys_mcp_app_request_handler))
+                .route(web::post().to(sys_mcp_app_request_handler))
+                .route(web::delete().to(sys_mcp_app_request_handler)),
+        )
+        .service(
+            web::resource("/mcp/apps/{name}/machine-waiver")
+                .route(web::post().to(sys_mcp_app_waiver_request_handler))
+                .route(web::delete().to(sys_mcp_app_waiver_request_handler)),
+        )
+        .service(
+            web::resource("/mcp/tokens")
+                .route(web::method(list_method()).to(sys_mcp_tokens_list_request_handler))
+                .route(web::get().to(sys_mcp_tokens_list_request_handler)),
+        )
+        .service(
+            web::resource("/mcp/tokens/{accessor}").route(web::delete().to(sys_mcp_token_delete_request_handler)),
+        )
+}
+
+async fn sys_mcp_config_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/mcp/config".to_string();
+    match *req.method() {
+        actix_web::http::Method::POST => {
+            r.operation = Operation::Write;
+            if !body.is_empty() {
+                r.body = Some(serde_json::from_slice(&body)?);
+                body.clear();
+            }
+        }
+        _ => r.operation = Operation::Read,
+    }
+    handle_request(core, &mut r).await
+}
+
+async fn sys_mcp_apps_list_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/mcp/apps".to_string();
+    r.operation = Operation::List;
+    handle_request(core, &mut r).await
+}
+
+async fn sys_mcp_app_request_handler(
+    req: HttpRequest,
+    path: web::Path<String>,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = format!("sys/mcp/apps/{}", path.into_inner());
+    match *req.method() {
+        actix_web::http::Method::POST => {
+            r.operation = Operation::Write;
+            if !body.is_empty() {
+                r.body = Some(serde_json::from_slice(&body)?);
+                body.clear();
+            }
+        }
+        actix_web::http::Method::DELETE => r.operation = Operation::Delete,
+        _ => r.operation = Operation::Read,
+    }
+    handle_request(core, &mut r).await
+}
+
+async fn sys_mcp_app_waiver_request_handler(
+    req: HttpRequest,
+    path: web::Path<String>,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = format!("sys/mcp/apps/{}/machine-waiver", path.into_inner());
+    match *req.method() {
+        actix_web::http::Method::DELETE => r.operation = Operation::Delete,
+        _ => {
+            r.operation = Operation::Write;
+            if !body.is_empty() {
+                r.body = Some(serde_json::from_slice(&body)?);
+                body.clear();
+            }
+        }
+    }
+    handle_request(core, &mut r).await
+}
+
+async fn sys_mcp_tokens_list_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/mcp/tokens".to_string();
+    r.operation = Operation::List;
+    handle_request(core, &mut r).await
+}
+
+async fn sys_mcp_token_delete_request_handler(
+    req: HttpRequest,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = format!("sys/mcp/tokens/{}", path.into_inner());
+    r.operation = Operation::Delete;
+    handle_request(core, &mut r).await
 }
 
 pub fn init_sys_service(cfg: &mut web::ServiceConfig) {

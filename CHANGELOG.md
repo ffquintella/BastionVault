@@ -45,6 +45,43 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.12] - 2026-09-28
+
+### Added
+
+#### MCP Access — Phases 1-3 ([spec](features/mcp-access.md))
+
+- **New `bv-mcp` crate**: JSON-RPC 2026-07-28 types, the 14-tool read-only
+  catalogue (`bv_whoami` through `bv_pki_read_cert`) with a deterministic
+  BLAKE3 `tools/list` hash, the dispatcher (tool-allowlist / path-scope /
+  reveal gates, `sanitize_for_model` control-character and ANSI stripping,
+  MRTR `requestState` mint/verify with single-use replay protection).
+- **`TokenEntry.mcp_binding` / `Auth.mcp_binding`**: a typed, unforgeable
+  binding, `#[serde(default)]` for read-old compatibility, following the
+  `machine_identity_exempt` precedent. `TokenStore::check_token` gained a
+  symmetric MCP-origin gate — an MCP-bound token is refused everywhere
+  except the MCP dispatcher, and vice versa — and `auth/token/create`
+  refuses to mint a child from an MCP-bound parent.
+- **`sys/mcp/config`, `sys/mcp/apps/<name>`, `sys/mcp/apps/<name>/machine-waiver`,
+  `sys/mcp/tokens`** (`crates/bv-kernel/.../system/mcp.rs`): the app
+  registry, sudo-gated machine-identity waivers, and revocation of an
+  app's outstanding MCP-bound tokens on delete via a hash-derived,
+  non-secret accessor.
+- **`mcp/token` exchange**: a normally-routed logical path so it inherits
+  the standard `check_token` + ACL + audit pipeline; mints a service
+  token (never a superset of the caller's policies) requiring either a
+  FerroGate-attested login or an active machine waiver.
+- **`POST /v2/mcp` and `POST /v2/mcp/token`** (`crates/bv-server/src/mcp_routes.rs`):
+  the JSON-RPC transport, dispatching each `tools/call` through
+  `Core::handle_request` (so every call is on the normal audit chain) via
+  an in-process `bv_client::Backend` adapter. `GET
+  /.well-known/oauth-protected-resource/v2/mcp` (RFC 9728 PRM, minimal).
+  New `mcp { ... }` HCL config block.
+- Local pairing (Phase 4/5), write tools (Phase 6) and external/enterprise
+  authorization (Phase 7) are not implemented. `require_hybrid_kex` and
+  the `requestState` HMAC key are disclosed Phase-3 simplifications — see
+  `mcp_routes.rs`'s module doc.
+
 ## [0.44.11] - 2026-09-24
 
 ### Changed

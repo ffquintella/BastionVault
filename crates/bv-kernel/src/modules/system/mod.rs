@@ -4,6 +4,7 @@
 pub mod access_audit_reconciler;
 pub mod access_audit_store;
 pub mod denial_audit_store;
+pub mod mcp;
 pub mod self_profile;
 
 use std::{
@@ -206,6 +207,17 @@ impl SystemBackend {
         let sys_backend_dos_stats = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_dos_ban = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_dos_unban = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_mcp_config_read = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_mcp_config_write = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_mcp_apps_list = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_mcp_app_read = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_mcp_app_write = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_mcp_app_delete = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_mcp_app_waiver_write = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_mcp_app_waiver_delete = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_mcp_tokens_list = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_mcp_token_delete = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_mcp_token_exchange = self.self_ptr.upgrade().unwrap().clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -1086,6 +1098,101 @@ impl SystemBackend {
                     help: "Manually ban or unban a client IP."
                 },
                 {
+                    // MCP Access (features/mcp-access.md): runtime policy
+                    // settings. Sudo-gated via `root_paths` below.
+                    pattern: "mcp/config$",
+                    fields: {
+                        "default_ttl_secs": { field_type: FieldType::Int, required: false, description: "Default MCP token TTL in seconds." },
+                        "max_ttl_secs": { field_type: FieldType::Int, required: false, description: "Maximum MCP token TTL in seconds." },
+                        "waiver_max_days": { field_type: FieldType::Int, required: false, description: "Maximum machine-waiver duration in days (<= 90)." },
+                        "catalogue_pin": { field_type: FieldType::Str, required: false, description: "Expected tools/list catalogue hash; empty clears the pin." }
+                    },
+                    operations: [
+                        {op: Operation::Read,  handler: sys_backend_mcp_config_read.handle_mcp_config_read},
+                        {op: Operation::Write, handler: sys_backend_mcp_config_write.handle_mcp_config_write}
+                    ],
+                    help: "Read or update MCP Access runtime policy settings."
+                },
+                {
+                    pattern: "mcp/apps/?$",
+                    operations: [
+                        {op: Operation::List, handler: sys_backend_mcp_apps_list.handle_mcp_apps_list}
+                    ],
+                    help: "List registered MCP apps."
+                },
+                {
+                    // Create-or-update / read / delete an MCP app record by
+                    // name. Deleting an app revokes its outstanding
+                    // MCP-bound tokens (see mcp.rs's module doc).
+                    pattern: r"mcp/apps/(?P<name>[^/]+)$",
+                    fields: {
+                        "name": { field_type: FieldType::Str, required: true, description: "MCP app name, [a-z0-9-]+." },
+                        "approle_role": { field_type: FieldType::Str, required: false, description: "AppRole role this app logs in as." },
+                        "entity_id": { field_type: FieldType::Str, required: false, description: "Entity id shares may be granted to." },
+                        "description": { field_type: FieldType::Str, required: false, description: "Free-text description." },
+                        "tool_allowlist": { field_type: FieldType::CommaStringSlice, required: false, description: "Tool names this app may call. Empty means deny-all." },
+                        "path_scope": { field_type: FieldType::CommaStringSlice, required: false, description: "Path-glob prefixes this app's tool calls may target. Empty means deny-all." },
+                        "reveal_allowed": { field_type: FieldType::Bool, required: false, description: "May this app request reveal: true?" },
+                        "destructive_allowed": { field_type: FieldType::Bool, required: false, description: "May this app call destructive tools (Phase 6)?" },
+                        "ttl_secs": { field_type: FieldType::Int, required: false, description: "MCP token TTL in seconds, max 86400." }
+                    },
+                    operations: [
+                        {op: Operation::Read,   handler: sys_backend_mcp_app_read.handle_mcp_app_read},
+                        {op: Operation::Write,  handler: sys_backend_mcp_app_write.handle_mcp_app_write},
+                        {op: Operation::Delete, handler: sys_backend_mcp_app_delete.handle_mcp_app_delete}
+                    ],
+                    help: "Read, create/update, or delete an MCP app record."
+                },
+                {
+                    // Sudo-gated via `root_paths` below: a machine-identity
+                    // waiver bypasses FerroGate attestation for this app.
+                    pattern: r"mcp/apps/(?P<name>[^/]+)/machine-waiver$",
+                    fields: {
+                        "name": { field_type: FieldType::Str, required: true, description: "MCP app name." },
+                        "reason": { field_type: FieldType::Str, required: false, description: "Required, non-empty reason for the waiver." },
+                        "expires_in_days": { field_type: FieldType::Int, required: false, description: "Required, 1-90." }
+                    },
+                    operations: [
+                        {op: Operation::Write,  handler: sys_backend_mcp_app_waiver_write.handle_mcp_app_waiver_write},
+                        {op: Operation::Delete, handler: sys_backend_mcp_app_waiver_delete.handle_mcp_app_waiver_delete}
+                    ],
+                    help: "Grant or revoke a machine-identity waiver for an MCP app."
+                },
+                {
+                    pattern: "mcp/tokens/?$",
+                    operations: [
+                        {op: Operation::List, handler: sys_backend_mcp_tokens_list.handle_mcp_tokens_list}
+                    ],
+                    help: "List active MCP-bound tokens across every app."
+                },
+                {
+                    pattern: r"mcp/tokens/(?P<accessor>[^/]+)$",
+                    fields: {
+                        "accessor": { field_type: FieldType::Str, required: true, description: "MCP token accessor (hex, from the tokens list)." }
+                    },
+                    operations: [
+                        {op: Operation::Delete, handler: sys_backend_mcp_token_delete.handle_mcp_token_delete}
+                    ],
+                    help: "Revoke one MCP-bound token by accessor."
+                },
+                {
+                    // The public HTTP path is `/v2/mcp/token` (not under
+                    // `/v2/sys/`); Phase 3's server route maps that to this
+                    // logical path. See mcp.rs's handler doc for why this
+                    // is routed normally rather than called directly.
+                    pattern: "mcp/token$",
+                    fields: {
+                        "app": { field_type: FieldType::Str, required: true, description: "MCP app name to exchange for." },
+                        "policies": { field_type: FieldType::CommaStringSlice, required: false, description: "Requested policies; must be a subset of the caller's own." },
+                        "ttl_secs": { field_type: FieldType::Int, required: false, description: "Requested TTL in seconds; clamped to the app's configured max." },
+                        "catalogue_hash": { field_type: FieldType::Str, required: false, description: "BLAKE3 tools/list hash to stamp on the minted binding." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_mcp_token_exchange.handle_mcp_token_exchange}
+                    ],
+                    help: "Exchange a login token for an MCP-bound token (spec: mcp-access.md §4)."
+                },
+                {
                     // Per-principal default resource accounts (Resource Connect).
                     // List every principal that has default accounts on record.
                     // Root-scoped: operator-authored, independent of the
@@ -1336,7 +1443,14 @@ impl SystemBackend {
             // Admin reads/writes are gated by policy on the explicit
             // mount/name paths instead. `identity/profile/*` is caller-scoped
             // for the same reason and is likewise never root-scoped.
-            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*", "identity/ns-assignment", "identity/ns-assignment/*", "dos/config", "dos/stats", "dos/bans/*"],
+            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*", "identity/ns-assignment", "identity/ns-assignment/*", "dos/config", "dos/stats", "dos/bans/*", "mcp/config"],
+            // NB: `mcp/apps/<name>/machine-waiver` is NOT listed here even
+            // though it is sudo-gated: `root_paths` only supports an exact
+            // path or a trailing-`*` prefix (`new_radix_from_paths` in
+            // `bv-kernel-api`'s router), and the variable segment here is
+            // in the middle (`mcp/apps/<name>/machine-waiver`). The two
+            // waiver handlers enforce `root_privs` themselves instead --
+            // see `mcp.rs`.
             unauth_paths: ["internal/ui/mounts", "internal/ui/mounts/*", "init", "seal-status", "unseal", "sso/providers"],
             help: SYSTEM_BACKEND_HELP,
         });
@@ -3391,7 +3505,7 @@ impl SystemBackend {
             return Err(RvError::ErrPermissionDenied);
         };
         let client_ip = req.connection.as_ref().map(|c| c.client_ip()).unwrap_or_default();
-        let acl: Option<ACL> = match token_store.check_token(&req.path, &req.client_token, &client_ip).await? {
+        let acl: Option<ACL> = match token_store.check_token(&req.path, &req.client_token, &client_ip, false).await? {
             Some(auth) if !auth.policies.is_empty() => Some(
                 policy_module
                     .policy_store
@@ -3621,7 +3735,7 @@ impl SystemBackend {
         let mut is_authed = false;
 
         let client_ip = req.connection.as_ref().map(|c| c.client_ip()).unwrap_or_default();
-        let acl: Option<ACL> = if let Some(auth) = token_store.check_token(&req.path, &req.client_token, &client_ip).await? {
+        let acl: Option<ACL> = if let Some(auth) = token_store.check_token(&req.path, &req.client_token, &client_ip, false).await? {
             if auth.policies.is_empty() {
                 None
             } else {
@@ -3774,7 +3888,7 @@ impl SystemBackend {
             .load()
             .as_ref()
             .unwrap()
-            .check_token(&req.path, &req.client_token, &client_ip)
+            .check_token(&req.path, &req.client_token, &client_ip, false)
             .await?
         {
             if auth.policies.is_empty() {
@@ -4713,7 +4827,7 @@ impl SystemBackend {
         };
         let client_ip = req.connection.as_ref().map(|c| c.client_ip()).unwrap_or_default();
         let auth = token_store
-            .check_token(&req.path, &req.client_token, &client_ip)
+            .check_token(&req.path, &req.client_token, &client_ip, false)
             .await?
             .ok_or(RvError::ErrPermissionDenied)?;
 

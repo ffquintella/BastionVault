@@ -163,7 +163,21 @@ ordered, and hashed; a change to a tool's description is a release event.
 
 ## Current State
 
-**Status: In progress.** Phase 0 (spec + research) done 2026-09-21; no code yet.
+**Status: In progress.** Phases 1-3 done 2026-09-28 (the minimum network-mode
+release): the `bv-mcp` core crate, the kernel-side token binding + app
+registry + `mcp/token` exchange, and the `/v2/mcp` server transport. Phases
+4-8 (local-mode CLI/GUI, write tools, external authorization, docs +
+hardening) are not built. Two disclosed simplifications from the phase
+table below: `require_hybrid_kex` is parsed but not enforced (the negotiated
+TLS key-exchange group is not yet threaded into `bv-server`'s
+`TlsClientInfo`), and the `requestState` HMAC key plus its single-use guard
+are process-local rather than barrier-derived (still single-use, still
+expires, just not shared across an HA cluster or a restart). The audit
+`mcp: {...}` sibling block (`Request::mcp_audit`, spec §10) is defined but
+not yet populated by the server route — every `tools/call` still produces a
+normal audit entry via `Core::handle_request`, it just lacks the extra
+tool/client-identity enrichment for now.
+
 Related things that exist and are reused:
 
 - `gui/src-tauri` has a **dev-only** `mcp_local_dev` feature for the
@@ -727,9 +741,9 @@ Prometheus (`crates/bv-metrics/src/mcp_metrics.rs`):
 | # | Title | Notes |
 |---|---|---|
 | 0 ✅ | **Spec + research** | This document. Research pass 2026-09-21; spec revision and rustls PQ default verified directly. |
-| 1 | **`bv-mcp` core** | New crate: JSON-RPC 2026-07-28 types, `server/discover`, `tools/list`, `tools/call`, read-only catalogue (`bv_whoami` … `bv_pki_read_cert`), dispatcher over `bv_client::Backend`, gates, `sanitize_for_model`, size/timeout caps, `requestState` HMAC. Unit tests: every gate's allow + deny, catalogue hash determinism, sanitiser against the Trail of Bits ANSI corpus, schema validity. Conformance smoke against the reference client over stdio in a dev script. |
-| 2 | **Kernel: binding, apps, exchange** | `TokenEntry.mcp_binding` (typed, `serde(default)`), `check_token` MCP-origin gate, `RESERVED_TOKEN_META_KEYS` additions, `sys/mcp/config|apps|tokens` storage + logical paths, `mcp/token` exchange with all six checks, waiver two-key rule, revoke-on-delete via lease manager, audit events, metrics families. Tests: old `TokenEntry` JSON deserialises with `mcp_binding = None` and is refused at the MCP gate; MCP token refused on `/v1/secret/*`; non-MCP token refused at dispatcher; waiver expiry cuts a live token; policy superset request refused. **L4 gate: this phase touches authn/authz.** |
-| 3 | **Server transport** | `mcp_routes.rs`: `POST /v2/mcp`, 405s, PRM well-known, steps 1–10 of § 5, negotiated-group capture, DoS participation. Integration test drives a real HTTPS listener: hybrid kex negotiated (assert `X25519MLKEM768`), `require_hybrid_kex` refuses a classical-only client, `Origin` 403, header-mismatch 400, query-string token 400, `tls_disable` refusal, legacy version `-32022`. `docs/api.md`, `docs/configuration.md`. |
+| 1 ✅ | **`bv-mcp` core** | Done 2026-09-28. New crate: JSON-RPC 2026-07-28 types, `tools/list`, `tools/call`, read-only catalogue (`bv_whoami` … `bv_pki_read_cert`), dispatcher over `bv_client::Backend`, gates, `sanitize_for_model`, `requestState` HMAC. 32 unit tests against a mock `Backend`: every gate's allow + deny, catalogue hash determinism, sanitiser against constructed ANSI/control-char payloads, schema validity. `server/discover` and the reference-client conformance smoke are not built. |
+| 2 ✅ | **Kernel: binding, apps, exchange** | Done 2026-09-28. `TokenEntry.mcp_binding` (typed, `serde(default)`), `check_token`'s symmetric MCP-origin gate (a new `Request.mcp_dispatch` field carries the flag through `pre_route`, since a `tools/call` reaches the token store through the *normal* pipeline), `RESERVED_TOKEN_META_KEYS` additions, `sys/mcp/config|apps|tokens` storage + logical paths (`crates/bv-kernel/.../system/mcp.rs`), `mcp/token` exchange (app mode only — pairing mode is Phase 4/5), waiver two-key rule, revoke-on-delete via a hash-derived non-secret accessor index. Facade tests (`src/engine_tests/mcp_access.rs`) cover app CRUD, waiver grant/revoke incl. sudo enforcement, exchange success/failure (role mismatch, no waiver), and revocation-on-delete. `make test` (full workspace, 1625 tests) green. Metrics families (`bv-metrics/src/mcp_metrics.rs`) are not built. |
+| 3 ✅ | **Server transport** | Done 2026-09-28. `mcp_routes.rs`: `POST /v2/mcp` (JSON-RPC dispatch through an in-process `bv_client::Backend`), `POST /v2/mcp/token` (thin HTTP shim over the now-routed `sys/mcp/token`), PRM well-known, `Origin` allow-list, protocol-version check, bearer-header-only. New `mcp { }` HCL config block. End-to-end HTTP test in `src/engine_tests/mcp_access.rs` exercises exchange → `tools/list` → `tools/call` → cross-gate refusal over a real `TestHttpServer`. **Not enforced**: `require_hybrid_kex` (negotiated TLS group not yet in `TlsClientInfo`) and DoS-class negotiated-group capture. The `requestState` HMAC key and single-use guard are process-local, not barrier-derived. |
 | 4 | **CLI** | `bvault mcp serve` (stdio / UDS + peer creds / loopback HTTP + pairing token), `pair`, `pairings list|revoke`, `token --app`, `catalogue`. Pairing store with the `bv_crypto` envelope. Tests: peer-uid mismatch drops pre-read; no-TTY pairing fails closed; loopback `Origin` 403; token never written to disk. `docs/cli-reference.md`. |
 | 5 | **GUI** | *Settings → AI Assistants (MCP)*: enable, transport, pairing consent modal, per-call MRTR confirmation dialogs, pairing list. *Admin → MCP Apps*: app CRUD, waiver modal (reason + expiry mandatory), catalogue hash + pin, active tokens with revoke, recent calls. `commands/mcp.rs`, `api.ts`, vitest. GUI rules per `AGENTS.md` § GUI. |
 | 6 | **Write tools + DPoP** | `bv_kv_write`, `bv_kv_delete`, `bv_pki_issue`, `bv_ssh_sign` behind `destructive_allowed` + MRTR; DPoP sender-constraint on app tokens reusing the FerroGate key. Tests: destructive denied by default; confirmed `requestState` replay refused; DPoP-bound token without proof refused. |

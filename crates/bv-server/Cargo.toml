@@ -21,7 +21,7 @@ publish = ["uox-bastionvault"]
 # framework.
 
 [dependencies]
-bastion_vault = { path = "../..", version = "0.44.11", registry = "uox-bastionvault", default-features = false }
+bastion_vault = { path = "../..", version = "0.44.12", registry = "uox-bastionvault", default-features = false }
 # The Prometheus families, named directly rather than through
 # `bastion_vault::metrics`: this crate owns the module name `metrics` (the
 # `/metrics` scrape endpoint), so the alias would collide. Same collision
@@ -30,10 +30,19 @@ bv-metrics = { path = "../bv-metrics", version = "0.41.0", registry = "uox-basti
 # The plugin client-surface manifest, parsed by the `sys/plugins/.../surface`
 # route before it is handed to the GUI.
 bv_plugin_surface = { path = "../bv_plugin_surface", version = "0.41.0", registry = "uox-bastionvault" }
+# MCP Access (features/mcp-access.md, Phase 3): the JSON-RPC types, tool
+# catalogue and dispatcher `/v2/mcp` drives.
+bv-mcp = { path = "../bv-mcp", version = "0.1.0", registry = "uox-bastionvault" }
+# The `Backend` trait `/v2/mcp` implements to call `Core::handle_request` for
+# each `tools/call`, and the JSON-only `Operation`/`ClientError` types
+# `bv-mcp` speaks in.
+bv-client = { path = "../bv-client", version = "0.42.3", registry = "uox-bastionvault" }
 
 actix-web = { version = "4.13", features = ["rustls-0_23"] }
 actix-tls = "3.5"
+async-trait = "0.1"
 base64 = "0.22"
+blake3 = "1.8"
 chrono = "0.4"
 # Validating the `cron` field on a scheduled-export schedule at write time,
 # so a bad expression is a 400 rather than a silently dead schedule.

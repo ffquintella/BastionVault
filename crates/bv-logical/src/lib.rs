@@ -43,9 +43,9 @@ pub mod secret;
 pub mod util;
 
 pub use auth::{
-    is_reserved_token_meta_key, split_principal, Auth, CHILD_VISIBLE_META, ENTITY_ID_META,
-    NS_ID_META, NS_PATH_META, RESERVED_TOKEN_META_KEYS, RESERVED_TOKEN_META_PREFIXES,
-    SPIFFE_ID_META, USERNAME_META,
+    is_reserved_token_meta_key, split_principal, Auth, McpBinding, McpBindingKind,
+    CHILD_VISIBLE_META, ENTITY_ID_META, NS_ID_META, NS_PATH_META, RESERVED_TOKEN_META_KEYS,
+    RESERVED_TOKEN_META_PREFIXES, SPIFFE_ID_META, USERNAME_META,
 };
 pub use backend::{LogicalBackend, CTX_KEY_BACKEND_PATH};
 pub use connection::Connection;
@@ -53,7 +53,7 @@ pub use field::{Field, FieldType};
 pub use lease::Lease;
 pub use page::{optional_param, page_response, paginate, Page, PageLimits};
 pub use path::{Path, PathOperation};
-pub use request::Request;
+pub use request::{McpAuditContext, Request};
 pub use response::Response;
 pub use secret::{Secret, SecretData};
 pub use util::{parse_query_allowlist, split_path_query};

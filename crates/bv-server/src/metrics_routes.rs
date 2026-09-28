@@ -279,7 +279,7 @@ async fn token_grants_scrape(core: &Arc<Core>, token: &str, client_ip: &str) -> 
         .token_store
         .load_full()
         .ok_or(RvError::ErrPermissionDenied)?;
-    let Some(auth) = token_store.check_token(METRICS_ACL_PATH, token, client_ip).await? else {
+    let Some(auth) = token_store.check_token(METRICS_ACL_PATH, token, client_ip, false).await? else {
         return Ok(false);
     };
 

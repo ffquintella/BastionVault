@@ -95,6 +95,13 @@ pub const RESERVED_TOKEN_META_KEYS: &[&str] = &[
     "machine_id",
     "approle_machine_bypass",
     "machine_identity_exempt",
+    // MCP binding — same forgery vector as `machine_identity_exempt`.
+    "mcp_binding",
+    "mcp_kind",
+    "mcp_app",
+    "mcp_pairing",
+    "mcp_tool_allowlist",
+    "mcp_path_scope",
     // Principal identity — policy templating, audit attribution.
     USERNAME_META,
     ENTITY_ID_META,
@@ -251,6 +258,50 @@ pub struct Auth {
     /// its parent).
     #[serde(default)]
     pub machine_identity_exempt: bool,
+
+    /// The MCP binding carried by this token's [`crate::TokenEntry`], if
+    /// any. Copied verbatim by `TokenStore::check_token`. See
+    /// [`McpBinding`].
+    #[serde(default)]
+    pub mcp_binding: Option<McpBinding>,
+}
+
+/// Which kind of MCP principal a [`McpBinding`] was minted for: an
+/// `sys/mcp/apps/<name>` record, or a local pairing id.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub enum McpBindingKind {
+    App(String),
+    Pairing(String),
+}
+
+/// Marks a token as **MCP-bound**: minted only by the `mcp/token` exchange,
+/// accepted only by the MCP dispatcher. Typed and `#[serde(default)]` for
+/// the same forgery reason as `machine_identity_exempt` above — see
+/// `RESERVED_TOKEN_META_KEYS`.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct McpBinding {
+    pub kind: McpBindingKind,
+    /// BLAKE3 catalogue hash captured at mint time.
+    pub catalogue_hash: String,
+    /// Tool names this binding may call. Empty means deny-all.
+    #[serde(default)]
+    pub tool_allowlist: Vec<String>,
+    /// Path-glob prefixes this binding's tool calls may target. Dispatcher
+    /// pre-check only; real ACL underneath remains authoritative.
+    #[serde(default)]
+    pub path_scope: Vec<String>,
+    #[serde(default)]
+    pub reveal_allowed: bool,
+    #[serde(default)]
+    pub destructive_allowed: bool,
+    #[serde(default)]
+    pub client_name: String,
+    #[serde(default)]
+    pub client_version: String,
+    /// Unix-epoch seconds an app's `machine_waiver` expires, if minted
+    /// under one. Checked at every `tools/call`, not just at exchange time.
+    #[serde(default)]
+    pub waived_until: Option<u64>,
 }
 
 #[derive(Debug, Clone, Eq, Default, PartialEq, Serialize, Deserialize)]

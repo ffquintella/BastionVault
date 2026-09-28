@@ -624,11 +624,18 @@ pub fn new_test_http_server(core: Arc<Core>, tls_config: Option<TestTlsConfig>) 
     // matching the production default. Phase 1.5 hookup, mirrors
     // src/cli/command/server.rs.
     let trusted_proxies = web::Data::new(TrustedProxies::default());
+    // MCP Access (features/mcp-access.md): unconditionally "enabled" in
+    // this test harness (production default is `false`) so a test can
+    // exercise `/v2/mcp` / `/v2/mcp/token` without a way to plumb a
+    // custom `Config` through `TestHttpServer::new`'s existing call
+    // sites. Test-only, behind the `test-support` feature.
+    let mcp_config = web::Data::new(bastion_vault::config::McpConfig { enabled: true, ..Default::default() });
     let mut http_server = HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::default())
             .app_data(web::Data::new(core.clone()))
             .app_data(trusted_proxies.clone())
+            .app_data(mcp_config.clone())
             .app_data(web::Data::new(bastion_vault::exchange::PreviewStore::default()))
             .configure(init_service)
             .default_service(web::to(HttpResponse::NotFound))
