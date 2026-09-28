@@ -284,4 +284,4 @@ Add a roadmap row under **Infrastructure** near the GUI row:
 | `[ ]` Todo | GUI Dashboard Redesign (operational PAM landing view) | [spec](features/gui-dashboard-redesign.md) — KPI tiles + session activity + live sessions + audit feed + attention panel; 4 GUI phases + 1 optional backend summary endpoint. |
 ```
 
-When phases land, update [CHANGELOG.md](../CHANGELOG.md), [roadmap.md](../roadmap.md), and this file's "Current State" / phase markers.
+When phases land, update [CHANGELOG.md](../CHANGELOG.md), [ROADMAP.md](../ROADMAP.md), and this file's "Current State" / phase markers.

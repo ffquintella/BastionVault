@@ -179,7 +179,8 @@ instead. See the roadmap's Phase 4.5 section.
 | `scripts/ci-plan.sh`, `.github/workflows/tests.yml` | What CI runs and how it decides — read before changing test scope or cache keys |
 | `docs/publishing-crates.md`, `scripts/crates-plan.sh` | Per-crate versions and the Cloudsmith release loop — read before touching any `version` field |
 | `docs/build-timings/baseline.md` | Build-cost baseline, noise floor, how to get comparable numbers |
-| `roadmap.md`, `features/*.md`, `roadmaps/*.md` | Feature status and specs |
+| `ROADMAP.md`, `features/*.md`, `roadmaps/*.md` | Feature status (PTF milestones/tasks) and specs |
+| `docs/tracking-format.md` | The Project Tracking Format (PTF v1) that `ROADMAP.md` and `CHANGELOG.md` follow — read before editing either |
 | `docs/api.md`, `docs/cli-reference.md`, `docs/configuration.md` | Operator-facing surfaces |
 
 ---
@@ -568,16 +569,30 @@ snapshots, IPC events and logs as sensitive.
 
 ## 8. Tracking — required after every feature, phase or roadmap stage
 
-1. `CHANGELOG.md` — entry under `[Unreleased]` in the right category (Added/Changed/
-   Deprecated/Removed/Fixed/Security). Imperative mood, operator's perspective, grouped
-   under a sub-heading, referencing the feature file or phase. See the HTML comment at
-   the top of that file.
-2. `roadmap.md` — feature status (Todo → In Progress → Done); move finished initiatives
-   to Completed.
-3. `features/<feature>.md` — update "Current State" and the phase table.
+`ROADMAP.md` and `CHANGELOG.md` follow the Project Tracking Format v1
+(`docs/tracking-format.md`, normative). The two files are one record: a state
+change in the roadmap and its changelog entry land in the same commit.
+
+1. `CHANGELOG.md` — entry under `[Unreleased]` in the right category, in the
+   canonical order Added/Changed/Deprecated/Removed/Fixed/Security/Postponed/
+   Abandoned. Imperative mood, operator's perspective, grouped under a `####`
+   sub-heading. **End the entry's first line with a reference group** naming the
+   task it delivers, e.g. `(T53, S38)` — only the last parenthesised group on the
+   line is parsed, so keep an entry on one line or put the group on its first line.
+2. `ROADMAP.md` — move the task's checkbox: `[ ]` planned, `[/]` in progress,
+   `[!]` blocked (add `  - blocked-by:`), `[x]` done (needs a changelog entry),
+   `[>]` postponed (move the line, add `  - from: M<n>`, and a `### Postponed`
+   entry with the reason), `[-]` abandoned (a `### Abandoned` entry with the
+   reason). A new capability gets a new task `T<max+1>` under its milestone;
+   IDs are never renumbered or reused. No nested sub-tasks — split them.
+3. `features/<feature>.md` — update "Current State" and the phase table. A new
+   feature file, roadmap or doc gets a row `S<max+1>` in `ROADMAP.md`'s `## Specs`.
 4. `roadmaps/<roadmap>.md` — mark phases Complete; keep "What Is Not Yet Implemented" honest.
 
 Create a feature file for any significant new capability *before* implementing it.
+The invariants PTF001–PTF013 (`docs/tracking-format.md` §5) must hold after
+every edit; the ones that break most often are PTF004 (a `[x]` task with no
+changelog entry) and PTF003 (a reference to an ID that does not exist).
 
 ---
 

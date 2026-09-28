@@ -73,7 +73,7 @@ Phase 1 lands first because it is the authoritative engine and can be validated 
 - Integrate with `PolicyHistoryPanel` (test cases unaffected by restore semantics, or restored alongside — decide and document).
 - Full `vitest` coverage for the TS parser/simulator; Rust tests for the dry-run + tests endpoints.
 - Operator docs under `docs/`.
-- Tracking updates per [`CLAUDE.md`](../CLAUDE.md): `CHANGELOG.md`, `roadmap.md`, this file, and `features/policy-builder-validator.md`.
+- Tracking updates per [`CLAUDE.md`](../CLAUDE.md): `CHANGELOG.md`, `ROADMAP.md`, this file, and `features/policy-builder-validator.md`.
 
 ## Open questions
 

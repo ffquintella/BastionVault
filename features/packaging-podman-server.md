@@ -59,7 +59,7 @@ client-side counterpart (GUI + CLI binaries served from a static site) is
   [operator README](../deploy/container/README.md), [`podman compose` reference](../deploy/compose/standalone.yml),
   and a [`linux/amd64` GHCR push workflow](../.github/workflows/container-image.yml)
   triggered on `v*.*.*` tags. **Unsigned** and **standalone-only** in this phase;
-  the `Partial` row in [roadmap.md](../roadmap.md) reflects this.
+  the `Partial` row in [ROADMAP.md](../ROADMAP.md) reflects this.
 - The server binary itself is a single static-leaning Rust binary
   (`bvault`, [bin/bastion_vault.rs](../bin/bastion_vault.rs)) that compiles
   into the runtime image as-is. The Hiqlite cluster CLI and PQC TLS
@@ -193,7 +193,7 @@ openssl is statically linked into `bvault` from the system static libs;
 the distroless **runtime** never gains a `libssl.so.3` on disk. A
 post-build `ldd` check fails the build if a dynamic link sneaks back in.
 Replacing the `webauthn-rs` openssl dep is tracked under [Deferred
-sub-initiatives → FIDO2 / WebAuthn](../roadmap.md) in the global roadmap.
+sub-initiatives → FIDO2 / WebAuthn](../ROADMAP.md) in the global roadmap.
 
 The production runtime intentionally has no `ip` / `ss` / `netstat` /
 `tcpdump` / `curl`. **It does not need them to know who is connecting:**
@@ -657,6 +657,6 @@ is published to the same OCI registry as the image
 ## Tracking
 
 When phases land, update [CHANGELOG.md](../CHANGELOG.md),
-[roadmap.md](../roadmap.md) (Packaging & Distribution → Server Container
+[ROADMAP.md](../ROADMAP.md) (Packaging & Distribution → Server Container
 Image row: `Todo` → `In Progress` (Phase 1) → `Done` (Phase 4)), and
 this file's "Current State" / phase markers.

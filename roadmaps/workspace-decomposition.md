@@ -2004,7 +2004,7 @@ cannot afford to run.
 Update on each phase completion:
 
 - `CHANGELOG.md` under `[Unreleased]` → **Changed**
-- `roadmap.md` — one row, `Workspace Decomposition`, Todo → In Progress → Done
+- `ROADMAP.md` — one row, `Workspace Decomposition`, Todo → In Progress → Done
 - this file — phase status and the measured delta against the baseline table
 
 Done: Phases 0, 1, 2, 3, 4, 4.5, 5 and 6. The roadmap is complete; the

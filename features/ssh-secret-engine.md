@@ -28,7 +28,7 @@ This is also the first engine that surfaces **post-quantum SSH credentials**: th
 - ML-DSA-65 signing is already available via [crates/bv_crypto/src/signature](crates/bv_crypto/src/signature) (`fips204`).
 - **Audit coverage shipped.** CA create/delete (0.18.3) and now every successful cert issuance via `ssh/sign/:role` (classical + PQC) append to system-view audit stores ([`ssh_ca_audit_store.rs`](../src/modules/ssh/ssh_ca_audit_store.rs), [`ssh_sign_audit_store.rs`](../src/modules/ssh/ssh_sign_audit_store.rs)) and surface on the admin Audit page under the **SSH CA** / **SSH Sign** categories.
 - The PKI engine spec ([features/pki-secret-engine.md](pki-secret-engine.md)) defines a `CertSigner` trait abstraction that the SSH CA can re-use almost unchanged -- only the TBS encoding differs (OpenSSH cert format vs. X.509).
-- File-resource SFTP/SCP transports are explicitly deferred ([roadmap.md:109](roadmap.md:109)) pending an SSH stack decision; that decision is now: **`russh`** (pure-Rust client, MIT) over `libssh2-sys` (C lib).
+- File-resource SFTP/SCP transports are explicitly deferred ([ROADMAP.md](../ROADMAP.md)) pending an SSH stack decision; that decision is now: **`russh`** (pure-Rust client, MIT) over `libssh2-sys` (C lib).
 
 ## Design
 
@@ -270,4 +270,4 @@ Shipped as a dedicated `/ssh` page rather than a tab inside the existing Secrets
 
 ## Tracking
 
-When phases land, update [CHANGELOG.md](../CHANGELOG.md), [roadmap.md](../roadmap.md), and this file's "Current State" / phase markers.
+When phases land, update [CHANGELOG.md](../CHANGELOG.md), [ROADMAP.md](../ROADMAP.md), and this file's "Current State" / phase markers.

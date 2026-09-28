@@ -24,7 +24,7 @@ The whole stack is pure-Rust + rustls; no OpenSSL, no `aws-lc-sys`. The CSI driv
 - **No K8s integration exists in the repo.** No `kubernetes` auth backend, no CSI driver, no admission webhook.
 - **The auth-backend trait machinery is ready** ([src/modules/credential/](../src/modules/credential)). The existing `oidc` and `saml` modules are the closest analogues — token-bearing-credential verifiers that map external identity to a BastionVault entity. The K8s backend will follow the same pattern.
 - **The Tauri GUI ships in embedded mode** for desktop users; the K8s story is server-mode only. None of the GUI work changes.
-- **Kubernetes Integration row currently reads `Todo`** ([roadmap.md:55](roadmap.md:55)). The roadmap also notes that work is deferred to a future initiative ([roadmap.md:101](roadmap.md:101)).
+- **Kubernetes Integration row currently reads `Todo`** ([ROADMAP.md](../ROADMAP.md)). The roadmap also notes that work is deferred to a future initiative ([ROADMAP.md](../ROADMAP.md)).
 
 ## Design
 
@@ -308,4 +308,4 @@ axum        = "0.7"         # admission webhook HTTP server (TLS via rustls)
 
 ## Tracking
 
-When phases land, update [CHANGELOG.md](../CHANGELOG.md), [roadmap.md](../roadmap.md) (move from `Todo` → `In Progress` (Phase 1) → `Done` (Phase 5)), and this file's "Current State" / phase markers.
+When phases land, update [CHANGELOG.md](../CHANGELOG.md), [ROADMAP.md](../ROADMAP.md) (move from `Todo` → `In Progress` (Phase 1) → `Done` (Phase 5)), and this file's "Current State" / phase markers.

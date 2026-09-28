@@ -625,7 +625,7 @@ No new C-linked deps. No OpenSSL. No `aws-lc-sys`. (rustls is already in tree; i
 
 ## Tracking
 
-When phases land, update [CHANGELOG.md](../CHANGELOG.md), [roadmap.md](../roadmap.md), and this file's "Current State" section.
+When phases land, update [CHANGELOG.md](../CHANGELOG.md), [ROADMAP.md](../ROADMAP.md), and this file's "Current State" section.
 
 ## Notes on alternatives considered
 

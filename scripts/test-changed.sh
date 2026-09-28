@@ -258,7 +258,7 @@ IGNORED_PREFIXES = (
 CI_PREFIXES = (".github/",)
 IGNORED_EXACT = {
     "README.md", "CHANGELOG.md", "AGENTS.md", "CLAUDE.md", "agent.md",
-    "roadmap.md", "LICENSE", "Makefile", ".gitignore",
+    "ROADMAP.md", "roadmap.md", "LICENSE", "Makefile", ".gitignore",
 }
 
 with open(os.path.join(work, "changed")) as fh:

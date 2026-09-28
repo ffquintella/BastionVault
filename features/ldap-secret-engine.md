@@ -451,7 +451,7 @@ When phases land, update:
 
 1. [CHANGELOG.md](../CHANGELOG.md) under `[Unreleased]` -- `Added`
    for new endpoints and the GUI tab.
-2. [roadmap.md](../roadmap.md) -- move
+2. [ROADMAP.md](../ROADMAP.md) -- move
    "Secret Engine: OpenLDAP / AD password-rotation" from `Todo` →
    `In Progress` (Phase 1 in flight) → `Done` (Phase 3 shipped;
    Phase 4 GUI optional).

@@ -73,7 +73,7 @@ this container are also published on GitHub Releases.
   CLI half now builds on all four platforms, and the GUI half is wired to
   Tauri's bundler. What is still missing for a real release is the signing CI
   and the `manifest.json` this site consumes.
-- The Packaging & Distribution row in [roadmap.md](../roadmap.md) reads
+- The Packaging & Distribution row in [ROADMAP.md](../ROADMAP.md) reads
   `Partial`.
 
 ### Where the implementation deviates from the design below
@@ -499,6 +499,6 @@ Auto-download and auto-install are explicitly out of scope.
 ## Tracking
 
 When phases land, update [CHANGELOG.md](../CHANGELOG.md),
-[roadmap.md](../roadmap.md) (Packaging & Distribution → Client
+[ROADMAP.md](../ROADMAP.md) (Packaging & Distribution → Client
 Distribution Website row: `Todo` → `In Progress` (Phase 1) → `Done`
 (Phase 4)), and this file's "Current State" / phase markers.

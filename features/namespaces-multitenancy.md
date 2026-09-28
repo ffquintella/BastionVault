@@ -615,4 +615,4 @@ decisions and rationale.
 
 ## Tracking
 
-When phases land, update [CHANGELOG.md](../CHANGELOG.md), [roadmap.md](../roadmap.md) (move from `Partial` → `In Progress` (Phase 1) → `Done` (Phase 4)), and this file's "Current State" / phase markers.
+When phases land, update [CHANGELOG.md](../CHANGELOG.md), [ROADMAP.md](../ROADMAP.md) (move from `Partial` → `In Progress` (Phase 1) → `Done` (Phase 4)), and this file's "Current State" / phase markers.

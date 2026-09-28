@@ -470,7 +470,7 @@ control-plane client. The only cross-repo dependency is Rustion's new `ssh-cert`
 
 ## Tracking
 
-When phases land, update [CHANGELOG.md](../CHANGELOG.md), [roadmap.md](../roadmap.md),
+When phases land, update [CHANGELOG.md](../CHANGELOG.md), [ROADMAP.md](../ROADMAP.md),
 and this file's "Current State" / phase markers. The Rustion-side
 `ssh-cert` / `ssh-otp` materialiser is tracked in lockstep with the
 [Rustion integration](rustion-integration.md) cross-repo phases.

@@ -88,7 +88,7 @@ Acceptance: HA fault-injection suite green on CI for all four scenarios.
 ## Phase 8 — Documentation + operator runbook ✅ Done
 
 - Add a `docs/cluster-client-discovery.md` (or expand the existing HA doc) covering: SRV record shape, port/scheme conventions, TLS SAN coverage requirements, troubleshooting (`bvault cluster discover`), known caveats (no mid-session failover by design).
-- Update CHANGELOG, roadmap.md, and the feature file's "Current State".
+- Update CHANGELOG, ROADMAP.md, and the feature file's "Current State".
 
 Acceptance: a new operator can configure a clustered deployment from the docs without reading the source.
 

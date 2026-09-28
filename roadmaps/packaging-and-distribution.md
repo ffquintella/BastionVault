@@ -315,7 +315,7 @@ that needs the answer. Answered ones move up to § Decisions.
 ## Tracking
 
 Update this file when each wave closes. Update the global
-[roadmap.md](../roadmap.md) Packaging & Distribution rows when a row
+[ROADMAP.md](../ROADMAP.md) Packaging & Distribution rows when a row
 flips from `Todo` to `In Progress` (entering Wave 1 / 2 / 3) or to
 `Done` (exiting Wave 4). Each individual phase landing also updates
 [CHANGELOG.md](../CHANGELOG.md) under `[Unreleased]`.

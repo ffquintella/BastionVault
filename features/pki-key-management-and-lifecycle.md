@@ -115,7 +115,7 @@ End-to-end coverage in [tests/test_pki_managed_keys.rs](../tests/test_pki_manage
 - `key_ref` is honoured on `pki/issue/:role`, `pki/sign/:role`, `pki/root/generate/*`, and `pki/intermediate/generate/*`. `pki/sign-verbatim` is intentionally excluded from leaf reuse — it has no role to gate `allow_key_reuse` against.
 - The chain walk uses textual DN comparison via `x509-parser`'s `to_string()`. Distinct issuers with identical Subject DNs (a pre-existing data hazard at the mount) cause first-match-wins behaviour. Real deployments use unique CA names, so this is acceptable for L3.
 
-All seven phases are landed. The only open follow-up is the **`plugin-ext` bridge** that would let third-party Rust binaries register additional `CertDeliveryPlugin` implementations at runtime. The trait + registry surface is stable; the bridge is scoped as a separate effort that touches the existing `plugin-ext` IPC contract rather than this module. Roadmap entry tracks the active phase under "PKI: Key Management + Cert Lifecycle" in [roadmap.md](../roadmap.md).
+All seven phases are landed. The only open follow-up is the **`plugin-ext` bridge** that would let third-party Rust binaries register additional `CertDeliveryPlugin` implementations at runtime. The trait + registry surface is stable; the bridge is scoped as a separate effort that touches the existing `plugin-ext` IPC contract rather than this module. Roadmap entry tracks the active phase under "PKI: Key Management + Cert Lifecycle" in [ROADMAP.md](../ROADMAP.md).
 
 ## Phases
 
@@ -171,6 +171,6 @@ All entries pass through the storage barrier; private-key material in `pki/<moun
 
 On completion of each phase:
 
-- Update `roadmap.md` with the new initiative + phase status.
+- Update `ROADMAP.md` with the new initiative + phase status.
 - Update `CHANGELOG.md` under `[Unreleased]` (`Added` for new endpoints / module, `Changed` for role schema additions).
 - Update this file's "Current State" section (to be added on first phase landing) with shipped phases + deviations.
