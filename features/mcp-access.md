@@ -1,6 +1,7 @@
 # Feature: MCP Access — authenticated, permission-scoped Model Context Protocol server
 
-**Status: Todo.** Nothing in this document is implemented. It is the design for
+**Status: In progress.** Phase 0 (spec + research) is complete; no code yet —
+Phases 1-8 are pending. It is the design for
 exposing BastionVault to AI assistants and agents over the
 [Model Context Protocol](https://modelcontextprotocol.io) (MCP) in two deployment
 shapes — a **local** MCP server on the operator's workstation and a **network**
@@ -162,7 +163,8 @@ ordered, and hashed; a change to a tool's description is a release event.
 
 ## Current State
 
-**Status: Todo.** No code. Related things that exist and are reused:
+**Status: In progress.** Phase 0 (spec + research) done 2026-09-21; no code yet.
+Related things that exist and are reused:
 
 - `gui/src-tauri` has a **dev-only** `mcp_local_dev` feature for the
   `tauri-plugin-mcp-bridge` GUI-automation bridge (`AGENTS.md` § "Local Tauri
