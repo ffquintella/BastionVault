@@ -1762,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "bv-core"
-version = "0.41.3"
+version = "0.41.4"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
@@ -2155,7 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "bv-kernel"
-version = "0.41.10"
+version = "0.41.11"
 dependencies = [
  "actix-rt",
  "arc-swap",
@@ -2227,7 +2227,7 @@ dependencies = [
 
 [[package]]
 name = "bv-logical"
-version = "0.41.3"
+version = "0.41.4"
 dependencies = [
  "actix-rt",
  "async-trait",
