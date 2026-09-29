@@ -505,16 +505,6 @@ pub async fn session_open_rdp(
             request.profile_id, request.resource_name
         ))
     })?;
-    // Connect-time MFA gate — see the note on the SSH path above. RDP has no
-    // FIDO2 authentication method of its own, so for RDP profiles this gate is
-    // the entire FIDO2 story.
-    crate::commands::connect_mfa::authorize_direct(
-        &state,
-        &request.resource_name,
-        &request.profile_id,
-        request.connect_ticket.as_deref(),
-    )
-    .await?;
 
     let host_candidates = profile_host_candidates(&profile, &meta);
     if host_candidates.is_empty() {
@@ -524,23 +514,92 @@ pub async fn session_open_rdp(
     }
     let port = profile.get("target_port").and_then(|v| v.as_u64()).and_then(|n| u16::try_from(n).ok()).unwrap_or(3389);
     let username = profile_username(&profile);
-    // For RDP we don't fail when the profile username is empty
-    // — LDAP credential sources supply it. The check after
-    // resolution catches the case where every source path is also
-    // empty.
+    let primary_target_host = host_candidates.first().cloned().unwrap_or_default();
 
-    let resolved =
-        resolve_rdp_credential(&state, &request.resource_name, &profile, request.operator_credential.as_ref()).await?;
-    let username = resolved.effective_username.unwrap_or(username);
-    if username.is_empty() {
-        return Err(CommandError::from(
-            "RDP profile has no username (set profile.username, supply via the LDAP credential source, or use a Secret with a `username` field)"
-                .to_string(),
-        ));
-    }
-    let on_close = resolved.on_close;
-    let credential = resolved.credential;
-    let domain = resolved.domain;
+    // For a `secret`-backed credential, prefer server-side resolution
+    // through `rustion/v2/session/open` — see the note on the SSH path
+    // above. Returns `Direct` when the policy doesn't route through a
+    // bastion, in which case we fall back to the client-side resolution
+    // path below (Secret + LDAP / smart-card).
+    let credential_source = profile.get("credential_source").cloned().unwrap_or(Value::Null);
+    let credential_source_kind = credential_source.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    let v2_route: Option<ConnectRoute> = if credential_source_kind == "secret" {
+        let r = open_rustion_session_v2_rdp(
+            &state,
+            &request.resource_name,
+            &request.profile_id,
+            request.connect_ticket.as_deref(),
+            &meta,
+            &profile,
+            &primary_target_host,
+            port,
+            &username,
+            &credential_source,
+        )
+        .await?;
+        match r {
+            ConnectRoute::Rustion { .. } => Some(r),
+            ConnectRoute::Direct => None,
+        }
+    } else {
+        None
+    };
+
+    // `credential` is `Some` only on the client-side path (direct dials and
+    // non-secret kinds). The v2 server-side path dials the bastion with the
+    // ticket and never resolves a target credential locally.
+    let (route, credential, username, domain, on_close): (
+        ConnectRoute,
+        Option<session::rdp::RdpCredential>,
+        String,
+        Option<String>,
+        Option<crate::session::SessionCleanup>,
+    ) = if let Some(r) = v2_route {
+        // Brokered: `rustion/v2/session/open` already evaluated the
+        // profile's MFA gate and burnt the ticket. Redeeming it again here
+        // would fail — exactly one server-side consumer runs per connect.
+        (r, None, username, None, None)
+    } else {
+        // Connect-time MFA gate — see the note on the SSH path above. RDP
+        // has no FIDO2 authentication method of its own, so for RDP
+        // profiles this gate is the entire FIDO2 story. Runs before any
+        // credential is resolved, so on a gated profile nothing is read
+        // until the ticket has been redeemed.
+        crate::commands::connect_mfa::authorize_direct(
+            &state,
+            &request.resource_name,
+            &request.profile_id,
+            request.connect_ticket.as_deref(),
+        )
+        .await?;
+
+        let resolved = resolve_rdp_credential(
+            &state,
+            &request.resource_name,
+            &profile,
+            request.operator_credential.as_ref(),
+        )
+        .await?;
+        let username = resolved.effective_username.unwrap_or(username);
+        if username.is_empty() {
+            return Err(CommandError::from(
+                "RDP profile has no username (set profile.username, supply via the LDAP credential source, or use a Secret with a `username` field)"
+                    .to_string(),
+            ));
+        }
+        let route = resolve_rdp_connect_route(
+            &state,
+            &request.resource_name,
+            &meta,
+            &profile,
+            &primary_target_host,
+            port,
+            &username,
+            &resolved.credential,
+        )
+        .await?;
+        (route, Some(resolved.credential), username, resolved.domain, resolved.on_close)
+    };
     let aggressive_performance = profile.get("rdp_aggressive_performance").and_then(|v| v.as_bool()).unwrap_or(false);
     // Graphics Pipeline opt-in. Off unless the profile asks for it:
     // it needs a separately-installed OpenH264 and is the newest,
@@ -562,25 +621,6 @@ pub async fn session_open_rdp(
         session::rdp_clipboard::direction_from_profile(profile.get("rdp_clipboard").and_then(|v| v.as_str()))
             .map_err(CommandError::from)?;
 
-    // Phase 7.4 — consult the Rustion policy resolver. Mirrors the SSH
-    // path: when transport requires (or prefers) a bastion AND the
-    // credential is rdp-password, route session/open at Rustion and
-    // dial the bastion with the ticket in the X.224 `mstshash=`
-    // cookie. Smartcard credentials under `rustion-required` fail closed
-    // (the bastion's `rdp-cert` PKINIT path is tracked separately).
-    let primary_target_host = host_candidates.first().cloned().unwrap_or_default();
-    let route = resolve_rdp_connect_route(
-        &state,
-        &request.resource_name,
-        &meta,
-        &profile,
-        &primary_target_host,
-        port,
-        &username,
-        &credential,
-    )
-    .await?;
-
     let (
         host_candidates,
         port,
@@ -591,18 +631,23 @@ pub async fn session_open_rdp(
         rustion_label,
         tls_pin_for_dial,
     ) = match &route {
-        ConnectRoute::Direct => (
-            host_candidates,
-            port,
-            username.clone(),
-            credential.clone(),
-            domain.clone(),
-            None,
-            None,
-            // Direct RDP keeps its existing behaviour (no bastion pin);
-            // resource-level RDP TLS pinning is out of scope here.
-            None,
-        ),
+        ConnectRoute::Direct => {
+            let cred = credential
+                .clone()
+                .ok_or_else(|| CommandError::from("direct dial requires a resolved credential".to_string()))?;
+            (
+                host_candidates,
+                port,
+                username.clone(),
+                cred,
+                domain.clone(),
+                None,
+                None,
+                // Direct RDP keeps its existing behaviour (no bastion pin);
+                // resource-level RDP TLS pinning is out of scope here.
+                None,
+            )
+        }
         ConnectRoute::Rustion { bastion_host, bastion_port, ticket, bastion_name, bastion_pin, .. } => {
             if bastion_pin.is_empty() {
                 log::warn!(
@@ -2027,6 +2072,83 @@ async fn resolve_rdp_connect_route(
     let resp = make_request(state, Operation::Write, format!("{RUSTION_MOUNT}session/open"), Some(body))
         .await
         .map_err(|e| CommandError::from(format!("rustion session/open failed: {e:?}")))?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    parse_rustion_ticket_bundle(state, data, BASTION_PROTOCOL, max_renewals as u32).await
+}
+
+/// RDP analogue of [`open_rustion_session_v2_ssh`], for the `secret`
+/// credential kind only — `ldap` / `rdp-cert` are the operator's own, not
+/// the stored secret this feature protects, and keep resolving client-side.
+/// Returns [`ConnectRoute::Direct`] when the policy does not route through
+/// a bastion.
+#[allow(clippy::too_many_arguments)]
+async fn open_rustion_session_v2_rdp(
+    state: &State<'_, AppState>,
+    resource_name: &str,
+    profile_id: &str,
+    connect_ticket: Option<&str>,
+    meta: &Map<String, Value>,
+    profile: &Value,
+    target_host: &str,
+    target_port: u16,
+    target_user: &str,
+    credential_source: &Value,
+) -> Result<ConnectRoute, CommandError> {
+    const BASTION_PROTOCOL: BastionProtocol = BastionProtocol::Rdp;
+    let (resource_id, resource_type, asset_group_ids) = collect_policy_hints(state, resource_name, meta).await;
+    let effective = read_effective_policy(state, &resource_id, &resource_type, &asset_group_ids).await?;
+
+    if let Some(detail) = effective.lock_violation {
+        return Err(CommandError::from(format!("rustion policy lock violation: {detail}")));
+    }
+
+    let prefer_rustion = match effective.transport.as_str() {
+        "rustion-required" => true,
+        "rustion-preferred" => !effective.bastions.is_empty(),
+        _ => false,
+    };
+    if !prefer_rustion {
+        return Ok(ConnectRoute::Direct);
+    }
+
+    let ttl_secs = profile.get("ttl_secs").and_then(|v| v.as_u64()).and_then(|n| u32::try_from(n).ok()).unwrap_or(3600);
+    let max_renewals =
+        profile.get("max_renewals").and_then(|v| v.as_u64()).and_then(|n| u8::try_from(n).ok()).unwrap_or(3);
+    let recording = if effective.recording.is_empty() { "always".to_string() } else { effective.recording.clone() };
+
+    let mut body = Map::new();
+    // The reference, not the material — BastionVault resolves it.
+    body.insert("resource_name".into(), Value::String(resource_name.to_string()));
+    body.insert("profile_id".into(), Value::String(profile_id.to_string()));
+    if let Some(t) = connect_ticket.map(str::trim).filter(|t| !t.is_empty()) {
+        body.insert("connect_ticket".into(), Value::String(t.to_string()));
+    }
+    body.insert("credential_source".into(), credential_source.clone());
+    body.insert("target_host".into(), Value::String(target_host.to_string()));
+    body.insert("target_port".into(), Value::Number(target_port.into()));
+    body.insert("target_protocol".into(), Value::String("rdp".to_string()));
+    body.insert("credential_kind".into(), Value::String("rdp-password".to_string()));
+    // May be empty; the server fills it from the secret's `username` field.
+    body.insert("credential_username".into(), Value::String(target_user.to_string()));
+    body.insert("ttl_secs".into(), Value::Number(ttl_secs.into()));
+    body.insert("max_renewals".into(), Value::Number(max_renewals.into()));
+    body.insert("recording".into(), Value::String(recording));
+    if !effective.bastions.is_empty() {
+        body.insert("bastions".into(), Value::Array(effective.bastions.iter().cloned().map(Value::String).collect()));
+    }
+    if !resource_id.is_empty() {
+        body.insert("resource_id".into(), Value::String(resource_id));
+    }
+    if !resource_type.is_empty() {
+        body.insert("resource_type".into(), Value::String(resource_type));
+    }
+    if !asset_group_ids.is_empty() {
+        body.insert("asset_group_ids".into(), Value::Array(asset_group_ids.into_iter().map(Value::String).collect()));
+    }
+
+    let resp = make_request(state, Operation::Write, format!("{RUSTION_MOUNT}v2/session/open"), Some(body))
+        .await
+        .map_err(|e| CommandError::from(format!("rustion v2 session/open failed: {e:?}")))?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     parse_rustion_ticket_bundle(state, data, BASTION_PROTOCOL, max_renewals as u32).await
 }

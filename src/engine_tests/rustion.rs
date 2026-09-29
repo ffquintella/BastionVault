@@ -158,6 +158,87 @@ mod connect_only_tests {
         assert_eq!(noconn_open, 403, "no-connect must be denied at the connect gate");
     }
 
+    /// Same proof as [`test_connect_only_session_open_v2_gate_and_resolution`],
+    /// for the RDP connect path this closes out: `resolve_secret_credential`
+    /// reads a generic `password`/`username` shape, so a `secret`-kind
+    /// reference resolves the same way under `credential_kind: rdp-password`
+    /// as it does under the ssh default — the GUI's RDP dialog no longer
+    /// needs to read the stored credential itself to route through Rustion.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_connect_only_session_open_v2_resolves_rdp_password() {
+        let mut server = TestHttpServer::new("test_connect_only_session_open_v2_rdp", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+
+        server
+            .write(
+                "resources/secrets/win/rdp",
+                serde_json::json!({ "password": "hunter2", "username": "administrator" }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        server
+            .write(
+                "sys/policies/acl/connect-only",
+                serde_json::json!({
+                    "policy": "path \"resources/secrets/win/*\" { capabilities = [\"connect\"] }\n\
+                               path \"rustion/*\" { capabilities = [\"create\", \"update\", \"read\"] }"
+                })
+                .as_object()
+                .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        server
+            .write("sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
+            .unwrap();
+        server
+            .write(
+                "auth/pass/users/conn",
+                serde_json::json!({ "password": "hunter22XX!", "token_policies": "connect-only", "ttl": 0 })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        let conn = server
+            .write("auth/pass/login/conn", serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(), None)
+            .unwrap()
+            .1
+            .get("auth")
+            .and_then(|a| a.get("client_token"))
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        // Connect-only caller cannot read the stored credential directly.
+        let (read_status, _) = server.request("GET", "resources/secrets/win/rdp", None, Some(&conn), None).unwrap();
+        assert_eq!(read_status, 403, "connect-only must be denied a direct secret read");
+
+        // Its v2 session-open passes the connect gate and resolves the
+        // rdp-password credential server-side, failing only at dispatch.
+        let (open_status, _) = server
+            .write(
+                "rustion/v2/session/open",
+                serde_json::json!({
+                    "resource_name": "win",
+                    "credential_source": { "kind": "secret", "secret_id": "rdp" },
+                    "target_host": "10.0.0.6",
+                    "target_port": 3389,
+                    "target_protocol": "rdp",
+                    "credential_kind": "rdp-password"
+                })
+                .as_object()
+                .cloned(),
+                Some(&conn),
+            )
+            .unwrap();
+        assert!(
+            open_status == 502 || open_status == 503,
+            "connect-only rdp-password should reach dispatch and fail on no-bastion (502/503), got {open_status}"
+        );
+    }
+
     /// v1 `session/open` had **no** per-resource gate: it authorized only the
     /// endpoint path, then brokered a session to a caller-named `target_host`
     /// with caller-supplied credential material. That is why it could not be

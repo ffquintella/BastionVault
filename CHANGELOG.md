@@ -56,7 +56,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.13] - 2026-09-29
+
 ### Changed
+
+#### Connect-only RDP sessions ([spec](features/connect-only-access.md) Phase 2f)
+- **The GUI's RDP connect path now resolves a `secret`-backed credential server-side, instead of reading it client-side before routing**: `session_open_rdp` previously called `resolve_rdp_credential` (a direct read of the resource's stored password) *before* deciding whether the session routes through a Rustion bastion, so a connect-only caller (capability `connect`, not `read`) was refused before the brokered path meant to protect them was ever reached. It now calls the new `open_rustion_session_v2_rdp` first for `secret`-kind profiles, sending a credential *reference* to `rustion/v2/session/open` (mirroring the SSH path's Phase 2b), and only falls back to the client-side read when the policy doesn't route through a bastion, or for `ldap` / `rdp-cert` (smart-card) profiles, which carry the operator's own credential rather than the stored secret. `resolve_secret_credential` on the server already read a generic `password`/`username` shape for either protocol — only its doc comments claimed ssh-only (T25, S10)
 
 #### Tracking files move to the Project Tracking Format
 - Restructure `ROADMAP.md` (renamed from `roadmap.md`) and `CHANGELOG.md` into PTF v1: milestones `M1`–`M9`, one task per tracked feature with a stable `T<n>` ID, a `## Specs` table, and changelog entries that end with the task they deliver; the spec is `docs/tracking-format.md` and the old-to-new map is `docs/ptf-migration.md`

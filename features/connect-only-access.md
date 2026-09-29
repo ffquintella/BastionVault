@@ -1,13 +1,13 @@
 # Connect-Only Access
 
-**Status:** every numbered phase is done — 1 (backend), 2a (GUI filtering),
-2b (GUI Rustion credential-reference connect path), 2c (the gate extended to
-the resource *list*), 2d (gate parity + share awareness) and 2e (the list gate
-turned into a cached, force-refreshable connect-access validator). Only the
-`Deferred` row below is outstanding: the RDP connect path, which waits on the
-bastion resolving `rdp-password` server-side, and server-side resolution for
-the `ldap` / `pki` kinds, which do not use the stored secret this feature
-exists to hide.
+**Status:** Done. Every phase shipped, including 2f (the RDP connect path):
+1 (backend), 2a (GUI filtering), 2b (GUI Rustion credential-reference SSH
+connect path), 2c (the gate extended to the resource *list*), 2d (gate parity
++ share awareness), 2e (the list gate turned into a cached, force-refreshable
+connect-access validator), 2f (the same credential-reference rewiring for
+RDP). Server-side resolution for the `ldap` / `pki` / `rdp-cert` kinds stays
+client-side by design — they are the operator's own credential, not the
+stored secret this feature exists to hide.
 
 ## Goal
 
@@ -59,7 +59,7 @@ in play.
 | Endpoint-level grants | The three `resources/v2/connect/*` endpoints are fixed paths, not per-object ones, so the pipeline's ACL check guards *who may call them*, not *which resource they name in the body* — each handler re-authorizes that through the connect gate above. Both baselines therefore grant them `update`: `default` bare, `namespace-shared` `{{namespace.path}}`-templated (`resources/` is namespace-rewritten; `rustion/` is not, which is why its grants sit bare in `namespace-self`). Ungranted, the GUI's unconditional `mfa/begin` pre-flight — the server, not the host, decides whether a profile is gated — 403'd and killed Connect for every non-root principal before the session open was reached. |
 | v1 vs v2 | v1 `session/open` takes caller-resolved `credential_material`; v2 additionally resolves `secret` / `ssh-engine` references server-side, which is what connect-only access needs. Both are gated, so both are grantable to a tenant. v1's **unbound** shape (no `resource_id`: arbitrary target host, caller-supplied credential, no object to authorize against) requires `sudo` on the path. The shared brokering engine is `brokered_session_open`, which authorizes nothing itself — every caller reaches it through one of the two gates. |
 | Resolver gate | `policy/effective` and `dispatcher/preview` gate their caller-supplied `resource_id` with `may_view_resource` — deliberately broader than the connect gate (inventory record **or** the connect gate), because an SSH-engine profile needs no grant on the secret path. See the operator note below for why both halves are necessary. |
-| Server-side resolution | When the caller passes a credential **reference** (`credential_source = {kind:"secret", secret_id:"…"}`) instead of raw `credential_material`, the handler reads `resources/secrets/<name>/<key>` via `core.router.handle_request` (server authority, bypasses the caller's ACL) and brokers it. The connect-only caller never reads it. Only the `ssh-password` shape is brokered server-side today — matching the bastion proxy's current capability. |
+| Server-side resolution | When the caller passes a credential **reference** (`credential_source = {kind:"secret", secret_id:"…"}`) instead of raw `credential_material`, the handler reads `resources/secrets/<name>/<key>` via `core.router.handle_request` (server authority, bypasses the caller's ACL) and brokers it. The connect-only caller never reads it. `resolve_secret_credential` reads a generic `password`/`username` shape, so both the `ssh-password` and `rdp-password` kinds broker server-side — selected by the caller's `credential_kind`, matching the bastion proxy's capability for both protocols. |
 | Audit | The server-side read emits a `target: "security"` log line (`rustion-connect-resolve: user=… resource=… key=…`) attributed to the connecting operator. |
 | GUI capability lookup | `v2/sys/capabilities-self` (`handle_capabilities_self`, `src/modules/system/mod.rs`; HTTP shim `/v2/sys/capabilities-self`, v2-only) returns the caller's effective capabilities per path. Vault-compatible shape. Clients send **mount-relative** paths (`resources/secrets/<name>/`); the handler namespace-qualifies them before evaluating (`qualify_capability_path`) so the verdict matches what the router will decide, and keys the response by the path the caller sent. Header-scoped mounts (`sys/` `auth/` `identity/` `rustion/` `notifications/`) are exempt, exactly as in the router. Scope-gated capabilities are re-verified per path before they are reported — including `connect`, which needs its own pass because it maps to no `Operation` and so cannot go through `can_operate`. Left unverified it was the one capability that leaked its gate, and since the GUI reads this field to decide whether to render Connect, it rendered a button the server then refused. |
 | GUI filtering | The Resources page queries capabilities for `resources/secrets/<name>/`; when the caller has `connect` but not `read`, it hides credential values (`ResourceSecretsPanel`) and restricts launchable connection profiles to the ones whose session is brokered (`ConnectionProfilesPanel`). |
@@ -77,7 +77,7 @@ in play.
 | 2b | GUI: the SSH Rustion connect path sends a credential reference to `rustion/v2/session/open` for `secret`-backed profiles (no client-side read). See below. `default-account` joins `secret` / `ssh-engine` on that path — it is an `ssh-engine` mint whose principal is the operator's own account, resolved from the self-service `sys/identity/default-account/self`. | **Done** |
 | 2d | Gate parity + share awareness: v1 `session/open` gains the same per-resource gate (its unbound shape now needs `sudo`), the gate itself learns ownership- and share-derived access via `PolicyStore::readable_targets`, the read-only resolvers gate their `resource_id` with the broader `may_view_resource`, and the GUI launch gate keys off the *effective transport tier* rather than the profile's stored `kind`. | **Done** |
 | 2e | GUI: the list gate becomes a *validator* — `lib/connectValidation.ts` resolves profiles + connect-only status + effective transport for every card on screen in parallel, disables Connect only on a provable no, caches verdicts for 10 minutes, and exposes "Revalidate Connectivity" in the app menu. | **Done** |
-| Deferred | RDP Rustion connect path (`session_open_rdp`) — same rewiring once the bastion supports rdp-password server-side resolution. Server-side resolution for `ldap` / `ssh-engine` / `pki` kinds (those use the operator's own typed creds or mint ephemeral certs — not the stored secret connect-only protects). | Not started |
+| 2f | GUI: the RDP Rustion connect path (`session_open_rdp`) gets the same credential-reference rewiring as 2b — `open_rustion_session_v2_rdp` sends `credential_source` to `rustion/v2/session/open` for `secret`-backed profiles instead of reading the password client-side first. `ldap` / `rdp-cert` (smart-card) profiles are the operator's own credential, not the stored secret, and keep resolving client-side via `resolve_rdp_credential` + `resolve_rdp_connect_route`. | **Done** |
 
 ### Phase 2b — GUI Rustion connect path (done)
 
@@ -91,8 +91,21 @@ operator can launch. It returns `Direct` when the policy doesn't route through
 a bastion, and the caller falls back to the existing client-side resolution
 path (used for direct dials and `ldap`/`ssh-engine`/`pki` kinds). The v1 and
 v2 paths share `parse_rustion_ticket_bundle`, so the downstream SSH dial is
-identical. RDP is deferred (the bastion's rdp-password server-side path is not
-wired yet).
+identical.
+
+### Phase 2f — GUI RDP connect path (done)
+
+`session_open_rdp` mirrors 2b: for `credential_source.kind == "secret"`, it
+calls `open_rustion_session_v2_rdp` (`credential_kind: "rdp-password"`)
+*before* resolving anything client-side. A `Rustion` route means the MFA gate
+and credential resolution already ran server-side inside
+`handle_session_open_v2` — redeeming the connect ticket again here would fail,
+so `resolve_rdp_credential` and the client-resolved `resolve_rdp_connect_route`
+only run on `Direct` (no bastion in the policy) or for `ldap` / `rdp-cert`
+sources, which stay client-side by design. `resolve_secret_credential` on the
+server was never actually ssh-specific — it reads a generic
+`password`/`username` shape — so no server-side change was needed beyond
+correcting the doc comments that claimed otherwise.
 
 ### Phase 2e — GUI connect-access validator (done)
 
@@ -142,11 +155,13 @@ Three invariants, all load-bearing:
   `read`) for a connect-only policy; both for read+connect.
 - `src/modules/system/mod.rs` — `v2/sys/capabilities-self` returns `connect`
   without `read` for a connect-only userpass token, and both for read+connect.
-- `src/modules/rustion/mod.rs` (`connect_only_tests`) — **end-to-end through
+- `src/engine_tests/rustion.rs` (`connect_only_tests`) — **end-to-end through
   the real HTTP + core pipeline:** a connect-only token is denied a direct
   read of the resource secret (403) but its `rustion/v2/session/open` passes
   the connect gate and resolves the credential server-side, reaching dispatch
-  (502/503 with no bastion enrolled — not a gate 403); a no-connect token is
+  (502/503 with no bastion enrolled — not a gate 403); the same proof repeats
+  for `credential_kind: "rdp-password"` (`test_connect_only_session_open_v2_resolves_rdp_password`),
+  showing server-side resolution was never ssh-specific; a no-connect token is
   denied at the gate (403). This exercises the entire new server-side path
   (gate + router-direct secret read + dispatch) without a live bastion.
 

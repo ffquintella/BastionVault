@@ -2263,18 +2263,12 @@ impl RustionBackendInner {
         self.brokered_session_open(b, req).await
     }
 
-    /// Resolve a resource-stored secret to base64-encoded ssh-password
-    /// credential material, using BastionVault's own authority (NOT the
-    /// caller's `read` capability — that's the whole point of connect-only).
-    /// The caller's `connect` grant must already have been verified.
-    ///
-    /// Only the ssh-password shape is brokered server-side today, matching
-    /// the bastion proxy's current capability (private-key/cert flows are
-    /// not yet wired through the proxy).
-    ///
-    /// `ns_prefix` is the caller's namespace prefix from
-    /// [`Self::namespace_sub_request_prefix`] — the resource (and therefore
-    /// its secret) belongs to the caller's namespace, not to root.
+    /// Resolve a resource-stored secret to base64-encoded password
+    /// credential material (`ssh-password` or `rdp-password`, selected by
+    /// the caller's `credential_kind`), using BastionVault's own authority —
+    /// NOT the caller's `read` capability. The caller's `connect` grant must
+    /// already have been verified. `ns_prefix` is the caller's namespace
+    /// prefix ([`Self::namespace_sub_request_prefix`]).
     async fn resolve_secret_credential(
         &self,
         ns_prefix: &str,
@@ -2300,8 +2294,8 @@ impl RustionBackendInner {
             return Err(bv_error_response_status!(
                 422,
                 &format!(
-                    "secret `{secret_id}` carries no `password` field — only ssh-password \
-                     credentials can be brokered server-side today"
+                    "secret `{secret_id}` carries no `password` field — only password-shaped \
+                     credentials (ssh-password / rdp-password) can be brokered server-side today"
                 )
             ));
         }
