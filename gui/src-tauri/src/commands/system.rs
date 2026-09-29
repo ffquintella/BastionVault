@@ -140,7 +140,7 @@ async fn authorize_embedded_seal(
     use bastion_vault::logical::Operation as ServerOp;
 
     let auth = token_store
-        .check_token("sys/seal", token, "")
+        .check_token("sys/seal", token, "", false)
         .await
         .map_err(CommandError::from)?
         .ok_or("invalid or expired token")?;
@@ -1339,7 +1339,7 @@ mod seal_authz_tests {
         // seal grant.
         for (token, addr) in [(&loopback_bound, "127.0.0.1"), (&lan_bound, "10.0.0.7")] {
             let auth = token_store
-                .check_token("sys/seal", token, addr)
+                .check_token("sys/seal", token, addr, false)
                 .await
                 .expect("an address inside the bound CIDR must satisfy the binding")
                 .expect("the token exists");
