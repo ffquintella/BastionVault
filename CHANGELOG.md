@@ -56,6 +56,44 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.15] - 2026-09-30
+
+### Fixed
+
+#### MCP Access
+- **Revoking an MCP app, token or pairing no longer reports success when the revoke failed**: the three revoke paths discarded the error from `TokenStore::revoke` and then deleted the only index entry that could find the token again. The error now surfaces and the index entry is kept, so a retry works. (T80)
+
+### Security
+
+#### MCP Access
+- **An MCP token's lifetime is now enforced**: `mint_mcp_token` never registered the token's lease with the expiration manager and `check_token` did not compare `creation_time + ttl`, so the short TTL an app or pairing token advertised was not acted on and the token lived until revoked. It is now registered like any issued token and refused at its next call once expired. (T80)
+- **`DELETE /v2/sys/mcp/pairings/{id}` is v2-only**: it had been mounted on the shared sys scope and so also appeared under the frozen `/v1`. The earlier `sys/mcp/*` routes are still on both scopes; moving them is tracked in T94. (T80)
+
+## [0.44.14] - 2026-09-30
+
+### Added
+
+#### MCP Access — local mode, write tools and GUI ([spec](features/mcp-access.md) Phases 4-6)
+- **`bvault mcp serve | pair | pairings list|revoke | token | catalogue`**: the local MCP server for a workstation's AI assistants over stdio, an owner-only Unix socket (a peer with any other uid is dropped before a byte is read) or loopback-only HTTP (`--listen 0.0.0.0:…` is a usage error; foreign `Origin` and rebinding `Host` are 403 before the vault is contacted). Each client is paired once by the operator at a terminal with an explicit scope; with no terminal, pairing and per-call confirmations fail closed. The server mints an MCP-bound token from the operator's own login and forwards each request to `POST /v2/mcp`, so the vault's dispatcher stays the single enforcement point. The token lives in memory only. `bvault mcp token --app` exchanges an AppID login for an app token; `bvault mcp catalogue` prints the tools and the hash to pin. (T80)
+- **Pairing store in `bv-mcp`** (`pairing.rs`): pairings sealed in the same ML-KEM-768 + ChaCha20-Poly1305 envelope as the GUI keystore, in a 0600 file in a 0700 directory; a group- or world-readable store is refused rather than used. Shared by the CLI and the desktop app. (T80)
+- **`mcp/token` pairing mode**: an operator session (an entity- or username-bound login, never AppRole, machine or root) exchanges for a pairing-bound token carrying exactly the approved grant. New `DELETE /v2/sys/mcp/pairings/{id}` revokes every token minted for one pairing; `sys/mcp/tokens` now lists pairing tokens (`kind: "pairing"`) alongside app tokens. (T80)
+- **Write tools** `bv_kv_write`, `bv_kv_delete` (soft-delete only), `bv_pki_issue` and `bv_ssh_sign`, appended to the catalogue. Each is refused unless the binding has `destructive_allowed`; `bv_pki_issue` also needs `reveal_allowed` and redacts `private_key` unless a reveal is granted. Both gates are wired into the dispatcher and a call needing both confirmations is confirmed once. (T80)
+- **Admin → MCP Apps** (app CRUD with tool picker and path scope, sudo-gated machine-identity waivers with mandatory reason and expiry, active tokens with revoke, catalogue hash with pin/unpin, TTL and waiver limits) and **Settings → AI Assistants** (paired clients with revoke, client configuration snippets) in the desktop app. (T80)
+- **`docs/mcp.md`**: the operator guide — threat model, pairing, waivers, client configuration and troubleshooting. (T80, S104)
+
+### Changed
+
+#### MCP Access
+- **The tool catalogue grew by four tools, so its hash changed**: the catalogue hash is now `6b861ee876dc86de8103f651b961306e93ae5f818aa766abc98780d7c46e12b0`. An operator who pinned the previous hash in `sys/mcp/config` must pin this one. (T80)
+- **`mcp { require_hybrid_kex = true }` now fails closed**: the negotiated key-exchange group is not yet carried out of the TLS layer, so the requirement cannot be verified and `/v2/mcp` answers 503 `mcp_hybrid_kex_unverifiable` instead of silently ignoring the setting. Unset it, or wait for T94. (T80)
+
+### Security
+
+#### MCP Access
+- **A machine-identity waiver is now enforced at every call**: `waived_until` was recorded on the binding but never checked, so a token minted under an expired waiver kept working until its own TTL. `TokenStore::check_token` now refuses it at its next call, and revoking a waiver revokes the tokens minted under it. (T80)
+- **`/v2/mcp` and `/v2/mcp/token` now refuse plaintext**: served over TLS, or plaintext only on a loopback-only listener with `mcp.allow_plaintext_loopback = true`, judged on the listener and not on `X-Forwarded-Proto`. (T80)
+- **`mcp.max_request_bytes` and `mcp.tool_timeout_secs` are now enforced** (413, and `mcp_tool_timeout`); both were parsed and ignored. (T80)
+
 ## [0.44.13] - 2026-09-29
 
 ### Changed
@@ -7392,7 +7430,10 @@ Bulk dependency upgrade across the workspace (`Cargo.toml`, `crates/bv-plugin-pa
 
 - Abandon the SQLx storage backend: `libsqlite3-sys` conflicts at link time with hiqlite's `rusqlite`, so `storage "sqlx"` was removed (T5, M2)
 
-[Unreleased]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.12...HEAD
+[Unreleased]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.15...HEAD
+[0.44.15]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.14...releases/0.44.15
+[0.44.14]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.13...releases/0.44.14
+[0.44.13]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.12...releases/0.44.13
 [0.44.12]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.11...releases/0.44.12
 [0.44.11]: https://github.com/ffquintella/BastionVault/compare/v0.44.10...releases/0.44.11
 [0.44.10]: https://github.com/ffquintella/BastionVault/compare/v0.44.9...v0.44.10

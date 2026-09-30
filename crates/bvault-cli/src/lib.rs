@@ -93,6 +93,7 @@ pub enum Commands {
     SshBroker(command::ssh_broker::SshBroker),
     #[cfg(unix)]
     Ferrogate(command::ferrogate::Ferrogate),
+    Mcp(command::mcp::Mcp),
 }
 
 impl Commands {
@@ -115,6 +116,7 @@ impl Commands {
             Commands::SshBroker(ssh_broker) => ssh_broker.execute(),
             #[cfg(unix)]
             Commands::Ferrogate(ferrogate) => ferrogate.execute(),
+            Commands::Mcp(mcp) => mcp.execute(),
         }
     }
 }

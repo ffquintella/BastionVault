@@ -1,6 +1,6 @@
 [package]
 name = "bvault-cli"
-version = "0.44.13"
+version = "0.44.15"
 edition = "2021"
 description = "BastionVault's command-line client, `bvault`, and the `bvault server` command"
 license = "Apache-2.0"
@@ -28,18 +28,28 @@ name = "bvault"
 path = "src/main.rs"
 
 [dependencies]
-bastion_vault = { path = "../..", version = "0.44.13", registry = "uox-bastionvault", default-features = false }
+bastion_vault = { path = "../..", version = "0.44.15", registry = "uox-bastionvault", default-features = false }
 bv-server = { path = "../bv-server", version = "0.41.0", registry = "uox-bastionvault" }
 # SRV-based cluster node selection for `bvault cluster discover` and
 # `HttpOptions::client_with_discovery`. This was a dependency of the root
 # crate purely because the CLI lived there; it travels with its only caller.
 bv-client = { path = "../bv-client", version = "0.42.0", registry = "uox-bastionvault" }
+# `bvault mcp` (features/mcp-access.md Phase 4). `bv-mcp` supplies the
+# compiled-in tool catalogue (`bvault mcp catalogue`) and the JSON-RPC types
+# the local MCP server parses; `bv_crypto` supplies the ML-KEM-768 + ChaCha20
+# envelope the pairing store is sealed with -- the same scheme the GUI
+# keystore uses, deliberately not a second one.
+bv-mcp = { path = "../bv-mcp", version = "0.1.0", registry = "uox-bastionvault" }
+bv_crypto = { path = "../bv_crypto", version = "0.41.0", registry = "uox-bastionvault" }
 
-actix-web = { version = "4.13", features = ["rustls-0_23"] }
+actix-web ={ version = "4.13", features = ["rustls-0_23"] }
 actix-rt = "2.11"
 anyhow = { version = "^1.0" }
 base64 = "0.22"
 better_default = "1.0.5"
+# Pairing-token hashes for `bvault mcp` (spec §3: BLAKE3 of the random bearer
+# handed to a loopback-HTTP client). Same hash `bv-mcp` uses for its catalogue.
+blake3 = "1.8"
 chacha20poly1305 = "0.10"
 clap = { version = "4.6", features = ["wrap_help", "derive", "env", "suggestions"] }
 dashmap = "6.1"
@@ -47,8 +57,20 @@ derive_more = "2.1.1"
 env_logger = "0.11"
 hex = "0.4"
 hkdf = "0.13"
+# Parses the requests on `bvault mcp serve --listen`'s loopback HTTP
+# transport, so a security-relevant listener does not carry a hand-rolled
+# HTTP/1.1 parser. Already in the lockfile via actix.
+httparse = "1.10"
+# `bvault mcp pairings revoke` reads only the status of a DELETE whose success
+# body is empty, which the shared `api::Client::request` (it always parses
+# JSON) reports as an error. Already in the lockfile via ureq/actix.
+http = "1"
 humantime = "2.3"
 lazy_static = "1.5.0"
+# `SO_PEERCRED` / `getpeereid` on `bvault mcp serve --socket`: the kernel's
+# answer to "which uid is on the other end" has no safe std wrapper. Already
+# in the lockfile via `bv-storage`.
+libc = "0.2"
 log = "0.4"
 maybe-async = "0.2"
 prettytable = "0.10"
@@ -56,11 +78,14 @@ rand = "^0.10"
 regex = "1.12"
 rpassword = "7.4"
 rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
+# The `bvault mcp` pairing store derives (de)serialization for its records.
+serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0"
 serde_yaml = "0.9"
-# ed25519-dalek, serde and toml are deliberately absent: they belonged to
+# ed25519-dalek and toml are deliberately absent: they belonged to
 # `ferrogate_mia`, which Phase 4 moved to `bv-auth-ferrogate` where the GUI
-# can reach it without depending on the CLI.
+# can reach it without depending on the CLI. (`serde` came back for
+# `bvault mcp`'s pairing store, see above.)
 sha2 = "0.11"
 sysexits = { version = "0.13", features = ["std"] }
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }

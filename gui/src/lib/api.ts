@@ -54,6 +54,11 @@ import type {
   FerroGateRequirement,
   FerroGateMachine,
   FerroGateLoginResult,
+  McpApp,
+  McpToken,
+  McpConfig,
+  McpCatalogue,
+  McpPairing,
   GroupKind,
   GroupListResult,
   GroupInfo,
@@ -3188,3 +3193,33 @@ export const notificationsConfigPut = (
   inboxCap?: number,
   pluginRatePerMin?: number,
 ) => invoke<void>("notifications_config_put", { inboxCap, pluginRatePerMin });
+
+// MCP Access (vault-side registry + local pairings)
+export const mcpListApps = () => invoke<McpApp[]>("mcp_list_apps");
+export const mcpWriteApp = (app: {
+  name: string;
+  approleRole: string;
+  description: string;
+  toolAllowlist: string[];
+  pathScope: string[];
+  revealAllowed: boolean;
+  destructiveAllowed: boolean;
+  ttlSecs: number;
+}) => invoke<void>("mcp_write_app", app);
+export const mcpDeleteApp = (name: string) => invoke<void>("mcp_delete_app", { name });
+export const mcpGrantWaiver = (name: string, reason: string, expiresInDays: number) =>
+  invoke<void>("mcp_grant_waiver", { name, reason, expiresInDays });
+export const mcpRevokeWaiver = (name: string) => invoke<void>("mcp_revoke_waiver", { name });
+export const mcpListTokens = () => invoke<McpToken[]>("mcp_list_tokens");
+export const mcpRevokeToken = (accessor: string) => invoke<void>("mcp_revoke_token", { accessor });
+export const mcpReadConfig = () => invoke<McpConfig>("mcp_read_config");
+export const mcpWriteConfig = (cfg: {
+  defaultTtlSecs: number;
+  maxTtlSecs: number;
+  waiverMaxDays: number;
+  cataloguePin: string;
+}) => invoke<void>("mcp_write_config", cfg);
+export const mcpCatalogue = () => invoke<McpCatalogue>("mcp_catalogue");
+export const mcpPairingsPath = () => invoke<string>("mcp_pairings_path");
+export const mcpListPairings = () => invoke<McpPairing[]>("mcp_list_pairings");
+export const mcpRevokePairing = (id: string) => invoke<void>("mcp_revoke_pairing", { id });

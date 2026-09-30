@@ -629,7 +629,7 @@ pub fn new_test_http_server(core: Arc<Core>, tls_config: Option<TestTlsConfig>) 
     // exercise `/v2/mcp` / `/v2/mcp/token` without a way to plumb a
     // custom `Config` through `TestHttpServer::new`'s existing call
     // sites. Test-only, behind the `test-support` feature.
-    let mcp_config = web::Data::new(bastion_vault::config::McpConfig { enabled: true, ..Default::default() });
+    let mcp_config = web::Data::new(bastion_vault::config::McpConfig { enabled: true, allow_plaintext_loopback: true, ..Default::default() });
     let mut http_server = HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::default())

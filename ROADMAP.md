@@ -33,7 +33,7 @@ Next-up list recorded before the migration, in its order:
 - Compliance Reporting
 - Rustion Bastion Integration (delegated PAM transport + recording)
 - Machine Authentication (FerroGate-attested machine identity, admin-approval gated, first-machine root bootstrap)
-- MCP Access ([spec](features/mcp-access.md)) — Phases 1–3 (`bv-mcp` core, kernel binding + app registry + token exchange, `/v2/mcp` transport) are the minimum network-mode release; 4–5 (CLI `bvault mcp serve` + GUI pairing/consent) the minimum local-mode release; 7 waits on Identity Provider
+- MCP Access ([spec](features/mcp-access.md)) — network and local modes and the write tools are shipped; external/enterprise authorization (T93) waits on Identity Provider, and hardening/deferred items are tracked in T94
 
 ## [M1] Networking and TLS
 > outcome: Done when the listener serves TLS/mTLS via rustls and abusive client IPs are throttled or banned.
@@ -334,9 +334,14 @@ Next-up list recorded before the migration, in its order:
 - [ ] T79 Report on compliance (S8)
   - source: roadmap.md feature row "Compliance Reporting", status `[ ]` Todo
   - old-notes: [spec](features/compliance-reporting.md)
-- [/] T80 Expose a permission-scoped MCP server (S26)
+- [x] T80 Expose a permission-scoped MCP server (S26, S104)
   - source: roadmap.md feature row "MCP Access (authenticated, permission-scoped Model Context Protocol server — local + network)", status `[/]` In progress
-  - old-notes: [spec](features/mcp-access.md) — **Phases 1-3 done, 2026-09-28** (minimum network-mode release): `bv-mcp` core crate (JSON-RPC, catalogue, dispatcher), `TokenEntry.mcp_binding` + `check_token`'s symmetric MCP-origin gate, the `sys/mcp/apps` registry + sudo-gated machine waivers + `mcp/token` exchange, and the `/v2/mcp` + `/v2/mcp/token` server transport dispatching through `Core::handle_request`. Local mode (pairing, CLI, GUI — Phases 4-5), write tools (Phase 6) and external authorization (Phase 7) are not built. `require_hybrid_kex` enforcement and a barrier-derived `requestState` key are disclosed Phase-3 gaps (see `bv-server/src/mcp_routes.rs`'s module doc).
+  - old-notes: [spec](features/mcp-access.md), [operator guide](docs/mcp.md) — network mode (`POST /v2/mcp`, MCP apps, machine waivers) and local mode (`bvault mcp serve|pair|pairings|token|catalogue`, per-client pairing, Admin → MCP Apps and Settings → AI Assistants in the GUI) are shipped, plus the four write tools behind `destructive_allowed`. What is left is split out: external/enterprise authorization (T93) and hardening + deferred items (T94).
+- [!] T93 Authorize MCP clients through an external or enterprise identity provider (S26)
+  - blocked-by: T52 (the Identity Provider feature, `features/identity-provider.md`, which Phase 7 depends on)
+  - note: spec Phase 7 — PRM `authorization_servers`, AS-issued JWTs (`aud` = `canonical_url`) via the OIDC mount, Enterprise-Managed Authorization (ID-JAG), Client ID Metadata Documents for interactive clients.
+- [ ] T94 Close the MCP Access hardening gaps and deferred items (S26)
+  - note: DPoP sender-constraint for app tokens; populate the audit `mcp: {...}` block (`Request::mcp_audit` is defined but never set or read); `bvault_mcp_*` Prometheus families; carry the negotiated TLS key-exchange group out of the TLS layer so `require_hybrid_kex` can be enforced (today the route refuses to serve while it is set); a barrier-derived `requestState` key; per-principal and per-tool rate limits; `GET /v2/sys/mcp/calls`; `catalogue_pin` enforcement at the endpoint; move the `sys/mcp/*` routes off the shared v1/v2 sys scope (only `mcp/pairings` is v2-only today); `server/discover`; a GUI-supervised local server with pairing-consent and per-call confirmation dialogs; lifecycle audit events (`mcp.local.*`, `mcp.app.*`); a cucumber feature file.
 - [x] T81 Keep client requests under the abuse guard with coherent caching (S6)
   - note: old roadmap listed this as Active with Phases 1-2 done; features/client-request-efficiency.md says all five phases are complete, so status inferred during PTF migration
   - source: roadmap.md active list: Client request efficiency
@@ -504,3 +509,4 @@ Next-up list recorded before the migration, in its order:
 | S101 | SSH Login Brokering — Operator Runbook | docs/ssh-login-brokering.md |
 | S102 | SSH Secret Engine | docs/ssh-secret-engine.md |
 | S103 | Project Tracking Format (PTF) v1 | docs/tracking-format.md |
+| S104 | MCP Access — operator guide | docs/mcp.md |

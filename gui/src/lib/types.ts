@@ -2127,3 +2127,78 @@ export interface CertLifecycleSchedulerConfig {
   base_backoff_seconds: number;
   max_backoff_seconds: number;
 }
+
+// ── MCP Access (features/mcp-access.md) ─────────────────────────────────────
+
+export interface McpMachineWaiver {
+  reason: string;
+  granted_by: string;
+  granted_at: number;
+  expires_at: number;
+}
+
+export interface McpApp {
+  name: string;
+  approle_role: string;
+  entity_id: string;
+  description: string;
+  tool_allowlist: string[];
+  path_scope: string[];
+  reveal_allowed: boolean;
+  destructive_allowed: boolean;
+  ttl_secs: number;
+  machine_waiver: McpMachineWaiver | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface McpToken {
+  accessor: string;
+  /** "app" or "pairing". */
+  kind: string;
+  /** The app name, or `pairing_<id>` for a local pairing. */
+  app: string;
+  client_name: string;
+  client_version: string;
+  issued_at: number;
+  expires_at: number;
+}
+
+export interface McpConfig {
+  default_ttl_secs: number;
+  max_ttl_secs: number;
+  waiver_max_days: number;
+  catalogue_pin: string | null;
+}
+
+export interface McpCatalogueTool {
+  name: string;
+  description: string;
+  /** "read" | "reveal" | "write" | "write+reveal". */
+  kind: string;
+}
+
+export interface McpCatalogue {
+  hash: string;
+  tools: McpCatalogueTool[];
+}
+
+/** A client the operator approved on this workstation. Carries no secret. */
+export interface McpPairing {
+  id: string;
+  client_name: string;
+  client_version: string;
+  transport: string;
+  peer_uid: number | null;
+  tool_allowlist: string[];
+  path_scope: string[];
+  reveal_allowed: boolean;
+  destructive_allowed: boolean;
+  confirm_reveal: boolean;
+  confirm_destructive: boolean;
+  ttl_secs: number;
+  approved_at: number;
+  expires_at: number | null;
+  last_used_at: number;
+  expired: boolean;
+}

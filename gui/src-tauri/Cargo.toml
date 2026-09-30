@@ -1,6 +1,6 @@
 [package]
 name = "bastion-vault-gui"
-version = "0.44.13"
+version = "0.44.15"
 edition = "2021"
 description = "BastionVault Desktop GUI"
 # Shipped as a signed installer (see roadmaps/packaging-and-distribution.md),
@@ -83,6 +83,11 @@ rand_v10 = { package = "rand", version = "0.10" }
 # seed-based keygen. The GUI keystore uses the same crate so the
 # PQC primitives match the vault core's (no version skew).
 bv_crypto = { path = "../../crates/bv_crypto" }
+# MCP Access (features/mcp-access.md Phase 5): the compiled-in tool catalogue
+# the Admin -> MCP Apps page shows and pins, and the local pairing store the
+# Settings -> AI Assistants tab lists -- the same code and on-disk format
+# `bvault mcp` uses, so the two can never disagree about what a pairing is.
+bv-mcp = { path = "../../crates/bv-mcp" }
 # YubiKey PIV client — enumerates connected YubiKeys, reads the
 # signing cert in slot 9a, and issues RSA-PKCS1 / ECDSA signatures
 # on operator-supplied salts. Used by the YubiKey failsafe unlock

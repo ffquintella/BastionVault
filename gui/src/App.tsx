@@ -11,6 +11,7 @@ import { FilesPage } from "./routes/FilesPage";
 import { UsersPage } from "./routes/UsersPage";
 import { AppRolePage } from "./routes/AppRolePage";
 import { FerroGatePage } from "./routes/FerroGatePage";
+import { McpAppsPage } from "./routes/McpAppsPage";
 import { GroupsPage } from "./routes/GroupsPage";
 import { AssetGroupsPage } from "./routes/AssetGroupsPage";
 import { SharingPage } from "./routes/SharingPage";
@@ -116,6 +117,10 @@ export default function App() {
             <Route
               path="/ferrogate"
               element={<ProtectedRoute><FerroGatePage /></ProtectedRoute>}
+            />
+            <Route
+              path="/mcp-apps"
+              element={<ProtectedRoute><McpAppsPage /></ProtectedRoute>}
             />
             <Route
               path="/groups"

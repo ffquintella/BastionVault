@@ -161,10 +161,11 @@ pub struct McpConfig {
     #[serde(default)]
     pub allowed_origins: Vec<String>,
     /// Refuse a connection whose negotiated TLS key-exchange group is not
-    /// the hybrid post-quantum group. Phase 3 note: the negotiated-group
-    /// capture this reads is not yet wired into the connection info this
-    /// route sees (see `bv-server`'s `TlsClientInfo`); until it is, this
-    /// flag is parsed but not enforced.
+    /// the hybrid post-quantum group. The negotiated group is not yet carried
+    /// out of the TLS layer (see `bv-server`'s `TlsClientInfo`), so this
+    /// build cannot verify it: while the flag is set, `/v2/mcp` refuses to
+    /// serve (503 `mcp_hybrid_kex_unverifiable`) instead of silently ignoring
+    /// the requirement.
     #[serde(default, deserialize_with = "parse_bool_string")]
     pub require_hybrid_kex: bool,
     /// Serve `/v2/mcp` over a `tls_disable = true` listener anyway, only
@@ -172,12 +173,11 @@ pub struct McpConfig {
     #[serde(default, deserialize_with = "parse_bool_string")]
     pub allow_plaintext_loopback: bool,
     /// Body size cap in bytes. `0` means use the built-in default
-    /// (256 KiB).
+    /// (256 KiB), which is also the ceiling: a larger value is clamped to it.
     #[serde(default)]
     pub max_request_bytes: usize,
     /// Per-call timeout in seconds. `0` means use the built-in default
-    /// (30s). Phase 3 note: parsed but not yet enforced -- see the
-    /// dispatcher call site in `bv-server`'s `mcp_routes.rs`.
+    /// (30s). A call that exceeds it answers `mcp_tool_timeout`.
     #[serde(default)]
     pub tool_timeout_secs: u64,
     /// RFC 9728 PRM `authorization_servers`. Unused until Phase 7

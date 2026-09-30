@@ -59,13 +59,32 @@ pub async fn call(
     let req = build_tool_request(tool, &args)?;
     check_path_scope(&req.path, ctx.binding)?;
 
+    // Destructiveness is a property of the tool itself (write/delete/issue),
+    // not an opt-in request argument the way `reveal` is — a destructive
+    // tool is refused outright unless the binding allows it.
+    if meta.destructive {
+        check_destructive_gate(meta.destructive, ctx.binding)?;
+    }
+
     let reveal_requested = args.get("reveal").and_then(Value::as_bool).unwrap_or(false);
     if meta.is_reveal && reveal_requested {
         check_reveal_gate(meta.is_reveal, reveal_requested, ctx.binding)?;
-        if ctx.confirm_reveal {
-            if let Some(result) = require_confirmation(tool, &args, "reveal", confirmed_state, ctx)? {
-                return Ok(result);
-            }
+    }
+
+    // A tool can need both confirmations at once (`bv_pki_issue` is both
+    // destructive and a reveal) — combine into a single MRTR round trip
+    // rather than asking twice.
+    let needs_reveal_confirm = meta.is_reveal && reveal_requested && ctx.confirm_reveal;
+    let needs_destructive_confirm = meta.destructive && ctx.confirm_destructive;
+    if needs_reveal_confirm || needs_destructive_confirm {
+        let decision = match (needs_reveal_confirm, needs_destructive_confirm) {
+            (true, true) => "reveal+destructive",
+            (true, false) => "reveal",
+            (false, true) => "destructive",
+            (false, false) => unreachable!("guarded by the enclosing if"),
+        };
+        if let Some(result) = require_confirmation(tool, &args, decision, confirmed_state, ctx)? {
+            return Ok(result);
         }
     }
 
@@ -158,7 +177,7 @@ fn shape_result(meta: &ToolMeta, reveal_requested: bool, response: Option<bv_cli
 /// tools. A field not in this list is assumed non-secret and passes
 /// through unredacted even when `reveal` was not requested.
 fn redact_reveal_fields(data: &mut Map<String, Value>) {
-    for key in ["data", "plaintext", "code"] {
+    for key in ["data", "plaintext", "code", "private_key"] {
         if data.contains_key(key) {
             data.insert(key.to_string(), Value::String("<redacted>".to_string()));
         }
@@ -213,10 +232,6 @@ fn check_reveal_gate(is_reveal_tool: bool, reveal_requested: bool, binding: &Mcp
     Ok(())
 }
 
-// `pub(crate)`, not used from `call` yet: no destructive tool ships in the
-// v1 catalogue (Phase 6). Exercised directly by a unit test in `lib.rs` and
-// ready to wire in when write tools land.
-#[allow(dead_code)]
 pub(crate) fn check_destructive_gate(is_destructive_tool: bool, binding: &McpBinding) -> Result<(), McpError> {
     if is_destructive_tool && !binding.destructive_allowed {
         return Err(McpError::DestructiveDenied);
@@ -317,6 +332,48 @@ fn build_tool_request(tool: &str, args: &Map<String, Value>) -> Result<ToolReque
         "bv_pki_read_cert" => {
             let serial = normalize_component(arg_str(args, "serial")?)?;
             Ok(ToolRequest { operation: Operation::Read, path: format!("pki/cert/{serial}"), body: None })
+        }
+        "bv_kv_write" => {
+            let mount = normalize_component(arg_str(args, "mount")?)?;
+            let path = normalize_component(arg_str(args, "path")?)?;
+            let data = args
+                .get("data")
+                .and_then(Value::as_object)
+                .cloned()
+                .ok_or_else(|| McpError::InvalidArgument("missing or non-object `data`".into()))?;
+            let mut body = Map::new();
+            body.insert("data".into(), Value::Object(data));
+            Ok(ToolRequest { operation: Operation::Write, path: format!("{mount}/data/{path}"), body: Some(body) })
+        }
+        "bv_kv_delete" => {
+            let mount = normalize_component(arg_str(args, "mount")?)?;
+            let path = normalize_component(arg_str(args, "path")?)?;
+            // Soft-delete only — the current version's data endpoint, never
+            // `metadata` (which would also erase version history).
+            Ok(ToolRequest { operation: Operation::Delete, path: format!("{mount}/data/{path}"), body: None })
+        }
+        "bv_pki_issue" => {
+            let role = normalize_component(arg_str(args, "role")?)?;
+            let common_name = arg_str(args, "common_name")?;
+            let mut body = Map::new();
+            body.insert("common_name".into(), Value::String(common_name.to_string()));
+            if let Some(ttl) = args.get("ttl").and_then(Value::as_str) {
+                body.insert("ttl".into(), Value::String(ttl.to_string()));
+            }
+            if let Some(alt_names) = args.get("alt_names").and_then(Value::as_str) {
+                body.insert("alt_names".into(), Value::String(alt_names.to_string()));
+            }
+            Ok(ToolRequest { operation: Operation::Write, path: format!("pki/issue/{role}"), body: Some(body) })
+        }
+        "bv_ssh_sign" => {
+            let role = normalize_component(arg_str(args, "role")?)?;
+            let public_key = arg_str(args, "public_key")?;
+            let mut body = Map::new();
+            body.insert("public_key".into(), Value::String(public_key.to_string()));
+            if let Some(principals) = args.get("valid_principals").and_then(Value::as_str) {
+                body.insert("valid_principals".into(), Value::String(principals.to_string()));
+            }
+            Ok(ToolRequest { operation: Operation::Write, path: format!("ssh/sign/{role}"), body: Some(body) })
         }
         other => Err(McpError::UnknownTool(other.to_string())),
     }

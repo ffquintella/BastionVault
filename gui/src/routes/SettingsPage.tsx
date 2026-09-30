@@ -26,6 +26,7 @@ import { UnsealModal } from "../components/UnsealModal";
 import { RustionBastionsTab } from "../components/RustionBastionsTab";
 import { RustionPolicyPanel } from "../components/RustionPolicyPanel";
 import { DosProtectionPanel } from "../components/DosProtectionPanel";
+import { McpAssistantsPanel } from "../components/McpAssistantsPanel";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
@@ -67,6 +68,7 @@ export function SettingsPage() {
     { id: "resources", label: "Resources" },
     { id: "rustion", label: "Rustion" },
     { id: "storage", label: "Storage" },
+    { id: "assistants", label: "AI Assistants" },
   ];
   // Effective data location for the currently-default Local profile.
   // Resolved at mount time so the Connection card reflects what
@@ -1039,6 +1041,8 @@ export function SettingsPage() {
             }
           }}
         />
+
+        {activeTab === "assistants" && <McpAssistantsPanel />}
 
         {activeTab === "storage" && (<>
         {/* Cloud Storage Targets — OAuth connect flow. Phase 7 of

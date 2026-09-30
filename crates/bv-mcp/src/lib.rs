@@ -9,6 +9,7 @@ pub mod catalogue;
 pub mod dispatcher;
 pub mod error;
 pub mod jsonrpc;
+pub mod pairing;
 pub mod request_state;
 pub mod sanitize;
 
@@ -278,11 +279,108 @@ mod dispatch_tests {
 
     #[test]
     fn destructive_gate_pure_function_allows_and_denies() {
-        // No destructive tool ships in the v1 catalogue (Phase 6), so this
-        // exercises the gate directly rather than through `call`.
         let mut b = binding(&[], &[]);
         assert!(crate::dispatcher::check_destructive_gate(true, &b).is_err());
         b.destructive_allowed = true;
         assert!(crate::dispatcher::check_destructive_gate(true, &b).is_ok());
+    }
+
+    #[tokio::test]
+    async fn destructive_tool_denied_by_default() {
+        let b = binding(&["bv_kv_write"], &["secret/data/*"]);
+        let backend = FakeBackend::default();
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        let mut args = Map::new();
+        args.insert("mount".into(), json!("secret"));
+        args.insert("path".into(), json!("foo"));
+        args.insert("data".into(), json!({ "k": "v" }));
+        let err = dispatcher::call("bv_kv_write", args, None, &ctx(&b, &backend, &p, &guard)).await.unwrap_err();
+        assert_eq!(err.code(), "mcp_destructive_denied");
+    }
+
+    #[tokio::test]
+    async fn destructive_tool_allowed_after_grant_dispatches() {
+        let mut b = binding(&["bv_kv_write"], &["secret/data/*"]);
+        b.destructive_allowed = true;
+        let backend = FakeBackend::default().with("secret/data/foo", json!({ "ok": true }));
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        let mut args = Map::new();
+        args.insert("mount".into(), json!("secret"));
+        args.insert("path".into(), json!("foo"));
+        args.insert("data".into(), json!({ "k": "v" }));
+        let result = dispatcher::call("bv_kv_write", args, None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn destructive_with_confirmation_requires_state_then_succeeds_and_is_single_use() {
+        let mut b = binding(&["bv_kv_delete"], &["secret/data/*"]);
+        b.destructive_allowed = true;
+        let backend = FakeBackend::default().with("secret/data/foo", json!({ "ok": true }));
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        let mut args = Map::new();
+        args.insert("mount".into(), json!("secret"));
+        args.insert("path".into(), json!("foo"));
+
+        let mut dc = ctx(&b, &backend, &p, &guard);
+        dc.confirm_destructive = true;
+
+        let first = dispatcher::call("bv_kv_delete", args.clone(), None, &dc).await.unwrap();
+        assert_eq!(first.result_type, ResultType::InputRequired);
+        let state = first.request_state.expect("input_required must carry a requestState");
+
+        let second = dispatcher::call("bv_kv_delete", args.clone(), Some(&state), &dc).await.unwrap();
+        assert!(!second.is_error);
+
+        let replay = dispatcher::call("bv_kv_delete", args, Some(&state), &dc).await;
+        assert!(replay.is_err(), "a second use of the same requestState must be refused");
+    }
+
+    #[tokio::test]
+    async fn pki_issue_requires_both_destructive_and_reveal_allowed() {
+        let backend = FakeBackend::default().with(
+            "pki/issue/web-server",
+            json!({ "certificate": "-----BEGIN CERTIFICATE-----", "private_key": "-----BEGIN PRIVATE KEY-----" }),
+        );
+        let p = principal();
+        let mut args = Map::new();
+        args.insert("role".into(), json!("web-server"));
+        args.insert("common_name".into(), json!("example.com"));
+        args.insert("reveal".into(), json!(true));
+
+        // destructive_allowed alone is not enough — reveal is also gated.
+        let mut b = binding(&["bv_pki_issue"], &["pki/issue/*"]);
+        b.destructive_allowed = true;
+        let guard = SingleUseGuard::new();
+        let err =
+            dispatcher::call("bv_pki_issue", args.clone(), None, &ctx(&b, &backend, &p, &guard)).await.unwrap_err();
+        assert_eq!(err.code(), "mcp_reveal_denied");
+
+        // Both granted: succeeds and the private key is not redacted.
+        b.reveal_allowed = true;
+        let guard = SingleUseGuard::new();
+        let result = dispatcher::call("bv_pki_issue", args, None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
+        assert_eq!(result.structured_content.unwrap()["private_key"], json!("-----BEGIN PRIVATE KEY-----"));
+    }
+
+    #[tokio::test]
+    async fn pki_issue_without_reveal_requested_redacts_private_key() {
+        let backend = FakeBackend::default().with(
+            "pki/issue/web-server",
+            json!({ "certificate": "-----BEGIN CERTIFICATE-----", "private_key": "-----BEGIN PRIVATE KEY-----" }),
+        );
+        let p = principal();
+        let mut b = binding(&["bv_pki_issue"], &["pki/issue/*"]);
+        b.destructive_allowed = true;
+        b.reveal_allowed = true;
+        let guard = SingleUseGuard::new();
+        let mut args = Map::new();
+        args.insert("role".into(), json!("web-server"));
+        args.insert("common_name".into(), json!("example.com"));
+        let result = dispatcher::call("bv_pki_issue", args, None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
+        assert_eq!(result.structured_content.unwrap()["private_key"], json!("<redacted>"));
     }
 }
