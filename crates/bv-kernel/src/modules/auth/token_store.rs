@@ -681,6 +681,26 @@ impl TokenStore {
             return Err(RvError::ErrPermissionDenied);
         }
 
+        // A token minted under a machine-identity waiver dies with that
+        // waiver, not at its own TTL (features/mcp-access.md § 2): checked
+        // here, at every call, so an expired waiver cuts a live token off at
+        // the next one. Revoking the waiver early is handled by revoking the
+        // tokens minted under it (`handle_mcp_app_waiver_delete`).
+        if let Some(until) = entry.mcp_binding.as_ref().and_then(|b| b.waived_until) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(u64::MAX);
+            if until <= now {
+                log::warn!(
+                    target: "security",
+                    "request denied: the MCP machine-identity waiver this token was minted under expired (path={path}, display_name={})",
+                    entry.display_name
+                );
+                return Err(RvError::ErrPermissionDenied);
+            }
+        }
+
         // Source-address binding, before `use_token`: a refused request must
         // not burn one of a use-limited token's uses.
         if !entry.bound_cidrs.is_empty() && !cidr::remote_addr_in_bound_cidrs(client_ip, &entry.bound_cidrs) {

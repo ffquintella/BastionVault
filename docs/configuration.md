@@ -261,6 +261,32 @@ scrape_configs:
 > allowances. Leaving `allow_cluster_local = true` is what keeps a node-local
 > scrape working across a seal.
 
+## MCP Access (optional)
+
+Off by default. Serves the MCP endpoint `POST /v2/mcp` and the token exchange
+`POST /v2/mcp/token`; see [`mcp.md`](mcp.md).
+
+```hcl
+mcp {
+  enabled                  = true
+  canonical_url            = "https://vault.example.com:8200/v2/mcp"
+  allowed_origins          = []
+  allow_plaintext_loopback = false
+  max_request_bytes        = 262144
+  tool_timeout_secs        = 30
+}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Serve the MCP routes; otherwise they answer 503 |
+| `canonical_url` | — | The endpoint's public URL (RFC 8707 resource), advertised in the protected-resource metadata |
+| `allowed_origins` | `[]` | Exact browser origins allowed to call `/v2/mcp`; empty admits only clients that send no `Origin` |
+| `allow_plaintext_loopback` | `false` | Serve over a plaintext listener, only if that listener is loopback-only. Without it the routes require TLS |
+| `max_request_bytes` | `0` (256 KiB) | Request body cap; 256 KiB is also the ceiling |
+| `tool_timeout_secs` | `0` (30) | Per-call timeout |
+| `require_hybrid_kex` | `false` | Not verifiable in this build: while `true`, `/v2/mcp` refuses to serve (503) rather than ignore it |
+
 ## Environment Variables
 
 Configuration can also be influenced by environment variables:

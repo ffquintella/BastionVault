@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "bastion-vault-gui"
-version = "0.44.13"
+version = "0.44.14"
 dependencies = [
  "arboard",
  "argon2 0.5.3",
@@ -1029,6 +1029,7 @@ dependencies = [
  "bastion-plugin-testkit",
  "bastion_vault",
  "bv-client",
+ "bv-mcp",
  "bv_crypto",
  "bv_plugin_surface",
  "chacha20poly1305",
@@ -1082,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "bastion_vault"
-version = "0.44.13"
+version = "0.44.14"
 dependencies = [
  "actix-rt",
  "anyhow",
@@ -2259,10 +2260,13 @@ dependencies = [
  "bv-client",
  "bv-errors",
  "bv-logical",
+ "bv_crypto",
+ "hex",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -2441,7 +2445,7 @@ dependencies = [
 
 [[package]]
 name = "bvault-cli"
-version = "0.44.13"
+version = "0.44.14"
 dependencies = [
  "actix-rt",
  "actix-web",
@@ -2450,8 +2454,11 @@ dependencies = [
  "base64 0.22.1",
  "bastion_vault",
  "better_default",
+ "blake3",
  "bv-client",
+ "bv-mcp",
  "bv-server",
+ "bv_crypto",
  "chacha20poly1305",
  "clap",
  "daemonize",
@@ -2460,8 +2467,11 @@ dependencies = [
  "env_logger",
  "hex",
  "hkdf 0.13.0",
+ "http 1.4.2",
+ "httparse",
  "humantime",
  "lazy_static",
+ "libc",
  "log",
  "maybe-async",
  "prettytable",
@@ -2469,6 +2479,7 @@ dependencies = [
  "regex",
  "rpassword",
  "rustls",
+ "serde",
  "serde_json",
  "serde_yaml",
  "serial_test",

@@ -207,6 +207,287 @@ mod mod_test {
         assert!(matches!(resp, Err(RvError::ErrPermissionDenied)));
     }
 
+    /// Mounts userpass and a policy letting a human operator run the pairing
+    /// exchange and revoke a pairing, then returns a fresh login token.
+    async fn operator_token(core: &crate::core::Core, root_token: &str, user: &str) -> String {
+        test_mount_auth_api(core, root_token, "userpass", "userpass").await;
+        let policy_hcl = r#"
+            path "sys/mcp/token" { capabilities = ["update"] }
+            path "sys/mcp/pairings/*" { capabilities = ["delete"] }
+            path "secret/data/ai/*" { capabilities = ["read"] }
+        "#;
+        let _ = test_write_api(
+            core,
+            root_token,
+            "sys/policy/mcp-pairer",
+            true,
+            json!({ "policy": policy_hcl }).as_object().cloned(),
+        )
+        .await;
+        let _ = test_write_api(
+            core,
+            root_token,
+            &format!("auth/userpass/users/{user}"),
+            true,
+            json!({ "password": "pw", "policies": "mcp-pairer" }).as_object().cloned(),
+        )
+        .await;
+        let mut req = crate::logical::Request::new(format!("auth/userpass/login/{user}"));
+        req.operation = crate::logical::Operation::Write;
+        req.body = json!({ "password": "pw" }).as_object().cloned();
+        core.handle_request(&mut req)
+            .await
+            .unwrap()
+            .expect("userpass login response")
+            .auth
+            .expect("userpass login mints a token")
+            .client_token
+    }
+
+    fn pairing_body(id: &str) -> Option<serde_json::Map<String, Value>> {
+        json!({
+            "pairing": {
+                "id": id,
+                "client_name": "claude-desktop",
+                "client_version": "1.2.3",
+                "tool_allowlist": ["bv_kv_read_metadata"],
+                "path_scope": ["secret/metadata/ai/*"],
+                "reveal_allowed": false,
+                "destructive_allowed": false,
+            },
+            "catalogue_hash": "deadbeef",
+        })
+        .as_object()
+        .cloned()
+    }
+
+    /// Pairing mode (Phase 4): an operator session exchanges for a
+    /// pairing-bound token whose binding carries exactly the approved grant,
+    /// is listed as a pairing token, and is revoked by pairing id.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_mcp_pairing_exchange_and_revoke_by_id() {
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_mcp_pairing_exchange").await;
+        let core: &crate::core::Core = &core;
+        let op = operator_token(core, &root_token, "felipe").await;
+
+        let resp = test_write_api(core, &op, "sys/mcp/token", true, pairing_body("abc-123")).await;
+        let data = resp.unwrap().unwrap().data.expect("pairing exchange mints a token");
+        assert_eq!(data["auth"]["metadata"]["mcp_kind"], json!("pairing"));
+        let mcp_token = data["auth"]["client_token"].as_str().unwrap().to_string();
+
+        let auth_module = core.module_manager().get_module::<crate::modules::auth::AuthModule>("auth").unwrap();
+        let token_store = auth_module.token_store.load_full().unwrap();
+        assert!(token_store.check_token("secret/metadata/ai/x", &mcp_token, "", false).await.is_err());
+        let auth = token_store
+            .check_token("secret/metadata/ai/x", &mcp_token, "", true)
+            .await
+            .unwrap()
+            .expect("a pairing token is accepted on the MCP dispatcher");
+        let binding = auth.mcp_binding.expect("token carries its binding");
+        assert_eq!(binding.kind, crate::logical::McpBindingKind::Pairing("abc-123".to_string()));
+        assert_eq!(binding.client_name, "claude-desktop");
+        assert_eq!(binding.tool_allowlist, vec!["bv_kv_read_metadata".to_string()]);
+        assert_eq!(binding.path_scope, vec!["secret/metadata/ai/*".to_string()]);
+        assert!(!binding.reveal_allowed && !binding.destructive_allowed);
+        assert_eq!(binding.catalogue_hash, "deadbeef");
+
+        let resp = test_list_api(core, &root_token, "sys/mcp/tokens", true).await;
+        let rows = resp.unwrap().unwrap().data.unwrap()["tokens"].clone();
+        assert_eq!(rows[0]["kind"], json!("pairing"));
+        assert_eq!(rows[0]["app"], json!("pairing_abc-123"));
+
+        // Revoke by pairing id as the operator (not root).
+        let _ = test_delete_api(core, &op, "sys/mcp/pairings/abc-123", true, None).await;
+        assert!(token_store.check_token("secret/metadata/ai/x", &mcp_token, "", true).await.is_err());
+        let resp = test_list_api(core, &root_token, "sys/mcp/tokens", true).await;
+        assert_eq!(resp.unwrap().unwrap().data.unwrap()["tokens"], json!([]));
+    }
+
+    /// Pairing is an operator-session feature: AppRole and root callers are
+    /// refused, and so is an MCP-bound token or a malformed grant.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_mcp_pairing_refusals() {
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_mcp_pairing_refusals").await;
+        let core: &crate::core::Core = &core;
+
+        // Root.
+        let resp = test_write_api(core, &root_token, "sys/mcp/token", false, pairing_body("r1")).await;
+        assert!(resp.is_err());
+
+        // AppRole login token: a machine-class principal, not an operator.
+        setup_app_role(core, &root_token, "reader-role").await;
+        let approle_login = login_as(core, &root_token, "reader-role").await;
+        let resp = test_write_api(core, &approle_login, "sys/mcp/token", false, pairing_body("r2")).await;
+        assert!(resp.is_err());
+
+        // Operator, but a malformed grant.
+        let op = operator_token(core, &root_token, "felipe").await;
+        let bad_id = test_write_api(core, &op, "sys/mcp/token", false, pairing_body("Not Valid!")).await;
+        assert!(bad_id.is_err());
+        let mut bad_tool = pairing_body("ok-id").unwrap();
+        bad_tool["pairing"]["tool_allowlist"] = json!(["../etc/passwd"]);
+        assert!(test_write_api(core, &op, "sys/mcp/token", false, Some(bad_tool)).await.is_err());
+
+        // `app` and `pairing` together, and neither.
+        let mut both = pairing_body("both-ok").unwrap();
+        both.insert("app".into(), json!("ci-secrets-reader"));
+        assert!(test_write_api(core, &op, "sys/mcp/token", false, Some(both)).await.is_err());
+        assert!(test_write_api(core, &op, "sys/mcp/token", false, json!({}).as_object().cloned()).await.is_err());
+
+        // An MCP-bound token cannot itself exchange for another.
+        let ok = test_write_api(core, &op, "sys/mcp/token", true, pairing_body("first")).await;
+        let mcp_token = ok.unwrap().unwrap().data.unwrap()["auth"]["client_token"].as_str().unwrap().to_string();
+        let auth_module = core.module_manager().get_module::<crate::modules::auth::AuthModule>("auth").unwrap();
+        let token_store = auth_module.token_store.load_full().unwrap();
+        assert!(token_store.check_token("sys/mcp/token", &mcp_token, "", false).await.is_err());
+    }
+
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    }
+
+    /// A machine-identity waiver is enforced at every call, not only at
+    /// exchange: a token minted under one is dead the moment the waiver
+    /// expires, and dies immediately when the waiver is revoked.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_mcp_waiver_expiry_and_revocation_cut_off_live_tokens() {
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_mcp_waiver_enforcement").await;
+        let core: &crate::core::Core = &core;
+        let auth_module = core.module_manager().get_module::<crate::modules::auth::AuthModule>("auth").unwrap();
+        let token_store = auth_module.token_store.load_full().unwrap();
+
+        // Expiry. Minted directly so the test does not have to wait a day.
+        let op = operator_token(core, &root_token, "felipe").await;
+        let binding = |waived_until: Option<u64>| crate::logical::McpBinding {
+            kind: crate::logical::McpBindingKind::App("x".into()),
+            catalogue_hash: String::new(),
+            tool_allowlist: vec![],
+            path_scope: vec![],
+            reveal_allowed: false,
+            destructive_allowed: false,
+            client_name: String::new(),
+            client_version: String::new(),
+            waived_until,
+        };
+        let expired = token_store.mint_mcp_token(&op, &[], 600, "t-expired".into(), binding(Some(unix_now() - 5))).await.unwrap();
+        assert!(
+            token_store.check_token("mcp/dispatch", &expired.client_token, "", true).await.is_err(),
+            "a token whose waiver has expired must be refused at its next call"
+        );
+        let live = token_store.mint_mcp_token(&op, &[], 600, "t-live".into(), binding(Some(unix_now() + 600))).await.unwrap();
+        assert!(token_store.check_token("mcp/dispatch", &live.client_token, "", true).await.unwrap().is_some());
+        let unwaived = token_store.mint_mcp_token(&op, &[], 600, "t-plain".into(), binding(None)).await.unwrap();
+        assert!(token_store.check_token("mcp/dispatch", &unwaived.client_token, "", true).await.unwrap().is_some());
+
+        // Revocation: the waiver record goes, and so do the tokens minted under it.
+        setup_app_role(core, &root_token, "reader-role").await;
+        register_mcp_app(core, &root_token, "ci-secrets-reader", "reader-role").await;
+        let _ = test_write_api(
+            core,
+            &root_token,
+            "sys/mcp/apps/ci-secrets-reader/machine-waiver",
+            true,
+            json!({ "reason": "no agent", "expires_in_days": 7 }).as_object().cloned(),
+        )
+        .await;
+        let login = login_as(core, &root_token, "reader-role").await;
+        let resp = test_write_api(
+            core,
+            &login,
+            "sys/mcp/token",
+            true,
+            json!({ "app": "ci-secrets-reader" }).as_object().cloned(),
+        )
+        .await;
+        let minted = resp.unwrap().unwrap().data.unwrap()["auth"]["client_token"].as_str().unwrap().to_string();
+        let auth = token_store.check_token("mcp/dispatch", &minted, "", true).await.unwrap().unwrap();
+        assert!(auth.mcp_binding.unwrap().waived_until.is_some(), "a waived exchange stamps the expiry");
+
+        let _ = test_delete_api(core, &root_token, "sys/mcp/apps/ci-secrets-reader/machine-waiver", true, None).await;
+        assert!(
+            token_store.check_token("mcp/dispatch", &minted, "", true).await.is_err(),
+            "revoking the waiver must cut off the tokens minted under it"
+        );
+        let resp = test_list_api(core, &root_token, "sys/mcp/tokens", true).await;
+        let rows = resp.unwrap().unwrap().data.unwrap()["tokens"].clone();
+        assert!(
+            rows.as_array().unwrap().iter().all(|r| r["app"] != json!("ci-secrets-reader")),
+            "and their index entries are gone: {rows}"
+        );
+    }
+
+    fn http_post(listen_addr: &str, path: &str, token: Option<&str>, body: Value) -> (u16, Value) {
+        let agent = ureq::Agent::config_builder().http_status_as_error(false).build().new_agent();
+        let mut builder = ::http::Request::builder()
+            .method("POST")
+            .uri(format!("http://{listen_addr}{path}"))
+            .header("Content-Type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("Authorization", format!("Bearer {t}"));
+        }
+        let req = builder.body(serde_json::to_vec(&body).unwrap()).unwrap();
+        let mut resp = agent.run(req).expect("request must complete");
+        let status = resp.status().as_u16();
+        let json: Value = resp.body_mut().read_json().unwrap_or(Value::Null);
+        (status, json)
+    }
+
+    /// Revocation must take effect over real HTTP, not only in-process: a
+    /// pairing token is dead at `/v2/mcp` the moment its pairing is revoked,
+    /// and so is a token revoked by accessor.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_mcp_http_revocation_takes_effect() {
+        use crate::test_utils::TestHttpServer;
+
+        let mut server = TestHttpServer::new("test_mcp_http_revocation", false).await;
+        let root = server.root_token.clone();
+        let addr = server.listen_addr.clone();
+
+        server.mount_auth("userpass", "userpass").unwrap();
+        let policy = r#"
+            path "sys/mcp/token" { capabilities = ["update"] }
+            path "sys/mcp/pairings/*" { capabilities = ["delete"] }
+            path "sys/mcp/tokens/*" { capabilities = ["delete"] }
+        "#;
+        server.write("sys/policy/mcp-pairer", json!({ "policy": policy }).as_object().cloned(), Some(&root)).unwrap();
+        server
+            .write(
+                "auth/userpass/users/felipe",
+                json!({ "password": "pw", "policies": "mcp-pairer" }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        let (_, login) = server
+            .login("auth/userpass/login/felipe", json!({ "password": "pw" }).as_object().cloned(), None)
+            .unwrap();
+        let op = login["auth"]["client_token"].as_str().unwrap().to_string();
+
+        let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} });
+        let mint = |id: &str| {
+            let body = pairing_body(id).map(Value::Object).unwrap();
+            let (status, resp) = http_post(&addr, "/v2/mcp/token", Some(&op), body);
+            assert_eq!(status, 200, "{resp}");
+            (
+                resp["auth"]["client_token"].as_str().unwrap().to_string(),
+                resp["auth"]["accessor"].as_str().unwrap().to_string(),
+            )
+        };
+
+        // By pairing id.
+        let (token, _) = mint("pair-one");
+        assert_eq!(http_post(&addr, "/v2/mcp", Some(&token), list.clone()).0, 200);
+        let (status, _) = server.delete("sys/mcp/pairings/pair-one", None, Some(&op)).unwrap();
+        assert!((200..300).contains(&status), "revoke answered {status}");
+        assert_eq!(http_post(&addr, "/v2/mcp", Some(&token), list.clone()).0, 403, "a revoked pairing's token must be dead");
+
+        // By accessor.
+        let (token, accessor) = mint("pair-two");
+        assert_eq!(http_post(&addr, "/v2/mcp", Some(&token), list.clone()).0, 200);
+        let (status, _) = server.delete(&format!("sys/mcp/tokens/{accessor}"), None, Some(&root)).unwrap();
+        assert!((200..300).contains(&status), "revoke answered {status}");
+        assert_eq!(http_post(&addr, "/v2/mcp", Some(&token), list).0, 403, "a token revoked by accessor must be dead");
+    }
+
     /// End-to-end over real HTTP (Phase 3, `crates/bv-server/src/mcp_routes.rs`):
     /// `POST /v2/mcp/token` mints an MCP-bound token, then `POST /v2/mcp`
     /// answers `tools/list` and dispatches a `tools/call` for

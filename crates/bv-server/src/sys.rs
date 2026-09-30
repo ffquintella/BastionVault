@@ -4471,6 +4471,9 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
         .service(
             web::resource("/mcp/tokens/{accessor}").route(web::delete().to(sys_mcp_token_delete_request_handler)),
         )
+        .service(
+            web::resource("/mcp/pairings/{id}").route(web::delete().to(sys_mcp_pairing_delete_request_handler)),
+        )
 }
 
 async fn sys_mcp_config_request_handler(
@@ -4563,6 +4566,17 @@ async fn sys_mcp_token_delete_request_handler(
 ) -> Result<HttpResponse, HttpError> {
     let mut r = request_auth(&req);
     r.path = format!("sys/mcp/tokens/{}", path.into_inner());
+    r.operation = Operation::Delete;
+    handle_request(core, &mut r).await
+}
+
+async fn sys_mcp_pairing_delete_request_handler(
+    req: HttpRequest,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = format!("sys/mcp/pairings/{}", path.into_inner());
     r.operation = Operation::Delete;
     handle_request(core, &mut r).await
 }

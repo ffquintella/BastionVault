@@ -218,6 +218,7 @@ impl SystemBackend {
         let sys_backend_mcp_tokens_list = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_mcp_token_delete = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_mcp_token_exchange = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_mcp_pairing_delete = self.self_ptr.upgrade().unwrap().clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -1176,13 +1177,24 @@ impl SystemBackend {
                     help: "Revoke one MCP-bound token by accessor."
                 },
                 {
+                    pattern: r"mcp/pairings/(?P<id>[^/]+)$",
+                    fields: {
+                        "id": { field_type: FieldType::Str, required: true, description: "Local MCP pairing id." }
+                    },
+                    operations: [
+                        {op: Operation::Delete, handler: sys_backend_mcp_pairing_delete.handle_mcp_pairing_delete}
+                    ],
+                    help: "Revoke every MCP-bound token minted for one local pairing."
+                },
+                {
                     // The public HTTP path is `/v2/mcp/token` (not under
                     // `/v2/sys/`); Phase 3's server route maps that to this
                     // logical path. See mcp.rs's handler doc for why this
                     // is routed normally rather than called directly.
                     pattern: "mcp/token$",
                     fields: {
-                        "app": { field_type: FieldType::Str, required: true, description: "MCP app name to exchange for." },
+                        "app": { field_type: FieldType::Str, required: false, description: "MCP app name to exchange for (network mode). Mutually exclusive with `pairing`." },
+                        "pairing": { field_type: FieldType::Map, required: false, description: "Local-pairing grant: id, client_name, client_version, tool_allowlist, path_scope, reveal_allowed, destructive_allowed, ttl_secs. Mutually exclusive with `app`." },
                         "policies": { field_type: FieldType::CommaStringSlice, required: false, description: "Requested policies; must be a subset of the caller's own." },
                         "ttl_secs": { field_type: FieldType::Int, required: false, description: "Requested TTL in seconds; clamped to the app's configured max." },
                         "catalogue_hash": { field_type: FieldType::Str, required: false, description: "BLAKE3 tools/list hash to stamp on the minted binding." }

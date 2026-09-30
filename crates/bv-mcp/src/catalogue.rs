@@ -248,6 +248,70 @@ pub fn catalogue() -> &'static [ToolMeta] {
             }),
             output_schema: empty_output_schema,
         },
+        // Phase 6 write tools. Disabled per principal unless the binding's
+        // `destructive_allowed` is set; appended here, never reordered,
+        // because catalogue order is load-bearing for `catalogue_hash`.
+        ToolMeta {
+            name: "bv_kv_write",
+            description: "Write a new version of a KV secret. Requires this principal's binding to have destructive_allowed.",
+            read_only: false,
+            destructive: true,
+            idempotent: false,
+            is_reveal: false,
+            input_schema: || path_args_schema(json!({
+                "properties": { "data": { "type": "object" } },
+                "required": ["data"],
+            })),
+            output_schema: empty_output_schema,
+        },
+        ToolMeta {
+            name: "bv_kv_delete",
+            description: "Soft-delete the current version of a KV secret. Never destroys version history and never deletes metadata. Requires destructive_allowed.",
+            read_only: false,
+            destructive: true,
+            idempotent: true,
+            is_reveal: false,
+            input_schema: || path_args_schema(json!({})),
+            output_schema: empty_output_schema,
+        },
+        ToolMeta {
+            name: "bv_pki_issue",
+            description: "Issue a certificate from a PKI role. Returns a private key, so this requires both destructive_allowed and reveal_allowed.",
+            read_only: false,
+            destructive: true,
+            idempotent: false,
+            is_reveal: true,
+            input_schema: || json!({
+                "type": "object",
+                "properties": {
+                    "role": { "type": "string" },
+                    "common_name": { "type": "string" },
+                    "ttl": { "type": "string" },
+                    "alt_names": { "type": "string" },
+                    "reveal": { "type": "boolean", "default": false },
+                },
+                "required": ["role", "common_name"],
+            }),
+            output_schema: empty_output_schema,
+        },
+        ToolMeta {
+            name: "bv_ssh_sign",
+            description: "Sign an SSH public key from an SSH CA role. Requires destructive_allowed.",
+            read_only: false,
+            destructive: true,
+            idempotent: false,
+            is_reveal: false,
+            input_schema: || json!({
+                "type": "object",
+                "properties": {
+                    "role": { "type": "string" },
+                    "public_key": { "type": "string" },
+                    "valid_principals": { "type": "string" },
+                },
+                "required": ["role", "public_key"],
+            }),
+            output_schema: empty_output_schema,
+        },
     ]
 }
 
@@ -316,12 +380,22 @@ mod tests {
     #[test]
     fn find_locates_a_known_tool_and_rejects_unknown() {
         assert!(find("bv_whoami").is_some());
-        assert!(find("bv_kv_write").is_none());
+        assert!(find("bv_kv_write").is_some());
+        assert!(find("bv_does_not_exist").is_none());
     }
 
     #[test]
     fn reveal_tools_match_spec_table() {
         let reveal_tools: Vec<&str> = catalogue().iter().filter(|t| t.is_reveal).map(|t| t.name).collect();
-        assert_eq!(reveal_tools, vec!["bv_kv_read", "bv_transit_decrypt", "bv_totp_code"]);
+        assert_eq!(reveal_tools, vec!["bv_kv_read", "bv_transit_decrypt", "bv_totp_code", "bv_pki_issue"]);
+    }
+
+    #[test]
+    fn write_tools_are_destructive_and_disabled_by_default() {
+        for name in ["bv_kv_write", "bv_kv_delete", "bv_pki_issue", "bv_ssh_sign"] {
+            let tool = find(name).unwrap_or_else(|| panic!("{name} missing from catalogue"));
+            assert!(tool.destructive, "{name} must be destructiveHint");
+            assert!(!tool.read_only, "{name} must not be readOnlyHint");
+        }
     }
 }

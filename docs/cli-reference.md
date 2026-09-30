@@ -279,6 +279,40 @@ Move a secrets engine to a different path.
 bvault secrets move secret/ generic/
 ~~~
 
+## mcp
+
+Give AI assistants scoped, audited access to BastionVault over the Model Context
+Protocol. The operator guide is [`mcp.md`](mcp.md).
+
+```bash
+bvault mcp pair --client-name <name> [--transport stdio|uds|loopback-http]
+bvault mcp serve [--stdio | --socket <path> | --listen 127.0.0.1:<port>]
+bvault mcp pairings list
+bvault mcp pairings revoke <id>
+bvault mcp token --app <name> [--ttl-secs N] [--policies a,b]
+bvault mcp catalogue
+```
+
+- `pair` needs an interactive terminal (a non-interactive environment cannot
+  pair). It asks for the path scope, tools, and whether the client may reveal
+  values or make changes. For `--transport loopback-http` it prints a pairing
+  token once.
+- `serve` runs the local MCP server. The three transports are mutually
+  exclusive; stdio is the default. `--listen` accepts only a loopback address
+  (`0.0.0.0:…` is a usage error), and `--socket` creates an owner-only socket.
+  A client that is not paired, or a call that needs confirmation, is refused when
+  there is no terminal to ask. `--allowed-origin` (repeatable) admits a browser
+  origin on the loopback HTTP transport; the default admits none.
+- `pairings revoke` removes the pairing locally and revokes its tokens on the
+  vault; it exits non-zero if the vault could not be reached.
+- `token --app` exchanges the current login for an MCP-bound token for a
+  registered MCP app and prints it (`--format json`, `--field client_token`). The
+  token is never persisted.
+- `catalogue` prints every tool and the catalogue hash used by
+  `sys/mcp/config`'s `catalogue_pin`. No vault is contacted.
+- `--pairings-file` (env `BVAULT_MCP_PAIRINGS_FILE`) overrides the pairing store
+  location, `$XDG_CONFIG_HOME/bvault/mcp-pairings.json` by default.
+
 ## Exit Codes
 
 | Code | Meaning |

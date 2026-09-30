@@ -125,6 +125,7 @@ const adminNav: NavItem[] = [
   { path: "/users", label: "Users" },
   { path: "/approle", label: "AppID" },
   { path: "/ferrogate", label: "Machines (FerroGate)", rootOnly: true },
+  { path: "/mcp-apps", label: "MCP Apps" },
   { path: "/groups", label: "Identity Groups" },
   { path: "/asset-groups", label: "Asset Groups" },
   { path: "/policies", label: "Policies" },

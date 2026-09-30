@@ -1227,6 +1227,61 @@ GET /v1/auth/{mount}/role/{role_name}/role-id
 POST /v1/auth/{mount}/role/{role_name}/secret-id
 ~~~
 
+## MCP Endpoints
+
+MCP Access (see [`mcp.md`](mcp.md)). All of these are `v2` only and require the
+`mcp { enabled = true }` server block. TLS is required (plaintext only on a
+loopback-only listener with `allow_plaintext_loopback`).
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `POST` | `/v2/mcp` | MCP-bound bearer | The MCP JSON-RPC endpoint (`server/discover`, `tools/list`, `tools/call`) |
+| `GET` | `/.well-known/oauth-protected-resource/v2/mcp` | none | RFC 9728 metadata (minimal) |
+| `POST` | `/v2/mcp/token` | login token | Exchange for an MCP-bound token |
+| `GET`/`POST` | `/v2/sys/mcp/config` | `sudo` | Runtime limits and `catalogue_pin` |
+| `LIST` | `/v2/sys/mcp/apps` | ACL | List MCP apps |
+| `GET`/`POST`/`DELETE` | `/v2/sys/mcp/apps/{name}` | ACL | App record; `DELETE` revokes its tokens |
+| `POST`/`DELETE` | `/v2/sys/mcp/apps/{name}/machine-waiver` | `sudo` | Grant (`reason`, `expires_in_days` 1-90) or revoke a machine-identity waiver; revoking also revokes the tokens minted under it |
+| `LIST` | `/v2/sys/mcp/tokens` | ACL | Active MCP-bound tokens (`kind` is `app` or `pairing`) |
+| `DELETE` | `/v2/sys/mcp/tokens/{accessor}` | ACL | Revoke one token |
+| `DELETE` | `/v2/sys/mcp/pairings/{id}` | ACL | Revoke every token minted for one local pairing |
+
+### `POST /v2/mcp/token`
+
+Send the login token in `X-BastionVault-Token`, `X-Vault-Token` or
+`Authorization: Bearer`. Exactly one of `app` and `pairing` is required.
+
+```json
+{ "app": "ci-secrets-reader", "policies": "ai-reader", "ttl_secs": 3600, "catalogue_hash": "<hash>" }
+```
+
+```json
+{ "pairing": { "id": "<[a-z0-9-]{1,64}>", "client_name": "claude-desktop", "client_version": "1.0",
+               "tool_allowlist": ["bv_kv_read_metadata"], "path_scope": ["secret/metadata/ai/*"],
+               "reveal_allowed": false, "destructive_allowed": false, "ttl_secs": 28800 } }
+```
+
+- **App mode** requires the caller to be the app's AppID login, carrying a
+  machine identity or an active waiver (`403 mcp_machine_identity_required`).
+- **Pairing mode** requires an operator session: an entity- or
+  username-bound login, never AppRole, machine, root or MCP-bound
+  (`403 mcp_pairing_requires_operator_session`).
+- The token's policies are the caller's, narrowed by `policies`, never wider.
+
+Response: `{ "auth": { "client_token", "accessor", "policies", "lease_duration",
+"metadata": { "mcp_kind", "mcp_name" } } }`. The token is refused by every
+endpoint except `POST /v2/mcp`.
+
+### `POST /v2/mcp`
+
+Bearer token in `Authorization`. The body is one JSON-RPC request (no batches).
+Refusals: `401` missing or unknown token, `403` a token that is not MCP-bound,
+expired, or whose waiver ended, `413` over `max_request_bytes`, `503`
+`mcp_requires_tls` or `mcp_hybrid_kex_unverifiable`. Tool errors are JSON-RPC
+errors whose `data.code` is one of `mcp_tool_not_allowed`,
+`mcp_path_out_of_scope`, `mcp_reveal_denied`, `mcp_destructive_denied`,
+`mcp_invalid_argument`, `mcp_tool_timeout`.
+
 ## Response Format
 
 All API responses follow a consistent structure:
