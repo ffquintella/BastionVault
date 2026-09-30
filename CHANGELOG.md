@@ -56,6 +56,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.15] - 2026-09-30
+
 ### Fixed
 
 #### MCP Access
@@ -7428,7 +7430,8 @@ Bulk dependency upgrade across the workspace (`Cargo.toml`, `crates/bv-plugin-pa
 
 - Abandon the SQLx storage backend: `libsqlite3-sys` conflicts at link time with hiqlite's `rusqlite`, so `storage "sqlx"` was removed (T5, M2)
 
-[Unreleased]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.14...HEAD
+[Unreleased]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.15...HEAD
+[0.44.15]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.14...releases/0.44.15
 [0.44.14]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.13...releases/0.44.14
 [0.44.13]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.12...releases/0.44.13
 [0.44.12]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.11...releases/0.44.12
