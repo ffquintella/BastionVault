@@ -56,6 +56,17 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+#### MCP Access
+- **Revoking an MCP app, token or pairing no longer reports success when the revoke failed**: the three revoke paths discarded the error from `TokenStore::revoke` and then deleted the only index entry that could find the token again. The error now surfaces and the index entry is kept, so a retry works. (T80)
+
+### Security
+
+#### MCP Access
+- **An MCP token's lifetime is now enforced**: `mint_mcp_token` never registered the token's lease with the expiration manager and `check_token` did not compare `creation_time + ttl`, so the short TTL an app or pairing token advertised was not acted on and the token lived until revoked. It is now registered like any issued token and refused at its next call once expired. (T80)
+- **`DELETE /v2/sys/mcp/pairings/{id}` is v2-only**: it had been mounted on the shared sys scope and so also appeared under the frozen `/v1`. The earlier `sys/mcp/*` routes are still on both scopes; moving them is tracked in T94. (T80)
+
 ## [0.44.14] - 2026-09-30
 
 ### Added

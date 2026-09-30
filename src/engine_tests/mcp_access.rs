@@ -342,6 +342,42 @@ mod mod_test {
         assert!(token_store.check_token("sys/mcp/token", &mcp_token, "", false).await.is_err());
     }
 
+    /// The short lifetime an MCP token advertises is enforced: it was never
+    /// registered with the expiration manager, so nothing ended it, and
+    /// `check_token` did not look at its TTL.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_mcp_token_ttl_is_enforced() {
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_mcp_token_ttl").await;
+        let core: &crate::core::Core = &core;
+        let auth_module = core.module_manager().get_module::<crate::modules::auth::AuthModule>("auth").unwrap();
+        let token_store = auth_module.token_store.load_full().unwrap();
+        let op = operator_token(core, &root_token, "felipe").await;
+
+        // Through the real exchange, asking for one second.
+        let resp = test_write_api(
+            core,
+            &op,
+            "sys/mcp/token",
+            true,
+            json!({
+                "pairing": { "id": "short-lived", "client_name": "c", "client_version": "1",
+                             "tool_allowlist": [], "path_scope": [] },
+                "ttl_secs": 1,
+            })
+            .as_object()
+            .cloned(),
+        )
+        .await;
+        let token = resp.unwrap().unwrap().data.unwrap()["auth"]["client_token"].as_str().unwrap().to_string();
+        assert!(token_store.check_token("mcp/dispatch", &token, "", true).await.is_ok());
+
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+        assert!(
+            token_store.check_token("mcp/dispatch", &token, "", true).await.is_err(),
+            "a token past its advertised lifetime must be refused at its next call"
+        );
+    }
+
     fn unix_now() -> u64 {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
     }
@@ -473,9 +509,22 @@ mod mod_test {
             )
         };
 
-        // By pairing id.
+        // By pairing id. The route is v2-only: v1 is frozen and must not serve it.
         let (token, _) = mint("pair-one");
         assert_eq!(http_post(&addr, "/v2/mcp", Some(&token), list.clone()).0, 200);
+        let v1_status = {
+            let agent = ureq::Agent::config_builder().http_status_as_error(false).build().new_agent();
+            let req = ::http::Request::builder()
+                .method("DELETE")
+                .uri(format!("http://{addr}/v1/sys/mcp/pairings/pair-one"))
+                .header("X-BastionVault-Token", &op)
+                .body(())
+                .unwrap();
+            agent.run(req).expect("request must complete").status().as_u16()
+        };
+        assert_eq!(v1_status, 404, "/v1/sys/mcp/pairings/{{id}} must not exist");
+        assert_eq!(http_post(&addr, "/v2/mcp", Some(&token), list.clone()).0, 200, "the v1 attempt revoked nothing");
+        server.url_prefix = server.url_prefix.replace("/v1", "/v2");
         let (status, _) = server.delete("sys/mcp/pairings/pair-one", None, Some(&op)).unwrap();
         assert!((200..300).contains(&status), "revoke answered {status}");
         assert_eq!(http_post(&addr, "/v2/mcp", Some(&token), list.clone()).0, 403, "a revoked pairing's token must be dead");

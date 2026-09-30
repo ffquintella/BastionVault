@@ -390,7 +390,10 @@ impl SystemBackend {
             let key = format!("{index_prefix}{accessor}");
             if let Some(entry) = req.storage_get(&key).await? {
                 let indexed: McpTokenIndexEntry = serde_json::from_slice(&entry.value)?;
-                token_store.revoke(&indexed.id).await.ok();
+                // A failed revoke must leave the index entry in place and surface:
+                // swallowing it would report success for a token that still works,
+                // and delete the only record a retry could find it by.
+                token_store.revoke(&indexed.id).await?;
             }
             req.storage_delete(&key).await?;
         }
@@ -535,7 +538,10 @@ impl SystemBackend {
             let key = format!("{MCP_APP_TOKEN_PREFIX}{name}/{accessor}");
             if let Some(entry) = req.storage_get(&key).await? {
                 let indexed: McpTokenIndexEntry = serde_json::from_slice(&entry.value)?;
-                token_store.revoke(&indexed.id).await.ok();
+                // A failed revoke must leave the index entry in place and surface:
+                // swallowing it would report success for a token that still works,
+                // and delete the only record a retry could find it by.
+                token_store.revoke(&indexed.id).await?;
                 req.storage_delete(&key).await?;
                 return Ok(None);
             }
@@ -722,7 +728,10 @@ impl SystemBackend {
             let key = format!("{index_prefix}{accessor}");
             if let Some(entry) = req.storage_get(&key).await? {
                 let indexed: McpTokenIndexEntry = serde_json::from_slice(&entry.value)?;
-                token_store.revoke(&indexed.id).await.ok();
+                // A failed revoke must leave the index entry in place and surface:
+                // swallowing it would report success for a token that still works,
+                // and delete the only record a retry could find it by.
+                token_store.revoke(&indexed.id).await?;
             }
             req.storage_delete(&key).await?;
         }

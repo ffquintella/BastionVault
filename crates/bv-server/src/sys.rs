@@ -4471,9 +4471,6 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
         .service(
             web::resource("/mcp/tokens/{accessor}").route(web::delete().to(sys_mcp_token_delete_request_handler)),
         )
-        .service(
-            web::resource("/mcp/pairings/{id}").route(web::delete().to(sys_mcp_pairing_delete_request_handler)),
-        )
 }
 
 async fn sys_mcp_config_request_handler(
@@ -4608,6 +4605,12 @@ pub fn init_sys_service(cfg: &mut web::ServiceConfig) {
                 web::resource("/policy-tests/{name:.*}")
                     .route(web::get().to(sys_policy_tests_read_request_handler))
                     .route(web::post().to(sys_policy_tests_write_request_handler)),
+            )
+            // Revoke every MCP token minted for one local pairing. v2-only:
+            // new routes do not enter the frozen v1 surface, and this scope
+            // is shared with `configure_sys_routes`, so it is registered here.
+            .service(
+                web::resource("/mcp/pairings/{id}").route(web::delete().to(sys_mcp_pairing_delete_request_handler)),
             )
             // HSM seal status (features/hsm-support.md). v2-only, read-only.
             .service(web::resource("/hsm/status").route(web::get().to(sys_hsm_status_request_handler)))

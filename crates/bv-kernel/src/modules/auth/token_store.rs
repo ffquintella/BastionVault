@@ -681,6 +681,21 @@ impl TokenStore {
             return Err(RvError::ErrPermissionDenied);
         }
 
+        // An MCP-bound token's short lifetime is the point of the exchange, so
+        // it is enforced here at every call rather than left to the expiration
+        // manager's timer.
+        if entry.mcp_binding.is_some()
+            && entry.ttl > 0
+            && entry.creation_time + Duration::from_secs(entry.ttl) <= SystemTime::now()
+        {
+            log::warn!(
+                target: "security",
+                "request denied: MCP token expired (path={path}, display_name={})",
+                entry.display_name
+            );
+            return Err(RvError::ErrPermissionDenied);
+        }
+
         // A token minted under a machine-identity waiver dies with that
         // waiver, not at its own TTL (features/mcp-access.md § 2): checked
         // here, at every call, so an expired waiver cuts a live token off at
@@ -1169,14 +1184,21 @@ impl TokenStore {
         };
         self.create(&mut te).await?;
 
-        Ok(Auth {
+        let mut auth = Auth {
             lease: Lease { ttl: Duration::from_secs(te.ttl), renewable: false, ..Lease::default() },
             client_token: te.id.clone(),
             display_name: te.display_name.clone(),
             policies: te.policies.clone(),
             mcp_binding: te.mcp_binding.clone(),
             ..Default::default()
-        })
+        };
+        // Normal issuance (`post_route`) registers the token's lease with the
+        // expiration manager; without it nothing ever expires this token, and
+        // the TTL it advertises would be decoration. `check_token` also
+        // enforces the TTL directly, so expiry does not wait for the manager.
+        self.expiration.register_auth(&te, &mut auth).await?;
+
+        Ok(auth)
     }
 
     pub async fn handle_revoke_tree(

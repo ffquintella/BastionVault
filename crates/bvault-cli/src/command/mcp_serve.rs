@@ -1564,9 +1564,15 @@ mod tests {
             let wrong = uds::current_uid().wrapping_add(1);
             uds::serve_connection(&rig.server, server_end, wrong);
 
+            // Dropping a socket with unread data is an orderly EOF on macOS but
+            // a connection reset on Linux; either way the peer is cut off and
+            // gets no answer.
             let mut reply = String::new();
-            client_end.read_to_string(&mut reply).unwrap();
-            assert!(reply.is_empty(), "a rejected peer gets EOF, not an answer: {reply:?}");
+            match client_end.read_to_string(&mut reply) {
+                Ok(_) => assert!(reply.is_empty(), "a rejected peer gets EOF, not an answer: {reply:?}"),
+                Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::ConnectionReset, "{e}"),
+            }
+            assert!(reply.is_empty(), "nothing was answered: {reply:?}");
             assert_eq!(lock(&rig.link.forwards).len(), forwards_before, "nothing reached the vault");
         }
 
