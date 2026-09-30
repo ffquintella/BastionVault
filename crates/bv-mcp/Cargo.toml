@@ -1,6 +1,6 @@
 [package]
 name = "bv-mcp"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "BastionVault's MCP (Model Context Protocol) dispatcher: JSON-RPC types, the read-only tool catalogue, and the tools/call gates. See features/mcp-access.md."
 license = "Apache-2.0"
