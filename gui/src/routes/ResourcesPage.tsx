@@ -197,7 +197,7 @@ function ResourceCard({
         ) : (
           <span
             role="button"
-            aria-disabled={connecting}
+            aria-disabled={connecting ? "true" : undefined}
             tabIndex={connecting ? -1 : 0}
             onClick={(ev) => {
               ev.stopPropagation();
@@ -327,10 +327,14 @@ export function ResourcesPage() {
   // Name of the resource currently being cloned (drives a toast + guards
   // against a double-fire while the read/write round-trip is in flight).
   const [cloning, setCloning] = useState<string | null>(null);
-  // Name of the resource whose card-level Connect is currently resolving
+  // Names of resources whose card-level Connect is currently resolving
   // (capability checks, profile pick, session open). Drives the chip's
-  // spinner so a multi-second dial doesn't look unresponsive or double-clickable.
-  const [connectingCard, setConnectingCard] = useState<string | null>(null);
+  // spinner so a multi-second dial doesn't look unresponsive or
+  // double-clickable. A set, not a single name, so connecting to one
+  // card doesn't clear the spinner on another already in flight.
+  const [connectingCards, setConnectingCards] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   // Credential prompt for a card-level Connect whose profile needs one
   // typed (LDAP operator bind, RDP default account without a stored
   // password). Set instead of opening the detail view, so the shortcut
@@ -666,11 +670,16 @@ export function ResourcesPage() {
   // (zero profiles, or 2+ with none flagged default — genuine ambiguity),
   // because that is a choice one click cannot make.
   async function connectResource(name: string) {
-    setConnectingCard(name);
+    setConnectingCards((cur) => new Set(cur).add(name));
     try {
       await connectResourceInner(name);
     } finally {
-      setConnectingCard(null);
+      setConnectingCards((cur) => {
+        if (!cur.has(name)) return cur;
+        const next = new Set(cur);
+        next.delete(name);
+        return next;
+      });
     }
   }
 
@@ -1086,7 +1095,7 @@ export function ResourcesPage() {
                       typeConfig={typeConfig}
                       assetGroups={assetGroups.map.byResource[meta.name] || []}
                       verdict={connectAccess.byName[meta.name]}
-                      connecting={connectingCard === meta.name}
+                      connecting={connectingCards.has(meta.name)}
                       onSelect={selectResource}
                       onConnect={connectResource}
                       onPickGroup={(g) => setFilterGroup((cur) => (cur === g ? "" : g))}
@@ -1105,7 +1114,7 @@ export function ResourcesPage() {
                   typeConfig={typeConfig}
                   assetGroups={assetGroups.map.byResource[meta.name] || []}
                   verdict={connectAccess.byName[meta.name]}
-                  connecting={connectingCard === meta.name}
+                  connecting={connectingCards.has(meta.name)}
                   onSelect={selectResource}
                   onConnect={connectResource}
                   onPickGroup={(g) => setFilterGroup((cur) => (cur === g ? "" : g))}
@@ -1144,11 +1153,13 @@ export function ResourcesPage() {
               icon: <ExternalLink size={14} />,
               onSelect: () => void selectResource(entry.name),
             },
+            // No "Connecting…" state here: ContextMenu closes synchronously
+            // on click, before this item could ever re-render — the card
+            // chip's own spinner is the feedback for this launch.
             ...(canConnect
               ? [{
-                  label: connectingCard === entry.name ? "Connecting…" : "Connect",
+                  label: "Connect",
                   icon: <Plug size={14} />,
-                  disabled: connectingCard === entry.name,
                   onSelect: () => void connectResource(entry.name),
                 }]
               : []),
