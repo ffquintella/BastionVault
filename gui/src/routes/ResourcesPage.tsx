@@ -113,6 +113,7 @@ function ResourceCard({
   typeConfig,
   assetGroups,
   verdict,
+  connecting,
   onSelect,
   onConnect,
   onPickGroup,
@@ -127,6 +128,8 @@ function ResourceCard({
    * Absent and indeterminate verdicts both leave Connect live.
    */
   verdict: ConnectVerdict | undefined;
+  /** True while this card's own Connect click is still resolving. */
+  connecting: boolean;
   onSelect: (name: string) => void;
   onConnect: (name: string) => void;
   onPickGroup: (group: string) => void;
@@ -194,22 +197,33 @@ function ResourceCard({
         ) : (
           <span
             role="button"
-            tabIndex={0}
+            aria-disabled={connecting}
+            tabIndex={connecting ? -1 : 0}
             onClick={(ev) => {
               ev.stopPropagation();
+              if (connecting) return;
               onConnect(meta.name);
             }}
             onKeyDown={(ev) => {
+              if (connecting) return;
               if (ev.key === "Enter" || ev.key === " ") {
                 ev.stopPropagation();
                 ev.preventDefault();
                 onConnect(meta.name);
               }
             }}
-            className="px-2 py-0.5 bg-[var(--color-primary)] text-white rounded text-xs cursor-pointer hover:opacity-80 shrink-0"
-            title="Connect"
+            className={
+              "px-2 py-0.5 bg-[var(--color-primary)] text-white rounded text-xs shrink-0 inline-flex items-center gap-1.5" +
+              (connecting
+                ? " opacity-70 cursor-wait"
+                : " cursor-pointer hover:opacity-80")
+            }
+            title={connecting ? "Connecting…" : "Connect"}
           >
-            Connect
+            {connecting && (
+              <span className="w-2.5 h-2.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+            )}
+            {connecting ? "Connecting…" : "Connect"}
           </span>
         ))}
         <ResourceTypeIcon typeDef={td} />
@@ -313,6 +327,10 @@ export function ResourcesPage() {
   // Name of the resource currently being cloned (drives a toast + guards
   // against a double-fire while the read/write round-trip is in flight).
   const [cloning, setCloning] = useState<string | null>(null);
+  // Name of the resource whose card-level Connect is currently resolving
+  // (capability checks, profile pick, session open). Drives the chip's
+  // spinner so a multi-second dial doesn't look unresponsive or double-clickable.
+  const [connectingCard, setConnectingCard] = useState<string | null>(null);
   // Credential prompt for a card-level Connect whose profile needs one
   // typed (LDAP operator bind, RDP default account without a stored
   // password). Set instead of opening the detail view, so the shortcut
@@ -648,6 +666,15 @@ export function ResourcesPage() {
   // (zero profiles, or 2+ with none flagged default — genuine ambiguity),
   // because that is a choice one click cannot make.
   async function connectResource(name: string) {
+    setConnectingCard(name);
+    try {
+      await connectResourceInner(name);
+    } finally {
+      setConnectingCard(null);
+    }
+  }
+
+  async function connectResourceInner(name: string) {
     let info: ResourceMetadata;
     try {
       info = await api.readResource(name);
@@ -1059,6 +1086,7 @@ export function ResourcesPage() {
                       typeConfig={typeConfig}
                       assetGroups={assetGroups.map.byResource[meta.name] || []}
                       verdict={connectAccess.byName[meta.name]}
+                      connecting={connectingCard === meta.name}
                       onSelect={selectResource}
                       onConnect={connectResource}
                       onPickGroup={(g) => setFilterGroup((cur) => (cur === g ? "" : g))}
@@ -1077,6 +1105,7 @@ export function ResourcesPage() {
                   typeConfig={typeConfig}
                   assetGroups={assetGroups.map.byResource[meta.name] || []}
                   verdict={connectAccess.byName[meta.name]}
+                  connecting={connectingCard === meta.name}
                   onSelect={selectResource}
                   onConnect={connectResource}
                   onPickGroup={(g) => setFilterGroup((cur) => (cur === g ? "" : g))}
@@ -1117,8 +1146,9 @@ export function ResourcesPage() {
             },
             ...(canConnect
               ? [{
-                  label: "Connect",
+                  label: connectingCard === entry.name ? "Connecting…" : "Connect",
                   icon: <Plug size={14} />,
+                  disabled: connectingCard === entry.name,
                   onSelect: () => void connectResource(entry.name),
                 }]
               : []),
@@ -1895,6 +1925,7 @@ function ConnectionProfilesPanel({
                     size="sm"
                     onClick={() => handleConnect(p)}
                     disabled={connecting !== null}
+                    loading={connecting === p.id}
                     title={
                       p.credential_source.kind === "pki" && p.protocol === "rdp"
                         ? "PKI + RDP: vault-issued cert wraps as a synthetic PIV smartcard for CredSSP / NLA negotiation."
