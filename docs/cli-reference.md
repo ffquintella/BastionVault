@@ -302,7 +302,10 @@ bvault mcp catalogue
   (`0.0.0.0:…` is a usage error), and `--socket` creates an owner-only socket.
   A client that is not paired, or a call that needs confirmation, is refused when
   there is no terminal to ask. `--allowed-origin` (repeatable) admits a browser
-  origin on the loopback HTTP transport; the default admits none.
+  origin on the loopback HTTP transport; the default admits none. On stdio and
+  `--socket` it also accepts the `initialize` handshake of clients on MCP
+  2025-03-26 to 2025-11-25, such as Claude Code; see
+  [Clients on earlier MCP revisions](mcp.md#clients-on-earlier-mcp-revisions).
 - `pairings revoke` removes the pairing locally and revokes its tokens on the
   vault; it exits non-zero if the vault could not be reached.
 - `token --app` exchanges the current login for an MCP-bound token for a

@@ -14,6 +14,15 @@
 //! Fail-closed everywhere: no controlling terminal means no pairing and no
 //! per-call confirmation, never a silent approval. The minted token lives in
 //! this process's memory for the pairing's TTL and is never written out.
+//!
+//! The vault speaks the stateless MCP 2026-07-28 revision, in which every
+//! request names its client in `_meta`. Clients on the earlier, stateful
+//! revisions (Claude Code among them) open with `initialize` and name
+//! themselves only there. On the line transports -- stdio and the Unix
+//! socket, where one connection is one client for its whole life -- this
+//! server answers that handshake itself and carries the identity it was given
+//! onto every request it relays (see [`SessionState`]). Loopback HTTP is
+//! stateless and does not take the handshake.
 
 use std::{
     collections::HashMap,
@@ -50,6 +59,16 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 32;
 /// vault is about to refuse.
 const TOKEN_REFRESH_MARGIN_SECS: u64 = 30;
 pub const HTTP_PATH: &str = "/mcp";
+/// MCP revisions whose stateful `initialize` handshake the line transports
+/// accept, newest first. A client asking for any other revision is offered
+/// the newest, as the handshake prescribes; it disconnects if it cannot speak
+/// it. Every revision listed here reads the vault's `tools/list` and
+/// `tools/call` answers as they are: the 2026-07-28 additions (`resultType`,
+/// `ttlMs`, `cacheScope`) are extra fields an older client ignores, and every
+/// successful call carries the `structuredContent` the catalogue's
+/// `outputSchema` promises.
+pub const HANDSHAKE_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
+const CLIENT_INFO_META_KEY: &str = "io.modelcontextprotocol/clientInfo";
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -390,6 +409,26 @@ pub struct LocalServer {
     clock: fn() -> u64,
 }
 
+/// What one line-transport connection has established about its client.
+///
+/// A client on a stateful MCP revision names itself once, in `initialize`,
+/// and never again. A stdio connection is the parent process and a Unix-socket
+/// connection is one uid-checked peer, so the name given at `initialize` is
+/// the name for the rest of the connection. It is exactly as self-asserted as
+/// the `_meta` name a stateless client sends on each request: pairing still
+/// binds it to the transport and peer uid, and the vault still judges every
+/// call. A request that names a *different* client later in the same
+/// connection is refused, never silently re-attributed.
+#[derive(Default)]
+pub struct SessionState {
+    handshake: Option<Handshake>,
+}
+
+struct Handshake {
+    client_name: String,
+    client_version: String,
+}
+
 struct Refusal {
     code: i64,
     data_code: &'static str,
@@ -411,8 +450,70 @@ fn rpc_error(id: Value, code: i64, message: &str, data_code: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
+fn rpc_success(id: Value, result: Value) -> Value {
+    serde_json::to_value(JsonRpcResponse::success(id, result)).unwrap_or(Value::Null)
+}
+
+/// The client a stateless request names in `_meta`.
 fn client_info(message: &Map<String, Value>) -> Option<(String, String)> {
-    let info = message.get("params")?.get("_meta")?.get("io.modelcontextprotocol/clientInfo")?;
+    parse_client_info(message.get("params")?.get("_meta")?.get(CLIENT_INFO_META_KEY)?)
+}
+
+/// The client identity a request is judged by: the one its connection
+/// established at `initialize`, if it did, else the request's own `_meta`.
+fn request_identity(
+    handshake: Option<&Handshake>,
+    message: &Map<String, Value>,
+) -> Result<Option<(String, String)>, Refusal> {
+    let stated = client_info(message);
+    let Some(handshake) = handshake else {
+        return Ok(stated);
+    };
+    if stated.as_ref().is_some_and(|(name, _)| *name != handshake.client_name) {
+        return Err(Refusal::new(
+            -32602,
+            "mcp_client_info_mismatch",
+            "this request names a different client from the one this connection initialized as",
+        ));
+    }
+    Ok(Some((handshake.client_name.clone(), handshake.client_version.clone())))
+}
+
+/// The revision to answer `initialize` with: the one asked for when it is
+/// supported, else the newest.
+fn negotiate_protocol_version(requested: &str) -> &'static str {
+    HANDSHAKE_PROTOCOL_VERSIONS.iter().copied().find(|v| *v == requested).unwrap_or(HANDSHAKE_PROTOCOL_VERSIONS[0])
+}
+
+/// The message as the vault must receive it: a 2026-07-28 request names its
+/// client in `_meta`. Overwrites only that one key; `request_identity` has
+/// already refused a request that named someone else.
+fn with_client_info(message: &Map<String, Value>, handshake: &Handshake) -> Value {
+    let mut message = message.clone();
+    let params = message.entry("params").or_insert(Value::Null);
+    if params.is_null() {
+        *params = Value::Object(Map::new());
+    }
+    if let Value::Object(params) = params {
+        let meta = params.entry("_meta").or_insert(Value::Null);
+        if meta.is_null() {
+            *meta = Value::Object(Map::new());
+        }
+        if let Value::Object(meta) = meta {
+            meta.insert(
+                CLIENT_INFO_META_KEY.to_string(),
+                json!({ "name": handshake.client_name, "version": handshake.client_version }),
+            );
+        }
+    }
+    Value::Object(message)
+}
+
+fn server_major_minor() -> String {
+    env!("CARGO_PKG_VERSION").splitn(3, '.').take(2).collect::<Vec<_>>().join(".")
+}
+
+fn parse_client_info(info: &Value) -> Option<(String, String)> {
     let name = info.get("name")?.as_str()?.trim();
     if name.is_empty() || name.len() > MAX_CLIENT_NAME_LEN {
         return None;
@@ -461,7 +562,22 @@ impl LocalServer {
     /// One JSON-RPC message in, at most one out. `None` for a notification
     /// (no `id`): there is nothing to answer and, since the vault's endpoint
     /// only takes requests, nothing to forward.
+    ///
+    /// Stateless: every request must name its client in `_meta`. This is the
+    /// loopback-HTTP entry point; the line transports use
+    /// [`Self::handle_session_message`].
     pub fn handle_message(&self, conn: &ConnInfo, raw: &[u8]) -> Option<Value> {
+        self.handle(conn, None, raw)
+    }
+
+    /// [`Self::handle_message`] for a connection that may open with the
+    /// stateful `initialize` handshake. `session` lives as long as the
+    /// connection does.
+    pub fn handle_session_message(&self, conn: &ConnInfo, session: &mut SessionState, raw: &[u8]) -> Option<Value> {
+        self.handle(conn, Some(session), raw)
+    }
+
+    fn handle(&self, conn: &ConnInfo, session: Option<&mut SessionState>, raw: &[u8]) -> Option<Value> {
         let message: Value = match serde_json::from_slice(raw) {
             Ok(v) => v,
             Err(_) => return Some(rpc_error(Value::Null, -32700, "parse error", "mcp_parse_error")),
@@ -475,11 +591,29 @@ impl LocalServer {
             ));
         };
         let id = object.get("id").cloned()?;
-        if object.get("method").and_then(Value::as_str).is_none() {
+        let Some(method) = object.get("method").and_then(Value::as_str) else {
             return Some(rpc_error(id, -32600, "missing method", "mcp_invalid_request"));
-        }
+        };
 
-        let record = match self.resolve_pairing(conn, object) {
+        let handshake = match session {
+            Some(session) => {
+                match method {
+                    "initialize" => return Some(self.initialize(conn, session, id, object)),
+                    // The vault has no `ping`; a stateful client expects one
+                    // answered once it has initialized.
+                    "ping" if session.handshake.is_some() => return Some(rpc_success(id, json!({}))),
+                    _ => {}
+                }
+                session.handshake.as_ref()
+            }
+            None => None,
+        };
+
+        let identity = match request_identity(handshake, object) {
+            Ok(identity) => identity,
+            Err(refusal) => return Some(refusal.into_response(id)),
+        };
+        let record = match self.resolve_pairing(conn, identity) {
             Ok(r) => r,
             Err(refusal) => return Some(refusal.into_response(id)),
         };
@@ -491,7 +625,11 @@ impl LocalServer {
             Err(refusal) => return Some(refusal.into_response(id)),
         };
 
-        match self.link.forward(&token, &message) {
+        let forwarded = match handshake {
+            Some(handshake) => with_client_info(object, handshake),
+            None => message.clone(),
+        };
+        match self.link.forward(&token, &forwarded) {
             Ok(response) => Some(response),
             Err(ForwardError::Refused(status)) => {
                 lock(&self.tokens).remove(&record.id);
@@ -506,11 +644,53 @@ impl LocalServer {
         }
     }
 
-    fn resolve_pairing(&self, conn: &ConnInfo, message: &Map<String, Value>) -> Result<PairingRecord, Refusal> {
+    /// Answers a stateful client's `initialize` here: the vault speaks only the
+    /// stateless revision and has no such method. The pairing is resolved now
+    /// -- prompting the operator if there is one -- so an unapproved client
+    /// fails at connect, not at its first tool call. No token is minted and
+    /// nothing reaches the vault until the first relayed request.
+    fn initialize(
+        &self,
+        conn: &ConnInfo,
+        session: &mut SessionState,
+        id: Value,
+        message: &Map<String, Value>,
+    ) -> Value {
+        if session.handshake.is_some() {
+            return rpc_error(id, -32600, "initialize may be sent only once per connection", "mcp_already_initialized");
+        }
+        let params = message.get("params");
+        let Some((client_name, client_version)) = params.and_then(|p| p.get("clientInfo")).and_then(parse_client_info)
+        else {
+            return rpc_error(id, -32602, "initialize must carry clientInfo with a name", "mcp_client_info_required");
+        };
+        let requested = params.and_then(|p| p.get("protocolVersion")).and_then(Value::as_str).unwrap_or("");
+        let negotiated = negotiate_protocol_version(requested);
+
+        if let Err(refusal) = self.resolve_pairing(conn, Some((client_name.clone(), client_version.clone()))) {
+            return refusal.into_response(id);
+        }
+        eprintln!(
+            "bvault mcp: `{}` {} initialized (MCP {negotiated})",
+            sanitize_for_model(&client_name),
+            sanitize_for_model(&client_version)
+        );
+        session.handshake = Some(Handshake { client_name, client_version });
+        rpc_success(
+            id,
+            json!({
+                "protocolVersion": negotiated,
+                "capabilities": { "tools": { "listChanged": false } },
+                "serverInfo": { "name": "bastionvault", "version": server_major_minor() },
+            }),
+        )
+    }
+
+    fn resolve_pairing(&self, conn: &ConnInfo, identity: Option<(String, String)>) -> Result<PairingRecord, Refusal> {
         if let Some(record) = &conn.preauthenticated {
             return Ok(record.clone());
         }
-        let Some((client_name, client_version)) = client_info(message) else {
+        let Some((client_name, client_version)) = identity else {
             return Err(Refusal::new(
                 -32602,
                 "mcp_client_info_required",
@@ -646,6 +826,7 @@ pub fn run_line_session<R: BufRead, W: Write>(
     mut reader: R,
     mut writer: W,
 ) -> std::io::Result<()> {
+    let mut session = SessionState::default();
     loop {
         let mut line = Vec::new();
         let read = (&mut reader).take(MAX_MESSAGE_BYTES + 1).read_until(b'\n', &mut line)?;
@@ -663,7 +844,7 @@ pub fn run_line_session<R: BufRead, W: Write>(
         if trimmed.is_empty() {
             continue;
         }
-        if let Some(response) = server.handle_message(conn, trimmed) {
+        if let Some(response) = server.handle_session_message(conn, &mut session, trimmed) {
             serde_json::to_writer(&mut writer, &response)?;
             writer.write_all(b"\n")?;
             writer.flush()?;
@@ -1270,10 +1451,192 @@ mod tests {
     #[test]
     fn a_request_without_client_info_cannot_pair() {
         let rig = rig("noinfo");
-        let bare = serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} })).unwrap();
+        let bare =
+            serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} })).unwrap();
         let resp = rig.server.handle_message(&stdio(), &bare).unwrap();
         assert_eq!(data_code(&resp), "mcp_client_info_required");
         assert_eq!(rig.prompt.approvals_asked.load(Ordering::SeqCst), 0);
+    }
+
+    // ── stateful handshake (MCP 2025-xx clients such as Claude Code) ──────
+
+    /// `initialize` exactly as Claude Code 2.1.277 sends it: the client is
+    /// named in `params.clientInfo`, never in `_meta`.
+    fn initialize(id: u64, version: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "jsonrpc": "2.0", "id": id, "method": "initialize",
+            "params": {
+                "protocolVersion": version,
+                "capabilities": {},
+                "clientInfo": { "name": "claude-code", "title": "Claude Code", "version": "2.1.277" },
+            },
+        }))
+        .unwrap()
+    }
+
+    /// A request with no `_meta`, as a stateful client sends after `initialize`.
+    fn bare(id: u64, method: &str, params: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).unwrap()
+    }
+
+    #[test]
+    fn handshake_pairs_at_initialize_and_carries_the_identity_onto_relayed_requests() {
+        let rig = rig("handshake");
+        *lock(&rig.prompt.approve) = Some(Some(PairingDecision::Approved(grant())));
+        let mut session = SessionState::default();
+
+        let init = rig.server.handle_session_message(&stdio(), &mut session, &initialize(0, "2025-11-25")).unwrap();
+        assert_eq!(init["result"]["protocolVersion"], json!("2025-11-25"));
+        assert_eq!(init["result"]["capabilities"]["tools"], json!({ "listChanged": false }));
+        assert_eq!(init["result"]["serverInfo"]["name"], json!("bastionvault"));
+        assert_eq!(rig.prompt.approvals_asked.load(Ordering::SeqCst), 1, "pairing is decided at connect");
+        assert_eq!(rig.link.exchanges.load(Ordering::SeqCst), 0, "initialize mints nothing");
+        assert!(lock(&rig.link.forwards).is_empty(), "initialize never reaches the vault");
+
+        let list =
+            rig.server.handle_session_message(&stdio(), &mut session, &bare(1, "tools/list", json!({}))).unwrap();
+        assert_eq!(list["result"]["relayed"], json!(true));
+        // A request with no params at all is completed the same way.
+        let no_params = serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).unwrap();
+        rig.server.handle_session_message(&stdio(), &mut session, &no_params).unwrap();
+
+        let forwards = lock(&rig.link.forwards);
+        assert_eq!(forwards.len(), 2);
+        for (token, message) in forwards.iter() {
+            assert_eq!(token, MINTED);
+            assert_eq!(
+                message["params"]["_meta"][CLIENT_INFO_META_KEY],
+                json!({ "name": "claude-code", "version": "2.1.277" })
+            );
+        }
+        assert_eq!(rig.prompt.approvals_asked.load(Ordering::SeqCst), 1, "a paired client is not asked again");
+        let records = rig.server.store().load().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].client_name, "claude-code");
+        assert_eq!(records[0].transport, "stdio");
+    }
+
+    #[test]
+    fn handshake_negotiates_a_supported_revision_or_offers_the_newest() {
+        for (asked, answered) in [
+            ("2025-11-25", "2025-11-25"),
+            ("2025-06-18", "2025-06-18"),
+            ("2025-03-26", "2025-03-26"),
+            ("2024-11-05", "2025-11-25"),
+            ("2026-07-28", "2025-11-25"),
+            ("", "2025-11-25"),
+        ] {
+            let rig = rig("negotiate");
+            *lock(&rig.prompt.approve) = Some(Some(PairingDecision::Approved(grant())));
+            let mut session = SessionState::default();
+            let init = rig.server.handle_session_message(&stdio(), &mut session, &initialize(0, asked)).unwrap();
+            assert_eq!(init["result"]["protocolVersion"], json!(answered), "asked for `{asked}`");
+        }
+    }
+
+    #[test]
+    fn an_unapproved_handshake_fails_closed_and_establishes_nothing() {
+        let rig = rig("handshake-noterminal");
+        // Scripted::approve defaults to None: no operator reachable.
+        let mut session = SessionState::default();
+        let init = rig.server.handle_session_message(&stdio(), &mut session, &initialize(0, "2025-11-25")).unwrap();
+        assert_eq!(data_code(&init), "mcp_pairing_requires_operator");
+        assert!(init.get("result").is_none());
+
+        // The failed handshake did not leave an identity behind to borrow.
+        let list =
+            rig.server.handle_session_message(&stdio(), &mut session, &bare(1, "tools/list", json!({}))).unwrap();
+        assert_eq!(data_code(&list), "mcp_client_info_required");
+        let ping = rig.server.handle_session_message(&stdio(), &mut session, &bare(2, "ping", json!({}))).unwrap();
+        assert_eq!(data_code(&ping), "mcp_client_info_required", "no local ping before a handshake");
+        assert_eq!(rig.link.exchanges.load(Ordering::SeqCst), 0);
+        assert!(lock(&rig.link.forwards).is_empty());
+        assert!(rig.server.store().load().unwrap().is_empty());
+    }
+
+    #[test]
+    fn initialize_without_client_info_is_refused_before_any_prompt() {
+        let rig = rig("handshake-noinfo");
+        let mut session = SessionState::default();
+        for params in [json!({ "protocolVersion": "2025-11-25" }), json!({ "clientInfo": { "name": "  " } })] {
+            let init =
+                rig.server.handle_session_message(&stdio(), &mut session, &bare(0, "initialize", params)).unwrap();
+            assert_eq!(data_code(&init), "mcp_client_info_required");
+        }
+        assert_eq!(rig.prompt.approvals_asked.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_connection_initializes_once_and_cannot_change_who_it_is() {
+        let rig = rig("handshake-identity");
+        *lock(&rig.prompt.approve) = Some(Some(PairingDecision::Approved(grant())));
+        let mut session = SessionState::default();
+        rig.server.handle_session_message(&stdio(), &mut session, &initialize(0, "2025-11-25")).unwrap();
+
+        let again = rig.server.handle_session_message(&stdio(), &mut session, &initialize(1, "2025-11-25")).unwrap();
+        assert_eq!(data_code(&again), "mcp_already_initialized");
+
+        // `request()` names `claude-desktop` in `_meta`: another client.
+        let other =
+            rig.server.handle_session_message(&stdio(), &mut session, &request(2, "tools/list", json!({}))).unwrap();
+        assert_eq!(data_code(&other), "mcp_client_info_mismatch");
+        assert!(lock(&rig.link.forwards).is_empty(), "a mismatched request is never relayed");
+        assert_eq!(rig.prompt.approvals_asked.load(Ordering::SeqCst), 1, "and never prompts a second pairing");
+
+        // Naming itself consistently in `_meta` is fine.
+        let mut same = serde_json::from_slice::<Value>(&bare(3, "tools/list", json!({}))).unwrap();
+        same["params"]["_meta"] = json!({ CLIENT_INFO_META_KEY: { "name": "claude-code", "version": "2.1.277" } });
+        let resp =
+            rig.server.handle_session_message(&stdio(), &mut session, &serde_json::to_vec(&same).unwrap()).unwrap();
+        assert_eq!(resp["result"]["relayed"], json!(true));
+    }
+
+    #[test]
+    fn ping_after_the_handshake_is_answered_here() {
+        let rig = rig("handshake-ping");
+        *lock(&rig.prompt.approve) = Some(Some(PairingDecision::Approved(grant())));
+        let mut session = SessionState::default();
+        rig.server.handle_session_message(&stdio(), &mut session, &initialize(0, "2025-11-25")).unwrap();
+        let pong = rig.server.handle_session_message(&stdio(), &mut session, &bare(7, "ping", json!({}))).unwrap();
+        assert_eq!(pong["id"], json!(7));
+        assert_eq!(pong["result"], json!({}));
+        assert!(lock(&rig.link.forwards).is_empty());
+        assert_eq!(rig.link.exchanges.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn the_stateless_entry_point_does_not_take_the_handshake() {
+        let rig = rig("handshake-stateless");
+        *lock(&rig.prompt.approve) = Some(Some(PairingDecision::Approved(grant())));
+        let resp = rig.server.handle_message(&stdio(), &initialize(0, "2025-11-25")).unwrap();
+        assert_eq!(data_code(&resp), "mcp_client_info_required");
+        assert_eq!(rig.prompt.approvals_asked.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_line_session_speaks_the_stateful_handshake_end_to_end() {
+        let rig = rig("handshake-lines");
+        *lock(&rig.prompt.approve) = Some(Some(PairingDecision::Approved(grant())));
+        let input = [
+            String::from_utf8(initialize(0, "2025-11-25")).unwrap(),
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string(),
+            String::from_utf8(bare(1, "tools/list", json!({}))).unwrap(),
+        ]
+        .join("\n");
+        let mut out = Vec::new();
+        run_line_session(&rig.server, &stdio(), std::io::Cursor::new(input.into_bytes()), &mut out).unwrap();
+        let replies: Vec<Value> =
+            out.split(|b| *b == b'\n').filter(|l| !l.is_empty()).map(|l| serde_json::from_slice(l).unwrap()).collect();
+        assert_eq!(replies.len(), 2, "the notification gets no reply");
+        assert_eq!(replies[0]["result"]["protocolVersion"], json!("2025-11-25"));
+        assert_eq!(replies[1]["result"]["relayed"], json!(true));
+
+        // A new connection starts with no identity of its own.
+        let mut out = Vec::new();
+        let later = String::from_utf8(bare(2, "tools/list", json!({}))).unwrap();
+        run_line_session(&rig.server, &stdio(), std::io::Cursor::new(later.into_bytes()), &mut out).unwrap();
+        let reply: Value = serde_json::from_slice(out.trim_ascii()).unwrap();
+        assert_eq!(data_code(&reply), "mcp_client_info_required");
     }
 
     fn reveal_call(id: u64) -> Vec<u8> {

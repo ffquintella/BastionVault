@@ -132,7 +132,8 @@ default and at most 24; revoke from Admin → MCP Apps → Tokens or
    ```
 
    `--client-name` must match the name the client reports in its MCP
-   `clientInfo`. You are shown who is asking and choose the path scope, the tools
+   `clientInfo`. Claude Code reports `claude-code`; Claude Desktop reports
+   `claude-desktop`. You are shown who is asking and choose the path scope, the tools
    (default: read-only, never reveals a value), whether it may reveal values or
    make changes, and whether you want to confirm each such call.
 3. Point the assistant at the server.
@@ -151,7 +152,30 @@ default and at most 24; revoke from Admin → MCP Apps → Tokens or
    }
    ```
 
-   Claude Code: `claude mcp add bastionvault -- bvault mcp serve`
+   Claude Code:
+
+   ```bash
+   claude mcp add bastionvault -e VAULT_ADDR=https://vault.example.com:8200 -- bvault mcp serve
+   ```
+
+### Clients on earlier MCP revisions
+
+The vault speaks the stateless MCP revision 2026-07-28, in which every request
+names its client. Most assistants today, Claude Code and Claude Desktop among
+them, speak an earlier, stateful revision instead: they open with `initialize`
+and name themselves only there.
+
+`bvault mcp serve` bridges the two on stdio and on the Unix socket. It answers
+`initialize` itself for revisions 2025-11-25, 2025-06-18 and 2025-03-26, and
+offers 2025-11-25 to a client that asks for anything else. It checks the
+pairing at that point, so an unapproved client fails when it connects rather
+than at its first tool call. It then attaches the name the client gave to every
+request it relays, and answers `ping` locally. A connection initializes once,
+and a later request that names a different client is refused
+(`mcp_client_info_mismatch`).
+
+Loopback HTTP does not take the handshake: a client on that transport must
+speak 2026-07-28.
 
 Other transports:
 
