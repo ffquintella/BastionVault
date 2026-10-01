@@ -56,6 +56,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.16] - 2026-10-01
+
+### Added
+
+#### MCP Access
+- **Connect Claude Code and other clients on earlier MCP revisions to `bvault mcp serve`**: on stdio and the Unix socket the local server now answers the `initialize` handshake of MCP 2025-03-26 to 2025-11-25 itself. It checks the pairing when the client connects and attaches the client's name to every request it relays to the vault. Before this, every request from such a client was refused with `mcp_client_info_required`, because the vault's revision expects the client to be named on each request. A connection initializes once, and a request naming a different client is refused with `mcp_client_info_mismatch`. Loopback HTTP still requires MCP 2026-07-28. Pair Claude Code with `bvault mcp pair --client-name claude-code`. (T95, S26)
+
 ## [0.44.15] - 2026-09-30
 
 ### Fixed
