@@ -198,7 +198,9 @@ pub async fn session_open_ssh(
         let username = resolved.effective_username.unwrap_or(username);
         if username.is_empty() {
             return Err(CommandError::from(
-                "SSH profile has no username (set profile.username or use an LDAP credential source)".to_string(),
+                "SSH profile has no username (set profile.username, use a `default-account` or LDAP \
+                 credential source, or give the ssh-engine role a `default_user`)"
+                    .to_string(),
             ));
         }
         let route = resolve_ssh_connect_route(
@@ -2501,6 +2503,18 @@ fn ssh_engine_mount_prefix(cs: &Value) -> Result<String, CommandError> {
     Ok(format!("{}/", raw.trim_end_matches('/')))
 }
 
+/// The sole principal on an OpenSSH user cert, or `None` when the cert lists
+/// zero or several. Used to recover the role's `default_user` as the login
+/// name when a CA-mode profile sets no username.
+fn single_cert_principal(cert_openssh: &str) -> Result<Option<String>, CommandError> {
+    let cert = russh::keys::ssh_key::Certificate::from_openssh(cert_openssh.trim())
+        .map_err(|e| CommandError::from(format!("parse signed ssh cert: {e}")))?;
+    Ok(match cert.valid_principals() {
+        [only] if !only.is_empty() => Some(only.clone()),
+        _ => None,
+    })
+}
+
 async fn sign_ssh_engine_ca(
     state: &State<'_, AppState>,
     ssh_mount: &str,
@@ -2526,7 +2540,8 @@ async fn sign_ssh_engine_ca(
 
     // Ask the SSH engine to sign it. We don't override the role's
     // ttl / extensions — operators tune those on the role itself.
-    // `valid_principals` is left to the role's `default_user`.
+    // With no profile username, `valid_principals` falls back to the
+    // role's `default_user` server-side.
     let mut body = Map::new();
     body.insert("public_key".into(), Value::String(public_openssh));
     if let Some(user) = profile.get("username").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
@@ -2546,11 +2561,18 @@ async fn sign_ssh_engine_ca(
     // `ssh/sign` issuance audit row.
     let cert_serial = data.get("serial_number").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
 
+    // CA-mode roles enforce `valid_principals` themselves, so a profile
+    // username is never overridden. When the profile has none, the engine
+    // filled the principal from the role's `default_user`; dial as that
+    // principal, read from the signed cert so it is exactly what the server
+    // issued. A cert carrying several principals (or none) is ambiguous and
+    // stays `None`, so the caller's "no username" error still fires.
+    let profile_has_username = profile.get("username").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty());
+    let effective_username = if profile_has_username { None } else { single_cert_principal(&signed_key)? };
+
     Ok(ResolvedSshCredential {
         credential: SshCredential::Cert { pem: Zeroizing::new(private_openssh.to_string()), cert_openssh: signed_key },
-        // CA-mode roles enforce `valid_principals` themselves; don't
-        // second-guess the profile's username here.
-        effective_username: None,
+        effective_username,
         on_close: None,
         engine_mint: Some(EngineMint { mode: "ca".into(), cert_serial }),
     })
@@ -3035,6 +3057,47 @@ async fn caller_display(state: &State<'_, AppState>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn signed_user_cert(principals: &[&str]) -> String {
+        use russh::keys::ssh_key::{certificate, Algorithm, PrivateKey};
+        let ca = PrivateKey::random(&mut rand_v10::rng(), Algorithm::Ed25519).unwrap();
+        let subject = PrivateKey::random(&mut rand_v10::rng(), Algorithm::Ed25519).unwrap();
+        let mut builder =
+            certificate::Builder::new_with_random_nonce(&mut rand_v10::rng(), subject.public_key(), 0, u64::MAX >> 1)
+                .unwrap();
+        builder.cert_type(certificate::CertType::User).unwrap();
+        builder.key_id("test").unwrap();
+        if principals.is_empty() {
+            builder.all_principals_valid().unwrap();
+        }
+        for p in principals {
+            builder.valid_principal(*p).unwrap();
+        }
+        builder.sign(&ca).unwrap().to_openssh().unwrap()
+    }
+
+    #[test]
+    fn single_cert_principal_returns_the_one_principal() {
+        let cert = signed_user_cert(&["root"]);
+        assert_eq!(single_cert_principal(&cert).unwrap().as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn single_cert_principal_refuses_to_guess_between_several() {
+        let cert = signed_user_cert(&["root", "admin"]);
+        assert_eq!(single_cert_principal(&cert).unwrap(), None);
+    }
+
+    #[test]
+    fn single_cert_principal_returns_none_for_no_principals() {
+        let cert = signed_user_cert(&[]);
+        assert_eq!(single_cert_principal(&cert).unwrap(), None);
+    }
+
+    #[test]
+    fn single_cert_principal_rejects_malformed_cert() {
+        assert!(single_cert_principal("ssh-ed25519-cert-v01@openssh.com AAAA garbage").is_err());
+    }
 
     #[test]
     fn permission_denied_matches_remote_and_embedded_shapes() {

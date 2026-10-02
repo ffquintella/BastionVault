@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "bastion-vault-gui"
-version = "0.44.17"
+version = "0.44.18"
 dependencies = [
  "arboard",
  "argon2 0.5.3",
@@ -1083,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "bastion_vault"
-version = "0.44.17"
+version = "0.44.18"
 dependencies = [
  "actix-rt",
  "anyhow",
@@ -1763,7 +1763,7 @@ dependencies = [
 
 [[package]]
 name = "bv-core"
-version = "0.41.4"
+version = "0.41.5"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
@@ -1996,7 +1996,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-rustion"
-version = "0.41.5"
+version = "0.41.6"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2156,7 +2156,7 @@ dependencies = [
 
 [[package]]
 name = "bv-kernel"
-version = "0.41.11"
+version = "0.41.12"
 dependencies = [
  "actix-rt",
  "arc-swap",
@@ -2252,7 +2252,7 @@ dependencies = [
 
 [[package]]
 name = "bv-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2445,7 +2445,7 @@ dependencies = [
 
 [[package]]
 name = "bvault-cli"
-version = "0.44.17"
+version = "0.44.18"
 dependencies = [
  "actix-rt",
  "actix-web",

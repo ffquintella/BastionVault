@@ -56,6 +56,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.18] - 2026-10-02
+
+### Fixed
+
+#### Resource Connect
+- **Connect over an `ssh-engine` CA profile with no username logs in as the role's `default_user`** (T36, S46): the engine already signed the cert for the role's `default_user`, but the GUI ignored it and failed with "SSH profile has no username". The login name is now read from the signed cert's single principal. A profile username still takes precedence, and a cert with several principals still fails rather than guessing. The error message now also points at the `default-account` source and the role's `default_user`.
+
 ## [0.44.17] - 2026-10-02
 
 ### Security

@@ -135,6 +135,8 @@ The resource binds to one of:
 
 The resource binding stores `ssh_mount = "ssh/"`, `ssh_role = "admins"`, and the mode (`ca` / `otp` / `pqc`). No credential is persisted on the resource — the role binding is.
 
+**Login name.** The profile's `username` is sent as the cert's `valid_principals` (CA) or the OTP `username`, and it is also the login name. If the profile has no username, the engine falls back to the role's `default_user`. The GUI then logs in as whatever the engine returned: the OTP response's `username`, or in CA mode the signed cert's principal, used only when the cert lists exactly one. Otherwise Connect fails with "SSH profile has no username" rather than guessing. To log in as the *connecting operator*, use the `default-account` source instead.
+
 #### `pki` — vault-issued client X.509
 
 The resource binds to a **PKI role** (`pki/issue/<role>`). At connect time the host calls `pki/issue/<role>` with the resource hostname as the requested CN/SAN, gets back a fresh cert + key + chain, and feeds them to:
