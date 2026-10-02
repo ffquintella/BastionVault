@@ -56,6 +56,14 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.17] - 2026-10-02
+
+### Security
+
+#### Dependencies
+
+- **Refresh the GUI's `undici` (7.30.0) and `vitest` / `@vitest/mocker` (4.1.11) locks** (`gui/package-lock.json`) -- clears ten `undici` advisories (DoS, response splitting, shared-cache cookie disclosure, `BalancedPool` TLS validation bypass, among others) and GHSA-82fw-gwwq-j7x9, a path traversal in `@vitest/mocker`. Both are build- and test-time dependencies only and never ship in the desktop bundle; the refresh keeps `npm audit` clean. No `package.json` range changed.
+
 ## [0.44.16] - 2026-10-01
 
 ### Added
