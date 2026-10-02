@@ -20,6 +20,7 @@ import {
   validateConnectAccess,
   type ConnectCandidate,
 } from "../lib/connectValidation";
+import { DEFAULT_RESOURCE_TYPES, typeSupportsConnect } from "../lib/resourceTypes";
 
 const SSH_SECRET = {
   protocol: "ssh",
@@ -76,8 +77,28 @@ describe("connect-access validator", () => {
   });
 
   describe("staticVerdict", () => {
-    it("refuses a non-server resource without a round trip", () => {
-      expect(staticVerdict(candidate({ type: "database" }))?.allowed).toBe(false);
+    it("refuses a resource whose type offers no Connect protocol without a round trip", () => {
+      // The gate is the type's protocol list (`typeSupportsConnect`), not a
+      // hard-coded `type === "server"`: `database` offers none.
+      const connectEnabled = typeSupportsConnect(DEFAULT_RESOURCE_TYPES.database);
+      expect(connectEnabled).toBe(false);
+      expect(
+        staticVerdict(candidate({ type: "database", connectEnabled }))?.allowed,
+      ).toBe(false);
+    });
+
+    it("defers to the server for a web-application resource with an open web profile", () => {
+      const connectEnabled = typeSupportsConnect(DEFAULT_RESOURCE_TYPES.web_application);
+      expect(connectEnabled).toBe(true);
+      expect(
+        staticVerdict(
+          candidate({
+            type: "web_application",
+            connectEnabled,
+            hints: [{ protocol: "web", credential_source: { kind: "none" } }],
+          }),
+        ),
+      ).toBeNull();
     });
 
     it("refuses a resource whose type has Connect disabled", () => {

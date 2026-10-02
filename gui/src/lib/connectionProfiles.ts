@@ -13,13 +13,39 @@ import type {
   ResourceSecretShape,
   SessionProtocol,
   SshLoginClass,
+  WebProfileSettings,
 } from "./types";
 
 /** Default port per (protocol). Per-OS-type defaults that override
  *  these live on the operator-side `ResourceTypeDef.connect`
  *  (Phase 7) — for v1 the protocol default is enough. */
 export function defaultPort(protocol: SessionProtocol): number {
-  return protocol === "ssh" ? 22 : 3389;
+  switch (protocol) {
+    case "ssh":
+      return 22;
+    case "rdp":
+      return 3389;
+    case "web":
+      return 443;
+  }
+}
+
+/**
+ * Parse a stored profile's `protocol`. Returns null for anything this
+ * build doesn't know — callers must treat that as "not launchable", never
+ * as SSH. A profile written by a newer GUI (or by hand) can carry any
+ * string here. See features/web-application-connect.md §1, "Strict
+ * parsing / old clients".
+ */
+export function parseSessionProtocol(raw: unknown): SessionProtocol | null {
+  switch (raw) {
+    case "ssh":
+    case "rdp":
+    case "web":
+      return raw;
+    default:
+      return null;
+  }
 }
 
 /** Map structured `os_type` to the protocol the Connect button
@@ -94,8 +120,9 @@ export function readProfiles(meta: Record<string, unknown>): ConnectionProfile[]
       p !== null &&
       typeof (p as ConnectionProfile).id === "string" &&
       typeof (p as ConnectionProfile).name === "string" &&
-      ((p as ConnectionProfile).protocol === "ssh" ||
-        (p as ConnectionProfile).protocol === "rdp") &&
+      // Strict: an unknown protocol drops the profile (fail closed) —
+      // it is never read as SSH.
+      parseSessionProtocol((p as ConnectionProfile).protocol) !== null &&
       typeof (p as ConnectionProfile).credential_source === "object" &&
       (p as ConnectionProfile).credential_source !== null,
   );
@@ -127,7 +154,9 @@ export function blankProfile(
  */
 export function validateProfile(p: ConnectionProfile): string | null {
   if (!p.name.trim()) return "Profile name is required";
-  if (p.protocol !== "ssh" && p.protocol !== "rdp") return "Invalid protocol";
+  const protocol = parseSessionProtocol(p.protocol);
+  if (protocol === null) return "Invalid protocol";
+  if (protocol === "web") return validateWebProfile(p);
   if (p.target_port !== undefined) {
     if (
       !Number.isInteger(p.target_port) ||
@@ -198,7 +227,172 @@ export function validateProfile(p: ConnectionProfile): string | null {
         }
       }
       return null;
+    case "none":
+      return "SSH and RDP profiles need a credential source";
   }
+}
+
+// ── Web profiles (features/web-application-connect.md, T96) ─────────
+
+/** Login modes this release can launch. */
+const LAUNCHABLE_WEB_LOGIN_MODES = ["open"] as const;
+
+/** Credential sources that can never authenticate a web session. */
+const NEVER_WEB_SOURCES: CredentialSource["kind"][] = ["ssh-engine", "pki", "fido2"];
+
+/**
+ * Normalise an operator-typed origin to `scheme://host[:port]`: lower-case
+ * host (punycode for IDNs), default port dropped. Mirrors the host's
+ * `WebOrigin::parse_config`, which is the authoritative check — this one
+ * only lets the editor say no before the connect does.
+ */
+export function normalizeWebOrigin(
+  raw: string,
+  allowInsecureHttp: boolean,
+): { origin: string } | { error: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { error: "An allowed origin is empty" };
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return { error: `\`${trimmed}\` is not a valid origin` };
+  }
+  if ((url.pathname !== "/" && url.pathname !== "") || url.search || url.hash) {
+    return {
+      error: `\`${trimmed}\` is not a bare origin: give scheme://host[:port] only (no path, query or fragment)`,
+    };
+  }
+  if (url.username || url.password) {
+    return { error: `\`${trimmed}\` carries userinfo (user@host); origins may not` };
+  }
+  const err = webUrlError(url, allowInsecureHttp);
+  if (err) return { error: `\`${trimmed}\`: ${err}` };
+  return { origin: url.origin };
+}
+
+/** Scheme + host rules shared by the start URL and allowed origins. */
+function webUrlError(url: URL, allowInsecureHttp: boolean): string | null {
+  if (url.protocol === "http:") {
+    if (!allowInsecureHttp) {
+      return "plain http is refused unless \u201cAllow insecure HTTP\u201d is set";
+    }
+  } else if (url.protocol !== "https:") {
+    return `scheme ${url.protocol} is not allowed (https only)`;
+  }
+  const host = url.hostname.toLowerCase();
+  if (!host) return "missing host";
+  if (host.endsWith(".")) {
+    return `host ${host} has a trailing dot; browsers treat it as a different origin \u2014 remove the dot`;
+  }
+  if (host === "localhost" || host.endsWith(".localhost")) {
+    return `host ${host} is reserved for the vault's own UI; web sessions may not open it`;
+  }
+  return null;
+}
+
+/**
+ * The exact origin set a web profile allows: the start URL's origin plus
+ * `allowed_origins`, normalised and de-duplicated. Null when any entry is
+ * invalid.
+ */
+export function webOriginSet(web: WebProfileSettings): string[] | null {
+  const allowHttp = web.allow_insecure_http === true;
+  let start: URL;
+  try {
+    start = new URL(web.start_url.trim());
+  } catch {
+    return null;
+  }
+  if (start.username || start.password || webUrlError(start, allowHttp)) return null;
+  const out = [start.origin];
+  for (const raw of web.allowed_origins ?? []) {
+    const r = normalizeWebOrigin(raw, allowHttp);
+    if ("error" in r) return null;
+    if (!out.includes(r.origin)) out.push(r.origin);
+  }
+  return out;
+}
+
+/** Window-size bounds, matching the host. */
+export const WEB_WINDOW_MIN = 400;
+export const WEB_WINDOW_MAX = 10_000;
+
+/**
+ * Save-time validation of a `web` profile. Refuses everything this release
+ * cannot honour rather than letting it look honoured: later login modes,
+ * the Rustion transport, TLS pins, credential sources that `open` doesn't
+ * use.
+ */
+export function validateWebProfile(p: ConnectionProfile): string | null {
+  const cs = p.credential_source.kind;
+  if (NEVER_WEB_SOURCES.includes(cs)) {
+    return `The ${cs} credential source can't authenticate a web session.`;
+  }
+  if (p.kind === "rustion") {
+    return "Web sessions can't be brokered through a Rustion bastion yet \u2014 use the direct transport.";
+  }
+  const web = p.web;
+  if (!web) return "Web profiles need web settings (start URL, login mode).";
+  if (!(LAUNCHABLE_WEB_LOGIN_MODES as readonly string[]).includes(web.login_mode)) {
+    return ["form", "http-auth", "sso"].includes(web.login_mode)
+      ? `The ${web.login_mode} login mode is not available yet \u2014 this release supports \u201copen\u201d only.`
+      : "Unknown login mode.";
+  }
+  if (cs !== "none") {
+    return "The open login mode releases no credential \u2014 set the credential source to \u201cNone\u201d.";
+  }
+  if (web.transport !== undefined && web.transport !== "local") {
+    return web.transport === "rustion-isolated"
+      ? "Rustion browser isolation is not available yet."
+      : "Unknown web transport.";
+  }
+  if ((web.tls_pin_sha256 ?? []).length > 0) {
+    return "TLS certificate pinning for web sessions is not available yet \u2014 remove the pin.";
+  }
+  const allowHttp = web.allow_insecure_http === true;
+  if (!web.start_url.trim()) return "Start URL is required.";
+  let start: URL;
+  try {
+    start = new URL(web.start_url.trim());
+  } catch {
+    return "Start URL is not a valid URL.";
+  }
+  if (start.username || start.password) {
+    return "Start URL may not carry user@ credentials \u2014 never put a credential in a URL.";
+  }
+  const startErr = webUrlError(start, allowHttp);
+  if (startErr) return `Start URL: ${startErr}`;
+  for (const raw of web.allowed_origins ?? []) {
+    const r = normalizeWebOrigin(raw, allowHttp);
+    if ("error" in r) return r.error;
+  }
+  for (const dim of ["width", "height"] as const) {
+    const v = web.window?.[dim];
+    if (v === undefined) continue;
+    if (!Number.isInteger(v) || v < WEB_WINDOW_MIN || v > WEB_WINDOW_MAX) {
+      return `Window ${dim} must be a whole number between ${WEB_WINDOW_MIN} and ${WEB_WINDOW_MAX}.`;
+    }
+  }
+  return null;
+}
+
+/**
+ * A new `web` profile, its start URL pre-filled from the resource's `url`
+ * field when it has one.
+ */
+export function blankWebProfile(resourceUrl?: string): ConnectionProfile {
+  return {
+    id: newProfileId(),
+    name: "Default",
+    protocol: "web",
+    credential_source: { kind: "none" },
+    web: {
+      start_url: (resourceUrl ?? "").trim(),
+      allowed_origins: [],
+      login_mode: "open",
+    },
+  };
 }
 
 /**
@@ -209,7 +403,15 @@ export function validateProfile(p: ConnectionProfile): string | null {
  * quick-Connect and the Connection-tab launcher agree on launchability.
  */
 export function isLaunchableProfile(p: ConnectProfileHint): boolean {
-  if (p.protocol !== "ssh" && p.protocol !== "rdp") return false;
+  const protocol = parseSessionProtocol(p.protocol);
+  if (protocol === null) return false;
+  if (protocol === "web") {
+    // Phase 1 launches the `open` mode only, which is exactly the profiles
+    // carrying the `none` source (validation pins the two together). The
+    // card hint carries no login mode, so the source stands in for it.
+    // Rustion-brokered web sessions don't exist yet.
+    return p.credential_source.kind === "none" && p.kind !== "rustion";
+  }
   switch (p.credential_source.kind) {
     case "secret":
     case "ldap":
@@ -229,6 +431,9 @@ export function isLaunchableProfile(p: ConnectProfileHint): boolean {
       // prompts for the password at connect and launches.
       if (p.protocol === "ssh") return p.credential_source.mode !== "pqc";
       return true;
+    case "none":
+      // Only meaningful on a web profile (handled above).
+      return false;
   }
 }
 
@@ -280,6 +485,10 @@ export function isLaunchableForCaller(
 ): boolean {
   if (!isLaunchableProfile(p)) return false;
   if (!connectOnly) return true;
+  // An `open` web session resolves no credential anywhere, so there is
+  // nothing for connect-only access to protect: the server's `connect`
+  // gate (and MFA, when required) is the whole check.
+  if (p.protocol === "web") return true;
   if (p.kind === "rustion") return true;
   return (
     brokeredByPolicy &&
@@ -354,6 +563,8 @@ export function blankCredentialSource(
       // Carries no fields — the key is resolved at connect time from the
       // connecting operator's own enrolment, never pinned on the profile.
       return { kind: "fido2" };
+    case "none":
+      return { kind: "none" };
   }
 }
 

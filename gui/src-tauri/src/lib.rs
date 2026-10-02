@@ -608,6 +608,7 @@ pub fn run() {
             commands::ldap::ldap_check_connection,
             commands::connect::session_open_ssh,
             commands::connect::session_open_rdp,
+            commands::connect_web::session_open_web,
             commands::connect::session_input,
             commands::connect::session_attach_rdp_frames,
             commands::connect::session_input_rdp_mouse,

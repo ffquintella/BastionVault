@@ -111,6 +111,7 @@ pub mod mcp;
 pub mod cert_lifecycle;
 pub mod cloud_target;
 pub mod connect;
+pub mod connect_web;
 pub mod oidc;
 pub mod vaults;
 pub mod sharing;
