@@ -1,0 +1,945 @@
+# Feature: Web Application Connect — in-app web sessions with injected login or SSO
+
+## Summary
+
+Add a **web application** resource type and a third Connect protocol, `web`,
+next to `ssh` and `rdp`. Pressing **Connect** on a web-application resource
+opens a dedicated, isolated BastionVault window pointed at the application's
+URL and signs the operator in, using one of four **login modes**:
+
+| Login mode | What happens | Where the credential ends up |
+|---|---|---|
+| `open` | Window opens on the app, no login performed (the app's own SSO, or the operator types) | nowhere — no credential released |
+| `form` | A declarative **login recipe** fills username / password / TOTP into the login form(s) and submits | the target page's DOM, for the instant between fill and submit |
+| `http-auth` | HTTP Basic / Digest / NTLM challenge answered by the host, natively | the webview's auth handler, never the DOM |
+| `sso` | BastionVault acts as the IdP (SAML 2.0 / OIDC, from [S19](identity-provider.md)) and launches an IdP-initiated login | no shared secret exists |
+
+A later **proxy** variant of `form` (Phase 6) keeps the password out of the DOM
+entirely by substituting it into the outgoing request at a host-local proxy.
+
+A **future** transport, **Rustion browser isolation** (Phase 8, §12), runs the
+browser on a Rustion-managed worker instead of the operator's machine. The
+operator sees it over the existing RDP session path, the credential never
+reaches the operator's endpoint, and the session is recorded like any brokered
+RDP session. It needs work in the Rustion repo first and is not scheduled.
+
+The operator never sees the password in any mode. Every launch passes the same
+gates as SSH/RDP Connect: the `connect` capability, connect-time MFA, and a
+server-side audit record. Each resource declares an **exposure level** so that
+policy can forbid DOM injection for high-value accounts.
+
+Builds on [features/resource-connect.md](resource-connect.md) (S46),
+[features/connect-only-access.md](connect-only-access.md) (S10),
+[features/connect-mfa-and-fido2-ssh.md](connect-mfa-and-fido2-ssh.md) (S9) and,
+for the `sso` mode, [features/identity-provider.md](identity-provider.md) (S19).
+Desktop GUI only, like the rest of Resource Connect.
+
+## Motivation
+
+- **Most privileged consoles are web UIs.** FortiGate, vCenter, iDRAC/iLO,
+  pfSense, Grafana, Jenkins, Kubernetes dashboards and SaaS admin portals are all
+  administered through HTTPS. Today an operator opens the resource, reveals the
+  secret, copies it, and pastes it into a browser. That makes the reveal the
+  normal path, and it defeats connect-only access.
+- **The inventory already describes them.** The builtin `website` type carries a
+  `url` field ([gui/src/lib/resourceTypes.ts:180](../gui/src/lib/resourceTypes.ts:180)),
+  and [features/resources.md](resources.md) describes it as "URLs with login
+  credentials". [features/resource-types-firewall-switch-db.md](resource-types-firewall-switch-db.md)
+  explicitly defers vendor HTTPS GUIs "until the website-style 'open in browser'
+  connect path is generalised". This spec is that generalisation.
+- **Comparable products all ship it.** Examples include CyberArk Secure Web
+  Sessions and PSM for Web, BeyondTrust PRA Web Jump, KeeperPAM Remote Browser
+  Isolation, Delinea Credential Manager, ManageEngine PAM360 auto-logon, StrongDM
+  Websites and Teleport App Access. See *Research* below.
+
+## Research — how others do it, and what we take
+
+There are five architectural patterns, listed here from lowest to highest
+credential exposure on the operator's endpoint:
+
+1. **Federation.** The vault is the IdP (SAML/OIDC), or the vault signs an
+   identity header for an app behind a proxy (Teleport `Teleport-Jwt-Assertion`,
+   Pomerium `X-Pomerium-Jwt-Assertion`, Cloudflare `Cf-Access-Jwt-Assertion`).
+   No shared password exists. The cost is that every app must be configured as a
+   relying party.
+2. **Remote browser isolation.** A browser runs server-side and only pixels reach
+   the operator. Examples: KeeperPAM RBI (Chromium in the gateway), CyberArk
+   PSM-HTML5 (Selenium-driven browser on the PSM host). The credential never
+   leaves the server.
+3. **Credential-injecting reverse proxy.** Basic auth or an `Authorization`
+   header is injected at the last hop (StrongDM Websites). It never reaches the
+   client, but it only works for apps that accept header auth.
+4. **Controlled local browser with recipe injection.** BeyondTrust Web Jump,
+   CyberArk Secure Browser, and the KeeperPAM fill-rule format. The credential
+   reaches the endpoint's DOM.
+5. **Browser-extension autofill.** CyberArk SWS, Delinea DCM, PAM360. The
+   exposure is the same as (4), plus the extension's own attack surface. The
+   2025 DOM-based extension-clickjacking research found 10 of 11 password
+   managers exploitable.
+
+What we adopt:
+
+- **Pattern 4 as the baseline.** It is the only pattern that works for an
+  arbitrary form-login app without server-side infrastructure. It maps directly
+  onto Tauri: the `WebviewWindow` is the controlled browser and the Rust host is
+  the injector.
+- **Recipe shape from KeeperPAM and CyberArk `WebFormFields`.** Ordered steps
+  keyed by a URL pattern, each a `fill(selector, username | password | totp)`,
+  `click`, or `wait`, plus explicit `success_when` and `failure_when`
+  conditions. Multi-page logins (username page, then password page, then TOTP
+  page) are one step group per page. BeyondTrust handles CAPTCHA by letting the
+  operator solve it while the recipe waits; we do the same.
+- **The autofill-safety rules from Silver et al.** ("Password Managers: Attacks
+  and Defenses", USENIX Security 2014) **and the 2025 clickjacking work.**
+  - Fill only in the top frame.
+  - Fill only on an exact origin match over HTTPS.
+  - Fill only visible, non-occluded fields of the expected type.
+  - Never draw fill UI inside the page.
+- **Patterns 3 and 1 as phases.** `http-auth` is the cheap form of pattern 3.
+  The proxy mode is the general form. `sso` is pattern 1, and it depends on the
+  Identity Provider feature.
+- **Pattern 2 (server-side RBI) is a future phase, delivered through Rustion.**
+  It is the right answer for the highest-assurance apps. Building a browser
+  fleet and a pixel-streaming stack inside BastionVault is not. Rustion already
+  has the three hard parts: it receives credentials from the vault in a sealed
+  envelope, terminates and records RDP, and has a replay path BastionVault can
+  already play. Phase 8 (§12) adds browser workers behind Rustion and reuses all
+  three.
+- **Not adopted: a browser extension.** It would move the injector out of the
+  process we control and into the operator's everyday browser profile, alongside
+  every other extension and tab.
+
+Primary sources: CyberArk docs (Secure Web Sessions; PSM for web applications),
+BeyondTrust PRA "Web Jump credential injection", KeeperPAM "RBI → browser
+autofill", StrongDM "Websites", Teleport "App Access JWT", Pomerium "Headers"
+reference, HashiCorp Boundary credential injection (SSH/RDP only; HTTPS targets
+are a plain tunnel), Tauri v2 `WebviewWindowBuilder` / wry `WebViewBuilder`
+docs, Tauri 2.4 and tauri-runtime 2.8 release notes (cookie APIs), Tauri
+security / capability docs, Microsoft WebView2 "Basic authentication" docs, W3C
+"A Well-Known URL for Changing Passwords".
+
+## Current State
+
+**Status: Todo.** Nothing in this document is implemented; it is the design for
+the work.
+
+What exists today, and what this feature has to change:
+
+- Resource types are GUI-only. They are an opaque JSON blob at the resource
+  mount's `config/types` ([crates/bv-engine-resource/src/lib.rs:330](../crates/bv-engine-resource/src/lib.rs:330)),
+  with builtins in [gui/src/lib/resourceTypes.ts](../gui/src/lib/resourceTypes.ts).
+  - `ResourceTypeDef.connect` only knows `enabled`, `default_ports.{ssh,rdp}` and
+    `default_users` ([gui/src/lib/types.ts:447](../gui/src/lib/types.ts:447)).
+  - **`mergeTypeConfig` lets a saved config fully replace the defaults**
+    ([resourceTypes.ts:208](../gui/src/lib/resourceTypes.ts:208)). A deployment
+    that ever saved its types will never see a new builtin. Phase 1 must handle
+    this.
+- The Connect chip is hard-gated to `type === "server"`
+  ([gui/src/routes/ResourcesPage.tsx:147](../gui/src/routes/ResourcesPage.tsx:147)).
+  The same check repeats at `ResourcesPage.tsx:927`, `:1148`,
+  `ConnectPalette.tsx:118` and `SettingsPage.tsx:1255`.
+- `ConnectionProfile.protocol` is `"ssh" | "rdp"`
+  ([types.ts:488](../gui/src/lib/types.ts:488), [:606](../gui/src/lib/types.ts:606)).
+  Profiles are stored inside the resource record with no server schema. The
+  server projects them to a `ConnectProfileHint`
+  ([bv-engine-resource/src/lib.rs:132](../crates/bv-engine-resource/src/lib.rs:132)).
+- Session windows are built with `WebviewUrl::App` only
+  ([gui/src-tauri/src/commands/connect.rs:401](../gui/src-tauri/src/commands/connect.rs:401),
+  [:792](../gui/src-tauri/src/commands/connect.rs:792)).
+  - Nothing in the GUI uses `WebviewUrl::External`, `initialization_script`,
+    `on_navigation`, `incognito`, `data_directory` or `proxy_url`.
+  - `capabilities/default.json` grants IPC to windows matching `main`, `ssh-*`,
+    `rdp-*` and `plugin-*`.
+  - `tauri.conf.json` has `withGlobalTauri: true` and `csp: null`.
+- The `connect` capability, the MFA ticket (`v2/connect/mfa/{begin,verify}`) and
+  the direct-path pre-flight `v2/connect/authorize` exist and are
+  protocol-agnostic
+  ([bv-engine-resource/src/lib.rs:495](../crates/bv-engine-resource/src/lib.rs:495),
+  [:687](../crates/bv-engine-resource/src/lib.rs:687)). On the direct path the GUI
+  host resolves the credential itself, which needs `read` on the secret. The
+  connect-only guarantee is therefore hard only on the Rustion path.
+- The Identity Provider (S19, T52) is fully unimplemented. There is no `idp`
+  module.
+
+## Scope
+
+### In scope
+
+- **Type and protocol.** A new builtin type `web_application`.
+  - `ResourceTypeDef.connect` gains `protocols: ("ssh" | "rdp" | "web")[]`. The
+    Connect chip is gated on that list instead of `type === "server"`.
+  - The `web` protocol is also enabled on the existing `website` builtin. Its
+    `url` field already exists.
+- **`web` connection profiles** with a `web` block covering:
+  - the start URL,
+  - the navigation allow-list,
+  - the login mode,
+  - the recipe (for `form`),
+  - the TLS pin (optional),
+  - the window and session options.
+- **Server-side launch:** `resources/v2/connect/web/launch`.
+  - Authorises via `may_connect_target` and the MFA ticket.
+  - Resolves the credential **server-side**.
+  - Computes TOTP codes server-side.
+  - Returns a short-lived launch bundle to the GUI host.
+  - Writes the audit record.
+  - This is what makes connect-only access real for web, unlike today's direct
+    SSH path.
+- **Tauri host session:** `session_open_web`.
+  - An ephemeral, IPC-less `WebviewWindow` on an external URL, with origin
+    enforcement on navigation, new-window and download.
+  - The recipe engine.
+  - Teardown, using the same `connect_sessions` registry and `on_close` cleanup
+    as SSH/RDP.
+- **Recipe editor** in the profile editor, with a "test login" dry run and
+  recipe import/export as JSON.
+- **`http-auth` mode** through native webview challenge handlers.
+- **Per-profile TLS certificate pin** for appliances with self-signed or
+  private-CA certificates, through native handlers.
+- **`sso` mode** on top of S19, once that feature exists.
+- **Exposure-level policy:** `web_exposure_max` at the type and resource tiers.
+- **Proxy mode:** placeholder substitution at a host-local proxy. Phase 6 is a
+  spike, gated on per-platform CA-trust feasibility.
+
+### Out of scope (explicit)
+
+- **Implementing server-side browser isolation now.** It is designed as Phase 8
+  (§12), through Rustion, and left as future work. It depends on Rustion-side
+  work that has not started.
+- **Recording local web sessions** (Phases 1–7). Pixel capture of a
+  WKWebView/WebView2 is a different project. Launch, navigation-origin and close
+  events are audited instead. Recorded web sessions arrive with Phase 8, where
+  Rustion records the RDP stream.
+- **Routing a *local* webview's traffic through Rustion.** Rustion terminates SSH
+  and RDP, not HTTP. The `proxy_url` hook used in Phase 6 is where a bastion
+  HTTP egress could attach later, but Phase 8 moves the whole browser to the
+  bastion side instead, which is the stronger design.
+- **Passkeys / WebAuthn with a vault-held key.** Embedded webviews do not expose
+  a usable platform-authenticator path:
+  - WKWebView needs per-RP associated domains or the browser entitlement.
+  - Conditional UI is unsupported.
+  - A JS `navigator.credentials` shim would be fragile and would put key material
+    in reach of page JS.
+  - The operator's own FIDO2 key, used by the site directly, is *not* blocked.
+    It simply is not something the vault injects.
+- **Kerberos / Integrated Windows Auth.** WebView2 does not support it.
+- **Opening in the operator's system browser with injection.** The system
+  browser is not ours to control. `open` mode may offer "open in system browser"
+  with **no** credential release.
+- **Password rotation on check-in for `secret`-sourced web credentials.** This
+  is a natural follow-up using `/.well-known/change-password` discovery and a
+  second recipe. LDAP-library check-out/check-in works from day one through the
+  existing `on_close` cleanup.
+
+## Design
+
+### 1. Data model
+
+`ResourceTypeDef.connect` gains a protocol list. Existing configs with no
+`protocols` key are read as `["ssh","rdp"]` when `enabled !== false`, which
+preserves today's behaviour:
+
+```ts
+connect?: {
+  enabled?: boolean;
+  protocols?: ("ssh" | "rdp" | "web")[];
+  default_ports?: { ssh?: number; rdp?: number };
+  default_users?: { linux?: string; macos?: string; windows?: string };
+  web_exposure_max?: WebExposure; // see §6
+};
+```
+
+Builtin `web_application`:
+
+- Fields: `url` (url), `vendor` (select: generic / fortigate / vcenter / idrac /
+  ilo / pfsense / grafana / jenkins / other), `environment`, `owner`.
+- `connect: { protocols: ["web"] }`.
+
+`website` gains `connect: { protocols: ["web"] }`.
+
+**Saved-config migration.** `mergeTypeConfig` changes from "saved replaces
+defaults" to "saved wins per key; builtins absent from the saved config are
+added". This is additive only: a saved type is never altered and a deleted
+builtin is not resurrected unless it was never saved. The second condition needs
+a `removed_builtins: string[]` tombstone list written when an operator deletes a
+builtin. Without that tombstone, a deletion would come back on the next release.
+
+`ConnectionProfile.protocol` becomes `"ssh" | "rdp" | "web"`. A `web` profile
+carries:
+
+```ts
+web?: {
+  start_url: string;              // https only (http only with allow_insecure_http, §6)
+  allowed_origins: string[];      // exact scheme://host[:port]; start_url's origin is implicit
+  login_mode: "open" | "form" | "http-auth" | "sso";
+  transport?: "local" | "rustion-isolated"; // default "local"; "rustion-isolated" is Phase 8 (§12)
+  recipe?: WebLoginRecipe;        // form only
+  sso?: { idp_app: string };      // sso only — an S19 relying-party id
+  tls_pin_sha256?: string[];      // SPKI pins, Phase 4
+  allow_insecure_http?: boolean;  // default false
+  allow_downloads?: boolean;      // default false
+  allow_popups_same_origin_set?: boolean; // default true
+  clipboard?: "bidirectional" | "host-to-session" | "session-to-host" | "off"; // Linux/Windows only
+  window?: { width?: number; height?: number };
+}
+```
+
+`credential_source` is reused unchanged. The valid sources for `web` are:
+
+- `secret` — reads keys `username`, `password` and optional `totp_seed` (a
+  mapping can override the key names).
+- `ldap` — library check-out returns username and password; check-in on close
+  through `on_close`.
+- `default-account` — username only, for apps where the operator types the
+  password.
+
+`ssh-engine`, `pki` and `fido2` fail validation on a `web` profile.
+
+**Strict parsing / old clients.** A GUI that predates this feature sees
+`protocol: "web"`, which is outside its union.
+
+- The profile parser must fail closed on an unknown protocol. It must not
+  default to `ssh`.
+- Phase 1 includes a test that pins this behaviour for the current release.
+- Older releases are a compatibility risk and are documented in the CHANGELOG
+  **Security** entry: an older GUI either ignores the profile or errors, and it
+  never dials it as SSH.
+  - This must be verified against the parser at the last two released tags
+    before Phase 1 merges.
+
+### 2. Login recipe
+
+A recipe is declarative data, never script:
+
+```jsonc
+{
+  "version": 1,
+  "steps": [
+    { "when_url": "https://fw01.example.com/login*",
+      "actions": [
+        { "fill": "input[name=username]", "value": "username" },
+        { "fill": "input[name=secretkey]", "value": "password" },
+        { "click": "button#login_button" }
+      ] },
+    { "when_url": "https://fw01.example.com/login/2fa*",
+      "actions": [
+        { "fill": "input[autocomplete=one-time-code]", "value": "totp" },
+        { "submit": "form" }
+      ] }
+  ],
+  "success_when": { "url": "https://fw01.example.com/ng/*" },
+  "failure_when": { "selector": ".error-message, .login-error" },
+  "timeout_secs": 30,
+  "pause_for_operator": ["captcha"]
+}
+```
+
+Rules:
+
+- `value` is an enum: `username | password | totp | literal:<non-secret>`.
+  Selectors and URLs are data. The host never evaluates operator-supplied
+  JavaScript.
+- `when_url` is matched against the **top-frame URL as reported by the host**
+  (`on_page_load(Finished)`), never a URL the page reports about itself.
+  - Its origin must be in the profile's origin set.
+  - Its scheme must be `https` unless `allow_insecure_http` is set.
+  - A profile save is rejected when a step's origin is outside the set.
+- A recipe can carry `vendor` presets. Phase 2 ships tested presets for the
+  `web_application.vendor` enum. An operator who picks FortiGate gets a working
+  recipe without writing selectors.
+- **Heuristic mode** (`"steps": "auto"`) finds fields by
+  `autocomplete="username" | "current-password" | "one-time-code"`, then
+  `type=password`. It is off unless the resource's policy allows it (§6).
+  Heuristics increase the chance of filling the wrong field, so they are opt-in
+  and visibly labelled in the editor.
+
+### 3. Launch flow
+
+```
+GUI (main window)                      GUI host (Rust)                         Server
+Connect ▸ web profile ──────────────▶ session_open_web(resource, profile)
+                                       [MFA prompt if require_mfa] ─────────▶ v2/connect/mfa/{begin,verify}
+                                       POST resources/v2/connect/web/launch ─▶ may_connect_target
+                                                                               + burn MFA ticket
+                                                                               + resolve credential (server-side)
+                                                                               + compute TOTP now (never the seed)
+                                                                               + audit connect.web.launch
+                                       ◀── launch bundle {launch_id, username,
+                                           password, totp?, totp_valid_until,
+                                           recipe_hash, expires_at (≤ 60 s)}
+                                       Zeroizing<..>; build ephemeral window
+                                       navigate start_url; run recipe;
+                                       drop bundle after success/failure/timeout
+                                       ──────────────────────────────────────▶ v2/connect/web/result {launch_id, outcome}
+```
+
+- **Why server-side resolution.** It closes the direct-path gap noted in
+  [connect-only-access.md](connect-only-access.md): an operator who holds only
+  `connect` can launch without ever having `read` on the secret.
+  - The launch endpoint is the only reader. It is subject to the same
+    `may_connect_target` gate as Rustion open.
+  - It returns credentials only for a `web` profile whose `login_mode` needs
+    them.
+  - This is an honest, bounded guarantee. The operator's own machine receives
+    the plaintext for `form` mode, and it is labelled as exactly that (§6).
+- **TOTP.** The seed never leaves the server. The bundle carries the current code
+  and its validity window. If a recipe reaches its TOTP step after the code
+  expires, the host asks for a fresh code at `v2/connect/web/totp` with
+  `launch_id`. That call is single-use per step and bound to the launch.
+- **`launch_id` binding.** Bound to (principal, namespace, resource, profile,
+  recipe_hash) and valid for 60 s. Recorded server-side as SHA-256 only, using
+  the MFA-ticket store pattern.
+- **No silent fallback.**
+  - An unreachable launch endpoint fails the connect. It never falls back to
+    host-side secret resolution.
+  - A failed recipe surfaces a failed state to the operator. It never falls back
+    to heuristic mode.
+
+### 4. The web session window
+
+Built in `gui/src-tauri/src/commands/connect_web.rs` (new) and
+`gui/src-tauri/src/session/web.rs` (new):
+
+- **Label `web-<token>`.** A new capability test asserts that **no** capability
+  file matches `web-*` and that no capability anywhere declares a `remote` URL
+  list. The window has no IPC bridge. The test runs in
+  `cargo nextest run -p bastion-vault-gui --lib`. With `withGlobalTauri: true`
+  the global script may still be injected, so Phase 1 verifies on all three
+  platforms that `invoke` from the web window is rejected. If it is not, the
+  global script is disabled for `web-*` windows.
+- **`WebviewUrl::External(start_url)`, `incognito(true)`.** On macOS 14+ the
+  window also gets a per-session `data_store_identifier`. Elsewhere it gets a
+  per-session `data_directory` under the app cache, removed in `on_close`. No
+  cookie, cache or local storage outlives the session or is shared with the
+  vault UI or another web session.
+- **`on_navigation`.** Allows only origins in the profile set. A blocked
+  navigation is cancelled, shown to the operator in the window title area, and
+  audited as `connect.web.navigation_blocked` with the origin only (no path, no
+  query, which can carry tokens).
+- **`on_new_window`.**
+  - In the origin set (OAuth popups, vendor consoles): opened in a child window
+    sharing the session's data store, under the same rules.
+  - Otherwise: denied.
+- **`on_download`.** Denied unless `allow_downloads`, then saved through the
+  existing save dialog. Downloads are audited by filename and size.
+- **Devtools off.** Not enabled in release builds. The `devtools` Cargo feature
+  stays off for the GUI crate. The context-menu "Inspect" disappears with it.
+- **Clipboard.** `enable_clipboard_access` follows the profile's `clipboard`
+  setting on Linux and Windows. On macOS the webview clipboard cannot be gated,
+  which the profile editor states.
+- **Window title.** Always `"<resource> — <current origin>"`, updated by the host
+  from `on_page_load`. There is no address bar, so the title is the operator's
+  only origin indicator and it must come from the host, never `document.title`.
+  A small chrome strip (origin, lock state, Disconnect, Re-run login) needs
+  Tauri's `unstable` multi-webview so that vault-controlled UI and the remote
+  page live in separate webviews. It is Phase 5. Phase 1 uses the title plus the
+  OS window close.
+- **Teardown.** Same as SSH/RDP:
+  - `CloseRequested` → `drop_session` → `run_cleanup`.
+  - Cleanup clears the data directory, runs LDAP check-in, and posts
+    `connect.web.close` with duration.
+
+### 5. Recipe engine
+
+Runs in the host. JavaScript only touches the page through one fixed, audited
+fill routine that ships with the binary:
+
+- Triggered on `on_page_load(Finished)` for the top frame. Any URL matching
+  `when_url` makes the host first re-check the origin against the profile set.
+- **Fill script.** For each action the host `eval`s the fixed routine with
+  arguments serialised by `serde_json` (never string-concatenated). The routine:
+  - resolves the selector in the **top document only**;
+  - requires exactly one match;
+  - requires the element to be an `<input>` of the expected type, visible
+    (non-zero box, not `opacity:0` / `visibility:hidden`, not covered at its
+    centre point according to `elementFromPoint`), and in a form whose `action`
+    resolves to an allowed origin;
+  - sets the value through the native `HTMLInputElement` value setter and
+    dispatches `input` / `change`, so React- or Vue-controlled forms see it;
+  - returns a structured result. Any failed check aborts the recipe. The host
+    never retries with a looser selector.
+- **After submit.** The routine clears password fields still present in the
+  document, which covers SPAs that keep the form mounted. The host drops its
+  `Zeroizing` copy at success, failure or timeout, whichever is first.
+- **Frames.** Frames are not filled in Phase 1. A later recipe flag
+  (`frame_origin`) may allow one named same-origin frame. Cross-origin frames are
+  never filled. On Windows, wry adds initialization scripts to subframes, which
+  is one reason the engine uses targeted `eval` after load instead of an
+  initialization script.
+- **Success and failure** are judged from host-observed URL and selector
+  presence, reported to `v2/connect/web/result` and shown in the window title.
+- **Pause for operator.** A step can wait (up to `timeout_secs`) for the operator
+  to solve a CAPTCHA or approve a push MFA, then continue.
+
+**Exposure, stated plainly.** In `form` mode the password exists in the page's
+JavaScript realm from fill until submit and clear. Page scripts, any XSS on the
+target, or a compromised third-party script there can read it. This is the same
+exposure as every pattern-4/5 product. It is why §6 exists and why the proxy mode
+(Phase 6) is on the roadmap.
+
+### 6. Exposure levels and policy
+
+```
+WebExposure = "none"     // open, sso
+            | "isolated" // Phase 8: any login mode over transport "rustion-isolated";
+                         //   the credential reaches Rustion and its worker, never the operator's endpoint
+            | "handler"  // http-auth: native challenge handler, never in the DOM
+            | "proxy"    // Phase 6: placeholder in DOM, real secret only on the wire
+            | "dom"      // form
+```
+
+- `web_exposure_max` can be set on the type (`ResourceTypeDef.connect`) and on
+  the resource. The most restrictive value wins, matching the Rustion transport
+  tier rule.
+- **Enforcement.**
+  - The profile editor rejects a profile whose login mode exceeds the cap.
+  - The server enforces the cap again in `v2/connect/web/launch`. GUI-side
+    validation is a convenience, not the control.
+- The order is `none < isolated < handler < proxy < dom`. A cap of `isolated`
+  therefore means "SSO or Rustion browser isolation only". That is the setting
+  for crown-jewel consoles once Phase 8 exists. Until then, a resource capped at
+  `isolated` can still use `open` and `sso`, and `form` is refused, not
+  silently run locally.
+- **Heuristic recipes** need `allow_heuristic_fill: true` at the same tiers.
+  Default is false.
+- **`allow_insecure_http`.** Defaults false and is refused when the effective
+  cap is below `dom`. A credential sent over plaintext HTTP is not "handler" or
+  "proxy" exposure in any meaningful sense.
+
+### 7. `http-auth` mode (Phase 3)
+
+wry does not expose authentication challenges, so the host attaches native
+handlers through `Webview::with_webview`:
+
+| Platform | Handler |
+|---|---|
+| Windows | WebView2 `BasicAuthenticationRequested` (Basic, Digest, NTLM, proxy auth) |
+| macOS | `WKNavigationDelegate webView:didReceiveAuthenticationChallenge:` for `NSURLAuthenticationMethodHTTPBasic` / `HTTPDigest` / `NTLM` |
+| Linux | WebKitGTK `authenticate` signal |
+
+The handler answers only when:
+
+- the challenge's protection space host and port match an allowed origin, and
+- the scheme is https (or `allow_insecure_http`).
+
+It answers at most once per (origin, realm). A second challenge after a supplied
+answer means the credential was rejected, which is reported as failure; the
+handler does not loop. Kerberos/Negotiate is refused explicitly with a clear
+message.
+
+### 8. TLS pinning (Phase 4)
+
+Appliances commonly serve self-signed certificates. The webviews reject those
+by default, and the Phase 1 behaviour is to fail closed with the TLS error shown.
+Phase 4 adds `tls_pin_sha256` (SPKI SHA-256, one or more), honoured through:
+
+- WebView2 `ServerCertificateErrorDetected`
+- WKWebView's server-trust challenge
+- WebKitGTK `load-failed-with-tls-errors` plus a per-session certificate
+  exception
+
+The pin is the only override. There is no "accept any certificate" switch.
+
+- The profile editor offers a "fetch and show fingerprint" helper. It is
+  trust-on-first-use, explicitly labelled, and requires an operator to confirm.
+- Where the PKI engine issued the appliance certificate, the editor proposes the
+  issuing CA's pin instead.
+
+### 9. `sso` mode (Phase 7, blocked by T52)
+
+Once S19 ships the SAML IdP and OIDC OP:
+
+- `web.sso.idp_app` names a registered relying party.
+- **SAML.** The host asks `v2/idp/saml/initiate` (new, S19-side) for an
+  IdP-initiated `SAMLResponse` for that SP. It opens the window on an
+  auto-posting page served from the host's custom protocol, never from the vault
+  UI webview, which posts to the SP's ACS URL. The ACS origin must be in the
+  profile's origin set.
+- **OIDC.** The host opens the RP's `initiate_login_uri` (OIDC Third-Party
+  Initiated Login) with `iss` = the vault OP. The RP redirects back to the OP. The
+  OP needs a session for the operator in this *ephemeral* store, so the host
+  first plants a single-use OP login cookie with `set_cookie` (tauri-runtime
+  ≥ 2.8), scoped to the OP origin and minted by `v2/idp/oidc/launch-session`
+  bound to `launch_id`.
+- Identity, entitlement checks and the `idp.issue` audit events are S19's. This
+  feature contributes the launch plumbing and the profile mode only.
+- **Apps that do their own SSO against a corporate IdP** (Entra ID, Okta,
+  Keycloak) need no S19. They use `open` mode, with the IdP's origin added to
+  `allowed_origins`.
+
+### 10. Proxy mode (Phase 6, spike first)
+
+- The webview is pointed at a host-local proxy (`proxy_url`, `http://127.0.0.1:<ephemeral>`;
+  macOS 14+ with wry's `mac-proxy` feature).
+- The proxy terminates TLS with a per-session leaf certificate issued by a
+  per-session CA held in memory only.
+- The recipe fills a random per-launch **placeholder** instead of the password.
+- The proxy replaces the placeholder with the real secret in the outgoing request
+  body only when all of these hold:
+  - the request's origin and path match the recipe's submit target;
+  - it is a POST;
+  - the content type is form or JSON.
+- Header injection (`Authorization`, StrongDM-style) is the same mechanism
+  without a placeholder.
+
+The open question that gates it is **making the webview trust the per-session CA
+without installing it into the OS trust store**. Installing into the OS store
+would be a persistent system-wide change and is refused.
+
+- WebView2 can accept it per-instance through `ServerCertificateErrorDetected`.
+- WKWebView through the server-trust challenge.
+- WebKitGTK through a per-context TLS database.
+
+The spike must confirm all three. If any platform cannot do it without touching
+the OS store, proxy mode ships on the platforms that can and is **visibly
+unavailable** elsewhere; it does not fall back to `dom`. Dependencies (a Rust
+MITM-capable proxy and certificate generation) must stay inside the
+`openssl-sys`/`aws-lc-sys`-free constraints in the root `Cargo.toml`. That
+rules out several off-the-shelf proxies and is the second spike question.
+
+### 11. Audit
+
+Server-side, through the resource mount, using the existing audit broker:
+
+| Event | Fields |
+|---|---|
+| `connect.web.launch` | principal, namespace, resource, profile, login_mode, exposure, credential_source kind, recipe_hash, mfa method, launch_id hash |
+| `connect.web.result` | launch_id hash, outcome (`success` / `failure` / `timeout` / `aborted:<check>`), step reached |
+| `connect.web.close` | launch_id hash, duration_ms |
+| `connect.web.navigation_blocked` | launch_id hash, origin |
+| `connect.web.download` | launch_id hash, filename, size (only when allowed) |
+
+Never logged: credential values, TOTP codes, full URLs (paths and queries can
+carry tokens; origins only), cookies, selectors' matched values. The host writes
+the existing `target:"audit"` `session.open` line with `protocol=web`, so
+host-side logs stay uniform with SSH/RDP.
+
+### 12. Rustion browser isolation (Phase 8 — future, cross-repo)
+
+**Status: future.** Designed so that Phases 1–7 do not paint it into a corner.
+Not scheduled. It needs the Rustion-side work listed below before any
+BastionVault code is written.
+
+**Idea.** Move the browser from the operator's machine to a disposable worker
+behind Rustion. Rustion already:
+
+- receives credentials from BastionVault inside a signed, ML-KEM-sealed BVRG-v1
+  envelope ([rustion-integration.md](rustion-integration.md), *Envelope format*);
+- terminates RDP and records it as `.rdp-rec`;
+- hands the recording back through the signed sidecar + `recording.ready`
+  webhook that BastionVault already replays in `SessionReplayWindow`.
+
+A web session then becomes an RDP session whose "target" is a browser.
+
+```
+Operator GUI                BastionVault                 Rustion                   Browser worker (per session)
+Connect ▸ web profile ───▶ authorize + MFA ticket
+ (transport: rustion-       resolve credential + TOTP
+  isolated)                 BVRG-v1 op=open,
+                            protocol=web ───────────▶ verify + decrypt
+                                                      pick/spawn worker ───────▶ fresh container/VM:
+                                                                                 Chromium kiosk, empty profile,
+                                                                                 enterprise policies from envelope
+                                                      hand recipe + credential ─▶ worker agent runs the recipe
+                                                        over a local control       over CDP (localhost only)
+                                                        channel
+                           ◀── {sid, host, port, ticket, expires_at}
+RDP client (existing,
+IronRDP) ── ticket@sid ─────────────────────────────▶ RDP proxy + recorder ───▶ worker's RDP endpoint
+                                                      on close: destroy worker,
+                                                      sidecar + recording.ready ─▶ BV links recording
+```
+
+**What stays the same on the BastionVault side:**
+
+- the profile model (§1), adding only `transport: "rustion-isolated"`;
+- the recipe format (§2), which becomes a shared, versioned contract;
+- the authorisation, MFA and exposure-cap checks (§3, §6);
+- the RDP session window, ticket dialling, TTL renewal and recording replay from
+  [rustion-integration.md](rustion-integration.md).
+
+There is no new streaming code in the GUI.
+
+**What BastionVault adds (when Phase 8 starts):**
+
+- **BVRG-v1 payload additions** (additive, `v: 1` stays readable):
+  - `target.protocol = "web"`;
+  - `credential.kind = "web-form" | "web-http-auth" | "web-none"`;
+  - `credential.extra = { totp_codes, recipe, recipe_hash, start_url,
+    allowed_origins, tls_pin_sha256, allow_downloads, clipboard }`.
+  - Rustion must reject an envelope with an unknown `credential.kind`; it must
+    not ignore it.
+- **TOTP.** The seed still never leaves BastionVault. The envelope carries the
+  codes for the current and next time steps (about 60 s of validity). A login
+  that takes longer fails and the operator relaunches. Keeping Rustion → vault
+  traffic one-way is worth more than covering slow logins.
+- **Routing.** A `rustion-isolated` profile goes through the same bastion
+  selection as RDP (profile → asset group → type → global). Under
+  `rustion-required` transport policy, a `web` profile with
+  `transport: "local"` is refused. It never falls back to local.
+- **Audit.** `connect.web.launch` with `transport=rustion-isolated`, plus the
+  existing `session.open` / `recording.linked` events. Rustion's navigation
+  origins (from the sidecar) are attached to the session timeline.
+
+**What Rustion has to provide** (tracked in the Rustion repo; the preparation
+prompt is in [roadmaps/prompts/rustion-browser-isolation.md](../roadmaps/prompts/rustion-browser-isolation.md)):
+
+1. Accept and validate the `web` envelope additions, with fail-closed handling
+   of unknown kinds.
+2. A **browser worker** abstraction: a per-session, disposable environment
+   running Chromium in kiosk mode with a fresh profile. It is reachable by
+   Rustion over RDP and destroyed on close, with no state reused across
+   sessions.
+3. A **worker agent** that receives the recipe and credential from Rustion over
+   an authenticated local channel and drives the login through the Chrome
+   DevTools Protocol on localhost. It applies the same safety checks as §5
+   (exact origin, top frame, visible single-match fields, form action origin)
+   and reports the outcome.
+4. **Policy enforced inside the worker**, not only in the recipe:
+   - Chromium enterprise policies: URL allow-list, devtools disabled, download
+     restrictions, no password manager, no extensions.
+   - Network egress restricted to the allowed origins (plus DNS).
+5. **Recording and audit:** the RDP stream recorded as usual, plus navigation
+   origins and recipe outcome in the sidecar and Rustion's hash chain.
+6. **Capacity and lifecycle:** worker pool or on-demand spawn, limits per
+   authority, start-up time budget, cleanup on crash, health exposed through
+   `GET /v1/health`.
+
+**Exposure.** The credential reaches Rustion's process and the worker's memory
+and DOM. Rustion is already trusted with SSH/RDP credentials, and the worker is
+destroyed after each session. Page JavaScript on the target can still read a
+filled password inside the worker, but it cannot exfiltrate it past the egress
+allow-list, and the operator's endpoint never holds it. That is exposure level
+`isolated`.
+
+**Open questions for the Rustion-side design:**
+
+- Worker technology: container (Podman) per session vs microVM vs a pre-warmed
+  pool. Chromium's sandbox inside containers needs user namespaces or seccomp.
+- RDP endpoint inside the worker: xrdp in the worker image vs an embedded
+  `ironrdp-server` fed by a virtual framebuffer.
+- Clipboard and file transfer: reuse Rustion's RDP channel policies.
+- Chromium patch cadence: who rebuilds the worker image, and how fast after a
+  Chromium security release.
+
+## API surface (all `v2`)
+
+| Path | Op | Purpose |
+|---|---|---|
+| `resources/v2/connect/web/launch` | write | authorise, resolve credential, return launch bundle |
+| `resources/v2/connect/web/totp` | write | fresh TOTP code for an in-flight `launch_id` |
+| `resources/v2/connect/web/result` | write | report recipe outcome |
+| `resources/v2/connect/web/close` | write | report session end |
+
+Tauri commands: `session_open_web`, `session_close` (existing, extended),
+`web_recipe_test` (dry run against a URL with a dummy credential, which never
+calls `launch`).
+
+`docs/api.md` gains a "Web connect" subsection. `docs/gui.md` gains the operator
+walkthrough.
+
+## Phases
+
+### Phase 1 — type, protocol and `open` mode — **Todo**
+
+- `web_application` builtin, `connect.protocols`, and the `website` type enabled.
+- The `mergeTypeConfig` additive migration with tombstones.
+- The Connect chip gated on `protocols`.
+- `web` profiles with `open` mode only.
+- `session_open_web`:
+  - ephemeral IPC-less window, navigation/new-window/download policy;
+  - host-owned title;
+  - teardown;
+  - `v2/connect/authorize` pre-flight and MFA ticket reused.
+- The no-capability-for-`web-*` test, the strict-protocol-parsing test, and the
+  per-platform `invoke`-rejected check.
+
+This phase alone removes the "reveal, copy, open browser" habit for SSO-fronted
+apps and gives them an audited launch point.
+
+### Phase 2 — `form` mode with recipes — **Todo**
+
+- The `resources/v2/connect/web/{launch,totp,result,close}` endpoints with
+  server-side credential resolution and TOTP.
+- The recipe engine and fixed fill routine.
+- The recipe editor, `web_recipe_test`, JSON import/export, and vendor presets
+  (FortiGate, vCenter, iDRAC, iLO, pfSense, Grafana, Jenkins) tested against
+  recorded login pages.
+- `web_exposure_max` and `allow_heuristic_fill` enforced server-side.
+- LDAP library check-in on close.
+
+### Phase 3 — `http-auth` mode — **Todo**
+
+Native challenge handlers on all three platforms (§7), answering once per
+(origin, realm).
+
+### Phase 4 — TLS SPKI pinning — **Todo**
+
+Native certificate-error handlers honouring `tls_pin_sha256` only (§8), plus the
+fingerprint helper and the PKI-issued-CA suggestion.
+
+### Phase 5 — session chrome — **Todo**
+
+A vault-owned toolbar webview (origin, lock state, Disconnect, Re-run login, TTL)
+beside the remote webview, using Tauri's `unstable` multi-webview. The remote
+webview keeps no IPC. Coordinates with [session-workspace.md](session-workspace.md)
+(S56) so that web sessions can later become workspace tabs, with the remote
+content always in its own webview, never a shared realm.
+
+### Phase 6 — proxy mode — **Todo (spike first)**
+
+The per-platform CA-trust spike, then placeholder substitution and header
+injection (§10). Ships per platform where the spike succeeds.
+
+### Phase 7 — `sso` mode — **Todo, blocked by T52 (S19)**
+
+IdP-initiated SAML and OIDC third-party-initiated login (§9).
+
+### Phase 8 — Rustion browser isolation — **Future (cross-repo, not scheduled)**
+
+The `rustion-isolated` transport and the `isolated` exposure level (§12).
+Depends on the Rustion-side browser worker, worker agent and envelope additions,
+and on Phase 2's recipe format being frozen as a versioned shared contract.
+BastionVault work starts only once Rustion ships its half. Tracked separately
+as T97 in the roadmap backlog.
+
+## Dependencies
+
+- Tauri `>= 2.4` (cookie APIs), tauri-runtime `>= 2.8` for `set_cookie`
+  (Phase 7). wry's `mac-proxy` feature is needed for Phase 6 only.
+- Platform minimums:
+  - macOS 14 for `data_store_identifier` and `proxy_url`; macOS 13 falls back to
+    `incognito` plus a per-session `data_directory`.
+  - WebView2 101+ for `incognito`.
+- Native-handler work (Phases 3, 4 and 6) uses the `webview2-com`, `objc2` and
+  `webkit2gtk` bindings already pulled in transitively by wry. Promoting them to
+  direct dependencies needs the manifest justification §7 of AGENTS.md requires.
+- S19 / T52 for Phase 7.
+- Rustion (S51, [rustion-integration.md](rustion-integration.md)) browser worker
+  support and BVRG-v1 `web` payload additions for Phase 8.
+
+## Security Considerations
+
+1. **Credential reaches the endpoint DOM in `form` mode.** This is inherent to
+   pattern 4 and is stated in the UI, in docs and by the exposure level.
+   Mitigations:
+   - the fill/submit/clear window;
+   - devtools off;
+   - an ephemeral store;
+   - the exposure cap that lets policy forbid `dom` for crown-jewel accounts;
+   - LDAP-library and (follow-up) rotate-on-check-in credentials;
+   - proxy mode as the real fix.
+2. **Origin confusion and phishing.**
+   - Exact-origin match, from host-observed URLs only, at every fill.
+   - HTTPS required.
+   - Top frame only.
+   - Visible, non-occluded, correctly typed, single-match fields.
+   - Form `action` must resolve to an allowed origin.
+   - No fill UI inside the page.
+3. **Remote content must never reach vault IPC.**
+   - The `web-*` label has no capability.
+   - Tests assert it.
+   - A per-platform `invoke` check.
+   - No shared data store with the main window.
+4. **Connect-only access.** The launch endpoint is a new secret reader gated by
+   `connect`, not `read`. It must return credentials only for a `web` profile
+   bound into the `launch_id`, only within the exposure cap, and only after the
+   MFA ticket when required.
+   - Reviewers should treat it like `rustion/v2/session/open`.
+   - L4 (`make test-release`) is required before merging Phase 2, because it
+     touches authz.
+5. **No silent downgrade.** None of the following has a fallback path:
+   - recipe mismatch → no heuristic fill;
+   - launch failure → no host-side secret read;
+   - proxy unavailable → no `dom`;
+   - TLS error → no "accept anyway" without a pin.
+6. **Logging.** Never values, codes, cookies or full URLs (§11). Recipe test runs
+   use a dummy credential and never call `launch`.
+7. **Rustion isolation (Phase 8)** widens what Rustion handles from SSH/RDP
+   credentials to web credentials and hostile web content. The browser must run
+   in a disposable worker outside Rustion's own process, with egress restricted
+   to the allowed origins. An envelope with an unknown `credential.kind` must be
+   rejected by an older Rustion, never ignored.
+8. **macOS clipboard** cannot be gated in WKWebView. This is documented, and the
+   profile editor shows it when `clipboard` is set to anything but
+   `bidirectional` on macOS.
+
+## Testing Plan
+
+### Rust unit tests
+
+- `bv-engine-resource`:
+  - `launch` authorises via `may_connect_target`;
+  - `launch` refuses on a missing or used MFA ticket;
+  - `launch` refuses over the exposure cap;
+  - `launch` refuses a non-`web` profile or a recipe-hash mismatch;
+  - `launch` never returns the TOTP seed;
+  - `launch_id` is single-use, expires, and is stored hashed;
+  - audit lines carry no secret.
+- `bastion-vault-gui`:
+  - the capability set has no `web-*` match and no `remote`;
+  - origin matching (ports, IDNs, trailing dots, userinfo `https://a@b`, upper
+    case, `http` vs `https`);
+  - `when_url` glob semantics;
+  - recipe parsing rejects unknown actions and non-enum values;
+  - fill-routine argument serialisation round-trips hostile selectors.
+
+### Frontend (vitest)
+
+- The `mergeTypeConfig` additive merge and tombstones.
+- The Connect chip appears for `protocols` including `web`.
+- Profile validation: exposure cap, source/protocol compatibility, origin set
+  coverage of recipe steps.
+- Strict parsing of an unknown `protocol`.
+
+### Integration / manual (per platform)
+
+A fixture site served by the test harness with:
+
+- single-page, two-page and TOTP logins;
+- a React-controlled form;
+- an opacity-0 decoy field;
+- an overlay-covered field;
+- a cross-origin iframe login;
+- a form whose `action` posts off-origin;
+- a redirect to a non-allowed origin;
+- a self-signed certificate;
+- a Basic-auth realm.
+
+Each hostile case must abort with the documented `aborted:<check>` outcome.
+
+## Tracking
+
+Tracked as **T96** in `ROADMAP.md` (M5 Resources), spec **S105**. Phase 8
+(Rustion browser isolation) is tracked separately as backlog task **T97**,
+because it is cross-repo and unscheduled. When phases
+land, update [CHANGELOG.md](../CHANGELOG.md) (the connect-only/launch endpoint
+and exposure levels under **Security**), [ROADMAP.md](../ROADMAP.md), this
+file's "Current State", [docs/api.md](../docs/api.md) and
+[docs/gui.md](../docs/gui.md).
+
+## Alternatives considered
+
+- **Server-side browser isolation built into BastionVault** (a KeeperPAM /
+  CyberArk PSM-HTML5 clone). Rejected in favour of Phase 8.
+  - It would need a headless-Chromium fleet next to the vault, a new
+    pixel-streaming path and viewer, and a recorder.
+  - It would add a large hostile-content TCB to the system that holds the keys.
+  - Rustion already has the credential handoff, the RDP proxy, recording and
+    replay, so Phase 8 adds only the browser worker there.
+- **A browser on a manually managed RDP RemoteApp jump host**, reached through
+  the existing RDP Connect. Cheapest of all and usable today, but there is no
+  automated login, no per-session disposal, and no origin policy tied to the
+  resource. Phase 8 is the automated version of this.
+- **Browser extension** (CyberArk SWS, Delinea DCM). Rejected:
+  - the operator's everyday browser profile is not a controlled environment;
+  - extensions have their own clickjacking record;
+  - it would need a native-messaging bridge to the vault.
+- **Opening the system browser with a one-time URL token.** Only works for apps
+  that accept token login. Covered better by `sso` mode.
+- **Initialization scripts instead of post-load `eval`.** Rejected:
+  - they run on every page, and on Windows in every frame;
+  - they live in the page's main world, so they can be observed and overridden
+    before the vault's code acts;
+  - targeted `eval` after host-verified load keeps the fill path small and
+    origin-checked.

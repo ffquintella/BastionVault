@@ -154,7 +154,7 @@ Next-up list recorded before the migration, in its order:
   - old-notes: [roadmap](roadmaps/formal-verification-and-type-driven-security.md) — four phases making three guarantees mechanical rather than conventional: an `Authorized<R>` witness extractor + route-table-as-data so no privileged route can be served without crossing `authorize_sys_request` (the v0.37.6 44-route bypass becomes a compile error, not a review finding); a zero-dep `bv-sql-guard` (`SqlIdent` allow-list + literal-only `Sql`) plus a Semgrep gate over every driver call site; and Kani model checking of an extracted, bounded `bv-policy-core` for eight ACL theorems (deny supremacy, fail-closed default, group/scope-gate soundness, specificity precedence, root isolation, parameter constraints), with production delegating to the verified core so the proofs describe shipped code. Scoping surfaced four defects to fix first (F2–F5); **all four shipped in v0.38.6** ahead of the phases, per `03` §10: `/metrics` is authorization-gated, `list`/`scan` escape the `LIKE` pattern and make `strip_prefix` the authoritative membership test (hiqlite + MySQL), and the storage table identifier is allow-listed at construction. The phases now own making those guarantees *structural* rather than hand-written.
 
 ## [M5] Resources
-> outcome: Done when operators can inventory resources and files, connect to them in-app over SSH/RDP without seeing credentials, and work in a tabbed session workspace.
+> outcome: Done when operators can inventory resources and files, connect to them in-app over SSH/RDP and web without seeing credentials, and work in a tabbed session workspace.
 
 - [x] T32 Manage a resource inventory with grouped secrets (S49)
   - source: roadmap.md feature row "Resource Management (inventory + grouped secrets)", status `[x]` Done
@@ -184,6 +184,8 @@ Next-up list recorded before the migration, in its order:
 - [/] T39 Broker SSH logins to resources without a shared credential (S57, S101)
   - source: roadmap.md feature row "SSH Login Brokering for Resources (cert-signing / OTP, no shared credential)", status `[/]` In progress
   - old-notes: [spec](features/ssh-resource-login-brokering.md) — adds a per-resource `login_class` (`shared-credential` \
+- [ ] T96 Open web applications in-app with an injected login or SSO (S105)
+  - initiative: [Web Application Connect](features/web-application-connect.md) — new `web_application` resource type and a `web` Connect protocol. An ephemeral, IPC-less session window logs the operator in without revealing the credential. Login modes are `open`, `form` (declarative login recipe, server-side credential + TOTP resolution through `resources/v2/connect/web/launch`), `http-auth` (native challenge handlers), and `sso` (BastionVault as SAML/OIDC IdP, blocked by T52). A later proxy mode keeps the password out of the DOM, and a future Rustion browser-isolation transport is tracked as T97. Per-resource exposure caps (`none`/`handler`/`proxy`/`dom`) are enforced server-side, plus SPKI TLS pinning for appliances. Seven phases, all Todo.
 
 ## [M6] Authentication
 > outcome: Done when every listed auth method (token, AppID, userpass, cert, OIDC, SAML, FIDO2, FerroGate) is shipped and workforce identity can be brokered downstream.
@@ -403,6 +405,8 @@ Next-up list recorded before the migration, in its order:
   - why: the trait and DelivererRegistry::register plug point are stable; only the runtime bridge remains
   - source: roadmap.md Deferred sub-initiatives
   - old-notes: `plugin-ext` bridge for third-party `CertDeliveryPlugin` deliverers — trait + `DelivererRegistry::register` plug point are stable; runtime bridge is the remaining work.
+- [ ] T97 Run web application sessions in a Rustion browser-isolation worker (S105, S51, S106)
+  - initiative: Phase 8 of [Web Application Connect](features/web-application-connect.md) §12. A `rustion-isolated` web transport, where Rustion starts a disposable per-session Chromium worker, performs the login there over the Chrome DevTools Protocol, and serves it to the operator over the existing RDP ticket path, recorded as `.rdp-rec`. The credential never reaches the operator's endpoint (exposure level `isolated`). Cross-repo and unscheduled: the Rustion side goes first, and its preparation prompt is [roadmaps/prompts/rustion-browser-isolation.md](roadmaps/prompts/rustion-browser-isolation.md). BastionVault work starts once Rustion ships its half and T96's recipe format is frozen.
 
 ## Specs
 
@@ -512,3 +516,5 @@ Next-up list recorded before the migration, in its order:
 | S102 | SSH Secret Engine | docs/ssh-secret-engine.md |
 | S103 | Project Tracking Format (PTF) v1 | docs/tracking-format.md |
 | S104 | MCP Access — operator guide | docs/mcp.md |
+| S105 | Feature: Web Application Connect — in-app web sessions with injected login or SSO | features/web-application-connect.md |
+| S106 | Prompt: prepare Rustion for BastionVault web browser isolation | roadmaps/prompts/rustion-browser-isolation.md |
