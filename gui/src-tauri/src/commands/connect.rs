@@ -85,6 +85,10 @@ pub async fn session_open_ssh(
             request.profile_id, request.resource_name
         ))
     })?;
+    // Strict protocol check before anything is resolved or dialled: a
+    // `web` (or unknown) profile handed to this command must not be
+    // opened as SSH.
+    session::ProfileProtocol::require(&profile, session::ProfileProtocol::Ssh).map_err(CommandError::from)?;
 
     // Compute the effective target, user, port from the profile +
     // resource metadata defaults.
@@ -507,6 +511,8 @@ pub async fn session_open_rdp(
             request.profile_id, request.resource_name
         ))
     })?;
+    // See `session_open_ssh`: refuse a profile of any other protocol.
+    session::ProfileProtocol::require(&profile, session::ProfileProtocol::Rdp).map_err(CommandError::from)?;
 
     let host_candidates = profile_host_candidates(&profile, &meta);
     if host_candidates.is_empty() {
@@ -1265,7 +1271,13 @@ pub async fn resource_login_class(
 }
 
 #[tauri::command]
-pub async fn session_close(state: State<'_, AppState>, request: SshCloseRequest) -> CmdResult<()> {
+pub async fn session_close(state: State<'_, AppState>, app: AppHandle, request: SshCloseRequest) -> CmdResult<()> {
+    // A web session has no control channel to signal: closing it means
+    // destroying its window and running its own teardown. Handled first so
+    // the SSH/RDP fan-out below never sees a web token.
+    if crate::commands::connect_web::close_web_session(&state, &app, &request.token, "session_close").await {
+        return Ok(());
+    }
     // Best-effort fan-out: we don't know whether the token names
     // an SSH or RDP session, so try both. The mismatched one
     // returns an error we ignore. drop_session removes either kind
@@ -1479,7 +1491,7 @@ enum ConnectRoute {
 /// `resource-group/by-resource/<name>` index — that's the same
 /// lookup the Resources page uses for its Groups chip, so the
 /// resolver sees exactly what the operator sees.
-async fn collect_policy_hints(
+pub(super) async fn collect_policy_hints(
     state: &State<'_, AppState>,
     resource_name: &str,
     meta: &Map<String, Value>,
@@ -1508,11 +1520,11 @@ async fn collect_policy_hints(
 /// transport, no bastions) reads as "no Rustion policy applies" — every
 /// route resolver treats that as a plain direct dial.
 #[derive(Default)]
-struct EffectivePolicyView {
-    transport: String,
+pub(super) struct EffectivePolicyView {
+    pub(super) transport: String,
     bastions: Vec<String>,
     recording: String,
-    lock_violation: Option<String>,
+    pub(super) lock_violation: Option<String>,
 }
 
 /// True when a backend error is an HTTP 403 / permission-denied. The
@@ -1524,7 +1536,7 @@ fn is_permission_denied(e: &CommandError) -> bool {
     msg.contains("403") || msg.contains("permission denied")
 }
 
-async fn read_effective_policy(
+pub(super) async fn read_effective_policy(
     state: &State<'_, AppState>,
     resource_id: &str,
     resource_type: &str,
@@ -2155,13 +2167,16 @@ async fn open_rustion_session_v2_rdp(
     parse_rustion_ticket_bundle(state, data, BASTION_PROTOCOL, max_renewals as u32).await
 }
 
-async fn read_resource_meta(state: &State<'_, AppState>, name: &str) -> Result<Map<String, Value>, CommandError> {
+pub(super) async fn read_resource_meta(
+    state: &State<'_, AppState>,
+    name: &str,
+) -> Result<Map<String, Value>, CommandError> {
     let path = format!("{RESOURCE_MOUNT}resources/{name}");
     let resp = make_request(state, Operation::Read, path, None).await?;
     Ok(resp.and_then(|r| r.data).unwrap_or_default())
 }
 
-fn find_profile(meta: &Map<String, Value>, profile_id: &str) -> Option<Value> {
+pub(super) fn find_profile(meta: &Map<String, Value>, profile_id: &str) -> Option<Value> {
     meta.get("connection_profiles")
         .and_then(|v| v.as_array())
         .and_then(|arr| arr.iter().find(|p| p.get("id").and_then(|i| i.as_str()) == Some(profile_id)).cloned())
@@ -2938,9 +2953,10 @@ fn ldap_mount_prefix(cs: &Value) -> Result<String, CommandError> {
 const RECENT_SESSIONS_CAP: usize = 10;
 
 #[derive(Copy, Clone)]
-enum SessionProtocolTag {
+pub(super) enum SessionProtocolTag {
     Ssh,
     Rdp,
+    Web,
 }
 
 impl SessionProtocolTag {
@@ -2948,6 +2964,7 @@ impl SessionProtocolTag {
         match self {
             Self::Ssh => "ssh",
             Self::Rdp => "rdp",
+            Self::Web => "web",
         }
     }
 }
@@ -2957,7 +2974,7 @@ impl SessionProtocolTag {
 /// otherwise swallowed — losing a recently-connected entry is
 /// far less bad than failing the actual session-open after the
 /// transport is already up.
-async fn record_recent_session(
+pub(super) async fn record_recent_session(
     state: &State<'_, AppState>,
     resource_name: &str,
     profile: &Value,

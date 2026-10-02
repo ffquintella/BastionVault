@@ -2913,6 +2913,23 @@ export type SessionOpenRdpResponse = {
 export const sessionOpenRdp = (request: SessionOpenRdpRequest) =>
   invoke<SessionOpenRdpResponse>("session_open_rdp", { request });
 
+/** Web Application Connect (T96). `open` mode takes no credential, so
+ *  there is no `operator_credential` slot. */
+export type SessionOpenWebRequest = {
+  resource_name: string;
+  profile_id: string;
+  /** See {@link SessionOpenSshRequest.connect_ticket}. */
+  connect_ticket?: string;
+};
+
+export type SessionOpenWebResponse = {
+  token: string;
+  window_label: string;
+};
+
+export const sessionOpenWeb = (request: SessionOpenWebRequest) =>
+  invoke<SessionOpenWebResponse>("session_open_web", { request });
+
 
 // ── Connect-time MFA re-validation + SSH security keys ──────────
 // features/connect-mfa-and-fido2-ssh.md

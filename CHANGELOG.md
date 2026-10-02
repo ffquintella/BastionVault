@@ -56,6 +56,19 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### Web Application Connect
+- **Add the Web Application resource type and open web applications from Connect**: a new built-in **Web Application** type (URL, vendor, environment, owner) and a `web` Connect protocol, also enabled on the built-in **Website** type. A resource type now declares the Connect protocols it offers (`connect.protocols`, with SSH / RDP / Web checkboxes under Settings → Resource Types); an unset list keeps today's behaviour, SSH and RDP on Server only. A `web` connection profile takes a start URL, extra allowed origins, download, pop-up and page-clipboard settings and a window size. This release ships the `open` login mode: the window opens on the application and releases no credential, so you, or the application's own single sign-on, log in; form, HTTP-auth and SSO logins are refused as "not available yet". Connecting runs the same server pre-flight as a direct SSH/RDP dial (`v2/connect/authorize`, including connect-time MFA on a `require_mfa` profile), writes a host `session.open: protocol=web` audit line and a close line with the duration, and is listed under the resource's recent sessions. (T96, S105)
+- **Add new built-in resource types to deployments that saved their type list before**: saved types still win per type, but built-ins missing from the saved list are now added, so Web Application appears without a reset. Deleting a built-in type in Settings records it, so a release never adds it back, and a built-in deleted with an older release stays deleted. Older GUIs read the record as one extra type named "(internal) removed built-in types"; leave it in place. (T96, S105)
+
+### Security
+
+#### Web Application Connect
+- **Run web sessions in an IPC-less, ephemeral window**: the window (`web-<token>`) matches no capability and no capability grants a remote origin, so the page cannot call vault commands; a unit test fails the build if a capability ever matches `web-*` or declares `remote` URLs. It uses a private browsing store and, on Windows and Linux, a per-session data directory deleted when the window closes, so no cookie or storage outlives the session or reaches the vault UI. Devtools and Tauri's file drag-drop interception are off. The per-platform check that the page cannot invoke commands is still manual. (T96, S105)
+- **Hold web sessions to an exact origin allow-list**: navigation, pop-ups and downloads are limited to the profile's origins (`scheme://host[:port]`, https unless explicitly allowed, no userinfo, `localhost` refused because the vault UI lives there). A blocked navigation is cancelled, shown in the window title and audited as `connect.web.navigation_blocked` with the origin only; the title is always set by the host from the observed URL, never by the page. A resource whose transport policy is `rustion-required` refuses web sessions outright, with no local fallback. (T96, S105)
+- **Refuse connection profiles with an unknown protocol instead of treating them as SSH**: profile protocols are parsed strictly in the GUI and the desktop host, each `session_open_*` command refuses a profile of another protocol, and the launchers no longer open anything that isn't SSH as RDP. Checked against 0.44.17 and 0.44.18: their profile parser drops `web` profiles, so they never dial one, though saving profile edits from those releases on a resource that carries a `web` profile removes it. (T96, S105)
+
 ## [0.44.18] - 2026-10-02
 
 ### Fixed

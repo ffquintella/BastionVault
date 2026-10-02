@@ -1,4 +1,4 @@
-import type { ResourceTypeDef, ResourceTypeConfig } from "./types";
+import type { ConnectProtocol, ResourceTypeDef, ResourceTypeConfig } from "./types";
 
 /** Default built-in resource types with their fields. */
 export const DEFAULT_RESOURCE_TYPES: ResourceTypeConfig = {
@@ -188,6 +188,39 @@ export const DEFAULT_RESOURCE_TYPES: ResourceTypeConfig = {
       { key: "technology", label: "Technology", type: "text", placeholder: "React / Django / Rails" },
       { key: "owner", label: "Owner", type: "text", placeholder: "dev-team" },
     ],
+    // Web Application Connect (T96): a website opens in an in-app web
+    // session window. Only reaches deployments whose saved type config has
+    // no `website` entry — a saved type is never altered by a release.
+    connect: { protocols: ["web"] },
+  },
+  web_application: {
+    id: "web_application",
+    label: "Web Application",
+    color: "info",
+    icon: "Globe",
+    fields: [
+      { key: "url", label: "URL", type: "url", placeholder: "https://fw01.example.com/" },
+      {
+        key: "vendor",
+        label: "Vendor",
+        type: "select",
+        options: [
+          { value: "", label: "(unset)" },
+          { value: "generic", label: "Generic" },
+          { value: "fortigate", label: "FortiGate" },
+          { value: "vcenter", label: "VMware vCenter" },
+          { value: "idrac", label: "Dell iDRAC" },
+          { value: "ilo", label: "HPE iLO" },
+          { value: "pfsense", label: "pfSense / OPNsense" },
+          { value: "grafana", label: "Grafana" },
+          { value: "jenkins", label: "Jenkins" },
+          { value: "other", label: "Other" },
+        ],
+      },
+      { key: "environment", label: "Environment", type: "text", placeholder: "production" },
+      { key: "owner", label: "Owner", type: "text", placeholder: "network-team" },
+    ],
+    connect: { protocols: ["web"] },
   },
   application: {
     id: "application",
@@ -204,11 +237,174 @@ export const DEFAULT_RESOURCE_TYPES: ResourceTypeConfig = {
   },
 };
 
-/** Merge saved config with defaults — saved types take precedence. */
+// ── Saved type config: additive merge with tombstones ───────────────
+//
+// The type config is one opaque JSON object at the resource mount's
+// `config/types`, keyed by type id. Until T96 a saved config *replaced*
+// the defaults, so a deployment that had ever saved its types never saw a
+// new builtin. The merge is now additive: saved types win per key, and
+// builtins the saved config lacks are added — unless the operator deleted
+// them, which is recorded as a tombstone.
+//
+// Where the tombstone lives. Older GUIs read the blob as
+// `Record<string, ResourceTypeDef>` and iterate every value, touching
+// `.id`, `.label`, `.color` and `.fields.length`. A bare top-level array
+// would crash them. So the tombstone is a reserved entry shaped like a
+// type definition — `fields: []`, Connect disabled — under a key that
+// Settings can never mint as a type id (`$` is not in `[a-z0-9_]`), written
+// last so it is never an older GUI's default pick, and written only when
+// at least one builtin has been deleted. An older GUI shows it as an extra
+// type named "(internal) removed built-in types"; it round-trips it
+// untouched through its own saves, so the tombstones survive.
+
+/** Reserved key of the tombstone entry in the saved type config. */
+export const TYPE_CONFIG_META_KEY = "$bv_meta";
+
+/**
+ * Builtins that existed before tombstones did. A config saved by an older
+ * GUI that lacks one of these was saved by a GUI that offered it — so the
+ * operator deleted it. Without a tombstone entry those absences are read as
+ * deletions, not as builtins to add. Frozen: a builtin added later is
+ * absent from such a config because it is *new*, and must be added.
+ */
+export const PRE_TOMBSTONE_BUILTIN_IDS: readonly string[] = Object.freeze([
+  "server",
+  "database",
+  "firewall",
+  "switch",
+  "network_device",
+  "website",
+  "application",
+]);
+
+/** A saved type config, split into the types and the tombstones. */
+export interface ParsedTypeConfig {
+  /** Every type to show: saved ones plus builtins the merge added. */
+  types: ResourceTypeConfig;
+  /** Builtin ids the operator deleted; never re-added by the merge. */
+  removedBuiltins: string[];
+}
+
+function readTombstones(meta: unknown): string[] | null {
+  if (typeof meta !== "object" || meta === null) return null;
+  const raw = (meta as { removed_builtins?: unknown }).removed_builtins;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((v): v is string => typeof v === "string");
+}
+
+/**
+ * Parse a saved type config (the `resource_types_read` payload).
+ *
+ * * `null` (never saved) → the builtins, no tombstones.
+ * * Saved types are kept verbatim, per key.
+ * * A builtin absent from the saved config is added unless it is
+ *   tombstoned — explicitly, or implicitly for a pre-tombstone save (see
+ *   {@link PRE_TOMBSTONE_BUILTIN_IDS}).
+ */
+export function parseTypeConfig(saved: Record<string, unknown> | null): ParsedTypeConfig {
+  if (!saved) return { types: { ...DEFAULT_RESOURCE_TYPES }, removedBuiltins: [] };
+  const types: ResourceTypeConfig = {};
+  for (const [id, def] of Object.entries(saved)) {
+    if (id === TYPE_CONFIG_META_KEY) continue;
+    types[id] = def as ResourceTypeDef;
+  }
+  const explicit = readTombstones(saved[TYPE_CONFIG_META_KEY]);
+  const removed = new Set<string>(explicit ?? []);
+  if (explicit === null) {
+    for (const id of PRE_TOMBSTONE_BUILTIN_IDS) {
+      if (!(id in types)) removed.add(id);
+    }
+  }
+  for (const [id, def] of Object.entries(DEFAULT_RESOURCE_TYPES)) {
+    if (id in types || removed.has(id)) continue;
+    types[id] = def;
+  }
+  const removedBuiltins = [...removed]
+    .filter((id) => id in DEFAULT_RESOURCE_TYPES && !(id in types))
+    .sort();
+  return { types, removedBuiltins };
+}
+
+/**
+ * Build the object to write back to `config/types`. The tombstone entry is
+ * appended last and only when there is something in it.
+ */
+export function serializeTypeConfig(
+  types: ResourceTypeConfig,
+  removedBuiltins: string[],
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [id, def] of Object.entries(types)) {
+    if (id === TYPE_CONFIG_META_KEY) continue;
+    out[id] = def;
+  }
+  const tombstones = [...new Set(removedBuiltins)]
+    .filter((id) => id in DEFAULT_RESOURCE_TYPES && !(id in types))
+    .sort();
+  if (tombstones.length > 0) {
+    out[TYPE_CONFIG_META_KEY] = {
+      id: TYPE_CONFIG_META_KEY,
+      label: "(internal) removed built-in types",
+      color: "neutral",
+      fields: [],
+      connect: { enabled: false },
+      removed_builtins: tombstones,
+    };
+  }
+  return out;
+}
+
+/** Saved config merged with the builtins — the types to show. */
 export function mergeTypeConfig(saved: ResourceTypeConfig | null): ResourceTypeConfig {
-  if (!saved) return { ...DEFAULT_RESOURCE_TYPES };
-  // Saved config fully replaces defaults
-  return saved;
+  return parseTypeConfig(saved as Record<string, unknown> | null).types;
+}
+
+// ── Connect protocols ────────────────────────────────────────────────
+
+const CONNECT_PROTOCOLS: readonly ConnectProtocol[] = ["ssh", "rdp", "web"];
+
+function isConnectProtocol(v: unknown): v is ConnectProtocol {
+  return typeof v === "string" && (CONNECT_PROTOCOLS as readonly string[]).includes(v);
+}
+
+/**
+ * The type that offered SSH/RDP Connect before `connect.protocols` existed.
+ * Absent `protocols` keeps that exact behaviour: `server` offers SSH and
+ * RDP, every other type offers nothing.
+ */
+const LEGACY_CONNECT_TYPE_ID = "server";
+
+/**
+ * The Connect protocols a resource type offers — the single gate for the
+ * Connect chip, the Connection tab, the ⌘K palette and the profile editor.
+ *
+ * * `connect.enabled === false` → none.
+ * * `connect.protocols` set → those, with unknown entries dropped (a value
+ *   this build doesn't know is never read as one it does) and a non-array
+ *   read as none.
+ * * absent → the legacy rule above.
+ */
+export function connectProtocols(typeDef: ResourceTypeDef | undefined | null): ConnectProtocol[] {
+  if (!typeDef || typeDef.connect?.enabled === false) return [];
+  const declared: unknown = typeDef.connect?.protocols;
+  if (declared !== undefined) {
+    if (!Array.isArray(declared)) return [];
+    return CONNECT_PROTOCOLS.filter((p) => declared.some((d) => isConnectProtocol(d) && d === p));
+  }
+  return typeDef.id === LEGACY_CONNECT_TYPE_ID ? ["ssh", "rdp"] : [];
+}
+
+/** True when the type offers `protocol`. */
+export function typeSupportsProtocol(
+  typeDef: ResourceTypeDef | undefined | null,
+  protocol: ConnectProtocol,
+): boolean {
+  return connectProtocols(typeDef).includes(protocol);
+}
+
+/** True when the type offers any Connect protocol at all. */
+export function typeSupportsConnect(typeDef: ResourceTypeDef | undefined | null): boolean {
+  return connectProtocols(typeDef).length > 0;
 }
 
 /**

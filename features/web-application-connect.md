@@ -120,44 +120,179 @@ security / capability docs, Microsoft WebView2 "Basic authentication" docs, W3C
 
 ## Current State
 
-**Status: Todo.** Nothing in this document is implemented; it is the design for
-the work.
+**Status: In progress — Phase 1 done, with caveats (below); Phases 2–7 Todo,
+Phase 8 future.**
 
-What exists today, and what this feature has to change:
+### What Phase 1 shipped
 
-- Resource types are GUI-only. They are an opaque JSON blob at the resource
-  mount's `config/types` ([crates/bv-engine-resource/src/lib.rs:330](../crates/bv-engine-resource/src/lib.rs:330)),
-  with builtins in [gui/src/lib/resourceTypes.ts](../gui/src/lib/resourceTypes.ts).
-  - `ResourceTypeDef.connect` only knows `enabled`, `default_ports.{ssh,rdp}` and
-    `default_users` ([gui/src/lib/types.ts:447](../gui/src/lib/types.ts:447)).
-  - **`mergeTypeConfig` lets a saved config fully replace the defaults**
-    ([resourceTypes.ts:208](../gui/src/lib/resourceTypes.ts:208)). A deployment
-    that ever saved its types will never see a new builtin. Phase 1 must handle
-    this.
-- The Connect chip is hard-gated to `type === "server"`
-  ([gui/src/routes/ResourcesPage.tsx:147](../gui/src/routes/ResourcesPage.tsx:147)).
-  The same check repeats at `ResourcesPage.tsx:927`, `:1148`,
-  `ConnectPalette.tsx:118` and `SettingsPage.tsx:1255`.
-- `ConnectionProfile.protocol` is `"ssh" | "rdp"`
-  ([types.ts:488](../gui/src/lib/types.ts:488), [:606](../gui/src/lib/types.ts:606)).
-  Profiles are stored inside the resource record with no server schema. The
-  server projects them to a `ConnectProfileHint`
-  ([bv-engine-resource/src/lib.rs:132](../crates/bv-engine-resource/src/lib.rs:132)).
-- Session windows are built with `WebviewUrl::App` only
-  ([gui/src-tauri/src/commands/connect.rs:401](../gui/src-tauri/src/commands/connect.rs:401),
-  [:792](../gui/src-tauri/src/commands/connect.rs:792)).
-  - Nothing in the GUI uses `WebviewUrl::External`, `initialization_script`,
-    `on_navigation`, `incognito`, `data_directory` or `proxy_url`.
-  - `capabilities/default.json` grants IPC to windows matching `main`, `ssh-*`,
-    `rdp-*` and `plugin-*`.
-  - `tauri.conf.json` has `withGlobalTauri: true` and `csp: null`.
-- The `connect` capability, the MFA ticket (`v2/connect/mfa/{begin,verify}`) and
-  the direct-path pre-flight `v2/connect/authorize` exist and are
-  protocol-agnostic
-  ([bv-engine-resource/src/lib.rs:495](../crates/bv-engine-resource/src/lib.rs:495),
-  [:687](../crates/bv-engine-resource/src/lib.rs:687)). On the direct path the GUI
-  host resolves the credential itself, which needs `read` on the secret. The
-  connect-only guarantee is therefore hard only on the Rustion path.
+- **Type and protocol.** `ResourceTypeDef.connect.protocols` and
+  `web_exposure_max` are typed ([gui/src/lib/types.ts](../gui/src/lib/types.ts)).
+  The builtin `web_application` type exists and `website` offers `web`
+  ([gui/src/lib/resourceTypes.ts](../gui/src/lib/resourceTypes.ts)).
+  `connectProtocols()` / `typeSupportsProtocol()` / `typeSupportsConnect()`
+  are the single gate for the Connect chip, the card context menu, the
+  Connection tab, the ⌘K palette, the profile editor's protocol list and the
+  connect-validation static verdict. Settings → Resource Types has SSH / RDP /
+  Web checkboxes.
+  - **Decision: absent `protocols` means `["ssh","rdp"]` for the `server`
+    type only, and `[]` for every other type** — not `["ssh","rdp"]` for
+    every type as §1 first said. The chip used to be hard-gated to
+    `type === "server"`, so this is what keeps today's behaviour exact:
+    `firewall` / `switch` carry `connect.enabled: true` but never had a
+    Connect chip, and saved configs of `database` etc. have no `connect` key
+    at all. Reading absence as SSH/RDP everywhere would have put a Connect
+    chip on all of them.
+- **Saved-config merge with tombstones** (`parseTypeConfig` /
+  `serializeTypeConfig`). Saved types win per type id; builtins absent from
+  the saved config are added unless tombstoned. A saved type is never
+  altered, so a deployment that saved `website` before this release keeps a
+  `website` without `web` until an operator ticks it in Settings.
+  - **Where the tombstone lives.** Older GUIs read `config/types` as
+    `Record<string, ResourceTypeDef>` and iterate every value (`.id`,
+    `.label`, `.color`, `.fields.length`), so a top-level array would crash
+    them. The tombstone is a reserved entry `"$bv_meta"` shaped like a type
+    (`fields: []`, `connect.enabled: false`, label "(internal) removed
+    built-in types") with `removed_builtins: string[]`. `$` can't come out
+    of Settings' id sanitiser, the entry is written last (never an older
+    GUI's default pick in the create-resource modal) and only when at least
+    one builtin is deleted. An older GUI shows it as one extra type and
+    round-trips it untouched through its own saves; deleting it there
+    loses the tombstones, after which deleted builtins reappear once.
+  - **Pre-tombstone saves.** A config with no `$bv_meta` entry was written
+    by a GUI whose saves always contained every builtin it offered. So a
+    builtin from the frozen pre-T96 list (`PRE_TOMBSTONE_BUILTIN_IDS`) that
+    such a config lacks was deleted by the operator, and is treated as
+    tombstoned rather than re-added. Builtins added from T96 on are added.
+- **`web` connection profiles, `open` mode only.** `SessionProtocol` is
+  `"ssh" | "rdp" | "web"`; profiles carry the `web` block of §1.
+  `CredentialSource` gains `{ kind: "none" }`, the only source `open` mode
+  accepts (it releases nothing); `none` is refused on SSH/RDP, and
+  `ssh-engine` / `pki` / `fido2` are refused on `web`. Form / http-auth /
+  sso, `transport: "rustion-isolated"`, a non-empty `tls_pin_sha256`, a
+  recipe and a profile `kind: "rustion"` are all refused with "not available
+  yet" at save (GUI) and at connect (host) — never ignored. Origins follow
+  the rules of §4: exact `scheme://host[:port]`, default ports normalised,
+  lower-case / punycode host, no path, query, fragment or userinfo, no
+  trailing dot, https unless `allow_insecure_http`. **Additionally refused:
+  `localhost` and `*.localhost`**, because Tauri classes those as *local*
+  origins (the dev server, `tauri.localhost`, `ipc.localhost`) and grants
+  them IPC.
+- **Strict protocol parsing.** `parseSessionProtocol` (TS) and
+  `ProfileProtocol::of_profile` (host) refuse unknown, missing and
+  mistyped protocols; `readProfiles` drops such profiles; every launcher
+  dispatches through `openProfileSession`, which throws on an unknown
+  protocol (the launchers used to open anything that wasn't SSH as RDP); and
+  `session_open_ssh` / `session_open_rdp` / `session_open_web` each refuse a
+  profile of another protocol before resolving anything. Pinned by
+  `src/test/webConnect.test.ts` and `session::profile_protocol_tests`.
+  - **Older releases, verified at v0.44.17 and v0.44.18:** their
+    `readProfiles` keeps only `ssh` / `rdp` and their `isLaunchableProfile`
+    refuses any other protocol on the card hints, so they never dial a `web`
+    profile. Their host does not check the protocol, but no code path in
+    those GUIs sends a `web` profile id. One caveat: saving profile edits
+    from those releases on a resource that carries a `web` profile writes
+    back only the profiles they parsed, which removes the `web` one. (Their
+    Connection tab only exists on `server` resources.)
+- **No server change.** `v2/connect/authorize`, the MFA ticket and the
+  search-card `ConnectProfileHint` projection are protocol-agnostic: the
+  projection passes `protocol: "web"` and `credential_source.kind: "none"`
+  through as strings, and `authorize` reads only the profile's id and
+  `require_mfa`.
+- **`session_open_web`** ([gui/src-tauri/src/commands/connect_web.rs](../gui/src-tauri/src/commands/connect_web.rs),
+  [gui/src-tauri/src/session/web.rs](../gui/src-tauri/src/session/web.rs)).
+  Loads the resource and profile, requires `protocol == web`, validates the
+  profile, refuses when the effective Rustion transport is
+  `rustion-required` or the resolver reports a lock violation (no local
+  fallback), then runs `authorize_direct` (MFA ticket burnt exactly as on
+  the direct SSH path). The window: label `web-<token>`,
+  `WebviewUrl::External`, `incognito(true)`, `devtools(false)`,
+  `disable_drag_drop_handler()`, a per-session `data_directory` under
+  `<app cache>/web-sessions/<token>` (0700) on Windows and Linux, size from
+  the profile, title `"<resource> — <origin>"` set by the host from
+  `on_page_load`. Registered as `SessionState::Web` in `connect_sessions`;
+  `session_close` and window destruction both tear it down (destroy the
+  window, `session.close: protocol=web … duration_ms=…`, remove the data
+  directory with retries; leftovers are swept on the next web-session
+  open). Host audit lines (`target: "audit"`): `session.open:
+  protocol=web …` (origins only), `connect.web.navigation_blocked`,
+  `connect.web.popup_blocked`, `connect.web.download` /
+  `connect.web.download_blocked`, `connect.web.policy_violation`.
+  `record_recent_session` records `protocol: "web"`.
+- **Capability isolation test** (`capability_isolation_tests`, runs under
+  `cargo nextest run -p bastion-vault-gui --lib`): walks every file under
+  `gui/src-tauri/capabilities/`, plus any inline capability in
+  `tauri.conf.json`, and fails if a `windows` / `webviews` glob matches a
+  `web-<token>` label, if any capability declares `remote`, if a glob uses
+  syntax the test can't evaluate, or if a non-JSON capability file appears.
+
+### Phase 1 caveats — where it differs from §4
+
+- **Pop-ups.** `on_new_window` never returns `Allow` (that hands the popup
+  to the platform's default window, outside this window's handlers and
+  store). An in-set popup is loaded **in the session window itself**
+  (`navigate`), not in a child window sharing the store as §4 says; anything
+  else is denied. `Create { window }` needs per-platform shared webview
+  configuration (`with_related_view` / `with_environment` /
+  `webview_configuration`) that 2.11.5 doesn't expose on the stable API.
+  Pages that depend on `window.opener` (some OAuth popups) won't complete;
+  add the IdP to `allowed_origins` and let it redirect instead.
+- **Downloads.** When allowed, files go to the webview's default
+  destination (the OS downloads folder), not through the save dialog —
+  a blocking dialog can't run inside the webview's download callback. Each
+  download is audited by file name on request and by size on completion
+  (size `unknown` on macOS, where wry reports no path).
+- **Clipboard.** Only `bidirectional` calls `enable_clipboard_access`;
+  WebView2 and WebKitGTK can grant or refuse page clipboard access only as a
+  whole, so `host-to-session` / `session-to-host` behave as `off`. Absent
+  means `off`. The operator's own keyboard copy/paste is native and never
+  blocked. On macOS the page clipboard can't be gated (the editor says so).
+- **macOS data store.** No `data_store_identifier` and no `data_directory`:
+  with `incognito(true)` wry gives each window a fresh
+  `WKWebsiteDataStore.nonPersistentDataStore()`, which it prefers over an
+  identifier, and WKWebView ignores `data_directory`.
+- **Sub-frames.** wry consults the navigation handler for every frame on
+  macOS but for top-level navigations only on Windows (WebView2
+  `NavigationStarting`). On macOS a cross-origin iframe therefore needs its
+  origin in the set; elsewhere iframes are not policed (nothing is filled
+  in Phase 1). `about:blank`, `about:srcdoc` and `blob:` URLs of an allowed
+  origin are allowed; `data:`, `file:`, `mailto:` and custom schemes are
+  blocked. As a safety net, a top-frame page load the host sees for an
+  origin outside the set closes the session (`connect.web.policy_violation`).
+- **Tauri's IPC scripts still reach the page — residual risk.** Tauri
+  2.11.5 injects its IPC initialisation script (including the invoke key)
+  into every webview, remote ones included, and there is no stable API to
+  withhold it. App and plugin commands from a remote origin are rejected by
+  the ACL (`Webview::on_message`: remote origin and no matching capability
+  ⇒ reject; Tauri's own test
+  `remote_origin_blocked_for_custom_commands_without_app_manifest`). **One
+  command is exempt upstream:** `plugin:__TAURI_CHANNEL__|fetch` ("TODO:
+  Remove this special check in v3"), which returns — and removes — a queued
+  IPC channel payload by a global, sequential id. A hostile page in a web
+  session could poll it and read or steal large channel payloads destined
+  for another window, notably RDP frames of a concurrently open RDP
+  session. Closing it needs an upstream fix or a GUI policy (for example,
+  refusing a web session while an RDP session is open); neither is in
+  Phase 1.
+- **Per-platform `invoke`-rejected check: still pending (manual).** The
+  rejection above is established from the 2.11.5 source and its upstream
+  test, not by running `window.__TAURI_INTERNALS__.invoke(...)` from a web
+  window on macOS, Windows and Linux. Do that before the first release that
+  ships this.
+- **Server-side audit** (`connect.web.launch` / `result` / `close` through
+  the resource mount) is Phase 2, with the launch endpoint. Phase 1 writes
+  the host-side lines above; the server sees the `v2/connect/authorize`
+  call.
+
+### Context this feature builds on
+
+- Resource types are GUI-only: an opaque JSON blob at the resource mount's
+  `config/types` ([crates/bv-engine-resource/src/lib.rs:330](../crates/bv-engine-resource/src/lib.rs:330)).
+- The `connect` capability, the MFA ticket (`v2/connect/mfa/{begin,verify}`)
+  and the direct-path pre-flight `v2/connect/authorize` are
+  protocol-agnostic ([bv-engine-resource/src/connect_mfa.rs](../crates/bv-engine-resource/src/connect_mfa.rs)).
+  On the direct SSH/RDP path the GUI host resolves the credential itself,
+  which needs `read` on the secret; the connect-only guarantee is hard only
+  on the Rustion path. Phase 2's launch endpoint closes that for web.
 - The Identity Provider (S19, T52) is fully unimplemented. There is no `idp`
   module.
 
@@ -740,7 +875,13 @@ walkthrough.
 
 ## Phases
 
-### Phase 1 — type, protocol and `open` mode — **Todo**
+### Phase 1 — type, protocol and `open` mode — **Done, with caveats**
+
+See *Current State → Phase 1 caveats*: in-set pop-ups load in the session
+window, allowed downloads skip the save dialog, the per-platform
+`invoke`-rejected check is still manual, and Tauri's channel-fetch IPC
+exemption is an open residual risk.
+
 
 - `web_application` builtin, `connect.protocols`, and the `website` type enabled.
 - The `mergeTypeConfig` additive migration with tombstones.

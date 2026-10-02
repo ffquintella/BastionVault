@@ -685,6 +685,13 @@ pub async fn drop_session(
             log::info!("resource-connect/ssh: dropped (was RDP) token={token}");
             s.on_close
         }
+        // A web entry carries its own teardown (close audit + data-dir
+        // removal) rather than a `SessionCleanup`; run it here so this
+        // path can't skip it.
+        Some(SessionState::Web(w)) => {
+            crate::session::web::finish_session(token, w, "dropped");
+            None
+        }
         None => None,
     }
 }

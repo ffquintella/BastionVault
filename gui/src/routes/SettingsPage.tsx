@@ -7,6 +7,7 @@ import { useAuthStore } from "../stores/authStore";
 import { useNamespaceStore } from "../stores/namespaceStore";
 import { usePasswordPolicyStore } from "../stores/passwordPolicyStore";
 import type {
+  ConnectProtocol,
   Fido2Config,
   ResourceTypeConfig,
   ResourceTypeDef,
@@ -20,7 +21,12 @@ import type {
   SsoCallbackHints,
   SsoCallbackNode,
 } from "../lib/api";
-import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig } from "../lib/resourceTypes";
+import {
+  DEFAULT_RESOURCE_TYPES,
+  connectProtocols,
+  parseTypeConfig,
+  serializeTypeConfig,
+} from "../lib/resourceTypes";
 import { CloudStorageCard } from "../components/CloudStorageCard";
 import { UnsealModal } from "../components/UnsealModal";
 import { RustionBastionsTab } from "../components/RustionBastionsTab";
@@ -85,6 +91,8 @@ export function SettingsPage() {
 
   // Resource type config
   const [resTypes, setResTypes] = useState<ResourceTypeConfig>(DEFAULT_RESOURCE_TYPES);
+  // Builtin type ids the operator deleted (tombstones in the saved config).
+  const [removedBuiltins, setRemovedBuiltins] = useState<string[]>([]);
   const [editType, setEditType] = useState<ResourceTypeDef | null>(null);
   const [deleteTypeId, setDeleteTypeId] = useState<string | null>(null);
   const [showAddType, setShowAddType] = useState(false);
@@ -330,16 +338,22 @@ export function SettingsPage() {
   async function loadResourceTypes() {
     try {
       const saved = await api.resourceTypesRead();
-      setResTypes(mergeTypeConfig(saved as ResourceTypeConfig | null));
+      const parsed = parseTypeConfig(saved);
+      setResTypes(parsed.types);
+      setRemovedBuiltins(parsed.removedBuiltins);
     } catch {
       setResTypes(DEFAULT_RESOURCE_TYPES);
+      setRemovedBuiltins([]);
     }
   }
 
-  async function saveResourceTypes(updated: ResourceTypeConfig) {
+  // Every write carries the tombstones (deleted builtins), so the additive
+  // merge never brings a deleted builtin back. See `serializeTypeConfig`.
+  async function saveResourceTypes(updated: ResourceTypeConfig, removed: string[]) {
     try {
-      await api.resourceTypesWrite(updated as unknown as Record<string, unknown>);
+      await api.resourceTypesWrite(serializeTypeConfig(updated, removed));
       setResTypes(updated);
+      setRemovedBuiltins(removed);
       toast("success", "Resource types saved");
     } catch (e: unknown) {
       toast("error", extractError(e));
@@ -348,7 +362,8 @@ export function SettingsPage() {
 
   function handleSaveType(typeDef: ResourceTypeDef) {
     const updated = { ...resTypes, [typeDef.id]: typeDef };
-    saveResourceTypes(updated);
+    // Re-adding a deleted builtin's id lifts its tombstone.
+    saveResourceTypes(updated, removedBuiltins.filter((id) => id !== typeDef.id));
     setEditType(null);
     setShowAddType(false);
   }
@@ -357,12 +372,16 @@ export function SettingsPage() {
     if (!deleteTypeId) return;
     const updated = { ...resTypes };
     delete updated[deleteTypeId];
-    saveResourceTypes(updated);
+    const removed =
+      deleteTypeId in DEFAULT_RESOURCE_TYPES && !removedBuiltins.includes(deleteTypeId)
+        ? [...removedBuiltins, deleteTypeId]
+        : removedBuiltins;
+    saveResourceTypes(updated, removed);
     setDeleteTypeId(null);
   }
 
   function handleResetTypes() {
-    saveResourceTypes(DEFAULT_RESOURCE_TYPES);
+    saveResourceTypes(DEFAULT_RESOURCE_TYPES, []);
   }
 
   async function handleSaveFido2() {
@@ -1254,6 +1273,20 @@ function TypeEditorModal({ typeDef, onSave, onClose }: {
   const [connectEnabled, setConnectEnabled] = useState<boolean>(
     typeDef?.connect?.enabled ?? true,
   );
+  // Which Connect protocols the type offers (T96). Seeded from the
+  // effective list with the enabled toggle ignored, so unticking "enabled"
+  // and ticking it again doesn't lose the selection.
+  const [protocols, setProtocols] = useState<ConnectProtocol[]>(() =>
+    typeDef
+      ? connectProtocols({ ...typeDef, connect: { ...typeDef.connect, enabled: true } })
+      : [],
+  );
+
+  function toggleProtocol(p: ConnectProtocol, on: boolean) {
+    setProtocols((cur) =>
+      (["ssh", "rdp", "web"] as const).filter((x) => (x === p ? on : cur.includes(x))),
+    );
+  }
 
   function addField() {
     setFields([...fields, { key: "", label: "", type: "text", placeholder: "" }]);
@@ -1269,20 +1302,28 @@ function TypeEditorModal({ typeDef, onSave, onClose }: {
 
   function handleSave() {
     const resolvedId = isNew ? id.toLowerCase().replace(/[^a-z0-9_]/g, "_") : id;
-    // Only emit a `connect` block if the operator changed the
-    // default — keeps the persisted shape minimal so a
-    // round-trip through save → load doesn't bloat existing
-    // type records that never opted in.
-    const connect: ResourceTypeDef["connect"] = connectEnabled
-      ? typeDef?.connect
-      : { ...(typeDef?.connect ?? {}), enabled: false };
+    // Only emit what differs from the default — keeps the persisted shape
+    // minimal so a round-trip through save → load doesn't bloat existing
+    // type records that never opted in. `protocols` is written when the
+    // record already carried it or the selection differs from what an
+    // absent key means for this id (SSH+RDP for `server`, nothing else).
+    const { enabled: _enabled, protocols: savedProtocols, ...rest } = typeDef?.connect ?? {};
+    void _enabled;
+    const legacyDefault = connectProtocols({ id: resolvedId, label: "", color: "neutral", fields: [] });
+    const sameAsLegacy =
+      legacyDefault.length === protocols.length && legacyDefault.every((p) => protocols.includes(p));
+    const connect: NonNullable<ResourceTypeDef["connect"]> = {
+      ...rest,
+      ...(connectEnabled ? {} : { enabled: false }),
+      ...(savedProtocols !== undefined || !sameAsLegacy ? { protocols } : {}),
+    };
     onSave({
       id: resolvedId,
       label: label || resolvedId,
       color: color as ResourceTypeDef["color"],
       ...(icon ? { icon } : {}),
       fields: fields.filter((f) => f.key),
-      ...(connect ? { connect } : {}),
+      ...(Object.keys(connect).length > 0 ? { connect } : {}),
     });
   }
 
@@ -1346,6 +1387,25 @@ function TypeEditorModal({ typeDef, onSave, onClose }: {
             are hidden for every resource of this type. Useful for
             regulated environments that ship the metadata layer but
             force operators through an existing PAM tool.
+          </p>
+          <div className="mt-2 pl-6 flex flex-wrap gap-4 text-sm">
+            {(["ssh", "rdp", "web"] as const).map((p) => (
+              <label key={p} className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  disabled={!connectEnabled}
+                  checked={protocols.includes(p)}
+                  onChange={(e) => toggleProtocol(p, e.target.checked)}
+                />
+                <span>{p === "web" ? "Web" : p.toUpperCase()}</span>
+              </label>
+            ))}
+          </div>
+          <p className="text-xs text-[var(--color-text-muted)] mt-1 pl-6">
+            Protocols resources of this type can be connected with. SSH and
+            RDP pick the protocol from the resource&rsquo;s <code>os_type</code>{" "}
+            field, which only the Server type carries by default. Web opens
+            the application in an isolated in-app window.
           </p>
         </div>
 

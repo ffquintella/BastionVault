@@ -14,8 +14,68 @@ pub mod rdp;
 pub mod rdp_clipboard;
 pub mod sk_signer;
 pub mod ssh;
+pub mod web;
 
 use tokio::sync::mpsc;
+
+/// A connection profile's `protocol`, parsed strictly.
+///
+/// Profiles are opaque JSON on the resource record, so a value this build
+/// doesn't know (a profile written by a newer GUI, or by hand) is possible.
+/// It is an error, never a default: a `web` profile read by code that
+/// assumed `ssh` would dial its URL's host over SSH with whatever credential
+/// source the profile names. See features/web-application-connect.md §1,
+/// "Strict parsing / old clients".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileProtocol {
+    Ssh,
+    Rdp,
+    Web,
+}
+
+impl ProfileProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ssh => "ssh",
+            Self::Rdp => "rdp",
+            Self::Web => "web",
+        }
+    }
+
+    /// Parse `profile.protocol`. Missing, non-string and unknown values are
+    /// all errors.
+    pub fn of_profile(profile: &serde_json::Value) -> Result<Self, String> {
+        match profile.get("protocol") {
+            Some(serde_json::Value::String(s)) => match s.as_str() {
+                "ssh" => Ok(Self::Ssh),
+                "rdp" => Ok(Self::Rdp),
+                "web" => Ok(Self::Web),
+                other => Err(format!(
+                    "connection profile has unknown protocol `{other}`; refusing to guess (this client \
+                     supports ssh, rdp and web)"
+                )),
+            },
+            Some(_) => Err("connection profile `protocol` is not a string".to_string()),
+            None => Err("connection profile has no `protocol`".to_string()),
+        }
+    }
+
+    /// Require `profile.protocol == expected`. Each `session_open_*`
+    /// command calls this first, so a profile id handed to the wrong
+    /// command is refused before anything is resolved or dialled.
+    pub fn require(profile: &serde_json::Value, expected: Self) -> Result<(), String> {
+        let actual = Self::of_profile(profile)?;
+        if actual != expected {
+            return Err(format!(
+                "connection profile is a `{}` profile, not `{}`; refusing to open it as {}",
+                actual.as_str(),
+                expected.as_str(),
+                expected.as_str(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// One live Resource-Connect session. Drops when the
 /// WebviewWindow closes (the `session_close` command removes the
@@ -30,6 +90,10 @@ pub enum SessionState {
     /// and forwards bitmap updates back to the WebviewWindow over
     /// a binary IPC channel the window installs on mount.
     Rdp(RdpSessionState),
+    /// Web application session (T96) — an external-URL window with no IPC
+    /// grant. Nothing to pump; the entry exists so teardown (data-dir
+    /// removal, the close audit line) runs through the same registry.
+    Web(web::WebSessionState),
 }
 
 pub struct RdpSessionState {
@@ -92,4 +156,44 @@ pub enum SshControl {
     Resize { cols: u16, rows: u16 },
     /// Operator clicked Disconnect or closed the WebviewWindow.
     Close,
+}
+
+#[cfg(test)]
+mod profile_protocol_tests {
+    use super::ProfileProtocol;
+    use serde_json::json;
+
+    #[test]
+    fn known_protocols_parse() {
+        assert_eq!(ProfileProtocol::of_profile(&json!({ "protocol": "ssh" })), Ok(ProfileProtocol::Ssh));
+        assert_eq!(ProfileProtocol::of_profile(&json!({ "protocol": "rdp" })), Ok(ProfileProtocol::Rdp));
+        assert_eq!(ProfileProtocol::of_profile(&json!({ "protocol": "web" })), Ok(ProfileProtocol::Web));
+    }
+
+    /// Pins the fail-closed rule: an unknown, missing or mistyped protocol
+    /// is an error. Nothing may fall back to `ssh`.
+    #[test]
+    fn unknown_missing_or_mistyped_protocol_fails_closed() {
+        for p in [
+            json!({ "protocol": "telnet" }),
+            json!({ "protocol": "SSH" }),
+            json!({ "protocol": "" }),
+            json!({ "protocol": 22 }),
+            json!({ "protocol": null }),
+            json!({}),
+        ] {
+            assert!(ProfileProtocol::of_profile(&p).is_err(), "{p}");
+            assert!(ProfileProtocol::require(&p, ProfileProtocol::Ssh).is_err(), "{p}");
+        }
+    }
+
+    #[test]
+    fn require_refuses_a_profile_of_another_protocol() {
+        let web = json!({ "protocol": "web" });
+        let err = ProfileProtocol::require(&web, ProfileProtocol::Ssh).unwrap_err();
+        assert!(err.contains("`web` profile"), "{err}");
+        assert!(ProfileProtocol::require(&web, ProfileProtocol::Rdp).is_err());
+        assert!(ProfileProtocol::require(&web, ProfileProtocol::Web).is_ok());
+        assert!(ProfileProtocol::require(&json!({ "protocol": "rdp" }), ProfileProtocol::Ssh).is_err());
+    }
 }
