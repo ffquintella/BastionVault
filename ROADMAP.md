@@ -201,6 +201,8 @@ Next-up list recorded before the migration, in its order:
 - [x] T102 Preserve unknown-protocol connection profiles when saving a resource's profiles (S105)
   - source: review of [PR #16](https://github.com/ffquintella/BastionVault/pull/16) (Copilot), `gui/src/lib/connectionProfiles.ts`
   - why: parsing drops profiles with an unknown protocol, which is correct for launching, but `ConnectionProfilesPanel` persists the filtered array wholesale. Saving, deleting or changing the default of any known profile therefore deletes every profile written by a newer client. Keep unknown raw entries through writes while excluding them from launch and UI decisions.
+- [ ] T103 Connect with the operator's own registered accounts, picked at connect time (S107)
+  - initiative: [Self-Accounts](features/self-accounts.md) — delivered as the `bastion-plugin-self-accounts` WASM plugin. Operators register personal accounts (login + password or SSH key) scoped by resource type, OS, protocol and target patterns. A connection profile whose credential source is the `self-accounts` provider shows the operator a host-rendered picker of their matching accounts at Connect, and the credential is released server-side (direct, Rustion and web `form`). The host gains a generic credential-provider extension point: ABI 1.3 caller identity, host-enforced per-entity plugin storage, provider-only envelope ops, and an admin grant pinned to the manifest. Spec only; Phases 0–5 are Todo.
 
 ## [M6] Authentication
 > outcome: Done when every listed auth method (token, AppID, userpass, cert, OIDC, SAML, FIDO2, FerroGate) is shipped and workforce identity can be brokered downstream.
@@ -533,3 +535,4 @@ Next-up list recorded before the migration, in its order:
 | S104 | MCP Access — operator guide | docs/mcp.md |
 | S105 | Feature: Web Application Connect — in-app web sessions with injected login or SSO | features/web-application-connect.md |
 | S106 | Prompt: prepare Rustion for BastionVault web browser isolation | roadmaps/prompts/rustion-browser-isolation.md |
+| S107 | Feature: Self-Accounts — operator-registered accounts, picked at Connect (plugin) | features/self-accounts.md |
