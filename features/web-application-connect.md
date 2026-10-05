@@ -120,8 +120,144 @@ security / capability docs, Microsoft WebView2 "Basic authentication" docs, W3C
 
 ## Current State
 
-**Status: In progress — Phase 1 done, with caveats (below); Phases 2–7 Todo,
-Phase 8 future.**
+**Status: In progress — Phase 1 done, with caveats (below); Phase 2 server
+half done, its host recipe engine and GUI recipe editor Todo; Phases 3–7
+Todo, Phase 8 future.**
+
+### What the Phase 2 server half shipped
+
+`resources/v2/connect/web/{launch,totp,result,close}` in
+[crates/bv-engine-resource/src/connect_web/](../crates/bv-engine-resource/src/connect_web/)
+(handlers in `mod.rs`; `recipe.rs`, `exposure.rs`, `profile.rs`, `totp.rs`,
+`launch_store.rs`). The request/response contract the host builds on is in
+[docs/api.md](../docs/api.md) → *Web Connect (`form` mode)*. Nothing calls
+it yet: the host still refuses `form` at connect.
+
+- **`launch`** runs the `connect/authorize` front half (the `connect` grant
+  through `may_connect_target`, then the stored record), then every static
+  check — protocol `web`, `login_mode: form`, transport `local`, a strictly
+  parsed v1 recipe whose URLs sit on the profile's origin set, a credential
+  source that can supply what the recipe fills — then the host's
+  `recipe_hash`, then the §6 policy, then the Rustion transport tier, and
+  only then burns the MFA ticket (the redeem step is shared with
+  `connect/authorize`). It resolves the credential, persists the launch and
+  returns the bundle.
+- **Rustion transport tier, enforced server-side.** The host's
+  `web_transport_refusal` is now also the server's rule: `rustion-required`
+  or a policy lock violation refuses with `transport_policy`, before the
+  ticket and before any credential read; `direct` and `rustion-preferred`
+  are allowed. A patched host can no longer obtain a form credential on a
+  resource the policy reserves for Rustion.
+  - *Reused:* Rustion's own resolver, `rustion/policy/effective` (the
+    endpoint the host reads; the same four-tier `policy::resolve` that
+    `rustion/v2/session/open` applies). It is dispatched through the router
+    under server authority, as `session/open` reads its store, so the
+    caller's grant on the resolver endpoint cannot decide whether a
+    restriction on them applies. The caller's `auth` and namespace ride
+    along for the resolver's own resource gate. Asset-group hints come from
+    the kernel `ResourceGroupIndex`, with errors propagated rather than
+    read as "no groups".
+  - *Unmounted / errors:* no `rustion/` mount (`ErrRouterMountNotFound`)
+    means no policy, since the tiers live in that mount's store. This
+    differs from the host, which fails closed on that error too. Any other
+    failure (store not initialised, an undecodable tier record, an index
+    error, an unknown verdict) refuses with `transport_policy_unavailable`.
+- **Credential delivery.** Plaintext fields in the `launch` response body,
+  as §3 draws it, minimised to what the recipe fills (`username`,
+  `password`, the current `totp` + `totp_valid_until`). The seed never
+  leaves; a `default-account`'s stored Windows password is never released.
+  - *Decision:* no extra envelope. The host is the TLS endpoint that would
+    unwrap it, so sealing to a host key would add a new construction without
+    protecting against anything the host can't already see; the audit
+    pipeline already records response values HMAC-redacted.
+- **Whose authority.** `secret` is read under the server's authority — the
+  `connect` grant on the resource authorises it, as on
+  `rustion/v2/session/open`, which is what makes connect-only real for web.
+  `ldap` (`static_role`, `library_set`) and `default-account` go through the
+  full request pipeline **as the caller**.
+  - *Decision:* a stored profile can name any LDAP library or role in the
+    namespace, and anyone who may edit the resource may edit its profiles,
+    so resolving those under server authority would let a resource editor
+    check out any library account. As-caller resolution keeps today's
+    direct-path grants authoritative. The alternative, server authority plus
+    a policy probe on the LDAP path, needs a `PolicyGate` question that does
+    not exist (a `bv-kernel-api` change).
+  - `ldap` `bind_mode: operator` and source `none` are refused for `form`.
+- **TOTP.** From `totp_seed` (base32) in the `secret` source's secret, with
+  `credential_source.totp = {algorithm, digits, period}` (default
+  SHA1/6/30) and `credential_source.fields` to rename the keys. RFC 6238
+  built from the same `hmac`/`sha1`/`sha2`/`base32` crates as
+  `bv-engine-totp` and checked against the RFC vectors; an engine may not
+  depend on another engine, hence the second copy.
+  - *Decision:* not a TOTP-engine key reference. Read under server
+    authority, that would let a profile author pull codes for any
+    generate-mode key in the namespace; the seed in the resource's own
+    secret stays inside the trust boundary the `connect` grant covers.
+  - `totp` gives one refresh per recipe step that fills `totp` (heuristic
+    mode: step `0`), inside the 60 s login window, and re-checks the
+    `connect` grant.
+- **`launch_id`.** 32 random bytes, base64url. Stored at the barrier root
+  as `connect/web-launches/<hex sha256>`, as a versioned (`v: 1`) record
+  with no credential in it. Bound to (auth mount + principal, namespace,
+  resource, profile, recipe hash). Any authenticated principal can be
+  bound, not only userpass: the name falls back to the entity id. The
+  login window is 60 s; `result` (once; a repeat is idempotent, a different
+  outcome conflicts) and `close` (idempotent) work until close. Closed
+  records are reaped after 15 min and never-closed ones after 24 h. A record
+  of an unknown version is refused and never reaped. Concurrent calls on
+  one launch are refused (`launch_busy`), never raced.
+- **`close`** records the end first, then checks an LDAP library account
+  back in by `account` name. A failed check-in returns
+  `ldap_checkin_failed` and stays pending, and the next `close` retries
+  it.
+- **§6 policy.** `web_exposure_max` / `allow_heuristic_fill` on
+  `config/types[<type>].connect` and on the resource record (top-level
+  keys). The stricter cap wins. An explicit `false` for heuristics at either
+  tier beats `true` at the other, and unset at both means "no cap, no
+  heuristics". A value outside the enum refuses the launch.
+  `allow_insecure_http` is refused below `dom`.
+- **Recipe format (§2), frozen as v1.**
+  - Strict: unknown version, key or verb refused.
+  - Actions: `fill` / `click` / `submit` / `wait`; `value` is
+    `username | password | totp | literal:<text>`.
+  - At most 16 steps × 32 actions; `timeout_secs` 1–60, default 30.
+  - `success_when` is required; `failure_when` is optional.
+  - `pause_for_operator` takes `captcha` and `push_mfa`.
+  - `vendor` is from the `web_application.vendor` enum and only says where
+    the steps came from.
+  - Origins are read more strictly than the host's WHATWG parser: no
+    punycode-less Unicode hosts, no percent-encoding, no trailing dot.
+    That can only add refusals.
+  - `recipe_hash` = `sha256:` + hex of the RFC 8785 canonical form of the
+    stored value. The module is `pub`, so the host can reuse the parser and
+    the hash.
+- **Audit** (`target: "audit"`): `connect.web.launch`, `.totp`, `.result`,
+  `.close`, `.refused` (`op`, `reason` code) and `.reaped`. They carry names,
+  enum values and the launch-id hash, never a value, code, raw id or URL.
+- **Tests.** In-crate: recipe, exposure, profile, TOTP, launch-store state
+  machine, audit-line shape. `src/engine_tests/resource_connect_web.rs`:
+  end to end against a vault, covering connect-only release, every refusal
+  class, MFA ticket burn, principal binding, the login window, a failed
+  LDAP check-in on close, and the Rustion transport tier (`rustion-required`
+  refused with the ticket unspent, a lock violation refused,
+  `rustion-preferred` / `direct` allowed, an undecodable tier record
+  refused, no `rustion/` mount allowed).
+
+**Still open for Phase 2:**
+
+- The host recipe engine (`session_open_web` form mode, the fixed fill
+  routine, the call order `mfa → launch → totp* → result → close`).
+- The GUI recipe editor, `web_recipe_test` and the vendor presets.
+- Granting `resources/v2/connect/web/*` in the built-in baseline policies.
+  Today only `connect/mfa/*` and `connect/authorize` are granted, so a
+  non-root operator needs an explicit grant.
+- An end-to-end LDAP library check-out test, which needs an LDAP fixture.
+- The host and the server disagree on one transport case: with no
+  `rustion/` mount the server allows the launch (no policy can exist),
+  while the host's `read_effective_policy` fails closed on the same
+  error. Align the host when it gains form mode.
+- `make test-release` (L4), which §Security Considerations requires before
+  merging, since this touches authz.
 
 ### What Phase 1 shipped
 
@@ -293,9 +429,10 @@ Phase 8 future.**
   window on macOS, Windows and Linux. Do that before the first release that
   ships this.
 - **Server-side audit** (`connect.web.launch` / `result` / `close` through
-  the resource mount) is Phase 2, with the launch endpoint. Phase 1 writes
-  the host-side lines above; the server sees the `v2/connect/authorize`
-  call.
+  the resource mount) is Phase 2, with the launch endpoint — now on the
+  server (see *What the Phase 2 server half shipped*), unused until the host
+  calls it. An `open`-mode session still writes the host-side lines above,
+  and the server still sees only its `v2/connect/authorize` call.
 
 ### Context this feature builds on
 
@@ -913,16 +1050,21 @@ exemption is mitigated by refusing web and RDP sessions at the same time
 This phase alone removes the "reveal, copy, open browser" habit for SSO-fronted
 apps and gives them an audited launch point.
 
-### Phase 2 — `form` mode with recipes — **Todo**
+### Phase 2 — `form` mode with recipes — **In progress (server half done; host and GUI Todo)**
 
-- The `resources/v2/connect/web/{launch,totp,result,close}` endpoints with
-  server-side credential resolution and TOTP.
-- The recipe engine and fixed fill routine.
-- The recipe editor, `web_recipe_test`, JSON import/export, and vendor presets
-  (FortiGate, vCenter, iDRAC, iLO, pfSense, Grafana, Jenkins) tested against
-  recorded login pages.
-- `web_exposure_max` and `allow_heuristic_fill` enforced server-side.
-- LDAP library check-in on close.
+- **Done:** the `resources/v2/connect/web/{launch,totp,result,close}`
+  endpoints with server-side credential resolution and TOTP, server-side
+  `web_exposure_max` / `allow_heuristic_fill` enforcement, the v1 recipe
+  validator and hash, and LDAP library check-in on close. See *Current
+  State*.
+- **Todo:** the host recipe engine and fixed fill routine, calling `launch`
+  / `totp` / `result` / `close`. `close` already performs the LDAP
+  check-in; the host only has to call it on teardown.
+- **Todo:** the recipe editor, `web_recipe_test`, JSON import/export, and
+  vendor presets (FortiGate, vCenter, iDRAC, iLO, pfSense, Grafana, Jenkins)
+  tested against recorded login pages. The editor's exposure check mirrors
+  the server's.
+- **Todo:** `resources/v2/connect/web/*` in the built-in baseline policies.
 
 ### Phase 3 — `http-auth` mode — **Todo**
 

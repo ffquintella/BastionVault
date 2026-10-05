@@ -1977,6 +1977,7 @@ name = "bv-engine-resource"
 version = "0.41.0"
 dependencies = [
  "async-trait",
+ "base32",
  "base64 0.22.1",
  "bv-context",
  "bv-errors",
@@ -1986,12 +1987,16 @@ dependencies = [
  "chrono",
  "derive_more 2.1.1",
  "hex",
+ "hmac 0.13.0",
  "log",
  "maybe-async",
  "rand 0.10.2",
  "serde",
  "serde_json",
+ "sha1 0.11.0",
  "sha2 0.11.0",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]

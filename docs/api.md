@@ -675,6 +675,136 @@ Only the `secret` credential kind (ssh-password shape) is resolved
 server-side today. v1 `POST /v1/rustion/session/open` (raw
 `credential_material`) is unchanged.
 
+### Web Connect (`form` mode)
+
+Server half of [Web Application Connect](../features/web-application-connect.md)
+§3: four `POST` endpoints on the resource mount (v2 only). The desktop host
+calls `launch` **instead of** `connect/authorize` for a `web` profile whose
+`login_mode` is `form` — `launch` burns the MFA ticket itself. Every refusal
+is an HTTP error whose message starts with a stable code (`<code>: …`); the
+codes are listed per endpoint.
+
+The caller needs `update` on the endpoint paths **and** `connect` (or `read`
+/ `root`) on `resources/secrets/<resource>/`. The built-in baseline policies
+grant `connect/mfa/*` and `connect/authorize` but not yet `connect/web/*`, so
+grant it explicitly:
+
+~~~hcl
+path "resources/v2/connect/web/*" { capabilities = ["update"] }
+path "resources/secrets/fw01/*"   { capabilities = ["connect"] }
+~~~
+
+**`POST /v2/resources/v2/connect/web/launch`**
+
+~~~json
+{ "resource": "fw01", "profile_id": "p_web",
+  "recipe_hash": "sha256:9f2c…", "connect_ticket": "…" }
+~~~
+
+- `recipe_hash` (required) is `sha256:` + lowercase hex SHA-256 of the
+  RFC 8785 (JCS) canonical JSON of the profile's `web.recipe` exactly as
+  stored. Reuse `bastion_vault::modules::resource::connect_web::recipe::recipe_hash`.
+  A mismatch means the profile changed since the host loaded it.
+- `connect_ticket` is required only when the profile has `require_mfa`.
+
+Response:
+
+~~~json
+{
+  "launch_id": "<43-char base64url>",
+  "expires_at": "2026-10-05T12:01:00Z",
+  "resource": "fw01", "profile_id": "p_web",
+  "login_mode": "form", "exposure": "dom", "exposure_cap": "dom",
+  "recipe_hash": "sha256:9f2c…", "heuristic": false,
+  "credential_source": "secret",
+  "credential": { "username": "admin", "password": "…",
+                  "totp": "123456", "totp_valid_until": "2026-10-05T12:00:30Z" },
+  "totp_refresh_steps": [1],
+  "mfa_method": "totp"
+}
+~~~
+
+- `credential` carries **only what the recipe fills** (`username`,
+  `password`, `totp`; heuristic mode takes whichever the source has). It
+  travels in plaintext in this response body over the API's TLS channel —
+  the host holds it in `Zeroizing` buffers and drops it after
+  success / failure / timeout. The TOTP seed never leaves the server. The
+  audit pipeline records the response HMAC-redacted.
+- `launch_id` is single-use per operation, stored server-side as its
+  SHA-256 only, and bound to (auth mount + principal, namespace, resource,
+  profile, `recipe_hash`). `expires_at` ends the **login window**
+  (60 s): TOTP refreshes are issued only inside it. `result` and `close`
+  are accepted until the session closes.
+- Credential sources: `secret` (keys `username`, `password`, optional
+  `totp_seed` — base32 — remappable with
+  `credential_source.fields = {username?, password?, totp_seed?}`; TOTP
+  parameters in `credential_source.totp = {algorithm: SHA1|SHA256|SHA512,
+  digits: 6|8, period: 30|60}`, default SHA1/6/30) is read under the
+  server's authority, so a connect-only caller never needs `read`.
+  `ldap` (`bind_mode` `static_role` or `library_set`) and `default-account`
+  (username only, chosen by the resource's `os_type` like SSH) are resolved
+  **as the caller**, through the caller's own grants on those paths.
+- Exposure policy: `web_exposure_max` (`none < isolated < handler < proxy <
+  dom`) and `allow_heuristic_fill` on the resource type
+  (`config/types[<type>].connect`) and on the resource record (top-level
+  keys). The stricter tier wins; an explicit `allow_heuristic_fill: false`
+  at either tier beats `true` at the other; unset everywhere means "no cap,
+  no heuristics". Form mode needs `dom`.
+- Rustion transport policy: the resource's effective policy (Rustion's own
+  resolver over the global, type, asset-group and resource tiers — the
+  `rustion/policy/effective` verdict) is checked before the MFA ticket is
+  redeemed and before any credential is read. `rustion-required`, or any
+  policy lock violation, refuses with `transport_policy` (403): a form
+  launch is always local, and there is no brokered web transport yet.
+  `direct` and `rustion-preferred` are allowed; a resource with no policy at
+  any tier resolves to `direct`. With no `rustion/` mount at all, no policy
+  applies. A policy that cannot be resolved (unreadable store, undecodable
+  tier record, asset-group lookup failure, unknown verdict) refuses with
+  `transport_policy_unavailable` (503) — never "allowed".
+- Refusal codes: `wrong_protocol`, `wrong_login_mode`,
+  `transport_unavailable`, `invalid_profile`, `invalid_recipe`,
+  `credential_source_unsupported`, `recipe_hash_required`,
+  `recipe_hash_mismatch`, `exposure_cap_exceeded`,
+  `exposure_policy_invalid`, `heuristic_not_allowed`,
+  `insecure_http_not_allowed`, `transport_policy`,
+  `transport_policy_unavailable`, `mfa_required` (plus the ticket store's
+  refusals), `credential_unavailable`, `totp_not_configured`,
+  `resource_not_found`, `profile_not_found`; a missing connect grant is a
+  plain `permission denied`.
+
+**`POST /v2/resources/v2/connect/web/totp`** — `{ "launch_id": "…", "step": 1 }`
+
+One fresh code per step listed in `totp_refresh_steps`, inside the login
+window. Call it after `totp_valid_until` has passed. Response:
+`{ "totp", "totp_valid_until", "step", "totp_refresh_steps" }` (the steps
+still refreshable). Refusals: `launch_unknown` (404),
+`launch_binding_mismatch` (403), `launch_expired` (410), `launch_closed`,
+`totp_not_configured`, `totp_step_used`, `launch_busy` (409),
+`totp_step_invalid` (400).
+
+**`POST /v2/resources/v2/connect/web/result`** — `{ "launch_id": "…", "outcome": "success", "step": 1 }`
+
+`outcome` is `success` | `failure` | `timeout` | `aborted:<check>` (check =
+1–32 of `[a-z0-9_]`, e.g. `aborted:origin`, `aborted:form_action`); `step`
+(optional) is the last step reached. Recorded once: repeating it returns
+`already_recorded: true`, a different outcome is `result_conflict` (409).
+Response: `{ "recorded": true, "already_recorded", "outcome" }`.
+
+**`POST /v2/resources/v2/connect/web/close`** — `{ "launch_id": "…" }`
+
+Idempotent. Records the session end and, when `launch` checked an LDAP
+library account out, checks it back in **as the caller**. Response:
+`{ "closed": true, "already_closed", "duration_ms",
+"ldap_checkin": "not_applicable" | "done" }`. A failed check-in returns
+`ldap_checkin_failed` (502); the close itself stands, and calling `close`
+again retries the check-in.
+
+Audit (`target: "audit"`): `connect.web.launch`, `connect.web.totp`,
+`connect.web.result`, `connect.web.close`, `connect.web.refused`
+(`op`, `reason`), `connect.web.reaped`. They carry names, enum values and
+`launch_id_hash` (hex SHA-256 of the `launch_id`) — never a credential, a
+TOTP code, a raw `launch_id` or a URL.
+
 ### Session Recordings + Keystroke Transcripts
 
 ~~~
