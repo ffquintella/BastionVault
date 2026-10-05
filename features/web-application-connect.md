@@ -120,12 +120,12 @@ security / capability docs, Microsoft WebView2 "Basic authentication" docs, W3C
 
 ## Current State
 
-**Status: In progress — Phase 1 done, with caveats (below); Phase 2 server,
-desktop-host and GUI-editor halves done (the host recipe engine, fixed fill
-routine and `web_recipe_test`; the profile editor with recipe editor, import /
-export, test button and vendor presets, **whose presets are unverified against
-live appliances**), per-platform manual checks still open; Phases 3–7 Todo,
-Phase 8 future.**
+**Status: In progress — Phases 1 and 2 done, with caveats (below). Phase 2
+shipped the server, desktop-host and GUI-editor halves (the host recipe engine,
+fixed fill routine and `web_recipe_test`; the profile editor with recipe editor,
+import / export, test button and vendor presets, **whose presets are unverified
+against live appliances**); its per-platform manual checks are carried forward
+as caveats. Phases 3–7 Todo, Phase 8 future.**
 
 ### What the Phase 2 server half shipped
 
@@ -378,10 +378,10 @@ and shows them.
   judge success by an element). The tests hold each preset to the validator and
   the origin check, not to a real device. The spec's "tested against recorded
   login pages" is **not** done and stays a follow-up.
-- **Session outcome in the main window: not done.** The host reports the
-  outcome to the server and in the session window's title, and emits no event
-  or command result the main window can read, so there is nothing to show.
-  Surfacing it needs a host change.
+- **Session outcome in the main window.** The host emits
+  `web-session-outcome` to the main window only, and the vault UI shows it as
+  a toast ([webSessionOutcome.ts](../gui/src/lib/webSessionOutcome.ts),
+  wired in `Layout.tsx`; see *What the Phase 2 host half shipped*).
 - **Tests.** `src/test/webRecipe.test.ts` (validator, origin keys, presets,
   import, form-profile save checks, exposure matrix) and
   `src/test/webRecipeEditor.test.tsx` (exposure notice, presets, structured and
@@ -538,7 +538,9 @@ call-state machine).
 - `pause_for_operator` only changes the waiting text in the title; every
   recipe waits up to `timeout_secs` either way.
 
-**Still open for Phase 2:**
+**Phase 2 caveats — carried forward.** Phase 2 is marked done with these
+open; none of them is a missing feature, and each is a check or hardening step
+that must still happen before the first release that ships `form` mode:
 
 - The vendor presets are unverified against live appliances and the spec's
   "tested against recorded login pages" is not done (see *What the Phase 2 GUI
@@ -1358,7 +1360,12 @@ exemption is mitigated by refusing web and RDP sessions at the same time
 This phase alone removes the "reveal, copy, open browser" habit for SSO-fronted
 apps and gives them an audited launch point.
 
-### Phase 2 — `form` mode with recipes — **In progress (server, host and GUI editor done; presets unverified; per-platform checks open)**
+### Phase 2 — `form` mode with recipes — **Done, with caveats**
+
+See *Current State → What the Phase 2 host half shipped → Phase 2 caveats*:
+the vendor presets are unverified against live appliances, the per-platform
+manual checks and `make test-release` have not been run, the fill routine runs
+in the page's main world, and there is no end-to-end LDAP check-out test.
 
 - **Done:** the `resources/v2/connect/web/{launch,totp,result,close}`
   endpoints with server-side credential resolution and TOTP, server-side
@@ -1375,9 +1382,9 @@ apps and gives them an audited launch point.
   pfSense, Grafana, Jenkins). The editor's validation and exposure check
   mirror the server's. See *Current State → What the Phase 2 GUI editor
   shipped*.
-- **Todo:** test the presets against recorded login pages or live appliances
-  (they are **unverified** today, and labelled so), and the per-platform
-  manual checks.
+- **Carried forward as caveats:** testing the presets against recorded login
+  pages or live appliances (they are **unverified** today, and labelled so),
+  and the per-platform manual checks.
 - **Done:** `resources/v2/connect/web/*` in the built-in baseline policies (`default`, `standard-user`, `shared-access` refreshed at startup; `administrator` is not refreshed but inherits `update` through `default`).
 
 ### Phase 3 — `http-auth` mode — **Todo**
