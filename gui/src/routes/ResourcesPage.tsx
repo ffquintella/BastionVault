@@ -62,11 +62,12 @@ import {
   isLaunchableProfile,
   loginClassGate,
   needsOperatorPrompt,
-  normalizeProfileDefaults,
   pickDefaultProfile,
   profileConnectHints,
   protocolForOsType,
+  profilesForWrite,
   readProfiles,
+  readUnknownProfiles,
   validateProfile,
   validateProfileForLoginClass,
 } from "../lib/connectionProfiles";
@@ -1673,6 +1674,10 @@ function ConnectionProfilesPanel({
   toast: (type: "success" | "error" | "info", msg: string) => void;
 }) {
   const profiles = readProfiles(resource as Record<string, unknown>);
+  // Entries from a newer client (unknown protocol): never shown or launched
+  // here, but written back untouched so editing a known profile can't
+  // delete them.
+  const unknownProfiles = readUnknownProfiles(resource as Record<string, unknown>);
   const osType = String(resource["os_type"] ?? "");
   const osTypeProtocol = protocolForOsType(osType);
   // The OS-type hints only concern SSH/RDP; a web-only type has no os_type.
@@ -1774,11 +1779,12 @@ function ConnectionProfilesPanel({
     try {
       // Enforce the at-most-one-default invariant on every write so a
       // resource with profiles always has exactly one default (the
-      // first, if the operator never set one explicitly).
-      const normalized = normalizeProfileDefaults(next);
+      // first, if the operator never set one explicitly), and re-append
+      // the entries this build can't read.
+      const toWrite = profilesForWrite(next, unknownProfiles);
       const updated: ResourceMetadata = {
         ...(resource as ResourceMetadata),
-        connection_profiles: normalized as unknown as ResourceMetadata["connection_profiles"],
+        connection_profiles: toWrite as unknown as ResourceMetadata["connection_profiles"],
       };
       await api.writeResource(String(resource.name), updated);
       onUpdated();

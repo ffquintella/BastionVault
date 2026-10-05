@@ -96,6 +96,80 @@ pub enum SessionState {
     Web(web::WebSessionState),
 }
 
+impl SessionState {
+    /// Which protocol this registry entry belongs to.
+    pub fn protocol(&self) -> ProfileProtocol {
+        match self {
+            Self::Ssh(_) => ProfileProtocol::Ssh,
+            Self::Rdp(_) => ProfileProtocol::Rdp,
+            Self::Web(_) => ProfileProtocol::Web,
+        }
+    }
+}
+
+/// Why a session of one kind may not start while a session of the other is
+/// live (see [`web_rdp_conflict`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebRdpConflict {
+    /// Stable `reason=` token for the host audit line.
+    pub audit_reason: &'static str,
+    /// Operator-facing refusal.
+    pub message: String,
+}
+
+/// Web / RDP mutual exclusion.
+///
+/// Tauri 2.11.5 exempts `plugin:__TAURI_CHANNEL__|fetch` from the
+/// remote-origin ACL, so a hostile page in a `web-*` window could poll
+/// sequential channel ids and read payloads queued for another session's
+/// `tauri::ipc::Channel`. The only channel users are the RDP frame path
+/// (`session_attach_rdp_frames`, `session::rdp::FrameSink`), so a web
+/// session and an RDP session are never allowed to be live together. This
+/// is the pure predicate; callers evaluate it while holding the
+/// `connect_sessions` lock at the point of registration so two concurrent
+/// opens cannot both pass. Remove this once upstream drops the exemption.
+/// See features/web-application-connect.md, Security Considerations.
+///
+/// `opening` is the kind of session about to start; `live` are the kinds
+/// already registered. SSH sessions never conflict.
+pub fn web_rdp_conflict(
+    opening: ProfileProtocol,
+    live: impl IntoIterator<Item = ProfileProtocol>,
+) -> Option<WebRdpConflict> {
+    let other = match opening {
+        ProfileProtocol::Web => ProfileProtocol::Rdp,
+        ProfileProtocol::Rdp => ProfileProtocol::Web,
+        ProfileProtocol::Ssh => return None,
+    };
+    if !live.into_iter().any(|p| p == other) {
+        return None;
+    }
+    Some(match opening {
+        ProfileProtocol::Web => WebRdpConflict {
+            audit_reason: "rdp_session_live",
+            message: "an RDP session is open; close it before opening a web application session. Web and RDP \
+                 sessions cannot run at the same time because the webview's IPC channel transport cannot yet \
+                 isolate the RDP desktop stream from web content"
+                .to_string(),
+        },
+        _ => WebRdpConflict {
+            audit_reason: "web_session_live",
+            message: "a web application session is open; close it before opening an RDP session. Web and RDP \
+                 sessions cannot run at the same time because the webview's IPC channel transport cannot yet \
+                 isolate the RDP desktop stream from web content"
+                .to_string(),
+        },
+    })
+}
+
+/// [`web_rdp_conflict`] over a `connect_sessions` map. Call with the lock held.
+pub fn registry_web_rdp_conflict(
+    opening: ProfileProtocol,
+    sessions: &std::collections::HashMap<String, SessionState>,
+) -> Option<WebRdpConflict> {
+    web_rdp_conflict(opening, sessions.values().map(SessionState::protocol))
+}
+
 pub struct RdpSessionState {
     /// Tx side of the input channel. Frontend `session_input_rdp_*`
     /// commands push control messages here; the spawned task awaits
@@ -141,11 +215,7 @@ pub struct SessionCleanup {
 
 #[derive(Clone, Debug)]
 pub enum SessionCleanupKind {
-    LdapLibraryCheckIn {
-        ldap_mount: String,
-        library_set: String,
-        lease_id: String,
-    },
+    LdapLibraryCheckIn { ldap_mount: String, library_set: String, lease_id: String },
 }
 
 #[derive(Debug, Clone)]
@@ -195,5 +265,34 @@ mod profile_protocol_tests {
         assert!(ProfileProtocol::require(&web, ProfileProtocol::Rdp).is_err());
         assert!(ProfileProtocol::require(&web, ProfileProtocol::Web).is_ok());
         assert!(ProfileProtocol::require(&json!({ "protocol": "rdp" }), ProfileProtocol::Ssh).is_err());
+    }
+}
+
+#[cfg(test)]
+mod web_rdp_exclusion_tests {
+    use super::{web_rdp_conflict, ProfileProtocol::*};
+
+    #[test]
+    fn web_is_refused_while_rdp_is_live() {
+        let c = web_rdp_conflict(Web, [Ssh, Rdp]).unwrap();
+        assert_eq!(c.audit_reason, "rdp_session_live");
+        assert!(c.message.contains("RDP session is open"), "{}", c.message);
+    }
+
+    #[test]
+    fn rdp_is_refused_while_web_is_live() {
+        let c = web_rdp_conflict(Rdp, [Web]).unwrap();
+        assert_eq!(c.audit_reason, "web_session_live");
+        assert!(c.message.contains("web application session is open"), "{}", c.message);
+    }
+
+    #[test]
+    fn same_kind_ssh_and_empty_registries_do_not_conflict() {
+        assert_eq!(web_rdp_conflict(Web, [Web, Ssh]), None);
+        assert_eq!(web_rdp_conflict(Rdp, [Rdp, Ssh]), None);
+        assert_eq!(web_rdp_conflict(Web, []), None);
+        assert_eq!(web_rdp_conflict(Rdp, []), None);
+        // SSH never conflicts, whatever is live.
+        assert_eq!(web_rdp_conflict(Ssh, [Web, Rdp]), None);
     }
 }

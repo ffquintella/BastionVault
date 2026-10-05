@@ -45,6 +45,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::rdp_clipboard::{self, ClipboardDirection, ClipboardStats, SharedClipboardStats};
 use ironrdp::cliprdr::backend::ClipboardMessage;
 use ironrdp::cliprdr::{Cliprdr, CliprdrClient};
 use ironrdp::connector::connection_activation::ConnectionActivationState;
@@ -66,7 +67,6 @@ use ironrdp::session::{ActiveStage, ActiveStageBuilder, ActiveStageOutput};
 use ironrdp_async::{single_sequence_step_read, FramedWrite, NetworkClient};
 use ironrdp_core::{encode_buf, WriteBuf};
 use ironrdp_tokio::TokioFramed;
-use super::rdp_clipboard::{self, ClipboardDirection, ClipboardStats, SharedClipboardStats};
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
@@ -545,10 +545,7 @@ impl Dirty {
 
 /// Inclusive-rectangle containment: does `outer` cover all of `inner`?
 fn contains(outer: &InclusiveRectangle, inner: &InclusiveRectangle) -> bool {
-    outer.left <= inner.left
-        && outer.top <= inner.top
-        && outer.right >= inner.right
-        && outer.bottom >= inner.bottom
+    outer.left <= inner.left && outer.top <= inner.top && outer.right >= inner.right && outer.bottom >= inner.bottom
 }
 
 /// Per-session throughput counters.
@@ -743,7 +740,8 @@ pub async fn open_rdp_session(
                 );
             }
             let (tx, rx) = mpsc::unbounded_channel();
-            let client = ironrdp_egfx::client::GraphicsPipelineClient::new(Box::new(EgfxHandler::new(tx)), Some(decoder));
+            let client =
+                ironrdp_egfx::client::GraphicsPipelineClient::new(Box::new(EgfxHandler::new(tx)), Some(decoder));
             (drdynvc.with_dynamic_channel(client), Some(rx))
         }
         _ => (drdynvc, None),
@@ -772,17 +770,8 @@ pub async fn open_rdp_session(
                 args.clipboard.label()
             );
         }
-        log::info!(
-            "rdp clipboard [{}]: attaching CLIPRDR, direction {}",
-            args.label,
-            args.clipboard.label()
-        );
-        Some(rdp_clipboard::spawn(
-            args.clipboard,
-            clipboard_proxy,
-            Arc::clone(&clipboard_stats),
-            args.label.clone(),
-        ))
+        log::info!("rdp clipboard [{}]: attaching CLIPRDR, direction {}", args.label, args.clipboard.label());
+        Some(rdp_clipboard::spawn(args.clipboard, clipboard_proxy, Arc::clone(&clipboard_stats), args.label.clone()))
     } else {
         None
     };
@@ -890,7 +879,16 @@ pub async fn open_rdp_session(
     ));
 
     {
+        // The web/RDP exclusion is decided under the lock that inserts the
+        // entry, so a web session registering concurrently either sees this
+        // RDP session or is seen here. On a conflict the already-spawned
+        // pump is told to stop and the dialled session is abandoned.
         let mut sessions = state.connect_sessions.lock().await;
+        if let Some(conflict) = super::registry_web_rdp_conflict(super::ProfileProtocol::Rdp, &sessions) {
+            drop(sessions);
+            let _ = tx.try_send(RdpControl::Close);
+            return Err(refuse_rdp_open(&format!("{}:{}", args.host, args.port), conflict));
+        }
         sessions.insert(
             token.clone(),
             SessionState::Rdp(RdpSessionState {
@@ -1591,15 +1589,15 @@ fn flush_frame(
     };
 
     let full = sink.needs_full || dirty.full;
-    let full_rect = InclusiveRectangle { left: 0, top: 0, right: width.saturating_sub(1), bottom: height.saturating_sub(1) };
+    let full_rect =
+        InclusiveRectangle { left: 0, top: 0, right: width.saturating_sub(1), bottom: height.saturating_sub(1) };
     let rects: &[InclusiveRectangle] = if full { std::slice::from_ref(&full_rect) } else { &dirty.rects };
     if rects.is_empty() || width == 0 || height == 0 {
         dirty.clear();
         return;
     }
 
-    let pixel_bytes: usize =
-        rects.iter().map(rect_dims).map(|(w, h)| usize::from(w) * usize::from(h) * 4).sum();
+    let pixel_bytes: usize = rects.iter().map(rect_dims).map(|(w, h)| usize::from(w) * usize::from(h) * 4).sum();
     let mut out = Vec::with_capacity(FRAME_HEADER_LEN + rects.len() * FRAME_RECT_LEN + pixel_bytes);
     out.push(FRAME_WIRE_VERSION);
     out.push(if full { FRAME_FLAG_FULL } else { 0 });
@@ -1814,15 +1812,15 @@ fn encode_clipboard_message(
         return Ok(None);
     };
     let messages = match message {
-        ClipboardMessage::SendInitiateCopy(formats) => cliprdr
-            .initiate_copy(&formats)
-            .map_err(|e| format!("initiate_copy: {e}"))?,
-        ClipboardMessage::SendInitiatePaste(format) => cliprdr
-            .initiate_paste(format)
-            .map_err(|e| format!("initiate_paste: {e}"))?,
-        ClipboardMessage::SendFormatData(response) => cliprdr
-            .submit_format_data(response)
-            .map_err(|e| format!("submit_format_data: {e}"))?,
+        ClipboardMessage::SendInitiateCopy(formats) => {
+            cliprdr.initiate_copy(&formats).map_err(|e| format!("initiate_copy: {e}"))?
+        }
+        ClipboardMessage::SendInitiatePaste(format) => {
+            cliprdr.initiate_paste(format).map_err(|e| format!("initiate_paste: {e}"))?
+        }
+        ClipboardMessage::SendFormatData(response) => {
+            cliprdr.submit_format_data(response).map_err(|e| format!("submit_format_data: {e}"))?
+        }
         // Phase 1 is text only: the backend never asks for a file
         // transfer, so these can only come from a future backend and
         // are refused rather than half-handled.
@@ -1836,9 +1834,8 @@ fn encode_clipboard_message(
             return Err(format!("backend error: {e}"));
         }
     };
-    let frame = active_stage
-        .process_svc_processor_messages(messages)
-        .map_err(|e| format!("encode CLIPRDR messages: {e}"))?;
+    let frame =
+        active_stage.process_svc_processor_messages(messages).map_err(|e| format!("encode CLIPRDR messages: {e}"))?;
     Ok(Some(frame))
 }
 
@@ -2190,8 +2187,7 @@ const MAX_WHEEL_NOTCHES_PER_EVENT: i32 = 32;
 /// `MousePdu::encode` from the value itself, so we only pick the
 /// axis flag here.
 fn wheel_events(units: i32, horizontal: bool, x: u16, y: u16) -> Vec<FastPathInputEvent> {
-    let axis =
-        if horizontal { PointerFlags::HORIZONTAL_WHEEL } else { PointerFlags::VERTICAL_WHEEL };
+    let axis = if horizontal { PointerFlags::HORIZONTAL_WHEEL } else { PointerFlags::VERTICAL_WHEEL };
     let ceiling = WHEEL_UNITS_PER_NOTCH * MAX_WHEEL_NOTCHES_PER_EVENT;
     let mut remaining = units.clamp(-ceiling, ceiling);
     let mut events = Vec::new();
@@ -2252,10 +2248,9 @@ fn control_to_fastpath(ctl: RdpControl) -> Option<FastPathInput> {
             }
             FastPathInputEvent::KeyboardEvent(flags, scancode)
         }
-        RdpControl::PointerWheel { .. }
-        | RdpControl::Resize { .. }
-        | RdpControl::Repaint
-        | RdpControl::Close => return None,
+        RdpControl::PointerWheel { .. } | RdpControl::Resize { .. } | RdpControl::Repaint | RdpControl::Close => {
+            return None
+        }
     };
     FastPathInput::new(vec![event]).ok()
 }
@@ -2350,6 +2345,18 @@ fn js_code_to_ps2_scancode(code: &str) -> Option<u8> {
         "Insert" => 0x52,
         _ => return None,
     })
+}
+
+/// Audit a refused RDP open and return the operator-facing message.
+/// `subject` is the resource name or the dialled `host:port`; no credential,
+/// username or profile detail is logged.
+pub(crate) fn refuse_rdp_open<E: From<String>>(subject: &str, conflict: super::WebRdpConflict) -> E {
+    log::warn!(
+        target: "audit",
+        "connect.rdp.refused: reason={} subject={subject}",
+        conflict.audit_reason,
+    );
+    E::from(conflict.message)
 }
 
 pub async fn send_control(state: &crate::state::AppState, token: &str, ctl: RdpControl) -> Result<(), String> {
@@ -2589,10 +2596,7 @@ mod nego_cookie_tests {
         // legal per MS-RDPBCGR and equally invisible to Rustion's
         // `extract_username_from_cookie`, which scans only for
         // `Cookie: mstshash=`.
-        assert!(
-            !pdu.contains("Cookie: msts="),
-            "routing-token slot is not read by the bastion; got {pdu:?}"
-        );
+        assert!(!pdu.contains("Cookie: msts="), "routing-token slot is not read by the bastion; got {pdu:?}");
         // The bare ticket must not be double-prefixed either.
         assert!(!pdu.contains("mstshash=mstshash="), "double prefix; got {pdu:?}");
     }
@@ -2615,7 +2619,7 @@ mod nego_cookie_tests {
 #[cfg(test)]
 mod frame_tests {
     use super::{
-        contains, parse_bulk_compression, rect_dims, rect_pixel_bytes, Dirty, CompressionType,
+        contains, parse_bulk_compression, rect_dims, rect_pixel_bytes, CompressionType, Dirty,
         DEFAULT_BULK_COMPRESSION, MAX_DIRTY_RECTS,
     };
     use ironrdp::pdu::geometry::InclusiveRectangle;
@@ -2870,9 +2874,13 @@ mod egfx_tests {
         let (mut w, mut h) = (8u16, 4u16);
 
         assert!(!fb.active);
-        let resize =
-            apply_egfx_event(EgfxEvent::Blit { x: 0, y: 0, width: 2, height: 2, rgba: rgba(2, 2, 5) },
-                &mut fb, &mut dirty, &mut w, &mut h);
+        let resize = apply_egfx_event(
+            EgfxEvent::Blit { x: 0, y: 0, width: 2, height: 2, rgba: rgba(2, 2, 5) },
+            &mut fb,
+            &mut dirty,
+            &mut w,
+            &mut h,
+        );
         assert!(resize.is_none());
         assert!(fb.active);
         // Taking over must repaint whole — the old desktop lives in
@@ -2891,7 +2899,10 @@ mod egfx_tests {
         let (mut w, mut h) = (8u16, 4u16);
         apply_egfx_event(
             EgfxEvent::Blit { x: 99, y: 99, width: 2, height: 2, rgba: rgba(2, 2, 5) },
-            &mut fb, &mut dirty, &mut w, &mut h,
+            &mut fb,
+            &mut dirty,
+            &mut w,
+            &mut h,
         );
         assert!(!fb.active);
         assert!(dirty.is_empty());
@@ -2902,11 +2913,8 @@ mod egfx_tests {
         let mut fb = EgfxFramebuffer::new(8, 4);
         let mut dirty = Dirty::default();
         let (mut w, mut h) = (8u16, 4u16);
-        let resize = apply_egfx_event(
-            EgfxEvent::Reset { width: 16, height: 9 },
-            &mut fb, &mut dirty, &mut w, &mut h,
-        )
-        .expect("a size change is reported so the caller can emit it");
+        let resize = apply_egfx_event(EgfxEvent::Reset { width: 16, height: 9 }, &mut fb, &mut dirty, &mut w, &mut h)
+            .expect("a size change is reported so the caller can emit it");
         assert_eq!((resize.width, resize.height), (16, 9));
         assert_eq!((w, h), (16, 9));
         assert_eq!(fb.data.len(), 16 * 9 * 4);
@@ -2918,11 +2926,9 @@ mod egfx_tests {
         let mut fb = EgfxFramebuffer::new(8, 4);
         let mut dirty = Dirty::default();
         let (mut w, mut h) = (8u16, 4u16);
-        assert!(apply_egfx_event(
-            EgfxEvent::Reset { width: 8, height: 4 },
-            &mut fb, &mut dirty, &mut w, &mut h,
-        )
-        .is_none());
+        assert!(
+            apply_egfx_event(EgfxEvent::Reset { width: 8, height: 4 }, &mut fb, &mut dirty, &mut w, &mut h,).is_none()
+        );
         assert_eq!((w, h), (8, 4));
     }
 
@@ -2931,11 +2937,9 @@ mod egfx_tests {
         let mut fb = EgfxFramebuffer::new(8, 4);
         let mut dirty = Dirty::default();
         let (mut w, mut h) = (8u16, 4u16);
-        assert!(apply_egfx_event(
-            EgfxEvent::Reset { width: 0, height: 0 },
-            &mut fb, &mut dirty, &mut w, &mut h,
-        )
-        .is_none());
+        assert!(
+            apply_egfx_event(EgfxEvent::Reset { width: 0, height: 0 }, &mut fb, &mut dirty, &mut w, &mut h,).is_none()
+        );
         assert_eq!((w, h), (8, 4), "the desktop size must survive a malformed ResetGraphics");
         assert!(dirty.is_empty());
     }
@@ -3043,8 +3047,8 @@ mod clipboard_inbox_tests {
 #[cfg(test)]
 mod wheel_tests {
     use super::{control_to_fastpath, wheel_events, RdpControl, WHEEL_UNITS_PER_NOTCH};
-    use ironrdp::pdu::input::mouse::{MousePdu, PointerFlags};
     use ironrdp::pdu::input::fast_path::FastPathInputEvent;
+    use ironrdp::pdu::input::mouse::{MousePdu, PointerFlags};
 
     fn mouse(ev: &FastPathInputEvent) -> MousePdu {
         match ev {
@@ -3119,14 +3123,11 @@ mod wheel_tests {
         // which would turn a wild flick into no scroll at all.
         let events = wheel_events(i32::MAX, false, 0, 0);
         assert!(events.len() <= 16, "{} events", events.len());
-        assert!(events.iter().all(|e| MousePdu::WHEEL_ROTATION_RANGE
-            .contains(&mouse(e).number_of_wheel_rotation_units)));
-        assert!(control_to_fastpath(RdpControl::PointerWheel {
-            units: i32::MIN,
-            horizontal: true,
-            x: 0,
-            y: 0
-        })
-        .is_some());
+        assert!(events
+            .iter()
+            .all(|e| MousePdu::WHEEL_ROTATION_RANGE.contains(&mouse(e).number_of_wheel_rotation_units)));
+        assert!(
+            control_to_fastpath(RdpControl::PointerWheel { units: i32::MIN, horizontal: true, x: 0, y: 0 }).is_some()
+        );
     }
 }

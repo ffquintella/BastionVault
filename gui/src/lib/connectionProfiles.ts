@@ -107,25 +107,76 @@ export function detectSecretShape(data: Record<string, unknown>): ResourceSecret
   };
 }
 
+/** Whether a raw `connection_profiles` entry is one this build can show and
+ *  launch. Strict: an unknown protocol, or a missing id / name /
+ *  credential source, makes it not-ours (fail closed — never read as SSH). */
+function isKnownProfile(p: unknown): p is ConnectionProfile {
+  return (
+    typeof p === "object" &&
+    p !== null &&
+    typeof (p as ConnectionProfile).id === "string" &&
+    typeof (p as ConnectionProfile).name === "string" &&
+    parseSessionProtocol((p as ConnectionProfile).protocol) !== null &&
+    typeof (p as ConnectionProfile).credential_source === "object" &&
+    (p as ConnectionProfile).credential_source !== null
+  );
+}
+
+function rawProfiles(meta: Record<string, unknown>): unknown[] {
+  const raw = meta["connection_profiles"];
+  return Array.isArray(raw) ? raw : [];
+}
+
 /** Pull the profile array off a resource metadata object. Tolerates
  *  the field being absent (returns []) or carrying a non-array (the
  *  caller's read just sees an empty list and the operator can
- *  re-create profiles via the editor). */
+ *  re-create profiles via the editor). Entries this build does not
+ *  understand are excluded here (so they are never launched or listed)
+ *  but are NOT lost on write: see {@link readUnknownProfiles}. */
 export function readProfiles(meta: Record<string, unknown>): ConnectionProfile[] {
-  const raw = meta["connection_profiles"];
-  if (!Array.isArray(raw)) return [];
-  return raw.filter(
-    (p): p is ConnectionProfile =>
-      typeof p === "object" &&
-      p !== null &&
-      typeof (p as ConnectionProfile).id === "string" &&
-      typeof (p as ConnectionProfile).name === "string" &&
-      // Strict: an unknown protocol drops the profile (fail closed) —
-      // it is never read as SSH.
-      parseSessionProtocol((p as ConnectionProfile).protocol) !== null &&
-      typeof (p as ConnectionProfile).credential_source === "object" &&
-      (p as ConnectionProfile).credential_source !== null,
+  return rawProfiles(meta).filter(isKnownProfile);
+}
+
+/** The raw entries {@link readProfiles} excluded — profiles written by a
+ *  newer client (unknown protocol or shape). Writers must hand these back
+ *  to {@link profilesForWrite} so saving, deleting or re-defaulting a known
+ *  profile never deletes a profile this build merely cannot read. */
+export function readUnknownProfiles(meta: Record<string, unknown>): unknown[] {
+  return rawProfiles(meta).filter((p) => !isKnownProfile(p));
+}
+
+function isDefaultFlagged(p: unknown): boolean {
+  return typeof p === "object" && p !== null && (p as { is_default?: unknown }).is_default === true;
+}
+
+/**
+ * Build the array to persist as `connection_profiles`: the known profiles,
+ * default-normalised, with the unknown entries re-appended untouched.
+ *
+ * The data model keeps exactly one default across the whole stored list
+ * (`normalizeProfileDefaults`), and unknown entries count toward it:
+ *   - when a known profile carries the default (the operator's explicit
+ *     choice, or the first one promoted), an unknown entry flagged
+ *     `is_default` is the only thing that is edited — its flag is set to
+ *     false so the list never holds two defaults;
+ *   - when no known profile is flagged and an unknown one is, the unknown
+ *     entry already holds the default, so no known profile is promoted
+ *     over it.
+ * Unknown entries are otherwise returned byte-for-byte as read, after the
+ * known ones. Inputs are not mutated.
+ */
+export function profilesForWrite(known: ConnectionProfile[], unknown: unknown[]): unknown[] {
+  const unknownHoldsDefault = unknown.some(isDefaultFlagged);
+  const knownFlagged = known.some((p) => p.is_default);
+  if (known.length === 0) return [...unknown];
+  if (unknownHoldsDefault && !knownFlagged) {
+    return [...known.map((p) => ({ ...p, is_default: false })), ...unknown];
+  }
+  const normalized = normalizeProfileDefaults(known);
+  const keptUnknown = unknown.map((p) =>
+    isDefaultFlagged(p) ? { ...(p as Record<string, unknown>), is_default: false } : p,
   );
+  return [...normalized, ...keptUnknown];
 }
 
 /** Empty profile pre-filled with defaults appropriate for the

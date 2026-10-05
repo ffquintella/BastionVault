@@ -514,6 +514,16 @@ pub async fn session_open_rdp(
     // See `session_open_ssh`: refuse a profile of any other protocol.
     session::ProfileProtocol::require(&profile, session::ProfileProtocol::Rdp).map_err(CommandError::from)?;
 
+    // Web / RDP mutual exclusion (see `session::web_rdp_conflict`). Refused
+    // early so nothing is resolved or dialled and no MFA ticket is burnt;
+    // `open_rdp_session` re-checks under the registry lock when it
+    // registers, which is the check that closes the race.
+    if let Some(conflict) =
+        session::registry_web_rdp_conflict(session::ProfileProtocol::Rdp, &*state.connect_sessions.lock().await)
+    {
+        return Err(session::rdp::refuse_rdp_open(&request.resource_name, conflict));
+    }
+
     let host_candidates = profile_host_candidates(&profile, &meta);
     if host_candidates.is_empty() {
         return Err(CommandError::from(
@@ -581,13 +591,9 @@ pub async fn session_open_rdp(
         )
         .await?;
 
-        let resolved = resolve_rdp_credential(
-            &state,
-            &request.resource_name,
-            &profile,
-            request.operator_credential.as_ref(),
-        )
-        .await?;
+        let resolved =
+            resolve_rdp_credential(&state, &request.resource_name, &profile, request.operator_credential.as_ref())
+                .await?;
         let username = resolved.effective_username.unwrap_or(username);
         if username.is_empty() {
             return Err(CommandError::from(
@@ -945,6 +951,18 @@ pub async fn session_attach_rdp_frames(
 ) -> CmdResult<()> {
     {
         let sessions = state.connect_sessions.lock().await;
+        // Defence in depth for the web/RDP exclusion: `session_open_*` keep
+        // the two kinds apart, and this keeps a frame channel from being
+        // armed while a web window could read it.
+        if let Some(conflict) = session::registry_web_rdp_conflict(session::ProfileProtocol::Rdp, &sessions) {
+            log::warn!(
+                target: "audit",
+                "connect.rdp.refused: reason={} action=attach_frames token={}",
+                conflict.audit_reason,
+                request.token,
+            );
+            return Err(CommandError::from(conflict.message));
+        }
         let frames = match sessions.get(&request.token) {
             Some(session::SessionState::Rdp(s)) => std::sync::Arc::clone(&s.frames),
             Some(_) => {
@@ -2324,9 +2342,7 @@ async fn resolve_security_key_ssh(
     state: &State<'_, AppState>,
     app: &AppHandle,
 ) -> Result<ResolvedSshCredential, CommandError> {
-    let resp =
-        make_request(state, Operation::Read, "sys/identity/ssh-security-key/self".to_string(), None)
-            .await?;
+    let resp = make_request(state, Operation::Read, "sys/identity/ssh-security-key/self".to_string(), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
 
     let enrolled = data.get("enrolled").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2360,11 +2376,7 @@ async fn resolve_security_key_ssh(
     Ok(ResolvedSshCredential {
         credential: SshCredential::SecurityKey {
             public_key_openssh,
-            identity: crate::session::sk_signer::SecurityKeyIdentity {
-                algorithm,
-                application,
-                credential_id,
-            },
+            identity: crate::session::sk_signer::SecurityKeyIdentity { algorithm, application, credential_id },
             app: app.clone(),
             pin_slot: state.pin_sender.clone(),
         },

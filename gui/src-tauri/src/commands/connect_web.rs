@@ -17,6 +17,10 @@
 //!   session or is shared with the vault UI or another web session;
 //! * an exact-origin allow-list on navigation, new windows and downloads;
 //! * devtools off, Tauri's file drag-drop interception off;
+//! * never alongside an RDP session: Tauri exempts its channel `fetch`
+//!   endpoint from the remote-origin ACL, so the RDP frame channel could be
+//!   read from here. Enforced in both directions by
+//!   `session::web_rdp_conflict`;
 //! * a host-owned window title (`<resource> — <origin>`), never
 //!   `document.title`.
 
@@ -34,10 +38,10 @@ use super::connect::{
 };
 use crate::error::{CmdResult, CommandError};
 use crate::session::web::{
-    self as web_session, display_origin, download_file_name, NavigationVerdict, WebSessionState, DATA_DIR_NAME,
-    WINDOW_LABEL_PREFIX,
+    self as web_session, display_origin, download_decision, download_file_name, DownloadDecision, NavigationVerdict,
+    WebSessionState, DATA_DIR_NAME, WINDOW_LABEL_PREFIX,
 };
-use crate::session::{ProfileProtocol, SessionState};
+use crate::session::{registry_web_rdp_conflict, ProfileProtocol, SessionState, WebRdpConflict};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -95,6 +99,12 @@ pub async fn session_open_web(
     let cfg = web_session::parse_web_profile(&profile)
         .map_err(|e| CommandError::from(format!("web profile `{}`: {e}", request.profile_id)))?;
 
+    // Early refusal, before the MFA pre-flight burns the operator's ticket.
+    // The authoritative check is the one under the registry lock below.
+    if let Some(conflict) = registry_web_rdp_conflict(ProfileProtocol::Web, &*state.connect_sessions.lock().await) {
+        return Err(refuse_web_open(&request.resource_name, conflict));
+    }
+
     // Transport policy before the MFA pre-flight, so a refusal here doesn't
     // burn the operator's connect ticket.
     let (resource_id, resource_type, asset_group_ids) =
@@ -117,20 +127,34 @@ pub async fn session_open_web(
 
     let token = crate::session::ssh::new_token();
     let window_label = format!("{WINDOW_LABEL_PREFIX}{token}");
-    let data_dir = prepare_data_dir(&state, &app, &token).await?;
+    let data_dir = prepare_data_dir(&app, &token)?;
 
     // Register before the window exists, so a window that closes the instant
-    // it opens still finds its entry to tear down.
-    state.connect_sessions.lock().await.insert(
-        token.clone(),
-        SessionState::Web(WebSessionState {
-            resource_name: request.resource_name.clone(),
-            profile_id: request.profile_id.clone(),
-            window_label: window_label.clone(),
-            data_dir: data_dir.clone(),
-            opened_at: Instant::now(),
-        }),
-    );
+    // it opens still finds its entry to tear down. The RDP conflict is
+    // decided under the same lock that inserts the entry, so an RDP session
+    // registering concurrently either sees this web session or is seen by
+    // this check — never neither. No window exists yet, so a refusal here
+    // only has the data dir to undo.
+    {
+        let mut sessions = state.connect_sessions.lock().await;
+        if let Some(conflict) = registry_web_rdp_conflict(ProfileProtocol::Web, &sessions) {
+            drop(sessions);
+            if let Some(dir) = data_dir {
+                web_session::remove_data_dir_eventually(dir);
+            }
+            return Err(refuse_web_open(&request.resource_name, conflict));
+        }
+        sessions.insert(
+            token.clone(),
+            SessionState::Web(WebSessionState {
+                resource_name: request.resource_name.clone(),
+                profile_id: request.profile_id.clone(),
+                window_label: window_label.clone(),
+                data_dir: data_dir.clone(),
+                opened_at: Instant::now(),
+            }),
+        );
+    }
 
     let win = match build_window(&app, &window_label, &token, &request.resource_name, &cfg, data_dir) {
         Ok(w) => w,
@@ -173,6 +197,17 @@ pub async fn session_open_web(
     Ok(WebOpenResponse { token, window_label })
 }
 
+/// Audit and build the operator-facing error for a web open refused by the
+/// web/RDP exclusion. No profile, credential or URL detail is logged.
+fn refuse_web_open(resource: &str, conflict: WebRdpConflict) -> CommandError {
+    log::warn!(
+        target: "audit",
+        "connect.web.refused: reason={} resource={resource}",
+        conflict.audit_reason,
+    );
+    CommandError::from(conflict.message)
+}
+
 /// Tear down a web session: drop its registry entry, destroy its window,
 /// write the close audit line and remove its data directory. Returns
 /// `false` when `token` doesn't name a live web session (so the caller can
@@ -196,12 +231,13 @@ pub(crate) async fn close_web_session(state: &AppState, app: &AppHandle, token: 
     true
 }
 
-/// Create this session's webview data directory, after sweeping any left
-/// behind by sessions that are no longer live. `None` on macOS: WKWebView
-/// ignores `data_directory`, and `incognito` already gives each window its
-/// own non-persistent `WKWebsiteDataStore` (wry prefers it over a
-/// `data_store_identifier`, so setting one would change nothing).
-async fn prepare_data_dir(state: &AppState, app: &AppHandle, token: &str) -> CmdResult<Option<PathBuf>> {
+/// Create this session's webview data directory under this process's
+/// instance directory, sweeping instance directories of dead processes
+/// first (see [`web_session::session_data_dir`]). `None` on macOS:
+/// WKWebView ignores `data_directory`, and `incognito` already gives each
+/// window its own non-persistent `WKWebsiteDataStore` (wry prefers it over
+/// a `data_store_identifier`, so setting one would change nothing).
+fn prepare_data_dir(app: &AppHandle, token: &str) -> CmdResult<Option<PathBuf>> {
     if cfg!(target_os = "macos") {
         return Ok(None);
     }
@@ -210,26 +246,7 @@ async fn prepare_data_dir(state: &AppState, app: &AppHandle, token: &str) -> Cmd
         .app_cache_dir()
         .map_err(|e| CommandError::from(format!("resolve app cache dir for the web session: {e}")))?
         .join(DATA_DIR_NAME);
-    let live: Vec<String> = state
-        .connect_sessions
-        .lock()
-        .await
-        .iter()
-        .filter(|(_, s)| matches!(s, SessionState::Web(_)))
-        .map(|(t, _)| t.clone())
-        .collect();
-    web_session::sweep_stale_data_dirs(&root, &live);
-
-    let dir = root.join(token);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| CommandError::from(format!("create web session data dir {}: {e}", dir.display())))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| CommandError::from(format!("restrict web session data dir {}: {e}", dir.display())))?;
-    }
-    Ok(Some(dir))
+    web_session::session_data_dir(&root, token).map(Some).map_err(CommandError::from)
 }
 
 fn set_title_later(app: &AppHandle, label: &str, title: String) {
@@ -315,20 +332,25 @@ fn build_window(
 
     // ── Downloads ─────────────────────────────────────────────────
     // A handler is always installed: without one, WebView2 runs its own
-    // download UI. Denied unless the profile allows downloads; allowed
-    // downloads go to the webview's default destination and are audited by
-    // file name and size.
+    // download UI. Denied unless the profile allows downloads and the
+    // download's origin is in the set; allowed downloads go to the
+    // webview's default destination and are audited by file name and size.
     let allow_downloads = cfg.allow_downloads;
+    let dl_origins = Arc::clone(&origins);
     let dl_token = token.to_string();
     let dl_resource = resource.to_string();
     let on_download = move |_webview: tauri::Webview, event: DownloadEvent<'_>| -> bool {
         match event {
             DownloadEvent::Requested { url, destination } => {
                 let origin = display_origin(&url);
-                if !allow_downloads {
+                // An allowed download must also come from an origin the
+                // window may navigate to.
+                if let DownloadDecision::Deny { reason, origin } = download_decision(allow_downloads, &dl_origins, &url)
+                {
                     log::info!(
                         target: "audit",
-                        "connect.web.download_blocked: resource={dl_resource} token={dl_token} origin={origin}"
+                        "connect.web.download_blocked: resource={dl_resource} token={dl_token} origin={origin} \
+                         reason={reason}"
                     );
                     return false;
                 }

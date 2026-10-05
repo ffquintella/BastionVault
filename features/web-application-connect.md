@@ -207,16 +207,21 @@ Phase 8 future.**
   the direct SSH path). The window: label `web-<token>`,
   `WebviewUrl::External`, `incognito(true)`, `devtools(false)`,
   `disable_drag_drop_handler()`, a per-session `data_directory` under
-  `<app cache>/web-sessions/<token>` (0700) on Windows and Linux, size from
+  `<app cache>/web-sessions/<instance>/<token>` (0700) on Windows and Linux, size from
   the profile, title `"<resource> — <origin>"` set by the host from
   `on_page_load`. Registered as `SessionState::Web` in `connect_sessions`;
   `session_close` and window destruction both tear it down (destroy the
   window, `session.close: protocol=web … duration_ms=…`, remove the data
-  directory with retries; leftovers are swept on the next web-session
-  open). Host audit lines (`target: "audit"`): `session.open:
+  directory with retries). `<instance>` is one directory per running
+  process holding a `.lock` file kept exclusively locked for the process
+  lifetime; the sweep on each web-session open removes only *other*
+  instance directories whose lock it can take (owner dead), so a second
+  running copy never loses its live sessions. Host audit lines (`target: "audit"`): `session.open:
   protocol=web …` (origins only), `connect.web.navigation_blocked`,
   `connect.web.popup_blocked`, `connect.web.download` /
-  `connect.web.download_blocked`, `connect.web.policy_violation`.
+  `connect.web.download_blocked` (`reason=disabled|origin`: an allowed
+  download must also come from an origin in the set),
+  `connect.web.policy_violation`, `connect.web.refused`.
   `record_recent_session` records `protocol: "web"`.
 - **Capability isolation test** (`capability_isolation_tests`, runs under
   `cargo nextest run -p bastion-vault-gui --lib`): walks every file under
@@ -258,21 +263,30 @@ Phase 8 future.**
   origin are allowed; `data:`, `file:`, `mailto:` and custom schemes are
   blocked. As a safety net, a top-frame page load the host sees for an
   origin outside the set closes the session (`connect.web.policy_violation`).
-- **Tauri's IPC scripts still reach the page — residual risk.** Tauri
-  2.11.5 injects its IPC initialisation script (including the invoke key)
-  into every webview, remote ones included, and there is no stable API to
-  withhold it. App and plugin commands from a remote origin are rejected by
-  the ACL (`Webview::on_message`: remote origin and no matching capability
-  ⇒ reject; Tauri's own test
+- **Tauri's IPC scripts still reach the page — mitigated by web/RDP mutual
+  exclusion.** Tauri 2.11.5 injects its IPC initialisation script (including
+  the invoke key) into every webview, remote ones included, and there is no
+  stable API to withhold it. App and plugin commands from a remote origin are
+  rejected by the ACL (`Webview::on_message`: remote origin and no matching
+  capability ⇒ reject; Tauri's own test
   `remote_origin_blocked_for_custom_commands_without_app_manifest`). **One
   command is exempt upstream:** `plugin:__TAURI_CHANNEL__|fetch` ("TODO:
   Remove this special check in v3"), which returns — and removes — a queued
   IPC channel payload by a global, sequential id. A hostile page in a web
   session could poll it and read or steal large channel payloads destined
-  for another window, notably RDP frames of a concurrently open RDP
-  session. Closing it needs an upstream fix or a GUI policy (for example,
-  refusing a web session while an RDP session is open); neither is in
-  Phase 1.
+  for another window. The only `tauri::ipc::Channel` users in the GUI are
+  the RDP frame path (`session_attach_rdp_frames`, `FrameSink`), so the risk
+  is closed by **mutual exclusion**: `session_open_web` refuses while any RDP
+  session is live, and `session_open_rdp` and `session_attach_rdp_frames`
+  refuse while any web session is live (`session::web_rdp_conflict`,
+  `connect.web.refused: reason=rdp_session_live` /
+  `connect.rdp.refused: reason=web_session_live`). The decision is taken
+  under the `connect_sessions` lock at the point each session registers, so a
+  web and an RDP open racing each other cannot both succeed (an RDP open
+  that loses is told to stop its already-dialled pump). SSH sessions do not
+  use channels and are unaffected. The exclusion stays until upstream removes
+  the exemption; any new `Channel` user must be added to the predicate, or
+  the mitigation no longer holds.
 - **Per-platform `invoke`-rejected check: still pending (manual).** The
   rejection above is established from the 2.11.5 source and its upstream
   test, not by running `window.__TAURI_INTERNALS__.invoke(...)` from a web
@@ -880,7 +894,8 @@ walkthrough.
 See *Current State → Phase 1 caveats*: in-set pop-ups load in the session
 window, allowed downloads skip the save dialog, the per-platform
 `invoke`-rejected check is still manual, and Tauri's channel-fetch IPC
-exemption is an open residual risk.
+exemption is mitigated by refusing web and RDP sessions at the same time
+(until upstream removes the exemption).
 
 
 - `web_application` builtin, `connect.protocols`, and the `website` type enabled.
@@ -982,6 +997,10 @@ as T97 in the roadmap backlog.
    - Tests assert it.
    - A per-platform `invoke` check.
    - No shared data store with the main window.
+   - Tauri 2.11.5 exempts `plugin:__TAURI_CHANNEL__|fetch` from the
+     remote-origin ACL, so a web window and an RDP session (the only
+     `Channel` user) are never live together. Mitigated by mutual
+     exclusion until upstream removes the exemption (see Current State).
 4. **Connect-only access.** The launch endpoint is a new secret reader gated by
    `connect`, not `read`. It must return credentials only for a `web` profile
    bound into the `launch_id`, only within the exposure cap, and only after the
