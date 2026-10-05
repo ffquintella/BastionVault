@@ -121,7 +121,8 @@ security / capability docs, Microsoft WebView2 "Basic authentication" docs, W3C
 ## Current State
 
 **Status: In progress — Phase 1 done, with caveats (below); Phase 2 server
-half done, its host recipe engine and GUI recipe editor Todo; Phases 3–7
+and desktop-host halves done (the host recipe engine, fixed fill routine and
+`web_recipe_test`), the GUI recipe editor and vendor presets Todo; Phases 3–7
 Todo, Phase 8 future.**
 
 ### What the Phase 2 server half shipped
@@ -130,8 +131,8 @@ Todo, Phase 8 future.**
 [crates/bv-engine-resource/src/connect_web/](../crates/bv-engine-resource/src/connect_web/)
 (handlers in `mod.rs`; `recipe.rs`, `exposure.rs`, `profile.rs`, `totp.rs`,
 `launch_store.rs`). The request/response contract the host builds on is in
-[docs/api.md](../docs/api.md) → *Web Connect (`form` mode)*. Nothing calls
-it yet: the host still refuses `form` at connect.
+[docs/api.md](../docs/api.md) → *Web Connect (`form` mode)*. The desktop
+host calls it (see *What the Phase 2 host half shipped*).
 
 - **`launch`** runs the `connect/authorize` front half (the `connect` grant
   through `may_connect_target`, then the stored record), then every static
@@ -302,19 +303,150 @@ it yet: the host still refuses `form` at connect.
   secret, missing seed, no LDAP mount, a non-LDAP mount, no default account
   — each with the ticket unspent), and the fill scope in bundle and record.
 
+### What the Phase 2 host half shipped
+
+In [gui/src-tauri/src/commands/connect_web.rs](../gui/src-tauri/src/commands/connect_web.rs)
+and the Tauri-free modules under [gui/src-tauri/src/session/](../gui/src-tauri/src/session/):
+`web_recipe.rs` (plan, globs, outcomes, TOTP decision, bundle, fill scope,
+heuristics), `web_script.rs` + `web_fill_routine.js` (the fixed routine and
+its argument encoding), `web_engine.rs` (the engine, generic over the page so
+it is unit-tested with a fake), `web_launch.rs` (the four server calls and the
+call-state machine).
+
+- **`session_open_web`, form mode.** Parses the profile with the server's own
+  `WebLoginRecipe::parse` and `recipe_hash`
+  (`bastion_vault::modules::resource::connect_web::recipe`, reachable through
+  the facade); `form` needs a `secret` / `ldap` / `default-account` source and
+  a recipe. Order: early web/RDP check → **reserve the registry slot** (the
+  authoritative web/RDP decision, taken before any credential is released) →
+  `v2/connect/web/launch` instead of `connect/authorize` → bundle checks →
+  window → engine. The bundle is parsed strictly (unknown `credential` /
+  `fill_scope` keys refused), the credential moved into `Zeroizing` buffers,
+  and cross-checked: resource, profile, `login_mode: form`, `exposure: dom`,
+  `recipe_hash`, `heuristic` equal to the local recipe's mode, and the parts
+  the recipe fills present. Any mismatch after the launch exists reports
+  `aborted:<check>` and closes it before the error returns.
+  - *Fill scope:* the window starts at `fill_scope.start_url` and its
+    navigation allow-list **is** `fill_scope.origins`. The server may narrow
+    the local copy (dropped origins are logged as
+    `connect.web.fill_scope_narrowed`); an origin the local copy lacks, or
+    `allow_insecure_http` it does not set, refuses the launch
+    (`aborted:fill_scope`).
+  - *Transport:* the host no longer calls `rustion/policy/effective` for a
+    form launch — `launch` enforces the tier before the ticket and the
+    credential, so the host/server disagreement noted below is closed. `open`
+    mode still checks on the host.
+- **How results travel without IPC.** The engine evaluates
+  `(<fixed routine>)(<JSON args>)` through `WebviewWindow::eval_with_callback`
+  (WKWebView `evaluateJavaScript`, WebView2 `ExecuteScript`, WebKitGTK
+  `run_javascript`). The only thing that returns is the script's own return
+  value — a JSON string, parsed strictly (`deny_unknown_fields`, version,
+  status enum) — delivered to a host closure. The page gets no channel and
+  nothing it can call; no `tauri::ipc::Channel` is used, so the web/RDP
+  exclusion predicate is unchanged. A reply can only make the engine refuse
+  or take its next host-decided step; it never widens where a value goes.
+- **The fixed routine.** Compiled into the binary (`include_str!`); no recipe
+  or page text ever becomes script. Arguments are serialised by `serde_json`
+  with `<`, `>`, `&`, U+2028, U+2029 additionally escaped, into a pre-sized
+  zeroizing buffer. In the top document only (`window.top === window`, and
+  `location.origin` must equal the origin the host checked): exactly one
+  match; an `<input>` of the expected type (password only into
+  `type=password`); enabled; visible (box ≥ 4×4 px, `visibility: visible`,
+  cumulative opacity ≥ 0.5, in the viewport after one `scrollIntoView`); not
+  covered at its centre (`elementFromPoint`, a `<label>` for the field
+  allowed); its form's `action` and every submitter's `formaction` on an
+  allowed origin (read through prototype accessors, so DOM clobbering cannot
+  hide them). It fills through the native `HTMLInputElement` value setter and
+  fires `input` / `change`; `submit` uses `requestSubmit`. After the outcome
+  it clears every password field. It never returns a value.
+- **The engine.** A step runs only on a finished top-frame load
+  (`on_page_load`) whose URL matches its `when_url` (origin exact, `*` glob
+  after it), on an origin of the fill scope; steps run in order, each at most
+  once (a later step may be reached without an optional earlier one). Every
+  action re-checks the host-observed origin; a navigation to another origin
+  mid-step aborts (`aborted:navigated`). A failed safety check aborts at once;
+  a check the page can still pass (`no_match`, `not_visible`, `occluded`,
+  `disabled`, navigation in flight) is retried **unchanged** until
+  `timeout_secs`, then reported as `aborted:<that check>`. A click or submit
+  whose evaluation returned nothing is never repeated. Outcomes are judged
+  only after a step ran, failure before success; then `web/result` once
+  (`result.step` = last step started), the title shows it, password fields
+  are cleared, and the credential is dropped with the engine.
+  - *TOTP:* a `totp` fill after `totp_valid_until` (host clock) calls
+    `web/totp` for that step when it is still in `totp_refresh_steps`;
+    otherwise `aborted:totp_expired` and nothing is filled.
+  - *Heuristic mode:* only when the bundle says `heuristic: true` and the
+    recipe is `"steps": "auto"`. One pass: `autocomplete=username`,
+    `current-password` (else `type=password`), `one-time-code`, filling only
+    what the source released; more than one candidate aborts
+    (`ambiguous_match`); submits the last filled field's form.
+- **Teardown.** `web/close` on every path — window closed, `session_close`,
+  window build failure, the SSH/RDP drop paths, app exit (`RunEvent::Exit`,
+  3 s budget, including teardowns the closing windows started) — through
+  one idempotent state machine (`LaunchCalls`): a teardown before an outcome
+  reports `aborted:window_closed|session_closed|window_build|app_exit|
+  session_dropped|policy_violation` first; an undelivered `result` is resent
+  unchanged once. `ldap_checkin_failed` is retried once, then logged as a
+  warning. All four calls use the backend, token and namespace captured at
+  launch.
+- **`web_recipe_test`** (dry run). Opens a full web session window (IPC-less,
+  ephemeral, origin allow-list, counts for the web/RDP exclusion) on the URL;
+  the recipe's URLs must sit on its origin set. For every page a step names it
+  runs every check of the routine in **check mode** — no value, no click, no
+  submit — and probes the outcome selectors, then reports per step and action
+  the routine's status and match count (no selectors or values echoed).
+  - *Decision:* checks only, no placeholder credential (the spec said "a
+    dummy credential"). A placeholder fill would send a real login attempt
+    to the target — lockouts, IDS alarms — while verifying nothing the
+    check-mode routine does not already verify. `run_check` has no credential
+    parameter, and the command never reads the vault, asks for MFA or calls
+    `launch`. Later pages are checked when the operator signs in by hand.
+- **Host audit** (`target: "audit"`): `session.open: protocol=web
+  login_mode=form` (fill origins, `launch_id_hash`), `connect.web.fill` /
+  `connect.web.action` (step, action index, value kind, origin),
+  `connect.web.totp_refresh`, `connect.web.login`, `connect.web.result`,
+  `connect.web.close` (`ldap_checkin`), `*_failed` (refusal code only),
+  `connect.web.fill_scope_narrowed`, `connect.web.recipe_test`,
+  `connect.web.refused`. Never a value, TOTP code, raw `launch_id`, vault
+  token, selector match, path or query.
+- **Tests.** Rust (`cargo nextest run -p bastion-vault-gui --lib`): glob and
+  step selection, plan building, outcome mapping, check names, TOTP refresh
+  selection, strict bundle parsing and cross-checks, fill-scope narrowing vs
+  widening, heuristics, script escaping of hostile values and selectors, reply
+  parsing, the call-state machine on every teardown path, and the engine
+  against a fake page (order, origin gating, mid-step navigation, permanent vs
+  transient checks, refresh, no-result clicks, cancellation, heuristics, the
+  dry run carrying no value). Vitest (`src/test/webFillRoutine.test.ts`): the
+  real routine in jsdom — native setter, check mode, origin, match count,
+  type, opacity / size / off-screen decoys, overlay vs own label, off-origin
+  `action` / `formaction` under DOM clobbering, submit, probe, scan, clear.
+
+**Host deviations from §5, decided here:**
+
+- `when_url` and `success_when.url` see only URLs of finished top-frame loads,
+  as §2 says — not same-document (`pushState`) route changes. A single-page
+  app's multi-screen login is one step with `wait` actions, and its success
+  condition a selector.
+- A field outside any `<form>` is fillable (no form, no action to check);
+  the navigation allow-list still blocks a native post off-origin.
+- Transient checks are retried until the timeout instead of aborting at the
+  first failure; the check itself never changes.
+- `pause_for_operator` only changes the waiting text in the title; every
+  recipe waits up to `timeout_secs` either way.
+
 **Still open for Phase 2:**
 
-- The host recipe engine (`session_open_web` form mode, the fixed fill
-  routine, the call order `mfa → launch → totp* → result → close`).
-- The GUI recipe editor, `web_recipe_test` and the vendor presets.
+- The GUI recipe editor, JSON import/export and the vendor presets; the
+  editor still refuses to save `form` profiles, and the main window is not
+  told the outcome (it shows in the session window's title).
+- Per-platform manual checks (macOS, Windows, Linux) against the fixture site
+  of the Testing Plan, including `eval_with_callback` returning on each
+  webview and the `invoke`-rejected check of Phase 1.
+- The routine runs in the page's main world, so a compromised allowed origin
+  can patch DOM prototypes and make it misreport (it can read the filled
+  password anyway — §5 *Exposure*). Evaluating in an isolated world
+  (`WKContentWorld`, a CDP isolated world on WebView2) is a follow-up.
 - An end-to-end LDAP library check-out test, which needs an LDAP fixture.
-- The host and the server still disagree on one transport case: with no
-  `rustion/` mount and no policy record the server allows the launch, while
-  the host's `read_effective_policy` fails closed on the same error. The
-  host is the stricter of the two, so the pair fails closed; align it when
-  it gains form mode.
-- The host must take its fill scope from the bundle's `fill_scope`, not
-  from its own copy of the profile (contract in `docs/api.md`).
 - `make test-release` (L4), which §Security Considerations requires before
   merging, since this touches authz.
 
@@ -488,10 +620,10 @@ it yet: the host still refuses `form` at connect.
   window on macOS, Windows and Linux. Do that before the first release that
   ships this.
 - **Server-side audit** (`connect.web.launch` / `result` / `close` through
-  the resource mount) is Phase 2, with the launch endpoint — now on the
-  server (see *What the Phase 2 server half shipped*), unused until the host
-  calls it. An `open`-mode session still writes the host-side lines above,
-  and the server still sees only its `v2/connect/authorize` call.
+  the resource mount) is Phase 2, with the launch endpoint, which the host
+  calls for `form` sessions (see *What the Phase 2 host half shipped*). An
+  `open`-mode session still writes the host-side lines above, and the server
+  still sees only its `v2/connect/authorize` call.
 
 ### Context this feature builds on
 
@@ -1087,7 +1219,8 @@ allow-list, and the operator's endpoint never holds it. That is exposure level
 | `resources/v2/connect/web/close` | write | report session end |
 
 Tauri commands: `session_open_web`, `session_close` (existing, extended),
-`web_recipe_test` (dry run against a URL with a dummy credential, which never
+`web_recipe_test` (dry run against a URL with no credential at all — every
+check of the fill routine, nothing filled, clicked or submitted — which never
 calls `launch`).
 
 `docs/api.md` gains a "Web connect" subsection. `docs/gui.md` gains the operator
@@ -1119,20 +1252,21 @@ exemption is mitigated by refusing web and RDP sessions at the same time
 This phase alone removes the "reveal, copy, open browser" habit for SSO-fronted
 apps and gives them an audited launch point.
 
-### Phase 2 — `form` mode with recipes — **In progress (server half done; host and GUI Todo)**
+### Phase 2 — `form` mode with recipes — **In progress (server and host halves done; GUI editor Todo)**
 
 - **Done:** the `resources/v2/connect/web/{launch,totp,result,close}`
   endpoints with server-side credential resolution and TOTP, server-side
   `web_exposure_max` / `allow_heuristic_fill` enforcement, the v1 recipe
   validator and hash, and LDAP library check-in on close. See *Current
   State*.
-- **Todo:** the host recipe engine and fixed fill routine, calling `launch`
-  / `totp` / `result` / `close`. `close` already performs the LDAP
-  check-in; the host only has to call it on teardown.
-- **Todo:** the recipe editor, `web_recipe_test`, JSON import/export, and
-  vendor presets (FortiGate, vCenter, iDRAC, iLO, pfSense, Grafana, Jenkins)
-  tested against recorded login pages. The editor's exposure check mirrors
-  the server's.
+- **Done:** the host recipe engine and fixed fill routine, calling `launch`
+  / `totp` / `result` / `close` on every teardown path, and the
+  `web_recipe_test` dry run (checks only, no credential). See *Current State
+  → What the Phase 2 host half shipped*.
+- **Todo:** the recipe editor (calling `web_recipe_test`), JSON
+  import/export, and vendor presets (FortiGate, vCenter, iDRAC, iLO, pfSense,
+  Grafana, Jenkins) tested against recorded login pages. The editor's
+  exposure check mirrors the server's.
 - **Done:** `resources/v2/connect/web/*` in the built-in baseline policies (`default`, `standard-user`, `shared-access` refreshed at startup; `administrator` is not refreshed but inherits `update` through `default`).
 
 ### Phase 3 — `http-auth` mode — **Todo**
@@ -1225,7 +1359,7 @@ as T97 in the roadmap backlog.
    - proxy unavailable → no `dom`;
    - TLS error → no "accept anyway" without a pin.
 6. **Logging.** Never values, codes, cookies or full URLs (§11). Recipe test runs
-   use a dummy credential and never call `launch`.
+   use no credential at all and never call `launch`.
 7. **Rustion isolation (Phase 8)** widens what Rustion handles from SSH/RDP
    credentials to web credentials and hostile web content. The browser must run
    in a disposable worker outside Rustion's own process, with egress restricted

@@ -2384,7 +2384,7 @@ pub async fn drop_session(state: &crate::state::AppState, token: &str) -> Option
         }
         // See the matching arm in `ssh::drop_session`.
         Some(SessionState::Web(w)) => {
-            crate::session::web::finish_session(token, w, "dropped");
+            crate::session::web::finish_session(token, w, crate::session::web::WebCloseReason::Dropped).await;
             None
         }
         None => None,

@@ -1278,7 +1278,14 @@ pub async fn session_close(state: State<'_, AppState>, app: AppHandle, request: 
     // A web session has no control channel to signal: closing it means
     // destroying its window and running its own teardown. Handled first so
     // the SSH/RDP fan-out below never sees a web token.
-    if crate::commands::connect_web::close_web_session(&state, &app, &request.token, "session_close").await {
+    if crate::commands::connect_web::close_web_session(
+        &state,
+        &app,
+        &request.token,
+        crate::session::web::WebCloseReason::SessionClose,
+    )
+    .await
+    {
         return Ok(());
     }
     // Best-effort fan-out: we don't know whether the token names

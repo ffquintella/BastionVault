@@ -628,7 +628,7 @@ pub async fn drop_session(state: &crate::state::AppState, token: &str) -> Option
         // removal) rather than a `SessionCleanup`; run it here so this
         // path can't skip it.
         Some(SessionState::Web(w)) => {
-            crate::session::web::finish_session(token, w, "dropped");
+            crate::session::web::finish_session(token, w, crate::session::web::WebCloseReason::Dropped).await;
             None
         }
         None => None,

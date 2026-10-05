@@ -1,10 +1,30 @@
-//! `session_open_web` — Web Application Connect, Phase 1
-//! (features/web-application-connect.md §4, T96).
+//! `session_open_web` and `web_recipe_test` — Web Application Connect
+//! (features/web-application-connect.md §3–§5, T96).
 //!
 //! Opens an ephemeral BastionVault window on a `web` connection profile's
-//! start URL. Phase 1 supports `login_mode: "open"` only: no credential is
-//! resolved, read or released — the window is an audited, policy-bound
-//! launch point for applications that do their own login (typically SSO).
+//! start URL.
+//!
+//! * `login_mode: "open"` (Phase 1) releases no credential: the window is an
+//!   audited, policy-bound launch point for applications that do their own
+//!   login (typically SSO). Authorised by `v2/connect/authorize`.
+//! * `login_mode: "form"` (Phase 2) calls `resources/v2/connect/web/launch`
+//!   **instead of** `connect/authorize` (it burns the MFA ticket itself),
+//!   opens the window on the bundle's `fill_scope.start_url` with the
+//!   navigation allow-list built from `fill_scope.origins`, and runs the
+//!   profile's login recipe through the fixed fill routine
+//!   (`session::web_engine`). The outcome goes to `web/result` once and to
+//!   the host-owned title; teardown always ends in `web/close`.
+//!
+//! How the recipe talks to the page **without IPC**: the host evaluates the
+//! fixed routine with the webview's native script evaluation
+//! (`WebviewWindow::eval_with_callback` → WKWebView `evaluateJavaScript`,
+//! WebView2 `ExecuteScript`, WebKitGTK `run_javascript`). The only thing that
+//! travels back is the script's own return value, delivered to a host
+//! closure. The page is never handed a channel, an `invoke` or a callback it
+//! could call; it can at most make the routine's reply lie, and a reply can
+//! only make the engine refuse or take the next host-decided step. No
+//! `tauri::ipc::Channel` is used, so the web/RDP exclusion predicate is
+//! unchanged.
 //!
 //! The window is deliberately a hostile-content container:
 //!
@@ -20,17 +40,23 @@
 //! * never alongside an RDP session: Tauri exempts its channel `fetch`
 //!   endpoint from the remote-origin ACL, so the RDP frame channel could be
 //!   read from here. Enforced in both directions by
-//!   `session::web_rdp_conflict`;
-//! * a host-owned window title (`<resource> — <origin>`), never
-//!   `document.title`.
+//!   `session::web_rdp_conflict`, and decided before any credential is
+//!   released;
+//! * a host-owned window title (`<resource> — <origin>`, then the login
+//!   state), never `document.title`.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tauri::webview::{DownloadEvent, NewWindowResponse, PageLoadEvent};
-use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, State, Url, WebviewUrl, WebviewWindowBuilder};
+use tokio::sync::Notify;
+
+use bastion_vault::modules::resource::connect_web::recipe::{recipe_hash, WebLoginRecipe};
 
 use super::connect::{
     collect_policy_hints, find_profile, read_effective_policy, read_resource_meta, record_recent_session,
@@ -38,11 +64,28 @@ use super::connect::{
 };
 use crate::error::{CmdResult, CommandError};
 use crate::session::web::{
-    self as web_session, display_origin, download_decision, download_file_name, DownloadDecision, NavigationVerdict,
-    WebSessionState, DATA_DIR_NAME, WINDOW_LABEL_PREFIX,
+    self as web_session, display_origin, download_decision, download_file_name, DownloadDecision, FormLogin,
+    NavigationVerdict, OriginSet, WebClipboard, WebCloseReason, WebLogin, WebOrigin, WebSessionKind, WebSessionState,
+    WebShared, DATA_DIR_NAME, DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, WINDOW_LABEL_PREFIX,
 };
+use crate::session::web_engine::{
+    run_check, run_fill, AuditTag, CheckReport, EngineTiming, EvalError, PageSnapshot, RecipePage,
+};
+use crate::session::web_launch::{self, LaunchChannel, LaunchRequest, WebLaunch};
+use crate::session::web_recipe::{
+    check_bundle, reconcile_fill_scope, BundleExpectation, EffectiveScope, LaunchCredential, PlanSteps, RecipePlan,
+    UrlGlob,
+};
+use crate::session::web_script::{parse_reply, render, ReplyError, ScriptCall, ScriptReply};
 use crate::session::{registry_web_rdp_conflict, ProfileProtocol, SessionState, WebRdpConflict};
 use crate::state::AppState;
+
+/// How long one evaluation of the fill routine may take before the engine
+/// treats it as "no result".
+const EVAL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long app exit waits for web launches to be reported and closed.
+const EXIT_CLOSE_BUDGET: Duration = Duration::from_secs(3);
 
 #[derive(Deserialize)]
 pub struct WebOpenRequest {
@@ -58,6 +101,8 @@ pub struct WebOpenRequest {
 pub struct WebOpenResponse {
     pub token: String,
     pub window_label: String,
+    /// `open` or `form`.
+    pub login_mode: &'static str,
 }
 
 /// Why a web session may not run locally under the resource's effective
@@ -105,96 +150,298 @@ pub async fn session_open_web(
         return Err(refuse_web_open(&request.resource_name, conflict));
     }
 
-    // Transport policy before the MFA pre-flight, so a refusal here doesn't
-    // burn the operator's connect ticket.
-    let (resource_id, resource_type, asset_group_ids) =
-        collect_policy_hints(&state, &request.resource_name, &meta).await;
-    let effective = read_effective_policy(&state, &resource_id, &resource_type, &asset_group_ids).await?;
-    if let Some(reason) = web_transport_refusal(&effective.transport, effective.lock_violation.as_deref()) {
-        return Err(CommandError::from(reason));
+    // Transport policy. `connect/authorize` (open mode) does not look at the
+    // Rustion tiers, so the host checks them first, before the ticket is
+    // spent. A form launch is checked by `launch` itself — server-side,
+    // before the ticket is redeemed and before any credential is read — and
+    // that check is authoritative, so the host does not repeat it (the two
+    // used to disagree on a deployment with no `rustion/` mount).
+    if matches!(cfg.login, WebLogin::Open) {
+        let (resource_id, resource_type, asset_group_ids) =
+            collect_policy_hints(&state, &request.resource_name, &meta).await;
+        let effective = read_effective_policy(&state, &resource_id, &resource_type, &asset_group_ids).await?;
+        if let Some(reason) = web_transport_refusal(&effective.transport, effective.lock_violation.as_deref()) {
+            return Err(CommandError::from(reason));
+        }
     }
-
-    // Same server-side pre-flight as a direct SSH/RDP dial: checks the
-    // `connect` grant and, on a `require_mfa` profile, verifies and burns
-    // the ticket. Nothing is opened until it says yes.
-    crate::commands::connect_mfa::authorize_direct(
-        &state,
-        &request.resource_name,
-        &request.profile_id,
-        request.connect_ticket.as_deref(),
-    )
-    .await?;
 
     let token = crate::session::ssh::new_token();
     let window_label = format!("{WINDOW_LABEL_PREFIX}{token}");
-    let data_dir = prepare_data_dir(&app, &token)?;
+    let kind = match cfg.login {
+        WebLogin::Open => WebSessionKind::Open,
+        WebLogin::Form(_) => WebSessionKind::Form,
+    };
+    let shared = WebShared::new(&request.resource_name, &display_origin(&cfg.start_url));
 
-    // Register before the window exists, so a window that closes the instant
-    // it opens still finds its entry to tear down. The RDP conflict is
-    // decided under the same lock that inserts the entry, so an RDP session
-    // registering concurrently either sees this web session or is seen by
-    // this check — never neither. No window exists yet, so a refusal here
-    // only has the data dir to undo.
-    {
-        let mut sessions = state.connect_sessions.lock().await;
-        if let Some(conflict) = registry_web_rdp_conflict(ProfileProtocol::Web, &sessions) {
-            drop(sessions);
-            if let Some(dir) = data_dir {
-                web_session::remove_data_dir_eventually(dir);
+    // Reserve the registry slot before anything is authorised or released.
+    // The RDP conflict is decided under the same lock that inserts the entry,
+    // so an RDP session registering concurrently either sees this web
+    // session or is seen by this check — never neither — and a form launch
+    // never releases a credential for a session that cannot open.
+    let data_dir = reserve_session(
+        &state,
+        &app,
+        &token,
+        WebSessionState {
+            resource_name: request.resource_name.clone(),
+            profile_id: request.profile_id.clone(),
+            window_label: window_label.clone(),
+            data_dir: None,
+            opened_at: Instant::now(),
+            kind,
+            launch: None,
+            shared: Arc::clone(&shared),
+        },
+    )
+    .await?;
+
+    let mut form_run: Option<(FormStart, RecipePlan)> = None;
+    let scope = match &cfg.login {
+        WebLogin::Open => {
+            // Same server-side pre-flight as a direct SSH/RDP dial: checks
+            // the `connect` grant and, on a `require_mfa` profile, verifies
+            // and burns the ticket. Nothing is opened until it says yes.
+            if let Err(e) = crate::commands::connect_mfa::authorize_direct(
+                &state,
+                &request.resource_name,
+                &request.profile_id,
+                request.connect_ticket.as_deref(),
+            )
+            .await
+            {
+                release_reservation(&state, &token).await;
+                return Err(e);
             }
-            return Err(refuse_web_open(&request.resource_name, conflict));
+            EffectiveScope::local(cfg.start_url.clone(), cfg.origins.clone(), cfg.allow_insecure_http)
         }
-        sessions.insert(
-            token.clone(),
-            SessionState::Web(WebSessionState {
-                resource_name: request.resource_name.clone(),
-                profile_id: request.profile_id.clone(),
-                window_label: window_label.clone(),
-                data_dir: data_dir.clone(),
-                opened_at: Instant::now(),
-            }),
-        );
-    }
-
-    let win = match build_window(&app, &window_label, &token, &request.resource_name, &cfg, data_dir) {
-        Ok(w) => w,
-        Err(e) => {
-            close_web_session(&state, &app, &token, "window-build-failed").await;
-            return Err(e);
+        WebLogin::Form(form) => {
+            let start = match start_form_launch(&state, &request, &token, &cfg, form).await {
+                Ok(s) => s,
+                Err(e) => {
+                    release_reservation(&state, &token).await;
+                    return Err(e);
+                }
+            };
+            if !attach_launch(&state, &token, &start.launch).await {
+                // Removed while the launch was in flight; nothing else will
+                // finish this launch.
+                start.launch.finish("session_closed").await;
+                return Err(CommandError::from("the web session was closed while it was being opened".to_string()));
+            }
+            let scope = start.scope.clone();
+            form_run = Some((start, form.plan.clone()));
+            scope
         }
     };
 
-    let token_for_destroy = token.clone();
-    let app_for_destroy = app.clone();
-    win.on_window_event(move |ev| {
-        if let tauri::WindowEvent::Destroyed = ev {
-            let token = token_for_destroy.clone();
-            let app = app_for_destroy.clone();
-            tauri::async_runtime::spawn(async move {
-                let s = app.state::<AppState>();
-                close_web_session(&s, &app, &token, "window-closed").await;
-            });
+    let win = match build_window(&app, &window_label, &token, &request.resource_name, &cfg, &scope, &shared, data_dir) {
+        Ok(w) => w,
+        Err(e) => {
+            close_web_session(&state, &app, &token, WebCloseReason::WindowBuildFailed).await;
+            return Err(e);
         }
-    });
+    };
+    hook_window_destroyed(&win, &app, &token);
 
-    let start_origin = display_origin(&cfg.start_url);
-    log::info!(
-        target: "audit",
-        "session.open: protocol=web login_mode=open resource={} profile={} origin={} allowed_origins={} \
-         downloads={} popups={} clipboard={:?} token={}",
-        request.resource_name,
-        request.profile_id,
-        start_origin,
-        cfg.origins,
-        cfg.allow_downloads,
-        cfg.allow_popups,
-        cfg.clipboard,
-        token,
-    );
+    let start_origin = display_origin(&scope.start_url);
+    match &form_run {
+        None => log::info!(
+            target: "audit",
+            "session.open: protocol=web login_mode=open resource={} profile={} origin={} allowed_origins={} \
+             downloads={} popups={} clipboard={:?} token={}",
+            request.resource_name,
+            request.profile_id,
+            start_origin,
+            scope.origins,
+            cfg.allow_downloads,
+            cfg.allow_popups,
+            cfg.clipboard,
+            token,
+        ),
+        Some((start, plan)) => log::info!(
+            target: "audit",
+            "session.open: protocol=web login_mode=form resource={} profile={} origin={} fill_origins={} \
+             narrowed_out={} heuristic={} credential_source={} mfa={} launch_id_hash={} downloads={} popups={} \
+             clipboard={:?} token={}",
+            request.resource_name,
+            request.profile_id,
+            start_origin,
+            scope.origins,
+            start.narrowed_out_count,
+            plan.is_heuristic(),
+            start.credential_source,
+            start.mfa_method.as_deref().unwrap_or("none"),
+            start.launch.launch_id_hash(),
+            cfg.allow_downloads,
+            cfg.allow_popups,
+            cfg.clipboard,
+            token,
+        ),
+    }
+
+    let login_mode = if let Some((start, plan)) = form_run {
+        spawn_recipe_engine(&app, &window_label, &token, &request.resource_name, &shared, plan, scope, start);
+        "form"
+    } else {
+        "open"
+    };
 
     let _ = record_recent_session(&state, &request.resource_name, &profile, SessionProtocolTag::Web).await;
 
-    Ok(WebOpenResponse { token, window_label })
+    Ok(WebOpenResponse { token, window_label, login_mode })
+}
+
+/// What a successful `launch` hands the window and the engine.
+struct FormStart {
+    scope: EffectiveScope,
+    launch: Arc<WebLaunch>,
+    credential: LaunchCredential,
+    refresh_steps: Vec<u32>,
+    credential_source: String,
+    mfa_method: Option<String>,
+    narrowed_out_count: usize,
+}
+
+/// `v2/connect/web/launch`, then the bundle checks. Any check that fails
+/// after the server created the launch reports `aborted:<check>` and closes
+/// it before the error returns; the credential is dropped with the bundle.
+async fn start_form_launch(
+    state: &State<'_, AppState>,
+    request: &WebOpenRequest,
+    token: &str,
+    cfg: &web_session::WebSessionConfig,
+    form: &FormLogin,
+) -> CmdResult<FormStart> {
+    let channel = LaunchChannel::capture(state).await.map_err(CommandError::from)?;
+    let launch_request = LaunchRequest {
+        resource: &request.resource_name,
+        profile_id: &request.profile_id,
+        recipe_hash: &form.recipe_hash,
+        connect_ticket: request.connect_ticket.as_deref(),
+        session_token: token,
+    };
+    let (launch, bundle) = web_launch::launch(channel, &launch_request).await.map_err(|e| {
+        log::warn!(
+            target: "audit",
+            "connect.web.refused: reason=launch_refused code={} resource={} profile={}",
+            web_launch::refusal_code(&e),
+            request.resource_name,
+            request.profile_id,
+        );
+        CommandError::from(e)
+    })?;
+
+    let expect = BundleExpectation {
+        resource: &request.resource_name,
+        profile_id: &request.profile_id,
+        recipe_hash: &form.recipe_hash,
+        plan: &form.plan,
+    };
+    if let Err(check) = check_bundle(&bundle, &expect) {
+        drop(bundle);
+        log::warn!(
+            target: "audit",
+            "connect.web.refused: reason={check} resource={} profile={} launch_id_hash={}",
+            request.resource_name,
+            request.profile_id,
+            launch.launch_id_hash(),
+        );
+        launch.finish(check).await;
+        return Err(CommandError::from(format!(
+            "the server's launch does not match this profile ({check}); nothing was filled — reload the resource \
+             and connect again"
+        )));
+    }
+    let scope = match reconcile_fill_scope(&cfg.origins, cfg.allow_insecure_http, &bundle.fill_scope) {
+        Ok(s) => s,
+        Err(e) => {
+            drop(bundle);
+            log::warn!(
+                target: "audit",
+                "connect.web.refused: reason=fill_scope resource={} profile={} launch_id_hash={}",
+                request.resource_name,
+                request.profile_id,
+                launch.launch_id_hash(),
+            );
+            launch.finish("fill_scope").await;
+            return Err(CommandError::from(format!("refusing the launch: {e}; nothing was filled")));
+        }
+    };
+    if !scope.narrowed_out.is_empty() {
+        log::info!(
+            target: "audit",
+            "connect.web.fill_scope_narrowed: resource={} profile={} launch_id_hash={} dropped={}",
+            request.resource_name,
+            request.profile_id,
+            launch.launch_id_hash(),
+            scope.narrowed_out.join(","),
+        );
+    }
+    let narrowed_out_count = scope.narrowed_out.len();
+    Ok(FormStart {
+        scope,
+        launch,
+        credential: bundle.credential,
+        refresh_steps: bundle.totp_refresh_steps,
+        credential_source: bundle.credential_source,
+        mfa_method: bundle.mfa_method,
+        narrowed_out_count,
+    })
+}
+
+/// Insert a web session entry, refusing (and audited) when an RDP session
+/// is live. Creates the per-session data directory first, so the entry
+/// owns it from the moment it exists; returns it for the window builder.
+async fn reserve_session(
+    state: &State<'_, AppState>,
+    app: &AppHandle,
+    token: &str,
+    mut entry: WebSessionState,
+) -> CmdResult<Option<PathBuf>> {
+    entry.data_dir = prepare_data_dir(app, token)?;
+    let data_dir = entry.data_dir.clone();
+    let mut sessions = state.connect_sessions.lock().await;
+    if let Some(conflict) = registry_web_rdp_conflict(ProfileProtocol::Web, &sessions) {
+        drop(sessions);
+        if let Some(dir) = entry.data_dir {
+            web_session::remove_data_dir_eventually(dir);
+        }
+        return Err(refuse_web_open(&entry.resource_name, conflict));
+    }
+    sessions.insert(token.to_string(), SessionState::Web(entry));
+    Ok(data_dir)
+}
+
+/// Undo [`reserve_session`] when the open failed before a window or a launch
+/// existed. No `session.close` line: no `session.open` was written.
+async fn release_reservation(state: &AppState, token: &str) {
+    let removed = {
+        let mut sessions = state.connect_sessions.lock().await;
+        match sessions.get(token) {
+            Some(SessionState::Web(_)) => sessions.remove(token),
+            _ => None,
+        }
+    };
+    if let Some(SessionState::Web(w)) = removed {
+        if let Some(launch) = &w.launch {
+            launch.finish("session_closed").await;
+        }
+        if let Some(dir) = w.data_dir {
+            web_session::remove_data_dir_eventually(dir);
+        }
+    }
+}
+
+/// Attach a launch to its reserved entry; `false` when the entry is gone.
+async fn attach_launch(state: &AppState, token: &str, launch: &Arc<WebLaunch>) -> bool {
+    let mut sessions = state.connect_sessions.lock().await;
+    match sessions.get_mut(token) {
+        Some(SessionState::Web(w)) => {
+            w.launch = Some(Arc::clone(launch));
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Audit and build the operator-facing error for a web open refused by the
@@ -208,12 +455,51 @@ fn refuse_web_open(resource: &str, conflict: WebRdpConflict) -> CommandError {
     CommandError::from(conflict.message)
 }
 
+// ── Teardown ───────────────────────────────────────────────────────
+
+/// Teardowns between taking a session out of the registry and finishing its
+/// launch. App exit waits for these, so a window closed by the quit itself
+/// still gets its `web/close`.
+static CLOSES_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+static CLOSES_IDLE: Notify = Notify::const_new();
+
+struct InFlightClose;
+
+impl InFlightClose {
+    fn begin() -> Self {
+        CLOSES_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for InFlightClose {
+    fn drop(&mut self) {
+        if CLOSES_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst) == 1 {
+            CLOSES_IDLE.notify_waiters();
+        }
+    }
+}
+
+async fn wait_for_closes() {
+    loop {
+        let idle = CLOSES_IDLE.notified();
+        tokio::pin!(idle);
+        idle.as_mut().enable();
+        if CLOSES_IN_FLIGHT.load(Ordering::SeqCst) == 0 {
+            return;
+        }
+        idle.await;
+    }
+}
+
 /// Tear down a web session: drop its registry entry, destroy its window,
-/// write the close audit line and remove its data directory. Returns
-/// `false` when `token` doesn't name a live web session (so the caller can
-/// try the SSH/RDP paths). Idempotent: the window-destroyed hook and an
-/// explicit `session_close` can both call it.
-pub(crate) async fn close_web_session(state: &AppState, app: &AppHandle, token: &str, reason: &str) -> bool {
+/// stop its recipe engine, report and close its launch, write the close
+/// audit line and remove its data directory. Returns `false` when `token`
+/// doesn't name a live web session (so the caller can try the SSH/RDP
+/// paths). Idempotent: the window-destroyed hook and an explicit
+/// `session_close` can both call it.
+pub(crate) async fn close_web_session(state: &AppState, app: &AppHandle, token: &str, reason: WebCloseReason) -> bool {
+    let _in_flight = InFlightClose::begin();
     let removed = {
         let mut sessions = state.connect_sessions.lock().await;
         match sessions.get(token) {
@@ -227,9 +513,303 @@ pub(crate) async fn close_web_session(state: &AppState, app: &AppHandle, token: 
     if let Some(win) = app.get_webview_window(&session.window_label) {
         let _ = win.destroy();
     }
-    web_session::finish_session(token, session, reason);
+    web_session::finish_session(token, session, reason).await;
     true
 }
+
+/// `RunEvent::Exit`: report and close every web launch still open, within
+/// [`EXIT_CLOSE_BUDGET`], including teardowns the closing windows already
+/// started. Windows are not touched — they are going away with the process.
+/// A launch that cannot be closed in time is reaped by the server, and an
+/// LDAP account it checked out is released when its lease expires.
+pub fn close_web_sessions_on_exit(app: &AppHandle) {
+    let app = app.clone();
+    let finished = tauri::async_runtime::block_on(async move {
+        tokio::time::timeout(EXIT_CLOSE_BUDGET, async {
+            let state = app.state::<AppState>();
+            let sessions: Vec<(String, WebSessionState)> = {
+                let mut map = state.connect_sessions.lock().await;
+                let tokens: Vec<String> =
+                    map.iter().filter(|(_, s)| matches!(s, SessionState::Web(_))).map(|(t, _)| t.clone()).collect();
+                tokens
+                    .into_iter()
+                    .filter_map(|t| match map.remove(&t) {
+                        Some(SessionState::Web(w)) => Some((t, w)),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            for (token, session) in sessions {
+                web_session::finish_session(&token, session, WebCloseReason::AppExit).await;
+            }
+            // Teardowns the closing windows started before this ran.
+            wait_for_closes().await;
+        })
+        .await
+        .is_ok()
+    });
+    if !finished {
+        log::warn!(
+            target: "audit",
+            "connect.web.close_failed: reason=app_exit — not every web launch was closed within {}s; the server \
+             reaps them",
+            EXIT_CLOSE_BUDGET.as_secs()
+        );
+    }
+}
+
+fn hook_window_destroyed(win: &tauri::WebviewWindow, app: &AppHandle, token: &str) {
+    let token = token.to_string();
+    let app = app.clone();
+    win.on_window_event(move |ev| {
+        if let tauri::WindowEvent::Destroyed = ev {
+            let token = token.clone();
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let s = app.state::<AppState>();
+                close_web_session(&s, &app, &token, WebCloseReason::WindowClosed).await;
+            });
+        }
+    });
+}
+
+// ── The recipe engine's view of the window ─────────────────────────
+
+/// [`RecipePage`] over a live session window. The page state comes from the
+/// window's own navigation events (host-observed); the only way in is the
+/// fixed routine through the webview's native script evaluation.
+struct TauriPage {
+    app: AppHandle,
+    label: String,
+    shared: Arc<WebShared>,
+}
+
+impl RecipePage for TauriPage {
+    fn snapshot(&self) -> PageSnapshot {
+        self.shared.snapshot()
+    }
+
+    fn closed(&self) -> bool {
+        self.shared.is_closed()
+    }
+
+    fn eval(&self, call: &ScriptCall<'_>) -> impl std::future::Future<Output = Result<ScriptReply, EvalError>> + Send {
+        let mut script = render(call);
+        let app = self.app.clone();
+        let label = self.label.clone();
+        async move {
+            let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+            let tx = std::sync::Mutex::new(Some(tx));
+            {
+                let Some(win) = app.get_webview_window(&label) else {
+                    return Err(EvalError::WindowGone);
+                };
+                // Moves the buffer out; the zeroizing wrapper is left empty.
+                let js = std::mem::take(&mut *script);
+                let sent = win.eval_with_callback(js, move |raw| {
+                    if let Some(tx) = tx.lock().ok().and_then(|mut g| g.take()) {
+                        let _ = tx.send(raw);
+                    }
+                });
+                if sent.is_err() {
+                    return Err(EvalError::WindowGone);
+                }
+            }
+            match tokio::time::timeout(EVAL_TIMEOUT, rx).await {
+                Ok(Ok(raw)) => parse_reply(&raw).map_err(|e| match e {
+                    ReplyError::NoResult => EvalError::NoResult,
+                    ReplyError::Invalid => EvalError::Invalid,
+                }),
+                Ok(Err(_)) => Err(EvalError::NoResult),
+                Err(_) => Err(EvalError::Timeout),
+            }
+        }
+    }
+
+    fn show(&self, text: &str) {
+        let title = self.shared.set_login(text);
+        set_title_later(&self.app, &self.label, title);
+    }
+}
+
+/// Run the recipe for a form session, then report the outcome once. The
+/// credential moves into the engine and is dropped when it returns.
+#[allow(clippy::too_many_arguments)]
+fn spawn_recipe_engine(
+    app: &AppHandle,
+    label: &str,
+    token: &str,
+    resource: &str,
+    shared: &Arc<WebShared>,
+    plan: RecipePlan,
+    scope: EffectiveScope,
+    start: FormStart,
+) {
+    let page = TauriPage { app: app.clone(), label: label.to_string(), shared: Arc::clone(shared) };
+    let token = token.to_string();
+    let resource = resource.to_string();
+    tauri::async_runtime::spawn(async move {
+        let FormStart { launch, credential, refresh_steps, .. } = start;
+        let audit = AuditTag { resource: &resource, token: &token, launch_id_hash: launch.launch_id_hash() };
+        let report = run_fill(
+            &plan,
+            &scope,
+            credential,
+            refresh_steps,
+            &page,
+            &*launch,
+            launch.cancel_rx(),
+            EngineTiming::for_plan(&plan),
+            audit,
+        )
+        .await;
+        log::info!(
+            target: "audit",
+            "connect.web.login: resource={resource} token={token} launch_id_hash={} outcome={} step={} fills={}",
+            launch.launch_id_hash(),
+            report.outcome.wire(),
+            report.step.map(|s| s.to_string()).unwrap_or_else(|| "none".into()),
+            report.fills,
+        );
+        launch.report(&report.outcome, report.step).await;
+    });
+}
+
+// ── web_recipe_test ────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct WebRecipeTestRequest {
+    /// The page to open (normally the profile's start URL).
+    pub url: String,
+    /// The recipe as it would be stored on the profile.
+    pub recipe: Value,
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+    #[serde(default)]
+    pub allow_insecure_http: bool,
+}
+
+#[derive(Serialize)]
+pub struct WebRecipeTestResponse {
+    /// What `launch` would require as `recipe_hash` for this recipe.
+    pub recipe_hash: String,
+    pub report: CheckReport,
+}
+
+/// The dry-run scope: the URL's origin plus `allowed_origins`, under the
+/// same rules as a profile; every recipe URL must sit on it (spec §2).
+fn recipe_test_scope(request: &WebRecipeTestRequest, plan: &RecipePlan) -> Result<EffectiveScope, String> {
+    let http = request.allow_insecure_http;
+    let start_url = Url::parse(request.url.trim()).map_err(|e| format!("the test URL is not a valid URL: {e}"))?;
+    if !start_url.username().is_empty() || start_url.password().is_some() {
+        return Err("the test URL carries userinfo (`user@host`)".into());
+    }
+    let mut origins = vec![WebOrigin::validated(&start_url, http).map_err(|e| format!("test URL: {e}"))?];
+    for raw in &request.allowed_origins {
+        origins.push(WebOrigin::parse_config(raw, http)?);
+    }
+    let set = OriginSet::new(origins);
+    let mut globs: Vec<&UrlGlob> = Vec::new();
+    if let PlanSteps::Explicit(steps) = &plan.steps {
+        globs.extend(steps.iter().map(|s| &s.when_url));
+    }
+    globs.extend(plan.success.url.iter());
+    globs.extend(plan.failure.iter().filter_map(|f| f.url.as_ref()));
+    if let Some(g) = globs.iter().find(|g| !set.contains(g.origin())) {
+        return Err(format!(
+            "the recipe matches on {}, which is not the test URL's origin or an allowed origin",
+            g.origin()
+        ));
+    }
+    Ok(EffectiveScope::local(start_url, set, http))
+}
+
+/// Dry-run a login recipe against a URL (spec Phase 2).
+///
+/// No credential exists anywhere on this path: nothing is read from the
+/// vault, `launch` is never called, no MFA ticket is involved, and the
+/// engine runs in check mode only (`run_check` has no credential parameter)
+/// — every safety check of the fill routine runs, but no value is set, no
+/// button is clicked and no form is submitted, so the target sees no login
+/// attempt. The window is a full web session window (IPC-less, ephemeral
+/// store, origin allow-list) and counts for the web/RDP exclusion. Pages
+/// after the first are checked when the operator signs in by hand inside
+/// the test window. Returns per-step selector results when every step was
+/// seen or the recipe's timeout passed, then closes the window.
+#[tauri::command]
+pub async fn web_recipe_test(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    request: WebRecipeTestRequest,
+) -> CmdResult<WebRecipeTestResponse> {
+    let recipe = WebLoginRecipe::parse(&request.recipe).map_err(|e| CommandError::from(e.to_string()))?;
+    let hash = recipe_hash(&request.recipe).map_err(|e| CommandError::from(e.to_string()))?;
+    let plan = RecipePlan::from_recipe(&recipe).map_err(CommandError::from)?;
+    let scope = recipe_test_scope(&request, &plan).map_err(CommandError::from)?;
+
+    if let Some(conflict) = registry_web_rdp_conflict(ProfileProtocol::Web, &*state.connect_sessions.lock().await) {
+        return Err(refuse_web_open("(recipe test)", conflict));
+    }
+    let token = crate::session::ssh::new_token();
+    let window_label = format!("{WINDOW_LABEL_PREFIX}{token}");
+    const TEST_TITLE: &str = "Recipe test";
+    let shared = WebShared::new(TEST_TITLE, &display_origin(&scope.start_url));
+    let data_dir = reserve_session(
+        &state,
+        &app,
+        &token,
+        WebSessionState {
+            resource_name: TEST_TITLE.to_string(),
+            profile_id: String::new(),
+            window_label: window_label.clone(),
+            data_dir: None,
+            opened_at: Instant::now(),
+            kind: WebSessionKind::RecipeTest,
+            launch: None,
+            shared: Arc::clone(&shared),
+        },
+    )
+    .await?;
+    let cfg = web_session::WebSessionConfig {
+        start_url: scope.start_url.clone(),
+        origins: scope.origins.clone(),
+        allow_insecure_http: scope.allow_insecure_http,
+        allow_downloads: false,
+        allow_popups: true,
+        clipboard: WebClipboard::Off,
+        width: DEFAULT_WINDOW_WIDTH,
+        height: DEFAULT_WINDOW_HEIGHT,
+        login: WebLogin::Open,
+    };
+    let win = match build_window(&app, &window_label, &token, TEST_TITLE, &cfg, &scope, &shared, data_dir) {
+        Ok(w) => w,
+        Err(e) => {
+            close_web_session(&state, &app, &token, WebCloseReason::WindowBuildFailed).await;
+            return Err(e);
+        }
+    };
+    hook_window_destroyed(&win, &app, &token);
+    log::info!(
+        target: "audit",
+        "connect.web.recipe_test: state=started origins={} steps={} heuristic={} recipe_hash={hash} token={token}",
+        scope.origins,
+        plan.step_count(),
+        plan.is_heuristic(),
+    );
+
+    let page = TauriPage { app: app.clone(), label: window_label, shared };
+    let report = run_check(&plan, &scope, &page, EngineTiming::for_plan(&plan)).await;
+    log::info!(
+        target: "audit",
+        "connect.web.recipe_test: state=finished outcome={} steps_reached={} token={token}",
+        report.outcome,
+        report.steps.iter().filter(|s| s.reached).count(),
+    );
+    close_web_session(&state, &app, &token, WebCloseReason::SessionClose).await;
+    Ok(WebRecipeTestResponse { recipe_hash: hash, report })
+}
+
+// ── The window ─────────────────────────────────────────────────────
 
 /// Create this session's webview data directory under this process's
 /// instance directory, sweeping instance directories of dead processes
@@ -262,22 +842,24 @@ fn set_title_later(app: &AppHandle, label: &str, title: String) {
     });
 }
 
+/// Build the session window on `scope.start_url`, navigating only within
+/// `scope.origins` — for a form launch, the server's fill scope.
+#[allow(clippy::too_many_arguments)]
 fn build_window(
     app: &AppHandle,
     label: &str,
     token: &str,
     resource: &str,
     cfg: &web_session::WebSessionConfig,
+    scope: &EffectiveScope,
+    shared: &Arc<WebShared>,
     data_dir: Option<PathBuf>,
 ) -> CmdResult<tauri::WebviewWindow> {
-    let origins = Arc::new(cfg.origins.clone());
-    // Last origin the host saw load in the top frame — the "current origin"
-    // half of the title while a block notice is shown.
-    let current_origin = Arc::new(Mutex::new(display_origin(&cfg.start_url)));
+    let origins = Arc::new(scope.origins.clone());
 
     // ── Navigation allow-list ──────────────────────────────────────
     let nav_origins = Arc::clone(&origins);
-    let nav_current = Arc::clone(&current_origin);
+    let nav_shared = Arc::clone(shared);
     let nav_app = app.clone();
     let nav_label = label.to_string();
     let nav_token = token.to_string();
@@ -291,8 +873,8 @@ fn build_window(
                     target: "audit",
                     "connect.web.navigation_blocked: resource={nav_resource} token={nav_token} origin={origin}"
                 );
-                let current = nav_current.lock().map(|g| g.clone()).unwrap_or_default();
-                set_title_later(&nav_app, &nav_label, format!("{nav_resource} — {current} — blocked: {origin}"));
+                let title = nav_shared.set_notice(format!("blocked: {origin}"));
+                set_title_later(&nav_app, &nav_label, title);
                 false
             }
         }
@@ -380,9 +962,9 @@ fn build_window(
         }
     };
 
-    // ── Host-owned title ──────────────────────────────────────────
+    // ── Host-observed page state and title ────────────────────────
     let load_origins = Arc::clone(&origins);
-    let load_current = Arc::clone(&current_origin);
+    let load_shared = Arc::clone(shared);
     let load_app = app.clone();
     let load_label = label.to_string();
     let load_token = token.to_string();
@@ -393,12 +975,14 @@ fn build_window(
             // A top-frame load the navigation handler should have refused.
             // Not expected on any platform; if it happens anyway, the
             // policy has been bypassed and the session ends rather than
-            // carrying on outside its allow-list.
+            // carrying on outside its allow-list (a form launch is closed
+            // with `aborted:policy_violation`).
             log::warn!(
                 target: "audit",
                 "connect.web.policy_violation: resource={load_resource} token={load_token} origin={origin} \
                  — closing the session"
             );
+            load_shared.note_abort("policy_violation");
             let app = load_app.clone();
             let label = load_label.clone();
             tauri::async_runtime::spawn(async move {
@@ -408,17 +992,15 @@ fn build_window(
             });
             return;
         }
-        if matches!(payload.event(), PageLoadEvent::Started | PageLoadEvent::Finished) {
-            let origin = display_origin(url);
-            if let Ok(mut g) = load_current.lock() {
-                *g = origin.clone();
-            }
-            let _ = window.set_title(&format!("{load_resource} — {origin}"));
-        }
+        // The recipe engine reads the load state from here: steps run only
+        // on a finished top-frame load the host saw.
+        let finished = matches!(payload.event(), PageLoadEvent::Finished);
+        let title = load_shared.page_load(url, finished);
+        let _ = window.set_title(&title);
     };
 
-    let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(cfg.start_url.clone()))
-        .title(format!("{resource} — {}", display_origin(&cfg.start_url)))
+    let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(scope.start_url.clone()))
+        .title(shared.title())
         .inner_size(f64::from(cfg.width), f64::from(cfg.height))
         .resizable(true)
         .focused(true)

@@ -29,6 +29,7 @@ import {
   blankWebProfile,
   isLaunchableForCaller,
   isLaunchableProfile,
+  isLaunchableWebProfile,
   normalizeWebOrigin,
   parseSessionProtocol,
   readProfiles,
@@ -36,6 +37,7 @@ import {
   webOriginSet,
 } from "../lib/connectionProfiles";
 import { openProfileSession } from "../lib/sessionLaunch";
+import { webRecipeTest } from "../lib/api";
 import type { ConnectionProfile, ResourceTypeDef, WebProfileSettings } from "../lib/types";
 
 function webProfile(
@@ -451,13 +453,59 @@ describe("web profile launchability", () => {
     expect(isLaunchableForCaller(p, true, false)).toBe(true);
   });
 
-  it("web profiles with a real source or a Rustion transport don't launch", () => {
-    expect(
-      isLaunchableProfile({ protocol: "web", credential_source: { kind: "secret" } }),
-    ).toBe(false);
+  it("form-mode web profiles launch with a server-released source", () => {
+    for (const kind of ["secret", "ldap", "default-account"] as const) {
+      const hint = { protocol: "web" as const, credential_source: { kind } };
+      expect(isLaunchableProfile(hint)).toBe(true);
+      // The credential is released to the host by the server, never resolved
+      // in the GUI, so connect-only callers launch too.
+      expect(isLaunchableForCaller(hint, true, false)).toBe(true);
+    }
+    const form = webProfile(
+      {
+        login_mode: "form",
+        recipe: {
+          version: 1,
+          steps: [{ when_url: "https://a.example/login*", actions: [{ fill: "#u", value: "username" }] }],
+          success_when: { url: "https://a.example/home*" },
+        },
+      },
+      { credential_source: { kind: "secret", secret_id: "web" } },
+    );
+    expect(isLaunchableWebProfile(form)).toBe(true);
+    // No recipe, the `none` source, or a later transport: not launchable.
+    expect(isLaunchableWebProfile({ ...form, web: { ...form.web!, recipe: undefined } })).toBe(false);
+    expect(isLaunchableWebProfile({ ...form, credential_source: { kind: "none" } })).toBe(false);
+    expect(isLaunchableWebProfile({ ...form, web: { ...form.web!, transport: "rustion-isolated" } })).toBe(false);
+    expect(isLaunchableWebProfile(webProfile())).toBe(true);
+    expect(isLaunchableWebProfile(webProfile({}, { credential_source: { kind: "secret", secret_id: "x" } }))).toBe(
+      false,
+    );
+  });
+
+  it("web profiles with a source that can't sign in, or a Rustion transport, don't launch", () => {
+    for (const kind of ["ssh-engine", "pki", "fido2"] as const) {
+      expect(isLaunchableProfile({ protocol: "web", credential_source: { kind } })).toBe(false);
+    }
     expect(
       isLaunchableProfile({ protocol: "web", kind: "rustion", credential_source: { kind: "none" } }),
     ).toBe(false);
+    expect(
+      isLaunchableProfile({ protocol: "web", kind: "rustion", credential_source: { kind: "secret" } }),
+    ).toBe(false);
+  });
+
+  it("webRecipeTest calls the dry-run command with the recipe and no credential", async () => {
+    mockInvoke.mockResolvedValue({ recipe_hash: "sha256:x", report: {} });
+    const recipe = {
+      version: 1 as const,
+      steps: "auto" as const,
+      success_when: { url: "https://a.example/home*" },
+    };
+    await webRecipeTest({ url: "https://a.example/login", recipe, allowed_origins: [] });
+    expect(mockInvoke).toHaveBeenLastCalledWith("web_recipe_test", {
+      request: { url: "https://a.example/login", recipe, allowed_origins: [] },
+    });
   });
 
   it("blankWebProfile pre-fills the start URL from the resource's url field", () => {

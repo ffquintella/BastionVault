@@ -291,6 +291,27 @@ const LAUNCHABLE_WEB_LOGIN_MODES = ["open"] as const;
 /** Credential sources that can never authenticate a web session. */
 const NEVER_WEB_SOURCES: CredentialSource["kind"][] = ["ssh-engine", "pki", "fido2"];
 
+/** Credential sources a `form` web login can be signed in with; the server
+ *  releases the credential at `v2/connect/web/launch`. */
+const FORM_WEB_SOURCES: CredentialSource["kind"][] = ["secret", "ldap", "default-account"];
+
+/**
+ * True when a full web profile is one the host can launch: `open` with the
+ * `none` source, or `form` with a recipe and a source the server can
+ * release a credential from, on the direct transport. Used by launchers
+ * that hold the whole profile (the ⌘K palette); card hints use
+ * `isLaunchableProfile`.
+ */
+export function isLaunchableWebProfile(p: ConnectionProfile): boolean {
+  if (p.protocol !== "web" || p.kind === "rustion" || !p.web) return false;
+  if (p.web.transport !== undefined && p.web.transport !== "local") return false;
+  if (p.web.login_mode === "open") return p.credential_source.kind === "none";
+  if (p.web.login_mode === "form") {
+    return FORM_WEB_SOURCES.includes(p.credential_source.kind) && p.web.recipe !== undefined;
+  }
+  return false;
+}
+
 /**
  * Normalise an operator-typed origin to `scheme://host[:port]`: lower-case
  * host (punycode for IDNs), default port dropped. Mirrors the host's
@@ -457,11 +478,15 @@ export function isLaunchableProfile(p: ConnectProfileHint): boolean {
   const protocol = parseSessionProtocol(p.protocol);
   if (protocol === null) return false;
   if (protocol === "web") {
-    // Phase 1 launches the `open` mode only, which is exactly the profiles
-    // carrying the `none` source (validation pins the two together). The
-    // card hint carries no login mode, so the source stands in for it.
-    // Rustion-brokered web sessions don't exist yet.
-    return p.credential_source.kind === "none" && p.kind !== "rustion";
+    // `open` carries the `none` source and `form` a secret / ldap /
+    // default-account one (validation and the host pin the pairs). The card
+    // hint carries no login mode, so the source stands in for it; the host
+    // and `v2/connect/web/launch` refuse any other combination. Rustion-
+    // brokered web sessions don't exist yet.
+    return (
+      p.kind !== "rustion" &&
+      (p.credential_source.kind === "none" || FORM_WEB_SOURCES.includes(p.credential_source.kind))
+    );
   }
   switch (p.credential_source.kind) {
     case "secret":
@@ -536,8 +561,10 @@ export function isLaunchableForCaller(
 ): boolean {
   if (!isLaunchableProfile(p)) return false;
   if (!connectOnly) return true;
-  // An `open` web session resolves no credential anywhere, so there is
-  // nothing for connect-only access to protect: the server's `connect`
+  // A web session never resolves a credential in this process: `open`
+  // releases none, and `form` gets it from `v2/connect/web/launch`, which
+  // reads a `secret` source under the server's authority behind the
+  // `connect` grant (ldap / default-account as the caller). The server's
   // gate (and MFA, when required) is the whole check.
   if (p.protocol === "web") return true;
   if (p.kind === "rustion") return true;

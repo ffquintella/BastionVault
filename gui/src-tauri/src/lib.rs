@@ -596,6 +596,7 @@ pub fn run() {
             commands::connect::session_open_ssh,
             commands::connect::session_open_rdp,
             commands::connect_web::session_open_web,
+            commands::connect_web::web_recipe_test,
             commands::connect::session_input,
             commands::connect::session_attach_rdp_frames,
             commands::connect::session_input_rdp_mouse,
@@ -732,5 +733,13 @@ pub fn run() {
         }
     };
 
-    builder.run(tauri::generate_context!()).expect("error while running tauri application");
+    let app = builder.build(tauri::generate_context!()).expect("error while building tauri application");
+    app.run(|handle, event| {
+        // Web Application Connect: a form launch still open at exit is
+        // reported and closed (`v2/connect/web/close`, which also checks an
+        // LDAP library account back in) within a short budget.
+        if let tauri::RunEvent::Exit = event {
+            commands::connect_web::close_web_sessions_on_exit(handle);
+        }
+    });
 }

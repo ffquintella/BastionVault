@@ -4,22 +4,32 @@
 //! This module holds the parts of a web session that need no Tauri
 //! runtime, so they can be unit-tested: parsing a `web` connection
 //! profile, the exact-origin allow-list the window's navigation /
-//! new-window handlers consult, and the per-session registry entry plus
-//! its teardown. The command that builds the window lives in
-//! `commands/connect_web.rs`.
+//! new-window handlers consult, the state the window's handlers share with
+//! the recipe engine, and the per-session registry entry plus its teardown.
+//! The command that builds the window lives in `commands/connect_web.rs`;
+//! the form-mode recipe engine in `web_recipe` / `web_script` /
+//! `web_engine`, its server calls in `web_launch`.
 //!
-//! Phase 1 ships `login_mode: "open"` only: the window opens on the
-//! application and releases no credential. Every other login mode, the
-//! `rustion-isolated` transport and TLS pinning are refused explicitly
-//! rather than ignored, so a profile written for a later phase can never
-//! run with its protections silently missing.
+//! Login modes: `open` (Phase 1) releases no credential; `form` (Phase 2)
+//! runs a login recipe with a credential the server releases at
+//! `v2/connect/web/launch`. `http-auth`, `sso`, the `rustion-isolated`
+//! transport and TLS pinning are refused explicitly rather than ignored, so
+//! a profile written for a later phase can never run with its protections
+//! silently missing.
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tauri::Url;
+
+use bastion_vault::modules::resource::connect_web::recipe::{recipe_hash, WebLoginRecipe};
+
+use super::web_engine::PageSnapshot;
+use super::web_launch::WebLaunch;
+use super::web_recipe::{session_title, RecipePlan};
 
 /// Default window size when the profile doesn't set one.
 pub const DEFAULT_WINDOW_WIDTH: u32 = 1280;
@@ -104,7 +114,7 @@ impl WebOrigin {
     }
 
     /// Shared scheme/host rules for a configured origin or start URL.
-    fn validated(url: &Url, allow_insecure_http: bool) -> Result<Self, String> {
+    pub(crate) fn validated(url: &Url, allow_insecure_http: bool) -> Result<Self, String> {
         match url.scheme() {
             "https" => {}
             "http" if allow_insecure_http => {}
@@ -184,6 +194,10 @@ impl OriginSet {
 
     pub fn contains(&self, origin: &WebOrigin) -> bool {
         self.origins.contains(origin)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &WebOrigin> {
+        self.origins.iter()
     }
 
     #[cfg(test)]
@@ -274,16 +288,37 @@ impl WebClipboard {
     }
 }
 
+/// How the session signs in.
+#[derive(Debug, Clone)]
+pub enum WebLogin {
+    /// No credential; the operator (or the application's own SSO) logs in.
+    Open,
+    /// A login recipe, filled with a credential the server releases at
+    /// `v2/connect/web/launch`. Boxed: the plan is far larger than `Open`.
+    Form(Box<FormLogin>),
+}
+
+/// A `form`-mode profile's recipe, parsed by the server's own strict parser.
+#[derive(Debug, Clone)]
+pub struct FormLogin {
+    /// `sha256:<hex>` of the recipe's RFC 8785 canonical form, exactly as the
+    /// server computes it; `launch` refuses a stale one.
+    pub recipe_hash: String,
+    pub plan: RecipePlan,
+}
+
 /// A validated `web` connection profile, ready to build a window from.
 #[derive(Debug, Clone)]
 pub struct WebSessionConfig {
     pub start_url: Url,
     pub origins: OriginSet,
+    pub allow_insecure_http: bool,
     pub allow_downloads: bool,
     pub allow_popups: bool,
     pub clipboard: WebClipboard,
     pub width: u32,
     pub height: u32,
+    pub login: WebLogin,
 }
 
 fn opt_bool(obj: &serde_json::Map<String, Value>, key: &str, default: bool) -> Result<bool, String> {
@@ -325,10 +360,14 @@ fn opt_str<'a>(v: Option<&'a Value>, what: &str) -> Result<Option<&'a str>, Stri
     }
 }
 
-/// Parse and validate the `web` half of a connection profile for an
-/// `open`-mode launch. Every field that belongs to a later phase is
-/// refused when set, never ignored. Every field the checks below read is
-/// type-checked: absent / null means unset, any other wrong type is an error.
+/// Credential sources a `form` launch can resolve (the server resolves and
+/// checks the details; the host only refuses a kind that cannot apply).
+const FORM_SOURCES: &[&str] = &["secret", "ldap", "default-account"];
+
+/// Parse and validate the `web` half of a connection profile. Every field
+/// that belongs to a later phase is refused when set, never ignored. Every
+/// field the checks below read is type-checked: absent / null means unset,
+/// any other wrong type is an error.
 pub fn parse_web_profile(profile: &Value) -> Result<WebSessionConfig, String> {
     // The profile's own transport. Rustion-brokered web sessions are the
     // Phase 8 browser-isolation design; nothing routes them today.
@@ -342,22 +381,12 @@ pub fn parse_web_profile(profile: &Value) -> Result<WebSessionConfig, String> {
         Some(other) => return Err(format!("unknown profile transport `{other}`")),
     }
 
-    // `open` releases no credential, so the only acceptable source is the
-    // explicit `none` (or none at all). A profile carrying a real source
-    // would make the operator believe a login is performed.
-    match profile.get("credential_source") {
-        None | Some(Value::Null) => {}
-        Some(Value::Object(cs)) => {
-            let kind = opt_str(cs.get("kind"), "credential_source.kind")?.unwrap_or("");
-            if kind != "none" {
-                return Err(format!(
-                    "credential source `{kind}` does not apply to the `open` login mode, which releases no \
-                     credential; set the source to none"
-                ));
-            }
-        }
+    // The credential-source kind, type-checked; absent / null reads as none.
+    let source_kind = match profile.get("credential_source") {
+        None | Some(Value::Null) => "none",
+        Some(Value::Object(cs)) => opt_str(cs.get("kind"), "credential_source.kind")?.unwrap_or(""),
         Some(_) => return Err("credential_source must be an object".to_string()),
-    }
+    };
 
     let web = match profile.get("web") {
         Some(Value::Object(m)) => m,
@@ -365,13 +394,32 @@ pub fn parse_web_profile(profile: &Value) -> Result<WebSessionConfig, String> {
         Some(_) => return Err("the profile's `web` settings must be an object".to_string()),
     };
 
-    match opt_str(web.get("login_mode"), "web.login_mode")? {
-        Some("open") => {}
-        Some(mode @ ("form" | "http-auth" | "sso")) => {
-            return Err(format!("login mode `{mode}` is not available yet; this release supports `open` only"))
+    let form = match opt_str(web.get("login_mode"), "web.login_mode")? {
+        Some("open") => false,
+        Some("form") => true,
+        Some(mode @ ("http-auth" | "sso")) => {
+            return Err(format!("login mode `{mode}` is not available yet; this release supports `open` and `form`"))
         }
         Some(other) => return Err(format!("unknown login mode `{other}`")),
         None => return Err("web profile has no login_mode".to_string()),
+    };
+
+    if form {
+        // `form` needs a source the server can release a credential from.
+        if !FORM_SOURCES.contains(&source_kind) {
+            return Err(format!(
+                "credential source `{source_kind}` cannot sign in a `form` login; use a secret, ldap or \
+                 default-account source"
+            ));
+        }
+    } else if source_kind != "none" {
+        // `open` releases no credential, so the only acceptable source is
+        // the explicit `none` (or none at all). A profile carrying a real
+        // source would make the operator believe a login is performed.
+        return Err(format!(
+            "credential source `{source_kind}` does not apply to the `open` login mode, which releases no \
+             credential; set the source to none"
+        ));
     }
 
     match opt_str(web.get("transport"), "web.transport")? {
@@ -379,9 +427,18 @@ pub fn parse_web_profile(profile: &Value) -> Result<WebSessionConfig, String> {
         Some("rustion-isolated") => return Err("the rustion-isolated web transport is not available yet".to_string()),
         Some(other) => return Err(format!("unknown web transport `{other}`")),
     }
-    if web.get("recipe").is_some_and(|v| !v.is_null()) {
-        return Err("a login recipe only applies to the `form` login mode".to_string());
-    }
+    let login = match (form, web.get("recipe").filter(|v| !v.is_null())) {
+        (false, None) => WebLogin::Open,
+        (false, Some(_)) => return Err("a login recipe only applies to the `form` login mode".to_string()),
+        (true, None) => return Err("a `form` login needs a login recipe".to_string()),
+        (true, Some(raw)) => {
+            // The server's own strict parser and hash, so the recipe the host
+            // runs is byte-for-byte the one `launch` checks.
+            let recipe = WebLoginRecipe::parse(raw).map_err(|e| e.to_string())?;
+            let recipe_hash = recipe_hash(raw).map_err(|e| e.to_string())?;
+            WebLogin::Form(Box::new(FormLogin { recipe_hash, plan: RecipePlan::from_recipe(&recipe)? }))
+        }
+    };
     if web.get("sso").is_some_and(|v| !v.is_null()) {
         return Err("sso settings only apply to the `sso` login mode".to_string());
     }
@@ -448,11 +505,13 @@ pub fn parse_web_profile(profile: &Value) -> Result<WebSessionConfig, String> {
     Ok(WebSessionConfig {
         start_url,
         origins: OriginSet::new(origins),
+        allow_insecure_http,
         allow_downloads,
         allow_popups,
         clipboard,
         width,
         height,
+        login,
     })
 }
 
@@ -488,6 +547,163 @@ pub fn download_decision(allow_downloads: bool, origins: &OriginSet, url: &Url) 
     }
 }
 
+/// What a web session registry entry is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebSessionKind {
+    /// `login_mode: open`.
+    Open,
+    /// `login_mode: form` — carries a launch to finish.
+    Form,
+    /// A `web_recipe_test` dry run: remote content like any web session, so
+    /// it counts for the web/RDP exclusion, but no credential and no launch.
+    RecipeTest,
+}
+
+impl WebSessionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Form => "form",
+            Self::RecipeTest => "recipe_test",
+        }
+    }
+}
+
+/// Why a web session ended. `as_str` is the `session.close` audit reason;
+/// `abort_check` is the `aborted:<check>` a form launch is closed with when
+/// its recipe had not reported an outcome yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebCloseReason {
+    WindowClosed,
+    SessionClose,
+    WindowBuildFailed,
+    /// Removed by the generic SSH/RDP drop path.
+    Dropped,
+    AppExit,
+}
+
+impl WebCloseReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WindowClosed => "window-closed",
+            Self::SessionClose => "session_close",
+            Self::WindowBuildFailed => "window-build-failed",
+            Self::Dropped => "dropped",
+            Self::AppExit => "app-exit",
+        }
+    }
+
+    pub fn abort_check(self) -> &'static str {
+        match self {
+            Self::WindowClosed => "window_closed",
+            Self::SessionClose => "session_closed",
+            Self::WindowBuildFailed => "window_build",
+            Self::Dropped => "session_dropped",
+            Self::AppExit => "app_exit",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct PageTrack {
+    url: Option<Url>,
+    loading: bool,
+}
+
+#[derive(Debug, Default)]
+struct TitleParts {
+    origin: String,
+    notice: Option<String>,
+    login: Option<String>,
+}
+
+/// State the window's handlers (main thread) share with the recipe engine
+/// and the teardown: the host-observed page, the title parts, and the
+/// reason a handler wants the launch closed with. Never holds page content.
+#[derive(Debug)]
+pub struct WebShared {
+    resource: String,
+    page: Mutex<PageTrack>,
+    title: Mutex<TitleParts>,
+    abort_hint: Mutex<Option<&'static str>>,
+    /// Set by teardown; the recipe engine and the dry run stop on it.
+    closed: std::sync::atomic::AtomicBool,
+}
+
+impl WebShared {
+    pub fn new(resource: &str, start_origin: &str) -> Arc<Self> {
+        Arc::new(Self {
+            resource: resource.to_string(),
+            // Loading until the first load finishes.
+            page: Mutex::new(PageTrack { url: None, loading: true }),
+            title: Mutex::new(TitleParts { origin: start_origin.to_string(), ..TitleParts::default() }),
+            abort_hint: Mutex::new(None),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    pub fn mark_closed(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        m.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// A top-frame load event the host observed. Returns the new title.
+    pub fn page_load(&self, url: &Url, finished: bool) -> String {
+        {
+            let mut p = Self::lock(&self.page);
+            p.url = Some(url.clone());
+            p.loading = !finished;
+        }
+        let mut t = Self::lock(&self.title);
+        t.origin = display_origin(url);
+        t.notice = None;
+        Self::render(&self.resource, &t)
+    }
+
+    pub fn snapshot(&self) -> PageSnapshot {
+        let p = Self::lock(&self.page);
+        PageSnapshot { url: p.url.clone(), loading: p.loading }
+    }
+
+    /// Show a navigation notice (`blocked: <origin>`). Returns the title.
+    pub fn set_notice(&self, notice: String) -> String {
+        let mut t = Self::lock(&self.title);
+        t.notice = Some(notice);
+        Self::render(&self.resource, &t)
+    }
+
+    /// Show the login state. Returns the title.
+    pub fn set_login(&self, login: &str) -> String {
+        let mut t = Self::lock(&self.title);
+        t.login = Some(login.to_string());
+        Self::render(&self.resource, &t)
+    }
+
+    pub fn title(&self) -> String {
+        Self::render(&self.resource, &Self::lock(&self.title))
+    }
+
+    fn render(resource: &str, t: &TitleParts) -> String {
+        session_title(resource, &t.origin, t.notice.as_deref(), t.login.as_deref())
+    }
+
+    /// Record why a handler is ending the session (first reason wins).
+    pub fn note_abort(&self, check: &'static str) {
+        Self::lock(&self.abort_hint).get_or_insert(check);
+    }
+
+    fn take_abort_hint(&self) -> Option<&'static str> {
+        Self::lock(&self.abort_hint).take()
+    }
+}
+
 /// Registry entry for one live web session in `AppState::connect_sessions`.
 pub struct WebSessionState {
     pub resource_name: String,
@@ -498,25 +714,42 @@ pub struct WebSessionState {
     /// and WKWebView ignores `data_directory`.
     pub data_dir: Option<PathBuf>,
     pub opened_at: Instant,
+    pub kind: WebSessionKind,
+    /// The form-mode launch, attached once `launch` succeeded. Teardown
+    /// finishes it (`result` if still owed, then `close`).
+    pub launch: Option<Arc<WebLaunch>>,
+    pub shared: Arc<WebShared>,
 }
 
-/// Finish a web session that has just been removed from the registry:
-/// write the host-side close audit line and remove the data directory.
+/// Finish a web session that has just been removed from the registry: stop
+/// its recipe engine, report and close its launch, write the host-side close
+/// audit line and remove the data directory.
 ///
 /// Every path that drops a web session's registry entry calls this —
-/// window destruction, `session_close`, and the generic SSH/RDP drop paths
-/// should a web token ever reach them — so the cleanup can't be skipped by
-/// taking a different door out.
-pub fn finish_session(token: &str, session: WebSessionState, reason: &str) {
+/// window destruction, `session_close`, a window that failed to build, app
+/// exit, and the generic SSH/RDP drop paths should a web token ever reach
+/// them — so neither `v2/connect/web/close` nor the cleanup can be skipped
+/// by taking a different door out.
+pub async fn finish_session(token: &str, session: WebSessionState, reason: WebCloseReason) {
+    session.shared.mark_closed();
+    let mut launch_hash = String::new();
+    if let Some(launch) = &session.launch {
+        let check = session.shared.take_abort_hint().unwrap_or(reason.abort_check());
+        launch.cancel(check);
+        launch.finish(check).await;
+        launch_hash = format!(" launch_id_hash={}", launch.launch_id_hash());
+    }
     let duration_ms = session.opened_at.elapsed().as_millis();
     log::info!(
         target: "audit",
-        "session.close: protocol=web resource={} profile={} token={} duration_ms={} reason={}",
+        "session.close: protocol=web login_mode={} resource={} profile={} token={}{launch_hash} duration_ms={} \
+         reason={}",
+        session.kind.as_str(),
         session.resource_name,
         session.profile_id,
         token,
         duration_ms,
-        reason,
+        reason.as_str(),
     );
     if let Some(dir) = session.data_dir {
         remove_data_dir_eventually(dir);
@@ -861,7 +1094,7 @@ mod tests {
 
     #[test]
     fn later_phase_login_modes_are_refused_not_ignored() {
-        for mode in ["form", "http-auth", "sso"] {
+        for mode in ["http-auth", "sso"] {
             let err = parse_web_profile(&open_profile(json!({
                 "start_url": "https://a.example", "login_mode": mode,
             })))
@@ -922,6 +1155,117 @@ mod tests {
         // Paths and queries are fine on the start URL; only the origin is
         // added to the allow-list.
         assert!(parse("https://a.example/ng/login?next=%2F").is_ok());
+    }
+
+    // ── Form mode ───────────────────────────────────────────────────
+
+    fn form_recipe() -> Value {
+        json!({
+            "version": 1,
+            "steps": [ { "when_url": "https://fw01.example.com/login*", "actions": [
+                { "fill": "input[name=username]", "value": "username" },
+                { "fill": "input[name=password]", "value": "password" },
+                { "click": "button[type=submit]" } ] } ],
+            "success_when": { "url": "https://fw01.example.com/ng/*" }
+        })
+    }
+
+    fn form_profile(source: Value, recipe: Option<Value>) -> Value {
+        let mut web = json!({ "start_url": "https://fw01.example.com/login", "login_mode": "form" });
+        if let Some(r) = recipe {
+            web["recipe"] = r;
+        }
+        json!({ "id": "p_web", "name": "Console", "protocol": "web", "credential_source": source, "web": web })
+    }
+
+    #[test]
+    fn a_form_profile_parses_with_the_servers_recipe_hash() {
+        for kind in ["secret", "ldap", "default-account"] {
+            let cfg = parse_web_profile(&form_profile(json!({ "kind": kind }), Some(form_recipe()))).unwrap();
+            let WebLogin::Form(f) = &cfg.login else { panic!("{kind}: not form") };
+            assert_eq!(f.recipe_hash, recipe_hash(&form_recipe()).unwrap());
+            assert!(f.recipe_hash.starts_with("sha256:"));
+            assert!(!f.plan.is_heuristic());
+        }
+        let cfg = parse_web_profile(&open_profile(json!({ "start_url": "https://a.example", "login_mode": "open" })))
+            .unwrap();
+        assert!(matches!(cfg.login, WebLogin::Open));
+    }
+
+    #[test]
+    fn form_mode_needs_a_real_source_and_a_recipe() {
+        for kind in ["none", "ssh-engine", "pki", "fido2", ""] {
+            let err = parse_web_profile(&form_profile(json!({ "kind": kind }), Some(form_recipe()))).unwrap_err();
+            assert!(err.contains("cannot sign in"), "{kind}: {err}");
+        }
+        let mut p = form_profile(json!({ "kind": "secret" }), Some(form_recipe()));
+        p.as_object_mut().unwrap().remove("credential_source");
+        assert!(parse_web_profile(&p).unwrap_err().contains("cannot sign in"));
+        let err = parse_web_profile(&form_profile(json!({ "kind": "secret" }), None)).unwrap_err();
+        assert!(err.contains("needs a login recipe"), "{err}");
+    }
+
+    #[test]
+    fn form_recipes_are_parsed_strictly_by_the_shared_parser() {
+        for (bad, why) in [
+            (json!({ "version": 2, "steps": "auto", "success_when": { "url": "https://a.example/" } }), "version"),
+            (
+                json!({ "version": 1, "steps": [ { "when_url": "https://fw01.example.com/", "actions": [
+                { "eval": "alert(1)" } ] } ], "success_when": { "url": "https://a.example/" } }),
+                "unknown verb",
+            ),
+            (
+                json!({ "version": 1, "steps": [ { "when_url": "https://fw01.example.com/", "actions": [
+                { "fill": "#u", "value": "javascript:alert(1)" } ] } ], "success_when": { "url": "https://a.example/" } }),
+                "non-enum value",
+            ),
+            (
+                json!({ "version": 1, "steps": "auto", "success_when": { "url": "https://a.example/" }, "timeout_secs": 61 }),
+                "timeout",
+            ),
+            (json!({ "version": 1, "steps": "auto" }), "no success_when"),
+        ] {
+            assert!(parse_web_profile(&form_profile(json!({ "kind": "secret" }), Some(bad))).is_err(), "{why}");
+        }
+    }
+
+    #[test]
+    fn web_shared_tracks_the_host_observed_page_and_title() {
+        let shared = WebShared::new("fw01", "https://fw01.example.com");
+        assert!(shared.snapshot().loading, "loading until the first load finishes");
+        assert_eq!(shared.title(), "fw01 — https://fw01.example.com");
+        shared.page_load(&url("https://fw01.example.com/login?next=/secret"), false);
+        assert!(shared.snapshot().loading);
+        let t = shared.page_load(&url("https://fw01.example.com/login?next=/secret"), true);
+        assert!(!shared.snapshot().loading);
+        // Origin only in the title: never the path or query.
+        assert_eq!(t, "fw01 — https://fw01.example.com");
+        assert_eq!(shared.set_login("signed in"), "fw01 — https://fw01.example.com — signed in");
+        let t = shared.set_notice("blocked: https://evil.example".into());
+        assert_eq!(t, "fw01 — https://fw01.example.com — blocked: https://evil.example — signed in");
+        // A new load clears the notice, keeps the login state.
+        assert_eq!(
+            shared.page_load(&url("https://fw01.example.com/ng/"), true),
+            "fw01 — https://fw01.example.com — signed in"
+        );
+        shared.note_abort("policy_violation");
+        shared.note_abort("origin");
+        assert_eq!(shared.take_abort_hint(), Some("policy_violation"), "the first reason wins");
+        assert_eq!(shared.take_abort_hint(), None);
+    }
+
+    #[test]
+    fn close_reasons_map_to_valid_abort_checks() {
+        for r in [
+            WebCloseReason::WindowClosed,
+            WebCloseReason::SessionClose,
+            WebCloseReason::WindowBuildFailed,
+            WebCloseReason::Dropped,
+            WebCloseReason::AppExit,
+        ] {
+            let c = r.abort_check();
+            assert!(crate::session::web_recipe::HOST_ABORT_CHECKS.contains(&c), "{c}");
+        }
     }
 
     #[test]

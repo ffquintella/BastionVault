@@ -515,10 +515,48 @@ export type WebExposure = "none" | "isolated" | "handler" | "proxy" | "dom";
  */
 export type SessionProtocol = "ssh" | "rdp" | "web";
 
-/** Login modes a `web` profile can declare (spec §1). Only `open` is
- *  launchable in this release; the others are refused at save and at
- *  connect with "not available yet". */
+/** Login modes a `web` profile can declare (spec §1). `open` and `form`
+ *  launch; `http-auth` and `sso` are refused at save and at connect with
+ *  "not available yet". `form` profiles are not editable in the profile
+ *  editor yet (the recipe editor is a follow-up). */
 export type WebLoginMode = "open" | "form" | "http-auth" | "sso";
+
+/** What a recipe `fill` writes (spec §2). Never JavaScript. */
+export type WebFillValue = "username" | "password" | "totp" | `literal:${string}`;
+
+/** One recipe action: exactly one verb. Selectors are CSS, matched in the
+ *  top document only. */
+export type WebRecipeAction =
+  | { fill: string; value: WebFillValue }
+  | { click: string }
+  | { submit: string }
+  | { wait: string };
+
+export interface WebRecipeStep {
+  /** Glob over the host-observed top-frame URL; `*` only after the origin. */
+  when_url: string;
+  actions: WebRecipeAction[];
+}
+
+export interface WebRecipeCondition {
+  url?: string;
+  selector?: string;
+}
+
+/** The v1 login recipe of a `form` profile (spec §2), as stored. The server
+ *  and the desktop host parse it with the same strict parser; unknown keys
+ *  are refused. */
+export interface WebLoginRecipe {
+  version: 1;
+  vendor?: string;
+  /** Explicit steps, or `"auto"` for heuristic mode (policy-gated). */
+  steps: WebRecipeStep[] | "auto";
+  success_when: WebRecipeCondition;
+  failure_when?: WebRecipeCondition;
+  /** 1–60, default 30. */
+  timeout_secs?: number;
+  pause_for_operator?: ("captcha" | "push_mfa")[];
+}
 
 /** Programmatic clipboard access for the web session's page. Only
  *  `bidirectional` grants it, and only on Linux / Windows — WKWebView
@@ -537,6 +575,8 @@ export interface WebProfileSettings {
    *  implicit. Navigation outside the set is blocked. */
   allowed_origins: string[];
   login_mode: WebLoginMode;
+  /** `form` only. */
+  recipe?: WebLoginRecipe;
   /** `rustion-isolated` is Phase 8 and refused today. */
   transport?: "local" | "rustion-isolated";
   /** Phase 4; a non-empty list is refused today rather than ignored. */

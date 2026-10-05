@@ -15,6 +15,10 @@ pub mod rdp_clipboard;
 pub mod sk_signer;
 pub mod ssh;
 pub mod web;
+pub mod web_engine;
+pub mod web_launch;
+pub mod web_recipe;
+pub mod web_script;
 
 use tokio::sync::mpsc;
 
@@ -91,8 +95,10 @@ pub enum SessionState {
     /// a binary IPC channel the window installs on mount.
     Rdp(RdpSessionState),
     /// Web application session (T96) — an external-URL window with no IPC
-    /// grant. Nothing to pump; the entry exists so teardown (data-dir
-    /// removal, the close audit line) runs through the same registry.
+    /// grant. Nothing to pump; the entry exists so teardown (the form-mode
+    /// launch's `result` / `close`, data-dir removal, the close audit line)
+    /// runs through the same registry. A `web_recipe_test` dry-run window is
+    /// one too, so it counts for the web/RDP exclusion.
     Web(web::WebSessionState),
 }
 
