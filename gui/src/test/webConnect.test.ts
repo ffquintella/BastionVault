@@ -344,7 +344,7 @@ describe("validateProfile — web profiles", () => {
   });
 
   it("refuses later login modes as not available yet", () => {
-    for (const mode of ["form", "http-auth", "sso"] as const) {
+    for (const mode of ["http-auth", "sso"] as const) {
       expect(validateProfile(webProfile({ login_mode: mode }))).toMatch(/not available yet/);
     }
     expect(validateProfile(webProfile({ login_mode: "magic" as never }))).toMatch(/Unknown login mode/);

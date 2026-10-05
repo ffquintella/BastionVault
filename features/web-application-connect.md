@@ -120,10 +120,12 @@ security / capability docs, Microsoft WebView2 "Basic authentication" docs, W3C
 
 ## Current State
 
-**Status: In progress — Phase 1 done, with caveats (below); Phase 2 server
-and desktop-host halves done (the host recipe engine, fixed fill routine and
-`web_recipe_test`), the GUI recipe editor and vendor presets Todo; Phases 3–7
-Todo, Phase 8 future.**
+**Status: In progress — Phase 1 done, with caveats (below); Phase 2 server,
+desktop-host and GUI-editor halves done (the host recipe engine, fixed fill
+routine and `web_recipe_test`; the profile editor with recipe editor, import /
+export, test button and vendor presets, **whose presets are unverified against
+live appliances**), per-platform manual checks still open; Phases 3–7 Todo,
+Phase 8 future.**
 
 ### What the Phase 2 server half shipped
 
@@ -303,6 +305,88 @@ host calls it (see *What the Phase 2 host half shipped*).
   secret, missing seed, no LDAP mount, a non-LDAP mount, no default account
   — each with the ticket unspent), and the fill scope in bundle and record.
 
+### What the Phase 2 GUI editor shipped
+
+In [gui/src/](../gui/src/) — no server or host change. The recipe format, the
+exposure rule and the dry run are the ones above; the GUI only edits, checks
+and shows them.
+
+- **Profile editor.** The **Form** login mode saves
+  ([connectionProfiles.ts](../gui/src/lib/connectionProfiles.ts)
+  `validateWebProfile`; it used to refuse every form profile). The credential
+  source for form is the set the server releases from: `secret` (with
+  `credential_source.fields` for key names and `credential_source.totp` for
+  algorithm / digits / period), `ldap` `static_role` / `library_set`
+  (operator bind is not offered), and `default-account` (username only).
+  Switching the login mode moves the source and the recipe with it
+  (`setWebLoginMode`). The Connection tab's profile list shows the source and a
+  recipe summary.
+- **Recipe editor** ([WebRecipeEditor.tsx](../gui/src/components/WebRecipeEditor.tsx)).
+  Structured step / action list (fill username / password / TOTP / fixed text,
+  click, submit, wait; reorder and remove), success and failure conditions,
+  timeout, CAPTCHA / push-MFA pauses, vendor label, explicit or heuristic
+  mode, and a raw JSON view. Unparseable text in the JSON view holds Save; the
+  profile keeps the last valid recipe meanwhile.
+- **Validation mirrors the server.**
+  [webRecipe.ts](../gui/src/lib/webRecipe.ts) is a line-by-line port of
+  `WebLoginRecipe::parse`, `check_origins`, `origin_key` and `split_url`
+  (recipe.rs), in the same check order and with the server's `at` locations
+  and wording; [webFormProfile.ts](../gui/src/lib/webFormProfile.ts) ports the
+  rest of `parse_launch_profile` (profile.rs): origins read by the server's
+  stricter `origin_key` rather than the browser's URL parser, the credential
+  source's fields, and whether the source can supply what the recipe fills
+  (`credential_unavailable`, `totp_not_configured`). The Rust test cases are
+  ported to `src/test/webRecipe.test.ts`. **Not mirrored:** the
+  integer-versus-float distinction of JSON numbers (`30.0`; a JS number can't
+  tell, and the GUI sends `JSON.stringify` output, which prints integers
+  plainly); `recipe_hash` (the dry run reports the host's); the launch-time
+  checks that need the vault (the secret exists and carries a decodable TOTP
+  seed, the LDAP mount exists, the default account is set). Keep the constants
+  and the check order in step with recipe.rs when it changes.
+- **Exposure notice.** [webExposure.ts](../gui/src/lib/webExposure.ts) ports
+  `exposure.rs`: deny unless the *saved* `config/types` entry for the
+  resource's `type` sets `connect.web_exposure_max` (`dom` for form), the
+  resource tier can only lower it, heuristics need a tier to enable them and
+  none to forbid them, insecure http is refused below `dom`, an unreadable
+  value is a refusal. The editor reads the raw `resource_types_read` payload,
+  not the merged config — the GUI shows `web_application` as opted in even when
+  the server has nothing saved — and links to Settings → Resource Types; if the
+  payload can't be read it says it can't tell. A hint only: the server enforces.
+- **Settings → Resource Types.** Types that offer `web` get a **Web exposure
+  cap** (unset / none / isolated / handler / proxy / dom) and **Allow heuristic
+  fill** (unset / allowed / forbidden), written to `connect.web_exposure_max`
+  and `connect.allow_heuristic_fill`. Unset removes the key; a saved value the
+  build doesn't recognise is kept as saved.
+- **Test recipe** calls `web_recipe_test` with the start URL, the allowed
+  origins and the recipe, and renders the per-step, per-action status and match
+  count, the success / failure flags and the recipe hash. The UI says it sends
+  no credential and submits nothing; the request carries no credential field.
+- **Import / export.** Copy to the clipboard, download as `.json`, import from a
+  file, the clipboard or the JSON view. Imports go through `JSON.parse` and the
+  strict reader only (256 KiB cap; unknown keys including `__proto__` refused);
+  nothing is evaluated. The download uses a Blob link and is **not verified in
+  the Tauri webview on each platform**; the clipboard route is the fallback the
+  UI names.
+- **Vendor presets** ([webRecipePresets.ts](../gui/src/lib/webRecipePresets.ts)):
+  FortiGate, vCenter, iDRAC, iLO, pfSense, Grafana, Jenkins, each a function of
+  the profile's origin. **Every preset is unverified against a live
+  appliance.** They were written from each vendor's documented or widely known
+  login form without recording a real login page, and `unverified: true` is a
+  literal type, shown in the picker label, beside the note and in a banner
+  after one is applied. Success and failure conditions are the least certain
+  part (iLO, pfSense and Grafana sign in to a page on the same URL, so they
+  judge success by an element). The tests hold each preset to the validator and
+  the origin check, not to a real device. The spec's "tested against recorded
+  login pages" is **not** done and stays a follow-up.
+- **Session outcome in the main window: not done.** The host reports the
+  outcome to the server and in the session window's title, and emits no event
+  or command result the main window can read, so there is nothing to show.
+  Surfacing it needs a host change.
+- **Tests.** `src/test/webRecipe.test.ts` (validator, origin keys, presets,
+  import, form-profile save checks, exposure matrix) and
+  `src/test/webRecipeEditor.test.tsx` (exposure notice, presets, structured and
+  JSON editing, import / export, dry run, Settings controls).
+
 ### What the Phase 2 host half shipped
 
 In [gui/src-tauri/src/commands/connect_web.rs](../gui/src-tauri/src/commands/connect_web.rs)
@@ -436,9 +520,11 @@ call-state machine).
 
 **Still open for Phase 2:**
 
-- The GUI recipe editor, JSON import/export and the vendor presets; the
-  editor still refuses to save `form` profiles, and the main window is not
-  told the outcome (it shows in the session window's title).
+- The vendor presets are unverified against live appliances and the spec's
+  "tested against recorded login pages" is not done (see *What the Phase 2 GUI
+  editor shipped*), and the main window is not told the session outcome (it
+  shows in the session window's title; the host emits nothing the main window
+  can read).
 - Per-platform manual checks (macOS, Windows, Linux) against the fixture site
   of the Testing Plan, including `eval_with_callback` returning on each
   webview and the `invoke`-rejected check of Phase 1.
@@ -821,9 +907,11 @@ Rules:
   - Its origin must be in the profile's origin set.
   - Its scheme must be `https` unless `allow_insecure_http` is set.
   - A profile save is rejected when a step's origin is outside the set.
-- A recipe can carry `vendor` presets. Phase 2 ships tested presets for the
-  `web_application.vendor` enum. An operator who picks FortiGate gets a working
-  recipe without writing selectors.
+- A recipe can carry `vendor` presets. Phase 2 ships presets for the
+  `web_application.vendor` enum, starting points an operator tests with "Test
+  recipe". **They are unverified against live appliances** (written from the
+  vendors' documented login forms, not recorded), so they are not yet the
+  "working recipe without writing selectors" this section set out to give.
 - **Heuristic mode** (`"steps": "auto"`) finds fields by
   `autocomplete="username" | "current-password" | "one-time-code"`, then
   `type=password`. It is off unless the resource's policy allows it (§6).
@@ -1252,7 +1340,7 @@ exemption is mitigated by refusing web and RDP sessions at the same time
 This phase alone removes the "reveal, copy, open browser" habit for SSO-fronted
 apps and gives them an audited launch point.
 
-### Phase 2 — `form` mode with recipes — **In progress (server and host halves done; GUI editor Todo)**
+### Phase 2 — `form` mode with recipes — **In progress (server, host and GUI editor done; presets unverified; per-platform checks open)**
 
 - **Done:** the `resources/v2/connect/web/{launch,totp,result,close}`
   endpoints with server-side credential resolution and TOTP, server-side
@@ -1263,10 +1351,15 @@ apps and gives them an audited launch point.
   / `totp` / `result` / `close` on every teardown path, and the
   `web_recipe_test` dry run (checks only, no credential). See *Current State
   → What the Phase 2 host half shipped*.
-- **Todo:** the recipe editor (calling `web_recipe_test`), JSON
-  import/export, and vendor presets (FortiGate, vCenter, iDRAC, iLO, pfSense,
-  Grafana, Jenkins) tested against recorded login pages. The editor's
-  exposure check mirrors the server's.
+- **Done:** the recipe editor (calling `web_recipe_test`), JSON
+  import/export, the form-mode profile editor, the Settings → Resource Types
+  exposure controls, and vendor presets (FortiGate, vCenter, iDRAC, iLO,
+  pfSense, Grafana, Jenkins). The editor's validation and exposure check
+  mirror the server's. See *Current State → What the Phase 2 GUI editor
+  shipped*.
+- **Todo:** test the presets against recorded login pages or live appliances
+  (they are **unverified** today, and labelled so), and the per-platform
+  manual checks.
 - **Done:** `resources/v2/connect/web/*` in the built-in baseline policies (`default`, `standard-user`, `shared-access` refreshed at startup; `administrator` is not refreshed but inherits `update` through `default`).
 
 ### Phase 3 — `http-auth` mode — **Todo**

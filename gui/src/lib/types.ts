@@ -486,6 +486,10 @@ export interface ResourceTypeDef {
      *  the resource's *saved* type sets this (form mode needs `dom`); unset
      *  means `none`. `open` mode (exposure `none`) fits under every cap. */
     web_exposure_max?: WebExposure;
+    /** Heuristic recipes (`"steps": "auto"`) are refused unless a tier sets
+     *  this to `true`, and by an explicit `false` at either tier (spec §6).
+     *  Unset at both tiers means no heuristics. */
+    allow_heuristic_fill?: boolean;
   };
 }
 
@@ -517,8 +521,8 @@ export type SessionProtocol = "ssh" | "rdp" | "web";
 
 /** Login modes a `web` profile can declare (spec §1). `open` and `form`
  *  launch; `http-auth` and `sso` are refused at save and at connect with
- *  "not available yet". `form` profiles are not editable in the profile
- *  editor yet (the recipe editor is a follow-up). */
+ *  "not available yet". `form` carries a login recipe (`WebLoginRecipe`)
+ *  and needs the type to opt in to `web_exposure_max: "dom"`. */
 export type WebLoginMode = "open" | "form" | "http-auth" | "sso";
 
 /** What a recipe `fill` writes (spec §2). Never JavaScript. */
@@ -610,7 +614,16 @@ export interface EffectiveLoginClass {
 }
 
 export type CredentialSource =
-  | { kind: "secret"; secret_id: string }
+  | {
+      kind: "secret";
+      secret_id: string;
+      /** `form` web logins only: the secret's key names, when they differ
+       *  from `username` / `password` / `totp_seed`. */
+      fields?: { username?: string; password?: string; totp_seed?: string };
+      /** `form` web logins only: how the `totp_seed` (base32) turns into a
+       *  code. Defaults SHA1 / 6 digits / 30 s. */
+      totp?: { algorithm?: "SHA1" | "SHA256" | "SHA512"; digits?: 6 | 8; period?: 30 | 60 };
+    }
   | {
       kind: "ldap";
       ldap_mount: string;

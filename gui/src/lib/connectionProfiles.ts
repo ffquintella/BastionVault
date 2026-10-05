@@ -6,6 +6,7 @@
 //! resource backend accepts this without schema changes — the field
 //! is opaque to the host.
 
+import { validateFormWebProfile } from "./webFormProfile";
 import type {
   ConnectionProfile,
   ConnectProfileHint,
@@ -286,7 +287,7 @@ export function validateProfile(p: ConnectionProfile): string | null {
 // ── Web profiles (features/web-application-connect.md, T96) ─────────
 
 /** Login modes this release can launch. */
-const LAUNCHABLE_WEB_LOGIN_MODES = ["open"] as const;
+const LAUNCHABLE_WEB_LOGIN_MODES = ["open", "form"] as const;
 
 /** Credential sources that can never authenticate a web session. */
 const NEVER_WEB_SOURCES: CredentialSource["kind"][] = ["ssh-engine", "pki", "fido2"];
@@ -393,8 +394,9 @@ export const WEB_WINDOW_MAX = 10_000;
 /**
  * Save-time validation of a `web` profile. Refuses everything this release
  * cannot honour rather than letting it look honoured: later login modes,
- * the Rustion transport, TLS pins, credential sources that `open` doesn't
- * use.
+ * the Rustion transport, TLS pins, credential sources the mode doesn't use.
+ * A `form` profile is additionally held to the server's own reading of its
+ * origins, recipe and credential source (`validateFormWebProfile`).
  */
 export function validateWebProfile(p: ConnectionProfile): string | null {
   const cs = p.credential_source.kind;
@@ -407,12 +409,18 @@ export function validateWebProfile(p: ConnectionProfile): string | null {
   const web = p.web;
   if (!web) return "Web profiles need web settings (start URL, login mode).";
   if (!(LAUNCHABLE_WEB_LOGIN_MODES as readonly string[]).includes(web.login_mode)) {
-    return ["form", "http-auth", "sso"].includes(web.login_mode)
-      ? `The ${web.login_mode} login mode is not available yet \u2014 this release supports \u201copen\u201d only.`
+    return ["http-auth", "sso"].includes(web.login_mode)
+      ? `The ${web.login_mode} login mode is not available yet \u2014 this release supports \u201copen\u201d and \u201cform\u201d.`
       : "Unknown login mode.";
   }
-  if (cs !== "none") {
-    return "The open login mode releases no credential \u2014 set the credential source to \u201cNone\u201d.";
+  const isForm = web.login_mode === "form";
+  if (!isForm) {
+    if (cs !== "none") {
+      return "The open login mode releases no credential \u2014 set the credential source to \u201cNone\u201d.";
+    }
+    if (web.recipe !== undefined && web.recipe !== null) {
+      return "A login recipe only applies to the form login mode.";
+    }
   }
   if (web.transport !== undefined && web.transport !== "local") {
     return web.transport === "rustion-isolated"
@@ -446,7 +454,31 @@ export function validateWebProfile(p: ConnectionProfile): string | null {
       return `Window ${dim} must be a whole number between ${WEB_WINDOW_MIN} and ${WEB_WINDOW_MAX}.`;
     }
   }
+  if (isForm) return validateFormWebProfile(p, web);
   return null;
+}
+
+/**
+ * Switch a web profile's login mode, moving the parts the modes disagree on
+ * with it: `open` releases nothing (source `none`, no recipe); `form` needs a
+ * source that can release a credential, so a leftover `none` becomes an empty
+ * `secret` source for the operator to fill in. A recipe the profile already
+ * has is kept across `form` -> `form`.
+ */
+export function setWebLoginMode(p: ConnectionProfile, mode: WebProfileSettings["login_mode"]): ConnectionProfile {
+  const web: WebProfileSettings = { ...(p.web ?? { start_url: "", allowed_origins: [], login_mode: mode }), login_mode: mode };
+  if (mode === "form") {
+    const credential_source: CredentialSource =
+      p.credential_source.kind === "none" || !FORM_WEB_SOURCES.includes(p.credential_source.kind)
+        ? { kind: "secret", secret_id: "" }
+        : p.credential_source;
+    return { ...p, credential_source, web };
+  }
+  if (mode === "open") {
+    delete web.recipe;
+    return { ...p, credential_source: { kind: "none" }, web };
+  }
+  return { ...p, web };
 }
 
 /**

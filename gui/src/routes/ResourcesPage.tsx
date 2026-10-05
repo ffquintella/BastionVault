@@ -68,6 +68,7 @@ import {
   profilesForWrite,
   readProfiles,
   readUnknownProfiles,
+  setWebLoginMode,
   validateProfile,
   validateProfileForLoginClass,
 } from "../lib/connectionProfiles";
@@ -1948,6 +1949,22 @@ function ConnectionProfilesPanel({
                     <dd className="font-mono break-all min-w-0">{p.web?.start_url || "—"}</dd>
                     <dt>login</dt>
                     <dd className="font-mono">{p.web?.login_mode ?? "—"}</dd>
+                    {p.web?.login_mode === "form" && (
+                      <>
+                        <dt>cred</dt>
+                        <dd className="font-mono min-w-0 truncate">
+                          {describeCredentialSource(p.credential_source)}
+                        </dd>
+                        <dt>recipe</dt>
+                        <dd className="font-mono">
+                          {p.web.recipe
+                            ? p.web.recipe.steps === "auto"
+                              ? "heuristic"
+                              : `${p.web.recipe.steps.length} step${p.web.recipe.steps.length === 1 ? "" : "s"}${p.web.recipe.vendor ? ` (${p.web.recipe.vendor})` : ""}`
+                            : "—"}
+                        </dd>
+                      </>
+                    )}
                     {(p.web?.allowed_origins?.length ?? 0) > 0 && (
                       <>
                         <dt>also</dt>
@@ -2082,8 +2099,9 @@ function ConnectionProfilesPanel({
             window closes, navigation limited to the profile&rsquo;s origins,
             and no access to the vault. The <strong>open</strong> login mode
             releases no credential &mdash; you, or the application&rsquo;s
-            own single sign-on, log in. Injected logins arrive in a later
-            release.
+            own single sign-on, log in. The <strong>form</strong> login mode
+            signs in for you from a recipe, once the resource&rsquo;s type has
+            been opted in under Settings &rarr; Resource Types.
           </p>
         )}
       </div>
@@ -2446,7 +2464,12 @@ function ConnectionProfileEditor({
     .filter((p) => protocols.includes(p) || p === profile.protocol || p === existing?.protocol)
     .map((p) => ({ value: p, label: p === "web" ? "Web" : p.toUpperCase() }));
 
+  // Unparseable text in the recipe's JSON view holds Save: the profile
+  // keeps the last valid recipe meanwhile, which would silently save the
+  // wrong thing.
+  const [recipeTextError, setRecipeTextError] = useState<string | null>(null);
   const validationError =
+    (profile.protocol === "web" ? recipeTextError : null) ??
     validateProfile(profile) ??
     validateProfileForLoginClass(
       profile,
@@ -2499,6 +2522,19 @@ function ConnectionProfileEditor({
                 }
               }
               onChange={(web) => update("web", web)}
+              resource={resource as Record<string, unknown>}
+              onLoginModeChange={(mode) => setProfile((p) => setWebLoginMode(p, mode))}
+              onRecipeTextError={setRecipeTextError}
+              credentialSlot={
+                profile.web?.login_mode === "form" ? (
+                  <WebFormCredentialEditor
+                    cs={profile.credential_source}
+                    onChange={updateCredentialSource}
+                    secretCandidates={secretCandidates}
+                    loadingSecrets={loadingSecrets}
+                  />
+                ) : undefined
+              }
             />
             {validationError && (
               <p className="text-xs text-[var(--color-danger)]">{validationError}</p>
@@ -2878,9 +2914,13 @@ function CredentialSecretInspector({
 function LdapCredentialEditor({
   cs,
   onChange,
+  allowOperator = true,
 }: {
   cs: Extract<CredentialSource, { kind: "ldap" }>;
   onChange: (s: CredentialSource) => void;
+  /** Operator-supplied bind means the operator types the credential, so a
+   *  web form login (which releases one) can't use it. */
+  allowOperator?: boolean;
 }) {
   return (
     <div className="space-y-2">
@@ -2907,7 +2947,9 @@ function LdapCredentialEditor({
             })
           }
           options={[
-            { value: "operator", label: "Operator-supplied (prompt at connect)" },
+            ...(allowOperator
+              ? [{ value: "operator", label: "Operator-supplied (prompt at connect)" }]
+              : []),
             { value: "static_role", label: "Vault-managed (static role)" },
             { value: "library_set", label: "Vault-managed (library check-out)" },
           ]}
@@ -3230,6 +3272,130 @@ function SecurityKeyCredentialEditor() {
   );
 }
 
+/**
+ * Credential source for a `form` web login: the sources the server can
+ * release a credential from at `v2/connect/web/launch` (`secret`, `ldap`
+ * static role / library check-out, `default-account`), plus the `secret`
+ * source's key names and TOTP parameters.
+ */
+function WebFormCredentialEditor({
+  cs,
+  onChange,
+  secretCandidates,
+  loadingSecrets,
+}: {
+  cs: CredentialSource;
+  onChange: (s: CredentialSource) => void;
+  secretCandidates: Array<{ value: string; label: string }>;
+  loadingSecrets: boolean;
+}) {
+  const kind = cs.kind === "ldap" || cs.kind === "default-account" ? cs.kind : "secret";
+  return (
+    <div className="space-y-2 min-w-0">
+      <Select
+        label="Credential source"
+        value={kind}
+        onChange={(e) => {
+          // Web form blanks: no `ssh_*` leftovers, and an LDAP source that
+          // releases something (operator-supplied bind releases nothing).
+          const next = e.target.value;
+          if (next === "ldap") onChange({ kind: "ldap", ldap_mount: "", bind_mode: "static_role" });
+          else if (next === "default-account") onChange({ kind: "default-account" });
+          else onChange(blankCredentialSource("secret"));
+        }}
+        options={[
+          { value: "secret", label: "Resource secret (username, password, optional TOTP seed)" },
+          { value: "ldap", label: "LDAP / Active Directory (static role or library check-out)" },
+          { value: "default-account", label: "Connecting user's default account (username only)" },
+        ]}
+      />
+      <p className="text-xs text-[var(--color-text-muted)]">
+        The server reads the credential when the session opens and hands the host only what the recipe
+        fills. The operator never sees it.
+      </p>
+      {cs.kind === "secret" && (
+        <div className="space-y-2">
+          <Select
+            label="Resource secret"
+            value={cs.secret_id}
+            onChange={(e) => onChange({ ...cs, secret_id: e.target.value })}
+            options={[
+              { value: "", label: loadingSecrets ? "Loading…" : "(pick a secret)" },
+              ...secretCandidates,
+            ]}
+          />
+          <details open={cs.fields !== undefined || cs.totp !== undefined}>
+            <summary className="cursor-pointer text-xs font-medium text-[var(--color-text-muted)]">
+              Secret key names and TOTP
+            </summary>
+            <div className="mt-2 grid grid-cols-2 gap-3">
+              {(["username", "password", "totp_seed"] as const).map((key) => (
+                <Input
+                  key={key}
+                  label={`${key === "totp_seed" ? "TOTP seed" : key === "username" ? "Username" : "Password"} key`}
+                  value={cs.fields?.[key] ?? ""}
+                  onChange={(e) => {
+                    const fields = { ...cs.fields, [key]: e.target.value };
+                    if (e.target.value === "") delete fields[key];
+                    const { fields: _f, ...rest } = cs;
+                    void _f;
+                    onChange(Object.keys(fields).length > 0 ? { ...rest, fields } : rest);
+                  }}
+                  placeholder={key}
+                />
+              ))}
+              <p className="col-span-2 text-xs text-[var(--color-text-muted)]">
+                Names of the keys inside the secret, when they differ from the defaults shown. The TOTP seed
+                is base32 and never leaves the server: the host receives only the current code.
+              </p>
+              <Select
+                label="TOTP algorithm"
+                value={cs.totp?.algorithm ?? "SHA1"}
+                onChange={(e) =>
+                  onChange({ ...cs, totp: { ...cs.totp, algorithm: e.target.value as "SHA1" | "SHA256" | "SHA512" } })
+                }
+                options={[
+                  { value: "SHA1", label: "SHA1 (default)" },
+                  { value: "SHA256", label: "SHA256" },
+                  { value: "SHA512", label: "SHA512" },
+                ]}
+              />
+              <div className="grid grid-cols-2 gap-3">
+                <Select
+                  label="Digits"
+                  value={String(cs.totp?.digits ?? 6)}
+                  onChange={(e) =>
+                    onChange({ ...cs, totp: { ...cs.totp, digits: Number(e.target.value) as 6 | 8 } })
+                  }
+                  options={[
+                    { value: "6", label: "6" },
+                    { value: "8", label: "8" },
+                  ]}
+                />
+                <Select
+                  label="Period (s)"
+                  value={String(cs.totp?.period ?? 30)}
+                  onChange={(e) =>
+                    onChange({ ...cs, totp: { ...cs.totp, period: Number(e.target.value) as 30 | 60 } })
+                  }
+                  options={[
+                    { value: "30", label: "30" },
+                    { value: "60", label: "60" },
+                  ]}
+                />
+              </div>
+            </div>
+          </details>
+        </div>
+      )}
+      {cs.kind === "ldap" && <LdapCredentialEditor cs={cs} onChange={onChange} allowOperator={false} />}
+      {cs.kind === "default-account" && (
+        <DefaultAccountCredentialEditor cs={cs} onChange={onChange} protocol="web" />
+      )}
+    </div>
+  );
+}
+
 function DefaultAccountCredentialEditor({
   cs,
   onChange,
@@ -3239,6 +3405,18 @@ function DefaultAccountCredentialEditor({
   onChange: (s: CredentialSource) => void;
   protocol: SessionProtocol;
 }) {
+  if (protocol === "web") {
+    return (
+      <p className="text-xs text-[var(--color-text-muted)]">
+        The login user is the connecting operator's default resource account
+        (set per user under <em>Users → Edit User → Default Resource
+        Account</em>). It supplies a username only: the recipe may fill{" "}
+        <code>username</code> but not <code>password</code> or{" "}
+        <code>totp</code>, and the operator types the rest in the session
+        window.
+      </p>
+    );
+  }
   if (protocol === "rdp") {
     return (
       <p className="text-xs text-[var(--color-text-muted)]">

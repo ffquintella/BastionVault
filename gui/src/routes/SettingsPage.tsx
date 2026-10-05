@@ -23,9 +23,15 @@ import type {
 } from "../lib/api";
 import {
   DEFAULT_RESOURCE_TYPES,
+  WEB_EXPOSURE_CAPS,
   connectProtocols,
+  heuristicChoice,
   parseTypeConfig,
   serializeTypeConfig,
+  webExposureChoice,
+  withWebPolicy,
+  type HeuristicChoice,
+  type WebExposureChoice,
 } from "../lib/resourceTypes";
 import { CloudStorageCard } from "../components/CloudStorageCard";
 import { UnsealModal } from "../components/UnsealModal";
@@ -1257,7 +1263,7 @@ function parseSelectOptions(input: string): { value: string; label: string }[] {
     });
 }
 
-function TypeEditorModal({ typeDef, onSave, onClose }: {
+export function TypeEditorModal({ typeDef, onSave, onClose }: {
   typeDef: ResourceTypeDef | null;
   onSave: (t: ResourceTypeDef) => void;
   onClose: () => void;
@@ -1280,6 +1286,16 @@ function TypeEditorModal({ typeDef, onSave, onClose }: {
     typeDef
       ? connectProtocols({ ...typeDef, connect: { ...typeDef.connect, enabled: true } })
       : [],
+  );
+
+  // Web exposure policy (T96 §6). The server denies a credential-releasing
+  // web login unless the resource's *saved* type sets a cap, so this is where
+  // an administrator opts a type in. Unset keeps today's deny.
+  const [webExposure, setWebExposure] = useState<WebExposureChoice>(() =>
+    webExposureChoice(typeDef?.connect),
+  );
+  const [webHeuristic, setWebHeuristic] = useState<HeuristicChoice>(() =>
+    heuristicChoice(typeDef?.connect),
   );
 
   function toggleProtocol(p: ConnectProtocol, on: boolean) {
@@ -1312,11 +1328,15 @@ function TypeEditorModal({ typeDef, onSave, onClose }: {
     const legacyDefault = connectProtocols({ id: resolvedId, label: "", color: "neutral", fields: [] });
     const sameAsLegacy =
       legacyDefault.length === protocols.length && legacyDefault.every((p) => protocols.includes(p));
-    const connect: NonNullable<ResourceTypeDef["connect"]> = {
-      ...rest,
-      ...(connectEnabled ? {} : { enabled: false }),
-      ...(savedProtocols !== undefined || !sameAsLegacy ? { protocols } : {}),
-    };
+    const connect: NonNullable<ResourceTypeDef["connect"]> = withWebPolicy(
+      {
+        ...rest,
+        ...(connectEnabled ? {} : { enabled: false }),
+        ...(savedProtocols !== undefined || !sameAsLegacy ? { protocols } : {}),
+      },
+      webExposure,
+      webHeuristic,
+    );
     onSave({
       id: resolvedId,
       label: label || resolvedId,
@@ -1407,6 +1427,52 @@ function TypeEditorModal({ typeDef, onSave, onClose }: {
             field, which only the Server type carries by default. Web opens
             the application in an isolated in-app window.
           </p>
+          {protocols.includes("web") && (
+            <div className="mt-3 pl-6 grid grid-cols-2 gap-3" data-testid="web-policy">
+              <div className="min-w-0">
+                <Select
+                  label="Web exposure cap"
+                  disabled={!connectEnabled}
+                  value={webExposure}
+                  onChange={(e) => setWebExposure(e.target.value as WebExposureChoice)}
+                  options={[
+                    { value: "", label: "(not set \u2014 form logins denied)" },
+                    ...(webExposure === "keep"
+                      ? [{ value: "keep", label: "(saved value not recognised \u2014 kept; the server refuses it)" }]
+                      : []),
+                    ...WEB_EXPOSURE_CAPS.map((c) => ({
+                      value: c,
+                      label: c === "dom" ? "dom \u2014 form logins allowed" : c,
+                    })),
+                  ]}
+                />
+              </div>
+              <div className="min-w-0">
+                <Select
+                  label="Allow heuristic fill"
+                  disabled={!connectEnabled}
+                  value={webHeuristic}
+                  onChange={(e) => setWebHeuristic(e.target.value as HeuristicChoice)}
+                  options={[
+                    { value: "", label: "(not set \u2014 heuristics denied)" },
+                    ...(webHeuristic === "keep"
+                      ? [{ value: "keep", label: "(saved value not recognised \u2014 kept; the server refuses it)" }]
+                      : []),
+                    { value: "true", label: "Allowed" },
+                    { value: "false", label: "Forbidden (beats a resource that allows it)" },
+                  ]}
+                />
+              </div>
+              <p className="col-span-2 text-xs text-[var(--color-text-muted)]">
+                Web credential release is <strong>off by default</strong>: the server injects a username
+                or password into a web page only for a resource whose type is saved with a cap of{" "}
+                <code>dom</code> here. Opening a site without signing in (open mode) works under any
+                setting. A resource can lower this cap for itself but never raise it. Heuristic fill finds
+                the login fields automatically and can pick the wrong one, so it stays off unless you
+                allow it. The server enforces both; the profile editor only warns.
+              </p>
+            </div>
+          )}
         </div>
 
         <div>
