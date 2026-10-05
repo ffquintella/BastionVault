@@ -162,6 +162,7 @@ import type {
   CertLifecycleState,
   CertLifecycleRenewResult,
   CertLifecycleSchedulerConfig,
+  WebLoginRecipe,
 } from "./types";
 
 // Connection
@@ -2912,6 +2913,81 @@ export type SessionOpenRdpResponse = {
 
 export const sessionOpenRdp = (request: SessionOpenRdpRequest) =>
   invoke<SessionOpenRdpResponse>("session_open_rdp", { request });
+
+/** Web Application Connect (T96). Neither login mode takes a credential
+ *  from the GUI, so there is no `operator_credential` slot: `open` releases
+ *  none, and `form` has the host fetch it from
+ *  `resources/v2/connect/web/launch`, which also redeems the ticket. */
+export type SessionOpenWebRequest = {
+  resource_name: string;
+  profile_id: string;
+  /** See {@link SessionOpenSshRequest.connect_ticket}. */
+  connect_ticket?: string;
+};
+
+export type SessionOpenWebResponse = {
+  token: string;
+  window_label: string;
+  /** `form` sessions sign in by themselves; the outcome shows in the
+   *  session window's title. */
+  login_mode: "open" | "form";
+};
+
+export const sessionOpenWeb = (request: SessionOpenWebRequest) =>
+  invoke<SessionOpenWebResponse>("session_open_web", { request });
+
+/** Dry-run a login recipe (`web_recipe_test`). No credential is involved:
+ *  the host opens a web session window on `url`, runs every check of the
+ *  fill routine without filling, clicking or submitting, and reports what
+ *  each step's selectors matched. Later pages are checked if you sign in by
+ *  hand in the test window. */
+export type WebRecipeTestRequest = {
+  url: string;
+  recipe: WebLoginRecipe;
+  allowed_origins?: string[];
+  allow_insecure_http?: boolean;
+};
+
+export type WebRecipeActionCheck = {
+  index: number;
+  kind: "fill" | "click" | "submit" | "wait";
+  /** The value a fill would write (`username`, `password`, `totp`,
+   *  `literal`) — never the value itself. */
+  value: string | null;
+  /** The routine's verdict (`ok`, `no_match`, `ambiguous`, `not_visible`,
+   *  `occluded`, `form_action`, …) or `not_reached`. */
+  status: string;
+  matches: number | null;
+};
+
+export type WebRecipeStepCheck = {
+  index: number;
+  reached: boolean;
+  origin: string | null;
+  actions: WebRecipeActionCheck[];
+};
+
+export type WebRecipeTestResponse = {
+  /** The `recipe_hash` a launch of this recipe would carry. */
+  recipe_hash: string;
+  report: {
+    /** `complete`, `timeout` or `aborted:<check>`. */
+    outcome: string;
+    heuristic: boolean;
+    steps: WebRecipeStepCheck[];
+    heuristic_check: {
+      scan: { username: number; current_password: number; password: number; otp: number };
+      would_fill: string[];
+      verdict: string;
+    } | null;
+    origins_seen: string[];
+    success_seen: boolean;
+    failure_seen: boolean;
+  };
+};
+
+export const webRecipeTest = (request: WebRecipeTestRequest) =>
+  invoke<WebRecipeTestResponse>("web_recipe_test", { request });
 
 
 // ── Connect-time MFA re-validation + SSH security keys ──────────

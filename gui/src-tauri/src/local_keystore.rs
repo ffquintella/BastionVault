@@ -62,11 +62,7 @@
 //! keychain entries are still migrated into the v2 file per the
 //! earlier commit, indexed under `last_used_id`.
 
-use std::{
-    fs,
-    io::Write,
-    path::PathBuf,
-};
+use std::{fs, io::Write, path::PathBuf};
 
 use bv_crypto::{KemProvider, MlKem768Provider, ML_KEM_768_SEED_LEN};
 use chacha20poly1305::{
@@ -164,15 +160,11 @@ fn keys_file_path() -> Result<PathBuf, CommandError> {
     let root = if let Ok(overridden) = std::env::var("BV_GUI_DATA_DIR_OVERRIDE") {
         PathBuf::from(overridden)
     } else {
-        let base = dirs::data_local_dir()
-            .or_else(dirs::home_dir)
-            .ok_or("Cannot determine home directory")?;
+        let base = dirs::data_local_dir().or_else(dirs::home_dir).ok_or("Cannot determine home directory")?;
         base.join(".bastion_vault_gui")
     };
     if !root.exists() {
-        fs::create_dir_all(&root).map_err(|e| {
-            CommandError::from(format!("create data dir {root:?}: {e}"))
-        })?;
+        fs::create_dir_all(&root).map_err(|e| CommandError::from(format!("create data dir {root:?}: {e}")))?;
     }
     Ok(root.join(KEYS_FILE_NAME))
 }
@@ -180,15 +172,12 @@ fn keys_file_path() -> Result<PathBuf, CommandError> {
 // ── Local-key (OS keychain) helpers ────────────────────────────────
 
 fn load_or_create_local_key() -> Result<[u8; KEY_LEN], CommandError> {
-    let entry = keyring::Entry::new(SERVICE, LOCAL_KEY_ENTRY)
-        .map_err(|e| CommandError::from(format!("keyring entry: {e}")))?;
+    let entry =
+        keyring::Entry::new(SERVICE, LOCAL_KEY_ENTRY).map_err(|e| CommandError::from(format!("keyring entry: {e}")))?;
     match entry.get_password() {
         Ok(hex_str) => {
-            let decoded = hex::decode(hex_str.trim()).map_err(|e| {
-                CommandError::from(format!(
-                    "local-master-key in keychain is not valid hex: {e}"
-                ))
-            })?;
+            let decoded = hex::decode(hex_str.trim())
+                .map_err(|e| CommandError::from(format!("local-master-key in keychain is not valid hex: {e}")))?;
             if decoded.len() != KEY_LEN {
                 return Err(CommandError::from(format!(
                     "local-master-key in keychain has wrong length: \
@@ -203,9 +192,7 @@ fn load_or_create_local_key() -> Result<[u8; KEY_LEN], CommandError> {
         Err(keyring::Error::NoEntry) => {
             let mut key = [0u8; KEY_LEN];
             rand::rng().fill_bytes(&mut key);
-            entry
-                .set_password(&hex::encode(key))
-                .map_err(|e| CommandError::from(format!("keyring store: {e}")))?;
+            entry.set_password(&hex::encode(key)).map_err(|e| CommandError::from(format!("keyring store: {e}")))?;
             Ok(key)
         }
         Err(e) => Err(CommandError::from(format!("keyring read: {e}"))),
@@ -219,9 +206,8 @@ fn seed_from_keychain() -> Result<[u8; ML_KEM_768_SEED_LEN], CommandError> {
     let key = load_or_create_local_key()?;
     let hk = Hkdf::<Sha256>::new(None, &key);
     let mut seed = [0u8; ML_KEM_768_SEED_LEN];
-    hk.expand(HKDF_INFO_KEYCHAIN_SEED, &mut seed).map_err(|e| {
-        CommandError::from(format!("hkdf expand (keychain): {e}"))
-    })?;
+    hk.expand(HKDF_INFO_KEYCHAIN_SEED, &mut seed)
+        .map_err(|e| CommandError::from(format!("hkdf expand (keychain): {e}")))?;
     Ok(seed)
 }
 
@@ -230,19 +216,15 @@ fn seed_from_keychain() -> Result<[u8; ML_KEM_768_SEED_LEN], CommandError> {
 /// and RFC-6979 ECDSA signatures are both deterministic — the same
 /// (card, salt) pair always produces the same seed.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn seed_from_yubikey_signature(
-    signature: &[u8],
-    salt: &[u8],
-) -> Result<[u8; ML_KEM_768_SEED_LEN], CommandError> {
+fn seed_from_yubikey_signature(signature: &[u8], salt: &[u8]) -> Result<[u8; ML_KEM_768_SEED_LEN], CommandError> {
     // HKDF salt is the openly-stored salt; IKM is the signature.
     // That way a captured file + known salt still isn't enough —
     // the attacker also needs the private key that produced the
     // signature (which never leaves the YubiKey).
     let hk = Hkdf::<Sha256>::new(Some(salt), signature);
     let mut seed = [0u8; ML_KEM_768_SEED_LEN];
-    hk.expand(HKDF_INFO_YUBIKEY_SEED, &mut seed).map_err(|e| {
-        CommandError::from(format!("hkdf expand (yubikey): {e}"))
-    })?;
+    hk.expand(HKDF_INFO_YUBIKEY_SEED, &mut seed)
+        .map_err(|e| CommandError::from(format!("hkdf expand (yubikey): {e}")))?;
     Ok(seed)
 }
 
@@ -251,8 +233,7 @@ fn seed_from_yubikey_signature(
 fn wrap_key_from_shared_secret(ss: &[u8]) -> Result<[u8; KEY_LEN], CommandError> {
     let hk = Hkdf::<Sha256>::new(None, ss);
     let mut k = [0u8; KEY_LEN];
-    hk.expand(HKDF_INFO_WRAP_KEY, &mut k)
-        .map_err(|e| CommandError::from(format!("hkdf wrap-key: {e}")))?;
+    hk.expand(HKDF_INFO_WRAP_KEY, &mut k).map_err(|e| CommandError::from(format!("hkdf wrap-key: {e}")))?;
     Ok(k)
 }
 
@@ -264,9 +245,7 @@ fn wrap_key_from_shared_secret(ss: &[u8]) -> Result<[u8; KEY_LEN], CommandError>
 /// payload ciphertext.
 fn seal_v2(plaintext: &[u8], slot_seeds: &[SlotSealInput]) -> Result<Vec<u8>, CommandError> {
     if slot_seeds.is_empty() {
-        return Err(CommandError::from(
-            "local_keystore: at least one unlock slot required".to_string(),
-        ));
+        return Err(CommandError::from("local_keystore: at least one unlock slot required".to_string()));
     }
 
     // 1. Generate the one content key that protects the payload.
@@ -288,9 +267,7 @@ fn seal_v2(plaintext: &[u8], slot_seeds: &[SlotSealInput]) -> Result<Vec<u8>, Co
     for input in slot_seeds {
         let (kem_ct, shared_secret) = provider
             .encapsulate(&input.encapsulation_key)
-            .map_err(|e| {
-                CommandError::from(format!("ml-kem encapsulate: {e}"))
-            })?;
+            .map_err(|e| CommandError::from(format!("ml-kem encapsulate: {e}")))?;
         let wrap_key = wrap_key_from_shared_secret(shared_secret.as_bytes())?;
         let mut wrap_nonce = [0u8; NONCE_LEN];
         rand::rng().fill_bytes(&mut wrap_nonce);
@@ -318,11 +295,9 @@ fn seal_v2(plaintext: &[u8], slot_seeds: &[SlotSealInput]) -> Result<Vec<u8>, Co
     content_key.fill(0);
 
     let header = FileHeaderV2 { version: 2, slots };
-    let header_json = serde_json::to_vec(&header)
-        .map_err(|e| CommandError::from(format!("serialise header: {e}")))?;
+    let header_json = serde_json::to_vec(&header).map_err(|e| CommandError::from(format!("serialise header: {e}")))?;
 
-    let mut out =
-        Vec::with_capacity(MAGIC_V2.len() + 4 + header_json.len() + NONCE_LEN + payload_ct.len());
+    let mut out = Vec::with_capacity(MAGIC_V2.len() + 4 + header_json.len() + NONCE_LEN + payload_ct.len());
     out.extend_from_slice(MAGIC_V2);
     out.extend_from_slice(&(header_json.len() as u32).to_be_bytes());
     out.extend_from_slice(&header_json);
@@ -354,20 +329,13 @@ fn open_v2(blob: &[u8]) -> Result<Vec<u8>, CommandError> {
                 // the "same error seven times per page load" noise
                 // is gone.
                 let tag = format!("{:?}:{e}", slot.kind);
-                log_once(&tag, || {
-                    eprintln!(
-                        "local_keystore: slot {i} ({:?}) failed to open: {e}",
-                        slot.kind
-                    )
-                });
+                log_once(&tag, || eprintln!("local_keystore: slot {i} ({:?}) failed to open: {e}", slot.kind));
                 last_err = Some(e);
             }
         }
     }
     Err(last_err.unwrap_or_else(|| {
-        CommandError::from(
-            "local_keystore: no unlock slots available to open the file".to_string(),
-        )
+        CommandError::from("local_keystore: no unlock slots available to open the file".to_string())
     }))
 }
 
@@ -381,9 +349,8 @@ fn try_open_slot(
         SlotKind::Keychain => seed_from_keychain()?,
         SlotKind::Yubikey => derive_yubikey_seed_for_slot(slot)?,
     };
-    let keypair = provider
-        .keypair_from_seed(&seed)
-        .map_err(|e| CommandError::from(format!("ml-kem keygen from seed: {e}")))?;
+    let keypair =
+        provider.keypair_from_seed(&seed).map_err(|e| CommandError::from(format!("ml-kem keygen from seed: {e}")))?;
     let kem_ct = base64_decode(&slot.kem_ct)?;
     let shared_secret = provider
         .decapsulate(keypair.secret_key(), &kem_ct)
@@ -396,29 +363,27 @@ fn try_open_slot(
         return Err(CommandError::from("slot wrap_nonce wrong length".to_string()));
     }
     let cipher = ChaCha20Poly1305::new((&wrap_key).into());
-    let content_key_vec = cipher
-        .decrypt(Nonce::from_slice(&wrap_nonce), wrapped.as_slice())
-        .map_err(|e| {
-            // This is the most common "something is wrong with the
-            // local keystore" path: the KEM seed we derived from
-            // the current OS keychain entry doesn't match what was
-            // used to seal the file. Happens when the keychain
-            // entry gets wiped between runs (OS credential-manager
-            // cleanup, uninstall/reinstall, moving the profile
-            // across machines). The cloud bucket's own data is
-            // unaffected — only the cached unseal key is — so the
-            // remediation is to reset the local keystore and
-            // re-enter the vault's unseal key on next open.
-            CommandError::from(format!(
-                "local keystore: unable to unwrap the cached content key \
+    let content_key_vec = cipher.decrypt(Nonce::from_slice(&wrap_nonce), wrapped.as_slice()).map_err(|e| {
+        // This is the most common "something is wrong with the
+        // local keystore" path: the KEM seed we derived from
+        // the current OS keychain entry doesn't match what was
+        // used to seal the file. Happens when the keychain
+        // entry gets wiped between runs (OS credential-manager
+        // cleanup, uninstall/reinstall, moving the profile
+        // across machines). The cloud bucket's own data is
+        // unaffected — only the cached unseal key is — so the
+        // remediation is to reset the local keystore and
+        // re-enter the vault's unseal key on next open.
+        CommandError::from(format!(
+            "local keystore: unable to unwrap the cached content key \
                  with this machine's Local Key ({e}). The keychain entry \
                  `local-master-key` no longer matches the one that sealed \
                  the file — most likely the OS keychain was wiped between \
                  runs. Vault data on disk / in the cloud is unaffected; \
                  run `Settings → Reset local key cache` and re-enter the \
                  vault's unseal key on next open."
-            ))
-        })?;
+        ))
+    })?;
     if content_key_vec.len() != KEY_LEN {
         return Err(CommandError::from(format!(
             "unwrapped content key has wrong length: {} bytes",
@@ -437,16 +402,10 @@ fn try_open_slot(
     Ok(plain)
 }
 
-fn derive_yubikey_seed_for_slot(
-    slot: &SlotHeader,
-) -> Result<[u8; ML_KEM_768_SEED_LEN], CommandError> {
-    let serial = slot.yk_serial.ok_or_else(|| {
-        CommandError::from("yubikey slot missing `yk_serial`".to_string())
-    })?;
-    let salt_b64 = slot
-        .yk_salt
-        .as_ref()
-        .ok_or_else(|| CommandError::from("yubikey slot missing `yk_salt`".to_string()))?;
+fn derive_yubikey_seed_for_slot(slot: &SlotHeader) -> Result<[u8; ML_KEM_768_SEED_LEN], CommandError> {
+    let serial = slot.yk_serial.ok_or_else(|| CommandError::from("yubikey slot missing `yk_serial`".to_string()))?;
+    let salt_b64 =
+        slot.yk_salt.as_ref().ok_or_else(|| CommandError::from("yubikey slot missing `yk_salt`".to_string()))?;
     let salt = base64_decode(salt_b64)?;
     // The PIN is supplied through a thread-local set by the command
     // layer right before `open`; this keeps the keystore core free
@@ -454,9 +413,7 @@ fn derive_yubikey_seed_for_slot(
     // caller didn't set one — surface as a distinct error so the
     // UI can prompt.
     let pin = current_yubikey_pin().ok_or_else(|| {
-        CommandError::from(
-            "yubikey slot requires PIN — call `set_yubikey_pin` before open".to_string(),
-        )
+        CommandError::from("yubikey slot requires PIN — call `set_yubikey_pin` before open".to_string())
     })?;
     let sig = crate::yubikey_bridge::sign(serial, pin.as_bytes(), &salt)?;
 
@@ -478,14 +435,10 @@ fn derive_yubikey_seed_for_slot(
 
 fn parse_v2(blob: &[u8]) -> Result<(FileHeaderV2, &[u8; NONCE_LEN], &[u8]), CommandError> {
     if blob.len() < MAGIC_V2.len() + 4 + NONCE_LEN {
-        return Err(CommandError::from(
-            "local_keystore: file truncated".to_string(),
-        ));
+        return Err(CommandError::from("local_keystore: file truncated".to_string()));
     }
     if &blob[..MAGIC_V2.len()] != MAGIC_V2 {
-        return Err(CommandError::from(
-            "local_keystore: wrong magic for v2".to_string(),
-        ));
+        return Err(CommandError::from("local_keystore: wrong magic for v2".to_string()));
     }
     let header_len = u32::from_be_bytes([
         blob[MAGIC_V2.len()],
@@ -496,14 +449,10 @@ fn parse_v2(blob: &[u8]) -> Result<(FileHeaderV2, &[u8; NONCE_LEN], &[u8]), Comm
     let header_start = MAGIC_V2.len() + 4;
     let header_end = header_start + header_len;
     if blob.len() < header_end + NONCE_LEN {
-        return Err(CommandError::from(
-            "local_keystore: header length runs off end of file".to_string(),
-        ));
+        return Err(CommandError::from("local_keystore: header length runs off end of file".to_string()));
     }
-    let header: FileHeaderV2 =
-        serde_json::from_slice(&blob[header_start..header_end]).map_err(|e| {
-            CommandError::from(format!("parse v2 header: {e}"))
-        })?;
+    let header: FileHeaderV2 = serde_json::from_slice(&blob[header_start..header_end])
+        .map_err(|e| CommandError::from(format!("parse v2 header: {e}")))?;
 
     // Split the payload_nonce off into a fixed-size slice ref so
     // the caller can pass it straight to ChaCha's nonce type.
@@ -518,22 +467,16 @@ fn parse_v2(blob: &[u8]) -> Result<(FileHeaderV2, &[u8; NONCE_LEN], &[u8]), Comm
 
 fn decrypt_v1(blob: &[u8], key: &[u8; KEY_LEN]) -> Result<Vec<u8>, CommandError> {
     if blob.len() < MAGIC_V1.len() + NONCE_LEN {
-        return Err(CommandError::from(
-            "v1 file truncated".to_string(),
-        ));
+        return Err(CommandError::from("v1 file truncated".to_string()));
     }
     if &blob[..MAGIC_V1.len()] != MAGIC_V1 {
-        return Err(CommandError::from(
-            "v1 file has unrecognised magic".to_string(),
-        ));
+        return Err(CommandError::from("v1 file has unrecognised magic".to_string()));
     }
     let nonce_start = MAGIC_V1.len();
     let nonce_end = nonce_start + NONCE_LEN;
     let nonce = Nonce::from_slice(&blob[nonce_start..nonce_end]);
     let cipher = ChaCha20Poly1305::new(key.into());
-    cipher
-        .decrypt(nonce, &blob[nonce_end..])
-        .map_err(|e| CommandError::from(format!("v1 AEAD decrypt: {e}")))
+    cipher.decrypt(nonce, &blob[nonce_end..]).map_err(|e| CommandError::from(format!("v1 AEAD decrypt: {e}")))
 }
 
 // ── Load + save (version-aware) ────────────────────────────────────
@@ -541,13 +484,9 @@ fn decrypt_v1(blob: &[u8], key: &[u8; KEY_LEN]) -> Result<Vec<u8>, CommandError>
 fn load_contents() -> Result<FileContents, CommandError> {
     let path = keys_file_path()?;
     if !path.exists() {
-        return Ok(FileContents {
-            version: 1,
-            vaults: Default::default(),
-        });
+        return Ok(FileContents { version: 1, vaults: Default::default() });
     }
-    let blob = fs::read(&path)
-        .map_err(|e| CommandError::from(format!("read {path:?}: {e}")))?;
+    let blob = fs::read(&path).map_err(|e| CommandError::from(format!("read {path:?}: {e}")))?;
 
     if blob.starts_with(MAGIC_V2) {
         let plaintext = open_v2(&blob)?;
@@ -566,14 +505,12 @@ fn load_contents() -> Result<FileContents, CommandError> {
         return Ok(parsed);
     }
 
-    Err(CommandError::from(
-        "vault-keys file has unrecognised magic header".to_string(),
-    ))
+    Err(CommandError::from("vault-keys file has unrecognised magic header".to_string()))
 }
 
 fn save_contents(contents: &FileContents) -> Result<(), CommandError> {
-    let plaintext = serde_json::to_vec(contents)
-        .map_err(|e| CommandError::from(format!("serialize vault-keys JSON: {e}")))?;
+    let plaintext =
+        serde_json::to_vec(contents).map_err(|e| CommandError::from(format!("serialize vault-keys JSON: {e}")))?;
     let slot_seeds = build_slot_seal_inputs()?;
     let blob = seal_v2(&plaintext, &slot_seeds)?;
 
@@ -581,15 +518,11 @@ fn save_contents(contents: &FileContents) -> Result<(), CommandError> {
     // a state that locks every vault out.
     let path = keys_file_path()?;
     let tmp = path.with_extension("enc.tmp");
-    let mut f = fs::File::create(&tmp)
-        .map_err(|e| CommandError::from(format!("create {tmp:?}: {e}")))?;
-    f.write_all(&blob)
-        .map_err(|e| CommandError::from(format!("write {tmp:?}: {e}")))?;
-    f.sync_all()
-        .map_err(|e| CommandError::from(format!("sync {tmp:?}: {e}")))?;
+    let mut f = fs::File::create(&tmp).map_err(|e| CommandError::from(format!("create {tmp:?}: {e}")))?;
+    f.write_all(&blob).map_err(|e| CommandError::from(format!("write {tmp:?}: {e}")))?;
+    f.sync_all().map_err(|e| CommandError::from(format!("sync {tmp:?}: {e}")))?;
     drop(f);
-    fs::rename(&tmp, &path)
-        .map_err(|e| CommandError::from(format!("rename {tmp:?} → {path:?}: {e}")))?;
+    fs::rename(&tmp, &path).map_err(|e| CommandError::from(format!("rename {tmp:?} → {path:?}: {e}")))?;
     Ok(())
 }
 
@@ -611,9 +544,7 @@ fn save_contents(contents: &FileContents) -> Result<(), CommandError> {
 /// YubiKey slots are always preserved verbatim from the existing
 /// file (callers that want to add a NEW yubikey append after this
 /// helper).
-fn build_slot_seal_inputs_with_policy(
-    keychain_policy: KeychainSlotPolicy,
-) -> Result<Vec<SlotSealInput>, CommandError> {
+fn build_slot_seal_inputs_with_policy(keychain_policy: KeychainSlotPolicy) -> Result<Vec<SlotSealInput>, CommandError> {
     let mut slots = Vec::new();
 
     let existing_has_keychain = existing_keystore_has_keychain_slot()?;
@@ -628,9 +559,9 @@ fn build_slot_seal_inputs_with_policy(
         // keep the encapsulation key for re-seal.
         let seed = seed_from_keychain()?;
         let provider = MlKem768Provider;
-        let keypair = provider.keypair_from_seed(&seed).map_err(|e| {
-            CommandError::from(format!("ml-kem keypair for keychain slot: {e}"))
-        })?;
+        let keypair = provider
+            .keypair_from_seed(&seed)
+            .map_err(|e| CommandError::from(format!("ml-kem keypair for keychain slot: {e}")))?;
         slots.push(SlotSealInput {
             kind: SlotKind::Keychain,
             encapsulation_key: keypair.public_key().to_vec(),
@@ -656,9 +587,8 @@ fn build_slot_seal_inputs_with_policy(
     if slots.is_empty() {
         let seed = seed_from_keychain()?;
         let provider = MlKem768Provider;
-        let keypair = provider
-            .keypair_from_seed(&seed)
-            .map_err(|e| CommandError::from(format!("ml-kem keypair: {e}")))?;
+        let keypair =
+            provider.keypair_from_seed(&seed).map_err(|e| CommandError::from(format!("ml-kem keypair: {e}")))?;
         slots.push(SlotSealInput {
             kind: SlotKind::Keychain,
             encapsulation_key: keypair.public_key().to_vec(),
@@ -689,8 +619,7 @@ fn existing_keystore_has_keychain_slot() -> Result<bool, CommandError> {
     if !path.exists() {
         return Ok(false);
     }
-    let blob = fs::read(&path)
-        .map_err(|e| CommandError::from(format!("read {path:?}: {e}")))?;
+    let blob = fs::read(&path).map_err(|e| CommandError::from(format!("read {path:?}: {e}")))?;
     if !blob.starts_with(MAGIC_V2) {
         return Ok(false);
     }
@@ -703,8 +632,7 @@ fn load_existing_yubikey_slots() -> Result<Option<Vec<SlotSealInput>>, CommandEr
     if !path.exists() {
         return Ok(None);
     }
-    let blob = fs::read(&path)
-        .map_err(|e| CommandError::from(format!("read {path:?}: {e}")))?;
+    let blob = fs::read(&path).map_err(|e| CommandError::from(format!("read {path:?}: {e}")))?;
     if !blob.starts_with(MAGIC_V2) {
         return Ok(None);
     }
@@ -771,17 +699,12 @@ fn current_yubikey_pin() -> Option<String> {
 pub fn get_unseal_key(vault_id: &str) -> Result<Option<String>, CommandError> {
     migrate_legacy_if_needed(vault_id)?;
     let contents = load_contents()?;
-    Ok(contents
-        .vaults
-        .get(vault_id)
-        .map(|k| k.unseal_key_hex.clone()))
+    Ok(contents.vaults.get(vault_id).map(|k| k.unseal_key_hex.clone()))
 }
 
 pub fn store_unseal_key(vault_id: &str, unseal_key_hex: &str) -> Result<(), CommandError> {
     if vault_id.trim().is_empty() {
-        return Err(CommandError::from(
-            "store_unseal_key: vault_id must be non-empty".to_string(),
-        ));
+        return Err(CommandError::from("store_unseal_key: vault_id must be non-empty".to_string()));
     }
     let mut contents = load_contents().unwrap_or_default();
     if contents.version == 0 {
@@ -799,17 +722,12 @@ pub fn store_unseal_key(vault_id: &str, unseal_key_hex: &str) -> Result<(), Comm
 pub fn get_root_token(vault_id: &str) -> Result<Option<String>, CommandError> {
     migrate_legacy_if_needed(vault_id)?;
     let contents = load_contents()?;
-    Ok(contents
-        .vaults
-        .get(vault_id)
-        .map(|k| k.root_token.clone()))
+    Ok(contents.vaults.get(vault_id).map(|k| k.root_token.clone()))
 }
 
 pub fn store_root_token(vault_id: &str, root_token: &str) -> Result<(), CommandError> {
     if vault_id.trim().is_empty() {
-        return Err(CommandError::from(
-            "store_root_token: vault_id must be non-empty".to_string(),
-        ));
+        return Err(CommandError::from("store_root_token: vault_id must be non-empty".to_string()));
     }
     let mut contents = load_contents().unwrap_or_default();
     if contents.version == 0 {
@@ -893,8 +811,7 @@ pub fn list_registered_yubikeys() -> Result<Vec<RegisteredYubiKey>, CommandError
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let blob = fs::read(&path)
-        .map_err(|e| CommandError::from(format!("read {path:?}: {e}")))?;
+    let blob = fs::read(&path).map_err(|e| CommandError::from(format!("read {path:?}: {e}")))?;
     if !blob.starts_with(MAGIC_V2) {
         return Ok(Vec::new());
     }
@@ -903,11 +820,7 @@ pub fn list_registered_yubikeys() -> Result<Vec<RegisteredYubiKey>, CommandError
     for slot in header.slots {
         if slot.kind == SlotKind::Yubikey {
             if let (Some(serial), Some(key_id)) = (slot.yk_serial, slot.yk_key_id) {
-                out.push(RegisteredYubiKey {
-                    serial,
-                    key_id,
-                    registered_at: 0,
-                });
+                out.push(RegisteredYubiKey { serial, key_id, registered_at: 0 });
             }
         }
     }
@@ -928,11 +841,7 @@ pub fn list_registered_yubikeys() -> Result<Vec<RegisteredYubiKey>, CommandError
 /// enrolled — multi-card setups are the recommended posture, since
 /// a single-card-required posture loses access permanently if
 /// that one card is damaged or lost).
-pub fn register_yubikey(
-    serial: u32,
-    pin: String,
-    require: bool,
-) -> Result<RegisteredYubiKey, CommandError> {
+pub fn register_yubikey(serial: u32, pin: String, require: bool) -> Result<RegisteredYubiKey, CommandError> {
     // Load the current file so we re-encrypt with the new slot
     // alongside the existing ones. Empty keystore → start a new file.
     let mut contents = load_contents().unwrap_or_default();
@@ -975,11 +884,7 @@ pub fn register_yubikey(
     // we drop the keychain slot from the re-sealed file so only
     // YubiKey(s) can unlock; when false, we preserve whatever
     // keychain policy the existing file already had.
-    let policy = if require {
-        KeychainSlotPolicy::Exclude
-    } else {
-        KeychainSlotPolicy::Auto
-    };
+    let policy = if require { KeychainSlotPolicy::Exclude } else { KeychainSlotPolicy::Auto };
     let mut slot_seeds = build_slot_seal_inputs_with_policy(policy)?;
     slot_seeds.push(SlotSealInput {
         kind: SlotKind::Yubikey,
@@ -989,20 +894,16 @@ pub fn register_yubikey(
         yk_salt: Some(salt_b64),
     });
 
-    let plaintext = serde_json::to_vec(&contents)
-        .map_err(|e| CommandError::from(format!("serialise vault-keys JSON: {e}")))?;
+    let plaintext =
+        serde_json::to_vec(&contents).map_err(|e| CommandError::from(format!("serialise vault-keys JSON: {e}")))?;
     let blob = seal_v2(&plaintext, &slot_seeds)?;
     let path = keys_file_path()?;
     let tmp = path.with_extension("enc.tmp");
-    let mut f = fs::File::create(&tmp)
-        .map_err(|e| CommandError::from(format!("create {tmp:?}: {e}")))?;
-    f.write_all(&blob)
-        .map_err(|e| CommandError::from(format!("write {tmp:?}: {e}")))?;
-    f.sync_all()
-        .map_err(|e| CommandError::from(format!("sync {tmp:?}: {e}")))?;
+    let mut f = fs::File::create(&tmp).map_err(|e| CommandError::from(format!("create {tmp:?}: {e}")))?;
+    f.write_all(&blob).map_err(|e| CommandError::from(format!("write {tmp:?}: {e}")))?;
+    f.sync_all().map_err(|e| CommandError::from(format!("sync {tmp:?}: {e}")))?;
     drop(f);
-    fs::rename(&tmp, &path)
-        .map_err(|e| CommandError::from(format!("rename {tmp:?} → {path:?}: {e}")))?;
+    fs::rename(&tmp, &path).map_err(|e| CommandError::from(format!("rename {tmp:?} → {path:?}: {e}")))?;
 
     // Don't leave the PIN sitting in the static after a successful
     // registration — the caller's session is done with it.
@@ -1048,11 +949,7 @@ pub fn register_yubikey(
     // verbatim. Drop the binding here to silence the unused-mut
     // lint without the earlier self-assignment hack.
     drop(contents);
-    Ok(RegisteredYubiKey {
-        serial,
-        key_id: key_id_b64,
-        registered_at: now_unix(),
-    })
+    Ok(RegisteredYubiKey { serial, key_id: key_id_b64, registered_at: now_unix() })
 }
 
 /// Re-enable keychain unlock alongside any registered YubiKeys.
@@ -1071,20 +968,16 @@ pub fn enable_keychain_slot() -> Result<(), CommandError> {
     // atomically.
     let contents = load_contents()?;
     let slot_seeds = build_slot_seal_inputs_with_policy(KeychainSlotPolicy::Include)?;
-    let plaintext = serde_json::to_vec(&contents)
-        .map_err(|e| CommandError::from(format!("serialise vault-keys JSON: {e}")))?;
+    let plaintext =
+        serde_json::to_vec(&contents).map_err(|e| CommandError::from(format!("serialise vault-keys JSON: {e}")))?;
     let blob = seal_v2(&plaintext, &slot_seeds)?;
     let path = keys_file_path()?;
     let tmp = path.with_extension("enc.tmp");
-    let mut f = fs::File::create(&tmp)
-        .map_err(|e| CommandError::from(format!("create {tmp:?}: {e}")))?;
-    f.write_all(&blob)
-        .map_err(|e| CommandError::from(format!("write {tmp:?}: {e}")))?;
-    f.sync_all()
-        .map_err(|e| CommandError::from(format!("sync {tmp:?}: {e}")))?;
+    let mut f = fs::File::create(&tmp).map_err(|e| CommandError::from(format!("create {tmp:?}: {e}")))?;
+    f.write_all(&blob).map_err(|e| CommandError::from(format!("write {tmp:?}: {e}")))?;
+    f.sync_all().map_err(|e| CommandError::from(format!("sync {tmp:?}: {e}")))?;
     drop(f);
-    fs::rename(&tmp, &path)
-        .map_err(|e| CommandError::from(format!("rename {tmp:?} → {path:?}: {e}")))?;
+    fs::rename(&tmp, &path).map_err(|e| CommandError::from(format!("rename {tmp:?} → {path:?}: {e}")))?;
     Ok(())
 }
 
@@ -1106,22 +999,15 @@ pub fn remove_yubikey(serial: u32) -> Result<(), CommandError> {
         return Ok(());
     }
     let contents = load_contents()?;
-    let blob = fs::read(&path)
-        .map_err(|e| CommandError::from(format!("read {path:?}: {e}")))?;
+    let blob = fs::read(&path).map_err(|e| CommandError::from(format!("read {path:?}: {e}")))?;
     if !blob.starts_with(MAGIC_V2) {
         return Ok(());
     }
     let (header, _, _) = parse_v2(&blob)?;
     let has_keychain = header.slots.iter().any(|s| s.kind == SlotKind::Keychain);
-    let yk_count = header
-        .slots
-        .iter()
-        .filter(|s| s.kind == SlotKind::Yubikey)
-        .count();
+    let yk_count = header.slots.iter().filter(|s| s.kind == SlotKind::Yubikey).count();
     if !has_keychain && yk_count <= 1 {
-        return Err(CommandError::from(
-            "local_keystore: refusing to remove the last unlock slot".to_string(),
-        ));
+        return Err(CommandError::from("local_keystore: refusing to remove the last unlock slot".to_string()));
     }
 
     // Rebuild seal inputs minus the target serial, then re-save.
@@ -1146,9 +1032,7 @@ pub fn remove_yubikey(serial: u32) -> Result<(), CommandError> {
     // Prepend the fresh keychain slot.
     let seed = seed_from_keychain()?;
     let provider = MlKem768Provider;
-    let keypair = provider
-        .keypair_from_seed(&seed)
-        .map_err(|e| CommandError::from(format!("ml-kem keypair: {e}")))?;
+    let keypair = provider.keypair_from_seed(&seed).map_err(|e| CommandError::from(format!("ml-kem keypair: {e}")))?;
     let mut seeds = vec![SlotSealInput {
         kind: SlotKind::Keychain,
         encapsulation_key: keypair.public_key().to_vec(),
@@ -1158,19 +1042,15 @@ pub fn remove_yubikey(serial: u32) -> Result<(), CommandError> {
     }];
     seeds.extend(keep);
 
-    let plaintext = serde_json::to_vec(&contents)
-        .map_err(|e| CommandError::from(format!("serialise vault-keys JSON: {e}")))?;
+    let plaintext =
+        serde_json::to_vec(&contents).map_err(|e| CommandError::from(format!("serialise vault-keys JSON: {e}")))?;
     let blob = seal_v2(&plaintext, &seeds)?;
     let tmp = path.with_extension("enc.tmp");
-    let mut f = fs::File::create(&tmp)
-        .map_err(|e| CommandError::from(format!("create {tmp:?}: {e}")))?;
-    f.write_all(&blob)
-        .map_err(|e| CommandError::from(format!("write {tmp:?}: {e}")))?;
-    f.sync_all()
-        .map_err(|e| CommandError::from(format!("sync {tmp:?}: {e}")))?;
+    let mut f = fs::File::create(&tmp).map_err(|e| CommandError::from(format!("create {tmp:?}: {e}")))?;
+    f.write_all(&blob).map_err(|e| CommandError::from(format!("write {tmp:?}: {e}")))?;
+    f.sync_all().map_err(|e| CommandError::from(format!("sync {tmp:?}: {e}")))?;
     drop(f);
-    fs::rename(&tmp, &path)
-        .map_err(|e| CommandError::from(format!("rename {tmp:?} → {path:?}: {e}")))?;
+    fs::rename(&tmp, &path).map_err(|e| CommandError::from(format!("rename {tmp:?} → {path:?}: {e}")))?;
     Ok(())
 }
 
@@ -1189,14 +1069,11 @@ fn migrate_legacy_if_needed(vault_id: &str) -> Result<(), CommandError> {
     }
     let already = contents.vaults.contains_key(vault_id);
     if !already {
-        let entry = contents
-            .vaults
-            .entry(vault_id.to_string())
-            .or_insert(VaultKeys {
-                unseal_key_hex: String::new(),
-                root_token: String::new(),
-                created_at: now_unix(),
-            });
+        let entry = contents.vaults.entry(vault_id.to_string()).or_insert(VaultKeys {
+            unseal_key_hex: String::new(),
+            root_token: String::new(),
+            created_at: now_unix(),
+        });
         if let Some(k) = legacy_unseal {
             entry.unseal_key_hex = k;
         }
@@ -1234,10 +1111,7 @@ fn log_once<F: FnOnce()>(tag: &str, body: F) {
 }
 
 fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -1247,9 +1121,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 
 fn base64_decode(s: &str) -> Result<Vec<u8>, CommandError> {
     use base64::{engine::general_purpose, Engine as _};
-    general_purpose::STANDARD
-        .decode(s)
-        .map_err(|e| CommandError::from(format!("base64 decode: {e}")))
+    general_purpose::STANDARD.decode(s).map_err(|e| CommandError::from(format!("base64 decode: {e}")))
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -1324,20 +1196,11 @@ mod tests {
             let _ = wipe_all();
             store_unseal_key("vault-a", "aaaa1111").unwrap();
             store_unseal_key("vault-b", "bbbb2222").unwrap();
-            assert_eq!(
-                get_unseal_key("vault-a").unwrap().as_deref(),
-                Some("aaaa1111")
-            );
-            assert_eq!(
-                get_unseal_key("vault-b").unwrap().as_deref(),
-                Some("bbbb2222")
-            );
+            assert_eq!(get_unseal_key("vault-a").unwrap().as_deref(), Some("aaaa1111"));
+            assert_eq!(get_unseal_key("vault-b").unwrap().as_deref(), Some("bbbb2222"));
             remove_vault("vault-a").unwrap();
             assert!(get_unseal_key("vault-a").unwrap().is_none());
-            assert_eq!(
-                get_unseal_key("vault-b").unwrap().as_deref(),
-                Some("bbbb2222")
-            );
+            assert_eq!(get_unseal_key("vault-b").unwrap().as_deref(), Some("bbbb2222"));
             remove_vault("vault-b").unwrap();
             let _ = wipe_all();
         });
@@ -1367,9 +1230,7 @@ mod tests {
             let mut nonce = [0u8; NONCE_LEN];
             rand::rng().fill_bytes(&mut nonce);
             let cipher = ChaCha20Poly1305::new((&key).into());
-            let ct = cipher
-                .encrypt(Nonce::from_slice(&nonce), plaintext.as_slice())
-                .unwrap();
+            let ct = cipher.encrypt(Nonce::from_slice(&nonce), plaintext.as_slice()).unwrap();
             let mut v1 = Vec::with_capacity(4 + NONCE_LEN + ct.len());
             v1.extend_from_slice(MAGIC_V1);
             v1.extend_from_slice(&nonce);
@@ -1378,19 +1239,13 @@ mod tests {
             fs::write(&path, &v1).unwrap();
 
             // Read the legacy file via the normal public API.
-            assert_eq!(
-                get_unseal_key("legacy").unwrap().as_deref(),
-                Some("deadbeef")
-            );
+            assert_eq!(get_unseal_key("legacy").unwrap().as_deref(), Some("deadbeef"));
 
             // Trigger a write — the next save produces a v2 file.
             store_unseal_key("legacy", "newvalue").unwrap();
             let on_disk = fs::read(&path).unwrap();
             assert_eq!(&on_disk[..4], MAGIC_V2);
-            assert_eq!(
-                get_unseal_key("legacy").unwrap().as_deref(),
-                Some("newvalue")
-            );
+            assert_eq!(get_unseal_key("legacy").unwrap().as_deref(), Some("newvalue"));
             let _ = wipe_all();
         });
     }
@@ -1419,10 +1274,7 @@ mod tests {
         blob.extend_from_slice(b"BVK\x99");
         blob.extend_from_slice(&[0u8; 28]);
         let err = parse_v2(&blob).unwrap_err();
-        assert!(
-            format!("{err}").contains("magic"),
-            "expected `magic` in error, got: {err}"
-        );
+        assert!(format!("{err}").contains("magic"), "expected `magic` in error, got: {err}");
     }
 
     #[test]

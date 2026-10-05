@@ -212,10 +212,7 @@ pub async fn sso_admin_list(state: State<'_, AppState>) -> CmdResult<Vec<SsoAdmi
 }
 
 #[tauri::command]
-pub async fn sso_admin_get(
-    state: State<'_, AppState>,
-    mount: String,
-) -> CmdResult<SsoAdminProvider> {
+pub async fn sso_admin_get(state: State<'_, AppState>, mount: String) -> CmdResult<SsoAdminProvider> {
     let mounts = load_sso_mounts(&state).await?;
     let found = mounts
         .iter()
@@ -226,10 +223,7 @@ pub async fn sso_admin_get(
 }
 
 #[tauri::command]
-pub async fn sso_admin_create(
-    state: State<'_, AppState>,
-    input: SsoAdminInput,
-) -> CmdResult<()> {
+pub async fn sso_admin_create(state: State<'_, AppState>, input: SsoAdminInput) -> CmdResult<()> {
     validate_input(&input)?;
 
     // 1. Mount the auth backend with the operator's display name as
@@ -237,10 +231,7 @@ pub async fn sso_admin_create(
     //    surfaces this as the login button label.
     let mut mount_body = Map::new();
     mount_body.insert("type".into(), Value::String(input.kind.clone()));
-    mount_body.insert(
-        "description".into(),
-        Value::String(input.display_name.clone()),
-    );
+    mount_body.insert("description".into(), Value::String(input.display_name.clone()));
     sys_write(&state, &format!("sys/auth/{}", input.mount), mount_body).await?;
 
     // 2. Write provider config. On create we allow clearing secrets
@@ -254,10 +245,7 @@ pub async fn sso_admin_create(
 }
 
 #[tauri::command]
-pub async fn sso_admin_update(
-    state: State<'_, AppState>,
-    input: SsoAdminInput,
-) -> CmdResult<()> {
+pub async fn sso_admin_update(state: State<'_, AppState>, input: SsoAdminInput) -> CmdResult<()> {
     validate_input(&input)?;
 
     // Refresh the mount description if the display name changed.
@@ -266,18 +254,11 @@ pub async fn sso_admin_update(
     // Tolerate errors — the buttons will still render from the
     // latest description on next read.
     let mounts = load_sso_mounts(&state).await?;
-    let current_desc = mounts
-        .iter()
-        .find(|(m, _, _)| *m == input.mount)
-        .map(|(_, _, d)| d.clone())
-        .unwrap_or_default();
+    let current_desc = mounts.iter().find(|(m, _, _)| *m == input.mount).map(|(_, _, d)| d.clone()).unwrap_or_default();
     if current_desc != input.display_name {
         let mut mount_body = Map::new();
         mount_body.insert("type".into(), Value::String(input.kind.clone()));
-        mount_body.insert(
-            "description".into(),
-            Value::String(input.display_name.clone()),
-        );
+        mount_body.insert("description".into(), Value::String(input.display_name.clone()));
         let _ = sys_write(&state, &format!("sys/auth/{}", input.mount), mount_body).await;
     }
 
@@ -443,28 +424,18 @@ async fn callback_nodes(state: &State<'_, AppState>, mount: &str) -> Vec<SsoCall
 
 // ── helpers ────────────────────────────────────────────────────────
 
-async fn load_sso_mounts(
-    state: &State<'_, AppState>,
-) -> Result<Vec<(String, String, String)>, CommandError> {
+async fn load_sso_mounts(state: &State<'_, AppState>) -> Result<Vec<(String, String, String)>, CommandError> {
     // Returns `(mount, kind, description)` tuples for every mounted
     // SSO-capable auth backend.
     let data = sys_read(state, "sys/auth").await?;
     let mut out: Vec<(String, String, String)> = Vec::new();
     for (raw_path, v) in data.iter() {
-        let kind = v
-            .get("type")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
+        let kind = v.get("type").and_then(|x| x.as_str()).unwrap_or("").to_string();
         if kind != "oidc" && kind != "saml" {
             continue;
         }
         let mount = raw_path.trim_end_matches('/').to_string();
-        let description = v
-            .get("description")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
+        let description = v.get("description").and_then(|x| x.as_str()).unwrap_or("").to_string();
         out.push((mount, kind, description));
     }
     Ok(out)
@@ -488,26 +459,18 @@ async fn load_oidc_detail(
     mount: &str,
     display_name: &str,
 ) -> Result<SsoAdminProvider, CommandError> {
-    let cfg_data = sys_read(state, &format!("auth/{mount}/config"))
-        .await
-        .unwrap_or_default();
+    let cfg_data = sys_read(state, &format!("auth/{mount}/config")).await.unwrap_or_default();
     let config = OidcAdminConfig {
         discovery_url: str_field(&cfg_data, "oidc_discovery_url"),
         client_id: str_field(&cfg_data, "oidc_client_id"),
-        client_secret_set: cfg_data
-            .get("oidc_client_secret_set")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        client_secret_set: cfg_data.get("oidc_client_secret_set").and_then(|v| v.as_bool()).unwrap_or(false),
         scopes: string_list(&cfg_data, "oidc_scopes"),
         allowed_redirect_uris: string_list(&cfg_data, "allowed_redirect_uris"),
     };
     let default_role = str_field(&cfg_data, "default_role");
     let role = if !default_role.is_empty() {
         match sys_read(state, &format!("auth/{mount}/role/{default_role}")).await {
-            Ok(d) if !d.is_empty() => Some(SsoAdminRole::Oidc(oidc_role_from_data(
-                &default_role,
-                &d,
-            ))),
+            Ok(d) if !d.is_empty() => Some(SsoAdminRole::Oidc(oidc_role_from_data(&default_role, &d))),
             _ => None,
         }
     } else {
@@ -528,32 +491,21 @@ async fn load_saml_detail(
     mount: &str,
     display_name: &str,
 ) -> Result<SsoAdminProvider, CommandError> {
-    let cfg_data = sys_read(state, &format!("auth/{mount}/config"))
-        .await
-        .unwrap_or_default();
+    let cfg_data = sys_read(state, &format!("auth/{mount}/config")).await.unwrap_or_default();
     let config = SamlAdminConfig {
         entity_id: str_field(&cfg_data, "entity_id"),
         acs_url: str_field(&cfg_data, "acs_url"),
         idp_sso_url: str_field(&cfg_data, "idp_sso_url"),
         idp_slo_url: str_field(&cfg_data, "idp_slo_url"),
         idp_metadata_url: str_field(&cfg_data, "idp_metadata_url"),
-        idp_metadata_xml_set: cfg_data
-            .get("idp_metadata_xml_set")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        idp_cert_set: cfg_data
-            .get("idp_cert_set")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        idp_metadata_xml_set: cfg_data.get("idp_metadata_xml_set").and_then(|v| v.as_bool()).unwrap_or(false),
+        idp_cert_set: cfg_data.get("idp_cert_set").and_then(|v| v.as_bool()).unwrap_or(false),
         allowed_redirect_uris: string_list(&cfg_data, "allowed_redirect_uris"),
     };
     let default_role = str_field(&cfg_data, "default_role");
     let role = if !default_role.is_empty() {
         match sys_read(state, &format!("auth/{mount}/role/{default_role}")).await {
-            Ok(d) if !d.is_empty() => Some(SsoAdminRole::Saml(saml_role_from_data(
-                &default_role,
-                &d,
-            ))),
+            Ok(d) if !d.is_empty() => Some(SsoAdminRole::Saml(saml_role_from_data(&default_role, &d))),
             _ => None,
         }
     } else {
@@ -580,11 +532,7 @@ fn validate_input(input: &SsoAdminInput) -> Result<(), CommandError> {
         return Err("sso: default role name is required".into());
     }
     // Kind must match the config + role variants.
-    match (
-        input.kind.as_str(),
-        &input.config,
-        &input.role,
-    ) {
+    match (input.kind.as_str(), &input.config, &input.role) {
         ("oidc", SsoAdminInputConfig::Oidc(cfg), SsoAdminRole::Oidc(role)) => {
             if cfg.discovery_url.trim().is_empty() {
                 return Err("sso: OIDC discovery URL is required".into());
@@ -602,9 +550,11 @@ fn validate_input(input: &SsoAdminInput) -> Result<(), CommandError> {
             if !bc.is_empty() {
                 match serde_json::from_str::<Value>(bc) {
                     Ok(Value::Object(_)) => {}
-                    Ok(_) => return Err(
-                        "sso: OIDC `bound_claims` must be a JSON object (e.g. `{\"hd\":[\"example.com\"]}`)".into(),
-                    ),
+                    Ok(_) => {
+                        return Err(
+                            "sso: OIDC `bound_claims` must be a JSON object (e.g. `{\"hd\":[\"example.com\"]}`)".into(),
+                        )
+                    }
                     Err(e) => return Err(format!("sso: OIDC `bound_claims` invalid JSON: {e}").into()),
                 }
             }
@@ -616,10 +566,8 @@ fn validate_input(input: &SsoAdminInput) -> Result<(), CommandError> {
             if cfg.acs_url.trim().is_empty() {
                 return Err("sso: SAML `acs_url` (ACS URL) is required".into());
             }
-            let has_metadata = !cfg.idp_metadata_url.trim().is_empty()
-                || !cfg.idp_metadata_xml.trim().is_empty();
-            let has_manual =
-                !cfg.idp_sso_url.trim().is_empty() && !cfg.idp_cert.trim().is_empty();
+            let has_metadata = !cfg.idp_metadata_url.trim().is_empty() || !cfg.idp_metadata_xml.trim().is_empty();
+            let has_manual = !cfg.idp_sso_url.trim().is_empty() && !cfg.idp_cert.trim().is_empty();
             if !has_metadata && !has_manual {
                 return Err(
                     "sso: SAML requires either `idp_metadata_url` / `idp_metadata_xml` OR both `idp_sso_url` and `idp_cert`".into(),
@@ -637,22 +585,13 @@ fn validate_input(input: &SsoAdminInput) -> Result<(), CommandError> {
                 }
                 match serde_json::from_str::<Value>(raw) {
                     Ok(Value::Object(_)) => {}
-                    Ok(_) => {
-                        return Err(
-                            format!("sso: SAML `{field}` must be a JSON object").into(),
-                        )
-                    }
-                    Err(e) => {
-                        return Err(format!("sso: SAML `{field}` invalid JSON: {e}").into())
-                    }
+                    Ok(_) => return Err(format!("sso: SAML `{field}` must be a JSON object").into()),
+                    Err(e) => return Err(format!("sso: SAML `{field}` invalid JSON: {e}").into()),
                 }
             }
         }
         (kind, _, _) => {
-            return Err(format!(
-                "sso: input kind `{kind}` does not match the supplied config/role shape"
-            )
-            .into())
+            return Err(format!("sso: input kind `{kind}` does not match the supplied config/role shape").into())
         }
     }
     Ok(())
@@ -666,37 +605,19 @@ async fn write_provider_config(
     match &input.config {
         SsoAdminInputConfig::Oidc(cfg) => {
             let mut body = Map::new();
-            body.insert(
-                "oidc_discovery_url".into(),
-                Value::String(cfg.discovery_url.clone()),
-            );
-            body.insert(
-                "oidc_client_id".into(),
-                Value::String(cfg.client_id.clone()),
-            );
+            body.insert("oidc_discovery_url".into(), Value::String(cfg.discovery_url.clone()));
+            body.insert("oidc_client_id".into(), Value::String(cfg.client_id.clone()));
             // Empty-on-update preserves existing secret (backend
             // merges onto prior config). Empty-on-create persists
             // an empty secret (public / PKCE client).
             if allow_secret_clear || !cfg.client_secret.is_empty() {
-                body.insert(
-                    "oidc_client_secret".into(),
-                    Value::String(cfg.client_secret.clone()),
-                );
+                body.insert("oidc_client_secret".into(), Value::String(cfg.client_secret.clone()));
             }
-            body.insert(
-                "default_role".into(),
-                Value::String(input.default_role.clone()),
-            );
+            body.insert("default_role".into(), Value::String(input.default_role.clone()));
             if !cfg.allowed_redirect_uris.is_empty() {
                 body.insert(
                     "allowed_redirect_uris".into(),
-                    Value::Array(
-                        cfg.allowed_redirect_uris
-                            .iter()
-                            .cloned()
-                            .map(Value::String)
-                            .collect(),
-                    ),
+                    Value::Array(cfg.allowed_redirect_uris.iter().cloned().map(Value::String).collect()),
                 );
             }
             if !cfg.scopes.is_empty() {
@@ -712,46 +633,25 @@ async fn write_provider_config(
             body.insert("entity_id".into(), Value::String(cfg.entity_id.clone()));
             body.insert("acs_url".into(), Value::String(cfg.acs_url.clone()));
             if !cfg.idp_sso_url.is_empty() {
-                body.insert(
-                    "idp_sso_url".into(),
-                    Value::String(cfg.idp_sso_url.clone()),
-                );
+                body.insert("idp_sso_url".into(), Value::String(cfg.idp_sso_url.clone()));
             }
             if !cfg.idp_slo_url.is_empty() {
-                body.insert(
-                    "idp_slo_url".into(),
-                    Value::String(cfg.idp_slo_url.clone()),
-                );
+                body.insert("idp_slo_url".into(), Value::String(cfg.idp_slo_url.clone()));
             }
             if !cfg.idp_metadata_url.is_empty() {
-                body.insert(
-                    "idp_metadata_url".into(),
-                    Value::String(cfg.idp_metadata_url.clone()),
-                );
+                body.insert("idp_metadata_url".into(), Value::String(cfg.idp_metadata_url.clone()));
             }
             if allow_secret_clear || !cfg.idp_metadata_xml.is_empty() {
-                body.insert(
-                    "idp_metadata_xml".into(),
-                    Value::String(cfg.idp_metadata_xml.clone()),
-                );
+                body.insert("idp_metadata_xml".into(), Value::String(cfg.idp_metadata_xml.clone()));
             }
             if allow_secret_clear || !cfg.idp_cert.is_empty() {
                 body.insert("idp_cert".into(), Value::String(cfg.idp_cert.clone()));
             }
-            body.insert(
-                "default_role".into(),
-                Value::String(input.default_role.clone()),
-            );
+            body.insert("default_role".into(), Value::String(input.default_role.clone()));
             if !cfg.allowed_redirect_uris.is_empty() {
                 body.insert(
                     "allowed_redirect_uris".into(),
-                    Value::Array(
-                        cfg.allowed_redirect_uris
-                            .iter()
-                            .cloned()
-                            .map(Value::String)
-                            .collect(),
-                    ),
+                    Value::Array(cfg.allowed_redirect_uris.iter().cloned().map(Value::String).collect()),
                 );
             }
             sys_write(state, &format!("auth/{}/config", input.mount), body).await?;
@@ -760,82 +660,42 @@ async fn write_provider_config(
     Ok(())
 }
 
-async fn write_provider_role(
-    state: &State<'_, AppState>,
-    input: &SsoAdminInput,
-) -> Result<(), CommandError> {
+async fn write_provider_role(state: &State<'_, AppState>, input: &SsoAdminInput) -> Result<(), CommandError> {
     match &input.role {
         SsoAdminRole::Oidc(role) => {
             let mut body = Map::new();
             body.insert("user_claim".into(), Value::String(role.user_claim.clone()));
             if !role.groups_claim.is_empty() {
-                body.insert(
-                    "groups_claim".into(),
-                    Value::String(role.groups_claim.clone()),
-                );
+                body.insert("groups_claim".into(), Value::String(role.groups_claim.clone()));
             }
             if !role.bound_audiences.is_empty() {
                 body.insert(
                     "bound_audiences".into(),
-                    Value::Array(
-                        role.bound_audiences
-                            .iter()
-                            .cloned()
-                            .map(Value::String)
-                            .collect(),
-                    ),
+                    Value::Array(role.bound_audiences.iter().cloned().map(Value::String).collect()),
                 );
             }
             if !role.bound_claims_json.trim().is_empty() {
-                body.insert(
-                    "bound_claims".into(),
-                    Value::String(role.bound_claims_json.trim().to_string()),
-                );
+                body.insert("bound_claims".into(), Value::String(role.bound_claims_json.trim().to_string()));
             }
-            body.insert(
-                "policies".into(),
-                Value::Array(
-                    role.policies.iter().cloned().map(Value::String).collect(),
-                ),
-            );
+            body.insert("policies".into(), Value::Array(role.policies.iter().cloned().map(Value::String).collect()));
             if role.token_ttl_secs > 0 {
-                body.insert(
-                    "token_ttl_secs".into(),
-                    Value::Number(role.token_ttl_secs.into()),
-                );
+                body.insert("token_ttl_secs".into(), Value::Number(role.token_ttl_secs.into()));
             }
-            sys_write(
-                state,
-                &format!("auth/{}/role/{}", input.mount, input.default_role),
-                body,
-            )
-            .await?;
+            sys_write(state, &format!("auth/{}/role/{}", input.mount, input.default_role), body).await?;
         }
         SsoAdminRole::Saml(role) => {
             let mut body = Map::new();
             if !role.bound_subjects.is_empty() {
                 body.insert(
                     "bound_subjects".into(),
-                    Value::Array(
-                        role.bound_subjects
-                            .iter()
-                            .cloned()
-                            .map(Value::String)
-                            .collect(),
-                    ),
+                    Value::Array(role.bound_subjects.iter().cloned().map(Value::String).collect()),
                 );
             }
             if !role.bound_subjects_type.is_empty() {
-                body.insert(
-                    "bound_subjects_type".into(),
-                    Value::String(role.bound_subjects_type.clone()),
-                );
+                body.insert("bound_subjects_type".into(), Value::String(role.bound_subjects_type.clone()));
             }
             if !role.bound_attributes_json.trim().is_empty() {
-                body.insert(
-                    "bound_attributes".into(),
-                    Value::String(role.bound_attributes_json.trim().to_string()),
-                );
+                body.insert("bound_attributes".into(), Value::String(role.bound_attributes_json.trim().to_string()));
             }
             if !role.attribute_mappings_json.trim().is_empty() {
                 body.insert(
@@ -844,29 +704,13 @@ async fn write_provider_role(
                 );
             }
             if !role.groups_attribute.is_empty() {
-                body.insert(
-                    "groups_attribute".into(),
-                    Value::String(role.groups_attribute.clone()),
-                );
+                body.insert("groups_attribute".into(), Value::String(role.groups_attribute.clone()));
             }
-            body.insert(
-                "policies".into(),
-                Value::Array(
-                    role.policies.iter().cloned().map(Value::String).collect(),
-                ),
-            );
+            body.insert("policies".into(), Value::Array(role.policies.iter().cloned().map(Value::String).collect()));
             if role.token_ttl_secs > 0 {
-                body.insert(
-                    "token_ttl_secs".into(),
-                    Value::Number(role.token_ttl_secs.into()),
-                );
+                body.insert("token_ttl_secs".into(), Value::Number(role.token_ttl_secs.into()));
             }
-            sys_write(
-                state,
-                &format!("auth/{}/role/{}", input.mount, input.default_role),
-                body,
-            )
-            .await?;
+            sys_write(state, &format!("auth/{}/role/{}", input.mount, input.default_role), body).await?;
         }
     }
     Ok(())
@@ -883,10 +727,7 @@ fn oidc_role_from_data(name: &str, data: &Map<String, Value>) -> OidcAdminRole {
             .map(|v| serde_json::to_string(v).unwrap_or_default())
             .unwrap_or_default(),
         policies: string_list(data, "policies"),
-        token_ttl_secs: data
-            .get("token_ttl_secs")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
+        token_ttl_secs: data.get("token_ttl_secs").and_then(|v| v.as_u64()).unwrap_or(0),
     }
 }
 
@@ -905,18 +746,12 @@ fn saml_role_from_data(name: &str, data: &Map<String, Value>) -> SamlAdminRole {
             .unwrap_or_default(),
         groups_attribute: str_field(data, "groups_attribute"),
         policies: string_list(data, "policies"),
-        token_ttl_secs: data
-            .get("token_ttl_secs")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
+        token_ttl_secs: data.get("token_ttl_secs").and_then(|v| v.as_u64()).unwrap_or(0),
     }
 }
 
 fn str_field(m: &Map<String, Value>, key: &str) -> String {
-    m.get(key)
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
+    m.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
 }
 
 fn string_list(m: &Map<String, Value>, key: &str) -> Vec<String> {
@@ -929,19 +764,12 @@ fn string_list(m: &Map<String, Value>, key: &str) -> Vec<String> {
         .collect()
 }
 
-async fn sys_read(
-    state: &State<'_, AppState>,
-    path: &str,
-) -> Result<Map<String, Value>, CommandError> {
+async fn sys_read(state: &State<'_, AppState>, path: &str) -> Result<Map<String, Value>, CommandError> {
     let resp = make_request(state, Operation::Read, path.to_string(), None).await?;
     Ok(resp.and_then(|r| r.data).unwrap_or_default())
 }
 
-async fn sys_write(
-    state: &State<'_, AppState>,
-    path: &str,
-    body: Map<String, Value>,
-) -> Result<(), CommandError> {
+async fn sys_write(state: &State<'_, AppState>, path: &str, body: Map<String, Value>) -> Result<(), CommandError> {
     make_request(state, Operation::Write, path.to_string(), Some(body)).await?;
     Ok(())
 }

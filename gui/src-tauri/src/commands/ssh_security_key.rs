@@ -18,11 +18,10 @@ use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::time::Duration;
 
 use authenticator::authenticatorservice::{AuthenticatorService, RegisterArgs};
-use authenticator::crypto::{COSEKeyType, COSEAlgorithm};
+use authenticator::crypto::{COSEAlgorithm, COSEKeyType};
 use authenticator::ctap2::server::{
-    AuthenticationExtensionsClientInputs, PublicKeyCredentialParameters,
-    PublicKeyCredentialUserEntity, RelyingParty, ResidentKeyRequirement,
-    UserVerificationRequirement,
+    AuthenticationExtensionsClientInputs, PublicKeyCredentialParameters, PublicKeyCredentialUserEntity, RelyingParty,
+    ResidentKeyRequirement, UserVerificationRequirement,
 };
 use authenticator::statecallback::StateCallback;
 use authenticator::StatusUpdate;
@@ -37,9 +36,7 @@ use bv_client::Operation;
 use crate::commands::fido2_native::handle_status_updates;
 use crate::commands::make_request;
 use crate::error::{CmdResult, CommandError};
-use crate::session::sk_signer::{
-    sk_ecdsa_p256_public_key, sk_ed25519_public_key, ALG_SK_ECDSA_P256, ALG_SK_ED25519,
-};
+use crate::session::sk_signer::{sk_ecdsa_p256_public_key, sk_ed25519_public_key, ALG_SK_ECDSA_P256, ALG_SK_ED25519};
 use crate::state::AppState;
 
 /// OpenSSH's default application for security-key credentials.
@@ -87,9 +84,7 @@ impl SshSecurityKeyInfo {
 
 /// Read the calling operator's own enrolment.
 #[tauri::command]
-pub async fn ssh_security_key_self_read(
-    state: State<'_, AppState>,
-) -> CmdResult<SshSecurityKeyInfo> {
+pub async fn ssh_security_key_self_read(state: State<'_, AppState>) -> CmdResult<SshSecurityKeyInfo> {
     let resp = make_request(&state, Operation::Read, SELF_PATH.to_string(), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(SshSecurityKeyInfo::from_map(&data))
@@ -109,12 +104,8 @@ pub async fn ssh_security_key_self_delete(state: State<'_, AppState>) -> CmdResu
 
 /// Every principal with an enrolled key (admin view).
 #[tauri::command]
-pub async fn ssh_security_key_list(
-    state: State<'_, AppState>,
-) -> CmdResult<Vec<SshSecurityKeyInfo>> {
-    let resp =
-        make_request(&state, Operation::List, "sys/identity/ssh-security-key".to_string(), None)
-            .await?;
+pub async fn ssh_security_key_list(state: State<'_, AppState>) -> CmdResult<Vec<SshSecurityKeyInfo>> {
+    let resp = make_request(&state, Operation::List, "sys/identity/ssh-security-key".to_string(), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     let keys = data.get("keys").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     Ok(keys
@@ -131,11 +122,7 @@ pub async fn ssh_security_key_list(
 
 /// Remove another principal's enrolment (admin).
 #[tauri::command]
-pub async fn ssh_security_key_admin_delete(
-    state: State<'_, AppState>,
-    mount: String,
-    name: String,
-) -> CmdResult<()> {
+pub async fn ssh_security_key_admin_delete(state: State<'_, AppState>, mount: String, name: String) -> CmdResult<()> {
     let mount = mount.trim().trim_end_matches('/').to_string();
     let path = format!("sys/identity/ssh-security-key/{mount}/{name}");
     make_request(&state, Operation::Delete, path, None).await?;
@@ -189,10 +176,7 @@ pub async fn ssh_security_key_enroll(
 
     let register_args = RegisterArgs {
         client_data_hash,
-        relying_party: RelyingParty {
-            id: application.clone(),
-            name: Some("BastionVault SSH".to_string()),
-        },
+        relying_party: RelyingParty { id: application.clone(), name: Some("BastionVault SSH".to_string()) },
         origin: application.clone(),
         user: PublicKeyCredentialUserEntity {
             id: user_id,
@@ -243,15 +227,12 @@ pub async fn ssh_security_key_enroll(
 
         let _ = handle.emit("fido2-status", "insert-key");
 
-        service.register(ENROL_TIMEOUT_MS, register_args, status_tx, callback)
-            .map_err(CommandError::from)?;
+        service.register(ENROL_TIMEOUT_MS, register_args, status_tx, callback).map_err(CommandError::from)?;
 
         match result_rx.recv_timeout(Duration::from_millis(ENROL_TIMEOUT_MS + 5_000)) {
             Ok(Ok(r)) => Ok(r),
             Ok(Err(e)) => Err(CommandError::from(e)),
-            Err(RecvTimeoutError::Timeout) => {
-                Err(CommandError::from("security-key enrolment timed out"))
-            }
+            Err(RecvTimeoutError::Timeout) => Err(CommandError::from("security-key enrolment timed out")),
             Err(e) => Err(CommandError::from(format!("enrolment channel error: {e}"))),
         }
     })
@@ -262,17 +243,13 @@ pub async fn ssh_security_key_enroll(
     let _ = app_handle.emit("fido2-status", "processing");
 
     let cred_data = result.att_obj.auth_data.credential_data.as_ref().ok_or_else(|| {
-        CommandError::from(
-            "the authenticator returned no credential data; enrolment cannot continue"
-                .to_string(),
-        )
+        CommandError::from("the authenticator returned no credential data; enrolment cannot continue".to_string())
     })?;
 
     let (algorithm, public_key) = match &cred_data.credential_public_key.key {
         COSEKeyType::OKP(okp) => (
             ALG_SK_ED25519.to_string(),
-            sk_ed25519_public_key(&okp.x, &application, comment.trim())
-                .map_err(CommandError::from)?,
+            sk_ed25519_public_key(&okp.x, &application, comment.trim()).map_err(CommandError::from)?,
         ),
         COSEKeyType::EC2(ec2) => {
             // SEC1 uncompressed point: 0x04 ‖ X ‖ Y.
@@ -282,8 +259,7 @@ pub async fn ssh_security_key_enroll(
             point.extend_from_slice(&ec2.y);
             (
                 ALG_SK_ECDSA_P256.to_string(),
-                sk_ecdsa_p256_public_key(&point, &application, comment.trim())
-                    .map_err(CommandError::from)?,
+                sk_ecdsa_p256_public_key(&point, &application, comment.trim()).map_err(CommandError::from)?,
             )
         }
         COSEKeyType::RSA(_) => {
@@ -298,10 +274,7 @@ pub async fn ssh_security_key_enroll(
     let mut body = Map::new();
     body.insert("algorithm".into(), Value::String(algorithm));
     body.insert("public_key".into(), Value::String(public_key));
-    body.insert(
-        "credential_id".into(),
-        Value::String(URL_SAFE_NO_PAD.encode(&cred_data.credential_id)),
-    );
+    body.insert("credential_id".into(), Value::String(URL_SAFE_NO_PAD.encode(&cred_data.credential_id)));
     body.insert("application".into(), Value::String(application));
     body.insert("comment".into(), Value::String(comment.trim().to_string()));
 

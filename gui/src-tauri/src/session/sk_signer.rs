@@ -22,20 +22,19 @@
 //! own ssh-agent client emits for `sk-` keys (`keys::agent::client::
 //! write_signature`) — [`build_sk_signature_blob`]'s tests pin the layout.
 
-use std::sync::Arc;
 use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use authenticator::authenticatorservice::{AuthenticatorService, SignArgs};
 use authenticator::ctap2::server::{
-    AuthenticationExtensionsClientInputs, PublicKeyCredentialDescriptor, Transport,
-    UserVerificationRequirement,
+    AuthenticationExtensionsClientInputs, PublicKeyCredentialDescriptor, Transport, UserVerificationRequirement,
 };
 use authenticator::statecallback::StateCallback;
 use authenticator::StatusUpdate;
 use russh::keys::agent::AgentIdentity;
-use russh::Signer;
 use russh::keys::ssh_key::HashAlg;
+use russh::Signer;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
 
@@ -125,16 +124,11 @@ impl Signer for SecurityKeySigner {
         let client_data_hash: [u8; 32] = Sha256::digest(&to_sign).into();
 
         let assertion =
-            get_assertion(&self.identity, client_data_hash, self.app.clone(), self.pin_slot.clone())
-                .await?;
+            get_assertion(&self.identity, client_data_hash, self.app.clone(), self.pin_slot.clone()).await?;
 
-        let blob = build_sk_signature_blob(
-            &self.identity.algorithm,
-            &assertion.signature,
-            assertion.flags,
-            assertion.counter,
-        )
-        .map_err(SkSignError::Encoding)?;
+        let blob =
+            build_sk_signature_blob(&self.identity.algorithm, &assertion.signature, assertion.flags, assertion.counter)
+                .map_err(SkSignError::Encoding)?;
 
         // russh expects the to-sign buffer with the signature appended, not
         // the signature alone — it writes `buffer[i..]` as the packet tail.
@@ -215,14 +209,11 @@ async fn get_assertion(
             .sign(TOUCH_TIMEOUT_MS, sign_args, status_tx, callback)
             .map_err(|e| SkSignError::Ctap(format!("{e:?}")))?;
 
-        let sign_result = match result_rx.recv_timeout(Duration::from_millis(TOUCH_TIMEOUT_MS + 5_000))
-        {
+        let sign_result = match result_rx.recv_timeout(Duration::from_millis(TOUCH_TIMEOUT_MS + 5_000)) {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => return Err(SkSignError::Ctap(format!("{e:?}"))),
             Err(RecvTimeoutError::Timeout) => {
-                return Err(SkSignError::Ctap(
-                    "no touch registered on the security key within 30s".into(),
-                ))
+                return Err(SkSignError::Ctap("no touch registered on the security key within 30s".into()))
             }
             Err(e) => return Err(SkSignError::Ctap(format!("channel error: {e}"))),
         };
@@ -301,10 +292,7 @@ pub fn build_sk_signature_blob(
     let inner_sig: Vec<u8> = match algorithm {
         ALG_SK_ED25519 => {
             if raw_signature.len() != 64 {
-                return Err(format!(
-                    "expected a 64-byte Ed25519 signature, got {}",
-                    raw_signature.len()
-                ));
+                return Err(format!("expected a 64-byte Ed25519 signature, got {}", raw_signature.len()));
             }
             raw_signature.to_vec()
         }
@@ -363,16 +351,9 @@ fn der_ecdsa_to_mpint_pair(der: &[u8]) -> Result<Vec<u8>, String> {
 /// under one application cannot be used under another: the target hashes the
 /// application it read from `authorized_keys` and compares against what the
 /// authenticator signed.
-pub fn sk_ed25519_public_key(
-    raw_public: &[u8],
-    application: &str,
-    comment: &str,
-) -> Result<String, String> {
+pub fn sk_ed25519_public_key(raw_public: &[u8], application: &str, comment: &str) -> Result<String, String> {
     if raw_public.len() != 32 {
-        return Err(format!(
-            "expected a 32-byte Ed25519 public key from the authenticator, got {}",
-            raw_public.len()
-        ));
+        return Err(format!("expected a 32-byte Ed25519 public key from the authenticator, got {}", raw_public.len()));
     }
     let mut blob = Vec::new();
     put_string(&mut blob, ALG_SK_ED25519.as_bytes());
@@ -389,11 +370,7 @@ pub fn sk_ed25519_public_key(
 /// string  public key      (SEC1 uncompressed point: 0x04 ‖ X ‖ Y)
 /// string  application
 /// ```
-pub fn sk_ecdsa_p256_public_key(
-    sec1_point: &[u8],
-    application: &str,
-    comment: &str,
-) -> Result<String, String> {
+pub fn sk_ecdsa_p256_public_key(sec1_point: &[u8], application: &str, comment: &str) -> Result<String, String> {
     if sec1_point.len() != 65 || sec1_point.first() != Some(&0x04) {
         return Err(format!(
             "expected a 65-byte uncompressed SEC1 P-256 point from the authenticator, \
@@ -448,8 +425,7 @@ impl<'a> DerReader<'a> {
             if n == 0 || n > 4 {
                 return Err("unsupported DER length form".into());
             }
-            let bytes =
-                self.buf.get(self.pos..self.pos + n).ok_or("truncated DER: short length")?;
+            let bytes = self.buf.get(self.pos..self.pos + n).ok_or("truncated DER: short length")?;
             self.pos += n;
             bytes.iter().fold(0usize, |acc, b| (acc << 8) | *b as usize)
         };
@@ -585,10 +561,7 @@ mod tests {
         // No comment ⇒ two fields only.
         assert_eq!(line.split_whitespace().count(), 2);
         let parsed = russh::keys::ssh_key::PublicKey::from_openssh(&line).unwrap();
-        assert_eq!(
-            parsed.key_data().sk_ed25519().unwrap().application(),
-            "ssh:prod-bastion"
-        );
+        assert_eq!(parsed.key_data().sk_ed25519().unwrap().application(), "ssh:prod-bastion");
     }
 
     #[test]

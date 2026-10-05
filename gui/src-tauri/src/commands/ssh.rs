@@ -103,10 +103,7 @@ pub async fn ssh_read_ca(state: State<'_, AppState>, mount: String) -> CmdResult
     let path = format!("{}/config/ca", mount_prefix(&mount));
     let resp = make_request(&state, Operation::Read, path, None).await?;
     let map = data_to_map(resp);
-    Ok(SshCaInfo {
-        public_key: val_str(&map, "public_key"),
-        algorithm: val_str(&map, "algorithm"),
-    })
+    Ok(SshCaInfo { public_key: val_str(&map, "public_key"), algorithm: val_str(&map, "algorithm") })
 }
 
 #[derive(Deserialize)]
@@ -122,10 +119,7 @@ pub struct SshGenerateCaRequest {
 }
 
 #[tauri::command]
-pub async fn ssh_generate_ca(
-    state: State<'_, AppState>,
-    request: SshGenerateCaRequest,
-) -> CmdResult<SshCaInfo> {
+pub async fn ssh_generate_ca(state: State<'_, AppState>, request: SshGenerateCaRequest) -> CmdResult<SshCaInfo> {
     let path = format!("{}/config/ca", mount_prefix(&request.mount));
     let mut body = Map::new();
     if let Some(a) = request.algorithm.as_ref().filter(|s| !s.is_empty()) {
@@ -136,10 +130,7 @@ pub async fn ssh_generate_ca(
     }
     let resp = make_request(&state, Operation::Write, path, Some(body)).await?;
     let map = data_to_map(resp);
-    Ok(SshCaInfo {
-        public_key: val_str(&map, "public_key"),
-        algorithm: val_str(&map, "algorithm"),
-    })
+    Ok(SshCaInfo { public_key: val_str(&map, "public_key"), algorithm: val_str(&map, "algorithm") })
 }
 
 #[tauri::command]
@@ -179,31 +170,20 @@ pub struct SshRoleConfig {
 }
 
 #[tauri::command]
-pub async fn ssh_list_roles(
-    state: State<'_, AppState>,
-    mount: String,
-) -> CmdResult<Vec<String>> {
+pub async fn ssh_list_roles(state: State<'_, AppState>, mount: String) -> CmdResult<Vec<String>> {
     let path = format!("{}/roles", mount_prefix(&mount));
     let resp = make_request(&state, Operation::List, path, None).await?;
     let map = data_to_map(resp);
     let keys = map
         .get("keys")
         .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect::<Vec<_>>()
-        })
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
         .unwrap_or_default();
     Ok(keys)
 }
 
 #[tauri::command]
-pub async fn ssh_read_role(
-    state: State<'_, AppState>,
-    mount: String,
-    name: String,
-) -> CmdResult<SshRoleConfig> {
+pub async fn ssh_read_role(state: State<'_, AppState>, mount: String, name: String) -> CmdResult<SshRoleConfig> {
     let path = format!("{}/roles/{}", mount_prefix(&mount), name);
     let resp = make_request(&state, Operation::Read, path, None).await?;
     Ok(role_config_from_map(&data_to_map(resp)))
@@ -230,11 +210,7 @@ fn role_config_from_map(map: &Map<String, Value>) -> SshRoleConfig {
     let kv_map = |k: &str| -> std::collections::BTreeMap<String, String> {
         map.get(k)
             .and_then(|v| v.as_object())
-            .map(|o| {
-                o.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
-            })
+            .map(|o| o.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
             .unwrap_or_default()
     };
 
@@ -297,18 +273,11 @@ pub async fn ssh_list_roles_info(
         .map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_object())
-                .map(|r| SshRoleEntry {
-                    name: val_str(r, "name"),
-                    config: role_config_from_map(r),
-                })
+                .map(|r| SshRoleEntry { name: val_str(r, "name"), config: role_config_from_map(r) })
                 .collect()
         })
         .unwrap_or_default();
-    Ok(SshRolePage {
-        records,
-        total: val_u64(&map, "total"),
-        next: val_str(&map, "next"),
-    })
+    Ok(SshRolePage { records, total: val_u64(&map, "total"), next: val_str(&map, "next") })
 }
 
 #[tauri::command]
@@ -360,21 +329,14 @@ pub async fn ssh_write_role(
         Value::Object(out)
     };
     body.insert("default_extensions".into(), to_obj(&config.default_extensions));
-    body.insert(
-        "default_critical_options".into(),
-        to_obj(&config.default_critical_options),
-    );
+    body.insert("default_critical_options".into(), to_obj(&config.default_critical_options));
 
     make_request(&state, Operation::Write, path, Some(body)).await?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn ssh_delete_role(
-    state: State<'_, AppState>,
-    mount: String,
-    name: String,
-) -> CmdResult<()> {
+pub async fn ssh_delete_role(state: State<'_, AppState>, mount: String, name: String) -> CmdResult<()> {
     let path = format!("{}/roles/{}", mount_prefix(&mount), name);
     make_request(&state, Operation::Delete, path, None).await?;
     Ok(())
@@ -451,10 +413,7 @@ pub struct SshCredsResult {
 }
 
 #[tauri::command]
-pub async fn ssh_creds(
-    state: State<'_, AppState>,
-    request: SshCredsRequest,
-) -> CmdResult<SshCredsResult> {
+pub async fn ssh_creds(state: State<'_, AppState>, request: SshCredsRequest) -> CmdResult<SshCredsResult> {
     let path = format!("{}/creds/{}", mount_prefix(&request.mount), request.role);
     let mut body = Map::new();
     body.insert("ip".into(), Value::String(request.ip));
@@ -489,10 +448,7 @@ pub struct SshLookupResult {
 }
 
 #[tauri::command]
-pub async fn ssh_lookup(
-    state: State<'_, AppState>,
-    request: SshLookupRequest,
-) -> CmdResult<SshLookupResult> {
+pub async fn ssh_lookup(state: State<'_, AppState>, request: SshLookupRequest) -> CmdResult<SshLookupResult> {
     let path = format!("{}/lookup", mount_prefix(&request.mount));
     let mut body = Map::new();
     body.insert("ip".into(), Value::String(request.ip));
@@ -504,11 +460,7 @@ pub async fn ssh_lookup(
     let roles = map
         .get("roles")
         .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect::<Vec<_>>()
-        })
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
         .unwrap_or_default();
     Ok(SshLookupResult { roles })
 }

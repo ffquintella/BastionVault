@@ -675,6 +675,182 @@ Only the `secret` credential kind (ssh-password shape) is resolved
 server-side today. v1 `POST /v1/rustion/session/open` (raw
 `credential_material`) is unchanged.
 
+### Web Connect (`form` mode)
+
+Server half of [Web Application Connect](../features/web-application-connect.md)
+§3: four `POST` endpoints on the resource mount (v2 only). The desktop host
+calls `launch` **instead of** `connect/authorize` for a `web` profile whose
+`login_mode` is `form` — `launch` burns the MFA ticket itself. Every refusal
+is an HTTP error whose message starts with a stable code (`<code>: …`); the
+codes are listed per endpoint.
+
+The caller needs `update` on the endpoint paths **and** `connect` (or `read`
+/ `root`) on `resources/secrets/<resource>/`. The built-in baseline policies
+(`default`, `shared-access` and the namespace baselines) grant `update` on
+`connect/web/{launch,totp,result,close}` alongside `connect/mfa/*` and
+`connect/authorize`, so only the per-resource `connect` grant is needed. A
+custom policy that wants the endpoint grant without the baseline can state it
+explicitly:
+
+~~~hcl
+path "resources/v2/connect/web/*" { capabilities = ["update"] }
+path "resources/secrets/fw01/*"   { capabilities = ["connect"] }
+~~~
+
+**`POST /v2/resources/v2/connect/web/launch`**
+
+~~~json
+{ "resource": "fw01", "profile_id": "p_web",
+  "recipe_hash": "sha256:9f2c…", "connect_ticket": "…" }
+~~~
+
+- `recipe_hash` (required) is `sha256:` + lowercase hex SHA-256 of the
+  RFC 8785 (JCS) canonical JSON of the profile's `web.recipe` exactly as
+  stored. Reuse `bastion_vault::modules::resource::connect_web::recipe::recipe_hash`.
+  A mismatch means the profile changed since the host loaded it.
+- `connect_ticket` is required only when the profile has `require_mfa`.
+
+Response:
+
+~~~json
+{
+  "launch_id": "<43-char base64url>",
+  "expires_at": "2026-10-05T12:01:00Z",
+  "resource": "fw01", "profile_id": "p_web",
+  "login_mode": "form", "exposure": "dom", "exposure_cap": "dom",
+  "recipe_hash": "sha256:9f2c…", "heuristic": false,
+  "fill_scope": { "start_url": "https://fw01.example.com/login",
+                  "origins": ["https://fw01.example.com"],
+                  "allow_insecure_http": false },
+  "credential_source": "secret",
+  "credential": { "username": "admin", "password": "…",
+                  "totp": "123456", "totp_valid_until": "2026-10-05T12:00:30Z" },
+  "totp_refresh_steps": [1],
+  "mfa_method": "totp"
+}
+~~~
+
+- `credential` carries **only what the recipe fills** (`username`,
+  `password`, `totp`; heuristic mode takes whichever the source has). It
+  travels in plaintext in this response body over the API's TLS channel —
+  the host holds it in `Zeroizing` buffers and drops it after
+  success / failure / timeout. The TOTP seed never leaves the server. The
+  audit pipeline records the response HMAC-redacted.
+- `fill_scope` is the **authoritative fill scope**, bound to the launch:
+  the profile's start URL and its normalised origin set (`scheme://host[:port]`,
+  start origin first) as the server checked them. `recipe_hash` does not
+  cover these profile fields, and in heuristic mode they are the only
+  constraint on where a fill happens, so the host **must** start at
+  `fill_scope.start_url` and fill **only** on a top-frame origin in
+  `fill_scope.origins` (`http` only when `allow_insecure_http`) — never on
+  origins from its own copy of the profile.
+- `launch_id` is single-use per operation, stored server-side as its
+  SHA-256 only, and bound to (principal, namespace, resource, profile,
+  `recipe_hash`, `fill_scope`). The principal is the first of: `username`
+  on a known auth mount; `entity:<entity_id>`; `token:<sha256 of the client
+  token>` (this token store has no accessor); `name:<display_name>` on a
+  known auth mount. A display name with no mount never binds.
+  `expires_at` ends the **login window** (60 s): TOTP refreshes are issued
+  only inside it. `result` and `close` are accepted until the session
+  closes. Follow-up calls on one launch are serialised per server process;
+  on a multi-node deployment serving requests from more than one node,
+  concurrent calls on different nodes are not excluded.
+- Credential sources: `secret` (keys `username`, `password`, optional
+  `totp_seed` — base32 — remappable with
+  `credential_source.fields = {username?, password?, totp_seed?}`; TOTP
+  parameters in `credential_source.totp = {algorithm: SHA1|SHA256|SHA512,
+  digits: 6|8, period: 30|60}`, default SHA1/6/30) is read under the
+  server's authority, so a connect-only caller never needs `read`.
+  `ldap` (`bind_mode` `static_role` or `library_set`) and `default-account`
+  (username only, chosen by the resource's `os_type` like SSH) are resolved
+  **as the caller**, through the caller's own grants on those paths.
+- Exposure policy — **deny unless opted in**: `web_exposure_max` (`none <
+  isolated < handler < proxy < dom`) on the resource type
+  (`config/types[<type>].connect`) and on the resource record (top-level
+  key). The resource's `type` must name a type in the **saved**
+  `config/types` that sets `web_exposure_max`; form mode needs `dom`. An
+  unset cap, a type missing from the saved configuration, or a
+  configuration never saved leaves the cap at `none` and refuses with
+  `exposure_not_permitted`. The resource tier can only lower the type's cap
+  (`exposure_cap_exceeded`), never opt in by itself. An unreadable or
+  unparseable `config/types`, or a value outside the enum, refuses with
+  `exposure_policy_invalid`. `allow_heuristic_fill` on the same two tiers:
+  an explicit `false` at either beats `true` at the other, and unset at both
+  means no heuristics. The GUI's built-in `web_application` and `website`
+  types carry `web_exposure_max: "dom"`, so a type configuration saved by a
+  current GUI opts them in; a configuration saved earlier keeps its types as
+  saved and is denied until an administrator sets the cap.
+- Rustion transport policy: the resource's effective policy (Rustion's own
+  resolver over the global, type, asset-group and resource tiers — the
+  `rustion/policy/effective` verdict) is checked before the MFA ticket is
+  redeemed and before any credential is read. `rustion-required`, or any
+  policy lock violation, refuses with `transport_policy` (403): a form
+  launch is always local, and there is no brokered web transport yet.
+  `direct` and `rustion-preferred` are allowed; a resource with no policy at
+  any tier resolves to `direct`. Rustion keeps its tiers in the system view,
+  not in the mount, and they survive an unmount, so when the `rustion/`
+  mount is unavailable (unmounted, or tainted mid-unmount or remount) the
+  launch is allowed only if no Rustion policy record exists at all. A
+  policy that cannot be resolved (records present without the mount,
+  unreadable store, undecodable tier record, asset-group lookup failure,
+  unknown verdict) refuses with `transport_policy_unavailable` (503) —
+  never "allowed".
+- Order, and what costs the MFA ticket. Every check above runs before the
+  ticket is redeemed, and so do the credential pre-checks: a `secret`
+  source is read and checked (the secret exists, carries what the recipe
+  fills, and a decodable `totp_seed` when the recipe fills `totp`), a
+  `default-account` is resolved, and an `ldap` source's mount must exist,
+  be untainted and be an LDAP engine. Nothing is released before the
+  ticket. What still fails after it, and so spends it: the LDAP
+  static-credential read or library check-out (permission, an exhausted
+  library, the directory), and persisting the launch. A check-out that
+  returns an account but no password or lease is checked straight back in.
+- Refusal codes: `wrong_protocol`, `wrong_login_mode`,
+  `transport_unavailable`, `invalid_profile`, `invalid_recipe`,
+  `credential_source_unsupported`, `recipe_hash_required`,
+  `recipe_hash_mismatch`, `exposure_not_permitted`, `exposure_cap_exceeded`,
+  `exposure_policy_invalid`, `heuristic_not_allowed`,
+  `insecure_http_not_allowed`, `transport_policy`,
+  `transport_policy_unavailable`, `mfa_required` (plus the ticket store's
+  refusals), `credential_unavailable`, `totp_not_configured`,
+  `resource_not_found`, `profile_not_found`; a missing connect grant is a
+  plain `permission denied`.
+
+**`POST /v2/resources/v2/connect/web/totp`** — `{ "launch_id": "…", "step": 1 }`
+
+One fresh code per step listed in `totp_refresh_steps`, inside the login
+window. Call it after `totp_valid_until` has passed. Response:
+`{ "totp", "totp_valid_until", "step", "totp_refresh_steps" }` (the steps
+still refreshable). Refusals: `launch_unknown` (404),
+`launch_binding_mismatch` (403), `launch_expired` (410), `launch_closed`,
+`totp_not_configured`, `totp_step_used`, `launch_busy` (409),
+`totp_step_invalid` (400).
+
+**`POST /v2/resources/v2/connect/web/result`** — `{ "launch_id": "…", "outcome": "success", "step": 1 }`
+
+`outcome` is `success` | `failure` | `timeout` | `aborted:<check>` (check =
+1–32 of `[a-z0-9_]`, e.g. `aborted:origin`, `aborted:form_action`); `step`
+(optional) is the last step reached. Recorded once: repeating it returns
+`already_recorded: true`, a different outcome is `result_conflict` (409).
+Response: `{ "recorded": true, "already_recorded", "outcome" }`.
+
+**`POST /v2/resources/v2/connect/web/close`** — `{ "launch_id": "…" }`
+
+Idempotent. Records the session end and, when `launch` checked an LDAP
+library account out, checks it back in **as the caller**. Response:
+`{ "closed": true, "already_closed", "duration_ms",
+"ldap_checkin": "not_applicable" | "done" }`. A failed check-in returns
+`ldap_checkin_failed` (502); the close itself stands, and calling `close`
+again retries the check-in.
+
+Audit (`target: "audit"`): `connect.web.launch`, `connect.web.totp`,
+`connect.web.result`, `connect.web.close`, `connect.web.refused`
+(`op`, `reason`), `connect.web.reaped`, `connect.web.launch_rollback`. They
+carry names, enum values, origins (`fill_origins`) and `launch_id_hash` (hex
+SHA-256 of the `launch_id`) — never a credential, a TOTP code, a raw
+`launch_id`, a full token hash, or a URL path or query. Expired records are
+reaped from `launch`, at most once a minute per server process.
+
 ### Session Recordings + Keystroke Transcripts
 
 ~~~

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
-use tauri::{State, async_runtime};
+use tauri::{async_runtime, State};
 
 use crate::preferences::{self, CloudStorageConfig};
 use crate::state::{AppState, CloudSession};
@@ -59,10 +59,7 @@ pub async fn cloud_target_start_connect(
     validate_credentials_ref_writable(&credentials_ref)?;
 
     let provider = oauth::well_known_provider(&target).map_err(|e| e.to_string())?;
-    let creds = oauth::OAuthCredentials {
-        client_id: client_id.clone(),
-        client_secret: client_secret.clone(),
-    };
+    let creds = oauth::OAuthCredentials { client_id: client_id.clone(), client_secret: client_secret.clone() };
     // Loopback-only — the redirect URI must stay on the same machine
     // as the Tauri app. No point making this configurable.
     // Fixed port so the redirect URI stays stable across consent
@@ -70,13 +67,8 @@ pub async fn cloud_target_start_connect(
     // a random ephemeral port. `get_oauth_redirect_uri` exposes the
     // matching URL so the user can register it at the provider's
     // dev console.
-    let session = oauth::begin_consent(
-        &provider,
-        &creds,
-        "127.0.0.1",
-        Some(oauth::DEFAULT_LOOPBACK_PORT),
-    )
-    .map_err(|e| e.to_string())?;
+    let session = oauth::begin_consent(&provider, &creds, "127.0.0.1", Some(oauth::DEFAULT_LOOPBACK_PORT))
+        .map_err(|e| e.to_string())?;
 
     let consent_url = session.consent_url.to_string();
     // Generate a short session id. A UUID would be overkill here —
@@ -84,12 +76,7 @@ pub async fn cloud_target_start_connect(
     // lookup. 16 bytes base64url is plenty.
     let session_id = short_id();
 
-    let entry = CloudSession {
-        session,
-        provider,
-        creds,
-        credentials_ref,
-    };
+    let entry = CloudSession { session, provider, creds, credentials_ref };
 
     state
         .cloud_sessions
@@ -97,10 +84,7 @@ pub async fn cloud_target_start_connect(
         .map_err(|e| format!("cloud session map poisoned: {e}"))?
         .insert(session_id.clone(), entry);
 
-    Ok(StartConnectResult {
-        session_id,
-        consent_url,
-    })
+    Ok(StartConnectResult { session_id, consent_url })
 }
 
 /// Block until the browser callback, exchange the authorization
@@ -117,19 +101,12 @@ pub async fn cloud_target_complete_connect(
     // Take the session out of the map — we're about to consume it
     // on the wait_for_callback side, and leaving a half-consumed
     // handle in the map would only cause confusion.
-    let CloudSession {
-        session,
-        provider,
-        creds,
-        credentials_ref,
-    } = state
+    let CloudSession { session, provider, creds, credentials_ref } = state
         .cloud_sessions
         .lock()
         .map_err(|e| format!("cloud session map poisoned: {e}"))?
         .remove(&session_id)
-        .ok_or_else(|| {
-            "no such cloud-target session (it may have timed out or been cancelled)".to_string()
-        })?;
+        .ok_or_else(|| "no such cloud-target session (it may have timed out or been cancelled)".to_string())?;
 
     // Offload the whole blocking sequence (accept → parse → POST
     // token endpoint → persist file) to a worker so we don't park
@@ -138,18 +115,14 @@ pub async fn cloud_target_complete_connect(
     let verifier = session.verifier.clone();
     async_runtime::spawn_blocking(move || -> Result<(), String> {
         let callback = session.wait_for_callback(timeout).map_err(|e| e.to_string())?;
-        let token_response =
-            oauth::exchange_code(&provider, &creds, &callback.code, &verifier, &redirect_uri)
-                .map_err(|e| e.to_string())?;
-        let refresh_token = token_response
-            .refresh_token
-            .as_deref()
-            .ok_or_else(|| {
-                "provider returned no refresh_token — check that your app registration \
+        let token_response = oauth::exchange_code(&provider, &creds, &callback.code, &verifier, &redirect_uri)
+            .map_err(|e| e.to_string())?;
+        let refresh_token = token_response.refresh_token.as_deref().ok_or_else(|| {
+            "provider returned no refresh_token — check that your app registration \
                  grants offline access (for Google Drive, the target_provider config \
                  already sets access_type=offline and prompt=consent)"
-                    .to_string()
-            })?;
+                .to_string()
+        })?;
         creds::persist(&credentials_ref, refresh_token.as_bytes()).map_err(|e| e.to_string())?;
         Ok(())
     })
@@ -162,15 +135,8 @@ pub async fn cloud_target_complete_connect(
 /// removal from the map. Safe to call twice — missing session is
 /// silently `Ok`.
 #[tauri::command]
-pub async fn cloud_target_cancel_connect(
-    state: State<'_, AppState>,
-    session_id: String,
-) -> Result<(), String> {
-    state
-        .cloud_sessions
-        .lock()
-        .map_err(|e| format!("cloud session map poisoned: {e}"))?
-        .remove(&session_id);
+pub async fn cloud_target_cancel_connect(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    state.cloud_sessions.lock().map_err(|e| format!("cloud session map poisoned: {e}"))?.remove(&session_id);
     Ok(())
 }
 
@@ -181,22 +147,17 @@ pub async fn cloud_target_cancel_connect(
 /// writable scheme today.
 fn validate_credentials_ref_writable(reference: &str) -> Result<(), String> {
     let trimmed = reference.trim();
-    let (scheme, _) = trimmed.split_once(':').ok_or_else(|| {
-        "credentials_ref must include a scheme (`file:`, `env:`, `inline:`, `keychain:`)"
-            .to_string()
-    })?;
+    let (scheme, _) = trimmed
+        .split_once(':')
+        .ok_or_else(|| "credentials_ref must include a scheme (`file:`, `env:`, `inline:`, `keychain:`)".to_string())?;
     match scheme {
         "file" => Ok(()),
-        "env" => Err(
-            "`env:` credentials_ref cannot be written durably — use `file:` to persist the \
+        "env" => Err("`env:` credentials_ref cannot be written durably — use `file:` to persist the \
              refresh token"
-                .into(),
-        ),
-        "inline" => Err(
-            "`inline:` credentials_ref is read-only (the value would have to live in the \
+            .into()),
+        "inline" => Err("`inline:` credentials_ref is read-only (the value would have to live in the \
              server config)"
-                .into(),
-        ),
+            .into()),
         "keychain" => {
             // Don't pre-reject: the server may have been built with
             // `cloud_keychain`, in which case persistence works. If
@@ -204,9 +165,9 @@ fn validate_credentials_ref_writable(reference: &str) -> Result<(), String> {
             // completion time pointing at the build feature.
             Ok(())
         }
-        other => Err(format!(
-            "unknown credentials_ref scheme `{other}` (expected `file` / `env` / `inline` / `keychain`)"
-        )),
+        other => {
+            Err(format!("unknown credentials_ref scheme `{other}` (expected `file` / `env` / `inline` / `keychain`)"))
+        }
     }
 }
 
@@ -247,16 +208,11 @@ pub struct CloudVaultConfigInput {
 /// ConnectPage uses `vaults::add_vault_profile` + `set_last_used_vault`
 /// directly for finer control over profile names.
 #[tauri::command]
-pub async fn set_cloud_vault_config(
-    input: CloudVaultConfigInput,
-) -> Result<(), String> {
+pub async fn set_cloud_vault_config(input: CloudVaultConfigInput) -> Result<(), String> {
     use preferences::{short_id, VaultProfile, VaultSpec};
 
     let mut prefs = preferences::load().map_err(|e| e.to_string())?;
-    let config = CloudStorageConfig {
-        target: input.target.clone(),
-        config: input.config.into_iter().collect(),
-    };
+    let config = CloudStorageConfig { target: input.target.clone(), config: input.config.into_iter().collect() };
 
     // Upsert: find an existing Cloud entry targeting the same
     // provider (we have no better natural key without asking the
@@ -264,10 +220,8 @@ pub async fn set_cloud_vault_config(
     // vault per provider; multi-cloud-per-provider setups should
     // use the fine-grained `add_vault_profile` command with
     // distinct names.
-    let existing_idx = prefs
-        .vaults
-        .iter()
-        .position(|v| matches!(&v.spec, VaultSpec::Cloud { config: c } if c.target == input.target));
+    let existing_idx =
+        prefs.vaults.iter().position(|v| matches!(&v.spec, VaultSpec::Cloud { config: c } if c.target == input.target));
     let id = if let Some(idx) = existing_idx {
         prefs.vaults[idx].spec = VaultSpec::Cloud { config };
         prefs.vaults[idx].id.clone()
@@ -291,9 +245,8 @@ pub async fn set_cloud_vault_config(
 #[tauri::command]
 pub async fn clear_cloud_vault_config() -> Result<(), String> {
     let mut prefs = preferences::load().map_err(|e| e.to_string())?;
-    let is_cloud_default = prefs
-        .default_profile()
-        .is_some_and(|p| matches!(p.spec, preferences::VaultSpec::Cloud { .. }));
+    let is_cloud_default =
+        prefs.default_profile().is_some_and(|p| matches!(p.spec, preferences::VaultSpec::Cloud { .. }));
     if is_cloud_default {
         prefs.last_used_id = None;
     }
@@ -308,12 +261,10 @@ pub async fn clear_cloud_vault_config() -> Result<(), String> {
 #[tauri::command]
 pub async fn get_cloud_vault_config() -> Result<Option<CloudStorageConfig>, String> {
     let prefs = preferences::load().map_err(|e| e.to_string())?;
-    Ok(prefs
-        .default_profile()
-        .and_then(|p| match &p.spec {
-            preferences::VaultSpec::Cloud { config } => Some(config.clone()),
-            _ => None,
-        }))
+    Ok(prefs.default_profile().and_then(|p| match &p.spec {
+        preferences::VaultSpec::Cloud { config } => Some(config.clone()),
+        _ => None,
+    }))
 }
 
 // ── Add-vault modal helpers ────────────────────────────────────────
@@ -361,32 +312,18 @@ pub async fn save_s3_credentials(input: S3CredentialInput) -> Result<String, Str
     let reference = format!("file:{}", path.display());
 
     let mut obj = serde_json::Map::new();
-    obj.insert(
-        "access_key_id".into(),
-        Value::String(input.access_key_id.trim().to_string()),
-    );
-    obj.insert(
-        "secret_access_key".into(),
-        Value::String(input.secret_access_key.trim().to_string()),
-    );
-    if let Some(tok) = input
-        .session_token
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
+    obj.insert("access_key_id".into(), Value::String(input.access_key_id.trim().to_string()));
+    obj.insert("secret_access_key".into(), Value::String(input.secret_access_key.trim().to_string()));
+    if let Some(tok) = input.session_token.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
         obj.insert("session_token".into(), Value::String(tok.to_string()));
     }
-    let bytes = serde_json::to_vec_pretty(&Value::Object(obj))
-        .map_err(|e| e.to_string())?;
+    let bytes = serde_json::to_vec_pretty(&Value::Object(obj)).map_err(|e| e.to_string())?;
     creds::persist(&reference, &bytes).map_err(|e| e.to_string())?;
     Ok(reference)
 }
 
 fn cloud_creds_dir() -> Result<std::path::PathBuf, String> {
-    let base = dirs::data_local_dir()
-        .or_else(dirs::home_dir)
-        .ok_or("cannot determine per-user data dir")?;
+    let base = dirs::data_local_dir().or_else(dirs::home_dir).ok_or("cannot determine per-user data dir")?;
     let dir = base.join(".bastion_vault_gui").join("cloud-creds");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     Ok(dir)
@@ -412,10 +349,7 @@ fn cloud_creds_dir() -> Result<std::path::PathBuf, String> {
 /// to register at the provider's dev console.
 #[tauri::command]
 pub async fn get_oauth_redirect_uri() -> Result<String, String> {
-    Ok(format!(
-        "http://127.0.0.1:{}/callback",
-        oauth::DEFAULT_LOOPBACK_PORT
-    ))
+    Ok(format!("http://127.0.0.1:{}/callback", oauth::DEFAULT_LOOPBACK_PORT))
 }
 
 /// Persist a token the user generated directly at the provider's
@@ -431,10 +365,7 @@ pub async fn get_oauth_redirect_uri() -> Result<String, String> {
 /// this is strictly the refresh token; those providers don't
 /// expose a "generate" button.
 #[tauri::command]
-pub async fn save_pasted_token(
-    target: String,
-    token: String,
-) -> Result<String, String> {
+pub async fn save_pasted_token(target: String, token: String) -> Result<String, String> {
     let trimmed = token.trim();
     if trimmed.is_empty() {
         return Err("token cannot be empty".into());
@@ -443,11 +374,9 @@ pub async fn save_pasted_token(
     // user accidentally pasting a whole URL or a JSON blob instead
     // of the raw token string.
     if trimmed.contains('\n') || trimmed.contains(' ') {
-        return Err(
-            "token contains whitespace — paste just the raw token string, not a URL \
+        return Err("token contains whitespace — paste just the raw token string, not a URL \
              or JSON blob"
-                .into(),
-        );
+            .into());
     }
     // Wrap in a `{"access_token":"..."}` envelope so targets can
     // tell a long-lived access token (generated directly at the

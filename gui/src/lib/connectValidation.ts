@@ -80,9 +80,15 @@ export interface ConnectVerdict {
 /** What the validator needs to know about one card. */
 export interface ConnectCandidate {
   name: string;
-  /** Resource type — only `server` resources can be connected to. */
+  /** Resource type — a transport-tier contributor for the policy resolver. */
   type: string;
-  /** False when the operator disabled Connect for this type. */
+  /**
+   * True when the resource's type offers any Connect protocol —
+   * `typeSupportsConnect(typeDef)` from `lib/resourceTypes`. False when the
+   * type offers none or the operator disabled Connect for it. This used to
+   * be a hard-coded `type === "server"` check here; the protocol list on
+   * the type is now the single gate.
+   */
   connectEnabled: boolean;
   /**
    * The card's profile hints. `undefined` means "this card came from a path
@@ -196,7 +202,7 @@ export function connectAccessCacheSizeForTests(): number {
  * waiting for anything.
  */
 export function staticVerdict(c: ConnectCandidate): ConnectVerdict | null {
-  if (c.type !== "server" || !c.connectEnabled) {
+  if (!c.connectEnabled) {
     return {
       allowed: false,
       reason: "Connect isn't available for this resource.",

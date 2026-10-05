@@ -471,12 +471,39 @@ export interface ResourceTypeDef {
    *  the protocol's standard port (22 / 3389) is used. */
   connect?: {
     enabled?: boolean;
+    /**
+     * Which Connect protocols resources of this type offer. Absent keeps
+     * the behaviour that predates the field: `["ssh", "rdp"]` for the
+     * `server` type — the only one Connect ever applied to — and nothing
+     * for every other type. Read it through `connectProtocols()`, never
+     * directly. See features/web-application-connect.md §1.
+     */
+    protocols?: ConnectProtocol[];
     default_ports?: { ssh?: number; rdp?: number };
     default_users?: { linux?: string; macos?: string; windows?: string };
+    /** Exposure cap for `web` profiles (spec §6), enforced server-side.
+     *  Deny unless opted in: the server releases no web credential unless
+     *  the resource's *saved* type sets this (form mode needs `dom`); unset
+     *  means `none`. `open` mode (exposure `none`) fits under every cap. */
+    web_exposure_max?: WebExposure;
+    /** Heuristic recipes (`"steps": "auto"`) are refused unless a tier sets
+     *  this to `true`, and by an explicit `false` at either tier (spec §6).
+     *  Unset at both tiers means no heuristics. */
+    allow_heuristic_fill?: boolean;
   };
 }
 
 export type ResourceTypeConfig = Record<string, ResourceTypeDef>;
+
+/** Connect protocols a resource type can offer. */
+export type ConnectProtocol = "ssh" | "rdp" | "web";
+
+/**
+ * How far a `web` login mode lets the credential travel, least to most
+ * exposed: `none` (open / sso) < `isolated` (Rustion browser isolation,
+ * future) < `handler` (http-auth) < `proxy` < `dom` (form). Spec §6.
+ */
+export type WebExposure = "none" | "isolated" | "handler" | "proxy" | "dom";
 
 // ── Resource Connect — Connection profiles ─────────────────────────
 // See features/resource-connect.md. Each server resource carries
@@ -485,7 +512,87 @@ export type ResourceTypeConfig = Record<string, ResourceTypeDef>;
 // resource record; the resource module accepts it without any
 // backend schema change.
 
-export type SessionProtocol = "ssh" | "rdp";
+/**
+ * A profile's protocol. Profiles are opaque JSON on the resource record, so
+ * anything read from storage must go through `parseSessionProtocol` — an
+ * unknown value is refused, never defaulted to `ssh`.
+ */
+export type SessionProtocol = "ssh" | "rdp" | "web";
+
+/** Login modes a `web` profile can declare (spec §1). `open` and `form`
+ *  launch; `http-auth` and `sso` are refused at save and at connect with
+ *  "not available yet". `form` carries a login recipe (`WebLoginRecipe`)
+ *  and needs the type to opt in to `web_exposure_max: "dom"`. */
+export type WebLoginMode = "open" | "form" | "http-auth" | "sso";
+
+/** What a recipe `fill` writes (spec §2). Never JavaScript. */
+export type WebFillValue = "username" | "password" | "totp" | `literal:${string}`;
+
+/** One recipe action: exactly one verb. Selectors are CSS, matched in the
+ *  top document only. */
+export type WebRecipeAction =
+  | { fill: string; value: WebFillValue }
+  | { click: string }
+  | { submit: string }
+  | { wait: string };
+
+export interface WebRecipeStep {
+  /** Glob over the host-observed top-frame URL; `*` only after the origin. */
+  when_url: string;
+  actions: WebRecipeAction[];
+}
+
+export interface WebRecipeCondition {
+  url?: string;
+  selector?: string;
+}
+
+/** The v1 login recipe of a `form` profile (spec §2), as stored. The server
+ *  and the desktop host parse it with the same strict parser; unknown keys
+ *  are refused. */
+export interface WebLoginRecipe {
+  version: 1;
+  vendor?: string;
+  /** Explicit steps, or `"auto"` for heuristic mode (policy-gated). */
+  steps: WebRecipeStep[] | "auto";
+  success_when: WebRecipeCondition;
+  failure_when?: WebRecipeCondition;
+  /** 1–60, default 30. */
+  timeout_secs?: number;
+  pause_for_operator?: ("captcha" | "push_mfa")[];
+}
+
+/** Programmatic clipboard access for the web session's page. Only
+ *  `bidirectional` grants it, and only on Linux / Windows — WKWebView
+ *  can't gate the clipboard (spec §4). */
+export type WebClipboardMode =
+  | "bidirectional"
+  | "host-to-session"
+  | "session-to-host"
+  | "off";
+
+/** The `web` block of a `protocol: "web"` profile (spec §1). */
+export interface WebProfileSettings {
+  /** https only; http only with `allow_insecure_http`. */
+  start_url: string;
+  /** Exact `scheme://host[:port]` origins; the start URL's origin is
+   *  implicit. Navigation outside the set is blocked. */
+  allowed_origins: string[];
+  login_mode: WebLoginMode;
+  /** `form` only. */
+  recipe?: WebLoginRecipe;
+  /** `rustion-isolated` is Phase 8 and refused today. */
+  transport?: "local" | "rustion-isolated";
+  /** Phase 4; a non-empty list is refused today rather than ignored. */
+  tls_pin_sha256?: string[];
+  allow_insecure_http?: boolean;
+  allow_downloads?: boolean;
+  /** Default true: popups to an in-set origin load in the session window. */
+  allow_popups_same_origin_set?: boolean;
+  /** Absent = `off`. */
+  clipboard?: WebClipboardMode;
+  window?: { width?: number; height?: number };
+}
 
 /**
  * SSH login class (see features/ssh-resource-login-brokering.md):
@@ -507,7 +614,16 @@ export interface EffectiveLoginClass {
 }
 
 export type CredentialSource =
-  | { kind: "secret"; secret_id: string }
+  | {
+      kind: "secret";
+      secret_id: string;
+      /** `form` web logins only: the secret's key names, when they differ
+       *  from `username` / `password` / `totp_seed`. */
+      fields?: { username?: string; password?: string; totp_seed?: string };
+      /** `form` web logins only: how the `totp_seed` (base32) turns into a
+       *  code. Defaults SHA1 / 6 digits / 30 s. */
+      totp?: { algorithm?: "SHA1" | "SHA256" | "SHA512"; digits?: 6 | 8; period?: 30 | 60 };
+    }
   | {
       kind: "ldap";
       ldap_mount: string;
@@ -563,6 +679,15 @@ export type CredentialSource =
       ssh_mount?: string;
       ssh_role?: string;
       mode?: "ca" | "otp" | "pqc";
+    }
+  | {
+      /**
+       * No credential at all. Valid only on a `web` profile in the `open`
+       * login mode, which opens the application and releases nothing — the
+       * operator (or the application's own SSO) logs in. Refused on SSH and
+       * RDP profiles.
+       */
+      kind: "none";
     };
 
 /**
@@ -701,6 +826,8 @@ export interface ConnectionProfile {
    * this field is only an editor hint. Ignored for RDP profiles.
    */
   login_class?: SshLoginClass;
+  /** `protocol: "web"` only — see `WebProfileSettings`. */
+  web?: WebProfileSettings;
 }
 
 /**

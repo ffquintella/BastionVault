@@ -19,6 +19,7 @@ mod kv_version_read;
 mod mcp_access;
 mod notifications;
 mod resource;
+mod resource_connect_web;
 mod oidc;
 mod pki_certs_info;
 mod pki_export;

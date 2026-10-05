@@ -44,27 +44,39 @@ import type {
   SessionProtocol,
   RecentSession,
 } from "../lib/types";
-import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig, getTypeDef, inferOsType } from "../lib/resourceTypes";
+import {
+  DEFAULT_RESOURCE_TYPES,
+  connectProtocols,
+  mergeTypeConfig,
+  getTypeDef,
+  inferOsType,
+  typeSupportsConnect,
+} from "../lib/resourceTypes";
 import {
   blankCredentialSource,
   blankProfile,
+  blankWebProfile,
   defaultPort,
   detectSecretShape,
   isLaunchableForCaller,
   isLaunchableProfile,
   loginClassGate,
   needsOperatorPrompt,
-  normalizeProfileDefaults,
   pickDefaultProfile,
   profileConnectHints,
   protocolForOsType,
+  profilesForWrite,
   readProfiles,
+  readUnknownProfiles,
+  setWebLoginMode,
   validateProfile,
   validateProfileForLoginClass,
 } from "../lib/connectionProfiles";
 import { resourceLoginClass, loginClassChipLabel } from "../lib/sshBroker";
-import type { EffectiveLoginClass } from "../lib/types";
+import type { ConnectProtocol, EffectiveLoginClass } from "../lib/types";
 import * as api from "../lib/api";
+import { openProfileSession } from "../lib/sessionLaunch";
+import { WebProfileFields } from "../components/WebProfileFields";
 import { useConnectMfa } from "../components/ConnectMfaPrompt";
 import { extractError } from "../lib/error";
 import { useNamespaceStore } from "../stores/namespaceStore";
@@ -142,10 +154,10 @@ function ResourceCard({
   // through the detail view: the Connection tab is opened only when
   // there is a choice one click cannot make.
   const td = getTypeDef(typeConfig, meta.type);
-  // Connect is server-only (matches the detail view's tab gating) and
-  // honours the per-type connect toggle.
-  const canConnect =
-    String(meta.type || "") === "server" && td.connect?.enabled !== false;
+  // Connect appears when the type offers any Connect protocol
+  // (`connect.protocols`, with the per-type toggle folded in) — the same
+  // gate as the detail view's Connection tab.
+  const canConnect = typeSupportsConnect(td);
   // …and agrees with the Connection tab on whether one click could launch
   // anything. Two sources, in order:
   //
@@ -165,7 +177,7 @@ function ResourceCard({
   const local = staticVerdict({
     name: meta.name,
     type: String(meta.type || ""),
-    connectEnabled: td.connect?.enabled !== false,
+    connectEnabled: canConnect,
     hints: meta.connect_profiles,
     assetGroupIds: assetGroups,
   });
@@ -379,7 +391,7 @@ export function ResourcesPage() {
       out.push({
         name: c.name,
         type: String(c.type || ""),
-        connectEnabled: td.connect?.enabled !== false,
+        connectEnabled: typeSupportsConnect(td),
         hints: c.connect_profiles,
         assetGroupIds: assetGroups.map.byResource[c.name] || [],
       });
@@ -387,6 +399,8 @@ export function ResourcesPage() {
     out.sort((a, b) => a.name.localeCompare(b.name));
     return out;
   }, [cards, recentCards, typeConfig, assetGroups.map.byResource]);
+
+  const showRecent = recentCards.length >= 2 && !search && !filterType && !filterGroup;
   const connectAccess = useConnectAccess(connectCandidates);
 
   // Each fetch run is tagged with a token. When the user changes a
@@ -691,7 +705,12 @@ export function ResourcesPage() {
       toast("error", extractError(e));
       return;
     }
-    const profiles = readProfiles(info as Record<string, unknown>);
+    // Only the protocols this resource's type offers are one-click
+    // launchable — the same gate as the chip and the Connection tab.
+    const offered = connectProtocols(getTypeDef(typeConfig, String(info.type ?? "")));
+    const profiles = readProfiles(info as Record<string, unknown>).filter((p) =>
+      offered.includes(p.protocol),
+    );
     // Authoritative connect-only check before we pick anything: the card's
     // batched probe may be stale, in flight, or have failed. A connect-only
     // caller must not one-click a `direct` profile — that would resolve the
@@ -764,17 +783,14 @@ export function ResourcesPage() {
       // profile is ungated, so the spread below is a no-op in that case.
       const mfa = await gateConnect(name, profile.id, profile.name);
       if (!mfa) return; // operator cancelled the prompt
-      const req = {
+      // Strict dispatch: an unknown protocol throws instead of being
+      // opened as RDP (the old `ssh ? … : rdp` fallthrough).
+      await openProfileSession(profile, {
         resource_name: name,
         profile_id: profile.id,
         operator_credential: operatorCredential,
         ...mfa,
-      };
-      if (profile.protocol === "ssh") {
-        await api.sessionOpenSsh(req);
-      } else {
-        await api.sessionOpenRdp(req);
-      }
+      });
     } catch (e: unknown) {
       toast("error", extractError(e));
     }
@@ -918,13 +934,12 @@ export function ResourcesPage() {
                 { id: "info", label: "Info" },
                 { id: "secrets", label: "Secrets" },
                 { id: "files", label: "Files" },
-                // Connection tab is server-only — the Connect button
-                // dispatches on os_type, which only exists on the
-                // server resource type. Also hidden when the
-                // operator disabled Connect for this type via
+                // Connection tab appears when the type offers any
+                // Connect protocol (`connect.protocols`; absent means
+                // SSH/RDP on `server` only, as before). Also hidden
+                // when the operator disabled Connect for this type via
                 // Settings (Phase 7 per-type policy).
-                ...(String(resourceInfo.type || "") === "server" &&
-                typeDef.connect?.enabled !== false
+                ...(typeSupportsConnect(typeDef)
                   ? [{ id: "connection", label: "Connection" }]
                   : []),
                 { id: "sharing", label: "Sharing" },
@@ -966,6 +981,7 @@ export function ResourcesPage() {
             <>
               <ConnectionProfilesPanel
                 resource={resourceInfo}
+                protocols={connectProtocols(typeDef)}
                 assetGroupIds={
                   assetGroups.map.byResource[String(resourceInfo.name)] || []
                 }
@@ -1084,7 +1100,7 @@ export function ResourcesPage() {
                 it doesn't fight the user's current intent. Hidden
                 until at least 2 entries would render — a single tile
                 in its own section is just noise. */}
-            {recentCards.length >= 2 && !search && !filterType && !filterGroup && (
+            {showRecent && (
               <div>
                 <div className="text-sm text-[var(--color-text-muted)] mb-2">Recently accessed</div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
@@ -1103,6 +1119,14 @@ export function ResourcesPage() {
                     />
                   ))}
                 </div>
+              </div>
+            )}
+
+            {/* When the recent strip is shown, separate it from the full
+                list so the duplicated tiles read as two distinct sections. */}
+            {showRecent && (
+              <div className="border-t border-[var(--color-border)] pt-4 text-sm text-[var(--color-text-muted)]">
+                All resources
               </div>
             )}
 
@@ -1144,8 +1168,7 @@ export function ResourcesPage() {
           // rather than offer a launch that resolves to "you can't"; an
           // unresolved verdict keeps it, for the same fail-open reason.
           const canConnect =
-            String(entry.type || "") === "server" &&
-            td.connect?.enabled !== false &&
+            typeSupportsConnect(td) &&
             connectAccess.byName[entry.name]?.allowed !== false;
           const items: ContextMenuItem[] = [
             {
@@ -1637,11 +1660,14 @@ function useCanReadSecrets(resourceName: string): boolean | null {
 
 function ConnectionProfilesPanel({
   resource,
+  protocols,
   assetGroupIds,
   onUpdated,
   toast,
 }: {
   resource: ResourceMetadata;
+  /** Connect protocols the resource's type offers (`connectProtocols`). */
+  protocols: ConnectProtocol[];
   /** Asset groups this resource belongs to — a contributor to the
    *  effective transport tier, so the resolver needs them. */
   assetGroupIds: string[];
@@ -1649,8 +1675,14 @@ function ConnectionProfilesPanel({
   toast: (type: "success" | "error" | "info", msg: string) => void;
 }) {
   const profiles = readProfiles(resource as Record<string, unknown>);
+  // Entries from a newer client (unknown protocol): never shown or launched
+  // here, but written back untouched so editing a known profile can't
+  // delete them.
+  const unknownProfiles = readUnknownProfiles(resource as Record<string, unknown>);
   const osType = String(resource["os_type"] ?? "");
   const osTypeProtocol = protocolForOsType(osType);
+  // The OS-type hints only concern SSH/RDP; a web-only type has no os_type.
+  const offersShellProtocols = protocols.includes("ssh") || protocols.includes("rdp");
   const [editTarget, setEditTarget] = useState<ConnectionProfile | null>(null);
   const [creating, setCreating] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<ConnectionProfile | null>(null);
@@ -1691,8 +1723,10 @@ function ConnectionProfilesPanel({
   const canWrite = useCanWriteResource(String(resource.name ?? ""));
   const readOnly = canWrite === false;
   const readOnlyTitle = "You don't have permission to modify this resource.";
-  const launchableProfiles = profiles.filter((p) =>
-    isLaunchableForCaller(p, connectOnly, brokeredByPolicy),
+  const launchableProfiles = profiles.filter(
+    (p) =>
+      protocols.includes(p.protocol) &&
+      isLaunchableForCaller(p, connectOnly, brokeredByPolicy),
   );
 
   // LDAP operator-bind mode requires a credential prompt before
@@ -1729,21 +1763,12 @@ function ConnectionProfilesPanel({
         profile.name,
       );
       if (!mfa) return; // operator cancelled the prompt
-      if (profile.protocol === "ssh") {
-        await api.sessionOpenSsh({
-          resource_name: String(resource.name),
-          profile_id: profile.id,
-          operator_credential: operatorCredential,
-          ...mfa,
-        });
-      } else {
-        await api.sessionOpenRdp({
-          resource_name: String(resource.name),
-          profile_id: profile.id,
-          operator_credential: operatorCredential,
-          ...mfa,
-        });
-      }
+      await openProfileSession(profile, {
+        resource_name: String(resource.name),
+        profile_id: profile.id,
+        operator_credential: operatorCredential,
+        ...mfa,
+      });
     } catch (e: unknown) {
       toast("error", extractError(e));
     } finally {
@@ -1755,11 +1780,12 @@ function ConnectionProfilesPanel({
     try {
       // Enforce the at-most-one-default invariant on every write so a
       // resource with profiles always has exactly one default (the
-      // first, if the operator never set one explicitly).
-      const normalized = normalizeProfileDefaults(next);
+      // first, if the operator never set one explicitly), and re-append
+      // the entries this build can't read.
+      const toWrite = profilesForWrite(next, unknownProfiles);
       const updated: ResourceMetadata = {
         ...(resource as ResourceMetadata),
-        connection_profiles: normalized as unknown as ResourceMetadata["connection_profiles"],
+        connection_profiles: toWrite as unknown as ResourceMetadata["connection_profiles"],
       };
       await api.writeResource(String(resource.name), updated);
       onUpdated();
@@ -1884,13 +1910,13 @@ function ConnectionProfilesPanel({
           </div>
         )}
 
-        {!osType && (
+        {offersShellProtocols && !osType && (
           <div className="rounded border border-yellow-700 bg-yellow-950/40 text-yellow-200 px-3 py-2 text-sm">
             Set <strong>OS Type</strong> on this resource (Info tab) so
             the Connect button knows which protocol to dispatch.
           </div>
         )}
-        {osType && !osTypeProtocol && (
+        {offersShellProtocols && osType && !osTypeProtocol && (
           <div className="rounded border border-yellow-700 bg-yellow-950/40 text-yellow-200 px-3 py-2 text-sm">
             <code>os_type = {osType}</code> — Connect is disabled for
             this OS type. Profiles can still be saved for future use.
@@ -1917,18 +1943,51 @@ function ConnectionProfilesPanel({
                     <Badge label="DEFAULT" variant="success" />
                   )}
                 </div>
-                <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5 text-xs text-[var(--color-text-muted)] mt-1">
-                  <dt>target</dt>
-                  <dd className="font-mono break-all">
-                    {p.target_host || (resource["hostname"] as string) || (resource["ip_address"] as string) || "—"}
-                    :
-                    {p.target_port ?? defaultPort(p.protocol)}
-                  </dd>
-                  <dt>user</dt>
-                  <dd className="font-mono">{p.username || "(default)"}</dd>
-                  <dt>cred</dt>
-                  <dd className="font-mono">{describeCredentialSource(p.credential_source)}</dd>
-                </dl>
+                {p.protocol === "web" ? (
+                  <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5 text-xs text-[var(--color-text-muted)] mt-1">
+                    <dt>start</dt>
+                    <dd className="font-mono break-all min-w-0">{p.web?.start_url || "—"}</dd>
+                    <dt>login</dt>
+                    <dd className="font-mono">{p.web?.login_mode ?? "—"}</dd>
+                    {p.web?.login_mode === "form" && (
+                      <>
+                        <dt>cred</dt>
+                        <dd className="font-mono min-w-0 truncate">
+                          {describeCredentialSource(p.credential_source)}
+                        </dd>
+                        <dt>recipe</dt>
+                        <dd className="font-mono">
+                          {p.web.recipe
+                            ? p.web.recipe.steps === "auto"
+                              ? "heuristic"
+                              : `${p.web.recipe.steps.length} step${p.web.recipe.steps.length === 1 ? "" : "s"}${p.web.recipe.vendor ? ` (${p.web.recipe.vendor})` : ""}`
+                            : "—"}
+                        </dd>
+                      </>
+                    )}
+                    {(p.web?.allowed_origins?.length ?? 0) > 0 && (
+                      <>
+                        <dt>also</dt>
+                        <dd className="font-mono break-all min-w-0">
+                          {p.web?.allowed_origins.join(", ")}
+                        </dd>
+                      </>
+                    )}
+                  </dl>
+                ) : (
+                  <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5 text-xs text-[var(--color-text-muted)] mt-1">
+                    <dt>target</dt>
+                    <dd className="font-mono break-all">
+                      {p.target_host || (resource["hostname"] as string) || (resource["ip_address"] as string) || "—"}
+                      :
+                      {p.target_port ?? defaultPort(p.protocol)}
+                    </dd>
+                    <dt>user</dt>
+                    <dd className="font-mono">{p.username || "(default)"}</dd>
+                    <dt>cred</dt>
+                    <dd className="font-mono">{describeCredentialSource(p.credential_source)}</dd>
+                  </dl>
+                )}
               </div>
               <div className="flex flex-col gap-1 shrink-0">
                 {launchableProfiles.some((lp) => lp.id === p.id) ? (
@@ -1957,7 +2016,9 @@ function ConnectionProfilesPanel({
                       // Distinguish "this client can't drive that combination
                       // yet" from "your access won't allow this dial" — the
                       // old blanket phase message misattributed the latter.
-                      connectOnly && isLaunchableProfile(p)
+                      !protocols.includes(p.protocol)
+                        ? `This resource type doesn't offer ${p.protocol.toUpperCase()} Connect (Settings → Resource Types).`
+                        : connectOnly && isLaunchableProfile(p)
                         ? brokeredByPolicy
                           ? "This resource brokers through a bastion, but BastionVault can't resolve this credential source server-side (only stored secrets and SSH-engine mints, over SSH). Launching it would resolve the credential onto this machine, which your connect-only access doesn't allow."
                           : "Direct-dial profile: launching it would resolve the credential onto this machine, which your connect-only access doesn't allow."
@@ -2005,7 +2066,8 @@ function ConnectionProfilesPanel({
           ))}
         </div>
 
-        {launchableProfiles.length === 0 &&
+        {offersShellProtocols &&
+          launchableProfiles.length === 0 &&
           profiles.length > 0 &&
           // When connect-only is what's blocking every profile, the notice
           // above already said so — repeating the phase roadmap here reads
@@ -2020,20 +2082,35 @@ function ConnectionProfilesPanel({
 
         <RecentSessionsList resource={resource} />
 
-        <p className="text-xs text-[var(--color-text-muted)]">
-          Connect launches an in-app session window for SSH × {"{"}
-          Secret, LDAP, PKI{"}"} (xterm.js + russh) and RDP × {"{"}
-          Secret, LDAP, PKI{"}"} (canvas + ironrdp). RDP+PKI
-          negotiates CredSSP smartcard auth via sspi-rs's PIV
-          emulator using the vault-issued cert + key. The SSH
-          secret-engine source remains pending its own follow-up.
-        </p>
+        {offersShellProtocols && (
+          <p className="text-xs text-[var(--color-text-muted)]">
+            Connect launches an in-app session window for SSH × {"{"}
+            Secret, LDAP, PKI{"}"} (xterm.js + russh) and RDP × {"{"}
+            Secret, LDAP, PKI{"}"} (canvas + ironrdp). RDP+PKI
+            negotiates CredSSP smartcard auth via sspi-rs's PIV
+            emulator using the vault-issued cert + key. The SSH
+            secret-engine source remains pending its own follow-up.
+          </p>
+        )}
+        {protocols.includes("web") && (
+          <p className="text-xs text-[var(--color-text-muted)]">
+            Web profiles open the application in a separate, isolated
+            BastionVault window: a private browsing store discarded when the
+            window closes, navigation limited to the profile&rsquo;s origins,
+            and no access to the vault. The <strong>open</strong> login mode
+            releases no credential &mdash; you, or the application&rsquo;s
+            own single sign-on, log in. The <strong>form</strong> login mode
+            signs in for you from a recipe, once the resource&rsquo;s type has
+            been opted in under Settings &rarr; Resource Types.
+          </p>
+        )}
       </div>
 
       {(creating || editTarget) && (
         <ConnectionProfileEditor
           open
           resource={resource}
+          protocols={protocols}
           existing={editTarget}
           onClose={() => {
             setCreating(false);
@@ -2226,6 +2303,8 @@ function describeCredentialSource(c: CredentialSource): string {
         : "default-account • connecting user";
     case "fido2":
       return "fido2 • connecting user's security key";
+    case "none":
+      return "none • no credential released";
   }
 }
 
@@ -2237,6 +2316,7 @@ function describeCredentialSource(c: CredentialSource): string {
 function ConnectionProfileEditor({
   open,
   resource,
+  protocols,
   existing,
   onClose,
   onSave,
@@ -2244,6 +2324,10 @@ function ConnectionProfileEditor({
 }: {
   open: boolean;
   resource: ResourceMetadata;
+  /** Protocols the resource's type offers; the Protocol select is limited
+   *  to these (plus the edited profile's own, so editing never silently
+   *  rewrites it). */
+  protocols: ConnectProtocol[];
   existing: ConnectionProfile | null;
   onClose: () => void;
   onSave: (p: ConnectionProfile) => Promise<void>;
@@ -2251,9 +2335,16 @@ function ConnectionProfileEditor({
 }) {
   const osType = String(resource["os_type"] ?? "");
   const fallbackProtocol = protocolForOsType(osType) ?? "ssh";
-  const [profile, setProfile] = useState<ConnectionProfile>(
-    existing ?? blankProfile(osType),
-  );
+  const resourceUrl = typeof resource["url"] === "string" ? (resource["url"] as string) : "";
+  const [profile, setProfile] = useState<ConnectionProfile>(() => {
+    if (existing) return existing;
+    // A new profile starts on the protocol the OS type maps to when the
+    // type offers it, else on the first protocol the type offers.
+    if (protocols.includes(fallbackProtocol)) return blankProfile(osType);
+    if (protocols[0] === "web") return blankWebProfile(resourceUrl);
+    if (protocols[0]) return { ...blankProfile(osType), protocol: protocols[0] };
+    return blankProfile(osType);
+  });
   const [secretCandidates, setSecretCandidates] = useState<Array<{
     value: string;
     label: string;
@@ -2350,7 +2441,35 @@ function ConnectionProfileEditor({
     updateCredentialSource(blankCredentialSource(kind));
   }
 
+  // Switching to or from `web` swaps the whole shape (a web profile has no
+  // target, user or credential, an SSH/RDP one has no `web` block); only
+  // the identity and the MFA flag carry over. SSH ↔ RDP keeps today's
+  // behaviour of changing the protocol alone.
+  function handleProtocolChange(next: SessionProtocol) {
+    setProfile((p) => {
+      if (p.protocol === next) return p;
+      const keep = {
+        id: p.id,
+        name: p.name,
+        is_default: p.is_default,
+        require_mfa: p.require_mfa,
+      };
+      if (next === "web") return { ...blankWebProfile(resourceUrl), ...keep };
+      if (p.protocol === "web") return { ...blankProfile(osType), ...keep, protocol: next };
+      return { ...p, protocol: next };
+    });
+  }
+
+  const protocolOptions = (["ssh", "rdp", "web"] as const)
+    .filter((p) => protocols.includes(p) || p === profile.protocol || p === existing?.protocol)
+    .map((p) => ({ value: p, label: p === "web" ? "Web" : p.toUpperCase() }));
+
+  // Unparseable text in the recipe's JSON view holds Save: the profile
+  // keeps the last valid recipe meanwhile, which would silently save the
+  // wrong thing.
+  const [recipeTextError, setRecipeTextError] = useState<string | null>(null);
   const validationError =
+    (profile.protocol === "web" ? recipeTextError : null) ??
     validateProfile(profile) ??
     validateProfileForLoginClass(
       profile,
@@ -2387,14 +2506,43 @@ function ConnectionProfileEditor({
             label="Protocol"
             value={profile.protocol}
             onChange={(e) =>
-              update("protocol", e.target.value as SessionProtocol)
+              handleProtocolChange(e.target.value as SessionProtocol)
             }
-            options={[
-              { value: "ssh", label: "SSH" },
-              { value: "rdp", label: "RDP" },
-            ]}
+            options={protocolOptions}
           />
         </div>
+        {profile.protocol === "web" && (
+          <>
+            <WebProfileFields
+              web={
+                profile.web ?? {
+                  start_url: resourceUrl,
+                  allowed_origins: [],
+                  login_mode: "open",
+                }
+              }
+              onChange={(web) => update("web", web)}
+              resource={resource as Record<string, unknown>}
+              onLoginModeChange={(mode) => setProfile((p) => setWebLoginMode(p, mode))}
+              onRecipeTextError={setRecipeTextError}
+              credentialSlot={
+                profile.web?.login_mode === "form" ? (
+                  <WebFormCredentialEditor
+                    cs={profile.credential_source}
+                    onChange={updateCredentialSource}
+                    secretCandidates={secretCandidates}
+                    loadingSecrets={loadingSecrets}
+                  />
+                ) : undefined
+              }
+            />
+            {validationError && (
+              <p className="text-xs text-[var(--color-danger)]">{validationError}</p>
+            )}
+          </>
+        )}
+        {profile.protocol !== "web" && (
+        <>
         {osType && profile.protocol !== fallbackProtocol && (
           <p className="text-xs text-[var(--color-text-muted)]">
             os_type = {osType} normally maps to{" "}
@@ -2527,12 +2675,12 @@ function ConnectionProfileEditor({
           />
         ) : profile.credential_source.kind === "fido2" ? (
           <SecurityKeyCredentialEditor />
-        ) : (
+        ) : profile.credential_source.kind === "ssh-engine" ? (
           <SshEngineCredentialEditor
             cs={profile.credential_source}
             onChange={updateCredentialSource}
           />
-        )}
+        ) : null}
 
         {validationError && (
           <p className="text-xs text-[var(--color-danger)]">{validationError}</p>
@@ -2553,6 +2701,8 @@ function ConnectionProfileEditor({
           }
           hint="Leave empty for TOFU on first connect. The session window will surface the observed fingerprint so you can pin it on the next save."
         />
+        </>
+        )}
 
         <hr className="border-[var(--color-border)]" />
 
@@ -2764,9 +2914,13 @@ function CredentialSecretInspector({
 function LdapCredentialEditor({
   cs,
   onChange,
+  allowOperator = true,
 }: {
   cs: Extract<CredentialSource, { kind: "ldap" }>;
   onChange: (s: CredentialSource) => void;
+  /** Operator-supplied bind means the operator types the credential, so a
+   *  web form login (which releases one) can't use it. */
+  allowOperator?: boolean;
 }) {
   return (
     <div className="space-y-2">
@@ -2793,7 +2947,9 @@ function LdapCredentialEditor({
             })
           }
           options={[
-            { value: "operator", label: "Operator-supplied (prompt at connect)" },
+            ...(allowOperator
+              ? [{ value: "operator", label: "Operator-supplied (prompt at connect)" }]
+              : []),
             { value: "static_role", label: "Vault-managed (static role)" },
             { value: "library_set", label: "Vault-managed (library check-out)" },
           ]}
@@ -3116,6 +3272,130 @@ function SecurityKeyCredentialEditor() {
   );
 }
 
+/**
+ * Credential source for a `form` web login: the sources the server can
+ * release a credential from at `v2/connect/web/launch` (`secret`, `ldap`
+ * static role / library check-out, `default-account`), plus the `secret`
+ * source's key names and TOTP parameters.
+ */
+function WebFormCredentialEditor({
+  cs,
+  onChange,
+  secretCandidates,
+  loadingSecrets,
+}: {
+  cs: CredentialSource;
+  onChange: (s: CredentialSource) => void;
+  secretCandidates: Array<{ value: string; label: string }>;
+  loadingSecrets: boolean;
+}) {
+  const kind = cs.kind === "ldap" || cs.kind === "default-account" ? cs.kind : "secret";
+  return (
+    <div className="space-y-2 min-w-0">
+      <Select
+        label="Credential source"
+        value={kind}
+        onChange={(e) => {
+          // Web form blanks: no `ssh_*` leftovers, and an LDAP source that
+          // releases something (operator-supplied bind releases nothing).
+          const next = e.target.value;
+          if (next === "ldap") onChange({ kind: "ldap", ldap_mount: "", bind_mode: "static_role" });
+          else if (next === "default-account") onChange({ kind: "default-account" });
+          else onChange(blankCredentialSource("secret"));
+        }}
+        options={[
+          { value: "secret", label: "Resource secret (username, password, optional TOTP seed)" },
+          { value: "ldap", label: "LDAP / Active Directory (static role or library check-out)" },
+          { value: "default-account", label: "Connecting user's default account (username only)" },
+        ]}
+      />
+      <p className="text-xs text-[var(--color-text-muted)]">
+        The server reads the credential when the session opens and hands the host only what the recipe
+        fills. The operator never sees it.
+      </p>
+      {cs.kind === "secret" && (
+        <div className="space-y-2">
+          <Select
+            label="Resource secret"
+            value={cs.secret_id}
+            onChange={(e) => onChange({ ...cs, secret_id: e.target.value })}
+            options={[
+              { value: "", label: loadingSecrets ? "Loading…" : "(pick a secret)" },
+              ...secretCandidates,
+            ]}
+          />
+          <details open={cs.fields !== undefined || cs.totp !== undefined}>
+            <summary className="cursor-pointer text-xs font-medium text-[var(--color-text-muted)]">
+              Secret key names and TOTP
+            </summary>
+            <div className="mt-2 grid grid-cols-2 gap-3">
+              {(["username", "password", "totp_seed"] as const).map((key) => (
+                <Input
+                  key={key}
+                  label={`${key === "totp_seed" ? "TOTP seed" : key === "username" ? "Username" : "Password"} key`}
+                  value={cs.fields?.[key] ?? ""}
+                  onChange={(e) => {
+                    const fields = { ...cs.fields, [key]: e.target.value };
+                    if (e.target.value === "") delete fields[key];
+                    const { fields: _f, ...rest } = cs;
+                    void _f;
+                    onChange(Object.keys(fields).length > 0 ? { ...rest, fields } : rest);
+                  }}
+                  placeholder={key}
+                />
+              ))}
+              <p className="col-span-2 text-xs text-[var(--color-text-muted)]">
+                Names of the keys inside the secret, when they differ from the defaults shown. The TOTP seed
+                is base32 and never leaves the server: the host receives only the current code.
+              </p>
+              <Select
+                label="TOTP algorithm"
+                value={cs.totp?.algorithm ?? "SHA1"}
+                onChange={(e) =>
+                  onChange({ ...cs, totp: { ...cs.totp, algorithm: e.target.value as "SHA1" | "SHA256" | "SHA512" } })
+                }
+                options={[
+                  { value: "SHA1", label: "SHA1 (default)" },
+                  { value: "SHA256", label: "SHA256" },
+                  { value: "SHA512", label: "SHA512" },
+                ]}
+              />
+              <div className="grid grid-cols-2 gap-3">
+                <Select
+                  label="Digits"
+                  value={String(cs.totp?.digits ?? 6)}
+                  onChange={(e) =>
+                    onChange({ ...cs, totp: { ...cs.totp, digits: Number(e.target.value) as 6 | 8 } })
+                  }
+                  options={[
+                    { value: "6", label: "6" },
+                    { value: "8", label: "8" },
+                  ]}
+                />
+                <Select
+                  label="Period (s)"
+                  value={String(cs.totp?.period ?? 30)}
+                  onChange={(e) =>
+                    onChange({ ...cs, totp: { ...cs.totp, period: Number(e.target.value) as 30 | 60 } })
+                  }
+                  options={[
+                    { value: "30", label: "30" },
+                    { value: "60", label: "60" },
+                  ]}
+                />
+              </div>
+            </div>
+          </details>
+        </div>
+      )}
+      {cs.kind === "ldap" && <LdapCredentialEditor cs={cs} onChange={onChange} allowOperator={false} />}
+      {cs.kind === "default-account" && (
+        <DefaultAccountCredentialEditor cs={cs} onChange={onChange} protocol="web" />
+      )}
+    </div>
+  );
+}
+
 function DefaultAccountCredentialEditor({
   cs,
   onChange,
@@ -3125,6 +3405,18 @@ function DefaultAccountCredentialEditor({
   onChange: (s: CredentialSource) => void;
   protocol: SessionProtocol;
 }) {
+  if (protocol === "web") {
+    return (
+      <p className="text-xs text-[var(--color-text-muted)]">
+        The login user is the connecting operator's default resource account
+        (set per user under <em>Users → Edit User → Default Resource
+        Account</em>). It supplies a username only: the recipe may fill{" "}
+        <code>username</code> but not <code>password</code> or{" "}
+        <code>totp</code>, and the operator types the rest in the session
+        window.
+      </p>
+    );
+  }
   if (protocol === "rdp") {
     return (
       <p className="text-xs text-[var(--color-text-muted)]">

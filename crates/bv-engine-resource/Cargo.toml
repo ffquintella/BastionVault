@@ -33,6 +33,25 @@ rand = "^0.10"
 serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
 serde_json = "^1.0"
 sha2 = "0.11"
+# Web Application Connect, `form` mode (features/web-application-connect.md
+# §3): `v2/connect/web/{launch,totp}` compute the target application's TOTP
+# code server-side so the seed never leaves the vault. RFC 6238 is built from
+# the same RustCrypto primitives (`hmac` + `sha1`/`sha2`) and the same `base32`
+# seed decoder the TOTP engine uses — every one of them is already in the
+# lockfile; an engine may not depend on another engine, so these are direct
+# edges rather than a dependency on `bv-engine-totp`.
+hmac = "0.13"
+sha1 = "0.11"
+base32 = "0.5"
+# Scrubs the resolved web credential (password, TOTP seed, MAC output) from
+# this process's heap once the launch bundle is built.
+zeroize = "1.8.2"
+
+[dev-dependencies]
+# The launch-store state machine is tested in-crate over an in-memory
+# `Storage`; its methods are `maybe_async`, so the async build needs a runtime.
+# Same pin as bv-engine-rustion's dev-dependency.
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
 
 [features]
 default = []

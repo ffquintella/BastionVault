@@ -6,6 +6,7 @@
 //! resource backend accepts this without schema changes — the field
 //! is opaque to the host.
 
+import { validateFormWebProfile } from "./webFormProfile";
 import type {
   ConnectionProfile,
   ConnectProfileHint,
@@ -13,13 +14,39 @@ import type {
   ResourceSecretShape,
   SessionProtocol,
   SshLoginClass,
+  WebProfileSettings,
 } from "./types";
 
 /** Default port per (protocol). Per-OS-type defaults that override
  *  these live on the operator-side `ResourceTypeDef.connect`
  *  (Phase 7) — for v1 the protocol default is enough. */
 export function defaultPort(protocol: SessionProtocol): number {
-  return protocol === "ssh" ? 22 : 3389;
+  switch (protocol) {
+    case "ssh":
+      return 22;
+    case "rdp":
+      return 3389;
+    case "web":
+      return 443;
+  }
+}
+
+/**
+ * Parse a stored profile's `protocol`. Returns null for anything this
+ * build doesn't know — callers must treat that as "not launchable", never
+ * as SSH. A profile written by a newer GUI (or by hand) can carry any
+ * string here. See features/web-application-connect.md §1, "Strict
+ * parsing / old clients".
+ */
+export function parseSessionProtocol(raw: unknown): SessionProtocol | null {
+  switch (raw) {
+    case "ssh":
+    case "rdp":
+    case "web":
+      return raw;
+    default:
+      return null;
+  }
 }
 
 /** Map structured `os_type` to the protocol the Connect button
@@ -81,24 +108,76 @@ export function detectSecretShape(data: Record<string, unknown>): ResourceSecret
   };
 }
 
+/** Whether a raw `connection_profiles` entry is one this build can show and
+ *  launch. Strict: an unknown protocol, or a missing id / name /
+ *  credential source, makes it not-ours (fail closed — never read as SSH). */
+function isKnownProfile(p: unknown): p is ConnectionProfile {
+  return (
+    typeof p === "object" &&
+    p !== null &&
+    typeof (p as ConnectionProfile).id === "string" &&
+    typeof (p as ConnectionProfile).name === "string" &&
+    parseSessionProtocol((p as ConnectionProfile).protocol) !== null &&
+    typeof (p as ConnectionProfile).credential_source === "object" &&
+    (p as ConnectionProfile).credential_source !== null
+  );
+}
+
+function rawProfiles(meta: Record<string, unknown>): unknown[] {
+  const raw = meta["connection_profiles"];
+  return Array.isArray(raw) ? raw : [];
+}
+
 /** Pull the profile array off a resource metadata object. Tolerates
  *  the field being absent (returns []) or carrying a non-array (the
  *  caller's read just sees an empty list and the operator can
- *  re-create profiles via the editor). */
+ *  re-create profiles via the editor). Entries this build does not
+ *  understand are excluded here (so they are never launched or listed)
+ *  but are NOT lost on write: see {@link readUnknownProfiles}. */
 export function readProfiles(meta: Record<string, unknown>): ConnectionProfile[] {
-  const raw = meta["connection_profiles"];
-  if (!Array.isArray(raw)) return [];
-  return raw.filter(
-    (p): p is ConnectionProfile =>
-      typeof p === "object" &&
-      p !== null &&
-      typeof (p as ConnectionProfile).id === "string" &&
-      typeof (p as ConnectionProfile).name === "string" &&
-      ((p as ConnectionProfile).protocol === "ssh" ||
-        (p as ConnectionProfile).protocol === "rdp") &&
-      typeof (p as ConnectionProfile).credential_source === "object" &&
-      (p as ConnectionProfile).credential_source !== null,
+  return rawProfiles(meta).filter(isKnownProfile);
+}
+
+/** The raw entries {@link readProfiles} excluded — profiles written by a
+ *  newer client (unknown protocol or shape). Writers must hand these back
+ *  to {@link profilesForWrite} so saving, deleting or re-defaulting a known
+ *  profile never deletes a profile this build merely cannot read. */
+export function readUnknownProfiles(meta: Record<string, unknown>): unknown[] {
+  return rawProfiles(meta).filter((p) => !isKnownProfile(p));
+}
+
+function isDefaultFlagged(p: unknown): boolean {
+  return typeof p === "object" && p !== null && (p as { is_default?: unknown }).is_default === true;
+}
+
+/**
+ * Build the array to persist as `connection_profiles`: the known profiles,
+ * default-normalised, with the unknown entries re-appended untouched.
+ *
+ * The data model keeps exactly one default across the whole stored list
+ * (`normalizeProfileDefaults`), and unknown entries count toward it:
+ *   - when a known profile carries the default (the operator's explicit
+ *     choice, or the first one promoted), an unknown entry flagged
+ *     `is_default` is the only thing that is edited — its flag is set to
+ *     false so the list never holds two defaults;
+ *   - when no known profile is flagged and an unknown one is, the unknown
+ *     entry already holds the default, so no known profile is promoted
+ *     over it.
+ * Unknown entries are otherwise returned byte-for-byte as read, after the
+ * known ones. Inputs are not mutated.
+ */
+export function profilesForWrite(known: ConnectionProfile[], unknown: unknown[]): unknown[] {
+  const unknownHoldsDefault = unknown.some(isDefaultFlagged);
+  const knownFlagged = known.some((p) => p.is_default);
+  if (known.length === 0) return [...unknown];
+  if (unknownHoldsDefault && !knownFlagged) {
+    return [...known.map((p) => ({ ...p, is_default: false })), ...unknown];
+  }
+  const normalized = normalizeProfileDefaults(known);
+  const keptUnknown = unknown.map((p) =>
+    isDefaultFlagged(p) ? { ...(p as Record<string, unknown>), is_default: false } : p,
   );
+  return [...normalized, ...keptUnknown];
 }
 
 /** Empty profile pre-filled with defaults appropriate for the
@@ -127,7 +206,9 @@ export function blankProfile(
  */
 export function validateProfile(p: ConnectionProfile): string | null {
   if (!p.name.trim()) return "Profile name is required";
-  if (p.protocol !== "ssh" && p.protocol !== "rdp") return "Invalid protocol";
+  const protocol = parseSessionProtocol(p.protocol);
+  if (protocol === null) return "Invalid protocol";
+  if (protocol === "web") return validateWebProfile(p);
   if (p.target_port !== undefined) {
     if (
       !Number.isInteger(p.target_port) ||
@@ -198,7 +279,224 @@ export function validateProfile(p: ConnectionProfile): string | null {
         }
       }
       return null;
+    case "none":
+      return "SSH and RDP profiles need a credential source";
   }
+}
+
+// ── Web profiles (features/web-application-connect.md, T96) ─────────
+
+/** Login modes this release can launch. */
+const LAUNCHABLE_WEB_LOGIN_MODES = ["open", "form"] as const;
+
+/** Credential sources that can never authenticate a web session. */
+const NEVER_WEB_SOURCES: CredentialSource["kind"][] = ["ssh-engine", "pki", "fido2"];
+
+/** Credential sources a `form` web login can be signed in with; the server
+ *  releases the credential at `v2/connect/web/launch`. */
+const FORM_WEB_SOURCES: CredentialSource["kind"][] = ["secret", "ldap", "default-account"];
+
+/**
+ * True when a full web profile is one the host can launch: `open` with the
+ * `none` source, or `form` with a recipe and a source the server can
+ * release a credential from, on the direct transport. Used by launchers
+ * that hold the whole profile (the ⌘K palette); card hints use
+ * `isLaunchableProfile`.
+ */
+export function isLaunchableWebProfile(p: ConnectionProfile): boolean {
+  if (p.protocol !== "web" || p.kind === "rustion" || !p.web) return false;
+  if (p.web.transport !== undefined && p.web.transport !== "local") return false;
+  if (p.web.login_mode === "open") return p.credential_source.kind === "none";
+  if (p.web.login_mode === "form") {
+    return FORM_WEB_SOURCES.includes(p.credential_source.kind) && p.web.recipe !== undefined;
+  }
+  return false;
+}
+
+/**
+ * Normalise an operator-typed origin to `scheme://host[:port]`: lower-case
+ * host (punycode for IDNs), default port dropped. Mirrors the host's
+ * `WebOrigin::parse_config`, which is the authoritative check — this one
+ * only lets the editor say no before the connect does.
+ */
+export function normalizeWebOrigin(
+  raw: string,
+  allowInsecureHttp: boolean,
+): { origin: string } | { error: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { error: "An allowed origin is empty" };
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return { error: `\`${trimmed}\` is not a valid origin` };
+  }
+  if ((url.pathname !== "/" && url.pathname !== "") || url.search || url.hash) {
+    return {
+      error: `\`${trimmed}\` is not a bare origin: give scheme://host[:port] only (no path, query or fragment)`,
+    };
+  }
+  if (url.username || url.password) {
+    return { error: `\`${trimmed}\` carries userinfo (user@host); origins may not` };
+  }
+  const err = webUrlError(url, allowInsecureHttp);
+  if (err) return { error: `\`${trimmed}\`: ${err}` };
+  return { origin: url.origin };
+}
+
+/** Scheme + host rules shared by the start URL and allowed origins. */
+function webUrlError(url: URL, allowInsecureHttp: boolean): string | null {
+  if (url.protocol === "http:") {
+    if (!allowInsecureHttp) {
+      return "plain http is refused unless \u201cAllow insecure HTTP\u201d is set";
+    }
+  } else if (url.protocol !== "https:") {
+    return `scheme ${url.protocol} is not allowed (https only)`;
+  }
+  const host = url.hostname.toLowerCase();
+  if (!host) return "missing host";
+  if (host.endsWith(".")) {
+    return `host ${host} has a trailing dot; browsers treat it as a different origin \u2014 remove the dot`;
+  }
+  if (host === "localhost" || host.endsWith(".localhost")) {
+    return `host ${host} is reserved for the vault's own UI; web sessions may not open it`;
+  }
+  return null;
+}
+
+/**
+ * The exact origin set a web profile allows: the start URL's origin plus
+ * `allowed_origins`, normalised and de-duplicated. Null when any entry is
+ * invalid.
+ */
+export function webOriginSet(web: WebProfileSettings): string[] | null {
+  const allowHttp = web.allow_insecure_http === true;
+  let start: URL;
+  try {
+    start = new URL(web.start_url.trim());
+  } catch {
+    return null;
+  }
+  if (start.username || start.password || webUrlError(start, allowHttp)) return null;
+  const out = [start.origin];
+  for (const raw of web.allowed_origins ?? []) {
+    const r = normalizeWebOrigin(raw, allowHttp);
+    if ("error" in r) return null;
+    if (!out.includes(r.origin)) out.push(r.origin);
+  }
+  return out;
+}
+
+/** Window-size bounds, matching the host. */
+export const WEB_WINDOW_MIN = 400;
+export const WEB_WINDOW_MAX = 10_000;
+
+/**
+ * Save-time validation of a `web` profile. Refuses everything this release
+ * cannot honour rather than letting it look honoured: later login modes,
+ * the Rustion transport, TLS pins, credential sources the mode doesn't use.
+ * A `form` profile is additionally held to the server's own reading of its
+ * origins, recipe and credential source (`validateFormWebProfile`).
+ */
+export function validateWebProfile(p: ConnectionProfile): string | null {
+  const cs = p.credential_source.kind;
+  if (NEVER_WEB_SOURCES.includes(cs)) {
+    return `The ${cs} credential source can't authenticate a web session.`;
+  }
+  if (p.kind === "rustion") {
+    return "Web sessions can't be brokered through a Rustion bastion yet \u2014 use the direct transport.";
+  }
+  const web = p.web;
+  if (!web) return "Web profiles need web settings (start URL, login mode).";
+  if (!(LAUNCHABLE_WEB_LOGIN_MODES as readonly string[]).includes(web.login_mode)) {
+    return ["http-auth", "sso"].includes(web.login_mode)
+      ? `The ${web.login_mode} login mode is not available yet \u2014 this release supports \u201copen\u201d and \u201cform\u201d.`
+      : "Unknown login mode.";
+  }
+  const isForm = web.login_mode === "form";
+  if (!isForm) {
+    if (cs !== "none") {
+      return "The open login mode releases no credential \u2014 set the credential source to \u201cNone\u201d.";
+    }
+    if (web.recipe !== undefined && web.recipe !== null) {
+      return "A login recipe only applies to the form login mode.";
+    }
+  }
+  if (web.transport !== undefined && web.transport !== "local") {
+    return web.transport === "rustion-isolated"
+      ? "Rustion browser isolation is not available yet."
+      : "Unknown web transport.";
+  }
+  if ((web.tls_pin_sha256 ?? []).length > 0) {
+    return "TLS certificate pinning for web sessions is not available yet \u2014 remove the pin.";
+  }
+  const allowHttp = web.allow_insecure_http === true;
+  if (!web.start_url.trim()) return "Start URL is required.";
+  let start: URL;
+  try {
+    start = new URL(web.start_url.trim());
+  } catch {
+    return "Start URL is not a valid URL.";
+  }
+  if (start.username || start.password) {
+    return "Start URL may not carry user@ credentials \u2014 never put a credential in a URL.";
+  }
+  const startErr = webUrlError(start, allowHttp);
+  if (startErr) return `Start URL: ${startErr}`;
+  for (const raw of web.allowed_origins ?? []) {
+    const r = normalizeWebOrigin(raw, allowHttp);
+    if ("error" in r) return r.error;
+  }
+  for (const dim of ["width", "height"] as const) {
+    const v = web.window?.[dim];
+    if (v === undefined) continue;
+    if (!Number.isInteger(v) || v < WEB_WINDOW_MIN || v > WEB_WINDOW_MAX) {
+      return `Window ${dim} must be a whole number between ${WEB_WINDOW_MIN} and ${WEB_WINDOW_MAX}.`;
+    }
+  }
+  if (isForm) return validateFormWebProfile(p, web);
+  return null;
+}
+
+/**
+ * Switch a web profile's login mode, moving the parts the modes disagree on
+ * with it: `open` releases nothing (source `none`, no recipe); `form` needs a
+ * source that can release a credential, so a leftover `none` becomes an empty
+ * `secret` source for the operator to fill in. A recipe the profile already
+ * has is kept across `form` -> `form`.
+ */
+export function setWebLoginMode(p: ConnectionProfile, mode: WebProfileSettings["login_mode"]): ConnectionProfile {
+  const web: WebProfileSettings = { ...(p.web ?? { start_url: "", allowed_origins: [], login_mode: mode }), login_mode: mode };
+  if (mode === "form") {
+    const credential_source: CredentialSource =
+      p.credential_source.kind === "none" || !FORM_WEB_SOURCES.includes(p.credential_source.kind)
+        ? { kind: "secret", secret_id: "" }
+        : p.credential_source;
+    return { ...p, credential_source, web };
+  }
+  if (mode === "open") {
+    delete web.recipe;
+    return { ...p, credential_source: { kind: "none" }, web };
+  }
+  return { ...p, web };
+}
+
+/**
+ * A new `web` profile, its start URL pre-filled from the resource's `url`
+ * field when it has one.
+ */
+export function blankWebProfile(resourceUrl?: string): ConnectionProfile {
+  return {
+    id: newProfileId(),
+    name: "Default",
+    protocol: "web",
+    credential_source: { kind: "none" },
+    web: {
+      start_url: (resourceUrl ?? "").trim(),
+      allowed_origins: [],
+      login_mode: "open",
+    },
+  };
 }
 
 /**
@@ -209,7 +507,19 @@ export function validateProfile(p: ConnectionProfile): string | null {
  * quick-Connect and the Connection-tab launcher agree on launchability.
  */
 export function isLaunchableProfile(p: ConnectProfileHint): boolean {
-  if (p.protocol !== "ssh" && p.protocol !== "rdp") return false;
+  const protocol = parseSessionProtocol(p.protocol);
+  if (protocol === null) return false;
+  if (protocol === "web") {
+    // `open` carries the `none` source and `form` a secret / ldap /
+    // default-account one (validation and the host pin the pairs). The card
+    // hint carries no login mode, so the source stands in for it; the host
+    // and `v2/connect/web/launch` refuse any other combination. Rustion-
+    // brokered web sessions don't exist yet.
+    return (
+      p.kind !== "rustion" &&
+      (p.credential_source.kind === "none" || FORM_WEB_SOURCES.includes(p.credential_source.kind))
+    );
+  }
   switch (p.credential_source.kind) {
     case "secret":
     case "ldap":
@@ -229,6 +539,9 @@ export function isLaunchableProfile(p: ConnectProfileHint): boolean {
       // prompts for the password at connect and launches.
       if (p.protocol === "ssh") return p.credential_source.mode !== "pqc";
       return true;
+    case "none":
+      // Only meaningful on a web profile (handled above).
+      return false;
   }
 }
 
@@ -280,6 +593,12 @@ export function isLaunchableForCaller(
 ): boolean {
   if (!isLaunchableProfile(p)) return false;
   if (!connectOnly) return true;
+  // A web session never resolves a credential in this process: `open`
+  // releases none, and `form` gets it from `v2/connect/web/launch`, which
+  // reads a `secret` source under the server's authority behind the
+  // `connect` grant (ldap / default-account as the caller). The server's
+  // gate (and MFA, when required) is the whole check.
+  if (p.protocol === "web") return true;
   if (p.kind === "rustion") return true;
   return (
     brokeredByPolicy &&
@@ -354,6 +673,8 @@ export function blankCredentialSource(
       // Carries no fields — the key is resolved at connect time from the
       // connecting operator's own enrolment, never pinned on the profile.
       return { kind: "fido2" };
+    case "none":
+      return { kind: "none" };
   }
 }
 

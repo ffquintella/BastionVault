@@ -42,23 +42,10 @@ pub async fn token_status(state: State<'_, AppState>) -> CmdResult<TokenStatus> 
     let Some(token) = token else {
         // No token on the Rust side but the UI thinks it is logged in
         // — a definitive "you are signed out".
-        return Ok(TokenStatus {
-            valid: false,
-            reachable: true,
-            ttl_seconds: None,
-            expire_time: None,
-        });
+        return Ok(TokenStatus { valid: false, reachable: true, ttl_seconds: None, expire_time: None });
     };
 
-    match dispatch_with_token(
-        &state,
-        Operation::Read,
-        "auth/token/lookup-self".to_string(),
-        None,
-        &token,
-    )
-    .await
-    {
+    match dispatch_with_token(&state, Operation::Read, "auth/token/lookup-self".to_string(), None, &token).await {
         Ok(Some(resp)) => {
             let data = resp.data.as_ref();
             let ttl_seconds = data.and_then(|d| d.get("ttl")).and_then(|v| v.as_i64());
@@ -67,20 +54,10 @@ pub async fn token_status(state: State<'_, AppState>) -> CmdResult<TokenStatus> 
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string());
-            Ok(TokenStatus {
-                valid: true,
-                reachable: true,
-                ttl_seconds,
-                expire_time,
-            })
+            Ok(TokenStatus { valid: true, reachable: true, ttl_seconds, expire_time })
         }
         // A 200 with no body is not a valid lookup-self result.
-        Ok(None) => Ok(TokenStatus {
-            valid: false,
-            reachable: true,
-            ttl_seconds: None,
-            expire_time: None,
-        }),
+        Ok(None) => Ok(TokenStatus { valid: false, reachable: true, ttl_seconds: None, expire_time: None }),
         Err(e) => {
             // Classify: an auth failure is a definitive expired/revoked
             // token (reachable, invalid). Anything else (connection
@@ -93,12 +70,7 @@ pub async fn token_status(state: State<'_, AppState>) -> CmdResult<TokenStatus> 
                 || msg.contains("expired")
                 || msg.contains("unauthorized")
                 || msg.contains("403");
-            Ok(TokenStatus {
-                valid: false,
-                reachable: is_auth_failure,
-                ttl_seconds: None,
-                expire_time: None,
-            })
+            Ok(TokenStatus { valid: false, reachable: is_auth_failure, ttl_seconds: None, expire_time: None })
         }
     }
 }
@@ -118,27 +90,21 @@ pub async fn login_token(state: State<'_, AppState>, token: String) -> CmdResult
     // surface to the UI so role-gated routes (Admin sections, etc.)
     // render correctly from the moment of login rather than waiting
     // on a follow-up fetch.
-    let resp = dispatch_with_token(
-        &state,
-        Operation::Read,
-        "auth/token/lookup-self".to_string(),
-        None,
-        &token,
-    )
-    .await
-    .map_err(|e| {
-        // Surface a more operator-friendly message than the raw
-        // vault error for the common case — "permission denied"
-        // on lookup-self means the token string didn't match
-        // anything known, not that policy blocked the introspect.
-        let msg = e.to_string().to_ascii_lowercase();
-        if msg.contains("permission denied") || msg.contains("invalid") {
-            crate::error::CommandError::from("Invalid token")
-        } else {
-            e
-        }
-    })?
-    .ok_or_else(|| crate::error::CommandError::from("Invalid token"))?;
+    let resp = dispatch_with_token(&state, Operation::Read, "auth/token/lookup-self".to_string(), None, &token)
+        .await
+        .map_err(|e| {
+            // Surface a more operator-friendly message than the raw
+            // vault error for the common case — "permission denied"
+            // on lookup-self means the token string didn't match
+            // anything known, not that policy blocked the introspect.
+            let msg = e.to_string().to_ascii_lowercase();
+            if msg.contains("permission denied") || msg.contains("invalid") {
+                crate::error::CommandError::from("Invalid token")
+            } else {
+                e
+            }
+        })?
+        .ok_or_else(|| crate::error::CommandError::from("Invalid token"))?;
 
     // Extract policies from the response data. The shape is
     // `{data: {policies: [...], ...}}`. Missing/empty policies is
@@ -150,11 +116,7 @@ pub async fn login_token(state: State<'_, AppState>, token: String) -> CmdResult
         .as_ref()
         .and_then(|d| d.get("policies"))
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|p| p.as_str().map(|s| s.to_string()))
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|p| p.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_else(|| vec!["default".to_string()]);
 
     *state.token.lock().await = Some(token.clone());
@@ -168,14 +130,7 @@ pub async fn login_token(state: State<'_, AppState>, token: String) -> CmdResult
     // so repeated probes don't spam the trail. Best-effort — a failure
     // here (e.g. a token whose policy lacks the grant) must not block a
     // valid login.
-    let _ = dispatch_with_token(
-        &state,
-        Operation::Write,
-        "auth/token/audit-login".to_string(),
-        None,
-        &token,
-    )
-    .await;
+    let _ = dispatch_with_token(&state, Operation::Write, "auth/token/audit-login".to_string(), None, &token).await;
 
     Ok(LoginResponse { token, policies })
 }
@@ -200,31 +155,17 @@ pub async fn login_userpass(
     // EmbeddedBackend (just stores it on the Request) and
     // RemoteBackend (skips the X-BastionVault-Token header for
     // /login paths) handle it correctly.
-    let resp = dispatch_with_token(
-        &state,
-        Operation::Write,
-        format!("auth/userpass/login/{username}"),
-        Some(body),
-        "",
-    )
-    .await?;
+    let resp = dispatch_with_token(&state, Operation::Write, format!("auth/userpass/login/{username}"), Some(body), "")
+        .await?;
 
     match resp {
         Some(r) => {
             if let Some(auth) = r.auth {
-                let token = auth
-                    .get("client_token")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
+                let token = auth.get("client_token").and_then(|v| v.as_str()).unwrap_or_default().to_string();
                 let policies = auth
                     .get("policies")
                     .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                     .unwrap_or_default();
                 if token.is_empty() {
                     return Err("Login failed: no token in auth response".into());
@@ -254,14 +195,7 @@ pub async fn logout(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdRes
     // the active backend, so it works in both embedded and remote mode.
     let token = state.token.lock().await.clone();
     if let Some(token) = token.filter(|t| !t.is_empty()) {
-        let _ = dispatch_with_token(
-            &state,
-            Operation::Write,
-            "auth/token/revoke-self".to_string(),
-            None,
-            &token,
-        )
-        .await;
+        let _ = dispatch_with_token(&state, Operation::Write, "auth/token/revoke-self".to_string(), None, &token).await;
     }
     *state.token.lock().await = None;
     // Reset the session's active namespace to root. It is otherwise sticky
@@ -298,13 +232,7 @@ pub struct SessionPrincipal {
 
 #[tauri::command]
 pub async fn session_principal(state: State<'_, AppState>) -> CmdResult<SessionPrincipal> {
-    let resp = super::make_request_root(
-        &state,
-        Operation::Read,
-        "auth/token/lookup-self".to_string(),
-        None,
-    )
-    .await?;
+    let resp = super::make_request_root(&state, Operation::Read, "auth/token/lookup-self".to_string(), None).await?;
     let meta = resp
         .and_then(|r| r.data)
         .and_then(|d| d.get("meta").cloned())
@@ -313,13 +241,15 @@ pub async fn session_principal(state: State<'_, AppState>) -> CmdResult<SessionP
             _ => None,
         })
         .unwrap_or_default();
-    let str_at = |k: &str| -> String {
-        meta.get(k).and_then(|v| v.as_str()).unwrap_or("").trim().to_string()
-    };
+    let str_at = |k: &str| -> String { meta.get(k).and_then(|v| v.as_str()).unwrap_or("").trim().to_string() };
     let mount = str_at("mount_path");
     let name = {
         let username = str_at("username");
-        if username.is_empty() { str_at("role_name") } else { username }
+        if username.is_empty() {
+            str_at("role_name")
+        } else {
+            username
+        }
     };
     let known = !mount.is_empty() && !name.is_empty();
     Ok(SessionPrincipal { mount, name, known })

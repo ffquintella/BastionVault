@@ -77,10 +77,7 @@ pub fn list_devices() -> Result<Vec<YubiKeyInfo>, CommandError> {
     let mut readers = yubikey::reader::Context::open()
         .map_err(|e| CommandError::from(format!("yubikey: open PC/SC context: {e}")))?;
 
-    for reader in readers
-        .iter()
-        .map_err(|e| CommandError::from(format!("yubikey: iter readers: {e}")))?
-    {
+    for reader in readers.iter().map_err(|e| CommandError::from(format!("yubikey: iter readers: {e}")))? {
         // A reader that fails to `open()` typically means the card
         // was removed mid-scan. Skip rather than error out — the
         // enumeration is best-effort by design.
@@ -99,20 +96,14 @@ pub fn list_devices() -> Result<Vec<YubiKeyInfo>, CommandError> {
         // Authenticator app reports as "Key without certificate
         // loaded."
         let slot_occupied = has_asymmetric_key_in_slot_9a(&mut yk);
-        out.push(YubiKeyInfo {
-            serial,
-            slot_occupied,
-        });
+        out.push(YubiKeyInfo { serial, slot_occupied });
     }
     Ok(out)
 }
 
 fn has_asymmetric_key_in_slot_9a(yk: &mut YubiKey) -> bool {
     match yubikey::piv::metadata(yk, SIGNING_SLOT) {
-        Ok(meta) => matches!(
-            meta.algorithm,
-            yubikey::piv::ManagementAlgorithmId::Asymmetric(_)
-        ),
+        Ok(meta) => matches!(meta.algorithm, yubikey::piv::ManagementAlgorithmId::Asymmetric(_)),
         Err(_) => {
             // Metadata unsupported (older firmware) — fall back to
             // the cert-presence probe. Less accurate (it misses
@@ -146,10 +137,7 @@ pub fn load_signing_public_key(serial: u32) -> Result<(YubiKeyId, Vec<u8>), Comm
     // generate`) don't hit a dead-end. The Yubico Authenticator
     // app reports this state as "Key without certificate loaded."
     let pk_bits: Vec<u8> = if let Ok(meta) = yubikey::piv::metadata(&mut yk, SIGNING_SLOT) {
-        if matches!(
-            meta.algorithm,
-            yubikey::piv::ManagementAlgorithmId::Asymmetric(_)
-        ) {
+        if matches!(meta.algorithm, yubikey::piv::ManagementAlgorithmId::Asymmetric(_)) {
             match meta.public {
                 Some(spki) => spki.subject_public_key.raw_bytes().to_vec(),
                 None => {
@@ -194,13 +182,7 @@ pub fn load_signing_public_key(serial: u32) -> Result<(YubiKeyId, Vec<u8>), Comm
     let mut key_id = [0u8; 32];
     key_id.copy_from_slice(&hasher.finalize());
 
-    Ok((
-        YubiKeyId {
-            serial,
-            key_id_sha256: key_id,
-        },
-        pk_bits,
-    ))
+    Ok((YubiKeyId { serial, key_id_sha256: key_id }, pk_bits))
 }
 
 /// Sign `salt` with the slot-9a key of `serial`, returning the raw
@@ -234,11 +216,7 @@ pub fn load_signing_public_key(serial: u32) -> Result<(YubiKeyId, Vec<u8>), Comm
 pub fn provision_slot_9a(serial: u32, pin: &[u8]) -> Result<(), CommandError> {
     use std::str::FromStr;
     use std::time::Duration;
-    use x509_cert::{
-        name::Name,
-        serial_number::SerialNumber,
-        time::Validity,
-    };
+    use x509_cert::{name::Name, serial_number::SerialNumber, time::Validity};
     use yubikey::{
         certificate::{
             yubikey_signer::{Rsa2048, YubiRsa},
@@ -264,8 +242,7 @@ pub fn provision_slot_9a(serial: u32, pin: &[u8]) -> Result<(), CommandError> {
         )));
     }
 
-    yk.verify_pin(pin)
-        .map_err(|e| CommandError::from(format!("yubikey: PIN verify: {e}")))?;
+    yk.verify_pin(pin).map_err(|e| CommandError::from(format!("yubikey: PIN verify: {e}")))?;
 
     // PIV card administration requires the "management key" (a
     // 3DES key, 24 bytes). Factory default is well-known; operators
@@ -285,14 +262,9 @@ pub fn provision_slot_9a(serial: u32, pin: &[u8]) -> Result<(), CommandError> {
     //    Default (PIN required once per session for signing, no
     //    touch required) — matches how operators typically use the
     //    signing slot for non-interactive workflows.
-    let public_key = piv::generate(
-        &mut yk,
-        SIGNING_SLOT,
-        AlgorithmId::Rsa2048,
-        PinPolicy::Default,
-        TouchPolicy::Default,
-    )
-    .map_err(|e| CommandError::from(format!("yubikey: piv::generate: {e}")))?;
+    let public_key =
+        piv::generate(&mut yk, SIGNING_SLOT, AlgorithmId::Rsa2048, PinPolicy::Default, TouchPolicy::Default)
+            .map_err(|e| CommandError::from(format!("yubikey: piv::generate: {e}")))?;
 
     // 2. Build + sign + write the X.509 envelope. 20 years so the
     //    host-side `load_signing_public_key` keeps reading a
@@ -322,8 +294,7 @@ pub fn provision_slot_9a(serial: u32, pin: &[u8]) -> Result<(), CommandError> {
 
 pub fn sign(serial: u32, pin: &[u8], salt: &[u8]) -> Result<Vec<u8>, CommandError> {
     let mut yk = open_by_serial(serial)?;
-    yk.verify_pin(pin)
-        .map_err(|e| CommandError::from(format!("yubikey: PIN verify: {e}")))?;
+    yk.verify_pin(pin).map_err(|e| CommandError::from(format!("yubikey: PIN verify: {e}")))?;
     let algo = detect_algorithm(&mut yk)?;
 
     // The PIV sign API takes raw input bytes in RSA-sign mode (the
@@ -342,11 +313,7 @@ pub fn sign(serial: u32, pin: &[u8], salt: &[u8]) -> Result<Vec<u8>, CommandErro
     // structurally total for this code path.
     let to_sign: Vec<u8> = match algo {
         AlgorithmId::Rsa1024 | AlgorithmId::Rsa2048 => {
-            let key_size_bytes = if matches!(algo, AlgorithmId::Rsa2048) {
-                256
-            } else {
-                128
-            };
+            let key_size_bytes = if matches!(algo, AlgorithmId::Rsa2048) { 256 } else { 128 };
             pkcs1v15_sha256_encode(salt, key_size_bytes)
         }
         AlgorithmId::EccP256 | AlgorithmId::EccP384 => {
@@ -383,18 +350,18 @@ fn pkcs1v15_sha256_encode(input: &[u8], key_size_bytes: usize) -> Vec<u8> {
     //       NULL
     //     OCTET STRING len=0x20 (32 bytes of hash follow)
     const SHA256_DIGEST_INFO_PREFIX: &[u8; 19] = &[
-        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
-        0x05, 0x00, 0x04, 0x20,
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04,
+        0x20,
     ];
 
     let digest = Sha256::digest(input);
     let t_len = SHA256_DIGEST_INFO_PREFIX.len() + digest.len(); // 19 + 32 = 51
-    // key_size_bytes ≥ t_len + 11 must hold per PKCS#1 (3 bytes of
-    // framing + at least 8 padding bytes). For RSA-2048 we have
-    // 256 − 51 − 3 = 202 bytes of 0xff padding; for RSA-1024 we'd
-    // have 74. Both well above the 8-byte minimum, but assert
-    // defensively in case a future AlgorithmId variant slips
-    // through.
+                                                                // key_size_bytes ≥ t_len + 11 must hold per PKCS#1 (3 bytes of
+                                                                // framing + at least 8 padding bytes). For RSA-2048 we have
+                                                                // 256 − 51 − 3 = 202 bytes of 0xff padding; for RSA-1024 we'd
+                                                                // have 74. Both well above the 8-byte minimum, but assert
+                                                                // defensively in case a future AlgorithmId variant slips
+                                                                // through.
     debug_assert!(key_size_bytes >= t_len + 11, "RSA key too small for SHA-256 PKCS1v15");
     let padding_len = key_size_bytes - t_len - 3;
 
@@ -497,10 +464,7 @@ mod tests {
     #[ignore]
     fn list_devices_sees_plugged_in_yubikey() {
         let devices = list_devices().expect("list_devices");
-        assert!(
-            !devices.is_empty(),
-            "no YubiKeys detected — plug one in + re-run"
-        );
+        assert!(!devices.is_empty(), "no YubiKeys detected — plug one in + re-run");
         // At least one device should have slot 9a populated; the
         // ignore-guard + documented prereq above makes that a
         // reasonable assertion when running this test explicitly.

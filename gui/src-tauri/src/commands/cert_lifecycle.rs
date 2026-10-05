@@ -65,19 +65,14 @@ pub struct CertLifecycleMountInfo {
 }
 
 #[tauri::command]
-pub async fn cert_lifecycle_list_mounts(
-    state: State<'_, AppState>,
-) -> CmdResult<Vec<CertLifecycleMountInfo>> {
+pub async fn cert_lifecycle_list_mounts(state: State<'_, AppState>) -> CmdResult<Vec<CertLifecycleMountInfo>> {
     let resp = make_request(&state, Operation::Read, "sys/mounts".into(), None).await?;
     let map = data_to_map(resp);
     let mut out = Vec::new();
     for (path, info) in map.iter() {
         if let Some(t) = info.get("type").and_then(|v| v.as_str()) {
             if t == "cert-lifecycle" {
-                out.push(CertLifecycleMountInfo {
-                    path: path.clone(),
-                    mount_type: t.to_string(),
-                });
+                out.push(CertLifecycleMountInfo { path: path.clone(), mount_type: t.to_string() });
             }
         }
     }
@@ -135,10 +130,7 @@ fn default_renew_before() -> String {
 }
 
 #[tauri::command]
-pub async fn cert_lifecycle_list_targets(
-    state: State<'_, AppState>,
-    mount: String,
-) -> CmdResult<Vec<String>> {
+pub async fn cert_lifecycle_list_targets(state: State<'_, AppState>, mount: String) -> CmdResult<Vec<String>> {
     let mount = mount_prefix(&mount);
     let resp = make_request(&state, Operation::List, format!("{mount}/targets"), None).await?;
     Ok(val_str_array(&data_to_map(resp), "keys"))
@@ -200,11 +192,7 @@ pub async fn cert_lifecycle_write_target(
 }
 
 #[tauri::command]
-pub async fn cert_lifecycle_delete_target(
-    state: State<'_, AppState>,
-    mount: String,
-    name: String,
-) -> CmdResult<()> {
+pub async fn cert_lifecycle_delete_target(state: State<'_, AppState>, mount: String, name: String) -> CmdResult<()> {
     let mount = mount_prefix(&mount);
     make_request(&state, Operation::Delete, format!("{mount}/targets/{name}"), None).await?;
     Ok(())
@@ -291,24 +279,13 @@ pub async fn cert_lifecycle_list_targets_info(
                 .map(|r| {
                     // The state half is nested under `state`; both halves
                     // carry a `name`, so flattening them would collide.
-                    let state_map = r
-                        .get("state")
-                        .and_then(|v| v.as_object())
-                        .cloned()
-                        .unwrap_or_default();
-                    CertLifecycleTargetRow {
-                        target: target_from_map(r),
-                        state: state_from_map(&state_map),
-                    }
+                    let state_map = r.get("state").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+                    CertLifecycleTargetRow { target: target_from_map(r), state: state_from_map(&state_map) }
                 })
                 .collect()
         })
         .unwrap_or_default();
-    Ok(CertLifecycleTargetPage {
-        records,
-        total: val_u64(&map, "total"),
-        next: val_str(&map, "next"),
-    })
+    Ok(CertLifecycleTargetPage { records, total: val_u64(&map, "total"), next: val_str(&map, "next") })
 }
 
 #[derive(Serialize, Default)]
@@ -328,13 +305,7 @@ pub async fn cert_lifecycle_renew(
     name: String,
 ) -> CmdResult<CertLifecycleRenewResult> {
     let mount = mount_prefix(&mount);
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{mount}/renew/{name}"),
-        Some(Map::new()),
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Write, format!("{mount}/renew/{name}"), Some(Map::new())).await?;
     let map = data_to_map(resp);
     Ok(CertLifecycleRenewResult {
         name: val_str(&map, "name"),
@@ -382,8 +353,7 @@ pub async fn cert_lifecycle_read_scheduler_config(
     mount: String,
 ) -> CmdResult<CertLifecycleSchedulerConfig> {
     let mount = mount_prefix(&mount);
-    let resp =
-        make_request(&state, Operation::Read, format!("{mount}/scheduler/config"), None).await?;
+    let resp = make_request(&state, Operation::Read, format!("{mount}/scheduler/config"), None).await?;
     let map = data_to_map(resp);
     Ok(CertLifecycleSchedulerConfig {
         enabled: val_bool(&map, "enabled"),
@@ -417,13 +387,9 @@ pub async fn cert_lifecycle_write_scheduler_config(
 }
 
 #[tauri::command]
-pub async fn cert_lifecycle_list_deliverers(
-    state: State<'_, AppState>,
-    mount: String,
-) -> CmdResult<Vec<String>> {
+pub async fn cert_lifecycle_list_deliverers(state: State<'_, AppState>, mount: String) -> CmdResult<Vec<String>> {
     let mount = mount_prefix(&mount);
-    let resp =
-        make_request(&state, Operation::Read, format!("{mount}/sys/deliverers"), None).await?;
+    let resp = make_request(&state, Operation::Read, format!("{mount}/sys/deliverers"), None).await?;
     Ok(val_str_array(&data_to_map(resp), "deliverers"))
 }
 

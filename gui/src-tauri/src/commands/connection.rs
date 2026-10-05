@@ -54,10 +54,7 @@ pub async fn get_remote_profile(state: State<'_, AppState>) -> CmdResult<Option<
 /// explicitly disabled, this short-circuits to the pre-discovery
 /// behaviour and connects to the address as-is.
 #[tauri::command]
-pub async fn connect_remote(
-    state: State<'_, AppState>,
-    profile: RemoteProfile,
-) -> CmdResult<()> {
+pub async fn connect_remote(state: State<'_, AppState>, profile: RemoteProfile) -> CmdResult<()> {
     // Resolve the operator-typed address into a concrete URL the
     // legacy `Client` can dial. This is the only place discovery
     // runs — once we've picked a node, every legacy / bv-client
@@ -67,19 +64,14 @@ pub async fn connect_remote(
         resolve_remote_address(&profile, tls_for_bv.as_ref()).await?;
 
     // Legacy `Client`: point it at the chosen URL.
-    let mut client_builder = Client::new()
-        .with_addr(&effective_address)
-        .with_system_proxy(profile.use_system_proxy);
+    let mut client_builder = Client::new().with_addr(&effective_address).with_system_proxy(profile.use_system_proxy);
     if effective_address.starts_with("https://") {
         client_builder = client_builder.with_tls_config(build_legacy_tls(&profile)?);
     }
     let client = client_builder.build();
 
     // Test the connection by checking health.
-    let health = client
-        .sys()
-        .health()
-        .map_err(|e| CommandError::from(format!("Connection failed: {e}")))?;
+    let health = client.sys().health().map_err(|e| CommandError::from(format!("Connection failed: {e}")))?;
     if health.response_status == 0 {
         return Err("Connection failed: no response from server".into());
     }
@@ -156,9 +148,7 @@ pub async fn test_system_proxy(profile: RemoteProfile) -> CmdResult<ProxyTestRes
     let (effective_address, _selected, _candidates, _health_cfg) =
         resolve_remote_address(&profile, tls_for_bv.as_ref()).await?;
 
-    let mut client_builder = Client::new()
-        .with_addr(&effective_address)
-        .with_system_proxy(true);
+    let mut client_builder = Client::new().with_addr(&effective_address).with_system_proxy(true);
     if effective_address.starts_with("https://") {
         client_builder = client_builder.with_tls_config(build_legacy_tls(&profile)?);
     }
@@ -173,22 +163,12 @@ pub async fn test_system_proxy(profile: RemoteProfile) -> CmdResult<ProxyTestRes
     let latency_ms = started.elapsed().as_millis() as u64;
 
     let (reachable, message) = match outcome {
-        Ok(h) if h.response_status != 0 => (
-            true,
-            format!("Reached {addr_for_probe} (HTTP {})", h.response_status),
-        ),
+        Ok(h) if h.response_status != 0 => (true, format!("Reached {addr_for_probe} (HTTP {})", h.response_status)),
         Ok(_) => (false, "No response from server".to_string()),
         Err(e) => (false, format!("Connection failed: {e}")),
     };
 
-    Ok(ProxyTestResult {
-        source,
-        proxy_uri,
-        effective_address,
-        reachable,
-        latency_ms,
-        message,
-    })
+    Ok(ProxyTestResult { source, proxy_uri, effective_address, reachable, latency_ms, message })
 }
 
 /// Run cluster discovery for `profile` and return everything the
@@ -212,8 +192,7 @@ async fn resolve_remote_address(
         health,
     };
 
-    let mut health_cfg =
-        HealthConfig { use_system_proxy: profile.use_system_proxy, ..Default::default() };
+    let mut health_cfg = HealthConfig { use_system_proxy: profile.use_system_proxy, ..Default::default() };
     if let Some(ms) = profile.health_probe_timeout_ms {
         if ms > 0 {
             health_cfg.probe_timeout = Duration::from_millis(ms.into());
@@ -255,10 +234,7 @@ async fn resolve_remote_address(
 
     let probes = health::probe_all(&candidates, &health_cfg, tls).await;
     let selected = health::pick(&probes).ok_or_else(|| {
-        let reasons: Vec<String> = probes
-            .iter()
-            .map(|p| format!("{}={:?}", p.candidate.target, p.state))
-            .collect();
+        let reasons: Vec<String> = probes.iter().map(|p| format!("{}={:?}", p.candidate.target, p.state)).collect();
         CommandError::from(format!(
             "Cluster discovery failed: no healthy node for `{}`: {}",
             profile.address,
@@ -314,11 +290,7 @@ async fn cluster_target_urls(profile: &RemoteProfile) -> CmdResult<Vec<String>> 
     }
 
     let mut discovery_cfg = DiscoveryConfig::default();
-    if let Some(svc) = profile
-        .discovery_srv_service
-        .as_deref()
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(svc) = profile.discovery_srv_service.as_deref().filter(|s| !s.is_empty()) {
         discovery_cfg.srv_service = svc.to_string();
     }
 
@@ -326,16 +298,9 @@ async fn cluster_target_urls(profile: &RemoteProfile) -> CmdResult<Vec<String>> 
     let resolved = discovery::resolve(&profile.address, &discovery_cfg, &resolver)
         .await
         .map_err(|e| CommandError::from(format!("Cluster discovery failed: {e}")))?;
-    let urls: Vec<String> = resolved
-        .into_candidates()
-        .iter()
-        .map(|c| c.url())
-        .collect();
+    let urls: Vec<String> = resolved.into_candidates().iter().map(|c| c.url()).collect();
     if urls.is_empty() {
-        return Err(CommandError::from(format!(
-            "No nodes found for `{}`",
-            profile.address
-        )));
+        return Err(CommandError::from(format!("No nodes found for `{}`", profile.address)));
     }
     Ok(urls)
 }
@@ -365,9 +330,7 @@ pub(crate) struct ClusterNodeHealth {
 /// Resolve every node of the connected cluster (via SRV when the
 /// profile is a bare cluster name) and probe each one's health. Returns
 /// one row per node in SRV-priority order, healthy or not.
-pub(crate) async fn cluster_node_health(
-    profile: &RemoteProfile,
-) -> CmdResult<Vec<ClusterNodeHealth>> {
+pub(crate) async fn cluster_node_health(profile: &RemoteProfile) -> CmdResult<Vec<ClusterNodeHealth>> {
     use bv_client::{
         discovery::{self, SystemResolver},
         health::{self, NodeState},
@@ -376,11 +339,7 @@ pub(crate) async fn cluster_node_health(
     let tls = build_bv_tls(profile)?;
 
     let mut discovery_cfg = DiscoveryConfig::default();
-    if let Some(svc) = profile
-        .discovery_srv_service
-        .as_deref()
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(svc) = profile.discovery_srv_service.as_deref().filter(|s| !s.is_empty()) {
         discovery_cfg.srv_service = svc.to_string();
     }
 
@@ -390,14 +349,10 @@ pub(crate) async fn cluster_node_health(
         .map_err(|e| CommandError::from(format!("Cluster discovery failed: {e}")))?;
     let candidates = resolved.into_candidates();
     if candidates.is_empty() {
-        return Err(CommandError::from(format!(
-            "No nodes found for `{}`",
-            profile.address
-        )));
+        return Err(CommandError::from(format!("No nodes found for `{}`", profile.address)));
     }
 
-    let mut health_cfg =
-        HealthConfig { use_system_proxy: profile.use_system_proxy, ..Default::default() };
+    let mut health_cfg = HealthConfig { use_system_proxy: profile.use_system_proxy, ..Default::default() };
     if let Some(ms) = profile.health_probe_timeout_ms {
         if ms > 0 {
             health_cfg.probe_timeout = Duration::from_millis(ms.into());
@@ -434,9 +389,7 @@ pub(crate) async fn cluster_node_health(
 /// CLI fans seal/unseal out — `Client` is immutable once built, so a
 /// per-node target means a per-node client.
 fn client_for_node(profile: &RemoteProfile, url: &str) -> CmdResult<Client> {
-    let mut builder = Client::new()
-        .with_addr(url)
-        .with_system_proxy(profile.use_system_proxy);
+    let mut builder = Client::new().with_addr(url).with_system_proxy(profile.use_system_proxy);
     if url.starts_with("https://") {
         builder = builder.with_tls_config(build_legacy_tls(profile)?);
     }
@@ -453,10 +406,7 @@ fn client_for_node(profile: &RemoteProfile, url: &str) -> CmdResult<Client> {
 /// so the per-node clients carry no token. Per-node failures are
 /// captured rather than aborting the sweep, so one unreachable node
 /// doesn't strand the others mid-threshold.
-pub(crate) async fn remote_unseal_fanout(
-    profile: &RemoteProfile,
-    key: &str,
-) -> CmdResult<Vec<NodeSealResult>> {
+pub(crate) async fn remote_unseal_fanout(profile: &RemoteProfile, key: &str) -> CmdResult<Vec<NodeSealResult>> {
     let urls = cluster_target_urls(profile).await?;
     let mut results = Vec::with_capacity(urls.len());
     for url in urls {
@@ -478,12 +428,8 @@ pub(crate) async fn remote_unseal_fanout(
                 let body = resp.response_data.as_ref().and_then(|v| v.as_object());
                 results.push(NodeSealResult {
                     address: url,
-                    sealed: body
-                        .and_then(|b| b.get("sealed"))
-                        .and_then(|v| v.as_bool()),
-                    progress: body
-                        .and_then(|b| b.get("progress"))
-                        .and_then(|v| v.as_u64()),
+                    sealed: body.and_then(|b| b.get("sealed")).and_then(|v| v.as_bool()),
+                    progress: body.and_then(|b| b.get("progress")).and_then(|v| v.as_u64()),
                     threshold: body.and_then(|b| b.get("t")).and_then(|v| v.as_u64()),
                     error: None,
                 });
@@ -509,10 +455,7 @@ pub(crate) async fn remote_unseal_fanout(
 /// captured rather than aborting the sweep, so one node that refuses
 /// (e.g. a transient 403 or an unreachable peer) doesn't leave the
 /// remaining nodes un-sealed.
-pub(crate) async fn remote_seal_fanout(
-    profile: &RemoteProfile,
-    token: &str,
-) -> CmdResult<Vec<NodeSealResult>> {
+pub(crate) async fn remote_seal_fanout(profile: &RemoteProfile, token: &str) -> CmdResult<Vec<NodeSealResult>> {
     let urls = cluster_target_urls(profile).await?;
     let mut results = Vec::with_capacity(urls.len());
     for url in urls {
@@ -567,17 +510,13 @@ fn build_bv_tls(profile: &RemoteProfile) -> CmdResult<Option<ClientTlsConfig>> {
     // input doesn't explicitly start with `http://`.
     let needs_tls = profile.address.starts_with("https://")
         || (!profile.address.starts_with("http://")
-            && (profile.tls_skip_verify
-                || profile.ca_cert_path.is_some()
-                || profile.client_cert_path.is_some()));
+            && (profile.tls_skip_verify || profile.ca_cert_path.is_some() || profile.client_cert_path.is_some()));
     if !needs_tls {
         return Ok(None);
     }
     let mut b = BvTLSConfigBuilder::new().with_insecure(profile.tls_skip_verify);
     if let Some(p) = profile.ca_cert_path.as_deref().filter(|s| !s.is_empty()) {
-        b = b
-            .with_server_ca_path(&PathBuf::from(p))
-            .map_err(|e| CommandError::from(format!("CA cert error: {e}")))?;
+        b = b.with_server_ca_path(&PathBuf::from(p)).map_err(|e| CommandError::from(format!("CA cert error: {e}")))?;
     }
     if let (Some(cp), Some(kp)) = (
         profile.client_cert_path.as_deref().filter(|s| !s.is_empty()),
@@ -587,9 +526,7 @@ fn build_bv_tls(profile: &RemoteProfile) -> CmdResult<Option<ClientTlsConfig>> {
             .with_client_cert_path(&PathBuf::from(cp), &PathBuf::from(kp))
             .map_err(|e| CommandError::from(format!("Client cert error: {e}")))?;
     }
-    let cfg = b
-        .build()
-        .map_err(|e| CommandError::from(format!("TLS config error: {e}")))?;
+    let cfg = b.build().map_err(|e| CommandError::from(format!("TLS config error: {e}")))?;
     Ok(Some(cfg))
 }
 
@@ -608,9 +545,7 @@ fn build_legacy_tls(profile: &RemoteProfile) -> CmdResult<bastion_vault::api::cl
             .with_client_cert_path(&PathBuf::from(cp), &PathBuf::from(kp))
             .map_err(|e| CommandError::from(format!("Client cert error: {e}")))?;
     }
-    tls_builder
-        .build()
-        .map_err(|e| CommandError::from(format!("TLS config error: {e}")))
+    tls_builder.build().map_err(|e| CommandError::from(format!("TLS config error: {e}")))
 }
 
 /// Disconnect from remote server and reset to embedded mode.
@@ -649,8 +584,7 @@ pub async fn cluster_discover(profile: RemoteProfile) -> CmdResult<ClusterDiagno
     if let Some(svc) = profile.discovery_srv_service.as_deref().filter(|s| !s.is_empty()) {
         discovery_cfg.srv_service = svc.to_string();
     }
-    let mut health_cfg =
-        HealthConfig { use_system_proxy: profile.use_system_proxy, ..Default::default() };
+    let mut health_cfg = HealthConfig { use_system_proxy: profile.use_system_proxy, ..Default::default() };
     if let Some(ms) = profile.health_probe_timeout_ms.filter(|m| *m > 0) {
         health_cfg.probe_timeout = Duration::from_millis(ms.into());
     }
@@ -729,40 +663,23 @@ pub async fn get_remote_status(state: State<'_, AppState>) -> CmdResult<RemoteSt
     let profile_guard = state.remote_profile.lock().await;
 
     match (client_guard.as_ref(), profile_guard.as_ref()) {
-        (Some(client), Some(profile)) => {
-            match client.sys().health() {
-                Ok(resp) => {
-                    let data = resp.response_data;
-                    let initialized = data.as_ref()
-                        .and_then(|d| d.get("initialized"))
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let sealed = data.as_ref()
-                        .and_then(|d| d.get("sealed"))
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(true);
+        (Some(client), Some(profile)) => match client.sys().health() {
+            Ok(resp) => {
+                let data = resp.response_data;
+                let initialized =
+                    data.as_ref().and_then(|d| d.get("initialized")).and_then(|v| v.as_bool()).unwrap_or(false);
+                let sealed = data.as_ref().and_then(|d| d.get("sealed")).and_then(|v| v.as_bool()).unwrap_or(true);
 
-                    Ok(RemoteStatus {
-                        connected: true,
-                        address: profile.address.clone(),
-                        initialized,
-                        sealed,
-                    })
-                }
-                Err(_) => Ok(RemoteStatus {
-                    connected: false,
-                    address: profile.address.clone(),
-                    initialized: false,
-                    sealed: true,
-                }),
+                Ok(RemoteStatus { connected: true, address: profile.address.clone(), initialized, sealed })
             }
-        }
-        _ => Ok(RemoteStatus {
-            connected: false,
-            address: String::new(),
-            initialized: false,
-            sealed: true,
-        }),
+            Err(_) => Ok(RemoteStatus {
+                connected: false,
+                address: profile.address.clone(),
+                initialized: false,
+                sealed: true,
+            }),
+        },
+        _ => Ok(RemoteStatus { connected: false, address: String::new(), initialized: false, sealed: true }),
     }
 }
 
@@ -788,19 +705,17 @@ pub async fn remote_login_token(
     // we surface that as "Invalid token" without storing anything.
     let endpoint = format!("{}/auth/token/lookup-self", client.api_prefix());
     let bound = client.clone().with_token(&token);
-    let resp = bound
-        .request_read(endpoint)
-        .map_err(|e| {
-            let msg = format!("{e}");
-            if msg.to_ascii_lowercase().contains("permission denied")
-                || msg.to_ascii_lowercase().contains("invalid")
-                || msg.to_ascii_lowercase().contains("forbidden")
-            {
-                CommandError::from("Invalid token")
-            } else {
-                CommandError::from(format!("Token validation failed: {e}"))
-            }
-        })?;
+    let resp = bound.request_read(endpoint).map_err(|e| {
+        let msg = format!("{e}");
+        if msg.to_ascii_lowercase().contains("permission denied")
+            || msg.to_ascii_lowercase().contains("invalid")
+            || msg.to_ascii_lowercase().contains("forbidden")
+        {
+            CommandError::from("Invalid token")
+        } else {
+            CommandError::from(format!("Token validation failed: {e}"))
+        }
+    })?;
 
     // Extract policies so the UI can gate role-specific routes on the
     // first render — same shape as the embedded `login_token` path.
@@ -843,10 +758,7 @@ pub async fn remote_login_userpass(
 
     let data = serde_json::json!({ "password": password });
     let resp = client
-        .request_write(
-            format!("{}/auth/userpass/login/{username}", client.api_prefix()),
-            data.as_object().cloned(),
-        )
+        .request_write(format!("{}/auth/userpass/login/{username}", client.api_prefix()), data.as_object().cloned())
         .map_err(|e| CommandError::from(format!("Login failed: {e}")))?;
 
     let response_data = resp.response_data.ok_or("No response data")?;
@@ -893,20 +805,14 @@ pub async fn save_preferences(mode: VaultMode, remote_profile: Option<RemoteProf
     match mode {
         VaultMode::Embedded => {
             // Find any existing Local profile; otherwise create one.
-            let existing_id = prefs
-                .vaults
-                .iter()
-                .find(|v| matches!(v.spec, VaultSpec::Local { .. }))
-                .map(|v| v.id.clone());
+            let existing_id =
+                prefs.vaults.iter().find(|v| matches!(v.spec, VaultSpec::Local { .. })).map(|v| v.id.clone());
             let id = existing_id.unwrap_or_else(|| {
                 let id = short_id();
                 prefs.vaults.push(VaultProfile {
                     id: id.clone(),
                     name: "Local Vault".to_string(),
-                    spec: VaultSpec::Local {
-                        data_dir: None,
-                        storage_kind: "file".to_string(),
-                    },
+                    spec: VaultSpec::Local { data_dir: None, storage_kind: "file".to_string() },
                 });
                 id
             });
@@ -930,11 +836,7 @@ pub async fn save_preferences(mode: VaultMode, remote_profile: Option<RemoteProf
                 let id = short_id();
                 prefs.vaults.push(VaultProfile {
                     id: id.clone(),
-                    name: if profile.name.is_empty() {
-                        "Remote Vault".to_string()
-                    } else {
-                        profile.name.clone()
-                    },
+                    name: if profile.name.is_empty() { "Remote Vault".to_string() } else { profile.name.clone() },
                     spec: VaultSpec::Remote { profile },
                 });
                 id
@@ -951,9 +853,7 @@ pub async fn get_password_policy() -> CmdResult<crate::preferences::PasswordPoli
 }
 
 #[tauri::command]
-pub async fn set_password_policy(
-    policy: crate::preferences::PasswordPolicy,
-) -> CmdResult<()> {
+pub async fn set_password_policy(policy: crate::preferences::PasswordPolicy) -> CmdResult<()> {
     let mut prefs = crate::preferences::load().unwrap_or_default();
     prefs.password_policy = policy;
     crate::preferences::save(&prefs)

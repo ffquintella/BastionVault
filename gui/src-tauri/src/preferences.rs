@@ -112,7 +112,6 @@ pub struct Preferences {
     pub cloud_storage: Option<CloudStorageConfig>,
 }
 
-
 impl Preferences {
     /// One-time in-memory migration: if the on-disk file was written
     /// by a pre-multi-vault build (legacy fields set, `vaults` empty)
@@ -139,21 +138,14 @@ impl Preferences {
                 entries.push(VaultProfile {
                     id: short_id(),
                     name: "Local Vault".to_string(),
-                    spec: VaultSpec::Local {
-                        data_dir: None,
-                        storage_kind: default_local_storage_kind(),
-                    },
+                    spec: VaultSpec::Local { data_dir: None, storage_kind: default_local_storage_kind() },
                 });
             }
             Some(VaultMode::Remote) => {
                 if let Some(profile) = self.remote_profile.clone() {
                     entries.push(VaultProfile {
                         id: short_id(),
-                        name: if profile.name.is_empty() {
-                            "Remote Vault".to_string()
-                        } else {
-                            profile.name.clone()
-                        },
+                        name: if profile.name.is_empty() { "Remote Vault".to_string() } else { profile.name.clone() },
                         spec: VaultSpec::Remote { profile },
                     });
                 }
@@ -194,10 +186,7 @@ impl Preferences {
 /// just needs to be unique within the file.
 pub fn short_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     // Stir in a pid to disambiguate two adds inside the same ns
     // clock tick (rare but possible on fast hardware).
     let pid = std::process::id() as u128;
@@ -205,9 +194,7 @@ pub fn short_id() -> String {
 }
 
 fn prefs_path() -> Result<std::path::PathBuf, CommandError> {
-    let base = dirs::data_local_dir()
-        .or_else(dirs::home_dir)
-        .ok_or("Cannot determine home directory")?;
+    let base = dirs::data_local_dir().or_else(dirs::home_dir).ok_or("Cannot determine home directory")?;
     Ok(base.join(".bastion_vault_gui").join("preferences.json"))
 }
 
@@ -217,8 +204,8 @@ pub fn load() -> Result<Preferences, CommandError> {
         return Ok(Preferences::default());
     }
     let data = std::fs::read_to_string(&path)?;
-    let mut prefs: Preferences = serde_json::from_str(&data)
-        .map_err(|e| CommandError::from(format!("Failed to parse preferences: {e}")))?;
+    let mut prefs: Preferences =
+        serde_json::from_str(&data).map_err(|e| CommandError::from(format!("Failed to parse preferences: {e}")))?;
     prefs.migrate_legacy();
     Ok(prefs)
 }

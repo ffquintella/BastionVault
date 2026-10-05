@@ -10,10 +10,10 @@
 use std::collections::HashMap;
 
 use bv_client::{JsonResponse, Operation};
-use zeroize::Zeroize as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::State;
+use zeroize::Zeroize as _;
 
 use crate::error::CmdResult;
 use crate::state::AppState;
@@ -110,23 +110,14 @@ pub struct PkiMountInfo {
 /// so we drill into `secret` before filtering on `type == "pki"`.
 #[tauri::command]
 pub async fn pki_list_mounts(state: State<'_, AppState>) -> CmdResult<Vec<PkiMountInfo>> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        "sys/internal/ui/mounts".into(),
-        None,
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Read, "sys/internal/ui/mounts".into(), None).await?;
     let map = data_to_map(resp);
     let mut out = Vec::new();
     if let Some(Value::Object(secret)) = map.get("secret") {
         for (path, info) in secret.iter() {
             if let Some(t) = info.get("type").and_then(|v| v.as_str()) {
                 if t == "pki" {
-                    out.push(PkiMountInfo {
-                        path: path.clone(),
-                        mount_type: t.to_string(),
-                    });
+                    out.push(PkiMountInfo { path: path.clone(), mount_type: t.to_string() });
                 }
             }
         }
@@ -176,10 +167,7 @@ pub struct PkiIssuerListResult {
 /// `LIST /v1/<mount>/issuers` — projection: `{keys, key_info}` →
 /// flat `Vec<PkiIssuerSummary>` so the GUI can render a single table.
 #[tauri::command]
-pub async fn pki_list_issuers(
-    state: State<'_, AppState>,
-    mount: String,
-) -> CmdResult<PkiIssuerListResult> {
+pub async fn pki_list_issuers(state: State<'_, AppState>, mount: String) -> CmdResult<PkiIssuerListResult> {
     let mount = mount_prefix(&mount);
     let resp = make_request(&state, Operation::List, format!("{mount}/issuers"), None).await?;
     let map = data_to_map(resp);
@@ -224,8 +212,7 @@ pub async fn pki_read_issuer(
     reference: String,
 ) -> CmdResult<PkiIssuerDetail> {
     let mount = mount_prefix(&mount);
-    let resp =
-        make_request(&state, Operation::Read, format!("{mount}/issuer/{reference}"), None).await?;
+    let resp = make_request(&state, Operation::Read, format!("{mount}/issuer/{reference}"), None).await?;
     let map = data_to_map(resp);
     Ok(PkiIssuerDetail {
         id: val_str(&map, "issuer_id"),
@@ -250,8 +237,7 @@ pub async fn pki_rename_issuer(
 ) -> CmdResult<()> {
     let mount = mount_prefix(&mount);
     let body = json!({"issuer_name": new_name}).as_object().cloned().unwrap_or_default();
-    make_request(&state, Operation::Write, format!("{mount}/issuer/{reference}"), Some(body))
-        .await?;
+    make_request(&state, Operation::Write, format!("{mount}/issuer/{reference}"), Some(body)).await?;
     Ok(())
 }
 
@@ -266,17 +252,12 @@ pub async fn pki_set_issuer_usages(
     // Engine accepts a comma-separated `usage` string.
     let usage_str = usages.join(",");
     let body = json!({"usage": usage_str}).as_object().cloned().unwrap_or_default();
-    make_request(&state, Operation::Write, format!("{mount}/issuer/{reference}"), Some(body))
-        .await?;
+    make_request(&state, Operation::Write, format!("{mount}/issuer/{reference}"), Some(body)).await?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn pki_delete_issuer(
-    state: State<'_, AppState>,
-    mount: String,
-    reference: String,
-) -> CmdResult<()> {
+pub async fn pki_delete_issuer(state: State<'_, AppState>, mount: String, reference: String) -> CmdResult<()> {
     let mount = mount_prefix(&mount);
     make_request(&state, Operation::Delete, format!("{mount}/issuer/{reference}"), None).await?;
     Ok(())
@@ -289,10 +270,7 @@ pub struct PkiDefaultIssuer {
 }
 
 #[tauri::command]
-pub async fn pki_read_default_issuer(
-    state: State<'_, AppState>,
-    mount: String,
-) -> CmdResult<PkiDefaultIssuer> {
+pub async fn pki_read_default_issuer(state: State<'_, AppState>, mount: String) -> CmdResult<PkiDefaultIssuer> {
     let mount = mount_prefix(&mount);
     let resp = make_request(&state, Operation::Read, format!("{mount}/config/issuers"), None).await?;
     let map = data_to_map(resp);
@@ -300,11 +278,7 @@ pub async fn pki_read_default_issuer(
 }
 
 #[tauri::command]
-pub async fn pki_set_default_issuer(
-    state: State<'_, AppState>,
-    mount: String,
-    reference: String,
-) -> CmdResult<()> {
+pub async fn pki_set_default_issuer(state: State<'_, AppState>, mount: String, reference: String) -> CmdResult<()> {
     let mount = mount_prefix(&mount);
     let body = json!({"default": reference}).as_object().cloned().unwrap_or_default();
     make_request(&state, Operation::Write, format!("{mount}/config/issuers"), Some(body)).await?;
@@ -367,13 +341,8 @@ pub async fn pki_generate_root(
     if let Some(k) = request.key_ref.filter(|s| !s.is_empty()) {
         body.insert("key_ref".into(), json!(k));
     }
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{mount}/root/generate/{}", request.mode),
-        Some(body),
-    )
-    .await?;
+    let resp =
+        make_request(&state, Operation::Write, format!("{mount}/root/generate/{}", request.mode), Some(body)).await?;
     let map = data_to_map(resp);
     Ok(PkiRootResult {
         certificate: val_str(&map, "certificate"),
@@ -428,13 +397,9 @@ pub async fn pki_generate_intermediate(
     if let Some(k) = request.key_ref.filter(|s| !s.is_empty()) {
         body.insert("key_ref".into(), json!(k));
     }
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{mount}/intermediate/generate/{}", request.mode),
-        Some(body),
-    )
-    .await?;
+    let resp =
+        make_request(&state, Operation::Write, format!("{mount}/intermediate/generate/{}", request.mode), Some(body))
+            .await?;
     let map = data_to_map(resp);
     Ok(PkiIntermediateResult {
         csr: val_str(&map, "csr"),
@@ -468,13 +433,7 @@ pub async fn pki_set_signed_intermediate(
     if let Some(n) = request.issuer_name {
         body.insert("issuer_name".into(), json!(n));
     }
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{mount}/intermediate/set-signed"),
-        Some(body),
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Write, format!("{mount}/intermediate/set-signed"), Some(body)).await?;
     let map = data_to_map(resp);
     Ok(PkiSetSignedResult { issuer_id: val_str(&map, "issuer_id"), issuer_name: val_str(&map, "issuer_name") })
 }
@@ -519,13 +478,9 @@ pub async fn pki_sign_intermediate(
     if let Some(r) = request.issuer_ref {
         body.insert("issuer_ref".into(), json!(r));
     }
-    let resp =
-        make_request(&state, Operation::Write, format!("{mount}/root/sign-intermediate"), Some(body)).await?;
+    let resp = make_request(&state, Operation::Write, format!("{mount}/root/sign-intermediate"), Some(body)).await?;
     let map = data_to_map(resp);
-    Ok(PkiSignIntermediateResult {
-        certificate: val_str(&map, "certificate"),
-        issuing_ca: val_str(&map, "issuing_ca"),
-    })
+    Ok(PkiSignIntermediateResult { certificate: val_str(&map, "certificate"), issuing_ca: val_str(&map, "issuing_ca") })
 }
 
 // ── External-signing CSR flow (`pki/csr/*`) ──────────────────────────
@@ -578,13 +533,7 @@ pub async fn pki_csr_generate(
     if request.exported.unwrap_or(false) {
         body.insert("exported".into(), json!(true));
     }
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{mount}/csr/generate"),
-        Some(body),
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Write, format!("{mount}/csr/generate"), Some(body)).await?;
     let map = data_to_map(resp);
     Ok(PkiCsrGenerateResult {
         csr_id: val_str(&map, "csr_id"),
@@ -621,14 +570,7 @@ pub async fn pki_csr_read(
     csr_id: String,
 ) -> CmdResult<Option<PkiCsrPending>> {
     let mount = mount_prefix(&mount);
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{mount}/csr/{csr_id}"),
-        None,
-    )
-    .await
-    .ok();
+    let resp = make_request(&state, Operation::Read, format!("{mount}/csr/{csr_id}"), None).await.ok();
     let Some(resp) = resp else { return Ok(None) };
     let map = data_to_map(resp);
     if map.is_empty() {
@@ -695,27 +637,13 @@ pub async fn pki_csr_list_info(
                 .collect()
         })
         .unwrap_or_default();
-    Ok(PkiCsrSummaryPage {
-        records,
-        total: val_u64(&map, "total"),
-        next: val_str(&map, "next"),
-    })
+    Ok(PkiCsrSummaryPage { records, total: val_u64(&map, "total"), next: val_str(&map, "next") })
 }
 
 #[tauri::command]
-pub async fn pki_csr_delete(
-    state: State<'_, AppState>,
-    mount: String,
-    csr_id: String,
-) -> CmdResult<()> {
+pub async fn pki_csr_delete(state: State<'_, AppState>, mount: String, csr_id: String) -> CmdResult<()> {
     let mount = mount_prefix(&mount);
-    make_request(
-        &state,
-        Operation::Delete,
-        format!("{mount}/csr/{csr_id}"),
-        None,
-    )
-    .await?;
+    make_request(&state, Operation::Delete, format!("{mount}/csr/{csr_id}"), None).await?;
     Ok(())
 }
 
@@ -743,13 +671,8 @@ pub async fn pki_csr_set_signed(
     let mount = mount_prefix(&request.mount);
     let mut body = Map::new();
     body.insert("certificate".into(), json!(request.certificate));
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{mount}/csr/{}/set-signed", request.csr_id),
-        Some(body),
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Write, format!("{mount}/csr/{}/set-signed", request.csr_id), Some(body))
+        .await?;
     let map = data_to_map(resp);
     Ok(PkiCsrSetSignedResult {
         serial_number: val_str(&map, "serial_number"),
@@ -833,10 +756,7 @@ fn unwrap_pkcs12(der: &[u8], passphrase: &str) -> Result<(Option<String>, Vec<St
     // `keys/import` / `config/ca` splitter expects behind a
     // `PRIVATE KEY` header.
     if let Some((_alias, chain)) = keystore.private_key_chain() {
-        key_pem = Some(pem::encode(&Pem::new(
-            "PRIVATE KEY",
-            chain.key().as_der().to_vec(),
-        )));
+        key_pem = Some(pem::encode(&Pem::new("PRIVATE KEY", chain.key().as_der().to_vec())));
         for c in chain.certs() {
             if seen.insert(c.as_der().to_vec()) {
                 cert_pems.push(pem::encode(&Pem::new("CERTIFICATE", c.as_der().to_vec())));
@@ -846,10 +766,7 @@ fn unwrap_pkcs12(der: &[u8], passphrase: &str) -> Result<(Option<String>, Vec<St
     for (_alias, entry) in keystore.entries() {
         if let KeyStoreEntry::Certificate(cert) = entry {
             if seen.insert(cert.as_der().to_vec()) {
-                cert_pems.push(pem::encode(&Pem::new(
-                    "CERTIFICATE",
-                    cert.as_der().to_vec(),
-                )));
+                cert_pems.push(pem::encode(&Pem::new("CERTIFICATE", cert.as_der().to_vec())));
             }
         }
     }
@@ -892,8 +809,7 @@ pub async fn pki_import_ca_pkcs12(
     if let Some(n) = request.issuer_name {
         body.insert("issuer_name".into(), json!(n));
     }
-    let resp =
-        make_request(&state, Operation::Write, format!("{mount}/config/ca"), Some(body)).await?;
+    let resp = make_request(&state, Operation::Write, format!("{mount}/config/ca"), Some(body)).await?;
     let map = data_to_map(resp);
     Ok(ca_import_result(&map))
 }
@@ -945,13 +861,7 @@ fn chain_node_from_der(der: &[u8]) -> Option<PkiChainNode> {
     let (_, cert) = x509_parser::certificate::X509Certificate::from_der(der).ok()?;
     let subject = cert.tbs_certificate.subject.to_string();
     let issuer = cert.tbs_certificate.issuer.to_string();
-    let is_ca = cert
-        .tbs_certificate
-        .basic_constraints()
-        .ok()
-        .flatten()
-        .map(|bc| bc.value.ca)
-        .unwrap_or(false);
+    let is_ca = cert.tbs_certificate.basic_constraints().ok().flatten().map(|bc| bc.value.ca).unwrap_or(false);
     Some(PkiChainNode {
         common_name: cn_from_dn(&subject),
         issuer_common_name: cn_from_dn(&issuer),
@@ -1005,9 +915,8 @@ pub fn pki_parse_chain(pem_bundle: String) -> CmdResult<PkiChainPreview> {
     if nodes.is_empty() {
         warnings.push("No certificate found yet — paste at least one CA certificate.".into());
     } else if !key_present {
-        warnings.push(
-            "No private key in the paste — every CA will be imported as trust/chain-only (cannot sign).".into(),
-        );
+        warnings
+            .push("No private key in the paste — every CA will be imported as trust/chain-only (cannot sign).".into());
     }
 
     Ok(PkiChainPreview { nodes, key_present, warnings })
@@ -1178,11 +1087,7 @@ pub async fn pki_list_roles(state: State<'_, AppState>, mount: String) -> CmdRes
 }
 
 #[tauri::command]
-pub async fn pki_read_role(
-    state: State<'_, AppState>,
-    mount: String,
-    name: String,
-) -> CmdResult<PkiRoleConfig> {
+pub async fn pki_read_role(state: State<'_, AppState>, mount: String, name: String) -> CmdResult<PkiRoleConfig> {
     let mount = mount_prefix(&mount);
     let resp = make_request(&state, Operation::Read, format!("{mount}/roles/{name}"), None).await?;
     let map = data_to_map(resp);
@@ -1268,11 +1173,7 @@ pub async fn pki_write_role(
 }
 
 #[tauri::command]
-pub async fn pki_delete_role(
-    state: State<'_, AppState>,
-    mount: String,
-    name: String,
-) -> CmdResult<()> {
+pub async fn pki_delete_role(state: State<'_, AppState>, mount: String, name: String) -> CmdResult<()> {
     let mount = mount_prefix(&mount);
     make_request(&state, Operation::Delete, format!("{mount}/roles/{name}"), None).await?;
     Ok(())
@@ -1312,10 +1213,7 @@ pub struct PkiIssueResult {
 }
 
 #[tauri::command]
-pub async fn pki_issue_cert(
-    state: State<'_, AppState>,
-    request: PkiIssueRequest,
-) -> CmdResult<PkiIssueResult> {
+pub async fn pki_issue_cert(state: State<'_, AppState>, request: PkiIssueRequest) -> CmdResult<PkiIssueResult> {
     let mount = mount_prefix(&request.mount);
     let mut body = Map::new();
     body.insert("common_name".into(), json!(request.common_name));
@@ -1337,8 +1235,7 @@ pub async fn pki_issue_cert(
     if let Some(k) = request.key_ref.filter(|s| !s.is_empty()) {
         body.insert("key_ref".into(), json!(k));
     }
-    let resp =
-        make_request(&state, Operation::Write, format!("{mount}/issue/{}", request.role), Some(body)).await?;
+    let resp = make_request(&state, Operation::Write, format!("{mount}/issue/{}", request.role), Some(body)).await?;
     let map = data_to_map(resp);
     Ok(PkiIssueResult {
         certificate: val_str(&map, "certificate"),
@@ -1381,10 +1278,7 @@ pub struct PkiSignResult {
 }
 
 #[tauri::command]
-pub async fn pki_sign_csr(
-    state: State<'_, AppState>,
-    request: PkiSignCsrRequest,
-) -> CmdResult<PkiSignResult> {
+pub async fn pki_sign_csr(state: State<'_, AppState>, request: PkiSignCsrRequest) -> CmdResult<PkiSignResult> {
     let mount = mount_prefix(&request.mount);
     let mut body = Map::new();
     body.insert("csr".into(), json!(request.csr));
@@ -1406,8 +1300,7 @@ pub async fn pki_sign_csr(
     if let Some(k) = request.key_ref.filter(|s| !s.is_empty()) {
         body.insert("key_ref".into(), json!(k));
     }
-    let resp =
-        make_request(&state, Operation::Write, format!("{mount}/sign/{}", request.role), Some(body)).await?;
+    let resp = make_request(&state, Operation::Write, format!("{mount}/sign/{}", request.role), Some(body)).await?;
     let map = data_to_map(resp);
     Ok(PkiSignResult {
         certificate: val_str(&map, "certificate"),
@@ -1534,11 +1427,7 @@ pub async fn pki_list_certs_info(
                 .collect()
         })
         .unwrap_or_default();
-    Ok(PkiCertSummaryPage {
-        records,
-        total: val_u64(&map, "total"),
-        next: val_str(&map, "next"),
-    })
+    Ok(PkiCertSummaryPage { records, total: val_u64(&map, "total"), next: val_str(&map, "next") })
 }
 
 #[derive(Serialize)]
@@ -1644,23 +1533,53 @@ fn parse_cert_extras(der: &[u8]) -> CertExtras {
                 }
             }
             ParsedExtension::KeyUsage(ku) => {
-                if ku.digital_signature() { out.key_usages.push("digitalSignature".into()); }
-                if ku.non_repudiation() { out.key_usages.push("nonRepudiation".into()); }
-                if ku.key_encipherment() { out.key_usages.push("keyEncipherment".into()); }
-                if ku.data_encipherment() { out.key_usages.push("dataEncipherment".into()); }
-                if ku.key_agreement() { out.key_usages.push("keyAgreement".into()); }
-                if ku.key_cert_sign() { out.key_usages.push("keyCertSign".into()); }
-                if ku.crl_sign() { out.key_usages.push("cRLSign".into()); }
-                if ku.encipher_only() { out.key_usages.push("encipherOnly".into()); }
-                if ku.decipher_only() { out.key_usages.push("decipherOnly".into()); }
+                if ku.digital_signature() {
+                    out.key_usages.push("digitalSignature".into());
+                }
+                if ku.non_repudiation() {
+                    out.key_usages.push("nonRepudiation".into());
+                }
+                if ku.key_encipherment() {
+                    out.key_usages.push("keyEncipherment".into());
+                }
+                if ku.data_encipherment() {
+                    out.key_usages.push("dataEncipherment".into());
+                }
+                if ku.key_agreement() {
+                    out.key_usages.push("keyAgreement".into());
+                }
+                if ku.key_cert_sign() {
+                    out.key_usages.push("keyCertSign".into());
+                }
+                if ku.crl_sign() {
+                    out.key_usages.push("cRLSign".into());
+                }
+                if ku.encipher_only() {
+                    out.key_usages.push("encipherOnly".into());
+                }
+                if ku.decipher_only() {
+                    out.key_usages.push("decipherOnly".into());
+                }
             }
             ParsedExtension::ExtendedKeyUsage(eku) => {
-                if eku.server_auth { out.ext_key_usages.push("serverAuth".into()); }
-                if eku.client_auth { out.ext_key_usages.push("clientAuth".into()); }
-                if eku.code_signing { out.ext_key_usages.push("codeSigning".into()); }
-                if eku.email_protection { out.ext_key_usages.push("emailProtection".into()); }
-                if eku.time_stamping { out.ext_key_usages.push("timeStamping".into()); }
-                if eku.ocsp_signing { out.ext_key_usages.push("OCSPSigning".into()); }
+                if eku.server_auth {
+                    out.ext_key_usages.push("serverAuth".into());
+                }
+                if eku.client_auth {
+                    out.ext_key_usages.push("clientAuth".into());
+                }
+                if eku.code_signing {
+                    out.ext_key_usages.push("codeSigning".into());
+                }
+                if eku.email_protection {
+                    out.ext_key_usages.push("emailProtection".into());
+                }
+                if eku.time_stamping {
+                    out.ext_key_usages.push("timeStamping".into());
+                }
+                if eku.ocsp_signing {
+                    out.ext_key_usages.push("OCSPSigning".into());
+                }
                 for oid in &eku.other {
                     out.ext_key_usages.push(oid.to_string());
                 }
@@ -1679,11 +1598,7 @@ fn format_ip(bytes: &[u8]) -> String {
             for (i, g) in groups.iter_mut().enumerate() {
                 *g = ((bytes[i * 2] as u16) << 8) | bytes[i * 2 + 1] as u16;
             }
-            groups
-                .iter()
-                .map(|g| format!("{g:x}"))
-                .collect::<Vec<_>>()
-                .join(":")
+            groups.iter().map(|g| format!("{g:x}")).collect::<Vec<_>>().join(":")
         }
         _ => hex::encode(bytes),
     }
@@ -1706,8 +1621,7 @@ fn parse_cert_meta(pem: &str) -> (String, u64, String) {
     };
 
     // Subject CN: walk the RDN sequence for the OID 2.5.4.3.
-    let cn_oid: x509_cert::der::asn1::ObjectIdentifier =
-        "2.5.4.3".parse().expect("CN OID literal is valid");
+    let cn_oid: x509_cert::der::asn1::ObjectIdentifier = "2.5.4.3".parse().expect("CN OID literal is valid");
     let mut common_name = String::new();
     'outer: for rdn in cert.tbs_certificate.subject.0.iter() {
         for atv in rdn.0.iter() {
@@ -1749,11 +1663,7 @@ fn parse_cert_meta(pem: &str) -> (String, u64, String) {
 }
 
 #[tauri::command]
-pub async fn pki_read_cert(
-    state: State<'_, AppState>,
-    mount: String,
-    serial: String,
-) -> CmdResult<PkiCertRecord> {
+pub async fn pki_read_cert(state: State<'_, AppState>, mount: String, serial: String) -> CmdResult<PkiCertRecord> {
     let mount = mount_prefix(&mount);
     let resp = make_request(&state, Operation::Read, format!("{mount}/cert/{serial}"), None).await?;
     let map = data_to_map(resp);
@@ -1803,11 +1713,7 @@ pub async fn pki_associate_key(
 
 /// Clear the managed-key binding on a certificate.
 #[tauri::command]
-pub async fn pki_clear_cert_key(
-    state: State<'_, AppState>,
-    mount: String,
-    serial: String,
-) -> CmdResult<()> {
+pub async fn pki_clear_cert_key(state: State<'_, AppState>, mount: String, serial: String) -> CmdResult<()> {
     let mount = mount_prefix(&mount);
     make_request(&state, Operation::Delete, format!("{mount}/cert/{serial}/key"), None).await?;
     Ok(())
@@ -1896,11 +1802,7 @@ pub struct PkiImportCertsFileResult {
 /// Extract certificate PEM blocks from a PEM / PKCS#7 / PKCS#12 file.
 /// Every returned string is a normalised `-----BEGIN CERTIFICATE-----`
 /// block. The passphrase is only consulted for PKCS#12.
-fn extract_cert_pems(
-    format: &str,
-    bytes: &[u8],
-    passphrase: &str,
-) -> Result<Vec<String>, String> {
+fn extract_cert_pems(format: &str, bytes: &[u8], passphrase: &str) -> Result<Vec<String>, String> {
     use pem::Pem;
 
     match format.to_ascii_lowercase().as_str() {
@@ -1908,10 +1810,8 @@ fn extract_cert_pems(
             // A PEM file may bundle several certs (and unrelated blocks
             // like keys). Keep only CERTIFICATE blocks; re-encode each so
             // the output is canonical regardless of the input's wrapping.
-            let text = std::str::from_utf8(bytes)
-                .map_err(|_| "PEM file is not valid UTF-8".to_string())?;
-            let blocks = pem::parse_many(text)
-                .map_err(|e| format!("PEM parse failed: {e}"))?;
+            let text = std::str::from_utf8(bytes).map_err(|_| "PEM file is not valid UTF-8".to_string())?;
+            let blocks = pem::parse_many(text).map_err(|e| format!("PEM parse failed: {e}"))?;
             let certs: Vec<String> = blocks
                 .into_iter()
                 .filter(|p| p.tag() == "CERTIFICATE")
@@ -1930,9 +1830,7 @@ fn extract_cert_pems(
             }
             Ok(cert_pems)
         }
-        other => Err(format!(
-            "unknown format `{other}` (accepted: pem, pkcs7, pkcs12)"
-        )),
+        other => Err(format!("unknown format `{other}` (accepted: pem, pkcs7, pkcs12)")),
     }
 }
 
@@ -1950,38 +1848,24 @@ fn extract_pkcs7_cert_pems(bytes: &[u8]) -> Result<Vec<String>, String> {
     // Unwrap PEM armor if present; otherwise treat the bytes as DER.
     let der: Vec<u8> = match std::str::from_utf8(bytes) {
         Ok(text) if text.contains("BEGIN PKCS7") || text.contains("BEGIN PKCS #7") => {
-            pem::parse(text.trim())
-                .map_err(|e| format!("PKCS#7 PEM parse failed: {e}"))?
-                .contents()
-                .to_vec()
+            pem::parse(text.trim()).map_err(|e| format!("PKCS#7 PEM parse failed: {e}"))?.contents().to_vec()
         }
         _ => bytes.to_vec(),
     };
 
-    let ci = ContentInfo::from_der(&der)
-        .map_err(|e| format!("PKCS#7 ContentInfo decode failed: {e}"))?;
+    let ci = ContentInfo::from_der(&der).map_err(|e| format!("PKCS#7 ContentInfo decode failed: {e}"))?;
     // id-signedData = 1.2.840.113549.1.7.2. A certs-only .p7b is always
     // SignedData; reject anything else with a clear message.
     if ci.content_type.to_string() != "1.2.840.113549.1.7.2" {
-        return Err(format!(
-            "PKCS#7 is not SignedData (content type {})",
-            ci.content_type
-        ));
+        return Err(format!("PKCS#7 is not SignedData (content type {})", ci.content_type));
     }
-    let signed: SignedData = ci
-        .content
-        .decode_as()
-        .map_err(|e| format!("PKCS#7 SignedData decode failed: {e}"))?;
-    let cert_set = signed
-        .certificates
-        .ok_or("PKCS#7 SignedData carries no certificates")?;
+    let signed: SignedData = ci.content.decode_as().map_err(|e| format!("PKCS#7 SignedData decode failed: {e}"))?;
+    let cert_set = signed.certificates.ok_or("PKCS#7 SignedData carries no certificates")?;
 
     let mut out = Vec::new();
     for choice in cert_set.0.iter() {
         if let CertificateChoices::Certificate(cert) = choice {
-            let der = cert
-                .to_der()
-                .map_err(|e| format!("PKCS#7 certificate re-encode failed: {e}"))?;
+            let der = cert.to_der().map_err(|e| format!("PKCS#7 certificate re-encode failed: {e}"))?;
             out.push(pem::encode(&Pem::new("CERTIFICATE", der)));
         }
     }
@@ -2005,9 +1889,8 @@ pub async fn pki_import_certs_file(
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine;
 
-    let bytes = B64
-        .decode(request.data_b64.trim())
-        .map_err(|e| format!("pki_import_certs_file: base64 decode failed: {e}"))?;
+    let bytes =
+        B64.decode(request.data_b64.trim()).map_err(|e| format!("pki_import_certs_file: base64 decode failed: {e}"))?;
     let cert_pems = extract_cert_pems(&request.format, &bytes, &request.passphrase)
         .map_err(|e| format!("pki_import_certs_file: {e}"))?;
 
@@ -2032,14 +1915,7 @@ pub async fn pki_import_certs_file(
         let mut body = Map::new();
         body.insert("certificate".into(), json!(pem_str));
         body.insert("source".into(), json!(source));
-        match make_request(
-            &state,
-            Operation::Write,
-            format!("{mount}/certs/import"),
-            Some(body),
-        )
-        .await
-        {
+        match make_request(&state, Operation::Write, format!("{mount}/certs/import"), Some(body)).await {
             Ok(resp) => {
                 let map = data_to_map(resp);
                 imported += 1;
@@ -2079,12 +1955,7 @@ pub async fn pki_import_certs_file(
         }
     }
 
-    Ok(PkiImportCertsFileResult {
-        imported,
-        skipped,
-        failed,
-        entries,
-    })
+    Ok(PkiImportCertsFileResult { imported, skipped, failed, entries })
 }
 
 #[derive(Serialize)]
@@ -2186,29 +2057,19 @@ fn export_operation(body: &Map<String, Value>) -> Operation {
 }
 
 #[tauri::command]
-pub async fn pki_export_cert(
-    state: State<'_, AppState>,
-    request: PkiExportCertRequest,
-) -> CmdResult<PkiExportResult> {
+pub async fn pki_export_cert(state: State<'_, AppState>, request: PkiExportCertRequest) -> CmdResult<PkiExportResult> {
     let mount = mount_prefix(&request.mount);
     let body = cert_export_body(&request);
-    let resp = make_request(
-        &state,
-        export_operation(&body),
-        format!("{mount}/cert/{}/export", request.serial),
-        Some(body),
-    )
-    .await?;
+    let resp =
+        make_request(&state, export_operation(&body), format!("{mount}/cert/{}/export", request.serial), Some(body))
+            .await?;
     let map = data_to_map(resp);
     Ok(PkiExportResult {
         format: val_str(&map, "format"),
         filename_extension: val_str(&map, "filename_extension"),
         body: val_str(&map, "body"),
         body_encoding: val_str(&map, "body_encoding"),
-        includes_private_key: map
-            .get("includes_private_key")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        includes_private_key: map.get("includes_private_key").and_then(|v| v.as_bool()).unwrap_or(false),
         backup_mode: map.get("backup_mode").and_then(|v| v.as_bool()).unwrap_or(false),
         serial_number: val_str(&map, "serial_number"),
         issuer_id: String::new(),
@@ -2295,11 +2156,7 @@ pub struct PkiExportFileResult {
 /// matters. On unix the file is created `0600`: the bag is
 /// password-encrypted, but a private key has no business being
 /// world-readable while the operator decides where to put it.
-fn write_export_file(
-    target_path: &str,
-    body: &str,
-    body_encoding: &str,
-) -> CmdResult<u64> {
+fn write_export_file(target_path: &str, body: &str, body_encoding: &str) -> CmdResult<u64> {
     use std::io::Write as _;
 
     let mut bytes: Vec<u8> = if body_encoding == "base64" {
@@ -2345,27 +2202,15 @@ pub async fn pki_export_cert_to_path(
     let mount = mount_prefix(&request.mount);
     let serial = request.serial.clone();
     let body = cert_export_body(&request);
-    let resp = make_request(
-        &state,
-        export_operation(&body),
-        format!("{mount}/cert/{serial}/export"),
-        Some(body),
-    )
-    .await?;
+    let resp =
+        make_request(&state, export_operation(&body), format!("{mount}/cert/{serial}/export"), Some(body)).await?;
     let map = data_to_map(resp);
-    let bytes_written = write_export_file(
-        &target_path,
-        &val_str(&map, "body"),
-        &val_str(&map, "body_encoding"),
-    )?;
+    let bytes_written = write_export_file(&target_path, &val_str(&map, "body"), &val_str(&map, "body_encoding"))?;
     Ok(PkiExportFileResult {
         format: val_str(&map, "format"),
         path: target_path,
         bytes_written,
-        includes_private_key: map
-            .get("includes_private_key")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        includes_private_key: map.get("includes_private_key").and_then(|v| v.as_bool()).unwrap_or(false),
         backup_mode: map.get("backup_mode").and_then(|v| v.as_bool()).unwrap_or(false),
     })
 }
@@ -2381,19 +2226,10 @@ pub async fn pki_export_issuer_to_path(
     let mount = mount_prefix(&request.mount);
     let issuer_ref = request.issuer_ref.clone();
     let body = issuer_export_body(&request);
-    let resp = make_request(
-        &state,
-        export_operation(&body),
-        format!("{mount}/issuer/{issuer_ref}/export"),
-        Some(body),
-    )
-    .await?;
+    let resp = make_request(&state, export_operation(&body), format!("{mount}/issuer/{issuer_ref}/export"), Some(body))
+        .await?;
     let map = data_to_map(resp);
-    let bytes_written = write_export_file(
-        &target_path,
-        &val_str(&map, "body"),
-        &val_str(&map, "body_encoding"),
-    )?;
+    let bytes_written = write_export_file(&target_path, &val_str(&map, "body"), &val_str(&map, "body_encoding"))?;
     Ok(PkiExportFileResult {
         format: val_str(&map, "format"),
         path: target_path,
@@ -2404,11 +2240,7 @@ pub async fn pki_export_issuer_to_path(
 }
 
 #[tauri::command]
-pub async fn pki_revoke_cert(
-    state: State<'_, AppState>,
-    mount: String,
-    serial: String,
-) -> CmdResult<PkiRevokeResult> {
+pub async fn pki_revoke_cert(state: State<'_, AppState>, mount: String, serial: String) -> CmdResult<PkiRevokeResult> {
     let mount = mount_prefix(&mount);
     let body = json!({"serial_number": serial}).as_object().cloned().unwrap_or_default();
     let resp = make_request(&state, Operation::Write, format!("{mount}/revoke"), Some(body)).await?;
@@ -2473,10 +2305,7 @@ pub struct PkiRotateCrlResult {
 }
 
 #[tauri::command]
-pub async fn pki_rotate_crl(
-    state: State<'_, AppState>,
-    mount: String,
-) -> CmdResult<PkiRotateCrlResult> {
+pub async fn pki_rotate_crl(state: State<'_, AppState>, mount: String) -> CmdResult<PkiRotateCrlResult> {
     let mount = mount_prefix(&mount);
     let resp = make_request(&state, Operation::Write, format!("{mount}/crl/rotate"), None).await?;
     let map = data_to_map(resp);
@@ -2506,10 +2335,7 @@ pub struct PkiTidyResult {
 }
 
 #[tauri::command]
-pub async fn pki_run_tidy(
-    state: State<'_, AppState>,
-    request: PkiTidyRequest,
-) -> CmdResult<PkiTidyResult> {
+pub async fn pki_run_tidy(state: State<'_, AppState>, request: PkiTidyRequest) -> CmdResult<PkiTidyResult> {
     let mount = mount_prefix(&request.mount);
     let mut body = Map::new();
     if let Some(b) = request.tidy_cert_store {
@@ -2542,10 +2368,7 @@ pub struct PkiTidyStatus {
 }
 
 #[tauri::command]
-pub async fn pki_read_tidy_status(
-    state: State<'_, AppState>,
-    mount: String,
-) -> CmdResult<PkiTidyStatus> {
+pub async fn pki_read_tidy_status(state: State<'_, AppState>, mount: String) -> CmdResult<PkiTidyStatus> {
     let mount = mount_prefix(&mount);
     let resp = make_request(&state, Operation::Read, format!("{mount}/tidy-status"), None).await?;
     let map = data_to_map(resp);
@@ -2569,10 +2392,7 @@ pub struct PkiAutoTidyConfig {
 }
 
 #[tauri::command]
-pub async fn pki_read_auto_tidy(
-    state: State<'_, AppState>,
-    mount: String,
-) -> CmdResult<PkiAutoTidyConfig> {
+pub async fn pki_read_auto_tidy(state: State<'_, AppState>, mount: String) -> CmdResult<PkiAutoTidyConfig> {
     let mount = mount_prefix(&mount);
     let resp = make_request(&state, Operation::Read, format!("{mount}/config/auto-tidy"), None).await?;
     let map = data_to_map(resp);
@@ -2610,10 +2430,7 @@ pub struct PkiUrlsConfig {
 }
 
 #[tauri::command]
-pub async fn pki_read_config_urls(
-    state: State<'_, AppState>,
-    mount: String,
-) -> CmdResult<PkiUrlsConfig> {
+pub async fn pki_read_config_urls(state: State<'_, AppState>, mount: String) -> CmdResult<PkiUrlsConfig> {
     let mount = mount_prefix(&mount);
     let resp = make_request(&state, Operation::Read, format!("{mount}/config/urls"), None).await?;
     let map = data_to_map(resp);
@@ -2625,11 +2442,7 @@ pub async fn pki_read_config_urls(
 }
 
 #[tauri::command]
-pub async fn pki_write_config_urls(
-    state: State<'_, AppState>,
-    mount: String,
-    config: PkiUrlsConfig,
-) -> CmdResult<()> {
+pub async fn pki_write_config_urls(state: State<'_, AppState>, mount: String, config: PkiUrlsConfig) -> CmdResult<()> {
     let mount = mount_prefix(&mount);
     let mut body = Map::new();
     body.insert("issuing_certificates".into(), json!(config.issuing_certificates.join(",")));
@@ -2646,10 +2459,7 @@ pub struct PkiCrlConfig {
 }
 
 #[tauri::command]
-pub async fn pki_read_config_crl(
-    state: State<'_, AppState>,
-    mount: String,
-) -> CmdResult<PkiCrlConfig> {
+pub async fn pki_read_config_crl(state: State<'_, AppState>, mount: String) -> CmdResult<PkiCrlConfig> {
     let mount = mount_prefix(&mount);
     let resp = make_request(&state, Operation::Read, format!("{mount}/config/crl"), None).await?;
     let map = data_to_map(resp);
@@ -2657,11 +2467,7 @@ pub async fn pki_read_config_crl(
 }
 
 #[tauri::command]
-pub async fn pki_write_config_crl(
-    state: State<'_, AppState>,
-    mount: String,
-    config: PkiCrlConfig,
-) -> CmdResult<()> {
+pub async fn pki_write_config_crl(state: State<'_, AppState>, mount: String, config: PkiCrlConfig) -> CmdResult<()> {
     let mount = mount_prefix(&mount);
     let mut body = Map::new();
     body.insert("expiry".into(), json!(config.expiry));
@@ -2701,14 +2507,9 @@ pub async fn pki_list_keys(state: State<'_, AppState>, mount: String) -> CmdResu
 }
 
 #[tauri::command]
-pub async fn pki_read_key(
-    state: State<'_, AppState>,
-    mount: String,
-    key_ref: String,
-) -> CmdResult<PkiManagedKey> {
+pub async fn pki_read_key(state: State<'_, AppState>, mount: String, key_ref: String) -> CmdResult<PkiManagedKey> {
     let mount = mount_prefix(&mount);
-    let resp =
-        make_request(&state, Operation::Read, format!("{mount}/key/{key_ref}"), None).await?;
+    let resp = make_request(&state, Operation::Read, format!("{mount}/key/{key_ref}"), None).await?;
     let map = data_to_map(resp);
     Ok(PkiManagedKey {
         key_id: val_str(&map, "key_id"),
@@ -2763,13 +2564,8 @@ pub async fn pki_generate_key(
     if !request.name.is_empty() {
         body.insert("name".into(), json!(request.name));
     }
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{mount}/keys/generate/{}", request.mode),
-        Some(body),
-    )
-    .await?;
+    let resp =
+        make_request(&state, Operation::Write, format!("{mount}/keys/generate/{}", request.mode), Some(body)).await?;
     let map = data_to_map(resp);
     Ok(PkiGenerateKeyResult {
         key_id: val_str(&map, "key_id"),
@@ -2812,11 +2608,9 @@ pub async fn pki_import_key(
     use base64::Engine;
 
     let private_key = if !request.pkcs12_b64.trim().is_empty() {
-        let der = B64
-            .decode(request.pkcs12_b64.trim())
-            .map_err(|e| format!("pki_import_key: base64 decode failed: {e}"))?;
-        let (key_pem, _certs) =
-            unwrap_pkcs12(&der, &request.passphrase).map_err(|e| format!("pki_import_key: {e}"))?;
+        let der =
+            B64.decode(request.pkcs12_b64.trim()).map_err(|e| format!("pki_import_key: base64 decode failed: {e}"))?;
+        let (key_pem, _certs) = unwrap_pkcs12(&der, &request.passphrase).map_err(|e| format!("pki_import_key: {e}"))?;
         key_pem.ok_or("pki_import_key: PKCS#12 container has no private key entry")?
     } else {
         request.private_key.clone()
@@ -2831,8 +2625,7 @@ pub async fn pki_import_key(
     if !request.name.is_empty() {
         body.insert("name".into(), json!(request.name));
     }
-    let resp =
-        make_request(&state, Operation::Write, format!("{mount}/keys/import"), Some(body)).await?;
+    let resp = make_request(&state, Operation::Write, format!("{mount}/keys/import"), Some(body)).await?;
     let map = data_to_map(resp);
     Ok(PkiGenerateKeyResult {
         key_id: val_str(&map, "key_id"),
@@ -2853,10 +2646,7 @@ pub async fn pki_delete_key(
     force: Option<bool>,
 ) -> CmdResult<()> {
     let mount = mount_prefix(&mount);
-    let body = json!({"force": force.unwrap_or(false)})
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
+    let body = json!({"force": force.unwrap_or(false)}).as_object().cloned().unwrap_or_default();
     make_request(&state, Operation::Delete, format!("{mount}/key/{key_ref}"), Some(body)).await?;
     Ok(())
 }
@@ -2869,10 +2659,8 @@ pub async fn pki_delete_cert(
     force: Option<bool>,
 ) -> CmdResult<()> {
     let mount = mount_prefix(&mount);
-    let body = json!({"force": force.unwrap_or(false), "serial": serial.clone()})
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
+    let body =
+        json!({"force": force.unwrap_or(false), "serial": serial.clone()}).as_object().cloned().unwrap_or_default();
     make_request(&state, Operation::Delete, format!("{mount}/cert/{serial}"), Some(body)).await?;
     Ok(())
 }
@@ -2894,13 +2682,7 @@ pub async fn pki_read_issuer_chain(
     issuer_ref: String,
 ) -> CmdResult<PkiIssuerChain> {
     let mount = mount_prefix(&mount);
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{mount}/issuer/{issuer_ref}/chain"),
-        None,
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Read, format!("{mount}/issuer/{issuer_ref}/chain"), None).await?;
     let map = data_to_map(resp);
     Ok(PkiIssuerChain {
         issuer_id: val_str(&map, "issuer_id"),
@@ -2948,12 +2730,10 @@ mod tests {
     /// the shape the server's export path produces. Returns DER.
     fn make_pkcs7_der(certs: &[&[u8]]) -> Vec<u8> {
         use cms::cert::CertificateChoices;
-        use cms::content_info::ContentInfo;
         use cms::content_info::CmsVersion;
-        use cms::signed_data::{
-            CertificateSet, EncapsulatedContentInfo, SignedData, SignerInfos,
-        };
+        use cms::content_info::ContentInfo;
         use cms::revocation::RevocationInfoChoices;
+        use cms::signed_data::{CertificateSet, EncapsulatedContentInfo, SignedData, SignerInfos};
         use x509_cert::der::{asn1::SetOfVec, Any, Decode, Encode};
         use x509_cert::Certificate as X509Cert;
 
@@ -2983,9 +2763,7 @@ mod tests {
 
     /// Build a PKCS#12 container holding the fixture's key + cert.
     fn make_pkcs12(fx: &Fixture, extra_certs: &[&[u8]], passphrase: &str) -> Vec<u8> {
-        use p12_keystore::{
-            Certificate as P12Cert, KeyStore, KeyStoreEntry, PrivateKey, PrivateKeyChain,
-        };
+        use p12_keystore::{Certificate as P12Cert, KeyStore, KeyStoreEntry, PrivateKey, PrivateKeyChain};
 
         let mut store = KeyStore::new();
         let key = PrivateKey::from_der(&fx.key_pkcs8_der).unwrap();
@@ -3000,11 +2778,7 @@ mod tests {
     }
 
     fn cert_count(pem: &str) -> usize {
-        pem::parse_many(pem)
-            .unwrap()
-            .iter()
-            .filter(|p| p.tag() == "CERTIFICATE")
-            .count()
+        pem::parse_many(pem).unwrap().iter().filter(|p| p.tag() == "CERTIFICATE").count()
     }
 
     #[test]
@@ -3237,21 +3011,12 @@ pub async fn pki_sign_request_import(
     if request.allow_duplicate.unwrap_or(false) {
         body.insert("allow_duplicate".into(), json!(true));
     }
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{mount}/sign-request/import"),
-        Some(body),
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Write, format!("{mount}/sign-request/import"), Some(body)).await?;
     Ok(sign_request_from_map(&data_to_map(resp)))
 }
 
 #[tauri::command]
-pub async fn pki_sign_request_list(
-    state: State<'_, AppState>,
-    mount: String,
-) -> CmdResult<Vec<String>> {
+pub async fn pki_sign_request_list(state: State<'_, AppState>, mount: String) -> CmdResult<Vec<String>> {
     let mount = mount_prefix(&mount);
     let resp = make_request(&state, Operation::List, format!("{mount}/sign-request"), None).await?;
     Ok(val_str_array(&data_to_map(resp), "keys"))
@@ -3264,14 +3029,7 @@ pub async fn pki_sign_request_read(
     request_id: String,
 ) -> CmdResult<Option<PkiSignRequest>> {
     let mount = mount_prefix(&mount);
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{mount}/sign-request/{request_id}"),
-        None,
-    )
-    .await
-    .ok();
+    let resp = make_request(&state, Operation::Read, format!("{mount}/sign-request/{request_id}"), None).await.ok();
     let Some(resp) = resp else { return Ok(None) };
     let map = data_to_map(resp);
     if map.is_empty() {
@@ -3308,34 +3066,15 @@ pub async fn pki_sign_request_list_info(
     let records = map
         .get("records")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_object())
-                .map(sign_request_from_map)
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|v| v.as_object()).map(sign_request_from_map).collect())
         .unwrap_or_default();
-    Ok(PkiSignRequestPage {
-        records,
-        total: val_u64(&map, "total"),
-        next: val_str(&map, "next"),
-    })
+    Ok(PkiSignRequestPage { records, total: val_u64(&map, "total"), next: val_str(&map, "next") })
 }
 
 #[tauri::command]
-pub async fn pki_sign_request_delete(
-    state: State<'_, AppState>,
-    mount: String,
-    request_id: String,
-) -> CmdResult<()> {
+pub async fn pki_sign_request_delete(state: State<'_, AppState>, mount: String, request_id: String) -> CmdResult<()> {
     let mount = mount_prefix(&mount);
-    make_request(
-        &state,
-        Operation::Delete,
-        format!("{mount}/sign-request/{request_id}"),
-        None,
-    )
-    .await?;
+    make_request(&state, Operation::Delete, format!("{mount}/sign-request/{request_id}"), None).await?;
     Ok(())
 }
 

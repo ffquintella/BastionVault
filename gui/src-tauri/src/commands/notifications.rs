@@ -22,64 +22,31 @@ fn data_of(resp: Option<JsonResponse>) -> Map<String, Value> {
 pub async fn notifications_inbox(state: State<'_, AppState>) -> CmdResult<Value> {
     let resp = make_request(&state, Operation::Read, "notifications/inbox".into(), None).await?;
     let data = data_of(resp);
-    Ok(data
-        .get("notifications")
-        .cloned()
-        .unwrap_or(Value::Array(vec![])))
+    Ok(data.get("notifications").cloned().unwrap_or(Value::Array(vec![])))
 }
 
 /// Unread count for the bell badge.
 #[tauri::command]
 pub async fn notifications_unread_count(state: State<'_, AppState>) -> CmdResult<u64> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        "notifications/inbox/unread-count".into(),
-        None,
-    )
-    .await?;
-    Ok(data_of(resp)
-        .get("unread")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0))
+    let resp = make_request(&state, Operation::Read, "notifications/inbox/unread-count".into(), None).await?;
+    Ok(data_of(resp).get("unread").and_then(|v| v.as_u64()).unwrap_or(0))
 }
 
 #[tauri::command]
 pub async fn notifications_mark_read(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    make_request(
-        &state,
-        Operation::Write,
-        format!("notifications/inbox/{id}/read"),
-        Some(Map::new()),
-    )
-    .await?;
+    make_request(&state, Operation::Write, format!("notifications/inbox/{id}/read"), Some(Map::new())).await?;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn notifications_mark_all_read(state: State<'_, AppState>) -> CmdResult<u64> {
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        "notifications/inbox/read-all".into(),
-        Some(Map::new()),
-    )
-    .await?;
-    Ok(data_of(resp)
-        .get("marked")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0))
+    let resp = make_request(&state, Operation::Write, "notifications/inbox/read-all".into(), Some(Map::new())).await?;
+    Ok(data_of(resp).get("marked").and_then(|v| v.as_u64()).unwrap_or(0))
 }
 
 #[tauri::command]
 pub async fn notifications_dismiss(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    make_request(
-        &state,
-        Operation::Delete,
-        format!("notifications/inbox/{id}"),
-        None,
-    )
-    .await?;
+    make_request(&state, Operation::Delete, format!("notifications/inbox/{id}"), None).await?;
     Ok(())
 }
 
@@ -102,10 +69,7 @@ pub async fn notifications_send(
     b.insert("body".into(), Value::String(body));
     b.insert("severity".into(), Value::String(severity));
     b.insert("target".into(), target);
-    b.insert(
-        "channels".into(),
-        Value::Array(channels.into_iter().map(Value::String).collect()),
-    );
+    b.insert("channels".into(), Value::Array(channels.into_iter().map(Value::String).collect()));
     if let Some(url) = action_url {
         if !url.is_empty() {
             b.insert("action_url".into(), Value::String(url));
@@ -118,30 +82,17 @@ pub async fn notifications_send(
 /// Available delivery channels (in-app + plugin-provided).
 #[tauri::command]
 pub async fn notifications_channels(state: State<'_, AppState>) -> CmdResult<Value> {
-    let resp =
-        make_request(&state, Operation::Read, "notifications/channels".into(), None).await?;
-    Ok(data_of(resp)
-        .get("channels")
-        .cloned()
-        .unwrap_or(Value::Array(vec![])))
+    let resp = make_request(&state, Operation::Read, "notifications/channels".into(), None).await?;
+    Ok(data_of(resp).get("channels").cloned().unwrap_or(Value::Array(vec![])))
 }
 
 /// Send a test notification through a channel to a supplied address.
 #[tauri::command]
-pub async fn notifications_channel_test(
-    state: State<'_, AppState>,
-    channel: String,
-    to: String,
-) -> CmdResult<Value> {
+pub async fn notifications_channel_test(state: State<'_, AppState>, channel: String, to: String) -> CmdResult<Value> {
     let mut b = Map::new();
     b.insert("to".into(), Value::String(to));
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("notifications/channels/{channel}/test"),
-        Some(b),
-    )
-    .await?;
+    let resp =
+        make_request(&state, Operation::Write, format!("notifications/channels/{channel}/test"), Some(b)).await?;
     Ok(Value::Object(data_of(resp)))
 }
 
@@ -149,10 +100,7 @@ pub async fn notifications_channel_test(
 #[tauri::command]
 pub async fn notifications_sent(state: State<'_, AppState>) -> CmdResult<Value> {
     let resp = make_request(&state, Operation::Read, "notifications/sent".into(), None).await?;
-    Ok(data_of(resp)
-        .get("notifications")
-        .cloned()
-        .unwrap_or(Value::Array(vec![])))
+    Ok(data_of(resp).get("notifications").cloned().unwrap_or(Value::Array(vec![])))
 }
 
 #[tauri::command]

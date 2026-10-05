@@ -50,23 +50,13 @@ async fn remote_data(
 
 /// Like [`parse_field`] but tolerates an absent / unparseable field, yielding
 /// the type's default. Used for fields a older server may not send back.
-fn parse_field_or_default<T: serde::de::DeserializeOwned + Default>(
-    data: &Map<String, Value>,
-    key: &str,
-) -> T {
-    data.get(key)
-        .cloned()
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default()
+fn parse_field_or_default<T: serde::de::DeserializeOwned + Default>(data: &Map<String, Value>, key: &str) -> T {
+    data.get(key).cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
 }
 
-fn parse_field<T: serde::de::DeserializeOwned>(
-    data: &Map<String, Value>,
-    key: &str,
-) -> CmdResult<T> {
+fn parse_field<T: serde::de::DeserializeOwned>(data: &Map<String, Value>, key: &str) -> CmdResult<T> {
     let value = data.get(key).cloned().unwrap_or(Value::Null);
-    serde_json::from_value(value)
-        .map_err(|e| CommandError::from(format!("unexpected server response: {e}")))
+    serde_json::from_value(value).map_err(|e| CommandError::from(format!("unexpected server response: {e}")))
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,19 +82,12 @@ pub struct ScopeSelectorInput {
 /// packs each tenant into its own bundle (see `exchange::namespaces`). Any
 /// selectors supplied alongside either is still honoured; the resolver's dedup
 /// pass collapses the overlap.
-fn parse_scope(
-    include: &[ScopeSelectorInput],
-    scope_kind: Option<&str>,
-) -> Result<exchange::ScopeSpec, CommandError> {
+fn parse_scope(include: &[ScopeSelectorInput], scope_kind: Option<&str>) -> Result<exchange::ScopeSpec, CommandError> {
     let kind = match scope_kind.unwrap_or("selective") {
         "selective" => exchange::ScopeKind::Selective,
         "full" => exchange::ScopeKind::Full,
         "all_namespaces" => exchange::ScopeKind::AllNamespaces,
-        _ => {
-            return Err(
-                "scopeKind must be \"selective\", \"full\", or \"all_namespaces\"".into(),
-            )
-        }
+        _ => return Err("scopeKind must be \"selective\", \"full\", or \"all_namespaces\"".into()),
     };
     let mut out = Vec::with_capacity(include.len());
     for s in include {
@@ -113,15 +96,9 @@ fn parse_scope(
                 mount: s.mount.clone().unwrap_or_default(),
                 path: s.path.clone().unwrap_or_default(),
             },
-            "resource" => exchange::ScopeSelector::Resource {
-                id: s.id.clone().unwrap_or_default(),
-            },
-            "asset_group" => exchange::ScopeSelector::AssetGroup {
-                id: s.id.clone().unwrap_or_default(),
-            },
-            "resource_group" => exchange::ScopeSelector::ResourceGroup {
-                id: s.id.clone().unwrap_or_default(),
-            },
+            "resource" => exchange::ScopeSelector::Resource { id: s.id.clone().unwrap_or_default() },
+            "asset_group" => exchange::ScopeSelector::AssetGroup { id: s.id.clone().unwrap_or_default() },
+            "resource_group" => exchange::ScopeSelector::ResourceGroup { id: s.id.clone().unwrap_or_default() },
             _ => return Err("unknown scope selector type".into()),
         };
         out.push(sel);
@@ -159,10 +136,7 @@ pub async fn exchange_export(
     if is_remote(&state).await {
         let mut body = Map::new();
         body.insert("format".into(), Value::String(format.clone()));
-        body.insert(
-            "scope".into(),
-            serde_json::to_value(&scope).map_err(|e| CommandError::from(e.to_string()))?,
-        );
+        body.insert("scope".into(), serde_json::to_value(&scope).map_err(|e| CommandError::from(e.to_string()))?);
         if let Some(p) = password {
             body.insert("password".into(), Value::String(p));
         }
@@ -185,30 +159,15 @@ pub async fn exchange_export(
     drop(vault_guard);
     let token = state.token.lock().await.clone().unwrap_or_default();
 
-    let outcome = exchange_export_inner(
-        &core_arc,
-        scope,
-        format.clone(),
-        password,
-        allow_plaintext_b,
-        comment.clone(),
-    )
-    .await;
+    let outcome =
+        exchange_export_inner(&core_arc, scope, format.clone(), password, allow_plaintext_b, comment.clone()).await;
 
     // Audit, success or failure. The audit body records the format +
     // comment + scope-shape (HMAC redaction handles values inside).
     let mut body = serde_json::Map::new();
     body.insert("format".into(), serde_json::Value::String(format));
-    body.insert(
-        "scope_kind".into(),
-        serde_json::Value::String(
-            scope_kind.unwrap_or_else(|| "selective".to_string()),
-        ),
-    );
-    body.insert(
-        "comment".into(),
-        comment.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null),
-    );
+    body.insert("scope_kind".into(), serde_json::Value::String(scope_kind.unwrap_or_else(|| "selective".to_string())));
+    body.insert("comment".into(), comment.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null));
     body.insert("allow_plaintext".into(), serde_json::Value::Bool(allow_plaintext_b));
     let err_str = match &outcome {
         Err(e) => Some(format!("{e:?}")),
@@ -242,8 +201,7 @@ async fn exchange_export_inner(
             .await
             .map_err(CommandError::from)?
     } else {
-        let mounts =
-            exchange::scope::MountIndex::from_core(core_arc).map_err(CommandError::from)?;
+        let mounts = exchange::scope::MountIndex::from_core(core_arc).map_err(CommandError::from)?;
         exchange::scope::export_to_document(
             core_arc.barrier.as_storage(),
             &mounts,
@@ -254,8 +212,7 @@ async fn exchange_export_inner(
         .map_err(CommandError::from)?
     };
 
-    let inner_bytes =
-        exchange::canonical::to_canonical_vec(&document).map_err(CommandError::from)?;
+    let inner_bytes = exchange::canonical::to_canonical_vec(&document).map_err(CommandError::from)?;
 
     let (bytes, format_label) = match format.as_str() {
         "json" => {
@@ -314,9 +271,8 @@ pub async fn exchange_preview(
     allow_plaintext: Option<bool>,
 ) -> CmdResult<ExchangePreviewResult> {
     let allow_plaintext = allow_plaintext.unwrap_or(false);
-    let file_bytes = base64::engine::general_purpose::STANDARD
-        .decode(file_b64.as_bytes())
-        .map_err(|_| "input not valid base64")?;
+    let file_bytes =
+        base64::engine::general_purpose::STANDARD.decode(file_b64.as_bytes()).map_err(|_| "input not valid base64")?;
 
     // Remote mode: the preview token lives in the server's
     // `core.exchange_preview_store`, so the classify-and-stash work must run
@@ -324,8 +280,7 @@ pub async fn exchange_preview(
     // also routes remote). The HTTP handler takes the file as a UTF-8 string
     // (both the `.bvx` envelope and plaintext JSON are text).
     if is_remote(&state).await {
-        let file = String::from_utf8(file_bytes)
-            .map_err(|_| "import file is not valid UTF-8")?;
+        let file = String::from_utf8(file_bytes).map_err(|_| "import file is not valid UTF-8")?;
         let mut body = Map::new();
         body.insert("file".into(), Value::String(file));
         body.insert("format".into(), Value::String(format.clone()));
@@ -333,9 +288,7 @@ pub async fn exchange_preview(
             body.insert("password".into(), Value::String(p));
         }
         body.insert("allow_plaintext".into(), Value::Bool(allow_plaintext));
-        let data =
-            remote_data(&state, Operation::Write, "sys/exchange/import/preview".into(), Some(body))
-                .await?;
+        let data = remote_data(&state, Operation::Write, "sys/exchange/import/preview".into(), Some(body)).await?;
         return Ok(ExchangePreviewResult {
             token: parse_field(&data, "token")?,
             expires_in_secs: parse_field(&data, "expires_in_secs")?,
@@ -364,9 +317,7 @@ pub async fn exchange_preview(
 
     let document: exchange::ExchangeDocument =
         serde_json::from_slice(&document_bytes).map_err(|_| "document is not valid bvx.v1 JSON")?;
-    document
-        .validate_schema_tag()
-        .map_err(|_| "unsupported bvx schema tag")?;
+    document.validate_schema_tag().map_err(|_| "unsupported bvx schema tag")?;
 
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
@@ -475,9 +426,7 @@ pub async fn exchange_apply(
             "conflict_policy".into(),
             Value::String(conflict_policy.clone().unwrap_or_else(|| "skip".to_string())),
         );
-        let data =
-            remote_data(&state, Operation::Write, "sys/exchange/import/apply".into(), Some(body))
-                .await?;
+        let data = remote_data(&state, Operation::Write, "sys/exchange/import/apply".into(), Some(body)).await?;
         return Ok(ExchangeApplyResult {
             written: parse_field(&data, "written")?,
             unchanged: parse_field(&data, "unchanged")?,
@@ -492,22 +441,15 @@ pub async fn exchange_apply(
     let core = vault.core.load();
 
     let owner = state.token.lock().await.clone().unwrap_or_default();
-    let document = state
-        .exchange_preview_store
-        .consume(&token, &owner)
-        .map_err(CommandError::from)?;
+    let document = state.exchange_preview_store.consume(&token, &owner).map_err(CommandError::from)?;
 
     let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
-    let result = exchange::import_all_namespaces(&core_arc, &document, policy, false)
-        .await
-        .map_err(CommandError::from)?;
+    let result =
+        exchange::import_all_namespaces(&core_arc, &document, policy, false).await.map_err(CommandError::from)?;
 
     drop(vault_guard);
     let mut audit_body = serde_json::Map::new();
-    audit_body.insert(
-        "conflict_policy".into(),
-        Value::String(conflict_policy.unwrap_or_else(|| "skip".to_string())),
-    );
+    audit_body.insert("conflict_policy".into(), Value::String(conflict_policy.unwrap_or_else(|| "skip".to_string())));
     audit_body.insert("written".into(), Value::Number(result.written.into()));
     audit_body.insert("unchanged".into(), Value::Number(result.unchanged.into()));
     audit_body.insert("skipped".into(), Value::Number(result.skipped.into()));

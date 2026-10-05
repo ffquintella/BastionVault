@@ -68,12 +68,8 @@ pub async fn oidc_login_start(
     // back, so stability across runs doesn't matter (unlike the
     // Cloud Storage Target flow where the provider pre-registers
     // a specific URI).
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| format!("oidc: bind loopback: {e}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| format!("oidc: local_addr: {e}"))?
-        .port();
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("oidc: bind loopback: {e}"))?;
+    let port = listener.local_addr().map_err(|e| format!("oidc: local_addr: {e}"))?.port();
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
 
     // Ask the vault to compose the auth URL. Body carries
@@ -84,9 +80,7 @@ pub async fn oidc_login_start(
         body.insert("role".into(), Value::String(r.to_string()));
     }
     let path = format!("auth/{mount}/auth_url");
-    let resp = dispatch_vault_write(&state, &path, body)
-        .await
-        .map_err(|e| format!("oidc: {path}: {e}"))?;
+    let resp = dispatch_vault_write(&state, &path, body).await.map_err(|e| format!("oidc: {path}: {e}"))?;
     let auth_url = resp
         .get("auth_url")
         .and_then(|v| v.as_str())
@@ -94,21 +88,14 @@ pub async fn oidc_login_start(
         .to_string();
 
     let session_id = short_id();
-    let entry = OidcLoginSession {
-        listener,
-        redirect_uri,
-        mount,
-    };
+    let entry = OidcLoginSession { listener, redirect_uri, mount };
     state
         .oidc_sessions
         .lock()
         .map_err(|e| format!("oidc session map poisoned: {e}"))?
         .insert(session_id.clone(), entry);
 
-    Ok(OidcLoginStartResult {
-        session_id,
-        auth_url,
-    })
+    Ok(OidcLoginStartResult { session_id, auth_url })
 }
 
 /// Block (up to `timeout_secs`) waiting for the IdP to redirect
@@ -127,18 +114,12 @@ pub async fn oidc_login_complete(
     // Take the session out of the map — we're about to block on it.
     // Holding the map lock across the accept loop would deadlock
     // every other Tauri command.
-    let OidcLoginSession {
-        listener,
-        redirect_uri: _,
-        mount,
-    } = state
+    let OidcLoginSession { listener, redirect_uri: _, mount } = state
         .oidc_sessions
         .lock()
         .map_err(|e| format!("oidc session map poisoned: {e}"))?
         .remove(&session_id)
-        .ok_or_else(|| {
-            "oidc: no such session (it may have timed out or been cancelled)".to_string()
-        })?;
+        .ok_or_else(|| "oidc: no such session (it may have timed out or been cancelled)".to_string())?;
 
     // Wait for the callback on a worker so the tokio runtime isn't
     // parked on the accept loop.
@@ -153,9 +134,7 @@ pub async fn oidc_login_complete(
     body.insert("state".into(), Value::String(params.state.clone()));
     body.insert("code".into(), Value::String(params.code.clone()));
     let path = format!("auth/{mount}/callback");
-    let resp = dispatch_vault_write(&state, &path, body)
-        .await
-        .map_err(|e| format!("oidc: {path}: {e}"))?;
+    let resp = dispatch_vault_write(&state, &path, body).await.map_err(|e| format!("oidc: {path}: {e}"))?;
 
     // The vault's `callback` handler returns an `Auth` embedded in
     // the response envelope. In the logical layer that's
@@ -165,9 +144,7 @@ pub async fn oidc_login_complete(
         .get("auth")
         .and_then(|v| v.as_object())
         .cloned()
-        .ok_or_else(|| {
-            "oidc: vault response missing `auth` — callback may have failed".to_string()
-        })?;
+        .ok_or_else(|| "oidc: vault response missing `auth` — callback may have failed".to_string())?;
     let client_token = auth_obj
         .get("client_token")
         .and_then(|v| v.as_str())
@@ -176,32 +153,18 @@ pub async fn oidc_login_complete(
     let policies: Vec<String> = auth_obj
         .get("policies")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|p| p.as_str().map(|s| s.to_string()))
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|p| p.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_else(|| vec!["default".to_string()]);
 
     // Persist into state for the rest of the GUI to use.
     *state.token.lock().await = Some(client_token.clone());
 
-    Ok(LoginResponse {
-        token: client_token,
-        policies,
-    })
+    Ok(LoginResponse { token: client_token, policies })
 }
 
 #[tauri::command]
-pub async fn oidc_login_cancel(
-    state: State<'_, AppState>,
-    session_id: String,
-) -> Result<(), String> {
-    state
-        .oidc_sessions
-        .lock()
-        .map_err(|e| format!("oidc session map poisoned: {e}"))?
-        .remove(&session_id);
+pub async fn oidc_login_cancel(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    state.oidc_sessions.lock().map_err(|e| format!("oidc session map poisoned: {e}"))?.remove(&session_id);
     Ok(())
 }
 
@@ -218,9 +181,7 @@ struct OidcCallback {
 /// Non-blocking accept loop with polling so the timeout is
 /// respected even when the user never completes consent.
 fn wait_for_callback(listener: TcpListener, timeout: Duration) -> Result<OidcCallback, String> {
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| format!("oidc: set nonblocking: {e}"))?;
+    listener.set_nonblocking(true).map_err(|e| format!("oidc: set nonblocking: {e}"))?;
     let deadline = Instant::now() + timeout;
     loop {
         if Instant::now() > deadline {
@@ -228,12 +189,8 @@ fn wait_for_callback(listener: TcpListener, timeout: Duration) -> Result<OidcCal
         }
         match listener.accept() {
             Ok((stream, _addr)) => {
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(10)))
-                    .ok();
-                stream
-                    .set_write_timeout(Some(Duration::from_secs(10)))
-                    .ok();
+                stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+                stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
                 return handle_callback(stream);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -247,16 +204,12 @@ fn wait_for_callback(listener: TcpListener, timeout: Duration) -> Result<OidcCal
 fn handle_callback(mut stream: TcpStream) -> Result<OidcCallback, String> {
     let mut reader = BufReader::new(&mut stream);
     let mut request_line = String::new();
-    reader
-        .read_line(&mut request_line)
-        .map_err(|e| format!("oidc: read request line: {e}"))?;
+    reader.read_line(&mut request_line).map_err(|e| format!("oidc: read request line: {e}"))?;
     // Drain headers so the peer doesn't get ECONNRESET when we
     // start writing the response.
     loop {
         let mut line = String::new();
-        let n = reader
-            .read_line(&mut line)
-            .map_err(|e| format!("oidc: read headers: {e}"))?;
+        let n = reader.read_line(&mut line).map_err(|e| format!("oidc: read headers: {e}"))?;
         if n == 0 || line == "\r\n" || line == "\n" {
             break;
         }
@@ -272,25 +225,18 @@ fn handle_callback(mut stream: TcpStream) -> Result<OidcCallback, String> {
 fn parse_callback_request(line: &str) -> Result<OidcCallback, String> {
     let trimmed = line.trim_end_matches(['\r', '\n']);
     let mut it = trimmed.splitn(3, ' ');
-    let method = it
-        .next()
-        .ok_or_else(|| "oidc: empty request line".to_string())?;
+    let method = it.next().ok_or_else(|| "oidc: empty request line".to_string())?;
     if method != "GET" {
         return Err(format!("oidc: expected GET callback, got {method}"));
     }
-    let path_and_query = it
-        .next()
-        .ok_or_else(|| "oidc: malformed request line".to_string())?;
+    let path_and_query = it.next().ok_or_else(|| "oidc: malformed request line".to_string())?;
 
     // We only need `code`, `state`, `error`, `error_description`
     // from the query string, so a tiny manual parser is simpler
     // than pulling in a whole URL-parsing crate just for this.
     // The URL shape is fixed (`/callback?k=v&k=v...`) so standard
     // percent-decoding on `+` and `%HH` is sufficient.
-    let query = path_and_query
-        .split_once('?')
-        .map(|(_, q)| q)
-        .unwrap_or_default();
+    let query = path_and_query.split_once('?').map(|(_, q)| q).unwrap_or_default();
 
     let mut code = None;
     let mut state = None;
@@ -397,15 +343,9 @@ async fn dispatch_vault_write(
 ) -> Result<Map<String, Value>, CommandError> {
     use bv_client::Operation;
 
-    let resp = crate::commands::dispatch_with_token(
-        state,
-        Operation::Write,
-        path.to_string(),
-        Some(body),
-        "",
-    )
-    .await?
-    .ok_or("vault returned empty response")?;
+    let resp = crate::commands::dispatch_with_token(state, Operation::Write, path.to_string(), Some(body), "")
+        .await?
+        .ok_or("vault returned empty response")?;
 
     let mut out = Map::new();
     if let Some(data) = resp.data {
@@ -428,11 +368,7 @@ async fn dispatch_vault_write(
 /// is the real secret) — just needs to be unique within the map.
 fn short_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let pid = std::process::id() as u128;
     format!("o{:x}{:x}", nanos, pid)
 }
-

@@ -5,17 +5,21 @@ import {
   protocolForOsType,
   readProfiles,
   defaultPort,
+  isLaunchableWebProfile,
   needsOperatorPrompt as profileNeedsOperatorPrompt,
 } from "../lib/connectionProfiles";
 import {
   DEFAULT_RESOURCE_TYPES,
+  connectProtocols,
   getTypeDef,
   mergeTypeConfig,
 } from "../lib/resourceTypes";
+import { openProfileSession } from "../lib/sessionLaunch";
 import type {
   ConnectionProfile,
   ResourceMetadata,
   ResourceTypeConfig,
+  SessionProtocol,
 } from "../lib/types";
 import { useAuthStore } from "../stores/authStore";
 import { Badge } from "./ui/Badge";
@@ -31,10 +35,12 @@ import { useConnectMfa } from "./ConnectMfaPrompt";
  * Connection tab fires — bypassing the resources list when the
  * operator already knows what they want to connect to.
  *
- * Inclusion rule: the resource type must have `connect.enabled !==
- * false`, the resource must have an `os_type` mapping to a protocol,
- * and the profile's protocol+credential combo must be one we
- * actually launch today (Secret / LDAP / PKI; SSH-engine still TODO).
+ * Inclusion rule: the resource type must offer the profile's protocol
+ * (`connectProtocols`, which folds in `connect.enabled`). SSH/RDP
+ * profiles additionally need the resource's `os_type` to map to that
+ * protocol and a credential combo we launch in one keystroke (Secret /
+ * LDAP / PKI; SSH-engine still TODO). Web profiles need the `open` login
+ * mode (credential source `none`).
  *
  * Out-of-scope here: LDAP operator-bind needs a typed credential, so
  * those entries are listed but launching them sends the operator
@@ -44,7 +50,7 @@ import { useConnectMfa } from "./ConnectMfaPrompt";
 interface PaletteEntry {
   resource: ResourceMetadata;
   profile: ConnectionProfile;
-  protocol: "ssh" | "rdp";
+  protocol: SessionProtocol;
   /** Lower-cased haystack assembled once for fuzzy matching. */
   haystack: string;
   /** Display strings precomputed so render stays cheap. */
@@ -115,13 +121,38 @@ export function ConnectPalette() {
         for (const meta of metas) {
           if (!meta) continue;
           const typeDef = getTypeDef(typeConfig, String(meta.type || ""));
-          if (typeDef.connect?.enabled === false) continue;
+          const offered = connectProtocols(typeDef);
+          if (offered.length === 0) continue;
           const osType = String(meta["os_type"] ?? "");
-          const protocol = protocolForOsType(osType);
-          if (!protocol) continue;
+          const osProtocol = protocolForOsType(osType);
           const profiles = readProfiles(meta as Record<string, unknown>);
           for (const p of profiles) {
-            if (p.protocol !== protocol) continue;
+            if (!offered.includes(p.protocol)) continue;
+            if (p.protocol === "web") {
+              // `open` (source `none`) and `form` (a recipe plus a server-
+              // released source); the host refuses anything else.
+              if (!isLaunchableWebProfile(p) || !p.web) continue;
+              const resourceLabel = String(meta.name || "");
+              let origin = p.web.start_url;
+              try {
+                origin = new URL(p.web.start_url).origin;
+              } catch {
+                // Leave the raw value; the host refuses an invalid URL.
+              }
+              next.push({
+                resource: meta,
+                profile: p,
+                protocol: "web",
+                haystack: [resourceLabel, p.name, "web", origin, String(meta["tags"] || "")]
+                  .join(" ")
+                  .toLowerCase(),
+                resourceLabel,
+                targetLabel: origin,
+                needsOperatorPrompt: false,
+              });
+              continue;
+            }
+            if (!osProtocol || p.protocol !== osProtocol) continue;
             // Only the kinds the host actually launches today.
             const kind = p.credential_source.kind;
             if (kind === "ssh-engine") continue;
@@ -153,7 +184,7 @@ export function ConnectPalette() {
             next.push({
               resource: meta,
               profile: p,
-              protocol,
+              protocol: osProtocol,
               haystack,
               resourceLabel,
               targetLabel,
@@ -232,21 +263,12 @@ export function ConnectPalette() {
         entry.profile.name,
       );
       if (!mfa) return; // operator cancelled — leave the palette open
-      if (entry.protocol === "ssh") {
-        await api.sessionOpenSsh({
-          resource_name: entry.resourceLabel,
-          profile_id: entry.profile.id,
-          operator_credential: undefined,
-          ...mfa,
-        });
-      } else {
-        await api.sessionOpenRdp({
-          resource_name: entry.resourceLabel,
-          profile_id: entry.profile.id,
-          operator_credential: undefined,
-          ...mfa,
-        });
-      }
+      await openProfileSession(entry.profile, {
+        resource_name: entry.resourceLabel,
+        profile_id: entry.profile.id,
+        operator_credential: undefined,
+        ...mfa,
+      });
       setOpen(false);
     } catch (e) {
       toast("error", extractError(e));

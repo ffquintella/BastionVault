@@ -60,9 +60,7 @@ async fn resolve_cache<R: Runtime>(
     let identifier = match mode {
         crate::state::VaultMode::Remote => {
             let prof = state.remote_profile.lock().await;
-            prof.as_ref()
-                .map(|p| p.address.clone())
-                .unwrap_or_else(|| "remote:unknown".into())
+            prof.as_ref().map(|p| p.address.clone()).unwrap_or_else(|| "remote:unknown".into())
         }
         crate::state::VaultMode::Embedded => "embedded:default".into(),
     };
@@ -84,9 +82,7 @@ pub async fn clear_cache_handle(state: &State<'_, AppState>) {
 
 async fn current_backend(state: &State<'_, AppState>) -> Result<Arc<dyn Backend>, CommandError> {
     let g = state.backend.lock().await;
-    g.as_ref()
-        .cloned()
-        .ok_or_else(|| CommandError::from("No vault open or remote server connected"))
+    g.as_ref().cloned().ok_or_else(|| CommandError::from("No vault open or remote server connected"))
 }
 
 async fn current_token(state: &State<'_, AppState>) -> String {
@@ -111,13 +107,10 @@ pub async fn plugin_surfaces_refresh<R: Runtime>(
     let cache = resolve_cache(&app, &state).await?;
     let backend = current_backend(&state).await?;
     let token = current_token(&state).await;
-    let bundle = bv_client::refresh(&*backend, &cache, &token)
-        .await
-        .map_err(CommandError::from)?;
+    let bundle = bv_client::refresh(&*backend, &cache, &token).await.map_err(CommandError::from)?;
     // Extensibility v2: (re)instantiate app modules to match the fresh
     // bundle and emit their dynamic menus.
-    crate::plugin_apps::sync_from_bundle(&app, &state, &bundle, backend.clone(), &cache, &token)
-        .await;
+    crate::plugin_apps::sync_from_bundle(&app, &state, &bundle, backend.clone(), &cache, &token).await;
     Ok(PluginSurfacesResult { bundle })
 }
 
@@ -148,16 +141,9 @@ pub async fn plugin_surface_asset<R: Runtime>(
     let cache = resolve_cache(&app, &state).await?;
     let backend = current_backend(&state).await?;
     let token = current_token(&state).await;
-    let bytes = bv_client::ensure_asset(
-        &*backend,
-        &cache,
-        &args.plugin,
-        &args.version,
-        &args.sha256,
-        &token,
-    )
-    .await
-    .map_err(CommandError::from)?;
+    let bytes = bv_client::ensure_asset(&*backend, &cache, &args.plugin, &args.version, &args.sha256, &token)
+        .await
+        .map_err(CommandError::from)?;
     let bytes_b64 = bytes.map(|b| base64::engine::general_purpose::STANDARD.encode(b));
     Ok(PluginSurfaceAssetResult { bytes_b64 })
 }
@@ -188,21 +174,15 @@ pub async fn plugin_surface_watch_tick<R: Runtime>(
     let cache = resolve_cache(&app, &state).await?;
     let backend = current_backend(&state).await?;
     let token = current_token(&state).await;
-    let new_bundle = bv_client::watch_once(&*backend, &cache, &token)
-        .await
-        .map_err(CommandError::from)?;
+    let new_bundle = bv_client::watch_once(&*backend, &cache, &token).await.map_err(CommandError::from)?;
     // Extensibility v2: on a bundle change, re-sync app modules; every
     // tick, give live modules a chance to run `bvx_tick` (30 s floor).
     if let Some(ref bundle) = new_bundle {
-        crate::plugin_apps::sync_from_bundle(&app, &state, bundle, backend.clone(), &cache, &token)
-            .await;
+        crate::plugin_apps::sync_from_bundle(&app, &state, bundle, backend.clone(), &cache, &token).await;
     } else {
         crate::plugin_apps::tick_all(&app, &state).await;
     }
-    Ok(PluginSurfaceWatchResult {
-        updated: new_bundle.is_some(),
-        bundle: new_bundle,
-    })
+    Ok(PluginSurfaceWatchResult { updated: new_bundle.is_some(), bundle: new_bundle })
 }
 
 // ── Form-hook execution ──────────────────────────────────────────────
@@ -242,9 +222,7 @@ pub async fn plugin_surface_hook<R: Runtime>(
     args: PluginSurfaceHookArgs,
 ) -> CmdResult<PluginSurfaceHookResult> {
     if args.sha256.len() != 64 || !args.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(CommandError::from(
-            "plugin_surface_hook: sha256 must be 64 hex chars",
-        ));
+        return Err(CommandError::from("plugin_surface_hook: sha256 must be 64 hex chars"));
     }
     // Resolve the asset bytes through the existing surface cache.
     // `ensure_asset` enforces the SHA-256 match on both the cached
@@ -253,22 +231,12 @@ pub async fn plugin_surface_hook<R: Runtime>(
     let cache = resolve_cache(&app, &state).await?;
     let backend = current_backend(&state).await?;
     let token = current_token(&state).await;
-    let bytes = bv_client::ensure_asset(
-        &*backend,
-        &cache,
-        &args.plugin,
-        &args.version,
-        &args.sha256,
-        &token,
-    )
-    .await
-    .map_err(CommandError::from)?
-    .ok_or_else(|| {
-        CommandError::from(format!(
-            "plugin_surface_hook: asset `{}` not available on the server",
-            args.sha256
-        ))
-    })?;
+    let bytes = bv_client::ensure_asset(&*backend, &cache, &args.plugin, &args.version, &args.sha256, &token)
+        .await
+        .map_err(CommandError::from)?
+        .ok_or_else(|| {
+            CommandError::from(format!("plugin_surface_hook: asset `{}` not available on the server", args.sha256))
+        })?;
 
     // Wasmtime calls are CPU-bound — park them on the blocking pool
     // so the Tauri command worker can keep responding to other
@@ -276,12 +244,10 @@ pub async fn plugin_surface_hook<R: Runtime>(
     let sha = args.sha256.clone();
     let export = args.export.clone();
     let input = args.input_json.clone();
-    let output = tokio::task::spawn_blocking(move || {
-        crate::plugin_hooks::run_hook(&sha, &bytes, &export, &input)
-    })
-    .await
-    .map_err(|e| CommandError::from(format!("plugin_surface_hook: join: {e}")))?
-    .map_err(|e| CommandError::from(format!("plugin_surface_hook: {e}")))?;
+    let output = tokio::task::spawn_blocking(move || crate::plugin_hooks::run_hook(&sha, &bytes, &export, &input))
+        .await
+        .map_err(|e| CommandError::from(format!("plugin_surface_hook: join: {e}")))?
+        .map_err(|e| CommandError::from(format!("plugin_surface_hook: {e}")))?;
 
     Ok(PluginSurfaceHookResult { output_json: output })
 }
@@ -330,9 +296,7 @@ pub async fn plugin_surface_dispatch(
         "delete" => Operation::Delete,
         "list" => Operation::List,
         other => {
-            return Err(CommandError::from(format!(
-                "plugin_surface_dispatch: unknown op `{other}`"
-            )));
+            return Err(CommandError::from(format!("plugin_surface_dispatch: unknown op `{other}`")));
         }
     };
 
@@ -359,11 +323,6 @@ pub async fn plugin_surface_dispatch(
 
     let backend = current_backend(&state).await?;
     let token = current_token(&state).await;
-    let resp = backend
-        .handle(op, &resolved, args.body, &token)
-        .await
-        .map_err(CommandError::from)?;
-    Ok(PluginSurfaceDispatchResult {
-        data: resp.and_then(|r| r.data),
-    })
+    let resp = backend.handle(op, &resolved, args.body, &token).await.map_err(CommandError::from)?;
+    Ok(PluginSurfaceDispatchResult { data: resp.and_then(|r| r.data) })
 }

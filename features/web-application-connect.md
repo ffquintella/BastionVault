@@ -120,44 +120,625 @@ security / capability docs, Microsoft WebView2 "Basic authentication" docs, W3C
 
 ## Current State
 
-**Status: Todo.** Nothing in this document is implemented; it is the design for
-the work.
+**Status: In progress — Phase 1 done, with caveats (below); Phase 2 server,
+desktop-host and GUI-editor halves done (the host recipe engine, fixed fill
+routine and `web_recipe_test`; the profile editor with recipe editor, import /
+export, test button and vendor presets, **whose presets are unverified against
+live appliances**), per-platform manual checks still open; Phases 3–7 Todo,
+Phase 8 future.**
 
-What exists today, and what this feature has to change:
+### What the Phase 2 server half shipped
 
-- Resource types are GUI-only. They are an opaque JSON blob at the resource
-  mount's `config/types` ([crates/bv-engine-resource/src/lib.rs:330](../crates/bv-engine-resource/src/lib.rs:330)),
-  with builtins in [gui/src/lib/resourceTypes.ts](../gui/src/lib/resourceTypes.ts).
-  - `ResourceTypeDef.connect` only knows `enabled`, `default_ports.{ssh,rdp}` and
-    `default_users` ([gui/src/lib/types.ts:447](../gui/src/lib/types.ts:447)).
-  - **`mergeTypeConfig` lets a saved config fully replace the defaults**
-    ([resourceTypes.ts:208](../gui/src/lib/resourceTypes.ts:208)). A deployment
-    that ever saved its types will never see a new builtin. Phase 1 must handle
-    this.
-- The Connect chip is hard-gated to `type === "server"`
-  ([gui/src/routes/ResourcesPage.tsx:147](../gui/src/routes/ResourcesPage.tsx:147)).
-  The same check repeats at `ResourcesPage.tsx:927`, `:1148`,
-  `ConnectPalette.tsx:118` and `SettingsPage.tsx:1255`.
-- `ConnectionProfile.protocol` is `"ssh" | "rdp"`
-  ([types.ts:488](../gui/src/lib/types.ts:488), [:606](../gui/src/lib/types.ts:606)).
-  Profiles are stored inside the resource record with no server schema. The
-  server projects them to a `ConnectProfileHint`
-  ([bv-engine-resource/src/lib.rs:132](../crates/bv-engine-resource/src/lib.rs:132)).
-- Session windows are built with `WebviewUrl::App` only
-  ([gui/src-tauri/src/commands/connect.rs:401](../gui/src-tauri/src/commands/connect.rs:401),
-  [:792](../gui/src-tauri/src/commands/connect.rs:792)).
-  - Nothing in the GUI uses `WebviewUrl::External`, `initialization_script`,
-    `on_navigation`, `incognito`, `data_directory` or `proxy_url`.
-  - `capabilities/default.json` grants IPC to windows matching `main`, `ssh-*`,
-    `rdp-*` and `plugin-*`.
-  - `tauri.conf.json` has `withGlobalTauri: true` and `csp: null`.
-- The `connect` capability, the MFA ticket (`v2/connect/mfa/{begin,verify}`) and
-  the direct-path pre-flight `v2/connect/authorize` exist and are
-  protocol-agnostic
-  ([bv-engine-resource/src/lib.rs:495](../crates/bv-engine-resource/src/lib.rs:495),
-  [:687](../crates/bv-engine-resource/src/lib.rs:687)). On the direct path the GUI
-  host resolves the credential itself, which needs `read` on the secret. The
-  connect-only guarantee is therefore hard only on the Rustion path.
+`resources/v2/connect/web/{launch,totp,result,close}` in
+[crates/bv-engine-resource/src/connect_web/](../crates/bv-engine-resource/src/connect_web/)
+(handlers in `mod.rs`; `recipe.rs`, `exposure.rs`, `profile.rs`, `totp.rs`,
+`launch_store.rs`). The request/response contract the host builds on is in
+[docs/api.md](../docs/api.md) → *Web Connect (`form` mode)*. The desktop
+host calls it (see *What the Phase 2 host half shipped*).
+
+- **`launch`** runs the `connect/authorize` front half (the `connect` grant
+  through `may_connect_target`, then the stored record), then every static
+  check — protocol `web`, `login_mode: form`, transport `local`, a strictly
+  parsed v1 recipe whose URLs sit on the profile's origin set, a credential
+  source that can supply what the recipe fills — then the host's
+  `recipe_hash`, then the §6 policy, then the Rustion transport tier, then
+  the credential pre-checks, and only then burns the MFA ticket (the redeem
+  step is shared with `connect/authorize`). It releases the credential,
+  persists the launch and returns the bundle.
+  - *Pre-checks before the ticket:* a `secret` source is read and checked
+    (exists, carries what the recipe fills, a decodable `totp_seed` when the
+    recipe fills `totp`); a `default-account` is resolved; an `ldap`
+    source's mount must exist, be untainted and be an LDAP engine. Nothing
+    is released before the ticket.
+  - *What still spends the ticket:* the LDAP static-credential read or
+    library check-out (it rotates a password, so it cannot run first), and
+    persisting the launch. An incomplete check-out (an account but no
+    password or lease) is checked straight back in.
+- **Rustion transport tier, enforced server-side.** The host's
+  `web_transport_refusal` is now also the server's rule: `rustion-required`
+  or a policy lock violation refuses with `transport_policy`, before the
+  ticket and before any credential read; `direct` and `rustion-preferred`
+  are allowed. A patched host can no longer obtain a form credential on a
+  resource the policy reserves for Rustion.
+  - *Reused:* Rustion's own resolver, `rustion/policy/effective` (the
+    endpoint the host reads; the same four-tier `policy::resolve` that
+    `rustion/v2/session/open` applies). It is dispatched through the router
+    under server authority, as `session/open` reads its store, so the
+    caller's grant on the resolver endpoint cannot decide whether a
+    restriction on them applies. The caller's `auth` and namespace ride
+    along for the resolver's own resource gate. Asset-group hints come from
+    the kernel `ResourceGroupIndex`, with errors propagated rather than
+    read as "no groups".
+  - *Mount unavailable / errors:* Rustion's `PolicyStore` keeps every tier
+    in the **system view** under `rustion/policy/` (`global`, `type/`,
+    `asset-group/`, `resource/`), not in the mount, and those records
+    survive an unmount; the router also reports a mount tainted mid-unmount
+    or mid-remount as not found. So `ErrRouterMountNotFound` is allowed only
+    when listing that prefix proves no record exists at all. Records
+    present, a sealed vault or a list error refuse with
+    `transport_policy_unavailable`, as does any other failure (store not
+    initialised, an undecodable tier record, an index error, an unknown
+    verdict). The resource engine names Rustion's storage prefix only for
+    this proof of absence.
+- **Credential delivery.** Plaintext fields in the `launch` response body,
+  as §3 draws it, minimised to what the recipe fills (`username`,
+  `password`, the current `totp` + `totp_valid_until`). The seed never
+  leaves; a `default-account`'s stored Windows password is never released.
+- **Fill scope.** The bundle's `fill_scope` (`start_url`, the normalised
+  origin set with the start origin first, `allow_insecure_http`) is the
+  scope the server checked, and it is recorded on the launch. `recipe_hash`
+  covers only `web.recipe`, and in heuristic mode the origin set is the only
+  constraint on where a fill happens, so the host must start at
+  `fill_scope.start_url` and fill only on `fill_scope.origins` — never on its
+  own copy of the profile.
+  - *Decision:* no extra envelope. The host is the TLS endpoint that would
+    unwrap it, so sealing to a host key would add a new construction without
+    protecting against anything the host can't already see; the audit
+    pipeline already records response values HMAC-redacted.
+- **Whose authority.** `secret` is read under the server's authority — the
+  `connect` grant on the resource authorises it, as on
+  `rustion/v2/session/open`, which is what makes connect-only real for web.
+  `ldap` (`static_role`, `library_set`) and `default-account` go through the
+  full request pipeline **as the caller**.
+  - *Decision:* a stored profile can name any LDAP library or role in the
+    namespace, and anyone who may edit the resource may edit its profiles,
+    so resolving those under server authority would let a resource editor
+    check out any library account. As-caller resolution keeps today's
+    direct-path grants authoritative. The alternative, server authority plus
+    a policy probe on the LDAP path, needs a `PolicyGate` question that does
+    not exist (a `bv-kernel-api` change).
+  - `ldap` `bind_mode: operator` and source `none` are refused for `form`.
+- **TOTP.** From `totp_seed` (base32) in the `secret` source's secret, with
+  `credential_source.totp = {algorithm, digits, period}` (default
+  SHA1/6/30) and `credential_source.fields` to rename the keys. RFC 6238
+  built from the same `hmac`/`sha1`/`sha2`/`base32` crates as
+  `bv-engine-totp` and checked against the RFC vectors; an engine may not
+  depend on another engine, hence the second copy.
+  - *Decision:* not a TOTP-engine key reference. Read under server
+    authority, that would let a profile author pull codes for any
+    generate-mode key in the namespace; the seed in the resource's own
+    secret stays inside the trust boundary the `connect` grant covers.
+  - `totp` gives one refresh per recipe step that fills `totp` (heuristic
+    mode: step `0`), inside the 60 s login window, and re-checks the
+    `connect` grant.
+- **`launch_id`.** 32 random bytes, base64url. Stored at the barrier root
+  as `connect/web-launches/<hex sha256>`, as a versioned record with no
+  credential in it: written as `v: 2` (which adds `fill_scope`), `v: 1`
+  still read. Bound to (principal, namespace, resource, profile, recipe
+  hash, fill scope). The principal is the first of: `username` on a known
+  auth mount (the MFA ticket's binding); `entity:<entity_id>`;
+  `token:<sha256 of the client token>` — this token store has no accessor,
+  so a root token, which has no entity, binds to itself; `name:<display
+  name>` on a known auth mount. A display name with no mount never binds.
+  The login window is 60 s; `result` (once; a repeat is idempotent, a
+  different outcome conflicts) and `close` (idempotent) work until close.
+  Closed records are reaped after 15 min and never-closed ones after 24 h,
+  by a pass `launch` runs at most once a minute per process, after the
+  launch is persisted. A record of an unknown version is refused and never
+  reaped.
+- **Concurrency is per process.** Concurrent calls on one launch are
+  refused (`launch_busy`), never raced — within one server process. On a
+  multi-node deployment where more than one node serves requests against
+  shared storage, two nodes could both refresh a TOTP step, or both attempt
+  the LDAP check-in (the LDAP engine's own per-set lock and record delete
+  make the second fail). Storage has no compare-and-swap to close this;
+  standby nodes forwarding to the active node keep it to one process today.
+- **`close`** records the end first, then checks an LDAP library account
+  back in by `account` name. A failed check-in returns
+  `ldap_checkin_failed` and stays pending, and the next `close` retries
+  it.
+- **§6 policy — deny unless opted in.** `web_exposure_max` /
+  `allow_heuristic_fill` on `config/types[<type>].connect` and on the
+  resource record (top-level keys). The effective cap starts at the type
+  tier's cap, and at `none` when the resource's `type` is not in the saved
+  `config/types`, the type sets no cap, or the configuration was never
+  saved: form mode is then refused with `exposure_not_permitted`. The
+  resource tier can only lower the type's cap. Because `type` is editable
+  resource metadata, an unknown type is a denial, not an escape from the
+  type tier, and the same resolved type is the one the Rustion type tier
+  sees. An unreadable `config/types` refuses (`exposure_policy_invalid`),
+  as does a value outside the enum. An explicit `false` for heuristics at
+  either tier beats `true` at the other, and unset at both means no
+  heuristics. `allow_insecure_http` is refused below `dom`.
+  - The GUI's built-in `web_application` and `website` types carry
+    `connect.web_exposure_max: "dom"`, so a type configuration saved by a
+    current GUI opts them in. A saved type still wins as saved
+    (`mergeTypeConfig`), so **a deployment that saved a `web_application`
+    or `website` type before this change is denied until an administrator
+    sets the cap on it.**
+- **Recipe format (§2), frozen as v1.**
+  - Strict: unknown version, key or verb refused.
+  - Actions: `fill` / `click` / `submit` / `wait`; `value` is
+    `username | password | totp | literal:<text>`.
+  - At most 16 steps × 32 actions; `timeout_secs` 1–60, default 30.
+  - `success_when` is required; `failure_when` is optional.
+  - `pause_for_operator` takes `captcha` and `push_mfa`.
+  - `vendor` is from the `web_application.vendor` enum and only says where
+    the steps came from.
+  - Origins are read more strictly than the host's WHATWG parser: no
+    punycode-less Unicode hosts, no percent-encoding, no trailing dot.
+    That can only add refusals.
+  - `recipe_hash` = `sha256:` + hex of the RFC 8785 canonical form of the
+    stored value. The module is `pub`, so the host can reuse the parser and
+    the hash.
+- **Audit** (`target: "audit"`): `connect.web.launch` (with `transport` and
+  `fill_origins`), `.totp`, `.result`, `.close`, `.refused` (`op`, `reason`
+  code), `.reaped` and `.launch_rollback`. They carry names, enum values,
+  origins and the launch-id hash — never a value, code, raw id, full token
+  hash, or URL path or query.
+- **Zeroization.** Secret maps are scrubbed through nested objects and
+  arrays; the HMAC output is copied into a `Zeroizing` buffer and the
+  original scrubbed; a seed-length error does not reveal the decoded length.
+- **Tests.** In-crate: recipe, exposure, profile, TOTP, launch-store state
+  machine, audit-line shape. `src/engine_tests/resource_connect_web.rs`:
+  end to end against a vault, covering connect-only release, every refusal
+  class, MFA ticket burn, principal binding, the login window, a failed
+  LDAP check-in on close, the Rustion transport tier (`rustion-required`
+  refused with the ticket unspent, a lock violation refused,
+  `rustion-preferred` / `direct` allowed, an undecodable tier record
+  refused, a stored policy refused while `rustion/` is tainted or
+  unmounted, no mount *and* no record allowed), the deny-by-default exposure
+  matrix (unsaved configuration, unknown type, a `server` type, an unset
+  cap, the resource tier alone, a type below `dom`, type `dom` with the
+  resource at `none`, an unreadable configuration — each with the ticket
+  unspent — and type `dom` allowed), the credential pre-checks (missing
+  secret, missing seed, no LDAP mount, a non-LDAP mount, no default account
+  — each with the ticket unspent), and the fill scope in bundle and record.
+
+### What the Phase 2 GUI editor shipped
+
+In [gui/src/](../gui/src/) — no server or host change. The recipe format, the
+exposure rule and the dry run are the ones above; the GUI only edits, checks
+and shows them.
+
+- **Profile editor.** The **Form** login mode saves
+  ([connectionProfiles.ts](../gui/src/lib/connectionProfiles.ts)
+  `validateWebProfile`; it used to refuse every form profile). The credential
+  source for form is the set the server releases from: `secret` (with
+  `credential_source.fields` for key names and `credential_source.totp` for
+  algorithm / digits / period), `ldap` `static_role` / `library_set`
+  (operator bind is not offered), and `default-account` (username only).
+  Switching the login mode moves the source and the recipe with it
+  (`setWebLoginMode`). The Connection tab's profile list shows the source and a
+  recipe summary.
+- **Recipe editor** ([WebRecipeEditor.tsx](../gui/src/components/WebRecipeEditor.tsx)).
+  Structured step / action list (fill username / password / TOTP / fixed text,
+  click, submit, wait; reorder and remove), success and failure conditions,
+  timeout, CAPTCHA / push-MFA pauses, vendor label, explicit or heuristic
+  mode, and a raw JSON view. Unparseable text in the JSON view holds Save; the
+  profile keeps the last valid recipe meanwhile.
+- **Validation mirrors the server.**
+  [webRecipe.ts](../gui/src/lib/webRecipe.ts) is a line-by-line port of
+  `WebLoginRecipe::parse`, `check_origins`, `origin_key` and `split_url`
+  (recipe.rs), in the same check order and with the server's `at` locations
+  and wording; [webFormProfile.ts](../gui/src/lib/webFormProfile.ts) ports the
+  rest of `parse_launch_profile` (profile.rs): origins read by the server's
+  stricter `origin_key` rather than the browser's URL parser, the credential
+  source's fields, and whether the source can supply what the recipe fills
+  (`credential_unavailable`, `totp_not_configured`). The Rust test cases are
+  ported to `src/test/webRecipe.test.ts`. **Not mirrored:** the
+  integer-versus-float distinction of JSON numbers (`30.0`; a JS number can't
+  tell, and the GUI sends `JSON.stringify` output, which prints integers
+  plainly); `recipe_hash` (the dry run reports the host's); the launch-time
+  checks that need the vault (the secret exists and carries a decodable TOTP
+  seed, the LDAP mount exists, the default account is set). Keep the constants
+  and the check order in step with recipe.rs when it changes.
+- **Exposure notice.** [webExposure.ts](../gui/src/lib/webExposure.ts) ports
+  `exposure.rs`: deny unless the *saved* `config/types` entry for the
+  resource's `type` sets `connect.web_exposure_max` (`dom` for form), the
+  resource tier can only lower it, heuristics need a tier to enable them and
+  none to forbid them, insecure http is refused below `dom`, an unreadable
+  value is a refusal. The editor reads the raw `resource_types_read` payload,
+  not the merged config — the GUI shows `web_application` as opted in even when
+  the server has nothing saved — and links to Settings → Resource Types; if the
+  payload can't be read it says it can't tell. A hint only: the server enforces.
+- **Settings → Resource Types.** Types that offer `web` get a **Web exposure
+  cap** (unset / none / isolated / handler / proxy / dom) and **Allow heuristic
+  fill** (unset / allowed / forbidden), written to `connect.web_exposure_max`
+  and `connect.allow_heuristic_fill`. Unset removes the key; a saved value the
+  build doesn't recognise is kept as saved.
+- **Test recipe** calls `web_recipe_test` with the start URL, the allowed
+  origins and the recipe, and renders the per-step, per-action status and match
+  count, the success / failure flags and the recipe hash. The UI says it sends
+  no credential and submits nothing; the request carries no credential field.
+- **Import / export.** Copy to the clipboard, download as `.json`, import from a
+  file, the clipboard or the JSON view. Imports go through `JSON.parse` and the
+  strict reader only (256 KiB cap; unknown keys including `__proto__` refused);
+  nothing is evaluated. The download uses a Blob link and is **not verified in
+  the Tauri webview on each platform**; the clipboard route is the fallback the
+  UI names.
+- **Vendor presets** ([webRecipePresets.ts](../gui/src/lib/webRecipePresets.ts)):
+  FortiGate, vCenter, iDRAC, iLO, pfSense, Grafana, Jenkins, each a function of
+  the profile's origin. **Every preset is unverified against a live
+  appliance.** They were written from each vendor's documented or widely known
+  login form without recording a real login page, and `unverified: true` is a
+  literal type, shown in the picker label, beside the note and in a banner
+  after one is applied. Success and failure conditions are the least certain
+  part (iLO, pfSense and Grafana sign in to a page on the same URL, so they
+  judge success by an element). The tests hold each preset to the validator and
+  the origin check, not to a real device. The spec's "tested against recorded
+  login pages" is **not** done and stays a follow-up.
+- **Session outcome in the main window: not done.** The host reports the
+  outcome to the server and in the session window's title, and emits no event
+  or command result the main window can read, so there is nothing to show.
+  Surfacing it needs a host change.
+- **Tests.** `src/test/webRecipe.test.ts` (validator, origin keys, presets,
+  import, form-profile save checks, exposure matrix) and
+  `src/test/webRecipeEditor.test.tsx` (exposure notice, presets, structured and
+  JSON editing, import / export, dry run, Settings controls).
+
+### What the Phase 2 host half shipped
+
+In [gui/src-tauri/src/commands/connect_web.rs](../gui/src-tauri/src/commands/connect_web.rs)
+and the Tauri-free modules under [gui/src-tauri/src/session/](../gui/src-tauri/src/session/):
+`web_recipe.rs` (plan, globs, outcomes, TOTP decision, bundle, fill scope,
+heuristics), `web_script.rs` + `web_fill_routine.js` (the fixed routine and
+its argument encoding), `web_engine.rs` (the engine, generic over the page so
+it is unit-tested with a fake), `web_launch.rs` (the four server calls and the
+call-state machine).
+
+- **`session_open_web`, form mode.** Parses the profile with the server's own
+  `WebLoginRecipe::parse` and `recipe_hash`
+  (`bastion_vault::modules::resource::connect_web::recipe`, reachable through
+  the facade); `form` needs a `secret` / `ldap` / `default-account` source and
+  a recipe. Order: early web/RDP check → **reserve the registry slot** (the
+  authoritative web/RDP decision, taken before any credential is released) →
+  `v2/connect/web/launch` instead of `connect/authorize` → bundle checks →
+  window → engine. The bundle is parsed strictly (unknown `credential` /
+  `fill_scope` keys refused), the credential moved into `Zeroizing` buffers,
+  and cross-checked: resource, profile, `login_mode: form`, `exposure: dom`,
+  `recipe_hash`, `heuristic` equal to the local recipe's mode, and the parts
+  the recipe fills present. Any mismatch after the launch exists reports
+  `aborted:<check>` and closes it before the error returns.
+  - *Fill scope:* the window starts at `fill_scope.start_url` and its
+    navigation allow-list **is** `fill_scope.origins`. The server may narrow
+    the local copy (dropped origins are logged as
+    `connect.web.fill_scope_narrowed`); an origin the local copy lacks, or
+    `allow_insecure_http` it does not set, refuses the launch
+    (`aborted:fill_scope`).
+  - *Transport:* the host no longer calls `rustion/policy/effective` for a
+    form launch — `launch` enforces the tier before the ticket and the
+    credential, so the host/server disagreement noted below is closed. `open`
+    mode still checks on the host.
+- **How results travel without IPC.** The engine evaluates
+  `(<fixed routine>)(<JSON args>)` through `WebviewWindow::eval_with_callback`
+  (WKWebView `evaluateJavaScript`, WebView2 `ExecuteScript`, WebKitGTK
+  `run_javascript`). The only thing that returns is the script's own return
+  value — a JSON string, parsed strictly (`deny_unknown_fields`, version,
+  status enum), and refused unparsed when either JSON layer exceeds
+  `MAX_REPLY_BYTES` (4 KiB; the largest reply the routine can produce is
+  under 700 bytes), so a page that patches `JSON.stringify` cannot hand the
+  host a huge string to parse — delivered to a host closure. The page gets no channel and
+  nothing it can call; no `tauri::ipc::Channel` is used, so the web/RDP
+  exclusion predicate is unchanged. A reply can only make the engine refuse
+  or take its next host-decided step; it never widens where a value goes.
+- **The fixed routine.** Compiled into the binary (`include_str!`); no recipe
+  or page text ever becomes script. Arguments are serialised by `serde_json`
+  with `<`, `>`, `&`, U+2028, U+2029 additionally escaped, into a pre-sized
+  zeroizing buffer. In the top document only (`window.top === window`, and
+  `location.origin` must equal the origin the host checked): exactly one
+  match; an `<input>` of the expected type (password only into
+  `type=password`); enabled; visible (box ≥ 4×4 px, `visibility: visible`,
+  cumulative opacity ≥ 0.5, in the viewport after one `scrollIntoView`); not
+  covered at its centre (`elementFromPoint`, a `<label>` for the field
+  allowed); its form's `action`, the `formaction` of every control that can
+  submit it — the listed elements, every `<input type=image>` attached to it
+  (which `form.elements` leaves out) and the clicked or submitted element
+  itself — on an allowed origin, and the form's `target`, every
+  `formtarget` and a document `<base target>` a keyword (`_self`, `_top`,
+  `_parent`, `_blank`), never a frame name (`aborted:form_target`: a named
+  target may be an `<iframe>`, and sub-frame navigations are not policed on
+  Windows and Linux). All read through prototype accessors, so DOM clobbering
+  cannot hide them. It fills through the native `HTMLInputElement` value setter and
+  fires `input` / `change`; `submit` uses `requestSubmit`. After the outcome
+  it clears every password field. It never returns a value.
+- **The engine.** A step runs only on a finished top-frame load
+  (`on_page_load`) whose URL matches its `when_url` (origin exact, `*` glob
+  after it), on an origin of the fill scope; steps run in order, each at most
+  once (a later step may be reached without an optional earlier one). Every
+  action re-checks the host-observed origin; a navigation to another origin
+  mid-step aborts (`aborted:navigated`). A failed safety check aborts at once;
+  a check the page can still pass (`no_match`, `not_visible`, `occluded`,
+  `disabled`, navigation in flight) is retried **unchanged** until
+  `timeout_secs`, then reported as `aborted:<that check>`. A click or submit
+  whose evaluation returned nothing is never repeated. Outcomes are judged
+  only after a step ran, failure before success; then `web/result` once
+  (`result.step` = last step started), the title shows it, password fields
+  are cleared, and the credential is dropped with the engine.
+  - *TOTP:* a `totp` fill after `totp_valid_until` (host clock) calls
+    `web/totp` for that step when it is still in `totp_refresh_steps`, and
+    only after a check-mode call shows the field passes every check, so a
+    field that fails them never spends the step's one refresh; otherwise
+    `aborted:totp_expired` and nothing is filled.
+  - *Outcome event:* the host also sends the main window
+    `web-session-outcome` `{token, resource, profile_id, outcome, step}`
+    (`emit_to` the `main` webview window; no credential, code or URL), which
+    the vault UI shows as a toast. Tauri delivers events by evaluating them
+    in webviews that registered a listener, and a `web-*` window cannot
+    register one (no capability). It is not a `tauri::ipc::Channel`, so the
+    web/RDP exclusion predicate is unchanged.
+  - *Heuristic mode:* only when the bundle says `heuristic: true` and the
+    recipe is `"steps": "auto"`. One pass: `autocomplete=username`,
+    `current-password` (else `type=password`), `one-time-code`, filling only
+    what the source released; more than one candidate aborts
+    (`ambiguous_match`); submits the last filled field's form.
+- **Teardown.** `web/close` on every path — window closed, `session_close`,
+  window build failure, the SSH/RDP drop paths, app exit (`RunEvent::Exit`,
+  3 s budget, including teardowns the closing windows started) — through
+  one idempotent state machine (`LaunchCalls`): a teardown before an outcome
+  reports `aborted:window_closed|session_closed|window_build|app_exit|
+  session_dropped|policy_violation` first; an undelivered `result` is resent
+  unchanged once. `ldap_checkin_failed` is retried once, then logged as a
+  warning. All four calls use the backend, token and namespace captured at
+  launch.
+- **`web_recipe_test`** (dry run). Opens a full web session window (IPC-less,
+  ephemeral, origin allow-list, counts for the web/RDP exclusion) on the URL;
+  the recipe's URLs must sit on its origin set. For every page a step names it
+  runs every check of the routine in **check mode** — no value, no click, no
+  submit — and probes the outcome selectors, then reports per step and action
+  the routine's status and match count (no selectors or values echoed).
+  - *Decision:* checks only, no placeholder credential (the spec said "a
+    dummy credential"). A placeholder fill would send a real login attempt
+    to the target — lockouts, IDS alarms — while verifying nothing the
+    check-mode routine does not already verify. `run_check` has no credential
+    parameter, and the command never reads the vault, asks for MFA or calls
+    `launch`. Later pages are checked when the operator signs in by hand.
+- **Host audit** (`target: "audit"`): `session.open: protocol=web
+  login_mode=form` (fill origins, `launch_id_hash`), `connect.web.fill` /
+  `connect.web.action` (step, action index, value kind, origin),
+  `connect.web.totp_refresh`, `connect.web.login`, `connect.web.result`,
+  `connect.web.close` (`ldap_checkin`), `*_failed` (refusal code only),
+  `connect.web.fill_scope_narrowed`, `connect.web.recipe_test`,
+  `connect.web.refused`. Never a value, TOTP code, raw `launch_id`, vault
+  token, selector match, path or query.
+- **Tests.** Rust (`cargo nextest run -p bastion-vault-gui --lib`): glob and
+  step selection, plan building, outcome mapping, check names, TOTP refresh
+  selection, strict bundle parsing and cross-checks, fill-scope narrowing vs
+  widening, heuristics, script escaping of hostile values and selectors, reply
+  parsing, the call-state machine on every teardown path, and the engine
+  against a fake page (order, origin gating, mid-step navigation, permanent vs
+  transient checks, refresh, no-result clicks, cancellation, heuristics, the
+  dry run carrying no value). Vitest (`src/test/webFillRoutine.test.ts`): the
+  real routine in jsdom — native setter, check mode, origin, match count,
+  type, opacity / size / off-screen decoys, overlay vs own label, off-origin
+  `action` / `formaction` under DOM clobbering, image-submit `formaction`,
+  named-frame `target` / `formtarget` / `<base target>`, submit, probe, scan,
+  clear. `src/test/webSessionOutcome.test.ts`: the outcome event payload.
+
+**Host deviations from §5, decided here:**
+
+- `when_url` and `success_when.url` see only URLs of finished top-frame loads,
+  as §2 says — not same-document (`pushState`) route changes. A single-page
+  app's multi-screen login is one step with `wait` actions, and its success
+  condition a selector.
+- A field outside any `<form>` is fillable (no form, no action to check);
+  the navigation allow-list still blocks a native post off-origin.
+- Transient checks are retried until the timeout instead of aborting at the
+  first failure; the check itself never changes.
+- `pause_for_operator` only changes the waiting text in the title; every
+  recipe waits up to `timeout_secs` either way.
+
+**Still open for Phase 2:**
+
+- The vendor presets are unverified against live appliances and the spec's
+  "tested against recorded login pages" is not done (see *What the Phase 2 GUI
+  editor shipped*).
+- Per-platform manual checks (macOS, Windows, Linux) against the fixture site
+  of the Testing Plan, including `eval_with_callback` returning on each
+  webview and the `invoke`-rejected check of Phase 1.
+- The routine runs in the page's main world, so a compromised allowed origin
+  can patch DOM prototypes and make it misreport (it can read the filled
+  password anyway — §5 *Exposure*). Evaluating in an isolated world
+  (`WKContentWorld`, a CDP isolated world on WebView2) is a follow-up.
+- An end-to-end LDAP library check-out test, which needs an LDAP fixture.
+- `make test-release` (L4), which §Security Considerations requires before
+  merging, since this touches authz.
+
+### What Phase 1 shipped
+
+- **Type and protocol.** `ResourceTypeDef.connect.protocols` and
+  `web_exposure_max` are typed ([gui/src/lib/types.ts](../gui/src/lib/types.ts)).
+  The builtin `web_application` type exists and `website` offers `web`
+  ([gui/src/lib/resourceTypes.ts](../gui/src/lib/resourceTypes.ts)).
+  `connectProtocols()` / `typeSupportsProtocol()` / `typeSupportsConnect()`
+  are the single gate for the Connect chip, the card context menu, the
+  Connection tab, the ⌘K palette, the profile editor's protocol list and the
+  connect-validation static verdict. Settings → Resource Types has SSH / RDP /
+  Web checkboxes.
+  - **Decision: absent `protocols` means `["ssh","rdp"]` for the `server`
+    type only, and `[]` for every other type** — not `["ssh","rdp"]` for
+    every type as §1 first said. The chip used to be hard-gated to
+    `type === "server"`, so this is what keeps today's behaviour exact:
+    `firewall` / `switch` carry `connect.enabled: true` but never had a
+    Connect chip, and saved configs of `database` etc. have no `connect` key
+    at all. Reading absence as SSH/RDP everywhere would have put a Connect
+    chip on all of them.
+- **Saved-config merge with tombstones** (`parseTypeConfig` /
+  `serializeTypeConfig`). Saved types win per type id; builtins absent from
+  the saved config are added unless tombstoned. A saved type is never
+  altered, so a deployment that saved `website` before this release keeps a
+  `website` without `web` until an operator ticks it in Settings.
+  - **Where the tombstone lives.** Older GUIs read `config/types` as
+    `Record<string, ResourceTypeDef>` and iterate every value (`.id`,
+    `.label`, `.color`, `.fields.length`), so a top-level array would crash
+    them. The tombstone is a reserved entry `"$bv_meta"` shaped like a type
+    (`fields: []`, `connect.enabled: false`, label "(internal) removed
+    built-in types") with `removed_builtins: string[]`. `$` can't come out
+    of Settings' id sanitiser, the entry is written last (never an older
+    GUI's default pick in the create-resource modal) and only when at least
+    one builtin is deleted. An older GUI shows it as one extra type and
+    round-trips it untouched through its own saves; deleting it there
+    loses the tombstones, after which deleted builtins reappear once.
+  - **Pre-tombstone saves.** A config with no `$bv_meta` entry was written
+    by a GUI whose saves always contained every builtin it offered. So a
+    builtin from the frozen pre-T96 list (`PRE_TOMBSTONE_BUILTIN_IDS`) that
+    such a config lacks was deleted by the operator, and is treated as
+    tombstoned rather than re-added. Builtins added from T96 on are added.
+- **`web` connection profiles, `open` mode only.** `SessionProtocol` is
+  `"ssh" | "rdp" | "web"`; profiles carry the `web` block of §1.
+  `CredentialSource` gains `{ kind: "none" }`, the only source `open` mode
+  accepts (it releases nothing); `none` is refused on SSH/RDP, and
+  `ssh-engine` / `pki` / `fido2` are refused on `web`. Form / http-auth /
+  sso, `transport: "rustion-isolated"`, a non-empty `tls_pin_sha256`, a
+  recipe and a profile `kind: "rustion"` are all refused with "not available
+  yet" at save (GUI) and at connect (host) — never ignored. Origins follow
+  the rules of §4: exact `scheme://host[:port]`, default ports normalised,
+  lower-case / punycode host, no path, query, fragment or userinfo, no
+  trailing dot, https unless `allow_insecure_http`. **Additionally refused:
+  `localhost` and `*.localhost`**, because Tauri classes those as *local*
+  origins (the dev server, `tauri.localhost`, `ipc.localhost`) and grants
+  them IPC.
+- **Strict protocol parsing.** `parseSessionProtocol` (TS) and
+  `ProfileProtocol::of_profile` (host) refuse unknown, missing and
+  mistyped protocols; `readProfiles` drops such profiles; every launcher
+  dispatches through `openProfileSession`, which throws on an unknown
+  protocol (the launchers used to open anything that wasn't SSH as RDP); and
+  `session_open_ssh` / `session_open_rdp` / `session_open_web` each refuse a
+  profile of another protocol before resolving anything. Pinned by
+  `src/test/webConnect.test.ts` and `session::profile_protocol_tests`.
+  - **Older releases, verified at v0.44.17 and v0.44.18:** their
+    `readProfiles` keeps only `ssh` / `rdp` and their `isLaunchableProfile`
+    refuses any other protocol on the card hints, so they never dial a `web`
+    profile. Their host does not check the protocol, but no code path in
+    those GUIs sends a `web` profile id. One caveat: saving profile edits
+    from those releases on a resource that carries a `web` profile writes
+    back only the profiles they parsed, which removes the `web` one. (Their
+    Connection tab only exists on `server` resources.)
+- **No server change.** `v2/connect/authorize`, the MFA ticket and the
+  search-card `ConnectProfileHint` projection are protocol-agnostic: the
+  projection passes `protocol: "web"` and `credential_source.kind: "none"`
+  through as strings, and `authorize` reads only the profile's id and
+  `require_mfa`.
+- **`session_open_web`** ([gui/src-tauri/src/commands/connect_web.rs](../gui/src-tauri/src/commands/connect_web.rs),
+  [gui/src-tauri/src/session/web.rs](../gui/src-tauri/src/session/web.rs)).
+  Loads the resource and profile, requires `protocol == web`, validates the
+  profile, refuses when the effective Rustion transport is
+  `rustion-required` or the resolver reports a lock violation (no local
+  fallback), then runs `authorize_direct` (MFA ticket burnt exactly as on
+  the direct SSH path). The window: label `web-<token>`,
+  `WebviewUrl::External`, `incognito(true)`, `devtools(false)`,
+  `disable_drag_drop_handler()`, a per-session `data_directory` under
+  `<app cache>/web-sessions/<instance>/<token>` (0700) on Windows and Linux, size from
+  the profile, title `"<resource> — <origin>"` set by the host from
+  `on_page_load`. Registered as `SessionState::Web` in `connect_sessions`;
+  `session_close` and window destruction both tear it down (destroy the
+  window, `session.close: protocol=web … duration_ms=…`, remove the data
+  directory with retries). `<instance>` is one directory per running
+  process holding a `.lock` file kept exclusively locked for the process
+  lifetime; the sweep on each web-session open removes only *other*
+  instance directories whose lock it can take (owner dead), so a second
+  running copy never loses its live sessions. Host audit lines (`target: "audit"`): `session.open:
+  protocol=web …` (origins only), `connect.web.navigation_blocked`,
+  `connect.web.popup_blocked`, `connect.web.download` /
+  `connect.web.download_blocked` (`reason=disabled|origin`: an allowed
+  download must also come from an origin in the set),
+  `connect.web.policy_violation`, `connect.web.refused`.
+  `record_recent_session` records `protocol: "web"`.
+- **Capability isolation test** (`capability_isolation_tests`, runs under
+  `cargo nextest run -p bastion-vault-gui --lib`): walks every file under
+  `gui/src-tauri/capabilities/`, plus any inline capability in
+  `tauri.conf.json`, and fails if a `windows` / `webviews` glob matches a
+  `web-<token>` label, if any capability declares `remote`, if a glob uses
+  syntax the test can't evaluate, or if a non-JSON capability file appears.
+
+### Phase 1 caveats — where it differs from §4
+
+- **Pop-ups.** `on_new_window` never returns `Allow` (that hands the popup
+  to the platform's default window, outside this window's handlers and
+  store). An in-set popup is loaded **in the session window itself**
+  (`navigate`), not in a child window sharing the store as §4 says; anything
+  else is denied. `Create { window }` needs per-platform shared webview
+  configuration (`with_related_view` / `with_environment` /
+  `webview_configuration`) that 2.11.5 doesn't expose on the stable API.
+  Pages that depend on `window.opener` (some OAuth popups) won't complete;
+  add the IdP to `allowed_origins` and let it redirect instead.
+- **Downloads.** When allowed, files go to the webview's default
+  destination (the OS downloads folder), not through the save dialog —
+  a blocking dialog can't run inside the webview's download callback. Each
+  download is audited by file name on request and by size on completion
+  (size `unknown` on macOS, where wry reports no path).
+- **Clipboard.** Only `bidirectional` calls `enable_clipboard_access`;
+  WebView2 and WebKitGTK can grant or refuse page clipboard access only as a
+  whole, so `host-to-session` / `session-to-host` behave as `off`. Absent
+  means `off`. The operator's own keyboard copy/paste is native and never
+  blocked. On macOS the page clipboard can't be gated (the editor says so).
+- **macOS data store.** No `data_store_identifier` and no `data_directory`:
+  with `incognito(true)` wry gives each window a fresh
+  `WKWebsiteDataStore.nonPersistentDataStore()`, which it prefers over an
+  identifier, and WKWebView ignores `data_directory`.
+- **Sub-frames.** wry consults the navigation handler for every frame on
+  macOS but for top-level navigations only on Windows (WebView2
+  `NavigationStarting`). On macOS a cross-origin iframe therefore needs its
+  origin in the set; elsewhere iframes are not policed (nothing is filled
+  in Phase 1). `about:blank`, `about:srcdoc` and `blob:` URLs of an allowed
+  origin are allowed; `data:`, `file:`, `mailto:` and custom schemes are
+  blocked. As a safety net, a top-frame page load the host sees for an
+  origin outside the set closes the session (`connect.web.policy_violation`).
+- **Tauri's IPC scripts still reach the page — mitigated by web/RDP mutual
+  exclusion.** Tauri 2.11.5 injects its IPC initialisation script (including
+  the invoke key) into every webview, remote ones included, and there is no
+  stable API to withhold it. App and plugin commands from a remote origin are
+  rejected by the ACL (`Webview::on_message`: remote origin and no matching
+  capability ⇒ reject; Tauri's own test
+  `remote_origin_blocked_for_custom_commands_without_app_manifest`). **One
+  command is exempt upstream:** `plugin:__TAURI_CHANNEL__|fetch` ("TODO:
+  Remove this special check in v3"), which returns — and removes — a queued
+  IPC channel payload by a global, sequential id. A hostile page in a web
+  session could poll it and read or steal large channel payloads destined
+  for another window. The only `tauri::ipc::Channel` users in the GUI are
+  the RDP frame path (`session_attach_rdp_frames`, `FrameSink`), so the risk
+  is closed by **mutual exclusion**: `session_open_web` refuses while any RDP
+  session is live, and `session_open_rdp` and `session_attach_rdp_frames`
+  refuse while any web session is live (`session::web_rdp_conflict`,
+  `connect.web.refused: reason=rdp_session_live` /
+  `connect.rdp.refused: reason=web_session_live`). The decision is taken
+  under the `connect_sessions` lock at the point each session registers, so a
+  web and an RDP open racing each other cannot both succeed (an RDP open
+  that loses is told to stop its already-dialled pump). SSH sessions do not
+  use channels and are unaffected. The exclusion stays until upstream removes
+  the exemption; any new `Channel` user must be added to the predicate, or
+  the mitigation no longer holds.
+- **Per-platform `invoke`-rejected check: still pending (manual).** The
+  rejection above is established from the 2.11.5 source and its upstream
+  test, not by running `window.__TAURI_INTERNALS__.invoke(...)` from a web
+  window on macOS, Windows and Linux. Do that before the first release that
+  ships this.
+- **Server-side audit** (`connect.web.launch` / `result` / `close` through
+  the resource mount) is Phase 2, with the launch endpoint, which the host
+  calls for `form` sessions (see *What the Phase 2 host half shipped*). An
+  `open`-mode session still writes the host-side lines above, and the server
+  still sees only its `v2/connect/authorize` call.
+
+### Context this feature builds on
+
+- Resource types are GUI-only: an opaque JSON blob at the resource mount's
+  `config/types` ([crates/bv-engine-resource/src/lib.rs:330](../crates/bv-engine-resource/src/lib.rs:330)).
+- The `connect` capability, the MFA ticket (`v2/connect/mfa/{begin,verify}`)
+  and the direct-path pre-flight `v2/connect/authorize` are
+  protocol-agnostic ([bv-engine-resource/src/connect_mfa.rs](../crates/bv-engine-resource/src/connect_mfa.rs)).
+  On the direct SSH/RDP path the GUI host resolves the credential itself,
+  which needs `read` on the secret; the connect-only guarantee is hard only
+  on the Rustion path. Phase 2's launch endpoint closes that for web.
 - The Identity Provider (S19, T52) is fully unimplemented. There is no `idp`
   module.
 
@@ -344,9 +925,11 @@ Rules:
   - Its origin must be in the profile's origin set.
   - Its scheme must be `https` unless `allow_insecure_http` is set.
   - A profile save is rejected when a step's origin is outside the set.
-- A recipe can carry `vendor` presets. Phase 2 ships tested presets for the
-  `web_application.vendor` enum. An operator who picks FortiGate gets a working
-  recipe without writing selectors.
+- A recipe can carry `vendor` presets. Phase 2 ships presets for the
+  `web_application.vendor` enum, starting points an operator tests with "Test
+  recipe". **They are unverified against live appliances** (written from the
+  vendors' documented login forms, not recorded), so they are not yet the
+  "working recipe without writing selectors" this section set out to give.
 - **Heuristic mode** (`"steps": "auto"`) finds fields by
   `autocomplete="username" | "current-password" | "one-time-code"`, then
   `type=password`. It is off unless the resource's policy allows it (§6).
@@ -491,6 +1074,16 @@ WebExposure = "none"     // open, sso
 - `web_exposure_max` can be set on the type (`ResourceTypeDef.connect`) and on
   the resource. The most restrictive value wins, matching the Rustion transport
   tier rule.
+- **The default is deny.** Only the type tier can opt a resource in: the
+  resource's `type` must name a type in the *saved* type configuration that
+  sets `web_exposure_max`. Unset, a type missing from the saved configuration,
+  or a configuration never saved all mean a cap of `none` — `open` and `sso`
+  still work, and every login mode that releases a credential is refused. The
+  resource tier can lower the type's cap, never raise it or opt in by itself,
+  so editing a resource's `type` cannot escape the type tier. The built-in
+  `web_application` and `website` types ship with `dom`. A type saved before
+  that keeps its saved shape and stays denied until an administrator sets the
+  cap.
 - **Enforcement.**
   - The profile editor rejects a profile whose login mode exceeds the cap.
   - The server enforces the cap again in `v2/connect/web/launch`. GUI-side
@@ -732,7 +1325,8 @@ allow-list, and the operator's endpoint never holds it. That is exposure level
 | `resources/v2/connect/web/close` | write | report session end |
 
 Tauri commands: `session_open_web`, `session_close` (existing, extended),
-`web_recipe_test` (dry run against a URL with a dummy credential, which never
+`web_recipe_test` (dry run against a URL with no credential at all — every
+check of the fill routine, nothing filled, clicked or submitted — which never
 calls `launch`).
 
 `docs/api.md` gains a "Web connect" subsection. `docs/gui.md` gains the operator
@@ -740,7 +1334,14 @@ walkthrough.
 
 ## Phases
 
-### Phase 1 — type, protocol and `open` mode — **Todo**
+### Phase 1 — type, protocol and `open` mode — **Done, with caveats**
+
+See *Current State → Phase 1 caveats*: in-set pop-ups load in the session
+window, allowed downloads skip the save dialog, the per-platform
+`invoke`-rejected check is still manual, and Tauri's channel-fetch IPC
+exemption is mitigated by refusing web and RDP sessions at the same time
+(until upstream removes the exemption).
+
 
 - `web_application` builtin, `connect.protocols`, and the `website` type enabled.
 - The `mergeTypeConfig` additive migration with tombstones.
@@ -757,16 +1358,27 @@ walkthrough.
 This phase alone removes the "reveal, copy, open browser" habit for SSO-fronted
 apps and gives them an audited launch point.
 
-### Phase 2 — `form` mode with recipes — **Todo**
+### Phase 2 — `form` mode with recipes — **In progress (server, host and GUI editor done; presets unverified; per-platform checks open)**
 
-- The `resources/v2/connect/web/{launch,totp,result,close}` endpoints with
-  server-side credential resolution and TOTP.
-- The recipe engine and fixed fill routine.
-- The recipe editor, `web_recipe_test`, JSON import/export, and vendor presets
-  (FortiGate, vCenter, iDRAC, iLO, pfSense, Grafana, Jenkins) tested against
-  recorded login pages.
-- `web_exposure_max` and `allow_heuristic_fill` enforced server-side.
-- LDAP library check-in on close.
+- **Done:** the `resources/v2/connect/web/{launch,totp,result,close}`
+  endpoints with server-side credential resolution and TOTP, server-side
+  `web_exposure_max` / `allow_heuristic_fill` enforcement, the v1 recipe
+  validator and hash, and LDAP library check-in on close. See *Current
+  State*.
+- **Done:** the host recipe engine and fixed fill routine, calling `launch`
+  / `totp` / `result` / `close` on every teardown path, and the
+  `web_recipe_test` dry run (checks only, no credential). See *Current State
+  → What the Phase 2 host half shipped*.
+- **Done:** the recipe editor (calling `web_recipe_test`), JSON
+  import/export, the form-mode profile editor, the Settings → Resource Types
+  exposure controls, and vendor presets (FortiGate, vCenter, iDRAC, iLO,
+  pfSense, Grafana, Jenkins). The editor's validation and exposure check
+  mirror the server's. See *Current State → What the Phase 2 GUI editor
+  shipped*.
+- **Todo:** test the presets against recorded login pages or live appliances
+  (they are **unverified** today, and labelled so), and the per-platform
+  manual checks.
+- **Done:** `resources/v2/connect/web/*` in the built-in baseline policies (`default`, `standard-user`, `shared-access` refreshed at startup; `administrator` is not refreshed but inherits `update` through `default`).
 
 ### Phase 3 — `http-auth` mode — **Todo**
 
@@ -836,11 +1448,20 @@ as T97 in the roadmap backlog.
    - Visible, non-occluded, correctly typed, single-match fields.
    - Form `action` must resolve to an allowed origin.
    - No fill UI inside the page.
+   - The form-action check only stops script-free mis-targeting: a submit,
+     input, change or click listener on an in-scope page can rewrite the
+     destination after the check, so the navigation allow-list is the
+     backstop — and at `dom` exposure in-scope script can read the value
+     anyway.
 3. **Remote content must never reach vault IPC.**
    - The `web-*` label has no capability.
    - Tests assert it.
    - A per-platform `invoke` check.
    - No shared data store with the main window.
+   - Tauri 2.11.5 exempts `plugin:__TAURI_CHANNEL__|fetch` from the
+     remote-origin ACL, so a web window and an RDP session (the only
+     `Channel` user) are never live together. Mitigated by mutual
+     exclusion until upstream removes the exemption (see Current State).
 4. **Connect-only access.** The launch endpoint is a new secret reader gated by
    `connect`, not `read`. It must return credentials only for a `web` profile
    bound into the `launch_id`, only within the exposure cap, and only after the
@@ -854,7 +1475,7 @@ as T97 in the roadmap backlog.
    - proxy unavailable → no `dom`;
    - TLS error → no "accept anyway" without a pin.
 6. **Logging.** Never values, codes, cookies or full URLs (§11). Recipe test runs
-   use a dummy credential and never call `launch`.
+   use no credential at all and never call `launch`.
 7. **Rustion isolation (Phase 8)** widens what Rustion handles from SSH/RDP
    credentials to web credentials and hostile web content. The browser must run
    in a disposable worker outside Rustion's own process, with egress restricted
