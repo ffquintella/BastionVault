@@ -57,7 +57,10 @@ impl WebCredentialSource {
 pub struct WebLaunchProfile {
     pub require_mfa: bool,
     pub allow_insecure_http: bool,
-    /// Normalised origin keys: the start URL's origin plus `allowed_origins`.
+    /// `web.start_url` as stored; its origin is `origins[0]`.
+    pub start_url: String,
+    /// Normalised origin keys: the start URL's origin first, then
+    /// `allowed_origins`.
     pub origins: Vec<String>,
     pub recipe: WebLoginRecipe,
     pub recipe_hash: String,
@@ -308,6 +311,7 @@ pub fn parse_launch_profile(profile: &Value) -> Result<WebLaunchProfile, WebRefu
     Ok(WebLaunchProfile {
         require_mfa: crate::kernel_api::engines::profile_gate_flag(profile),
         allow_insecure_http,
+        start_url: start_url.to_string(),
         origins,
         recipe,
         recipe_hash,

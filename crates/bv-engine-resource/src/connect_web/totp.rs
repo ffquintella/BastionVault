@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Shortest seed accepted, in bytes. 80 bits is what most authenticator
 /// enrolments issue (a 16-character base32 secret).
@@ -101,35 +101,42 @@ pub fn decode_seed(raw: &str) -> Result<Zeroizing<Vec<u8>>, String> {
     let key = base32::decode(base32::Alphabet::Rfc4648 { padding: false }, &cleaned)
         .map(Zeroizing::new)
         .ok_or("the TOTP seed is not valid base32 (RFC 4648)")?;
+    // The decoded length is not reported: it is a fact about the seed.
     if !(MIN_SEED_BYTES..=MAX_SEED_BYTES).contains(&key.len()) {
-        return Err(format!(
-            "the TOTP seed decodes to {} bytes; {MIN_SEED_BYTES}..={MAX_SEED_BYTES} are accepted",
-            key.len()
-        ));
+        return Err(format!("the TOTP seed must decode to {MIN_SEED_BYTES}..={MAX_SEED_BYTES} bytes"));
     }
     Ok(key)
+}
+
+/// Copy a MAC output into a `Zeroizing` buffer and scrub the original, so no
+/// un-zeroized copy of it outlives this function.
+fn take_and_scrub(mut out: impl AsMut<[u8]>) -> Zeroizing<Vec<u8>> {
+    let bytes = out.as_mut();
+    let copy = Zeroizing::new(bytes.to_vec());
+    bytes.zeroize();
+    copy
 }
 
 fn mac(key: &[u8], counter: u64, algorithm: TotpAlgorithm) -> Zeroizing<Vec<u8>> {
     let msg = counter.to_be_bytes();
     // `new_from_slice` accepts any key length for HMAC; the `expect`s cannot fire.
-    Zeroizing::new(match algorithm {
+    match algorithm {
         TotpAlgorithm::Sha1 => {
             let mut m = <Hmac<Sha1> as KeyInit>::new_from_slice(key).expect("hmac accepts any key length");
             m.update(&msg);
-            m.finalize().into_bytes().to_vec()
+            take_and_scrub(m.finalize().into_bytes())
         }
         TotpAlgorithm::Sha256 => {
             let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("hmac accepts any key length");
             m.update(&msg);
-            m.finalize().into_bytes().to_vec()
+            take_and_scrub(m.finalize().into_bytes())
         }
         TotpAlgorithm::Sha512 => {
             let mut m = <Hmac<Sha512> as KeyInit>::new_from_slice(key).expect("hmac accepts any key length");
             m.update(&msg);
-            m.finalize().into_bytes().to_vec()
+            take_and_scrub(m.finalize().into_bytes())
         }
-    })
+    }
 }
 
 /// RFC 4226 §5.3 HOTP with dynamic truncation.
@@ -198,6 +205,8 @@ mod tests {
         assert!(decode_seed("GEZDGNBV").is_err());
         let msg = decode_seed("SECRETVALUE1!").err().unwrap();
         assert!(!msg.contains("SECRETVALUE1"), "errors must not echo the seed");
+        // Nor its decoded length: "GEZDGNBV" is 5 bytes.
+        assert!(!decode_seed("GEZDGNBV").err().unwrap().contains('5'));
     }
 
     #[test]

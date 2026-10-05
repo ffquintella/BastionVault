@@ -50,19 +50,22 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use self::exposure::{ExposurePolicy, ExposureRefusal, WebExposure};
 use self::launch_store::{
-    launch_id_hash, CallerIdentity, CheckInState, LaunchError, LaunchGuard, LdapCheckIn, LdapCheckout, TotpSource,
-    WebLaunchRecord, WebLaunchStore, LAUNCH_RECORD_VERSION, LOGIN_WINDOW_SECS,
+    launch_id_hash, CallerIdentity, CheckInState, FillScope, LaunchError, LaunchGuard, LdapCheckIn, LdapCheckout,
+    TotpSource, WebLaunchRecord, WebLaunchStore, LAUNCH_RECORD_VERSION, LOGIN_WINDOW_SECS, TIDY_THROTTLE,
 };
 use self::profile::{parse_launch_profile, WebCredentialSource, WebLaunchProfile};
+use self::recipe::RecipeNeeds;
 use crate::connect_mfa::{caller_namespace, find_profile};
 use crate::kernel_api::{identity::caller_audit_actor, VaultCtx};
 use crate::{
     errors::RvError,
     logical::{connection::Connection, Backend, Operation, Request, Response},
+    storage::Storage,
     SECRET_PREFIX,
 };
 
@@ -168,6 +171,8 @@ struct LaunchAudit<'a> {
     /// The effective Rustion transport the launch passed (`none` when
     /// Rustion is not mounted).
     transport: &'a str,
+    /// The origins the credential may be filled on (origins only, never paths).
+    fill_origins: &'a [String],
     released: &'a str,
     launch_id_hash: &'a str,
 }
@@ -176,7 +181,7 @@ fn launch_line(a: &LaunchAudit<'_>) -> String {
     format!(
         "connect.web.launch principal={:?} namespace={:?} resource={:?} profile={:?} login_mode={} \
          exposure={} exposure_cap={} credential_source={} recipe_hash={} heuristic={} mfa={} \
-         transport={} released={} launch_id_hash={}",
+         transport={} fill_origins={:?} released={} launch_id_hash={}",
         a.principal,
         a.namespace,
         a.resource,
@@ -189,6 +194,7 @@ fn launch_line(a: &LaunchAudit<'_>) -> String {
         a.heuristic,
         a.mfa,
         a.transport,
+        a.fill_origins,
         a.released,
         a.launch_id_hash
     )
@@ -206,32 +212,65 @@ fn take_field(data: &Map<String, Value>, key: &str) -> Option<Zeroizing<String>>
     data.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(|s| Zeroizing::new(s.to_string()))
 }
 
-/// Scrub every string in a credential-bearing map before it is dropped.
+/// Scrub every string in a credential-bearing map — nested objects and
+/// arrays included — before it is dropped.
 fn zeroize_map(data: &mut Map<String, Value>) {
     for (_, v) in data.iter_mut() {
-        match v {
-            Value::String(s) => s.zeroize(),
-            Value::Object(m) => zeroize_map(m),
-            _ => {}
-        }
+        zeroize_value(v);
     }
 }
 
-/// The calling principal as `(auth mount, name)`. Unlike the connect-MFA
-/// ticket (userpass only, since only userpass carries a second factor) any
-/// authenticated principal may launch an ungated profile, so the name falls
-/// back to the entity id / display name the audit trail already uses.
+fn zeroize_value(v: &mut Value) {
+    match v {
+        Value::String(s) => s.zeroize(),
+        Value::Object(m) => zeroize_map(m),
+        Value::Array(items) => items.iter_mut().for_each(zeroize_value),
+        _ => {}
+    }
+}
+
+/// The calling principal a launch is bound to, as `(auth mount, name)`.
+///
+/// Any authenticated principal may launch an ungated profile (only the
+/// connect-MFA ticket is userpass-only), so the name is the first of:
+///
+///   1. `username` on a known auth mount — the binding the MFA ticket uses;
+///   2. `entity:<entity_id>`;
+///   3. `token:<hex sha256(client token)>` — this token store has no
+///      accessor, and a hash of a 256-bit token is the non-reversible
+///      equivalent (it binds a root token, which has no entity, to itself);
+///   4. `name:<display_name>`, only on a known auth mount.
+///
+/// A bare display name with no mount is never a binding. The prefixes keep
+/// one kind of name from colliding with another.
 fn web_caller(req: &Request) -> Result<(String, String), WebRefusal> {
     let auth = req.auth.as_ref().ok_or_else(|| WebRefusal::new(401, "no_caller", "no authenticated caller"))?;
-    let mount = auth.metadata.get("mount_path").cloned().unwrap_or_default();
-    let name = match auth.metadata.get("username").filter(|u| !u.is_empty()) {
-        Some(u) => u.to_lowercase(),
-        None => caller_audit_actor(req),
-    };
-    if name.is_empty() {
-        return Err(WebRefusal::new(403, "no_principal", "the caller has no principal a launch can be bound to"));
+    let meta = |k: &str| auth.metadata.get(k).map(|v| v.trim()).filter(|v| !v.is_empty());
+    let mount = meta("mount_path").unwrap_or_default().to_string();
+    if !mount.is_empty() {
+        if let Some(u) = meta("username") {
+            return Ok((mount, u.to_lowercase()));
+        }
     }
-    Ok((mount, name))
+    if let Some(entity) = meta("entity_id") {
+        return Ok((mount, format!("entity:{entity}")));
+    }
+    if !req.client_token.is_empty() {
+        return Ok((mount, format!("token:{}", hex::encode(Sha256::digest(req.client_token.as_bytes())))));
+    }
+    if !mount.is_empty() && !auth.display_name.trim().is_empty() {
+        return Ok((mount, format!("name:{}", auth.display_name.trim())));
+    }
+    Err(WebRefusal::new(403, "no_principal", "the caller has no principal a launch can be bound to"))
+}
+
+/// The principal as an audit line shows it: a token binding is shortened so
+/// the line does not carry a full token hash.
+fn audit_principal(mount: &str, principal: &str) -> String {
+    match principal.strip_prefix("token:") {
+        Some(h) => format!("{mount}token:{}", &h[..h.len().min(16)]),
+        None => format!("{mount}{principal}"),
+    }
 }
 
 fn string_field(req: &Request, key: &str) -> Option<String> {
@@ -320,6 +359,9 @@ impl LdapCheckIn for CallerDispatch {
 
 // ── Credential resolution ──────────────────────────────────────────
 
+/// The `logical_type` an `ldap` source's mount must have.
+const LDAP_LOGICAL_TYPE: &str = "openldap";
+
 #[derive(Default)]
 struct ResolvedCredential {
     username: Option<Zeroizing<String>>,
@@ -348,6 +390,36 @@ impl ResolvedCredential {
     }
 }
 
+/// A credential checked as far as it can be **before** the MFA ticket is
+/// redeemed, so a launch that fails for a reason the operator can fix does
+/// not cost them their ticket.
+///
+/// * `secret` and `default-account` are resolved completely here: one read of
+///   this resource's own storage, or of the caller's own default-account
+///   record. Neither has a side effect, and nothing reaches the response until
+///   `release_web_credential` runs, after the ticket.
+/// * `ldap` is only pre-checked: the mount exists in the caller's namespace,
+///   is untainted and is an LDAP engine. Reading a static credential and
+///   checking a library account out stay after the ticket — a check-out
+///   rotates a password — so their failures still spend it.
+enum PreparedCredential {
+    Ready {
+        username: Option<Zeroizing<String>>,
+        password: Option<Zeroizing<String>>,
+        totp: Option<(Zeroizing<Vec<u8>>, TotpSource)>,
+        /// How the security log names the source.
+        source_detail: String,
+    },
+    LdapStaticRole {
+        mount: String,
+        role: String,
+    },
+    LdapLibrarySet {
+        mount: String,
+        set: String,
+    },
+}
+
 fn unavailable(message: impl Into<String>) -> WebRefusal {
     WebRefusal::new(422, "credential_unavailable", message)
 }
@@ -366,6 +438,19 @@ fn demand(
         (true, Some(v)) => Ok(Some(v)),
         (true, None) if heuristic => Ok(None),
         (true, None) => Err(unavailable(format!("the credential source supplies no {what}, which the recipe fills"))),
+    }
+}
+
+/// A complete LDAP library check-out: `(account, password, lease_id)`.
+type Checkout = (Zeroizing<String>, Zeroizing<String>, Zeroizing<String>);
+
+/// Split a check-out response. `Err(Some(account))` is an incomplete response
+/// that still checked `account` out: it must be checked back in before the
+/// launch is refused, or the account stays leased to nobody.
+fn parse_checkout(data: &Map<String, Value>) -> Result<Checkout, Option<Zeroizing<String>>> {
+    match (take_field(data, "service_account_name"), take_field(data, "password"), take_field(data, "lease_id")) {
+        (Some(account), Some(password), Some(lease_id)) => Ok((account, password, lease_id)),
+        (account, _, _) => Err(account),
     }
 }
 
@@ -392,17 +477,38 @@ impl super::ResourceBackendInner {
         serde_json::from_slice(&raw).map_err(|_| unavailable(format!("secret `{secret_id}` is not a JSON object")))
     }
 
-    async fn resolve_web_credential(
+    /// The mount an `ldap` source names must exist in the caller's namespace,
+    /// be untainted and be an LDAP engine. Read off the mount table; nothing
+    /// is sent to the engine.
+    fn require_ldap_mount(&self, ns_prefix: &str, mount: &str) -> Result<(), WebRefusal> {
+        let path = format!("{ns_prefix}{mount}");
+        let missing = || unavailable(format!("no LDAP engine is mounted at `{mount}`"));
+        let router = self.core.router();
+        if router.matching_mount(&path).map_err(|e| WebRefusal::wrap("storage_error", e))? != path {
+            return Err(missing());
+        }
+        let entry = router
+            .matching_mount_entry(&path)
+            .map_err(|e| WebRefusal::wrap("storage_error", e))?
+            .ok_or_else(missing)?;
+        let entry =
+            entry.read().map_err(|_| WebRefusal::new(500, "storage_error", "the mount table lock is poisoned"))?;
+        if entry.tainted || entry.logical_type != LDAP_LOGICAL_TYPE {
+            return Err(missing());
+        }
+        Ok(())
+    }
+
+    /// Pre-ticket half of resolution; see [`PreparedCredential`].
+    async fn prepare_web_credential(
         &self,
         req: &mut Request,
         caller: &CallerDispatch,
         resource: &str,
         meta: &Map<String, Value>,
         profile: &WebLaunchProfile,
-        now_secs: u64,
-    ) -> Result<ResolvedCredential, WebRefusal> {
+    ) -> Result<PreparedCredential, WebRefusal> {
         let needs = &profile.needs;
-        let user = caller_audit_actor(req);
         match &profile.source {
             WebCredentialSource::Secret { secret_id, fields, totp: params } => {
                 let mut data = self.read_resource_secret(req, resource, secret_id).await?;
@@ -410,29 +516,22 @@ impl super::ResourceBackendInner {
                 let password = take_field(&data, &fields.password);
                 let seed = if needs.totp { take_field(&data, &fields.totp_seed) } else { None };
                 zeroize_map(&mut data);
-                log::info!(
-                    target: "security",
-                    "resource-connect-web-resolve: user={user:?} resource={resource:?} source=secret key={secret_id:?}"
-                );
 
-                let mut out = ResolvedCredential {
-                    username: demand(needs.username, needs.heuristic, username, "username")?,
-                    password: demand(needs.password, needs.heuristic, password, "password")?,
-                    ..Default::default()
-                };
-                match seed {
+                let username = demand(needs.username, needs.heuristic, username, "username")?;
+                let password = demand(needs.password, needs.heuristic, password, "password")?;
+                let totp = match seed {
                     Some(seed) => {
                         let key = totp::decode_seed(&seed).map_err(|m| {
                             unavailable(format!("secret `{secret_id}` field `{}`: {m}", fields.totp_seed))
                         })?;
-                        out.totp = Some(totp::code_at(&key, *params, now_secs));
-                        out.totp_source = Some(TotpSource {
+                        let source = TotpSource {
                             secret_id: secret_id.clone(),
                             seed_field: fields.totp_seed.clone(),
                             params: *params,
                             refresh_steps: needs.totp_steps.clone(),
                             refreshed_steps: Vec::new(),
-                        });
+                        };
+                        Some((key, source))
                     }
                     None if needs.totp && !needs.heuristic => {
                         return Err(WebRefusal::new(
@@ -444,75 +543,33 @@ impl super::ResourceBackendInner {
                             ),
                         ))
                     }
-                    None => {}
-                }
-                if needs.heuristic && out.username.is_none() && out.password.is_none() {
+                    None => None,
+                };
+                if needs.heuristic && username.is_none() && password.is_none() {
                     return Err(unavailable(format!("secret `{secret_id}` has neither a username nor a password")));
                 }
-                Ok(out)
+                Ok(PreparedCredential::Ready {
+                    username,
+                    password,
+                    totp,
+                    source_detail: format!("source=secret key={secret_id:?}"),
+                })
             }
 
             WebCredentialSource::LdapStaticRole { mount, role } => {
-                let path = format!("{}{mount}static-cred/{role}", caller.ns_prefix);
-                let mut data = caller
-                    .call(Operation::Read, &path, None)
-                    .await
-                    .map_err(|e| WebRefusal::wrap("credential_unavailable", e))?
-                    .ok_or_else(|| unavailable(format!("LDAP static role `{role}` returned no credential")))?;
-                let username = take_field(&data, "username");
-                let password = take_field(&data, "password");
-                zeroize_map(&mut data);
-                log::info!(
-                    target: "security",
-                    "resource-connect-web-resolve: user={user:?} resource={resource:?} source=ldap static_role={role:?}"
-                );
-                Ok(ResolvedCredential {
-                    username: demand(needs.username, needs.heuristic, username, "username")?,
-                    password: demand(needs.password, needs.heuristic, password, "password")?,
-                    ..Default::default()
-                })
+                self.require_ldap_mount(&caller.ns_prefix, mount)?;
+                Ok(PreparedCredential::LdapStaticRole { mount: mount.clone(), role: role.clone() })
             }
 
             WebCredentialSource::LdapLibrarySet { mount, set } => {
-                let path = format!("{}{mount}library/{set}/check-out", caller.ns_prefix);
-                let mut data = caller
-                    .call(Operation::Write, &path, Some(Map::new()))
-                    .await
-                    .map_err(|e| WebRefusal::wrap("credential_unavailable", e))?
-                    .unwrap_or_default();
-                let account = take_field(&data, "service_account_name");
-                let password = take_field(&data, "password");
-                let lease_id = take_field(&data, "lease_id");
-                zeroize_map(&mut data);
-                let (Some(account), Some(password), Some(lease_id)) = (account, password, lease_id) else {
-                    return Err(unavailable(format!("LDAP library `{set}` check-out returned an incomplete response")));
-                };
-                let checkout = LdapCheckout {
-                    mount: mount.clone(),
-                    library_set: set.clone(),
-                    account: account.to_string(),
-                    lease_id: lease_id.to_string(),
-                    checked_in: false,
-                };
-                log::info!(
-                    target: "security",
-                    "resource-connect-web-resolve: user={user:?} resource={resource:?} source=ldap library_set={set:?} account={:?}",
-                    checkout.account
-                );
-                let username = demand(needs.username, needs.heuristic, Some(account), "username");
-                let password = demand(needs.password, needs.heuristic, Some(password), "password");
-                Ok(ResolvedCredential {
-                    // `demand` cannot fail when the value is present.
-                    username: username?,
-                    password: password?,
-                    ldap: Some(checkout),
-                    ..Default::default()
-                })
+                self.require_ldap_mount(&caller.ns_prefix, mount)?;
+                Ok(PreparedCredential::LdapLibrarySet { mount: mount.clone(), set: set.clone() })
             }
 
             WebCredentialSource::DefaultAccount => {
+                let source_detail = "source=default-account".to_string();
                 if !needs.username {
-                    return Ok(ResolvedCredential::default());
+                    return Ok(PreparedCredential::Ready { username: None, password: None, totp: None, source_detail });
                 }
                 let mut data = caller
                     .call(Operation::Read, "sys/identity/default-account/self", None)
@@ -538,7 +595,112 @@ impl super::ResourceBackendInner {
                         "you have no default {family} account configured (Users → Edit User → Default Resource Account)"
                     ))
                 })?;
-                Ok(ResolvedCredential { username: Some(username), ..Default::default() })
+                Ok(PreparedCredential::Ready { username: Some(username), password: None, totp: None, source_detail })
+            }
+        }
+    }
+
+    /// Post-ticket half of resolution: compute the TOTP code, read an LDAP
+    /// static credential, or check a library account out.
+    async fn release_web_credential(
+        &self,
+        prepared: PreparedCredential,
+        caller: &CallerDispatch,
+        user: &str,
+        resource: &str,
+        needs: &RecipeNeeds,
+        now_secs: u64,
+    ) -> Result<ResolvedCredential, WebRefusal> {
+        match prepared {
+            PreparedCredential::Ready { username, password, totp, source_detail } => {
+                log::info!(
+                    target: "security",
+                    "resource-connect-web-resolve: user={user:?} resource={resource:?} {source_detail}"
+                );
+                let (code, totp_source) = match totp {
+                    Some((key, source)) => (Some(totp::code_at(&key, source.params, now_secs)), Some(source)),
+                    None => (None, None),
+                };
+                Ok(ResolvedCredential { username, password, totp: code, totp_source, ldap: None })
+            }
+
+            PreparedCredential::LdapStaticRole { mount, role } => {
+                let path = format!("{}{mount}static-cred/{role}", caller.ns_prefix);
+                let mut data = caller
+                    .call(Operation::Read, &path, None)
+                    .await
+                    .map_err(|e| WebRefusal::wrap("credential_unavailable", e))?
+                    .ok_or_else(|| unavailable(format!("LDAP static role `{role}` returned no credential")))?;
+                let username = take_field(&data, "username");
+                let password = take_field(&data, "password");
+                zeroize_map(&mut data);
+                log::info!(
+                    target: "security",
+                    "resource-connect-web-resolve: user={user:?} resource={resource:?} source=ldap static_role={role:?}"
+                );
+                Ok(ResolvedCredential {
+                    username: demand(needs.username, needs.heuristic, username, "username")?,
+                    password: demand(needs.password, needs.heuristic, password, "password")?,
+                    ..Default::default()
+                })
+            }
+
+            PreparedCredential::LdapLibrarySet { mount, set } => {
+                let path = format!("{}{mount}library/{set}/check-out", caller.ns_prefix);
+                let mut data = caller
+                    .call(Operation::Write, &path, Some(Map::new()))
+                    .await
+                    .map_err(|e| WebRefusal::wrap("credential_unavailable", e))?
+                    .unwrap_or_default();
+                let parsed = parse_checkout(&data);
+                zeroize_map(&mut data);
+                let (account, password, lease_id) = match parsed {
+                    Ok(c) => c,
+                    Err(account) => {
+                        // Checked out but unusable: give the account back now
+                        // rather than leaving it leased until its TTL.
+                        if let Some(account) = account {
+                            let c = LdapCheckout {
+                                mount: mount.clone(),
+                                library_set: set.clone(),
+                                account: account.to_string(),
+                                lease_id: String::new(),
+                                checked_in: false,
+                            };
+                            match caller.check_in(&c).await {
+                                Ok(()) => log::info!(
+                                    target: "audit",
+                                    "connect.web.launch_rollback ldap_checkin=done resource={resource:?} account={:?}",
+                                    c.account
+                                ),
+                                Err(e) => log::warn!(
+                                    target: "audit",
+                                    "connect.web.launch_rollback ldap_checkin=failed resource={resource:?} account={:?}: {e}",
+                                    c.account
+                                ),
+                            }
+                        }
+                        return Err(unavailable(format!(
+                            "LDAP library `{set}` check-out returned an incomplete response"
+                        )));
+                    }
+                };
+                let checkout = LdapCheckout {
+                    mount,
+                    library_set: set.clone(),
+                    account: account.to_string(),
+                    lease_id: lease_id.to_string(),
+                    checked_in: false,
+                };
+                log::info!(
+                    target: "security",
+                    "resource-connect-web-resolve: user={user:?} resource={resource:?} source=ldap library_set={set:?} account={:?}",
+                    checkout.account
+                );
+                // `demand` cannot fail when the value is present.
+                let username = demand(needs.username, needs.heuristic, Some(account), "username")?;
+                let password = demand(needs.password, needs.heuristic, Some(password), "password")?;
+                Ok(ResolvedCredential { username, password, ldap: Some(checkout), ..Default::default() })
             }
         }
     }
@@ -578,10 +740,14 @@ impl super::ResourceBackendInner {
     /// resolver's per-resource gate and tenant qualification still see the
     /// caller — who has already passed the connect grant on this resource.
     ///
-    /// No `rustion/` mount means no Rustion policy can exist (its tiers live
-    /// in that mount's store), which reads as "no policy". Every other failure
-    /// — the store unreadable, a tier record undecodable, an asset-group
-    /// lookup error, a verdict this server cannot parse — refuses.
+    /// The resolver being unreachable (`ErrRouterMountNotFound`: `rustion/`
+    /// unmounted, or tainted mid-unmount / remount) proves nothing, because
+    /// Rustion keeps its tiers in the system view, not in the mount, and they
+    /// survive an unmount. That case is allowed only when the system view's
+    /// `rustion/policy/` prefix holds no record at all; otherwise — and on any
+    /// other failure (the store unreadable, a tier record undecodable, an
+    /// asset-group lookup error, a verdict this server cannot parse) — the
+    /// launch is refused.
     async fn effective_transport(
         &self,
         req: &Request,
@@ -621,14 +787,33 @@ impl super::ResourceBackendInner {
                     resp.and_then(|r| r.data).ok_or_else(|| transport::unavailable("the resolver returned nothing"))?;
                 transport::evaluate(&data)
             }
-            Err(RvError::ErrRouterMountNotFound) => Ok(transport::TransportVerdict::NoRustion),
+            Err(RvError::ErrRouterMountNotFound) => self.prove_no_rustion_policy().await,
             Err(e) => Err(transport::unavailable(e.to_string())),
+        }
+    }
+
+    /// With the resolver unreachable, allow only on proof that no Rustion
+    /// policy record exists.
+    async fn prove_no_rustion_policy(&self) -> Result<transport::TransportVerdict, WebRefusal> {
+        let sys = self.core.system_view().ok_or_else(|| transport::unavailable("the vault is sealed"))?;
+        let records = sys.list(transport::RUSTION_POLICY_PREFIX).await.map_err(|e| {
+            transport::unavailable(format!(
+                "the rustion/ mount is unavailable and its policy records cannot be listed: {e}"
+            ))
+        })?;
+        if records.is_empty() {
+            Ok(transport::TransportVerdict::NoRustion)
+        } else {
+            Err(transport::unavailable(
+                "the rustion/ mount is unavailable (unmounted, or tainted mid-unmount or remount) while Rustion \
+                 policy records exist, so the policy cannot be evaluated",
+            ))
         }
     }
 
     async fn caller_identity(&self, req: &Request, audit: &mut AuditCtx) -> Result<CallerIdentity, WebRefusal> {
         let (mount, principal) = web_caller(req)?;
-        audit.principal = format!("{mount}{principal}");
+        audit.principal = audit_principal(&mount, &principal);
         let namespace = caller_namespace(&self.core, req).await.map_err(|e| WebRefusal::wrap("namespace", e))?;
         audit.namespace = namespace.clone();
         Ok(CallerIdentity { mount, principal, namespace })
@@ -703,8 +888,16 @@ impl super::ResourceBackendInner {
         // fallback.
         let transport = self.effective_transport(req, &resource, &meta).await?;
 
-        // (5) Connect-time MFA. Only now, so a profile that fails a static
-        // or policy check never costs the operator their ticket.
+        // (4c) Every credential check that can run before the ticket does:
+        // `secret` and `default-account` are resolved here (no side effects,
+        // nothing released yet); `ldap` gets its mount checked.
+        let dispatch = CallerDispatch::new(self.core.clone(), req, &caller.namespace);
+        let prepared = self.prepare_web_credential(req, &dispatch, &resource, &meta, &profile).await?;
+
+        // (5) Connect-time MFA. Only now, so a profile that fails a static,
+        // policy or credential pre-check never costs the operator their
+        // ticket. What can still fail after it: the LDAP static-credential
+        // read or library check-out, and persisting the launch.
         let mfa_method = if profile.require_mfa {
             let ticket = self
                 .redeem_connect_ticket(req, &resource, &profile_id)
@@ -715,30 +908,27 @@ impl super::ResourceBackendInner {
             None
         };
 
-        let store = WebLaunchStore::new(self.core.as_ref());
-        match store.tidy(now_ms).await {
-            Ok(reaped) => {
-                for r in reaped {
-                    log::info!(
-                        target: "audit",
-                        "connect.web.reaped launch_id_hash={} ldap_checkin={}",
-                        r.launch_id_hash,
-                        if r.ldap_pending { "pending" } else { "not_pending" }
-                    );
-                }
-            }
-            // Hygiene only: every follow-up call enforces its own window.
-            Err(e) => log::warn!("connect.web: launch-record tidy failed: {e}"),
-        }
-
-        // (6) Resolve the credential.
-        let dispatch = CallerDispatch::new(self.core.clone(), req, &caller.namespace);
+        // (6) Release: the TOTP code for `now`, or the LDAP read / check-out.
+        let user = caller_audit_actor(req);
         let mut cred = self
-            .resolve_web_credential(req, &dispatch, &resource, &meta, &profile, now.timestamp().max(0) as u64)
+            .release_web_credential(
+                prepared,
+                &dispatch,
+                &user,
+                &resource,
+                &profile.needs,
+                now.timestamp().max(0) as u64,
+            )
             .await?;
 
-        // (7) Persist the launch. On failure, give back an LDAP account that
-        // was just checked out rather than leaving it to its lease.
+        // (7) Persist the launch, with its fill scope. On failure, give back
+        // an LDAP account that was just checked out rather than leaving it to
+        // its lease.
+        let fill_scope = FillScope {
+            start_url: profile.start_url.clone(),
+            origins: profile.origins.clone(),
+            allow_insecure_http: profile.allow_insecure_http,
+        };
         let record = WebLaunchRecord {
             v: LAUNCH_RECORD_VERSION,
             caller: caller.clone(),
@@ -756,7 +946,9 @@ impl super::ResourceBackendInner {
             ldap: cred.ldap.clone(),
             result: None,
             closed_at_ms: None,
+            fill_scope: Some(fill_scope.clone()),
         };
+        let store = WebLaunchStore::new(self.core.as_ref());
         let launch_id = match store.create(&record).await {
             Ok(id) => id,
             Err(e) => {
@@ -791,10 +983,29 @@ impl super::ResourceBackendInner {
                 heuristic: profile.needs.heuristic,
                 mfa: mfa_method.as_deref().unwrap_or("none"),
                 transport: transport.as_str(),
+                fill_origins: &fill_scope.origins,
                 released: &released,
                 launch_id_hash: &audit.launch_id_hash,
             })
         );
+
+        // (7b) Reap expired records — at most once a minute per process, after
+        // the launch is persisted, and never a reason to fail it.
+        if TIDY_THROTTLE.claim(now_ms) {
+            match store.tidy(now_ms).await {
+                Ok(reaped) => {
+                    for r in reaped {
+                        log::info!(
+                            target: "audit",
+                            "connect.web.reaped launch_id_hash={} ldap_checkin={}",
+                            r.launch_id_hash,
+                            if r.ldap_pending { "pending" } else { "not_pending" }
+                        );
+                    }
+                }
+                Err(e) => log::warn!("connect.web: launch-record tidy failed: {e}"),
+            }
+        }
 
         // (8) The bundle.
         let mut credential = Map::new();
@@ -821,6 +1032,12 @@ impl super::ResourceBackendInner {
         data.insert("exposure_cap".into(), Value::String(cap.as_str().into()));
         data.insert("recipe_hash".into(), Value::String(profile.recipe_hash.clone()));
         data.insert("heuristic".into(), Value::Bool(profile.needs.heuristic));
+        // The authoritative fill scope: the host fills only on these origins
+        // and starts at this URL, whatever its own copy of the profile says.
+        data.insert(
+            "fill_scope".into(),
+            serde_json::to_value(&fill_scope).map_err(|e| WebRefusal::wrap("storage_error", e.into()))?,
+        );
         data.insert("credential_source".into(), Value::String(profile.source.kind().into()));
         data.insert("credential".into(), Value::Object(credential));
         data.insert("totp_refresh_steps".into(), Value::Array(refresh_steps.into_iter().map(Value::from).collect()));
@@ -1020,6 +1237,7 @@ mod tests {
             heuristic: false,
             mfa: "totp",
             transport: "rustion-preferred",
+            fill_origins: &["https://fw01.example.com".to_string()],
             released: "username,password,totp",
             launch_id_hash: "cd",
         });
@@ -1041,7 +1259,9 @@ mod tests {
         }
         // `released` names the parts; it is not the values.
         assert!(line.contains("released=username,password,totp"));
-        assert!(!line.contains("://"), "no URL ever reaches an audit line");
+        // Origins appear (§11 allows them); paths and queries never do.
+        assert!(line.contains(r#"fill_origins=["https://fw01.example.com"]"#));
+        assert_eq!(line.matches("://").count(), 1, "the only URL-like text is the origin: {line}");
 
         // Operator-controlled names are quoted, so one cannot forge a field.
         let mut a = AuditCtx::new("launch");
@@ -1084,23 +1304,72 @@ mod tests {
         req.auth = Some(auth);
         assert_eq!(web_caller(&req).unwrap(), ("userpass/".to_string(), "alice".to_string()));
 
+        // No username: the entity id, before anything else.
         let mut auth = Auth::default();
         auth.metadata.insert("mount_path".into(), "oidc/".into());
         auth.metadata.insert("entity_id".into(), "ent-1".into());
+        auth.display_name = "oidc-alice".into();
         req.auth = Some(auth);
-        assert_eq!(web_caller(&req).unwrap(), ("oidc/".to_string(), "ent-1".to_string()));
+        assert_eq!(web_caller(&req).unwrap(), ("oidc/".to_string(), "entity:ent-1".to_string()));
+
+        // A username with no mount does not bind by name.
+        let mut auth = Auth::default();
+        auth.metadata.insert("username".into(), "alice".into());
+        auth.metadata.insert("entity_id".into(), "ent-2".into());
+        req.auth = Some(auth);
+        assert_eq!(web_caller(&req).unwrap().1, "entity:ent-2");
+
+        // No entity (a root token): the token, by hash — never the display name.
+        let mut auth = Auth::default();
+        auth.display_name = "root".into();
+        req.auth = Some(auth);
+        req.client_token = "s.roottoken".into();
+        let (mount, principal) = web_caller(&req).unwrap();
+        assert_eq!(mount, "");
+        assert_eq!(principal, format!("token:{}", hex::encode(Sha256::digest(b"s.roottoken"))));
+        assert!(!principal.contains("s.roottoken"));
+        assert_eq!(audit_principal(&mount, &principal).len(), "token:".len() + 16);
+
+        // A display name binds only on a known mount, and never alone.
+        req.client_token.clear();
+        assert_eq!(web_caller(&req).unwrap_err().code, "no_principal", "empty mount + display name");
+        let mut auth = Auth::default();
+        auth.metadata.insert("mount_path".into(), "cert/".into());
+        auth.display_name = "web-ops".into();
+        req.auth = Some(auth);
+        assert_eq!(web_caller(&req).unwrap(), ("cert/".to_string(), "name:web-ops".to_string()));
 
         req.auth = Some(Auth::default());
         assert_eq!(web_caller(&req).unwrap_err().code, "no_principal");
     }
 
     #[test]
+    fn an_incomplete_checkout_names_the_account_to_give_back() {
+        let full = serde_json::json!({ "service_account_name": "svc-1", "password": "p", "lease_id": "l" });
+        let (a, p, l) = parse_checkout(full.as_object().unwrap()).ok().unwrap();
+        assert_eq!((a.as_str(), p.as_str(), l.as_str()), ("svc-1", "p", "l"));
+
+        for (body, account) in [
+            (serde_json::json!({ "service_account_name": "svc-1", "password": "p" }), Some("svc-1")),
+            (serde_json::json!({ "service_account_name": "svc-1", "lease_id": "l" }), Some("svc-1")),
+            (serde_json::json!({ "password": "p", "lease_id": "l" }), None),
+            (serde_json::json!({}), None),
+        ] {
+            let got = parse_checkout(body.as_object().unwrap()).err().unwrap();
+            assert_eq!(got.as_deref().map(String::as_str), account, "{body}");
+        }
+    }
+
+    #[test]
     fn zeroize_map_scrubs_nested_strings() {
-        let mut m: Map<String, Value> =
-            serde_json::from_value(serde_json::json!({ "password": "hunter2", "nested": { "seed": "abc" }, "n": 1 }))
-                .unwrap();
+        let mut m: Map<String, Value> = serde_json::from_value(serde_json::json!({
+            "password": "hunter2", "nested": { "seed": "abc" }, "n": 1,
+            "codes": ["123456", { "k": "v" }, ["deep"]]
+        }))
+        .unwrap();
         zeroize_map(&mut m);
         assert_eq!(m["password"], Value::String(String::new()));
         assert_eq!(m["nested"]["seed"], Value::String(String::new()));
+        assert_eq!(m["codes"], serde_json::json!(["", { "k": "" }, [""]]));
     }
 }

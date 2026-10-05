@@ -481,9 +481,10 @@ export interface ResourceTypeDef {
     protocols?: ConnectProtocol[];
     default_ports?: { ssh?: number; rdp?: number };
     default_users?: { linux?: string; macos?: string; windows?: string };
-    /** Exposure cap for `web` profiles (spec §6). Typed for forward
-     *  compatibility; Phase 1 only offers `open` mode, whose exposure is
-     *  `none` and fits under every cap. Enforced server-side from Phase 2. */
+    /** Exposure cap for `web` profiles (spec §6), enforced server-side.
+     *  Deny unless opted in: the server releases no web credential unless
+     *  the resource's *saved* type sets this (form mode needs `dom`); unset
+     *  means `none`. `open` mode (exposure `none`) fits under every cap. */
     web_exposure_max?: WebExposure;
   };
 }

@@ -2,9 +2,18 @@
 //!
 //! `web_exposure_max` and `allow_heuristic_fill` can be set on the resource
 //! *type* (`config/types[<type>].connect`) and on the *resource* record
-//! itself (top-level keys). The most restrictive tier wins, matching the
-//! Rustion transport tier rule. The profile editor checks the same thing as a
+//! itself (top-level keys). The profile editor checks the same thing as a
 //! convenience; this module is the control.
+//!
+//! **Deny unless opted in.** Releasing a credential is off by default: the
+//! effective cap starts at `none`, and only the **type** tier can raise it —
+//! the resource's `type` must name a type present in the *saved* type
+//! configuration whose `connect.web_exposure_max` is set. A type that is
+//! unset, missing from the saved configuration, or never saved at all leaves
+//! the cap at `none`, so `form` (which needs `dom`) is refused. The resource
+//! tier can only lower the type's cap (the stricter wins), never opt in by
+//! itself. Because the resource's `type` is editable metadata, an unknown
+//! type is a denial rather than an escape from the type tier.
 //!
 //! Every value is parsed strictly. A tier carrying a value this server does
 //! not recognise refuses the launch instead of being read as "unset", so a
@@ -71,10 +80,20 @@ impl Tier {
     }
 }
 
+/// Where the effective cap came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapSource {
+    /// No type tier opted in: the deny-by-default cap `none`.
+    Default,
+    Tier(Tier),
+}
+
 /// The two tiers' settings, as read. `None` means the tier expresses no
 /// opinion.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExposurePolicy {
+    /// The resource's type has an entry in the saved type configuration.
+    pub type_saved: bool,
     pub type_cap: Option<WebExposure>,
     pub resource_cap: Option<WebExposure>,
     pub type_heuristic: Option<bool>,
@@ -85,7 +104,10 @@ pub struct ExposurePolicy {
 pub enum ExposureRefusal {
     /// A tier carries a value of the wrong type or outside the enum.
     InvalidPolicy { tier: Tier, field: &'static str },
-    /// The login mode needs more exposure than the effective cap allows.
+    /// No type tier opted in. `type_saved` says whether the type is in the
+    /// saved configuration at all (it then lacks `web_exposure_max`).
+    NotPermitted { type_saved: bool },
+    /// The login mode needs more exposure than an explicit tier allows.
     CapExceeded { required: WebExposure, cap: WebExposure, set_by: Tier },
     /// Heuristic mode without `allow_heuristic_fill`. `blocked_by` names the
     /// tier that set it `false`; `None` means no tier enabled it.
@@ -100,6 +122,7 @@ impl ExposureRefusal {
     pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidPolicy { .. } => "exposure_policy_invalid",
+            Self::NotPermitted { .. } => "exposure_not_permitted",
             Self::CapExceeded { .. } => "exposure_cap_exceeded",
             Self::HeuristicNotAllowed { .. } => "heuristic_not_allowed",
             Self::InsecureHttpBelowDom { .. } => "insecure_http_not_allowed",
@@ -122,6 +145,17 @@ impl fmt::Display for ExposureRefusal {
                 "the {} tier's `{field}` is not a value this server understands; fix it rather \
                  than relying on a default",
                 tier.as_str()
+            ),
+            Self::NotPermitted { type_saved: false } => write!(
+                f,
+                "web credential release is off by default: this resource's type is not in the saved \
+                 resource type configuration, so it has not opted in. Save the type with \
+                 `connect.web_exposure_max` set (`dom` for form mode)"
+            ),
+            Self::NotPermitted { type_saved: true } => write!(
+                f,
+                "web credential release is off by default: this resource's type does not set \
+                 `connect.web_exposure_max`. Set it on the type (`dom` for form mode) to opt in"
             ),
             Self::CapExceeded { required, cap, set_by } => write!(
                 f,
@@ -170,20 +204,23 @@ fn read_flag(v: Option<&Value>, tier: Tier) -> Result<Option<bool>, ExposureRefu
 }
 
 impl ExposurePolicy {
-    /// Read both tiers. `type_def` is the resource's entry in `config/types`
-    /// (absent when the type was never saved, which leaves the builtin
-    /// defaults — no cap); `resource_meta` is the resource record.
+    /// Read both tiers. `type_def` is the resource's entry in the *saved*
+    /// `config/types` — `None` when the configuration was never saved, the
+    /// resource has no type, or its type is not in the configuration; all
+    /// three leave the type tier unopted and so deny. `resource_meta` is the
+    /// resource record.
     pub fn from_tiers(type_def: Option<&Value>, resource_meta: &Map<String, Value>) -> Result<Self, ExposureRefusal> {
-        let type_connect = match type_def {
-            None | Some(Value::Null) => None,
+        let (type_saved, type_connect) = match type_def {
+            None | Some(Value::Null) => (false, None),
             Some(Value::Object(def)) => match def.get("connect") {
-                None | Some(Value::Null) => None,
-                Some(Value::Object(c)) => Some(c),
+                None | Some(Value::Null) => (true, None),
+                Some(Value::Object(c)) => (true, Some(c)),
                 Some(_) => return Err(ExposureRefusal::InvalidPolicy { tier: Tier::Type, field: "connect" }),
             },
             Some(_) => return Err(ExposureRefusal::InvalidPolicy { tier: Tier::Type, field: "connect" }),
         };
         Ok(Self {
+            type_saved,
             type_cap: read_cap(type_connect.and_then(|c| c.get("web_exposure_max")), Tier::Type)?,
             type_heuristic: read_flag(type_connect.and_then(|c| c.get("allow_heuristic_fill")), Tier::Type)?,
             resource_cap: read_cap(resource_meta.get("web_exposure_max"), Tier::Resource)?,
@@ -191,16 +228,21 @@ impl ExposurePolicy {
         })
     }
 
-    /// The effective cap and the tier that set it. With no cap at either tier
-    /// every exposure level is allowed (`dom`).
-    pub fn effective_cap(&self) -> (WebExposure, Option<Tier>) {
-        match (self.type_cap, self.resource_cap) {
-            (None, None) => (WebExposure::Dom, None),
-            (Some(t), None) => (t, Some(Tier::Type)),
-            (None, Some(r)) => (r, Some(Tier::Resource)),
-            (Some(t), Some(r)) if r <= t => (r, Some(Tier::Resource)),
-            (Some(t), Some(_)) => (t, Some(Tier::Type)),
+    /// The effective cap and where it came from. It starts at the type
+    /// tier's cap — `none` when the type has not opted in — and the resource
+    /// tier can only lower it.
+    pub fn effective_cap(&self) -> (WebExposure, CapSource) {
+        let (mut cap, mut source) = match self.type_cap {
+            Some(t) => (t, CapSource::Tier(Tier::Type)),
+            None => (WebExposure::None, CapSource::Default),
+        };
+        if let Some(r) = self.resource_cap {
+            if r < cap {
+                cap = r;
+                source = CapSource::Tier(Tier::Resource);
+            }
         }
+        (cap, source)
     }
 
     /// Heuristic fill is allowed when no tier forbids it and at least one
@@ -225,11 +267,12 @@ impl ExposurePolicy {
         heuristic: bool,
         allow_insecure_http: bool,
     ) -> Result<WebExposure, ExposureRefusal> {
-        let (cap, set_by) = self.effective_cap();
+        let (cap, source) = self.effective_cap();
         if required > cap {
-            // `set_by` is always Some here: with no tier set the cap is `dom`,
-            // which nothing exceeds.
-            return Err(ExposureRefusal::CapExceeded { required, cap, set_by: set_by.unwrap_or(Tier::Resource) });
+            return Err(match source {
+                CapSource::Default => ExposureRefusal::NotPermitted { type_saved: self.type_saved },
+                CapSource::Tier(set_by) => ExposureRefusal::CapExceeded { required, cap, set_by },
+            });
         }
         if allow_insecure_http && cap < WebExposure::Dom {
             return Err(ExposureRefusal::InsecureHttpBelowDom { cap });
@@ -250,6 +293,10 @@ mod tests {
         v.as_object().cloned().unwrap()
     }
 
+    fn dom_type() -> Value {
+        json!({ "id": "web_application", "fields": [], "connect": { "web_exposure_max": "dom" } })
+    }
+
     #[test]
     fn order_is_the_policy_order() {
         use WebExposure::*;
@@ -261,19 +308,38 @@ mod tests {
     }
 
     #[test]
-    fn no_tier_set_means_dom_is_allowed_and_heuristics_are_not() {
+    fn nothing_is_released_unless_the_type_opts_in() {
+        // Type missing from the saved configuration (or never saved).
         let p = ExposurePolicy::from_tiers(None, &Map::new()).unwrap();
+        assert_eq!(p.effective_cap(), (WebExposure::None, CapSource::Default));
+        assert_eq!(p.check(WebExposure::Dom, false, false), Err(ExposureRefusal::NotPermitted { type_saved: false }));
+        // `open` / `sso` (exposure `none`) are unaffected by the default.
+        assert!(p.check(WebExposure::None, false, false).is_ok());
+
+        // Type saved, but with no `connect` block, or a `connect` block that
+        // sets no cap.
+        for def in [json!({ "id": "server", "fields": [] }), json!({ "id": "server", "connect": { "enabled": true } })]
+        {
+            let p = ExposurePolicy::from_tiers(Some(&def), &Map::new()).unwrap();
+            assert_eq!(
+                p.check(WebExposure::Dom, false, false),
+                Err(ExposureRefusal::NotPermitted { type_saved: true })
+            );
+        }
+
+        // The resource tier alone cannot opt in.
+        let p = ExposurePolicy::from_tiers(None, &meta(json!({ "web_exposure_max": "dom" }))).unwrap();
+        assert_eq!(p.check(WebExposure::Dom, false, false), Err(ExposureRefusal::NotPermitted { type_saved: false }));
+
+        // A type set to `dom` opts in.
+        let p = ExposurePolicy::from_tiers(Some(&dom_type()), &Map::new()).unwrap();
         assert_eq!(p.check(WebExposure::Dom, false, false), Ok(WebExposure::Dom));
-        assert_eq!(
-            p.check(WebExposure::Dom, true, false),
-            Err(ExposureRefusal::HeuristicNotAllowed { blocked_by: None })
-        );
     }
 
     #[test]
     fn the_stricter_tier_wins_and_is_named() {
-        let type_def = json!({ "connect": { "web_exposure_max": "handler" } });
-        let p = ExposurePolicy::from_tiers(Some(&type_def), &Map::new()).unwrap();
+        let handler = json!({ "connect": { "web_exposure_max": "handler" } });
+        let p = ExposurePolicy::from_tiers(Some(&handler), &Map::new()).unwrap();
         assert_eq!(
             p.check(WebExposure::Dom, false, false),
             Err(ExposureRefusal::CapExceeded {
@@ -283,23 +349,16 @@ mod tests {
             })
         );
 
-        let p = ExposurePolicy::from_tiers(None, &meta(json!({ "web_exposure_max": "isolated" }))).unwrap();
+        // The resource tier lowers an opted-in type …
+        let p = ExposurePolicy::from_tiers(Some(&dom_type()), &meta(json!({ "web_exposure_max": "none" }))).unwrap();
+        assert_eq!(p.effective_cap(), (WebExposure::None, CapSource::Tier(Tier::Resource)));
         assert!(matches!(
             p.check(WebExposure::Dom, false, false),
-            Err(ExposureRefusal::CapExceeded { set_by: Tier::Resource, cap: WebExposure::Isolated, .. })
+            Err(ExposureRefusal::CapExceeded { set_by: Tier::Resource, cap: WebExposure::None, .. })
         ));
-
-        // A resource cannot loosen its type's cap …
-        let p = ExposurePolicy::from_tiers(Some(&type_def), &meta(json!({ "web_exposure_max": "dom" }))).unwrap();
-        assert_eq!(p.effective_cap(), (WebExposure::Handler, Some(Tier::Type)));
-        // … but can tighten it.
-        let p = ExposurePolicy::from_tiers(Some(&type_def), &meta(json!({ "web_exposure_max": "none" }))).unwrap();
-        assert_eq!(p.effective_cap(), (WebExposure::None, Some(Tier::Resource)));
-
-        // A cap at `dom` on both tiers lets form mode through.
-        let dom = json!({ "connect": { "web_exposure_max": "dom" } });
-        let p = ExposurePolicy::from_tiers(Some(&dom), &meta(json!({ "web_exposure_max": "dom" }))).unwrap();
-        assert_eq!(p.check(WebExposure::Dom, false, false), Ok(WebExposure::Dom));
+        // … and can never raise one.
+        let p = ExposurePolicy::from_tiers(Some(&handler), &meta(json!({ "web_exposure_max": "dom" }))).unwrap();
+        assert_eq!(p.effective_cap(), (WebExposure::Handler, CapSource::Tier(Tier::Type)));
     }
 
     #[test]
@@ -333,12 +392,17 @@ mod tests {
 
     #[test]
     fn heuristic_fill_needs_an_enabling_tier_and_no_forbidding_one() {
-        let on = json!({ "connect": { "allow_heuristic_fill": true } });
-        let off = json!({ "connect": { "allow_heuristic_fill": false } });
+        let on = json!({ "connect": { "web_exposure_max": "dom", "allow_heuristic_fill": true } });
+        let off = json!({ "connect": { "web_exposure_max": "dom", "allow_heuristic_fill": false } });
 
+        let p = ExposurePolicy::from_tiers(Some(&dom_type()), &Map::new()).unwrap();
+        assert_eq!(
+            p.check(WebExposure::Dom, true, false),
+            Err(ExposureRefusal::HeuristicNotAllowed { blocked_by: None })
+        );
         let p = ExposurePolicy::from_tiers(Some(&on), &Map::new()).unwrap();
         assert!(p.check(WebExposure::Dom, true, false).is_ok());
-        let p = ExposurePolicy::from_tiers(None, &meta(json!({ "allow_heuristic_fill": true }))).unwrap();
+        let p = ExposurePolicy::from_tiers(Some(&dom_type()), &meta(json!({ "allow_heuristic_fill": true }))).unwrap();
         assert!(p.check(WebExposure::Dom, true, false).is_ok());
 
         // An explicit `false` at either tier beats a `true` at the other.
@@ -358,13 +422,14 @@ mod tests {
 
     #[test]
     fn insecure_http_is_refused_below_dom() {
-        let p = ExposurePolicy::from_tiers(None, &meta(json!({ "web_exposure_max": "handler" }))).unwrap();
+        let handler = json!({ "connect": { "web_exposure_max": "handler" } });
+        let p = ExposurePolicy::from_tiers(Some(&handler), &Map::new()).unwrap();
         assert_eq!(
             p.check(WebExposure::Handler, false, true),
             Err(ExposureRefusal::InsecureHttpBelowDom { cap: WebExposure::Handler })
         );
         assert!(p.check(WebExposure::Handler, false, false).is_ok());
-        let p = ExposurePolicy::from_tiers(None, &Map::new()).unwrap();
+        let p = ExposurePolicy::from_tiers(Some(&dom_type()), &Map::new()).unwrap();
         assert!(p.check(WebExposure::Dom, false, true).is_ok());
     }
 }

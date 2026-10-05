@@ -192,6 +192,24 @@ describe("connectProtocols — the single Connect gate", () => {
     expect(typeSupportsConnect(DEFAULT_RESOURCE_TYPES.website)).toBe(true);
   });
 
+  it("opts the built-in web types in to form-mode logins, and nothing else", () => {
+    // The server denies form mode unless the saved type sets a cap, so a
+    // freshly saved type config must carry it for the web types.
+    expect(DEFAULT_RESOURCE_TYPES.website.connect?.web_exposure_max).toBe("dom");
+    expect(DEFAULT_RESOURCE_TYPES.web_application.connect?.web_exposure_max).toBe("dom");
+    const saved = serializeTypeConfig(DEFAULT_RESOURCE_TYPES, []) as Record<string, ResourceTypeDef>;
+    expect(saved.web_application.connect?.web_exposure_max).toBe("dom");
+    for (const [id, def] of Object.entries(DEFAULT_RESOURCE_TYPES)) {
+      if (id === "website" || id === "web_application") continue;
+      expect(def.connect?.web_exposure_max, id).toBeUndefined();
+    }
+    // A saved type still wins as saved: no cap is added to one saved before.
+    const { connect: _c, ...rest } = DEFAULT_RESOURCE_TYPES.web_application;
+    const legacy: ResourceTypeDef = { ...rest, connect: { protocols: ["web"] } };
+    const { types } = parseTypeConfig({ ...DEFAULT_RESOURCE_TYPES, web_application: legacy });
+    expect(types.web_application.connect?.web_exposure_max).toBeUndefined();
+  });
+
   it("the enabled toggle wins over the protocol list", () => {
     const t: ResourceTypeDef = {
       ...DEFAULT_RESOURCE_TYPES.web_application,

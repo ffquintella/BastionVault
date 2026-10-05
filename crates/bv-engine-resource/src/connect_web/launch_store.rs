@@ -4,7 +4,7 @@
 //! ## Storage layout (barrier root, the connect-MFA ticket pattern)
 //!
 //! ```text
-//! connect/web-launches/<hex(sha256(launch_id))> -> WebLaunchRecord (JSON, `v: 1`)
+//! connect/web-launches/<hex(sha256(launch_id))> -> WebLaunchRecord (JSON, `v: 2`)
 //! ```
 //!
 //! Only the SHA-256 of a `launch_id` is persisted, so a dump of the barrier
@@ -23,18 +23,35 @@
 //!   [`CLOSED_RETENTION_SECS`] (so a repeated `close` still answers
 //!   idempotently) and never-closed records after
 //!   [`UNCLOSED_RETENTION_SECS`]. A never-closed LDAP check-out is then left to
-//!   the LDAP engine's own lease expiry, and the reap is logged.
+//!   the LDAP engine's own lease expiry, and the reap is logged. Reaping
+//!   runs from `launch`, at most once per [`TIDY_INTERVAL_MS`] per process
+//!   ([`TidyThrottle`]), after the launch is persisted, and never fails it.
+//!
+//! ## Concurrency — per process only
+//!
+//! [`LaunchGuard`] serialises follow-up calls on one launch **inside one
+//! server process**. On a multi-node deployment where two nodes serve requests
+//! against shared storage, two concurrent calls for the same launch on
+//! different nodes are not excluded: both could refresh the same TOTP step,
+//! and both could attempt the LDAP check-in (the LDAP engine's own per-set
+//! lock and record delete make the second check-in fail rather than double
+//! up). Storage offers no compare-and-swap to close this; standby nodes
+//! forwarding to the active node is what keeps it a single process today.
 //!
 //! ## Versioning
 //!
 //! `v` is read before anything else. A record of a version this server does
 //! not know is refused (and never reaped), so a rolled-back server cannot
-//! misread — or delete — a newer server's state.
+//! misread — or delete — a newer server's state. `v: 1` (no `fill_scope`) is
+//! still read; every record is written as [`LAUNCH_RECORD_VERSION`].
 
 use std::{
     collections::HashSet,
     fmt,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc, Mutex, OnceLock,
+    },
 };
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -51,7 +68,9 @@ use crate::{
 };
 
 pub const LAUNCH_PREFIX: &str = "connect/web-launches/";
-pub const LAUNCH_RECORD_VERSION: u64 = 1;
+pub const LAUNCH_RECORD_VERSION: u64 = 2;
+/// Oldest record version still read.
+pub const MIN_READABLE_RECORD_VERSION: u64 = 1;
 /// How long after `launch` TOTP refreshes are issued (spec: "valid for 60 s").
 pub const LOGIN_WINDOW_SECS: i64 = 60;
 /// How long a closed record is kept so a repeated `close` stays idempotent.
@@ -60,6 +79,8 @@ pub const CLOSED_RETENTION_SECS: i64 = 15 * 60;
 pub const UNCLOSED_RETENTION_SECS: i64 = 24 * 3600;
 /// Longest accepted `aborted:<check>` check name.
 pub const MAX_CHECK_NAME_LEN: usize = 32;
+/// Minimum spacing between two reaping passes in one process.
+pub const TIDY_INTERVAL_MS: i64 = 60_000;
 
 /// Who a launch belongs to. Every follow-up call must come from the same
 /// principal (auth mount + name) in the same namespace.
@@ -97,6 +118,20 @@ pub struct LdapCheckout {
     pub checked_in: bool,
 }
 
+/// Where the host may fill the credential: the profile's normalised origin set
+/// and start URL as checked at launch. Bound to the launch and returned in the
+/// bundle as the authoritative fill scope — the recipe hash does not cover
+/// these profile fields, and in heuristic mode they are the only constraint on
+/// where a fill happens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FillScope {
+    pub start_url: String,
+    /// Exact `scheme://host[:port]` keys, the start URL's origin first.
+    pub origins: Vec<String>,
+    pub allow_insecure_http: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchOutcome {
@@ -124,6 +159,9 @@ pub struct WebLaunchRecord {
     pub ldap: Option<LdapCheckout>,
     pub result: Option<LaunchOutcome>,
     pub closed_at_ms: Option<i64>,
+    /// Absent on `v: 1` records only.
+    #[serde(default)]
+    pub fill_scope: Option<FillScope>,
 }
 
 /// Why a follow-up call on a launch was refused. Every variant is a refusal.
@@ -241,7 +279,7 @@ pub fn validate_outcome(raw: &str) -> Result<String, LaunchError> {
 fn decode_record(bytes: &[u8]) -> Result<WebLaunchRecord, LaunchError> {
     let value: Value = serde_json::from_slice(bytes).map_err(|e| LaunchError::Storage(e.into()))?;
     let v = value.get("v").and_then(Value::as_u64).unwrap_or(0);
-    if v != LAUNCH_RECORD_VERSION {
+    if !(MIN_READABLE_RECORD_VERSION..=LAUNCH_RECORD_VERSION).contains(&v) {
         return Err(LaunchError::UnsupportedVersion(v));
     }
     serde_json::from_value(value).map_err(|e| LaunchError::Storage(e.into()))
@@ -305,6 +343,38 @@ impl WebLaunchRecord {
     }
 }
 
+// ── Reaping throttle ───────────────────────────────────────────────
+
+/// At most one reaping pass per [`TIDY_INTERVAL_MS`]: a launch claims the slot
+/// with one compare-and-swap, so concurrent launches never both scan.
+pub struct TidyThrottle {
+    last_ms: AtomicI64,
+}
+
+impl Default for TidyThrottle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TidyThrottle {
+    pub const fn new() -> Self {
+        Self { last_ms: AtomicI64::new(i64::MIN) }
+    }
+
+    /// `true` when this caller should run a pass now.
+    pub fn claim(&self, now_ms: i64) -> bool {
+        let last = self.last_ms.load(Ordering::Acquire);
+        if last != i64::MIN && now_ms.saturating_sub(last) < TIDY_INTERVAL_MS {
+            return false;
+        }
+        self.last_ms.compare_exchange(last, now_ms, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+}
+
+/// The process-wide throttle `launch` uses.
+pub static TIDY_THROTTLE: TidyThrottle = TidyThrottle::new();
+
 // ── Per-launch mutual exclusion ────────────────────────────────────
 
 fn in_flight() -> &'static Mutex<HashSet<String>> {
@@ -312,7 +382,8 @@ fn in_flight() -> &'static Mutex<HashSet<String>> {
     IN_FLIGHT.get_or_init(Default::default)
 }
 
-/// Serialises the follow-up calls on one launch inside this process, so a
+/// Serialises the follow-up calls on one launch inside this process (see the
+/// module docs for the multi-node limitation), so a
 /// TOTP step cannot be refreshed twice and an LDAP account cannot be checked
 /// in twice by racing requests. A concurrent call is refused with
 /// [`LaunchError::Busy`] rather than queued. Only the key's presence in the set
@@ -621,6 +692,11 @@ mod tests {
             ldap: None,
             result: None,
             closed_at_ms: None,
+            fill_scope: Some(FillScope {
+                start_url: "https://fw01.example.com/login".into(),
+                origins: vec!["https://fw01.example.com".into()],
+                allow_insecure_http: false,
+            }),
         }
     }
 
@@ -658,11 +734,19 @@ mod tests {
     async fn unknown_record_versions_are_refused_and_left_alone() {
         let (store, mem) = store();
         let id = store.create(&record()).await.unwrap();
+        // A v1 record — written before `fill_scope` existed — still reads.
+        let mut v1: Value = serde_json::to_value(record()).unwrap();
+        v1["v"] = Value::from(1);
+        v1.as_object_mut().unwrap().remove("fill_scope");
+        mem.0.lock().unwrap().insert(launch_key(&id), serde_json::to_vec(&v1).unwrap());
+        let (_, old) = store.load(&id, &alice()).await.unwrap();
+        assert_eq!((old.v, old.fill_scope), (1, None));
+
         let mut v: Value = serde_json::to_value(record()).unwrap();
-        v["v"] = Value::from(2);
+        v["v"] = Value::from(3);
         v["future_field"] = Value::from(true);
         mem.0.lock().unwrap().insert(launch_key(&id), serde_json::to_vec(&v).unwrap());
-        assert!(matches!(store.load(&id, &alice()).await, Err(LaunchError::UnsupportedVersion(2))));
+        assert!(matches!(store.load(&id, &alice()).await, Err(LaunchError::UnsupportedVersion(3))));
         // Never reaped, however old.
         assert!(store.tidy(T0 + 365 * 86_400_000).await.unwrap().is_empty());
 
@@ -773,6 +857,16 @@ mod tests {
         let r = store.close(&id, &alice(), T0 + 3000, &checkin).await.unwrap();
         assert_eq!(r.ldap_checkin, CheckInState::Done);
         assert_eq!(checkin.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn tidy_runs_at_most_once_per_interval() {
+        let t = TidyThrottle::new();
+        assert!(t.claim(T0), "the first launch tidies");
+        assert!(!t.claim(T0 + 1), "a launch right after does not");
+        assert!(!t.claim(T0 + TIDY_INTERVAL_MS - 1));
+        assert!(t.claim(T0 + TIDY_INTERVAL_MS), "the interval elapsed");
+        assert!(!t.claim(T0 + TIDY_INTERVAL_MS));
     }
 
     #[test]

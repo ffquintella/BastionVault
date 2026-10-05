@@ -10,7 +10,7 @@ use serde_json::{json, Map, Value};
 use crate::errors::RvError;
 use crate::kernel_api::VaultCtx;
 use crate::logical::{Operation, Request};
-use crate::modules::resource::connect_mfa::{ConnectMfaTicketStore, TicketBinding};
+use crate::modules::resource::connect_mfa::{ticket_key, ConnectMfaTicketStore, TicketBinding};
 use crate::modules::resource::connect_web::{
     launch_store::{
         launch_key, CallerIdentity, LdapCheckout, WebLaunchRecord, WebLaunchStore, LAUNCH_PREFIX, LAUNCH_RECORD_VERSION,
@@ -127,9 +127,27 @@ fn secret_source() -> Value {
     json!({ "kind": "secret", "secret_id": "admin" })
 }
 
+/// Save the type configuration with `web_application` opted in to `dom`, the
+/// way the GUI's built-in default now saves it.
+async fn opt_in_web_application(core: &dyn VaultCtx, root: &str) {
+    root_write(
+        core,
+        root,
+        "resources/config/types",
+        json!({ "web_application": { "id": "web_application", "fields": [], "connect": { "web_exposure_max": "dom" } } }),
+    )
+    .await;
+}
+
 /// `fw01`, a `web_application` with the given profiles and extra metadata,
-/// plus its admin secret.
+/// plus its admin secret, with the type opted in.
 async fn seed_fw01(core: &dyn VaultCtx, root: &str, profiles: Vec<Value>, extra: Value) {
+    opt_in_web_application(core, root).await;
+    seed_fw01_only(core, root, profiles, extra).await;
+}
+
+/// As [`seed_fw01`], leaving the type configuration untouched.
+async fn seed_fw01_only(core: &dyn VaultCtx, root: &str, profiles: Vec<Value>, extra: Value) {
     let mut meta = json!({ "name": "fw01", "type": "web_application", "connection_profiles": profiles });
     for (k, v) in extra.as_object().cloned().unwrap_or_default() {
         meta[k] = v;
@@ -201,11 +219,18 @@ async fn form_launch_is_connect_only_and_its_lifecycle_is_single_use() {
     assert_eq!(bundle["recipe_hash"], json!(recipe_hash(&r).unwrap()));
     assert_eq!(bundle["totp_refresh_steps"], json!([1]));
     assert_eq!(bundle["mfa_method"], Value::Null);
+    assert_eq!(
+        bundle["fill_scope"],
+        json!({ "start_url": "https://fw01.example.com/login", "origins": ["https://fw01.example.com"], "allow_insecure_http": false })
+    );
     let launch_id = bundle["launch_id"].as_str().unwrap().to_string();
 
     // The record is keyed by hash and holds no credential.
     let stored = launch_records_text(&core).await;
     assert!(stored.contains("\"recipe_hash\""));
+    assert!(stored.contains(
+        r#""fill_scope":{"start_url":"https://fw01.example.com/login","origins":["https://fw01.example.com"]"#
+    ));
     for secret in [APP_PASSWORD, APP_SEED, launch_id.as_str()] {
         assert!(!stored.contains(secret), "the launch record must not hold `{secret}`");
     }
@@ -294,47 +319,176 @@ async fn launch_refuses_profiles_and_callers_it_cannot_serve() {
     refused(call(&core, &root, LAUNCH, launch_body("p_web", &r)).await, 422, "totp_not_configured");
 }
 
+/// The ticket is still in the store, i.e. the refused launch did not burn it.
+async fn ticket_unspent(core: &dyn VaultCtx, ticket: &str) -> bool {
+    BarrierView::new(core.barrier().clone(), "").get(&ticket_key(ticket)).await.unwrap().is_some()
+}
+
+/// Launch `profile_id` (gated) as alice with a fresh ticket and assert the
+/// refusal, and that the ticket survived it.
+async fn refused_keeping_ticket(
+    core: &dyn VaultCtx,
+    alice: &str,
+    profile_id: &str,
+    recipe: &Value,
+    status: u16,
+    code: &str,
+) {
+    let ticket = alice_ticket(core, profile_id).await;
+    let mut body = launch_body(profile_id, recipe);
+    body["connect_ticket"] = json!(ticket);
+    refused(call(core, alice, LAUNCH, body).await, status, code);
+    assert!(ticket_unspent(core, &ticket).await, "`{code}` must refuse before the ticket is burnt");
+}
+
+fn types(def: Value) -> Value {
+    json!({ "web_application": def })
+}
+
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-async fn exposure_and_heuristic_policy_are_enforced_at_both_tiers() {
+async fn form_mode_is_denied_unless_the_resource_type_opts_in() {
     let (_bvault, core, root) = new_unseal_test_bastion_vault("test_web_connect_exposure").await;
     let r = recipe(false);
-    let auto = json!({ "version": 1, "steps": "auto", "success_when": { "selector": "#dashboard" } });
-    let profiles = || {
-        vec![
-            web_profile("p_web", recipe(false), secret_source()),
-            web_profile(
-                "p_auto",
-                json!({ "version": 1, "steps": "auto", "success_when": { "selector": "#dashboard" } }),
-                secret_source(),
-            ),
-        ]
-    };
+    let mut gated = web_profile("p_gated", r.clone(), secret_source());
+    gated["require_mfa"] = json!(true);
+    let profiles = || vec![gated.clone()];
+    let alice = userpass_user(&core, &root, "alice", CONNECT_ONLY).await;
 
-    // No tier set: form is allowed, heuristics are not.
-    seed_fw01(&core, &root, profiles(), json!({})).await;
-    assert!(call(&core, &root, LAUNCH, launch_body("p_web", &r)).await.is_ok());
-    refused(call(&core, &root, LAUNCH, launch_body("p_auto", &auto)).await, 403, "heuristic_not_allowed");
+    // Type configuration never saved: denied.
+    seed_fw01_only(&core, &root, profiles(), json!({})).await;
+    refused_keeping_ticket(&core, &alice, "p_gated", &r, 403, "exposure_not_permitted").await;
 
-    // Type tier caps below `dom`.
-    root_write(&core, &root, "resources/config/types", json!({ "web_application": { "id": "web_application", "fields": [], "connect": { "web_exposure_max": "handler" } } })).await;
-    refused(call(&core, &root, LAUNCH, launch_body("p_web", &r)).await, 403, "exposure_cap_exceeded");
+    // Saved, but without the resource's type (an unknown type): denied.
+    root_write(&core, &root, "resources/config/types", json!({ "server": { "id": "server", "fields": [] } })).await;
+    refused_keeping_ticket(&core, &alice, "p_gated", &r, 403, "exposure_not_permitted").await;
 
-    // Type tier allows `dom`; the resource tier caps at `isolated` — the stricter wins.
-    root_write(&core, &root, "resources/config/types", json!({ "web_application": { "id": "web_application", "fields": [], "connect": { "web_exposure_max": "dom" } } })).await;
-    seed_fw01(&core, &root, profiles(), json!({ "web_exposure_max": "isolated" })).await;
-    refused(call(&core, &root, LAUNCH, launch_body("p_web", &r)).await, 403, "exposure_cap_exceeded");
+    // A `server` resource carrying a form profile: its type never opted in.
+    root_write(
+        &core,
+        &root,
+        "resources/config/types",
+        json!({ "server": { "id": "server", "fields": [], "connect": { "enabled": true } } }),
+    )
+    .await;
+    seed_fw01_only(&core, &root, profiles(), json!({ "type": "server" })).await;
+    refused_keeping_ticket(&core, &alice, "p_gated", &r, 403, "exposure_not_permitted").await;
+
+    // The type is saved but sets no cap: denied.
+    seed_fw01_only(&core, &root, profiles(), json!({})).await;
+    root_write(
+        &core,
+        &root,
+        "resources/config/types",
+        types(json!({ "id": "web_application", "fields": [], "connect": { "enabled": true } })),
+    )
+    .await;
+    refused_keeping_ticket(&core, &alice, "p_gated", &r, 403, "exposure_not_permitted").await;
+
+    // The resource tier alone cannot opt in.
+    seed_fw01_only(&core, &root, profiles(), json!({ "web_exposure_max": "dom" })).await;
+    refused_keeping_ticket(&core, &alice, "p_gated", &r, 403, "exposure_not_permitted").await;
+
+    // A type cap below `dom`.
+    root_write(&core, &root, "resources/config/types", types(json!({ "connect": { "web_exposure_max": "handler" } })))
+        .await;
+    refused_keeping_ticket(&core, &alice, "p_gated", &r, 403, "exposure_cap_exceeded").await;
+
+    // Type `dom`, resource `none`: the stricter wins.
+    opt_in_web_application(&core, &root).await;
+    seed_fw01_only(&core, &root, profiles(), json!({ "web_exposure_max": "none" })).await;
+    refused_keeping_ticket(&core, &alice, "p_gated", &r, 403, "exposure_cap_exceeded").await;
 
     // An unrecognised cap fails closed instead of reading as unset.
-    seed_fw01(&core, &root, profiles(), json!({ "web_exposure_max": "everything" })).await;
-    refused(call(&core, &root, LAUNCH, launch_body("p_web", &r)).await, 422, "exposure_policy_invalid");
+    seed_fw01_only(&core, &root, profiles(), json!({ "web_exposure_max": "everything" })).await;
+    refused_keeping_ticket(&core, &alice, "p_gated", &r, 422, "exposure_policy_invalid").await;
 
-    // Heuristic fill enabled on the resource …
+    // An unreadable type configuration refuses — it is not "no cap".
+    seed_fw01_only(&core, &root, profiles(), json!({})).await;
+    let mount_view = core.router().matching_view("resources/").unwrap().unwrap();
+    mount_view.put(&StorageEntry { key: "config/types".into(), value: b"{ not json".to_vec() }).await.unwrap();
+    refused_keeping_ticket(&core, &alice, "p_gated", &r, 422, "exposure_policy_invalid").await;
+
+    // Type `dom`: allowed.
+    opt_in_web_application(&core, &root).await;
+    let ticket = alice_ticket(&core, "p_gated").await;
+    let mut body = launch_body("p_gated", &r);
+    body["connect_ticket"] = json!(ticket);
+    let bundle = call(&core, &alice, LAUNCH, body).await.unwrap();
+    assert_eq!((bundle["exposure_cap"].as_str(), bundle["mfa_method"].as_str()), (Some("dom"), Some("totp")));
+}
+
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn heuristic_fill_needs_an_enabling_tier_and_no_forbidding_one() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("test_web_connect_heuristic").await;
+    let auto = json!({ "version": 1, "steps": "auto", "success_when": { "selector": "#dashboard" } });
+    let profiles = || vec![web_profile("p_auto", auto.clone(), secret_source())];
+
+    seed_fw01(&core, &root, profiles(), json!({})).await;
+    refused(call(&core, &root, LAUNCH, launch_body("p_auto", &auto)).await, 403, "heuristic_not_allowed");
+
     seed_fw01(&core, &root, profiles(), json!({ "allow_heuristic_fill": true })).await;
     let b = call(&core, &root, LAUNCH, launch_body("p_auto", &auto)).await.unwrap();
     assert_eq!(b["heuristic"], json!(true));
-    // … but an explicit `false` on the type beats it.
-    root_write(&core, &root, "resources/config/types", json!({ "web_application": { "id": "web_application", "fields": [], "connect": { "allow_heuristic_fill": false } } })).await;
+
+    // An explicit `false` on the type beats the resource's `true`.
+    root_write(
+        &core,
+        &root,
+        "resources/config/types",
+        types(json!({ "connect": { "web_exposure_max": "dom", "allow_heuristic_fill": false } })),
+    )
+    .await;
     refused(call(&core, &root, LAUNCH, launch_body("p_auto", &auto)).await, 403, "heuristic_not_allowed");
+}
+
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn credential_pre_checks_refuse_before_the_ticket_is_burnt() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("test_web_connect_prechecks").await;
+    let r = recipe(false);
+    let with_totp = recipe(true);
+    let username_only = json!({
+        "version": 1,
+        "steps": [ { "when_url": "https://fw01.example.com/login*",
+                     "actions": [ { "fill": "#user", "value": "username" } ] } ],
+        "success_when": { "selector": "#dashboard" }
+    });
+    let gated = |id: &str, recipe: &Value, source: Value| {
+        let mut p = web_profile(id, recipe.clone(), source);
+        p["require_mfa"] = json!(true);
+        p
+    };
+    seed_fw01(
+        &core,
+        &root,
+        vec![
+            gated("p_missing", &r, json!({ "kind": "secret", "secret_id": "later" })),
+            gated("p_noseed", &with_totp, json!({ "kind": "secret", "secret_id": "noseed" })),
+            gated("p_ldap", &r, json!({ "kind": "ldap", "ldap_mount": "openldap", "bind_mode": "static_role", "static_role": "web-admin" })),
+            gated("p_notldap", &r, json!({ "kind": "ldap", "ldap_mount": "notldap", "bind_mode": "library_set", "library_set": "web-admins" })),
+            gated("p_da", &username_only, json!({ "kind": "default-account" })),
+        ],
+        json!({}),
+    )
+    .await;
+    root_write(&core, &root, "resources/secrets/fw01/noseed", json!({ "username": "admin", "password": APP_PASSWORD }))
+        .await;
+    root_write(&core, &root, "sys/mounts/notldap", json!({ "type": "kv-v2" })).await;
+    let alice = userpass_user(&core, &root, "alice", CONNECT_ONLY).await;
+
+    refused_keeping_ticket(&core, &alice, "p_missing", &r, 404, "credential_unavailable").await;
+    refused_keeping_ticket(&core, &alice, "p_noseed", &with_totp, 422, "totp_not_configured").await;
+    refused_keeping_ticket(&core, &alice, "p_ldap", &r, 422, "credential_unavailable").await;
+    refused_keeping_ticket(&core, &alice, "p_notldap", &r, 422, "credential_unavailable").await;
+    refused_keeping_ticket(&core, &alice, "p_da", &username_only, 422, "credential_unavailable").await;
+
+    // Fix the cause and the same unspent ticket redeems.
+    let ticket = alice_ticket(&core, "p_missing").await;
+    let mut body = launch_body("p_missing", &r);
+    body["connect_ticket"] = json!(ticket);
+    refused(call(&core, &alice, LAUNCH, body.clone()).await, 404, "credential_unavailable");
+    root_write(&core, &root, "resources/secrets/fw01/later", json!({ "username": "admin", "password": APP_PASSWORD }))
+        .await;
+    assert_eq!(call(&core, &alice, LAUNCH, body).await.unwrap()["credential"]["password"], json!(APP_PASSWORD));
 }
 
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
@@ -483,6 +637,7 @@ async fn close_reports_a_failed_ldap_checkin_and_retries_it() {
         }),
         result: None,
         closed_at_ms: None,
+        fill_scope: None,
     };
     let store = WebLaunchStore::new(&*core);
     let launch_id = store.create(&record).await.unwrap();
@@ -576,8 +731,31 @@ async fn no_rustion_mount_means_no_transport_policy() {
     unmount.client_token = root.clone();
     core.handle_request(&mut unmount).await.unwrap();
 
-    // Pinned: with no `rustion/` mount no Rustion policy can exist, so the
-    // launch is not refused for transport.
+    // Pinned: with no `rustion/` mount *and* no Rustion policy record in the
+    // system view, no restriction can exist, so the launch is not refused for
+    // transport. (With a record present it is — see the test above.)
     let bundle = call(&core, &root, LAUNCH, launch_body("p_web", &r)).await.unwrap();
     assert_eq!(bundle["credential"]["password"], json!(APP_PASSWORD));
+}
+
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_stored_rustion_policy_still_applies_when_the_mount_is_unavailable() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("test_web_connect_rustion_unavailable").await;
+    let r = recipe(false);
+    seed_fw01(&core, &root, vec![web_profile("p_web", r.clone(), secret_source())], json!({})).await;
+    root_write(&core, &root, "rustion/policy/resource/fw01", json!({ "transport": "rustion-required" })).await;
+
+    // Tainted mid-unmount / remount: the router reports the mount missing.
+    core.router().taint("rustion/").unwrap();
+    refused(call(&core, &root, LAUNCH, launch_body("p_web", &r)).await, 503, "transport_policy_unavailable");
+    core.router().untaint("rustion/").unwrap();
+    refused(call(&core, &root, LAUNCH, launch_body("p_web", &r)).await, 403, "transport_policy");
+
+    // Unmounted: the tiers live in the system view and survive it.
+    let mut unmount = Request::new("sys/mounts/rustion");
+    unmount.operation = Operation::Delete;
+    unmount.client_token = root.clone();
+    core.handle_request(&mut unmount).await.unwrap();
+    refused(call(&core, &root, LAUNCH, launch_body("p_web", &r)).await, 503, "transport_policy_unavailable");
+    assert!(launch_records_text(&core).await.is_empty());
 }

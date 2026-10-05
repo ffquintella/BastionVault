@@ -719,6 +719,9 @@ Response:
   "resource": "fw01", "profile_id": "p_web",
   "login_mode": "form", "exposure": "dom", "exposure_cap": "dom",
   "recipe_hash": "sha256:9f2c…", "heuristic": false,
+  "fill_scope": { "start_url": "https://fw01.example.com/login",
+                  "origins": ["https://fw01.example.com"],
+                  "allow_insecure_http": false },
   "credential_source": "secret",
   "credential": { "username": "admin", "password": "…",
                   "totp": "123456", "totp_valid_until": "2026-10-05T12:00:30Z" },
@@ -733,11 +736,25 @@ Response:
   the host holds it in `Zeroizing` buffers and drops it after
   success / failure / timeout. The TOTP seed never leaves the server. The
   audit pipeline records the response HMAC-redacted.
+- `fill_scope` is the **authoritative fill scope**, bound to the launch:
+  the profile's start URL and its normalised origin set (`scheme://host[:port]`,
+  start origin first) as the server checked them. `recipe_hash` does not
+  cover these profile fields, and in heuristic mode they are the only
+  constraint on where a fill happens, so the host **must** start at
+  `fill_scope.start_url` and fill **only** on a top-frame origin in
+  `fill_scope.origins` (`http` only when `allow_insecure_http`) — never on
+  origins from its own copy of the profile.
 - `launch_id` is single-use per operation, stored server-side as its
-  SHA-256 only, and bound to (auth mount + principal, namespace, resource,
-  profile, `recipe_hash`). `expires_at` ends the **login window**
-  (60 s): TOTP refreshes are issued only inside it. `result` and `close`
-  are accepted until the session closes.
+  SHA-256 only, and bound to (principal, namespace, resource, profile,
+  `recipe_hash`, `fill_scope`). The principal is the first of: `username`
+  on a known auth mount; `entity:<entity_id>`; `token:<sha256 of the client
+  token>` (this token store has no accessor); `name:<display_name>` on a
+  known auth mount. A display name with no mount never binds.
+  `expires_at` ends the **login window** (60 s): TOTP refreshes are issued
+  only inside it. `result` and `close` are accepted until the session
+  closes. Follow-up calls on one launch are serialised per server process;
+  on a multi-node deployment serving requests from more than one node,
+  concurrent calls on different nodes are not excluded.
 - Credential sources: `secret` (keys `username`, `password`, optional
   `totp_seed` — base32 — remappable with
   `credential_source.fields = {username?, password?, totp_seed?}`; TOTP
@@ -747,12 +764,22 @@ Response:
   `ldap` (`bind_mode` `static_role` or `library_set`) and `default-account`
   (username only, chosen by the resource's `os_type` like SSH) are resolved
   **as the caller**, through the caller's own grants on those paths.
-- Exposure policy: `web_exposure_max` (`none < isolated < handler < proxy <
-  dom`) and `allow_heuristic_fill` on the resource type
+- Exposure policy — **deny unless opted in**: `web_exposure_max` (`none <
+  isolated < handler < proxy < dom`) on the resource type
   (`config/types[<type>].connect`) and on the resource record (top-level
-  keys). The stricter tier wins; an explicit `allow_heuristic_fill: false`
-  at either tier beats `true` at the other; unset everywhere means "no cap,
-  no heuristics". Form mode needs `dom`.
+  key). The resource's `type` must name a type in the **saved**
+  `config/types` that sets `web_exposure_max`; form mode needs `dom`. An
+  unset cap, a type missing from the saved configuration, or a
+  configuration never saved leaves the cap at `none` and refuses with
+  `exposure_not_permitted`. The resource tier can only lower the type's cap
+  (`exposure_cap_exceeded`), never opt in by itself. An unreadable or
+  unparseable `config/types`, or a value outside the enum, refuses with
+  `exposure_policy_invalid`. `allow_heuristic_fill` on the same two tiers:
+  an explicit `false` at either beats `true` at the other, and unset at both
+  means no heuristics. The GUI's built-in `web_application` and `website`
+  types carry `web_exposure_max: "dom"`, so a type configuration saved by a
+  current GUI opts them in; a configuration saved earlier keeps its types as
+  saved and is denied until an administrator sets the cap.
 - Rustion transport policy: the resource's effective policy (Rustion's own
   resolver over the global, type, asset-group and resource tiers — the
   `rustion/policy/effective` verdict) is checked before the MFA ticket is
@@ -760,14 +787,28 @@ Response:
   policy lock violation, refuses with `transport_policy` (403): a form
   launch is always local, and there is no brokered web transport yet.
   `direct` and `rustion-preferred` are allowed; a resource with no policy at
-  any tier resolves to `direct`. With no `rustion/` mount at all, no policy
-  applies. A policy that cannot be resolved (unreadable store, undecodable
-  tier record, asset-group lookup failure, unknown verdict) refuses with
-  `transport_policy_unavailable` (503) — never "allowed".
+  any tier resolves to `direct`. Rustion keeps its tiers in the system view,
+  not in the mount, and they survive an unmount, so when the `rustion/`
+  mount is unavailable (unmounted, or tainted mid-unmount or remount) the
+  launch is allowed only if no Rustion policy record exists at all. A
+  policy that cannot be resolved (records present without the mount,
+  unreadable store, undecodable tier record, asset-group lookup failure,
+  unknown verdict) refuses with `transport_policy_unavailable` (503) —
+  never "allowed".
+- Order, and what costs the MFA ticket. Every check above runs before the
+  ticket is redeemed, and so do the credential pre-checks: a `secret`
+  source is read and checked (the secret exists, carries what the recipe
+  fills, and a decodable `totp_seed` when the recipe fills `totp`), a
+  `default-account` is resolved, and an `ldap` source's mount must exist,
+  be untainted and be an LDAP engine. Nothing is released before the
+  ticket. What still fails after it, and so spends it: the LDAP
+  static-credential read or library check-out (permission, an exhausted
+  library, the directory), and persisting the launch. A check-out that
+  returns an account but no password or lease is checked straight back in.
 - Refusal codes: `wrong_protocol`, `wrong_login_mode`,
   `transport_unavailable`, `invalid_profile`, `invalid_recipe`,
   `credential_source_unsupported`, `recipe_hash_required`,
-  `recipe_hash_mismatch`, `exposure_cap_exceeded`,
+  `recipe_hash_mismatch`, `exposure_not_permitted`, `exposure_cap_exceeded`,
   `exposure_policy_invalid`, `heuristic_not_allowed`,
   `insecure_http_not_allowed`, `transport_policy`,
   `transport_policy_unavailable`, `mfa_required` (plus the ticket store's
@@ -804,9 +845,11 @@ again retries the check-in.
 
 Audit (`target: "audit"`): `connect.web.launch`, `connect.web.totp`,
 `connect.web.result`, `connect.web.close`, `connect.web.refused`
-(`op`, `reason`), `connect.web.reaped`. They carry names, enum values and
-`launch_id_hash` (hex SHA-256 of the `launch_id`) — never a credential, a
-TOTP code, a raw `launch_id` or a URL.
+(`op`, `reason`), `connect.web.reaped`, `connect.web.launch_rollback`. They
+carry names, enum values, origins (`fill_origins`) and `launch_id_hash` (hex
+SHA-256 of the `launch_id`) — never a credential, a TOTP code, a raw
+`launch_id`, a full token hash, or a URL path or query. Expired records are
+reaped from `launch`, at most once a minute per server process.
 
 ### Session Recordings + Keystroke Transcripts
 

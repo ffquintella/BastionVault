@@ -138,10 +138,19 @@ it yet: the host still refuses `form` at connect.
   check — protocol `web`, `login_mode: form`, transport `local`, a strictly
   parsed v1 recipe whose URLs sit on the profile's origin set, a credential
   source that can supply what the recipe fills — then the host's
-  `recipe_hash`, then the §6 policy, then the Rustion transport tier, and
-  only then burns the MFA ticket (the redeem step is shared with
-  `connect/authorize`). It resolves the credential, persists the launch and
-  returns the bundle.
+  `recipe_hash`, then the §6 policy, then the Rustion transport tier, then
+  the credential pre-checks, and only then burns the MFA ticket (the redeem
+  step is shared with `connect/authorize`). It releases the credential,
+  persists the launch and returns the bundle.
+  - *Pre-checks before the ticket:* a `secret` source is read and checked
+    (exists, carries what the recipe fills, a decodable `totp_seed` when the
+    recipe fills `totp`); a `default-account` is resolved; an `ldap`
+    source's mount must exist, be untainted and be an LDAP engine. Nothing
+    is released before the ticket.
+  - *What still spends the ticket:* the LDAP static-credential read or
+    library check-out (it rotates a password, so it cannot run first), and
+    persisting the launch. An incomplete check-out (an account but no
+    password or lease) is checked straight back in.
 - **Rustion transport tier, enforced server-side.** The host's
   `web_transport_refusal` is now also the server's rule: `rustion-required`
   or a policy lock violation refuses with `transport_policy`, before the
@@ -157,15 +166,28 @@ it yet: the host still refuses `form` at connect.
     along for the resolver's own resource gate. Asset-group hints come from
     the kernel `ResourceGroupIndex`, with errors propagated rather than
     read as "no groups".
-  - *Unmounted / errors:* no `rustion/` mount (`ErrRouterMountNotFound`)
-    means no policy, since the tiers live in that mount's store. This
-    differs from the host, which fails closed on that error too. Any other
-    failure (store not initialised, an undecodable tier record, an index
-    error, an unknown verdict) refuses with `transport_policy_unavailable`.
+  - *Mount unavailable / errors:* Rustion's `PolicyStore` keeps every tier
+    in the **system view** under `rustion/policy/` (`global`, `type/`,
+    `asset-group/`, `resource/`), not in the mount, and those records
+    survive an unmount; the router also reports a mount tainted mid-unmount
+    or mid-remount as not found. So `ErrRouterMountNotFound` is allowed only
+    when listing that prefix proves no record exists at all. Records
+    present, a sealed vault or a list error refuse with
+    `transport_policy_unavailable`, as does any other failure (store not
+    initialised, an undecodable tier record, an index error, an unknown
+    verdict). The resource engine names Rustion's storage prefix only for
+    this proof of absence.
 - **Credential delivery.** Plaintext fields in the `launch` response body,
   as §3 draws it, minimised to what the recipe fills (`username`,
   `password`, the current `totp` + `totp_valid_until`). The seed never
   leaves; a `default-account`'s stored Windows password is never released.
+- **Fill scope.** The bundle's `fill_scope` (`start_url`, the normalised
+  origin set with the start origin first, `allow_insecure_http`) is the
+  scope the server checked, and it is recorded on the launch. `recipe_hash`
+  covers only `web.recipe`, and in heuristic mode the origin set is the only
+  constraint on where a fill happens, so the host must start at
+  `fill_scope.start_url` and fill only on `fill_scope.origins` — never on its
+  own copy of the profile.
   - *Decision:* no extra envelope. The host is the TLS endpoint that would
     unwrap it, so sealing to a host key would add a new construction without
     protecting against anything the host can't already see; the audit
@@ -197,25 +219,50 @@ it yet: the host still refuses `form` at connect.
     mode: step `0`), inside the 60 s login window, and re-checks the
     `connect` grant.
 - **`launch_id`.** 32 random bytes, base64url. Stored at the barrier root
-  as `connect/web-launches/<hex sha256>`, as a versioned (`v: 1`) record
-  with no credential in it. Bound to (auth mount + principal, namespace,
-  resource, profile, recipe hash). Any authenticated principal can be
-  bound, not only userpass: the name falls back to the entity id. The
-  login window is 60 s; `result` (once; a repeat is idempotent, a different
-  outcome conflicts) and `close` (idempotent) work until close. Closed
-  records are reaped after 15 min and never-closed ones after 24 h. A record
-  of an unknown version is refused and never reaped. Concurrent calls on
-  one launch are refused (`launch_busy`), never raced.
+  as `connect/web-launches/<hex sha256>`, as a versioned record with no
+  credential in it: written as `v: 2` (which adds `fill_scope`), `v: 1`
+  still read. Bound to (principal, namespace, resource, profile, recipe
+  hash, fill scope). The principal is the first of: `username` on a known
+  auth mount (the MFA ticket's binding); `entity:<entity_id>`;
+  `token:<sha256 of the client token>` — this token store has no accessor,
+  so a root token, which has no entity, binds to itself; `name:<display
+  name>` on a known auth mount. A display name with no mount never binds.
+  The login window is 60 s; `result` (once; a repeat is idempotent, a
+  different outcome conflicts) and `close` (idempotent) work until close.
+  Closed records are reaped after 15 min and never-closed ones after 24 h,
+  by a pass `launch` runs at most once a minute per process, after the
+  launch is persisted. A record of an unknown version is refused and never
+  reaped.
+- **Concurrency is per process.** Concurrent calls on one launch are
+  refused (`launch_busy`), never raced — within one server process. On a
+  multi-node deployment where more than one node serves requests against
+  shared storage, two nodes could both refresh a TOTP step, or both attempt
+  the LDAP check-in (the LDAP engine's own per-set lock and record delete
+  make the second fail). Storage has no compare-and-swap to close this;
+  standby nodes forwarding to the active node keep it to one process today.
 - **`close`** records the end first, then checks an LDAP library account
   back in by `account` name. A failed check-in returns
   `ldap_checkin_failed` and stays pending, and the next `close` retries
   it.
-- **§6 policy.** `web_exposure_max` / `allow_heuristic_fill` on
-  `config/types[<type>].connect` and on the resource record (top-level
-  keys). The stricter cap wins. An explicit `false` for heuristics at either
-  tier beats `true` at the other, and unset at both means "no cap, no
-  heuristics". A value outside the enum refuses the launch.
-  `allow_insecure_http` is refused below `dom`.
+- **§6 policy — deny unless opted in.** `web_exposure_max` /
+  `allow_heuristic_fill` on `config/types[<type>].connect` and on the
+  resource record (top-level keys). The effective cap starts at the type
+  tier's cap, and at `none` when the resource's `type` is not in the saved
+  `config/types`, the type sets no cap, or the configuration was never
+  saved: form mode is then refused with `exposure_not_permitted`. The
+  resource tier can only lower the type's cap. Because `type` is editable
+  resource metadata, an unknown type is a denial, not an escape from the
+  type tier, and the same resolved type is the one the Rustion type tier
+  sees. An unreadable `config/types` refuses (`exposure_policy_invalid`),
+  as does a value outside the enum. An explicit `false` for heuristics at
+  either tier beats `true` at the other, and unset at both means no
+  heuristics. `allow_insecure_http` is refused below `dom`.
+  - The GUI's built-in `web_application` and `website` types carry
+    `connect.web_exposure_max: "dom"`, so a type configuration saved by a
+    current GUI opts them in. A saved type still wins as saved
+    (`mergeTypeConfig`), so **a deployment that saved a `web_application`
+    or `website` type before this change is denied until an administrator
+    sets the cap on it.**
 - **Recipe format (§2), frozen as v1.**
   - Strict: unknown version, key or verb refused.
   - Actions: `fill` / `click` / `submit` / `wait`; `value` is
@@ -231,17 +278,29 @@ it yet: the host still refuses `form` at connect.
   - `recipe_hash` = `sha256:` + hex of the RFC 8785 canonical form of the
     stored value. The module is `pub`, so the host can reuse the parser and
     the hash.
-- **Audit** (`target: "audit"`): `connect.web.launch`, `.totp`, `.result`,
-  `.close`, `.refused` (`op`, `reason` code) and `.reaped`. They carry names,
-  enum values and the launch-id hash, never a value, code, raw id or URL.
+- **Audit** (`target: "audit"`): `connect.web.launch` (with `transport` and
+  `fill_origins`), `.totp`, `.result`, `.close`, `.refused` (`op`, `reason`
+  code), `.reaped` and `.launch_rollback`. They carry names, enum values,
+  origins and the launch-id hash — never a value, code, raw id, full token
+  hash, or URL path or query.
+- **Zeroization.** Secret maps are scrubbed through nested objects and
+  arrays; the HMAC output is copied into a `Zeroizing` buffer and the
+  original scrubbed; a seed-length error does not reveal the decoded length.
 - **Tests.** In-crate: recipe, exposure, profile, TOTP, launch-store state
   machine, audit-line shape. `src/engine_tests/resource_connect_web.rs`:
   end to end against a vault, covering connect-only release, every refusal
   class, MFA ticket burn, principal binding, the login window, a failed
-  LDAP check-in on close, and the Rustion transport tier (`rustion-required`
+  LDAP check-in on close, the Rustion transport tier (`rustion-required`
   refused with the ticket unspent, a lock violation refused,
   `rustion-preferred` / `direct` allowed, an undecodable tier record
-  refused, no `rustion/` mount allowed).
+  refused, a stored policy refused while `rustion/` is tainted or
+  unmounted, no mount *and* no record allowed), the deny-by-default exposure
+  matrix (unsaved configuration, unknown type, a `server` type, an unset
+  cap, the resource tier alone, a type below `dom`, type `dom` with the
+  resource at `none`, an unreadable configuration — each with the ticket
+  unspent — and type `dom` allowed), the credential pre-checks (missing
+  secret, missing seed, no LDAP mount, a non-LDAP mount, no default account
+  — each with the ticket unspent), and the fill scope in bundle and record.
 
 **Still open for Phase 2:**
 
@@ -249,10 +308,13 @@ it yet: the host still refuses `form` at connect.
   routine, the call order `mfa → launch → totp* → result → close`).
 - The GUI recipe editor, `web_recipe_test` and the vendor presets.
 - An end-to-end LDAP library check-out test, which needs an LDAP fixture.
-- The host and the server disagree on one transport case: with no
-  `rustion/` mount the server allows the launch (no policy can exist),
-  while the host's `read_effective_policy` fails closed on the same
-  error. Align the host when it gains form mode.
+- The host and the server still disagree on one transport case: with no
+  `rustion/` mount and no policy record the server allows the launch, while
+  the host's `read_effective_policy` fails closed on the same error. The
+  host is the stricter of the two, so the pair fails closed; align it when
+  it gains form mode.
+- The host must take its fill scope from the bundle's `fill_scope`, not
+  from its own copy of the profile (contract in `docs/api.md`).
 - `make test-release` (L4), which §Security Considerations requires before
   merging, since this touches authz.
 
@@ -774,6 +836,16 @@ WebExposure = "none"     // open, sso
 - `web_exposure_max` can be set on the type (`ResourceTypeDef.connect`) and on
   the resource. The most restrictive value wins, matching the Rustion transport
   tier rule.
+- **The default is deny.** Only the type tier can opt a resource in: the
+  resource's `type` must name a type in the *saved* type configuration that
+  sets `web_exposure_max`. Unset, a type missing from the saved configuration,
+  or a configuration never saved all mean a cap of `none` — `open` and `sso`
+  still work, and every login mode that releases a credential is refused. The
+  resource tier can lower the type's cap, never raise it or opt in by itself,
+  so editing a resource's `type` cannot escape the type tier. The built-in
+  `web_application` and `website` types ship with `dom`. A type saved before
+  that keeps its saved shape and stays denied until an administrator sets the
+  cap.
 - **Enforcement.**
   - The profile editor rejects a profile whose login mode exceeds the cap.
   - The server enforces the cap again in `v2/connect/web/launch`. GUI-side

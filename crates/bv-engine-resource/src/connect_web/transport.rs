@@ -13,17 +13,36 @@
 //! The verdict is Rustion's own (`rustion/policy/effective`, the resolver the
 //! host reads and `rustion/v2/session/open` applies); this module only reads
 //! it. Anything it cannot read as one of the three known transports refuses.
+//!
+//! **When the resolver is unreachable.** Rustion's policy tiers are not in the
+//! `rustion/` mount: `PolicyStore` keeps them in the *system view* under
+//! [`RUSTION_POLICY_PREFIX`] (`global`, `type/`, `asset-group/`, `resource/`),
+//! and they survive an unmount. The router also reports a mount that is
+//! tainted mid-unmount or mid-remount as not found. So a missing mount proves
+//! nothing on its own: the launch is allowed only when that prefix holds no
+//! record at all, and refused otherwise — or when the
+//! prefix cannot be listed.
 
 use serde_json::{Map, Value};
 
 use super::WebRefusal;
+
+/// Where `bv-engine-rustion`'s `PolicyStore` keeps every policy tier, relative
+/// to the system view (`crates/bv-engine-rustion/src/policy.rs`:
+/// `GLOBAL_POLICY_KEY`, `TYPE_POLICY_SUB_PATH`, `ASSET_GROUP_POLICY_SUB_PATH`,
+/// `RESOURCE_POLICY_SUB_PATH`). Read here only to prove the *absence* of
+/// policy when the resolver itself cannot be reached; if that store ever moves,
+/// this check fails closed (it would find records it cannot resolve, or none
+/// where some exist — hence the cross-reference).
+pub const RUSTION_POLICY_PREFIX: &str = "rustion/policy/";
 
 /// What the transport policy permits for a launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportVerdict {
     /// The resolver answered `direct` or `rustion-preferred`.
     Allowed(&'static str),
-    /// No `rustion/` mount exists, so no Rustion policy can apply.
+    /// The `rustion/` mount is unreachable *and* the system view holds no
+    /// Rustion policy record, so no restriction can exist.
     NoRustion,
 }
 

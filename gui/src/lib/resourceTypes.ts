@@ -191,7 +191,10 @@ export const DEFAULT_RESOURCE_TYPES: ResourceTypeConfig = {
     // Web Application Connect (T96): a website opens in an in-app web
     // session window. Only reaches deployments whose saved type config has
     // no `website` entry — a saved type is never altered by a release.
-    connect: { protocols: ["web"] },
+    // `web_exposure_max: "dom"` opts the type in to form-mode logins: the
+    // server releases no web credential unless the resource's saved type
+    // sets a cap (deny unless opted in, spec §6).
+    connect: { protocols: ["web"], web_exposure_max: "dom" },
   },
   web_application: {
     id: "web_application",
@@ -220,7 +223,8 @@ export const DEFAULT_RESOURCE_TYPES: ResourceTypeConfig = {
       { key: "environment", label: "Environment", type: "text", placeholder: "production" },
       { key: "owner", label: "Owner", type: "text", placeholder: "network-team" },
     ],
-    connect: { protocols: ["web"] },
+    // Opted in to form-mode logins (see `website` above).
+    connect: { protocols: ["web"], web_exposure_max: "dom" },
   },
   application: {
     id: "application",
