@@ -303,6 +303,10 @@ pub enum ActionStatus {
     Occluded,
     Disabled,
     FormAction,
+    /// The form, a submitter or the document's `<base>` targets a named
+    /// frame — a sub-frame navigation the allow-list cannot police
+    /// everywhere.
+    FormTarget,
     NoForm,
     Unsupported,
     BadSelector,
@@ -325,6 +329,7 @@ impl ActionStatus {
             "occluded" => Self::Occluded,
             "disabled" => Self::Disabled,
             "form_action" => Self::FormAction,
+            "form_target" => Self::FormTarget,
             "no_form" => Self::NoForm,
             "unsupported" => Self::Unsupported,
             "bad_selector" => Self::BadSelector,
@@ -346,6 +351,7 @@ impl ActionStatus {
             Self::Occluded => "occluded",
             Self::Disabled => "disabled",
             Self::FormAction => "form_action",
+            Self::FormTarget => "form_target",
             Self::NoForm => "no_form",
             Self::Unsupported => "unsupported",
             Self::BadSelector => "bad_selector",
@@ -375,6 +381,7 @@ impl ActionStatus {
             Self::Occluded => "occluded",
             Self::Disabled => "field_disabled",
             Self::FormAction => "form_action",
+            Self::FormTarget => "form_target",
             Self::NoForm => "no_form",
             Self::Unsupported => "submit_unsupported",
             Self::BadSelector => "bad_selector",
@@ -431,14 +438,30 @@ pub enum ReplyError {
     Invalid,
 }
 
+/// Upper bound on a routine reply, applied to both JSON layers before any
+/// parsing. The largest reply the routine can produce — every optional
+/// field present, all counts at `u32::MAX`, a 253-character host with a
+/// port, every quote escaped by the outer layer and `/` escaped as `\/` by
+/// WebKit — is under 700 bytes; 4 KiB leaves margin without letting a page
+/// that patches `JSON.stringify` hand the host a reply of hundreds of
+/// megabytes to parse.
+pub const MAX_REPLY_BYTES: usize = 4096;
+
 /// Parse what `eval_with_callback` delivered: the JSON encoding of the
-/// routine's return value, which is itself a JSON string.
+/// routine's return value, which is itself a JSON string. An oversized
+/// reply at either layer is invalid, like any other malformed reply.
 pub fn parse_reply(raw: &str) -> Result<ScriptReply, ReplyError> {
+    if raw.len() > MAX_REPLY_BYTES {
+        return Err(ReplyError::Invalid);
+    }
     let raw = raw.trim();
     if raw.is_empty() || raw == "null" || raw == "undefined" {
         return Err(ReplyError::NoResult);
     }
     let inner: String = serde_json::from_str(raw).map_err(|_| ReplyError::Invalid)?;
+    if inner.len() > MAX_REPLY_BYTES {
+        return Err(ReplyError::Invalid);
+    }
     let wire: ReplyWire = serde_json::from_str(&inner).map_err(|_| ReplyError::Invalid)?;
     if wire.v != 1 {
         return Err(ReplyError::Invalid);
@@ -583,6 +606,36 @@ mod tests {
     }
 
     #[test]
+    fn oversized_replies_are_refused_before_parsing() {
+        // The largest legitimate reply fits with room to spare.
+        let host = format!("{}.example", "a".repeat(240));
+        let biggest = format!(
+            r#"{{"v":1,"origin":"https://{host}:65535","status":"script_error","matches":4294967295,"success":4294967295,"failure":4294967295,"scan":{{"username":4294967295,"current_password":4294967295,"password":4294967295,"otp":4294967295}}}}"#
+        );
+        // WebKit's serialiser escapes `/` as `\/` in the outer layer.
+        let outer = serde_json::to_string(&biggest).unwrap().replace('/', "\\/");
+        assert!(outer.len() < 700, "{}", outer.len());
+        assert_eq!(parse_reply(&outer).unwrap().status, ActionStatus::ScriptError);
+
+        // A page that patched JSON.stringify: padding on the outer layer...
+        let padded = format!(
+            "{}{}",
+            reply(r#"{"v":1,"origin":"https://a.example","status":"ok"}"#),
+            " ".repeat(MAX_REPLY_BYTES)
+        );
+        assert_eq!(parse_reply(&padded), Err(ReplyError::Invalid));
+        // ...or a huge field inside a well-formed reply.
+        let huge =
+            reply(&format!(r#"{{"v":1,"origin":"https://{}.example","status":"ok"}}"#, "a".repeat(MAX_REPLY_BYTES)));
+        assert_eq!(parse_reply(&huge), Err(ReplyError::Invalid));
+        // Escapes cannot smuggle a large inner layer past the outer check:
+        // an escape never decodes to more bytes than it occupies.
+        let escaped = format!("\"{}\"", "\\u0041".repeat(MAX_REPLY_BYTES / 6 + 1));
+        assert!(escaped.len() > MAX_REPLY_BYTES);
+        assert_eq!(parse_reply(&escaped), Err(ReplyError::Invalid));
+    }
+
+    #[test]
     fn every_status_round_trips_and_maps_to_a_valid_check_name() {
         for s in [
             "ok",
@@ -594,6 +647,7 @@ mod tests {
             "occluded",
             "disabled",
             "form_action",
+            "form_target",
             "no_form",
             "unsupported",
             "bad_selector",
@@ -611,7 +665,7 @@ mod tests {
             );
         }
         // The safety checks are never retried.
-        for permanent in ["ambiguous", "wrong_type", "form_action", "not_top", "bad_selector"] {
+        for permanent in ["ambiguous", "wrong_type", "form_action", "form_target", "not_top", "bad_selector"] {
             assert!(!ActionStatus::parse(permanent).unwrap().is_transient(), "{permanent}");
         }
     }

@@ -124,6 +124,7 @@ const STATUS_HELP: Record<string, string> = {
   occluded: "Something covers the field",
   disabled: "The field is disabled",
   form_action: "The form posts to an origin outside the allow-list",
+  form_target: "The form submits into a named frame, which the allow-list cannot police",
   no_form: "The match is not inside a form",
   unsupported: "The page does not support this check",
   not_top: "Not the top-level page",

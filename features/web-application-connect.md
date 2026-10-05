@@ -425,7 +425,10 @@ call-state machine).
   (WKWebView `evaluateJavaScript`, WebView2 `ExecuteScript`, WebKitGTK
   `run_javascript`). The only thing that returns is the script's own return
   value — a JSON string, parsed strictly (`deny_unknown_fields`, version,
-  status enum) — delivered to a host closure. The page gets no channel and
+  status enum), and refused unparsed when either JSON layer exceeds
+  `MAX_REPLY_BYTES` (4 KiB; the largest reply the routine can produce is
+  under 700 bytes), so a page that patches `JSON.stringify` cannot hand the
+  host a huge string to parse — delivered to a host closure. The page gets no channel and
   nothing it can call; no `tauri::ipc::Channel` is used, so the web/RDP
   exclusion predicate is unchanged. A reply can only make the engine refuse
   or take its next host-decided step; it never widens where a value goes.
@@ -438,9 +441,15 @@ call-state machine).
   `type=password`); enabled; visible (box ≥ 4×4 px, `visibility: visible`,
   cumulative opacity ≥ 0.5, in the viewport after one `scrollIntoView`); not
   covered at its centre (`elementFromPoint`, a `<label>` for the field
-  allowed); its form's `action` and every submitter's `formaction` on an
-  allowed origin (read through prototype accessors, so DOM clobbering cannot
-  hide them). It fills through the native `HTMLInputElement` value setter and
+  allowed); its form's `action`, the `formaction` of every control that can
+  submit it — the listed elements, every `<input type=image>` attached to it
+  (which `form.elements` leaves out) and the clicked or submitted element
+  itself — on an allowed origin, and the form's `target`, every
+  `formtarget` and a document `<base target>` a keyword (`_self`, `_top`,
+  `_parent`, `_blank`), never a frame name (`aborted:form_target`: a named
+  target may be an `<iframe>`, and sub-frame navigations are not policed on
+  Windows and Linux). All read through prototype accessors, so DOM clobbering
+  cannot hide them. It fills through the native `HTMLInputElement` value setter and
   fires `input` / `change`; `submit` uses `requestSubmit`. After the outcome
   it clears every password field. It never returns a value.
 - **The engine.** A step runs only on a finished top-frame load
@@ -457,8 +466,17 @@ call-state machine).
   (`result.step` = last step started), the title shows it, password fields
   are cleared, and the credential is dropped with the engine.
   - *TOTP:* a `totp` fill after `totp_valid_until` (host clock) calls
-    `web/totp` for that step when it is still in `totp_refresh_steps`;
-    otherwise `aborted:totp_expired` and nothing is filled.
+    `web/totp` for that step when it is still in `totp_refresh_steps`, and
+    only after a check-mode call shows the field passes every check, so a
+    field that fails them never spends the step's one refresh; otherwise
+    `aborted:totp_expired` and nothing is filled.
+  - *Outcome event:* the host also sends the main window
+    `web-session-outcome` `{token, resource, profile_id, outcome, step}`
+    (`emit_to` the `main` webview window; no credential, code or URL), which
+    the vault UI shows as a toast. Tauri delivers events by evaluating them
+    in webviews that registered a listener, and a `web-*` window cannot
+    register one (no capability). It is not a `tauri::ipc::Channel`, so the
+    web/RDP exclusion predicate is unchanged.
   - *Heuristic mode:* only when the bundle says `heuristic: true` and the
     recipe is `"steps": "auto"`. One pass: `autocomplete=username`,
     `current-password` (else `type=password`), `one-time-code`, filling only
@@ -503,7 +521,9 @@ call-state machine).
   dry run carrying no value). Vitest (`src/test/webFillRoutine.test.ts`): the
   real routine in jsdom — native setter, check mode, origin, match count,
   type, opacity / size / off-screen decoys, overlay vs own label, off-origin
-  `action` / `formaction` under DOM clobbering, submit, probe, scan, clear.
+  `action` / `formaction` under DOM clobbering, image-submit `formaction`,
+  named-frame `target` / `formtarget` / `<base target>`, submit, probe, scan,
+  clear. `src/test/webSessionOutcome.test.ts`: the outcome event payload.
 
 **Host deviations from §5, decided here:**
 
@@ -522,9 +542,7 @@ call-state machine).
 
 - The vendor presets are unverified against live appliances and the spec's
   "tested against recorded login pages" is not done (see *What the Phase 2 GUI
-  editor shipped*), and the main window is not told the session outcome (it
-  shows in the session window's title; the host emits nothing the main window
-  can read).
+  editor shipped*).
 - Per-platform manual checks (macOS, Windows, Linux) against the fixture site
   of the Testing Plan, including `eval_with_callback` returning on each
   webview and the `invoke`-rejected check of Phase 1.
@@ -1430,6 +1448,11 @@ as T97 in the roadmap backlog.
    - Visible, non-occluded, correctly typed, single-match fields.
    - Form `action` must resolve to an allowed origin.
    - No fill UI inside the page.
+   - The form-action check only stops script-free mis-targeting: a submit,
+     input, change or click listener on an in-scope page can rewrite the
+     destination after the check, so the navigation allow-list is the
+     backstop — and at `dom` exposure in-scope script can read the value
+     anyway.
 3. **Remote content must never reach vault IPC.**
    - The `web-*` label has no capability.
    - Tests assert it.

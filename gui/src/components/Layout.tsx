@@ -18,6 +18,11 @@ import { listen } from "@tauri-apps/api/event";
 import { useToast } from "./ui/Toast";
 import { SUPER_ADMIN, isAdminUser } from "../lib/access";
 import { revalidateConnectAccess } from "../lib/connectValidation";
+import {
+  WEB_SESSION_OUTCOME_EVENT,
+  describeWebSessionOutcome,
+  parseWebSessionOutcome,
+} from "../lib/webSessionOutcome";
 
 // localStorage key for the persisted expanded/collapsed state of the
 // Admin section in the sidebar. Default (no key set) is expanded so
@@ -271,6 +276,23 @@ export function Layout({ children }: LayoutProps) {
       void unlistenOpen.then((u) => u());
     };
   }, [refreshUnread, setCenterOpen]);
+
+  // Web Application Connect: the host reports how a form session's sign-in
+  // ended (it shows in the session window's title too).
+  useEffect(() => {
+    let cancelled = false;
+    const unlisten = listen(WEB_SESSION_OUTCOME_EVENT, (e) => {
+      if (cancelled) return;
+      const outcome = parseWebSessionOutcome(e.payload);
+      if (!outcome) return;
+      const { type, message } = describeWebSessionOutcome(outcome);
+      toast(type, message);
+    });
+    return () => {
+      cancelled = true;
+      void unlisten.then((u) => u());
+    };
+  }, [toast]);
 
   // Notifications: toast once when a newly-arrived notification is seen
   // by the poll loop (the store flips `lastArrival` back to null).

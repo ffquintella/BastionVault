@@ -173,6 +173,57 @@ describe("fill routine — fill", () => {
     expect(fill("#u", "username", "x").status).toBe("form_action");
   });
 
+  it("checks image submits, which form.elements leaves out, and the click target's own formaction", () => {
+    const form = el<HTMLFormElement>("#login");
+    form.insertAdjacentHTML("beforeend", '<input id="img" type="image" alt="go" formaction="https://evil.example/c">');
+    const img = el<HTMLInputElement>("#img");
+    layout(img);
+    expect(Array.from(form.elements)).not.toContain(img);
+    hitTest(() => img);
+    // Clicking the image submit itself...
+    expect(run({ op: "action", mode: "check", kind: "click", selector: "#img" }).status).toBe("form_action");
+    expect(run({ op: "action", mode: "act", kind: "click", selector: "#img" }).status).toBe("form_action");
+    // ...and filling any field of a form it can submit.
+    hitTest(() => el("#u"));
+    expect(fill("#u", "username", "x").status).toBe("form_action");
+    expect(el<HTMLInputElement>("#u").value).toBe("");
+    // An image submit attached from outside with `form=` counts too.
+    img.remove();
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      '<input id="img2" type="image" form="login" alt="go" formaction="https://evil.example/c">',
+    );
+    expect(fill("#u", "username", "x").status).toBe("form_action");
+    el("#img2").setAttribute("formaction", "/session");
+    expect(fill("#u", "username", "x").status).toBe("ok");
+  });
+
+  it("refuses a form that submits into a named frame", () => {
+    document.body.insertAdjacentHTML("beforeend", '<iframe name="sink"></iframe>');
+    const form = el<HTMLFormElement>("#login");
+    hitTest(() => el("#u"));
+    form.setAttribute("target", "sink");
+    // A control named `target` cannot hide the attribute.
+    form.insertAdjacentHTML("beforeend", '<input name="target" value="_self">');
+    expect(fill("#u", "username", "x").status).toBe("form_target");
+    expect(el<HTMLInputElement>("#u").value).toBe("");
+    for (const ok of ["", "_self", "_TOP", "_parent", "_blank"]) {
+      form.setAttribute("target", ok);
+      expect(fill("#u", "username", "x").status).toBe("ok");
+    }
+    // A submitter's formtarget, and a document-wide <base target>.
+    form.removeAttribute("target");
+    el("#go").setAttribute("formtarget", "sink");
+    hitTest(() => el("#go"));
+    expect(run({ op: "action", mode: "act", kind: "click", selector: "#go" }).status).toBe("form_target");
+    expect(run({ op: "action", mode: "act", kind: "submit", selector: "form" }).status).toBe("form_target");
+    el("#go").removeAttribute("formtarget");
+    document.head.insertAdjacentHTML("beforeend", '<base target="sink">');
+    hitTest(() => el("#u"));
+    expect(fill("#u", "username", "x").status).toBe("form_target");
+    document.head.querySelector("base")?.remove();
+  });
+
   it("treats a disabled field as not ready", () => {
     hitTest(() => el("#u"));
     el<HTMLInputElement>("#u").disabled = true;

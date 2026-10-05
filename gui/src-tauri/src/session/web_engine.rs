@@ -41,7 +41,7 @@ use super::web_recipe::{
     deadline_outcome, judge, plan_heuristic, select_step, totp_decision, value_kind, CredentialHas, EffectiveScope,
     LaunchCredential, Outcome, PlanAction, PlanSteps, RecipePlan, RefreshedTotp, TotpDecision,
 };
-use super::web_script::{ActionKind, ActionStatus, ScanCounts, ScriptCall, ScriptMode, ScriptReply};
+use super::web_script::{ActionKind, ActionStatus, FieldExpect, ScanCounts, ScriptCall, ScriptMode, ScriptReply};
 
 /// Delay between polls of the page.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -331,24 +331,29 @@ impl<P: RecipePage, L: LaunchOps> FillRun<'_, P, L> {
         }
     }
 
-    /// Make sure the TOTP code is usable for a fill at `step`, refreshing it
-    /// through `v2/connect/web/totp` when it expired and the step still has
-    /// its refresh.
-    async fn ensure_totp(&mut self, step: u32) -> Result<(), Outcome> {
+    /// Whether a `totp` fill at `step` needs a fresh code: `Ok(Some(step))`
+    /// when the code expired and the step still has its one refresh,
+    /// `Ok(None)` when the current code is usable.
+    fn totp_refresh_needed(&self, step: u32) -> Result<Option<u32>, Outcome> {
         let Some(totp) = &self.credential.totp else {
             return Err(Outcome::Aborted("credential_missing"));
         };
         match totp_decision(self.launch.now_utc(), totp.valid_until, step, &self.refresh_steps) {
-            TotpDecision::UseCurrent => Ok(()),
+            TotpDecision::UseCurrent => Ok(None),
+            TotpDecision::Refresh(s) => Ok(Some(s)),
             TotpDecision::Expired => Err(Outcome::Aborted("totp_expired")),
-            TotpDecision::Refresh(s) => match self.launch.refresh_totp(s).await {
-                Ok(fresh) => {
-                    self.credential.totp = Some(fresh.code);
-                    self.refresh_steps = fresh.remaining_steps;
-                    Ok(())
-                }
-                Err(_) => Err(Outcome::Aborted("totp_refresh")),
-            },
+        }
+    }
+
+    /// Spend `step`'s one refresh through `v2/connect/web/totp`.
+    async fn refresh_totp(&mut self, step: u32) -> Result<(), Outcome> {
+        match self.launch.refresh_totp(step).await {
+            Ok(fresh) => {
+                self.credential.totp = Some(fresh.code);
+                self.refresh_steps = fresh.remaining_steps;
+                Ok(())
+            }
+            Err(_) => Err(Outcome::Aborted("totp_refresh")),
         }
     }
 
@@ -377,7 +382,38 @@ impl<P: RecipePage, L: LaunchOps> FillRun<'_, P, L> {
                     }
                 }
                 if matches!(action.value, Some(FillValue::Totp)) {
-                    self.ensure_totp(step).await?;
+                    if let Some(refresh_step) = self.totp_refresh_needed(step)? {
+                        // A step has one refresh: spend it only on a field
+                        // the routine's checks pass right now, so a field
+                        // that fails them never costs it.
+                        let probe = {
+                            let call = ScriptCall::check_fill(
+                                &key,
+                                &self.scope.origin_keys,
+                                &action.selector,
+                                FieldExpect::Totp,
+                            );
+                            self.page.eval(&call).await
+                        };
+                        match probe {
+                            Ok(r) if r.status == ActionStatus::Ok && r.origin == key => {
+                                self.refresh_totp(refresh_step).await?;
+                            }
+                            Ok(r) if r.status == ActionStatus::Ok => return Err(Outcome::Aborted("probe_invalid")),
+                            Ok(r) if !r.status.is_transient() => return Err(Outcome::Aborted(r.status.abort_check())),
+                            Err(EvalError::WindowGone) => return Err(Outcome::Aborted("window_closed")),
+                            Err(EvalError::Invalid) => return Err(Outcome::Aborted("probe_invalid")),
+                            transient => {
+                                if let Ok(r) = transient {
+                                    last = Some(r.status);
+                                }
+                                if let Some(r) = self.pause().await {
+                                    return Err(Outcome::Aborted(r));
+                                }
+                                continue;
+                            }
+                        }
+                    }
                 }
                 let reply = {
                     let origins = &self.scope.origin_keys;
@@ -717,7 +753,7 @@ mod tests {
     use super::*;
     use crate::session::web::{OriginSet, WebOrigin};
     use crate::session::web_recipe::TotpCode;
-    use crate::session::web_script::{FieldExpect, ScriptOp, HEURISTIC_SELECTORS};
+    use crate::session::web_script::{ScriptOp, HEURISTIC_SELECTORS};
     use bastion_vault::modules::resource::connect_web::recipe::WebLoginRecipe;
     use serde_json::{json, Value};
     use std::sync::Mutex;
@@ -1053,8 +1089,39 @@ mod tests {
         let r = fill(&two_page(), &scope(&[FW]), &page, &launch, 5_000).await;
         assert_eq!(r.outcome, Outcome::Success);
         assert_eq!(*launch.refreshes.lock().unwrap(), vec![1]);
-        let otp = page.actions().into_iter().find(|s| s.selector.as_deref() == Some("#otp")).unwrap();
-        assert_eq!(otp.value.as_deref(), Some("999999"), "the fresh code is filled");
+        let otp: Vec<Seen> = page.actions().into_iter().filter(|s| s.selector.as_deref() == Some("#otp")).collect();
+        // First a value-less check that the field is fillable, then the fill.
+        assert_eq!(otp.len(), 2);
+        assert_eq!((otp[0].mode, otp[0].value.as_deref()), (ScriptMode::Check, None));
+        assert_eq!(
+            (otp[1].mode, otp[1].value.as_deref()),
+            (ScriptMode::Act, Some("999999")),
+            "the fresh code is filled"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_one_refresh_is_not_spent_on_a_field_that_fails_its_checks() {
+        let page = FakePage::new(
+            "https://fw01.example.com/login",
+            Box::new(|seen, st| match (seen.op, seen.kind, seen.selector.as_deref()) {
+                (ScriptOp::Action, Some(ActionKind::Click), _) => {
+                    st.url = Url::parse("https://fw01.example.com/2fa").unwrap();
+                    ok(FW)
+                }
+                (ScriptOp::Action, _, Some("#otp")) => status(FW, ActionStatus::FormAction),
+                (ScriptOp::Probe, _, _) => probe(FW, 0),
+                _ => ok(FW),
+            }),
+        );
+        let launch = launch_at(t0() + chrono::Duration::seconds(45));
+        let r = fill(&two_page(), &scope(&[FW]), &page, &launch, 5_000).await;
+        assert_eq!(r.outcome, Outcome::Aborted("form_action"));
+        assert!(launch.refreshes.lock().unwrap().is_empty(), "the refresh was kept");
+        let otp: Vec<Seen> = page.actions().into_iter().filter(|s| s.selector.as_deref() == Some("#otp")).collect();
+        assert_eq!(otp.len(), 1);
+        assert_eq!(otp[0].mode, ScriptMode::Check);
+        assert!(otp[0].value.is_none(), "no code was sent to a field that failed");
     }
 
     #[tokio::test]

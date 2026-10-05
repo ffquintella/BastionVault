@@ -742,6 +742,41 @@ pub fn plan_heuristic(scan: &ScanCounts, has: CredentialHas) -> Result<Option<Ve
     Ok(Some(actions))
 }
 
+// ── Outcome event ──────────────────────────────────────────────────
+
+/// Name of the event the host sends the main window when a form session's
+/// sign-in ends.
+pub const WEB_SESSION_OUTCOME_EVENT: &str = "web-session-outcome";
+
+/// The payload of [`WEB_SESSION_OUTCOME_EVENT`]: names, the session token
+/// and the outcome only — never a credential, a TOTP code, the `launch_id`
+/// or any URL.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WebSessionOutcomeEvent {
+    pub token: String,
+    pub resource: String,
+    pub profile_id: String,
+    /// `success` | `failure` | `timeout` | `aborted:<check>`.
+    pub outcome: String,
+    pub step: Option<u32>,
+}
+
+pub fn outcome_event(
+    token: &str,
+    resource: &str,
+    profile_id: &str,
+    outcome: &Outcome,
+    step: Option<u32>,
+) -> WebSessionOutcomeEvent {
+    WebSessionOutcomeEvent {
+        token: token.to_string(),
+        resource: resource.to_string(),
+        profile_id: profile_id.to_string(),
+        outcome: outcome.wire(),
+        step,
+    }
+}
+
 // ── Title ──────────────────────────────────────────────────────────
 
 /// The host-owned window title: `<resource> — <origin>`, then an optional
@@ -1150,6 +1185,20 @@ mod tests {
         assert_eq!(plan_heuristic(&scan(0, 0, 2, 0), ALL), Err("ambiguous_match"));
         assert_eq!(plan_heuristic(&scan(0, 2, 1, 0), ALL), Err("ambiguous_match"));
         assert_eq!(plan_heuristic(&scan(0, 0, 0, 3), ALL), Err("ambiguous_match"));
+    }
+
+    #[test]
+    fn the_outcome_event_carries_names_and_the_outcome_only() {
+        let ev = outcome_event("sess_t", "fw01", "p_web", &Outcome::Aborted("form_action"), Some(1));
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            v,
+            json!({ "token": "sess_t", "resource": "fw01", "profile_id": "p_web",
+                    "outcome": "aborted:form_action", "step": 1 })
+        );
+        let ev = outcome_event("sess_t", "fw01", "p_web", &Outcome::Success, None);
+        assert_eq!(serde_json::to_value(&ev).unwrap()["step"], Value::Null);
+        assert_eq!(WEB_SESSION_OUTCOME_EVENT, "web-session-outcome");
     }
 
     #[test]

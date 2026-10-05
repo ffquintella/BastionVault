@@ -65,21 +65,57 @@ function (A) {
     if (el instanceof HTMLButtonElement) return getter(HTMLButtonElement, "form").call(el);
     return null;
   }
-  // The form's action and every submitter's formaction must resolve to an
-  // origin of the fill scope. An empty or missing action is the document URL.
-  function formTargetsOk(form) {
-    if (form === null) return true;
-    var action = Element.prototype.getAttribute.call(form, "action");
-    var targets = [action === null || action === "" ? D.URL : action];
+  function attr(el, name) {
+    return Element.prototype.getAttribute.call(el, name);
+  }
+  // Every control that can submit `form`: its listed elements plus image
+  // buttons, which `form.elements` leaves out, wherever they sit (`form=`).
+  function submittersOf(form) {
+    var subs = [];
     var els = getter(HTMLFormElement, "elements").call(form);
-    for (var i = 0; i < els.length; i++) {
-      var fa = Element.prototype.getAttribute.call(els[i], "formaction");
-      if (fa !== null) targets.push(fa === "" ? D.URL : fa);
+    for (var i = 0; i < els.length; i++) subs.push(els[i]);
+    var images = D.querySelectorAll('input[type="image" i]');
+    for (var j = 0; j < images.length; j++) {
+      if (getter(HTMLInputElement, "form").call(images[j]) === form) subs.push(images[j]);
     }
-    for (var j = 0; j < targets.length; j++) {
-      if (!allowed(originOf(targets[j]))) return false;
+    return subs;
+  }
+  // A target keyword keeps the submission in this window (policed by the
+  // navigation handler) or asks for a new one (policed by the new-window
+  // handler, which never opens one). A name may be an <iframe>, and
+  // sub-frame navigations are not policed on Windows and Linux.
+  function safeTarget(t) {
+    if (t === null || t === "") return true;
+    var k = t.toLowerCase();
+    return k === "_self" || k === "_top" || k === "_parent" || k === "_blank";
+  }
+  // null when `form` — submitted by `submitter`, or by any of its controls —
+  // can post only to an origin of the fill scope (its action, every
+  // formaction; an empty or missing one is the document URL), into this
+  // window; otherwise the failed check. Attributes are read through the
+  // prototype, so a control named `action` or `target` cannot shadow them.
+  function formTargets(form, submitter) {
+    if (form === null) return null;
+    var action = attr(form, "action");
+    var actions = [action === null || action === "" ? D.URL : action];
+    var targets = [attr(form, "target")];
+    // A form without a target uses the first <base target>.
+    var base = D.querySelector("base[target]");
+    if (base !== null) targets.push(attr(base, "target"));
+    var subs = submittersOf(form);
+    if (submitter instanceof HTMLInputElement || submitter instanceof HTMLButtonElement) subs.push(submitter);
+    for (var i = 0; i < subs.length; i++) {
+      var fa = attr(subs[i], "formaction");
+      if (fa !== null) actions.push(fa === "" ? D.URL : fa);
+      targets.push(attr(subs[i], "formtarget"));
     }
-    return true;
+    for (var j = 0; j < actions.length; j++) {
+      if (!allowed(originOf(actions[j]))) return "form_action";
+    }
+    for (var k = 0; k < targets.length; k++) {
+      if (!safeTarget(targets[k])) return "form_target";
+    }
+    return null;
   }
   function centre(el) {
     var r = el.getBoundingClientRect();
@@ -127,7 +163,8 @@ function (A) {
     }
     var v = visibility(el);
     if (v !== null) return out(v);
-    if (!formTargetsOk(formOf(el))) return out("form_action");
+    var ft = formTargets(formOf(el), null);
+    if (ft !== null) return out(ft);
     if (A.mode !== "act") return out("ok");
     HTMLElement.prototype.focus.call(el);
     // The native setter, so React / Vue value tracking sees the change.
@@ -143,7 +180,8 @@ function (A) {
     }
     var v = visibility(el);
     if (v !== null) return out(v);
-    if (!formTargetsOk(formOf(el))) return out("form_action");
+    var ft = formTargets(formOf(el), el);
+    if (ft !== null) return out(ft);
     if (A.mode !== "act") return out("ok");
     HTMLElement.prototype.click.call(el);
     return out("ok");
@@ -151,7 +189,8 @@ function (A) {
   function submit(el) {
     var form = formOf(el);
     if (form === null) return out("no_form");
-    if (!formTargetsOk(form)) return out("form_action");
+    var ft = formTargets(form, el === form ? null : el);
+    if (ft !== null) return out(ft);
     if (typeof HTMLFormElement.prototype.requestSubmit !== "function") return out("unsupported");
     if (A.mode !== "act") return out("ok");
     HTMLFormElement.prototype.requestSubmit.call(form);

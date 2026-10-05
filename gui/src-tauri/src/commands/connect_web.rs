@@ -53,7 +53,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::webview::{DownloadEvent, NewWindowResponse, PageLoadEvent};
-use tauri::{AppHandle, Manager, State, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, EventTarget, Manager, State, Url, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::Notify;
 
 use bastion_vault::modules::resource::connect_web::recipe::{recipe_hash, WebLoginRecipe};
@@ -73,10 +73,10 @@ use crate::session::web_engine::{
 };
 use crate::session::web_launch::{self, LaunchChannel, LaunchRequest, WebLaunch};
 use crate::session::web_recipe::{
-    check_bundle, reconcile_fill_scope, BundleExpectation, EffectiveScope, LaunchCredential, PlanSteps, RecipePlan,
-    UrlGlob,
+    check_bundle, outcome_event, reconcile_fill_scope, BundleExpectation, EffectiveScope, LaunchCredential, PlanSteps,
+    RecipePlan, UrlGlob, WebSessionOutcomeEvent, WEB_SESSION_OUTCOME_EVENT,
 };
-use crate::session::web_script::{parse_reply, render, ReplyError, ScriptCall, ScriptReply};
+use crate::session::web_script::{parse_reply, render, ReplyError, ScriptCall, ScriptReply, MAX_REPLY_BYTES};
 use crate::session::{registry_web_rdp_conflict, ProfileProtocol, SessionState, WebRdpConflict};
 use crate::state::AppState;
 
@@ -86,6 +86,10 @@ const EVAL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long app exit waits for web launches to be reported and closed.
 const EXIT_CLOSE_BUDGET: Duration = Duration::from_secs(3);
+
+/// The vault UI window (`tauri.conf.json`), the only recipient of
+/// [`WEB_SESSION_OUTCOME_EVENT`].
+const MAIN_WINDOW_LABEL: &str = "main";
 
 #[derive(Deserialize)]
 pub struct WebOpenRequest {
@@ -280,7 +284,17 @@ pub async fn session_open_web(
     }
 
     let login_mode = if let Some((start, plan)) = form_run {
-        spawn_recipe_engine(&app, &window_label, &token, &request.resource_name, &shared, plan, scope, start);
+        spawn_recipe_engine(
+            &app,
+            &window_label,
+            &token,
+            &request.resource_name,
+            &request.profile_id,
+            &shared,
+            plan,
+            scope,
+            start,
+        );
         "form"
     } else {
         "open"
@@ -598,7 +612,9 @@ impl RecipePage for TauriPage {
         let app = self.app.clone();
         let label = self.label.clone();
         async move {
-            let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+            // `None`: the reply was over `MAX_REPLY_BYTES` and was dropped
+            // in the callback, never handed on or parsed.
+            let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
             let tx = std::sync::Mutex::new(Some(tx));
             {
                 let Some(win) = app.get_webview_window(&label) else {
@@ -608,7 +624,7 @@ impl RecipePage for TauriPage {
                 let js = std::mem::take(&mut *script);
                 let sent = win.eval_with_callback(js, move |raw| {
                     if let Some(tx) = tx.lock().ok().and_then(|mut g| g.take()) {
-                        let _ = tx.send(raw);
+                        let _ = tx.send((raw.len() <= MAX_REPLY_BYTES).then_some(raw));
                     }
                 });
                 if sent.is_err() {
@@ -616,7 +632,8 @@ impl RecipePage for TauriPage {
                 }
             }
             match tokio::time::timeout(EVAL_TIMEOUT, rx).await {
-                Ok(Ok(raw)) => parse_reply(&raw).map_err(|e| match e {
+                Ok(Ok(None)) => Err(EvalError::Invalid),
+                Ok(Ok(Some(raw))) => parse_reply(&raw).map_err(|e| match e {
                     ReplyError::NoResult => EvalError::NoResult,
                     ReplyError::Invalid => EvalError::Invalid,
                 }),
@@ -632,22 +649,39 @@ impl RecipePage for TauriPage {
     }
 }
 
-/// Run the recipe for a form session, then report the outcome once. The
-/// credential moves into the engine and is dropped when it returns.
+/// Tell the vault UI how a form session's sign-in ended. Sent to the main
+/// window only: Tauri delivers an event by evaluating it in the webviews that
+/// registered a JS listener for it, and a `web-*` window cannot register one
+/// (it has no capability, so the ACL refuses `plugin:event|listen`). This is
+/// an event, not a `tauri::ipc::Channel`, so the web/RDP exclusion predicate
+/// is unaffected.
+fn emit_outcome(app: &AppHandle, event: &WebSessionOutcomeEvent) {
+    let target = EventTarget::WebviewWindow { label: MAIN_WINDOW_LABEL.to_string() };
+    if let Err(e) = app.emit_to(target, WEB_SESSION_OUTCOME_EVENT, event) {
+        log::warn!("connect.web: could not tell the main window the sign-in outcome: {e}");
+    }
+}
+
+/// Run the recipe for a form session, then report the outcome once — to the
+/// server and to the main window. The credential moves into the engine and
+/// is dropped when it returns.
 #[allow(clippy::too_many_arguments)]
 fn spawn_recipe_engine(
     app: &AppHandle,
     label: &str,
     token: &str,
     resource: &str,
+    profile_id: &str,
     shared: &Arc<WebShared>,
     plan: RecipePlan,
     scope: EffectiveScope,
     start: FormStart,
 ) {
     let page = TauriPage { app: app.clone(), label: label.to_string(), shared: Arc::clone(shared) };
+    let app = app.clone();
     let token = token.to_string();
     let resource = resource.to_string();
+    let profile_id = profile_id.to_string();
     tauri::async_runtime::spawn(async move {
         let FormStart { launch, credential, refresh_steps, .. } = start;
         let audit = AuditTag { resource: &resource, token: &token, launch_id_hash: launch.launch_id_hash() };
@@ -672,6 +706,7 @@ fn spawn_recipe_engine(
             report.fills,
         );
         launch.report(&report.outcome, report.step).await;
+        emit_outcome(&app, &outcome_event(&token, &resource, &profile_id, &report.outcome, report.step));
     });
 }
 
