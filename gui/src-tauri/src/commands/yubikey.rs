@@ -39,13 +39,7 @@ pub async fn yubikey_list_devices() -> CmdResult<Vec<YubiKeyDeviceInfo>> {
     // PC/SC enumeration is synchronous and cheap; wrapping in
     // `spawn_blocking` would add latency without buying anything.
     let devices = crate::yubikey_bridge::list_devices()?;
-    Ok(devices
-        .into_iter()
-        .map(|d| YubiKeyDeviceInfo {
-            serial: d.serial,
-            slot_occupied: d.slot_occupied,
-        })
-        .collect())
+    Ok(devices.into_iter().map(|d| YubiKeyDeviceInfo { serial: d.serial, slot_occupied: d.slot_occupied }).collect())
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -60,11 +54,7 @@ pub async fn yubikey_list_registered() -> CmdResult<Vec<RegisteredYubiKeyDto>> {
     let entries = crate::local_keystore::list_registered_yubikeys()?;
     Ok(entries
         .into_iter()
-        .map(|e| RegisteredYubiKeyDto {
-            serial: e.serial,
-            key_id: e.key_id,
-            registered_at: e.registered_at,
-        })
+        .map(|e| RegisteredYubiKeyDto { serial: e.serial, key_id: e.key_id, registered_at: e.registered_at })
         .collect())
 }
 
@@ -81,18 +71,9 @@ pub async fn yubikey_provision_slot_9a(serial: u32, pin: String) -> CmdResult<()
 }
 
 #[tauri::command]
-pub async fn yubikey_register(
-    serial: u32,
-    pin: String,
-    require: Option<bool>,
-) -> CmdResult<RegisteredYubiKeyDto> {
-    let reg =
-        crate::local_keystore::register_yubikey(serial, pin, require.unwrap_or(false))?;
-    Ok(RegisteredYubiKeyDto {
-        serial: reg.serial,
-        key_id: reg.key_id,
-        registered_at: reg.registered_at,
-    })
+pub async fn yubikey_register(serial: u32, pin: String, require: Option<bool>) -> CmdResult<RegisteredYubiKeyDto> {
+    let reg = crate::local_keystore::register_yubikey(serial, pin, require.unwrap_or(false))?;
+    Ok(RegisteredYubiKeyDto { serial: reg.serial, key_id: reg.key_id, registered_at: reg.registered_at })
 }
 
 /// Re-enable the OS-keychain unlock path on a keystore that

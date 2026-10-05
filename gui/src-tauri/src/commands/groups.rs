@@ -54,44 +54,23 @@ fn kind_segment(kind: &str) -> Result<&'static str, CommandError> {
 fn data_string_list(data: Option<&Map<String, Value>>, key: &str) -> Vec<String> {
     data.and_then(|d| d.get(key))
         .and_then(|v| match v {
-            Value::Array(a) => Some(
-                a.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
-                    .collect(),
-            ),
-            Value::String(s) => Some(
-                s.split(',')
-                    .map(|x| x.trim().to_string())
-                    .filter(|x| !x.is_empty())
-                    .collect(),
-            ),
+            Value::Array(a) => Some(a.iter().filter_map(|x| x.as_str().map(String::from)).collect()),
+            Value::String(s) => Some(s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()),
             _ => None,
         })
         .unwrap_or_default()
 }
 
 #[tauri::command]
-pub async fn list_groups(
-    state: State<'_, AppState>,
-    kind: String,
-) -> CmdResult<GroupListResult> {
+pub async fn list_groups(state: State<'_, AppState>, kind: String) -> CmdResult<GroupListResult> {
     let seg = kind_segment(&kind)?;
-    let resp = make_request(
-        &state,
-        Operation::List,
-        format!("identity/group/{seg}/"),
-        None,
-    )
-    .await?;
+    let resp = make_request(&state, Operation::List, format!("identity/group/{seg}/"), None).await?;
 
     match resp {
         Some(r) => {
             if let Some(data) = &r.data {
                 if let Some(Value::Array(keys)) = data.get("keys") {
-                    let groups = keys
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect();
+                    let groups = keys.iter().filter_map(|v| v.as_str().map(String::from)).collect();
                     return Ok(GroupListResult { groups });
                 }
             }
@@ -102,51 +81,21 @@ pub async fn list_groups(
 }
 
 #[tauri::command]
-pub async fn read_group(
-    state: State<'_, AppState>,
-    kind: String,
-    name: String,
-) -> CmdResult<GroupInfo> {
+pub async fn read_group(state: State<'_, AppState>, kind: String, name: String) -> CmdResult<GroupInfo> {
     let seg = kind_segment(&kind)?;
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("identity/group/{seg}/{name}"),
-        None,
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Read, format!("identity/group/{seg}/{name}"), None).await?;
 
     match resp {
         Some(r) => {
             let data = r.data.as_ref();
             Ok(GroupInfo {
-                name: data
-                    .and_then(|d| d.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&name)
-                    .to_string(),
-                kind: data
-                    .and_then(|d| d.get("kind"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(seg)
-                    .to_string(),
-                description: data
-                    .and_then(|d| d.get("description"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                name: data.and_then(|d| d.get("name")).and_then(|v| v.as_str()).unwrap_or(&name).to_string(),
+                kind: data.and_then(|d| d.get("kind")).and_then(|v| v.as_str()).unwrap_or(seg).to_string(),
+                description: data.and_then(|d| d.get("description")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 members: data_string_list(data, "members"),
                 policies: data_string_list(data, "policies"),
-                created_at: data
-                    .and_then(|d| d.get("created_at"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                updated_at: data
-                    .and_then(|d| d.get("updated_at"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                created_at: data.and_then(|d| d.get("created_at")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                updated_at: data.and_then(|d| d.get("updated_at")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
             })
         }
         None => Err("Group not found".into()),
@@ -168,13 +117,7 @@ pub async fn write_group(
     body.insert("members".into(), Value::String(members));
     body.insert("policies".into(), Value::String(policies));
 
-    make_request(
-        &state,
-        Operation::Write,
-        format!("identity/group/{seg}/{name}"),
-        Some(body),
-    )
-    .await?;
+    make_request(&state, Operation::Write, format!("identity/group/{seg}/{name}"), Some(body)).await?;
     Ok(())
 }
 
@@ -185,13 +128,7 @@ pub async fn list_group_history(
     name: String,
 ) -> CmdResult<GroupHistoryResult> {
     let seg = kind_segment(&kind)?;
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("identity/group/{seg}/{name}/history"),
-        None,
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Read, format!("identity/group/{seg}/{name}/history"), None).await?;
 
     match resp {
         Some(r) => {
@@ -210,22 +147,10 @@ pub async fn list_group_history(
                                 changed_fields: o
                                     .get("changed_fields")
                                     .and_then(|x| x.as_array())
-                                    .map(|a| {
-                                        a.iter()
-                                            .filter_map(|x| x.as_str().map(String::from))
-                                            .collect()
-                                    })
+                                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
                                     .unwrap_or_default(),
-                                before: o
-                                    .get("before")
-                                    .and_then(|x| x.as_object())
-                                    .cloned()
-                                    .unwrap_or_default(),
-                                after: o
-                                    .get("after")
-                                    .and_then(|x| x.as_object())
-                                    .cloned()
-                                    .unwrap_or_default(),
+                                before: o.get("before").and_then(|x| x.as_object()).cloned().unwrap_or_default(),
+                                after: o.get("after").and_then(|x| x.as_object()).cloned().unwrap_or_default(),
                             })
                         })
                         .collect()
@@ -238,18 +163,8 @@ pub async fn list_group_history(
 }
 
 #[tauri::command]
-pub async fn delete_group(
-    state: State<'_, AppState>,
-    kind: String,
-    name: String,
-) -> CmdResult<()> {
+pub async fn delete_group(state: State<'_, AppState>, kind: String, name: String) -> CmdResult<()> {
     let seg = kind_segment(&kind)?;
-    make_request(
-        &state,
-        Operation::Delete,
-        format!("identity/group/{seg}/{name}"),
-        None,
-    )
-    .await?;
+    make_request(&state, Operation::Delete, format!("identity/group/{seg}/{name}"), None).await?;
     Ok(())
 }

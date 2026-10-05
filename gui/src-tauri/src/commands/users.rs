@@ -51,10 +51,7 @@ pub struct MfaConfigDto {
 }
 
 #[tauri::command]
-pub async fn list_users(
-    state: State<'_, AppState>,
-    mount_path: String,
-) -> CmdResult<UserListResult> {
+pub async fn list_users(state: State<'_, AppState>, mount_path: String) -> CmdResult<UserListResult> {
     let path = format!("auth/{mount_path}users/");
     let resp = make_request(&state, Operation::List, path, None).await?;
 
@@ -62,10 +59,7 @@ pub async fn list_users(
         Some(r) => {
             if let Some(data) = &r.data {
                 if let Some(Value::Array(keys)) = data.get("keys") {
-                    let users: Vec<String> = keys
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect();
+                    let users: Vec<String> = keys.iter().filter_map(|v| v.as_str().map(String::from)).collect();
                     return Ok(UserListResult { users });
                 }
             }
@@ -76,11 +70,7 @@ pub async fn list_users(
 }
 
 #[tauri::command]
-pub async fn get_user(
-    state: State<'_, AppState>,
-    mount_path: String,
-    username: String,
-) -> CmdResult<UserInfo> {
+pub async fn get_user(state: State<'_, AppState>, mount_path: String, username: String) -> CmdResult<UserInfo> {
     let path = format!("auth/{mount_path}users/{username}");
     let resp = make_request(&state, Operation::Read, path, None).await?;
 
@@ -110,26 +100,18 @@ fn user_info_from_map(username: String, data: &Map<String, Value>) -> UserInfo {
                 .filter(|s| !s.is_empty())
                 .collect(),
             // Comma-separated string
-            Value::String(s) => s
-                .split(',')
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty())
-                .collect(),
+            Value::String(s) => s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect(),
             _ => vec![],
         })
         .unwrap_or_default();
     let get_bool = |k: &str| data.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
-    let get_str =
-        |k: &str| data.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let get_str = |k: &str| data.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
     UserInfo {
         username,
         policies,
         disabled: get_bool("disabled"),
         locked: get_bool("locked"),
-        failed_login_count: data
-            .get("failed_login_count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
+        failed_login_count: data.get("failed_login_count").and_then(|v| v.as_u64()).unwrap_or(0),
         totp_mfa_enabled: get_bool("totp_mfa_enabled"),
         totp_mount: get_str("totp_mount"),
         totp_key: get_str("totp_key"),
@@ -182,21 +164,11 @@ pub async fn list_users_info(
             arr.iter()
                 .filter_map(|v| v.as_object())
                 .map(|rec| {
-                    let username = rec
-                        .get("username")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
+                    let username = rec.get("username").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     UserRow {
                         info: user_info_from_map(username, rec),
-                        registered_keys: rec
-                            .get("registered_keys")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
-                        fido2_enabled: rec
-                            .get("fido2_enabled")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false),
+                        registered_keys: rec.get("registered_keys").and_then(|v| v.as_u64()).unwrap_or(0),
+                        fido2_enabled: rec.get("fido2_enabled").and_then(|v| v.as_bool()).unwrap_or(false),
                     }
                 })
                 .collect()
@@ -283,26 +255,22 @@ pub async fn update_user(
 }
 
 #[tauri::command]
-pub async fn unlock_user(
-    state: State<'_, AppState>,
-    mount_path: String,
-    username: String,
-) -> CmdResult<()> {
+pub async fn unlock_user(state: State<'_, AppState>, mount_path: String, username: String) -> CmdResult<()> {
     let path = format!("auth/{mount_path}users/{username}/unlock");
     make_request(&state, Operation::Write, path, Some(Map::new())).await?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn get_lockout_config(
-    state: State<'_, AppState>,
-    mount_path: String,
-) -> CmdResult<LockoutConfigDto> {
+pub async fn get_lockout_config(state: State<'_, AppState>, mount_path: String) -> CmdResult<LockoutConfigDto> {
     let path = format!("auth/{mount_path}config/lockout");
     let resp = make_request(&state, Operation::Read, path, None).await?;
     let data = resp.and_then(|r| r.data).map(Value::Object).unwrap_or(Value::Null);
-    Ok(serde_json::from_value(data)
-        .unwrap_or(LockoutConfigDto { enabled: true, max_failed_attempts: 5, lockout_duration_secs: 900 }))
+    Ok(serde_json::from_value(data).unwrap_or(LockoutConfigDto {
+        enabled: true,
+        max_failed_attempts: 5,
+        lockout_duration_secs: 900,
+    }))
 }
 
 #[tauri::command]
@@ -323,15 +291,11 @@ pub async fn set_lockout_config(
 }
 
 #[tauri::command]
-pub async fn get_mfa_config(
-    state: State<'_, AppState>,
-    mount_path: String,
-) -> CmdResult<MfaConfigDto> {
+pub async fn get_mfa_config(state: State<'_, AppState>, mount_path: String) -> CmdResult<MfaConfigDto> {
     let path = format!("auth/{mount_path}config/mfa");
     let resp = make_request(&state, Operation::Read, path, None).await?;
     let data = resp.and_then(|r| r.data).map(Value::Object).unwrap_or(Value::Null);
-    Ok(serde_json::from_value(data)
-        .unwrap_or(MfaConfigDto { enabled: false, default_mount: "totp/".to_string() }))
+    Ok(serde_json::from_value(data).unwrap_or(MfaConfigDto { enabled: false, default_mount: "totp/".to_string() }))
 }
 
 #[tauri::command]
@@ -352,11 +316,7 @@ pub async fn set_mfa_config(
 }
 
 #[tauri::command]
-pub async fn delete_user(
-    state: State<'_, AppState>,
-    mount_path: String,
-    username: String,
-) -> CmdResult<()> {
+pub async fn delete_user(state: State<'_, AppState>, mount_path: String, username: String) -> CmdResult<()> {
     let path = format!("auth/{mount_path}users/{username}");
     make_request(&state, Operation::Delete, path, None).await?;
     Ok(())
@@ -381,17 +341,11 @@ fn default_account_path(mount_path: &str, username: &str) -> String {
 }
 
 fn account_field(data: &Option<&Map<String, Value>>, key: &str) -> String {
-    data.and_then(|d| d.get(key))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string()
+    data.and_then(|d| d.get(key)).and_then(|v| v.as_str()).unwrap_or("").trim().to_string()
 }
 
 fn account_bool(data: &Option<&Map<String, Value>>, key: &str) -> bool {
-    data.and_then(|d| d.get(key))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+    data.and_then(|d| d.get(key)).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
 #[tauri::command]
@@ -400,13 +354,7 @@ pub async fn get_default_account(
     mount_path: String,
     username: String,
 ) -> CmdResult<DefaultAccountResult> {
-    let resp = make_request_root(
-        &state,
-        Operation::Read,
-        default_account_path(&mount_path, &username),
-        None,
-    )
-    .await?;
+    let resp = make_request_root(&state, Operation::Read, default_account_path(&mount_path, &username), None).await?;
     let data = resp.and_then(|r| r.data);
     let data_ref = data.as_ref();
     Ok(DefaultAccountResult {
@@ -424,16 +372,8 @@ pub async fn get_default_account(
 /// `self` endpoint reveals it to the host (the connect path consumes it
 /// directly in Rust).
 #[tauri::command]
-pub async fn get_default_account_self(
-    state: State<'_, AppState>,
-) -> CmdResult<DefaultAccountResult> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        "sys/identity/default-account/self".to_string(),
-        None,
-    )
-    .await?;
+pub async fn get_default_account_self(state: State<'_, AppState>) -> CmdResult<DefaultAccountResult> {
+    let resp = make_request(&state, Operation::Read, "sys/identity/default-account/self".to_string(), None).await?;
     let data = resp.and_then(|r| r.data);
     let data_ref = data.as_ref();
     Ok(DefaultAccountResult {
@@ -464,12 +404,6 @@ pub async fn set_default_account(
     if let Some(pw) = windows_password {
         body.insert("windows_password".to_string(), Value::String(pw));
     }
-    make_request_root(
-        &state,
-        Operation::Write,
-        default_account_path(&mount_path, &username),
-        Some(body),
-    )
-    .await?;
+    make_request_root(&state, Operation::Write, default_account_path(&mount_path, &username), Some(body)).await?;
     Ok(())
 }

@@ -481,10 +481,15 @@ export interface ResourceTypeDef {
     protocols?: ConnectProtocol[];
     default_ports?: { ssh?: number; rdp?: number };
     default_users?: { linux?: string; macos?: string; windows?: string };
-    /** Exposure cap for `web` profiles (spec §6). Typed for forward
-     *  compatibility; Phase 1 only offers `open` mode, whose exposure is
-     *  `none` and fits under every cap. Enforced server-side from Phase 2. */
+    /** Exposure cap for `web` profiles (spec §6), enforced server-side.
+     *  Deny unless opted in: the server releases no web credential unless
+     *  the resource's *saved* type sets this (form mode needs `dom`); unset
+     *  means `none`. `open` mode (exposure `none`) fits under every cap. */
     web_exposure_max?: WebExposure;
+    /** Heuristic recipes (`"steps": "auto"`) are refused unless a tier sets
+     *  this to `true`, and by an explicit `false` at either tier (spec §6).
+     *  Unset at both tiers means no heuristics. */
+    allow_heuristic_fill?: boolean;
   };
 }
 
@@ -514,10 +519,48 @@ export type WebExposure = "none" | "isolated" | "handler" | "proxy" | "dom";
  */
 export type SessionProtocol = "ssh" | "rdp" | "web";
 
-/** Login modes a `web` profile can declare (spec §1). Only `open` is
- *  launchable in this release; the others are refused at save and at
- *  connect with "not available yet". */
+/** Login modes a `web` profile can declare (spec §1). `open` and `form`
+ *  launch; `http-auth` and `sso` are refused at save and at connect with
+ *  "not available yet". `form` carries a login recipe (`WebLoginRecipe`)
+ *  and needs the type to opt in to `web_exposure_max: "dom"`. */
 export type WebLoginMode = "open" | "form" | "http-auth" | "sso";
+
+/** What a recipe `fill` writes (spec §2). Never JavaScript. */
+export type WebFillValue = "username" | "password" | "totp" | `literal:${string}`;
+
+/** One recipe action: exactly one verb. Selectors are CSS, matched in the
+ *  top document only. */
+export type WebRecipeAction =
+  | { fill: string; value: WebFillValue }
+  | { click: string }
+  | { submit: string }
+  | { wait: string };
+
+export interface WebRecipeStep {
+  /** Glob over the host-observed top-frame URL; `*` only after the origin. */
+  when_url: string;
+  actions: WebRecipeAction[];
+}
+
+export interface WebRecipeCondition {
+  url?: string;
+  selector?: string;
+}
+
+/** The v1 login recipe of a `form` profile (spec §2), as stored. The server
+ *  and the desktop host parse it with the same strict parser; unknown keys
+ *  are refused. */
+export interface WebLoginRecipe {
+  version: 1;
+  vendor?: string;
+  /** Explicit steps, or `"auto"` for heuristic mode (policy-gated). */
+  steps: WebRecipeStep[] | "auto";
+  success_when: WebRecipeCondition;
+  failure_when?: WebRecipeCondition;
+  /** 1–60, default 30. */
+  timeout_secs?: number;
+  pause_for_operator?: ("captcha" | "push_mfa")[];
+}
 
 /** Programmatic clipboard access for the web session's page. Only
  *  `bidirectional` grants it, and only on Linux / Windows — WKWebView
@@ -536,6 +579,8 @@ export interface WebProfileSettings {
    *  implicit. Navigation outside the set is blocked. */
   allowed_origins: string[];
   login_mode: WebLoginMode;
+  /** `form` only. */
+  recipe?: WebLoginRecipe;
   /** `rustion-isolated` is Phase 8 and refused today. */
   transport?: "local" | "rustion-isolated";
   /** Phase 4; a non-empty list is refused today rather than ignored. */
@@ -569,7 +614,16 @@ export interface EffectiveLoginClass {
 }
 
 export type CredentialSource =
-  | { kind: "secret"; secret_id: string }
+  | {
+      kind: "secret";
+      secret_id: string;
+      /** `form` web logins only: the secret's key names, when they differ
+       *  from `username` / `password` / `totp_seed`. */
+      fields?: { username?: string; password?: string; totp_seed?: string };
+      /** `form` web logins only: how the `totp_seed` (base32) turns into a
+       *  code. Defaults SHA1 / 6 digits / 30 s. */
+      totp?: { algorithm?: "SHA1" | "SHA256" | "SHA512"; digits?: 6 | 8; period?: 30 | 60 };
+    }
   | {
       kind: "ldap";
       ldap_mount: string;

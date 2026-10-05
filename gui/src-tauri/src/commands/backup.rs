@@ -53,14 +53,9 @@ const ARGON2_P: u32 = 4;
 /// Look up the caller's policies and refuse if `root` is missing.
 async fn require_root(state: &State<'_, AppState>) -> Result<(), CommandError> {
     use bv_client::Operation;
-    let resp = crate::commands::make_request(
-        state,
-        Operation::Read,
-        "auth/token/lookup-self".to_string(),
-        None,
-    )
-    .await?
-    .ok_or("token lookup returned empty response")?;
+    let resp = crate::commands::make_request(state, Operation::Read, "auth/token/lookup-self".to_string(), None)
+        .await?
+        .ok_or("token lookup returned empty response")?;
     let policies: Vec<String> = resp
         .data
         .as_ref()
@@ -93,19 +88,11 @@ fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32], CommandError> {
     Ok(key)
 }
 
-fn write_envelope(
-    payload: &[u8],
-    password: &str,
-    out: &mut Vec<u8>,
-) -> Result<(), CommandError> {
+fn write_envelope(payload: &[u8], password: &str, out: &mut Vec<u8>) -> Result<(), CommandError> {
     let mut salt = [0u8; SALT_LEN];
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    OsRng
-        .try_fill_bytes(&mut salt)
-        .map_err(|e| CommandError::from(format!("rng: {e}")))?;
-    OsRng
-        .try_fill_bytes(&mut nonce_bytes)
-        .map_err(|e| CommandError::from(format!("rng: {e}")))?;
+    OsRng.try_fill_bytes(&mut salt).map_err(|e| CommandError::from(format!("rng: {e}")))?;
+    OsRng.try_fill_bytes(&mut nonce_bytes).map_err(|e| CommandError::from(format!("rng: {e}")))?;
     let key_bytes = derive_key(password, &salt)?;
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_bytes));
     let nonce = Nonce::from_slice(&nonce_bytes);
@@ -141,8 +128,8 @@ fn read_envelope(blob: &[u8], password: &str) -> Result<Vec<u8>, CommandError> {
     let nonce_bytes = &header[20 + SALT_LEN..20 + SALT_LEN + NONCE_LEN];
     // Use the params from the file so backups taken at different
     // settings still restore correctly.
-    let params = Params::new(m_kib, t, p, Some(32))
-        .map_err(|e| CommandError::from(format!("argon2 params from file: {e}")))?;
+    let params =
+        Params::new(m_kib, t, p, Some(32)).map_err(|e| CommandError::from(format!("argon2 params from file: {e}")))?;
     let kdf = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key_bytes = [0u8; 32];
     kdf.hash_password_into(password.as_bytes(), salt, &mut key_bytes)
@@ -151,33 +138,21 @@ fn read_envelope(blob: &[u8], password: &str) -> Result<Vec<u8>, CommandError> {
     let nonce = Nonce::from_slice(nonce_bytes);
     cipher
         .decrypt(nonce, Payload { msg: ciphertext, aad: header })
-        .map_err(|_| CommandError::from(
-            "decrypt failed — wrong password or corrupted file".to_string(),
-        ))
+        .map_err(|_| CommandError::from("decrypt failed — wrong password or corrupted file".to_string()))
 }
 
 /// Generate a full vault backup, wrap it in the password envelope,
 /// and write the result to `path`. Returns the number of vault
 /// entries that were captured.
 #[tauri::command]
-pub async fn backup_export(
-    state: State<'_, AppState>,
-    path: String,
-    password: String,
-) -> CmdResult<u64> {
+pub async fn backup_export(state: State<'_, AppState>, path: String, password: String) -> CmdResult<u64> {
     require_root(&state).await?;
     validate_password(&password)?;
     let vault_guard = state.vault.lock().await;
-    let vault = vault_guard
-        .as_ref()
-        .ok_or("Vault not open")?
-        .clone();
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?.clone();
     drop(vault_guard);
     let core = vault.core.load();
-    let hmac_key = core
-        .barrier
-        .derive_hmac_key()
-        .map_err(|e| CommandError::from(format!("derive hmac key: {e}")))?;
+    let hmac_key = core.barrier.derive_hmac_key().map_err(|e| CommandError::from(format!("derive hmac key: {e}")))?;
     let mut inner = Vec::new();
     let entries = bastion_vault::backup::create::create_backup(
         core.physical.as_ref(),
@@ -189,9 +164,7 @@ pub async fn backup_export(
     .map_err(|e| CommandError::from(format!("create backup: {e}")))?;
     let mut envelope = Vec::with_capacity(inner.len() + HEADER_LEN + 16);
     write_envelope(&inner, &password, &mut envelope)?;
-    fs::write(&path, &envelope)
-        .await
-        .map_err(|e| CommandError::from(format!("write {path}: {e}")))?;
+    fs::write(&path, &envelope).await.map_err(|e| CommandError::from(format!("write {path}: {e}")))?;
     Ok(entries)
 }
 
@@ -199,36 +172,20 @@ pub async fn backup_export(
 /// `password`, and restore into the open vault. Returns the entry
 /// count restored.
 #[tauri::command]
-pub async fn backup_restore(
-    state: State<'_, AppState>,
-    path: String,
-    password: String,
-) -> CmdResult<u64> {
+pub async fn backup_restore(state: State<'_, AppState>, path: String, password: String) -> CmdResult<u64> {
     require_root(&state).await?;
     validate_password(&password)?;
-    let blob = fs::read(&path)
-        .await
-        .map_err(|e| CommandError::from(format!("read {path}: {e}")))?;
+    let blob = fs::read(&path).await.map_err(|e| CommandError::from(format!("read {path}: {e}")))?;
     let inner = read_envelope(&blob, &password)?;
     let vault_guard = state.vault.lock().await;
-    let vault = vault_guard
-        .as_ref()
-        .ok_or("Vault not open")?
-        .clone();
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?.clone();
     drop(vault_guard);
     let core = vault.core.load();
-    let hmac_key = core
-        .barrier
-        .derive_hmac_key()
-        .map_err(|e| CommandError::from(format!("derive hmac key: {e}")))?;
+    let hmac_key = core.barrier.derive_hmac_key().map_err(|e| CommandError::from(format!("derive hmac key: {e}")))?;
     let mut reader = Cursor::new(inner);
-    let count = bastion_vault::backup::restore::restore_backup(
-        core.physical.as_ref(),
-        &hmac_key,
-        &mut reader,
-    )
-    .await
-    .map_err(|e| CommandError::from(format!("restore backup: {e}")))?;
+    let count = bastion_vault::backup::restore::restore_backup(core.physical.as_ref(), &hmac_key, &mut reader)
+        .await
+        .map_err(|e| CommandError::from(format!("restore backup: {e}")))?;
     Ok(count)
 }
 

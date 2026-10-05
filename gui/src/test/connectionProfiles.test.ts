@@ -13,8 +13,10 @@ import {
   pickDefaultProfile,
   profileConnectHints,
   profilesForOsType,
+  profilesForWrite,
   protocolForOsType,
   readProfiles,
+  readUnknownProfiles,
   validateProfile,
   validateProfileForLoginClass,
 } from "../lib/connectionProfiles";
@@ -663,5 +665,82 @@ describe("blankCredentialSource", () => {
   it("offers fido2 on a non-brokered resource", () => {
     expect(loginClassGate("shared-credential").allowedKinds).toContain("fido2");
     expect(loginClassGate("brokered").allowedKinds).not.toContain("fido2");
+  });
+});
+
+describe("unknown profiles survive writes", () => {
+  const known = (id: string, extra: Partial<ConnectionProfile> = {}): ConnectionProfile => ({
+    id,
+    name: id,
+    protocol: "ssh",
+    credential_source: { kind: "secret", secret_id: "s" },
+    ...extra,
+  });
+  // A profile written by a newer client: unknown protocol and fields this
+  // build has never heard of.
+  const newer = {
+    id: "p_future",
+    name: "from a newer client",
+    protocol: "quic-tunnel",
+    credential_source: { kind: "passkey" },
+    future_field: { nested: [1, 2, 3] },
+  };
+  const malformed = { id: "p_nocred", name: "x", protocol: "rdp" };
+  const meta = {
+    connection_profiles: [known("p_a"), newer, known("p_b"), malformed, "junk", null],
+  };
+
+  it("readUnknownProfiles returns exactly the entries readProfiles drops", () => {
+    expect(readProfiles(meta).map((p) => p.id)).toEqual(["p_a", "p_b"]);
+    expect(readUnknownProfiles(meta)).toEqual([newer, malformed, "junk", null]);
+    expect(readUnknownProfiles({})).toEqual([]);
+    expect(readUnknownProfiles({ connection_profiles: "nope" })).toEqual([]);
+  });
+
+  it("save re-appends unknown entries unchanged", () => {
+    const edited = readProfiles(meta).map((p) => (p.id === "p_a" ? { ...p, name: "renamed" } : p));
+    const out = profilesForWrite(edited, readUnknownProfiles(meta));
+    expect(out.slice(2)).toEqual([newer, malformed, "junk", null]);
+    expect((out[0] as ConnectionProfile).name).toBe("renamed");
+    expect(out).toHaveLength(6);
+  });
+
+  it("delete keeps unknown entries, even when it removes the last known profile", () => {
+    const afterDelete = readProfiles(meta).filter((p) => p.id !== "p_a");
+    expect(profilesForWrite(afterDelete, readUnknownProfiles(meta))).toContainEqual(newer);
+    expect(profilesForWrite([], readUnknownProfiles(meta))).toEqual([newer, malformed, "junk", null]);
+  });
+
+  it("set default flags the known profile and leaves other unknown fields untouched", () => {
+    const withDefault = { ...newer, is_default: true };
+    const m = { connection_profiles: [known("p_a"), known("p_b"), withDefault] };
+    const next = readProfiles(m).map((p) => ({ ...p, is_default: p.id === "p_b" }));
+    const out = profilesForWrite(next, readUnknownProfiles(m)) as Array<Record<string, unknown>>;
+    expect(out.filter((p) => p.is_default === true).map((p) => p.id)).toEqual(["p_b"]);
+    // Only the flag changed on the unknown entry.
+    expect(out[2]).toEqual({ ...newer, is_default: false });
+  });
+
+  it("an unknown entry already holding the default is not displaced by promoting a known one", () => {
+    const withDefault = { ...newer, is_default: true };
+    const m = { connection_profiles: [known("p_a"), known("p_b"), withDefault] };
+    const out = profilesForWrite(readProfiles(m), readUnknownProfiles(m)) as Array<Record<string, unknown>>;
+    expect(out[2]).toBe(withDefault);
+    expect(out.filter((p) => p.is_default === true)).toHaveLength(1);
+  });
+
+  it("with no default anywhere the first known profile is promoted, as before", () => {
+    const out = profilesForWrite(readProfiles(meta), readUnknownProfiles(meta)) as Array<Record<string, unknown>>;
+    expect(out[0].is_default).toBe(true);
+    expect(out[1].is_default).toBe(false);
+  });
+
+  it("does not mutate its inputs", () => {
+    const withDefault = { ...newer, is_default: true };
+    const k = [known("p_a", { is_default: true })];
+    const u = [withDefault];
+    profilesForWrite(k, u);
+    expect(u[0]).toEqual({ ...newer, is_default: true });
+    expect(k[0].is_default).toBe(true);
   });
 });

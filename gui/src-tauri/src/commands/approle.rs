@@ -77,7 +77,9 @@ pub async fn read_approle(state: State<'_, AppState>, name: String) -> CmdResult
                 data.and_then(|d| d.get(key))
                     .and_then(|v| match v {
                         Value::Array(a) => Some(a.iter().filter_map(|x| x.as_str().map(String::from)).collect()),
-                        Value::String(s) => Some(s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()),
+                        Value::String(s) => {
+                            Some(s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+                        }
                         _ => None,
                     })
                     .unwrap_or_default()
@@ -86,7 +88,10 @@ pub async fn read_approle(state: State<'_, AppState>, name: String) -> CmdResult
             Ok(AppRoleInfo {
                 name,
                 bind_secret_id: data.and_then(|d| d.get("bind_secret_id")).and_then(|v| v.as_bool()).unwrap_or(true),
-                secret_id_num_uses: data.and_then(|d| d.get("secret_id_num_uses")).and_then(|v| v.as_i64()).unwrap_or(0),
+                secret_id_num_uses: data
+                    .and_then(|d| d.get("secret_id_num_uses"))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0),
                 secret_id_ttl: data.and_then(|d| d.get("secret_id_ttl")).and_then(|v| v.as_u64()).unwrap_or(0),
                 token_policies: get_str_vec("token_policies"),
                 token_ttl: data.and_then(|d| d.get("token_ttl")).and_then(|v| v.as_u64()).unwrap_or(0),
@@ -165,11 +170,8 @@ pub async fn read_role_id(state: State<'_, AppState>, name: String) -> CmdResult
 
     match resp {
         Some(r) => {
-            let role_id = r.data.as_ref()
-                .and_then(|d| d.get("role_id"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let role_id =
+                r.data.as_ref().and_then(|d| d.get("role_id")).and_then(|v| v.as_str()).unwrap_or("").to_string();
             Ok(RoleIdInfo { role_id })
         }
         None => Err("Role ID not found".into()),
@@ -217,19 +219,19 @@ pub async fn generate_secret_id(
         body.insert("environments".into(), Value::Array(environments.into_iter().map(Value::String).collect()));
     }
 
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("auth/approle/role/{name}/secret-id/"),
-        Some(body),
-    ).await?;
+    let resp =
+        make_request(&state, Operation::Write, format!("auth/approle/role/{name}/secret-id/"), Some(body)).await?;
 
     match resp {
         Some(r) => {
             let data = r.data.as_ref();
             Ok(SecretIdResponse {
                 secret_id: data.and_then(|d| d.get("secret_id")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                secret_id_accessor: data.and_then(|d| d.get("secret_id_accessor")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                secret_id_accessor: data
+                    .and_then(|d| d.get("secret_id_accessor"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 secret_id_ttl: data.and_then(|d| d.get("secret_id_ttl")).and_then(|v| v.as_u64()).unwrap_or(0),
             })
         }
@@ -238,16 +240,8 @@ pub async fn generate_secret_id(
 }
 
 #[tauri::command]
-pub async fn list_secret_id_accessors(
-    state: State<'_, AppState>,
-    name: String,
-) -> CmdResult<SecretIdAccessorList> {
-    let resp = make_request(
-        &state,
-        Operation::List,
-        format!("auth/approle/role/{name}/secret-id/"),
-        None,
-    ).await?;
+pub async fn list_secret_id_accessors(state: State<'_, AppState>, name: String) -> CmdResult<SecretIdAccessorList> {
+    let resp = make_request(&state, Operation::List, format!("auth/approle/role/{name}/secret-id/"), None).await?;
 
     match resp {
         Some(r) => {
@@ -277,7 +271,8 @@ pub async fn lookup_secret_id_accessor(
         Operation::Write,
         format!("auth/approle/role/{name}/secret-id-accessor/lookup/"),
         Some(body),
-    ).await?;
+    )
+    .await?;
 
     match resp {
         Some(r) => {
@@ -302,10 +297,21 @@ pub async fn lookup_secret_id_accessor(
 
             Ok(SecretIdAccessorInfo {
                 secret_id_accessor: accessor,
-                secret_id_num_uses: data.and_then(|d| d.get("secret_id_num_uses")).and_then(|v| v.as_i64()).unwrap_or(0),
+                secret_id_num_uses: data
+                    .and_then(|d| d.get("secret_id_num_uses"))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0),
                 secret_id_ttl: data.and_then(|d| d.get("secret_id_ttl")).and_then(|v| v.as_u64()).unwrap_or(0),
-                creation_time: data.and_then(|d| d.get("creation_time")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                expiration_time: data.and_then(|d| d.get("expiration_time")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                creation_time: data
+                    .and_then(|d| d.get("creation_time"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                expiration_time: data
+                    .and_then(|d| d.get("expiration_time"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 metadata,
                 cidr_list,
                 environments,
@@ -316,36 +322,20 @@ pub async fn lookup_secret_id_accessor(
 }
 
 #[tauri::command]
-pub async fn destroy_secret_id_accessor(
-    state: State<'_, AppState>,
-    name: String,
-    accessor: String,
-) -> CmdResult<()> {
+pub async fn destroy_secret_id_accessor(state: State<'_, AppState>, name: String, accessor: String) -> CmdResult<()> {
     let mut body = Map::new();
     body.insert("secret_id_accessor".into(), Value::String(accessor));
 
-    make_request(
-        &state,
-        Operation::Write,
-        format!("auth/approle/role/{name}/secret-id-accessor/destroy/"),
-        Some(body),
-    ).await?;
+    make_request(&state, Operation::Write, format!("auth/approle/role/{name}/secret-id-accessor/destroy/"), Some(body))
+        .await?;
     Ok(())
 }
 
 // ── Machine Bindings ───────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn list_role_machines(
-    state: State<'_, AppState>,
-    name: String,
-) -> CmdResult<MachineBindingList> {
-    let resp = make_request(
-        &state,
-        Operation::List,
-        format!("auth/approle/role/{name}/machine/"),
-        None,
-    ).await?;
+pub async fn list_role_machines(state: State<'_, AppState>, name: String) -> CmdResult<MachineBindingList> {
+    let resp = make_request(&state, Operation::List, format!("auth/approle/role/{name}/machine/"), None).await?;
 
     match resp {
         Some(r) => {
@@ -383,16 +373,7 @@ pub async fn add_role_machine(
 }
 
 #[tauri::command]
-pub async fn delete_role_machine(
-    state: State<'_, AppState>,
-    name: String,
-    machine_id: String,
-) -> CmdResult<()> {
-    make_request(
-        &state,
-        Operation::Delete,
-        format!("auth/approle/role/{name}/machine/{machine_id}"),
-        None,
-    ).await?;
+pub async fn delete_role_machine(state: State<'_, AppState>, name: String, machine_id: String) -> CmdResult<()> {
+    make_request(&state, Operation::Delete, format!("auth/approle/role/{name}/machine/{machine_id}"), None).await?;
     Ok(())
 }

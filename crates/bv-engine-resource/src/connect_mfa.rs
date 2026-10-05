@@ -475,7 +475,7 @@ impl super::ResourceBackendInner {
     /// rules see no caller, no owner, and no share on a `Request::default()`).
     /// So every share-derived connect was refused here while `session/open`
     /// allowed it — the two gates disagreeing about the same question.
-    async fn require_connect_grant(&self, req: &Request, resource: &str) -> Result<(), RvError> {
+    pub(crate) async fn require_connect_grant(&self, req: &Request, resource: &str) -> Result<(), RvError> {
         if req.auth.is_none() {
             return Err(bv_error_response_status!(401, "no authenticated caller"));
         }
@@ -506,6 +506,19 @@ impl super::ResourceBackendInner {
         &self,
         req: &mut Request,
     ) -> Result<(String, String, Option<Value>), RvError> {
+        let (resource, profile_id, meta) = self.connect_target_record(req).await?;
+        let profile = meta.as_ref().and_then(|m| find_profile(m, &profile_id));
+        Ok((resource, profile_id, profile))
+    }
+
+    /// [`Self::connect_target`], returning the whole resource record instead
+    /// of just the profile — `v2/connect/web/launch` also reads the record's
+    /// type and exposure policy. The connect grant is checked before the
+    /// record is read, exactly as for the other handlers.
+    pub(crate) async fn connect_target_record(
+        &self,
+        req: &mut Request,
+    ) -> Result<(String, String, Option<Map<String, Value>>), RvError> {
         let raw = req
             .get_data("resource")
             .ok()
@@ -524,14 +537,51 @@ impl super::ResourceBackendInner {
 
         // Read the record straight out of this mount's own view — we are the
         // resource backend, no router round trip needed.
-        let profile = match req.storage_get(&format!("meta/{resource}")).await? {
-            Some(e) => {
-                let meta: Map<String, Value> = serde_json::from_slice(&e.value)?;
-                find_profile(&meta, &profile_id)
-            }
+        let meta = match req.storage_get(&format!("meta/{resource}")).await? {
+            Some(e) => Some(serde_json::from_slice::<Map<String, Value>>(&e.value)?),
             None => None,
         };
-        Ok((resource, profile_id, profile))
+        Ok((resource, profile_id, meta))
+    }
+
+    /// Redeem the caller's `connect_ticket` for a gated profile: the second
+    /// half of every pre-flight on a `require_mfa` profile. A missing ticket
+    /// is the `mfa_required` refusal; a ticket that is unknown, spent,
+    /// expired or bound to anything else is refused by
+    /// [`ConnectMfaTicketStore::consume`], which burns it either way.
+    ///
+    /// Shared by `connect/authorize` and `connect/web/launch` so the two can
+    /// never disagree about what redeems a ticket.
+    pub(crate) async fn redeem_connect_ticket(
+        &self,
+        req: &Request,
+        resource: &str,
+        profile_id: &str,
+    ) -> Result<ConnectMfaTicket, RvError> {
+        let ticket = req
+            .get_data("connect_ticket")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                bv_error_response_status!(
+                    403,
+                    "mfa_required: this connection profile requires MFA re-validation. \
+                     Run `resources/v2/connect/mfa/begin` + `/verify` and pass the \
+                     resulting `connect_ticket`."
+                )
+            })?;
+
+        let (mount, principal) = caller_principal(req)?;
+        let binding = TicketBinding {
+            mount,
+            principal,
+            namespace: caller_namespace(&self.core, req).await?,
+            resource: resource.to_string(),
+            profile_id: profile_id.to_string(),
+        };
+        let store = ConnectMfaTicketStore::new(&self.core)?;
+        Ok(store.consume(ticket.as_str(), &binding).await?)
     }
 
     /// `POST resources/v2/connect/mfa/begin`.
@@ -707,34 +757,14 @@ impl super::ResourceBackendInner {
             return Ok(Some(crate::logical::Response::data_response(Some(data))));
         }
 
-        let ticket = req
-            .get_data("connect_ticket")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                bv_error_response_status!(
-                    403,
-                    "mfa_required: this connection profile requires MFA re-validation. \
-                     Run `resources/v2/connect/mfa/begin` + `/verify` and pass the \
-                     resulting `connect_ticket`."
-                )
-            })?;
-
-        let (mount, principal) = caller_principal(req)?;
-        let binding = TicketBinding {
-            mount,
-            principal: principal.clone(),
-            namespace: caller_namespace(&self.core, req).await?,
-            resource: resource.clone(),
-            profile_id: profile_id.clone(),
-        };
-        let store = ConnectMfaTicketStore::new(&self.core)?;
-        let record = store.consume(ticket.as_str(), &binding).await?;
+        // `consume` only returns a record whose principal equals the caller's,
+        // so `record.principal` is the caller.
+        let record = self.redeem_connect_ticket(req, &resource, &profile_id).await?;
 
         log::info!(
             "connect.mfa.authorized resource={resource} profile={profile_id} \
-             principal={principal} method={}",
+             principal={} method={}",
+            record.principal,
             record.method
         );
 

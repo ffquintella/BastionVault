@@ -52,10 +52,7 @@ pub async fn list_secrets(
         Some(r) => {
             if let Some(data) = &r.data {
                 if let Some(Value::Array(keys)) = data.get("keys") {
-                    let keys: Vec<String> = keys
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect();
+                    let keys: Vec<String> = keys.iter().filter_map(|v| v.as_str().map(String::from)).collect();
                     return Ok(SecretListResult { keys });
                 }
             }
@@ -90,18 +87,10 @@ pub async fn read_secret(
             // v2 nests the actual secret under a "data" key and exposes env
             // info under "metadata".
             if mt == "kv-v2" {
-                let data = raw
-                    .get("data")
-                    .and_then(|v| v.as_object())
-                    .cloned()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect();
+                let data =
+                    raw.get("data").and_then(|v| v.as_object()).cloned().unwrap_or_default().into_iter().collect();
                 let meta = raw.get("metadata");
-                let resolved_env = meta
-                    .and_then(|m| m.get("resolved_env"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
+                let resolved_env = meta.and_then(|m| m.get("resolved_env")).and_then(|v| v.as_str()).map(String::from);
                 let available_envs = meta
                     .and_then(|m| m.get("available_envs"))
                     .and_then(|v| v.as_array())
@@ -109,11 +98,7 @@ pub async fn read_secret(
                     .unwrap_or_default();
                 Ok(SecretData { data, resolved_env, available_envs })
             } else {
-                Ok(SecretData {
-                    data: raw.into_iter().collect(),
-                    resolved_env: None,
-                    available_envs: Vec::new(),
-                })
+                Ok(SecretData { data: raw.into_iter().collect(), resolved_env: None, available_envs: Vec::new() })
             }
         }
         None => Err("Secret not found".into()),
@@ -242,11 +227,7 @@ pub async fn list_secret_versions(
     let m = mount.as_deref().unwrap_or("");
     let mt = mount_type.as_deref().unwrap_or("kv");
     if mt != "kv-v2" {
-        return Ok(SecretVersionListResult {
-            current_version: 0,
-            oldest_version: 0,
-            versions: vec![],
-        });
+        return Ok(SecretVersionListResult { current_version: 0, oldest_version: 0, versions: vec![] });
     }
     let actual_path = adjust_kv_path(&path, m, mt, "metadata");
     let resp = make_request(&state, Operation::Read, actual_path, None).await?;
@@ -254,22 +235,12 @@ pub async fn list_secret_versions(
     let data = match resp.and_then(|r| r.data) {
         Some(d) => d,
         None => {
-            return Ok(SecretVersionListResult {
-                current_version: 0,
-                oldest_version: 0,
-                versions: vec![],
-            });
+            return Ok(SecretVersionListResult { current_version: 0, oldest_version: 0, versions: vec![] });
         }
     };
 
-    let current_version = data
-        .get("current_version")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let oldest_version = data
-        .get("oldest_version")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let current_version = data.get("current_version").and_then(|v| v.as_u64()).unwrap_or(0);
+    let oldest_version = data.get("oldest_version").and_then(|v| v.as_u64()).unwrap_or(0);
 
     let mut versions: Vec<SecretVersionInfo> = Vec::new();
     if let Some(Value::Object(vmap)) = data.get("versions") {
@@ -281,41 +252,18 @@ pub async fn list_secret_versions(
             };
             versions.push(SecretVersionInfo {
                 version,
-                created_time: obj
-                    .get("created_time")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                deletion_time: obj
-                    .get("deletion_time")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                destroyed: obj
-                    .get("destroyed")
-                    .and_then(|x| x.as_bool())
-                    .unwrap_or(false),
-                username: obj
-                    .get("username")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                operation: obj
-                    .get("operation")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                created_time: obj.get("created_time").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                deletion_time: obj.get("deletion_time").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                destroyed: obj.get("destroyed").and_then(|x| x.as_bool()).unwrap_or(false),
+                username: obj.get("username").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                operation: obj.get("operation").and_then(|x| x.as_str()).unwrap_or("").to_string(),
             });
         }
     }
     // Newest version first.
     versions.sort_by_key(|x| std::cmp::Reverse(x.version));
 
-    Ok(SecretVersionListResult {
-        current_version,
-        oldest_version,
-        versions,
-    })
+    Ok(SecretVersionListResult { current_version, oldest_version, versions })
 }
 
 /// Read a specific historical version of a KV-v2 secret. Not valid for
@@ -346,44 +294,17 @@ pub async fn read_secret_version(
     let resp = make_request(&state, Operation::Read, actual_path, None).await?;
 
     let raw = resp.and_then(|r| r.data).ok_or("Version not found")?;
-    let data_map = raw
-        .get("data")
-        .and_then(|v| v.as_object())
-        .cloned()
-        .unwrap_or_default();
-    let meta = raw
-        .get("metadata")
-        .and_then(|v| v.as_object())
-        .cloned()
-        .unwrap_or_default();
+    let data_map = raw.get("data").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    let meta = raw.get("metadata").and_then(|v| v.as_object()).cloned().unwrap_or_default();
 
     Ok(SecretVersionData {
         data: data_map.into_iter().collect(),
         version: meta.get("version").and_then(|v| v.as_u64()).unwrap_or(version),
-        created_time: meta
-            .get("created_time")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        deletion_time: meta
-            .get("deletion_time")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        destroyed: meta
-            .get("destroyed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        username: meta
-            .get("username")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        operation: meta
-            .get("operation")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+        created_time: meta.get("created_time").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        deletion_time: meta.get("deletion_time").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        destroyed: meta.get("destroyed").and_then(|v| v.as_bool()).unwrap_or(false),
+        username: meta.get("username").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        operation: meta.get("operation").and_then(|v| v.as_str()).unwrap_or("").to_string(),
     })
 }
 
@@ -414,10 +335,7 @@ pub async fn soft_delete_secret_versions(
     }
     let actual_path = adjust_kv_path(&path, m, mt, "data");
     let mut body = Map::new();
-    body.insert(
-        "versions".to_string(),
-        Value::Array(versions.into_iter().map(Value::from).collect()),
-    );
+    body.insert("versions".to_string(), Value::Array(versions.into_iter().map(Value::from).collect()));
     make_request(&state, Operation::Delete, actual_path, Some(body)).await?;
     Ok(())
 }
@@ -440,10 +358,7 @@ pub async fn undelete_secret_versions(
     }
     let actual_path = adjust_kv_path(&path, m, mt, "undelete");
     let mut body = Map::new();
-    body.insert(
-        "versions".to_string(),
-        Value::Array(versions.into_iter().map(Value::from).collect()),
-    );
+    body.insert("versions".to_string(), Value::Array(versions.into_iter().map(Value::from).collect()));
     make_request(&state, Operation::Write, actual_path, Some(body)).await?;
     Ok(())
 }
@@ -466,10 +381,7 @@ pub async fn destroy_secret_versions(
     }
     let actual_path = adjust_kv_path(&path, m, mt, "destroy");
     let mut body = Map::new();
-    body.insert(
-        "versions".to_string(),
-        Value::Array(versions.into_iter().map(Value::from).collect()),
-    );
+    body.insert("versions".to_string(), Value::Array(versions.into_iter().map(Value::from).collect()));
     make_request(&state, Operation::Write, actual_path, Some(body)).await?;
     Ok(())
 }
@@ -507,10 +419,7 @@ pub async fn write_secret_cas(
     wrapper.insert("options".to_string(), Value::Object(options));
 
     let resp = make_request(&state, Operation::Write, actual_path, Some(wrapper)).await?;
-    let new_version = resp
-        .and_then(|r| r.data)
-        .and_then(|d| d.get("version").and_then(|v| v.as_u64()))
-        .unwrap_or(0);
+    let new_version = resp.and_then(|r| r.data).and_then(|d| d.get("version").and_then(|v| v.as_u64())).unwrap_or(0);
     Ok(new_version)
 }
 
@@ -531,10 +440,7 @@ pub struct KvV2EngineConfig {
 }
 
 #[tauri::command]
-pub async fn read_kv_v2_engine_config(
-    state: State<'_, AppState>,
-    mount: String,
-) -> CmdResult<KvV2EngineConfig> {
+pub async fn read_kv_v2_engine_config(state: State<'_, AppState>, mount: String) -> CmdResult<KvV2EngineConfig> {
     if mount.is_empty() {
         return Err("mount path is required".into());
     }
@@ -543,15 +449,8 @@ pub async fn read_kv_v2_engine_config(
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(KvV2EngineConfig {
         max_versions: data.get("max_versions").and_then(|v| v.as_u64()).unwrap_or(0),
-        cas_required: data
-            .get("cas_required")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        delete_version_after: data
-            .get("delete_version_after")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0s")
-            .to_string(),
+        cas_required: data.get("cas_required").and_then(|v| v.as_bool()).unwrap_or(false),
+        delete_version_after: data.get("delete_version_after").and_then(|v| v.as_str()).unwrap_or("0s").to_string(),
         environments: data
             .get("environments")
             .and_then(|v| v.as_array())
@@ -573,14 +472,8 @@ pub async fn write_kv_v2_engine_config(
     let mut body = Map::new();
     body.insert("max_versions".to_string(), Value::from(config.max_versions));
     body.insert("cas_required".to_string(), Value::Bool(config.cas_required));
-    body.insert(
-        "delete_version_after".to_string(),
-        Value::String(config.delete_version_after),
-    );
-    body.insert(
-        "environments".to_string(),
-        Value::Array(config.environments.into_iter().map(Value::String).collect()),
-    );
+    body.insert("delete_version_after".to_string(), Value::String(config.delete_version_after));
+    body.insert("environments".to_string(), Value::Array(config.environments.into_iter().map(Value::String).collect()));
     make_request(&state, Operation::Write, path, Some(body)).await?;
     Ok(())
 }
@@ -621,13 +514,7 @@ pub async fn mount_engine(
         }
     }
 
-    make_request(
-        &state,
-        Operation::Write,
-        format!("sys/mounts/{path}"),
-        Some(body),
-    )
-    .await?;
+    make_request(&state, Operation::Write, format!("sys/mounts/{path}"), Some(body)).await?;
     Ok(())
 }
 
@@ -650,13 +537,7 @@ pub async fn enable_auth_method(
         body.insert("description".to_string(), Value::String(description));
     }
 
-    make_request(
-        &state,
-        Operation::Write,
-        format!("sys/auth/{path}"),
-        Some(body),
-    )
-    .await?;
+    make_request(&state, Operation::Write, format!("sys/auth/{path}"), Some(body)).await?;
     Ok(())
 }
 

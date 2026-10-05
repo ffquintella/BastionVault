@@ -14,6 +14,7 @@
 //!   sver/<resource>/<key>/<version>     -> ResourceSecretVersion JSON (old values)
 
 pub mod connect_mfa;
+pub mod connect_web;
 pub mod kernel_service;
 
 // The substrate, under the names this engine already spells it by. Private:
@@ -322,6 +323,10 @@ impl ResourceBackend {
         let h_mfa_begin = self.inner.clone();
         let h_mfa_verify = self.inner.clone();
         let h_authorize = self.inner.clone();
+        let h_web_launch = self.inner.clone();
+        let h_web_totp = self.inner.clone();
+        let h_web_result = self.inner.clone();
+        let h_web_close = self.inner.clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -572,6 +577,98 @@ impl ResourceBackend {
                     ],
                     help: "Authorize a direct-path session open, consuming the connect \
                            MFA ticket when the profile requires re-validation."
+                },
+                {
+                    // Web Application Connect, `form` mode: authorise, enforce
+                    // the exposure policy and release the credential the
+                    // recipe fills. See connect_web/mod.rs and
+                    // features/web-application-connect.md §3.
+                    pattern: r"v2/connect/web/launch$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name the profile lives on."
+                        },
+                        "profile_id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Connection-profile id of a `web` / `form` profile."
+                        },
+                        "recipe_hash": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "`sha256:<hex>` of the canonical recipe the host loaded."
+                        },
+                        "connect_ticket": {
+                            field_type: FieldType::SecretStr,
+                            required: false,
+                            description: "Ticket from connect/mfa/verify. Required for gated profiles."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_web_launch.handle_connect_web_launch}
+                    ],
+                    help: "Launch a form-mode web session: returns a short-lived launch bundle \
+                           with the credential the profile's recipe fills."
+                },
+                {
+                    pattern: r"v2/connect/web/totp$",
+                    fields: {
+                        "launch_id": {
+                            field_type: FieldType::SecretStr,
+                            required: true,
+                            description: "launch_id from connect/web/launch."
+                        },
+                        "step": {
+                            field_type: FieldType::Int,
+                            required: true,
+                            description: "Index of the recipe step that fills `totp`."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_web_totp.handle_connect_web_totp}
+                    ],
+                    help: "Issue one fresh TOTP code for a recipe step of an in-flight launch."
+                },
+                {
+                    pattern: r"v2/connect/web/result$",
+                    fields: {
+                        "launch_id": {
+                            field_type: FieldType::SecretStr,
+                            required: true,
+                            description: "launch_id from connect/web/launch."
+                        },
+                        "outcome": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "success | failure | timeout | aborted:<check>."
+                        },
+                        "step": {
+                            field_type: FieldType::Int,
+                            required: false,
+                            description: "Index of the last recipe step reached."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_web_result.handle_connect_web_result}
+                    ],
+                    help: "Record a web launch's recipe outcome (once)."
+                },
+                {
+                    pattern: r"v2/connect/web/close$",
+                    fields: {
+                        "launch_id": {
+                            field_type: FieldType::SecretStr,
+                            required: true,
+                            description: "launch_id from connect/web/launch."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_web_close.handle_connect_web_close}
+                    ],
+                    help: "Record a web session's end and check an LDAP library account back in. \
+                           Idempotent."
                 }
             ],
             secrets: [{

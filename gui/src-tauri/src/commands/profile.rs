@@ -78,10 +78,7 @@ pub async fn get_my_profile(state: State<'_, AppState>) -> CmdResult<MyProfile> 
     let data = resp.and_then(|r| r.data);
     let d = data.as_ref();
 
-    let account = d
-        .and_then(|m| m.get("default_account"))
-        .and_then(|v| v.as_object())
-        .cloned();
+    let account = d.and_then(|m| m.get("default_account")).and_then(|v| v.as_object()).cloned();
     let a = account.as_ref();
 
     Ok(MyProfile {
@@ -93,9 +90,7 @@ pub async fn get_my_profile(state: State<'_, AppState>) -> CmdResult<MyProfile> 
         policies: d
             .and_then(|m| m.get("policies"))
             .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().filter_map(|p| p.as_str().map(String::from)).collect()
-            })
+            .map(|arr| arr.iter().filter_map(|p| p.as_str().map(String::from)).collect())
             .unwrap_or_default(),
         email: str_at(d, "email"),
         phone: str_at(d, "phone"),
@@ -166,12 +161,9 @@ pub async fn set_my_default_account(
     windows_password: Option<String>,
 ) -> CmdResult<()> {
     let mut body = Map::new();
-    for (key, value) in [
-        ("linux", linux),
-        ("macos", macos),
-        ("windows", windows),
-        ("windows_password", windows_password),
-    ] {
+    for (key, value) in
+        [("linux", linux), ("macos", macos), ("windows", windows), ("windows_password", windows_password)]
+    {
         if let Some(v) = value {
             body.insert(key.to_string(), Value::String(v));
         }

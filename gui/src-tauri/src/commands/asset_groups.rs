@@ -59,17 +59,8 @@ pub struct AssetGroupLookupResult {
 fn data_string_list(data: Option<&Map<String, Value>>, key: &str) -> Vec<String> {
     data.and_then(|d| d.get(key))
         .and_then(|v| match v {
-            Value::Array(a) => Some(
-                a.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
-                    .collect(),
-            ),
-            Value::String(s) => Some(
-                s.split(',')
-                    .map(|x| x.trim().to_string())
-                    .filter(|x| !x.is_empty())
-                    .collect(),
-            ),
+            Value::Array(a) => Some(a.iter().filter_map(|x| x.as_str().map(String::from)).collect()),
+            Value::String(s) => Some(s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()),
             _ => None,
         })
         .unwrap_or_default()
@@ -82,10 +73,7 @@ pub async fn list_asset_groups(state: State<'_, AppState>) -> CmdResult<AssetGro
         Some(r) => {
             if let Some(data) = &r.data {
                 if let Some(Value::Array(keys)) = data.get("keys") {
-                    let groups = keys
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect();
+                    let groups = keys.iter().filter_map(|v| v.as_str().map(String::from)).collect();
                     return Ok(AssetGroupListResult { groups });
                 }
             }
@@ -96,32 +84,15 @@ pub async fn list_asset_groups(state: State<'_, AppState>) -> CmdResult<AssetGro
 }
 
 #[tauri::command]
-pub async fn read_asset_group(
-    state: State<'_, AppState>,
-    name: String,
-) -> CmdResult<AssetGroupInfo> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("resource-group/groups/{name}"),
-        None,
-    )
-    .await?;
+pub async fn read_asset_group(state: State<'_, AppState>, name: String) -> CmdResult<AssetGroupInfo> {
+    let resp = make_request(&state, Operation::Read, format!("resource-group/groups/{name}"), None).await?;
 
     match resp {
         Some(r) => {
             let data = r.data.as_ref();
             Ok(AssetGroupInfo {
-                name: data
-                    .and_then(|d| d.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&name)
-                    .to_string(),
-                description: data
-                    .and_then(|d| d.get("description"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                name: data.and_then(|d| d.get("name")).and_then(|v| v.as_str()).unwrap_or(&name).to_string(),
+                description: data.and_then(|d| d.get("description")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 members: data_string_list(data, "members"),
                 secrets: data_string_list(data, "secrets"),
                 owner_entity_id: data
@@ -129,16 +100,8 @@ pub async fn read_asset_group(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
-                created_at: data
-                    .and_then(|d| d.get("created_at"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                updated_at: data
-                    .and_then(|d| d.get("updated_at"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                created_at: data.and_then(|d| d.get("created_at")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                updated_at: data.and_then(|d| d.get("updated_at")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
             })
         }
         None => Err("Asset group not found".into()),
@@ -158,40 +121,19 @@ pub async fn write_asset_group(
     body.insert("members".into(), Value::String(members));
     body.insert("secrets".into(), Value::String(secrets));
 
-    make_request(
-        &state,
-        Operation::Write,
-        format!("resource-group/groups/{name}"),
-        Some(body),
-    )
-    .await?;
+    make_request(&state, Operation::Write, format!("resource-group/groups/{name}"), Some(body)).await?;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn delete_asset_group(state: State<'_, AppState>, name: String) -> CmdResult<()> {
-    make_request(
-        &state,
-        Operation::Delete,
-        format!("resource-group/groups/{name}"),
-        None,
-    )
-    .await?;
+    make_request(&state, Operation::Delete, format!("resource-group/groups/{name}"), None).await?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn list_asset_group_history(
-    state: State<'_, AppState>,
-    name: String,
-) -> CmdResult<AssetGroupHistoryResult> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("resource-group/groups/{name}/history"),
-        None,
-    )
-    .await?;
+pub async fn list_asset_group_history(state: State<'_, AppState>, name: String) -> CmdResult<AssetGroupHistoryResult> {
+    let resp = make_request(&state, Operation::Read, format!("resource-group/groups/{name}/history"), None).await?;
 
     match resp {
         Some(r) => {
@@ -210,22 +152,10 @@ pub async fn list_asset_group_history(
                                 changed_fields: o
                                     .get("changed_fields")
                                     .and_then(|x| x.as_array())
-                                    .map(|a| {
-                                        a.iter()
-                                            .filter_map(|x| x.as_str().map(String::from))
-                                            .collect()
-                                    })
+                                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
                                     .unwrap_or_default(),
-                                before: o
-                                    .get("before")
-                                    .and_then(|x| x.as_object())
-                                    .cloned()
-                                    .unwrap_or_default(),
-                                after: o
-                                    .get("after")
-                                    .and_then(|x| x.as_object())
-                                    .cloned()
-                                    .unwrap_or_default(),
+                                before: o.get("before").and_then(|x| x.as_object()).cloned().unwrap_or_default(),
+                                after: o.get("after").and_then(|x| x.as_object()).cloned().unwrap_or_default(),
                             })
                         })
                         .collect()
@@ -244,37 +174,18 @@ pub async fn asset_groups_for_resource(
     state: State<'_, AppState>,
     resource: String,
 ) -> CmdResult<AssetGroupLookupResult> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("resource-group/by-resource/{resource}"),
-        None,
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Read, format!("resource-group/by-resource/{resource}"), None).await?;
 
-    Ok(AssetGroupLookupResult {
-        groups: data_string_list(resp.as_ref().and_then(|r| r.data.as_ref()), "groups"),
-    })
+    Ok(AssetGroupLookupResult { groups: data_string_list(resp.as_ref().and_then(|r| r.data.as_ref()), "groups") })
 }
 
 /// List asset-groups that contain a given KV-secret path. The path is
 /// base64url-encoded (no padding) on the wire so `/` segments in the
 /// path don't clash with URL path separators.
 #[tauri::command]
-pub async fn asset_groups_for_secret(
-    state: State<'_, AppState>,
-    path: String,
-) -> CmdResult<AssetGroupLookupResult> {
+pub async fn asset_groups_for_secret(state: State<'_, AppState>, path: String) -> CmdResult<AssetGroupLookupResult> {
     let encoded = URL_SAFE_NO_PAD.encode(path.as_bytes());
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("resource-group/by-secret/{encoded}"),
-        None,
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Read, format!("resource-group/by-secret/{encoded}"), None).await?;
 
-    Ok(AssetGroupLookupResult {
-        groups: data_string_list(resp.as_ref().and_then(|r| r.data.as_ref()), "groups"),
-    })
+    Ok(AssetGroupLookupResult { groups: data_string_list(resp.as_ref().and_then(|r| r.data.as_ref()), "groups") })
 }

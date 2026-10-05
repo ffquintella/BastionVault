@@ -49,8 +49,7 @@ pub async fn resource_types_read(state: State<'_, AppState>) -> CmdResult<Option
 #[tauri::command]
 pub async fn resource_types_write(state: State<'_, AppState>, types: Value) -> CmdResult<()> {
     let path = format!("{RESOURCE_MOUNT}config/types");
-    let body = types.as_object().cloned()
-        .ok_or_else(|| CommandError::from("types must be a JSON object"))?;
+    let body = types.as_object().cloned().ok_or_else(|| CommandError::from("types must be a JSON object"))?;
     make_request(&state, Operation::Write, path, Some(body)).await?;
     Ok(())
 }
@@ -99,19 +98,11 @@ pub async fn search_resources(
     if let Some(t) = input.type_filter.as_deref().filter(|s| !s.is_empty()) {
         body.insert("type".into(), Value::String(t.to_string()));
     }
-    body.insert(
-        "offset".into(),
-        Value::Number(input.offset.unwrap_or(0).into()),
-    );
-    body.insert(
-        "limit".into(),
-        Value::Number(input.limit.unwrap_or(30).into()),
-    );
+    body.insert("offset".into(), Value::Number(input.offset.unwrap_or(0).into()));
+    body.insert("limit".into(), Value::Number(input.limit.unwrap_or(30).into()));
 
     let resp = make_request(&state, Operation::Write, path, Some(body)).await?;
-    let data = resp
-        .and_then(|r| r.data)
-        .ok_or_else(|| CommandError::from("search returned no data"))?;
+    let data = resp.and_then(|r| r.data).ok_or_else(|| CommandError::from("search returned no data"))?;
 
     let items = data
         .get("items")
@@ -124,11 +115,7 @@ pub async fn search_resources(
     let total = data.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
     let has_more = data.get("has_more").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    Ok(ResourceSearchResult {
-        items,
-        total,
-        has_more,
-    })
+    Ok(ResourceSearchResult { items, total, has_more })
 }
 
 #[tauri::command]
@@ -145,9 +132,7 @@ pub async fn list_resources(
         Some(r) => {
             if let Some(data) = &r.data {
                 if let Some(Value::Array(keys)) = data.get("keys") {
-                    let resources = keys.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect();
+                    let resources = keys.iter().filter_map(|v| v.as_str().map(String::from)).collect();
                     return Ok(ResourceListResult { resources });
                 }
             }
@@ -231,11 +216,7 @@ pub async fn delete_resource(
 ///
 /// Returns the canonical new name.
 #[tauri::command]
-pub async fn rename_resource(
-    state: State<'_, AppState>,
-    old_name: String,
-    new_name: String,
-) -> CmdResult<String> {
+pub async fn rename_resource(state: State<'_, AppState>, old_name: String, new_name: String) -> CmdResult<String> {
     let mut body = Map::new();
     body.insert("new_name".to_string(), Value::String(new_name.clone()));
     let path = format!("{RESOURCE_MOUNT}resources/{old_name}/rename");
@@ -254,13 +235,7 @@ pub async fn rename_resource(
     repoint.insert("new_resource".to_string(), Value::String(canonical.clone()));
     // The files engine is mounted at `files/` and its backend paths repeat
     // the `files/` segment, so the full path is `files/files/...`.
-    make_request(
-        &state,
-        Operation::Write,
-        "files/files/repoint-resource".to_string(),
-        Some(repoint),
-    )
-    .await?;
+    make_request(&state, Operation::Write, "files/files/repoint-resource".to_string(), Some(repoint)).await?;
 
     Ok(canonical)
 }
@@ -281,9 +256,7 @@ pub async fn list_resource_secrets(
         Some(r) => {
             if let Some(data) = &r.data {
                 if let Some(Value::Array(keys)) = data.get("keys") {
-                    let keys = keys.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect();
+                    let keys = keys.iter().filter_map(|v| v.as_str().map(String::from)).collect();
                     return Ok(ResourceSecretListResult { keys });
                 }
             }
@@ -306,9 +279,7 @@ pub async fn read_resource_secret(
 
     match resp {
         Some(r) => {
-            let data = r.data
-                .map(|m| m.into_iter().collect::<HashMap<String, Value>>())
-                .unwrap_or_default();
+            let data = r.data.map(|m| m.into_iter().collect::<HashMap<String, Value>>()).unwrap_or_default();
             Ok(ResourceSecretData { data })
         }
         None => Err("Secret not found".into()),
@@ -377,10 +348,7 @@ pub struct ResourceSecretVersionData {
 /// modified. Before/after values are NOT returned (resource history is
 /// field-level only, by design).
 #[tauri::command]
-pub async fn list_resource_history(
-    state: State<'_, AppState>,
-    name: String,
-) -> CmdResult<ResourceHistoryResult> {
+pub async fn list_resource_history(state: State<'_, AppState>, name: String) -> CmdResult<ResourceHistoryResult> {
     let path = format!("{RESOURCE_MOUNT}resources/{name}/history");
     let resp = make_request(&state, Operation::Read, path, None).await?;
 
@@ -390,10 +358,8 @@ pub async fn list_resource_history(
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
 
-    let out: Vec<ResourceHistoryEntry> = entries
-        .into_iter()
-        .filter_map(|v| serde_json::from_value::<ResourceHistoryEntry>(v).ok())
-        .collect();
+    let out: Vec<ResourceHistoryEntry> =
+        entries.into_iter().filter_map(|v| serde_json::from_value::<ResourceHistoryEntry>(v).ok()).collect();
     Ok(ResourceHistoryResult { entries: out })
 }
 
@@ -413,31 +379,16 @@ pub async fn list_resource_secret_versions(
     let data = match resp.and_then(|r| r.data) {
         Some(d) => d,
         None => {
-            return Ok(ResourceSecretVersionListResult {
-                current_version: 0,
-                versions: vec![],
-            });
+            return Ok(ResourceSecretVersionListResult { current_version: 0, versions: vec![] });
         }
     };
 
-    let current_version = data
-        .get("current_version")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let versions = data
-        .get("versions")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let versions: Vec<ResourceSecretVersionInfo> = versions
-        .into_iter()
-        .filter_map(|v| serde_json::from_value::<ResourceSecretVersionInfo>(v).ok())
-        .collect();
+    let current_version = data.get("current_version").and_then(|v| v.as_u64()).unwrap_or(0);
+    let versions = data.get("versions").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let versions: Vec<ResourceSecretVersionInfo> =
+        versions.into_iter().filter_map(|v| serde_json::from_value::<ResourceSecretVersionInfo>(v).ok()).collect();
 
-    Ok(ResourceSecretVersionListResult {
-        current_version,
-        versions,
-    })
+    Ok(ResourceSecretVersionListResult { current_version, versions })
 }
 
 /// Read one historical version of a resource secret.
@@ -452,32 +403,13 @@ pub async fn read_resource_secret_version(
     let resp = make_request(&state, Operation::Read, path, None).await?;
 
     let data = resp.and_then(|r| r.data).ok_or("Version not found")?;
-    let data_map = data
-        .get("data")
-        .and_then(|v| v.as_object())
-        .cloned()
-        .unwrap_or_default();
+    let data_map = data.get("data").and_then(|v| v.as_object()).cloned().unwrap_or_default();
     Ok(ResourceSecretVersionData {
         data: data_map.into_iter().collect(),
-        version: data
-            .get("version")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(version),
-        created_time: data
-            .get("created_time")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        username: data
-            .get("username")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        operation: data
-            .get("operation")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+        version: data.get("version").and_then(|v| v.as_u64()).unwrap_or(version),
+        created_time: data.get("created_time").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        username: data.get("username").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        operation: data.get("operation").and_then(|v| v.as_str()).unwrap_or("").to_string(),
     })
 }
 

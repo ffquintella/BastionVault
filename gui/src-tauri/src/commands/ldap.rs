@@ -100,10 +100,7 @@ pub struct LdapConfigInfo {
 }
 
 #[tauri::command]
-pub async fn ldap_read_config(
-    state: State<'_, AppState>,
-    mount: String,
-) -> CmdResult<Option<LdapConfigInfo>> {
+pub async fn ldap_read_config(state: State<'_, AppState>, mount: String) -> CmdResult<Option<LdapConfigInfo>> {
     let path = format!("{}/config", mount_prefix(&mount));
     let resp = make_request(&state, Operation::Read, path, None).await?;
     if resp.is_none() {
@@ -148,10 +145,7 @@ pub struct LdapWriteConfigRequest {
 }
 
 #[tauri::command]
-pub async fn ldap_write_config(
-    state: State<'_, AppState>,
-    request: LdapWriteConfigRequest,
-) -> CmdResult<()> {
+pub async fn ldap_write_config(state: State<'_, AppState>, request: LdapWriteConfigRequest) -> CmdResult<()> {
     let path = format!("{}/config", mount_prefix(&request.mount));
     let mut body = Map::new();
     body.insert("url".into(), Value::String(request.url));
@@ -237,10 +231,7 @@ pub struct LdapCheckConnectionResult {
 }
 
 #[tauri::command]
-pub async fn ldap_check_connection(
-    state: State<'_, AppState>,
-    mount: String,
-) -> CmdResult<LdapCheckConnectionResult> {
+pub async fn ldap_check_connection(state: State<'_, AppState>, mount: String) -> CmdResult<LdapCheckConnectionResult> {
     let path = format!("{}/check-connection", mount_prefix(&mount));
     let resp = make_request(&state, Operation::Read, path, None).await?;
     let map = data_to_map(resp);
@@ -285,10 +276,7 @@ pub struct LdapStaticRole {
 }
 
 #[tauri::command]
-pub async fn ldap_list_static_roles(
-    state: State<'_, AppState>,
-    mount: String,
-) -> CmdResult<Vec<String>> {
+pub async fn ldap_list_static_roles(state: State<'_, AppState>, mount: String) -> CmdResult<Vec<String>> {
     let path = format!("{}/static-role", mount_prefix(&mount));
     let resp = make_request(&state, Operation::List, path, None).await?;
     let map = data_to_map(resp);
@@ -333,10 +321,7 @@ pub async fn ldap_write_static_role(
     let mut body = Map::new();
     body.insert("dn".into(), Value::String(role.dn));
     body.insert("username".into(), Value::String(role.username));
-    body.insert(
-        "rotation_period".into(),
-        Value::Number(role.rotation_period.into()),
-    );
+    body.insert("rotation_period".into(), Value::Number(role.rotation_period.into()));
     if !role.password_policy.is_empty() {
         body.insert("password_policy".into(), Value::String(role.password_policy));
     }
@@ -345,11 +330,7 @@ pub async fn ldap_write_static_role(
 }
 
 #[tauri::command]
-pub async fn ldap_delete_static_role(
-    state: State<'_, AppState>,
-    mount: String,
-    name: String,
-) -> CmdResult<()> {
+pub async fn ldap_delete_static_role(state: State<'_, AppState>, mount: String, name: String) -> CmdResult<()> {
     let path = format!("{}/static-role/{}", mount_prefix(&mount), name);
     make_request(&state, Operation::Delete, path, None).await?;
     Ok(())
@@ -424,10 +405,7 @@ pub struct LdapLibrarySet {
 }
 
 #[tauri::command]
-pub async fn ldap_list_libraries(
-    state: State<'_, AppState>,
-    mount: String,
-) -> CmdResult<Vec<String>> {
+pub async fn ldap_list_libraries(state: State<'_, AppState>, mount: String) -> CmdResult<Vec<String>> {
     let path = format!("{}/library", mount_prefix(&mount));
     let resp = make_request(&state, Operation::List, path, None).await?;
     let map = data_to_map(resp);
@@ -476,30 +454,17 @@ pub async fn ldap_write_library(
 ) -> CmdResult<()> {
     let path = format!("{}/library/{}", mount_prefix(&mount), set);
     let mut body = Map::new();
-    body.insert(
-        "service_account_names".into(),
-        Value::String(config.service_account_names.join(",")),
-    );
+    body.insert("service_account_names".into(), Value::String(config.service_account_names.join(",")));
     body.insert("ttl".into(), Value::Number(config.ttl.into()));
     body.insert("max_ttl".into(), Value::Number(config.max_ttl.into()));
-    body.insert(
-        "disable_check_in_enforcement".into(),
-        Value::Bool(config.disable_check_in_enforcement),
-    );
-    body.insert(
-        "affinity_ttl".into(),
-        Value::Number(config.affinity_ttl.into()),
-    );
+    body.insert("disable_check_in_enforcement".into(), Value::Bool(config.disable_check_in_enforcement));
+    body.insert("affinity_ttl".into(), Value::Number(config.affinity_ttl.into()));
     make_request(&state, Operation::Write, path, Some(body)).await?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn ldap_delete_library(
-    state: State<'_, AppState>,
-    mount: String,
-    set: String,
-) -> CmdResult<()> {
+pub async fn ldap_delete_library(state: State<'_, AppState>, mount: String, set: String) -> CmdResult<()> {
     let path = format!("{}/library/{}", mount_prefix(&mount), set);
     make_request(&state, Operation::Delete, path, None).await?;
     Ok(())
@@ -591,8 +556,5 @@ pub async fn ldap_library_status(
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
-    Ok(LdapLibraryStatus {
-        checked_out,
-        available,
-    })
+    Ok(LdapLibraryStatus { checked_out, available })
 }

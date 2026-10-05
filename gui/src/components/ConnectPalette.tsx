@@ -5,6 +5,7 @@ import {
   protocolForOsType,
   readProfiles,
   defaultPort,
+  isLaunchableWebProfile,
   needsOperatorPrompt as profileNeedsOperatorPrompt,
 } from "../lib/connectionProfiles";
 import {
@@ -128,8 +129,9 @@ export function ConnectPalette() {
           for (const p of profiles) {
             if (!offered.includes(p.protocol)) continue;
             if (p.protocol === "web") {
-              // Phase 1 launches `open` mode only (source `none`).
-              if (p.credential_source.kind !== "none" || p.web?.login_mode !== "open") continue;
+              // `open` (source `none`) and `form` (a recipe plus a server-
+              // released source); the host refuses anything else.
+              if (!isLaunchableWebProfile(p) || !p.web) continue;
               const resourceLabel = String(meta.name || "");
               let origin = p.web.start_url;
               try {

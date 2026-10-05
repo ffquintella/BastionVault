@@ -1,4 +1,4 @@
-import type { ConnectProtocol, ResourceTypeDef, ResourceTypeConfig } from "./types";
+import type { ConnectProtocol, ResourceTypeDef, ResourceTypeConfig, WebExposure } from "./types";
 
 /** Default built-in resource types with their fields. */
 export const DEFAULT_RESOURCE_TYPES: ResourceTypeConfig = {
@@ -191,7 +191,10 @@ export const DEFAULT_RESOURCE_TYPES: ResourceTypeConfig = {
     // Web Application Connect (T96): a website opens in an in-app web
     // session window. Only reaches deployments whose saved type config has
     // no `website` entry — a saved type is never altered by a release.
-    connect: { protocols: ["web"] },
+    // `web_exposure_max: "dom"` opts the type in to form-mode logins: the
+    // server releases no web credential unless the resource's saved type
+    // sets a cap (deny unless opted in, spec §6).
+    connect: { protocols: ["web"], web_exposure_max: "dom" },
   },
   web_application: {
     id: "web_application",
@@ -220,7 +223,8 @@ export const DEFAULT_RESOURCE_TYPES: ResourceTypeConfig = {
       { key: "environment", label: "Environment", type: "text", placeholder: "production" },
       { key: "owner", label: "Owner", type: "text", placeholder: "network-team" },
     ],
-    connect: { protocols: ["web"] },
+    // Opted in to form-mode logins (see `website` above).
+    connect: { protocols: ["web"], web_exposure_max: "dom" },
   },
   application: {
     id: "application",
@@ -392,6 +396,58 @@ export function connectProtocols(typeDef: ResourceTypeDef | undefined | null): C
     return CONNECT_PROTOCOLS.filter((p) => declared.some((d) => isConnectProtocol(d) && d === p));
   }
   return typeDef.id === LEGACY_CONNECT_TYPE_ID ? ["ssh", "rdp"] : [];
+}
+
+// ── Web exposure policy (spec §6) ───────────────────────────────────
+
+/** The exposure caps a type can set, least to most exposed. */
+export const WEB_EXPOSURE_CAPS: readonly WebExposure[] = ["none", "isolated", "handler", "proxy", "dom"];
+
+/** The Settings control's value for `connect.web_exposure_max`: `""` is
+ *  unset (the server then caps at `none`, so a credential-releasing login is
+ *  denied), `"keep"` leaves a saved value this build does not recognise
+ *  untouched. */
+export type WebExposureChoice = WebExposure | "" | "keep";
+/** Same for `connect.allow_heuristic_fill`. */
+export type HeuristicChoice = "true" | "false" | "" | "keep";
+
+/** Read the saved `connect.web_exposure_max` as a Settings choice. */
+export function webExposureChoice(connect: ResourceTypeDef["connect"]): WebExposureChoice {
+  const v: unknown = connect?.web_exposure_max;
+  if (v === undefined || v === null) return "";
+  return typeof v === "string" && (WEB_EXPOSURE_CAPS as readonly string[]).includes(v)
+    ? (v as WebExposure)
+    : "keep";
+}
+
+/** Read the saved `connect.allow_heuristic_fill` as a Settings choice. */
+export function heuristicChoice(connect: ResourceTypeDef["connect"]): HeuristicChoice {
+  const v: unknown = connect?.allow_heuristic_fill;
+  if (v === undefined || v === null) return "";
+  return v === true ? "true" : v === false ? "false" : "keep";
+}
+
+/**
+ * Write the two policy choices onto a type's `connect` block. An unset choice
+ * removes the key (so a saved config only carries what an administrator set),
+ * and `"keep"` leaves whatever is saved — a value an administrator or a newer
+ * build wrote is never silently rewritten by saving something unrelated.
+ */
+export function withWebPolicy(
+  connect: NonNullable<ResourceTypeDef["connect"]>,
+  exposure: WebExposureChoice,
+  heuristic: HeuristicChoice,
+): NonNullable<ResourceTypeDef["connect"]> {
+  const out = { ...connect };
+  if (exposure !== "keep") {
+    if (exposure === "") delete out.web_exposure_max;
+    else out.web_exposure_max = exposure;
+  }
+  if (heuristic !== "keep") {
+    if (heuristic === "") delete out.allow_heuristic_fill;
+    else out.allow_heuristic_fill = heuristic === "true";
+  }
+  return out;
 }
 
 /** True when the type offers `protocol`. */

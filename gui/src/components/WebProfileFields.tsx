@@ -1,19 +1,136 @@
 /**
  * Editor fields for the `web` block of a connection profile
- * (features/web-application-connect.md §1, T96 Phase 1).
+ * (features/web-application-connect.md §1, T96 Phases 1-2).
  *
- * Phase 1 launches the `open` login mode only, so the editor offers only
- * that mode; a profile carrying a later mode (written by a newer client)
- * still shows it, and save-time validation explains why it can't launch.
+ * `open` and `form` launch. `form` adds the exposure notice, the credential
+ * source (rendered by the parent through `credentialSlot`, which owns the
+ * resource's secrets) and the recipe editor. A profile carrying a later mode
+ * (written by a newer client) still shows it, and save-time validation
+ * explains why it can't launch.
  */
 
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Link } from "react-router";
 import { Input, Select, Textarea } from "./ui";
+import { WebRecipeEditor } from "./WebRecipeEditor";
+import * as api from "../lib/api";
 import { WEB_WINDOW_MAX, WEB_WINDOW_MIN, webOriginSet } from "../lib/connectionProfiles";
+import { isHeuristicRecipe } from "../lib/webRecipe";
+import { evaluateWebExposure, savedTypeEntry, type ExposureVerdict } from "../lib/webExposure";
 import type { WebClipboardMode, WebLoginMode, WebProfileSettings } from "../lib/types";
 
 const IS_MACOS =
   typeof navigator !== "undefined" && /mac/i.test(navigator.platform || navigator.userAgent || "");
+
+/**
+ * What the server's policy will say about a `form` launch of this resource.
+ * Read from the *saved* `config/types` (the server never sees the builtins
+ * the GUI merges in), so a type the GUI shows as opted in can still be
+ * refused. `unknown` means the saved configuration could not be read; then
+ * the editor says it can't tell rather than guessing either way.
+ */
+export type WebExposureState =
+  | { kind: "loading" }
+  | { kind: "unknown"; reason: string }
+  | { kind: "checked"; verdict: ExposureVerdict };
+
+export function useWebExposureState(
+  resource: Record<string, unknown>,
+  web: Pick<WebProfileSettings, "login_mode" | "recipe" | "allow_insecure_http">,
+): WebExposureState {
+  const active = web.login_mode === "form";
+  const [saved, setSaved] = useState<
+    { kind: "loading" } | { kind: "error"; reason: string } | { kind: "ok"; config: Record<string, unknown> | null }
+  >({ kind: "loading" });
+
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    api
+      .resourceTypesRead()
+      .then((config) => {
+        if (!cancelled) setSaved({ kind: "ok", config });
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setSaved({ kind: "error", reason: e instanceof Error ? e.message : String(e) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [active]);
+
+  if (saved.kind === "loading") return { kind: "loading" };
+  if (saved.kind === "error") return { kind: "unknown", reason: saved.reason };
+  return {
+    kind: "checked",
+    verdict: evaluateWebExposure({
+      typeDef: savedTypeEntry(saved.config, String(resource["type"] ?? "")),
+      resource,
+      required: "dom",
+      heuristic: isHeuristicRecipe(web.recipe),
+      allowInsecureHttp: web.allow_insecure_http === true,
+    }),
+  };
+}
+
+/** Inline notice for the exposure policy: the server refuses form mode
+ *  unless the resource's saved type opts in. */
+export function WebExposureNotice({ state }: { state: WebExposureState }) {
+  if (state.kind === "loading") return null;
+  if (state.kind === "unknown") {
+    return (
+      <p className="text-xs text-[var(--color-text-muted)]" data-testid="exposure-unknown">
+        Could not read the resource type configuration, so this editor can&rsquo;t tell whether the server
+        will allow form logins for this resource ({state.reason}). The server decides at connect time.
+      </p>
+    );
+  }
+  const refusal = state.verdict.refusal;
+  if (refusal === null) {
+    return (
+      <p className="text-xs text-[var(--color-text-muted)]" data-testid="exposure-ok">
+        This resource&rsquo;s type allows form logins (exposure cap{" "}
+        <code>{state.verdict.cap}</code>). The password is in the page&rsquo;s DOM between fill and submit.
+      </p>
+    );
+  }
+  return (
+    <div
+      role="alert"
+      data-testid="exposure-refused"
+      className="rounded-md border border-yellow-500/40 bg-yellow-500/10 p-2 text-xs min-w-0"
+    >
+      <p className="font-medium">The server will refuse this profile&rsquo;s form login.</p>
+      <p className="mt-1 min-w-0 break-words">
+        <code>{refusal.code}</code>: {refusal.message}.
+      </p>
+      <p className="mt-1">
+        {refusal.fixAt === "type" && (
+          <>
+            An administrator opts a type in under{" "}
+            <Link className="underline" to="/settings">
+              Settings &rarr; Resource Types
+            </Link>{" "}
+            (edit the type, set &ldquo;Web exposure cap&rdquo; to <code>dom</code>
+            {refusal.code === "heuristic_not_allowed" && ", and allow heuristic fill"}).
+          </>
+        )}
+        {refusal.fixAt === "resource" && (
+          <>The resource itself sets this limit; edit the resource&rsquo;s <code>web_exposure_max</code> /{" "}
+          <code>allow_heuristic_fill</code>, or ask an administrator.</>
+        )}
+        {refusal.fixAt === "profile" && (
+          <>Turn off &ldquo;Allow insecure HTTP&rdquo; below, or raise the type&rsquo;s cap to <code>dom</code>{" "}
+          under{" "}
+          <Link className="underline" to="/settings">
+            Settings &rarr; Resource Types
+          </Link>
+          .</>
+        )}
+      </p>
+    </div>
+  );
+}
 
 function parseOrigins(text: string): string[] {
   return text
@@ -31,10 +148,25 @@ function parseDimension(raw: string): number | undefined {
 export function WebProfileFields({
   web,
   onChange,
+  resource,
+  onLoginModeChange,
+  credentialSlot,
+  onRecipeTextError,
 }: {
   web: WebProfileSettings;
   onChange: (next: WebProfileSettings) => void;
+  /** The resource record: its `type` and the resource-tier exposure keys
+   *  feed the exposure notice. */
+  resource?: Record<string, unknown>;
+  /** Switches the mode on the whole profile, because the modes disagree on
+   *  the credential source. Falls back to patching the `web` block alone. */
+  onLoginModeChange?: (mode: WebLoginMode) => void;
+  /** The credential-source editor, shown for `form`. */
+  credentialSlot?: ReactNode;
+  /** See {@link WebRecipeEditor}. */
+  onRecipeTextError?: (message: string | null) => void;
 }) {
+  const exposure = useWebExposureState(resource ?? {}, web);
   // The textarea keeps its own text so a trailing newline survives while
   // the operator is typing the next origin.
   const [originsText, setOriginsText] = useState(() => (web.allowed_origins ?? []).join("\n"));
@@ -45,8 +177,9 @@ export function WebProfileFields({
 
   const loginModeOptions: { value: WebLoginMode; label: string }[] = [
     { value: "open", label: "Open — no credential released" },
+    { value: "form", label: "Form — fill a login recipe with the credential" },
   ];
-  if (web.login_mode !== "open") {
+  if (web.login_mode !== "open" && web.login_mode !== "form") {
     loginModeOptions.push({ value: web.login_mode, label: `${web.login_mode} (not available yet)` });
   }
 
@@ -93,15 +226,49 @@ export function WebProfileFields({
         <Select
           label="Login mode"
           value={web.login_mode}
-          onChange={(e) => patch({ login_mode: e.target.value as WebLoginMode })}
+          onChange={(e) => {
+            const mode = e.target.value as WebLoginMode;
+            if (onLoginModeChange) onLoginModeChange(mode);
+            else patch({ login_mode: mode });
+          }}
           options={loginModeOptions}
         />
         <p className="mt-1 text-xs text-[var(--color-text-muted)]">
           Open mode opens the application and releases nothing: you, or the
-          application&rsquo;s own single sign-on, log in. Injected form,
-          HTTP-auth and SSO logins arrive in later releases.
+          application&rsquo;s own single sign-on, log in. Form mode signs in
+          for you by filling the application&rsquo;s login form from a
+          recipe. HTTP-auth and SSO logins arrive in later releases.
         </p>
       </div>
+
+      {web.login_mode === "form" && (
+        <>
+          <div className="col-span-2 space-y-2 min-w-0">
+            <WebExposureNotice state={exposure} />
+            <p className="text-xs text-[var(--color-text-muted)]">
+              <strong className="text-[var(--color-text)]">Exposure, plainly:</strong> with a form login the
+              password exists in the application&rsquo;s own page from fill until submit, where the page&rsquo;s
+              scripts (and any script injected into it) could read it. The operator never sees it, and the
+              fill happens only on the profile&rsquo;s origins, in the top page, into visible fields.
+            </p>
+          </div>
+          {credentialSlot && <div className="col-span-2 space-y-2 min-w-0">{credentialSlot}</div>}
+          <div className="col-span-2 min-w-0">
+            <h4 className="mb-2 text-sm font-medium">Login recipe</h4>
+            <WebRecipeEditor
+              recipe={web.recipe}
+              onChange={(recipe) => {
+                const next = { ...web };
+                if (recipe === undefined) delete next.recipe;
+                else next.recipe = recipe;
+                onChange(next);
+              }}
+              web={web}
+              onTextError={onRecipeTextError}
+            />
+          </div>
+        </>
+      )}
 
       <label className="col-span-2 flex items-start gap-2 text-sm">
         <input

@@ -130,8 +130,7 @@ pub async fn connect_mfa_verify_fido2(
     profile_id: String,
     challenge: Value,
 ) -> CmdResult<ConnectMfaTicket> {
-    let credential_json =
-        crate::commands::fido2_native::assert_webauthn(&state, &app_handle, &challenge).await?;
+    let credential_json = crate::commands::fido2_native::assert_webauthn(&state, &app_handle, &challenge).await?;
 
     let mut body = target_body(&resource_name, &profile_id);
     body.insert("method".into(), Value::String("fido2".into()));
@@ -179,9 +178,7 @@ pub async fn authorize_direct(
     let resp = make_request(state, Operation::Write, path, Some(body)).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     if !data.get("authorized").and_then(|v| v.as_bool()).unwrap_or(false) {
-        return Err(CommandError::from(
-            "the server did not authorize this connection".to_string(),
-        ));
+        return Err(CommandError::from("the server did not authorize this connection".to_string()));
     }
     Ok(())
 }

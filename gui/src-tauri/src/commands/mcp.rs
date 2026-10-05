@@ -137,9 +137,7 @@ fn str_list(v: Option<&Value>) -> Vec<String> {
 }
 
 fn to_value_list(items: Vec<String>) -> Value {
-    Value::Array(
-        items.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).map(Value::String).collect(),
-    )
+    Value::Array(items.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).map(Value::String).collect())
 }
 
 // ── Admin -> MCP Apps ──────────────────────────────────────────────────────
@@ -152,9 +150,8 @@ pub async fn mcp_list_apps(state: State<'_, AppState>) -> CmdResult<Vec<McpApp>>
     for name in names {
         let name = name.trim_end_matches('/').to_string();
         let read = make_request(&state, Operation::Read, format!("sys/mcp/apps/{name}"), None).await?;
-        if let Some(app) = read
-            .and_then(|r| r.data)
-            .and_then(|d| serde_json::from_value::<McpApp>(Value::Object(d)).ok())
+        if let Some(app) =
+            read.and_then(|r| r.data).and_then(|d| serde_json::from_value::<McpApp>(Value::Object(d)).ok())
         {
             apps.push(app);
         }
@@ -239,10 +236,7 @@ pub async fn mcp_revoke_token(state: State<'_, AppState>, accessor: String) -> C
 #[tauri::command]
 pub async fn mcp_read_config(state: State<'_, AppState>) -> CmdResult<McpConfig> {
     let resp = make_request(&state, Operation::Read, "sys/mcp/config".into(), None).await?;
-    Ok(resp
-        .and_then(|r| r.data)
-        .and_then(|d| serde_json::from_value(Value::Object(d)).ok())
-        .unwrap_or_default())
+    Ok(resp.and_then(|r| r.data).and_then(|d| serde_json::from_value(Value::Object(d)).ok()).unwrap_or_default())
 }
 
 /// An empty `catalogue_pin` clears the pin.

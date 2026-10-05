@@ -111,10 +111,7 @@ pub async fn list_files(state: State<'_, AppState>) -> CmdResult<FileListResult>
     let ids: Vec<String> = resp
         .and_then(|r| r.data)
         .and_then(|d| d.get("keys").cloned())
-        .and_then(|v| {
-            v.as_array()
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-        })
+        .and_then(|v| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()))
         .unwrap_or_default();
     Ok(FileListResult { ids })
 }
@@ -122,34 +119,20 @@ pub async fn list_files(state: State<'_, AppState>) -> CmdResult<FileListResult>
 #[tauri::command]
 pub async fn read_file_meta(state: State<'_, AppState>, id: String) -> CmdResult<FileMeta> {
     let path = format!("{FILES_MOUNT}files/{id}");
-    let resp = make_request(&state, Operation::Read, path, None)
-        .await?
-        .and_then(|r| r.data)
-        .ok_or("file not found")?;
-    let meta: FileMeta = serde_json::from_value(Value::Object(resp))
-        .map_err(|e| CommandError::from(e.to_string()))?;
+    let resp = make_request(&state, Operation::Read, path, None).await?.and_then(|r| r.data).ok_or("file not found")?;
+    let meta: FileMeta = serde_json::from_value(Value::Object(resp)).map_err(|e| CommandError::from(e.to_string()))?;
     Ok(meta)
 }
 
 #[tauri::command]
-pub async fn read_file_content(
-    state: State<'_, AppState>,
-    id: String,
-) -> CmdResult<FileContentResult> {
+pub async fn read_file_content(state: State<'_, AppState>, id: String) -> CmdResult<FileContentResult> {
     let path = format!("{FILES_MOUNT}files/{id}/content");
-    let resp = make_request(&state, Operation::Read, path, None)
-        .await?
-        .and_then(|r| r.data)
-        .ok_or("file not found")?;
+    let resp = make_request(&state, Operation::Read, path, None).await?.and_then(|r| r.data).ok_or("file not found")?;
     Ok(FileContentResult {
         id: resp.get("id").and_then(|v| v.as_str()).unwrap_or_default().into(),
         mime_type: resp.get("mime_type").and_then(|v| v.as_str()).unwrap_or_default().into(),
         size_bytes: resp.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or_default(),
-        content_base64: resp
-            .get("content_base64")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .into(),
+        content_base64: resp.get("content_base64").and_then(|v| v.as_str()).unwrap_or_default().into(),
     })
 }
 
@@ -173,30 +156,18 @@ pub async fn create_file(
         body.insert("mime_type".into(), Value::String(m));
     }
     if let Some(t) = tags {
-        body.insert(
-            "tags".into(),
-            Value::Array(t.into_iter().map(Value::String).collect()),
-        );
+        body.insert("tags".into(), Value::Array(t.into_iter().map(Value::String).collect()));
     }
     if let Some(n) = notes {
         body.insert("notes".into(), Value::String(n));
     }
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{FILES_MOUNT}files"),
-        Some(body),
-    )
-    .await?
-    .and_then(|r| r.data)
-    .ok_or("create did not return an id")?;
+    let resp = make_request(&state, Operation::Write, format!("{FILES_MOUNT}files"), Some(body))
+        .await?
+        .and_then(|r| r.data)
+        .ok_or("create did not return an id")?;
     // The create response only carries { id, size_bytes, sha256 }; fetch
     // the full meta so the caller gets a consistent shape.
-    let id = resp
-        .get("id")
-        .and_then(|v| v.as_str())
-        .ok_or("create did not return an id")?
-        .to_string();
+    let id = resp.get("id").and_then(|v| v.as_str()).ok_or("create did not return an id")?.to_string();
     read_file_meta(state, id).await
 }
 
@@ -224,21 +195,12 @@ pub async fn update_file_content(
         body.insert("mime_type".into(), Value::String(m));
     }
     if let Some(t) = tags {
-        body.insert(
-            "tags".into(),
-            Value::Array(t.into_iter().map(Value::String).collect()),
-        );
+        body.insert("tags".into(), Value::Array(t.into_iter().map(Value::String).collect()));
     }
     if let Some(n) = notes {
         body.insert("notes".into(), Value::String(n));
     }
-    let _ = make_request(
-        &state,
-        Operation::Write,
-        format!("{FILES_MOUNT}files/{id}"),
-        Some(body),
-    )
-    .await?;
+    let _ = make_request(&state, Operation::Write, format!("{FILES_MOUNT}files/{id}"), Some(body)).await?;
     read_file_meta(state, id).await
 }
 
@@ -250,40 +212,22 @@ pub async fn delete_file(state: State<'_, AppState>, id: String) -> CmdResult<()
 }
 
 #[tauri::command]
-pub async fn list_file_history(
-    state: State<'_, AppState>,
-    id: String,
-) -> CmdResult<FileHistoryResult> {
+pub async fn list_file_history(state: State<'_, AppState>, id: String) -> CmdResult<FileHistoryResult> {
     let path = format!("{FILES_MOUNT}files/{id}/history");
-    let resp = make_request(&state, Operation::Read, path, None)
-        .await?
-        .and_then(|r| r.data)
-        .unwrap_or_default();
-    let entries: Vec<FileHistoryEntry> = resp
-        .get("entries")
-        .cloned()
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
+    let resp = make_request(&state, Operation::Read, path, None).await?.and_then(|r| r.data).unwrap_or_default();
+    let entries: Vec<FileHistoryEntry> =
+        resp.get("entries").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
     Ok(FileHistoryResult { id, entries })
 }
 
 // ── Sync targets ───────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn list_file_sync_targets(
-    state: State<'_, AppState>,
-    id: String,
-) -> CmdResult<FileSyncListResult> {
+pub async fn list_file_sync_targets(state: State<'_, AppState>, id: String) -> CmdResult<FileSyncListResult> {
     let path = format!("{FILES_MOUNT}files/{id}/sync");
-    let resp = make_request(&state, Operation::Read, path, None)
-        .await?
-        .and_then(|r| r.data)
-        .unwrap_or_default();
-    let targets: Vec<FileSyncTarget> = resp
-        .get("targets")
-        .cloned()
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
+    let resp = make_request(&state, Operation::Read, path, None).await?.and_then(|r| r.data).unwrap_or_default();
+    let targets: Vec<FileSyncTarget> =
+        resp.get("targets").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
     Ok(FileSyncListResult { id, targets })
 }
 
@@ -306,29 +250,13 @@ pub async fn write_file_sync_target(
     if let Some(s) = sync_on_write {
         body.insert("sync_on_write".into(), Value::Bool(s));
     }
-    make_request(
-        &state,
-        Operation::Write,
-        format!("{FILES_MOUNT}files/{id}/sync/{name}"),
-        Some(body),
-    )
-    .await?;
+    make_request(&state, Operation::Write, format!("{FILES_MOUNT}files/{id}/sync/{name}"), Some(body)).await?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn delete_file_sync_target(
-    state: State<'_, AppState>,
-    id: String,
-    name: String,
-) -> CmdResult<()> {
-    make_request(
-        &state,
-        Operation::Delete,
-        format!("{FILES_MOUNT}files/{id}/sync/{name}"),
-        None,
-    )
-    .await?;
+pub async fn delete_file_sync_target(state: State<'_, AppState>, id: String, name: String) -> CmdResult<()> {
+    make_request(&state, Operation::Delete, format!("{FILES_MOUNT}files/{id}/sync/{name}"), None).await?;
     Ok(())
 }
 
@@ -339,10 +267,7 @@ pub async fn push_file_sync_target(
     name: String,
 ) -> CmdResult<HashMap<String, Value>> {
     let path = format!("{FILES_MOUNT}files/{id}/sync/{name}/push");
-    let resp = make_request(&state, Operation::Write, path, None)
-        .await?
-        .and_then(|r| r.data)
-        .unwrap_or_default();
+    let resp = make_request(&state, Operation::Write, path, None).await?.and_then(|r| r.data).unwrap_or_default();
     Ok(resp.into_iter().collect())
 }
 
@@ -369,21 +294,12 @@ pub struct FileVersionListResult {
 }
 
 #[tauri::command]
-pub async fn list_file_versions(
-    state: State<'_, AppState>,
-    id: String,
-) -> CmdResult<FileVersionListResult> {
+pub async fn list_file_versions(state: State<'_, AppState>, id: String) -> CmdResult<FileVersionListResult> {
     let path = format!("{FILES_MOUNT}files/{id}/versions");
-    let resp = make_request(&state, Operation::Read, path, None)
-        .await?
-        .and_then(|r| r.data)
-        .unwrap_or_default();
+    let resp = make_request(&state, Operation::Read, path, None).await?.and_then(|r| r.data).unwrap_or_default();
     let current_version = resp.get("current_version").and_then(|v| v.as_u64()).unwrap_or(0);
-    let versions: Vec<FileVersionInfo> = resp
-        .get("versions")
-        .cloned()
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
+    let versions: Vec<FileVersionInfo> =
+        resp.get("versions").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
     Ok(FileVersionListResult { id, current_version, versions })
 }
 
@@ -394,19 +310,13 @@ pub async fn read_file_version_content(
     version: u64,
 ) -> CmdResult<FileContentResult> {
     let path = format!("{FILES_MOUNT}files/{id}/versions/{version}/content");
-    let resp = make_request(&state, Operation::Read, path, None)
-        .await?
-        .and_then(|r| r.data)
-        .ok_or("version not found")?;
+    let resp =
+        make_request(&state, Operation::Read, path, None).await?.and_then(|r| r.data).ok_or("version not found")?;
     Ok(FileContentResult {
         id: resp.get("id").and_then(|v| v.as_str()).unwrap_or_default().into(),
         mime_type: resp.get("mime_type").and_then(|v| v.as_str()).unwrap_or_default().into(),
         size_bytes: resp.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or_default(),
-        content_base64: resp
-            .get("content_base64")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .into(),
+        content_base64: resp.get("content_base64").and_then(|v| v.as_str()).unwrap_or_default().into(),
     })
 }
 
@@ -421,17 +331,9 @@ pub async fn export_file_to_path(
         Some(v) => format!("{FILES_MOUNT}files/{id}/versions/{v}/content"),
         None => format!("{FILES_MOUNT}files/{id}/content"),
     };
-    let resp = make_request(&state, Operation::Read, path, None)
-        .await?
-        .and_then(|r| r.data)
-        .ok_or("file not found")?;
-    let b64 = resp
-        .get("content_base64")
-        .and_then(|v| v.as_str())
-        .ok_or("content missing")?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .map_err(|e| CommandError::from(e.to_string()))?;
+    let resp = make_request(&state, Operation::Read, path, None).await?.and_then(|r| r.data).ok_or("file not found")?;
+    let b64 = resp.get("content_base64").and_then(|v| v.as_str()).ok_or("content missing")?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| CommandError::from(e.to_string()))?;
     std::fs::write(&target_path, &bytes)?;
     Ok(bytes.len() as u64)
 }
@@ -443,9 +345,6 @@ pub async fn restore_file_version(
     version: u64,
 ) -> CmdResult<HashMap<String, Value>> {
     let path = format!("{FILES_MOUNT}files/{id}/versions/{version}/restore");
-    let resp = make_request(&state, Operation::Write, path, None)
-        .await?
-        .and_then(|r| r.data)
-        .unwrap_or_default();
+    let resp = make_request(&state, Operation::Write, path, None).await?.and_then(|r| r.data).unwrap_or_default();
     Ok(resp.into_iter().collect())
 }

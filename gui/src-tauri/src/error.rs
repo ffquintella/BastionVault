@@ -55,12 +55,8 @@ impl From<authenticator::errors::AuthenticatorError> for CommandError {
                 // Use the Display impl which gives user-friendly messages
                 format!("{pin_err}")
             }
-            AuthenticatorError::CancelledByUser => {
-                "Operation was cancelled".to_string()
-            }
-            AuthenticatorError::CredentialExcluded => {
-                "This security key is already registered".to_string()
-            }
+            AuthenticatorError::CancelledByUser => "Operation was cancelled".to_string(),
+            AuthenticatorError::CredentialExcluded => "This security key is already registered".to_string(),
             AuthenticatorError::NoConfiguredTransports => {
                 "No security key detected. Please insert your key and try again.".to_string()
             }

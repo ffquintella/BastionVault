@@ -34,7 +34,8 @@ export async function openProfileSession(
       await api.sessionOpenRdp(request);
       return;
     case "web":
-      // `open` mode releases no credential; never forward one.
+      // Never forward an operator credential: `open` releases none, and a
+      // `form` login gets its credential from the server inside the host.
       await api.sessionOpenWeb({
         resource_name: request.resource_name,
         profile_id: request.profile_id,

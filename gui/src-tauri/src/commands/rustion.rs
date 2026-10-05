@@ -746,8 +746,7 @@ pub async fn rustion_open_replay_window(
         Some(ms) if ms > 0 => format!("&at={ms}"),
         _ => String::new(),
     };
-    let url =
-        format!("index.html#/session-replay?recording={}{at}", urlencoding::encode(&recording_id));
+    let url = format!("index.html#/session-replay?recording={}{at}", urlencoding::encode(&recording_id));
     WebviewWindowBuilder::new(&app, &window_label, WebviewUrl::App(url.into()))
         .title(format!("BastionVault — Replay {recording_id}"))
         .inner_size(1200.0, 800.0)
@@ -1595,11 +1594,7 @@ fn keystroke_run_from_value(v: &Value) -> RustionKeystrokeRun {
         n: o.get("n").and_then(|v| v.as_u64()).unwrap_or(0),
         // A redacted run's text is dropped here too, so a malformed
         // upstream payload cannot put withheld text on screen.
-        text: if redacted {
-            None
-        } else {
-            o.get("text").and_then(|v| v.as_str()).map(String::from)
-        },
+        text: if redacted { None } else { o.get("text").and_then(|v| v.as_str()).map(String::from) },
         redacted,
         reason: o.get("reason").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
         epoch: o.get("epoch").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
@@ -1672,19 +1667,11 @@ pub async fn rustion_recording_keystrokes(
     state: State<'_, AppState>,
     recording_id: String,
 ) -> CmdResult<RustionKeystrokeTranscript> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{RUSTION_MOUNT}recordings/{recording_id}/keystrokes"),
-        None,
-    )
-    .await?;
+    let resp =
+        make_request(&state, Operation::Read, format!("{RUSTION_MOUNT}recordings/{recording_id}/keystrokes"), None)
+            .await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
-    let census = data
-        .get("census")
-        .and_then(|v| v.as_object())
-        .cloned()
-        .unwrap_or_default();
+    let census = data.get("census").and_then(|v| v.as_object()).cloned().unwrap_or_default();
     let cn = |k: &str| -> u64 { census.get(k).and_then(|v| v.as_u64()).unwrap_or(0) };
     Ok(RustionKeystrokeTranscript {
         recording_id: s(&data, "recording_id"),
@@ -1766,13 +1753,9 @@ pub async fn rustion_keystrokes_index(
     let mut body = Map::new();
     body.insert("recording_id".into(), Value::String(recording_id.unwrap_or_default()));
     body.insert("force".into(), Value::Bool(force.unwrap_or(false)));
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}recordings/keystrokes/index"),
-        Some(body),
-    )
-    .await?;
+    let resp =
+        make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}recordings/keystrokes/index"), Some(body))
+            .await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(RustionKeystrokeIndexReport {
         recording_id: s(&data, "recording_id"),
@@ -1842,13 +1825,9 @@ pub async fn rustion_keystroke_search(
     let mut body = Map::new();
     body.insert("query".into(), Value::String(query));
     body.insert("limit".into(), Value::Number(limit.unwrap_or(0).into()));
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}recordings/keystroke-search"),
-        Some(body),
-    )
-    .await?;
+    let resp =
+        make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}recordings/keystroke-search"), Some(body))
+            .await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     let hits = data
         .get("hits")
@@ -1857,13 +1836,9 @@ pub async fn rustion_keystroke_search(
             a.iter()
                 .filter_map(|v| v.as_object())
                 .map(|o| {
-                    let gs = |k: &str| -> String {
-                        o.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string()
-                    };
+                    let gs = |k: &str| -> String { o.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string() };
                     let gn = |k: &str| -> u64 { o.get(k).and_then(|v| v.as_u64()).unwrap_or(0) };
-                    let gb = |k: &str| -> bool {
-                        o.get(k).and_then(|v| v.as_bool()).unwrap_or(false)
-                    };
+                    let gb = |k: &str| -> bool { o.get(k).and_then(|v| v.as_bool()).unwrap_or(false) };
                     RustionKeystrokeHit {
                         recording_id: gs("recording_id"),
                         session_id: gs("session_id"),

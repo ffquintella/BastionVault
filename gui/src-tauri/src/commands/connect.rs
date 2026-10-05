@@ -514,6 +514,16 @@ pub async fn session_open_rdp(
     // See `session_open_ssh`: refuse a profile of any other protocol.
     session::ProfileProtocol::require(&profile, session::ProfileProtocol::Rdp).map_err(CommandError::from)?;
 
+    // Web / RDP mutual exclusion (see `session::web_rdp_conflict`). Refused
+    // early so nothing is resolved or dialled and no MFA ticket is burnt;
+    // `open_rdp_session` re-checks under the registry lock when it
+    // registers, which is the check that closes the race.
+    if let Some(conflict) =
+        session::registry_web_rdp_conflict(session::ProfileProtocol::Rdp, &*state.connect_sessions.lock().await)
+    {
+        return Err(session::rdp::refuse_rdp_open(&request.resource_name, conflict));
+    }
+
     let host_candidates = profile_host_candidates(&profile, &meta);
     if host_candidates.is_empty() {
         return Err(CommandError::from(
@@ -581,13 +591,9 @@ pub async fn session_open_rdp(
         )
         .await?;
 
-        let resolved = resolve_rdp_credential(
-            &state,
-            &request.resource_name,
-            &profile,
-            request.operator_credential.as_ref(),
-        )
-        .await?;
+        let resolved =
+            resolve_rdp_credential(&state, &request.resource_name, &profile, request.operator_credential.as_ref())
+                .await?;
         let username = resolved.effective_username.unwrap_or(username);
         if username.is_empty() {
             return Err(CommandError::from(
@@ -945,6 +951,18 @@ pub async fn session_attach_rdp_frames(
 ) -> CmdResult<()> {
     {
         let sessions = state.connect_sessions.lock().await;
+        // Defence in depth for the web/RDP exclusion: `session_open_*` keep
+        // the two kinds apart, and this keeps a frame channel from being
+        // armed while a web window could read it.
+        if let Some(conflict) = session::registry_web_rdp_conflict(session::ProfileProtocol::Rdp, &sessions) {
+            log::warn!(
+                target: "audit",
+                "connect.rdp.refused: reason={} action=attach_frames token={}",
+                conflict.audit_reason,
+                request.token,
+            );
+            return Err(CommandError::from(conflict.message));
+        }
         let frames = match sessions.get(&request.token) {
             Some(session::SessionState::Rdp(s)) => std::sync::Arc::clone(&s.frames),
             Some(_) => {
@@ -1077,33 +1095,18 @@ async fn resolve_rdp_credential(
                     })?;
                     let path = format!("{ldap_mount}library/{set}/check-out");
                     let resp = make_request(state, Operation::Write, path, None).await?;
-                    let data: HashMap<String, Value> =
-                        resp.and_then(|r| r.data).map(|m| m.into_iter().collect()).unwrap_or_default();
-                    let username = data
-                        .get("username")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| CommandError::from(format!("ldap library/{set}/check-out missing `username`")))?
-                        .to_string();
-                    let password = data
-                        .get("password")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| CommandError::from(format!("ldap library/{set}/check-out missing `password`")))?
-                        .to_string();
-                    let lease_id = data
-                        .get("lease_id")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| CommandError::from(format!("ldap library/{set}/check-out missing `lease_id`")))?
-                        .to_string();
-                    let (effective_user, domain) = split_domain_user(&username);
+                    let checkout = parse_ldap_library_checkout(set, resp.and_then(|r| r.data))?;
+                    let (effective_user, domain) = split_domain_user(&checkout.account);
                     Ok(ResolvedRdpCredential {
-                        credential: session::rdp::RdpCredential::Password(Zeroizing::new(password)),
+                        credential: session::rdp::RdpCredential::Password(checkout.password),
                         effective_username: Some(effective_user),
                         domain,
                         on_close: Some(crate::session::SessionCleanup {
                             kind: crate::session::SessionCleanupKind::LdapLibraryCheckIn {
                                 ldap_mount: ldap_mount.trim_end_matches('/').to_string(),
                                 library_set: set.to_string(),
-                                lease_id,
+                                account: checkout.account,
+                                lease_id: checkout.lease_id,
                             },
                         }),
                     })
@@ -1275,7 +1278,14 @@ pub async fn session_close(state: State<'_, AppState>, app: AppHandle, request: 
     // A web session has no control channel to signal: closing it means
     // destroying its window and running its own teardown. Handled first so
     // the SSH/RDP fan-out below never sees a web token.
-    if crate::commands::connect_web::close_web_session(&state, &app, &request.token, "session_close").await {
+    if crate::commands::connect_web::close_web_session(
+        &state,
+        &app,
+        &request.token,
+        crate::session::web::WebCloseReason::SessionClose,
+    )
+    .await
+    {
         return Ok(());
     }
     // Best-effort fan-out: we don't know whether the token names
@@ -1298,20 +1308,56 @@ pub async fn session_close(state: State<'_, AppState>, app: AppHandle, request: 
 /// the session record dangling, which is worse.
 async fn run_cleanup(state: &State<'_, AppState>, cleanup: crate::session::SessionCleanup) {
     match cleanup.kind {
-        crate::session::SessionCleanupKind::LdapLibraryCheckIn { ldap_mount, library_set, lease_id } => {
+        crate::session::SessionCleanupKind::LdapLibraryCheckIn { ldap_mount, library_set, account, lease_id } => {
             let path = format!("{ldap_mount}/library/{library_set}/check-in");
-            let mut body = Map::new();
-            body.insert("lease_id".into(), Value::String(lease_id.clone()));
+            let body = ldap_library_check_in_body(&account);
             match make_request(state, Operation::Write, path, Some(body)).await {
                 Ok(_) => log::info!(
-                    "resource-connect: ldap library check-in ok (mount={ldap_mount} set={library_set} lease={lease_id})"
+                    "resource-connect: ldap library check-in ok (mount={ldap_mount} set={library_set} account={account} lease={lease_id})"
                 ),
                 Err(e) => log::warn!(
-                    "resource-connect: ldap library check-in failed (mount={ldap_mount} set={library_set} lease={lease_id}): {e:?}"
+                    "resource-connect: ldap library check-in failed (mount={ldap_mount} set={library_set} account={account} lease={lease_id}): {e:?}"
                 ),
             }
         }
     }
+}
+
+/// The fields the host keeps from an LDAP `library/<set>/check-out`.
+struct LdapLibraryCheckout {
+    account: String,
+    password: Zeroizing<String>,
+    lease_id: String,
+}
+
+/// Parse a `library/<set>/check-out` response. The LDAP engine names
+/// the account `service_account_name`; every field is required, and a
+/// missing one is an error naming it rather than a session opened with
+/// a guessed username or no way to check the account back in.
+fn parse_ldap_library_checkout(
+    set: &str,
+    data: Option<Map<String, Value>>,
+) -> Result<LdapLibraryCheckout, CommandError> {
+    let mut data = data.unwrap_or_default();
+    let mut take = |key: &str| -> Result<String, CommandError> {
+        match data.remove(key) {
+            Some(Value::String(s)) if !s.is_empty() => Ok(s),
+            _ => Err(CommandError::from(format!("ldap library/{set}/check-out missing `{key}`"))),
+        }
+    };
+    let password = Zeroizing::new(take("password")?);
+    let account = take("service_account_name")?;
+    let lease_id = take("lease_id")?;
+    Ok(LdapLibraryCheckout { account, password, lease_id })
+}
+
+/// Body for `library/<set>/check-in`. The engine keys check-in on
+/// `account`; naming it explicitly releases the right account even when
+/// the caller holds more than one check-out in the set.
+fn ldap_library_check_in_body(account: &str) -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("account".into(), Value::String(account.to_string()));
+    body
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -2324,9 +2370,7 @@ async fn resolve_security_key_ssh(
     state: &State<'_, AppState>,
     app: &AppHandle,
 ) -> Result<ResolvedSshCredential, CommandError> {
-    let resp =
-        make_request(state, Operation::Read, "sys/identity/ssh-security-key/self".to_string(), None)
-            .await?;
+    let resp = make_request(state, Operation::Read, "sys/identity/ssh-security-key/self".to_string(), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
 
     let enrolled = data.get("enrolled").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2360,11 +2404,7 @@ async fn resolve_security_key_ssh(
     Ok(ResolvedSshCredential {
         credential: SshCredential::SecurityKey {
             public_key_openssh,
-            identity: crate::session::sk_signer::SecurityKeyIdentity {
-                algorithm,
-                application,
-                credential_id,
-            },
+            identity: crate::session::sk_signer::SecurityKeyIdentity { algorithm, application, credential_id },
             app: app.clone(),
             pin_slot: state.pin_sender.clone(),
         },
@@ -2892,31 +2932,16 @@ async fn resolve_ldap_ssh(
             })?;
             let path = format!("{ldap_mount}library/{set}/check-out");
             let resp = make_request(state, Operation::Write, path, None).await?;
-            let data: HashMap<String, Value> =
-                resp.and_then(|r| r.data).map(|m| m.into_iter().collect()).unwrap_or_default();
-            let username = data
-                .get("username")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| CommandError::from(format!("ldap library/{set}/check-out missing `username`")))?
-                .to_string();
-            let password = data
-                .get("password")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| CommandError::from(format!("ldap library/{set}/check-out missing `password`")))?
-                .to_string();
-            let lease_id = data
-                .get("lease_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| CommandError::from(format!("ldap library/{set}/check-out missing `lease_id`")))?
-                .to_string();
+            let checkout = parse_ldap_library_checkout(set, resp.and_then(|r| r.data))?;
             Ok(ResolvedSshCredential {
-                credential: SshCredential::Password(Zeroizing::new(password)),
-                effective_username: Some(username),
+                credential: SshCredential::Password(checkout.password),
+                effective_username: Some(checkout.account.clone()),
                 on_close: Some(crate::session::SessionCleanup {
                     kind: crate::session::SessionCleanupKind::LdapLibraryCheckIn {
                         ldap_mount: ldap_mount.trim_end_matches('/').to_string(),
                         library_set: set.to_string(),
-                        lease_id,
+                        account: checkout.account,
+                        lease_id: checkout.lease_id,
                     },
                 }),
                 engine_mint: None,
@@ -3144,5 +3169,64 @@ mod tests {
         assert!(v.bastions.is_empty());
         assert!(v.recording.is_empty());
         assert!(v.lock_violation.is_none());
+    }
+
+    /// The fields `bv-engine-ldap`'s `handle_check_out` returns.
+    fn ldap_checkout_response() -> Map<String, Value> {
+        let mut m = Map::new();
+        m.insert("service_account_name".into(), Value::String("svc-app1".into()));
+        m.insert("password".into(), Value::String("s3cret".into()));
+        m.insert("lease_id".into(), Value::String("ldap-library-1234".into()));
+        m
+    }
+
+    #[test]
+    fn ldap_checkout_reads_service_account_name() {
+        let c = parse_ldap_library_checkout("pool", Some(ldap_checkout_response())).unwrap();
+        assert_eq!(c.account, "svc-app1");
+        assert_eq!(c.password.as_str(), "s3cret");
+        assert_eq!(c.lease_id, "ldap-library-1234");
+    }
+
+    #[test]
+    fn ldap_checkout_does_not_fall_back_to_username() {
+        // The old host read `username`, which the engine never returns.
+        // A response carrying only that must fail, not open a session.
+        let mut m = ldap_checkout_response();
+        let account = m.remove("service_account_name").unwrap();
+        m.insert("username".into(), account);
+        let err = parse_ldap_library_checkout("pool", Some(m)).err().unwrap();
+        assert_eq!(err.message, "ldap library/pool/check-out missing `service_account_name`");
+    }
+
+    #[test]
+    fn ldap_checkout_missing_fields_are_named() {
+        for key in ["service_account_name", "password", "lease_id"] {
+            let mut m = ldap_checkout_response();
+            m.remove(key);
+            let err = parse_ldap_library_checkout("pool", Some(m)).err().unwrap();
+            assert_eq!(err.message, format!("ldap library/pool/check-out missing `{key}`"));
+
+            // Empty and non-string values are as unusable as absent ones.
+            let mut m = ldap_checkout_response();
+            m.insert(key.into(), Value::String(String::new()));
+            assert!(parse_ldap_library_checkout("pool", Some(m)).is_err(), "empty `{key}`");
+            let mut m = ldap_checkout_response();
+            m.insert(key.into(), Value::Null);
+            assert!(parse_ldap_library_checkout("pool", Some(m)).is_err(), "null `{key}`");
+        }
+    }
+
+    #[test]
+    fn ldap_checkout_without_response_data_fails() {
+        let err = parse_ldap_library_checkout("pool", None).err().unwrap();
+        assert!(err.message.starts_with("ldap library/pool/check-out missing"));
+    }
+
+    #[test]
+    fn ldap_check_in_body_names_the_account() {
+        let body = ldap_library_check_in_body("svc-app1");
+        assert_eq!(body.len(), 1, "only `account`: the engine ignores `lease_id`");
+        assert_eq!(body.get("account"), Some(&Value::String("svc-app1".into())));
     }
 }

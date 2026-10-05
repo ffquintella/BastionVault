@@ -1,10 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
-use bastion_vault::BastionVault;
 use bastion_vault::api::Client;
-use bastion_vault::storage::physical::file::oauth::{
-    ConsentSession, OAuthCredentials, OAuthProvider,
-};
+use bastion_vault::storage::physical::file::oauth::{ConsentSession, OAuthCredentials, OAuthProvider};
+use bastion_vault::BastionVault;
 use bv_client::Backend;
 use tokio::sync::Mutex;
 
@@ -193,15 +191,13 @@ pub struct AppState {
     /// Each entry owns the russh client + a control channel the
     /// session_input / session_resize / session_close commands
     /// use to drive the remote PTY.
-    pub connect_sessions:
-        tokio::sync::Mutex<HashMap<String, crate::session::SessionState>>,
+    pub connect_sessions: tokio::sync::Mutex<HashMap<String, crate::session::SessionState>>,
     /// Phase 7.4: per-session Rustion bundle stashed when the Connect
     /// path routed through a bastion. Keyed by the same SSH/RDP
     /// session token in `connect_sessions`. Read by the spawned window
     /// via `session_rustion_info` to drive renew/kill UI; dropped
     /// alongside the session in `drop_session`.
-    pub rustion_session_bundles:
-        tokio::sync::Mutex<HashMap<String, RustionSessionBundle>>,
+    pub rustion_session_bundles: tokio::sync::Mutex<HashMap<String, RustionSessionBundle>>,
     /// Plugin Extensibility v1: per-vault on-disk surface cache.
     /// Resolved on first use from the Tauri app's cache directory
     /// (`<dirs::cache>/com.bastionvault.gui/plugins/<vault-id>/`).

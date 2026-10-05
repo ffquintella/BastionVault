@@ -58,16 +58,8 @@ pub struct EntityAliasInfo {
 /// `handle_entity_aliases_list`. Each record's `namespace` says which
 /// keyspace it came from.
 #[tauri::command]
-pub async fn list_entity_aliases(
-    state: State<'_, AppState>,
-) -> CmdResult<Vec<EntityAliasInfo>> {
-    let resp = make_request(
-        &state,
-        Operation::List,
-        "identity/entity/aliases".into(),
-        None,
-    )
-    .await?;
+pub async fn list_entity_aliases(state: State<'_, AppState>) -> CmdResult<Vec<EntityAliasInfo>> {
+    let resp = make_request(&state, Operation::List, "identity/entity/aliases".into(), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     let arr = data.get("aliases").and_then(|v| v.as_array()).cloned();
     let out = arr
@@ -76,26 +68,10 @@ pub async fn list_entity_aliases(
         .filter_map(|v| {
             let o = v.as_object()?;
             Some(EntityAliasInfo {
-                mount: o
-                    .get("mount")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                name: o
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                entity_id: o
-                    .get("entity_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                namespace: o
-                    .get("namespace")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                mount: o.get("mount").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                name: o.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                entity_id: o.get("entity_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                namespace: o.get("namespace").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             })
         })
         .collect();
@@ -104,11 +80,8 @@ pub async fn list_entity_aliases(
 
 #[tauri::command]
 pub async fn get_entity_self(state: State<'_, AppState>) -> CmdResult<EntitySelf> {
-    let resp = make_request(&state, Operation::Read, "identity/entity/self".into(), None)
-        .await?;
-    let data = resp
-        .and_then(|r| r.data)
-        .ok_or("no data returned for entity/self")?;
+    let resp = make_request(&state, Operation::Read, "identity/entity/self".into(), None).await?;
+    let data = resp.and_then(|r| r.data).ok_or("no data returned for entity/self")?;
 
     fn s(d: &Map<String, Value>, k: &str) -> String {
         d.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string()
@@ -138,75 +111,32 @@ pub struct OwnerInfo {
 
 fn parse_owner(data: &Map<String, Value>) -> OwnerInfo {
     OwnerInfo {
-        target_kind: data
-            .get("target_kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        target: data
-            .get("target")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        entity_id: data
-            .get("entity_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+        target_kind: data.get("target_kind").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        target: data.get("target").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        entity_id: data.get("entity_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         owned: data.get("owned").and_then(|v| v.as_bool()).unwrap_or(false),
-        created_at: data
-            .get("created_at")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+        created_at: data.get("created_at").and_then(|v| v.as_str()).unwrap_or("").to_string(),
     }
 }
 
 #[tauri::command]
-pub async fn get_kv_owner(
-    state: State<'_, AppState>,
-    path: String,
-) -> CmdResult<OwnerInfo> {
+pub async fn get_kv_owner(state: State<'_, AppState>, path: String) -> CmdResult<OwnerInfo> {
     let segment = b64url(&path);
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("identity/owner/kv/{segment}"),
-        None,
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Read, format!("identity/owner/kv/{segment}"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(parse_owner(&data))
 }
 
 #[tauri::command]
-pub async fn get_resource_owner(
-    state: State<'_, AppState>,
-    name: String,
-) -> CmdResult<OwnerInfo> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("identity/owner/resource/{name}"),
-        None,
-    )
-    .await?;
+pub async fn get_resource_owner(state: State<'_, AppState>, name: String) -> CmdResult<OwnerInfo> {
+    let resp = make_request(&state, Operation::Read, format!("identity/owner/resource/{name}"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(parse_owner(&data))
 }
 
 #[tauri::command]
-pub async fn get_file_owner(
-    state: State<'_, AppState>,
-    id: String,
-) -> CmdResult<OwnerInfo> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("identity/owner/file/{id}"),
-        None,
-    )
-    .await?;
+pub async fn get_file_owner(state: State<'_, AppState>, id: String) -> CmdResult<OwnerInfo> {
+    let resp = make_request(&state, Operation::Read, format!("identity/owner/file/{id}"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(parse_owner(&data))
 }
@@ -242,7 +172,11 @@ fn parse_share(v: &Value) -> Option<ShareEntry> {
     }
     let grantee_kind = {
         let s = s(o, "grantee_kind");
-        if s.is_empty() { "entity".to_string() } else { s }
+        if s.is_empty() {
+            "entity".to_string()
+        } else {
+            s
+        }
     };
     Some(ShareEntry {
         target_kind: s(o, "target_kind"),
@@ -253,11 +187,7 @@ fn parse_share(v: &Value) -> Option<ShareEntry> {
         capabilities: o
             .get("capabilities")
             .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
-                    .collect()
-            })
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default(),
         granted_at: s(o, "granted_at"),
         expires_at: s(o, "expires_at"),
@@ -266,17 +196,8 @@ fn parse_share(v: &Value) -> Option<ShareEntry> {
 }
 
 #[tauri::command]
-pub async fn list_shares_for_grantee(
-    state: State<'_, AppState>,
-    grantee: String,
-) -> CmdResult<Vec<SharePointer>> {
-    let resp = make_request(
-        &state,
-        Operation::List,
-        format!("identity/sharing/by-grantee/{grantee}"),
-        None,
-    )
-    .await?;
+pub async fn list_shares_for_grantee(state: State<'_, AppState>, grantee: String) -> CmdResult<Vec<SharePointer>> {
+    let resp = make_request(&state, Operation::List, format!("identity/sharing/by-grantee/{grantee}"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     let arr = data.get("entries").and_then(|v| v.as_array()).cloned();
     let out = arr
@@ -284,21 +205,10 @@ pub async fn list_shares_for_grantee(
         .into_iter()
         .filter_map(|v| {
             let o = v.as_object()?;
-            let gk = o
-                .get("grantee_kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("entity");
+            let gk = o.get("grantee_kind").and_then(|v| v.as_str()).unwrap_or("entity");
             Some(SharePointer {
-                target_kind: o
-                    .get("target_kind")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                target_path: o
-                    .get("target_path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                target_kind: o.get("target_kind").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                target_path: o.get("target_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 grantee_kind: if gk.is_empty() { "entity".to_string() } else { gk.to_string() },
             })
         })
@@ -319,58 +229,28 @@ pub struct ShareForMeResponse {
 }
 
 #[tauri::command]
-pub async fn list_shares_for_me(
-    state: State<'_, AppState>,
-) -> CmdResult<ShareForMeResponse> {
-    let resp = make_request(
-        &state,
-        Operation::List,
-        "identity/sharing/for-me".into(),
-        None,
-    )
-    .await?;
+pub async fn list_shares_for_me(state: State<'_, AppState>) -> CmdResult<ShareForMeResponse> {
+    let resp = make_request(&state, Operation::List, "identity/sharing/for-me".into(), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
 
-    let entity_id = data
-        .get("entity_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let group_shared_resources = data
-        .get("group_shared_resources")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let entity_id = data.get("entity_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let group_shared_resources = data.get("group_shared_resources").and_then(|v| v.as_bool()).unwrap_or(false);
     let arr = data.get("entries").and_then(|v| v.as_array()).cloned();
     let entries = arr
         .unwrap_or_default()
         .into_iter()
         .filter_map(|v| {
             let o = v.as_object()?;
-            let gk = o
-                .get("grantee_kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("entity");
+            let gk = o.get("grantee_kind").and_then(|v| v.as_str()).unwrap_or("entity");
             Some(SharePointer {
-                target_kind: o
-                    .get("target_kind")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                target_path: o
-                    .get("target_path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                target_kind: o.get("target_kind").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                target_path: o.get("target_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 grantee_kind: if gk.is_empty() { "entity".to_string() } else { gk.to_string() },
             })
         })
         .collect();
 
-    Ok(ShareForMeResponse {
-        entity_id,
-        group_shared_resources,
-        entries,
-    })
+    Ok(ShareForMeResponse { entity_id, group_shared_resources, entries })
 }
 
 #[tauri::command]
@@ -380,20 +260,11 @@ pub async fn list_shares_for_target(
     target_path: String,
 ) -> CmdResult<Vec<ShareEntry>> {
     let target = b64url(&target_path);
-    let resp = make_request(
-        &state,
-        Operation::List,
-        format!("identity/sharing/by-target/{kind}/{target}"),
-        None,
-    )
-    .await?;
+    let resp =
+        make_request(&state, Operation::List, format!("identity/sharing/by-target/{kind}/{target}"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     let arr = data.get("entries").and_then(|v| v.as_array()).cloned();
-    Ok(arr
-        .unwrap_or_default()
-        .iter()
-        .filter_map(parse_share)
-        .collect())
+    Ok(arr.unwrap_or_default().iter().filter_map(parse_share).collect())
 }
 
 #[tauri::command]
@@ -412,10 +283,7 @@ pub async fn put_share(
     body.insert("target_kind".into(), Value::String(kind.clone()));
     body.insert("target_path".into(), Value::String(target_path));
     body.insert("grantee_kind".into(), Value::String(grantee_kind));
-    body.insert(
-        "capabilities".into(),
-        Value::Array(capabilities.into_iter().map(Value::String).collect()),
-    );
+    body.insert("capabilities".into(), Value::Array(capabilities.into_iter().map(Value::String).collect()));
     if !expires_at.is_empty() {
         body.insert("expires_at".into(), Value::String(expires_at));
     }
@@ -427,9 +295,7 @@ pub async fn put_share(
         Some(body),
     )
     .await?;
-    let data = resp
-        .and_then(|r| r.data)
-        .ok_or("share write returned no data")?;
+    let data = resp.and_then(|r| r.data).ok_or("share write returned no data")?;
     parse_share(&Value::Object(data)).ok_or_else(|| "malformed share response".into())
 }
 
@@ -459,41 +325,19 @@ pub async fn delete_share(
 // ── Ownership transfer ────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn transfer_kv_owner(
-    state: State<'_, AppState>,
-    path: String,
-    new_owner_entity_id: String,
-) -> CmdResult<()> {
+pub async fn transfer_kv_owner(state: State<'_, AppState>, path: String, new_owner_entity_id: String) -> CmdResult<()> {
     let mut body = Map::new();
     body.insert("path".into(), Value::String(path));
-    body.insert(
-        "new_owner_entity_id".into(),
-        Value::String(new_owner_entity_id),
-    );
-    make_request(
-        &state,
-        Operation::Write,
-        "sys/kv-owner/transfer".into(),
-        Some(body),
-    )
-    .await?;
+    body.insert("new_owner_entity_id".into(), Value::String(new_owner_entity_id));
+    make_request(&state, Operation::Write, "sys/kv-owner/transfer".into(), Some(body)).await?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn claim_kv_owner(
-    state: State<'_, AppState>,
-    path: String,
-) -> CmdResult<()> {
+pub async fn claim_kv_owner(state: State<'_, AppState>, path: String) -> CmdResult<()> {
     let mut body = Map::new();
     body.insert("path".into(), Value::String(path));
-    make_request(
-        &state,
-        Operation::Write,
-        "sys/kv-owner/claim".into(),
-        Some(body),
-    )
-    .await?;
+    make_request(&state, Operation::Write, "sys/kv-owner/claim".into(), Some(body)).await?;
     Ok(())
 }
 
@@ -505,17 +349,8 @@ pub async fn transfer_asset_group_owner(
 ) -> CmdResult<()> {
     let mut body = Map::new();
     body.insert("name".into(), Value::String(name));
-    body.insert(
-        "new_owner_entity_id".into(),
-        Value::String(new_owner_entity_id),
-    );
-    make_request(
-        &state,
-        Operation::Write,
-        "sys/asset-group-owner/transfer".into(),
-        Some(body),
-    )
-    .await?;
+    body.insert("new_owner_entity_id".into(), Value::String(new_owner_entity_id));
+    make_request(&state, Operation::Write, "sys/asset-group-owner/transfer".into(), Some(body)).await?;
     Ok(())
 }
 
@@ -523,24 +358,11 @@ pub async fn transfer_asset_group_owner(
 /// no `claim` endpoint for files (unlike KV), so the Files page rides
 /// this one to claim by naming the caller's own entity.
 #[tauri::command]
-pub async fn transfer_file_owner(
-    state: State<'_, AppState>,
-    id: String,
-    new_owner_entity_id: String,
-) -> CmdResult<()> {
+pub async fn transfer_file_owner(state: State<'_, AppState>, id: String, new_owner_entity_id: String) -> CmdResult<()> {
     let mut body = Map::new();
     body.insert("id".into(), Value::String(id));
-    body.insert(
-        "new_owner_entity_id".into(),
-        Value::String(new_owner_entity_id),
-    );
-    make_request(
-        &state,
-        Operation::Write,
-        "sys/file-owner/transfer".into(),
-        Some(body),
-    )
-    .await?;
+    body.insert("new_owner_entity_id".into(), Value::String(new_owner_entity_id));
+    make_request(&state, Operation::Write, "sys/file-owner/transfer".into(), Some(body)).await?;
     Ok(())
 }
 
@@ -552,16 +374,7 @@ pub async fn transfer_resource_owner(
 ) -> CmdResult<()> {
     let mut body = Map::new();
     body.insert("resource".into(), Value::String(resource));
-    body.insert(
-        "new_owner_entity_id".into(),
-        Value::String(new_owner_entity_id),
-    );
-    make_request(
-        &state,
-        Operation::Write,
-        "sys/resource-owner/transfer".into(),
-        Some(body),
-    )
-    .await?;
+    body.insert("new_owner_entity_id".into(), Value::String(new_owner_entity_id));
+    make_request(&state, Operation::Write, "sys/resource-owner/transfer".into(), Some(body)).await?;
     Ok(())
 }
