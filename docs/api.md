@@ -686,8 +686,11 @@ codes are listed per endpoint.
 
 The caller needs `update` on the endpoint paths **and** `connect` (or `read`
 / `root`) on `resources/secrets/<resource>/`. The built-in baseline policies
-grant `connect/mfa/*` and `connect/authorize` but not yet `connect/web/*`, so
-grant it explicitly:
+(`default`, `shared-access` and the namespace baselines) grant `update` on
+`connect/web/{launch,totp,result,close}` alongside `connect/mfa/*` and
+`connect/authorize`, so only the per-resource `connect` grant is needed. A
+custom policy that wants the endpoint grant without the baseline can state it
+explicitly:
 
 ~~~hcl
 path "resources/v2/connect/web/*" { capabilities = ["update"] }

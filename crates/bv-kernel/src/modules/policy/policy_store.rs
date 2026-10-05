@@ -411,6 +411,11 @@ path "ssh-broker/policy/effective" { capabilities = ["update"] }
 # `PolicyStore::may_connect_target`, so this reaches no resource the caller
 # could not already reach.
 #
+# `connect/web/{launch,totp,result,close}` are the form-mode web Connect
+# counterparts of `authorize`: the same endpoint-level pre-flight, each
+# re-authorizing the named resource's `connect` grant itself, so they are
+# granted on the same terms.
+#
 # Withheld, Connect failed at the first call with a bare 403 for every
 # non-root principal -- including callers holding `connect` on the resource
 # and `update` on `rustion/v2/session/open`, i.e. everything needed to
@@ -418,6 +423,10 @@ path "ssh-broker/policy/effective" { capabilities = ["update"] }
 path "resources/v2/connect/mfa/begin"  { capabilities = ["update"] }
 path "resources/v2/connect/mfa/verify" { capabilities = ["update"] }
 path "resources/v2/connect/authorize"  { capabilities = ["update"] }
+path "resources/v2/connect/web/launch" { capabilities = ["update"] }
+path "resources/v2/connect/web/totp"   { capabilities = ["update"] }
+path "resources/v2/connect/web/result" { capabilities = ["update"] }
+path "resources/v2/connect/web/close"  { capabilities = ["update"] }
 "#;
 
 // Implicit self-service policy for namespace-bound tokens.
@@ -636,7 +645,8 @@ path "{{namespace.path}}/resource-group/groups/+" {
 # the `resource-group/groups` list above): the rules are endpoint-level, so
 # scoping them to a share would be checking the wrong object -- there is no
 # per-target share on `.../connect/mfa/begin`. Each handler re-authorizes the
-# resource named in the body via `PolicyStore::may_connect_target`.
+# resource named in the body via `PolicyStore::may_connect_target`. That
+# includes the form-mode web Connect endpoints (`connect/web/*`).
 #
 # Templated, unlike the `rustion/` grants in `namespace-self`: `rustion/` is
 # header-scoped and never rewritten (`is_header_scoped_path`), while
@@ -646,6 +656,10 @@ path "{{namespace.path}}/resource-group/groups/+" {
 path "{{namespace.path}}/resources/v2/connect/mfa/begin"  { capabilities = ["update"] }
 path "{{namespace.path}}/resources/v2/connect/mfa/verify" { capabilities = ["update"] }
 path "{{namespace.path}}/resources/v2/connect/authorize"  { capabilities = ["update"] }
+path "{{namespace.path}}/resources/v2/connect/web/launch" { capabilities = ["update"] }
+path "{{namespace.path}}/resources/v2/connect/web/totp"   { capabilities = ["update"] }
+path "{{namespace.path}}/resources/v2/connect/web/result" { capabilities = ["update"] }
+path "{{namespace.path}}/resources/v2/connect/web/close"  { capabilities = ["update"] }
 "#;
 
 // Cross-namespace share access. Assignable, opt-in, share-scoped.
@@ -727,10 +741,15 @@ path "{{request.namespace}}/resource-group/groups/+" {
 # checking the wrong object -- there is no per-target share on
 # `.../connect/mfa/begin`. Each handler re-authorizes the resource named in the
 # request body through `PolicyStore::may_connect_target`, so these reach no
-# resource the caller could not already reach.
+# resource the caller could not already reach. `connect/web/*` (form-mode web
+# Connect) follows the same rule.
 path "{{request.namespace}}/resources/v2/connect/mfa/begin"  { capabilities = ["update"] }
 path "{{request.namespace}}/resources/v2/connect/mfa/verify" { capabilities = ["update"] }
 path "{{request.namespace}}/resources/v2/connect/authorize"  { capabilities = ["update"] }
+path "{{request.namespace}}/resources/v2/connect/web/launch" { capabilities = ["update"] }
+path "{{request.namespace}}/resources/v2/connect/web/totp"   { capabilities = ["update"] }
+path "{{request.namespace}}/resources/v2/connect/web/result" { capabilities = ["update"] }
+path "{{request.namespace}}/resources/v2/connect/web/close"  { capabilities = ["update"] }
 "#;
 
 // Administrator baseline. Full access to every path with every
@@ -811,6 +830,10 @@ path "ssh-broker/policy/effective"        { capabilities = ["create", "read", "u
 path "resources/v2/connect/mfa/begin"     { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "resources/v2/connect/mfa/verify"    { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "resources/v2/connect/authorize"     { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "resources/v2/connect/web/launch"    { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "resources/v2/connect/web/totp"      { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "resources/v2/connect/web/result"    { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "resources/v2/connect/web/close"     { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 "#;
 
 static RESPONSE_WRAPPING_POLICY_NAME: &str = "response-wrapping";
@@ -2177,7 +2200,8 @@ impl PolicyStore {
     ///
     /// The single authority for "may connect", shared by every connect gate
     /// — `rustion/v2/session/open`'s `may_connect_resource`, the resource
-    /// mount's `require_connect_grant`, and the direct-path
+    /// mount's `require_connect_grant` (also behind the form-mode
+    /// `resources/v2/connect/web/launch`), and the direct-path
     /// `resources/v2/connect/authorize`. It lives here rather than in either
     /// module because it was duplicated once and the copies drifted: the
     /// resource-mount copy claimed to be an "identical probe" while missing
@@ -4289,10 +4313,14 @@ mod implicit_rustion_grant_tests {
         assert!(rule(&p, "rustion/session/open").is_none());
     }
 
-    const CONNECT_ENDPOINTS: [&str; 3] = [
+    const CONNECT_ENDPOINTS: [&str; 7] = [
         "resources/v2/connect/mfa/begin",
         "resources/v2/connect/mfa/verify",
         "resources/v2/connect/authorize",
+        "resources/v2/connect/web/launch",
+        "resources/v2/connect/web/totp",
+        "resources/v2/connect/web/result",
+        "resources/v2/connect/web/close",
     ];
 
     /// The GUI calls `connect/mfa/begin` on *every* Connect — the server, not
@@ -4367,6 +4395,10 @@ mod implicit_rustion_grant_tests {
             "{{request.namespace}}/resources/v2/connect/mfa/begin",
             "{{request.namespace}}/resources/v2/connect/mfa/verify",
             "{{request.namespace}}/resources/v2/connect/authorize",
+            "{{request.namespace}}/resources/v2/connect/web/launch",
+            "{{request.namespace}}/resources/v2/connect/web/totp",
+            "{{request.namespace}}/resources/v2/connect/web/result",
+            "{{request.namespace}}/resources/v2/connect/web/close",
         ];
         for r in p.paths.iter() {
             if ungated_by_design.contains(&r.path.as_str()) {

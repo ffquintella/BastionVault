@@ -248,9 +248,6 @@ it yet: the host still refuses `form` at connect.
 - The host recipe engine (`session_open_web` form mode, the fixed fill
   routine, the call order `mfa → launch → totp* → result → close`).
 - The GUI recipe editor, `web_recipe_test` and the vendor presets.
-- Granting `resources/v2/connect/web/*` in the built-in baseline policies.
-  Today only `connect/mfa/*` and `connect/authorize` are granted, so a
-  non-root operator needs an explicit grant.
 - An end-to-end LDAP library check-out test, which needs an LDAP fixture.
 - The host and the server disagree on one transport case: with no
   `rustion/` mount the server allows the launch (no policy can exist),
@@ -1064,7 +1061,7 @@ apps and gives them an audited launch point.
   vendor presets (FortiGate, vCenter, iDRAC, iLO, pfSense, Grafana, Jenkins)
   tested against recorded login pages. The editor's exposure check mirrors
   the server's.
-- **Todo:** `resources/v2/connect/web/*` in the built-in baseline policies.
+- **Done:** `resources/v2/connect/web/*` in the built-in baseline policies (`default`, `standard-user`, `shared-access` refreshed at startup; `administrator` is not refreshed but inherits `update` through `default`).
 
 ### Phase 3 — `http-auth` mode — **Todo**
 
