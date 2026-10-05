@@ -50,13 +50,9 @@ async fn remote_data(
     Ok(resp.and_then(|r| r.data).unwrap_or_default())
 }
 
-fn parse_field<T: serde::de::DeserializeOwned>(
-    data: &Map<String, Value>,
-    key: &str,
-) -> CmdResult<T> {
+fn parse_field<T: serde::de::DeserializeOwned>(data: &Map<String, Value>, key: &str) -> CmdResult<T> {
     let value = data.get(key).cloned().unwrap_or(Value::Null);
-    serde_json::from_value(value)
-        .map_err(|e| CommandError::from(format!("unexpected server response: {e}")))
+    serde_json::from_value(value).map_err(|e| CommandError::from(format!("unexpected server response: {e}")))
 }
 
 #[derive(Debug, Serialize)]
@@ -80,18 +76,12 @@ pub async fn scheduled_exports_list(state: State<'_, AppState>) -> CmdResult<Sch
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
     let store = ScheduleStore::new();
-    let schedules = store
-        .list(core.barrier.as_storage())
-        .await
-        .map_err(CommandError::from)?;
+    let schedules = store.list(core.barrier.as_storage()).await.map_err(CommandError::from)?;
     Ok(ScheduleListResult { schedules })
 }
 
 #[tauri::command]
-pub async fn scheduled_exports_create(
-    state: State<'_, AppState>,
-    input: ScheduleInput,
-) -> CmdResult<Schedule> {
+pub async fn scheduled_exports_create(state: State<'_, AppState>, input: ScheduleInput) -> CmdResult<Schedule> {
     use std::str::FromStr;
     cron::Schedule::from_str(&input.cron).map_err(|_| "invalid cron expression")?;
     input.destination.validate().map_err(CommandError::from)?;
@@ -123,10 +113,7 @@ pub async fn scheduled_exports_create(
         enabled: input.enabled,
     };
     let store = ScheduleStore::new();
-    store
-        .put(core.barrier.as_storage(), &sched)
-        .await
-        .map_err(CommandError::from)?;
+    store.put(core.barrier.as_storage(), &sched).await.map_err(CommandError::from)?;
     Ok(sched)
 }
 
@@ -152,11 +139,8 @@ pub async fn scheduled_exports_update(
     let core = vault.core.load();
 
     let store = ScheduleStore::new();
-    let existing = store
-        .get(core.barrier.as_storage(), &id)
-        .await
-        .map_err(CommandError::from)?
-        .ok_or("schedule not found")?;
+    let existing =
+        store.get(core.barrier.as_storage(), &id).await.map_err(CommandError::from)?.ok_or("schedule not found")?;
     let sched = Schedule {
         id: existing.id,
         name: input.name,
@@ -171,10 +155,7 @@ pub async fn scheduled_exports_update(
         updated_at: chrono::Utc::now().to_rfc3339(),
         enabled: input.enabled,
     };
-    store
-        .put(core.barrier.as_storage(), &sched)
-        .await
-        .map_err(CommandError::from)?;
+    store.put(core.barrier.as_storage(), &sched).await.map_err(CommandError::from)?;
     Ok(sched)
 }
 
@@ -189,18 +170,12 @@ pub async fn scheduled_exports_delete(state: State<'_, AppState>, id: String) ->
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
     let store = ScheduleStore::new();
-    store
-        .delete(core.barrier.as_storage(), &id)
-        .await
-        .map_err(CommandError::from)?;
+    store.delete(core.barrier.as_storage(), &id).await.map_err(CommandError::from)?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn scheduled_exports_runs(
-    state: State<'_, AppState>,
-    id: String,
-) -> CmdResult<ScheduleRunsResult> {
+pub async fn scheduled_exports_runs(state: State<'_, AppState>, id: String) -> CmdResult<ScheduleRunsResult> {
     if is_remote(&state).await {
         let path = format!("sys/scheduled-exports/{id}/runs");
         let data = remote_data(&state, Operation::Read, path, None).await?;
@@ -211,19 +186,13 @@ pub async fn scheduled_exports_runs(
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
     let store = ScheduleStore::new();
-    let runs = store
-        .list_runs(core.barrier.as_storage(), &id)
-        .await
-        .map_err(CommandError::from)?;
+    let runs = store.list_runs(core.barrier.as_storage(), &id).await.map_err(CommandError::from)?;
     Ok(ScheduleRunsResult { runs })
 }
 
 /// Trigger an immediate one-off run, separate from the cron cadence.
 #[tauri::command]
-pub async fn scheduled_exports_run_now(
-    state: State<'_, AppState>,
-    id: String,
-) -> CmdResult<RunRecord> {
+pub async fn scheduled_exports_run_now(state: State<'_, AppState>, id: String) -> CmdResult<RunRecord> {
     if is_remote(&state).await {
         let path = format!("sys/scheduled-exports/{id}/run-now");
         let data = remote_data(&state, Operation::Write, path, None).await?;
@@ -233,16 +202,12 @@ pub async fn scheduled_exports_run_now(
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
     let store = ScheduleStore::new();
-    let sched = store
-        .get(core.barrier.as_storage(), &id)
-        .await
-        .map_err(CommandError::from)?
-        .ok_or("schedule not found")?;
+    let sched =
+        store.get(core.barrier.as_storage(), &id).await.map_err(CommandError::from)?.ok_or("schedule not found")?;
 
     // Resolve through the runner so the schedule's password-ref logic +
     // destination writer match what the cron-driven path uses.
-    let core_arc: std::sync::Arc<bastion_vault::core::Core> =
-        std::sync::Arc::clone(&*core);
+    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
     drop(vault_guard);
     let outcome = runner::run_once(&core_arc, &sched).await;
     let record = match outcome {
@@ -266,9 +231,7 @@ pub async fn scheduled_exports_run_now(
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
-    let _ = store
-        .append_run(core.barrier.as_storage(), &record)
-        .await;
+    let _ = store.append_run(core.barrier.as_storage(), &record).await;
     Ok(record)
 }
 
@@ -345,11 +308,7 @@ fn format_of(name: &str) -> Option<&'static str> {
 /// Label of the node the replicated catalog says holds a backup file, when it
 /// has a record for it. Used to turn "cannot read backup file" into something
 /// actionable.
-async fn catalogued_node_label(
-    state: &State<'_, AppState>,
-    schedule_id: &str,
-    filename: &str,
-) -> Option<String> {
+async fn catalogued_node_label(state: &State<'_, AppState>, schedule_id: &str, filename: &str) -> Option<String> {
     let vault_guard = state.vault.lock().await;
     let core = vault_guard.as_ref()?.core.load();
     bastion_vault::scheduled_exports::BackupCatalog::new()
@@ -376,10 +335,7 @@ async fn get_schedule(state: &State<'_, AppState>, id: &str) -> CmdResult<Schedu
 /// List the backup files present in a schedule's local destination directory,
 /// newest first. Files that are not `.bvx`/`.json` are ignored.
 #[tauri::command]
-pub async fn scheduled_exports_backups_list(
-    state: State<'_, AppState>,
-    id: String,
-) -> CmdResult<BackupListResult> {
+pub async fn scheduled_exports_backups_list(state: State<'_, AppState>, id: String) -> CmdResult<BackupListResult> {
     if is_remote(&state).await {
         // The backup files live on the server's filesystem; ask the server to
         // enumerate them rather than touching the (non-existent) local disk.
@@ -399,10 +355,9 @@ pub async fn scheduled_exports_backups_list(
     // `core` is an `arc_swap::Guard<Arc<Core>>`; deref twice to reach the
     // `&Core` that coerces to `&dyn VaultCtx`.
     let local_node = bastion_vault::scheduled_exports::local_node(&**core);
-    let (dir, entries) =
-        bastion_vault::scheduled_exports::list_backups(core.barrier.as_storage(), &sched, &local_node)
-            .await
-            .map_err(CommandError::from)?;
+    let (dir, entries) = bastion_vault::scheduled_exports::list_backups(core.barrier.as_storage(), &sched, &local_node)
+        .await
+        .map_err(CommandError::from)?;
 
     let files = entries
         .into_iter()
@@ -494,11 +449,7 @@ pub async fn scheduled_exports_restore(
     }
 
     // ── Embedded: read + classify/import in-process. ──────────────────────
-    if filename.is_empty()
-        || filename.contains('/')
-        || filename.contains('\\')
-        || filename.contains("..")
-    {
+    if filename.is_empty() || filename.contains('/') || filename.contains('\\') || filename.contains("..") {
         return Err("invalid backup file name".into());
     }
     let format = format_of(&filename).ok_or("backup file must be a .bvx or .json file")?;
@@ -539,9 +490,7 @@ pub async fn scheduled_exports_restore(
 
     let document: bastion_vault::exchange::ExchangeDocument =
         serde_json::from_slice(&document_bytes).map_err(|_| "document is not valid bvx.v1 JSON")?;
-    document
-        .validate_schema_tag()
-        .map_err(|_| "unsupported bvx schema tag")?;
+    document.validate_schema_tag().map_err(|_| "unsupported bvx schema tag")?;
 
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;

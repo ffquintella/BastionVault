@@ -48,18 +48,13 @@ pub async fn init_vault(state: State<'_, AppState>) -> CmdResult<InitResponse> {
     drop(vault_guard);
     #[cfg(feature = "embedded_vault")]
     {
-        *state.backend.lock().await = Some(std::sync::Arc::new(
-            crate::backend::EmbeddedBackend::new(vault_arc),
-        ));
+        *state.backend.lock().await = Some(std::sync::Arc::new(crate::backend::EmbeddedBackend::new(vault_arc)));
     }
     #[cfg(not(feature = "embedded_vault"))]
     let _ = vault_arc;
     *state.token.lock().await = Some(root_token.clone());
 
-    Ok(InitResponse {
-        root_token,
-        unseal_key_hex,
-    })
+    Ok(InitResponse { root_token, unseal_key_hex })
 }
 
 #[tauri::command]
@@ -77,9 +72,7 @@ pub async fn open_vault(state: State<'_, AppState>) -> CmdResult<()> {
     drop(vault_guard);
     #[cfg(feature = "embedded_vault")]
     {
-        *state.backend.lock().await = Some(std::sync::Arc::new(
-            crate::backend::EmbeddedBackend::new(vault_arc),
-        ));
+        *state.backend.lock().await = Some(std::sync::Arc::new(crate::backend::EmbeddedBackend::new(vault_arc)));
     }
     #[cfg(not(feature = "embedded_vault"))]
     let _ = vault_arc;
@@ -185,18 +178,10 @@ pub async fn seal_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Cm
             // they feed is `authorize_embedded_seal`, which is what the tests
             // drive and the only thing standing between this token and
             // `Core::seal`.
-            let auth_module = core
-                .module_manager
-                .get_module::<AuthModule>("auth")
-                .ok_or("auth module unavailable")?;
-            let token_store = auth_module
-                .token_store
-                .load_full()
-                .ok_or("token store unavailable")?;
-            let policy_module = core
-                .module_manager
-                .get_module::<PolicyModule>("policy")
-                .ok_or("policy module unavailable")?;
+            let auth_module = core.module_manager.get_module::<AuthModule>("auth").ok_or("auth module unavailable")?;
+            let token_store = auth_module.token_store.load_full().ok_or("token store unavailable")?;
+            let policy_module =
+                core.module_manager.get_module::<PolicyModule>("policy").ok_or("policy module unavailable")?;
             let policy_store = policy_module.policy_store.load_full();
 
             authorize_embedded_seal(&token_store, &policy_store, &token).await?;
@@ -226,8 +211,7 @@ pub async fn seal_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Cm
         }
         let profile = state.remote_profile.lock().await.clone();
         if let Some(profile) = profile {
-            let nodes =
-                crate::commands::connection::remote_seal_fanout(&profile, &token).await?;
+            let nodes = crate::commands::connection::remote_seal_fanout(&profile, &token).await?;
             // If no node could be sealed, surface the first failure as a
             // hard error so the caller sees why (e.g. permission denied).
             let sealed_count = nodes.iter().filter(|n| n.sealed == Some(true)).count();
@@ -243,10 +227,7 @@ pub async fn seal_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Cm
             // pointed at a now-sealed node.
             *state.backend.lock().await = None;
             crate::plugin_apps::teardown_all(&app, &state).await;
-            return Ok(SealOutcome {
-                status: VaultStatus { initialized: true, sealed: true, has_vault: true },
-                nodes,
-            });
+            return Ok(SealOutcome { status: VaultStatus { initialized: true, sealed: true, has_vault: true }, nodes });
         }
     }
 
@@ -266,8 +247,7 @@ fn resolve_embedded_unseal_key(provided: Option<&str>) -> CmdResult<Vec<u8>> {
             let vault_id = crate::embedded::current_vault_id();
             crate::local_keystore::get_unseal_key(&vault_id)?.ok_or_else(|| {
                 CommandError::from(
-                    "No unseal key supplied and none cached on this device for the active vault"
-                        .to_string(),
+                    "No unseal key supplied and none cached on this device for the active vault".to_string(),
                 )
             })?
         }
@@ -309,24 +289,16 @@ pub struct UnsealOutcome {
 /// submitted in turn; the aggregate `sealed` stays true until every node
 /// is open, so the dialog keeps prompting for the next share.
 #[tauri::command]
-pub async fn unseal_vault(
-    state: State<'_, AppState>,
-    unseal_key_hex: Option<String>,
-) -> CmdResult<UnsealOutcome> {
+pub async fn unseal_vault(state: State<'_, AppState>, unseal_key_hex: Option<String>) -> CmdResult<UnsealOutcome> {
     #[cfg(feature = "embedded_vault")]
     {
         let vault_guard = state.vault.lock().await;
         if let Some(vault) = vault_guard.as_ref() {
             if vault.core.load().sealed() {
                 let key = resolve_embedded_unseal_key(unseal_key_hex.as_deref())?;
-                let opened = vault
-                    .unseal(&[key.as_slice()])
-                    .await
-                    .map_err(CommandError::from)?;
+                let opened = vault.unseal(&[key.as_slice()]).await.map_err(CommandError::from)?;
                 if !opened {
-                    return Err(
-                        "Unseal failed: the key did not match this vault".into(),
-                    );
+                    return Err("Unseal failed: the key did not match this vault".into());
                 }
             }
             let core = vault.core.load();
@@ -337,9 +309,8 @@ pub async fn unseal_vault(
             if !sealed {
                 let vault_arc = vault.clone();
                 drop(vault_guard);
-                *state.backend.lock().await = Some(std::sync::Arc::new(
-                    crate::backend::EmbeddedBackend::new(vault_arc),
-                ));
+                *state.backend.lock().await =
+                    Some(std::sync::Arc::new(crate::backend::EmbeddedBackend::new(vault_arc)));
             }
             return Ok(UnsealOutcome {
                 status: VaultStatus { initialized, sealed, has_vault: true },
@@ -364,15 +335,12 @@ pub async fn unseal_vault(
             .to_string();
         let profile = state.remote_profile.lock().await.clone();
         if let Some(profile) = profile {
-            let nodes =
-                crate::commands::connection::remote_unseal_fanout(&profile, &key).await?;
+            let nodes = crate::commands::connection::remote_unseal_fanout(&profile, &key).await?;
             return Ok(remote_fanout_outcome(nodes));
         }
     }
 
-    Err(CommandError::from(
-        "No vault available to unseal".to_string(),
-    ))
+    Err(CommandError::from("No vault available to unseal".to_string()))
 }
 
 /// Fold a per-node unseal fan-out result into the aggregate
@@ -380,17 +348,10 @@ pub async fn unseal_vault(
 /// reached still reports sealed, OR any node errored (we can't confirm
 /// it crossed the threshold). A node that answered with a seal state is,
 /// by definition, initialized.
-fn remote_fanout_outcome(
-    nodes: Vec<crate::commands::connection::NodeSealResult>,
-) -> UnsealOutcome {
-    let sealed = nodes
-        .iter()
-        .any(|n| n.sealed.unwrap_or(true) || n.error.is_some());
+fn remote_fanout_outcome(nodes: Vec<crate::commands::connection::NodeSealResult>) -> UnsealOutcome {
+    let sealed = nodes.iter().any(|n| n.sealed.unwrap_or(true) || n.error.is_some());
     let initialized = nodes.iter().any(|n| n.sealed.is_some());
-    UnsealOutcome {
-        status: VaultStatus { initialized, sealed, has_vault: true },
-        nodes,
-    }
+    UnsealOutcome { status: VaultStatus { initialized, sealed, has_vault: true }, nodes }
 }
 
 /// Unseal a remote cluster identified by an explicit profile, WITHOUT a
@@ -405,10 +366,7 @@ fn remote_fanout_outcome(
 /// runs its own SRV discovery and reaches sealed/unreachable nodes,
 /// identical to the connected path; the key is required.
 #[tauri::command]
-pub async fn remote_unseal_profile(
-    profile: RemoteProfile,
-    unseal_key_hex: String,
-) -> CmdResult<UnsealOutcome> {
+pub async fn remote_unseal_profile(profile: RemoteProfile, unseal_key_hex: String) -> CmdResult<UnsealOutcome> {
     let key = unseal_key_hex.trim();
     if key.is_empty() {
         return Err("An unseal key is required to unseal a remote vault".into());
@@ -440,9 +398,8 @@ pub async fn get_vault_status(state: State<'_, AppState>) -> CmdResult<VaultStat
     {
         let client_guard = state.remote_client.lock().await;
         if let Some(client) = client_guard.as_ref() {
-            let resp = client.sys().seal_status().map_err(|e| {
-                CommandError::from(format!("sys/seal-status failed: {e}"))
-            })?;
+            let resp =
+                client.sys().seal_status().map_err(|e| CommandError::from(format!("sys/seal-status failed: {e}")))?;
             let body = resp
                 .response_data
                 .as_ref()
@@ -455,20 +412,12 @@ pub async fn get_vault_status(state: State<'_, AppState>) -> CmdResult<VaultStat
             // presence of a non-zero share count `n`.
             let sealed = body.get("sealed").and_then(|v| v.as_bool()).unwrap_or(true);
             let n = body.get("n").and_then(|v| v.as_u64()).unwrap_or(0);
-            return Ok(VaultStatus {
-                initialized: n > 0,
-                sealed,
-                has_vault: true,
-            });
+            return Ok(VaultStatus { initialized: n > 0, sealed, has_vault: true });
         }
     }
 
     // No backend at all — chooser screen, freshly-disconnected, etc.
-    Ok(VaultStatus {
-        initialized: embedded::is_initialized().unwrap_or(false),
-        sealed: true,
-        has_vault: false,
-    })
+    Ok(VaultStatus { initialized: embedded::is_initialized().unwrap_or(false), sealed: true, has_vault: false })
 }
 
 /// Server identity + lifecycle facts surfaced by the GUI's "Server
@@ -542,14 +491,9 @@ pub async fn get_server_info(state: State<'_, AppState>) -> CmdResult<ServerInfo
             let endpoint = client.address.clone();
             let token = state.token.lock().await.clone().unwrap_or_default();
             let bound = client.with_token(&token);
-            let resp = bound.sys().info().map_err(|e| {
-                CommandError::from(format!("sys/info failed: {e}"))
-            })?;
-            let body = resp
-                .response_data
-                .as_ref()
-                .and_then(|v| v.as_object())
-                .ok_or("sys/info: empty response body")?;
+            let resp = bound.sys().info().map_err(|e| CommandError::from(format!("sys/info failed: {e}")))?;
+            let body =
+                resp.response_data.as_ref().and_then(|v| v.as_object()).ok_or("sys/info: empty response body")?;
             fn s(o: &serde_json::Map<String, Value>, k: &str) -> String {
                 o.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string()
             }
@@ -558,18 +502,9 @@ pub async fn get_server_info(state: State<'_, AppState>) -> CmdResult<ServerInfo
                 endpoint,
                 version: s(body, "version"),
                 started_at: s(body, "started_at"),
-                uptime_seconds: body
-                    .get("uptime_seconds")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0),
-                initialized: body
-                    .get("initialized")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-                sealed: body
-                    .get("sealed")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true),
+                uptime_seconds: body.get("uptime_seconds").and_then(|v| v.as_i64()).unwrap_or(0),
+                initialized: body.get("initialized").and_then(|v| v.as_bool()).unwrap_or(false),
+                sealed: body.get("sealed").and_then(|v| v.as_bool()).unwrap_or(true),
                 storage_type: s(body, "storage_type"),
             });
         }
@@ -613,10 +548,7 @@ pub async fn reset_local_keystore(state: State<'_, AppState>) -> CmdResult<()> {
 /// `unseal_key_hex` is the hex-encoded unseal key as shown at init
 /// time. Length + hex validity are checked before touching state.
 #[tauri::command]
-pub async fn recover_unseal_key(
-    state: State<'_, AppState>,
-    unseal_key_hex: String,
-) -> CmdResult<()> {
+pub async fn recover_unseal_key(state: State<'_, AppState>, unseal_key_hex: String) -> CmdResult<()> {
     let trimmed = unseal_key_hex.trim();
     if trimmed.is_empty() {
         return Err("unseal key is required".into());
@@ -729,9 +661,8 @@ pub async fn reset_vault(state: State<'_, AppState>) -> CmdResult<()> {
             // `data_dir` overrides that `build_backend` applies.
             let dir = active_local_data_dir()?;
             if dir.exists() {
-                std::fs::remove_dir_all(&dir).map_err(|e| {
-                    crate::error::CommandError::from(format!("Failed to remove vault data: {e}"))
-                })?;
+                std::fs::remove_dir_all(&dir)
+                    .map_err(|e| crate::error::CommandError::from(format!("Failed to remove vault data: {e}")))?;
             }
         }
     }
@@ -761,9 +692,7 @@ async fn wipe_cloud_backend() -> Result<(), crate::error::CommandError> {
         let entries = match backend.list(&prefix).await {
             Ok(e) => e,
             Err(e) => {
-                eprintln!(
-                    "reset: cloud list(`{prefix}`) failed: {e} — continuing best-effort"
-                );
+                eprintln!("reset: cloud list(`{prefix}`) failed: {e} — continuing best-effort");
                 continue;
             }
         };
@@ -782,9 +711,7 @@ async fn wipe_cloud_backend() -> Result<(), crate::error::CommandError> {
                         // repeated resets not fully clearing the
                         // bucket can check the log + use their
                         // provider's console to remove the rest.
-                        eprintln!(
-                            "reset: cloud delete(`{full}`) failed: {e} — continuing"
-                        );
+                        eprintln!("reset: cloud delete(`{full}`) failed: {e} — continuing");
                     }
                 }
             }
@@ -863,16 +790,8 @@ pub async fn list_auth_methods(state: State<'_, AppState>) -> CmdResult<Vec<Moun
 /// both embedded and remote mode.
 #[tauri::command]
 pub async fn hsm_status(state: State<'_, AppState>) -> CmdResult<Value> {
-    let resp = crate::commands::make_request(
-        &state,
-        Operation::Read,
-        "sys/hsm/status".to_string(),
-        None,
-    )
-    .await?;
-    let data = resp
-        .and_then(|r| r.data)
-        .ok_or("sys/hsm/status returned no data")?;
+    let resp = crate::commands::make_request(&state, Operation::Read, "sys/hsm/status".to_string(), None).await?;
+    let data = resp.and_then(|r| r.data).ok_or("sys/hsm/status returned no data")?;
     Ok(Value::Object(data))
 }
 
@@ -883,22 +802,11 @@ async fn read_ui_mounts(
     state: &State<'_, AppState>,
     field: &str,
 ) -> Result<serde_json::Map<String, Value>, CommandError> {
-    let resp = crate::commands::make_request(
-        state,
-        Operation::Read,
-        "sys/internal/ui/mounts".to_string(),
-        None,
-    )
-    .await?;
+    let resp =
+        crate::commands::make_request(state, Operation::Read, "sys/internal/ui/mounts".to_string(), None).await?;
 
-    let data = resp
-        .and_then(|r| r.data)
-        .ok_or("sys/internal/ui/mounts returned no data")?;
-    let map = data
-        .get(field)
-        .and_then(|v| v.as_object())
-        .cloned()
-        .unwrap_or_default();
+    let data = resp.and_then(|r| r.data).ok_or("sys/internal/ui/mounts returned no data")?;
+    let map = data.get(field).and_then(|v| v.as_object()).cloned().unwrap_or_default();
     Ok(map)
 }
 
@@ -968,11 +876,8 @@ pub async fn list_audit_events(
         query.push(format!("limit={l}"));
         body.insert("limit".into(), Value::Number(l.into()));
     }
-    let path = if query.is_empty() {
-        "sys/audit/events".to_string()
-    } else {
-        format!("sys/audit/events?{}", query.join("&"))
-    };
+    let path =
+        if query.is_empty() { "sys/audit/events".to_string() } else { format!("sys/audit/events?{}", query.join("&")) };
     let body = if body.is_empty() { None } else { Some(body) };
 
     let resp = crate::commands::make_request(&state, Operation::Read, path, body).await?;
@@ -986,36 +891,16 @@ pub async fn list_audit_events(
             Some(AuditEvent {
                 ts: o.get("ts").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 user: o.get("user").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                machine: o
-                    .get("machine")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string),
+                machine: o.get("machine").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string),
                 op: o.get("op").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                category: o
-                    .get("category")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                target: o
-                    .get("target")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                category: o.get("category").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                target: o.get("target").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 changed_fields: o
                     .get("changed_fields")
                     .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(String::from))
-                            .collect()
-                    })
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
                     .unwrap_or_default(),
-                summary: o
-                    .get("summary")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                summary: o.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             })
         })
         .collect();
@@ -1062,13 +947,8 @@ pub struct DashboardSummary {
 
 #[tauri::command]
 pub async fn dashboard_summary(state: State<'_, AppState>) -> CmdResult<DashboardSummary> {
-    let resp = crate::commands::make_request(
-        &state,
-        Operation::Read,
-        "sys/dashboard/summary".to_string(),
-        None,
-    )
-    .await?;
+    let resp =
+        crate::commands::make_request(&state, Operation::Read, "sys/dashboard/summary".to_string(), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
 
     let counts = data.get("counts").and_then(|v| v.as_object()).cloned().unwrap_or_default();
@@ -1083,10 +963,7 @@ pub async fn dashboard_summary(state: State<'_, AppState>) -> CmdResult<Dashboar
     Ok(DashboardSummary {
         version: data.get("version").and_then(|v| v.as_str()).unwrap_or("1").to_string(),
         namespace: data.get("namespace").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        seal: DashboardSeal {
-            sealed: b(&seal, "sealed"),
-            initialized: b(&seal, "initialized"),
-        },
+        seal: DashboardSeal { sealed: b(&seal, "sealed"), initialized: b(&seal, "initialized") },
         counts: DashboardCounts {
             secret_mounts: u(&counts, "secret_mounts"),
             auth_mounts: u(&counts, "auth_mounts"),
@@ -1125,10 +1002,7 @@ pub struct SsoProvidersResult {
 #[tauri::command]
 pub async fn list_sso_providers(state: State<'_, AppState>) -> CmdResult<SsoProvidersResult> {
     let data = read_sys_path(&state, "sys/sso/providers", /* authed = */ false).await?;
-    let enabled = data
-        .get("enabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let enabled = data.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
     let providers = data
         .get("providers")
         .and_then(|v| v.as_array())
@@ -1139,16 +1013,8 @@ pub async fn list_sso_providers(state: State<'_, AppState>) -> CmdResult<SsoProv
             let o = v.as_object()?;
             Some(SsoProvider {
                 mount: o.get("mount")?.as_str()?.to_string(),
-                name: o
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                kind: o
-                    .get("kind")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                name: o.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                kind: o.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             })
         })
         .collect();
@@ -1162,19 +1028,10 @@ pub async fn get_sso_settings(state: State<'_, AppState>) -> CmdResult<bool> {
 }
 
 #[tauri::command]
-pub async fn set_sso_settings(
-    state: State<'_, AppState>,
-    enabled: bool,
-) -> CmdResult<()> {
+pub async fn set_sso_settings(state: State<'_, AppState>, enabled: bool) -> CmdResult<()> {
     let mut body = serde_json::Map::new();
     body.insert("enabled".into(), Value::Bool(enabled));
-    crate::commands::make_request(
-        &state,
-        Operation::Write,
-        "sys/sso/settings".to_string(),
-        Some(body),
-    )
-    .await?;
+    crate::commands::make_request(&state, Operation::Write, "sys/sso/settings".to_string(), Some(body)).await?;
     Ok(())
 }
 
@@ -1186,14 +1043,7 @@ async fn read_sys_path(
     let resp = if authed {
         crate::commands::make_request(state, Operation::Read, path.to_string(), None).await?
     } else {
-        crate::commands::dispatch_with_token(
-            state,
-            Operation::Read,
-            path.to_string(),
-            None,
-            "",
-        )
-        .await?
+        crate::commands::dispatch_with_token(state, Operation::Read, path.to_string(), None, "").await?
     };
     Ok(resp.and_then(|r| r.data).unwrap_or_default())
 }
@@ -1203,16 +1053,8 @@ fn mount_map_to_info(map: &serde_json::Map<String, Value>) -> Vec<MountInfo> {
         .iter()
         .map(|(path, v)| MountInfo {
             path: path.clone(),
-            mount_type: v
-                .get("type")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-            description: v
-                .get("description")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
+            mount_type: v.get("type").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            description: v.get("description").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         })
         .collect();
     out.sort_by(|a, b| a.path.cmp(&b.path));
@@ -1258,18 +1100,11 @@ mod seal_authz_tests {
 
         for (policy_name, policy) in [("seal-op", SEAL_POLICY), ("reader", READER_POLICY)] {
             let data = json!({ "policy": policy }).as_object().cloned();
-            test_write_api(core.as_ref(), &root_token, &format!("sys/policy/{policy_name}"), true, data)
-                .await
-                .unwrap();
+            test_write_api(core.as_ref(), &root_token, &format!("sys/policy/{policy_name}"), true, data).await.unwrap();
         }
 
-        let token_store = core
-            .module_manager
-            .get_module::<AuthModule>("auth")
-            .unwrap()
-            .token_store
-            .load_full()
-            .unwrap();
+        let token_store =
+            core.module_manager.get_module::<AuthModule>("auth").unwrap().token_store.load_full().unwrap();
         let policy_store = core.module_manager.get_module::<PolicyModule>("policy").unwrap().policy_store.load_full();
 
         (bvault, token_store, policy_store, root_token)
@@ -1323,9 +1158,9 @@ mod seal_authz_tests {
         let (_bvault, token_store, policy_store, _root) = setup("gui_seal_authz_bound_cidrs").await;
         let loopback_bound = mint(&token_store, &["seal-op"], &["127.0.0.0/8"]).await;
 
-        authorize_embedded_seal(&token_store, &policy_store, &loopback_bound)
-            .await
-            .expect_err("a loopback-bound token must not seal: the GUI observes no client address, it must not invent one");
+        authorize_embedded_seal(&token_store, &policy_store, &loopback_bound).await.expect_err(
+            "a loopback-bound token must not seal: the GUI observes no client address, it must not invent one",
+        );
 
         // Not a loopback quirk — a token bound anywhere is refused, because
         // `""` matches no CIDR at all.
@@ -1395,10 +1230,7 @@ pub struct CacheVersionSnapshot {
 /// has a handful of operators, not thousands. The long-poll stays available
 /// for clients that prefer it.
 #[tauri::command]
-pub async fn cache_version(
-    state: State<'_, AppState>,
-    topics: Vec<String>,
-) -> CmdResult<CacheVersionSnapshot> {
+pub async fn cache_version(state: State<'_, AppState>, topics: Vec<String>) -> CmdResult<CacheVersionSnapshot> {
     // No topics means nothing to ask about; skip the round-trip entirely.
     if topics.is_empty() {
         return Ok(CacheVersionSnapshot { version: 0, topics: Map::new(), coarse: false });
@@ -1408,11 +1240,7 @@ pub async fn cache_version(
     let map = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(CacheVersionSnapshot {
         version: map.get("version").and_then(|v| v.as_u64()).unwrap_or(0),
-        topics: map
-            .get("topics")
-            .and_then(|v| v.as_object())
-            .cloned()
-            .unwrap_or_default(),
+        topics: map.get("topics").and_then(|v| v.as_object()).cloned().unwrap_or_default(),
         coarse: map.get("coarse").and_then(|v| v.as_bool()).unwrap_or(false),
     })
 }

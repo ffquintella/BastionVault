@@ -152,8 +152,7 @@ pub async fn ferrogate_requirement(state: State<'_, AppState>) -> CmdResult<Ferr
     match make_request(&state, Operation::Read, "auth/ferrogate/requirement".into(), None).await {
         Ok(resp) => match resp.and_then(|r| r.data) {
             Some(data) => {
-                let mut req: FerroGateRequirement =
-                    serde_json::from_value(Value::Object(data)).unwrap_or_default();
+                let mut req: FerroGateRequirement = serde_json::from_value(Value::Object(data)).unwrap_or_default();
                 req.advertised = true;
                 Ok(req)
             }
@@ -220,10 +219,7 @@ pub async fn ferrogate_write_config(
     body.insert("self_enroll_enabled".into(), Value::Bool(self_enroll_enabled));
     body.insert("self_enroll_allowlist".into(), Value::String(self_enroll_allowlist));
     body.insert("self_enroll_blocklist".into(), Value::String(self_enroll_blocklist));
-    body.insert(
-        "self_enroll_rate_limit_per_min".into(),
-        Value::Number(self_enroll_rate_limit_per_min.max(0).into()),
-    );
+    body.insert("self_enroll_rate_limit_per_min".into(), Value::Number(self_enroll_rate_limit_per_min.max(0).into()));
 
     make_request(&state, Operation::Write, "auth/ferrogate/config".into(), Some(body)).await?;
     Ok(())
@@ -464,7 +460,11 @@ fn norm_socket(socket: String, environment: Option<String>) -> Result<String, St
 #[cfg(unix)]
 fn norm_mount(mount: String) -> String {
     let m = mount.trim().trim_matches('/');
-    if m.is_empty() { "ferrogate".to_string() } else { m.to_string() }
+    if m.is_empty() {
+        "ferrogate".to_string()
+    } else {
+        m.to_string()
+    }
 }
 
 /// Dial the MIA, mint a child token, and exchange it at `auth/<mount>/login`.
@@ -497,21 +497,12 @@ pub async fn ferrogate_machine_login(
         body.insert("user_token".into(), Value::String(ut));
     }
 
-    let resp = super::dispatch_with_token(
-        &state,
-        Operation::Write,
-        format!("auth/{mount}/login"),
-        Some(body),
-        "",
-    )
-    .await?;
+    let resp =
+        super::dispatch_with_token(&state, Operation::Write, format!("auth/{mount}/login"), Some(body), "").await?;
 
     let auth = resp.as_ref().and_then(|r| r.auth.as_ref());
-    let client_token = auth
-        .and_then(|a| a.get("client_token"))
-        .and_then(|t| t.as_str())
-        .unwrap_or_default()
-        .to_string();
+    let client_token =
+        auth.and_then(|a| a.get("client_token")).and_then(|t| t.as_str()).unwrap_or_default().to_string();
 
     // No token minted: the server either denied enrolment (a gate decision we
     // classify and hand back as a typed result) or failed for a harder reason
@@ -582,14 +573,8 @@ pub async fn ferrogate_machine_status(
     body.insert("token".into(), Value::String(jws));
     body.insert("dpop".into(), Value::String(proof));
 
-    let resp = super::dispatch_with_token(
-        &state,
-        Operation::Write,
-        format!("auth/{mount}/status"),
-        Some(body),
-        "",
-    )
-    .await?;
+    let resp =
+        super::dispatch_with_token(&state, Operation::Write, format!("auth/{mount}/status"), Some(body), "").await?;
 
     Ok(resp.and_then(|r| r.data).map(Value::Object).unwrap_or(Value::Null))
 }
@@ -622,7 +607,8 @@ pub async fn ferrogate_machine_login(
     _user_token: Option<String>,
     _environment: Option<String>,
 ) -> CmdResult<FerroGateLoginResult> {
-    Err("FerroGate MIA login is only available on Unix (the MIA helper socket is not supported on this platform yet)".into())
+    Err("FerroGate MIA login is only available on Unix (the MIA helper socket is not supported on this platform yet)"
+        .into())
 }
 
 #[cfg(not(unix))]

@@ -99,8 +99,7 @@ fn get_or_compile(sha256: &str, bytes: &[u8]) -> Result<Module, HookError> {
             return Ok(m.clone());
         }
     }
-    let module =
-        Module::from_binary(engine(), bytes).map_err(|e| HookError::Compile(e.to_string()))?;
+    let module = Module::from_binary(engine(), bytes).map_err(|e| HookError::Compile(e.to_string()))?;
     let mut cache = module_cache().lock().unwrap();
     cache.insert(sha256.to_string(), module.clone());
     Ok(module)
@@ -119,41 +118,26 @@ pub fn evict(sha256: &str) {
 /// Run one hook export with `input_json`, return its UTF-8 JSON
 /// output. The caller passes `sha256` so the host module cache can
 /// short-circuit recompilation across repeated hook calls.
-pub fn run_hook(
-    sha256: &str,
-    wasm_bytes: &[u8],
-    export: &str,
-    input_json: &str,
-) -> Result<String, HookError> {
+pub fn run_hook(sha256: &str, wasm_bytes: &[u8], export: &str, input_json: &str) -> Result<String, HookError> {
     if input_json.len() > MAX_PAYLOAD_BYTES {
         return Err(HookError::InputTooLarge(input_json.len()));
     }
     let module = get_or_compile(sha256, wasm_bytes)?;
 
-    let limits: StoreLimits = StoreLimitsBuilder::new()
-        .memory_size(MEMORY_BYTES)
-        .build();
+    let limits: StoreLimits = StoreLimitsBuilder::new().memory_size(MEMORY_BYTES).build();
 
     let mut store: Store<StoreLimits> = Store::new(engine(), limits);
     store.limiter(|s| s);
-    store
-        .set_fuel(FUEL_PER_CALL)
-        .map_err(|e| HookError::Instantiate(e.to_string()))?;
+    store.set_fuel(FUEL_PER_CALL).map_err(|e| HookError::Instantiate(e.to_string()))?;
 
     // No host imports — a hook either runs as pure compute on the
     // input string or fails to instantiate. Plugin authors who need
     // host services should build a server-side plugin instead.
     let linker = wasmtime::Linker::new(engine());
-    let instance = linker
-        .instantiate(&mut store, &module)
-        .map_err(|e| HookError::Instantiate(e.to_string()))?;
+    let instance = linker.instantiate(&mut store, &module).map_err(|e| HookError::Instantiate(e.to_string()))?;
 
-    let memory = instance
-        .get_memory(&mut store, "memory")
-        .ok_or(HookError::MissingMemory)?;
-    let bv_alloc = instance
-        .get_typed_func::<i32, i32>(&mut store, "bv_alloc")
-        .map_err(|_| HookError::MissingAlloc)?;
+    let memory = instance.get_memory(&mut store, "memory").ok_or(HookError::MissingMemory)?;
+    let bv_alloc = instance.get_typed_func::<i32, i32>(&mut store, "bv_alloc").map_err(|_| HookError::MissingAlloc)?;
     let entry = instance
         .get_typed_func::<(i32, i32), i64>(&mut store, export)
         .map_err(|_| HookError::MissingExport(export.to_string()))?;
@@ -162,16 +146,10 @@ pub fn run_hook(
     // into it.
     let input_bytes = input_json.as_bytes();
     let in_len = input_bytes.len() as i32;
-    let in_ptr = bv_alloc
-        .call(&mut store, in_len)
-        .map_err(|e| HookError::Invocation(e.to_string()))?;
-    memory
-        .write(&mut store, in_ptr as usize, input_bytes)
-        .map_err(|e| HookError::Invocation(e.to_string()))?;
+    let in_ptr = bv_alloc.call(&mut store, in_len).map_err(|e| HookError::Invocation(e.to_string()))?;
+    memory.write(&mut store, in_ptr as usize, input_bytes).map_err(|e| HookError::Invocation(e.to_string()))?;
 
-    let packed = entry
-        .call(&mut store, (in_ptr, in_len))
-        .map_err(|e| HookError::Invocation(e.to_string()))?;
+    let packed = entry.call(&mut store, (in_ptr, in_len)).map_err(|e| HookError::Invocation(e.to_string()))?;
     let out_ptr = (packed >> 32) as i32;
     let out_len = (packed as u32) as i32;
 
@@ -185,9 +163,7 @@ pub fn run_hook(
         return Err(HookError::OutputOutOfBounds);
     }
     let mut buf = vec![0u8; out_len_u];
-    memory
-        .read(&store, out_ptr_u, &mut buf)
-        .map_err(|_| HookError::OutputOutOfBounds)?;
+    memory.read(&store, out_ptr_u, &mut buf).map_err(|_| HookError::OutputOutOfBounds)?;
     String::from_utf8(buf).map_err(|_| HookError::OutputNotUtf8)
 }
 
@@ -238,8 +214,7 @@ mod tests {
         // We can't easily observe the compile path from outside,
         // but at minimum the second call must succeed without
         // re-supplying bytes.
-        let again =
-            run_hook(&h, &[/* bogus, won't be parsed */], "validate", "{}").unwrap();
+        let again = run_hook(&h, &[/* bogus, won't be parsed */], "validate", "{}").unwrap();
         assert_eq!(again, "ok");
     }
 
@@ -284,10 +259,7 @@ mod tests {
         let err = run_hook(&h, &bytes, "validate", "{}").unwrap_err();
         // Either OutOfBounds or OutputTooLarge depending on values;
         // both are correct refusal paths.
-        assert!(matches!(
-            err,
-            HookError::OutputOutOfBounds | HookError::OutputTooLarge(_)
-        ));
+        assert!(matches!(err, HookError::OutputOutOfBounds | HookError::OutputTooLarge(_)));
     }
 
     #[test]

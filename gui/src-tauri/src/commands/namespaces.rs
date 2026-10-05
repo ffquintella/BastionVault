@@ -61,30 +61,15 @@ pub struct NamespacesSelfResult {
 }
 
 fn u64_at(data: Option<&Map<String, Value>>, key: &str) -> u64 {
-    data.and_then(|d| d.get("quotas"))
-        .and_then(|q| q.get(key))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0)
+    data.and_then(|d| d.get("quotas")).and_then(|q| q.get(key)).and_then(|v| v.as_u64()).unwrap_or(0)
 }
 
 fn to_info(data: Option<&Map<String, Value>>, fallback_path: &str) -> NamespaceInfo {
     NamespaceInfo {
         uuid: data.and_then(|d| d.get("uuid")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        path: data
-            .and_then(|d| d.get("path"))
-            .and_then(|v| v.as_str())
-            .unwrap_or(fallback_path)
-            .to_string(),
-        parent_uuid: data
-            .and_then(|d| d.get("parent_uuid"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        created_at: data
-            .and_then(|d| d.get("created_at"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+        path: data.and_then(|d| d.get("path")).and_then(|v| v.as_str()).unwrap_or(fallback_path).to_string(),
+        parent_uuid: data.and_then(|d| d.get("parent_uuid")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        created_at: data.and_then(|d| d.get("created_at")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
         child_visible_default: data
             .and_then(|d| d.get("child_visible_default"))
             .and_then(|v| v.as_bool())
@@ -107,15 +92,8 @@ async fn list_direct_children(
     token: &str,
     parent: Option<&str>,
 ) -> CmdResult<Vec<String>> {
-    let resp = dispatch_with_token_ns(
-        state,
-        Operation::List,
-        "sys/namespaces".to_string(),
-        None,
-        token,
-        parent,
-    )
-    .await?;
+    let resp =
+        dispatch_with_token_ns(state, Operation::List, "sys/namespaces".to_string(), None, token, parent).await?;
     Ok(resp
         .and_then(|r| {
             r.data
@@ -161,15 +139,8 @@ async fn list_direct_children_info(
     token: &str,
     parent: Option<&str>,
 ) -> CmdResult<(Vec<String>, Vec<NamespaceInfo>)> {
-    let resp = dispatch_with_token_ns(
-        state,
-        Operation::Read,
-        "sys/namespaces-info".to_string(),
-        None,
-        token,
-        parent,
-    )
-    .await?;
+    let resp =
+        dispatch_with_token_ns(state, Operation::Read, "sys/namespaces-info".to_string(), None, token, parent).await?;
     let Some(data) = resp.and_then(|r| r.data) else {
         return Ok((vec![], vec![]));
     };
@@ -248,8 +219,7 @@ pub struct NamespaceTreeResult {
 /// namespace the switcher currently has selected.
 #[tauri::command]
 pub async fn namespaces_self(state: State<'_, AppState>) -> CmdResult<NamespacesSelfResult> {
-    let resp = make_request_root(&state, Operation::Read, "sys/namespaces-self".to_string(), None)
-        .await?;
+    let resp = make_request_root(&state, Operation::Read, "sys/namespaces-self".to_string(), None).await?;
     let data = resp.and_then(|r| r.data);
     let namespaces = data
         .as_ref()
@@ -257,24 +227,15 @@ pub async fn namespaces_self(state: State<'_, AppState>) -> CmdResult<Namespaces
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
-    let token_namespace = data
-        .as_ref()
-        .and_then(|d| d.get("token_namespace"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let root = data
-        .as_ref()
-        .and_then(|d| d.get("root"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let token_namespace =
+        data.as_ref().and_then(|d| d.get("token_namespace")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let root = data.as_ref().and_then(|d| d.get("root")).and_then(|v| v.as_bool()).unwrap_or(false);
     Ok(NamespacesSelfResult { namespaces, token_namespace, root })
 }
 
 #[tauri::command]
 pub async fn read_namespace(state: State<'_, AppState>, path: String) -> CmdResult<NamespaceInfo> {
-    let resp =
-        make_request_root(&state, Operation::Read, format!("sys/namespaces/{path}"), None).await?;
+    let resp = make_request_root(&state, Operation::Read, format!("sys/namespaces/{path}"), None).await?;
     match resp {
         Some(r) => Ok(to_info(r.data.as_ref(), &path)),
         None => Err("Namespace not found".into()),
@@ -303,8 +264,7 @@ pub async fn write_namespace(
     body.insert("max_child_namespaces".into(), Value::from(max_child_namespaces));
     body.insert("child_visible_default".into(), Value::Bool(child_visible_default));
 
-    let resp = make_request_root(&state, Operation::Write, format!("sys/namespaces/{path}"), Some(body))
-        .await?;
+    let resp = make_request_root(&state, Operation::Write, format!("sys/namespaces/{path}"), Some(body)).await?;
     Ok(to_info(resp.and_then(|r| r.data).as_ref(), &path))
 }
 
@@ -337,13 +297,8 @@ pub async fn get_ns_assignment(
     mount: String,
     name: String,
 ) -> CmdResult<NsAssignmentResult> {
-    let resp = make_request_root(
-        &state,
-        Operation::Read,
-        format!("sys/identity/ns-assignment/{mount}{name}"),
-        None,
-    )
-    .await?;
+    let resp =
+        make_request_root(&state, Operation::Read, format!("sys/identity/ns-assignment/{mount}{name}"), None).await?;
     Ok(NsAssignmentResult { namespaces: ns_paths_from(resp.and_then(|r| r.data).as_ref()) })
 }
 
@@ -358,30 +313,15 @@ pub async fn set_ns_assignment(
 ) -> CmdResult<()> {
     let mut body = Map::new();
     body.insert("namespaces".into(), Value::from(namespaces));
-    make_request_root(
-        &state,
-        Operation::Write,
-        format!("sys/identity/ns-assignment/{mount}{name}"),
-        Some(body),
-    )
-    .await?;
+    make_request_root(&state, Operation::Write, format!("sys/identity/ns-assignment/{mount}{name}"), Some(body))
+        .await?;
     Ok(())
 }
 
 /// Remove a principal's restriction (back to unrestricted). Idempotent.
 #[tauri::command]
-pub async fn delete_ns_assignment(
-    state: State<'_, AppState>,
-    mount: String,
-    name: String,
-) -> CmdResult<()> {
-    make_request_root(
-        &state,
-        Operation::Delete,
-        format!("sys/identity/ns-assignment/{mount}{name}"),
-        None,
-    )
-    .await?;
+pub async fn delete_ns_assignment(state: State<'_, AppState>, mount: String, name: String) -> CmdResult<()> {
+    make_request_root(&state, Operation::Delete, format!("sys/identity/ns-assignment/{mount}{name}"), None).await?;
     Ok(())
 }
 

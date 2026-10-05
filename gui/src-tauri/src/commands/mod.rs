@@ -67,16 +67,10 @@ pub async fn dispatch_with_token_ns(
     namespace: Option<&str>,
 ) -> CmdResult<Option<JsonResponse>> {
     let backend_guard = state.backend.lock().await;
-    let backend = backend_guard
-        .as_ref()
-        .ok_or("No vault open or remote server connected")?
-        .clone();
+    let backend = backend_guard.as_ref().ok_or("No vault open or remote server connected")?.clone();
     drop(backend_guard);
 
-    backend
-        .handle_with_namespace(operation, &path, body, token, namespace)
-        .await
-        .map_err(CommandError::from)
+    backend.handle_with_namespace(operation, &path, body, token, namespace).await.map_err(CommandError::from)
 }
 
 /// Append the pagination cursor and page size to a `<list>-info` path.
@@ -104,46 +98,46 @@ pub fn paginated_path(base: &str, after: Option<String>, limit: Option<u64>) -> 
 
 pub mod approle;
 pub mod asset_groups;
+pub mod auth;
 pub mod backup;
 pub mod capabilities;
-pub mod ferrogate;
-pub mod mcp;
 pub mod cert_lifecycle;
 pub mod cloud_target;
 pub mod connect;
-pub mod connect_web;
-pub mod oidc;
-pub mod vaults;
-pub mod sharing;
-pub mod auth;
-pub mod fido2;
 pub mod connect_mfa;
+pub mod connect_web;
+pub mod connection;
+pub mod dos;
+pub mod exchange;
+pub mod ferrogate;
+pub mod fido2;
 pub mod fido2_native;
 /// Windows-only: the OS WebAuthn platform API that `fido2_native` delegates
 /// its ceremonies to. See that module's docs for why raw HID cannot work here.
 #[cfg(windows)]
 pub mod fido2_windows;
-pub mod ssh_security_key;
 pub mod files;
 pub mod groups;
 pub mod ldap;
-pub mod connection;
-pub mod exchange;
-pub mod pki;
-pub mod plugins;
-pub mod plugin_surface;
-pub mod scheduled_exports;
-pub mod policies;
-pub mod profile;
+pub mod mcp;
 pub mod namespaces;
 pub mod notifications;
-pub mod dos;
+pub mod oidc;
+pub mod pki;
+pub mod plugin_surface;
+pub mod plugins;
+pub mod policies;
+pub mod profile;
 pub mod resources;
 pub mod rustion;
+pub mod scheduled_exports;
 pub mod secrets;
+pub mod sharing;
 pub mod ssh;
+pub mod ssh_security_key;
 pub mod sso_admin;
-pub mod totp;
 pub mod system;
+pub mod totp;
 pub mod users;
+pub mod vaults;
 pub mod yubikey;

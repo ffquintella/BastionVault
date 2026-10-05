@@ -104,21 +104,13 @@ pub async fn totp_list_keys(state: State<'_, AppState>, mount: String) -> CmdRes
     let keys = map
         .get("keys")
         .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect::<Vec<_>>()
-        })
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
         .unwrap_or_default();
     Ok(keys)
 }
 
 #[tauri::command]
-pub async fn totp_read_key(
-    state: State<'_, AppState>,
-    mount: String,
-    name: String,
-) -> CmdResult<TotpKeyInfo> {
+pub async fn totp_read_key(state: State<'_, AppState>, mount: String, name: String) -> CmdResult<TotpKeyInfo> {
     let path = format!("{}/keys/{}", mount_prefix(&mount), name);
     let resp = make_request(&state, Operation::Read, path, None).await?;
     let map = data_to_map(resp);
@@ -219,11 +211,7 @@ pub async fn totp_create_key(
 }
 
 #[tauri::command]
-pub async fn totp_delete_key(
-    state: State<'_, AppState>,
-    mount: String,
-    name: String,
-) -> CmdResult<()> {
+pub async fn totp_delete_key(state: State<'_, AppState>, mount: String, name: String) -> CmdResult<()> {
     let path = format!("{}/keys/{}", mount_prefix(&mount), name);
     make_request(&state, Operation::Delete, path, None).await?;
     Ok(())
@@ -238,17 +226,11 @@ pub struct TotpCodeResult {
 
 /// `GET /v1/totp/code/:name` — generate-mode current code.
 #[tauri::command]
-pub async fn totp_get_code(
-    state: State<'_, AppState>,
-    mount: String,
-    name: String,
-) -> CmdResult<TotpCodeResult> {
+pub async fn totp_get_code(state: State<'_, AppState>, mount: String, name: String) -> CmdResult<TotpCodeResult> {
     let path = format!("{}/code/{}", mount_prefix(&mount), name);
     let resp = make_request(&state, Operation::Read, path, None).await?;
     let map = data_to_map(resp);
-    Ok(TotpCodeResult {
-        code: val_str(&map, "code"),
-    })
+    Ok(TotpCodeResult { code: val_str(&map, "code") })
 }
 
 #[derive(Serialize, Default)]
@@ -269,7 +251,5 @@ pub async fn totp_validate_code(
     body.insert("code".into(), Value::String(code));
     let resp = make_request(&state, Operation::Write, path, Some(body)).await?;
     let map = data_to_map(resp);
-    Ok(TotpValidateResult {
-        valid: val_bool(&map, "valid"),
-    })
+    Ok(TotpValidateResult { valid: val_bool(&map, "valid") })
 }

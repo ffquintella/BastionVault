@@ -60,19 +60,11 @@ pub struct Fido2ChallengeResponse {
 }
 
 #[tauri::command]
-pub async fn fido2_register_begin(
-    state: State<'_, AppState>,
-    username: String,
-) -> CmdResult<Fido2ChallengeResponse> {
+pub async fn fido2_register_begin(state: State<'_, AppState>, username: String) -> CmdResult<Fido2ChallengeResponse> {
     let mut body = Map::new();
     body.insert("username".into(), Value::String(username));
 
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        "auth/userpass/fido2/register/begin".into(),
-        Some(body),
-    ).await?;
+    let resp = make_request(&state, Operation::Write, "auth/userpass/fido2/register/begin".into(), Some(body)).await?;
 
     match resp {
         Some(r) => {
@@ -93,12 +85,7 @@ pub async fn fido2_register_complete(
     body.insert("username".into(), Value::String(username));
     body.insert("credential".into(), Value::String(credential));
 
-    make_request(
-        &state,
-        Operation::Write,
-        "auth/userpass/fido2/register/complete".into(),
-        Some(body),
-    ).await?;
+    make_request(&state, Operation::Write, "auth/userpass/fido2/register/complete".into(), Some(body)).await?;
     Ok(())
 }
 
@@ -112,19 +99,11 @@ pub struct Fido2LoginResponse {
 }
 
 #[tauri::command]
-pub async fn fido2_login_begin(
-    state: State<'_, AppState>,
-    username: String,
-) -> CmdResult<Fido2ChallengeResponse> {
+pub async fn fido2_login_begin(state: State<'_, AppState>, username: String) -> CmdResult<Fido2ChallengeResponse> {
     let mut body = Map::new();
     body.insert("username".into(), Value::String(username));
 
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        "auth/userpass/fido2/login/begin".into(),
-        Some(body),
-    ).await?;
+    let resp = make_request(&state, Operation::Write, "auth/userpass/fido2/login/begin".into(), Some(body)).await?;
 
     match resp {
         Some(r) => {
@@ -145,29 +124,16 @@ pub async fn fido2_login_complete(
     body.insert("username".into(), Value::String(username));
     body.insert("credential".into(), Value::String(credential));
 
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        "auth/userpass/fido2/login/complete".into(),
-        Some(body),
-    ).await?;
+    let resp = make_request(&state, Operation::Write, "auth/userpass/fido2/login/complete".into(), Some(body)).await?;
 
     match resp {
         Some(r) => {
             if let Some(auth) = r.auth {
-                let token = auth
-                    .get("client_token")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
+                let token = auth.get("client_token").and_then(|v| v.as_str()).unwrap_or_default().to_string();
                 let policies = auth
                     .get("policies")
                     .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                     .unwrap_or_default();
                 Ok(Fido2LoginResponse { token, policies })
             } else {
@@ -193,12 +159,7 @@ pub async fn fido2_list_credentials(
     state: State<'_, AppState>,
     username: String,
 ) -> CmdResult<Option<Fido2CredentialInfo>> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("auth/userpass/users/{username}/fido2"),
-        None,
-    ).await?;
+    let resp = make_request(&state, Operation::Read, format!("auth/userpass/users/{username}/fido2"), None).await?;
 
     match resp {
         Some(r) => {
@@ -214,15 +175,7 @@ pub async fn fido2_list_credentials(
 }
 
 #[tauri::command]
-pub async fn fido2_delete_credential(
-    state: State<'_, AppState>,
-    username: String,
-) -> CmdResult<()> {
-    make_request(
-        &state,
-        Operation::Delete,
-        format!("auth/userpass/users/{username}/fido2"),
-        None,
-    ).await?;
+pub async fn fido2_delete_credential(state: State<'_, AppState>, username: String) -> CmdResult<()> {
+    make_request(&state, Operation::Delete, format!("auth/userpass/users/{username}/fido2"), None).await?;
     Ok(())
 }

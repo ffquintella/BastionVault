@@ -35,20 +35,14 @@ pub struct CapabilitiesResult {
 }
 
 #[tauri::command]
-pub async fn capabilities_self(
-    state: State<'_, AppState>,
-    paths: Vec<String>,
-) -> CmdResult<CapabilitiesResult> {
+pub async fn capabilities_self(state: State<'_, AppState>, paths: Vec<String>) -> CmdResult<CapabilitiesResult> {
     // capabilities-self is a v2-only route. Embedded mode routes by logical
     // path; the remote backend now defaults to the `/v2` prefix, so the same
     // relative path lands on `/v2/sys/capabilities-self` in both modes.
     let path = "sys/capabilities-self".to_string();
 
     let mut body = Map::new();
-    body.insert(
-        "paths".into(),
-        Value::Array(paths.into_iter().map(Value::String).collect()),
-    );
+    body.insert("paths".into(), Value::Array(paths.into_iter().map(Value::String).collect()));
 
     let resp = make_request(&state, Operation::Write, path, Some(body)).await?;
     let data = resp.and_then(|r| r.data);
@@ -57,10 +51,7 @@ pub async fn capabilities_self(
     if let Some(Value::Object(caps)) = data.as_ref().and_then(|d| d.get("capabilities").cloned()) {
         for (k, v) in caps {
             if let Value::Array(arr) = v {
-                out.insert(
-                    k,
-                    arr.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
-                );
+                out.insert(k, arr.iter().filter_map(|x| x.as_str().map(String::from)).collect());
             }
         }
     }
@@ -68,18 +59,10 @@ pub async fn capabilities_self(
     // `namespace_operable` is absent on older servers / non-namespace builds;
     // treat its absence as "operable" so single-tenant deployments behave
     // exactly as before.
-    let str_field = |k: &str| -> String {
-        data.as_ref()
-            .and_then(|d| d.get(k))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
-    let namespace_operable = data
-        .as_ref()
-        .and_then(|d| d.get("namespace_operable"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+    let str_field =
+        |k: &str| -> String { data.as_ref().and_then(|d| d.get(k)).and_then(|v| v.as_str()).unwrap_or("").to_string() };
+    let namespace_operable =
+        data.as_ref().and_then(|d| d.get("namespace_operable")).and_then(|v| v.as_bool()).unwrap_or(true);
 
     Ok(CapabilitiesResult {
         paths: out,

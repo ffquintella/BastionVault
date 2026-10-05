@@ -45,10 +45,7 @@ pub async fn list_policies(state: State<'_, AppState>) -> CmdResult<PolicyListRe
         Some(r) => {
             if let Some(data) = &r.data {
                 if let Some(Value::Array(keys)) = data.get("keys") {
-                    let policies: Vec<String> = keys
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect();
+                    let policies: Vec<String> = keys.iter().filter_map(|v| v.as_str().map(String::from)).collect();
                     return Ok(PolicyListResult { policies });
                 }
             }
@@ -59,27 +56,13 @@ pub async fn list_policies(state: State<'_, AppState>) -> CmdResult<PolicyListRe
 }
 
 #[tauri::command]
-pub async fn read_policy(
-    state: State<'_, AppState>,
-    name: String,
-) -> CmdResult<PolicyContent> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("sys/policies/acl/{name}"),
-        None,
-    )
-    .await?;
+pub async fn read_policy(state: State<'_, AppState>, name: String) -> CmdResult<PolicyContent> {
+    let resp = make_request(&state, Operation::Read, format!("sys/policies/acl/{name}"), None).await?;
 
     match resp {
         Some(r) => {
-            let policy = r
-                .data
-                .as_ref()
-                .and_then(|d| d.get("policy"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let policy =
+                r.data.as_ref().and_then(|d| d.get("policy")).and_then(|v| v.as_str()).unwrap_or("").to_string();
             Ok(PolicyContent { name, policy })
         }
         None => Err("Policy not found".into()),
@@ -87,36 +70,17 @@ pub async fn read_policy(
 }
 
 #[tauri::command]
-pub async fn write_policy(
-    state: State<'_, AppState>,
-    name: String,
-    policy: String,
-) -> CmdResult<()> {
+pub async fn write_policy(state: State<'_, AppState>, name: String, policy: String) -> CmdResult<()> {
     let mut body = Map::new();
     body.insert("policy".to_string(), Value::String(policy));
 
-    make_request(
-        &state,
-        Operation::Write,
-        format!("sys/policies/acl/{name}"),
-        Some(body),
-    )
-    .await?;
+    make_request(&state, Operation::Write, format!("sys/policies/acl/{name}"), Some(body)).await?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn list_policy_history(
-    state: State<'_, AppState>,
-    name: String,
-) -> CmdResult<PolicyHistoryResult> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("sys/policies/acl/{name}/history"),
-        None,
-    )
-    .await?;
+pub async fn list_policy_history(state: State<'_, AppState>, name: String) -> CmdResult<PolicyHistoryResult> {
+    let resp = make_request(&state, Operation::Read, format!("sys/policies/acl/{name}/history"), None).await?;
 
     match resp {
         Some(r) => {
@@ -132,16 +96,8 @@ pub async fn list_policy_history(
                                 ts: o.get("ts").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                                 user: o.get("user").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                                 op: o.get("op").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                                before_raw: o
-                                    .get("before_raw")
-                                    .and_then(|x| x.as_str())
-                                    .unwrap_or("")
-                                    .to_string(),
-                                after_raw: o
-                                    .get("after_raw")
-                                    .and_then(|x| x.as_str())
-                                    .unwrap_or("")
-                                    .to_string(),
+                                before_raw: o.get("before_raw").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                                after_raw: o.get("after_raw").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                             })
                         })
                         .collect()
@@ -247,27 +203,17 @@ pub async fn policy_test(
             // token", i.e. `["default"]`. Only an explicit list (including
             // an explicit empty one) is sent.
             if let Some(policies) = c.policies {
-                m.insert(
-                    "policies".to_string(),
-                    Value::Array(policies.into_iter().map(Value::String).collect()),
-                );
+                m.insert("policies".to_string(), Value::Array(policies.into_iter().map(Value::String).collect()));
             }
             Value::Object(m)
         })
         .collect();
     body.insert("cases".to_string(), Value::Array(cases_json));
 
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        "sys/policies/acl/test".to_string(),
-        Some(body),
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Write, "sys/policies/acl/test".to_string(), Some(body)).await?;
 
     let data = resp.and_then(|r| r.data).unwrap_or_default();
-    let result: PolicyTestResult =
-        serde_json::from_value(Value::Object(data)).map_err(|e| e.to_string())?;
+    let result: PolicyTestResult = serde_json::from_value(Value::Object(data)).map_err(|e| e.to_string())?;
     Ok(result)
 }
 
@@ -299,17 +245,8 @@ pub struct PolicyTestCase {
 /// Read the saved effectivity test cases attached to a policy (empty when
 /// none are saved). Stored alongside, not inside, the policy HCL.
 #[tauri::command]
-pub async fn read_policy_tests(
-    state: State<'_, AppState>,
-    name: String,
-) -> CmdResult<Vec<PolicyTestCase>> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("sys/policy-tests/{name}"),
-        None,
-    )
-    .await?;
+pub async fn read_policy_tests(state: State<'_, AppState>, name: String) -> CmdResult<Vec<PolicyTestCase>> {
+    let resp = make_request(&state, Operation::Read, format!("sys/policy-tests/{name}"), None).await?;
 
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     let cases = data.get("cases").cloned().unwrap_or_else(|| Value::Array(vec![]));
@@ -319,34 +256,15 @@ pub async fn read_policy_tests(
 /// Overwrite the saved effectivity test cases attached to a policy. An
 /// empty list clears them.
 #[tauri::command]
-pub async fn write_policy_tests(
-    state: State<'_, AppState>,
-    name: String,
-    cases: Vec<PolicyTestCase>,
-) -> CmdResult<()> {
+pub async fn write_policy_tests(state: State<'_, AppState>, name: String, cases: Vec<PolicyTestCase>) -> CmdResult<()> {
     let mut body = Map::new();
-    body.insert(
-        "cases".to_string(),
-        serde_json::to_value(&cases).map_err(|e| e.to_string())?,
-    );
-    make_request(
-        &state,
-        Operation::Write,
-        format!("sys/policy-tests/{name}"),
-        Some(body),
-    )
-    .await?;
+    body.insert("cases".to_string(), serde_json::to_value(&cases).map_err(|e| e.to_string())?);
+    make_request(&state, Operation::Write, format!("sys/policy-tests/{name}"), Some(body)).await?;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn delete_policy(state: State<'_, AppState>, name: String) -> CmdResult<()> {
-    make_request(
-        &state,
-        Operation::Delete,
-        format!("sys/policies/acl/{name}"),
-        None,
-    )
-    .await?;
+    make_request(&state, Operation::Delete, format!("sys/policies/acl/{name}"), None).await?;
     Ok(())
 }

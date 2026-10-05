@@ -31,9 +31,8 @@ use authenticator::authenticatorservice::AuthenticatorService;
 use authenticator::authenticatorservice::{RegisterArgs, SignArgs};
 #[cfg(not(windows))]
 use authenticator::ctap2::server::{
-    AuthenticationExtensionsClientInputs, PublicKeyCredentialDescriptor,
-    PublicKeyCredentialParameters, PublicKeyCredentialUserEntity, RelyingParty,
-    ResidentKeyRequirement, Transport, UserVerificationRequirement,
+    AuthenticationExtensionsClientInputs, PublicKeyCredentialDescriptor, PublicKeyCredentialParameters,
+    PublicKeyCredentialUserEntity, RelyingParty, ResidentKeyRequirement, Transport, UserVerificationRequirement,
 };
 #[cfg(not(windows))]
 use authenticator::statecallback::StateCallback;
@@ -115,11 +114,7 @@ fn parse_rp_from_address(address: &str) -> Option<(String, String)> {
         return None;
     }
     // Strip path/query/fragment so the origin stays a bare scheme://host[:port].
-    let host_with_port = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(rest)
-        .trim_end_matches('/');
+    let host_with_port = rest.split(['/', '?', '#']).next().unwrap_or(rest).trim_end_matches('/');
     if host_with_port.is_empty() {
         return None;
     }
@@ -144,10 +139,7 @@ fn parse_rp_from_address(address: &str) -> Option<(String, String)> {
 ///   This matches the derivation `SettingsPage.tsx::deriveDefaults`
 ///   uses, so the two backfill paths stay consistent.
 async fn derive_fido2_defaults(state: &State<'_, AppState>) -> (String, String, String) {
-    let is_remote = matches!(
-        *state.mode.lock().await,
-        crate::state::VaultMode::Remote
-    );
+    let is_remote = matches!(*state.mode.lock().await, crate::state::VaultMode::Remote);
     if is_remote {
         if let Some(profile) = state.remote_profile.lock().await.clone() {
             if let Some((rp_id, rp_origin)) = parse_rp_from_address(&profile.address) {
@@ -155,11 +147,7 @@ async fn derive_fido2_defaults(state: &State<'_, AppState>) -> (String, String, 
             }
         }
     }
-    (
-        "localhost".to_string(),
-        "https://localhost".to_string(),
-        "BastionVault".to_string(),
-    )
+    ("localhost".to_string(), "https://localhost".to_string(), "BastionVault".to_string())
 }
 
 /// Write FIDO2 defaults to the userpass mount. Used to backfill vaults
@@ -172,14 +160,7 @@ async fn write_default_fido2_config(state: &State<'_, AppState>) -> Result<(), C
     body.insert("rp_id".to_string(), Value::String(rp_id));
     body.insert("rp_origin".to_string(), Value::String(rp_origin));
     body.insert("rp_name".to_string(), Value::String(rp_name));
-    make_request(
-        state,
-        Operation::Write,
-        "auth/userpass/fido2/config".to_string(),
-        Some(body),
-    )
-    .await
-    .map(|_| ())
+    make_request(state, Operation::Write, "auth/userpass/fido2/config".to_string(), Some(body)).await.map(|_| ())
 }
 
 /// Read the FIDO2 relying party config from the vault.
@@ -195,14 +176,7 @@ async fn read_fido2_config(state: &State<'_, AppState>) -> Result<(String, Strin
     // as "not configured" so `LoginPage.handleContinue` recognises the
     // marker substring and falls through to password entry rather than
     // surfacing a confusing "HTTP 404 (no body)" toast.
-    let resp = match make_request(
-        state,
-        Operation::Read,
-        "auth/userpass/fido2/config".to_string(),
-        None,
-    )
-    .await
-    {
+    let resp = match make_request(state, Operation::Read, "auth/userpass/fido2/config".to_string(), None).await {
         Ok(r) => r,
         Err(e) if is_not_configured_err(&e) => None,
         Err(e) => return Err(e),
@@ -219,15 +193,10 @@ async fn read_fido2_config(state: &State<'_, AppState>) -> Result<(String, Strin
             if write_default_fido2_config(state).await.is_err() {
                 return Err("FIDO2 not configured".into());
             }
-            make_request(
-                state,
-                Operation::Read,
-                "auth/userpass/fido2/config".to_string(),
-                None,
-            )
-            .await?
-            .and_then(|r| r.data)
-            .ok_or("FIDO2 not configured")?
+            make_request(state, Operation::Read, "auth/userpass/fido2/config".to_string(), None)
+                .await?
+                .and_then(|r| r.data)
+                .ok_or("FIDO2 not configured")?
         }
     };
 
@@ -331,9 +300,7 @@ fn os_dialog_parent(app_handle: &AppHandle) -> Result<isize, CommandError> {
         .get_webview_window("main")
         .or_else(|| app_handle.webview_windows().into_values().next())
         .ok_or("No application window to parent the Windows security prompt to")?;
-    let hwnd = window
-        .hwnd()
-        .map_err(|e| CommandError::from(format!("Window handle unavailable: {e}")))?;
+    let hwnd = window.hwnd().map_err(|e| CommandError::from(format!("Window handle unavailable: {e}")))?;
     Ok(hwnd.0 as isize)
 }
 
@@ -364,27 +331,18 @@ async fn run_register_ceremony(
 ) -> CmdResult<RegisterCeremonyOutput> {
     let client_data_hash: [u8; 32] = Sha256::digest(&args.client_data_json).into();
 
-    let pub_cred_params: Vec<PublicKeyCredentialParameters> = args
-        .cose_algorithms
-        .iter()
-        .map(|alg| PublicKeyCredentialParameters { alg: parse_cose_alg(*alg) })
-        .collect();
+    let pub_cred_params: Vec<PublicKeyCredentialParameters> =
+        args.cose_algorithms.iter().map(|alg| PublicKeyCredentialParameters { alg: parse_cose_alg(*alg) }).collect();
 
     let exclude_list: Vec<PublicKeyCredentialDescriptor> = args
         .exclude_credential_ids
         .iter()
-        .map(|id| PublicKeyCredentialDescriptor {
-            id: id.clone(),
-            transports: vec![Transport::USB],
-        })
+        .map(|id| PublicKeyCredentialDescriptor { id: id.clone(), transports: vec![Transport::USB] })
         .collect();
 
     let register_args = RegisterArgs {
         client_data_hash,
-        relying_party: RelyingParty {
-            id: args.rp_id.clone(),
-            name: Some(args.rp_name.clone()),
-        },
+        relying_party: RelyingParty { id: args.rp_id.clone(), name: Some(args.rp_name.clone()) },
         origin: args.rp_origin.clone(),
         user: PublicKeyCredentialUserEntity {
             id: args.user_id.clone(),
@@ -430,8 +388,7 @@ async fn run_register_ceremony(
 
         let _ = handle.emit("fido2-status", "insert-key");
 
-        service.register(timeout_ms, register_args, status_tx, callback)
-            .map_err(CommandError::from)?;
+        service.register(timeout_ms, register_args, status_tx, callback).map_err(CommandError::from)?;
 
         match result_rx.recv_timeout(Duration::from_millis(timeout_ms + 5000)) {
             Ok(Ok(register_result)) => Ok(register_result),
@@ -450,18 +407,10 @@ async fn run_register_ceremony(
     ciborium::into_writer(&result.att_obj, &mut attestation_object)
         .map_err(|e| CommandError::from(format!("CBOR serialize error: {e}")))?;
 
-    let credential_id = result
-        .att_obj
-        .auth_data
-        .credential_data
-        .as_ref()
-        .map(|cd| cd.credential_id.clone())
-        .unwrap_or_default();
+    let credential_id =
+        result.att_obj.auth_data.credential_data.as_ref().map(|cd| cd.credential_id.clone()).unwrap_or_default();
 
-    Ok(RegisterCeremonyOutput {
-        credential_id,
-        attestation_object,
-    })
+    Ok(RegisterCeremonyOutput { credential_id, attestation_object })
 }
 
 // ── Assertion ceremony, per platform ─────────────────────────────────
@@ -492,10 +441,7 @@ async fn run_assert_ceremony(
     let allow_list: Vec<PublicKeyCredentialDescriptor> = args
         .allow_credential_ids
         .iter()
-        .map(|id| PublicKeyCredentialDescriptor {
-            id: id.clone(),
-            transports: vec![Transport::USB],
-        })
+        .map(|id| PublicKeyCredentialDescriptor { id: id.clone(), transports: vec![Transport::USB] })
         .collect();
 
     let sign_args = SignArgs {
@@ -540,8 +486,7 @@ async fn run_assert_ceremony(
 
         let _ = handle.emit("fido2-status", "insert-key");
 
-        service.sign(timeout_ms, sign_args, status_tx, callback)
-            .map_err(CommandError::from)?;
+        service.sign(timeout_ms, sign_args, status_tx, callback).map_err(CommandError::from)?;
 
         match result_rx.recv_timeout(Duration::from_millis(timeout_ms + 5000)) {
             Ok(Ok(result)) => Ok(result),
@@ -558,11 +503,7 @@ async fn run_assert_ceremony(
 
     let assertion = &sign_result.assertion;
     Ok(AssertCeremonyOutput {
-        credential_id: assertion
-            .credentials
-            .as_ref()
-            .map(|c| c.id.clone())
-            .unwrap_or_default(),
+        credential_id: assertion.credentials.as_ref().map(|c| c.id.clone()).unwrap_or_default(),
         authenticator_data: assertion.auth_data.to_vec(),
         signature: assertion.signature.clone(),
         user_handle: assertion.user.as_ref().map(|u| u.id.clone()),
@@ -612,9 +553,7 @@ pub(crate) fn handle_status_updates(
                 }
             }
             StatusUpdate::PinUvError(StatusPinUv::InvalidPin(sender, attempts)) => {
-                let msg = attempts
-                    .map(|a| format!("invalid-pin:{a}"))
-                    .unwrap_or_else(|| "invalid-pin".to_string());
+                let msg = attempts.map(|a| format!("invalid-pin:{a}")).unwrap_or_else(|| "invalid-pin".to_string());
                 let _ = handle.emit("fido2-status", &msg);
                 if let Some(pin) = request_pin_from_frontend(&handle, &pin_rx, &msg) {
                     let _ = sender.send(Pin::new(&pin));
@@ -629,9 +568,7 @@ pub(crate) fn handle_status_updates(
                 let _ = handle.emit("fido2-status", "pin-blocked");
             }
             StatusUpdate::PinUvError(StatusPinUv::InvalidUv(attempts)) => {
-                let msg = attempts
-                    .map(|a| format!("invalid-uv:{a}"))
-                    .unwrap_or_else(|| "invalid-uv".to_string());
+                let msg = attempts.map(|a| format!("invalid-uv:{a}")).unwrap_or_else(|| "invalid-uv".to_string());
                 let _ = handle.emit("fido2-status", &msg);
             }
             StatusUpdate::PinUvError(StatusPinUv::UvBlocked) => {
@@ -651,10 +588,7 @@ pub(crate) fn handle_status_updates(
 // ── PIN submission command ───────────────────────────────────────────
 
 #[tauri::command]
-pub async fn fido2_submit_pin(
-    pin: String,
-    state: State<'_, AppState>,
-) -> CmdResult<()> {
+pub async fn fido2_submit_pin(pin: String, state: State<'_, AppState>) -> CmdResult<()> {
     // Clone — do NOT take — the sender. The authenticator crate may
     // raise multiple PIN prompts in a single ceremony (e.g. InvalidPin
     // after a wrong attempt), and each prompt goes through this command.
@@ -684,24 +618,16 @@ pub async fn fido2_native_register(
     let mut body = Map::new();
     body.insert("username".to_string(), Value::String(username.clone()));
 
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        "auth/userpass/fido2/register/begin".to_string(),
-        Some(body),
-    ).await?;
+    let resp =
+        make_request(&state, Operation::Write, "auth/userpass/fido2/register/begin".to_string(), Some(body)).await?;
 
-    let data = resp
-        .and_then(|r| r.data)
-        .ok_or("No challenge data returned")?;
+    let data = resp.and_then(|r| r.data).ok_or("No challenge data returned")?;
 
     // 3. Parse the CreationChallengeResponse
     let data_value = Value::Object(data.clone());
     let public_key = data.get("publicKey").unwrap_or(&data_value);
 
-    let challenge_b64 = public_key.get("challenge")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing challenge in response")?;
+    let challenge_b64 = public_key.get("challenge").and_then(|v| v.as_str()).ok_or("Missing challenge in response")?;
     let _challenge_bytes = base64url_decode(challenge_b64)?;
 
     // Parse user
@@ -715,11 +641,7 @@ pub async fn fido2_native_register(
     let cose_algorithms: Vec<i64> = public_key
         .get("pubKeyCredParams")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|p| p.get("alg").and_then(|a| a.as_i64()))
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|p| p.get("alg").and_then(|a| a.as_i64())).collect())
         .filter(|algs: &Vec<i64>| !algs.is_empty())
         .unwrap_or_else(|| vec![-7]); // ES256
 
@@ -739,25 +661,14 @@ pub async fn fido2_native_register(
 
     // Parse authenticatorSelection
     let auth_sel = public_key.get("authenticatorSelection");
-    let uv_req = auth_sel
-        .and_then(|s| s.get("userVerification"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("preferred");
-    let rk_req = auth_sel
-        .and_then(|s| s.get("residentKey"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("discouraged");
-    let attestation = public_key
-        .get("attestation")
-        .and_then(|v| v.as_str())
-        .unwrap_or("none");
+    let uv_req = auth_sel.and_then(|s| s.get("userVerification")).and_then(|v| v.as_str()).unwrap_or("preferred");
+    let rk_req = auth_sel.and_then(|s| s.get("residentKey")).and_then(|v| v.as_str()).unwrap_or("discouraged");
+    let attestation = public_key.get("attestation").and_then(|v| v.as_str()).unwrap_or("none");
 
     // 4. Build clientDataJSON — the RP hashes these exact bytes.
     let client_data_json = build_client_data_json("webauthn.create", challenge_b64, &rp_origin);
 
-    let timeout_ms = public_key.get("timeout")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(60000);
+    let timeout_ms = public_key.get("timeout").and_then(|v| v.as_u64()).unwrap_or(60000);
 
     // 5-6. Run the registration ceremony against the authenticator.
     let ceremony = run_register_ceremony(
@@ -802,12 +713,7 @@ pub async fn fido2_native_register(
     body.insert("username".to_string(), Value::String(username));
     body.insert("credential".to_string(), Value::String(credential_json.to_string()));
 
-    make_request(
-        &state,
-        Operation::Write,
-        "auth/userpass/fido2/register/complete".to_string(),
-        Some(body),
-    ).await?;
+    make_request(&state, Operation::Write, "auth/userpass/fido2/register/complete".to_string(), Some(body)).await?;
 
     let _ = app_handle.emit("fido2-status", "complete");
     Ok(())
@@ -837,13 +743,9 @@ pub(crate) async fn assert_webauthn(
     // us the inner object directly. Accept either.
     let public_key = challenge.get("publicKey").unwrap_or(challenge);
 
-    let challenge_b64 = public_key.get("challenge")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing challenge in response")?;
+    let challenge_b64 = public_key.get("challenge").and_then(|v| v.as_str()).ok_or("Missing challenge in response")?;
 
-    let rp_id = public_key.get("rpId")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&cfg_rp_id);
+    let rp_id = public_key.get("rpId").and_then(|v| v.as_str()).unwrap_or(&cfg_rp_id);
 
     // Parse allowCredentials
     let allow_credential_ids: Vec<Vec<u8>> = public_key
@@ -859,16 +761,12 @@ pub(crate) async fn assert_webauthn(
         })
         .unwrap_or_default();
 
-    let uv_req = public_key.get("userVerification")
-        .and_then(|v| v.as_str())
-        .unwrap_or("preferred");
+    let uv_req = public_key.get("userVerification").and_then(|v| v.as_str()).unwrap_or("preferred");
 
     // 4. Build clientDataJSON — the RP hashes these exact bytes.
     let client_data_json = build_client_data_json("webauthn.get", challenge_b64, &rp_origin);
 
-    let timeout_ms = public_key.get("timeout")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(60000);
+    let timeout_ms = public_key.get("timeout").and_then(|v| v.as_u64()).unwrap_or(60000);
 
     // 5-6. Run the assertion ceremony against the authenticator.
     let ceremony = run_assert_ceremony(
@@ -897,10 +795,7 @@ pub(crate) async fn assert_webauthn(
     });
 
     if let Some(uh) = ceremony.user_handle {
-        response_obj.as_object_mut().unwrap().insert(
-            "userHandle".to_string(),
-            Value::String(base64url_encode(&uh)),
-        );
+        response_obj.as_object_mut().unwrap().insert("userHandle".to_string(), Value::String(base64url_encode(&uh)));
     }
 
     let credential_json = serde_json::json!({
@@ -913,7 +808,6 @@ pub(crate) async fn assert_webauthn(
 
     Ok(credential_json.to_string())
 }
-
 
 #[tauri::command]
 pub async fn fido2_native_login(
@@ -932,60 +826,41 @@ pub async fn fido2_native_login(
     let mut body = Map::new();
     body.insert("username".to_string(), Value::String(username.clone()));
 
-    let resp = match make_request(
-        &state,
-        Operation::Write,
-        "auth/userpass/fido2/login/begin".to_string(),
-        Some(body),
-    ).await {
-        Ok(r) => r,
-        // 404 here means the user has no registered FIDO2 credentials
-        // (or FIDO2 isn't configured). Either way, the GUI should drop
-        // to password entry — translate to a substring the LoginPage
-        // fall-through detector recognises.
-        Err(e) if is_not_configured_err(&e) => {
-            return Err("FIDO2 credential not found for this user".into());
-        }
-        Err(e) => return Err(e),
-    };
+    let resp =
+        match make_request(&state, Operation::Write, "auth/userpass/fido2/login/begin".to_string(), Some(body)).await {
+            Ok(r) => r,
+            // 404 here means the user has no registered FIDO2 credentials
+            // (or FIDO2 isn't configured). Either way, the GUI should drop
+            // to password entry — translate to a substring the LoginPage
+            // fall-through detector recognises.
+            Err(e) if is_not_configured_err(&e) => {
+                return Err("FIDO2 credential not found for this user".into());
+            }
+            Err(e) => return Err(e),
+        };
 
-    let data = resp
-        .and_then(|r| r.data)
-        .ok_or("FIDO2 credential not found for this user")?;
+    let data = resp.and_then(|r| r.data).ok_or("FIDO2 credential not found for this user")?;
 
     // 3-7. Run the assertion ceremony against the authenticator.
     let credential_json = assert_webauthn(&state, &app_handle, &Value::Object(data)).await?;
-
 
     // 8. Send to login/complete
     let mut body = Map::new();
     body.insert("username".to_string(), Value::String(username));
     body.insert("credential".to_string(), Value::String(credential_json.to_string()));
 
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        "auth/userpass/fido2/login/complete".to_string(),
-        Some(body),
-    ).await?;
+    let resp =
+        make_request(&state, Operation::Write, "auth/userpass/fido2/login/complete".to_string(), Some(body)).await?;
 
     // 9. Extract token and policies from auth response
     match resp {
         Some(r) => {
             if let Some(auth) = r.auth {
-                let token = auth
-                    .get("client_token")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
+                let token = auth.get("client_token").and_then(|v| v.as_str()).unwrap_or_default().to_string();
                 let policies = auth
                     .get("policies")
                     .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                     .unwrap_or_default();
                 if token.is_empty() {
                     return Err("Login failed: no token in auth response".into());

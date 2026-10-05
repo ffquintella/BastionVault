@@ -29,12 +29,8 @@ pub async fn get_dos_config(state: State<'_, AppState>) -> CmdResult<Value> {
 /// Update DoS thresholds. `config` is a partial object — only supplied keys are
 /// changed. Returns the effective (server-sanitized) config.
 #[tauri::command]
-pub async fn set_dos_config(
-    state: State<'_, AppState>,
-    config: Map<String, Value>,
-) -> CmdResult<Value> {
-    let resp =
-        make_request_root(&state, Operation::Write, "sys/dos/config".into(), Some(config)).await?;
+pub async fn set_dos_config(state: State<'_, AppState>, config: Map<String, Value>) -> CmdResult<Value> {
+    let resp = make_request_root(&state, Operation::Write, "sys/dos/config".into(), Some(config)).await?;
     Ok(data_of(resp))
 }
 
@@ -60,14 +56,12 @@ pub async fn ban_ip(
     if let Some(reason) = reason {
         body.insert("reason".into(), Value::from(reason));
     }
-    let resp =
-        make_request_root(&state, Operation::Write, format!("sys/dos/bans/{ip}"), Some(body)).await?;
+    let resp = make_request_root(&state, Operation::Write, format!("sys/dos/bans/{ip}"), Some(body)).await?;
     Ok(data_of(resp))
 }
 
 #[tauri::command]
 pub async fn unban_ip(state: State<'_, AppState>, ip: String) -> CmdResult<Value> {
-    let resp =
-        make_request_root(&state, Operation::Delete, format!("sys/dos/bans/{ip}"), None).await?;
+    let resp = make_request_root(&state, Operation::Delete, format!("sys/dos/bans/{ip}"), None).await?;
     Ok(data_of(resp))
 }

@@ -52,13 +52,13 @@ use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ironrdp::cliprdr::backend::{CliprdrBackend, ClipboardMessage, ClipboardMessageProxy};
+use ironrdp::cliprdr::backend::{ClipboardMessage, ClipboardMessageProxy, CliprdrBackend};
 use ironrdp::cliprdr::loop_detector::{ClipboardSource, LoopDetector};
 use ironrdp::cliprdr::pdu::{
-    ClipboardFormat, ClipboardFormatId, ClipboardGeneralCapabilityFlags, FileContentsRequest,
-    FileContentsResponse, FormatDataRequest, FormatDataResponse, LockDataId,
+    ClipboardFormat, ClipboardFormatId, ClipboardGeneralCapabilityFlags, FileContentsRequest, FileContentsResponse,
+    FormatDataRequest, FormatDataResponse, LockDataId,
 };
-use ironrdp_core::{IntoOwned as _, impl_as_any};
+use ironrdp_core::{impl_as_any, IntoOwned as _};
 use tokio::sync::mpsc as tokio_mpsc;
 
 /// Largest clipboard payload transferred in either direction.
@@ -316,13 +316,7 @@ pub fn spawn(
         log::warn!("rdp clipboard [{label}]: could not start bridge thread: {e}");
         bump(&stats, |s| s.errors += 1);
     }
-    TextCliprdrBackend {
-        bridge: BridgeHandle { tx },
-        proxy,
-        direction,
-        stats,
-        label,
-    }
+    TextCliprdrBackend { bridge: BridgeHandle { tx }, proxy, direction, stats, label }
 }
 
 fn bridge_loop(
@@ -365,9 +359,9 @@ fn bridge_loop(
                     continue;
                 }
                 if last_host_text.as_deref().is_some_and(|t| !t.is_empty()) {
-                    proxy.send_clipboard_message(ClipboardMessage::SendInitiateCopy(vec![
-                        ClipboardFormat::new(TEXT_FORMAT),
-                    ]));
+                    proxy.send_clipboard_message(ClipboardMessage::SendInitiateCopy(vec![ClipboardFormat::new(
+                        TEXT_FORMAT,
+                    )]));
                 }
             }
             Ok(BridgeCommand::ProvideHostText) => {
@@ -400,9 +394,7 @@ fn bridge_loop(
                         FormatDataResponse::new_error()
                     }
                 };
-                proxy.send_clipboard_message(ClipboardMessage::SendFormatData(
-                    response.into_owned(),
-                ));
+                proxy.send_clipboard_message(ClipboardMessage::SendFormatData(response.into_owned()));
             }
             Ok(BridgeCommand::StoreRemoteText(text)) => {
                 let text = host_line_endings(&text);
@@ -433,18 +425,14 @@ fn bridge_loop(
                     continue;
                 }
                 last_host_text = Some(text.clone());
-                if detector.would_cause_content_loop(
-                    text.as_bytes(),
-                    ClipboardSource::Local,
-                    now_ms(),
-                ) {
+                if detector.would_cause_content_loop(text.as_bytes(), ClipboardSource::Local, now_ms()) {
                     bump(&stats, |s| s.suppressed_loop += 1);
                     log::trace!("rdp clipboard [{label}]: local change is our own paste; skipped");
                     continue;
                 }
-                proxy.send_clipboard_message(ClipboardMessage::SendInitiateCopy(vec![
-                    ClipboardFormat::new(TEXT_FORMAT),
-                ]));
+                proxy.send_clipboard_message(ClipboardMessage::SendInitiateCopy(vec![ClipboardFormat::new(
+                    TEXT_FORMAT,
+                )]));
             }
             Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -486,11 +474,7 @@ impl CliprdrBackend for TextCliprdrBackend {
 
     fn on_ready(&mut self) {
         bump(&self.stats, |s| s.ready = true);
-        log::info!(
-            "rdp clipboard [{}]: channel ready, direction {}",
-            self.label,
-            self.direction.label()
-        );
+        log::info!("rdp clipboard [{}]: channel ready, direction {}", self.label, self.direction.label());
         self.bridge.send(BridgeCommand::AdvertiseHostFormats);
     }
 
@@ -498,14 +482,8 @@ impl CliprdrBackend for TextCliprdrBackend {
         self.bridge.send(BridgeCommand::AdvertiseHostFormats);
     }
 
-    fn on_process_negotiated_capabilities(
-        &mut self,
-        capabilities: ClipboardGeneralCapabilityFlags,
-    ) {
-        log::debug!(
-            "rdp clipboard [{}]: negotiated capabilities {capabilities:?}",
-            self.label
-        );
+    fn on_process_negotiated_capabilities(&mut self, capabilities: ClipboardGeneralCapabilityFlags) {
+        log::debug!("rdp clipboard [{}]: negotiated capabilities {capabilities:?}", self.label);
     }
 
     fn on_remote_copy(&mut self, available_formats: &[ClipboardFormat]) {
@@ -517,8 +495,7 @@ impl CliprdrBackend for TextCliprdrBackend {
             return;
         }
         if available_formats.iter().any(|f| f.id() == TEXT_FORMAT) {
-            self.proxy
-                .send_clipboard_message(ClipboardMessage::SendInitiatePaste(TEXT_FORMAT));
+            self.proxy.send_clipboard_message(ClipboardMessage::SendInitiatePaste(TEXT_FORMAT));
         } else {
             log::debug!(
                 "rdp clipboard [{}]: remote offered no text format ({} offered)",
@@ -535,9 +512,8 @@ impl CliprdrBackend for TextCliprdrBackend {
             }
             // An explicit failure response, not silence: the remote is
             // waiting on this and MS-RDPECLIP has a slot for "no".
-            self.proxy.send_clipboard_message(ClipboardMessage::SendFormatData(
-                FormatDataResponse::new_error().into_owned(),
-            ));
+            self.proxy
+                .send_clipboard_message(ClipboardMessage::SendFormatData(FormatDataResponse::new_error().into_owned()));
             return;
         }
         self.bridge.send(BridgeCommand::ProvideHostText);
@@ -549,10 +525,7 @@ impl CliprdrBackend for TextCliprdrBackend {
             return;
         }
         if response.is_error() {
-            log::debug!(
-                "rdp clipboard [{}]: remote refused the format data request",
-                self.label
-            );
+            log::debug!("rdp clipboard [{}]: remote refused the format data request", self.label);
             return;
         }
         let len = response.data().len();
@@ -575,27 +548,18 @@ impl CliprdrBackend for TextCliprdrBackend {
                 self.bridge.send(BridgeCommand::StoreRemoteText(text));
             }
             Err(e) => {
-                log::warn!(
-                    "rdp clipboard [{}]: malformed CF_UNICODETEXT payload ({len} bytes): {e}",
-                    self.label
-                );
+                log::warn!("rdp clipboard [{}]: malformed CF_UNICODETEXT payload ({len} bytes): {e}", self.label);
                 bump(&self.stats, |s| s.errors += 1);
             }
         }
     }
 
     fn on_file_contents_request(&mut self, _request: FileContentsRequest) {
-        log::debug!(
-            "rdp clipboard [{}]: file contents request ignored (text-only backend)",
-            self.label
-        );
+        log::debug!("rdp clipboard [{}]: file contents request ignored (text-only backend)", self.label);
     }
 
     fn on_file_contents_response(&mut self, _response: FileContentsResponse<'_>) {
-        log::debug!(
-            "rdp clipboard [{}]: file contents response ignored (text-only backend)",
-            self.label
-        );
+        log::debug!("rdp clipboard [{}]: file contents response ignored (text-only backend)", self.label);
     }
 
     fn on_lock(&mut self, _data_id: LockDataId) {}
@@ -644,15 +608,9 @@ mod tests {
         assert_eq!(parse_clipboard_direction("off"), Ok(ClipboardDirection::Off));
         assert_eq!(parse_clipboard_direction(""), Ok(ClipboardDirection::Off));
         assert_eq!(parse_clipboard_direction("  NONE "), Ok(ClipboardDirection::Off));
-        assert_eq!(
-            parse_clipboard_direction("host-to-session"),
-            Ok(ClipboardDirection::HostToSession)
-        );
+        assert_eq!(parse_clipboard_direction("host-to-session"), Ok(ClipboardDirection::HostToSession));
         assert_eq!(parse_clipboard_direction("in"), Ok(ClipboardDirection::HostToSession));
-        assert_eq!(
-            parse_clipboard_direction("session_to_host"),
-            Ok(ClipboardDirection::SessionToHost)
-        );
+        assert_eq!(parse_clipboard_direction("session_to_host"), Ok(ClipboardDirection::SessionToHost));
         assert_eq!(parse_clipboard_direction("both"), Ok(ClipboardDirection::Bidirectional));
         // A typo must not silently become a default — in either
         // direction. `bidirectionnal` enabling nothing is as wrong as
@@ -700,9 +658,7 @@ mod tests {
         // Two-byte, three-byte and astral-plane characters: a
         // latin1/UTF-8 confusion or a lost surrogate pair shows here.
         for text in ["café", "日本語", "emoji 🔐 ok", "Ω≈ç√∫"] {
-            let decoded = FormatDataResponse::new_data(encode_unicode_text(text))
-                .to_unicode_string()
-                .unwrap();
+            let decoded = FormatDataResponse::new_data(encode_unicode_text(text)).to_unicode_string().unwrap();
             assert_eq!(decoded, *text, "round trip failed for {text:?}");
         }
     }
@@ -808,9 +764,7 @@ mod tests {
             stats: Arc::clone(&stats),
             label: "test".into(),
         };
-        backend.on_format_data_request(FormatDataRequest {
-            format: ClipboardFormatId::CF_DIB,
-        });
+        backend.on_format_data_request(FormatDataRequest { format: ClipboardFormatId::CF_DIB });
         match rx.try_recv() {
             Ok(ClipboardMessage::SendFormatData(resp)) => assert!(resp.is_error()),
             other => panic!("expected an error format-data response, got {other:?}"),

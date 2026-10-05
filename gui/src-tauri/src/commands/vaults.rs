@@ -27,10 +27,7 @@ use crate::preferences::{self, short_id, VaultProfile, VaultSpec};
 #[tauri::command]
 pub async fn list_vault_profiles() -> CmdResult<VaultProfileList> {
     let prefs = preferences::load().unwrap_or_default();
-    Ok(VaultProfileList {
-        vaults: prefs.vaults,
-        last_used_id: prefs.last_used_id,
-    })
+    Ok(VaultProfileList { vaults: prefs.vaults, last_used_id: prefs.last_used_id })
 }
 
 #[derive(serde::Serialize)]
@@ -44,21 +41,13 @@ pub struct VaultProfileList {
 /// last-used so the caller can immediately open it. The returned id
 /// is the caller's handle for subsequent operations.
 #[tauri::command]
-pub async fn add_vault_profile(
-    name: String,
-    spec: VaultSpec,
-    set_default: Option<bool>,
-) -> CmdResult<String> {
+pub async fn add_vault_profile(name: String, spec: VaultSpec, set_default: Option<bool>) -> CmdResult<String> {
     if name.trim().is_empty() {
         return Err("vault profile name cannot be empty".into());
     }
     let mut prefs = preferences::load().unwrap_or_default();
     let id = short_id();
-    prefs.vaults.push(VaultProfile {
-        id: id.clone(),
-        name: name.trim().to_string(),
-        spec,
-    });
+    prefs.vaults.push(VaultProfile { id: id.clone(), name: name.trim().to_string(), spec });
     if set_default.unwrap_or(true) {
         prefs.last_used_id = Some(id.clone());
     }
@@ -71,11 +60,7 @@ pub async fn add_vault_profile(
 /// command so editing doesn't have a side-effect on which vault is
 /// the default.
 #[tauri::command]
-pub async fn update_vault_profile(
-    id: String,
-    name: String,
-    spec: VaultSpec,
-) -> CmdResult<()> {
+pub async fn update_vault_profile(id: String, name: String, spec: VaultSpec) -> CmdResult<()> {
     if name.trim().is_empty() {
         return Err("vault profile name cannot be empty".into());
     }
@@ -112,18 +97,11 @@ pub async fn update_vault_profile(
 /// operator's intent even if (say) a cloud network blip aborts the
 /// bucket walk.
 #[tauri::command]
-pub async fn remove_vault_profile(
-    id: String,
-    also_delete_data: Option<bool>,
-) -> CmdResult<()> {
+pub async fn remove_vault_profile(id: String, also_delete_data: Option<bool>) -> CmdResult<()> {
     // Capture the spec BEFORE mutating preferences so the disk-
     // wipe branch below knows where to point.
     let prefs_before = preferences::load().unwrap_or_default();
-    let profile_spec = prefs_before
-        .vaults
-        .iter()
-        .find(|v| v.id == id)
-        .map(|v| v.spec.clone());
+    let profile_spec = prefs_before.vaults.iter().find(|v| v.id == id).map(|v| v.spec.clone());
 
     let mut prefs = prefs_before;
     let before = prefs.vaults.len();
@@ -139,10 +117,7 @@ pub async fn remove_vault_profile(
     if also_delete_data.unwrap_or(false) {
         if let Some(spec) = profile_spec {
             if let Err(e) = wipe_profile_storage(&spec).await {
-                return Err(format!(
-                    "profile removed from list but data wipe failed: {e}"
-                )
-                .into());
+                return Err(format!("profile removed from list but data wipe failed: {e}").into());
             }
         }
     }
@@ -167,10 +142,7 @@ async fn wipe_profile_storage(spec: &preferences::VaultSpec) -> Result<(), Comma
     use preferences::VaultSpec;
 
     match spec {
-        VaultSpec::Local {
-            data_dir,
-            storage_kind,
-        } => {
+        VaultSpec::Local { data_dir, storage_kind } => {
             // Resolve effective dir the same way build_backend /
             // is_initialized do: honour the profile's custom
             // data_dir override, fall back to the per-kind default.
@@ -183,9 +155,8 @@ async fn wipe_profile_storage(spec: &preferences::VaultSpec) -> Result<(), Comma
                 None => crate::embedded::data_dir_for(kind)?,
             };
             if dir.exists() {
-                std::fs::remove_dir_all(&dir).map_err(|e| {
-                    CommandError::from(format!("remove data dir {dir:?}: {e}"))
-                })?;
+                std::fs::remove_dir_all(&dir)
+                    .map_err(|e| CommandError::from(format!("remove data dir {dir:?}: {e}")))?;
             }
             Ok(())
         }
@@ -197,14 +168,10 @@ async fn wipe_profile_storage(spec: &preferences::VaultSpec) -> Result<(), Comma
             // profile is currently the active one in AppState.
             let mut conf: std::collections::HashMap<String, serde_json::Value> =
                 config.config.clone().into_iter().collect();
-            conf.insert(
-                "target".into(),
-                serde_json::Value::String(config.target.clone()),
-            );
-            let backend =
-                bastion_vault::storage::physical::file::FileBackend::new_maybe_obfuscated(&conf)
-                    .await
-                    .map_err(CommandError::from)?;
+            conf.insert("target".into(), serde_json::Value::String(config.target.clone()));
+            let backend = bastion_vault::storage::physical::file::FileBackend::new_maybe_obfuscated(&conf)
+                .await
+                .map_err(CommandError::from)?;
 
             let mut queue: Vec<String> = vec![String::new()];
             while let Some(prefix) = queue.pop() {
@@ -260,11 +227,7 @@ pub async fn clear_last_used_vault() -> CmdResult<()> {
 #[tauri::command]
 pub async fn get_vault_profile(id: String) -> CmdResult<VaultProfile> {
     let prefs = preferences::load().unwrap_or_default();
-    prefs
-        .vaults
-        .into_iter()
-        .find(|v| v.id == id)
-        .ok_or_else(|| format!("no vault profile with id `{id}`").into())
+    prefs.vaults.into_iter().find(|v| v.id == id).ok_or_else(|| format!("no vault profile with id `{id}`").into())
 }
 
 /// Return the canonical default data directory for a local vault of

@@ -74,10 +74,7 @@ mod embedded {
                 req.headers = Some(h);
             }
 
-            let resp = core
-                .handle_request(&mut req)
-                .await
-                .map_err(|e| ClientError::backend(e.to_string()))?;
+            let resp = core.handle_request(&mut req).await.map_err(|e| ClientError::backend(e.to_string()))?;
 
             Ok(resp.map(logical_response_to_json))
         }
@@ -112,10 +109,7 @@ mod embedded {
     /// handler at `src/http/logical.rs::response_logical` writes onto
     /// the wire so the embedded path is observably equivalent.
     fn logical_response_to_json(resp: bastion_vault::logical::Response) -> JsonResponse {
-        let mut out = JsonResponse {
-            data: resp.data,
-            ..Default::default()
-        };
+        let mut out = JsonResponse { data: resp.data, ..Default::default() };
         if let Some(secret) = &resp.secret {
             out.lease_id = Some(secret.lease_id.clone());
             out.renewable = Some(secret.lease.renewable);

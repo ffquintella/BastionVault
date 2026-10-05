@@ -17,8 +17,8 @@
 use base64::Engine;
 use bastion_vault::plugins::{
     metrics::{snapshot_all, PluginMetricsSnapshot},
-    ConfigField, ConfigStore, InvokeOutcome, PluginCatalog, PluginManifest, WasmRuntime,
-    DEFAULT_FUEL, DEFAULT_MEMORY_BYTES,
+    ConfigField, ConfigStore, InvokeOutcome, PluginCatalog, PluginManifest, WasmRuntime, DEFAULT_FUEL,
+    DEFAULT_MEMORY_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -46,10 +46,7 @@ async fn remote_raw(
     body: Option<Map<String, Value>>,
 ) -> Result<(u16, Value), CommandError> {
     let client_guard = state.remote_client.lock().await;
-    let client = client_guard
-        .as_ref()
-        .ok_or("Not connected to remote server")?
-        .clone();
+    let client = client_guard.as_ref().ok_or("Not connected to remote server")?.clone();
     drop(client_guard);
 
     let token = state.token.lock().await.clone().unwrap_or_default();
@@ -129,24 +126,18 @@ pub struct PluginListResult {
 
 /// Read the publisher allowlist. Returns `name → hex(public_key)`.
 #[tauri::command]
-pub async fn plugins_get_publishers(
-    state: State<'_, AppState>,
-) -> CmdResult<BTreeMap<String, String>> {
+pub async fn plugins_get_publishers(state: State<'_, AppState>) -> CmdResult<BTreeMap<String, String>> {
     if is_remote(&state).await {
         let json = remote_call(&state, "GET", "sys/plugins/publishers", None).await?;
-        let pubs = json
-            .get("publishers")
-            .cloned()
-            .unwrap_or(Value::Object(Map::new()));
+        let pubs = json.get("publishers").cloned().unwrap_or(Value::Object(Map::new()));
         return decode_json(pubs, "publishers");
     }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
-    let allow =
-        bastion_vault::plugins::verifier::PublisherAllowlist::load(core.barrier.as_storage())
-            .await
-            .map_err(CommandError::from)?;
+    let allow = bastion_vault::plugins::verifier::PublisherAllowlist::load(core.barrier.as_storage())
+        .await
+        .map_err(CommandError::from)?;
     Ok(allow.keys.into_iter().collect())
 }
 
@@ -154,10 +145,7 @@ pub async fn plugins_get_publishers(
 /// (GUI) reads the current map, applies its add/remove, and submits
 /// the result. Mirrors the PUT /v1/sys/plugins/publishers shape.
 #[tauri::command]
-pub async fn plugins_set_publishers(
-    state: State<'_, AppState>,
-    publishers: BTreeMap<String, String>,
-) -> CmdResult<()> {
+pub async fn plugins_set_publishers(state: State<'_, AppState>, publishers: BTreeMap<String, String>) -> CmdResult<()> {
     // Validate hex + length up front so a typo doesn't break verify
     // later. ML-DSA-65 PK is 1952 bytes / 3904 hex chars. We do this
     // client-side regardless of mode so the operator gets the same
@@ -167,9 +155,8 @@ pub async fn plugins_set_publishers(
         if name.is_empty() {
             return Err("publisher name cannot be empty".into());
         }
-        let bytes = hex_decode(pk_hex).ok_or_else(|| {
-            CommandError::from(format!("publisher `{name}` public key is not valid hex"))
-        })?;
+        let bytes = hex_decode(pk_hex)
+            .ok_or_else(|| CommandError::from(format!("publisher `{name}` public key is not valid hex")))?;
         if bytes.len() != bv_crypto::ML_DSA_65_PUBLIC_KEY_LEN {
             return Err(CommandError::from(format!(
                 "publisher `{name}` public key must be {} bytes, got {}",
@@ -180,9 +167,7 @@ pub async fn plugins_set_publishers(
     }
 
     if is_remote(&state).await {
-        let body = json!({ "keys": publishers })
-            .as_object()
-            .cloned();
+        let body = json!({ "keys": publishers }).as_object().cloned();
         remote_call(&state, "PUT", "sys/plugins/publishers", body).await?;
         return Ok(());
     }
@@ -190,13 +175,8 @@ pub async fn plugins_set_publishers(
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
-    let allow = bastion_vault::plugins::verifier::PublisherAllowlist {
-        keys: publishers.into_iter().collect(),
-    };
-    allow
-        .save(core.barrier.as_storage())
-        .await
-        .map_err(CommandError::from)?;
+    let allow = bastion_vault::plugins::verifier::PublisherAllowlist { keys: publishers.into_iter().collect() };
+    allow.save(core.barrier.as_storage()).await.map_err(CommandError::from)?;
     Ok(())
 }
 
@@ -223,34 +203,23 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 pub async fn plugins_get_accept_unsigned(state: State<'_, AppState>) -> CmdResult<bool> {
     if is_remote(&state).await {
         let json = remote_call(&state, "GET", "sys/plugins/publishers", None).await?;
-        let v = json
-            .get("accept_unsigned")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let v = json.get("accept_unsigned").and_then(|v| v.as_bool()).unwrap_or(false);
         return Ok(v);
     }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
-    bastion_vault::plugins::verifier::read_accept_unsigned(core.barrier.as_storage())
-        .await
-        .map_err(CommandError::from)
+    bastion_vault::plugins::verifier::read_accept_unsigned(core.barrier.as_storage()).await.map_err(CommandError::from)
 }
 
 /// Flip the `accept_unsigned` flag. Logged at WARN by the verifier
 /// when set to `true`.
 #[tauri::command]
-pub async fn plugins_set_accept_unsigned(
-    state: State<'_, AppState>,
-    on: bool,
-) -> CmdResult<bool> {
+pub async fn plugins_set_accept_unsigned(state: State<'_, AppState>, on: bool) -> CmdResult<bool> {
     if is_remote(&state).await {
         let body = json!({ "accept_unsigned": on }).as_object().cloned();
         let resp = remote_call(&state, "PUT", "sys/plugins/accept_unsigned", body).await?;
-        let v = resp
-            .get("accept_unsigned")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(on);
+        let v = resp.get("accept_unsigned").and_then(|v| v.as_bool()).unwrap_or(on);
         return Ok(v);
     }
     let vault_guard = state.vault.lock().await;
@@ -266,10 +235,7 @@ pub async fn plugins_set_accept_unsigned(
 pub async fn plugins_list(state: State<'_, AppState>) -> CmdResult<PluginListResult> {
     if is_remote(&state).await {
         let json = remote_call(&state, "GET", "sys/plugins", None).await?;
-        let plugins_v = json
-            .get("plugins")
-            .cloned()
-            .unwrap_or(Value::Array(Vec::new()));
+        let plugins_v = json.get("plugins").cloned().unwrap_or(Value::Array(Vec::new()));
         let plugins: Vec<PluginManifest> = decode_json(plugins_v, "plugin manifests")?;
         return Ok(PluginListResult { plugins });
     }
@@ -277,18 +243,12 @@ pub async fn plugins_list(state: State<'_, AppState>) -> CmdResult<PluginListRes
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
     let catalog = PluginCatalog::new();
-    let plugins = catalog
-        .list(core.barrier.as_storage())
-        .await
-        .map_err(CommandError::from)?;
+    let plugins = catalog.list(core.barrier.as_storage()).await.map_err(CommandError::from)?;
     Ok(PluginListResult { plugins })
 }
 
 #[tauri::command]
-pub async fn plugins_get(
-    state: State<'_, AppState>,
-    name: String,
-) -> CmdResult<Option<PluginManifest>> {
+pub async fn plugins_get(state: State<'_, AppState>, name: String) -> CmdResult<Option<PluginManifest>> {
     if is_remote(&state).await {
         match remote_call_opt(&state, "GET", &format!("sys/plugins/{name}"), None).await? {
             None => return Ok(None),
@@ -306,10 +266,7 @@ pub async fn plugins_get(
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
     let catalog = PluginCatalog::new();
-    let manifest = catalog
-        .get_manifest(core.barrier.as_storage(), &name)
-        .await
-        .map_err(CommandError::from)?;
+    let manifest = catalog.get_manifest(core.barrier.as_storage(), &name).await.map_err(CommandError::from)?;
     Ok(manifest)
 }
 
@@ -343,10 +300,7 @@ pub struct PluginRegisterAsset {
 }
 
 #[tauri::command]
-pub async fn plugins_register(
-    state: State<'_, AppState>,
-    input: PluginRegisterInput,
-) -> CmdResult<PluginManifest> {
+pub async fn plugins_register(state: State<'_, AppState>, input: PluginRegisterInput) -> CmdResult<PluginManifest> {
     if is_remote(&state).await {
         // The HTTP register endpoint takes manifest + binary_b64 (+ the
         // optional surface / client assets) in the same shape the Tauri
@@ -381,25 +335,14 @@ pub async fn plugins_register(
     drop(vault_guard);
 
     let catalog = PluginCatalog::new();
-    let outcome = catalog
-        .put(core_arc.barrier.as_storage(), &input.manifest, &binary)
-        .await
-        .map_err(CommandError::from);
+    let outcome =
+        catalog.put(core_arc.barrier.as_storage(), &input.manifest, &binary).await.map_err(CommandError::from);
 
     let token = state.token.lock().await.clone().unwrap_or_default();
     let mut audit_body = serde_json::Map::new();
-    audit_body.insert(
-        "name".to_string(),
-        serde_json::Value::String(input.manifest.name.clone()),
-    );
-    audit_body.insert(
-        "version".to_string(),
-        serde_json::Value::String(input.manifest.version.clone()),
-    );
-    audit_body.insert(
-        "size".to_string(),
-        serde_json::Value::Number(input.manifest.size.into()),
-    );
+    audit_body.insert("name".to_string(), serde_json::Value::String(input.manifest.name.clone()));
+    audit_body.insert("version".to_string(), serde_json::Value::String(input.manifest.version.clone()));
+    audit_body.insert("size".to_string(), serde_json::Value::Number(input.manifest.size.into()));
     let err_str = match &outcome {
         Err(e) => Some(format!("{e:?}")),
         _ => None,
@@ -422,20 +365,12 @@ pub async fn plugins_register(
     // re-verify each hash against the manifest declaration, so a
     // tampered upload fails here rather than landing a half-bad plugin.
     let storage = core_arc.barrier.as_storage();
-    if let (Some(surface_b64), Some(surface_ref)) =
-        (input.surface_b64.as_ref(), input.manifest.surface.as_ref())
-    {
+    if let (Some(surface_b64), Some(surface_ref)) = (input.surface_b64.as_ref(), input.manifest.surface.as_ref()) {
         let surface_bytes = base64::engine::general_purpose::STANDARD
             .decode(surface_b64.as_bytes())
             .map_err(|_| "surface_b64 not valid base64")?;
         catalog
-            .put_surface(
-                storage,
-                &input.manifest.name,
-                &input.manifest.version,
-                &surface_bytes,
-                &surface_ref.sha256,
-            )
+            .put_surface(storage, &input.manifest.name, &input.manifest.version, &surface_bytes, &surface_ref.sha256)
             .await?;
     } else if input.manifest.surface.is_some() {
         return Err("manifest declares a surface but request omitted `surface_b64`".into());
@@ -443,11 +378,7 @@ pub async fn plugins_register(
     // Every declared asset must have a matching upload (the app-module
     // WASM is declared here and supplied as the binary bytes).
     for declared in &input.manifest.client_assets {
-        if !input
-            .client_assets_b64
-            .iter()
-            .any(|u| u.name == declared.name)
-        {
+        if !input.client_assets_b64.iter().any(|u| u.name == declared.name) {
             return Err(format!(
                 "manifest declares client asset `{}` but no matching upload was provided",
                 declared.name
@@ -466,23 +397,11 @@ pub async fn plugins_register(
             .decode(asset.bytes_b64.as_bytes())
             .map_err(|_| "asset bytes_b64 not valid base64")?;
         if bytes.len() as u64 != aref.size {
-            return Err(format!(
-                "asset `{}` size {} does not match declared {}",
-                asset.name,
-                bytes.len(),
-                aref.size
-            )
-            .into());
+            return Err(
+                format!("asset `{}` size {} does not match declared {}", asset.name, bytes.len(), aref.size).into()
+            );
         }
-        catalog
-            .put_asset(
-                storage,
-                &input.manifest.name,
-                &input.manifest.version,
-                &bytes,
-                &aref.sha256,
-            )
-            .await?;
+        catalog.put_asset(storage, &input.manifest.name, &input.manifest.version, &bytes, &aref.sha256).await?;
     }
 
     Ok(input.manifest)
@@ -502,10 +421,7 @@ pub async fn plugins_delete(state: State<'_, AppState>, name: String) -> CmdResu
     drop(vault_guard);
 
     let catalog = PluginCatalog::new();
-    let outcome = catalog
-        .delete(core_arc.barrier.as_storage(), &name)
-        .await
-        .map_err(CommandError::from);
+    let outcome = catalog.delete(core_arc.barrier.as_storage(), &name).await.map_err(CommandError::from);
 
     let token = state.token.lock().await.clone().unwrap_or_default();
     let mut audit_body = serde_json::Map::new();
@@ -543,10 +459,7 @@ pub struct PluginConfigResult {
 }
 
 #[tauri::command]
-pub async fn plugins_get_config(
-    state: State<'_, AppState>,
-    name: String,
-) -> CmdResult<PluginConfigResult> {
+pub async fn plugins_get_config(state: State<'_, AppState>, name: String) -> CmdResult<PluginConfigResult> {
     if is_remote(&state).await {
         let json = remote_call(&state, "GET", &format!("sys/plugins/{name}/config"), None).await?;
         return decode_json(json, "plugin config");
@@ -561,14 +474,8 @@ pub async fn plugins_get_config(
         .map_err(CommandError::from)?
         .ok_or("plugin not found")?;
     let store = ConfigStore::new();
-    let values = store
-        .get_redacted(core.barrier.as_storage(), &manifest)
-        .await
-        .map_err(CommandError::from)?;
-    Ok(PluginConfigResult {
-        schema: manifest.config_schema,
-        values,
-    })
+    let values = store.get_redacted(core.barrier.as_storage(), &manifest).await.map_err(CommandError::from)?;
+    Ok(PluginConfigResult { schema: manifest.config_schema, values })
 }
 
 #[tauri::command]
@@ -595,10 +502,7 @@ pub async fn plugins_set_config(
         .map_err(CommandError::from)?
         .ok_or("plugin not found")?;
     let store = ConfigStore::new();
-    let outcome = store
-        .put(core_arc.barrier.as_storage(), &manifest, values)
-        .await
-        .map_err(CommandError::from);
+    let outcome = store.put(core_arc.barrier.as_storage(), &manifest, values).await.map_err(CommandError::from);
 
     let token = state.token.lock().await.clone().unwrap_or_default();
     let mut audit_body = serde_json::Map::new();
@@ -637,10 +541,7 @@ pub struct PluginGrantsResult {
 
 /// Best-effort actor entity id for the embedded grant record. Mirrors
 /// the server handler + audit path (entity id lives in the token meta).
-async fn resolve_grant_actor(
-    core: &std::sync::Arc<bastion_vault::core::Core>,
-    token: &str,
-) -> String {
+async fn resolve_grant_actor(core: &std::sync::Arc<bastion_vault::core::Core>, token: &str) -> String {
     use bastion_vault::modules::auth::AuthModule;
     if token.is_empty() {
         return String::new();
@@ -652,21 +553,13 @@ async fn resolve_grant_actor(
         return String::new();
     };
     match ts.lookup(token).await {
-        Ok(Some(te)) => te
-            .meta
-            .get("entity_id")
-            .cloned()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(te.display_name),
+        Ok(Some(te)) => te.meta.get("entity_id").cloned().filter(|s| !s.is_empty()).unwrap_or(te.display_name),
         _ => String::new(),
     }
 }
 
 #[tauri::command]
-pub async fn plugins_get_grants(
-    state: State<'_, AppState>,
-    name: String,
-) -> CmdResult<PluginGrantsResult> {
+pub async fn plugins_get_grants(state: State<'_, AppState>, name: String) -> CmdResult<PluginGrantsResult> {
     if is_remote(&state).await {
         let json = remote_call(&state, "GET", &format!("sys/plugins/{name}/grants"), None).await?;
         return decode_json(json, "plugin grants");
@@ -676,40 +569,22 @@ pub async fn plugins_get_grants(
     let core = vault.core.load();
     let storage = core.barrier.as_storage();
     let catalog = PluginCatalog::new();
-    let manifest = catalog
-        .get_manifest(storage, &name)
-        .await
-        .map_err(CommandError::from)?
-        .ok_or("plugin not found")?;
-    let record = bastion_vault::plugins::grants::get(storage, &name)
-        .await
-        .map_err(CommandError::from)?;
+    let manifest = catalog.get_manifest(storage, &name).await.map_err(CommandError::from)?.ok_or("plugin not found")?;
+    let record = bastion_vault::plugins::grants::get(storage, &name).await.map_err(CommandError::from)?;
     let live = bastion_vault::plugins::grants::active_net_hosts(storage, &name, &manifest)
         .await
         .map_err(CommandError::from)?
         .is_some();
-    let requested_net_hosts = manifest
-        .capabilities
-        .app
-        .net
-        .as_ref()
-        .map(|n| n.hosts.clone())
-        .unwrap_or_default();
+    let requested_net_hosts = manifest.capabilities.app.net.as_ref().map(|n| n.hosts.clone()).unwrap_or_default();
     Ok(PluginGrantsResult {
-        net: record
-            .and_then(|r| r.net)
-            .and_then(|n| serde_json::to_value(n).ok()),
+        net: record.and_then(|r| r.net).and_then(|n| serde_json::to_value(n).ok()),
         live,
         requested_net_hosts,
     })
 }
 
 #[tauri::command]
-pub async fn plugins_set_grants(
-    state: State<'_, AppState>,
-    name: String,
-    hosts: Vec<String>,
-) -> CmdResult<()> {
+pub async fn plugins_set_grants(state: State<'_, AppState>, name: String, hosts: Vec<String>) -> CmdResult<()> {
     if is_remote(&state).await {
         let body = json!({ "net": { "hosts": hosts } }).as_object().cloned();
         remote_call(&state, "PUT", &format!("sys/plugins/{name}/grants"), body).await?;
@@ -770,9 +645,8 @@ pub async fn plugins_delete_grants(state: State<'_, AppState>, name: String) -> 
     let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
     drop(vault_guard);
 
-    let outcome = bastion_vault::plugins::grants::delete(core_arc.barrier.as_storage(), &name)
-        .await
-        .map_err(CommandError::from);
+    let outcome =
+        bastion_vault::plugins::grants::delete(core_arc.barrier.as_storage(), &name).await.map_err(CommandError::from);
     let token = state.token.lock().await.clone().unwrap_or_default();
     let mut audit_body = serde_json::Map::new();
     audit_body.insert("name".into(), Value::String(name.clone()));
@@ -796,10 +670,7 @@ pub struct PluginVersionsResult {
 }
 
 #[tauri::command]
-pub async fn plugins_versions(
-    state: State<'_, AppState>,
-    name: String,
-) -> CmdResult<PluginVersionsResult> {
+pub async fn plugins_versions(state: State<'_, AppState>, name: String) -> CmdResult<PluginVersionsResult> {
     if is_remote(&state).await {
         let json = remote_call(&state, "GET", &format!("sys/plugins/{name}/versions"), None).await?;
         return decode_json(json, "plugin versions");
@@ -808,31 +679,15 @@ pub async fn plugins_versions(
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
     let catalog = PluginCatalog::new();
-    let versions = catalog
-        .list_versions(core.barrier.as_storage(), &name)
-        .await
-        .map_err(CommandError::from)?;
-    let active = catalog
-        .get_active_version(core.barrier.as_storage(), &name)
-        .await
-        .map_err(CommandError::from)?;
+    let versions = catalog.list_versions(core.barrier.as_storage(), &name).await.map_err(CommandError::from)?;
+    let active = catalog.get_active_version(core.barrier.as_storage(), &name).await.map_err(CommandError::from)?;
     Ok(PluginVersionsResult { versions, active })
 }
 
 #[tauri::command]
-pub async fn plugins_activate_version(
-    state: State<'_, AppState>,
-    name: String,
-    version: String,
-) -> CmdResult<()> {
+pub async fn plugins_activate_version(state: State<'_, AppState>, name: String, version: String) -> CmdResult<()> {
     if is_remote(&state).await {
-        remote_call(
-            &state,
-            "POST",
-            &format!("sys/plugins/{name}/versions/{version}/activate"),
-            None,
-        )
-        .await?;
+        remote_call(&state, "POST", &format!("sys/plugins/{name}/versions/{version}/activate"), None).await?;
         return Ok(());
     }
     let vault_guard = state.vault.lock().await;
@@ -842,10 +697,7 @@ pub async fn plugins_activate_version(
     drop(vault_guard);
 
     let catalog = PluginCatalog::new();
-    let outcome = catalog
-        .set_active(core_arc.barrier.as_storage(), &name, &version)
-        .await
-        .map_err(CommandError::from);
+    let outcome = catalog.set_active(core_arc.barrier.as_storage(), &name, &version).await.map_err(CommandError::from);
 
     if outcome.is_ok() {
         if let Ok(cache) = bastion_vault::plugins::ModuleCache::shared() {
@@ -874,29 +726,16 @@ pub async fn plugins_activate_version(
 }
 
 #[tauri::command]
-pub async fn plugins_delete_version(
-    state: State<'_, AppState>,
-    name: String,
-    version: String,
-) -> CmdResult<()> {
+pub async fn plugins_delete_version(state: State<'_, AppState>, name: String, version: String) -> CmdResult<()> {
     if is_remote(&state).await {
-        remote_call(
-            &state,
-            "DELETE",
-            &format!("sys/plugins/{name}/versions/{version}"),
-            None,
-        )
-        .await?;
+        remote_call(&state, "DELETE", &format!("sys/plugins/{name}/versions/{version}"), None).await?;
         return Ok(());
     }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
     let catalog = PluginCatalog::new();
-    catalog
-        .delete_version(core.barrier.as_storage(), &name, &version)
-        .await
-        .map_err(CommandError::from)?;
+    catalog.delete_version(core.barrier.as_storage(), &name, &version).await.map_err(CommandError::from)?;
     Ok(())
 }
 
@@ -909,10 +748,7 @@ pub struct PluginReloadResult {
 }
 
 #[tauri::command]
-pub async fn plugins_reload(
-    state: State<'_, AppState>,
-    name: String,
-) -> CmdResult<PluginReloadResult> {
+pub async fn plugins_reload(state: State<'_, AppState>, name: String) -> CmdResult<PluginReloadResult> {
     if is_remote(&state).await {
         let json = remote_call(&state, "POST", &format!("sys/plugins/{name}/reload"), None).await?;
         // The server response carries an extra `drained_via` key the
@@ -938,14 +774,8 @@ pub async fn plugins_reload(
     let token = state.token.lock().await.clone().unwrap_or_default();
     let mut audit_body = serde_json::Map::new();
     audit_body.insert("name".into(), serde_json::Value::String(name.clone()));
-    audit_body.insert(
-        "active_version".into(),
-        serde_json::Value::String(record.manifest.version.clone()),
-    );
-    audit_body.insert(
-        "cache_entries_evicted".into(),
-        serde_json::Value::Number(evicted.into()),
-    );
+    audit_body.insert("active_version".into(), serde_json::Value::String(record.manifest.version.clone()));
+    audit_body.insert("cache_entries_evicted".into(), serde_json::Value::Number(evicted.into()));
     bastion_vault::audit::emit_sys_audit(
         core_arc.as_ref(),
         &token,
@@ -1015,39 +845,21 @@ pub async fn plugins_invoke(
         .ok_or("plugin not found")?;
 
     let config_store = ConfigStore::new();
-    let config = config_store
-        .get(core_arc.barrier.as_storage(), &record.manifest.name)
-        .await
-        .unwrap_or_default();
+    let config = config_store.get(core_arc.barrier.as_storage(), &record.manifest.name).await.unwrap_or_default();
 
     let outcome = match record.manifest.runtime {
         bastion_vault::plugins::RuntimeKind::Wasm => {
-            let fuel = fuel
-                .unwrap_or(DEFAULT_FUEL)
-                .min(DEFAULT_FUEL.saturating_mul(10));
-            let runtime = WasmRuntime::with_budgets(fuel, DEFAULT_MEMORY_BYTES)
-                .map_err(|e| format!("{e}"))?;
+            let fuel = fuel.unwrap_or(DEFAULT_FUEL).min(DEFAULT_FUEL.saturating_mul(10));
+            let runtime = WasmRuntime::with_budgets(fuel, DEFAULT_MEMORY_BYTES).map_err(|e| format!("{e}"))?;
             runtime
-                .invoke_with_config(
-                    &record.manifest,
-                    &record.binary,
-                    &input,
-                    Some(core_arc.clone()),
-                    config,
-                )
+                .invoke_with_config(&record.manifest, &record.binary, &input, Some(core_arc.clone()), config)
                 .await
                 .map_err(|e| format!("{e}"))
         }
         bastion_vault::plugins::RuntimeKind::Process => {
             let runtime = bastion_vault::plugins::ProcessRuntime::new();
             runtime
-                .invoke_with_config(
-                    &record.manifest,
-                    &record.binary,
-                    &input,
-                    Some(core_arc.clone()),
-                    config,
-                )
+                .invoke_with_config(&record.manifest, &record.binary, &input, Some(core_arc.clone()), config)
                 .await
                 .map_err(|e| format!("{e}"))
         }
@@ -1056,10 +868,7 @@ pub async fn plugins_invoke(
     let token = state.token.lock().await.clone().unwrap_or_default();
     let mut audit_body = serde_json::Map::new();
     audit_body.insert("name".to_string(), serde_json::Value::String(name.clone()));
-    audit_body.insert(
-        "input_size".to_string(),
-        serde_json::Value::Number(input.len().into()),
-    );
+    audit_body.insert("input_size".to_string(), serde_json::Value::Number(input.len().into()));
     let err_str = match &outcome {
         Err(e) => Some(e.clone()),
         Ok(_) => None,
@@ -1087,7 +896,6 @@ pub async fn plugins_invoke(
     })
 }
 
-
 /// Read a file from the user's local filesystem and return its bytes
 /// base64-encoded. Used by plugin pages (e.g. PKI Import XCA) that
 /// accept a local file but invoke a plugin which may run on a remote
@@ -1098,12 +906,9 @@ pub async fn plugins_invoke(
 /// reaches the vault, so it's safe in either embedded or remote mode.
 #[tauri::command]
 pub async fn read_local_file_b64(path: String) -> CmdResult<String> {
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|e| CommandError::from(format!("read {path}: {e}")))?;
+    let bytes = tokio::fs::read(&path).await.map_err(|e| CommandError::from(format!("read {path}: {e}")))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }
-
 
 // ── Phase 5.12 — per-plugin metrics for the GUI ──
 

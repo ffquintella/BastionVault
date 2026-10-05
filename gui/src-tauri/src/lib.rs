@@ -2,14 +2,14 @@ mod backend;
 mod commands;
 mod embedded;
 mod error;
+mod local_keystore;
 mod plugin_apps;
 mod plugin_hooks;
 mod preferences;
-mod local_keystore;
 mod secure_store;
-mod yubikey_bridge;
-mod state;
 mod session;
+mod state;
+mod yubikey_bridge;
 
 use state::AppState;
 
@@ -66,25 +66,18 @@ pub fn run() {
     // this, every log line is silently dropped because the `log` facade
     // has no registered backend. Default filter keeps things quiet;
     // override via `RUST_LOG` (e.g. `RUST_LOG=bastion_vault_gui=debug,russh=debug`).
-    let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    )
-    .try_init();
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).try_init();
 
     // Best-effort Chromium-flag disable for autofill-related features. Runs
     // before Tauri initializes WebView2 so the runtime picks it up at launch.
     // The authoritative hardening happens in `harden_webview_autofill` below.
     #[cfg(target_os = "windows")]
     {
-        const EXTRA_ARGS: &str =
-            "--disable-features=AutofillServerCommunication,AutofillEnableAccountWalletStorage";
+        const EXTRA_ARGS: &str = "--disable-features=AutofillServerCommunication,AutofillEnableAccountWalletStorage";
         // Preserve any pre-existing value the user set.
         match std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") {
             Ok(existing) if !existing.is_empty() => {
-                std::env::set_var(
-                    "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-                    format!("{existing} {EXTRA_ARGS}"),
-                );
+                std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", format!("{existing} {EXTRA_ARGS}"));
             }
             _ => {
                 std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", EXTRA_ARGS);
@@ -125,19 +118,13 @@ pub fn run() {
             // window the harness opens.
             use tauri::menu::{Menu, MenuItemBuilder, SubmenuBuilder, WINDOW_SUBMENU_ID};
             let menu = Menu::default(app_handle)?;
-            let server_info = MenuItemBuilder::with_id("server_info", "Server Info...")
-                .build(app_handle)?;
-            let server_menu = SubmenuBuilder::new(app_handle, "Server")
-                .item(&server_info)
-                .build()?;
+            let server_info = MenuItemBuilder::with_id("server_info", "Server Info...").build(app_handle)?;
+            let server_menu = SubmenuBuilder::new(app_handle, "Server").item(&server_info).build()?;
             // Slot "Server" just before "Window" so the two OS-owned
             // trailing submenus keep their conventional position;
             // fall back to appending if the default menu ever stops
             // carrying a Window submenu.
-            let window_pos = menu
-                .items()?
-                .iter()
-                .position(|item| item.id().as_ref() == WINDOW_SUBMENU_ID);
+            let window_pos = menu.items()?.iter().position(|item| item.id().as_ref() == WINDOW_SUBMENU_ID);
             match window_pos {
                 Some(pos) => menu.insert(&server_menu, pos)?,
                 None => menu.append(&server_menu)?,
@@ -739,17 +726,11 @@ pub fn run() {
     #[cfg(all(debug_assertions, feature = "mcp_local_dev"))]
     let builder = {
         if matches!(std::env::var("BASTION_TAURI_MCP").as_deref(), Ok("1")) {
-            builder.plugin(
-                tauri_plugin_mcp_bridge::Builder::new()
-                    .bind_address("127.0.0.1")
-                    .build(),
-            )
+            builder.plugin(tauri_plugin_mcp_bridge::Builder::new().bind_address("127.0.0.1").build())
         } else {
             builder
         }
     };
 
-    builder
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+    builder.run(tauri::generate_context!()).expect("error while running tauri application");
 }

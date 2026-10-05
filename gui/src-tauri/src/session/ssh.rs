@@ -176,14 +176,10 @@ pub async fn open_ssh_session(
     // Connect + auth.
     let cfg = Arc::new(Config::default());
     let observed = Arc::new(std::sync::Mutex::new(String::new()));
-    let handler = HostKeyHandler {
-        expected_fp: args.host_key_fingerprint.clone(),
-        observed: observed.clone(),
-    };
-    let mut session =
-        client::connect(cfg, (args.host.as_str(), args.port), handler)
-            .await
-            .map_err(|e| format!("connect {}:{}: {e}", args.host, args.port))?;
+    let handler = HostKeyHandler { expected_fp: args.host_key_fingerprint.clone(), observed: observed.clone() };
+    let mut session = client::connect(cfg, (args.host.as_str(), args.port), handler)
+        .await
+        .map_err(|e| format!("connect {}:{}: {e}", args.host, args.port))?;
 
     // Auth — caller already picked one; we just dispatch.
     // russh ≥ 0.51 returns `AuthResult` (carrying success +
@@ -207,14 +203,10 @@ pub async fn open_ssh_session(
             let key = decode_secret_key(pem.as_str(), passphrase.as_deref().map(|p| p.as_str()))
                 .map_err(|e| format!("parse private key: {e}"))?;
             let key_arg = PrivateKeyWithHashAlg::new(Arc::new(key), None);
-            session
-                .authenticate_publickey(&args.username, key_arg)
-                .await
-                .map_err(|e| format!("publickey auth: {e}"))?
+            session.authenticate_publickey(&args.username, key_arg).await.map_err(|e| format!("publickey auth: {e}"))?
         }
         SshCredential::Cert { pem, cert_openssh } => {
-            let key = decode_secret_key(pem.as_str(), None)
-                .map_err(|e| format!("parse ephemeral private key: {e}"))?;
+            let key = decode_secret_key(pem.as_str(), None).map_err(|e| format!("parse ephemeral private key: {e}"))?;
             let cert = russh::keys::ssh_key::Certificate::from_openssh(cert_openssh.trim())
                 .map_err(|e| format!("parse signed certificate: {e}"))?;
             session
@@ -223,11 +215,9 @@ pub async fn open_ssh_session(
                 .map_err(|e| format!("openssh-cert auth: {e}"))?
         }
         SshCredential::SecurityKey { public_key_openssh, identity, app, pin_slot } => {
-            let public_key =
-                russh::keys::ssh_key::PublicKey::from_openssh(public_key_openssh.trim())
-                    .map_err(|e| format!("parse enrolled security-key public key: {e}"))?;
-            let mut signer =
-                super::sk_signer::SecurityKeySigner::new(identity, app, pin_slot);
+            let public_key = russh::keys::ssh_key::PublicKey::from_openssh(public_key_openssh.trim())
+                .map_err(|e| format!("parse enrolled security-key public key: {e}"))?;
+            let mut signer = super::sk_signer::SecurityKeySigner::new(identity, app, pin_slot);
             // russh drives the ceremony and calls back into the signer with
             // the buffer to sign; the operator touches the key at that point.
             session
@@ -243,8 +233,7 @@ pub async fn open_ssh_session(
     // wrong password, and the operator has no way to tell from the
     // GUI which one they are looking at.
     if let client::AuthResult::Failure { remaining_methods, partial_success } = &auth_result {
-        let offered: Vec<&'static str> =
-            remaining_methods.iter().map(<&'static str>::from).collect();
+        let offered: Vec<&'static str> = remaining_methods.iter().map(<&'static str>::from).collect();
         return Err(auth_failure_message(attempted, &offered, *partial_success));
     }
 
@@ -254,16 +243,14 @@ pub async fn open_ssh_session(
         if args.host_key_fingerprint.is_empty() && !fp.is_empty() {
             log::warn!(
                 "resource-connect/ssh: accepted unpinned host key for {}:{} — pin {fp} on the profile to lock",
-                args.host, args.port
+                args.host,
+                args.port
             );
         }
     }
 
     // Open a channel + request a PTY + start an interactive shell.
-    let mut channel = session
-        .channel_open_session()
-        .await
-        .map_err(|e| format!("channel_open_session: {e}"))?;
+    let mut channel = session.channel_open_session().await.map_err(|e| format!("channel_open_session: {e}"))?;
 
     // OpenSSH's client sends `no-more-sessions@openssh.com` AFTER
     // the session channel is open as a hardening hint ("I won't
@@ -274,9 +261,7 @@ pub async fn open_ssh_session(
     // sessions disabled"). want_reply=false so servers that don't
     // recognise the extension just ignore it.
     if let Err(e) = session.no_more_sessions(false).await {
-        log::warn!(
-            "resource-connect/ssh: no-more-sessions hint failed (continuing): {e:?}"
-        );
+        log::warn!("resource-connect/ssh: no-more-sessions hint failed (continuing): {e:?}");
     }
     // Populated terminal modes blob, mirroring what OpenSSH's
     // client sends. IMPORTANT: do NOT include Pty::TTY_OP_END in
@@ -291,11 +276,11 @@ pub async fn open_ssh_session(
     // SSH_MSG_DISCONNECT, just a silent TCP teardown. This is the
     // root cause of the "early eof" we were chasing.
     let modes: &[(russh::Pty, u32)] = &[
-        (russh::Pty::VINTR, 3),     // ^C
-        (russh::Pty::VQUIT, 28),    // ^\
-        (russh::Pty::VERASE, 127),  // DEL
-        (russh::Pty::VKILL, 21),    // ^U
-        (russh::Pty::VEOF, 4),      // ^D
+        (russh::Pty::VINTR, 3),    // ^C
+        (russh::Pty::VQUIT, 28),   // ^\
+        (russh::Pty::VERASE, 127), // DEL
+        (russh::Pty::VKILL, 21),   // ^U
+        (russh::Pty::VEOF, 4),     // ^D
         (russh::Pty::VEOL, 0),
         (russh::Pty::VSTART, 17),   // ^Q
         (russh::Pty::VSTOP, 19),    // ^S
@@ -326,10 +311,7 @@ pub async fn open_ssh_session(
         (russh::Pty::TTY_OP_OSPEED, 38400),
         // NOTE: no TTY_OP_END here — russh appends it for us.
     ];
-    channel
-        .request_pty(true, "xterm-256color", 80, 24, 0, 0, modes)
-        .await
-        .map_err(|e| format!("request_pty: {e}"))?;
+    channel.request_pty(true, "xterm-256color", 80, 24, 0, 0, modes).await.map_err(|e| format!("request_pty: {e}"))?;
     // russh's request_pty / request_shell are fire-and-forget — they
     // call send_msg and return without awaiting the server's
     // CHANNEL_SUCCESS reply, even when want_reply=true. Most sshd
@@ -348,20 +330,13 @@ pub async fn open_ssh_session(
             return Err("ssh: server refused pty-req".into());
         }
         Some(ChannelMsg::Data { data }) => pre_shell_buf.extend_from_slice(&data),
-        Some(ChannelMsg::ExtendedData { data, .. }) => {
-            pre_shell_buf.extend_from_slice(&data)
-        }
+        Some(ChannelMsg::ExtendedData { data, .. }) => pre_shell_buf.extend_from_slice(&data),
         Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
-            return Err(
-                "ssh: server closed the channel before pty-req completed".into(),
-            );
+            return Err("ssh: server closed the channel before pty-req completed".into());
         }
         _ => {}
     }
-    channel
-        .request_shell(true)
-        .await
-        .map_err(|e| format!("request_shell: {e}"))?;
+    channel.request_shell(true).await.map_err(|e| format!("request_shell: {e}"))?;
     // Drain the shell-req reply the same way so the worker loop
     // starts on the first real PTY byte.
     match channel.wait().await {
@@ -370,14 +345,9 @@ pub async fn open_ssh_session(
             return Err("ssh: server refused shell request".into());
         }
         Some(ChannelMsg::Data { data }) => pre_shell_buf.extend_from_slice(&data),
-        Some(ChannelMsg::ExtendedData { data, .. }) => {
-            pre_shell_buf.extend_from_slice(&data)
-        }
+        Some(ChannelMsg::ExtendedData { data, .. }) => pre_shell_buf.extend_from_slice(&data),
         Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
-            return Err(
-                "ssh: server closed the channel before shell request completed"
-                    .into(),
-            );
+            return Err("ssh: server closed the channel before shell request completed".into());
         }
         _ => {}
     }
@@ -511,9 +481,7 @@ pub async fn open_ssh_session(
                 }
             }
         }
-        log::info!(
-            "resource-connect/ssh: worker exiting — reason: {close_reason}"
-        );
+        log::info!("resource-connect/ssh: worker exiting — reason: {close_reason}");
         // Fire the closed event so the WebviewWindow shows
         // "disconnected" instead of waiting forever. The worker can
         // exit before the React listener has subscribed (a server
@@ -534,9 +502,7 @@ pub async fn open_ssh_session(
                 let _ = app_for_replay.emit(&evt_for_replay, payload_for_replay.clone());
             }
         });
-        let _ = session
-            .disconnect(russh::Disconnect::ByApplication, "", "")
-            .await;
+        let _ = session.disconnect(russh::Disconnect::ByApplication, "", "").await;
     });
 
     // Register the session on AppState so subsequent commands
@@ -553,16 +519,9 @@ pub async fn open_ssh_session(
         );
     }
 
-    log::info!(
-        "resource-connect/ssh: opened session token={token} label={} ({}:{})",
-        args.label, args.host, args.port
-    );
+    log::info!("resource-connect/ssh: opened session token={token} label={} ({}:{})", args.label, args.host, args.port);
 
-    Ok(SshOpenOutcome {
-        token,
-        stdout_event,
-        closed_event,
-    })
+    Ok(SshOpenOutcome { token, stdout_event, closed_event })
 }
 
 #[derive(Serialize, Clone)]
@@ -592,9 +551,7 @@ fn encode_b64(bytes: &[u8]) -> String {
 /// the encoding direction we use for stdout.
 pub fn decode_b64(b64: &str) -> Result<Vec<u8>, String> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    STANDARD
-        .decode(b64.as_bytes())
-        .map_err(|e| format!("base64 decode: {e}"))
+    STANDARD.decode(b64.as_bytes()).map_err(|e| format!("base64 decode: {e}"))
 }
 
 struct HostKeyHandler {
@@ -607,10 +564,7 @@ struct HostKeyHandler {
 // implementation read identically to the previous version.
 impl Handler for HostKeyHandler {
     type Error = russh::Error;
-    async fn check_server_key(
-        &mut self,
-        server_public_key: &PublicKey,
-    ) -> Result<bool, Self::Error> {
+    async fn check_server_key(&mut self, server_public_key: &PublicKey) -> Result<bool, Self::Error> {
         let fp = openssh_sha256_fingerprint(server_public_key);
         if let Ok(mut g) = self.observed.lock() {
             *g = fp.clone();
@@ -634,21 +588,13 @@ fn openssh_sha256_fingerprint(key: &PublicKey) -> String {
 /// Push a control message into a session's control channel. Used by
 /// the `session_input` / `session_resize` / `session_close` Tauri
 /// commands.
-pub async fn send_control(
-    state: &crate::state::AppState,
-    token: &str,
-    ctl: SshControl,
-) -> Result<(), String> {
+pub async fn send_control(state: &crate::state::AppState, token: &str, ctl: SshControl) -> Result<(), String> {
     let sessions = state.connect_sessions.lock().await;
     match sessions.get(token) {
-        Some(SessionState::Ssh(s)) => s
-            .input_tx
-            .send(ctl)
-            .await
-            .map_err(|_| "session control channel closed".to_string()),
-        Some(_) => Err(format!(
-            "session `{token}` is not an SSH session (cannot route SSH control message)"
-        )),
+        Some(SessionState::Ssh(s)) => {
+            s.input_tx.send(ctl).await.map_err(|_| "session control channel closed".to_string())
+        }
+        Some(_) => Err(format!("session `{token}` is not an SSH session (cannot route SSH control message)")),
         None => Err(format!("session token `{token}` not found")),
     }
 }
@@ -660,10 +606,7 @@ pub async fn send_control(
 /// hook captured at open time. Returns the captured hook (if any)
 /// so the caller can run it through the appropriate context (the
 /// LDAP library check-in needs the AppHandle + token).
-pub async fn drop_session(
-    state: &crate::state::AppState,
-    token: &str,
-) -> Option<SessionCleanup> {
+pub async fn drop_session(state: &crate::state::AppState, token: &str) -> Option<SessionCleanup> {
     let mut sessions = state.connect_sessions.lock().await;
     let removed = sessions.remove(token);
     drop(sessions);
@@ -671,11 +614,7 @@ pub async fn drop_session(
     // by the same token. The window's close hook already calls
     // rustion/session/kill so the bastion releases the slot; this just
     // clears the GUI-side mirror.
-    state
-        .rustion_session_bundles
-        .lock()
-        .await
-        .remove(token);
+    state.rustion_session_bundles.lock().await.remove(token);
     match removed {
         Some(SessionState::Ssh(s)) => {
             log::info!("resource-connect/ssh: closed session token={token}");
@@ -712,10 +651,7 @@ mod auth_failure_message_tests {
     #[test]
     fn names_the_mismatch_between_offered_and_accepted_methods() {
         let msg = auth_failure_message("password", &["publickey"], false);
-        assert_eq!(
-            msg,
-            "ssh: authentication rejected (offered `password`; server accepts: publickey)"
-        );
+        assert_eq!(msg, "ssh: authentication rejected (offered `password`; server accepts: publickey)");
     }
 
     /// Same method back from the server means the credential itself
@@ -733,10 +669,7 @@ mod auth_failure_message_tests {
     #[test]
     fn empty_method_list_does_not_render_a_dangling_accepts_clause() {
         let msg = auth_failure_message("publickey", &[], false);
-        assert_eq!(
-            msg,
-            "ssh: authentication rejected (offered `publickey`; server offered no further methods)"
-        );
+        assert_eq!(msg, "ssh: authentication rejected (offered `publickey`; server offered no further methods)");
         assert!(!msg.contains("server accepts"), "{msg}");
     }
 

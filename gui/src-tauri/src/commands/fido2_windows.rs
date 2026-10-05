@@ -41,9 +41,7 @@ use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
 use crate::error::CommandError;
 
-use super::fido2_native::{
-    AssertCeremonyArgs, AssertCeremonyOutput, RegisterCeremonyArgs, RegisterCeremonyOutput,
-};
+use super::fido2_native::{AssertCeremonyArgs, AssertCeremonyOutput, RegisterCeremonyArgs, RegisterCeremonyOutput};
 
 // ── Constants from webauthn.h ────────────────────────────────────────
 
@@ -302,13 +300,11 @@ fn load_api() -> Option<WebAuthnApi> {
         Some(WebAuthnApi {
             make_credential: std::mem::transmute::<RawProc, FnMakeCredential>(make_credential),
             get_assertion: std::mem::transmute::<RawProc, FnGetAssertion>(get_assertion),
-            free_credential_attestation: std::mem::transmute::<
-                RawProc,
-                FnFreeCredentialAttestation,
-            >(free_credential_attestation),
+            free_credential_attestation: std::mem::transmute::<RawProc, FnFreeCredentialAttestation>(
+                free_credential_attestation,
+            ),
             free_assertion: std::mem::transmute::<RawProc, FnFreeAssertion>(free_assertion),
-            get_error_name: get_error_name
-                .map(|f| std::mem::transmute::<RawProc, FnGetErrorName>(f)),
+            get_error_name: get_error_name.map(|f| std::mem::transmute::<RawProc, FnGetErrorName>(f)),
         })
     }
 }
@@ -411,10 +407,7 @@ fn hresult_message(api: &WebAuthnApi, hr: i32, ceremony: &str) -> CommandError {
 /// Both are returned because the pointer array borrows the entry array:
 /// callers must bind the entries to a live name (`_entries`, not `_`) for
 /// the whole FFI call, or the pointers dangle.
-fn credential_list(
-    ids: &[Vec<u8>],
-    credential_type: &[u16],
-) -> (Vec<CredentialEx>, Vec<*const CredentialEx>) {
+fn credential_list(ids: &[Vec<u8>], credential_type: &[u16]) -> (Vec<CredentialEx>, Vec<*const CredentialEx>) {
     let entries: Vec<CredentialEx> = ids
         .iter()
         .map(|id| CredentialEx {
@@ -431,17 +424,11 @@ fn credential_list(
 }
 
 fn empty_credentials() -> Credentials {
-    Credentials {
-        c_credentials: 0,
-        p_credentials: std::ptr::null(),
-    }
+    Credentials { c_credentials: 0, p_credentials: std::ptr::null() }
 }
 
 fn empty_extensions() -> Extensions {
-    Extensions {
-        c_extensions: 0,
-        p_extensions: std::ptr::null(),
-    }
+    Extensions { c_extensions: 0, p_extensions: std::ptr::null() }
 }
 
 /// Windows treats the timeout as guidance and clamps it itself; the cast
@@ -523,12 +510,9 @@ pub(crate) fn make_credential(
         pwsz_hash_alg_id: hash_alg.as_ptr(),
     };
 
-    let (_exclude_entries, exclude_pointers) =
-        credential_list(&args.exclude_credential_ids, &credential_type);
-    let exclude_list = CredentialList {
-        c_credentials: exclude_pointers.len() as u32,
-        pp_credentials: exclude_pointers.as_ptr(),
-    };
+    let (_exclude_entries, exclude_pointers) = credential_list(&args.exclude_credential_ids, &credential_type);
+    let exclude_list =
+        CredentialList { c_credentials: exclude_pointers.len() as u32, pp_credentials: exclude_pointers.as_ptr() };
 
     let options = MakeCredentialOptions {
         dw_version: MAKE_CREDENTIAL_OPTIONS_VERSION_3,
@@ -541,11 +525,7 @@ pub(crate) fn make_credential(
         dw_attestation_conveyance_preference: attestation_preference(&args.attestation),
         dw_flags: 0,
         p_cancellation_id: std::ptr::null(),
-        p_exclude_credential_list: if exclude_pointers.is_empty() {
-            std::ptr::null()
-        } else {
-            &exclude_list
-        },
+        p_exclude_credential_list: if exclude_pointers.is_empty() { std::ptr::null() } else { &exclude_list },
     };
 
     let mut attestation: *mut CredentialAttestation = std::ptr::null_mut();
@@ -595,10 +575,7 @@ pub(crate) fn make_credential(
 
 /// Run `WebAuthNAuthenticatorGetAssertion` against the operator's security
 /// key. Blocking, for the same reason as [`make_credential`].
-pub(crate) fn get_assertion(
-    hwnd: isize,
-    args: &AssertCeremonyArgs,
-) -> Result<AssertCeremonyOutput, CommandError> {
+pub(crate) fn get_assertion(hwnd: isize, args: &AssertCeremonyArgs) -> Result<AssertCeremonyOutput, CommandError> {
     let api = api()?;
 
     let rp_id = to_wide(&args.rp_id);
@@ -612,12 +589,9 @@ pub(crate) fn get_assertion(
         pwsz_hash_alg_id: hash_alg.as_ptr(),
     };
 
-    let (_allow_entries, allow_pointers) =
-        credential_list(&args.allow_credential_ids, &credential_type);
-    let allow_list = CredentialList {
-        c_credentials: allow_pointers.len() as u32,
-        pp_credentials: allow_pointers.as_ptr(),
-    };
+    let (_allow_entries, allow_pointers) = credential_list(&args.allow_credential_ids, &credential_type);
+    let allow_list =
+        CredentialList { c_credentials: allow_pointers.len() as u32, pp_credentials: allow_pointers.as_ptr() };
 
     let options = GetAssertionOptions {
         dw_version: GET_ASSERTION_OPTIONS_VERSION_4,
@@ -630,25 +604,14 @@ pub(crate) fn get_assertion(
         pwsz_u2f_app_id: std::ptr::null(),
         pb_u2f_app_id: std::ptr::null(),
         p_cancellation_id: std::ptr::null(),
-        p_allow_credential_list: if allow_pointers.is_empty() {
-            std::ptr::null()
-        } else {
-            &allow_list
-        },
+        p_allow_credential_list: if allow_pointers.is_empty() { std::ptr::null() } else { &allow_list },
     };
 
     let mut assertion: *mut Assertion = std::ptr::null_mut();
     // SAFETY: as in `make_credential` — borrowed buffers outlive the call and
     // `assertion` is a DLL-owned out-parameter freed below.
-    let hr = unsafe {
-        (api.get_assertion)(
-            hwnd as *mut c_void,
-            rp_id.as_ptr(),
-            &client_data,
-            &options,
-            &mut assertion,
-        )
-    };
+    let hr =
+        unsafe { (api.get_assertion)(hwnd as *mut c_void, rp_id.as_ptr(), &client_data, &options, &mut assertion) };
 
     if hr != S_OK {
         if !assertion.is_null() {
@@ -776,10 +739,7 @@ mod tests {
     #[ignore = "requires a Windows host with the WebAuthn platform API"]
     fn webauthn_dll_and_entry_points_resolve() {
         let api = api().expect("webauthn.dll should load on a supported Windows host");
-        assert!(
-            api.get_error_name.is_some(),
-            "WebAuthNGetErrorName is part of the baseline API surface"
-        );
+        assert!(api.get_error_name.is_some(), "WebAuthNGetErrorName is part of the baseline API surface");
     }
 
     /// The layouts are transcribed from `webauthn.h` by hand, so a wrong
@@ -814,26 +774,11 @@ mod tests {
         assert_eq!(std::mem::offset_of!(Assertion, cb_user_id), 56);
         assert_eq!(std::mem::offset_of!(Assertion, pb_user_id), 64);
 
-        assert_eq!(
-            std::mem::offset_of!(CredentialAttestation, pb_attestation_object),
-            72
-        );
-        assert_eq!(
-            std::mem::offset_of!(CredentialAttestation, cb_credential_id),
-            80
-        );
-        assert_eq!(
-            std::mem::offset_of!(CredentialAttestation, pb_credential_id),
-            88
-        );
+        assert_eq!(std::mem::offset_of!(CredentialAttestation, pb_attestation_object), 72);
+        assert_eq!(std::mem::offset_of!(CredentialAttestation, cb_credential_id), 80);
+        assert_eq!(std::mem::offset_of!(CredentialAttestation, pb_credential_id), 88);
 
-        assert_eq!(
-            std::mem::offset_of!(MakeCredentialOptions, p_exclude_credential_list),
-            72
-        );
-        assert_eq!(
-            std::mem::offset_of!(GetAssertionOptions, p_allow_credential_list),
-            80
-        );
+        assert_eq!(std::mem::offset_of!(MakeCredentialOptions, p_exclude_credential_list), 72);
+        assert_eq!(std::mem::offset_of!(GetAssertionOptions, p_allow_credential_list), 80);
     }
 }

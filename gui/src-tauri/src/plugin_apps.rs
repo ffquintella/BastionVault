@@ -32,8 +32,7 @@ use bv_client::{Backend, Operation};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use wasmtime::{
-    AsContext, AsContextMut, Caller, Engine, Instance, Linker, Module, Store, StoreLimits,
-    StoreLimitsBuilder,
+    AsContext, AsContextMut, Caller, Engine, Instance, Linker, Module, Store, StoreLimits, StoreLimitsBuilder,
 };
 
 /// Per-entry-point-call instruction ceiling (refueled each call).
@@ -323,213 +322,166 @@ fn register_bvx_imports(linker: &mut Linker<AppCtx>) -> Result<(), AppModuleErro
 
     // bvx.log(level, ptr, len) — always available; silent on bad input.
     linker
-        .func_wrap(
-            "bvx",
-            "log",
-            |mut caller: Caller<'_, AppCtx>, level: i32, ptr: i32, len: i32| {
-                let Some(bytes) = read_bytes(&mut caller, ptr, len) else {
-                    return;
-                };
-                let line = String::from_utf8_lossy(&bytes).into_owned();
-                let plugin = caller.data().plugin.clone();
-                match level {
-                    1 => log::trace!(target: "plugin_app", "[{plugin}] {line}"),
-                    2 => log::debug!(target: "plugin_app", "[{plugin}] {line}"),
-                    3 => log::info!(target: "plugin_app", "[{plugin}] {line}"),
-                    4 => log::warn!(target: "plugin_app", "[{plugin}] {line}"),
-                    _ => log::error!(target: "plugin_app", "[{plugin}] {line}"),
-                }
-            },
-        )
+        .func_wrap("bvx", "log", |mut caller: Caller<'_, AppCtx>, level: i32, ptr: i32, len: i32| {
+            let Some(bytes) = read_bytes(&mut caller, ptr, len) else {
+                return;
+            };
+            let line = String::from_utf8_lossy(&bytes).into_owned();
+            let plugin = caller.data().plugin.clone();
+            match level {
+                1 => log::trace!(target: "plugin_app", "[{plugin}] {line}"),
+                2 => log::debug!(target: "plugin_app", "[{plugin}] {line}"),
+                3 => log::info!(target: "plugin_app", "[{plugin}] {line}"),
+                4 => log::warn!(target: "plugin_app", "[{plugin}] {line}"),
+                _ => log::error!(target: "plugin_app", "[{plugin}] {line}"),
+            }
+        })
         .map_err(map_err)?;
 
     // bvx.now_unix_ms() -> i64 — always available (wall clock is not a
     // secret; matches the server `bv.now_unix_ms`).
-    linker
-        .func_wrap("bvx", "now_unix_ms", |_caller: Caller<'_, AppCtx>| -> i64 {
-            now_unix_ms()
-        })
-        .map_err(map_err)?;
+    linker.func_wrap("bvx", "now_unix_ms", |_caller: Caller<'_, AppCtx>| -> i64 { now_unix_ms() }).map_err(map_err)?;
 
     // bvx.set_result(ptr, len) — record the response window for the
     // current entry point (read back host-side after the call).
     linker
-        .func_wrap(
-            "bvx",
-            "set_result",
-            |mut caller: Caller<'_, AppCtx>, ptr: i32, len: i32| {
-                if ptr < 0 || len < 0 {
-                    return;
-                }
-                caller.data_mut().response_window = Some((ptr as u32, len as u32));
-            },
-        )
+        .func_wrap("bvx", "set_result", |mut caller: Caller<'_, AppCtx>, ptr: i32, len: i32| {
+            if ptr < 0 || len < 0 {
+                return;
+            }
+            caller.data_mut().response_window = Some((ptr as u32, len as u32));
+        })
         .map_err(map_err)?;
 
     // bvx.menu_upsert(json_ptr, json_len) -> i32 — gated by dynamic_menus.
     linker
-        .func_wrap(
-            "bvx",
-            "menu_upsert",
-            |mut caller: Caller<'_, AppCtx>, ptr: i32, len: i32| -> i32 {
-                if !caller.data().dynamic_menus {
-                    return RC_FORBIDDEN;
-                }
-                let Some(bytes) = read_bytes(&mut caller, ptr, len) else {
-                    return RC_INTERNAL;
-                };
-                let Ok(input) = serde_json::from_slice::<MenuUpsertInput>(&bytes) else {
-                    return RC_INTERNAL;
-                };
-                let prefix = caller.data().menu_prefix.clone();
-                let plugin = caller.data().plugin.clone();
-                let Some(menu) = validate_menu(input, &prefix, &plugin) else {
-                    return RC_INTERNAL;
-                };
-                let ctx = caller.data_mut();
-                if !ctx.menus.contains_key(&menu.id) && ctx.menus.len() >= MAX_DYNAMIC_MENUS {
-                    log::warn!(target: "plugin_app",
+        .func_wrap("bvx", "menu_upsert", |mut caller: Caller<'_, AppCtx>, ptr: i32, len: i32| -> i32 {
+            if !caller.data().dynamic_menus {
+                return RC_FORBIDDEN;
+            }
+            let Some(bytes) = read_bytes(&mut caller, ptr, len) else {
+                return RC_INTERNAL;
+            };
+            let Ok(input) = serde_json::from_slice::<MenuUpsertInput>(&bytes) else {
+                return RC_INTERNAL;
+            };
+            let prefix = caller.data().menu_prefix.clone();
+            let plugin = caller.data().plugin.clone();
+            let Some(menu) = validate_menu(input, &prefix, &plugin) else {
+                return RC_INTERNAL;
+            };
+            let ctx = caller.data_mut();
+            if !ctx.menus.contains_key(&menu.id) && ctx.menus.len() >= MAX_DYNAMIC_MENUS {
+                log::warn!(target: "plugin_app",
                         "[{plugin}] menu_upsert refused: {MAX_DYNAMIC_MENUS}-entry cap reached");
-                    return RC_INTERNAL;
-                }
-                ctx.menus.insert(menu.id.clone(), menu);
-                RC_OK
-            },
-        )
+                return RC_INTERNAL;
+            }
+            ctx.menus.insert(menu.id.clone(), menu);
+            RC_OK
+        })
         .map_err(map_err)?;
 
     // bvx.menu_remove(id_ptr, id_len) -> i32.
     linker
-        .func_wrap(
-            "bvx",
-            "menu_remove",
-            |mut caller: Caller<'_, AppCtx>, ptr: i32, len: i32| -> i32 {
-                if !caller.data().dynamic_menus {
-                    return RC_FORBIDDEN;
-                }
-                let Some(bytes) = read_bytes(&mut caller, ptr, len) else {
-                    return RC_INTERNAL;
-                };
-                let Ok(id) = String::from_utf8(bytes) else {
-                    return RC_INTERNAL;
-                };
-                caller.data_mut().menus.remove(&id);
-                RC_OK
-            },
-        )
+        .func_wrap("bvx", "menu_remove", |mut caller: Caller<'_, AppCtx>, ptr: i32, len: i32| -> i32 {
+            if !caller.data().dynamic_menus {
+                return RC_FORBIDDEN;
+            }
+            let Some(bytes) = read_bytes(&mut caller, ptr, len) else {
+                return RC_INTERNAL;
+            };
+            let Ok(id) = String::from_utf8(bytes) else {
+                return RC_INTERNAL;
+            };
+            caller.data_mut().menus.remove(&id);
+            RC_OK
+        })
         .map_err(map_err)?;
 
     // bvx.window_open(json_ptr, json_len) -> i32 (>= 0 handle) — gated
     // by windows_max_open > 0; clamped to the cap.
     linker
-        .func_wrap(
-            "bvx",
-            "window_open",
-            |mut caller: Caller<'_, AppCtx>, ptr: i32, len: i32| -> i32 {
-                let max = caller.data().windows_max_open;
-                if max == 0 {
-                    return RC_FORBIDDEN;
-                }
-                let Some(bytes) = read_bytes(&mut caller, ptr, len) else {
-                    return RC_INTERNAL;
-                };
-                let Ok(input) = serde_json::from_slice::<WindowOpenInput>(&bytes) else {
-                    return RC_INTERNAL;
-                };
-                let prefix = caller.data().menu_prefix.clone();
-                if !input.route.starts_with(&prefix) || input.route.contains("..") {
-                    return RC_INTERNAL;
-                }
-                let ctx = caller.data_mut();
-                if ctx.open_windows.len() as u32 >= max {
-                    return RC_WINDOW_LIMIT;
-                }
-                let handle = ctx.next_window_handle;
-                ctx.next_window_handle += 1;
-                ctx.open_windows.push(handle);
-                ctx.window_ops.push(WindowOp::Open {
-                    handle,
-                    route: input.route,
-                    title: input.title,
-                    width: input.width,
-                    height: input.height,
-                });
-                handle as i32
-            },
-        )
+        .func_wrap("bvx", "window_open", |mut caller: Caller<'_, AppCtx>, ptr: i32, len: i32| -> i32 {
+            let max = caller.data().windows_max_open;
+            if max == 0 {
+                return RC_FORBIDDEN;
+            }
+            let Some(bytes) = read_bytes(&mut caller, ptr, len) else {
+                return RC_INTERNAL;
+            };
+            let Ok(input) = serde_json::from_slice::<WindowOpenInput>(&bytes) else {
+                return RC_INTERNAL;
+            };
+            let prefix = caller.data().menu_prefix.clone();
+            if !input.route.starts_with(&prefix) || input.route.contains("..") {
+                return RC_INTERNAL;
+            }
+            let ctx = caller.data_mut();
+            if ctx.open_windows.len() as u32 >= max {
+                return RC_WINDOW_LIMIT;
+            }
+            let handle = ctx.next_window_handle;
+            ctx.next_window_handle += 1;
+            ctx.open_windows.push(handle);
+            ctx.window_ops.push(WindowOp::Open {
+                handle,
+                route: input.route,
+                title: input.title,
+                width: input.width,
+                height: input.height,
+            });
+            handle as i32
+        })
         .map_err(map_err)?;
 
     // bvx.window_close(handle) -> i32.
     linker
-        .func_wrap(
-            "bvx",
-            "window_close",
-            |mut caller: Caller<'_, AppCtx>, handle: i32| -> i32 {
-                if caller.data().windows_max_open == 0 || handle < 0 {
-                    return RC_FORBIDDEN;
-                }
-                let h = handle as u32;
-                let ctx = caller.data_mut();
-                ctx.open_windows.retain(|x| *x != h);
-                ctx.window_ops.push(WindowOp::Close { handle: h });
-                RC_OK
-            },
-        )
+        .func_wrap("bvx", "window_close", |mut caller: Caller<'_, AppCtx>, handle: i32| -> i32 {
+            if caller.data().windows_max_open == 0 || handle < 0 {
+                return RC_FORBIDDEN;
+            }
+            let h = handle as u32;
+            let ctx = caller.data_mut();
+            ctx.open_windows.retain(|x| *x != h);
+            ctx.window_ops.push(WindowOp::Close { handle: h });
+            RC_OK
+        })
         .map_err(map_err)?;
 
     // bvx.window_emit(handle, json_ptr, json_len) -> i32.
     linker
-        .func_wrap(
-            "bvx",
-            "window_emit",
-            |mut caller: Caller<'_, AppCtx>, handle: i32, ptr: i32, len: i32| -> i32 {
-                if caller.data().windows_max_open == 0 || handle < 0 {
-                    return RC_FORBIDDEN;
-                }
-                let Some(bytes) = read_bytes(&mut caller, ptr, len) else {
-                    return RC_INTERNAL;
-                };
-                let Ok(payload) = String::from_utf8(bytes) else {
-                    return RC_INTERNAL;
-                };
-                caller.data_mut().window_ops.push(WindowOp::Emit {
-                    handle: handle as u32,
-                    payload,
-                });
-                RC_OK
-            },
-        )
+        .func_wrap("bvx", "window_emit", |mut caller: Caller<'_, AppCtx>, handle: i32, ptr: i32, len: i32| -> i32 {
+            if caller.data().windows_max_open == 0 || handle < 0 {
+                return RC_FORBIDDEN;
+            }
+            let Some(bytes) = read_bytes(&mut caller, ptr, len) else {
+                return RC_INTERNAL;
+            };
+            let Ok(payload) = String::from_utf8(bytes) else {
+                return RC_INTERNAL;
+            };
+            caller.data_mut().window_ops.push(WindowOp::Emit { handle: handle as u32, payload });
+            RC_OK
+        })
         .map_err(map_err)?;
 
     // bvx.api_request(req_ptr, req_len, out_ptr, out_max) -> i32 — async;
     // the vault-API bridge (Phase 4). Rides the user's session token; the
     // server ACL pipeline stays the sole authority.
     linker
-        .func_wrap_async(
-            "bvx",
-            "api_request",
-            |mut caller: Caller<'_, AppCtx>, args: (i32, i32, i32, i32)| {
-                let (req_ptr, req_len, out_ptr, out_max) = args;
-                Box::new(async move {
-                    api_request_impl(&mut caller, req_ptr, req_len, out_ptr, out_max).await
-                })
-            },
-        )
+        .func_wrap_async("bvx", "api_request", |mut caller: Caller<'_, AppCtx>, args: (i32, i32, i32, i32)| {
+            let (req_ptr, req_len, out_ptr, out_max) = args;
+            Box::new(async move { api_request_impl(&mut caller, req_ptr, req_len, out_ptr, out_max).await })
+        })
         .map_err(map_err)?;
 
     // bvx.net_http(req_ptr, req_len, out_ptr, out_max) -> i32 — async;
     // admin-granted outbound HTTPS (Phase 5), gated by `net_gate`.
     linker
-        .func_wrap_async(
-            "bvx",
-            "net_http",
-            |mut caller: Caller<'_, AppCtx>, args: (i32, i32, i32, i32)| {
-                let (req_ptr, req_len, out_ptr, out_max) = args;
-                Box::new(async move {
-                    net_http_impl(&mut caller, req_ptr, req_len, out_ptr, out_max).await
-                })
-            },
-        )
+        .func_wrap_async("bvx", "net_http", |mut caller: Caller<'_, AppCtx>, args: (i32, i32, i32, i32)| {
+            let (req_ptr, req_len, out_ptr, out_max) = args;
+            Box::new(async move { net_http_impl(&mut caller, req_ptr, req_len, out_ptr, out_max).await })
+        })
         .map_err(map_err)?;
 
     // ABI minor 2: notifications. `bvx.notify_send` / `bvx.notify_list`
@@ -539,26 +491,16 @@ fn register_bvx_imports(linker: &mut Linker<AppCtx>) -> Result<(), AppModuleErro
     // own inbox). `bvx.notify_open` records intent to focus the in-app
     // notification center, applied host-side after the call.
     linker
-        .func_wrap_async(
-            "bvx",
-            "notify_send",
-            |mut caller: Caller<'_, AppCtx>, args: (i32, i32, i32, i32)| {
-                let (req_ptr, req_len, out_ptr, out_max) = args;
-                Box::new(async move {
-                    notify_send_impl(&mut caller, req_ptr, req_len, out_ptr, out_max).await
-                })
-            },
-        )
+        .func_wrap_async("bvx", "notify_send", |mut caller: Caller<'_, AppCtx>, args: (i32, i32, i32, i32)| {
+            let (req_ptr, req_len, out_ptr, out_max) = args;
+            Box::new(async move { notify_send_impl(&mut caller, req_ptr, req_len, out_ptr, out_max).await })
+        })
         .map_err(map_err)?;
     linker
-        .func_wrap_async(
-            "bvx",
-            "notify_list",
-            |mut caller: Caller<'_, AppCtx>, args: (i32, i32, i32, i32)| {
-                let (_rp, _rl, out_ptr, out_max) = args;
-                Box::new(async move { notify_list_impl(&mut caller, out_ptr, out_max).await })
-            },
-        )
+        .func_wrap_async("bvx", "notify_list", |mut caller: Caller<'_, AppCtx>, args: (i32, i32, i32, i32)| {
+            let (_rp, _rl, out_ptr, out_max) = args;
+            Box::new(async move { notify_list_impl(&mut caller, out_ptr, out_max).await })
+        })
         .map_err(map_err)?;
     linker
         .func_wrap("bvx", "notify_open", |mut caller: Caller<'_, AppCtx>| -> i32 {
@@ -585,20 +527,13 @@ async fn notify_send_impl(
     let Some(bytes) = read_bytes(caller, req_ptr, req_len) else {
         return RC_INTERNAL;
     };
-    let Ok(data) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes)
-    else {
+    let Ok(data) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes) else {
         return RC_INTERNAL;
     };
     let token = caller.data().token.clone();
     let namespace = caller.data().namespace.clone();
     let resp = backend
-        .handle_with_namespace(
-            Operation::Write,
-            "notifications/send",
-            Some(data),
-            &token,
-            namespace.as_deref(),
-        )
+        .handle_with_namespace(Operation::Write, "notifications/send", Some(data), &token, namespace.as_deref())
         .await;
     let out = match resp {
         Ok(Some(r)) => serde_json::json!({ "data": r.data }),
@@ -615,15 +550,8 @@ async fn notify_list_impl(caller: &mut Caller<'_, AppCtx>, out_ptr: i32, out_max
     };
     let token = caller.data().token.clone();
     let namespace = caller.data().namespace.clone();
-    let resp = backend
-        .handle_with_namespace(
-            Operation::Read,
-            "notifications/inbox",
-            None,
-            &token,
-            namespace.as_deref(),
-        )
-        .await;
+    let resp =
+        backend.handle_with_namespace(Operation::Read, "notifications/inbox", None, &token, namespace.as_deref()).await;
     let out = match resp {
         Ok(Some(r)) => serde_json::json!({ "data": r.data }),
         Ok(None) => serde_json::json!({ "data": null }),
@@ -708,9 +636,7 @@ async fn api_request_impl(
     };
     let token = caller.data().token.clone();
     let namespace = caller.data().namespace.clone();
-    let resp = backend
-        .handle_with_namespace(op, &resolved, req.data, &token, namespace.as_deref())
-        .await;
+    let resp = backend.handle_with_namespace(op, &resolved, req.data, &token, namespace.as_deref()).await;
     let out = match resp {
         Ok(Some(r)) => serde_json::json!({ "data": r.data }),
         Ok(None) => serde_json::json!({ "data": null }),
@@ -722,10 +648,7 @@ async fn api_request_impl(
 }
 
 fn now_unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
 // ── bvx.net_http (Phase 5) ───────────────────────────────────────────
@@ -749,13 +672,7 @@ fn default_method() -> String {
 
 /// Build the guest's request, delegate to the shared SSRF-safe fetch,
 /// and record the outcome in the per-plugin call ring.
-async fn net_http_impl(
-    caller: &mut Caller<'_, AppCtx>,
-    req_ptr: i32,
-    req_len: i32,
-    out_ptr: i32,
-    out_max: i32,
-) -> i32 {
+async fn net_http_impl(caller: &mut Caller<'_, AppCtx>, req_ptr: i32, req_len: i32, out_ptr: i32, out_max: i32) -> i32 {
     use bastion_vault::plugins::net_http;
 
     let granted = caller.data().net_hosts.clone();
@@ -856,12 +773,8 @@ impl AppModuleInstance {
     /// Compile + instantiate a module and wire its `bvx.*` imports.
     /// Does not call `bvx_init` — the caller does that after storing
     /// the instance so an init that pushes menus is observed.
-    pub async fn create(
-        config: AppModuleConfig,
-        wasm_bytes: &[u8],
-    ) -> Result<Self, AppModuleError> {
-        let module = Module::from_binary(engine(), wasm_bytes)
-            .map_err(|e| AppModuleError::Compile(e.to_string()))?;
+    pub async fn create(config: AppModuleConfig, wasm_bytes: &[u8]) -> Result<Self, AppModuleError> {
+        let module = Module::from_binary(engine(), wasm_bytes).map_err(|e| AppModuleError::Compile(e.to_string()))?;
 
         let limits = StoreLimitsBuilder::new().memory_size(MEMORY_BYTES).build();
         let ctx = AppCtx {
@@ -886,9 +799,7 @@ impl AppModuleInstance {
         };
         let mut store: Store<AppCtx> = Store::new(engine(), ctx);
         store.limiter(|c| &mut c.limits);
-        store
-            .set_fuel(FUEL_PER_CALL)
-            .map_err(|e| AppModuleError::Instantiate(e.to_string()))?;
+        store.set_fuel(FUEL_PER_CALL).map_err(|e| AppModuleError::Instantiate(e.to_string()))?;
 
         let mut linker: Linker<AppCtx> = Linker::new(engine());
         register_bvx_imports(&mut linker)?;
@@ -899,12 +810,8 @@ impl AppModuleInstance {
             .map_err(|e| AppModuleError::Instantiate(e.to_string()))?;
 
         // Required exports.
-        instance
-            .get_memory(&mut store, "memory")
-            .ok_or(AppModuleError::MissingMemory)?;
-        instance
-            .get_typed_func::<i32, i32>(&mut store, "bv_alloc")
-            .map_err(|_| AppModuleError::MissingAlloc)?;
+        instance.get_memory(&mut store, "memory").ok_or(AppModuleError::MissingMemory)?;
+        instance.get_typed_func::<i32, i32>(&mut store, "bv_alloc").map_err(|_| AppModuleError::MissingAlloc)?;
 
         Ok(Self {
             plugin: config.plugin,
@@ -952,10 +859,7 @@ impl AppModuleInstance {
         self.invoke_ptr_len("bvx_menu_click", ev_json).await
     }
 
-    pub async fn call_window_event(
-        &mut self,
-        ev_json: &[u8],
-    ) -> Result<Option<i32>, AppModuleError> {
+    pub async fn call_window_event(&mut self, ev_json: &[u8]) -> Result<Option<i32>, AppModuleError> {
         self.invoke_ptr_len("bvx_window_event", ev_json).await
     }
 
@@ -965,25 +869,18 @@ impl AppModuleInstance {
         if now_ms - self.last_tick_ms < MIN_TICK_INTERVAL_MS {
             return Ok(None);
         }
-        let Ok(func) = self
-            .instance
-            .get_typed_func::<i64, i32>(&mut self.store, "bvx_tick")
-        else {
+        let Ok(func) = self.instance.get_typed_func::<i64, i32>(&mut self.store, "bvx_tick") else {
             return Ok(None);
         };
         self.last_tick_ms = now_ms;
         self.reset_for_call()?;
-        let status = func
-            .call_async(&mut self.store, now_ms)
-            .await
-            .map_err(|e| AppModuleError::Invocation(e.to_string()))?;
+        let status =
+            func.call_async(&mut self.store, now_ms).await.map_err(|e| AppModuleError::Invocation(e.to_string()))?;
         Ok(Some(status))
     }
 
     fn reset_for_call(&mut self) -> Result<(), AppModuleError> {
-        self.store
-            .set_fuel(FUEL_PER_CALL)
-            .map_err(|e| AppModuleError::Instantiate(e.to_string()))?;
+        self.store.set_fuel(FUEL_PER_CALL).map_err(|e| AppModuleError::Instantiate(e.to_string()))?;
         let d = self.store.data_mut();
         d.response_window = None;
         d.window_ops.clear();
@@ -993,18 +890,11 @@ impl AppModuleInstance {
     /// Invoke an optional `(ptr,len) -> i32` entry point. Returns
     /// `Ok(None)` when the export is absent (all entry points except
     /// `memory`/`bv_alloc` are optional).
-    async fn invoke_ptr_len(
-        &mut self,
-        export: &str,
-        json: &[u8],
-    ) -> Result<Option<i32>, AppModuleError> {
+    async fn invoke_ptr_len(&mut self, export: &str, json: &[u8]) -> Result<Option<i32>, AppModuleError> {
         if json.len() > MAX_PAYLOAD_BYTES {
             return Err(AppModuleError::InputTooLarge(json.len()));
         }
-        let Ok(func) = self
-            .instance
-            .get_typed_func::<(i32, i32), i32>(&mut self.store, export)
-        else {
+        let Ok(func) = self.instance.get_typed_func::<(i32, i32), i32>(&mut self.store, export) else {
             return Ok(None);
         };
         self.reset_for_call()?;
@@ -1013,17 +903,10 @@ impl AppModuleInstance {
             .get_typed_func::<i32, i32>(&mut self.store, "bv_alloc")
             .map_err(|_| AppModuleError::MissingAlloc)?;
         let len = json.len() as i32;
-        let ptr = alloc
-            .call_async(&mut self.store, len)
-            .await
-            .map_err(|e| AppModuleError::Invocation(e.to_string()))?;
-        let memory = self
-            .instance
-            .get_memory(&mut self.store, "memory")
-            .ok_or(AppModuleError::MissingMemory)?;
-        memory
-            .write(&mut self.store, ptr as usize, json)
-            .map_err(|e| AppModuleError::Invocation(e.to_string()))?;
+        let ptr =
+            alloc.call_async(&mut self.store, len).await.map_err(|e| AppModuleError::Invocation(e.to_string()))?;
+        let memory = self.instance.get_memory(&mut self.store, "memory").ok_or(AppModuleError::MissingMemory)?;
+        memory.write(&mut self.store, ptr as usize, json).map_err(|e| AppModuleError::Invocation(e.to_string()))?;
         let status = func
             .call_async(&mut self.store, (ptr, len))
             .await
@@ -1067,13 +950,7 @@ fn emit_menus<R: Runtime>(app: &AppHandle<R>, menus: &[DynamicMenu]) {
 fn apply_window_ops<R: Runtime>(app: &AppHandle<R>, plugin: &str, ops: Vec<WindowOp>) {
     for op in ops {
         match op {
-            WindowOp::Open {
-                handle,
-                route,
-                title,
-                width,
-                height,
-            } => {
+            WindowOp::Open { handle, route, title, width, height } => {
                 let label = format!("plugin-{plugin}-{handle}");
                 // Host-drawn title, always prefixed with the plugin name
                 // so a plugin window can't spoof host chrome.
@@ -1141,11 +1018,8 @@ pub async fn sync_from_bundle<R: Runtime>(
     use std::collections::HashSet;
 
     // Entries that ship an app module.
-    let desired: Vec<&bv_plugin_surface::ActiveSurfaceEntry> = bundle
-        .entries
-        .iter()
-        .filter(|e| e.app_module.is_some())
-        .collect();
+    let desired: Vec<&bv_plugin_surface::ActiveSurfaceEntry> =
+        bundle.entries.iter().filter(|e| e.app_module.is_some()).collect();
     let desired_names: HashSet<&str> = desired.iter().map(|e| e.plugin.as_str()).collect();
 
     // Session context every app module's api/net imports ride.
@@ -1156,8 +1030,7 @@ pub async fn sync_from_bundle<R: Runtime>(
         let g = state.app_modules.lock().await;
         g.iter().map(|(k, v)| (k.clone(), v.sha256.clone())).collect()
     };
-    let current_sha: HashMap<&str, &str> =
-        current.iter().map(|(p, s)| (p.as_str(), s.as_str())).collect();
+    let current_sha: HashMap<&str, &str> = current.iter().map(|(p, s)| (p.as_str(), s.as_str())).collect();
 
     // Fetch bytes for new/changed modules (async; done outside the lock).
     struct Rebuild {
@@ -1171,9 +1044,7 @@ pub async fn sync_from_bundle<R: Runtime>(
         if unchanged {
             continue;
         }
-        match bv_client::ensure_asset(&*backend, cache, &e.plugin, &e.version, &am.sha256, token)
-            .await
-        {
+        match bv_client::ensure_asset(&*backend, cache, &e.plugin, &e.version, &am.sha256, token).await {
             Ok(Some(bytes)) => rebuilds.push(Rebuild {
                 config: AppModuleConfig {
                     plugin: e.plugin.clone(),
@@ -1190,11 +1061,7 @@ pub async fn sync_from_bundle<R: Runtime>(
                     namespace: namespace.clone(),
                     // Granted hosts arrive live in the bundle grant; empty
                     // (or absent) means the plugin is ungranted.
-                    net_hosts: e
-                        .grant
-                        .as_ref()
-                        .map(|g| g.net_hosts.clone())
-                        .unwrap_or_default(),
+                    net_hosts: e.grant.as_ref().map(|g| g.net_hosts.clone()).unwrap_or_default(),
                     net_https_only: am.net_https_only,
                 },
                 bytes,
@@ -1213,11 +1080,7 @@ pub async fn sync_from_bundle<R: Runtime>(
     {
         let mut g = state.app_modules.lock().await;
         // Tear down instances whose plugin is no longer present.
-        let stale: Vec<String> = g
-            .keys()
-            .filter(|k| !desired_names.contains(k.as_str()))
-            .cloned()
-            .collect();
+        let stale: Vec<String> = g.keys().filter(|k| !desired_names.contains(k.as_str())).cloned().collect();
         for p in stale {
             if let Some(inst) = g.remove(&p) {
                 for h in inst.open_window_handles() {
@@ -1380,10 +1243,7 @@ pub async fn plugin_app_status(state: State<'_, AppState>) -> CmdResult<Vec<AppM
 /// Phase 5: the per-plugin `bvx.net_http` call ring buffer (last 100),
 /// so an admin can see exactly what a granted plugin does with the grant.
 #[tauri::command]
-pub async fn plugin_app_net_calls(
-    state: State<'_, AppState>,
-    plugin: String,
-) -> CmdResult<Vec<NetCall>> {
+pub async fn plugin_app_net_calls(state: State<'_, AppState>, plugin: String) -> CmdResult<Vec<NetCall>> {
     let g = state.app_modules.lock().await;
     Ok(g.get(&plugin).map(|i| i.net_calls()).unwrap_or_default())
 }
@@ -1426,11 +1286,7 @@ mod tests {
     }
 
     fn caps(dynamic_menus: bool, windows_max_open: u32) -> AppCapsGate {
-        AppCapsGate {
-            dynamic_menus,
-            windows_max_open,
-            api_paths: vec![],
-        }
+        AppCapsGate { dynamic_menus, windows_max_open, api_paths: vec![] }
     }
 
     /// Build a config for a `totp`-plugin instance with the given caps
@@ -1636,11 +1492,7 @@ mod tests {
     async fn bvx_conformance_matches_testkit_surface() {
         let wat = bastion_plugin_testkit::app::bvx_conformance_wat();
         let bytes = wat::parse_str(&wat).unwrap();
-        let caps = AppCapsGate {
-            dynamic_menus: true,
-            windows_max_open: 2,
-            api_paths: vec!["{mount}/".into()],
-        };
+        let caps = AppCapsGate { dynamic_menus: true, windows_max_open: 2, api_paths: vec!["{mount}/".into()] };
         let result = AppModuleInstance::create(cfg(caps, sha(&bytes)), &bytes).await;
         assert!(
             result.is_ok(),

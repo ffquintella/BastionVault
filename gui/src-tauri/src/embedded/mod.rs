@@ -31,11 +31,7 @@ pub enum StorageKind {
 }
 
 pub fn storage_kind() -> StorageKind {
-    match std::env::var("BASTION_EMBEDDED_STORAGE")
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .trim()
-    {
+    match std::env::var("BASTION_EMBEDDED_STORAGE").unwrap_or_default().to_ascii_lowercase().trim() {
         "hiqlite" => StorageKind::Hiqlite,
         _ => StorageKind::File,
     }
@@ -55,9 +51,7 @@ pub fn data_dir() -> Result<std::path::PathBuf, CommandError> {
 /// always writable and on an exec-allowed filesystem — unlike the
 /// server's `/var/lib/bvault` default, which needs root to create.
 pub fn app_root() -> Result<std::path::PathBuf, CommandError> {
-    let base = dirs::data_local_dir()
-        .or_else(dirs::home_dir)
-        .ok_or("Cannot determine home directory")?;
+    let base = dirs::data_local_dir().or_else(dirs::home_dir).ok_or("Cannot determine home directory")?;
     Ok(base.join(".bastion_vault_gui"))
 }
 
@@ -162,10 +156,7 @@ pub async fn build_backend() -> Result<Arc<dyn Backend>, CommandError> {
 
     match effective_kind {
         StorageKind::File => {
-            eprintln!(
-                "embedded: starting file backend at {}",
-                dir.display()
-            );
+            eprintln!("embedded: starting file backend at {}", dir.display());
             conf.insert("path".into(), Value::String(dir_str));
             new_backend("file", &conf).map_err(CommandError::from)
         }
@@ -179,22 +170,10 @@ pub async fn build_backend() -> Result<Arc<dyn Backend>, CommandError> {
             // but is not a valid dial target on Windows and hangs here.
             conf.insert("data_dir".into(), Value::String(dir_str));
             conf.insert("node_id".into(), Value::from(1u64));
-            conf.insert(
-                "secret_raft".into(),
-                Value::String("dev_raft_secret_1".into()),
-            );
-            conf.insert(
-                "secret_api".into(),
-                Value::String("dev_api_secret_01".into()),
-            );
-            conf.insert(
-                "listen_addr_api".into(),
-                Value::String("127.0.0.1".into()),
-            );
-            conf.insert(
-                "listen_addr_raft".into(),
-                Value::String("127.0.0.1".into()),
-            );
+            conf.insert("secret_raft".into(), Value::String("dev_raft_secret_1".into()));
+            conf.insert("secret_api".into(), Value::String("dev_api_secret_01".into()));
+            conf.insert("listen_addr_api".into(), Value::String("127.0.0.1".into()));
+            conf.insert("listen_addr_raft".into(), Value::String("127.0.0.1".into()));
             conf.insert("tls_raft_disable".into(), Value::Bool(true));
             conf.insert("tls_api_disable".into(), Value::Bool(true));
             // Default ports: 8210 raft, 8220 api. If either is already in
@@ -214,20 +193,12 @@ pub async fn build_backend() -> Result<Arc<dyn Backend>, CommandError> {
 /// the async salt bootstrap for `obfuscate_keys = true` runs before
 /// the backend is handed to the vault.
 async fn build_cloud_backend(cloud: CloudStorageConfig) -> Result<Arc<dyn Backend>, CommandError> {
-    let mut conf: HashMap<String, Value> = cloud
-        .config
-        .into_iter()
-        .collect();
+    let mut conf: HashMap<String, Value> = cloud.config.into_iter().collect();
     conf.insert("target".into(), Value::String(cloud.target.clone()));
 
-    eprintln!(
-        "embedded: starting cloud backend with target `{}`",
-        cloud.target
-    );
+    eprintln!("embedded: starting cloud backend with target `{}`", cloud.target);
 
-    let backend = FileBackend::new_maybe_obfuscated(&conf)
-        .await
-        .map_err(CommandError::from)?;
+    let backend = FileBackend::new_maybe_obfuscated(&conf).await.map_err(CommandError::from)?;
     Ok(Arc::new(backend))
 }
 
@@ -273,18 +244,12 @@ pub fn is_initialized() -> Result<bool, CommandError> {
                 preferences::VaultSpec::Cloud { .. } => {
                     return Ok(probe_cloud_initialized().unwrap_or(false));
                 }
-                preferences::VaultSpec::Local {
-                    data_dir: profile_dir,
-                    storage_kind: sk,
-                } => {
+                preferences::VaultSpec::Local { data_dir: profile_dir, storage_kind: sk } => {
                     let effective_kind = match sk.as_str() {
                         "hiqlite" => StorageKind::Hiqlite,
                         _ => StorageKind::File,
                     };
-                    let dir = match profile_dir
-                        .as_ref()
-                        .filter(|s| !s.is_empty())
-                    {
+                    let dir = match profile_dir.as_ref().filter(|s| !s.is_empty()) {
                         Some(custom) => std::path::PathBuf::from(custom),
                         None => data_dir_for(effective_kind)?,
                     };
@@ -379,10 +344,7 @@ fn check_local_dir(dir: &std::path::Path) -> Result<bool, CommandError> {
     // strong signal.
     let file_backend_signals: &[(&str, &[&str])] = &[
         // (subdir, vault-specific filenames inside it)
-        (
-            "core",
-            &["_seal-config", "_auth", "_mounts", "_used-unseal-keys-set"],
-        ),
+        ("core", &["_seal-config", "_auth", "_mounts", "_used-unseal-keys-set"]),
         ("barrier", &["_init"]),
     ];
     for (sub, filenames) in file_backend_signals {
@@ -401,19 +363,10 @@ fn check_local_dir(dir: &std::path::Path) -> Result<bool, CommandError> {
     // unique enough on their own (no general-purpose repo we've
     // seen has a `state_machine_cache/` at its root) so the
     // non-empty-subdir check stays loose for these.
-    const HIQLITE_MARKERS: &[&str] = &[
-        "state_machine",
-        "logs",
-        "logs_cache",
-        "state_machine_cache",
-    ];
+    const HIQLITE_MARKERS: &[&str] = &["state_machine", "logs", "logs_cache", "state_machine_cache"];
     for marker in HIQLITE_MARKERS {
         let p = dir.join(marker);
-        if p.is_dir()
-            && std::fs::read_dir(&p)
-                .map(|mut it| it.next().is_some())
-                .unwrap_or(false)
-        {
+        if p.is_dir() && std::fs::read_dir(&p).map(|mut it| it.next().is_some()).unwrap_or(false) {
             return Ok(true);
         }
     }
@@ -463,14 +416,9 @@ fn resolve_audit_log_path() -> Result<std::path::PathBuf, CommandError> {
                     return Ok(dir.join("audit.log"));
                 }
                 preferences::VaultSpec::Cloud { .. } => {
-                    let base = dirs::data_local_dir()
-                        .or_else(dirs::home_dir)
-                        .ok_or("Cannot determine home directory")?;
-                    return Ok(base
-                        .join(".bastion_vault_gui")
-                        .join("logs")
-                        .join(current_vault_id())
-                        .join("audit.log"));
+                    let base =
+                        dirs::data_local_dir().or_else(dirs::home_dir).ok_or("Cannot determine home directory")?;
+                    return Ok(base.join(".bastion_vault_gui").join("logs").join(current_vault_id()).join("audit.log"));
                 }
                 preferences::VaultSpec::Remote { .. } => {}
             }
@@ -512,14 +460,8 @@ async fn ensure_default_audit_device(vault: &BastionVault) -> Result<(), Command
 
     let mut opts = HashMap::new();
     opts.insert("file_path".to_string(), path.to_string_lossy().into_owned());
-    opts.insert(
-        "rotate_size_bytes".to_string(),
-        bastion_vault::logging::DEFAULT_ROTATE_SIZE_BYTES.to_string(),
-    );
-    opts.insert(
-        "rotate_keep".to_string(),
-        bastion_vault::logging::DEFAULT_ROTATE_KEEP.to_string(),
-    );
+    opts.insert("rotate_size_bytes".to_string(), bastion_vault::logging::DEFAULT_ROTATE_SIZE_BYTES.to_string());
+    opts.insert("rotate_keep".to_string(), bastion_vault::logging::DEFAULT_ROTATE_KEEP.to_string());
 
     let cfg = bastion_vault::audit::AuditDeviceConfig {
         path: "file/".to_string(),
@@ -530,10 +472,7 @@ async fn ensure_default_audit_device(vault: &BastionVault) -> Result<(), Command
     };
 
     broker.enable_device(cfg).await.map_err(CommandError::from)?;
-    eprintln!(
-        "embedded: enabled default file audit device at {}",
-        path.display()
-    );
+    eprintln!("embedded: enabled default file audit device at {}", path.display());
     Ok(())
 }
 
@@ -546,10 +485,7 @@ pub async fn init_embedded() -> Result<InitOutcome, CommandError> {
     eprintln!("embedded: backend built, creating vault");
     let vault = BastionVault::new(backend, None).map_err(CommandError::from)?;
 
-    let seal_config = SealConfig {
-        secret_shares: 1,
-        secret_threshold: 1,
-    };
+    let seal_config = SealConfig { secret_shares: 1, secret_threshold: 1 };
 
     let init_result = vault.init(&seal_config).await.map_err(CommandError::from)?;
 
@@ -580,11 +516,7 @@ pub async fn init_embedded() -> Result<InitOutcome, CommandError> {
         eprintln!("embedded: could not enable default audit device: {e}");
     }
 
-    Ok(InitOutcome {
-        root_token,
-        unseal_key_hex,
-        vault: Arc::new(vault),
-    })
+    Ok(InitOutcome { root_token, unseal_key_hex, vault: Arc::new(vault) })
 }
 
 /// Create default policies on a freshly initialized vault.
@@ -729,12 +661,11 @@ pub async fn open_embedded() -> Result<Arc<BastionVault>, CommandError> {
     // (via the migration path inside `local_keystore::get_unseal_key`)
     // so existing installs upgrade transparently.
     let vault_id = current_vault_id();
-    let unseal_key_hex = crate::local_keystore::get_unseal_key(&vault_id)?
-        .ok_or_else(|| CommandError::from(format!(
-            "No unseal key found for vault `{vault_id}`. Was the vault initialized?"
-        )))?;
-    let unseal_key = hex::decode(&unseal_key_hex)
-        .map_err(|_| CommandError::from("Invalid unseal key in local keystore"))?;
+    let unseal_key_hex = crate::local_keystore::get_unseal_key(&vault_id)?.ok_or_else(|| {
+        CommandError::from(format!("No unseal key found for vault `{vault_id}`. Was the vault initialized?"))
+    })?;
+    let unseal_key =
+        hex::decode(&unseal_key_hex).map_err(|_| CommandError::from("Invalid unseal key in local keystore"))?;
 
     vault.unseal(&[&unseal_key]).await.map_err(CommandError::from)?;
 
@@ -793,9 +724,7 @@ fn probe_cloud_initialized() -> Result<bool, CommandError> {
             Ok::<bool, CommandError>(!entries.is_empty())
         })
     });
-    handle
-        .join()
-        .map_err(|_| CommandError::from("probe thread panicked".to_string()))?
+    handle.join().map_err(|_| CommandError::from("probe thread panicked".to_string()))?
 }
 
 /// Resolve the "active" vault id used to index the local keystore.
@@ -805,8 +734,5 @@ fn probe_cloud_initialized() -> Result<bool, CommandError> {
 /// behavior while still giving multi-vault installs their own
 /// per-id slots.
 pub fn current_vault_id() -> String {
-    crate::preferences::load()
-        .ok()
-        .and_then(|p| p.last_used_id)
-        .unwrap_or_else(|| "default".to_string())
+    crate::preferences::load().ok().and_then(|p| p.last_used_id).unwrap_or_else(|| "default".to_string())
 }
