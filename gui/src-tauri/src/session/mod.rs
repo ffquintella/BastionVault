@@ -206,8 +206,9 @@ pub struct SshSessionState {
 
 /// Library check-in payload — captured at connect time, executed
 /// from `session_close` (or the WebviewWindow close hook). Keeps
-/// the `(mount, set, lease_id)` tuple needed to call
-/// `<mount>/library/<set>/check-in`.
+/// the `(mount, set, account)` tuple needed to call
+/// `<mount>/library/<set>/check-in` (the engine keys check-in on
+/// `account`; `lease_id` is kept for log correlation only).
 #[derive(Clone, Debug)]
 pub struct SessionCleanup {
     pub kind: SessionCleanupKind,
@@ -215,7 +216,7 @@ pub struct SessionCleanup {
 
 #[derive(Clone, Debug)]
 pub enum SessionCleanupKind {
-    LdapLibraryCheckIn { ldap_mount: String, library_set: String, lease_id: String },
+    LdapLibraryCheckIn { ldap_mount: String, library_set: String, account: String, lease_id: String },
 }
 
 #[derive(Debug, Clone)]

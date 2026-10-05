@@ -68,6 +68,9 @@ EXAMPLE ENTRY:
 #### Web Application Connect
 - **Keep connection profiles written by a newer client when you edit profiles**: saving, deleting or re-defaulting a profile on a resource no longer drops profiles whose protocol this version does not know; they are still not listed or launched, and are written back unchanged. (T102, T96, S105)
 
+#### Resource Connect
+- **Connect over SSH or RDP with an LDAP library set credential**: the desktop host read the checked-out account from `username`, which the LDAP engine never returns, so every `library_set` connect failed with "check-out missing `username`" after the account had already been checked out, leaving it checked out. It now reads `service_account_name`, and still fails, naming the field, when the account, password or lease id is missing or empty. Closing the session checks the account back in by `account`, the field the engine's check-in keys on, instead of `lease_id`, which the engine ignored, so the right account is released even when you hold more than one check-out in the set. (T36, S46)
+
 ### Security
 
 #### Web Application Connect
