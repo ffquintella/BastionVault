@@ -7,10 +7,10 @@
 //   - "asset-group":  lock=true allowed + priority slider visible
 //   - "resource":     lock toggle hidden (API refuses lock=true)
 //
-// All four tiers ship the same five knobs (transport / bastions /
-// bastion_group / recording / lock) plus per-AG `priority`. The
-// component manages its own load/save state via the typed wrappers in
-// gui/src/lib/rustion.ts.
+// All four tiers ship the same knobs (transport / bastions /
+// bastion_group / recording / clipboard / clipboard_files / lock) plus
+// per-AG `priority`. The component manages its own load/save state via
+// the typed wrappers in gui/src/lib/rustion.ts.
 
 import { useCallback, useEffect, useState } from "react";
 
@@ -25,6 +25,8 @@ import {
   rustionPolicyTypeDelete,
   rustionPolicyTypeRead,
   rustionPolicyTypeWrite,
+  CLIPBOARD_CEILING_OPTIONS,
+  type ClipboardCeiling,
   type Recording,
   type RustionPolicyTier,
   type Transport,
@@ -55,6 +57,8 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
   const [bastionsList, setBastionsList] = useState("");
   const [bastionGroup, setBastionGroup] = useState("");
   const [recording, setRecording] = useState<Recording>("");
+  const [clipboard, setClipboard] = useState<ClipboardCeiling>("");
+  const [clipboardFiles, setClipboardFiles] = useState<ClipboardCeiling>("");
   const [lock, setLock] = useState(false);
   const [priority, setPriority] = useState(0);
   const [saving, setSaving] = useState(false);
@@ -83,6 +87,8 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
       setBastionsList("");
       setBastionGroup("");
       setRecording("");
+      setClipboard("");
+      setClipboardFiles("");
       setLock(false);
       setPriority(0);
     };
@@ -96,6 +102,8 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
           setBastionsList(p.bastions.join(", "));
           setBastionGroup(p.bastionGroup);
           setRecording(p.recording as Recording);
+          setClipboard((p.clipboard ?? "") as ClipboardCeiling);
+          setClipboardFiles((p.clipboardFiles ?? "") as ClipboardCeiling);
           setLock(p.lock);
         } catch (e) {
           clear();
@@ -109,6 +117,8 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
           setBastionsList(p.bastions.join(", "));
           setBastionGroup(p.bastionGroup);
           setRecording(p.recording as Recording);
+          setClipboard((p.clipboard ?? "") as ClipboardCeiling);
+          setClipboardFiles((p.clipboardFiles ?? "") as ClipboardCeiling);
           setLock(p.lock);
           setPriority(p.priority);
         } catch (e) {
@@ -123,6 +133,8 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
           setBastionsList(p.bastions.join(", "));
           setBastionGroup(p.bastionGroup);
           setRecording(p.recording as Recording);
+          setClipboard((p.clipboard ?? "") as ClipboardCeiling);
+          setClipboardFiles((p.clipboardFiles ?? "") as ClipboardCeiling);
           setLock(false);
         } catch (e) {
           clear();
@@ -154,6 +166,10 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
         bastions,
         bastionGroup,
         recording,
+        // Always sent from here: this editor shows the stored value, so
+        // an empty select is a deliberate "clear", not an omission.
+        clipboard,
+        clipboardFiles,
         lock: tier === "resource" ? false : lock,
       };
       if (tier === "type") {
@@ -188,6 +204,8 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
       setBastionsList("");
       setBastionGroup("");
       setRecording("");
+      setClipboard("");
+      setClipboardFiles("");
       setLock(false);
       return;
     }
@@ -269,6 +287,28 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
                 { value: "off", label: "off" },
               ]}
             />
+            <Select
+              label="RDP clipboard"
+              value={clipboard}
+              onChange={(e) => setClipboard(e.target.value as ClipboardCeiling)}
+              disabled={readOnly}
+              title={readOnly ? readOnlyTitle : undefined}
+              options={CLIPBOARD_CEILING_OPTIONS}
+            />
+            <Select
+              label="RDP file copy"
+              value={clipboardFiles}
+              onChange={(e) => setClipboardFiles(e.target.value as ClipboardCeiling)}
+              disabled={readOnly}
+              title={readOnly ? readOnlyTitle : undefined}
+              options={CLIPBOARD_CEILING_OPTIONS}
+            />
+            <div className="col-span-2 text-xs text-[var(--color-text-muted)]">
+              Clipboard and file copy are ceilings on every RDP profile this
+              tier covers: the most restrictive tier wins, and a profile can
+              narrow but never widen past them. Choose{" "}
+              <strong>off</strong> to pin a channel off.
+            </div>
             <Input
               label="Bastion group"
               value={bastionGroup}

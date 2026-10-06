@@ -18,6 +18,12 @@ function verdict(
     recordingSource: "",
     lockedBy: [],
     lockViolation: null,
+    clipboard: "",
+    clipboardSource: "",
+    clipboardFiles: "",
+    clipboardFilesSource: "",
+    clipboardLockedBy: [],
+    clipboardLockConflict: null,
     ...over,
   };
 }

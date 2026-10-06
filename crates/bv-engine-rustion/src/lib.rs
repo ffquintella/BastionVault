@@ -93,7 +93,81 @@ fn read_tier_fields(req: &Request) -> policy::PolicyTier {
     });
     let bastion_group = pick("bastion_group");
     let lock = req.get_data("lock").ok().and_then(|v| v.as_bool()).unwrap_or(false);
-    policy::PolicyTier { transport, bastions: read_string_list(req, "bastions"), bastion_group, recording, lock }
+    policy::PolicyTier {
+        transport,
+        bastions: read_string_list(req, "bastions"),
+        bastion_group,
+        recording,
+        // Set by `apply_clipboard_fields`, which needs the stored tier.
+        clipboard: None,
+        clipboard_files: None,
+        lock,
+    }
+}
+
+/// Parse one clipboard knob's raw request value.
+///
+/// - `None` (the key is absent) → `stored`, unchanged. A client that
+///   predates the knob — an older GUI or CLI rewriting the tier for its
+///   transport fields — must not silently erase an administrator's
+///   clipboard pin, and every tier write here is otherwise a full replace.
+/// - `""` → cleared (the knob falls through to less specific tiers).
+/// - one of the four canonical directions → set.
+/// - anything else, including a non-string → refused with 400. A typo
+///   never resolves to a default in either direction.
+fn parse_clipboard_knob(
+    key: &str,
+    raw: Option<&Value>,
+    stored: Option<policy::ClipboardPolicy>,
+) -> Result<Option<policy::ClipboardPolicy>, RvError> {
+    let Some(raw) = raw else {
+        return Ok(stored);
+    };
+    let Some(s) = raw.as_str() else {
+        return Err(bv_error_response_status!(
+            400,
+            &format!(
+                "`{key}` must be a string: off | host-to-session | session-to-host | bidirectional, or \"\" to clear"
+            )
+        ));
+    };
+    if s.trim().is_empty() {
+        return Ok(None);
+    }
+    policy::ClipboardPolicy::parse(s).map(Some).ok_or_else(|| {
+        bv_error_response_status!(
+            400,
+            &format!(
+                "unknown `{key}` value `{}` (expected one of: off, host-to-session, session-to-host, bidirectional)",
+                s.trim()
+            )
+        )
+    })
+}
+
+/// Fill `tier.clipboard` / `tier.clipboard_files` from the request, keeping
+/// what `stored` holds for a key the request leaves out. See
+/// [`parse_clipboard_knob`].
+fn apply_clipboard_fields(
+    req: &Request,
+    tier: &mut policy::PolicyTier,
+    stored: Option<&policy::PolicyTier>,
+) -> Result<(), RvError> {
+    for key in ["clipboard", "clipboard_files"] {
+        let raw = match req.get_data(key) {
+            Ok(v) => Some(v),
+            Err(RvError::ErrRequestFieldNotFound) | Err(RvError::ErrRequestNoData) => None,
+            Err(_) => {
+                return Err(bv_error_response_status!(400, &format!("`{key}` must be a string")));
+            }
+        };
+        let (slot, kept) = match key {
+            "clipboard" => (&mut tier.clipboard, stored.and_then(|t| t.clipboard)),
+            _ => (&mut tier.clipboard_files, stored.and_then(|t| t.clipboard_files)),
+        };
+        *slot = parse_clipboard_knob(key, raw.as_ref(), kept)?;
+    }
+    Ok(())
 }
 
 fn group_to_map(g: &policy::BastionGroup) -> Map<String, Value> {
@@ -116,6 +190,12 @@ fn tier_doc_to_map(
     }
     if let Some(r) = tier.recording {
         m.insert("recording".into(), Value::String(r.as_str().into()));
+    }
+    if let Some(c) = tier.clipboard {
+        m.insert("clipboard".into(), Value::String(c.as_str().into()));
+    }
+    if let Some(c) = tier.clipboard_files {
+        m.insert("clipboard_files".into(), Value::String(c.as_str().into()));
     }
     m.insert("lock".into(), Value::Bool(tier.lock));
     if let Some(n) = name {
@@ -793,6 +873,8 @@ impl RustionBackend {
                         "bastions": { field_type: FieldType::CommaStringSlice, required: false, description: "Pinned bastion ids (mutually exclusive with bastion_group)." },
                         "bastion_group": { field_type: FieldType::Str, required: false, description: "Named bastion group." },
                         "recording": { field_type: FieldType::Str, required: false, description: "always | input-redacted | off" },
+                        "clipboard": { field_type: FieldType::Str, required: false, description: "RDP clipboard ceiling: off | host-to-session | session-to-host | bidirectional. \"\" clears; absent leaves it unchanged." },
+                        "clipboard_files": { field_type: FieldType::Str, required: false, description: "RDP file-copy ceiling, same values as clipboard. \"\" clears; absent leaves it unchanged." },
                         "lock": { field_type: FieldType::Bool, required: false, description: "Freeze these settings against lower tiers." }
                     },
                     operations: [
@@ -824,6 +906,8 @@ impl RustionBackend {
                         "bastions": { field_type: FieldType::CommaStringSlice, required: false, description: "Pinned bastion ids." },
                         "bastion_group": { field_type: FieldType::Str, required: false, description: "Named bastion group." },
                         "recording": { field_type: FieldType::Str, required: false, description: "always | input-redacted | off" },
+                        "clipboard": { field_type: FieldType::Str, required: false, description: "RDP clipboard ceiling: off | host-to-session | session-to-host | bidirectional. \"\" clears; absent leaves it unchanged." },
+                        "clipboard_files": { field_type: FieldType::Str, required: false, description: "RDP file-copy ceiling, same values as clipboard. \"\" clears; absent leaves it unchanged." },
                         "lock": { field_type: FieldType::Bool, required: false, description: "Lock against lower tiers." }
                     },
                     operations: [
@@ -842,6 +926,8 @@ impl RustionBackend {
                         "bastions": { field_type: FieldType::CommaStringSlice, required: false, description: "Pinned bastion ids." },
                         "bastion_group": { field_type: FieldType::Str, required: false, description: "Named bastion group." },
                         "recording": { field_type: FieldType::Str, required: false, description: "always | input-redacted | off" },
+                        "clipboard": { field_type: FieldType::Str, required: false, description: "RDP clipboard ceiling: off | host-to-session | session-to-host | bidirectional. \"\" clears; absent leaves it unchanged." },
+                        "clipboard_files": { field_type: FieldType::Str, required: false, description: "RDP file-copy ceiling, same values as clipboard. \"\" clears; absent leaves it unchanged." },
                         "lock": { field_type: FieldType::Bool, required: false, description: "Lock against lower tiers." }
                     },
                     operations: [
@@ -860,7 +946,9 @@ impl RustionBackend {
                         "transport": { field_type: FieldType::Str, required: false, description: "direct | rustion-preferred | rustion-required" },
                         "bastions": { field_type: FieldType::CommaStringSlice, required: false, description: "Pinned bastion ids." },
                         "bastion_group": { field_type: FieldType::Str, required: false, description: "Named bastion group." },
-                        "recording": { field_type: FieldType::Str, required: false, description: "always | input-redacted | off" }
+                        "recording": { field_type: FieldType::Str, required: false, description: "always | input-redacted | off" },
+                        "clipboard": { field_type: FieldType::Str, required: false, description: "RDP clipboard ceiling: off | host-to-session | session-to-host | bidirectional. \"\" clears; absent leaves it unchanged. Refused (403) when it would widen a locked upstream tier." },
+                        "clipboard_files": { field_type: FieldType::Str, required: false, description: "RDP file-copy ceiling, same values and rules as clipboard." }
                     },
                     operations: [
                         {op: Operation::Read, handler: h_policy_res_read.handle_policy_res_read},
@@ -3315,10 +3403,18 @@ impl RustionBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
-        let tier = read_tier_fields(req);
+        let stored = pol.get_global().await?;
+        let mut tier = read_tier_fields(req);
+        apply_clipboard_fields(req, &mut tier, Some(&stored.tier))?;
         let g = policy::GlobalPolicy { tier, updated_at: Some(chrono::Utc::now()) };
         pol.put_global(&g).await?;
-        log::info!("{}: lock={}", audit::POLICY_GLOBAL_UPDATE, g.tier.lock);
+        log::info!(
+            "{}: lock={} clipboard={} clipboard_files={}",
+            audit::POLICY_GLOBAL_UPDATE,
+            g.tier.lock,
+            g.tier.clipboard.map(|c| c.as_str()).unwrap_or("(unset)"),
+            g.tier.clipboard_files.map(|c| c.as_str()).unwrap_or("(unset)"),
+        );
         Ok(Some(Response::data_response(Some(Map::new()))))
     }
 
@@ -3468,7 +3564,9 @@ impl RustionBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
         let name = req.path.strip_prefix("policy/type/").unwrap_or("").to_string();
-        let tier = read_tier_fields(req);
+        let stored = pol.get_type(&name).await?;
+        let mut tier = read_tier_fields(req);
+        apply_clipboard_fields(req, &mut tier, stored.as_ref().map(|p| &p.tier))?;
         let p = policy::TypePolicy { type_name: name.clone(), tier, updated_at: chrono::Utc::now() };
         pol.put_type(&p).await?;
         log::info!("{}: type={}", audit::POLICY_TYPE_UPDATE, name);
@@ -3514,7 +3612,9 @@ impl RustionBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
         let id = req.path.strip_prefix("policy/asset-group/").unwrap_or("").to_string();
-        let tier = read_tier_fields(req);
+        let stored = pol.get_asset_group(&id).await?;
+        let mut tier = read_tier_fields(req);
+        apply_clipboard_fields(req, &mut tier, stored.as_ref().map(|p| &p.tier))?;
         let priority = req.get_data("priority").ok().and_then(|v| v.as_i64()).map(|n| n as i32).unwrap_or(0);
         let p = policy::AssetGroupPolicy { asset_group_id: id.clone(), priority, tier, updated_at: chrono::Utc::now() };
         pol.put_asset_group(&p).await?;
@@ -3555,6 +3655,8 @@ impl RustionBackendInner {
                 "per-resource policy may not set lock=true; locking is admin/root only"
             ));
         }
+        let stored = pol.get_resource(&id).await?;
+        apply_clipboard_fields(req, &mut tier, stored.as_ref().map(|p| &p.tier))?;
         // Refuse any per-resource write when an upstream tier locked
         // the corresponding knobs — the operator can't escape a
         // higher-tier lock. We do a probe-resolve to detect violations.
@@ -3570,8 +3672,11 @@ impl RustionBackendInner {
             let proposed_res =
                 policy::ResourcePolicy { resource_id: id.clone(), tier: tier.clone(), updated_at: chrono::Utc::now() };
             let test = policy::resolve(&global, None, &[], Some(&proposed_res));
-            if test.lock_violation.is_some() {
-                let lv = test.lock_violation.as_ref().unwrap();
+            // A clipboard knob that widens a locked global ceiling is
+            // refused here like a weakened transport: at connect time it
+            // would only be outvoted, and a stored tier that silently does
+            // nothing is a configuration lie.
+            if let Some(lv) = test.lock_violation.as_ref().or(test.clipboard_lock_conflict.as_ref()) {
                 return Err(bv_error_response_status!(
                     403,
                     &format!("per-resource write blocked by upstream lock on {}: {}", lv.field, lv.detail)
@@ -3696,6 +3801,27 @@ impl RustionBackendInner {
             lvm.insert("field".into(), Value::String(lv.field.to_string()));
             lvm.insert("detail".into(), Value::String(lv.detail.clone()));
             data.insert("lock_violation".into(), Value::Object(lvm));
+        }
+        // RDP clipboard ceilings (T35). Always present on a server that
+        // knows the knobs, so a client can tell "this server has no
+        // clipboard policy" (key absent) from "no tier constrains it"
+        // (`bidirectional`, source `default`).
+        data.insert("clipboard".into(), Value::String(effective.clipboard.as_str().to_string()));
+        data.insert("clipboard_source".into(), Value::String(effective.clipboard_source.to_string()));
+        data.insert("clipboard_files".into(), Value::String(effective.clipboard_files.as_str().to_string()));
+        data.insert("clipboard_files_source".into(), Value::String(effective.clipboard_files_source.to_string()));
+        data.insert(
+            "clipboard_locked_by".into(),
+            Value::Array(effective.clipboard_locked_by.iter().map(|s| Value::String((*s).to_string())).collect()),
+        );
+        if let Some(ref c) = effective.clipboard_lock_conflict {
+            // Deliberately not `lock_violation`: callers refuse a session on
+            // that key, and a clipboard conflict must not (see policy.rs).
+            let mut cm = Map::new();
+            cm.insert("locking_tier".into(), Value::String(c.locking_tier.to_string()));
+            cm.insert("field".into(), Value::String(c.field.to_string()));
+            cm.insert("detail".into(), Value::String(c.detail.clone()));
+            data.insert("clipboard_lock_conflict".into(), Value::Object(cm));
         }
         Ok(Some(Response::data_response(Some(data))))
     }
@@ -4125,3 +4251,49 @@ impl Module for RustionModule {
     }
 }
 
+#[cfg(test)]
+mod clipboard_knob_tests {
+    //! The request-parsing half of the T35 clipboard knobs. The resolver
+    //! half is in `policy.rs`; these pin the write semantics a handler
+    //! applies before it stores a tier.
+
+    use super::{parse_clipboard_knob, policy::ClipboardPolicy};
+    use serde_json::Value;
+
+    #[test]
+    fn an_absent_knob_keeps_the_stored_value() {
+        // An older client rewriting the tier for its transport fields must
+        // not erase an administrator's clipboard pin.
+        assert_eq!(
+            parse_clipboard_knob("clipboard", None, Some(ClipboardPolicy::Off)).unwrap(),
+            Some(ClipboardPolicy::Off)
+        );
+        assert_eq!(parse_clipboard_knob("clipboard", None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn an_empty_string_clears_the_knob() {
+        let v = Value::String("  ".into());
+        assert_eq!(parse_clipboard_knob("clipboard", Some(&v), Some(ClipboardPolicy::Off)).unwrap(), None);
+    }
+
+    #[test]
+    fn a_canonical_value_sets_the_knob() {
+        let v = Value::String("session-to-host".into());
+        assert_eq!(
+            parse_clipboard_knob("clipboard_files", Some(&v), None).unwrap(),
+            Some(ClipboardPolicy::SessionToHost)
+        );
+    }
+
+    #[test]
+    fn a_typo_or_a_non_string_is_refused_not_defaulted() {
+        for bad in
+            [Value::String("bidirectionnal".into()), Value::String("on".into()), Value::Bool(true), Value::from(1)]
+        {
+            let err =
+                parse_clipboard_knob("clipboard", Some(&bad), Some(ClipboardPolicy::Off)).expect_err("must be refused");
+            assert!(err.to_string().contains("clipboard"), "{err}");
+        }
+    }
+}

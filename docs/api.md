@@ -1038,6 +1038,69 @@ Attaching a static SSH credential (`private_key` / `password`) to a
 brokered resource returns `409 brokered_resource_no_static_credential`.
 CLI: `bvault ssh-broker policy {get,set}`.
 
+### RDP Clipboard Policy and Audit
+
+Server half of [RDP clipboard redirection](../features/rdp-clipboard-redirection.md)
+§6 and §8 (T35).
+
+**Clipboard ceilings on the Rustion policy tiers.** Two optional knobs on
+every tier document of the four-tier transport policy, alongside
+`transport` / `recording` / `lock`:
+
+~~~
+GET|PUT /v2/rustion/policy/global                 # + clipboard, clipboard_files
+GET|PUT /v2/rustion/policy/type/{type}
+GET|PUT /v2/rustion/policy/asset-group/{id}
+GET|PUT /v2/rustion/policy/resource/{id}          # 403 when it would widen a locked upstream ceiling
+POST    /v2/rustion/policy/effective              # + clipboard, clipboard_source, clipboard_files,
+                                                  #   clipboard_files_source, clipboard_locked_by,
+                                                  #   clipboard_lock_conflict
+~~~
+
+Values are exactly `off` | `host-to-session` | `session-to-host` |
+`bidirectional`; anything else is `400`. On a write, a key that is **absent
+leaves the stored value unchanged** (so a client that predates the knob
+cannot erase a pin by omission) and `""` clears it. Tiers combine by
+intersection — the most restrictive wins — and an unset knob constrains
+nothing, so `policy/effective` reports `bidirectional` with source
+`default` when no tier sets one. The desktop host intersects the connection
+profile's `rdp_clipboard` / `rdp_clipboard_files` with the result; no
+profile value widens past it. A clipboard conflict with a locked tier is
+reported as `clipboard_lock_conflict`, never as `lock_violation`, and does
+not refuse a session. These are BastionVault-only fields on existing
+BastionVault-only paths — no route or operation was added to `v1`.
+
+**`POST /v2/resources/v2/connect/clipboard/audit`** — the vault-side audit
+row for a batch of clipboard transfers; the request pipeline writes it to
+every audit device.
+
+~~~json
+{
+  "resource": "srv1",
+  "profile_id": "p_rdp",
+  "session": "rdp_0123abcd",
+  "seq": 3,
+  "final": false,
+  "transfers": { "session-to-host.text.ok": [120, 33], "host-to-session.file.oversize": [268435457] },
+  "overflow":  { "session-to-host.image.ok": { "count": 40, "bytes": 9000000 } }
+}
+~~~
+
+Keys are `<direction>.<kind>.<outcome>` from a closed vocabulary —
+direction `host-to-session` | `session-to-host`, kind `text` | `image` |
+`file`, outcome `ok` | `oversize` | `refused` | `malformed` | `error` — and
+every value is a byte count (`transfers`: one per transfer) or a
+`{count, bytes}` pair (`overflow`: transfers folded in by the host's rate
+limit). There is no field for content or file names, and a body that tries
+to carry one is refused. At most 256 entries per batch; only a `final`
+batch may be empty; `session` is `[A-Za-z0-9_-]{1,64}`. The caller needs
+`connect` (or `read` / `root`, ownership, or a share) on the resource and
+the profile must be an RDP profile (`400` otherwise, `404` for an unknown
+profile). The endpoint is granted by every baseline policy (`default`,
+`shared-access` and the namespace baselines); the host withdraws the
+session's clipboard if a batch is refused. Response:
+`{ "accepted": <transfers>, "seq": <seq> }`.
+
 ### DoS / Abuse Protection
 
 IP-based request-abuse guard. Requests are counted per client IP over a sliding

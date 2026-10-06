@@ -704,12 +704,37 @@ export const rustionKeystrokeSearch = (query: string, limit?: number) =>
 export type Transport = "" | "direct" | "rustion-preferred" | "rustion-required";
 export type Recording = "" | "always" | "input-redacted" | "off";
 export type Selection = "ordered" | "random";
+/** RDP clipboard ceiling on a policy tier (T35). `""` = unset (the tier
+ *  constrains nothing). Tiers combine by intersection — the most
+ *  restrictive wins — and a connection profile can never widen past the
+ *  result. Same words as the profile key `rdp_clipboard`. */
+export type ClipboardCeiling =
+  | ""
+  | "off"
+  | "host-to-session"
+  | "session-to-host"
+  | "bidirectional";
+
+/** Options for a tier's clipboard / file-copy selects, shared by every
+ *  editor so the tiers read the same everywhere. */
+export const CLIPBOARD_CEILING_OPTIONS: { value: ClipboardCeiling; label: string }[] = [
+  { value: "", label: "(unset — fall through)" },
+  { value: "off", label: "off" },
+  { value: "host-to-session", label: "host-to-session only" },
+  { value: "session-to-host", label: "session-to-host only" },
+  { value: "bidirectional", label: "bidirectional" },
+];
 
 export interface RustionPolicyTier {
   transport: Transport;
   bastions: string[];
   bastionGroup: string;
   recording: Recording;
+  /** RDP clipboard ceiling (text and images). Leave out to keep what the
+   *  tier already stores; `""` clears it. */
+  clipboard?: ClipboardCeiling;
+  /** RDP file-copy ceiling. Same rules as `clipboard`. */
+  clipboardFiles?: ClipboardCeiling;
   lock: boolean;
 }
 
@@ -759,6 +784,8 @@ export interface RustionTypePolicy {
   bastions: string[];
   bastionGroup: string;
   recording: Recording;
+  clipboard: ClipboardCeiling;
+  clipboardFiles: ClipboardCeiling;
   lock: boolean;
   updatedAt: string;
 }
@@ -780,6 +807,8 @@ export interface RustionAssetGroupPolicy {
   bastions: string[];
   bastionGroup: string;
   recording: Recording;
+  clipboard: ClipboardCeiling;
+  clipboardFiles: ClipboardCeiling;
   lock: boolean;
   updatedAt: string;
 }
@@ -790,6 +819,8 @@ export interface RustionAssetGroupPolicyInput {
   bastions: string[];
   bastionGroup: string;
   recording: Recording;
+  clipboard?: ClipboardCeiling;
+  clipboardFiles?: ClipboardCeiling;
   lock: boolean;
 }
 
@@ -853,6 +884,16 @@ export interface RustionEffectivePolicy {
   /** Set when a lower tier tried to weaken a locked higher tier;
    *  session/open would refuse with 403. */
   lockViolation: RustionLockViolation | null;
+  /** RDP clipboard ceiling (T35). Empty from a vault that predates it. */
+  clipboard: string;
+  clipboardSource: string;
+  clipboardFiles: string;
+  clipboardFilesSource: string;
+  clipboardLockedBy: string[];
+  /** A lower tier asked for more clipboard than a locked tier allows.
+   *  Informational — the ceiling already holds; it does not refuse a
+   *  session the way `lockViolation` does. */
+  clipboardLockConflict: RustionLockViolation | null;
 }
 
 /** Resolve the effective Rustion policy for a resource without opening a

@@ -843,7 +843,27 @@ pub struct RustionPolicyTier {
     pub bastions: Vec<String>,
     pub bastion_group: String,
     pub recording: String,
+    /// RDP clipboard ceiling (T35): `off | host-to-session |
+    /// session-to-host | bidirectional`, or `""` to clear. `None` (the key
+    /// left out) leaves the stored value alone — a caller that does not
+    /// know the knob must not erase an administrator's pin by omission.
+    #[serde(default)]
+    pub clipboard: Option<String>,
+    /// RDP file-copy ceiling; same values and rules as `clipboard`.
+    #[serde(default)]
+    pub clipboard_files: Option<String>,
     pub lock: bool,
+}
+
+/// Add the clipboard knobs to a tier write body. Only a value the caller
+/// actually supplied is sent; see [`RustionPolicyTier::clipboard`].
+fn put_clipboard_fields(body: &mut Map<String, Value>, clipboard: Option<String>, clipboard_files: Option<String>) {
+    if let Some(c) = clipboard {
+        body.insert("clipboard".into(), Value::String(c));
+    }
+    if let Some(c) = clipboard_files {
+        body.insert("clipboard_files".into(), Value::String(c));
+    }
 }
 
 #[tauri::command]
@@ -859,6 +879,8 @@ pub async fn rustion_policy_global_read(state: State<'_, AppState>) -> CmdResult
             .unwrap_or_default(),
         bastion_group: s(&data, "bastion_group"),
         recording: s(&data, "recording"),
+        clipboard: Some(s(&data, "clipboard")),
+        clipboard_files: Some(s(&data, "clipboard_files")),
         lock: data.get("lock").and_then(|v| v.as_bool()).unwrap_or(false),
     })
 }
@@ -876,6 +898,7 @@ pub async fn rustion_policy_global_write(state: State<'_, AppState>, input: Rust
     if !input.recording.is_empty() {
         body.insert("recording".into(), Value::String(input.recording));
     }
+    put_clipboard_fields(&mut body, input.clipboard, input.clipboard_files);
     body.insert("lock".into(), Value::Bool(input.lock));
     make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}policy/global"), Some(body)).await?;
     Ok(())
@@ -979,6 +1002,8 @@ pub struct RustionTypePolicy {
     pub bastions: Vec<String>,
     pub bastion_group: String,
     pub recording: String,
+    pub clipboard: String,
+    pub clipboard_files: String,
     pub lock: bool,
     pub updated_at: String,
 }
@@ -994,6 +1019,8 @@ fn type_policy_from_map(data: &Map<String, Value>) -> RustionTypePolicy {
             .unwrap_or_default(),
         bastion_group: s(data, "bastion_group"),
         recording: s(data, "recording"),
+        clipboard: s(data, "clipboard"),
+        clipboard_files: s(data, "clipboard_files"),
         lock: data.get("lock").and_then(|v| v.as_bool()).unwrap_or(false),
         updated_at: s(data, "updated_at"),
     }
@@ -1023,6 +1050,7 @@ pub async fn rustion_policy_type_write(
     if !input.recording.is_empty() {
         body.insert("recording".into(), Value::String(input.recording));
     }
+    put_clipboard_fields(&mut body, input.clipboard, input.clipboard_files);
     body.insert("lock".into(), Value::Bool(input.lock));
     make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}policy/type/{type_name}"), Some(body)).await?;
     Ok(())
@@ -1042,6 +1070,8 @@ pub struct RustionAssetGroupPolicy {
     pub bastions: Vec<String>,
     pub bastion_group: String,
     pub recording: String,
+    pub clipboard: String,
+    pub clipboard_files: String,
     pub lock: bool,
     pub updated_at: String,
 }
@@ -1054,6 +1084,11 @@ pub struct RustionAssetGroupPolicyInput {
     pub bastions: Vec<String>,
     pub bastion_group: String,
     pub recording: String,
+    /// See [`RustionPolicyTier::clipboard`].
+    #[serde(default)]
+    pub clipboard: Option<String>,
+    #[serde(default)]
+    pub clipboard_files: Option<String>,
     pub lock: bool,
 }
 
@@ -1076,6 +1111,8 @@ pub async fn rustion_policy_asset_group_read(
             .unwrap_or_default(),
         bastion_group: s(&data, "bastion_group"),
         recording: s(&data, "recording"),
+        clipboard: s(&data, "clipboard"),
+        clipboard_files: s(&data, "clipboard_files"),
         lock: data.get("lock").and_then(|v| v.as_bool()).unwrap_or(false),
         updated_at: s(&data, "updated_at"),
     })
@@ -1099,6 +1136,7 @@ pub async fn rustion_policy_asset_group_write(
     if !input.recording.is_empty() {
         body.insert("recording".into(), Value::String(input.recording));
     }
+    put_clipboard_fields(&mut body, input.clipboard, input.clipboard_files);
     body.insert("lock".into(), Value::Bool(input.lock));
     make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}policy/asset-group/{asset_group_id}"), Some(body))
         .await?;
@@ -1122,6 +1160,8 @@ pub async fn rustion_policy_resource_read(
             .unwrap_or_default(),
         bastion_group: s(&data, "bastion_group"),
         recording: s(&data, "recording"),
+        clipboard: Some(s(&data, "clipboard")),
+        clipboard_files: Some(s(&data, "clipboard_files")),
         lock: false, // per-resource cannot lock
     })
 }
@@ -1143,6 +1183,7 @@ pub async fn rustion_policy_resource_write(
     if !input.recording.is_empty() {
         body.insert("recording".into(), Value::String(input.recording));
     }
+    put_clipboard_fields(&mut body, input.clipboard, input.clipboard_files);
     body.insert("lock".into(), Value::Bool(false));
     make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}policy/resource/{resource_id}"), Some(body)).await?;
     Ok(())
@@ -1211,6 +1252,17 @@ pub struct RustionEffectivePolicy {
     /// session/open would refuse with 403 in this case; callers should
     /// surface this verbatim and refuse to dial.
     pub lock_violation: Option<RustionLockViolation>,
+    /// RDP clipboard ceiling (T35). Empty on a vault that predates the
+    /// knob; `bidirectional` with source `default` when no tier sets one.
+    pub clipboard: String,
+    pub clipboard_source: String,
+    pub clipboard_files: String,
+    pub clipboard_files_source: String,
+    pub clipboard_locked_by: Vec<String>,
+    /// A lower tier asked for more clipboard than a locked tier allows.
+    /// Informational: the ceiling already holds, so it does not refuse a
+    /// session the way `lock_violation` does.
+    pub clipboard_lock_conflict: Option<RustionLockViolation>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1241,14 +1293,18 @@ pub async fn rustion_policy_effective(
     }
     let resp = make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}policy/effective"), Some(body)).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
-    let lock_violation = data.get("lock_violation").and_then(|v| match v {
-        Value::Object(m) => Some(RustionLockViolation {
-            locking_tier: s(m, "locking_tier"),
-            field: s(m, "field"),
-            detail: s(m, "detail"),
-        }),
-        _ => None,
-    });
+    let violation = |key: &str| {
+        data.get(key).and_then(|v| match v {
+            Value::Object(m) => Some(RustionLockViolation {
+                locking_tier: s(m, "locking_tier"),
+                field: s(m, "field"),
+                detail: s(m, "detail"),
+            }),
+            _ => None,
+        })
+    };
+    let lock_violation = violation("lock_violation");
+    let clipboard_lock_conflict = violation("clipboard_lock_conflict");
     Ok(RustionEffectivePolicy {
         transport: s(&data, "transport"),
         transport_source: s(&data, "transport_source"),
@@ -1267,6 +1323,16 @@ pub async fn rustion_policy_effective(
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default(),
         lock_violation,
+        clipboard: s(&data, "clipboard"),
+        clipboard_source: s(&data, "clipboard_source"),
+        clipboard_files: s(&data, "clipboard_files"),
+        clipboard_files_source: s(&data, "clipboard_files_source"),
+        clipboard_locked_by: data
+            .get("clipboard_locked_by")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        clipboard_lock_conflict,
     })
 }
 

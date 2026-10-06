@@ -56,6 +56,40 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### RDP clipboard: images, file copy, per-transfer audit and a lockable policy
+
+Phases 2–4 of clipboard redirection, in `gui/src-tauri/src/session/rdp_clipboard/` (now a module directory: `dib.rs`, `files.rs`, `audit.rs`), the Rustion policy tiers and the resource engine. See [features/rdp-clipboard-redirection.md](features/rdp-clipboard-redirection.md).
+
+- **Copy and paste images between the host and an RDP session** (T35)
+  -- `CF_DIB` / `CF_DIBV5` in both directions, under the existing `rdp_clipboard` direction. A remote DIB is parsed by a strict decoder of our own (`dib.rs`: 40/108/124-byte headers, 24/32 bpp, `BI_RGB` or standard-mask `BI_BITFIELDS`, no colour table, every offset and length overflow-checked, at most 16384 px a side) and only validated RGBA reaches `arboard`; palette, 16-bit, RLE and embedded JPEG/PNG are refused, typed and counted. Capped at 32 MiB on the wire, dropped rather than truncated.
+- **Copy files in and out of an RDP session, behind a switch of its own** (T35)
+  -- new profile key `rdp_clipboard_files` (`off` by default, the same vocabulary as `rdp_clipboard`, parsed strictly), never implied by `rdp_clipboard: bidirectional` and always within it. Files only, no folders; at most 128 files, 256 MiB each, 1 GiB per copy, refused whole when over. Only basenames cross the wire (`FILECLIP_NO_FILE_PATHS`); remote names have separators stripped to the last component and are refused when traversal-shaped, absolute, reserved on Windows or ambiguous; received files are written `create_new` into a private per-session directory under the app cache, removed when the session ends. No file capability is advertised unless the switch is on. Exposed as *File copy* on the RDP profile editor.
+- **Audit every clipboard transfer** (T35)
+  -- direction, kind, outcome and byte count per transfer, never content or file names; batched (10 s / 64 entries) and rate-limited (12 batches a minute, the excess folded into counted overflow rather than dropped), written as a host audit line and to the vault's audit devices through the new `POST resources/v2/connect/clipboard/audit`. Fails closed: a batch the vault refuses withdraws the session's clipboard for the rest of the session.
+- **Pin the RDP clipboard and file copy off from the policy tiers** (T35)
+  -- `clipboard` and `clipboard_files` on the global, resource-type, asset-group and resource tiers of the Rustion transport policy, with the tiers' existing lock. Most restrictive wins (by intersection of directions), no profile value can widen past the ceiling, a per-resource write that would widen a locked global ceiling is refused `403`, and `policy/effective` reports the ceiling with the tier that set it. Strict values; a write that omits a knob leaves the stored value alone, so an older client cannot erase a pin. Editable on Settings → Rustion policy and every tier card.
+- **`POST resources/v2/connect/clipboard/audit`** (T35)
+  -- metadata words as keys from a closed vocabulary and numbers as values, so the audit row stays readable through HMAC redaction and has no slot for a name; gated on the caller's `connect` grant, RDP profiles only, at most 256 entries per batch. Granted by every baseline policy (`default`, `shared-access`, both namespace baselines). Documented in `docs/api.md`.
+
+### Changed
+
+- **The `ironrdp_cliprdr` log target is capped at `error`** in the desktop host, after `RUST_LOG` is read, because it logs remote file names at `warn` while it sanitises a file list (`gui/src-tauri/src/lib.rs`). (T35)
+- **`arboard` now builds with `image-data`** -- the only `arboard` path to a host image. `image` was already in the graph; the lockfile delta is `tiff`, `fax`, `weezl` and `quick-error`, all pure Rust, justified in `gui/src-tauri/Cargo.toml`. (T35)
+
+### Fixed
+
+- **The RDP clipboard channel now initialises whatever the direction or the host clipboard holds** -- `CLIPRDR` reaches Ready only after the client answers the server's Monitor Ready with a format list, and Phase 1 sent one only when the host had text and the direction allowed ingress, so a `session-to-host` session, or one opened with an image or nothing on the host clipboard, never got a working clipboard. The host now always answers with an empty list, which also stops the pre-session clipboard being offered to the remote on connect. Built to the `ironrdp-cliprdr` state machine; not yet confirmed against a live Windows host. (T35)
+
+### Security
+
+- **An RDP server can no longer place content on the host clipboard unprompted** -- every format-data response used to be written to the host clipboard as text, including one the client never asked for. The backend now records what it requested and drops anything else, counted as malformed. (T35)
+
+### Postponed
+
+- Postpone carrying the RDP clipboard through a Rustion-brokered session to the backlog: it needs `CLIPRDR` forwarding on the bastion, which is Rustion work that has not been scheduled; BastionVault already warns on a brokered profile and reports `ready=false` when the channel never negotiates (T104)
+
 ## [0.44.19] - 2026-10-06
 
 ### Added

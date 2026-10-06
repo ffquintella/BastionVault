@@ -23,6 +23,7 @@ mod resource_connect_web;
 mod oidc;
 mod pki_certs_info;
 mod pki_export;
+mod rdp_clipboard;
 mod rustion;
 mod saml;
 mod userpass;

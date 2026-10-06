@@ -2803,9 +2803,11 @@ function ConnectionProfileEditor({
               it: &ldquo;session → host&rdquo; is an egress path for anything
               the operator can see on the target, &ldquo;host → session&rdquo;
               an ingress path into it, and &ldquo;off&rdquo; attaches no
-              channel at all. Text only, capped at 1&nbsp;MiB per transfer,
-              with per-session counters on the session window. Content is
-              never logged.
+              channel at all. Carries text (capped at 1&nbsp;MiB) and images
+              (capped at 32&nbsp;MiB); every transfer is audited by
+              direction, kind and size, and content is never logged. An
+              administrator&rsquo;s Rustion policy tier can narrow this
+              further; nothing here can widen past it.
             </span>
             {(profile.rdp_clipboard ?? "bidirectional") !== "off" && (
               <span className="text-xs text-[var(--color-text-muted)]">
@@ -2819,6 +2821,47 @@ function ConnectionProfileEditor({
             )}
           </label>
         )}
+
+        {profile.protocol === "rdp" &&
+          (profile.rdp_clipboard ?? "bidirectional") !== "off" && (
+            <label className="flex flex-col gap-1 text-sm">
+              <span className="font-medium">File copy</span>
+              <select
+                className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-sm"
+                value={profile.rdp_clipboard_files ?? "off"}
+                onChange={(e) =>
+                  update(
+                    "rdp_clipboard_files",
+                    e.target.value === "off"
+                      ? undefined
+                      : (e.target.value as RdpClipboardDirection),
+                  )
+                }
+              >
+                <option value="off">Off (default)</option>
+                <option value="host-to-session">
+                  Host → session only (copy files into the target)
+                </option>
+                <option value="session-to-host">
+                  Session → host only (copy files out of the target)
+                </option>
+                <option value="bidirectional">Both directions</option>
+              </select>
+              <span className="text-xs text-[var(--color-text-muted)]">
+                Copy files in Explorer or Finder and paste them on the other
+                side. Its own switch, off unless this resource needs it: a
+                file channel is a far larger egress and ingress path than
+                text, so &ldquo;Both directions&rdquo; above does not imply
+                it. It only works where the clipboard direction above also
+                allows. Files only, no folders; at most 128 files, 256&nbsp;MiB
+                each and 1&nbsp;GiB per copy, refused whole when over. Files
+                copied out land in a private folder that is deleted when the
+                session closes &mdash; paste them before you disconnect.
+                File names and contents are never logged; transfers are
+                audited by size.
+              </span>
+            </label>
+          )}
       </div>
     </Modal>
   );

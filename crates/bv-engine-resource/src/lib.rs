@@ -13,6 +13,7 @@
 //!   smeta/<resource>/<key>              -> ResourceSecretMeta JSON (version index)
 //!   sver/<resource>/<key>/<version>     -> ResourceSecretVersion JSON (old values)
 
+pub mod connect_clipboard;
 pub mod connect_mfa;
 pub mod connect_web;
 pub mod kernel_service;
@@ -327,6 +328,7 @@ impl ResourceBackend {
         let h_web_totp = self.inner.clone();
         let h_web_result = self.inner.clone();
         let h_web_close = self.inner.clone();
+        let h_clipboard_audit = self.inner.clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -669,6 +671,54 @@ impl ResourceBackend {
                     ],
                     help: "Record a web session's end and check an LDAP library account back in. \
                            Idempotent."
+                },
+                {
+                    // RDP clipboard redirection, vault-side audit row (T35
+                    // Phase 4). Metadata only — see connect_clipboard.rs for
+                    // why the shape has no slot for content or file names.
+                    pattern: r"v2/connect/clipboard/audit$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name the RDP profile lives on."
+                        },
+                        "profile_id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Connection-profile id of the RDP profile."
+                        },
+                        "session": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "The desktop host's session token ([A-Za-z0-9_-], at most 64)."
+                        },
+                        "seq": {
+                            field_type: FieldType::Int,
+                            required: true,
+                            description: "Batch sequence number within the session, from 0."
+                        },
+                        "final": {
+                            field_type: FieldType::Bool,
+                            required: false,
+                            description: "True on the session's closing batch, which may be empty."
+                        },
+                        "transfers": {
+                            field_type: FieldType::Map,
+                            required: false,
+                            description: "<direction>.<kind>.<outcome> -> array of per-transfer byte counts."
+                        },
+                        "overflow": {
+                            field_type: FieldType::Map,
+                            required: false,
+                            description: "<direction>.<kind>.<outcome> -> {count, bytes} for rate-limited transfers."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_clipboard_audit.handle_connect_clipboard_audit}
+                    ],
+                    help: "Record a batch of RDP clipboard transfers (direction, kind, outcome, byte \
+                           counts) for the audit trail. Never content or file names."
                 }
             ],
             secrets: [{

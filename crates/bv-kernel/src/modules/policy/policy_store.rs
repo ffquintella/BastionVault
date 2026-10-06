@@ -416,6 +416,12 @@ path "ssh-broker/policy/effective" { capabilities = ["update"] }
 # re-authorizing the named resource's `connect` grant itself, so they are
 # granted on the same terms.
 #
+# `connect/clipboard/audit` is where the desktop host records an RDP
+# session's clipboard transfers (metadata only). It re-authorizes the named
+# resource's `connect` grant the same way. The host fails *closed* on a
+# refusal here -- it withdraws the session's clipboard -- so withholding it
+# would silently turn clipboard redirection off for every non-root caller.
+#
 # Withheld, Connect failed at the first call with a bare 403 for every
 # non-root principal -- including callers holding `connect` on the resource
 # and `update` on `rustion/v2/session/open`, i.e. everything needed to
@@ -427,6 +433,7 @@ path "resources/v2/connect/web/launch" { capabilities = ["update"] }
 path "resources/v2/connect/web/totp"   { capabilities = ["update"] }
 path "resources/v2/connect/web/result" { capabilities = ["update"] }
 path "resources/v2/connect/web/close"  { capabilities = ["update"] }
+path "resources/v2/connect/clipboard/audit" { capabilities = ["update"] }
 "#;
 
 // Implicit self-service policy for namespace-bound tokens.
@@ -660,6 +667,7 @@ path "{{namespace.path}}/resources/v2/connect/web/launch" { capabilities = ["upd
 path "{{namespace.path}}/resources/v2/connect/web/totp"   { capabilities = ["update"] }
 path "{{namespace.path}}/resources/v2/connect/web/result" { capabilities = ["update"] }
 path "{{namespace.path}}/resources/v2/connect/web/close"  { capabilities = ["update"] }
+path "{{namespace.path}}/resources/v2/connect/clipboard/audit" { capabilities = ["update"] }
 "#;
 
 // Cross-namespace share access. Assignable, opt-in, share-scoped.
@@ -750,6 +758,7 @@ path "{{request.namespace}}/resources/v2/connect/web/launch" { capabilities = ["
 path "{{request.namespace}}/resources/v2/connect/web/totp"   { capabilities = ["update"] }
 path "{{request.namespace}}/resources/v2/connect/web/result" { capabilities = ["update"] }
 path "{{request.namespace}}/resources/v2/connect/web/close"  { capabilities = ["update"] }
+path "{{request.namespace}}/resources/v2/connect/clipboard/audit" { capabilities = ["update"] }
 "#;
 
 // Administrator baseline. Full access to every path with every
@@ -834,6 +843,7 @@ path "resources/v2/connect/web/launch"    { capabilities = ["create", "read", "u
 path "resources/v2/connect/web/totp"      { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "resources/v2/connect/web/result"    { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "resources/v2/connect/web/close"     { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "resources/v2/connect/clipboard/audit" { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 "#;
 
 static RESPONSE_WRAPPING_POLICY_NAME: &str = "response-wrapping";
@@ -4313,7 +4323,7 @@ mod implicit_rustion_grant_tests {
         assert!(rule(&p, "rustion/session/open").is_none());
     }
 
-    const CONNECT_ENDPOINTS: [&str; 7] = [
+    const CONNECT_ENDPOINTS: [&str; 8] = [
         "resources/v2/connect/mfa/begin",
         "resources/v2/connect/mfa/verify",
         "resources/v2/connect/authorize",
@@ -4321,6 +4331,7 @@ mod implicit_rustion_grant_tests {
         "resources/v2/connect/web/totp",
         "resources/v2/connect/web/result",
         "resources/v2/connect/web/close",
+        "resources/v2/connect/clipboard/audit",
     ];
 
     /// The GUI calls `connect/mfa/begin` on *every* Connect — the server, not
@@ -4399,6 +4410,7 @@ mod implicit_rustion_grant_tests {
             "{{request.namespace}}/resources/v2/connect/web/totp",
             "{{request.namespace}}/resources/v2/connect/web/result",
             "{{request.namespace}}/resources/v2/connect/web/close",
+            "{{request.namespace}}/resources/v2/connect/clipboard/audit",
         ];
         for r in p.paths.iter() {
             if ungated_by_design.contains(&r.path.as_str()) {

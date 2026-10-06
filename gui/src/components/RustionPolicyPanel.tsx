@@ -35,6 +35,8 @@ import {
   rustionPolicyForceRustion,
   rustionPolicyGlobalRead,
   rustionPolicyGlobalWrite,
+  CLIPBOARD_CEILING_OPTIONS,
+  type ClipboardCeiling,
   type RustionBastionGroup,
   type RustionPolicyTier,
 } from "../lib/rustion";
@@ -154,6 +156,34 @@ function GlobalPolicyCard() {
                 { value: "off", label: "off" },
               ]}
             />
+            <Select
+              label="RDP clipboard"
+              value={policy.clipboard ?? ""}
+              onChange={(e) =>
+                setPolicy({
+                  ...policy,
+                  clipboard: e.target.value as ClipboardCeiling,
+                })
+              }
+              options={CLIPBOARD_CEILING_OPTIONS}
+            />
+            <Select
+              label="RDP file copy"
+              value={policy.clipboardFiles ?? ""}
+              onChange={(e) =>
+                setPolicy({
+                  ...policy,
+                  clipboardFiles: e.target.value as ClipboardCeiling,
+                })
+              }
+              options={CLIPBOARD_CEILING_OPTIONS}
+            />
+            <div className="col-span-2 text-xs text-[var(--color-text-muted)]">
+              Deployment-wide ceilings on RDP clipboard redirection and file
+              copy. Set <strong>off</strong> and lock to pin a channel off
+              everywhere; no lower tier or connection profile can widen
+              past it.
+            </div>
             <Input
               label="Bastion group"
               value={policy.bastionGroup}

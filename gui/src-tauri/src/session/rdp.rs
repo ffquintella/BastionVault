@@ -45,7 +45,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::rdp_clipboard::{self, ClipboardDirection, ClipboardStats, SharedClipboardStats};
+use super::rdp_clipboard::{self, ClipboardSettings, ClipboardStats, SharedClipboardStats};
 use ironrdp::cliprdr::backend::ClipboardMessage;
 use ironrdp::cliprdr::{Cliprdr, CliprdrClient};
 use ironrdp::connector::connection_activation::ConnectionActivationState;
@@ -69,7 +69,7 @@ use ironrdp_core::{encode_buf, WriteBuf};
 use ironrdp_tokio::TokioFramed;
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
@@ -235,16 +235,45 @@ pub struct RdpOpenArgs {
     /// prior unpinned behaviour (direct dials, or a bastion that
     /// advertised no fingerprint).
     pub tls_pin_sha256: Option<String>,
-    /// Clipboard redirection (MS-RDPECLIP) for this session, from the
-    /// profile key `rdp_clipboard`, defaulting to
-    /// [`rdp_clipboard::PROFILE_DEFAULT_DIRECTION`].
-    /// [`ClipboardDirection::Off`] does not attach the `CLIPRDR`
-    /// channel at all, so the server sees a client with no clipboard
-    /// redirection rather than one that advertises the capability and
-    /// refuses every transfer.
-    /// See [`super::rdp_clipboard`] and
+    /// Clipboard redirection (MS-RDPECLIP) for this session: the profile
+    /// keys `rdp_clipboard` / `rdp_clipboard_files` intersected with the
+    /// vault's policy ceiling ([`rdp_clipboard::resolve_settings`]).
+    /// A `direction` of `Off` does not attach the `CLIPRDR` channel at
+    /// all, so the server sees a client with no clipboard redirection
+    /// rather than one that advertises the capability and refuses every
+    /// transfer. See [`super::rdp_clipboard`] and
     /// `features/rdp-clipboard-redirection.md`.
-    pub clipboard: ClipboardDirection,
+    pub clipboard: ClipboardSettings,
+    /// Who this session's clipboard transfers are audited against, and
+    /// whether the vault has an endpoint to audit them to.
+    pub clipboard_audit: rdp_clipboard::audit::AuditContext,
+}
+
+/// Delivers a session's clipboard audit batches to the vault through the
+/// same backend every other logical request uses, so the batch lands in
+/// the vault's audit devices like any request.
+struct VaultAuditDelivery {
+    app: AppHandle,
+}
+
+impl rdp_clipboard::audit::AuditDelivery for VaultAuditDelivery {
+    fn deliver(
+        &self,
+        body: serde_json::Map<String, serde_json::Value>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        Box::pin(async move {
+            let state = self.app.state::<crate::state::AppState>();
+            crate::commands::make_request(
+                &state,
+                bv_client::Operation::Write,
+                rdp_clipboard::audit::AUDIT_PATH.to_string(),
+                Some(body),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.message)
+        })
+    }
 }
 
 /// What kind of credential the operator picked for this session.
@@ -754,7 +783,7 @@ pub async fn open_rdp_session(
     // refuses every transfer.
     let (clipboard_proxy, clipboard_rx) = rdp_clipboard::channel();
     let clipboard_stats: SharedClipboardStats = Arc::new(Mutex::new(ClipboardStats::default()));
-    let clipboard_backend = if args.clipboard.enabled() {
+    let clipboard_backend = if args.clipboard.direction.enabled() {
         if args.ticket_cookie.is_some() {
             // A brokered session dials the bastion's RDP listener, and
             // whether CLIPRDR survives that hop depends on the bastion
@@ -767,11 +796,52 @@ pub async fn open_rdp_session(
                  The channel only works if the bastion forwards CLIPRDR; watch the session's \
                  clipboard counters for `ready`. See features/rdp-clipboard-redirection.md § Phase 5.",
                 args.label,
-                args.clipboard.label()
+                args.clipboard.direction.label()
             );
         }
-        log::info!("rdp clipboard [{}]: attaching CLIPRDR, direction {}", args.label, args.clipboard.label());
-        Some(rdp_clipboard::spawn(args.clipboard, clipboard_proxy, Arc::clone(&clipboard_stats), args.label.clone()))
+        log::info!(
+            "rdp clipboard [{}]: attaching CLIPRDR, direction {}, files {}",
+            args.label,
+            args.clipboard.direction.label(),
+            args.clipboard.files.label()
+        );
+        // Fail closed on audit: the audit task sets this when the vault
+        // cannot record a batch, and the backend then refuses every
+        // further transfer. See `rdp_clipboard::audit`.
+        let withdraw = rdp_clipboard::audit::Withdraw::new(Arc::clone(&clipboard_stats));
+        let withdrawn = withdraw.flag();
+        let audit = rdp_clipboard::audit::spawn(
+            args.clipboard_audit.clone(),
+            token.clone(),
+            args.label.clone(),
+            withdraw,
+            Arc::new(VaultAuditDelivery { app: app.clone() }),
+        );
+        let staging_base = if args.clipboard.files.allows_session_to_host() {
+            match app.path().app_cache_dir() {
+                Ok(dir) => Some(dir.join("rdp-clipboard")),
+                Err(e) => {
+                    log::warn!(
+                        "rdp clipboard [{}]: no application cache directory ({e}); files copied out of the \
+                         session will be refused",
+                        args.label
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        Some(rdp_clipboard::spawn(rdp_clipboard::SpawnConfig {
+            settings: args.clipboard,
+            proxy: clipboard_proxy,
+            stats: Arc::clone(&clipboard_stats),
+            label: args.label.clone(),
+            audit,
+            withdrawn,
+            staging_base,
+            token: token.clone(),
+        }))
     } else {
         None
     };
@@ -1192,7 +1262,7 @@ async fn active_stage_loop<S>(
     // See [`ClipboardInbox`].
     clipboard_rx: mpsc::UnboundedReceiver<ClipboardMessage>,
     clipboard_stats: SharedClipboardStats,
-    clipboard_direction: ClipboardDirection,
+    clipboard_settings: ClipboardSettings,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
 {
@@ -1327,13 +1397,13 @@ async fn active_stage_loop<S>(
             _ = tokio::time::sleep_until(stats_at) => {
                 let now = tokio::time::Instant::now();
                 stats.log_delta(&mut stats_baseline, &label, (now - stats_since).as_secs_f64());
-                if clipboard_direction.enabled() {
-                    log_clipboard_stats(&clipboard_stats, &label, clipboard_direction);
+                if clipboard_settings.direction.enabled() {
+                    log_clipboard_stats(&clipboard_stats, &label, clipboard_settings);
                     // Piggybacks on this tick rather than arming a
-                    // timer of its own: `drive_timeouts` only expires
-                    // stale file-contents transfers, and a text-only
-                    // backend never starts one. Kept because the
-                    // processor owns that state, not us.
+                    // timer of its own: `drive_timeouts` expires the
+                    // clipboard locks and stale file-contents requests
+                    // the processor tracks for file copy. Our own
+                    // per-request timeout lives on the bridge thread.
                     if let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() {
                         match cliprdr.drive_timeouts() {
                             Ok(messages) => {
@@ -1821,14 +1891,18 @@ fn encode_clipboard_message(
         ClipboardMessage::SendFormatData(response) => {
             cliprdr.submit_format_data(response).map_err(|e| format!("submit_format_data: {e}"))?
         }
-        // Phase 1 is text only: the backend never asks for a file
-        // transfer, so these can only come from a future backend and
-        // are refused rather than half-handled.
-        ClipboardMessage::SendInitiateFileCopy(_)
-        | ClipboardMessage::SendFileContentsRequest(_)
-        | ClipboardMessage::SendFileContentsResponse(_) => {
-            log::warn!("rdp clipboard: file-transfer message ignored (text-only backend)");
-            return Ok(None);
+        // File copy (T35 Phase 3). The backend only sends these when the
+        // session's file switch allows the direction; `ironrdp` validates
+        // each against the negotiated capabilities and its own file-list
+        // state and refuses with an error, never a partial send.
+        ClipboardMessage::SendInitiateFileCopy(files) => {
+            cliprdr.initiate_file_copy(files).map_err(|e| format!("initiate_file_copy: {e}"))?
+        }
+        ClipboardMessage::SendFileContentsRequest(request) => {
+            cliprdr.request_file_contents(request).map_err(|e| format!("request_file_contents: {e}"))?
+        }
+        ClipboardMessage::SendFileContentsResponse(response) => {
+            cliprdr.submit_file_contents(response).map_err(|e| format!("submit_file_contents: {e}"))?
         }
         ClipboardMessage::Error(e) => {
             return Err(format!("backend error: {e}"));
@@ -1841,28 +1915,37 @@ fn encode_clipboard_message(
 
 /// One line per stats interval, only while something moved. Byte
 /// counts and outcomes — never clipboard content.
-fn log_clipboard_stats(stats: &SharedClipboardStats, label: &str, direction: ClipboardDirection) {
+fn log_clipboard_stats(stats: &SharedClipboardStats, label: &str, settings: ClipboardSettings) {
     let Ok(s) = stats.lock() else {
         return;
     };
     let moved = s.in_transfers + s.out_transfers;
-    let refused = s.dropped_oversize + s.refused_direction + s.errors;
-    if moved == 0 && refused == 0 {
+    let refused = s.dropped_oversize + s.refused_direction + s.errors + s.malformed + s.refused_files;
+    if moved == 0 && refused == 0 && !s.withdrawn {
         return;
     }
     log::info!(
-        "rdp clipboard [{label}]: direction={} ready={} in={}x/{}B out={}x/{}B \
-         oversize={} wrong-direction={} loops-suppressed={} errors={}",
-        direction.label(),
+        "rdp clipboard [{label}]: direction={} files={} ready={} in={}x/{}B out={}x/{}B \
+         images={}/{} files-moved={}/{} oversize={} wrong-direction={} malformed={} files-refused={} \
+         loops-suppressed={} errors={} withdrawn={}",
+        settings.direction.label(),
+        settings.files.label(),
         s.ready,
         s.in_transfers,
         s.in_bytes,
         s.out_transfers,
         s.out_bytes,
+        s.images_in,
+        s.images_out,
+        s.files_in,
+        s.files_out,
         s.dropped_oversize,
         s.refused_direction,
+        s.malformed,
+        s.refused_files,
         s.suppressed_loop,
         s.errors,
+        s.withdrawn,
     );
 }
 
@@ -2535,7 +2618,7 @@ mod pin_tests {
 /// bytes on the wire.
 #[cfg(test)]
 mod nego_cookie_tests {
-    use super::{build_connector_config, ClipboardDirection, RdpCredential, RdpOpenArgs, DEFAULT_BULK_COMPRESSION};
+    use super::{build_connector_config, ClipboardSettings, RdpCredential, RdpOpenArgs, DEFAULT_BULK_COMPRESSION};
     use ironrdp::pdu::nego::{ConnectionRequest, RequestFlags, SecurityProtocol};
     use ironrdp::pdu::x224::X224;
     use ironrdp_core::{encode_buf, WriteBuf};
@@ -2555,7 +2638,12 @@ mod nego_cookie_tests {
             aggressive_performance: false,
             enable_egfx: false,
             bulk_compression: DEFAULT_BULK_COMPRESSION,
-            clipboard: ClipboardDirection::Off,
+            clipboard: ClipboardSettings::off(),
+            clipboard_audit: crate::session::rdp_clipboard::audit::AuditContext {
+                resource: "r".into(),
+                profile_id: "p".into(),
+                vault_audit: false,
+            },
             ticket_cookie,
             tls_pin_sha256: None,
         }

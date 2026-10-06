@@ -184,11 +184,26 @@ ironrdp-tokio = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-
 # `rdp-clipboard` thread in `session/rdp_clipboard.rs`: platform
 # clipboard handles carry thread affinity, and an X11 read can block
 # for as long as the owning application takes to answer.
-# `default-features = false` drops the `image-data` feature and with it
-# the `image` / `tiff` / `half` stack: Phase 1 carries text only, and a
-# clipboard image decoder is dependency surface this build has no use
-# for. Turn it back on with Phase 2 (CF_DIB), not before.
-arboard = { version = "3", default-features = false }
+# `image-data` is on for clipboard *images* (T35 Phase 2, CF_DIB /
+# CF_DIBV5). It is the only arboard path to a host image at all — arboard
+# exposes no raw-format read — and it is turned on deliberately, not by
+# taking the crate's defaults:
+#
+#   - The remote (attacker-influenced) side never reaches it. A DIB from
+#     the session is parsed and validated by our own strict decoder
+#     (`session/rdp_clipboard/dib.rs`) and handed to arboard as plain
+#     RGBA pixels, which arboard only *encodes* for the host pasteboard.
+#     Decoding through `image` happens only for the operator's own local
+#     clipboard, on its way out.
+#   - The cost is small: `image` 0.25 is already in this graph (qrcode,
+#     via the TOTP engine), so the delta is the per-platform codec arboard
+#     selects (TIFF on macOS for NSImage, PNG on X11/Wayland, PNG+BMP on
+#     Windows) plus the CoreGraphics bindings. Measured lockfile delta:
+#     four crates, `tiff`, `fax`, `weezl`, `quick-error` — all pure Rust,
+#     no C toolchain, no OpenSSL / aws-lc.
+#
+# File copy (Phase 3) uses arboard's `file_list`, which needs no feature.
+arboard = { version = "3", default-features = false, features = ["image-data"] }
 # Direct dep on sspi so we can pull `ReqwestNetworkClient` for the
 # CredSSP smartcard path. The transitive sspi via ironrdp-connector
 # would compile without the `network_client` feature here, so we

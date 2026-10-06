@@ -66,7 +66,17 @@ pub fn run() {
     // this, every log line is silently dropped because the `log` facade
     // has no registered backend. Default filter keeps things quiet;
     // override via `RUST_LOG` (e.g. `RUST_LOG=bastion_vault_gui=debug,russh=debug`).
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).try_init();
+    //
+    // `ironrdp_cliprdr` is capped at `error`, after the environment is read
+    // so `RUST_LOG` cannot lift it: while it sanitises a remote file list it
+    // logs the *original* remote file names at `warn` (and file metadata at
+    // `debug`), and clipboard file names must never reach a log (T35,
+    // features/rdp-clipboard-redirection.md §9). Our own clipboard logging
+    // lives under `bastion_vault_gui::session::rdp_clipboard` and carries
+    // counts, reasons and outcomes only.
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .filter_module("ironrdp_cliprdr", log::LevelFilter::Error)
+        .try_init();
 
     // Best-effort Chromium-flag disable for autofill-related features. Runs
     // before Tauri initializes WebView2 so the runtime picks it up at launch.

@@ -786,11 +786,23 @@ export interface ConnectionProfile {
    * `"session-to-host"` only carrying content out of it, and `"off"`
    * attaches no `CLIPRDR` channel at all. Ingress and egress are
    * separately expressible because they are different risks on a
-   * privileged session. Text only today, size-capped, with
-   * per-session counters on the session window. See
+   * privileged session. Carries text and images, size-capped, every
+   * transfer audited. An administrator's policy tier can narrow this
+   * further and a profile can never widen past it. See
    * features/rdp-clipboard-redirection.md.
    */
   rdp_clipboard?: RdpClipboardDirection;
+  /**
+   * RDP only — file copy over the clipboard channel, its own switch.
+   * Absent means `"off"`: unlike text, file copy is opt-in per resource,
+   * because a file channel is a far larger egress and ingress path. Same
+   * vocabulary as `rdp_clipboard`, and it can only travel where
+   * `rdp_clipboard` itself allows. Files only (no folders), capped per
+   * file, per list and in count; received files land in a private
+   * per-session directory that is removed when the session ends. Never
+   * folded into `rdp_clipboard: "bidirectional"`.
+   */
+  rdp_clipboard_files?: RdpClipboardDirection;
   /**
    * Require the connecting operator to re-prove a second factor (TOTP code
    * or FIDO2 security key) immediately before the session opens. Applies to

@@ -6,11 +6,13 @@
 //!   3. **Per-asset-group** (`AssetGroup.connect.*`)        — admin or group-owner gated.
 //!   4. **Per-resource** (`Resource.connect.*`)             — resource owner.
 //!
-//! Each tier carries the same four knobs:
+//! Each tier carries the same knobs:
 //!   - `transport`           ∈ {direct | rustion-preferred | rustion-required}
 //!   - `bastions`            : Vec<bastion_id>   (pinned ordered list)
 //!   - `bastion_group`       : String             (named pool, mutually-exclusive with `bastions`)
 //!   - `recording`           ∈ {always | input-redacted | off}
+//!   - `clipboard`           ∈ {off | host-to-session | session-to-host | bidirectional}
+//!   - `clipboard_files`     ∈ the same four values, for RDP file copy
 //!   - `lock`                : bool               (lower tiers may not weaken this tier's settings)
 //!
 //! ### Resolution rules (mirrors the spec §Phase 7)
@@ -18,10 +20,23 @@
 //! - `transport`: **most-restrictive** wins (`rustion-required` > `rustion-preferred` > `direct`).
 //! - `bastions` / `bastion_group`: **nearest-defined-tier** wins (resource > asset-group > type > global).
 //! - `recording`: **strictest** wins (`always` > `input-redacted` > `off`).
+//! - `clipboard` / `clipboard_files`: **most-restrictive** wins, by
+//!   *intersection* of the permitted directions — see [`ClipboardPolicy`].
+//!   An unset knob constrains nothing; the connection profile's own
+//!   `rdp_clipboard` / `rdp_clipboard_files` is then intersected with the
+//!   result on the connect path (features/rdp-clipboard-redirection.md §6).
 //! - `lock`: any tier with `lock = true` freezes its knobs against weakening
 //!   from lower tiers — a lower tier may *match or strengthen* (e.g. raise
 //!   transport to `rustion-required` even when type-level locks
 //!   `rustion-preferred`), but never *weaken*.
+//!
+//! A weakened transport or recording is a [`LockViolation`], which
+//! `session/open` and the GUI connect path refuse. A weakened clipboard
+//! knob is reported separately, as [`EffectivePolicy::clipboard_lock_conflict`],
+//! and does **not** refuse the session: the intersection already pins the
+//! effective value at or below the lock, so refusing would only push the
+//! operator onto a client the bastion never sees. It does refuse a
+//! per-resource *write* that tries it.
 //!
 //! Phase 7.1 ships the data model + storage + resolver + global-policy + bastion-groups CRUD.
 //! Phase 7.2 wires the per-type / per-asset-group / per-resource editors into the GUI.
@@ -116,6 +131,86 @@ impl Recording {
     }
 }
 
+/// Which way an RDP session's clipboard may carry content, as a policy
+/// ceiling. Same four words as the connection-profile key `rdp_clipboard`
+/// (features/rdp-clipboard-redirection.md §2), so a tier and a profile
+/// say the same thing the same way.
+///
+/// The directions form a *set* — {host→session, session→host} — not a
+/// line: `host-to-session` and `session-to-host` are incomparable, and the
+/// most restrictive combination of the two is `off`. Tiers therefore
+/// combine by intersection ([`ClipboardPolicy::meet`]), not by a rank.
+///
+/// Deliberately no `Default`: an unset tier is `None` ("constrains
+/// nothing"), and a defaulted variant sitting next to that is how a caller
+/// ends up silently opening or closing the channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClipboardPolicy {
+    /// No clipboard content in either direction.
+    Off,
+    /// Operator's machine → remote session only (ingress).
+    HostToSession,
+    /// Remote session → operator's machine only (egress).
+    SessionToHost,
+    Bidirectional,
+}
+
+impl ClipboardPolicy {
+    pub fn allows_host_to_session(self) -> bool {
+        matches!(self, Self::HostToSession | Self::Bidirectional)
+    }
+
+    pub fn allows_session_to_host(self) -> bool {
+        matches!(self, Self::SessionToHost | Self::Bidirectional)
+    }
+
+    fn from_directions(host_to_session: bool, session_to_host: bool) -> Self {
+        match (host_to_session, session_to_host) {
+            (true, true) => Self::Bidirectional,
+            (true, false) => Self::HostToSession,
+            (false, true) => Self::SessionToHost,
+            (false, false) => Self::Off,
+        }
+    }
+
+    /// The most restrictive combination: a direction survives only if
+    /// both sides permit it.
+    pub fn meet(a: Self, b: Self) -> Self {
+        Self::from_directions(
+            a.allows_host_to_session() && b.allows_host_to_session(),
+            a.allows_session_to_host() && b.allows_session_to_host(),
+        )
+    }
+
+    /// True when `self` permits nothing `ceiling` forbids.
+    pub fn within(self, ceiling: Self) -> bool {
+        Self::meet(self, ceiling) == self
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::HostToSession => "host-to-session",
+            Self::SessionToHost => "session-to-host",
+            Self::Bidirectional => "bidirectional",
+        }
+    }
+
+    /// Strict: exactly one of the four canonical spellings (surrounding
+    /// whitespace aside). An unknown value is never mapped onto a default
+    /// in either direction — the caller refuses it.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "off" => Some(Self::Off),
+            "host-to-session" => Some(Self::HostToSession),
+            "session-to-host" => Some(Self::SessionToHost),
+            "bidirectional" => Some(Self::Bidirectional),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Selection {
@@ -155,6 +250,20 @@ pub struct PolicyTier {
     pub bastions: Vec<String>,
     pub bastion_group: Option<String>,
     pub recording: Option<Recording>,
+    /// Ceiling on RDP clipboard redirection (text and images) for every
+    /// resource this tier covers. `None` constrains nothing.
+    ///
+    /// `serde(default)` is the read-old half of the migration: a tier
+    /// record written before this knob existed has no key and reads as
+    /// `None`. Skipped when unset so a record that never used it is
+    /// byte-identical to the old shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clipboard: Option<ClipboardPolicy>,
+    /// Ceiling on RDP *file* copy over the clipboard channel. Separate
+    /// from `clipboard` because a file channel is a materially larger
+    /// control question than text; same migration rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clipboard_files: Option<ClipboardPolicy>,
     /// When true, lower tiers may not *weaken* this tier's knobs.
     /// `lock` itself doesn't fall through — it's evaluated per-tier.
     #[serde(default)]
@@ -219,6 +328,81 @@ pub struct EffectivePolicy {
     /// True when the request explicitly tried to weaken a locked tier.
     /// `session/open` returns 403 in this case.
     pub lock_violation: Option<LockViolation>,
+    /// Intersection of every tier's `clipboard`. `Bidirectional` when no
+    /// tier set one — i.e. the policy constrains nothing and the
+    /// profile's own `rdp_clipboard` decides.
+    pub clipboard: ClipboardPolicy,
+    /// The last tier that narrowed `clipboard`, or `"default"`.
+    pub clipboard_source: &'static str,
+    /// Intersection of every tier's `clipboard_files`; same conventions.
+    pub clipboard_files: ClipboardPolicy,
+    pub clipboard_files_source: &'static str,
+    /// Tiers that locked a clipboard knob they set, in resolution order.
+    pub clipboard_locked_by: Vec<&'static str>,
+    /// A lower tier asked for more clipboard than a locked tier allows.
+    /// Informational at connect time — the intersection already holds
+    /// the effective value at or below the lock — but a per-resource
+    /// write that would create one is refused.
+    pub clipboard_lock_conflict: Option<LockViolation>,
+}
+
+/// One clipboard knob's walk over the tiers: running intersection, who
+/// narrowed it last, the locked ceiling so far, and the first conflict.
+struct ClipboardWalk {
+    field: &'static str,
+    value: ClipboardPolicy,
+    source: &'static str,
+    ceiling: Option<(ClipboardPolicy, &'static str)>,
+    conflict: Option<LockViolation>,
+}
+
+impl ClipboardWalk {
+    fn new(field: &'static str) -> Self {
+        Self { field, value: ClipboardPolicy::Bidirectional, source: "default", ceiling: None, conflict: None }
+    }
+
+    fn visit(
+        &mut self,
+        tier_name: &'static str,
+        set: Option<ClipboardPolicy>,
+        locks: bool,
+        locked_by: &mut Vec<&'static str>,
+    ) {
+        let Some(c) = set else {
+            return;
+        };
+        if let Some((ceiling, locking_tier)) = self.ceiling {
+            if !c.within(ceiling) {
+                self.conflict.get_or_insert(LockViolation {
+                    locking_tier,
+                    field: self.field,
+                    detail: format!(
+                        "tier `{tier_name}` set {}={} but tier `{locking_tier}` locked it at {}",
+                        self.field,
+                        c.as_str(),
+                        ceiling.as_str()
+                    ),
+                });
+            }
+        }
+        let narrowed = ClipboardPolicy::meet(self.value, c);
+        if narrowed != self.value {
+            self.value = narrowed;
+            self.source = tier_name;
+        }
+        if locks {
+            if !locked_by.contains(&tier_name) {
+                locked_by.push(tier_name);
+            }
+            self.ceiling = Some(match self.ceiling {
+                None => (c, tier_name),
+                Some((prev, prev_src)) => {
+                    let tighter = ClipboardPolicy::meet(prev, c);
+                    (tighter, if tighter == prev { prev_src } else { tier_name })
+                }
+            });
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -268,6 +452,10 @@ pub fn resolve(
     let mut locked_recording: Option<(Recording, &'static str)> = None;
 
     let mut lock_violation: Option<LockViolation> = None;
+
+    let mut clipboard = ClipboardWalk::new("clipboard");
+    let mut clipboard_files = ClipboardWalk::new("clipboard_files");
+    let mut clipboard_locked_by: Vec<&'static str> = Vec::new();
 
     let tiers: Vec<(&'static str, &PolicyTier)> = {
         let mut v: Vec<(&'static str, &PolicyTier)> = Vec::new();
@@ -348,6 +536,11 @@ pub fn resolve(
                 }
             };
         }
+        // clipboard / clipboard_files: intersection; a locked tier caps
+        // everything below it. Never a `lock_violation` — see the module
+        // docs for why a clipboard conflict does not refuse the session.
+        clipboard.visit(name, tier.clipboard, tier.lock, &mut clipboard_locked_by);
+        clipboard_files.visit(name, tier.clipboard_files, tier.lock, &mut clipboard_locked_by);
         // Lock processing: if this tier locks, snapshot the values it sees.
         if tier.lock {
             locked_by.push(*name);
@@ -375,6 +568,12 @@ pub fn resolve(
         recording_source,
         locked_by,
         lock_violation,
+        clipboard: clipboard.value,
+        clipboard_source: clipboard.source,
+        clipboard_files: clipboard_files.value,
+        clipboard_files_source: clipboard_files.source,
+        clipboard_locked_by,
+        clipboard_lock_conflict: clipboard.conflict.or(clipboard_files.conflict),
     }
 }
 
@@ -820,5 +1019,176 @@ mod tests {
             "global"
         );
         assert_eq!(p.lock_violation.as_ref().unwrap().field, "recording");
+    }
+
+    // ─── Clipboard knobs ────────────────────────────────────────────
+
+    fn global_clip(clipboard: Option<ClipboardPolicy>, files: Option<ClipboardPolicy>, lock: bool) -> GlobalPolicy {
+        GlobalPolicy {
+            tier: PolicyTier { clipboard, clipboard_files: files, lock, ..Default::default() },
+            updated_at: None,
+        }
+    }
+
+    fn res_clip(clipboard: Option<ClipboardPolicy>, files: Option<ClipboardPolicy>) -> ResourcePolicy {
+        ResourcePolicy {
+            resource_id: "r".into(),
+            tier: PolicyTier { clipboard, clipboard_files: files, ..Default::default() },
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn clipboard_meet_is_set_intersection() {
+        use ClipboardPolicy::*;
+        assert_eq!(ClipboardPolicy::meet(Bidirectional, HostToSession), HostToSession);
+        assert_eq!(ClipboardPolicy::meet(Bidirectional, SessionToHost), SessionToHost);
+        // The two single directions are incomparable: neither survives.
+        assert_eq!(ClipboardPolicy::meet(HostToSession, SessionToHost), Off);
+        assert_eq!(ClipboardPolicy::meet(Off, Bidirectional), Off);
+        assert!(HostToSession.within(Bidirectional));
+        assert!(!Bidirectional.within(HostToSession));
+        assert!(!SessionToHost.within(HostToSession));
+        assert!(Off.within(Off));
+    }
+
+    #[test]
+    fn clipboard_parse_is_strict() {
+        for (raw, want) in [
+            ("off", ClipboardPolicy::Off),
+            ("host-to-session", ClipboardPolicy::HostToSession),
+            ("session-to-host", ClipboardPolicy::SessionToHost),
+            (" bidirectional ", ClipboardPolicy::Bidirectional),
+        ] {
+            assert_eq!(ClipboardPolicy::parse(raw), Some(want), "{raw:?}");
+        }
+        // No aliases, no case folding, no typos resolving to anything.
+        for raw in ["", "on", "both", "in", "Off", "bidirectionnal", "host_to_session", "none"] {
+            assert_eq!(ClipboardPolicy::parse(raw), None, "{raw:?} must not parse");
+        }
+    }
+
+    #[test]
+    fn no_clipboard_tier_constrains_nothing() {
+        let p = resolve(&GlobalPolicy::default(), None, &[], None);
+        assert_eq!(p.clipboard, ClipboardPolicy::Bidirectional);
+        assert_eq!(p.clipboard_source, "default");
+        assert_eq!(p.clipboard_files, ClipboardPolicy::Bidirectional);
+        assert_eq!(p.clipboard_files_source, "default");
+        assert!(p.clipboard_locked_by.is_empty());
+        assert!(p.clipboard_lock_conflict.is_none());
+    }
+
+    #[test]
+    fn an_unlocked_upper_tier_still_narrows_a_lower_one() {
+        // Most-restrictive wins whether or not anything is locked — the same
+        // rule as transport. A resource cannot widen past its type.
+        let type_ = TypePolicy {
+            type_name: "server".into(),
+            tier: PolicyTier { clipboard: Some(ClipboardPolicy::HostToSession), ..Default::default() },
+            updated_at: Utc::now(),
+        };
+        let p = resolve(
+            &GlobalPolicy::default(),
+            Some(&type_),
+            &[],
+            Some(&res_clip(Some(ClipboardPolicy::Bidirectional), None)),
+        );
+        assert_eq!(p.clipboard, ClipboardPolicy::HostToSession);
+        assert_eq!(p.clipboard_source, "type");
+        assert!(p.clipboard_lock_conflict.is_none(), "nothing was locked");
+    }
+
+    #[test]
+    fn a_locked_off_pins_the_clipboard_and_reports_a_conflict_without_a_lock_violation() {
+        let p = resolve(
+            &global_clip(Some(ClipboardPolicy::Off), None, true),
+            None,
+            &[],
+            Some(&res_clip(Some(ClipboardPolicy::Bidirectional), None)),
+        );
+        assert_eq!(p.clipboard, ClipboardPolicy::Off);
+        assert_eq!(p.clipboard_source, "global");
+        assert_eq!(p.clipboard_locked_by, vec!["global"]);
+        let c = p.clipboard_lock_conflict.as_ref().expect("the resource tried to widen a lock");
+        assert_eq!(c.locking_tier, "global");
+        assert_eq!(c.field, "clipboard");
+        // Regression guard: a clipboard conflict must never become the
+        // transport `lock_violation` that refuses the whole session.
+        assert!(p.lock_violation.is_none());
+    }
+
+    #[test]
+    fn single_directions_from_two_tiers_intersect_to_off() {
+        let ag_in = ag("a", 1, PolicyTier { clipboard: Some(ClipboardPolicy::HostToSession), ..Default::default() });
+        let ag_out = ag("b", 99, PolicyTier { clipboard: Some(ClipboardPolicy::SessionToHost), ..Default::default() });
+        // Priority orders processing, it cannot win back a direction a
+        // lower-priority group withheld.
+        let p = resolve(&GlobalPolicy::default(), None, &[ag_in, ag_out], None);
+        assert_eq!(p.clipboard, ClipboardPolicy::Off);
+        assert_eq!(p.clipboard_source, "asset-group");
+    }
+
+    #[test]
+    fn file_copy_is_its_own_knob() {
+        // Locking files off says nothing about text, and the reverse.
+        let p = resolve(&global_clip(None, Some(ClipboardPolicy::Off), true), None, &[], None);
+        assert_eq!(p.clipboard, ClipboardPolicy::Bidirectional);
+        assert_eq!(p.clipboard_files, ClipboardPolicy::Off);
+        assert_eq!(p.clipboard_files_source, "global");
+
+        let p = resolve(
+            &global_clip(Some(ClipboardPolicy::SessionToHost), None, false),
+            None,
+            &[],
+            Some(&res_clip(None, Some(ClipboardPolicy::Bidirectional))),
+        );
+        assert_eq!(p.clipboard, ClipboardPolicy::SessionToHost);
+        assert_eq!(p.clipboard_files, ClipboardPolicy::Bidirectional);
+    }
+
+    #[test]
+    fn a_lock_without_a_clipboard_value_does_not_cap_the_clipboard() {
+        // `lock` is per tier and freezes only the knobs the tier sets: a
+        // global transport lock is not a clipboard pin.
+        let g = GlobalPolicy {
+            tier: PolicyTier { transport: Some(Transport::RustionRequired), lock: true, ..Default::default() },
+            updated_at: None,
+        };
+        let p = resolve(&g, None, &[], Some(&res_clip(Some(ClipboardPolicy::Bidirectional), None)));
+        assert!(p.clipboard_lock_conflict.is_none());
+        assert!(p.clipboard_locked_by.is_empty());
+        assert_eq!(p.clipboard, ClipboardPolicy::Bidirectional);
+    }
+
+    #[test]
+    fn a_tier_written_before_the_clipboard_knobs_reads_as_unset() {
+        // Read-old: the exact shape `put_type` wrote before this change.
+        let old = r#"{"type_name":"db","transport":"rustion-required","bastions":[],"bastion_group":null,"recording":"always","lock":true,"updated_at":"2026-01-01T00:00:00Z"}"#;
+        let p: TypePolicy = serde_json::from_str(old).expect("old record must still decode");
+        assert_eq!(p.tier.clipboard, None);
+        assert_eq!(p.tier.clipboard_files, None);
+        assert!(p.tier.lock);
+
+        // Write-new: an unset knob is omitted, a set one round-trips.
+        let unset = serde_json::to_value(&p).unwrap();
+        assert!(unset.get("clipboard").is_none() && unset.get("clipboard_files").is_none());
+        let mut set = p.clone();
+        set.tier.clipboard = Some(ClipboardPolicy::HostToSession);
+        set.tier.clipboard_files = Some(ClipboardPolicy::Off);
+        let v = serde_json::to_value(&set).unwrap();
+        assert_eq!(v["clipboard"], "host-to-session");
+        assert_eq!(v["clipboard_files"], "off");
+        let back: TypePolicy = serde_json::from_value(v).unwrap();
+        assert_eq!(back.tier.clipboard, Some(ClipboardPolicy::HostToSession));
+        assert_eq!(back.tier.clipboard_files, Some(ClipboardPolicy::Off));
+    }
+
+    #[test]
+    fn a_stored_unknown_clipboard_value_fails_the_decode() {
+        // A corrupted or future value is a decode error the operator sees,
+        // never a silent `None` that would lift a pin.
+        let bad = r#"{"clipboard":"sideways","lock":true}"#;
+        assert!(serde_json::from_str::<GlobalPolicy>(bad).is_err());
     }
 }

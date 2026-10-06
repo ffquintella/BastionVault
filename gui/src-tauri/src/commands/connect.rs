@@ -534,6 +534,51 @@ pub async fn session_open_rdp(
     let username = profile_username(&profile);
     let primary_target_host = host_candidates.first().cloned().unwrap_or_default();
 
+    // Clipboard redirection (MS-RDPECLIP), resolved before anything is
+    // dialled or any MFA ticket is burnt, so a misconfigured profile or an
+    // unreadable policy refuses the connect cleanly. The profile's two
+    // keys are parsed strictly — a present-but-unrecognised value is an
+    // error, never a silent fallback — and then intersected with the
+    // vault's four-tier policy ceiling, which no profile value can widen.
+    // See features/rdp-clipboard-redirection.md.
+    let profile_clipboard =
+        session::rdp_clipboard::direction_from_profile(profile.get("rdp_clipboard").and_then(|v| v.as_str()))
+            .map_err(CommandError::from)?;
+    let profile_clipboard_files = session::rdp_clipboard::files_direction_from_profile(
+        profile.get("rdp_clipboard_files").and_then(|v| v.as_str()),
+    )
+    .map_err(CommandError::from)?;
+    let clipboard_ceiling = if profile_clipboard.enabled() {
+        read_rdp_clipboard_ceiling(&state, &request.resource_name, &meta).await?
+    } else {
+        // `off` attaches no channel; there is nothing for a policy to cap.
+        session::rdp_clipboard::PolicyCeiling::from_effective(&Map::new())
+    };
+    let clipboard_resolution =
+        session::rdp_clipboard::resolve_settings(profile_clipboard, profile_clipboard_files, &clipboard_ceiling);
+    if let Some(reason) = &clipboard_ceiling.unreadable {
+        log::warn!(
+            "resource-connect/rdp: clipboard policy for `{}` could not be read ({reason}); \
+             clipboard redirection is withheld for this session",
+            request.resource_name
+        );
+    } else if profile_clipboard.enabled() && !clipboard_ceiling.server_supports {
+        log::info!(
+            "resource-connect/rdp: the vault predates clipboard policy (T35); `{}`'s profile values apply \
+             unconstrained and clipboard transfers are audited on this host only",
+            request.resource_name
+        );
+    }
+    for line in &clipboard_resolution.narrowed {
+        log::info!("resource-connect/rdp: `{}`: {line}", request.resource_name);
+    }
+    let clipboard = clipboard_resolution.settings;
+    let clipboard_audit = session::rdp_clipboard::audit::AuditContext {
+        resource: request.resource_name.clone(),
+        profile_id: request.profile_id.clone(),
+        vault_audit: clipboard_ceiling.server_supports,
+    };
+
     // For a `secret`-backed credential, prefer server-side resolution
     // through `rustion/v2/session/open` — see the note on the SSH path
     // above. Returns `Direct` when the policy doesn't route through a
@@ -626,15 +671,6 @@ pub async fn session_open_rdp(
             Err(e) => return Err(CommandError::from(e)),
         },
     };
-    // Clipboard redirection (MS-RDPECLIP). Bidirectional unless the
-    // resource says otherwise — see `PROFILE_DEFAULT_DIRECTION` for
-    // why the default is on and what the resource can set instead.
-    // A present-but-unrecognised value is still an error, never a
-    // silent fallback. See features/rdp-clipboard-redirection.md.
-    let clipboard =
-        session::rdp_clipboard::direction_from_profile(profile.get("rdp_clipboard").and_then(|v| v.as_str()))
-            .map_err(CommandError::from)?;
-
     let (
         host_candidates,
         port,
@@ -728,6 +764,7 @@ pub async fn session_open_rdp(
                     enable_egfx,
                     bulk_compression,
                     clipboard,
+                    clipboard_audit: clipboard_audit.clone(),
                     ticket_cookie: ticket_cookie.clone(),
                     tls_pin_sha256: tls_pin_for_dial.clone(),
                 },
@@ -1646,6 +1683,46 @@ pub(super) async fn read_effective_policy(
         _ => None,
     });
     Ok(EffectivePolicyView { transport, bastions, recording, lock_violation })
+}
+
+/// The RDP clipboard ceiling the vault's policy tiers put on a resource —
+/// the clipboard half of `rustion/policy/effective` (T35).
+///
+/// Fails closed like [`read_effective_policy`]: a denied or failed resolve
+/// refuses the connect rather than guessing, because the same call decides
+/// the transport a moment later and a guess here would be a guess there.
+/// A response that is readable but carries no clipboard keys is a vault
+/// that predates them, which [`PolicyCeiling::from_effective`] reads as
+/// "nothing constrained" (accurately — no tier can have set one).
+///
+/// [`PolicyCeiling::from_effective`]: session::rdp_clipboard::PolicyCeiling::from_effective
+async fn read_rdp_clipboard_ceiling(
+    state: &State<'_, AppState>,
+    resource_name: &str,
+    meta: &Map<String, Value>,
+) -> Result<session::rdp_clipboard::PolicyCeiling, CommandError> {
+    let (resource_id, resource_type, asset_group_ids) = collect_policy_hints(state, resource_name, meta).await;
+    let mut body = Map::new();
+    if !resource_id.is_empty() {
+        body.insert("resource_id".into(), Value::String(resource_id));
+    }
+    if !resource_type.is_empty() {
+        body.insert("resource_type".into(), Value::String(resource_type));
+    }
+    if !asset_group_ids.is_empty() {
+        body.insert("asset_group_ids".into(), Value::Array(asset_group_ids.into_iter().map(Value::String).collect()));
+    }
+    let resp = make_request(state, Operation::Write, format!("{RUSTION_MOUNT}policy/effective"), Some(body))
+        .await
+        .map_err(|e| {
+            CommandError::from(format!(
+                "cannot resolve the clipboard policy for this resource: {}. Refusing to connect: \
+                 a pinned-off clipboard would be bypassed by guessing.",
+                e.message
+            ))
+        })?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(session::rdp_clipboard::PolicyCeiling::from_effective(&data))
 }
 
 /// Resolved SSH login-class verdict for the connect path. Mirrors the
