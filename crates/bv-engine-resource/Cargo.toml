@@ -1,6 +1,6 @@
 [package]
 name = "bv-engine-resource"
-version = "0.41.0"
+version = "0.41.1"
 edition = "2021"
 description = "BastionVault's infrastructure-resource engine: assets, connection profiles and the connect-MFA gate"
 license = "Apache-2.0"

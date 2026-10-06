@@ -56,6 +56,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.19] - 2026-10-06
+
 ### Added
 
 #### Web Application Connect
