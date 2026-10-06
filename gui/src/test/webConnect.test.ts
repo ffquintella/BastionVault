@@ -33,9 +33,11 @@ import {
   normalizeWebOrigin,
   parseSessionProtocol,
   readProfiles,
+  setWebLoginMode,
   validateProfile,
   webOriginSet,
 } from "../lib/connectionProfiles";
+import { evaluateWebExposure, requiredExposureForLoginMode } from "../lib/webExposure";
 import { openProfileSession } from "../lib/sessionLaunch";
 import { webRecipeTest } from "../lib/api";
 import type { ConnectionProfile, ResourceTypeDef, WebProfileSettings } from "../lib/types";
@@ -344,9 +346,7 @@ describe("validateProfile — web profiles", () => {
   });
 
   it("refuses later login modes as not available yet", () => {
-    for (const mode of ["http-auth", "sso"] as const) {
-      expect(validateProfile(webProfile({ login_mode: mode }))).toMatch(/not available yet/);
-    }
+    expect(validateProfile(webProfile({ login_mode: "sso" }))).toMatch(/not available yet/);
     expect(validateProfile(webProfile({ login_mode: "magic" as never }))).toMatch(/Unknown login mode/);
   });
 
@@ -515,5 +515,99 @@ describe("web profile launchability", () => {
     expect(p.web?.start_url).toBe("https://grafana.example.com/");
     expect(p.web?.login_mode).toBe("open");
     expect(validateProfile(p)).toBeNull();
+  });
+});
+
+// ── http-auth (Phase 3) ───────────────────────────────────────────────
+
+describe("http-auth web profiles", () => {
+  const secret = { kind: "secret", secret_id: "admin" } as const;
+  const httpAuth = (web: Partial<WebProfileSettings> = {}, over: Partial<ConnectionProfile> = {}) =>
+    webProfile({ start_url: "https://bmc.example.com/", login_mode: "http-auth", ...web }, {
+      credential_source: secret,
+      ...over,
+    });
+
+  it("saves with a secret or a releasing LDAP source and no recipe", () => {
+    expect(validateProfile(httpAuth())).toBeNull();
+    expect(
+      validateProfile(
+        httpAuth({}, { credential_source: { kind: "ldap", ldap_mount: "openldap", bind_mode: "static_role", static_role: "bmc" } }),
+      ),
+    ).toBeNull();
+    expect(
+      validateProfile(
+        httpAuth(
+          {},
+          { credential_source: { kind: "ldap", ldap_mount: "openldap", bind_mode: "library_set", library_set: "bmc-admins" } },
+        ),
+      ),
+    ).toBeNull();
+    expect(isLaunchableWebProfile(httpAuth())).toBe(true);
+  });
+
+  it("refuses what the server refuses", () => {
+    expect(validateProfile(httpAuth({}, { credential_source: { kind: "default-account" } }))).toMatch(
+      /username only/,
+    );
+    expect(validateProfile(httpAuth({}, { credential_source: { kind: "none" } }))).toMatch(/releases nothing/);
+    expect(
+      validateProfile(httpAuth({}, { credential_source: { kind: "ldap", ldap_mount: "openldap", bind_mode: "operator" } })),
+    ).toMatch(/operator/);
+    expect(validateProfile(httpAuth({}, { credential_source: { kind: "secret", secret_id: "" } }))).toMatch(
+      /Pick a credential secret/,
+    );
+    const recipe = {
+      version: 1 as const,
+      steps: "auto" as const,
+      success_when: { selector: "#ok" },
+    };
+    expect(validateProfile(httpAuth({ recipe }))).toMatch(/only applies to the form login mode/);
+    expect(isLaunchableWebProfile(httpAuth({ recipe }))).toBe(false);
+    expect(isLaunchableWebProfile(httpAuth({}, { credential_source: { kind: "default-account" } }))).toBe(false);
+    // The shared rules hold: https only unless opted in, no pins.
+    expect(validateProfile(httpAuth({ start_url: "http://bmc.example.com/" }))).toMatch(/insecure HTTP/);
+    expect(validateProfile(httpAuth({ tls_pin_sha256: ["abc"] }))).toMatch(/pinning/);
+    // The server's strict origin reading (no percent-encoded hosts).
+    expect(validateProfile(httpAuth({ allowed_origins: ["https://bmc%2Eexample.com"] }))).not.toBeNull();
+  });
+
+  it("switching to http-auth drops the recipe and keeps only a source with a password", () => {
+    const form = webProfile(
+      {
+        login_mode: "form",
+        recipe: { version: 1, steps: "auto", success_when: { selector: "#ok" } },
+      },
+      { credential_source: secret },
+    );
+    const toHttp = setWebLoginMode(form, "http-auth");
+    expect(toHttp.web?.login_mode).toBe("http-auth");
+    expect(toHttp.web?.recipe).toBeUndefined();
+    expect(toHttp.credential_source).toEqual(secret);
+    const fromDefault = setWebLoginMode(
+      webProfile({ login_mode: "form" }, { credential_source: { kind: "default-account" } }),
+      "http-auth",
+    );
+    expect(fromDefault.credential_source).toEqual({ kind: "secret", secret_id: "" });
+    expect(setWebLoginMode(webProfile(), "http-auth").credential_source).toEqual({ kind: "secret", secret_id: "" });
+  });
+
+  it("needs a `handler` cap, and `dom` over plain http", () => {
+    const required = requiredExposureForLoginMode("http-auth");
+    expect(required).toBe("handler");
+    const verdict = (cap: string | undefined, allowInsecureHttp = false) =>
+      evaluateWebExposure({
+        typeDef: cap === undefined ? null : { connect: { web_exposure_max: cap } },
+        resource: {},
+        required: required!,
+        heuristic: false,
+        allowInsecureHttp,
+      }).refusal?.code ?? null;
+    for (const cap of ["handler", "proxy", "dom"]) expect(verdict(cap)).toBeNull();
+    for (const cap of ["none", "isolated"]) expect(verdict(cap)).toBe("exposure_cap_exceeded");
+    expect(verdict(undefined)).toBe("exposure_not_permitted");
+    expect(verdict("handler", true)).toBe("insecure_http_not_allowed");
+    expect(verdict("proxy", true)).toBe("insecure_http_not_allowed");
+    expect(verdict("dom", true)).toBeNull();
   });
 });

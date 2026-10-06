@@ -1,10 +1,11 @@
 /**
  * Editor fields for the `web` block of a connection profile
- * (features/web-application-connect.md §1, T96 Phases 1-2).
+ * (features/web-application-connect.md §1, T96 Phases 1-3).
  *
- * `open` and `form` launch. `form` adds the exposure notice, the credential
- * source (rendered by the parent through `credentialSlot`, which owns the
- * resource's secrets) and the recipe editor. A profile carrying a later mode
+ * `open`, `form` and `http-auth` launch. `form` adds the exposure notice, the
+ * credential source (rendered by the parent through `credentialSlot`, which
+ * owns the resource's secrets) and the recipe editor; `http-auth` the notice
+ * and the credential source, with no recipe. A profile carrying a later mode
  * (written by a newer client) still shows it, and save-time validation
  * explains why it can't launch.
  */
@@ -16,14 +17,20 @@ import { WebRecipeEditor } from "./WebRecipeEditor";
 import * as api from "../lib/api";
 import { WEB_WINDOW_MAX, WEB_WINDOW_MIN, webOriginSet } from "../lib/connectionProfiles";
 import { isHeuristicRecipe } from "../lib/webRecipe";
-import { evaluateWebExposure, savedTypeEntry, type ExposureVerdict } from "../lib/webExposure";
+import {
+  evaluateWebExposure,
+  requiredExposureForLoginMode,
+  savedTypeEntry,
+  type ExposureVerdict,
+} from "../lib/webExposure";
 import type { WebClipboardMode, WebLoginMode, WebProfileSettings } from "../lib/types";
 
 const IS_MACOS =
   typeof navigator !== "undefined" && /mac/i.test(navigator.platform || navigator.userAgent || "");
 
 /**
- * What the server's policy will say about a `form` launch of this resource.
+ * What the server's policy will say about a `form` or `http-auth` launch of
+ * this resource.
  * Read from the *saved* `config/types` (the server never sees the builtins
  * the GUI merges in), so a type the GUI shows as opted in can still be
  * refused. `unknown` means the saved configuration could not be read; then
@@ -38,7 +45,7 @@ export function useWebExposureState(
   resource: Record<string, unknown>,
   web: Pick<WebProfileSettings, "login_mode" | "recipe" | "allow_insecure_http">,
 ): WebExposureState {
-  const active = web.login_mode === "form";
+  const active = web.login_mode === "form" || web.login_mode === "http-auth";
   const [saved, setSaved] = useState<
     { kind: "loading" } | { kind: "error"; reason: string } | { kind: "ok"; config: Record<string, unknown> | null }
   >({ kind: "loading" });
@@ -66,22 +73,32 @@ export function useWebExposureState(
     verdict: evaluateWebExposure({
       typeDef: savedTypeEntry(saved.config, String(resource["type"] ?? "")),
       resource,
-      required: "dom",
-      heuristic: isHeuristicRecipe(web.recipe),
+      // `form` needs `dom`, `http-auth` `handler` (spec §6).
+      required: requiredExposureForLoginMode(web.login_mode) ?? "dom",
+      heuristic: web.login_mode === "form" && isHeuristicRecipe(web.recipe),
       allowInsecureHttp: web.allow_insecure_http === true,
     }),
   };
 }
 
-/** Inline notice for the exposure policy: the server refuses form mode
- *  unless the resource's saved type opts in. */
-export function WebExposureNotice({ state }: { state: WebExposureState }) {
+/** Inline notice for the exposure policy: the server refuses form and
+ *  http-auth mode unless the resource's saved type opts in. */
+export function WebExposureNotice({
+  state,
+  mode = "form",
+}: {
+  state: WebExposureState;
+  mode?: "form" | "http-auth";
+}) {
+  const what = mode === "http-auth" ? "HTTP-authentication logins" : "form logins";
+  // The cap that admits this mode (insecure HTTP always needs `dom`).
+  const needed = mode === "http-auth" ? "handler" : "dom";
   if (state.kind === "loading") return null;
   if (state.kind === "unknown") {
     return (
       <p className="text-xs text-[var(--color-text-muted)]" data-testid="exposure-unknown">
         Could not read the resource type configuration, so this editor can&rsquo;t tell whether the server
-        will allow form logins for this resource ({state.reason}). The server decides at connect time.
+        will allow {what} for this resource ({state.reason}). The server decides at connect time.
       </p>
     );
   }
@@ -89,8 +106,10 @@ export function WebExposureNotice({ state }: { state: WebExposureState }) {
   if (refusal === null) {
     return (
       <p className="text-xs text-[var(--color-text-muted)]" data-testid="exposure-ok">
-        This resource&rsquo;s type allows form logins (exposure cap{" "}
-        <code>{state.verdict.cap}</code>). The password is in the page&rsquo;s DOM between fill and submit.
+        This resource&rsquo;s type allows {what} (exposure cap <code>{state.verdict.cap}</code>).{" "}
+        {mode === "http-auth"
+          ? "The credential goes to the webview's own authentication handler, never into the page."
+          : "The password is in the page\u2019s DOM between fill and submit."}
       </p>
     );
   }
@@ -100,7 +119,9 @@ export function WebExposureNotice({ state }: { state: WebExposureState }) {
       data-testid="exposure-refused"
       className="rounded-md border border-yellow-500/40 bg-yellow-500/10 p-2 text-xs min-w-0"
     >
-      <p className="font-medium">The server will refuse this profile&rsquo;s form login.</p>
+      <p className="font-medium">
+        The server will refuse this profile&rsquo;s {mode === "http-auth" ? "HTTP-authentication" : "form"} login.
+      </p>
       <p className="mt-1 min-w-0 break-words">
         <code>{refusal.code}</code>: {refusal.message}.
       </p>
@@ -111,7 +132,8 @@ export function WebExposureNotice({ state }: { state: WebExposureState }) {
             <Link className="underline" to="/settings">
               Settings &rarr; Resource Types
             </Link>{" "}
-            (edit the type, set &ldquo;Web exposure cap&rdquo; to <code>dom</code>
+            (edit the type, set &ldquo;Web exposure cap&rdquo; to <code>{needed}</code>
+            {mode === "http-auth" && " or higher"}
             {refusal.code === "heuristic_not_allowed" && ", and allow heuristic fill"}).
           </>
         )}
@@ -178,8 +200,9 @@ export function WebProfileFields({
   const loginModeOptions: { value: WebLoginMode; label: string }[] = [
     { value: "open", label: "Open — no credential released" },
     { value: "form", label: "Form — fill a login recipe with the credential" },
+    { value: "http-auth", label: "HTTP authentication — answer Basic / Digest / NTLM sign-in natively" },
   ];
-  if (web.login_mode !== "open" && web.login_mode !== "form") {
+  if (web.login_mode !== "open" && web.login_mode !== "form" && web.login_mode !== "http-auth") {
     loginModeOptions.push({ value: web.login_mode, label: `${web.login_mode} (not available yet)` });
   }
 
@@ -237,9 +260,28 @@ export function WebProfileFields({
           Open mode opens the application and releases nothing: you, or the
           application&rsquo;s own single sign-on, log in. Form mode signs in
           for you by filling the application&rsquo;s login form from a
-          recipe. HTTP-auth and SSO logins arrive in later releases.
+          recipe. HTTP authentication answers the browser-level sign-in
+          prompt (Basic, Digest or NTLM) many appliances use, without
+          touching the page. SSO logins arrive in a later release.
         </p>
       </div>
+
+      {web.login_mode === "http-auth" && (
+        <>
+          <div className="col-span-2 space-y-2 min-w-0">
+            <WebExposureNotice state={exposure} mode="http-auth" />
+            <p className="text-xs text-[var(--color-text-muted)]">
+              <strong className="text-[var(--color-text)]">Exposure, plainly:</strong> the desktop app answers the
+              application&rsquo;s HTTP sign-in challenge itself, natively &mdash; the page never receives the
+              password and no recipe is involved. It answers only challenges from this profile&rsquo;s origins,
+              over HTTPS, once per realm; a second challenge means the password was rejected, and is reported as
+              a failed sign-in. Kerberos / Negotiate and client certificates are refused. Basic authentication
+              sends the password to the server on every request (inside TLS), so the application itself sees it.
+            </p>
+          </div>
+          {credentialSlot && <div className="col-span-2 space-y-2 min-w-0">{credentialSlot}</div>}
+        </>
+      )}
 
       {web.login_mode === "form" && (
         <>
@@ -317,7 +359,9 @@ export function WebProfileFields({
           <span className="block text-xs text-[var(--color-text-muted)]">
             Permits <code>http://</code> start URLs and origins. Anything on
             the network path can read and change the session. Leave off
-            unless the appliance offers no HTTPS at all.
+            unless the appliance offers no HTTPS at all. A form or HTTP
+            authentication login over plain HTTP needs the type&rsquo;s cap at{" "}
+            <code>dom</code>.
           </span>
         </span>
       </label>

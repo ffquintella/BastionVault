@@ -12,10 +12,11 @@
 //!
 //! Login modes: `open` (Phase 1) releases no credential; `form` (Phase 2)
 //! runs a login recipe with a credential the server releases at
-//! `v2/connect/web/launch`. `http-auth`, `sso`, the `rustion-isolated`
-//! transport and TLS pinning are refused explicitly rather than ignored, so
-//! a profile written for a later phase can never run with its protections
-//! silently missing.
+//! `v2/connect/web/launch`; `http-auth` (Phase 3) answers HTTP Basic /
+//! Digest / NTLM challenges natively with a credential released the same way
+//! (`web_http_auth`). `sso`, the `rustion-isolated` transport and TLS pinning
+//! are refused explicitly rather than ignored, so a profile written for a
+//! later phase can never run with its protections silently missing.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -296,6 +297,10 @@ pub enum WebLogin {
     /// A login recipe, filled with a credential the server releases at
     /// `v2/connect/web/launch`. Boxed: the plan is far larger than `Open`.
     Form(Box<FormLogin>),
+    /// HTTP Basic / Digest / NTLM challenges answered by the host's native
+    /// handler with a username and password the server releases at
+    /// `v2/connect/web/launch`. No recipe; never the DOM.
+    HttpAuth,
 }
 
 /// A `form`-mode profile's recipe, parsed by the server's own strict parser.
@@ -364,6 +369,10 @@ fn opt_str<'a>(v: Option<&'a Value>, what: &str) -> Result<Option<&'a str>, Stri
 /// checks the details; the host only refuses a kind that cannot apply).
 const FORM_SOURCES: &[&str] = &["secret", "ldap", "default-account"];
 
+/// Credential sources an `http-auth` launch can resolve: both need a username
+/// *and* a password, so a `default-account` (username only) cannot apply.
+const HTTP_AUTH_SOURCES: &[&str] = &["secret", "ldap"];
+
 /// Parse and validate the `web` half of a connection profile. Every field
 /// that belongs to a later phase is refused when set, never ignored. Every
 /// field the checks below read is type-checked: absent / null means unset,
@@ -394,15 +403,18 @@ pub fn parse_web_profile(profile: &Value) -> Result<WebSessionConfig, String> {
         Some(_) => return Err("the profile's `web` settings must be an object".to_string()),
     };
 
-    let form = match opt_str(web.get("login_mode"), "web.login_mode")? {
-        Some("open") => false,
-        Some("form") => true,
-        Some(mode @ ("http-auth" | "sso")) => {
-            return Err(format!("login mode `{mode}` is not available yet; this release supports `open` and `form`"))
+    let mode = match opt_str(web.get("login_mode"), "web.login_mode")? {
+        Some(mode @ ("open" | "form" | "http-auth")) => mode,
+        Some("sso") => {
+            return Err(
+                "login mode `sso` is not available yet; this release supports `open`, `form` and `http-auth`".to_string()
+            )
         }
         Some(other) => return Err(format!("unknown login mode `{other}`")),
         None => return Err("web profile has no login_mode".to_string()),
     };
+    let form = mode == "form";
+    let http_auth = mode == "http-auth";
 
     if form {
         // `form` needs a source the server can release a credential from.
@@ -410,6 +422,14 @@ pub fn parse_web_profile(profile: &Value) -> Result<WebSessionConfig, String> {
             return Err(format!(
                 "credential source `{source_kind}` cannot sign in a `form` login; use a secret, ldap or \
                  default-account source"
+            ));
+        }
+    } else if http_auth {
+        // An HTTP authentication challenge needs a username and a password.
+        if !HTTP_AUTH_SOURCES.contains(&source_kind) {
+            return Err(format!(
+                "credential source `{source_kind}` cannot answer an `http-auth` challenge, which needs a username \
+                 and a password; use a secret or ldap source"
             ));
         }
     } else if source_kind != "none" {
@@ -428,6 +448,7 @@ pub fn parse_web_profile(profile: &Value) -> Result<WebSessionConfig, String> {
         Some(other) => return Err(format!("unknown web transport `{other}`")),
     }
     let login = match (form, web.get("recipe").filter(|v| !v.is_null())) {
+        (false, None) if http_auth => WebLogin::HttpAuth,
         (false, None) => WebLogin::Open,
         (false, Some(_)) => return Err("a login recipe only applies to the `form` login mode".to_string()),
         (true, None) => return Err("a `form` login needs a login recipe".to_string()),
@@ -554,6 +575,8 @@ pub enum WebSessionKind {
     Open,
     /// `login_mode: form` — carries a launch to finish.
     Form,
+    /// `login_mode: http-auth` — carries a launch to finish.
+    HttpAuth,
     /// A `web_recipe_test` dry run: remote content like any web session, so
     /// it counts for the web/RDP exclusion, but no credential and no launch.
     RecipeTest,
@@ -564,6 +587,7 @@ impl WebSessionKind {
         match self {
             Self::Open => "open",
             Self::Form => "form",
+            Self::HttpAuth => "http-auth",
             Self::RecipeTest => "recipe_test",
         }
     }
@@ -1094,13 +1118,11 @@ mod tests {
 
     #[test]
     fn later_phase_login_modes_are_refused_not_ignored() {
-        for mode in ["http-auth", "sso"] {
-            let err = parse_web_profile(&open_profile(json!({
-                "start_url": "https://a.example", "login_mode": mode,
-            })))
-            .unwrap_err();
-            assert!(err.contains("not available yet"), "{mode}: {err}");
-        }
+        let err = parse_web_profile(&open_profile(json!({
+            "start_url": "https://a.example", "login_mode": "sso",
+        })))
+        .unwrap_err();
+        assert!(err.contains("not available yet"), "{err}");
         let err = parse_web_profile(&open_profile(json!({ "start_url": "https://a.example", "login_mode": "magic" })))
             .unwrap_err();
         assert!(err.contains("unknown login mode"), "{err}");
@@ -1227,6 +1249,39 @@ mod tests {
         ] {
             assert!(parse_web_profile(&form_profile(json!({ "kind": "secret" }), Some(bad))).is_err(), "{why}");
         }
+    }
+
+    // ── http-auth mode ──────────────────────────────────────────────
+
+    fn http_auth_profile(source: Value) -> Value {
+        json!({ "id": "p_basic", "name": "BMC", "protocol": "web", "credential_source": source,
+                "web": { "start_url": "https://bmc.example.com/", "login_mode": "http-auth" } })
+    }
+
+    #[test]
+    fn an_http_auth_profile_needs_a_username_and_password_source_and_no_recipe() {
+        for kind in ["secret", "ldap"] {
+            let cfg = parse_web_profile(&http_auth_profile(json!({ "kind": kind }))).unwrap();
+            assert!(matches!(cfg.login, WebLogin::HttpAuth), "{kind}");
+        }
+        for kind in ["default-account", "none", "ssh-engine", "pki", "fido2", ""] {
+            let err = parse_web_profile(&http_auth_profile(json!({ "kind": kind }))).unwrap_err();
+            assert!(err.contains("cannot answer"), "{kind}: {err}");
+        }
+        let mut p = http_auth_profile(json!({ "kind": "secret" }));
+        p.as_object_mut().unwrap().remove("credential_source");
+        assert!(parse_web_profile(&p).unwrap_err().contains("cannot answer"));
+        let mut p = http_auth_profile(json!({ "kind": "secret" }));
+        p["web"]["recipe"] = form_recipe();
+        assert!(parse_web_profile(&p).unwrap_err().contains("only applies to the `form`"));
+        // The shared rules still hold: no http without the opt-in, no pins.
+        let mut p = http_auth_profile(json!({ "kind": "secret" }));
+        p["web"]["start_url"] = json!("http://bmc.example.com/");
+        assert!(parse_web_profile(&p).unwrap_err().contains("allow_insecure_http"));
+        let mut p = http_auth_profile(json!({ "kind": "secret" }));
+        p["web"]["tls_pin_sha256"] = json!(["abc"]);
+        assert!(parse_web_profile(&p).unwrap_err().contains("pinning"));
+        assert_eq!(WebSessionKind::HttpAuth.as_str(), "http-auth");
     }
 
     #[test]

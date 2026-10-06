@@ -344,6 +344,16 @@ pub const HOST_ABORT_CHECKS: &[&str] = &[
     "fill_scope",
     "heuristic_mismatch",
     "registry_conflict",
+    // http-auth (`session::web_http_auth`).
+    "auth_handler",
+    "auth_proxy",
+    "auth_negotiate",
+    "auth_client_certificate",
+    "auth_scheme",
+    "auth_insecure",
+    "auth_origin",
+    "auth_repeat",
+    "auth_released",
 ];
 
 /// The outcome once failure / success conditions have been probed. Failure is
@@ -458,7 +468,8 @@ pub struct LaunchBundle {
     pub profile_id: String,
     pub login_mode: String,
     pub exposure: String,
-    pub recipe_hash: String,
+    /// `form` only; an `http-auth` launch carries none.
+    pub recipe_hash: Option<String>,
     pub heuristic: bool,
     pub fill_scope: ServerFillScope,
     pub credential_source: String,
@@ -566,12 +577,17 @@ pub fn parse_bundle(mut data: Map<String, Value>) -> Result<LaunchBundle, String
             Some(Value::String(s)) => Some(s),
             Some(_) => return Err("`mfa_method` is not a string".into()),
         };
+        let recipe_hash = match data.remove("recipe_hash") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => Some(s),
+            Some(_) => return Err("`recipe_hash` is not a string".into()),
+        };
         Ok(LaunchBundle {
             resource: take_string(&mut data, "resource")?,
             profile_id: take_string(&mut data, "profile_id")?,
             login_mode: take_string(&mut data, "login_mode")?,
             exposure: take_string(&mut data, "exposure")?,
-            recipe_hash: take_string(&mut data, "recipe_hash")?,
+            recipe_hash,
             heuristic,
             fill_scope,
             credential_source: take_string(&mut data, "credential_source")?,
@@ -588,33 +604,59 @@ pub fn parse_bundle(mut data: Map<String, Value>) -> Result<LaunchBundle, String
 pub struct BundleExpectation<'a> {
     pub resource: &'a str,
     pub profile_id: &'a str,
-    pub recipe_hash: &'a str,
-    pub plan: &'a RecipePlan,
+    pub login: ExpectedLogin<'a>,
+}
+
+/// The login the host is about to run.
+#[derive(Clone, Copy)]
+pub enum ExpectedLogin<'a> {
+    Form { recipe_hash: &'a str, plan: &'a RecipePlan },
+    /// Answers HTTP authentication challenges natively; no recipe, no TOTP.
+    HttpAuth,
 }
 
 /// Cross-check the bundle against the profile the host is about to run.
 /// `Err` carries the `aborted:<check>` name the launch is closed with.
 pub fn check_bundle(bundle: &LaunchBundle, expect: &BundleExpectation<'_>) -> Result<(), &'static str> {
-    if bundle.resource != expect.resource
-        || bundle.profile_id != expect.profile_id
-        || bundle.login_mode != "form"
-        || bundle.exposure != "dom"
-        || bundle.recipe_hash != expect.recipe_hash
-    {
+    if bundle.resource != expect.resource || bundle.profile_id != expect.profile_id {
         return Err("bundle_mismatch");
     }
-    // Heuristic filling runs only when the server says policy allows it for
-    // this launch, and only for a recipe that asks for it.
-    if bundle.heuristic != expect.plan.is_heuristic() {
-        return Err("heuristic_mismatch");
-    }
     let c = &bundle.credential;
-    let p = expect.plan;
-    if (p.needs_username && c.username.is_none())
-        || (p.needs_password && c.password.is_none())
-        || (p.needs_totp && c.totp.is_none())
-    {
-        return Err("credential_missing");
+    match expect.login {
+        ExpectedLogin::Form { recipe_hash, plan } => {
+            if bundle.login_mode != "form" || bundle.exposure != "dom" || bundle.recipe_hash.as_deref() != Some(recipe_hash)
+            {
+                return Err("bundle_mismatch");
+            }
+            // Heuristic filling runs only when the server says policy allows
+            // it for this launch, and only for a recipe that asks for it.
+            if bundle.heuristic != plan.is_heuristic() {
+                return Err("heuristic_mismatch");
+            }
+            if (plan.needs_username && c.username.is_none())
+                || (plan.needs_password && c.password.is_none())
+                || (plan.needs_totp && c.totp.is_none())
+            {
+                return Err("credential_missing");
+            }
+        }
+        ExpectedLogin::HttpAuth => {
+            // `handler`, or `dom` when the server's scope allows plain http
+            // (spec §6: a credential over plain http is not `handler`).
+            let exposure = if bundle.fill_scope.allow_insecure_http { "dom" } else { "handler" };
+            if bundle.login_mode != "http-auth"
+                || bundle.exposure != exposure
+                || bundle.recipe_hash.is_some()
+                || bundle.heuristic
+                || !bundle.totp_refresh_steps.is_empty()
+                || c.totp.is_some()
+            {
+                return Err("bundle_mismatch");
+            }
+            if c.username.is_none() || c.password.is_none() {
+                return Err("credential_missing");
+            }
+        }
     }
     Ok(())
 }
@@ -1058,9 +1100,19 @@ mod tests {
         take_launch_id(&mut d).unwrap();
         d["recipe_hash"] = json!(hash);
         let b = parse_bundle(d).unwrap();
-        let expect = BundleExpectation { resource: "fw01", profile_id: "p_web", recipe_hash: &hash, plan: &plan };
+        let expect = BundleExpectation {
+            resource: "fw01",
+            profile_id: "p_web",
+            login: ExpectedLogin::Form { recipe_hash: &hash, plan: &plan },
+        };
         assert_eq!(check_bundle(&b, &expect), Ok(()));
-        let other = BundleExpectation { recipe_hash: "sha256:other", ..expect };
+        let other = BundleExpectation {
+            login: ExpectedLogin::Form { recipe_hash: "sha256:other", plan: &plan },
+            ..expect
+        };
+        assert_eq!(check_bundle(&b, &other), Err("bundle_mismatch"));
+        // A form launch is never accepted as an http-auth one, or the reverse.
+        let other = BundleExpectation { login: ExpectedLogin::HttpAuth, ..expect };
         assert_eq!(check_bundle(&b, &other), Err("bundle_mismatch"));
         let other = BundleExpectation { resource: "fw02", ..expect };
         assert_eq!(check_bundle(&b, &other), Err("bundle_mismatch"));
@@ -1081,6 +1133,62 @@ mod tests {
         c.remove("totp");
         c.remove("totp_valid_until");
         assert_eq!(check_bundle(&parse_bundle(d).unwrap(), &expect), Err("credential_missing"));
+    }
+
+    fn http_auth_bundle_json() -> Map<String, Value> {
+        let mut d = bundle_json();
+        take_launch_id(&mut d).unwrap();
+        d.remove("recipe_hash");
+        d["login_mode"] = json!("http-auth");
+        d["exposure"] = json!("handler");
+        d["totp_refresh_steps"] = json!([]);
+        let c = d["credential"].as_object_mut().unwrap();
+        c.remove("totp");
+        c.remove("totp_valid_until");
+        d
+    }
+
+    #[test]
+    fn http_auth_bundles_carry_a_username_and_password_and_nothing_else() {
+        let expect = BundleExpectation { resource: "fw01", profile_id: "p_web", login: ExpectedLogin::HttpAuth };
+        let b = parse_bundle(http_auth_bundle_json()).unwrap();
+        assert_eq!(b.recipe_hash, None);
+        assert_eq!(check_bundle(&b, &expect), Ok(()));
+
+        // Plain http in the server's scope means `dom`, never `handler`.
+        let mut d = http_auth_bundle_json();
+        d["fill_scope"]["allow_insecure_http"] = json!(true);
+        assert_eq!(check_bundle(&parse_bundle(d).unwrap(), &expect), Err("bundle_mismatch"));
+        let mut d = http_auth_bundle_json();
+        d["fill_scope"]["allow_insecure_http"] = json!(true);
+        d["exposure"] = json!("dom");
+        assert_eq!(check_bundle(&parse_bundle(d).unwrap(), &expect), Ok(()));
+
+        let cases: Vec<(Box<dyn Fn(&mut Map<String, Value>)>, &str)> = vec![
+            (Box::new(|d| d["login_mode"] = json!("form")), "bundle_mismatch"),
+            (Box::new(|d| d["exposure"] = json!("dom")), "bundle_mismatch"),
+            (Box::new(|d| drop(d.insert("recipe_hash".into(), json!("sha256:abc")))), "bundle_mismatch"),
+            (Box::new(|d| d["heuristic"] = json!(true)), "bundle_mismatch"),
+            (Box::new(|d| d["totp_refresh_steps"] = json!([0])), "bundle_mismatch"),
+            (
+                Box::new(|d| {
+                    d["credential"]["totp"] = json!("123456");
+                    d["credential"]["totp_valid_until"] = json!("2026-10-05T12:00:30Z");
+                }),
+                "bundle_mismatch",
+            ),
+            (Box::new(|d| drop(d["credential"].as_object_mut().unwrap().remove("password"))), "credential_missing"),
+            (Box::new(|d| drop(d["credential"].as_object_mut().unwrap().remove("username"))), "credential_missing"),
+            (Box::new(|d| d["resource"] = json!("fw02")), "bundle_mismatch"),
+        ];
+        for (i, (mutate, want)) in cases.iter().enumerate() {
+            let mut d = http_auth_bundle_json();
+            mutate(&mut d);
+            assert_eq!(check_bundle(&parse_bundle(d).unwrap(), &expect), Err(*want), "case {i}");
+        }
+        let mut d = http_auth_bundle_json();
+        d.insert("recipe_hash".into(), json!(5));
+        assert!(parse_bundle(d).is_err(), "a mistyped recipe_hash is malformed, not absent");
     }
 
     // ── Fill scope ─────────────────────────────────────────────────

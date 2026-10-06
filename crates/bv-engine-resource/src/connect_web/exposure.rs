@@ -10,7 +10,8 @@
 //! the resource's `type` must name a type present in the *saved* type
 //! configuration whose `connect.web_exposure_max` is set. A type that is
 //! unset, missing from the saved configuration, or never saved at all leaves
-//! the cap at `none`, so `form` (which needs `dom`) is refused. The resource
+//! the cap at `none`, so `form` (which needs `dom`) and `http-auth` (which
+//! needs `handler`) are refused. The resource
 //! tier can only lower the type's cap (the stricter wins), never opt in by
 //! itself. Because the resource's `type` is editable metadata, an unknown
 //! type is a denial rather than an escape from the type tier.
@@ -150,12 +151,12 @@ impl fmt::Display for ExposureRefusal {
                 f,
                 "web credential release is off by default: this resource's type is not in the saved \
                  resource type configuration, so it has not opted in. Save the type with \
-                 `connect.web_exposure_max` set (`dom` for form mode)"
+                 `connect.web_exposure_max` set (`dom` for form mode, `handler` for http-auth)"
             ),
             Self::NotPermitted { type_saved: true } => write!(
                 f,
                 "web credential release is off by default: this resource's type does not set \
-                 `connect.web_exposure_max`. Set it on the type (`dom` for form mode) to opt in"
+                 `connect.web_exposure_max`. Set it on the type (`dom` for form mode, `handler` for http-auth) to opt in"
             ),
             Self::CapExceeded { required, cap, set_by } => write!(
                 f,
@@ -431,5 +432,56 @@ mod tests {
         assert!(p.check(WebExposure::Handler, false, false).is_ok());
         let p = ExposurePolicy::from_tiers(Some(&dom_type()), &Map::new()).unwrap();
         assert!(p.check(WebExposure::Dom, false, true).is_ok());
+    }
+    /// `http-auth` needs `handler` (§6): every cap from `handler` up admits it,
+    /// `none` / `isolated` / unset refuse it, and plain http lifts what it
+    /// needs to `dom`.
+    #[test]
+    fn http_auth_needs_a_handler_cap_and_https() {
+        let cap = |c: &str| json!({ "connect": { "web_exposure_max": c } });
+        for c in ["handler", "proxy", "dom"] {
+            let p = ExposurePolicy::from_tiers(Some(&cap(c)), &Map::new()).unwrap();
+            assert_eq!(p.check(WebExposure::Handler, false, false).map(WebExposure::as_str), Ok(c), "{c}");
+        }
+        for c in ["none", "isolated"] {
+            let p = ExposurePolicy::from_tiers(Some(&cap(c)), &Map::new()).unwrap();
+            assert!(
+                matches!(
+                    p.check(WebExposure::Handler, false, false),
+                    Err(ExposureRefusal::CapExceeded { required: WebExposure::Handler, set_by: Tier::Type, .. })
+                ),
+                "{c}"
+            );
+        }
+        // Unset (type saved without a cap, or not saved at all): denied by default.
+        let p = ExposurePolicy::from_tiers(Some(&json!({ "connect": { "enabled": true } })), &Map::new()).unwrap();
+        assert_eq!(
+            p.check(WebExposure::Handler, false, false),
+            Err(ExposureRefusal::NotPermitted { type_saved: true })
+        );
+        let p = ExposurePolicy::from_tiers(None, &Map::new()).unwrap();
+        assert_eq!(
+            p.check(WebExposure::Handler, false, false),
+            Err(ExposureRefusal::NotPermitted { type_saved: false })
+        );
+        // The resource tier lowering a `dom` type below `handler` refuses.
+        let p =
+            ExposurePolicy::from_tiers(Some(&cap("dom")), &meta(json!({ "web_exposure_max": "isolated" }))).unwrap();
+        assert!(matches!(
+            p.check(WebExposure::Handler, false, false),
+            Err(ExposureRefusal::CapExceeded { set_by: Tier::Resource, .. })
+        ));
+
+        // A credential over plain http is not `handler` exposure: refused at
+        // `handler` and `proxy`, allowed only at `dom`.
+        for c in ["handler", "proxy"] {
+            let p = ExposurePolicy::from_tiers(Some(&cap(c)), &Map::new()).unwrap();
+            assert!(
+                matches!(p.check(WebExposure::Handler, false, true), Err(ExposureRefusal::InsecureHttpBelowDom { .. })),
+                "{c}"
+            );
+        }
+        let p = ExposurePolicy::from_tiers(Some(&cap("dom")), &Map::new()).unwrap();
+        assert_eq!(p.check(WebExposure::Handler, false, true), Ok(WebExposure::Dom));
     }
 }

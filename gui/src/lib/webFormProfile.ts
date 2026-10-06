@@ -1,5 +1,5 @@
-//! Save-time validation of a `form`-mode web profile, mirroring the checks
-//! `parse_launch_profile` makes in
+//! Save-time validation of a `form`- or `http-auth`-mode web profile,
+//! mirroring the checks `parse_launch_profile` makes in
 //! crates/bv-engine-resource/src/connect_web/profile.rs: the origin set (read
 //! with the server's strict `origin_key`, not the browser's URL parser), the
 //! recipe and its URLs, the credential source, and whether the source can
@@ -109,16 +109,9 @@ function totpParamsError(v: unknown): string | null {
   return null;
 }
 
-/**
- * The credential-source half of `parse_launch_profile`: the kind, its fields,
- * and (for an explicit recipe) whether the source can supply what the recipe
- * fills. `recipe` is a recipe that already passed {@link validateWebRecipe}.
- */
-export function formCredentialSourceError(
-  cs: ConnectionProfile["credential_source"],
-  recipe: WebLoginRecipe,
-): string | null {
-  const needs = recipeNeeds(recipe);
+/** The field checks a `secret` or `ldap` source gets in either mode, in the
+ *  server's order. `undefined` for any other kind. */
+function releasingSourceError(cs: ConnectionProfile["credential_source"]): string | null | undefined {
   switch (cs.kind) {
     case "secret": {
       if (!cs.secret_id.trim()) return "Pick a credential secret on this resource";
@@ -153,6 +146,28 @@ export function formCredentialSourceError(
       } else {
         return "credential_source.bind_mode must be static_role or library_set";
       }
+      return null;
+    }
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * The credential-source half of `parse_launch_profile`: the kind, its fields,
+ * and (for an explicit recipe) whether the source can supply what the recipe
+ * fills. `recipe` is a recipe that already passed {@link validateWebRecipe}.
+ */
+export function formCredentialSourceError(
+  cs: ConnectionProfile["credential_source"],
+  recipe: WebLoginRecipe,
+): string | null {
+  const needs = recipeNeeds(recipe);
+  switch (cs.kind) {
+    case "secret":
+    case "ldap": {
+      const e = releasingSourceError(cs);
+      if (e) return e;
       break;
     }
     case "default-account":
@@ -198,4 +213,42 @@ export function validateFormWebProfile(p: ConnectionProfile, web: WebProfileSett
   if (originIssue) return formatRecipeIssue(originIssue);
 
   return formCredentialSourceError(p.credential_source, parsed.recipe);
+}
+
+/**
+ * The credential-source half of `parse_launch_profile` for `http-auth`: a
+ * `secret` or a releasing `ldap` source. A default account supplies a
+ * username only, and a challenge needs a username and a password. TOTP
+ * settings on a secret source are still checked (the server reads them) but
+ * release nothing in this mode.
+ */
+export function httpAuthCredentialSourceError(cs: ConnectionProfile["credential_source"]): string | null {
+  switch (cs.kind) {
+    case "secret":
+    case "ldap":
+      return releasingSourceError(cs) ?? null;
+    case "default-account":
+      return (
+        "a default-account source supplies a username only, and an HTTP authentication challenge needs a " +
+        "username and a password; use a secret or ldap source, or `open` mode and let the operator type it"
+      );
+    case "none":
+      return "credential_source `none` releases nothing; an http-auth profile needs a secret or ldap source";
+    case "ssh-engine":
+    case "pki":
+    case "fido2":
+      return "ssh-engine, pki and fido2 sources are not valid on a web profile";
+  }
+}
+
+/**
+ * Everything an `http-auth` web profile must satisfy beyond the checks it
+ * shares with the other modes: the server's strict reading of its origins
+ * (the only origins whose challenges the host will answer) and a source that
+ * supplies a username and a password. No recipe (checked by the caller).
+ */
+export function validateHttpAuthWebProfile(p: ConnectionProfile, web: WebProfileSettings): string | null {
+  const set = strictOriginSet(web);
+  if ("error" in set) return set.error;
+  return httpAuthCredentialSourceError(p.credential_source);
 }

@@ -16,6 +16,7 @@ pub mod sk_signer;
 pub mod ssh;
 pub mod web;
 pub mod web_engine;
+pub mod web_http_auth;
 pub mod web_launch;
 pub mod web_recipe;
 pub mod web_script;

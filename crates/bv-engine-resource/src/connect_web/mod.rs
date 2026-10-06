@@ -1,5 +1,6 @@
-//! Web Application Connect, `form` login mode — the server half
-//! (`features/web-application-connect.md` §3, §6, §11; T96 Phase 2).
+//! Web Application Connect, `form` and `http-auth` login modes — the server
+//! half (`features/web-application-connect.md` §3, §6, §7, §11; T96 Phases 2
+//! and 3).
 //!
 //! Four endpoints on the resource mount, all `Write`, all under `v2/`:
 //!
@@ -26,11 +27,14 @@
 //!
 //! ## What leaves the server
 //!
-//! Only what the recipe fills: the bundle carries `username`, `password` and
-//! the current TOTP code only when a step (or heuristic mode) uses them. The
-//! TOTP seed never leaves; neither does a `default-account`'s stored Windows
-//! password. The bundle travels in the response body of an authenticated
-//! request, which the audit pipeline records HMAC-redacted.
+//! Only what the login uses. `form`: the bundle carries `username`,
+//! `password` and the current TOTP code only when a step (or heuristic mode)
+//! uses them. `http-auth`: exactly a username and a password — the host hands
+//! them to the webview's native challenge handler, never to the page — and
+//! no TOTP, no recipe hash. The TOTP seed never leaves; neither does a
+//! `default-account`'s stored Windows password. The bundle travels in the
+//! response body of an authenticated request, which the audit pipeline
+//! records HMAC-redacted.
 //!
 //! ## Audit
 //!
@@ -58,7 +62,7 @@ use self::launch_store::{
     launch_id_hash, CallerIdentity, CheckInState, FillScope, LaunchError, LaunchGuard, LdapCheckIn, LdapCheckout,
     TotpSource, WebLaunchRecord, WebLaunchStore, LAUNCH_RECORD_VERSION, LOGIN_WINDOW_SECS, TIDY_THROTTLE,
 };
-use self::profile::{parse_launch_profile, WebCredentialSource, WebLaunchProfile};
+use self::profile::{parse_launch_profile, LaunchLogin, WebCredentialSource, WebLaunchProfile};
 use self::recipe::RecipeNeeds;
 use crate::connect_mfa::{caller_namespace, find_profile};
 use crate::kernel_api::{identity::caller_audit_actor, VaultCtx};
@@ -297,6 +301,76 @@ fn step_field(req: &Request, required: bool) -> Result<Option<u32>, WebRefusal> 
     n.and_then(|n| u32::try_from(n).ok()).map(Some).ok_or_else(bad)
 }
 
+// ── The launch bundle ──────────────────────────────────────────────
+
+/// What a `launch` response is built from. The credential is borrowed; the
+/// response map is the only copy that leaves.
+struct BundleParts<'a> {
+    launch_id: String,
+    expires_at_ms: i64,
+    resource: String,
+    profile_id: String,
+    profile: &'a WebLaunchProfile,
+    /// The level the launch was recorded at (`launched_exposure`).
+    exposure: WebExposure,
+    cap: WebExposure,
+    fill_scope: &'a FillScope,
+    cred: &'a ResolvedCredential,
+    totp_refresh_steps: Vec<u32>,
+    mfa_method: Option<String>,
+}
+
+/// The `launch` response (docs/api.md, *Web Connect*).
+///
+/// * `form`: `recipe_hash`, `heuristic`, and the credential parts the recipe
+///   fills, including the current TOTP code and its window.
+/// * `http-auth`: no `recipe_hash` (there is no recipe), `heuristic: false`,
+///   `totp_refresh_steps: []`, and a credential of `username` and `password`
+///   only — a TOTP code is never put in an http-auth bundle, whatever the
+///   resolved credential holds. `fill_scope` is the set of origins whose
+///   challenges the host may answer.
+fn launch_bundle(b: BundleParts<'_>) -> Result<Map<String, Value>, WebRefusal> {
+    let form = matches!(b.profile.login, LaunchLogin::Form { .. });
+    let mut credential = Map::new();
+    if let Some(u) = &b.cred.username {
+        credential.insert("username".into(), Value::String(u.to_string()));
+    }
+    if let Some(p) = &b.cred.password {
+        credential.insert("password".into(), Value::String(p.to_string()));
+    }
+    let mut refresh_steps = Vec::new();
+    if let (true, Some(t)) = (form, &b.cred.totp) {
+        credential.insert("totp".into(), Value::String(t.code.to_string()));
+        credential.insert("totp_valid_until".into(), Value::String(rfc3339_ms(t.valid_until as i64 * 1000)));
+        refresh_steps = b.totp_refresh_steps;
+    }
+
+    let mut data = Map::new();
+    data.insert("launch_id".into(), Value::String(b.launch_id));
+    data.insert("expires_at".into(), Value::String(rfc3339_ms(b.expires_at_ms)));
+    data.insert("resource".into(), Value::String(b.resource));
+    data.insert("profile_id".into(), Value::String(b.profile_id));
+    data.insert("login_mode".into(), Value::String(b.profile.login_mode().into()));
+    data.insert("exposure".into(), Value::String(b.exposure.as_str().into()));
+    data.insert("exposure_cap".into(), Value::String(b.cap.as_str().into()));
+    if let Some(hash) = b.profile.recipe_hash() {
+        data.insert("recipe_hash".into(), Value::String(hash.to_string()));
+    }
+    data.insert("heuristic".into(), Value::Bool(form && b.profile.needs.heuristic));
+    // The authoritative scope: the host fills (form) or answers challenges
+    // (http-auth) only on these origins and starts at this URL, whatever its
+    // own copy of the profile says.
+    data.insert(
+        "fill_scope".into(),
+        serde_json::to_value(b.fill_scope).map_err(|e| WebRefusal::wrap("storage_error", e.into()))?,
+    );
+    data.insert("credential_source".into(), Value::String(b.profile.source.kind().into()));
+    data.insert("credential".into(), Value::Object(credential));
+    data.insert("totp_refresh_steps".into(), Value::Array(refresh_steps.into_iter().map(Value::from).collect()));
+    data.insert("mfa_method".into(), b.mfa_method.map(Value::String).unwrap_or(Value::Null));
+    Ok(data)
+}
+
 // ── Pipeline dispatch as the caller ────────────────────────────────
 
 /// Dispatches a sub-request through the **full** request pipeline (token
@@ -437,7 +511,7 @@ fn demand(
         (false, _) => Ok(None),
         (true, Some(v)) => Ok(Some(v)),
         (true, None) if heuristic => Ok(None),
-        (true, None) => Err(unavailable(format!("the credential source supplies no {what}, which the recipe fills"))),
+        (true, None) => Err(unavailable(format!("the credential source supplies no {what}, which this login needs"))),
     }
 }
 
@@ -864,25 +938,45 @@ impl super::ResourceBackendInner {
         // origins, source/recipe compatibility.
         let profile = parse_launch_profile(&profile_value)?;
 
-        // (3) The host's copy of the recipe must be the stored one.
-        let supplied = string_field(req, "recipe_hash").ok_or_else(|| {
-            WebRefusal::new(400, "recipe_hash_required", "`recipe_hash` is required for a form-mode launch")
-        })?;
-        if supplied != profile.recipe_hash {
-            return Err(WebRefusal::new(
-                409,
-                "recipe_hash_mismatch",
-                "the profile's recipe changed since the host loaded it; reload the profile and launch again",
-            ));
+        // (3) A form launch's host copy of the recipe must be the stored one.
+        // An http-auth profile has no recipe: a host that sends a hash for one
+        // believes it is launching something else, so that is refused too.
+        match (profile.recipe_hash(), string_field(req, "recipe_hash")) {
+            (Some(_), None) => {
+                return Err(WebRefusal::new(
+                    400,
+                    "recipe_hash_required",
+                    "`recipe_hash` is required for a form-mode launch",
+                ))
+            }
+            (Some(stored), Some(supplied)) if supplied != stored => {
+                return Err(WebRefusal::new(
+                    409,
+                    "recipe_hash_mismatch",
+                    "the profile's recipe changed since the host loaded it; reload the profile and launch again",
+                ))
+            }
+            (None, Some(_)) => {
+                return Err(WebRefusal::new(
+                    400,
+                    "recipe_hash_unexpected",
+                    "this is an http-auth profile, which has no recipe, so its launch carries no `recipe_hash`; \
+                     reload the profile and launch again",
+                ))
+            }
+            (Some(_), Some(_)) | (None, None) => {}
         }
 
-        // (4) Exposure cap and heuristic policy (§6), at both tiers.
+        // (4) Exposure cap and heuristic policy (§6), at both tiers. `form`
+        // needs `dom`, `http-auth` `handler`; `allow_insecure_http` is
+        // refused below a `dom` cap, and a launch that allows it is recorded
+        // as `dom` whatever its mode.
         let type_def = self.resource_type_def(req, &meta).await?;
         let policy = ExposurePolicy::from_tiers(type_def.as_ref(), &meta)?;
-        let required = WebExposure::Dom;
-        let cap = policy.check(required, profile.needs.heuristic, profile.allow_insecure_http)?;
+        let cap = policy.check(profile.required_exposure(), profile.needs.heuristic, profile.allow_insecure_http)?;
+        let exposure = profile.launched_exposure();
 
-        // (4b) The Rustion transport tier. A form launch is always local, so
+        // (4b) The Rustion transport tier. A web launch is always local, so
         // `rustion-required` (or a lock violation) refuses here — before the
         // ticket is burnt and before any credential is read — never a local
         // fallback.
@@ -934,9 +1028,10 @@ impl super::ResourceBackendInner {
             caller: caller.clone(),
             resource: resource.clone(),
             profile_id: profile_id.clone(),
-            recipe_hash: profile.recipe_hash.clone(),
-            login_mode: "form".into(),
-            exposure: required.as_str().into(),
+            // `""` for http-auth, which has no recipe.
+            recipe_hash: profile.recipe_hash().unwrap_or_default().to_string(),
+            login_mode: profile.login_mode().into(),
+            exposure: exposure.as_str().into(),
             credential_kind: profile.source.kind().into(),
             mfa_method: mfa_method.clone(),
             issued_at_ms: now_ms,
@@ -975,11 +1070,11 @@ impl super::ResourceBackendInner {
                 namespace: &caller.namespace,
                 resource: &resource,
                 profile: &profile_id,
-                login_mode: "form",
-                exposure: required.as_str(),
+                login_mode: profile.login_mode(),
+                exposure: exposure.as_str(),
                 exposure_cap: cap.as_str(),
                 credential_source: profile.source.kind(),
-                recipe_hash: &profile.recipe_hash,
+                recipe_hash: profile.recipe_hash().unwrap_or("none"),
                 heuristic: profile.needs.heuristic,
                 mfa: mfa_method.as_deref().unwrap_or("none"),
                 transport: transport.as_str(),
@@ -1008,41 +1103,20 @@ impl super::ResourceBackendInner {
         }
 
         // (8) The bundle.
-        let mut credential = Map::new();
-        if let Some(u) = &cred.username {
-            credential.insert("username".into(), Value::String(u.to_string()));
-        }
-        if let Some(p) = &cred.password {
-            credential.insert("password".into(), Value::String(p.to_string()));
-        }
-        let mut refresh_steps = Vec::new();
-        if let Some(t) = &cred.totp {
-            credential.insert("totp".into(), Value::String(t.code.to_string()));
-            credential.insert("totp_valid_until".into(), Value::String(rfc3339_ms(t.valid_until as i64 * 1000)));
-            refresh_steps = record.totp.as_ref().map(|s| s.refresh_steps.clone()).unwrap_or_default();
-        }
-
-        let mut data = Map::new();
-        data.insert("launch_id".into(), Value::String(launch_id));
-        data.insert("expires_at".into(), Value::String(rfc3339_ms(record.login_expires_at_ms)));
-        data.insert("resource".into(), Value::String(resource));
-        data.insert("profile_id".into(), Value::String(profile_id));
-        data.insert("login_mode".into(), Value::String("form".into()));
-        data.insert("exposure".into(), Value::String(required.as_str().into()));
-        data.insert("exposure_cap".into(), Value::String(cap.as_str().into()));
-        data.insert("recipe_hash".into(), Value::String(profile.recipe_hash.clone()));
-        data.insert("heuristic".into(), Value::Bool(profile.needs.heuristic));
-        // The authoritative fill scope: the host fills only on these origins
-        // and starts at this URL, whatever its own copy of the profile says.
-        data.insert(
-            "fill_scope".into(),
-            serde_json::to_value(&fill_scope).map_err(|e| WebRefusal::wrap("storage_error", e.into()))?,
-        );
-        data.insert("credential_source".into(), Value::String(profile.source.kind().into()));
-        data.insert("credential".into(), Value::Object(credential));
-        data.insert("totp_refresh_steps".into(), Value::Array(refresh_steps.into_iter().map(Value::from).collect()));
-        data.insert("mfa_method".into(), mfa_method.map(Value::String).unwrap_or(Value::Null));
-        Ok(data)
+        let refresh_steps = record.totp.as_ref().map(|t| t.refresh_steps.clone()).unwrap_or_default();
+        launch_bundle(BundleParts {
+            launch_id,
+            expires_at_ms: record.login_expires_at_ms,
+            resource,
+            profile_id,
+            profile: &profile,
+            exposure,
+            cap,
+            fill_scope: &fill_scope,
+            cred: &cred,
+            totp_refresh_steps: refresh_steps,
+            mfa_method,
+        })
     }
 
     // ── totp ───────────────────────────────────────────────────────
@@ -1371,5 +1445,85 @@ mod tests {
         assert_eq!(m["password"], Value::String(String::new()));
         assert_eq!(m["nested"]["seed"], Value::String(String::new()));
         assert_eq!(m["codes"], serde_json::json!(["", { "k": "" }, [""]]));
+    }
+    fn bundle_for(profile: &Value, cred: &ResolvedCredential) -> Map<String, Value> {
+        let profile = parse_launch_profile(profile).unwrap();
+        let fill_scope = FillScope {
+            start_url: profile.start_url.clone(),
+            origins: profile.origins.clone(),
+            allow_insecure_http: profile.allow_insecure_http,
+        };
+        launch_bundle(BundleParts {
+            launch_id: "id".into(),
+            expires_at_ms: 0,
+            resource: "fw01".into(),
+            profile_id: "p".into(),
+            profile: &profile,
+            exposure: profile.launched_exposure(),
+            cap: WebExposure::Dom,
+            fill_scope: &fill_scope,
+            cred,
+            totp_refresh_steps: vec![1],
+            mfa_method: None,
+        })
+        .unwrap()
+    }
+
+    fn full_credential() -> ResolvedCredential {
+        ResolvedCredential {
+            username: Some(Zeroizing::new("admin".into())),
+            password: Some(Zeroizing::new("hunter2".into())),
+            totp: Some(totp::code_at(b"12345678901234567890", totp::TotpParams::default(), 59)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_http_auth_bundle_carries_username_and_password_only() {
+        let profile = serde_json::json!({
+            "id": "p", "name": "p", "protocol": "web",
+            "credential_source": { "kind": "secret", "secret_id": "admin" },
+            "web": { "start_url": "https://bmc.example.com/", "login_mode": "http-auth" }
+        });
+        let b = bundle_for(&profile, &full_credential());
+        assert_eq!(b["login_mode"], Value::String("http-auth".into()));
+        assert_eq!(b["exposure"], Value::String("handler".into()));
+        assert!(!b.contains_key("recipe_hash"), "an http-auth launch has no recipe");
+        assert_eq!(b["heuristic"], Value::Bool(false));
+        assert_eq!(b["totp_refresh_steps"], serde_json::json!([]));
+        // Even a resolved TOTP code never reaches an http-auth bundle.
+        let cred = b["credential"].as_object().unwrap();
+        let mut keys: Vec<&str> = cred.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["password", "username"]);
+        assert_eq!(
+            b["fill_scope"],
+            serde_json::json!({ "start_url": "https://bmc.example.com/", "origins": ["https://bmc.example.com"],
+                                 "allow_insecure_http": false })
+        );
+
+        // Plain http allowed: reported as `dom`, never `handler`.
+        let mut insecure = profile.clone();
+        insecure["web"]["start_url"] = Value::String("http://bmc.example.com/".into());
+        insecure["web"]["allow_insecure_http"] = Value::Bool(true);
+        assert_eq!(bundle_for(&insecure, &full_credential())["exposure"], Value::String("dom".into()));
+    }
+
+    #[test]
+    fn a_form_bundle_keeps_its_recipe_hash_and_totp() {
+        let profile = serde_json::json!({
+            "id": "p", "name": "p", "protocol": "web",
+            "credential_source": { "kind": "secret", "secret_id": "admin" },
+            "web": { "start_url": "https://fw01.example.com/login", "login_mode": "form",
+                     "recipe": { "version": 1, "steps": [ { "when_url": "https://fw01.example.com/*",
+                       "actions": [ { "fill": "#otp", "value": "totp" } ] } ],
+                       "success_when": { "url": "https://fw01.example.com/ng/*" } } }
+        });
+        let b = bundle_for(&profile, &full_credential());
+        assert_eq!(b["login_mode"], Value::String("form".into()));
+        assert_eq!(b["exposure"], Value::String("dom".into()));
+        assert!(b["recipe_hash"].as_str().unwrap().starts_with("sha256:"));
+        assert!(b["credential"].as_object().unwrap().contains_key("totp"));
+        assert_eq!(b["totp_refresh_steps"], serde_json::json!([1]));
     }
 }

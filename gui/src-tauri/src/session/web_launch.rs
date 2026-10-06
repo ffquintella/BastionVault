@@ -1,6 +1,6 @@
-//! The server half of a form-mode web session, host side
-//! (features/web-application-connect.md §3, docs/api.md "Web Connect (`form`
-//! mode)"; T96 Phase 2).
+//! The server half of a `form` or `http-auth` web session, host side
+//! (features/web-application-connect.md §3, §7, docs/api.md "Web Connect";
+//! T96 Phases 2 and 3).
 //!
 //! Call order: `connect/mfa/*` (the GUI, before the host is called) →
 //! `launch` → `totp`* → `result` → `close`.
@@ -91,6 +91,7 @@ pub fn refusal_code(message: &str) -> &'static str {
         "totp_step_used",
         "totp_step_invalid",
         "result_conflict",
+        "recipe_hash_unexpected",
         "invalid_request",
     ];
     CODES.iter().copied().find(|c| message.contains(c)).unwrap_or("request_failed")
@@ -410,7 +411,9 @@ pub fn parse_refreshed_totp(data: &mut Map<String, Value>) -> Result<RefreshedTo
 pub struct LaunchRequest<'a> {
     pub resource: &'a str,
     pub profile_id: &'a str,
-    pub recipe_hash: &'a str,
+    /// `form`: the hash of the recipe the host will run. `http-auth`: `None`
+    /// (the server refuses a hash for a profile without a recipe).
+    pub recipe_hash: Option<&'a str>,
     pub connect_ticket: Option<&'a str>,
     pub session_token: &'a str,
 }
@@ -423,7 +426,9 @@ pub async fn launch(channel: LaunchChannel, req: &LaunchRequest<'_>) -> Result<(
     let mut body = Map::new();
     body.insert("resource".into(), Value::String(req.resource.to_string()));
     body.insert("profile_id".into(), Value::String(req.profile_id.to_string()));
-    body.insert("recipe_hash".into(), Value::String(req.recipe_hash.to_string()));
+    if let Some(hash) = req.recipe_hash {
+        body.insert("recipe_hash".into(), Value::String(hash.to_string()));
+    }
     if let Some(t) = req.connect_ticket.map(str::trim).filter(|t| !t.is_empty()) {
         body.insert("connect_ticket".into(), Value::String(t.to_string()));
     }

@@ -6,7 +6,7 @@
 //! resource backend accepts this without schema changes — the field
 //! is opaque to the host.
 
-import { validateFormWebProfile } from "./webFormProfile";
+import { validateFormWebProfile, validateHttpAuthWebProfile } from "./webFormProfile";
 import type {
   ConnectionProfile,
   ConnectProfileHint,
@@ -287,7 +287,7 @@ export function validateProfile(p: ConnectionProfile): string | null {
 // ── Web profiles (features/web-application-connect.md, T96) ─────────
 
 /** Login modes this release can launch. */
-const LAUNCHABLE_WEB_LOGIN_MODES = ["open", "form"] as const;
+const LAUNCHABLE_WEB_LOGIN_MODES = ["open", "form", "http-auth"] as const;
 
 /** Credential sources that can never authenticate a web session. */
 const NEVER_WEB_SOURCES: CredentialSource["kind"][] = ["ssh-engine", "pki", "fido2"];
@@ -296,10 +296,16 @@ const NEVER_WEB_SOURCES: CredentialSource["kind"][] = ["ssh-engine", "pki", "fid
  *  releases the credential at `v2/connect/web/launch`. */
 const FORM_WEB_SOURCES: CredentialSource["kind"][] = ["secret", "ldap", "default-account"];
 
+/** Credential sources an `http-auth` login can answer a challenge with: both
+ *  supply a username *and* a password (a default account supplies only the
+ *  username). */
+const HTTP_AUTH_WEB_SOURCES: CredentialSource["kind"][] = ["secret", "ldap"];
+
 /**
  * True when a full web profile is one the host can launch: `open` with the
- * `none` source, or `form` with a recipe and a source the server can
- * release a credential from, on the direct transport. Used by launchers
+ * `none` source, `form` with a recipe and a source the server can release a
+ * credential from, or `http-auth` with a secret / LDAP source and no recipe,
+ * on the direct transport. Used by launchers
  * that hold the whole profile (the ⌘K palette); card hints use
  * `isLaunchableProfile`.
  */
@@ -309,6 +315,9 @@ export function isLaunchableWebProfile(p: ConnectionProfile): boolean {
   if (p.web.login_mode === "open") return p.credential_source.kind === "none";
   if (p.web.login_mode === "form") {
     return FORM_WEB_SOURCES.includes(p.credential_source.kind) && p.web.recipe !== undefined;
+  }
+  if (p.web.login_mode === "http-auth") {
+    return HTTP_AUTH_WEB_SOURCES.includes(p.credential_source.kind) && (p.web.recipe ?? null) === null;
   }
   return false;
 }
@@ -409,12 +418,17 @@ export function validateWebProfile(p: ConnectionProfile): string | null {
   const web = p.web;
   if (!web) return "Web profiles need web settings (start URL, login mode).";
   if (!(LAUNCHABLE_WEB_LOGIN_MODES as readonly string[]).includes(web.login_mode)) {
-    return ["http-auth", "sso"].includes(web.login_mode)
-      ? `The ${web.login_mode} login mode is not available yet \u2014 this release supports \u201copen\u201d and \u201cform\u201d.`
+    return web.login_mode === "sso"
+      ? "The sso login mode is not available yet \u2014 this release supports \u201copen\u201d, \u201cform\u201d and \u201chttp-auth\u201d."
       : "Unknown login mode.";
   }
   const isForm = web.login_mode === "form";
-  if (!isForm) {
+  const isHttpAuth = web.login_mode === "http-auth";
+  if (isHttpAuth) {
+    if (web.recipe !== undefined && web.recipe !== null) {
+      return "A login recipe only applies to the form login mode \u2014 HTTP authentication needs none.";
+    }
+  } else if (!isForm) {
     if (cs !== "none") {
       return "The open login mode releases no credential \u2014 set the credential source to \u201cNone\u201d.";
     }
@@ -455,6 +469,7 @@ export function validateWebProfile(p: ConnectionProfile): string | null {
     }
   }
   if (isForm) return validateFormWebProfile(p, web);
+  if (isHttpAuth) return validateHttpAuthWebProfile(p, web);
   return null;
 }
 
@@ -462,8 +477,9 @@ export function validateWebProfile(p: ConnectionProfile): string | null {
  * Switch a web profile's login mode, moving the parts the modes disagree on
  * with it: `open` releases nothing (source `none`, no recipe); `form` needs a
  * source that can release a credential, so a leftover `none` becomes an empty
- * `secret` source for the operator to fill in. A recipe the profile already
- * has is kept across `form` -> `form`.
+ * `secret` source for the operator to fill in; `http-auth` has no recipe and
+ * needs a source with a username *and* a password (`secret` or `ldap`). A
+ * recipe the profile already has is kept across `form` -> `form`.
  */
 export function setWebLoginMode(p: ConnectionProfile, mode: WebProfileSettings["login_mode"]): ConnectionProfile {
   const web: WebProfileSettings = { ...(p.web ?? { start_url: "", allowed_origins: [], login_mode: mode }), login_mode: mode };
@@ -477,6 +493,14 @@ export function setWebLoginMode(p: ConnectionProfile, mode: WebProfileSettings["
   if (mode === "open") {
     delete web.recipe;
     return { ...p, credential_source: { kind: "none" }, web };
+  }
+  if (mode === "http-auth") {
+    // No recipe; a source that supplies a username *and* a password.
+    delete web.recipe;
+    const credential_source: CredentialSource = HTTP_AUTH_WEB_SOURCES.includes(p.credential_source.kind)
+      ? p.credential_source
+      : { kind: "secret", secret_id: "" };
+    return { ...p, credential_source, web };
   }
   return { ...p, web };
 }

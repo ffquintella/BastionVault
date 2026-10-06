@@ -127,6 +127,34 @@ describe("exposure notice — mirrors the server's deny-by-default", () => {
     expect(screen.queryByTestId("exposure-refused")).toBeNull();
   });
 
+  it("holds http-auth to `handler`, and to `dom` over plain http", async () => {
+    const typeWith = (cap: string) => ({
+      web_application: { ...DOM_TYPES.web_application, connect: { protocols: ["web"], web_exposure_max: cap } },
+    });
+    mockTypes(typeWith("handler"));
+    const first = render(<Harness initial={{ login_mode: "http-auth" }} />);
+    expect(await screen.findByTestId("exposure-ok")).toHaveTextContent(/HTTP-authentication logins/);
+    expect(screen.getByTestId("exposure-ok")).toHaveTextContent(/never into the page/);
+    // No recipe editor in this mode.
+    expect(screen.queryByText("Login recipe")).toBeNull();
+    first.unmount();
+
+    mockTypes(typeWith("isolated"));
+    const second = render(<Harness initial={{ login_mode: "http-auth" }} />);
+    const refused = await screen.findByTestId("exposure-refused");
+    expect(refused).toHaveTextContent(/HTTP-authentication login/);
+    expect(refused.textContent).toMatch(/needs exposure `handler` but the type tier caps web exposure at `isolated`/);
+    second.unmount();
+
+    mockTypes(typeWith("handler"));
+    render(
+      <Harness
+        initial={{ login_mode: "http-auth", start_url: "http://bmc.example.com/", allow_insecure_http: true }}
+      />,
+    );
+    expect((await screen.findByTestId("exposure-refused")).textContent).toMatch(/insecure_http_not_allowed/);
+  });
+
   it("does not read the config for open mode", async () => {
     mockTypes(null);
     render(<Harness initial={{ login_mode: "open" }} />);

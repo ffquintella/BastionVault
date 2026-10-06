@@ -1949,6 +1949,14 @@ function ConnectionProfilesPanel({
                     <dd className="font-mono break-all min-w-0">{p.web?.start_url || "—"}</dd>
                     <dt>login</dt>
                     <dd className="font-mono">{p.web?.login_mode ?? "—"}</dd>
+                    {p.web?.login_mode === "http-auth" && (
+                      <>
+                        <dt>cred</dt>
+                        <dd className="font-mono min-w-0 truncate">
+                          {describeCredentialSource(p.credential_source)}
+                        </dd>
+                      </>
+                    )}
                     {p.web?.login_mode === "form" && (
                       <>
                         <dt>cred</dt>
@@ -2526,12 +2534,13 @@ function ConnectionProfileEditor({
               onLoginModeChange={(mode) => setProfile((p) => setWebLoginMode(p, mode))}
               onRecipeTextError={setRecipeTextError}
               credentialSlot={
-                profile.web?.login_mode === "form" ? (
+                profile.web?.login_mode === "form" || profile.web?.login_mode === "http-auth" ? (
                   <WebFormCredentialEditor
                     cs={profile.credential_source}
                     onChange={updateCredentialSource}
                     secretCandidates={secretCandidates}
                     loadingSecrets={loadingSecrets}
+                    mode={profile.web.login_mode}
                   />
                 ) : undefined
               }
@@ -3278,18 +3287,24 @@ function SecurityKeyCredentialEditor() {
  * static role / library check-out, `default-account`), plus the `secret`
  * source's key names and TOTP parameters.
  */
+/** The credential source of a `form` or `http-auth` web profile. `http-auth`
+ *  offers no default account (it supplies a username only) and no TOTP (a
+ *  challenge takes a username and a password). */
 function WebFormCredentialEditor({
   cs,
   onChange,
   secretCandidates,
   loadingSecrets,
+  mode = "form",
 }: {
   cs: CredentialSource;
   onChange: (s: CredentialSource) => void;
   secretCandidates: Array<{ value: string; label: string }>;
   loadingSecrets: boolean;
+  mode?: "form" | "http-auth";
 }) {
-  const kind = cs.kind === "ldap" || cs.kind === "default-account" ? cs.kind : "secret";
+  const httpAuth = mode === "http-auth";
+  const kind = cs.kind === "ldap" || (!httpAuth && cs.kind === "default-account") ? cs.kind : "secret";
   return (
     <div className="space-y-2 min-w-0">
       <Select
@@ -3303,15 +3318,23 @@ function WebFormCredentialEditor({
           else if (next === "default-account") onChange({ kind: "default-account" });
           else onChange(blankCredentialSource("secret"));
         }}
-        options={[
-          { value: "secret", label: "Resource secret (username, password, optional TOTP seed)" },
-          { value: "ldap", label: "LDAP / Active Directory (static role or library check-out)" },
-          { value: "default-account", label: "Connecting user's default account (username only)" },
-        ]}
+        options={
+          httpAuth
+            ? [
+                { value: "secret", label: "Resource secret (username and password)" },
+                { value: "ldap", label: "LDAP / Active Directory (static role or library check-out)" },
+              ]
+            : [
+                { value: "secret", label: "Resource secret (username, password, optional TOTP seed)" },
+                { value: "ldap", label: "LDAP / Active Directory (static role or library check-out)" },
+                { value: "default-account", label: "Connecting user's default account (username only)" },
+              ]
+        }
       />
       <p className="text-xs text-[var(--color-text-muted)]">
-        The server reads the credential when the session opens and hands the host only what the recipe
-        fills. The operator never sees it.
+        {httpAuth
+          ? "The server reads the username and password when the session opens and hands them to the desktop app's authentication handler. The operator never sees them, and the page never receives them."
+          : "The server reads the credential when the session opens and hands the host only what the recipe fills. The operator never sees it."}
       </p>
       {cs.kind === "secret" && (
         <div className="space-y-2">
@@ -3324,12 +3347,12 @@ function WebFormCredentialEditor({
               ...secretCandidates,
             ]}
           />
-          <details open={cs.fields !== undefined || cs.totp !== undefined}>
+          <details open={cs.fields !== undefined || (!httpAuth && cs.totp !== undefined)}>
             <summary className="cursor-pointer text-xs font-medium text-[var(--color-text-muted)]">
-              Secret key names and TOTP
+              {httpAuth ? "Secret key names" : "Secret key names and TOTP"}
             </summary>
             <div className="mt-2 grid grid-cols-2 gap-3">
-              {(["username", "password", "totp_seed"] as const).map((key) => (
+              {(httpAuth ? (["username", "password"] as const) : (["username", "password", "totp_seed"] as const)).map((key) => (
                 <Input
                   key={key}
                   label={`${key === "totp_seed" ? "TOTP seed" : key === "username" ? "Username" : "Password"} key`}
@@ -3345,45 +3368,50 @@ function WebFormCredentialEditor({
                 />
               ))}
               <p className="col-span-2 text-xs text-[var(--color-text-muted)]">
-                Names of the keys inside the secret, when they differ from the defaults shown. The TOTP seed
-                is base32 and never leaves the server: the host receives only the current code.
+                {httpAuth
+                  ? "Names of the keys inside the secret, when they differ from the defaults shown. HTTP authentication uses no TOTP."
+                  : "Names of the keys inside the secret, when they differ from the defaults shown. The TOTP seed is base32 and never leaves the server: the host receives only the current code."}
               </p>
-              <Select
-                label="TOTP algorithm"
-                value={cs.totp?.algorithm ?? "SHA1"}
-                onChange={(e) =>
-                  onChange({ ...cs, totp: { ...cs.totp, algorithm: e.target.value as "SHA1" | "SHA256" | "SHA512" } })
-                }
-                options={[
-                  { value: "SHA1", label: "SHA1 (default)" },
-                  { value: "SHA256", label: "SHA256" },
-                  { value: "SHA512", label: "SHA512" },
-                ]}
-              />
-              <div className="grid grid-cols-2 gap-3">
-                <Select
-                  label="Digits"
-                  value={String(cs.totp?.digits ?? 6)}
-                  onChange={(e) =>
-                    onChange({ ...cs, totp: { ...cs.totp, digits: Number(e.target.value) as 6 | 8 } })
-                  }
-                  options={[
-                    { value: "6", label: "6" },
-                    { value: "8", label: "8" },
-                  ]}
-                />
-                <Select
-                  label="Period (s)"
-                  value={String(cs.totp?.period ?? 30)}
-                  onChange={(e) =>
-                    onChange({ ...cs, totp: { ...cs.totp, period: Number(e.target.value) as 30 | 60 } })
-                  }
-                  options={[
-                    { value: "30", label: "30" },
-                    { value: "60", label: "60" },
-                  ]}
-                />
-              </div>
+              {!httpAuth && (
+                <>
+                  <Select
+                    label="TOTP algorithm"
+                    value={cs.totp?.algorithm ?? "SHA1"}
+                    onChange={(e) =>
+                      onChange({ ...cs, totp: { ...cs.totp, algorithm: e.target.value as "SHA1" | "SHA256" | "SHA512" } })
+                    }
+                    options={[
+                      { value: "SHA1", label: "SHA1 (default)" },
+                      { value: "SHA256", label: "SHA256" },
+                      { value: "SHA512", label: "SHA512" },
+                    ]}
+                  />
+                  <div className="grid grid-cols-2 gap-3">
+                    <Select
+                      label="Digits"
+                      value={String(cs.totp?.digits ?? 6)}
+                      onChange={(e) =>
+                        onChange({ ...cs, totp: { ...cs.totp, digits: Number(e.target.value) as 6 | 8 } })
+                      }
+                      options={[
+                        { value: "6", label: "6" },
+                        { value: "8", label: "8" },
+                      ]}
+                    />
+                    <Select
+                      label="Period (s)"
+                      value={String(cs.totp?.period ?? 30)}
+                      onChange={(e) =>
+                        onChange({ ...cs, totp: { ...cs.totp, period: Number(e.target.value) as 30 | 60 } })
+                      }
+                      options={[
+                        { value: "30", label: "30" },
+                        { value: "60", label: "60" },
+                      ]}
+                    />
+                  </div>
+                </>
+              )}
             </div>
           </details>
         </div>

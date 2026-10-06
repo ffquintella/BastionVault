@@ -675,12 +675,13 @@ Only the `secret` credential kind (ssh-password shape) is resolved
 server-side today. v1 `POST /v1/rustion/session/open` (raw
 `credential_material`) is unchanged.
 
-### Web Connect (`form` mode)
+### Web Connect (`form` and `http-auth` modes)
 
 Server half of [Web Application Connect](../features/web-application-connect.md)
-§3: four `POST` endpoints on the resource mount (v2 only). The desktop host
-calls `launch` **instead of** `connect/authorize` for a `web` profile whose
-`login_mode` is `form` — `launch` burns the MFA ticket itself. Every refusal
+§3 and §7: four `POST` endpoints on the resource mount (v2 only). The desktop
+host calls `launch` **instead of** `connect/authorize` for a `web` profile
+whose `login_mode` is `form` or `http-auth` — `launch` burns the MFA ticket
+itself. Every refusal
 is an HTTP error whose message starts with a stable code (`<code>: …`); the
 codes are listed per endpoint.
 
@@ -704,10 +705,12 @@ path "resources/secrets/fw01/*"   { capabilities = ["connect"] }
   "recipe_hash": "sha256:9f2c…", "connect_ticket": "…" }
 ~~~
 
-- `recipe_hash` (required) is `sha256:` + lowercase hex SHA-256 of the
-  RFC 8785 (JCS) canonical JSON of the profile's `web.recipe` exactly as
+- `recipe_hash` (required for `form`) is `sha256:` + lowercase hex SHA-256 of
+  the RFC 8785 (JCS) canonical JSON of the profile's `web.recipe` exactly as
   stored. Reuse `bastion_vault::modules::resource::connect_web::recipe::recipe_hash`.
-  A mismatch means the profile changed since the host loaded it.
+  A mismatch means the profile changed since the host loaded it. An
+  `http-auth` profile has no recipe: its launch must **not** carry
+  `recipe_hash` (`recipe_hash_unexpected`, 400).
 - `connect_ticket` is required only when the profile has `require_mfa`.
 
 Response:
@@ -730,8 +733,20 @@ Response:
 }
 ~~~
 
-- `credential` carries **only what the recipe fills** (`username`,
-  `password`, `totp`; heuristic mode takes whichever the source has). It
+- `http-auth` response: the same shape **without `recipe_hash`**, with
+  `login_mode: "http-auth"`, `exposure: "handler"` (`"dom"` when the profile
+  sets `allow_insecure_http`, see below), `heuristic: false`,
+  `totp_refresh_steps: []` and `credential: { "username", "password" }` —
+  never a TOTP code. `fill_scope` is the set of origins whose HTTP
+  authentication challenges the host may answer; the host answers Basic,
+  Digest and NTLM challenges natively (never through the page), once per
+  (origin, realm), and refuses Kerberos/Negotiate, client certificates and
+  proxy challenges. The launch record has no recipe step, so `result` takes
+  no `step` (`invalid_step`, 400) and `totp` always refuses
+  (`totp_not_configured`, 409).
+- `credential` carries **only what the login uses** (`form`: what the recipe
+  fills — `username`, `password`, `totp`, heuristic mode taking whichever the
+  source has; `http-auth`: `username` and `password`, both required). It
   travels in plaintext in this response body over the API's TLS channel —
   the host holds it in `Zeroizing` buffers and drops it after
   success / failure / timeout. The TOTP seed never leaves the server. The
@@ -764,11 +779,15 @@ Response:
   `ldap` (`bind_mode` `static_role` or `library_set`) and `default-account`
   (username only, chosen by the resource's `os_type` like SSH) are resolved
   **as the caller**, through the caller's own grants on those paths.
+  `http-auth` takes `secret` or `ldap` only: a `default-account` supplies no
+  password and is refused (`credential_unavailable`, 422); TOTP settings on a
+  `secret` source are validated but release nothing.
 - Exposure policy — **deny unless opted in**: `web_exposure_max` (`none <
   isolated < handler < proxy < dom`) on the resource type
   (`config/types[<type>].connect`) and on the resource record (top-level
   key). The resource's `type` must name a type in the **saved**
-  `config/types` that sets `web_exposure_max`; form mode needs `dom`. An
+  `config/types` that sets `web_exposure_max`; form mode needs `dom`,
+  http-auth `handler` (so `handler`, `proxy` or `dom` admit it). An
   unset cap, a type missing from the saved configuration, or a
   configuration never saved leaves the cap at `none` and refuses with
   `exposure_not_permitted`. The resource tier can only lower the type's cap
@@ -776,7 +795,10 @@ Response:
   unparseable `config/types`, or a value outside the enum, refuses with
   `exposure_policy_invalid`. `allow_heuristic_fill` on the same two tiers:
   an explicit `false` at either beats `true` at the other, and unset at both
-  means no heuristics. The GUI's built-in `web_application` and `website`
+  means no heuristics. `allow_insecure_http` is refused below a `dom` cap
+  (`insecure_http_not_allowed`), in either mode — a credential sent over
+  plain http is not `handler` exposure — and a launch that allows it is
+  recorded and reported as `exposure: "dom"`. The GUI's built-in `web_application` and `website`
   types carry `web_exposure_max: "dom"`, so a type configuration saved by a
   current GUI opts them in; a configuration saved earlier keeps its types as
   saved and is denied until an administrator sets the cap.
@@ -784,8 +806,8 @@ Response:
   resolver over the global, type, asset-group and resource tiers — the
   `rustion/policy/effective` verdict) is checked before the MFA ticket is
   redeemed and before any credential is read. `rustion-required`, or any
-  policy lock violation, refuses with `transport_policy` (403): a form
-  launch is always local, and there is no brokered web transport yet.
+  policy lock violation, refuses with `transport_policy` (403): a form or
+  http-auth launch is always local, and there is no brokered web transport yet.
   `direct` and `rustion-preferred` are allowed; a resource with no policy at
   any tier resolves to `direct`. Rustion keeps its tiers in the system view,
   not in the mount, and they survive an unmount, so when the `rustion/`
@@ -808,7 +830,7 @@ Response:
 - Refusal codes: `wrong_protocol`, `wrong_login_mode`,
   `transport_unavailable`, `invalid_profile`, `invalid_recipe`,
   `credential_source_unsupported`, `recipe_hash_required`,
-  `recipe_hash_mismatch`, `exposure_not_permitted`, `exposure_cap_exceeded`,
+  `recipe_hash_mismatch`, `recipe_hash_unexpected`, `exposure_not_permitted`, `exposure_cap_exceeded`,
   `exposure_policy_invalid`, `heuristic_not_allowed`,
   `insecure_http_not_allowed`, `transport_policy`,
   `transport_policy_unavailable`, `mfa_required` (plus the ticket store's

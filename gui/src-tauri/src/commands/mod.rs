@@ -106,6 +106,7 @@ pub mod cloud_target;
 pub mod connect;
 pub mod connect_mfa;
 pub mod connect_web;
+pub mod connect_web_http_auth;
 pub mod connection;
 pub mod dos;
 pub mod exchange;

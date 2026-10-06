@@ -35,7 +35,9 @@ function rank(e: WebExposure): number {
   return ORDER.indexOf(e);
 }
 
-/** The exposure a login mode needs: `form` is `dom`, `open` and `sso` none. */
+/** The exposure a login mode needs: `form` is `dom`, `http-auth` is
+ *  `handler`, `open` and `sso` none. (`allow_insecure_http` is refused below a
+ *  `dom` cap whatever the mode — `evaluateWebExposure` checks that.) */
 export function requiredExposureForLoginMode(mode: string): WebExposure | null {
   switch (mode) {
     case "form":
@@ -163,10 +165,10 @@ export function evaluateWebExposure(input: ExposureInput): ExposureVerdict {
         "exposure_not_permitted",
         typeSaved
           ? "web credential release is off by default: this resource's type does not set " +
-              "`connect.web_exposure_max`. Set it on the type (`dom` for form mode) to opt in"
+              "`connect.web_exposure_max`. Set it on the type (`dom` for form mode, `handler` for http-auth) to opt in"
           : "web credential release is off by default: this resource's type is not in the saved " +
               "resource type configuration, so it has not opted in. Save the type with " +
-              "`connect.web_exposure_max` set (`dom` for form mode)",
+              "`connect.web_exposure_max` set (`dom` for form mode, `handler` for http-auth)",
         "type",
       );
     }

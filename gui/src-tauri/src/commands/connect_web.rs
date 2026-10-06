@@ -14,6 +14,16 @@
 //!   profile's login recipe through the fixed fill routine
 //!   (`session::web_engine`). The outcome goes to `web/result` once and to
 //!   the host-owned title; teardown always ends in `web/close`.
+//! * `login_mode: "http-auth"` (Phase 3) also calls `launch` (exposure
+//!   `handler`; a username and a password, no recipe, no TOTP). The window
+//!   opens on `about:blank`, the native challenge handler
+//!   (`commands::connect_web_http_auth`, decisions in
+//!   `session::web_http_auth`) is attached, and only then does the window
+//!   navigate to `fill_scope.start_url`, so no challenge can reach the
+//!   platform's default handling first. The handler answers Basic / Digest /
+//!   NTLM challenges on the scope's origins, once per (origin, realm); the
+//!   credential never reaches the page. `result` / `close` and the outcome
+//!   event work as for form mode.
 //!
 //! How the recipe talks to the page **without IPC**: the host evaluates the
 //! fixed routine with the webview's native script evaluation
@@ -64,17 +74,20 @@ use super::connect::{
 };
 use crate::error::{CmdResult, CommandError};
 use crate::session::web::{
-    self as web_session, display_origin, download_decision, download_file_name, DownloadDecision, FormLogin,
+    self as web_session, display_origin, download_decision, download_file_name, DownloadDecision,
     NavigationVerdict, OriginSet, WebClipboard, WebCloseReason, WebLogin, WebOrigin, WebSessionKind, WebSessionState,
     WebShared, DATA_DIR_NAME, DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, WINDOW_LABEL_PREFIX,
 };
 use crate::session::web_engine::{
     run_check, run_fill, AuditTag, CheckReport, EngineTiming, EvalError, PageSnapshot, RecipePage,
 };
+use crate::session::web_http_auth::{
+    GateAudit, GateEvent, HttpAuthCredential, HttpAuthGate, HttpAuthState, ANSWER_WINDOW,
+};
 use crate::session::web_launch::{self, LaunchChannel, LaunchRequest, WebLaunch};
 use crate::session::web_recipe::{
-    check_bundle, outcome_event, reconcile_fill_scope, BundleExpectation, EffectiveScope, LaunchCredential, PlanSteps,
-    RecipePlan, UrlGlob, WebSessionOutcomeEvent, WEB_SESSION_OUTCOME_EVENT,
+    check_bundle, outcome_event, reconcile_fill_scope, BundleExpectation, EffectiveScope, ExpectedLogin,
+    LaunchCredential, Outcome, PlanSteps, RecipePlan, UrlGlob, WebSessionOutcomeEvent, WEB_SESSION_OUTCOME_EVENT,
 };
 use crate::session::web_script::{parse_reply, render, ReplyError, ScriptCall, ScriptReply, MAX_REPLY_BYTES};
 use crate::session::{registry_web_rdp_conflict, ProfileProtocol, SessionState, WebRdpConflict};
@@ -83,6 +96,10 @@ use crate::state::AppState;
 /// How long one evaluation of the fill routine may take before the engine
 /// treats it as "no result".
 const EVAL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long attaching an http-auth challenge handler may take before the
+/// session is refused.
+const HANDLER_INSTALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long app exit waits for web launches to be reported and closed.
 const EXIT_CLOSE_BUDGET: Duration = Duration::from_secs(3);
@@ -105,7 +122,7 @@ pub struct WebOpenRequest {
 pub struct WebOpenResponse {
     pub token: String,
     pub window_label: String,
-    /// `open` or `form`.
+    /// `open`, `form` or `http-auth`.
     pub login_mode: &'static str,
 }
 
@@ -156,7 +173,7 @@ pub async fn session_open_web(
 
     // Transport policy. `connect/authorize` (open mode) does not look at the
     // Rustion tiers, so the host checks them first, before the ticket is
-    // spent. A form launch is checked by `launch` itself — server-side,
+    // spent. A form or http-auth launch is checked by `launch` itself — server-side,
     // before the ticket is redeemed and before any credential is read — and
     // that check is authoritative, so the host does not repeat it (the two
     // used to disagree on a deployment with no `rustion/` mount).
@@ -174,6 +191,7 @@ pub async fn session_open_web(
     let kind = match cfg.login {
         WebLogin::Open => WebSessionKind::Open,
         WebLogin::Form(_) => WebSessionKind::Form,
+        WebLogin::HttpAuth => WebSessionKind::HttpAuth,
     };
     let shared = WebShared::new(&request.resource_name, &display_origin(&cfg.start_url));
 
@@ -199,7 +217,8 @@ pub async fn session_open_web(
     )
     .await?;
 
-    let mut form_run: Option<(FormStart, RecipePlan)> = None;
+    let mut form_run: Option<(LaunchStart, RecipePlan)> = None;
+    let mut http_auth_run: Option<LaunchStart> = None;
     let scope = match &cfg.login {
         WebLogin::Open => {
             // Same server-side pre-flight as a direct SSH/RDP dial: checks
@@ -219,50 +238,94 @@ pub async fn session_open_web(
             EffectiveScope::local(cfg.start_url.clone(), cfg.origins.clone(), cfg.allow_insecure_http)
         }
         WebLogin::Form(form) => {
-            let start = match start_form_launch(&state, &request, &token, &cfg, form).await {
-                Ok(s) => s,
-                Err(e) => {
-                    release_reservation(&state, &token).await;
-                    return Err(e);
-                }
-            };
-            if !attach_launch(&state, &token, &start.launch).await {
-                // Removed while the launch was in flight; nothing else will
-                // finish this launch.
-                start.launch.finish("session_closed").await;
-                return Err(CommandError::from("the web session was closed while it was being opened".to_string()));
-            }
+            let login = ExpectedLogin::Form { recipe_hash: &form.recipe_hash, plan: &form.plan };
+            let start = launch_and_attach(&state, &request, &token, &cfg, login).await?;
             let scope = start.scope.clone();
             form_run = Some((start, form.plan.clone()));
             scope
         }
+        WebLogin::HttpAuth => {
+            let start = launch_and_attach(&state, &request, &token, &cfg, ExpectedLogin::HttpAuth).await?;
+            let scope = start.scope.clone();
+            http_auth_run = Some(start);
+            scope
+        }
     };
 
-    let win = match build_window(&app, &window_label, &token, &request.resource_name, &cfg, &scope, &shared, data_dir) {
+    // http-auth: the credential moves out of the bundle into the gate the
+    // native handler consults. `check_bundle` guarantees both parts.
+    let mut http_auth: Option<(Arc<HttpAuthGate>, tokio::sync::mpsc::UnboundedReceiver<GateEvent>)> = None;
+    if let Some(start) = http_auth_run.as_mut() {
+        let (Some(username), Some(password)) = (start.credential.username.take(), start.credential.password.take())
+        else {
+            shared.note_abort("credential_missing");
+            close_web_session(&state, &app, &token, WebCloseReason::WindowBuildFailed).await;
+            return Err(CommandError::from("the launch carried no complete credential; nothing was sent".to_string()));
+        };
+        http_auth = Some(HttpAuthGate::new(
+            HttpAuthState::new(scope.origins.clone(), scope.allow_insecure_http),
+            HttpAuthCredential::new(username, password),
+            GateAudit {
+                resource: request.resource_name.clone(),
+                token: token.clone(),
+                launch_id_hash: start.launch.launch_id_hash().to_string(),
+            },
+        ));
+    }
+    let http_auth_gate = http_auth.as_ref().map(|(g, _)| Arc::clone(g));
+
+    // An http-auth window starts on `about:blank` and is sent to the start
+    // URL only once the challenge handler is attached (below).
+    let initial_url = if http_auth_gate.is_some() {
+        Url::parse("about:blank").map_err(|e| CommandError::from(format!("about:blank: {e}")))?
+    } else {
+        scope.start_url.clone()
+    };
+    let win = match build_window(
+        &app,
+        &window_label,
+        &token,
+        &request.resource_name,
+        &cfg,
+        &scope,
+        &shared,
+        data_dir,
+        initial_url,
+        http_auth_gate.clone(),
+    ) {
         Ok(w) => w,
         Err(e) => {
+            if let Some(g) = &http_auth_gate {
+                g.release();
+            }
             close_web_session(&state, &app, &token, WebCloseReason::WindowBuildFailed).await;
             return Err(e);
         }
     };
     hook_window_destroyed(&win, &app, &token);
 
+    if let (Some(gate), Some(start)) = (&http_auth_gate, &http_auth_run) {
+        if let Err(reason) = arm_http_auth(&win, gate, &scope.start_url).await {
+            log::warn!(
+                target: "audit",
+                "connect.web.refused: reason=auth_handler resource={} profile={} launch_id_hash={} — {reason}",
+                request.resource_name,
+                request.profile_id,
+                start.launch.launch_id_hash(),
+            );
+            gate.release();
+            shared.note_abort("auth_handler");
+            close_web_session(&state, &app, &token, WebCloseReason::WindowBuildFailed).await;
+            return Err(CommandError::from(format!(
+                "this webview cannot answer HTTP authentication challenges ({reason}); the launch was closed and \
+                 no credential was sent"
+            )));
+        }
+    }
+
     let start_origin = display_origin(&scope.start_url);
-    match &form_run {
-        None => log::info!(
-            target: "audit",
-            "session.open: protocol=web login_mode=open resource={} profile={} origin={} allowed_origins={} \
-             downloads={} popups={} clipboard={:?} token={}",
-            request.resource_name,
-            request.profile_id,
-            start_origin,
-            scope.origins,
-            cfg.allow_downloads,
-            cfg.allow_popups,
-            cfg.clipboard,
-            token,
-        ),
-        Some((start, plan)) => log::info!(
+    match (&form_run, &http_auth_run) {
+        (Some((start, plan)), _) => log::info!(
             target: "audit",
             "session.open: protocol=web login_mode=form resource={} profile={} origin={} fill_origins={} \
              narrowed_out={} heuristic={} credential_source={} mfa={} launch_id_hash={} downloads={} popups={} \
@@ -276,6 +339,38 @@ pub async fn session_open_web(
             start.credential_source,
             start.mfa_method.as_deref().unwrap_or("none"),
             start.launch.launch_id_hash(),
+            cfg.allow_downloads,
+            cfg.allow_popups,
+            cfg.clipboard,
+            token,
+        ),
+        (None, Some(start)) => log::info!(
+            target: "audit",
+            "session.open: protocol=web login_mode=http-auth resource={} profile={} origin={} answer_origins={} \
+             narrowed_out={} exposure={} credential_source={} mfa={} launch_id_hash={} downloads={} popups={} \
+             clipboard={:?} token={}",
+            request.resource_name,
+            request.profile_id,
+            start_origin,
+            scope.origins,
+            start.narrowed_out_count,
+            start.exposure,
+            start.credential_source,
+            start.mfa_method.as_deref().unwrap_or("none"),
+            start.launch.launch_id_hash(),
+            cfg.allow_downloads,
+            cfg.allow_popups,
+            cfg.clipboard,
+            token,
+        ),
+        (None, None) => log::info!(
+            target: "audit",
+            "session.open: protocol=web login_mode=open resource={} profile={} origin={} allowed_origins={} \
+             downloads={} popups={} clipboard={:?} token={}",
+            request.resource_name,
+            request.profile_id,
+            start_origin,
+            scope.origins,
             cfg.allow_downloads,
             cfg.allow_popups,
             cfg.clipboard,
@@ -296,6 +391,19 @@ pub async fn session_open_web(
             start,
         );
         "form"
+    } else if let (Some(start), Some((gate, events))) = (http_auth_run, http_auth) {
+        spawn_http_auth_reporter(
+            &app,
+            &window_label,
+            &token,
+            &request.resource_name,
+            &request.profile_id,
+            &shared,
+            gate,
+            events,
+            start.launch,
+        );
+        "http-auth"
     } else {
         "open"
     };
@@ -305,32 +413,64 @@ pub async fn session_open_web(
     Ok(WebOpenResponse { token, window_label, login_mode })
 }
 
-/// What a successful `launch` hands the window and the engine.
-struct FormStart {
+/// What a successful `launch` hands the window and the engine (form) or the
+/// challenge handler (http-auth).
+struct LaunchStart {
     scope: EffectiveScope,
     launch: Arc<WebLaunch>,
     credential: LaunchCredential,
     refresh_steps: Vec<u32>,
     credential_source: String,
+    exposure: String,
     mfa_method: Option<String>,
     narrowed_out_count: usize,
+}
+
+/// [`start_launch`], then attach the launch to the reserved registry entry.
+/// On failure the reservation is released (and a launch that exists is
+/// closed) before the error returns.
+async fn launch_and_attach(
+    state: &State<'_, AppState>,
+    request: &WebOpenRequest,
+    token: &str,
+    cfg: &web_session::WebSessionConfig,
+    login: ExpectedLogin<'_>,
+) -> CmdResult<LaunchStart> {
+    let start = match start_launch(state, request, token, cfg, login).await {
+        Ok(s) => s,
+        Err(e) => {
+            release_reservation(state, token).await;
+            return Err(e);
+        }
+    };
+    if !attach_launch(state, token, &start.launch).await {
+        // Removed while the launch was in flight; nothing else will finish
+        // this launch.
+        start.launch.finish("session_closed").await;
+        return Err(CommandError::from("the web session was closed while it was being opened".to_string()));
+    }
+    Ok(start)
 }
 
 /// `v2/connect/web/launch`, then the bundle checks. Any check that fails
 /// after the server created the launch reports `aborted:<check>` and closes
 /// it before the error returns; the credential is dropped with the bundle.
-async fn start_form_launch(
+async fn start_launch(
     state: &State<'_, AppState>,
     request: &WebOpenRequest,
     token: &str,
     cfg: &web_session::WebSessionConfig,
-    form: &FormLogin,
-) -> CmdResult<FormStart> {
+    login: ExpectedLogin<'_>,
+) -> CmdResult<LaunchStart> {
     let channel = LaunchChannel::capture(state).await.map_err(CommandError::from)?;
+    let recipe_hash = match login {
+        ExpectedLogin::Form { recipe_hash, .. } => Some(recipe_hash),
+        ExpectedLogin::HttpAuth => None,
+    };
     let launch_request = LaunchRequest {
         resource: &request.resource_name,
         profile_id: &request.profile_id,
-        recipe_hash: &form.recipe_hash,
+        recipe_hash,
         connect_ticket: request.connect_ticket.as_deref(),
         session_token: token,
     };
@@ -345,12 +485,7 @@ async fn start_form_launch(
         CommandError::from(e)
     })?;
 
-    let expect = BundleExpectation {
-        resource: &request.resource_name,
-        profile_id: &request.profile_id,
-        recipe_hash: &form.recipe_hash,
-        plan: &form.plan,
-    };
+    let expect = BundleExpectation { resource: &request.resource_name, profile_id: &request.profile_id, login };
     if let Err(check) = check_bundle(&bundle, &expect) {
         drop(bundle);
         log::warn!(
@@ -362,8 +497,8 @@ async fn start_form_launch(
         );
         launch.finish(check).await;
         return Err(CommandError::from(format!(
-            "the server's launch does not match this profile ({check}); nothing was filled — reload the resource \
-             and connect again"
+            "the server's launch does not match this profile ({check}); nothing was filled or sent — reload the \
+             resource and connect again"
         )));
     }
     let scope = match reconcile_fill_scope(&cfg.origins, cfg.allow_insecure_http, &bundle.fill_scope) {
@@ -378,7 +513,7 @@ async fn start_form_launch(
                 launch.launch_id_hash(),
             );
             launch.finish("fill_scope").await;
-            return Err(CommandError::from(format!("refusing the launch: {e}; nothing was filled")));
+            return Err(CommandError::from(format!("refusing the launch: {e}; nothing was filled or sent")));
         }
     };
     if !scope.narrowed_out.is_empty() {
@@ -392,12 +527,13 @@ async fn start_form_launch(
         );
     }
     let narrowed_out_count = scope.narrowed_out.len();
-    Ok(FormStart {
+    Ok(LaunchStart {
         scope,
         launch,
         credential: bundle.credential,
         refresh_steps: bundle.totp_refresh_steps,
         credential_source: bundle.credential_source,
+        exposure: bundle.exposure,
         mfa_method: bundle.mfa_method,
         narrowed_out_count,
     })
@@ -675,7 +811,7 @@ fn spawn_recipe_engine(
     shared: &Arc<WebShared>,
     plan: RecipePlan,
     scope: EffectiveScope,
-    start: FormStart,
+    start: LaunchStart,
 ) {
     let page = TauriPage { app: app.clone(), label: label.to_string(), shared: Arc::clone(shared) };
     let app = app.clone();
@@ -683,7 +819,7 @@ fn spawn_recipe_engine(
     let resource = resource.to_string();
     let profile_id = profile_id.to_string();
     tauri::async_runtime::spawn(async move {
-        let FormStart { launch, credential, refresh_steps, .. } = start;
+        let LaunchStart { launch, credential, refresh_steps, .. } = start;
         let audit = AuditTag { resource: &resource, token: &token, launch_id_hash: launch.launch_id_hash() };
         let report = run_fill(
             &plan,
@@ -707,6 +843,97 @@ fn spawn_recipe_engine(
         );
         launch.report(&report.outcome, report.step).await;
         emit_outcome(&app, &outcome_event(&token, &resource, &profile_id, &report.outcome, report.step));
+    });
+}
+
+// ── http-auth ──────────────────────────────────────────────────────
+
+/// Attach the native challenge handler, then — only then — send the window
+/// from `about:blank` to the start URL. `Err` carries a reason safe to show;
+/// the caller closes the session and its launch.
+async fn arm_http_auth(win: &tauri::WebviewWindow, gate: &Arc<HttpAuthGate>, start_url: &Url) -> Result<(), String> {
+    let installed = super::connect_web_http_auth::install(win, Arc::clone(gate));
+    match tokio::time::timeout(HANDLER_INSTALL_TIMEOUT, installed).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(reason))) => return Err(reason),
+        Ok(Err(_)) => return Err("the session window closed before the handler was attached".into()),
+        Err(_) => return Err("attaching the handler timed out".into()),
+    }
+    win.navigate(start_url.clone()).map_err(|e| format!("open the start URL: {e}"))
+}
+
+/// Drive an http-auth session's reporting: the outcome the gate settles goes
+/// to `web/result` once, to the title and to the main window; refusals show
+/// in the title; the answer window's end drops the credential (and settles
+/// `timeout` / `aborted:<refusal>` if nothing did); teardown drops it at
+/// once. Ends with the session.
+#[allow(clippy::too_many_arguments)]
+fn spawn_http_auth_reporter(
+    app: &AppHandle,
+    label: &str,
+    token: &str,
+    resource: &str,
+    profile_id: &str,
+    shared: &Arc<WebShared>,
+    gate: Arc<HttpAuthGate>,
+    mut events: tokio::sync::mpsc::UnboundedReceiver<GateEvent>,
+    launch: Arc<WebLaunch>,
+) {
+    let app = app.clone();
+    let label = label.to_string();
+    let token = token.to_string();
+    let resource = resource.to_string();
+    let profile_id = profile_id.to_string();
+    let shared = Arc::clone(shared);
+    set_title_later(&app, &label, shared.set_login("waiting for the sign-in challenge"));
+    tauri::async_runtime::spawn(async move {
+        let mut cancel = launch.cancel_rx();
+        let deadline = tokio::time::sleep(ANSWER_WINDOW);
+        tokio::pin!(deadline);
+        let mut window_open = true;
+        let report = |outcome: Outcome| {
+            let app = app.clone();
+            let label = label.clone();
+            let token = token.clone();
+            let resource = resource.clone();
+            let profile_id = profile_id.clone();
+            let shared = Arc::clone(&shared);
+            let launch = Arc::clone(&launch);
+            async move {
+                set_title_later(&app, &label, shared.set_login(&outcome.title_text()));
+                log::info!(
+                    target: "audit",
+                    "connect.web.login: resource={resource} token={token} launch_id_hash={} outcome={} step=none \
+                     login_mode=http-auth",
+                    launch.launch_id_hash(),
+                    outcome.wire(),
+                );
+                launch.report(&outcome, None).await;
+                emit_outcome(&app, &outcome_event(&token, &resource, &profile_id, &outcome, None));
+            }
+        };
+        while cancel.borrow().is_none() {
+            tokio::select! {
+                ev = events.recv() => match ev {
+                    Some(GateEvent::Outcome(o)) => report(o).await,
+                    Some(GateEvent::Notice(text)) => set_title_later(&app, &label, shared.set_notice(text.to_string())),
+                    None => break,
+                },
+                () = &mut deadline, if window_open => {
+                    window_open = false;
+                    if let Some(o) = gate.expire() {
+                        report(o).await;
+                    }
+                }
+                changed = cancel.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        // Teardown (or the launch going away): the credential goes now.
+        gate.release();
     });
 }
 
@@ -816,7 +1043,18 @@ pub async fn web_recipe_test(
         height: DEFAULT_WINDOW_HEIGHT,
         login: WebLogin::Open,
     };
-    let win = match build_window(&app, &window_label, &token, TEST_TITLE, &cfg, &scope, &shared, data_dir) {
+    let win = match build_window(
+        &app,
+        &window_label,
+        &token,
+        TEST_TITLE,
+        &cfg,
+        &scope,
+        &shared,
+        data_dir,
+        scope.start_url.clone(),
+        None,
+    ) {
         Ok(w) => w,
         Err(e) => {
             close_web_session(&state, &app, &token, WebCloseReason::WindowBuildFailed).await;
@@ -877,8 +1115,11 @@ fn set_title_later(app: &AppHandle, label: &str, title: String) {
     });
 }
 
-/// Build the session window on `scope.start_url`, navigating only within
-/// `scope.origins` — for a form launch, the server's fill scope.
+/// Build the session window on `initial_url` (`scope.start_url`, or
+/// `about:blank` for an http-auth session that navigates once its challenge
+/// handler is attached), navigating only within `scope.origins` — for a
+/// form or http-auth launch, the server's scope. `http_auth` hears every
+/// finished top-frame load.
 #[allow(clippy::too_many_arguments)]
 fn build_window(
     app: &AppHandle,
@@ -889,6 +1130,8 @@ fn build_window(
     scope: &EffectiveScope,
     shared: &Arc<WebShared>,
     data_dir: Option<PathBuf>,
+    initial_url: Url,
+    http_auth: Option<Arc<HttpAuthGate>>,
 ) -> CmdResult<tauri::WebviewWindow> {
     let origins = Arc::new(scope.origins.clone());
 
@@ -1004,6 +1247,7 @@ fn build_window(
     let load_label = label.to_string();
     let load_token = token.to_string();
     let load_resource = resource.to_string();
+    let load_gate = http_auth;
     let on_page_load = move |window: tauri::WebviewWindow, payload: tauri::webview::PageLoadPayload<'_>| {
         let url = payload.url();
         if let NavigationVerdict::Block { origin } = load_origins.check(url) {
@@ -1032,9 +1276,12 @@ fn build_window(
         let finished = matches!(payload.event(), PageLoadEvent::Finished);
         let title = load_shared.page_load(url, finished);
         let _ = window.set_title(&title);
+        if let (true, Some(gate)) = (finished, &load_gate) {
+            gate.page_finished(url);
+        }
     };
 
-    let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(scope.start_url.clone()))
+    let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(initial_url))
         .title(shared.title())
         .inner_size(f64::from(cfg.width), f64::from(cfg.height))
         .resizable(true)

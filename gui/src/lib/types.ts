@@ -519,10 +519,12 @@ export type WebExposure = "none" | "isolated" | "handler" | "proxy" | "dom";
  */
 export type SessionProtocol = "ssh" | "rdp" | "web";
 
-/** Login modes a `web` profile can declare (spec §1). `open` and `form`
- *  launch; `http-auth` and `sso` are refused at save and at connect with
- *  "not available yet". `form` carries a login recipe (`WebLoginRecipe`)
- *  and needs the type to opt in to `web_exposure_max: "dom"`. */
+/** Login modes a `web` profile can declare (spec §1). `open`, `form` and
+ *  `http-auth` launch; `sso` is refused at save and at connect with "not
+ *  available yet". `form` carries a login recipe (`WebLoginRecipe`) and needs
+ *  the type to opt in to `web_exposure_max: "dom"`; `http-auth` carries no
+ *  recipe, answers HTTP Basic / Digest / NTLM challenges natively, and needs
+ *  `handler` (or `dom` with insecure HTTP allowed). */
 export type WebLoginMode = "open" | "form" | "http-auth" | "sso";
 
 /** What a recipe `fill` writes (spec §2). Never JavaScript. */
@@ -579,7 +581,7 @@ export interface WebProfileSettings {
    *  implicit. Navigation outside the set is blocked. */
   allowed_origins: string[];
   login_mode: WebLoginMode;
-  /** `form` only. */
+  /** `form` only (an `http-auth` profile carrying one is refused). */
   recipe?: WebLoginRecipe;
   /** `rustion-isolated` is Phase 8 and refused today. */
   transport?: "local" | "rustion-isolated";

@@ -2928,9 +2928,9 @@ export type SessionOpenWebRequest = {
 export type SessionOpenWebResponse = {
   token: string;
   window_label: string;
-  /** `form` sessions sign in by themselves; the outcome shows in the
-   *  session window's title. */
-  login_mode: "open" | "form";
+  /** `form` and `http-auth` sessions sign in by themselves; the outcome
+   *  shows in the session window's title. */
+  login_mode: "open" | "form" | "http-auth";
 };
 
 export const sessionOpenWeb = (request: SessionOpenWebRequest) =>

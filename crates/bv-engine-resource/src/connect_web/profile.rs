@@ -1,4 +1,5 @@
-//! Reading a stored connection profile as a `form`-mode web launch.
+//! Reading a stored connection profile as a web launch: `form` mode (Phase 2)
+//! or `http-auth` mode (Phase 3).
 //!
 //! Profiles are GUI-owned JSON on the resource record. This module reads only
 //! the parts the launch decision depends on, and reads those strictly: a value
@@ -8,6 +9,7 @@
 
 use serde_json::{Map, Value};
 
+use super::exposure::WebExposure;
 use super::recipe::{self, RecipeNeeds, WebLoginRecipe};
 use super::totp::TotpParams;
 use super::WebRefusal;
@@ -27,7 +29,7 @@ impl Default for SecretFieldMap {
     }
 }
 
-/// The credential sources a `form` launch can resolve (§1).
+/// The credential sources a `form` or `http-auth` launch can resolve (§1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebCredentialSource {
     /// A secret on this resource. Resolved under the server's authority: the
@@ -52,6 +54,18 @@ impl WebCredentialSource {
     }
 }
 
+/// The login mode a launch serves, with what that mode carries.
+#[derive(Debug, Clone)]
+pub enum LaunchLogin {
+    /// `form` (§2, §5): a recipe fills the credential into the page's DOM.
+    /// Boxed: a parsed recipe is far larger than the `HttpAuth` variant.
+    Form { recipe: Box<WebLoginRecipe>, recipe_hash: String },
+    /// `http-auth` (§7): the desktop host answers HTTP Basic / Digest / NTLM
+    /// challenges natively. No recipe, no TOTP: the credential is a username
+    /// and a password, handed to the webview's challenge handler only.
+    HttpAuth,
+}
+
 /// A profile that passed every static check `v2/connect/web/launch` makes.
 #[derive(Debug, Clone)]
 pub struct WebLaunchProfile {
@@ -60,12 +74,61 @@ pub struct WebLaunchProfile {
     /// `web.start_url` as stored; its origin is `origins[0]`.
     pub start_url: String,
     /// Normalised origin keys: the start URL's origin first, then
-    /// `allowed_origins`.
+    /// `allowed_origins`. For `form` the fill scope; for `http-auth` the only
+    /// origins whose challenges the host may answer.
     pub origins: Vec<String>,
-    pub recipe: WebLoginRecipe,
-    pub recipe_hash: String,
+    pub login: LaunchLogin,
+    /// What the launch releases. For `http-auth`: username and password,
+    /// never TOTP, no steps.
     pub needs: RecipeNeeds,
     pub source: WebCredentialSource,
+}
+
+impl WebLaunchProfile {
+    /// `web.login_mode` as the record, the audit line and the bundle carry it.
+    pub fn login_mode(&self) -> &'static str {
+        match self.login {
+            LaunchLogin::Form { .. } => "form",
+            LaunchLogin::HttpAuth => "http-auth",
+        }
+    }
+
+    /// The recipe hash a `form` launch is bound to; `None` for `http-auth`,
+    /// which has no recipe.
+    pub fn recipe_hash(&self) -> Option<&str> {
+        match &self.login {
+            LaunchLogin::Form { recipe_hash, .. } => Some(recipe_hash),
+            LaunchLogin::HttpAuth => None,
+        }
+    }
+
+    /// The exposure the login mode needs (§6): `form` is `dom`, `http-auth`
+    /// is `handler`.
+    pub fn required_exposure(&self) -> WebExposure {
+        match self.login {
+            LaunchLogin::Form { .. } => WebExposure::Dom,
+            LaunchLogin::HttpAuth => WebExposure::Handler,
+        }
+    }
+
+    /// The exposure the launch is recorded and reported at. §6: "a credential
+    /// sent over plaintext HTTP is not `handler` or `proxy` exposure in any
+    /// meaningful sense", so a profile that allows plain http is `dom`
+    /// whatever its mode — which is also why the policy check refuses
+    /// `allow_insecure_http` below a `dom` cap.
+    pub fn launched_exposure(&self) -> WebExposure {
+        if self.allow_insecure_http {
+            WebExposure::Dom
+        } else {
+            self.required_exposure()
+        }
+    }
+}
+
+/// What an `http-auth` launch releases: a username and a password, nothing
+/// else. There is no recipe step, so no step index is valid in `result`.
+fn http_auth_needs() -> RecipeNeeds {
+    RecipeNeeds { heuristic: false, username: true, password: true, totp: false, totp_steps: Vec::new(), step_count: 0 }
 }
 
 fn refuse(status: u16, code: &'static str, message: impl Into<String>) -> WebRefusal {
@@ -134,11 +197,11 @@ fn secret_fields(v: Option<&Value>) -> Result<SecretFieldMap, WebRefusal> {
     Ok(map)
 }
 
-fn credential_source(profile: &Map<String, Value>) -> Result<WebCredentialSource, WebRefusal> {
+fn credential_source(profile: &Map<String, Value>, mode: &str) -> Result<WebCredentialSource, WebRefusal> {
     let cs = profile
         .get("credential_source")
         .and_then(Value::as_object)
-        .ok_or_else(|| invalid("a form-mode profile needs a credential_source"))?;
+        .ok_or_else(|| invalid(format!("a {mode} profile needs a credential_source")))?;
     match cs.get("kind").and_then(Value::as_str).unwrap_or_default() {
         "secret" => Ok(WebCredentialSource::Secret {
             secret_id: secret_key(cs.get("secret_id"), "secret_id")?,
@@ -170,7 +233,11 @@ fn credential_source(profile: &Map<String, Value>) -> Result<WebCredentialSource
         "none" => Err(refuse(
             400,
             "credential_source_unsupported",
-            "credential_source `none` releases nothing; a form-mode profile needs secret, ldap or default-account",
+            if mode == "http-auth" {
+                "credential_source `none` releases nothing; an http-auth profile needs a secret or ldap source"
+            } else {
+                "credential_source `none` releases nothing; a form-mode profile needs secret, ldap or default-account"
+            },
         )),
         "ssh-engine" | "pki" | "fido2" => Err(refuse(
             400,
@@ -220,8 +287,9 @@ pub fn parse_launch_profile(profile: &Value) -> Result<WebLaunchProfile, WebRefu
     }
 
     let web = p.get("web").and_then(Value::as_object).ok_or_else(|| invalid("the profile has no `web` block"))?;
-    match web.get("login_mode").and_then(Value::as_str) {
-        Some("form") => {}
+    let http_auth = match web.get("login_mode").and_then(Value::as_str) {
+        Some("form") => false,
+        Some("http-auth") => true,
         Some("open") => {
             return Err(refuse(
                 400,
@@ -229,15 +297,16 @@ pub fn parse_launch_profile(profile: &Value) -> Result<WebLaunchProfile, WebRefu
                 "`open` mode releases no credential; it is authorised by connect/authorize, not launched here",
             ))
         }
-        Some("http-auth") | Some("sso") => {
+        Some("sso") => {
             return Err(refuse(
                 400,
                 "wrong_login_mode",
-                "this login mode is not available yet; only `form` launches here",
+                "the `sso` login mode is not available yet; only `form` and `http-auth` launch here",
             ))
         }
         _ => return Err(refuse(400, "wrong_login_mode", "web.login_mode is missing or unknown")),
-    }
+    };
+    let mode = if http_auth { "http-auth" } else { "form" };
     match web.get("transport").filter(|v| !v.is_null()) {
         None => {}
         Some(Value::String(t)) if t == "local" => {}
@@ -274,14 +343,37 @@ pub fn parse_launch_profile(profile: &Value) -> Result<WebLaunchProfile, WebRefu
         Some(_) => return Err(invalid("web.allowed_origins must be an array")),
     }
 
-    let recipe_value =
-        web.get("recipe").ok_or_else(|| refuse(422, "invalid_recipe", "a form-mode profile needs a recipe"))?;
-    let (recipe, recipe_hash) =
-        recipe::parse_and_hash(recipe_value).map_err(|e| refuse(422, "invalid_recipe", e.to_string()))?;
-    recipe.check_origins(&origins, allow_insecure_http).map_err(|e| refuse(422, "invalid_recipe", e.to_string()))?;
-    let needs = recipe.needs();
+    let (login, needs) = if http_auth {
+        // No recipe: the host answers challenges, it never fills a page. A
+        // recipe left on the profile would make the stored record ambiguous
+        // about what was checked, so it is refused rather than ignored.
+        if web.get("recipe").is_some_and(|v| !v.is_null()) {
+            return Err(invalid(
+                "web.recipe applies to the form login mode only; an http-auth profile carries no recipe",
+            ));
+        }
+        (LaunchLogin::HttpAuth, http_auth_needs())
+    } else {
+        let recipe_value =
+            web.get("recipe").ok_or_else(|| refuse(422, "invalid_recipe", "a form-mode profile needs a recipe"))?;
+        let (recipe, recipe_hash) =
+            recipe::parse_and_hash(recipe_value).map_err(|e| refuse(422, "invalid_recipe", e.to_string()))?;
+        recipe
+            .check_origins(&origins, allow_insecure_http)
+            .map_err(|e| refuse(422, "invalid_recipe", e.to_string()))?;
+        let needs = recipe.needs();
+        (LaunchLogin::Form { recipe: Box::new(recipe), recipe_hash }, needs)
+    };
 
-    let source = credential_source(p)?;
+    let source = credential_source(p, mode)?;
+    if http_auth && matches!(source, WebCredentialSource::DefaultAccount) {
+        return Err(refuse(
+            422,
+            "credential_unavailable",
+            "a default-account source supplies a username only, and an HTTP authentication challenge needs a \
+             username and a password; use a secret or ldap source, or `open` mode and let the operator type it",
+        ));
+    }
     // What a source can supply is known without reading it; a recipe that
     // fills something the source can never provide is refused before any
     // ticket is burnt or credential read.
@@ -313,8 +405,7 @@ pub fn parse_launch_profile(profile: &Value) -> Result<WebLaunchProfile, WebRefu
         allow_insecure_http,
         start_url: start_url.to_string(),
         origins,
-        recipe,
-        recipe_hash,
+        login,
         needs,
         source,
     })
@@ -364,7 +455,9 @@ mod tests {
         assert!(p.needs.username && p.needs.password && p.needs.totp);
         assert_eq!(p.source.kind(), "secret");
         assert!(!p.require_mfa);
-        assert!(p.recipe_hash.starts_with("sha256:"));
+        assert!(p.recipe_hash().unwrap().starts_with("sha256:"));
+        assert_eq!(p.login_mode(), "form");
+        assert_eq!((p.required_exposure(), p.launched_exposure()), (WebExposure::Dom, WebExposure::Dom));
     }
 
     #[test]
@@ -376,7 +469,7 @@ mod tests {
         v.as_object_mut().unwrap().remove("protocol");
         assert_eq!(code(&v), "wrong_protocol");
 
-        for mode in ["open", "http-auth", "sso", "FORM"] {
+        for mode in ["open", "sso", "FORM", "http_auth", "basic"] {
             let mut v = form_profile();
             v["web"]["login_mode"] = json!(mode);
             assert_eq!(code(&v), "wrong_login_mode", "{mode}");
@@ -501,5 +594,117 @@ mod tests {
         let mut v = form_profile();
         v["require_mfa"] = json!(true);
         assert!(parse_launch_profile(&v).unwrap().require_mfa);
+    }
+    fn http_auth_profile() -> Value {
+        json!({
+            "id": "p_basic",
+            "name": "Appliance (Basic)",
+            "protocol": "web",
+            "credential_source": { "kind": "secret", "secret_id": "admin" },
+            "web": {
+                "start_url": "https://idrac01.example.com/",
+                "allowed_origins": ["https://idrac01.example.com:8443"],
+                "login_mode": "http-auth"
+            }
+        })
+    }
+
+    #[test]
+    fn an_http_auth_profile_parses_without_a_recipe() {
+        let p = parse_launch_profile(&http_auth_profile()).unwrap();
+        assert!(matches!(p.login, LaunchLogin::HttpAuth));
+        assert_eq!(p.login_mode(), "http-auth");
+        assert_eq!(p.recipe_hash(), None);
+        assert_eq!(
+            p.origins,
+            vec!["https://idrac01.example.com".to_string(), "https://idrac01.example.com:8443".to_string()]
+        );
+        // Username and password, never TOTP, and no recipe step.
+        assert!(p.needs.username && p.needs.password && !p.needs.totp && !p.needs.heuristic);
+        assert!(p.needs.totp_steps.is_empty());
+        assert_eq!(p.needs.step_count, 0);
+        assert_eq!((p.required_exposure(), p.launched_exposure()), (WebExposure::Handler, WebExposure::Handler));
+
+        // An LDAP static role or library set supplies both parts.
+        for cs in [
+            json!({ "kind": "ldap", "ldap_mount": "openldap", "bind_mode": "static_role", "static_role": "idrac" }),
+            json!({ "kind": "ldap", "ldap_mount": "openldap", "bind_mode": "library_set", "library_set": "bmc-admins" }),
+        ] {
+            let mut v = http_auth_profile();
+            v["credential_source"] = cs;
+            assert_eq!(parse_launch_profile(&v).unwrap().source.kind(), "ldap");
+        }
+
+        // TOTP settings on the source are read (so a malformed one still
+        // refuses) but release nothing.
+        let mut v = http_auth_profile();
+        v["credential_source"]["totp"] = json!({ "digits": 8 });
+        assert!(!parse_launch_profile(&v).unwrap().needs.totp);
+        v["credential_source"]["totp"] = json!({ "digits": 7 });
+        assert_eq!(code(&v), "invalid_profile");
+    }
+
+    #[test]
+    fn plain_http_makes_an_http_auth_launch_dom_level() {
+        let mut v = http_auth_profile();
+        v["web"]["start_url"] = json!("http://idrac01.example.com/");
+        // Refused unless the profile opts in …
+        assert_eq!(code(&v), "invalid_profile");
+        // … and when it does, the launch is `dom`, not `handler` (§6).
+        v["web"]["allow_insecure_http"] = json!(true);
+        let p = parse_launch_profile(&v).unwrap();
+        assert_eq!((p.required_exposure(), p.launched_exposure()), (WebExposure::Handler, WebExposure::Dom));
+    }
+
+    #[test]
+    fn malformed_http_auth_profiles_are_refused() {
+        // A recipe on an http-auth profile is refused, not ignored.
+        let mut v = http_auth_profile();
+        v["web"]["recipe"] = form_profile()["web"]["recipe"].clone();
+        assert_eq!(code(&v), "invalid_profile");
+        let mut v = http_auth_profile();
+        v["web"]["recipe"] = Value::Null;
+        assert!(parse_launch_profile(&v).is_ok(), "a null recipe is no recipe");
+
+        // A default account supplies a username only.
+        let mut v = http_auth_profile();
+        v["credential_source"] = json!({ "kind": "default-account" });
+        assert_eq!(code(&v), "credential_unavailable");
+        for (cs, want) in [
+            (json!({ "kind": "none" }), "credential_source_unsupported"),
+            (json!({ "kind": "fido2" }), "credential_source_unsupported"),
+            (
+                json!({ "kind": "ldap", "ldap_mount": "openldap", "bind_mode": "operator" }),
+                "credential_source_unsupported",
+            ),
+            (json!({ "kind": "secret", "secret_id": "../x" }), "invalid_profile"),
+            (json!({ "kind": "secret", "secret_id": "a", "fields": { "otp": "x" } }), "invalid_profile"),
+        ] {
+            let mut v = http_auth_profile();
+            v["credential_source"] = cs.clone();
+            assert_eq!(code(&v), want, "{cs}");
+        }
+        let mut v = http_auth_profile();
+        v.as_object_mut().unwrap().remove("credential_source");
+        assert_eq!(code(&v), "invalid_profile");
+
+        // The shared checks still apply.
+        for (path, bad) in [
+            ("start_url", json!("https://admin:pw@idrac01.example.com/")),
+            ("allowed_origins", json!(["https://idrac01.example.com/path"])),
+            ("allowed_origins", json!("https://idrac01.example.com")),
+            ("allow_insecure_http", json!("yes")),
+            ("transport", json!(5)),
+        ] {
+            let mut v = http_auth_profile();
+            v["web"][path] = bad.clone();
+            assert_eq!(code(&v), "invalid_profile", "{path} = {bad}");
+        }
+        let mut v = http_auth_profile();
+        v["web"]["transport"] = json!("rustion-isolated");
+        assert_eq!(code(&v), "transport_unavailable");
+        let mut v = http_auth_profile();
+        v["web"]["login_mode"] = json!(["http-auth"]);
+        assert_eq!(code(&v), "wrong_login_mode");
     }
 }

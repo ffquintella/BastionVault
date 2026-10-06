@@ -120,12 +120,168 @@ security / capability docs, Microsoft WebView2 "Basic authentication" docs, W3C
 
 ## Current State
 
-**Status: In progress — Phases 1 and 2 done, with caveats (below). Phase 2
+**Status: In progress — Phases 1, 2 and 3 done, with caveats (below). Phase 2
 shipped the server, desktop-host and GUI-editor halves (the host recipe engine,
 fixed fill routine and `web_recipe_test`; the profile editor with recipe editor,
 import / export, test button and vendor presets, **whose presets are unverified
 against live appliances**); its per-platform manual checks are carried forward
-as caveats. Phases 3–7 Todo, Phase 8 future.**
+as caveats. Phase 3 shipped `http-auth` mode on the server, the host (native
+Basic / Digest / NTLM challenge handlers) and the editor; **its Windows and
+Linux handlers are not compiled on the development hosts, and no handler has
+been run against a live challenge yet** (see *Phase 3 caveats*). Phases 4–7 Todo, Phase 8
+future.**
+
+### What Phase 3 shipped
+
+`login_mode: "http-auth"` end to end, reusing the Phase 2 launch, bundle,
+call-state machine, teardown, outcome event, title and web/RDP exclusion —
+nothing forked.
+
+- **Server** ([profile.rs](../crates/bv-engine-resource/src/connect_web/profile.rs),
+  [mod.rs](../crates/bv-engine-resource/src/connect_web/mod.rs)). `launch`
+  accepts `http-auth` (`sso` stays "not available yet").
+  - *No recipe:* a `web.recipe` on an http-auth profile is refused
+    (`invalid_profile`), not ignored, and so is a `recipe_hash` in the
+    request (`recipe_hash_unexpected`): a host that sends one thinks it is
+    launching something else.
+  - *Sources:* `secret` and `ldap` (`static_role`, `library_set`), resolved
+    exactly as for form (server authority for `secret`, as the caller for
+    `ldap`). `default-account` is refused (`credential_unavailable`): it
+    supplies no password, and a challenge needs one.
+  - *Exposure:* required `handler`, so caps `handler`, `proxy` and `dom`
+    admit it and `none`, `isolated` or unset refuse it under the same
+    deny-by-default rule as form. §6's plaintext rule is the existing check —
+    `allow_insecure_http` is refused below a `dom` cap
+    (`insecure_http_not_allowed`) — and a launch that allows plain http is
+    recorded, audited and reported as `exposure: dom`, never `handler`.
+  - *Bundle:* `credential` is `username` + `password` only — a TOTP code is
+    never put in an http-auth bundle — with no `recipe_hash`,
+    `heuristic: false` and `totp_refresh_steps: []`. `fill_scope` is the
+    answer scope: the only origins whose challenges the host may answer.
+  - *Record:* unchanged `v: 2` shape (`login_mode: "http-auth"`,
+    `recipe_hash: ""`, `step_count: 0`, so `result` takes no `step` and
+    `totp` always refuses). No format change; a rolled-back server reads it.
+  - *Decision:* no TOTP in this mode. Basic, Digest and NTLM carry a username
+    and a password; an appliance that adds a second factor does so in a form,
+    which is `form` mode.
+- **Host — the decisions** ([web_http_auth.rs](../gui/src-tauri/src/session/web_http_auth.rs),
+  Tauri-free). A challenge is *answered* only when it is Basic, Digest or
+  NTLM, not a proxy challenge, and its protection space (scheme, host, port)
+  is exactly an origin of the server's scope — https, or http only when the
+  scope allows it. Answered **at most once per (origin, realm)**: a second
+  challenge for an answered pair is the credential being rejected, so it is
+  refused, the outcome is `failure`, and the credential is dropped; nothing
+  loops. Kerberos / Negotiate, client-certificate requests, proxy challenges,
+  other schemes, out-of-scope origins and plain http without the opt-in are
+  *refused* explicitly: audited, shown in the title (fixed text, never the
+  server-chosen realm), and the platform's own prompt suppressed. **Server
+  trust** always falls through to the platform's default evaluation — never
+  accepted here; Phase 4 owns pinning.
+  - *Outcome*, reported once through the Phase 2 path: `success` on the
+    first finished top-frame load of a scope origin after an answer;
+    `failure` on a repeat challenge; when the answer window closes first,
+    `timeout`, or `aborted:auth_<refusal>` (`auth_negotiate`,
+    `auth_origin`, …) when challenges came and every one was refused.
+  - *Credential lifetime:* held in `Zeroizing` buffers for the answer window
+    (60 s from the window opening, the server's login window), dropped
+    earlier on a failure and at teardown. Each answer hands the platform a
+    zeroizing copy; the platform's own copy (an `NSURLCredential` with
+    `.forSession` persistence, WebView2's response strings, a WebKitGTK
+    `ForSession` credential) is cached by the webview in the window's
+    ephemeral store for the session and cannot be scrubbed by the host.
+- **Host — the window** ([connect_web.rs](../gui/src-tauri/src/commands/connect_web.rs)).
+  The window opens on `about:blank`; the challenge handler is attached
+  (5 s budget) and only then does the window navigate to
+  `fill_scope.start_url`, so no challenge can reach the platform's default
+  handling first. A handler that cannot be attached closes the launch with
+  `aborted:auth_handler` before anything is sent. The handler is installed
+  only on http-auth windows, so `open` and `form` keep the platform
+  defaults exactly.
+- **Host — the platform shims** ([connect_web_http_auth.rs](../gui/src-tauri/src/commands/connect_web_http_auth.rs)),
+  thin: read the challenge, ask the gate, apply its answer.
+  - *macOS:* wry installs its own `WKNavigationDelegate`, which Phase 1's
+    navigation / new-window / download / page-load policy relies on, and
+    does not implement the challenge method. A per-webview **forwarding
+    proxy delegate** implements only
+    `webView:didReceiveAuthenticationChallenge:completionHandler:` and
+    forwards everything else to wry's delegate (`respondsToSelector:` +
+    `forwardingTargetForSelector:`), then replaces it as the webview's
+    delegate. Rejected: replacing wry's delegate (loses Phase 1's policy);
+    `class_addMethod` on wry's class (mutates a class every wry webview in
+    the process shares, the vault's own windows included); isa-swizzling
+    wry's delegate object. The proxy is retained as an associated object of
+    wry's delegate and holds it weakly, so it lives exactly as long as wry's
+    delegate and no retain cycle forms. Refusal is
+    `RejectProtectionSpace` (a server offering Negotiate *and* Basic gets
+    its Basic challenge next); server trust is `PerformDefaultHandling`. The
+    shim also releases the +1 retains tauri-runtime-wry 2.11 leaks into every
+    `with_webview` call on macOS.
+  - *Windows:* WebView2 `BasicAuthenticationRequested` (`ICoreWebView2_10`,
+    runtime 101+; an older runtime refuses the session). The origin comes
+    from the request URI — for proxy authentication that is the proxy's,
+    which the scope never contains — and the scheme and realm from the
+    challenge text. Every refusal sets `Cancel`, because an unanswered event
+    shows WebView2's own prompt. `ClientCertificateRequested` is cancelled
+    on these windows too.
+  - *Linux:* WebKitGTK `authenticate`; returns `true` after authenticating
+    or cancelling (returning `false` would show WebKitGTK's dialog), and
+    `false` only for server trust.
+- **Host audit** (`target: "audit"`): `session.open: protocol=web
+  login_mode=http-auth` (`answer_origins`, `exposure`, `launch_id_hash`),
+  `connect.web.http_auth_answered` / `connect.web.http_auth_refused`
+  (origin, scheme, realm quoted and cut at 64 characters, reason),
+  `connect.web.http_auth_window_closed`, `connect.web.login …
+  login_mode=http-auth`, plus the Phase 2 `result` / `close` lines. Never the
+  username, the password or a path.
+- **GUI** ([connectionProfiles.ts](../gui/src/lib/connectionProfiles.ts),
+  [webFormProfile.ts](../gui/src/lib/webFormProfile.ts),
+  [WebProfileFields.tsx](../gui/src/components/WebProfileFields.tsx)). The
+  **HTTP authentication** login mode saves: a secret (username / password
+  key names, no TOTP controls) or LDAP static-role / library source, no
+  recipe, the origins read by the server's strict `origin_key`. Switching to
+  it drops the recipe and replaces a source with no password. The exposure
+  notice evaluates `handler` (and `dom` with insecure http) against the
+  saved type configuration and says what the mode exposes.
+- **Tests.** `bv-engine-resource`: http-auth parsing (sources, no recipe,
+  malformed profiles, plain http → `dom`), the `handler` cap matrix (allowed
+  at handler / proxy / dom, refused at none / isolated / unset, insecure http
+  only at dom), the bundle (no TOTP, no recipe hash). `src/engine_tests`:
+  an http-auth launch end to end — connect-only release of exactly username
+  and password, the cap matrix, `recipe_hash_unexpected`, no TOTP or step,
+  plain http recorded as `dom`. Host: once per realm, repeat → failure and
+  the credential dropped, wrong host / port / scheme, Negotiate / client
+  certificate / proxy refused, server trust → default, deadline outcomes,
+  `WWW-Authenticate` parsing, strict bundle checks. Vitest: save rules,
+  mode switching, the exposure matrix and the notice.
+
+**Phase 3 caveats — open:**
+
+- **Not run against a live challenge on any platform.** The macOS shim
+  compiles and the decision logic is unit-tested everywhere. **The Windows
+  shim has not been compiled**: `cargo check --target x86_64-pc-windows-msvc`
+  stops in the `ring` / `aws-lc-sys` C build scripts on a host without an
+  MSVC toolchain, before reaching it (its WebView2 calls were checked by hand
+  against `webview2-com` 0.38). **The Linux shim has not been compiled.**
+  Per-platform manual checks against the Testing Plan's Basic-auth realm,
+  plus Digest, NTLM, a wrong password (→ `failure`, one answer, no loop), a
+  Negotiate-only server (→ `aborted:auth_negotiate`) and a self-signed
+  certificate (still fails closed), are pending.
+- *Success* is inferred from the first finished top-frame load after an
+  answer. A challenge on a sub-resource after the page has loaded is
+  answered, but its outcome can only settle at the end of the answer window
+  (`timeout`).
+- "At most once per (origin, realm)" is literal: a Digest server that
+  re-challenges with `stale=true`, or two parallel requests challenged before
+  the webview caches the answer, read as a rejection (`failure`). The
+  platforms' own retry counters (`previousFailureCount`, `is_retry`) are not
+  consulted, because WebView2 has none.
+- WebView2 does not say whether a challenge is for a proxy; the request-URI
+  origin rule is what keeps a proxy from receiving the credential.
+- WebView2 / Chromium may still use the operator's own Windows logon
+  (ambient NTLM / Negotiate) for intranet hosts without raising the event.
+  That is the operator's own credential, unchanged since Phase 1, and never a
+  vault-released one.
+- `make test-release` (L4) has not been run; this touches authz.
 
 ### What the Phase 2 server half shipped
 
@@ -133,7 +289,7 @@ as caveats. Phases 3–7 Todo, Phase 8 future.**
 [crates/bv-engine-resource/src/connect_web/](../crates/bv-engine-resource/src/connect_web/)
 (handlers in `mod.rs`; `recipe.rs`, `exposure.rs`, `profile.rs`, `totp.rs`,
 `launch_store.rs`). The request/response contract the host builds on is in
-[docs/api.md](../docs/api.md) → *Web Connect (`form` mode)*. The desktop
+[docs/api.md](../docs/api.md) → *Web Connect (`form` and `http-auth` modes)*. The desktop
 host calls it (see *What the Phase 2 host half shipped*).
 
 - **`launch`** runs the `connect/authorize` front half (the `connect` grant
@@ -1122,6 +1278,12 @@ answer means the credential was rejected, which is reported as failure; the
 handler does not loop. Kerberos/Negotiate is refused explicitly with a clear
 message.
 
+As built (Phase 3): proxy and client-certificate challenges are refused too,
+server-trust challenges are left to the platform's default evaluation, the
+window loads the start URL only after the handler is attached, and the
+credential is held for the 60-second login window at most. See *Current State
+→ What Phase 3 shipped*.
+
 ### 8. TLS pinning (Phase 4)
 
 Appliances commonly serve self-signed certificates. The webviews reject those
@@ -1387,10 +1549,22 @@ in the page's main world, and there is no end-to-end LDAP check-out test.
   and the per-platform manual checks.
 - **Done:** `resources/v2/connect/web/*` in the built-in baseline policies (`default`, `standard-user`, `shared-access` refreshed at startup; `administrator` is not refreshed but inherits `update` through `default`).
 
-### Phase 3 — `http-auth` mode — **Todo**
+### Phase 3 — `http-auth` mode — **Done, with caveats**
 
-Native challenge handlers on all three platforms (§7), answering once per
-(origin, realm).
+See *Current State → What Phase 3 shipped → Phase 3 caveats*: no handler has
+been run against a live challenge yet, the Windows and Linux handlers are not
+compiled on the development hosts, success is inferred from the first top-frame load after
+an answer, and `make test-release` has not been run.
+
+- **Done:** `launch` for `http-auth` (exposure `handler`, `dom` over plain
+  http; username and password only; no recipe, no TOTP).
+- **Done:** native challenge handlers on macOS (forwarding proxy
+  `WKNavigationDelegate`), Windows (`BasicAuthenticationRequested`) and
+  Linux (WebKitGTK `authenticate`; Windows and Linux uncompiled here), answering once per
+  (origin, realm); Kerberos / Negotiate, client certificates and proxy
+  challenges refused; server trust left to the platform.
+- **Done:** the editor's HTTP authentication mode and its exposure notice.
+- **Carried forward as caveats:** the per-platform manual checks.
 
 ### Phase 4 — TLS SPKI pinning — **Todo**
 

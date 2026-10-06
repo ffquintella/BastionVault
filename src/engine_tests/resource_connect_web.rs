@@ -759,3 +759,106 @@ async fn a_stored_rustion_policy_still_applies_when_the_mount_is_unavailable() {
     refused(call(&core, &root, LAUNCH, launch_body("p_web", &r)).await, 503, "transport_policy_unavailable");
     assert!(launch_records_text(&core).await.is_empty());
 }
+
+// ── http-auth (T96 Phase 3) ────────────────────────────────────────
+
+fn http_auth_profile(id: &str, credential_source: Value) -> Value {
+    json!({
+        "id": id,
+        "name": id,
+        "protocol": "web",
+        "credential_source": credential_source,
+        "web": { "start_url": "https://fw01.example.com/", "allowed_origins": [], "login_mode": "http-auth" }
+    })
+}
+
+fn http_auth_body(profile_id: &str) -> Value {
+    json!({ "resource": "fw01", "profile_id": profile_id })
+}
+
+async fn set_type_cap(core: &dyn VaultCtx, root: &str, cap: &str) {
+    root_write(
+        core,
+        root,
+        "resources/config/types",
+        types(json!({ "id": "web_application", "fields": [], "connect": { "web_exposure_max": cap } })),
+    )
+    .await;
+}
+
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn http_auth_launch_releases_username_and_password_at_handler_exposure() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("test_web_connect_http_auth").await;
+    let mut insecure = http_auth_profile("p_http", secret_source());
+    insecure["web"]["start_url"] = json!("http://fw01.example.com/");
+    insecure["web"]["allow_insecure_http"] = json!(true);
+    let mut with_recipe = http_auth_profile("p_recipe", secret_source());
+    with_recipe["web"]["recipe"] = recipe(false);
+    let profiles = vec![
+        http_auth_profile("p_basic", secret_source()),
+        insecure,
+        with_recipe,
+        http_auth_profile("p_da", json!({ "kind": "default-account" })),
+    ];
+    seed_fw01_only(&core, &root, profiles, json!({})).await;
+    let alice = userpass_user(&core, &root, "alice", CONNECT_ONLY).await;
+
+    // Deny by default, and below `handler`.
+    refused(call(&core, &alice, LAUNCH, http_auth_body("p_basic")).await, 403, "exposure_not_permitted");
+    for cap in ["none", "isolated"] {
+        set_type_cap(&core, &root, cap).await;
+        refused(call(&core, &alice, LAUNCH, http_auth_body("p_basic")).await, 403, "exposure_cap_exceeded");
+    }
+
+    // `handler` admits it: connect-only, a username and a password, nothing else.
+    set_type_cap(&core, &root, "handler").await;
+    let b = call(&core, &alice, LAUNCH, http_auth_body("p_basic")).await.unwrap();
+    assert_eq!(b["login_mode"], json!("http-auth"));
+    assert_eq!((b["exposure"].as_str(), b["exposure_cap"].as_str()), (Some("handler"), Some("handler")));
+    assert!(!b.contains_key("recipe_hash"), "an http-auth launch has no recipe");
+    assert_eq!(b["heuristic"], json!(false));
+    assert_eq!(b["totp_refresh_steps"], json!([]));
+    assert_eq!(b["credential"], json!({ "username": "admin", "password": APP_PASSWORD }));
+    assert_eq!(
+        b["fill_scope"],
+        json!({ "start_url": "https://fw01.example.com/", "origins": ["https://fw01.example.com"], "allow_insecure_http": false })
+    );
+    assert!(!serde_json::to_string(&b).unwrap().contains(APP_SEED), "the TOTP seed never leaves");
+    let launch_id = b["launch_id"].as_str().unwrap().to_string();
+    let stored = launch_records_text(&core).await;
+    assert!(stored.contains(r#""login_mode":"http-auth""#) && stored.contains(r#""exposure":"handler""#));
+    for secret in [APP_PASSWORD, APP_SEED, launch_id.as_str()] {
+        assert!(!stored.contains(secret), "the launch record must not hold `{secret}`");
+    }
+
+    // No TOTP and no recipe step on an http-auth launch; result and close work as for form.
+    refused(call(&core, &alice, TOTP, json!({ "launch_id": launch_id, "step": 0 })).await, 409, "totp_not_configured");
+    refused(
+        call(&core, &alice, RESULT, json!({ "launch_id": launch_id, "outcome": "success", "step": 0 })).await,
+        400,
+        "invalid_step",
+    );
+    let res = call(&core, &alice, RESULT, json!({ "launch_id": launch_id, "outcome": "failure" })).await.unwrap();
+    assert_eq!(res["already_recorded"], json!(false));
+    let closed = call(&core, &alice, CLOSE, json!({ "launch_id": launch_id })).await.unwrap();
+    assert_eq!(closed["already_closed"], json!(false));
+
+    // A host that sends a recipe hash thinks it is launching something else.
+    let mut body = http_auth_body("p_basic");
+    body["recipe_hash"] = json!(recipe_hash(&recipe(false)).unwrap());
+    refused(call(&core, &alice, LAUNCH, body).await, 400, "recipe_hash_unexpected");
+    // A recipe on the profile, and a username-only source, are refused.
+    refused(call(&core, &alice, LAUNCH, http_auth_body("p_recipe")).await, 422, "invalid_profile");
+    refused(call(&core, &alice, LAUNCH, http_auth_body("p_da")).await, 422, "credential_unavailable");
+
+    // Plain http is not `handler` exposure: refused at `handler` and `proxy`, …
+    refused(call(&core, &alice, LAUNCH, http_auth_body("p_http")).await, 403, "insecure_http_not_allowed");
+    set_type_cap(&core, &root, "proxy").await;
+    refused(call(&core, &alice, LAUNCH, http_auth_body("p_http")).await, 403, "insecure_http_not_allowed");
+    assert!(call(&core, &alice, LAUNCH, http_auth_body("p_basic")).await.is_ok(), "https at `proxy`");
+    // … allowed only at `dom`, and recorded as `dom`.
+    set_type_cap(&core, &root, "dom").await;
+    let b = call(&core, &alice, LAUNCH, http_auth_body("p_http")).await.unwrap();
+    assert_eq!((b["exposure"].as_str(), b["exposure_cap"].as_str()), (Some("dom"), Some("dom")));
+    assert_eq!(b["fill_scope"]["allow_insecure_http"], json!(true));
+}

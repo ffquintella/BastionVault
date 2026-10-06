@@ -237,7 +237,9 @@ thiserror = "2"
 # See: gui/src-tauri/Cargo.toml, error at authenticator-0.5.0/src/transport/windows/device.rs:144
 winapi = { version = "0.3", features = ["std"] }
 # Used from the Tauri setup hook to disable WebView2 form autofill, which
-# would otherwise persist typed secret values to Chromium's Web Data cache.
+# would otherwise persist typed secret values to Chromium's Web Data cache,
+# and by Web Connect `http-auth` mode (`commands/connect_web_http_auth.rs`)
+# for the `BasicAuthenticationRequested` handler.
 # Version pinned to match the transitive dep pulled in by Tauri/wry.
 webview2-com = "0.38"
 # `Win32_System_LibraryLoader` is for `commands/fido2_windows.rs`, which
@@ -248,6 +250,26 @@ webview2-com = "0.38"
 # Pinned to 0.61 to match the version tauri-runtime-wry/wry resolve, so
 # `WebviewWindow::hwnd()` hands back an `HWND` of the same type.
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Web Connect `http-auth` mode (features/web-application-connect.md §7, T96
+# Phase 3): the WKWebView authentication-challenge delegate in
+# `commands/connect_web_http_auth.rs`. wry exposes no challenge callback, so
+# the host attaches one through `with_webview`. No new crates: all four are
+# already in the graph through wry at these versions (objc2 0.6.4, block2
+# 0.6, objc2-foundation / objc2-web-kit 0.3); they are named directly only to
+# reach the types and the Foundation / WebKit classes the delegate touches.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSString", "NSURLAuthenticationChallenge", "NSURLProtectionSpace", "NSURLCredential", "NSURLSession"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKWebView", "WKNavigationDelegate"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Web Connect `http-auth` mode: the WebKitGTK `authenticate` signal handler in
+# `commands/connect_web_http_auth.rs`. Already in the graph through wry
+# (=2.0.2, which enables `v2_38`); named directly for the signal and the
+# authentication-request API (`v2_30` for its security origin).
+webkit2gtk = { version = "2.0", features = ["v2_30"] }
 
 [features]
 # Cloud storage targets are on by default in the desktop GUI build so
