@@ -72,7 +72,7 @@ path.
 
 ## Current State
 
-**Phases 1–4 implemented; Phase 5 partially implemented.** The four-tier
+**Done (T39), with the open items split out to T105.** Phases 1–4 implemented; Phase 5 partially implemented. The four-tier
 `login_class` policy, attach-time `409` enforcement, direct-path
 `brokered_requires_ssh_engine` rejection, the `ssh-cert` / `ssh-otp`
 envelope kinds, server-side brokered minting on the Rustion path
@@ -102,10 +102,15 @@ resolvers are; the four write tiers stay admin-only. Covered by
 (tracked cross-repo — `ssh-cert` already works against Rustion v0.11.0;
 brokered OTP over Rustion fails closed with `ssh_otp_rustion_unsupported`);
 the direct-path testcontainers `ca` round-trip + the
-`tests/e2e/rustion-ssh/` end-to-end forwarding test; the standalone
-resource-detail brokered badge and the full per-tier policy editor in the
-GUI (the four tiers are manageable via CLI + the `ssh-broker/policy/*`
-API today); the operator runbook in `docs/`.
+`tests/e2e/rustion-ssh/` end-to-end forwarding test; the full
+per-tier policy editor in the GUI (the four tiers are manageable via CLI +
+the `ssh-broker/policy/*` API today); the recording leg of the combined
+Connection-tab chip.
+
+**Phase 5 (2026-10-06).** The Connection tab shows the resolved login class
+and its tier, and a brokered resource lists any pre-existing static SSH
+credential (`private_key` / `password`) in a "Remove — brokered" banner. The
+operator runbook is `docs/ssh-login-brokering.md`.
 
 ### Pre-existing building blocks
 
@@ -406,7 +411,7 @@ integration is.)
 | **(Rustion repo)** control-plane session materialiser handles `ssh-cert` (cert publickey auth) + `ssh-otp` | cross-repo |
 | e2e through the `tests/e2e/rustion-ssh/` stack: brokered cert forwarded → bastion authenticates to target → session recorded → `cert_serial` on both audit witnesses | `tests/e2e/rustion-ssh/` |
 
-### Phase 5 — Polish
+### Phase 5 — Polish — 🟡 Partly done (login-class chip, remove-static banner, runbook; per-tier editor + recording leg open)
 
 | Deliverable | Location |
 |---|---|

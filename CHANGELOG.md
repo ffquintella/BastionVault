@@ -58,6 +58,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### SSH login brokering: Connection-tab polish
+
+- **Show the effective SSH login class on a resource's Connection tab, and flag stored credentials a brokered resource must not keep** (T39)
+  -- the tab now states the resolved login class and the tier it came from (with a "locked" suffix), next to the existing transport line. When the resource is `brokered` and the caller can read its secrets, any secret carrying a non-blank `private_key` or `password` -- the exact shape the server's `409 brokered_resource_no_static_credential` guard refuses on write -- is listed in a "Remove — brokered" banner. Only the secret names are kept; values are dropped after the shape check, and at most 50 secrets are inspected. `gui/src/lib/sshBroker.ts`, `gui/src/routes/ResourcesPage.tsx`.
+
 #### RDP clipboard: images, file copy, per-transfer audit and a lockable policy
 
 Phases 2–4 of clipboard redirection, in `gui/src-tauri/src/session/rdp_clipboard/` (now a module directory: `dib.rs`, `files.rs`, `audit.rs`), the Rustion policy tiers and the resource engine. See [features/rdp-clipboard-redirection.md](features/rdp-clipboard-redirection.md).
@@ -88,6 +93,7 @@ Phases 2–4 of clipboard redirection, in `gui/src-tauri/src/session/rdp_clipboa
 
 ### Postponed
 
+- Postpone brokered SSH OTP through Rustion and the remaining brokered-SSH end-to-end tests to the backlog: the bastion's `ssh-otp` materialiser is Rustion work, and brokered OTP over Rustion keeps failing closed with `ssh_otp_rustion_unsupported` until it ships; the GUI per-tier policy editor is postponed with them (T105)
 - Postpone carrying the RDP clipboard through a Rustion-brokered session to the backlog: it needs `CLIPRDR` forwarding on the bastion, which is Rustion work that has not been scheduled; BastionVault already warns on a brokered profile and reports `ready=false` when the channel never negotiates (T104)
 
 ## [0.44.19] - 2026-10-06

@@ -72,7 +72,11 @@ import {
   validateProfile,
   validateProfileForLoginClass,
 } from "../lib/connectionProfiles";
-import { resourceLoginClass, loginClassChipLabel } from "../lib/sshBroker";
+import {
+  resourceLoginClass,
+  loginClassChipLabel,
+  findStaticSshSecrets,
+} from "../lib/sshBroker";
 import type { ConnectProtocol, EffectiveLoginClass } from "../lib/types";
 import * as api from "../lib/api";
 import { openProfileSession } from "../lib/sessionLaunch";
@@ -1716,6 +1720,55 @@ function ConnectionProfilesPanel({
   );
   const brokeredByPolicy = brokersThroughBastion(effective.policy);
 
+  // Effective SSH login class across the four broker tiers. Only meaningful
+  // for a resource that offers SSH; a failed resolve leaves it null and the
+  // chip is simply not shown (the profile editor gates on its own copy).
+  const offersSsh = protocols.includes("ssh");
+  const [loginClass, setLoginClass] = useState<EffectiveLoginClass | null>(null);
+  useEffect(() => {
+    if (!offersSsh) return;
+    let cancel = false;
+    setLoginClass(null);
+    resourceLoginClass(String(resource.name ?? ""))
+      .then((lc) => {
+        if (!cancel) setLoginClass(lc);
+      })
+      .catch(() => {
+        if (!cancel) setLoginClass(null);
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [offersSsh, resource.name]);
+  const loginBrokered = loginClass?.login_class === "brokered";
+
+  // A secret stored before the resource became brokered stays on disk (the
+  // server only refuses *new* writes). The dialler never uses it on a
+  // brokered resource, but it is still a shareable credential, so tell the
+  // operator to remove it. Needs `read`; a connect-only caller can't see it.
+  const [staleStatic, setStaleStatic] = useState<string[]>([]);
+  useEffect(() => {
+    setStaleStatic([]);
+    if (!loginBrokered || canReadSecrets !== true) return;
+    let cancel = false;
+    const name = String(resource.name ?? "");
+    (async () => {
+      try {
+        const { keys } = await api.listResourceSecrets(name);
+        const found = await findStaticSshSecrets(keys ?? [], async (k) => {
+          const r = await api.readResourceSecret(name, k);
+          return r.data as Record<string, unknown>;
+        });
+        if (!cancel) setStaleStatic(found);
+      } catch {
+        if (!cancel) setStaleStatic([]);
+      }
+    })();
+    return () => {
+      cancel = true;
+    };
+  }, [loginBrokered, canReadSecrets, resource.name]);
+
   // Whether the caller may add/edit/delete profiles. While the check is
   // in flight (`null`) we leave controls enabled to avoid a flicker; the
   // server enforces the boundary regardless. Read-only callers see the
@@ -1872,6 +1925,38 @@ function ConnectionProfilesPanel({
                 </span>
               </>
             )}
+          </div>
+        )}
+
+        {/* Effective SSH login class — the other half of "what does a
+            session on this resource do with a credential": brokered means
+            every login is minted per connect and no static one may exist. */}
+        {offersSsh && loginClass && (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-muted)]">
+            <span className="text-[var(--color-text)]">Login class</span>
+            <Badge
+              variant={loginBrokered ? "info" : "neutral"}
+              label={loginClassChipLabel(loginClass)}
+            />
+            <span>
+              {loginBrokered
+                ? "every SSH login is minted per connect from the SSH engine; no stored credential is used."
+                : "SSH logins may use a stored credential."}
+            </span>
+          </div>
+        )}
+        {staleStatic.length > 0 && (
+          <div className="rounded border border-yellow-700 bg-yellow-950/40 text-yellow-200 px-3 py-2 text-sm">
+            <strong>Remove — brokered.</strong> This resource is brokered, so
+            these stored SSH credentials are never used for login:{" "}
+            {staleStatic.map((k, i) => (
+              <span key={k}>
+                {i > 0 && ", "}
+                <code>{k}</code>
+              </span>
+            ))}
+            . Delete them on the Secrets tab; they remain a shareable
+            credential until you do.
           </div>
         )}
 

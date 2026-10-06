@@ -181,7 +181,7 @@ Next-up list recorded before the migration, in its order:
 - [ ] T38 Lay out sessions in a tabbed and split workspace (S56)
   - source: roadmap.md feature row "Session Workspace — tabbed + split session layout", status `[ ]` Todo
   - old-notes: [spec](features/session-workspace.md) — replaces one-free-floating-window-per-session with a Session Workspace window: tab strip + Ghostty-style binary splits (split / focus-move / divider drag / zoom), platform-aware chords from a single reserved-chord table shared by the xterm and RDP panes, multi-line paste guard, and layout persistence as a *skeleton* (resource + profile refs, never tokens or credentials) restored only by an explicit operator action through the normal connect path. Host-side, session teardown moves off `WindowEvent::CloseRequested` onto a token→window attachment registry with a heartbeat watchdog, which also closes today's leak of a session whose webview dies without a close event. Phase 0 is a one-line macOS `tabbing_identifier` win (native window tabs, per-session webview isolation intact); Phase 3's shared-realm workspace is an explicit isolation trade-off documented in the spec. GUI-only — no server change, no new logical paths.
-- [/] T39 Broker SSH logins to resources without a shared credential (S57, S101)
+- [x] T39 Broker SSH logins to resources without a shared credential (S57, S101)
   - source: roadmap.md feature row "SSH Login Brokering for Resources (cert-signing / OTP, no shared credential)", status `[/]` In progress
   - old-notes: [spec](features/ssh-resource-login-brokering.md) — adds a per-resource `login_class` (`shared-credential` \
 - [/] T96 Open web applications in-app with an injected login or SSO (S105)
@@ -424,6 +424,10 @@ Next-up list recorded before the migration, in its order:
   - old-notes: `plugin-ext` bridge for third-party `CertDeliveryPlugin` deliverers — trait + `DelivererRegistry::register` plug point are stable; runtime bridge is the remaining work.
 - [ ] T97 Run web application sessions in a Rustion browser-isolation worker (S105, S51, S106)
   - initiative: Phase 8 of [Web Application Connect](features/web-application-connect.md) §12. A `rustion-isolated` web transport, where Rustion starts a disposable per-session Chromium worker, performs the login there over the Chrome DevTools Protocol, and serves it to the operator over the existing RDP ticket path, recorded as `.rdp-rec`. The credential never reaches the operator's endpoint (exposure level `isolated`). Cross-repo and unscheduled: the Rustion side goes first, and its preparation prompt is [roadmaps/prompts/rustion-browser-isolation.md](roadmaps/prompts/rustion-browser-isolation.md). BastionVault work starts once Rustion ships its half and T96's recipe format is frozen.
+- [>] T105 Broker SSH OTP through Rustion, and finish the brokered-SSH end-to-end tests (S57, S101)
+  - from: M5
+  - why: needs the bastion's `ssh-otp` session materialiser, which is Rustion work; until it ships, brokered OTP over Rustion fails closed with `ssh_otp_rustion_unsupported`. Also open: the testcontainers `ca` round-trip, the `tests/e2e/rustion-ssh/` forwarding test, the GUI per-tier policy editor and the recording leg of the Connection-tab chip
+  - note: split out of T39, which is done with these caveats; the four-tier policy, attach-time `409`, `ssh-cert` forwarding and the Connection-tab chip all ship. See [the spec](features/ssh-resource-login-brokering.md)
 - [>] T104 Carry the RDP clipboard through a Rustion-brokered session (S45)
   - from: M5
   - why: needs bastion-side `CLIPRDR` forwarding in Rustion, which is cross-repo; BastionVault already warns on a brokered profile and reports `ready=false` when the channel never negotiates
