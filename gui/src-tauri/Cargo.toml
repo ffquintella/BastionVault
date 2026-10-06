@@ -253,8 +253,10 @@ thiserror = "2"
 winapi = { version = "0.3", features = ["std"] }
 # Used from the Tauri setup hook to disable WebView2 form autofill, which
 # would otherwise persist typed secret values to Chromium's Web Data cache,
-# and by Web Connect `http-auth` mode (`commands/connect_web_http_auth.rs`)
-# for the `BasicAuthenticationRequested` handler.
+# by Web Connect `http-auth` mode (`commands/connect_web_http_auth.rs`)
+# for the `BasicAuthenticationRequested` handler, and by Web Connect TLS
+# pinning (`commands/connect_web_tls_pin.rs`) for
+# `ServerCertificateErrorDetected`.
 # Version pinned to match the transitive dep pulled in by Tauri/wry.
 webview2-com = "0.38"
 # `Win32_System_LibraryLoader` is for `commands/fido2_windows.rs`, which
@@ -278,12 +280,27 @@ objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSString", "NSURLAuthenticationChallenge", "NSURLProtectionSpace", "NSURLCredential", "NSURLSession"] }
 objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKWebView", "WKNavigationDelegate"] }
+# Web Connect TLS pinning (T96 Phase 4, `commands/connect_web_tls_pin.rs`):
+# the same delegate's server-trust challenge evaluates the `SecTrust`, reads
+# its certificate chain and builds `credentialForTrust:`. No new crates: both
+# are already in this graph (security-framework 3.7 through keyring's
+# apple-native store, rustls-native-certs and rustls-platform-verifier;
+# core-foundation 0.10 through tao and security-framework). Named directly
+# for the RAII `SecTrust` / `SecCertificate` wrappers and the `TCFType` trait
+# that wraps the delegate's raw `SecTrustRef`, instead of hand-written
+# Security.framework FFI. `default-features = false` adds no feature to
+# either crate's existing build; the APIs used are ungated.
+security-framework = { version = "3", default-features = false }
+core-foundation = { version = "0.10", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Web Connect `http-auth` mode: the WebKitGTK `authenticate` signal handler in
 # `commands/connect_web_http_auth.rs`. Already in the graph through wry
 # (=2.0.2, which enables `v2_38`); named directly for the signal and the
-# authentication-request API (`v2_30` for its security origin).
+# authentication-request API (`v2_30` for its security origin). TLS pinning
+# (T96 Phase 4, `commands/connect_web_tls_pin.rs`) uses the same crate's
+# `load-failed-with-tls-errors` signal, `WebContext` certificate exception and
+# its `gio` re-export for the presented chain — no further crate.
 webkit2gtk = { version = "2.0", features = ["v2_30"] }
 
 [features]
@@ -334,6 +351,32 @@ debug_proxy = ["bastion_vault/debug_proxy", "bv-client/debug_proxy"]
 # either, the session silently keeps using the RemoteFX path — the
 # fallback is logged, not hidden.
 rdp_egfx = ["dep:ironrdp-egfx"]
+# Web Application Connect session chrome (T96 Phase 5,
+# features/web-application-connect.md): a vault-owned toolbar webview
+# (origin, lock state, sign-in window, Disconnect, Re-run login) above a web
+# session's remote webview, in the same window. It needs Tauri's `unstable`
+# multi-webview API (`WindowBuilder`, `WebviewBuilder`, `Window::add_child`).
+#
+# OFF by default and deliberately so. `tauri/unstable` is a crate-global
+# switch, not a per-window one: with it, tauri-runtime-wry 2.11.4 builds
+# *every* webview window as a child webview (`WebviewKind::WindowChild`)
+# instead of the window's content, which on the pinned versions means
+#
+#   1. macOS — wry 0.55.1 adds a child WKWebView with `addSubview` and never
+#      makes it the window's first responder (only the content-view path
+#      does), so the vault window, SSH terminals and RDP windows would not
+#      take keystrokes until clicked;
+#   2. Windows and Linux — the undecorated main window loses Tauri's
+#      edge-resize handler (`undecorated_resizing::attach_resize_handler`
+#      runs for `WindowContent` only);
+#   3. the `plugin:webview|create_webview` command becomes live (still
+#      ACL-gated; no capability grants it, which the isolation test keeps).
+#
+# None of these weakens the web session's isolation, but they change every
+# window of the app. The toolbar ships when those are fixed upstream or
+# mitigated per window and checked on all three platforms. Without the
+# feature a web session is the single remote webview of Phases 1–4.
+web_session_chrome = ["tauri/unstable"]
 
 [dev-dependencies]
 # The embedded seal's authorization gate (`commands/system.rs`) is tested

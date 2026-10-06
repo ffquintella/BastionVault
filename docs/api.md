@@ -685,6 +685,27 @@ itself. Every refusal
 is an HTTP error whose message starts with a stable code (`<code>: …`); the
 codes are listed per endpoint.
 
+A profile's `web.tls_pin_sha256` (TLS SPKI pins, Phase 4) is a desktop-host
+setting: the server stores it with the profile but neither reads nor
+validates it, and `launch` does not return it. New `aborted:<check>` values
+the host may send to `result`: `tls_handler` (the pin handler could not be
+attached; nothing was loaded), and `tls_pin_mismatch`, `tls_pin_issuer`,
+`tls_pin_malformed` or `tls_pin_no_certificate` when the session ends before
+its sign-in outcome after a certificate was refused.
+
+**Re-run login (Phase 5, desktop build feature `web_session_chrome`).** The
+web session toolbar's **Re-run login** on a `form` session makes a **new**
+`launch` (new `launch_id`, the same authorisation, a fresh credential) with the
+recipe hash the session was opened with — no endpoint is added and nothing is
+replayed. It sends no `connect_ticket` (the ticket is single-use and the
+toolbar runs no MFA ceremony), so on a profile gated on connect MFA the server
+refuses it and the session keeps its current launch. Once the new launch is
+accepted, the previous one is `result`-ed `aborted:relogin` if its recipe had
+not reported, then `close`d (an LDAP account is checked back in). The toolbar
+reaches the host through three Tauri commands that take no arguments and act
+only on the session whose window hosts the calling toolbar:
+`web_chrome_state`, `web_chrome_disconnect` and `web_chrome_relogin`.
+
 The caller needs `update` on the endpoint paths **and** `connect` (or `read`
 / `root`) on `resources/secrets/<resource>/`. The built-in baseline policies
 (`default`, `shared-access` and the namespace baselines) grant `update` on

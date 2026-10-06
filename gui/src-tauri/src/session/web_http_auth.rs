@@ -129,24 +129,7 @@ impl Challenge {
     /// the same URL parser as the window's allow-list, then held to the host
     /// it was given, so nothing the parser would re-interpret can match.
     pub fn origin(&self) -> Option<WebOrigin> {
-        let scheme = self.scheme.to_ascii_lowercase();
-        if scheme != "https" && scheme != "http" {
-            return None;
-        }
-        let host = self.host.trim().to_ascii_lowercase();
-        let bare = host.trim_start_matches('[').trim_end_matches(']');
-        let host_ok =
-            !bare.is_empty() && bare.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_'));
-        if !host_ok || self.port == 0 {
-            return None;
-        }
-        let authority = if bare.contains(':') { format!("[{bare}]") } else { bare.to_string() };
-        let url = Url::parse(&format!("{scheme}://{authority}:{}/", self.port)).ok()?;
-        let parsed = url.host_str()?.trim_start_matches('[').trim_end_matches(']').to_string();
-        if parsed != bare {
-            return None;
-        }
-        WebOrigin::of_url(&url)
+        WebOrigin::from_parts(&self.scheme, &self.host, self.port)
     }
 
     /// WebView2 reports the request URI and the `WWW-Authenticate` text. A URI

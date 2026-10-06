@@ -386,6 +386,7 @@ export function WebRecipeEditor({
           recipe,
           allowed_origins: web.allowed_origins ?? [],
           allow_insecure_http: allowHttp,
+          tls_pin_sha256: web.tls_pin_sha256 ?? [],
         }),
       );
     } catch (e: unknown) {

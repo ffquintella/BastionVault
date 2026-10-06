@@ -7,6 +7,7 @@
 //! is opaque to the host.
 
 import { validateFormWebProfile, validateHttpAuthWebProfile } from "./webFormProfile";
+import { validateTlsPins } from "./webTlsPin";
 import type {
   ConnectionProfile,
   ConnectProfileHint,
@@ -403,7 +404,8 @@ export const WEB_WINDOW_MAX = 10_000;
 /**
  * Save-time validation of a `web` profile. Refuses everything this release
  * cannot honour rather than letting it look honoured: later login modes,
- * the Rustion transport, TLS pins, credential sources the mode doesn't use.
+ * the Rustion transport, unreadable TLS pins, credential sources the mode
+ * doesn't use.
  * A `form` profile is additionally held to the server's own reading of its
  * origins, recipe and credential source (`validateFormWebProfile`).
  */
@@ -441,9 +443,9 @@ export function validateWebProfile(p: ConnectionProfile): string | null {
       ? "Rustion browser isolation is not available yet."
       : "Unknown web transport.";
   }
-  if ((web.tls_pin_sha256 ?? []).length > 0) {
-    return "TLS certificate pinning for web sessions is not available yet \u2014 remove the pin.";
-  }
+  // SPKI pins (Phase 4): every entry must be one the host can read.
+  const pinError = validateTlsPins(web.tls_pin_sha256);
+  if (pinError) return pinError;
   const allowHttp = web.allow_insecure_http === true;
   if (!web.start_url.trim()) return "Start URL is required.";
   let start: URL;

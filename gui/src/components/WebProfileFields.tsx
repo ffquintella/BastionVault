@@ -1,19 +1,21 @@
 /**
  * Editor fields for the `web` block of a connection profile
- * (features/web-application-connect.md §1, T96 Phases 1-3).
+ * (features/web-application-connect.md §1, T96 Phases 1-4).
  *
  * `open`, `form` and `http-auth` launch. `form` adds the exposure notice, the
  * credential source (rendered by the parent through `credentialSlot`, which
  * owns the resource's secrets) and the recipe editor; `http-auth` the notice
  * and the credential source, with no recipe. A profile carrying a later mode
  * (written by a newer client) still shows it, and save-time validation
- * explains why it can't launch.
+ * explains why it can't launch. Every mode can carry TLS certificate pins
+ * (`WebTlsPinFields`, Phase 4).
  */
 
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import { Input, Select, Textarea } from "./ui";
 import { WebRecipeEditor } from "./WebRecipeEditor";
+import { WebTlsPinFields } from "./WebTlsPinFields";
 import * as api from "../lib/api";
 import { WEB_WINDOW_MAX, WEB_WINDOW_MIN, webOriginSet } from "../lib/connectionProfiles";
 import { isHeuristicRecipe } from "../lib/webRecipe";
@@ -365,6 +367,16 @@ export function WebProfileFields({
           </span>
         </span>
       </label>
+
+      <WebTlsPinFields
+        web={web}
+        onChange={(pins) => {
+          const next = { ...web };
+          if (pins === undefined) delete next.tls_pin_sha256;
+          else next.tls_pin_sha256 = pins;
+          onChange(next);
+        }}
+      />
 
       <div className="col-span-2">
         <Select

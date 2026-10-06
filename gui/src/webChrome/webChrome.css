@@ -1,0 +1,138 @@
+/* Web session toolbar (Phase 5). Plain CSS: the page loads no Tailwind and
+   no vault UI code. Height matches CHROME_HEIGHT in session/web_chrome.rs. */
+:root {
+  color-scheme: light dark;
+  --wc-bg: #f4f4f5;
+  --wc-fg: #18181b;
+  --wc-muted: #52525b;
+  --wc-border: #d4d4d8;
+  --wc-secure: #15803d;
+  --wc-pinned: #b45309;
+  --wc-insecure: #b91c1c;
+  --wc-button: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --wc-bg: #18181b;
+    --wc-fg: #f4f4f5;
+    --wc-muted: #a1a1aa;
+    --wc-border: #3f3f46;
+    --wc-secure: #4ade80;
+    --wc-pinned: #fbbf24;
+    --wc-insecure: #f87171;
+    --wc-button: #27272a;
+  }
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--wc-bg);
+  color: var(--wc-fg);
+  font: 12px/1.2 system-ui, -apple-system, "Segoe UI", sans-serif;
+  user-select: none;
+}
+
+#web-chrome {
+  box-sizing: border-box;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--wc-border);
+}
+
+.wc-where,
+.wc-what {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.wc-where {
+  flex: 0 1 auto;
+  max-width: 45%;
+}
+
+.wc-what {
+  flex: 1 1 auto;
+}
+
+.wc-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.wc-lock {
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+
+.wc-lock[data-lock="secure"] {
+  color: var(--wc-secure);
+}
+
+.wc-lock[data-lock="pinned"] {
+  color: var(--wc-pinned);
+}
+
+.wc-lock[data-lock="insecure"] {
+  color: var(--wc-insecure);
+}
+
+.wc-origin,
+.wc-resource,
+.wc-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wc-origin {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.wc-resource {
+  font-weight: 600;
+  flex: 0 1 auto;
+}
+
+.wc-status,
+.wc-timer {
+  color: var(--wc-muted);
+}
+
+.wc-timer {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.wc-button {
+  font: inherit;
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--wc-border);
+  background: var(--wc-button);
+  color: var(--wc-fg);
+  cursor: pointer;
+}
+
+.wc-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.wc-danger {
+  color: var(--wc-insecure);
+}

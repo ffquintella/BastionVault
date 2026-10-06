@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Web session toolbar (features/web-application-connect.md Phase 5).
+      Loaded only in a web session's `webchrome-<token>` webview. Its own,
+      strict policy: scripts and styles from the bundle only, IPC to the
+      host, nothing else. `ws:` is the dev server's HMR socket (debug builds
+      load this page from it).
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost ws://localhost:1420; base-uri 'none'; form-action 'none'"
+    />
+    <title>Session toolbar</title>
+  </head>
+  <body>
+    <div id="web-chrome"></div>
+    <script type="module" src="/src/webChrome/main.ts"></script>
+  </body>
+</html>

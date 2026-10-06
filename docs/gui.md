@@ -61,6 +61,35 @@ Current limits:
 - **Clipboard content is never logged**, at any level, in either direction. The session's log line and the session window carry direction, byte counts and outcomes only.
 - **Bastion-brokered sessions are unverified.** A brokered session dials the bastion's RDP listener, and whether `CLIPRDR` survives that hop depends on the bastion forwarding the channel. Enabling clipboard on a `rustion-required` profile logs a warning at connect time, and the session's clipboard counters report `ready=false` if the channel never negotiates.
 
+#### Web sessions: TLS certificate pins
+
+Appliances (firewalls, BMCs, hypervisor consoles) often serve a self-signed certificate or one from a private CA. A web session window rejects those, like any browser, and has no "continue anyway". A `web` connection profile can instead carry **TLS certificate pins**: SHA-256 digests of a certificate's public key (`sha256:<hex>`, or the `sha256/<base64>` form curl prints).
+
+- A pin only overrides a certificate the window **rejects**, and only on the profile's own `https` origins. A certificate the system already trusts is used as before.
+- Pin the **server certificate's key** for a self-signed appliance: it is accepted whatever host name or dates it carries, because the TLS handshake proves the server holds that key.
+- Pin the **issuing CA's key** for an appliance whose certificate comes from your own CA (for example this vault's PKI engine): the pin then survives certificate renewal. The appliance must send that CA certificate in its chain, and its certificate must be valid and name the host you connect to.
+- **Fetch certificate fingerprint (trust on first use)** in the profile editor connects to the start URL's origin from this computer, shows the chain that answered (role, subject, issuer, validity, pin) and adds a pin only after you tick the confirmation. Anything on the network path could have answered: compare the fingerprint with the one the appliance shows on its console before you pin it. The helper connects directly, without a proxy, and speaks TLS 1.2 / 1.3 only; when it cannot reach an appliance, compute the pin on a trusted machine instead:
+
+  ~~~sh
+  openssl s_client -connect fw01.example.com:443 -servername fw01.example.com </dev/null 2>/dev/null \
+    | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -hex
+  ~~~
+
+  and enter it as `sha256:<the hex digest>`.
+- A refused certificate shows in the session window's title ("TLS certificate does not match the pinned key — refused") and is audited with the origin and the presented key's pin. **Test recipe** uses the profile's pins too.
+
+#### Web sessions: the session toolbar (opt-in build)
+
+A desktop build made with the GUI crate's `web_session_chrome` Cargo feature (`npm run tauri -- build --features web_session_chrome` in `gui/`, or `--features web_session_chrome` on any cargo build of `bastion-vault-gui`; **off in the default build and in the installers**) puts a vault-owned toolbar strip above a web session's application, in the same window:
+
+- **Lock and origin** — the origin the vault saw the application load (never what the page claims), with **Secure** (HTTPS, certificate trusted by the system), **Pinned** (the system rejected the certificate and one of the profile's pins accepted it), **Not secure** (plain HTTP, allowed by the profile) or **—** (nothing loaded yet).
+- **The resource and the sign-in state**, or a notice such as `blocked: <origin>` — the same text as the window title, which stays the vault's.
+- **Sign-in m:ss** while the vault may still hold the released credential (the recipe's timeout, or the 60-second HTTP-authentication answer window); afterwards **Session m:ss**, the time since it opened. Web sessions have no lifetime limit of their own.
+- **Re-run login** (form-login profiles only) signs in again in the same window with a **new launch**: the server authorises it again, releases a fresh credential (and TOTP code), and the previous launch is closed — an LDAP library account is checked back in. If the profile requires MFA at connect, the toolbar cannot run that prompt: the re-run is refused and nothing changes; disconnect and connect again from the vault window. With a single-account LDAP library set the new check-out is refused while the session still holds the account. HTTP-authentication sessions show the button disabled (the browser keeps the answered credential for the window's lifetime); open-mode sessions do not show it.
+- **Disconnect** ends the session exactly as closing the window does.
+
+The toolbar is a separate webview loading only a page shipped with the app; the application's page cannot read it, script it or draw over it. Without the feature the window is the application alone, titled `<resource> — <origin>` as before. The feature is off by default because it switches on Tauri's `unstable` multi-webview support for the whole app, which on the current Tauri version changes how every window is built. Read from the Tauri and wry sources and not yet observed in a running build: on macOS a newly opened vault, SSH or RDP window would not take keystrokes until clicked, and on Windows and Linux the main window could no longer be resized from its edges.
+
 > **Visibility note.** The Resources list is filtered server-side to entries the caller **owns** (authored) or has been **shared** on. With the per-user-scoping baseline (`standard-user` policy in 0.5.22+), a userpass identity will not see resources owned by another user unless an explicit share or asset-group share is in place.
 
 ### Secrets (KV v2)

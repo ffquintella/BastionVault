@@ -2946,6 +2946,9 @@ export type WebRecipeTestRequest = {
   recipe: WebLoginRecipe;
   allowed_origins?: string[];
   allow_insecure_http?: boolean;
+  /** The profile's pins, so the dry run reaches a self-signed appliance the
+   *  way the session will. */
+  tls_pin_sha256?: string[];
 };
 
 export type WebRecipeActionCheck = {
@@ -2988,6 +2991,36 @@ export type WebRecipeTestResponse = {
 
 export const webRecipeTest = (request: WebRecipeTestRequest) =>
   invoke<WebRecipeTestResponse>("web_recipe_test", { request });
+
+/** One certificate an https origin presented to `web_tls_fingerprint`. */
+export type WebPresentedCertificate = {
+  /** 0 = the server's own (leaf) certificate. */
+  depth: number;
+  /** `sha256:<hex>`, ready for `tls_pin_sha256`. */
+  pin: string;
+  /** The same digest as RFC 7469 / curl base64. */
+  pin_base64: string;
+  /** Server-chosen text, cut at 256 characters. */
+  subject: string;
+  issuer: string;
+  /** Unix seconds. */
+  not_before: number;
+  not_after: number;
+  self_issued: boolean;
+  ca: boolean;
+};
+
+export type WebTlsFingerprintResponse = {
+  origin: string;
+  chain: WebPresentedCertificate[];
+};
+
+/** Fetch the certificate chain an https origin presents, with each key's pin
+ *  (Web Connect TLS pinning, T96 Phase 4). **Trust on first use**: it shows
+ *  whoever answered from this machine; the operator confirms before pinning.
+ *  Nothing is sent and nothing is trusted by the call itself. */
+export const webTlsFingerprint = (url: string) =>
+  invoke<WebTlsFingerprintResponse>("web_tls_fingerprint", { request: { url } });
 
 
 // ── Connect-time MFA re-validation + SSH security keys ──────────

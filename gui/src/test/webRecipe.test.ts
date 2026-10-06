@@ -575,7 +575,7 @@ describe("validateProfile — form-mode web profiles now save", () => {
   });
 
   it("still holds form profiles to the shared web rules", () => {
-    expect(validateProfile(formProfile({ tls_pin_sha256: ["aa"] }))).toMatch(/pinning/);
+    expect(validateProfile(formProfile({ tls_pin_sha256: ["aa"] }))).toMatch(/not a SHA-256 public-key pin/);
     expect(validateProfile(formProfile({ transport: "rustion-isolated" }))).toMatch(/not available yet/);
     expect(validateProfile(formProfile({ window: { width: 10 } }))).toMatch(/Window width/);
     expect(validateProfile({ ...formProfile(), kind: "rustion" })).toMatch(/Rustion/);

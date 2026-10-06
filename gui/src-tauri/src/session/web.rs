@@ -14,9 +14,10 @@
 //! runs a login recipe with a credential the server releases at
 //! `v2/connect/web/launch`; `http-auth` (Phase 3) answers HTTP Basic /
 //! Digest / NTLM challenges natively with a credential released the same way
-//! (`web_http_auth`). `sso`, the `rustion-isolated` transport and TLS pinning
-//! are refused explicitly rather than ignored, so a profile written for a
-//! later phase can never run with its protections silently missing.
+//! (`web_http_auth`). Any mode may carry `tls_pin_sha256` SPKI pins (Phase 4,
+//! `web_tls_pin`). `sso` and the `rustion-isolated` transport are refused
+//! explicitly rather than ignored, so a profile written for a later phase can
+//! never run with its protections silently missing.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -31,6 +32,7 @@ use bastion_vault::modules::resource::connect_web::recipe::{recipe_hash, WebLogi
 use super::web_engine::PageSnapshot;
 use super::web_launch::WebLaunch;
 use super::web_recipe::{session_title, RecipePlan};
+use super::web_tls_pin::{PinSet, TlsPinGate};
 
 /// Default window size when the profile doesn't set one.
 pub const DEFAULT_WINDOW_WIDTH: u32 = 1280;
@@ -88,6 +90,49 @@ impl WebOrigin {
         }
         let port = url.port_or_known_default()?;
         Some(Self { scheme: scheme.to_string(), host, port })
+    }
+
+    /// The exact origin of a platform-reported `(scheme, host, port)` — an
+    /// authentication challenge's or a TLS server-trust challenge's
+    /// protection space — or `None` when it is not an http(s) origin with a
+    /// plain ASCII host and a known port. Built through the same URL parser
+    /// as the window's allow-list, then held to the host it was given, so
+    /// nothing the parser would re-interpret can match.
+    pub fn from_parts(scheme: &str, host: &str, port: u16) -> Option<Self> {
+        let scheme = scheme.to_ascii_lowercase();
+        if scheme != "https" && scheme != "http" {
+            return None;
+        }
+        let host = host.trim().to_ascii_lowercase();
+        let bare = host.trim_start_matches('[').trim_end_matches(']');
+        let host_ok =
+            !bare.is_empty() && bare.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_'));
+        if !host_ok || port == 0 {
+            return None;
+        }
+        let authority = if bare.contains(':') { format!("[{bare}]") } else { bare.to_string() };
+        let url = Url::parse(&format!("{scheme}://{authority}:{port}/")).ok()?;
+        let parsed = url.host_str()?.trim_start_matches('[').trim_end_matches(']').to_string();
+        if parsed != bare {
+            return None;
+        }
+        Self::of_url(&url)
+    }
+
+    /// `https` or `http`.
+    pub fn scheme(&self) -> &str {
+        &self.scheme
+    }
+
+    /// Always explicit (default ports filled in).
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// The host as the URL parser normalised it: lower-case, punycode, and
+    /// an IPv6 literal in brackets.
+    pub fn host(&self) -> &str {
+        &self.host
     }
 
     /// Parse an operator-configured origin (`scheme://host[:port]`, an
@@ -324,6 +369,10 @@ pub struct WebSessionConfig {
     pub width: u32,
     pub height: u32,
     pub login: WebLogin,
+    /// `tls_pin_sha256`: SPKI pins honoured only for a certificate the
+    /// platform rejects (`web_tls_pin`). Empty = no pinning; the platform's
+    /// verdict stands, as before Phase 4.
+    pub tls_pins: PinSet,
 }
 
 fn opt_bool(obj: &serde_json::Map<String, Value>, key: &str, default: bool) -> Result<bool, String> {
@@ -463,18 +512,14 @@ pub fn parse_web_profile(profile: &Value) -> Result<WebSessionConfig, String> {
     if web.get("sso").is_some_and(|v| !v.is_null()) {
         return Err("sso settings only apply to the `sso` login mode".to_string());
     }
-    // A pin the window cannot honour must not look like it is honoured. A
-    // non-list value is not "no pin" — it is a pin we cannot read.
-    match web.get("tls_pin_sha256") {
-        None | Some(Value::Null) => {}
-        Some(Value::Array(a)) if a.is_empty() => {}
-        Some(Value::Array(_)) => {
-            return Err("TLS certificate pinning for web sessions is not available yet; remove tls_pin_sha256 \
-                 (the session fails closed on an untrusted certificate)"
-                .to_string())
-        }
+    // SPKI pins (Phase 4, spec §8). A non-list value is not "no pin" — it is
+    // a pin we cannot read — and one unreadable entry refuses the profile
+    // rather than being dropped from the set.
+    let tls_pins = match web.get("tls_pin_sha256") {
+        None | Some(Value::Null) => PinSet::default(),
+        Some(Value::Array(a)) => PinSet::from_json(a)?,
         Some(_) => return Err("web.tls_pin_sha256 must be a list".to_string()),
-    }
+    };
 
     let allow_insecure_http = opt_bool(web, "allow_insecure_http", false)?;
     let allow_downloads = opt_bool(web, "allow_downloads", false)?;
@@ -533,6 +578,7 @@ pub fn parse_web_profile(profile: &Value) -> Result<WebSessionConfig, String> {
         width,
         height,
         login,
+        tls_pins,
     })
 }
 
@@ -600,6 +646,8 @@ impl WebSessionKind {
 pub enum WebCloseReason {
     WindowClosed,
     SessionClose,
+    /// The session toolbar's **Disconnect** (Phase 5).
+    Disconnect,
     WindowBuildFailed,
     /// Removed by the generic SSH/RDP drop path.
     Dropped,
@@ -611,6 +659,7 @@ impl WebCloseReason {
         match self {
             Self::WindowClosed => "window-closed",
             Self::SessionClose => "session_close",
+            Self::Disconnect => "disconnect",
             Self::WindowBuildFailed => "window-build-failed",
             Self::Dropped => "dropped",
             Self::AppExit => "app-exit",
@@ -620,7 +669,7 @@ impl WebCloseReason {
     pub fn abort_check(self) -> &'static str {
         match self {
             Self::WindowClosed => "window_closed",
-            Self::SessionClose => "session_closed",
+            Self::SessionClose | Self::Disconnect => "session_closed",
             Self::WindowBuildFailed => "window_build",
             Self::Dropped => "session_dropped",
             Self::AppExit => "app_exit",
@@ -641,6 +690,41 @@ struct TitleParts {
     login: Option<String>,
 }
 
+/// The sign-in window currently open, if any: when it ends and which
+/// [`WebShared::start_login_window`] call opened it.
+#[derive(Debug, Default)]
+struct LoginWindow {
+    generation: u64,
+    deadline: Option<Instant>,
+}
+
+/// Returned by [`WebShared::start_login_window`]; closing the window needs
+/// it, so a sign-in that ended late cannot close its successor's window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoginWindowTicket(u64);
+
+/// What the session toolbar renders from [`WebShared`] (Phase 5). The same
+/// host-observed parts as the title, plus the page URL for the lock
+/// indicator — the URL never leaves the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChromeView {
+    pub url: Option<Url>,
+    pub origin: String,
+    pub notice: Option<String>,
+    pub login: Option<String>,
+    pub login_deadline: Option<Instant>,
+}
+
+/// Held while a re-run login is in flight; clears the flag on drop.
+#[derive(Debug)]
+pub struct ReloginGuard<'a>(&'a WebShared);
+
+impl Drop for ReloginGuard<'_> {
+    fn drop(&mut self) {
+        self.0.relogin.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// State the window's handlers (main thread) share with the recipe engine
 /// and the teardown: the host-observed page, the title parts, and the
 /// reason a handler wants the launch closed with. Never holds page content.
@@ -652,6 +736,14 @@ pub struct WebShared {
     abort_hint: Mutex<Option<&'static str>>,
     /// Set by teardown; the recipe engine and the dry run stop on it.
     closed: std::sync::atomic::AtomicBool,
+    /// The sign-in window, for the toolbar's countdown.
+    login_window: Mutex<LoginWindow>,
+    /// A re-run login is in flight (single flight per session).
+    relogin: std::sync::atomic::AtomicBool,
+    /// The window's TLS pin gate, for the toolbar's lock indicator. Weak: the
+    /// gate's refusal hook holds this `WebShared`, and the platform handler
+    /// owns the gate for the window's lifetime.
+    pin_gate: std::sync::OnceLock<std::sync::Weak<TlsPinGate>>,
 }
 
 impl WebShared {
@@ -663,7 +755,64 @@ impl WebShared {
             title: Mutex::new(TitleParts { origin: start_origin.to_string(), ..TitleParts::default() }),
             abort_hint: Mutex::new(None),
             closed: std::sync::atomic::AtomicBool::new(false),
+            login_window: Mutex::new(LoginWindow::default()),
+            relogin: std::sync::atomic::AtomicBool::new(false),
+            pin_gate: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Open the sign-in window: the host may hold a released credential for
+    /// up to `length` from now. Replaces any window still open.
+    pub fn start_login_window(&self, length: Duration) -> LoginWindowTicket {
+        let mut w = Self::lock(&self.login_window);
+        w.generation += 1;
+        w.deadline = Instant::now().checked_add(length);
+        LoginWindowTicket(w.generation)
+    }
+
+    /// Close the sign-in window `ticket` opened — a no-op when a later
+    /// sign-in has opened its own since.
+    pub fn end_login_window(&self, ticket: LoginWindowTicket) {
+        let mut w = Self::lock(&self.login_window);
+        if w.generation == ticket.0 {
+            w.deadline = None;
+        }
+    }
+
+    /// Mark a re-run login in flight. `None` when one already is.
+    pub fn begin_relogin(&self) -> Option<ReloginGuard<'_>> {
+        self.relogin
+            .compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst)
+            .ok()
+            .map(|_| ReloginGuard(self))
+    }
+
+    pub fn relogin_running(&self) -> bool {
+        self.relogin.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Record the window's TLS pin gate (first call wins).
+    pub fn attach_pin_gate(&self, gate: &Arc<TlsPinGate>) {
+        let _ = self.pin_gate.set(Arc::downgrade(gate));
+    }
+
+    /// Whether this session accepted a certificate for `origin` on a pin.
+    pub fn accepted_on_pin(&self, origin: &WebOrigin) -> bool {
+        self.pin_gate.get().and_then(std::sync::Weak::upgrade).is_some_and(|g| g.accepted_on_pin(origin))
+    }
+
+    /// The host is about to send the page elsewhere (a re-run login): treat
+    /// it as loading until the host sees the next load, so the recipe engine
+    /// never acts on the page that is being left.
+    pub fn expect_navigation(&self) {
+        Self::lock(&self.page).loading = true;
+    }
+
+    pub fn chrome_view(&self) -> ChromeView {
+        let url = Self::lock(&self.page).url.clone();
+        let login_deadline = Self::lock(&self.login_window).deadline;
+        let t = Self::lock(&self.title);
+        ChromeView { url, origin: t.origin.clone(), notice: t.notice.clone(), login: t.login.clone(), login_deadline }
     }
 
     pub fn mark_closed(&self) {
@@ -743,6 +892,23 @@ pub struct WebSessionState {
     /// finishes it (`result` if still owed, then `close`).
     pub launch: Option<Arc<WebLaunch>>,
     pub shared: Arc<WebShared>,
+    /// What a re-run login (Phase 5, `form` only) needs to launch again.
+    pub relogin: Option<Arc<FormRelogin>>,
+    /// The running recipe engine, so a re-run can wait for it to report
+    /// before the launch it belongs to is closed.
+    pub engine: Option<tauri::async_runtime::JoinHandle<()>>,
+}
+
+/// A `form` session's re-run context: the recipe as the session was opened
+/// with, and the window's navigation allow-list (the effective scope of the
+/// first launch). A re-run's scope must fit inside that allow-list —
+/// `reconcile_fill_scope` refuses otherwise — because the window cannot
+/// navigate anywhere else. Holds no credential.
+#[derive(Debug)]
+pub struct FormRelogin {
+    pub origins: OriginSet,
+    pub allow_insecure_http: bool,
+    pub form: FormLogin,
 }
 
 /// Finish a web session that has just been removed from the registry: stop
@@ -1142,8 +1308,10 @@ mod tests {
         assert!(base(json!({ "transport": "rustion-isolated" })).unwrap_err().contains("not available"));
         assert!(base(json!({ "transport": "teleport" })).unwrap_err().contains("unknown web transport"));
         assert!(base(json!({ "recipe": { "version": 1 } })).unwrap_err().contains("form"));
-        assert!(base(json!({ "tls_pin_sha256": ["abc"] })).unwrap_err().contains("pinning"));
-        assert!(base(json!({ "tls_pin_sha256": [] })).is_ok());
+        // Phase 4: pins are honoured now, but an unreadable one still
+        // refuses the profile instead of being dropped from the set.
+        assert!(base(json!({ "tls_pin_sha256": ["abc"] })).unwrap_err().contains("tls_pin_sha256[0]"));
+        assert!(base(json!({ "tls_pin_sha256": [] })).unwrap().tls_pins.is_empty());
         assert!(base(json!({ "clipboard": "sideways" })).is_err());
         assert!(base(json!({ "window": { "width": 10 } })).unwrap_err().contains("between"));
         assert!(base(json!({ "window": { "width": "wide" } })).is_err());
@@ -1274,13 +1442,16 @@ mod tests {
         let mut p = http_auth_profile(json!({ "kind": "secret" }));
         p["web"]["recipe"] = form_recipe();
         assert!(parse_web_profile(&p).unwrap_err().contains("only applies to the `form`"));
-        // The shared rules still hold: no http without the opt-in, no pins.
+        // The shared rules still hold: no http without the opt-in; pins are
+        // read strictly (and honoured, Phase 4).
         let mut p = http_auth_profile(json!({ "kind": "secret" }));
         p["web"]["start_url"] = json!("http://bmc.example.com/");
         assert!(parse_web_profile(&p).unwrap_err().contains("allow_insecure_http"));
         let mut p = http_auth_profile(json!({ "kind": "secret" }));
         p["web"]["tls_pin_sha256"] = json!(["abc"]);
-        assert!(parse_web_profile(&p).unwrap_err().contains("pinning"));
+        assert!(parse_web_profile(&p).unwrap_err().contains("tls_pin_sha256[0]"));
+        p["web"]["tls_pin_sha256"] = json!([format!("sha256:{}", "ab".repeat(32))]);
+        assert_eq!(parse_web_profile(&p).unwrap().tls_pins.len(), 1);
         assert_eq!(WebSessionKind::HttpAuth.as_str(), "http-auth");
     }
 
@@ -1314,6 +1485,7 @@ mod tests {
         for r in [
             WebCloseReason::WindowClosed,
             WebCloseReason::SessionClose,
+            WebCloseReason::Disconnect,
             WebCloseReason::WindowBuildFailed,
             WebCloseReason::Dropped,
             WebCloseReason::AppExit,
@@ -1321,6 +1493,32 @@ mod tests {
             let c = r.abort_check();
             assert!(crate::session::web_recipe::HOST_ABORT_CHECKS.contains(&c), "{c}");
         }
+        assert_eq!(WebCloseReason::Disconnect.as_str(), "disconnect");
+    }
+
+    #[test]
+    fn a_login_window_is_closed_only_by_the_sign_in_that_opened_it() {
+        let shared = WebShared::new("fw01", "https://fw01.example.com");
+        assert_eq!(shared.chrome_view().login_deadline, None);
+        let first = shared.start_login_window(Duration::from_secs(30));
+        assert!(shared.chrome_view().login_deadline.is_some());
+        // A re-run opens its own window before the first sign-in winds down.
+        let second = shared.start_login_window(Duration::from_secs(30));
+        shared.end_login_window(first);
+        assert!(shared.chrome_view().login_deadline.is_some(), "a late end must not close the re-run's window");
+        shared.end_login_window(second);
+        assert_eq!(shared.chrome_view().login_deadline, None);
+    }
+
+    #[test]
+    fn expect_navigation_holds_the_engine_until_the_next_load() {
+        let shared = WebShared::new("fw01", "https://fw01.example.com");
+        shared.page_load(&url("https://fw01.example.com/ng"), true);
+        assert!(!shared.snapshot().loading);
+        shared.expect_navigation();
+        assert!(shared.snapshot().loading);
+        shared.page_load(&url("https://fw01.example.com/login"), true);
+        assert!(!shared.snapshot().loading);
     }
 
     #[test]
@@ -1497,9 +1695,15 @@ mod tests {
             let err = web_with(json!({ "tls_pin_sha256": bad.clone() })).unwrap_err();
             assert!(err.contains("tls_pin_sha256 must be a list"), "{bad}: {err}");
         }
-        assert!(web_with(json!({ "tls_pin_sha256": null })).is_ok());
-        assert!(web_with(json!({ "tls_pin_sha256": [] })).is_ok());
-        assert!(web_with(json!({ "tls_pin_sha256": ["x"] })).unwrap_err().contains("pinning"));
+        assert!(web_with(json!({ "tls_pin_sha256": null })).unwrap().tls_pins.is_empty());
+        assert!(web_with(json!({ "tls_pin_sha256": [] })).unwrap().tls_pins.is_empty());
+        // One bad entry is an error, never a smaller pin set.
+        let good = format!("sha256:{}", "0f".repeat(32));
+        for bad in [json!(["x"]), json!([good.clone(), 5]), json!([good.clone(), null]), json!([good.clone(), ""])] {
+            let err = web_with(json!({ "tls_pin_sha256": bad.clone() })).unwrap_err();
+            assert!(err.contains("tls_pin_sha256["), "{bad}: {err}");
+        }
+        assert_eq!(web_with(json!({ "tls_pin_sha256": [good.clone(), good] })).unwrap().tls_pins.len(), 1, "deduped");
     }
 
     #[test]

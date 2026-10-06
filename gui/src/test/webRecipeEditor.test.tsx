@@ -419,9 +419,18 @@ describe("recipe editor — Test recipe (dry run)", () => {
     const call = mockInvoke.mock.calls.find((c) => c[0] === "web_recipe_test");
     expect(call).toBeDefined();
     const request = (call![1] as { request: Record<string, unknown> }).request;
-    expect(Object.keys(request).sort()).toEqual(["allow_insecure_http", "allowed_origins", "recipe", "url"]);
+    expect(Object.keys(request).sort()).toEqual([
+      "allow_insecure_http",
+      "allowed_origins",
+      "recipe",
+      "tls_pin_sha256",
+      "url",
+    ]);
     expect(request.url).toBe(START);
     expect(request.allowed_origins).toEqual(["https://sso.example.com"]);
+    // The profile's pins go with it (none here), so a self-signed appliance is
+    // reached the way the session will reach it.
+    expect(request.tls_pin_sha256).toEqual([]);
     // Nothing that could carry a credential, and no vault call besides the type read.
     expect(JSON.stringify(request)).not.toMatch(/password":|totp_code|secret_id/);
     expect(mockInvoke.mock.calls.map((c) => c[0])).toEqual(["resource_types_read", "web_recipe_test"]);

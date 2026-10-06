@@ -368,10 +368,11 @@ describe("validateProfile — web profiles", () => {
     ).toMatch(/releases no credential/);
   });
 
-  it("refuses the Rustion transport, the isolated transport and TLS pins", () => {
+  it("refuses the Rustion transport and the isolated transport; reads TLS pins strictly (Phase 4)", () => {
     expect(validateProfile(webProfile({}, { kind: "rustion" }))).toMatch(/Rustion/);
     expect(validateProfile(webProfile({ transport: "rustion-isolated" }))).toMatch(/not available yet/);
-    expect(validateProfile(webProfile({ tls_pin_sha256: ["abc"] }))).toMatch(/pinning/);
+    expect(validateProfile(webProfile({ tls_pin_sha256: ["abc"] }))).toMatch(/not a SHA-256 public-key pin/);
+    expect(validateProfile(webProfile({ tls_pin_sha256: ["sha256:" + "ab".repeat(32)] }))).toBeNull();
   });
 
   it("enforces the start URL rules", () => {
@@ -565,9 +566,10 @@ describe("http-auth web profiles", () => {
     expect(validateProfile(httpAuth({ recipe }))).toMatch(/only applies to the form login mode/);
     expect(isLaunchableWebProfile(httpAuth({ recipe }))).toBe(false);
     expect(isLaunchableWebProfile(httpAuth({}, { credential_source: { kind: "default-account" } }))).toBe(false);
-    // The shared rules hold: https only unless opted in, no pins.
+    // The shared rules hold: https only unless opted in, pins read strictly.
     expect(validateProfile(httpAuth({ start_url: "http://bmc.example.com/" }))).toMatch(/insecure HTTP/);
-    expect(validateProfile(httpAuth({ tls_pin_sha256: ["abc"] }))).toMatch(/pinning/);
+    expect(validateProfile(httpAuth({ tls_pin_sha256: ["abc"] }))).toMatch(/not a SHA-256 public-key pin/);
+    expect(validateProfile(httpAuth({ tls_pin_sha256: ["sha256:" + "cd".repeat(32)] }))).toBeNull();
     // The server's strict origin reading (no percent-encoded hosts).
     expect(validateProfile(httpAuth({ allowed_origins: ["https://bmc%2Eexample.com"] }))).not.toBeNull();
   });

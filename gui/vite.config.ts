@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -13,6 +14,18 @@ export default defineConfig(async () => ({
     css: false,
   },
   clearScreen: false,
+  build: {
+    rolldownOptions: {
+      // Two pages: the vault UI, and the web session toolbar the desktop
+      // host loads in its own webview above a web session's remote content
+      // (features/web-application-connect.md Phase 5). The toolbar is a
+      // separate entry so that webview loads none of the vault UI.
+      input: {
+        main: fileURLToPath(new URL("./index.html", import.meta.url)),
+        webChrome: fileURLToPath(new URL("./web-chrome.html", import.meta.url)),
+      },
+    },
+  },
   server: {
     port: 1420,
     strictPort: true,

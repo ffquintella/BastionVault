@@ -585,7 +585,9 @@ export interface WebProfileSettings {
   recipe?: WebLoginRecipe;
   /** `rustion-isolated` is Phase 8 and refused today. */
   transport?: "local" | "rustion-isolated";
-  /** Phase 4; a non-empty list is refused today rather than ignored. */
+  /** SPKI SHA-256 pins (`sha256:<hex>` or `sha256/<base64>`), honoured only
+   *  for a certificate the webview rejects on one of the profile's https
+   *  origins (Phase 4, `lib/webTlsPin.ts`). Empty / absent = no pinning. */
   tls_pin_sha256?: string[];
   allow_insecure_http?: boolean;
   allow_downloads?: boolean;

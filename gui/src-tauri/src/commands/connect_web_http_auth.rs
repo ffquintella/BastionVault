@@ -2,7 +2,8 @@
 //! sessions (features/web-application-connect.md §7; T96 Phase 3).
 //!
 //! wry exposes no authentication-challenge callback, so the handler is
-//! attached to the platform webview through `WebviewWindow::with_webview`:
+//! attached to the platform webview through `Webview::with_webview` (the
+//! session's remote webview — with the Phase 5 toolbar the window holds two):
 //!
 //! | Platform | Hook |
 //! |---|---|
@@ -19,8 +20,17 @@
 //! Every refusal supplies no credential *and* suppresses the platform's own
 //! prompt (WebView2 and WebKitGTK would otherwise show a login dialog), so a
 //! refused challenge is never silently turned into "the operator types it".
-//! Server trust is never answered here: it falls through to the platform's
-//! default evaluation (Phase 4 owns pinning).
+//! Server trust is never answered by the HTTP-auth gate: it falls through to
+//! the platform's default evaluation.
+//!
+//! **This is also the one attach point for the Phase 4 TLS pin handler**
+//! (`commands/connect_web_tls_pin.rs`, decisions in `session::web_tls_pin`),
+//! because on macOS both arrive through the same delegate method: WebKit
+//! reports a TLS server-trust evaluation as one more authentication
+//! challenge. A window gets the delegate when it has an HTTP-auth gate, a pin
+//! gate, or both; on Windows and Linux the two are separate events and are
+//! attached independently. A window with neither keeps the platform defaults
+//! exactly.
 //!
 //! **The Windows and Linux blocks are not compiled on the development hosts
 //! this was written on** (the Windows cross-check stops in C build scripts
@@ -32,16 +42,69 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 use crate::session::web_http_auth::HttpAuthGate;
+use crate::session::web_tls_pin::TlsPinGate;
 
-/// Attach the gate to `win`'s webview. Resolves once the platform closure
-/// ran: `Ok` when the handler is in place, `Err` (with a reason safe to show)
-/// when it is not — the caller must then not load the application.
-pub(crate) fn install(win: &tauri::WebviewWindow, gate: Arc<HttpAuthGate>) -> oneshot::Receiver<Result<(), String>> {
+/// The native handlers one web session window needs. Neither set means
+/// nothing to attach (and [`install`] is not called).
+#[derive(Clone, Default)]
+pub(crate) struct NativeGates {
+    /// `http-auth` sessions (Phase 3).
+    pub http_auth: Option<Arc<HttpAuthGate>>,
+    /// Profiles carrying `tls_pin_sha256` (Phase 4).
+    pub tls_pin: Option<Arc<TlsPinGate>>,
+}
+
+impl NativeGates {
+    pub fn is_empty(&self) -> bool {
+        self.http_auth.is_none() && self.tls_pin.is_none()
+    }
+
+    /// The abort check for a failure that cannot be told apart (the shared
+    /// macOS delegate): the HTTP-auth handler's when there is one.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn shared_check(&self) -> &'static str {
+        if self.http_auth.is_some() {
+            HTTP_AUTH_HANDLER_CHECK
+        } else {
+            TLS_PIN_HANDLER_CHECK
+        }
+    }
+}
+
+/// `aborted:<check>` when the HTTP-auth handler could not be attached.
+pub(crate) const HTTP_AUTH_HANDLER_CHECK: &str = "auth_handler";
+/// `aborted:<check>` when the TLS pin handler could not be attached.
+pub(crate) const TLS_PIN_HANDLER_CHECK: &str = "tls_handler";
+
+/// A handler that could not be attached: which one (as its `aborted:<check>`
+/// name) and a reason safe to show.
+#[derive(Debug)]
+pub(crate) struct InstallError {
+    pub check: &'static str,
+    pub reason: String,
+}
+
+impl InstallError {
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    fn http_auth(reason: String) -> Self {
+        Self { check: HTTP_AUTH_HANDLER_CHECK, reason }
+    }
+
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    fn tls_pin(reason: String) -> Self {
+        Self { check: TLS_PIN_HANDLER_CHECK, reason }
+    }
+}
+
+/// Attach the gates to the remote webview `win`. Resolves once the platform
+/// closure ran: `Ok` when every handler is in place, `Err` when one is not —
+/// the caller must then not load the application.
+pub(crate) fn install(win: &tauri::Webview, gates: NativeGates) -> oneshot::Receiver<Result<(), InstallError>> {
     let (tx, rx) = oneshot::channel();
     // If the closure never runs (the window is already gone), `tx` is
     // dropped with it and the receiver reports that.
     let _ = win.with_webview(move |webview| {
-        let _ = tx.send(platform::install(webview, gate));
+        let _ = tx.send(platform::install(webview, gates));
     });
     rx
 }
@@ -74,6 +137,14 @@ pub(crate) fn install(win: &tauri::WebviewWindow, gate: Arc<HttpAuthGate>) -> on
 /// clears and nothing calls into either. WebKit reads which optional methods
 /// a delegate implements when it is set, so it is set once, after the proxy
 /// is complete.
+///
+/// Routing (Phase 4). A server-trust challenge goes to the TLS pin shim when
+/// the window has a pin gate, and to the platform's default evaluation
+/// otherwise (exactly Phase 3). Every other challenge goes to the HTTP-auth
+/// gate when the window has one; a pinned window without one answers it with
+/// `RejectProtectionSpace`, which is what WebKit does for a delegate that
+/// does not implement the method at all — so adding a pin changes nothing
+/// but the server-trust path.
 #[cfg(target_os = "macos")]
 mod platform {
     use std::ffi::c_void;
@@ -91,10 +162,13 @@ mod platform {
     };
     use objc2_web_kit::{WKNavigationDelegate, WKWebView};
 
+    use super::{InstallError, NativeGates};
     use crate::session::web_http_auth::{AuthMethod, Challenge, GateAnswer, HttpAuthGate};
+    use crate::session::web_tls_pin::TlsPinGate;
 
     pub struct ProxyIvars {
-        gate: Arc<HttpAuthGate>,
+        http_auth: Option<Arc<HttpAuthGate>>,
+        tls_pin: Option<Arc<TlsPinGate>>,
         /// wry's own delegate. Weak: the proxy is owned by it.
         inner: Weak<ProtocolObject<dyn WKNavigationDelegate>>,
     }
@@ -104,7 +178,7 @@ mod platform {
         // `dealloc` and its ivars are plain Rust values dropped by objc2.
         #[unsafe(super(NSObject))]
         #[thread_kind = MainThreadOnly]
-        #[name = "BastionVaultHttpAuthNavigationDelegate"]
+        #[name = "BastionVaultChallengeNavigationDelegate"]
         #[ivars = ProxyIvars]
         struct HttpAuthNavigationDelegate;
 
@@ -144,7 +218,25 @@ mod platform {
                 completion: &DynBlock<dyn Fn(NSURLSessionAuthChallengeDisposition, *mut NSURLCredential)>,
             ) {
                 let ch = read_challenge(challenge);
-                match self.ivars().gate.challenge(&ch) {
+                if ch.method == AuthMethod::ServerTrust {
+                    match &self.ivars().tls_pin {
+                        Some(pins) => {
+                            let (disposition, credential) =
+                                crate::commands::connect_web_tls_pin::macos::server_trust(challenge, pins);
+                            let ptr = credential.as_ref().map_or(std::ptr::null_mut(), |c| Retained::as_ptr(c).cast_mut());
+                            completion.call((disposition, ptr));
+                        }
+                        None => completion
+                            .call((NSURLSessionAuthChallengeDisposition::PerformDefaultHandling, std::ptr::null_mut())),
+                    }
+                    return;
+                }
+                let Some(gate) = &self.ivars().http_auth else {
+                    // What WebKit does when the delegate lacks this method.
+                    completion.call((NSURLSessionAuthChallengeDisposition::RejectProtectionSpace, std::ptr::null_mut()));
+                    return;
+                };
+                match gate.challenge(&ch) {
                     GateAnswer::Default => {
                         completion.call((NSURLSessionAuthChallengeDisposition::PerformDefaultHandling, std::ptr::null_mut()))
                     }
@@ -206,7 +298,15 @@ mod platform {
     /// Key for the associated object; only its address matters.
     static PROXY_KEY: u8 = 0;
 
-    pub fn install(webview: tauri::webview::PlatformWebview, gate: Arc<HttpAuthGate>) -> Result<(), String> {
+    pub fn install(webview: tauri::webview::PlatformWebview, gates: NativeGates) -> Result<(), InstallError> {
+        if gates.is_empty() {
+            return Ok(());
+        }
+        let check = gates.shared_check();
+        install_delegate(webview, gates).map_err(|reason| InstallError { check, reason })
+    }
+
+    fn install_delegate(webview: tauri::webview::PlatformWebview, gates: NativeGates) -> Result<(), String> {
         // SAFETY: `inner()` is a valid WKWebView, live for this call. We take
         // our own +1 with `retain` rather than adopting tauri's reference with
         // `from_raw`: tauri-runtime-wry 2.11 passes a leaked `into_raw` (+1),
@@ -222,9 +322,11 @@ mod platform {
         // SAFETY: a plain property read on the main thread.
         let inner =
             unsafe { wk.navigationDelegate() }.ok_or("the session window has no navigation delegate to extend")?;
-        let proxy = mtm
-            .alloc::<HttpAuthNavigationDelegate>()
-            .set_ivars(ProxyIvars { gate, inner: Weak::from_retained(&inner) });
+        let proxy = mtm.alloc::<HttpAuthNavigationDelegate>().set_ivars(ProxyIvars {
+            http_auth: gates.http_auth,
+            tls_pin: gates.tls_pin,
+            inner: Weak::from_retained(&inner),
+        });
         // SAFETY: `init` on a freshly allocated NSObject subclass.
         let proxy: Retained<HttpAuthNavigationDelegate> = unsafe { msg_send![super(proxy), init] };
 
@@ -254,7 +356,8 @@ mod platform {
 /// never in the scope); the `Challenge` text gives the scheme and realm.
 /// Unanswered and uncancelled, WebView2 would show its own prompt, so every
 /// refusal sets `Cancel`. Client-certificate requests are cancelled too, for
-/// this window only. Server-certificate errors are not touched.
+/// this window only. Server-certificate errors are the TLS pin shim's
+/// (`connect_web_tls_pin`), attached only when the window has a pin gate.
 #[cfg(windows)]
 mod platform {
     use std::sync::Arc;
@@ -264,6 +367,7 @@ mod platform {
     use windows::core::{Interface, PCWSTR, PWSTR};
     use zeroize::Zeroizing;
 
+    use super::{InstallError, NativeGates};
     use crate::session::web_http_auth::{Challenge, GateAnswer, HttpAuthGate};
 
     /// A NUL-terminated UTF-16 copy that is zeroized when dropped.
@@ -271,7 +375,17 @@ mod platform {
         Zeroizing::new(s.encode_utf16().chain(std::iter::once(0)).collect())
     }
 
-    pub fn install(webview: tauri::webview::PlatformWebview, gate: Arc<HttpAuthGate>) -> Result<(), String> {
+    pub fn install(webview: tauri::webview::PlatformWebview, gates: NativeGates) -> Result<(), InstallError> {
+        if let Some(gate) = gates.http_auth {
+            install_http_auth(&webview, gate).map_err(InstallError::http_auth)?;
+        }
+        if let Some(pins) = gates.tls_pin {
+            crate::commands::connect_web_tls_pin::platform::install(&webview, pins).map_err(InstallError::tls_pin)?;
+        }
+        Ok(())
+    }
+
+    fn install_http_auth(webview: &tauri::webview::PlatformWebview, gate: Arc<HttpAuthGate>) -> Result<(), String> {
         // SAFETY: COM calls on the WebView2 objects tauri hands this closure,
         // on the UI thread that owns them; every out-pointer is a local.
         unsafe {
@@ -357,6 +471,7 @@ mod platform {
     use webkit2gtk::glib::translate::ToGlibPtr;
     use webkit2gtk::{AuthenticationRequestExt, AuthenticationScheme, Credential, CredentialPersistence, WebViewExt};
 
+    use super::{InstallError, NativeGates};
     use crate::session::web_http_auth::{AuthMethod, Challenge, GateAnswer, HttpAuthGate};
 
     fn method_of(s: AuthenticationScheme) -> AuthMethod {
@@ -373,7 +488,17 @@ mod platform {
         }
     }
 
-    pub fn install(webview: tauri::webview::PlatformWebview, gate: Arc<HttpAuthGate>) -> Result<(), String> {
+    pub fn install(webview: tauri::webview::PlatformWebview, gates: NativeGates) -> Result<(), InstallError> {
+        if let Some(gate) = gates.http_auth {
+            install_http_auth(&webview, gate).map_err(InstallError::http_auth)?;
+        }
+        if let Some(pins) = gates.tls_pin {
+            crate::commands::connect_web_tls_pin::platform::install(&webview, pins).map_err(InstallError::tls_pin)?;
+        }
+        Ok(())
+    }
+
+    fn install_http_auth(webview: &tauri::webview::PlatformWebview, gate: Arc<HttpAuthGate>) -> Result<(), String> {
         webview.inner().connect_authenticate(move |_, request| {
             let ch = Challenge {
                 method: method_of(request.scheme()),
@@ -415,11 +540,15 @@ mod platform {
 
 #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 mod platform {
-    use std::sync::Arc;
+    use super::{InstallError, NativeGates};
 
-    use crate::session::web_http_auth::HttpAuthGate;
-
-    pub fn install(_webview: tauri::webview::PlatformWebview, _gate: Arc<HttpAuthGate>) -> Result<(), String> {
-        Err("HTTP authentication challenges cannot be answered on this platform".into())
+    pub fn install(_webview: tauri::webview::PlatformWebview, gates: NativeGates) -> Result<(), InstallError> {
+        if gates.is_empty() {
+            return Ok(());
+        }
+        Err(InstallError {
+            check: gates.shared_check(),
+            reason: "HTTP authentication challenges and TLS pins cannot be handled on this platform".into(),
+        })
     }
 }

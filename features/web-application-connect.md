@@ -120,7 +120,8 @@ security / capability docs, Microsoft WebView2 "Basic authentication" docs, W3C
 
 ## Current State
 
-**Status: In progress — Phases 1, 2 and 3 done, with caveats (below). Phase 2
+**Status: T96 closed — Phases 1–4 done and Phase 5 behind an opt-in build
+feature, each with the caveats below, and the Phase 6 spike done. Phase 2
 shipped the server, desktop-host and GUI-editor halves (the host recipe engine,
 fixed fill routine and `web_recipe_test`; the profile editor with recipe editor,
 import / export, test button and vendor presets, **whose presets are unverified
@@ -128,8 +129,445 @@ against live appliances**); its per-platform manual checks are carried forward
 as caveats. Phase 3 shipped `http-auth` mode on the server, the host (native
 Basic / Digest / NTLM challenge handlers) and the editor; **its Windows and
 Linux handlers are not compiled on the development hosts, and no handler has
-been run against a live challenge yet** (see *Phase 3 caveats*). Phases 4–7 Todo, Phase 8
-future.**
+been run against a live challenge yet** (see *Phase 3 caveats*). Phase 4
+shipped TLS SPKI pinning in the desktop host and the editor; **it has not been
+run against a live self-signed appliance, and its Windows and Linux handlers
+are not compiled on the development hosts either** (see *Phase 4 caveats*).
+Phase 5 (session chrome) is implemented **behind the GUI's opt-in
+`web_session_chrome` build feature, off by default** because the Tauri
+`unstable` feature it needs is crate-global and changes how every window of
+the app is built; **it has not been run in a live session** (see *Phase 5
+caveats*). Phase 6 was a spike, now done: proxy mode is a go on macOS 14+
+(run) and a conditional go on Windows and Linux (read from the sources, not
+run); see *Phase 6 spike findings*. Building proxy mode is tracked as T106,
+Phase 7 (`sso`) as T107, blocked by T52, and Phase 8 is future (T97).**
+
+### Phase 6 spike findings
+
+The spike asked the two questions §10 left open. **No proxy code was written
+into the app.** Evidence is of three kinds, labelled throughout:
+
+- **Run** — a throwaway prototype kept outside the repository (rustls 0.23.42
+  with `ring`, rcgen 0.14.8, hyper 1.10.1, tokio-rustls 0.26.4 — the
+  lockfile's versions; 11 tests, all passing), and one real WKWebView session
+  on macOS 27.0.1 driven by a Swift harness against that prototype.
+- **Read** — the pinned sources in the cargo registry: wry 0.55.1, tauri
+  2.11.5, tauri-runtime-wry 2.11.4, webkit2gtk 2.0.2, webview2-com 0.38.2,
+  security-framework 3.7.0, and the Phase 4 shims.
+- **Not checked** — anything on Windows or Linux at run time (no such host),
+  and wry's own `mac-proxy` path (the harness set the same data-store
+  property through Apple's Swift API instead).
+
+**Verdict per platform:**
+
+| Platform | Proxy hook (read) | Trusting a per-session CA without the OS store | Verdict |
+|---|---|---|---|
+| macOS (WKWebView) | Tauri `proxy_url` → wry `mac-proxy`: an HTTP CONNECT `nw_proxy_config` set as `proxyConfigurations` on the window's own non-persistent `WKWebsiteDataStore` | The server-trust challenge, through the Phase 4 shim unchanged. **Run** | **Go, macOS 14+ only** |
+| Windows (WebView2) | wry appends `--proxy-server=http://…` to the browser arguments of the window's own environment (per-session data directory, so its own browser process) | `ServerCertificateErrorDetected` → `ALWAYS_ALLOW`, through the Phase 4 shim unchanged — an error override, not an anchor. **Read** | **Conditional go** — a Windows run first |
+| Linux (WebKitGTK) | wry sets custom `NetworkProxySettings` on the data manager of the window's own ephemeral `WebContext` | `allow_tls_certificate_for_host` for each minted leaf, registered before the first load. **Read** | **Conditional go** — a Linux run first |
+
+**The macOS run** (non-persistent data store with an HTTP CONNECT
+`ProxyConfiguration`; trust anchored in the harness, not by the Phase 4 Rust
+shim):
+
+- WebKit sent each https load for a session host as `CONNECT host:443` to the
+  loopback proxy and resolved nothing itself (the `.test` names never
+  resolve); the proxy resolves the upstream.
+- The navigation delegate got a server-trust challenge for the main
+  document's host **and** for a sub-resource host, once per host. The
+  platform's own evaluation failed in both, and the evaluated chain was
+  `[leaf, session CA]` — what the Phase 4 shim reads before it asks the gate.
+- Anchoring the trust to the in-memory session CA alone
+  (`SecTrustSetAnchorCertificates` + `…AnchorCertificatesOnly`, SSL policy
+  with the host) passed, and `UseCredential` let the load proceed. No
+  keychain item, trust setting or OS store was touched.
+- The page's password field held the placeholder (read back by page script);
+  the proxy put the real secret into the POST, the upstream received it, the
+  upstream's reflection of the password in its reply was scrubbed back to the
+  placeholder, and the final DOM held no trace of the secret.
+- A sub-resource from a host outside the session was refused at `CONNECT`
+  and did not load.
+- **Plain `http://` is tunnelled too, as `CONNECT host:80`**, not sent as an
+  absolute-form request. The first prototype matched host names only and
+  accepted that tunnel; the proxy must match a `CONNECT` against the
+  session's https **origins** (host and port). Fixed and re-run.
+
+**The prototype's tests** (a rustls client that trusts only the session CA
+stands in for the webview):
+
+- One P-256 key per session and one leaf per session host, signed by a
+  per-session CA name-constrained to those hosts, all in memory; the CA's
+  private key is dropped as soon as the leaves exist, so nothing can mint
+  another certificate for the session. Sixteen hosts: about 1.5 ms (debug).
+- A leaf passes exactly the check the Phase 4 gate's issuer path runs
+  (`WebPkiServerVerifier`, that CA as sole anchor, host name and validity)
+  for its own host only; another session's CA does not verify it; name
+  constraints stop the CA vouching for a host outside the set.
+- The leaf is chosen by the `CONNECT` authority, not the SNI: a different
+  SNI is refused, and an IP-literal origin (which sends no SNI) works.
+- Substitution only for `POST` to the submit target's exact host and path
+  with a form or JSON body, only with exactly one placeholder (two → refused
+  before the upstream sees anything), re-encoded for the body type, with
+  `Content-Length` recomputed. The same body to another host, path, method
+  or content type, or the placeholder in a query, is never substituted.
+- `Alt-Svc` is stripped, so the page cannot be steered to HTTP/3 around the
+  proxy; non-`CONNECT` requests and `CONNECT` outside the session are refused.
+
+**The dependency question.** Everything a purpose-built proxy needs is
+already in `bastion-vault-gui`'s graph (`cargo tree -p bastion-vault-gui -i
+…`): `hyper` 1.10.1, `hyper-util` 0.1.20, `http-body-util` 0.1.4,
+`tokio-rustls` 0.26.4, `rustls` 0.23.42, `rustls-platform-verifier` 0.7.0
+(for the upstream leg) and `rcgen` 0.14.8 with its `ring` backend (normal
+dependency through `bastion_vault`, `bv-engine-pki` and `hiqlite`;
+dev-dependency of the GUI for the Phase 4 tests). Naming them directly
+changes no lockfile entry.
+
+- **`openssl-sys` is not in the graph.** **`aws-lc-sys` 0.42.0 is**, through
+  `aws-lc-rs` from the `aws_lc_rs` rustls provider the root and GUI
+  manifests select explicitly (also via `russh` and `rustls-post-quantum`).
+  §10's "`openssl-sys`/`aws-lc-sys`-free" therefore holds for OpenSSL only;
+  the aws-lc rule in the root manifest is the PKI engine's (`rcgen` without
+  `aws_lc_rs`), and a proxy on rcgen's `ring` backend keeps it.
+- **Off-the-shelf MITM crates** (`hudsucker`, `http-mitm-proxy`) are in
+  neither the lockfile nor the local registry and were **not evaluated from
+  source**. Rejected on trusted-computing-base grounds, before features: the
+  proxy sits on the credential path and needs `CONNECT`-only, origin-bound
+  termination, one substitution rule and one scrub; a general forward proxy
+  is more surface to constrain than the code to write.
+
+**Findings that change the design:**
+
+1. **The webview's trust decision does not need the CA.** The gate's leaf
+   path (a pinned leaf key, no host check) is as sound here: the session's
+   leaf key exists only in the proxy, which already binds each leaf to its
+   `CONNECT` origin. **Decision:** give the webview-side gate both pins — the
+   session CA (issuer path, host-bound; seen on macOS) and the session leaf
+   key (leaf path, which does not depend on how WebView2 and WebKitGTK report
+   the issuer chain of an untrusted certificate; unchecked). Rejected: a CA
+   that mints on demand — a signing key held for the session's lifetime when
+   the host set is known at launch.
+2. **macOS minimum version.** `gui/src-tauri/tauri.conf.json` sets
+   `minimumSystemVersion: 10.15`. wry's `mac-proxy` block sets
+   `proxyConfigurations` by key-value coding and calls
+   `nw_proxy_config_create_http_connect` (both macOS 14) with **no run-time
+   version check**, linking Network.framework strongly. The host must refuse
+   proxy mode below macOS 14, and a build with `tauri/macos-proxy` must be
+   started once on macOS 13 to confirm the strong symbol does not stop the
+   app from launching there (not checked). Unlike Phase 5's `unstable`,
+   `macos-proxy` gates only that block, which runs only for a webview given a
+   proxy (read).
+3. **wry drops the Windows proxy silently** when `additional_browser_args`
+   is set: it builds `--proxy-server` only inside its default-arguments
+   branch. The GUI sets none; proxy mode must keep it that way or compose the
+   whole string, wry's defaults included.
+4. **Windows trust is an error override.** Chromium treats an overridden
+   certificate as a certificate error for the origin; whether WebView2 then
+   limits caching, service workers or HSTS hosts is unchecked. To try on
+   Windows: `--ignore-certificate-errors-spki-list` with the session pins in
+   the composed arguments.
+5. **Linux: register before loading, do not wait for the signal.**
+   `load-failed-with-tls-errors` fires for main-resource loads only (Phase 4
+   caveat). The leaves are known at launch, so the host allows each one for
+   its host on the session's own `WebContext` before the first load, keeping
+   the Phase 4 handler as a fallback. §10's "per-context TLS database" does
+   not exist in webkit2gtk 2.0.2: the context offers
+   `allow_tls_certificate_for_host` and `set_tls_errors_policy`, whose only
+   alternative to failing is ignoring every TLS error, so it stays unused.
+6. **A bypass fails closed but must be seen.** If the webview reaches the
+   server directly, only the placeholder can be submitted and the login
+   fails. The recipe engine still fills only after the proxy reports it
+   terminated the current page's origin, and aborts with a named check
+   otherwise.
+7. **Upstream trust moves into the host.** The webview validates the proxy;
+   the proxy validates the server with `rustls-platform-verifier` (the OS's
+   trust on macOS and Windows) and the profile's Phase 4 pins as the
+   override, through the same `decide`. The engine's own Certificate
+   Transparency, CRLSet and HSTS-preload behaviour no longer covers session
+   origins, and the Phase 5 lock state must come from the proxy's verdict.
+8. **What proxy mode cannot do.** A page that hashes or encrypts the password
+   in script before posting never sends the placeholder verbatim, so its
+   login fails closed. Scrubbing covers the substituted request's own
+   response (sent with `Accept-Encoding: identity`), not a later echo. The
+   session cookie the login yields is in the webview, as in every mode.
+
+**Recommended build (T106), in order:**
+
+1. A Tauri-free `session/web_proxy.rs`: session key, CA and leaves; the
+   placeholder (fixed-length alphanumeric, so form and JSON encoding leave it
+   intact and it says nothing about the password's length); the substitution
+   rule and per-type encoding; the scrub; origin matching. The prototype's
+   cases become its unit tests.
+2. The listener, `commands/connect_web_proxy.rs`: loopback, ephemeral port,
+   one per session, `CONNECT` only; terminate the session's https origins;
+   **blind-tunnel** any other `CONNECT`, so sub-resources from other hosts
+   load as they do today and the webview validates them itself (rejected:
+   refusing them — an egress allow-list is a separate control that would
+   break CDN-backed applications); stream everything except the submit
+   request and its response; relay WebSocket upgrades.
+3. The upstream leg: `rustls-platform-verifier`, Phase 4 pins as override,
+   HTTP/1.1 to start.
+4. The webview: `proxy_url`, `tauri/macos-proxy` with its manifest
+   justification, the macOS 14 gate, the Phase 4 shims with the session's two
+   pins, Linux pre-registration, no Windows `additional_browser_args`.
+5. The recipe's submit target (origin, path, body type) in the versioned
+   recipe format, validated by the server; `launch` releasing the credential
+   at exposure `proxy`; `allow_insecure_http` refused for proxy mode.
+6. The bypass check, a `proxied` lock state in the toolbar, and audit lines
+   for termination, substitution, refusal and scrubbing (origins only).
+7. A per-platform run of the spike's harness on Windows and Linux before
+   either is enabled; header injection afterwards; `make test-release`
+   before merging (secret handling).
+
+### What Phase 5 shipped
+
+A vault-owned toolbar beside the remote content, in the same window, built
+with Tauri's `unstable` multi-webview API — **only in a build with the GUI
+crate's `web_session_chrome` feature** (`gui/src-tauri/Cargo.toml` records
+why it is off by default). Without the feature nothing changes: the window
+is the single remote webview of Phases 1–4.
+
+- **Two webviews, two realms**
+  ([connect_web_chrome.rs](../gui/src-tauri/src/commands/connect_web_chrome.rs),
+  decisions in [web_chrome.rs](../gui/src-tauri/src/session/web_chrome.rs),
+  Tauri-free). The window keeps the label `web-<token>`; the remote content
+  is a child webview with the **same** label, built with every Phase 1–4
+  setting and handler (allow-list, popups, downloads, page-load policy,
+  incognito, per-session data directory, devtools off, native HTTP-auth /
+  TLS-pin handlers, host-owned title). The toolbar is a second child
+  webview, `webchrome-<token>`, a fixed 40-px strip above it (resized with
+  the window; the two never overlap, so the page cannot draw over it). It
+  loads only the bundled `web-chrome.html` (a separate Vite entry,
+  [gui/src/webChrome/](../gui/src/webChrome/), none of the vault UI) under its
+  own CSP, may navigate only to that page on the app's asset origin (or the
+  dev server in debug builds), opens no windows, downloads nothing, devtools
+  off. The remote content keeps the window's label because Tauri resolves a
+  capability by window **or** webview label: a `windows` glob reaching
+  `web-*` would reach both webviews, and the isolation test already forbids
+  one.
+- **No capability for the toolbar — decided, rather than one scoped to it.**
+  The toolbar calls three app commands (`web_chrome_state`,
+  `web_chrome_disconnect`, `web_chrome_relogin`); Tauri lets a local origin
+  call app commands when the app defines no ACL manifest (it defines none)
+  and refuses every plugin command without a capability. So it needs none,
+  and `capability_isolation_tests` now also fails if any capability matches
+  a `webchrome-*` label: no events, no window or webview control, no
+  `create_webview`. It polls its state once a second instead of listening
+  for events. Rejected: a capability granting `core:event:allow-listen` for
+  push updates — a plugin surface the toolbar does not need. Consequence:
+  like the main window, the toolbar's origin could call any app command;
+  that is bounded by it loading only bundled code, rendering text only, and
+  its navigation lock.
+- **Caller binding.** Each command takes the calling webview and maps it to
+  a session only when its label is `webchrome-<well-formed token>` **and**
+  the window hosting it is that session's `web-<token>` window
+  (`chrome_caller`); nothing is taken from an argument. The main window, an
+  SSH/RDP window, the remote content itself and a toolbar label elsewhere
+  are refused.
+- **What it shows** (`ChromeState`, all host-observed or host-decided, never a
+  URL path or a query): the origin and the title's notice / sign-in text;
+  a lock state — `secure` (https, platform-trusted), `pinned` (https the
+  platform rejected and a pin accepted, from the session's TLS pin gate),
+  `insecure` (http), `none`; and a timer. **Decision on "TTL":** a web
+  session has no lifetime limit, so the toolbar counts down the **sign-in
+  window** — how long the host may still hold a released credential (the
+  recipe's `timeout_secs`, or the 60-s http-auth answer window) — and shows
+  the session's age once it closes. Rejected: inventing a session TTL.
+  **"Lock state"** is read as the TLS padlock, not the vault's seal.
+- **Disconnect** runs the same teardown as closing the window, audited
+  `session.close: … reason=disconnect`.
+- **Re-run login** (`form` only), through the existing launch / result /
+  close path: a **new** `launch` with the session's recipe hash (new
+  `launch_id`, server-side `connect` authorisation, a fresh credential and
+  TOTP code, audited by the server), whose fill scope must fit the window's
+  allow-list (`reconcile_fill_scope` against the first launch's scope).
+  - *Order — decided: new launch first.* Only once the new launch is checked
+    is the previous one retired: its engine is cancelled and awaited (5 s),
+    it reports `aborted:relogin` if it had not, and the launch is closed
+    (LDAP check-in). Any refusal before that changes nothing. Rejected:
+    closing the previous launch first — a refused re-run would leave a
+    signed-in page with no launch behind it. Cost: a single-account LDAP set
+    refuses the new check-out while the session holds the account.
+  - *No MFA ticket.* The ticket is single-use and the toolbar has no MFA
+    ceremony, so a re-run on a profile the server gates on connect MFA is
+    refused (the host still never reads `require_mfa` itself).
+  - The page is marked loading, sent to the start URL, and the recipe runs
+    on the next load the host sees. The page's own cookies are kept, so an
+    application still signed in may simply reach its `success_when` page.
+  - `http-auth` refuses a re-run (the webview keeps the answered credential
+    for the window's lifetime and the handler answers once per origin and
+    realm); `open` and recipe tests have no credential. Single flight per
+    session.
+  - Audited `connect.web.relogin: state=requested|refused|launched` with the
+    previous and new `launch_id_hash`.
+- **Tests.** Host (`session::web_chrome`, `session::web`,
+  `session::web_tls_pin`, `capability_isolation_tests`): caller binding
+  (own window only, malformed tokens, the remote label, other windows), the
+  label prefixes never matching each other, the layout, the toolbar's
+  navigation rule, lock states, the sign-in window (a late end cannot close
+  a re-run's window), re-run availability and single flight, the state
+  carrying no path, `accepted_on_pin`, `reason=disconnect`, and no
+  capability reaching `webchrome-*`. Vitest (`src/test/webChrome.test.ts`):
+  strict state parsing, formatting, the view rendering hostile strings as
+  text, polling and its stop, the re-run refusal message, Disconnect, and
+  that no command carries an argument.
+
+**Phase 5 caveats — open:**
+
+- **Off by default.** `tauri/unstable` is one switch for the whole app: on
+  tauri-runtime-wry 2.11.4 every webview window becomes a child webview.
+  Read from the sources, not observed: wry 0.55.1 never makes a child
+  WKWebView the first responder (macOS windows would not take keystrokes
+  until clicked — the toolbar window focuses its remote webview itself, the
+  vault, SSH and RDP windows do not), and the undecorated main window loses
+  `undecorated_resizing` on Windows and Linux. It also makes
+  `plugin:webview|create_webview` live (still ACL-gated; no capability
+  grants it). Shipping the toolbar needs those fixed upstream or mitigated
+  per window, then checked on all three platforms.
+- **Not run in a live session** on any platform; the feature build is
+  compiled and its unit tests run on macOS only. Windows and Linux are
+  uncompiled here, as for Phases 3 and 4.
+- CI does not build the feature (the `gui-host` job checks default
+  features), so the feature path can rot unnoticed; it needs
+  `cargo check -p bastion-vault-gui --features web_session_chrome` in CI.
+- No MFA prompt for a re-run (above); disconnect and connect again from the
+  vault window.
+- The toolbar polls (1 s) rather than being pushed updates.
+- Not coordinated further with the session workspace (S56) than keeping
+  the remote content in its own webview.
+- `make test-release` (L4) has not been run.
+
+### What Phase 4 shipped
+
+`tls_pin_sha256` honoured on every login mode, in the desktop host only — the
+server does not read the pins (they change which certificate the operator's
+webview accepts, not what the server releases).
+
+- **The pins** ([web_tls_pin.rs](../gui/src-tauri/src/session/web_tls_pin.rs),
+  Tauri-free). One to 16 SHA-256 digests of a certificate's DER
+  `SubjectPublicKeyInfo`, hashed over the bytes as they appear in the
+  certificate. Written `sha256:<64 hex>` (canonical; prefix optional,
+  any case, `:` between byte pairs tolerated) or `sha256/<base64>` / curl's
+  `sha256//<base64>` (RFC 7469 form, standard padded base64; also bare).
+  A non-list value, a non-string entry or an unreadable pin refuses the
+  profile — never a silently smaller set (T101's rule); duplicates collapse.
+  The editor mirrors the parser ([webTlsPin.ts](../gui/src/lib/webTlsPin.ts)).
+- **The rules — decided here, applied by thin platform shims.**
+  - *An override, never a restriction.* A pin is consulted only for a
+    certificate the platform has rejected; a certificate the system trusts is
+    used as before. **Decision:** WebView2 and WebKitGTK raise their events
+    for errors only, so a restrictive pin could not be enforced on two of the
+    three platforms; macOS evaluates the trust itself first to keep the same
+    meaning. Rejected: a restrictive pin on macOS alone.
+  - *Only the session's https origins* — the server's scope for a form /
+    http-auth launch, the profile's set for `open`. A rejection elsewhere
+    stands and is not the pins' business.
+  - *Leaf pin:* the leaf's key is pinned → accepted with no host-name or
+    validity check (appliance certificates commonly name the vendor and are
+    long expired; the handshake proves the key).
+  - *Issuer pin* — **decision: chain-CA pins match, but only verified.** A
+    pinned CA or intermediate counts only when the server *presents* it and
+    the leaf passes rustls' WebPKI server verification (`WebPkiServerVerifier`
+    with that certificate as the only trust anchor: chain signatures,
+    validity periods, `serverAuth`, the origin's host name). Rejected:
+    matching any presented certificate's SPKI — the presented chain is not
+    authenticated by the handshake (only the leaf's key is), so anyone could
+    append the public CA certificate to their own chain. An SPKI digest alone
+    is not a trust anchor, so a CA the server does not send cannot be pinned.
+  - *Anything else is refused:* audited `connect.web.tls_pin_refused` (origin,
+    `reason=tls_pin_mismatch|tls_pin_issuer|tls_pin_malformed|tls_pin_no_certificate`,
+    `observed_leaf=<pin>`), shown in the title (fixed text), and noted as the
+    session's `aborted:<reason>` if it ends before an outcome. An accept is
+    audited `connect.web.tls_pin_accepted` (`match=leaf|issuer`, the pin).
+    Each (origin, leaf key, verdict) is audited once per session. Never a URL
+    path, a certificate body or a name from it.
+- **The platform shims** ([connect_web_tls_pin.rs](../gui/src-tauri/src/commands/connect_web_tls_pin.rs)),
+  attached only to windows whose profile has pins, through the single native
+  attach point in `connect_web_http_auth.rs`. A pinned window opens on
+  `about:blank` and navigates only once the handler is attached (5 s budget);
+  a handler that cannot be attached ends the session (`aborted:tls_handler`,
+  launch closed before anything is sent).
+  - *macOS:* WebKit reports server trust through the same delegate method as
+    HTTP auth, so the Phase 3 forwarding proxy delegate now carries both
+    gates (class renamed `BastionVaultChallengeNavigationDelegate`). Server
+    trust on a pinned window: not a session origin → default handling;
+    `SecTrustEvaluateWithError` passes → default handling; otherwise the gate
+    decides → `UseCredential` with `+[NSURLCredential credentialForTrust:]`,
+    or `CancelAuthenticationChallenge`. Non-server-trust challenges on a
+    pinned window without http-auth get `RejectProtectionSpace` — WebKit's
+    own behaviour for a delegate that lacks the method — so a pin changes
+    nothing else. `security-framework` / `core-foundation` (already in the
+    graph) are named directly for the `SecTrust` wrappers.
+  - *Windows:* WebView2 `ServerCertificateErrorDetected`
+    (`ICoreWebView2_14`; an older runtime refuses the session). The origin
+    from the request URI, the chain from the certificate's PEM and its
+    issuer chain. Accept → `ALWAYS_ALLOW` (remembered by this window's own
+    browser process, per-session data directory); everything else, read
+    errors included → `CANCEL`, which also keeps WebView2's interstitial away.
+  - *Linux:* WebKitGTK `load-failed-with-tls-errors` (main-resource loads).
+    Accept → `allow_tls_certificate_for_host` on the window's own ephemeral
+    `WebContext` (wry creates one per incognito webview) and one reload of
+    the failing URI per (origin, key); refuse → WebKitGTK's error page.
+- **The fingerprint helper** (`web_tls_fingerprint`, trust on first use).
+  Handshakes with the start URL's https origin (profile host rules: no
+  `localhost`, no userinfo), records the presented chain, completes the
+  handshake (so the server has proven the leaf key) and closes; nothing is
+  sent and nothing is trusted by it. Returns per certificate: role, subject
+  and issuer (cut at 256 characters), validity, `sha256:<hex>` and base64
+  pins. Audited `connect.web.tls_fingerprint` (origin, count, leaf pin). The
+  editor's **TLS certificate pins** field
+  ([WebTlsPinFields.tsx](../gui/src/components/WebTlsPinFields.tsx)) labels
+  the result "Trust on first use", says anything on the path could have
+  answered, and enables **Pin** only after the operator ticks a
+  confirmation; a presented CA is offered as the pin that survives renewal.
+  - *Not done — PKI-engine attribution.* §8's "where the PKI engine issued
+    the appliance certificate, propose the issuing CA's pin" is met only as
+    "propose the presented CA's pin": telling whether that CA is one of this
+    vault's PKI issuers would need every PKI mount's issuers read and hashed
+    in the editor, which is not cheap, and would add nothing the runtime
+    could use for a CA the appliance does not send.
+- **`web_recipe_test`** takes `tls_pin_sha256` and attaches the same handler,
+  so the dry run reaches a pinned appliance the way the session will.
+- **Tests.** Host (`session::web_tls_pin`, `commands::connect_web_tls_pin`,
+  `session::web`): every accepted pin form, malformed pins (lengths, hex,
+  non-canonical base64, prefixes), strict list parsing and the bound; the
+  SPKI digest against rcgen's own SPKI; leaf pin accepted without host or
+  validity checks; out-of-set / http origins not applicable; mismatch,
+  empty and unreadable chains refused; a pinned issuer accepted only for the
+  right host within validity, through an intermediate or a root anchor, and
+  **refused when the public pinned CA is appended to a foreign self-signed
+  leaf or to another CA's leaf**; the gate's once-per-key audit and notice;
+  WebView2 PEM chain assembly; the probe against a local rustls server
+  (records the chain, finishes the handshake, pin matches) and an
+  unreachable port. Vitest (`src/test/webTlsPin.test.tsx`): the mirrored
+  parser on the host's vectors, save validation, the editor's list, the
+  https-only fetch, the TOFU label and confirmation gate, pin / pinned
+  state, the host's error.
+
+**Phase 4 caveats — open:**
+
+- **Not run against a live self-signed or private-CA appliance on any
+  platform.** The macOS shim compiles and the decisions are unit-tested;
+  **the Windows and Linux shims have not been compiled** (same reason as
+  Phase 3), their WebView2 / WebKitGTK calls checked by hand against
+  `webview2-com` 0.38 and `webkit2gtk` 2.0.2. The Testing Plan's
+  self-signed-certificate fixture, plus a pinned and an unpinned profile, a
+  private-CA chain with and without the CA presented, and an http-auth
+  profile with pins, are per-platform manual checks.
+- macOS evaluates the server trust (`SecTrustEvaluateWithError`) on the main
+  thread, where WebKit calls its delegate, for the session's own origins
+  only; a trust evaluation that needs the network (fetching a missing
+  intermediate) can stall the UI for its duration.
+- WebKitGTK raises the signal for main-resource loads only: a sub-resource
+  from another session origin with a pinned-but-rejected certificate fails
+  until a top-level load of that host has been accepted. The exception is
+  per host, not per port.
+- Whether WebView2's default certificate interstitial offers "continue
+  anyway" on an **unpinned** profile (Phase 1 behaviour, unchanged here) has
+  not been checked; a pinned window always cancels instead.
+- The fingerprint probe connects directly (no proxy) with rustls' TLS 1.2 /
+  1.3 defaults, so it can fail on an appliance the webview still reaches,
+  or see a different chain than a webview behind a TLS-intercepting proxy.
+- `make test-release` (L4) has not been run.
 
 ### What Phase 3 shipped
 
@@ -757,9 +1195,9 @@ that must still happen before the first release that ships `form` mode:
   `CredentialSource` gains `{ kind: "none" }`, the only source `open` mode
   accepts (it releases nothing); `none` is refused on SSH/RDP, and
   `ssh-engine` / `pki` / `fido2` are refused on `web`. Form / http-auth /
-  sso, `transport: "rustion-isolated"`, a non-empty `tls_pin_sha256`, a
-  recipe and a profile `kind: "rustion"` are all refused with "not available
-  yet" at save (GUI) and at connect (host) — never ignored. Origins follow
+  sso, `transport: "rustion-isolated"`, a non-empty `tls_pin_sha256` (until
+  Phase 4), a recipe and a profile `kind: "rustion"` are all refused with "not
+  available yet" at save (GUI) and at connect (host) — never ignored. Origins follow
   the rules of §4: exact `scheme://host[:port]`, default ports normalised,
   lower-case / punycode host, no path, query, fragment or userinfo, no
   trailing dot, https unless `allow_insecure_http`. **Additionally refused:
@@ -1173,8 +1611,10 @@ Built in `gui/src-tauri/src/commands/connect_web.rs` (new) and
   only origin indicator and it must come from the host, never `document.title`.
   A small chrome strip (origin, lock state, Disconnect, Re-run login) needs
   Tauri's `unstable` multi-webview so that vault-controlled UI and the remote
-  page live in separate webviews. It is Phase 5. Phase 1 uses the title plus the
-  OS window close.
+  page live in separate webviews. It is Phase 5, built behind the opt-in
+  `web_session_chrome` feature (see *What Phase 5 shipped*); the title stays
+  host-owned either way. Without the feature the window has the title plus
+  the OS window close.
 - **Teardown.** Same as SSH/RDP:
   - `CloseRequested` → `drop_session` → `run_cleanup`.
   - Cleanup clears the data directory, runs LDAP check-in, and posts
@@ -1302,6 +1742,13 @@ The pin is the only override. There is no "accept any certificate" switch.
 - Where the PKI engine issued the appliance certificate, the editor proposes the
   issuing CA's pin instead.
 
+As built (Phase 4): a pin overrides only a certificate the platform rejects,
+on the session's https origins; a leaf pin is accepted as is, an issuer pin
+only for a presented CA the leaf verifies under (WebPKI, host name and
+validity included); the editor proposes any presented CA's pin, without
+telling whether the PKI engine issued it. See *Current State → What Phase 4
+shipped*.
+
 ### 9. `sso` mode (Phase 7, blocked by T52)
 
 Once S19 ships the SAML IdP and OIDC OP:
@@ -1324,35 +1771,67 @@ Once S19 ships the SAML IdP and OIDC OP:
   Keycloak) need no S19. They use `open` mode, with the IdP's origin added to
   `allowed_origins`.
 
-### 10. Proxy mode (Phase 6, spike first)
+### 10. Proxy mode (Phase 6: spike done, build tracked as T106)
 
-- The webview is pointed at a host-local proxy (`proxy_url`, `http://127.0.0.1:<ephemeral>`;
-  macOS 14+ with wry's `mac-proxy` feature).
-- The proxy terminates TLS with a per-session leaf certificate issued by a
-  per-session CA held in memory only.
-- The recipe fills a random per-launch **placeholder** instead of the password.
-- The proxy replaces the placeholder with the real secret in the outgoing request
-  body only when all of these hold:
+- The webview is pointed at a host-local proxy (`proxy_url`,
+  `http://127.0.0.1:<ephemeral>`, one listener per session; on macOS only
+  from macOS 14, through Tauri's `macos-proxy` feature, i.e. wry's
+  `mac-proxy`).
+- The proxy accepts `CONNECT` only. It terminates TLS for the session's https
+  origins — matched on host **and** port — with a per-session leaf
+  certificate per host: one key per session, leaves signed by a per-session
+  CA name-constrained to the session's hosts, all in memory, the CA's private
+  key discarded once the leaves are minted. Any other `CONNECT` is tunnelled
+  without termination, so the webview validates those hosts itself, as
+  today. Non-`CONNECT` (absolute-form plain http) is refused.
+- The recipe fills a random per-launch **placeholder** instead of the
+  password: fixed-length alphanumeric, so form and JSON encoding leave it
+  intact and it reveals nothing about the password's length.
+- The proxy replaces the placeholder with the real secret in the outgoing
+  request body only when all of these hold:
   - the request's origin and path match the recipe's submit target;
   - it is a POST;
-  - the content type is form or JSON.
+  - the content type is form or JSON;
+  - the placeholder occurs exactly once (more → the request is refused
+    before it is sent).
+
+  The value is re-encoded for the body type and `Content-Length`
+  recomputed; the request goes out with `Accept-Encoding: identity`, and its
+  response is scrubbed of the secret (raw, form-, JSON- and HTML-encoded)
+  back to the placeholder. `Alt-Svc` is stripped from every terminated
+  response.
+- The proxy verifies the upstream itself (`rustls-platform-verifier`, with
+  the profile's `tls_pin_sha256` as the Phase 4 override through the same
+  `decide`), so the Phase 5 lock state comes from the proxy's verdict.
 - Header injection (`Authorization`, StrongDM-style) is the same mechanism
   without a placeholder.
+- `allow_insecure_http` is refused for proxy mode (§6: a secret sent in clear
+  is not `proxy` exposure).
 
-The open question that gates it is **making the webview trust the per-session CA
-without installing it into the OS trust store**. Installing into the OS store
-would be a persistent system-wide change and is refused.
+**Trusting the proxy without the OS trust store** — installing anything into
+the OS store would be a persistent system-wide change and is refused. The
+spike settled it per platform (see *Current State → Phase 6 spike findings*
+for the evidence and what was run versus read):
 
-- WebView2 can accept it per-instance through `ServerCertificateErrorDetected`.
-- WKWebView through the server-trust challenge.
-- WebKitGTK through a per-context TLS database.
+- **WKWebView:** the server-trust challenge, for main and sub-resource hosts,
+  through the Phase 4 shim. Run on macOS 27.
+- **WebView2:** `ServerCertificateErrorDetected` → `ALWAYS_ALLOW` through the
+  Phase 4 shim — an error override rather than an anchor. Read only.
+- **WebKitGTK:** `allow_tls_certificate_for_host` with each minted leaf,
+  registered before the first load, the Phase 4 handler as fallback. There is
+  no per-context TLS database API. Read only.
 
-The spike must confirm all three. If any platform cannot do it without touching
-the OS store, proxy mode ships on the platforms that can and is **visibly
-unavailable** elsewhere; it does not fall back to `dom`. Dependencies (a Rust
-MITM-capable proxy and certificate generation) must stay inside the
-`openssl-sys`/`aws-lc-sys`-free constraints in the root `Cargo.toml`. That
-rules out several off-the-shelf proxies and is the second spike question.
+In all three the gate is the Phase 4 `TlsPinGate`, given the session CA's pin
+(issuer path) and the session leaf key's pin (leaf path). Proxy mode ships on
+a platform once a run there confirms it, and is **visibly unavailable**
+elsewhere (including macOS below 14); it never falls back to `dom`. A load
+that bypasses the proxy can submit only the placeholder, and the recipe fills
+only after the proxy reports it terminated the page's origin.
+
+The proxy is built from crates already in the graph (`hyper`, `hyper-util`,
+`tokio-rustls`, `rustls`, `rustls-platform-verifier`, `rcgen` on its `ring`
+backend); it adds no OpenSSL and no new crate. Off-the-shelf MITM proxies are
+rejected on trusted-computing-base grounds.
 
 ### 11. Audit
 
@@ -1489,9 +1968,14 @@ allow-list, and the operator's endpoint never holds it. That is exposure level
 | `resources/v2/connect/web/close` | write | report session end |
 
 Tauri commands: `session_open_web`, `session_close` (existing, extended),
+`web_chrome_state` / `web_chrome_disconnect` / `web_chrome_relogin` (Phase 5,
+the session toolbar's own: no arguments, bound to the calling toolbar's
+session),
 `web_recipe_test` (dry run against a URL with no credential at all — every
 check of the fill routine, nothing filled, clicked or submitted — which never
-calls `launch`).
+calls `launch`; takes the profile's `tls_pin_sha256`), `web_tls_fingerprint`
+(Phase 4: the presented certificate chain of an https origin with each key's
+pin, trust on first use).
 
 `docs/api.md` gains a "Web connect" subsection. `docs/gui.md` gains the operator
 walkthrough.
@@ -1566,12 +2050,31 @@ an answer, and `make test-release` has not been run.
 - **Done:** the editor's HTTP authentication mode and its exposure notice.
 - **Carried forward as caveats:** the per-platform manual checks.
 
-### Phase 4 — TLS SPKI pinning — **Todo**
+### Phase 4 — TLS SPKI pinning — **Done, with caveats**
 
-Native certificate-error handlers honouring `tls_pin_sha256` only (§8), plus the
-fingerprint helper and the PKI-issued-CA suggestion.
+See *Current State → What Phase 4 shipped → Phase 4 caveats*: not run against
+a live appliance, the Windows and Linux handlers uncompiled on the development
+hosts, and the PKI-engine attribution of a suggested CA pin not done.
 
-### Phase 5 — session chrome — **Todo**
+- **Done:** `tls_pin_sha256` parsed strictly and honoured on every login mode
+  as an override of a rejected certificate on the session's https origins —
+  a pinned leaf key, or a presented pinned CA the leaf verifies under for the
+  host (WebPKI, that CA as sole anchor).
+- **Done:** native handlers — WKWebView server-trust challenge (macOS),
+  WebView2 `ServerCertificateErrorDetected` (Windows), WebKitGTK
+  `load-failed-with-tls-errors` with a per-window exception (Linux; Windows
+  and Linux uncompiled here); no "accept any certificate" path.
+- **Done:** the editor's pin list and the trust-on-first-use fingerprint
+  helper (`web_tls_fingerprint`), proposing a presented CA's pin.
+- **Not done:** recognising that a CA belongs to this vault's PKI engine.
+- **Carried forward as caveats:** the per-platform manual checks.
+
+### Phase 5 — session chrome — **Implemented behind an opt-in build feature, with caveats**
+
+See *Current State → What Phase 5 shipped → Phase 5 caveats*: off by default
+(Tauri's `unstable` is crate-global and changes how every window is built),
+not run in a live session, Windows and Linux uncompiled here, not built by CI,
+and no MFA prompt for a re-run.
 
 A vault-owned toolbar webview (origin, lock state, Disconnect, Re-run login, TTL)
 beside the remote webview, using Tauri's `unstable` multi-webview. The remote
@@ -1579,12 +2082,30 @@ webview keeps no IPC. Coordinates with [session-workspace.md](session-workspace.
 (S56) so that web sessions can later become workspace tabs, with the remote
 content always in its own webview, never a shared realm.
 
-### Phase 6 — proxy mode — **Todo (spike first)**
+- **Done (feature build):** the two-webview window, the toolbar page, its
+  three caller-bound commands and no capability, the lock indicator, the
+  sign-in window countdown ("TTL"), Disconnect, and Re-run login as a new
+  launch for `form` sessions.
+- **Not done:** enabling it by default (needs the window-wide `unstable`
+  effects fixed or mitigated and checked per platform), an MFA prompt for a
+  re-run, a re-run for `http-auth`, CI coverage of the feature build.
+- **Carried forward as caveats:** the per-platform manual checks.
 
-The per-platform CA-trust spike, then placeholder substitution and header
-injection (§10). Ships per platform where the spike succeeds.
+### Phase 6 — proxy mode — **Spike done; the build is T106 (Todo)**
 
-### Phase 7 — `sso` mode — **Todo, blocked by T52 (S19)**
+See *Current State → Phase 6 spike findings*.
+
+- **Done (T96):** the spike — per-platform trust of a per-session in-memory
+  CA without the OS store (macOS: go, run on macOS 27; Windows and Linux:
+  conditional go, read from the pinned sources), and the dependency question
+  (everything needed is already in the graph; no OpenSSL).
+- **Not done (T106):** the proxy, placeholder substitution, scrubbing and
+  header injection (§10); the per-platform wiring through the Phase 4 shims;
+  the submit target in the recipe format; a Windows and a Linux run before
+  either is enabled; a macOS 13 launch check of a `macos-proxy` build. Ships
+  per platform; visibly unavailable elsewhere.
+
+### Phase 7 — `sso` mode — **Todo, blocked by T52 (S19); tracked as T107**
 
 IdP-initiated SAML and OIDC third-party-initiated login (§9).
 
@@ -1599,10 +2120,14 @@ as T97 in the roadmap backlog.
 ## Dependencies
 
 - Tauri `>= 2.4` (cookie APIs), tauri-runtime `>= 2.8` for `set_cookie`
-  (Phase 7). wry's `mac-proxy` feature is needed for Phase 6 only.
+  (Phase 7). Tauri's `macos-proxy` feature (wry's `mac-proxy`) is needed for
+  Phase 6 only; it gates nothing but the proxy set-up, which runs only for a
+  webview given a proxy, but that code calls macOS 14 APIs with no run-time
+  check (see the spike findings).
 - Platform minimums:
   - macOS 14 for `data_store_identifier` and `proxy_url`; macOS 13 falls back to
-    `incognito` plus a per-session `data_directory`.
+    `incognito` plus a per-session `data_directory`, and has no proxy mode.
+    The app itself declares `minimumSystemVersion: 10.15`.
   - WebView2 101+ for `incognito`.
 - Native-handler work (Phases 3, 4 and 6) uses the `webview2-com`, `objc2` and
   `webkit2gtk` bindings already pulled in transitively by wry. Promoting them to
@@ -1643,6 +2168,9 @@ as T97 in the roadmap backlog.
      remote-origin ACL, so a web window and an RDP session (the only
      `Channel` user) are never live together. Mitigated by mutual
      exclusion until upstream removes the exemption (see Current State).
+   - The Phase 5 toolbar is a separate local webview with no capability
+     and no channel, loading only bundled content; the remote content
+     keeps its own webview and its `web-<token>` label.
 4. **Connect-only access.** The launch endpoint is a new secret reader gated by
    `connect`, not `read`. It must return credentials only for a `web` profile
    bound into the `launch_id`, only within the exposure cap, and only after the
@@ -1665,6 +2193,12 @@ as T97 in the roadmap backlog.
 8. **macOS clipboard** cannot be gated in WKWebView. This is documented, and the
    profile editor shows it when `clipboard` is set to anything but
    `bidirectional` on macOS.
+9. **Proxy mode (T106) moves upstream TLS validation into the host.** The
+   webview validates only the session's own certificates; the proxy validates
+   the real server with the platform verifier and the profile's pins. The
+   browser engine's Certificate Transparency, CRLSet and HSTS-preload
+   behaviour no longer covers session origins. The proxy is new code on the
+   credential path and needs L4 and a security review before it merges.
 
 ## Testing Plan
 
@@ -1710,9 +2244,16 @@ A fixture site served by the test harness with:
 
 Each hostile case must abort with the documented `aborted:<check>` outcome.
 
+Proxy mode (T106) adds the spike's run on each platform: a loopback `CONNECT`
+proxy, a sub-resource from a second session host, a host outside the session,
+a plain-`http://` load, and a login page that reflects the submitted password.
+
 ## Tracking
 
-Tracked as **T96** in `ROADMAP.md` (M5 Resources), spec **S105**. Phase 8
+Tracked as **T96** in `ROADMAP.md` (M5 Resources), spec **S105** — closed
+with Phases 1–5 and the Phase 6 spike, caveats carried in *Current State*.
+Building proxy mode (Phase 6) is **T106** and `sso` mode (Phase 7) is
+**T107**, blocked by T52, both in M5. Phase 8
 (Rustion browser isolation) is tracked separately as backlog task **T97**,
 because it is cross-repo and unscheduled. When phases
 land, update [CHANGELOG.md](../CHANGELOG.md) (the connect-only/launch endpoint

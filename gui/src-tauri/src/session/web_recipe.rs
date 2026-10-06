@@ -344,6 +344,8 @@ pub const HOST_ABORT_CHECKS: &[&str] = &[
     "fill_scope",
     "heuristic_mismatch",
     "registry_conflict",
+    // A launch retired by the session toolbar's re-run login (Phase 5).
+    "relogin",
     // http-auth (`session::web_http_auth`).
     "auth_handler",
     "auth_proxy",
@@ -354,6 +356,12 @@ pub const HOST_ABORT_CHECKS: &[&str] = &[
     "auth_origin",
     "auth_repeat",
     "auth_released",
+    // TLS pinning (`session::web_tls_pin`).
+    "tls_handler",
+    "tls_pin_no_certificate",
+    "tls_pin_malformed",
+    "tls_pin_mismatch",
+    "tls_pin_issuer",
 ];
 
 /// The outcome once failure / success conditions have been probed. Failure is
