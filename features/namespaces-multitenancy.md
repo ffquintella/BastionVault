@@ -108,7 +108,7 @@ The HTTP surface follows Vault Enterprise's: every endpoint accepts an `X-Bastio
 > member replicated its bytes but not its type entry — the same token worked on
 > that member and 500'd on its peers until they restarted.
 >
-> **Remaining follow-ups:**
+> **Remaining follow-ups** (Phase 5 / T73 is closed; these are tracked as T112 `cert` login binding, T113 GUI tree + rename, T114 tenant self-service of `sys/*`):
 > - **`cert`-login** namespace binding, and broader **tenant self-service of
 >   `sys/*`** beyond the introspection/self endpoints above (e.g. tenant-scoped
 >   mount management by a namespace admin, today reachable only by root/sudo
