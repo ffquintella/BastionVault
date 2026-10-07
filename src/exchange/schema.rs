@@ -59,7 +59,6 @@ pub struct ExporterInfo {
     pub actor_display_name: Option<String>,
 }
 
-
 /// What was selected for export. The `include` list is replayable; an
 /// importer with the right ACL can recompute which items the exporter
 /// intended to ship.
@@ -243,10 +242,7 @@ mod tests {
             ExporterInfo::default(),
             ScopeSpec {
                 kind: ScopeKind::Selective,
-                include: vec![ScopeSelector::KvPath {
-                    mount: "secret/".to_string(),
-                    path: "myapp/".to_string(),
-                }],
+                include: vec![ScopeSelector::KvPath { mount: "secret/".to_string(), path: "myapp/".to_string() }],
             },
             ExchangeItems::default(),
         );

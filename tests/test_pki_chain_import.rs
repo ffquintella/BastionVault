@@ -23,13 +23,18 @@ use bastion_vault::{
 };
 use go_defer::defer;
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+    PKCS_ECDSA_P256_SHA256,
 };
 use serde_json::{json, Map, Value};
 
 #[maybe_async::maybe_async]
-async fn write(core: &Core, token: &str, path: &str, body: Map<String, Value>) -> Result<Option<Map<String, Value>>, String> {
+async fn write(
+    core: &Core,
+    token: &str,
+    path: &str,
+    body: Map<String, Value>,
+) -> Result<Option<Map<String, Value>>, String> {
     let mut req = Request::new(path);
     req.operation = Operation::Write;
     req.client_token = token.to_string();
@@ -114,7 +119,8 @@ async fn test_config_ca_key_plus_chain() {
 
     // key(int) + int cert + root cert in one paste.
     let bundle = format!("{int_kp_pem}{int_pem}{root_pem}");
-    let resp = write_ok(&core, &token, "pki/config/ca", json!({"pem_bundle": bundle}).as_object().unwrap().clone()).await;
+    let resp =
+        write_ok(&core, &token, "pki/config/ca", json!({"pem_bundle": bundle}).as_object().unwrap().clone()).await;
     assert_eq!(resp["imported_issuers"].as_array().unwrap().len(), 2, "two issuers imported");
     assert_eq!(resp["imported_keys"].as_array().unwrap().len(), 1, "one signing issuer (int)");
     let chain = resp["chain"].as_array().unwrap();
@@ -129,10 +135,23 @@ async fn test_config_ca_key_plus_chain() {
     assert_eq!(issuers["keys"].as_array().unwrap().len(), 2);
 
     // Issue a leaf: the default (int) signs, chain resolves int → root.
-    write_ok(&core, &token, "pki/roles/web",
-        json!({"ttl": "24h", "key_type": "ec", "allow_any_name": true, "server_flag": true}).as_object().unwrap().clone()).await;
-    let issued = write_ok(&core, &token, "pki/issue/web",
-        json!({"common_name": "leaf.example.com", "ttl": "12h"}).as_object().unwrap().clone()).await;
+    write_ok(
+        &core,
+        &token,
+        "pki/roles/web",
+        json!({"ttl": "24h", "key_type": "ec", "allow_any_name": true, "server_flag": true})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .await;
+    let issued = write_ok(
+        &core,
+        &token,
+        "pki/issue/web",
+        json!({"common_name": "leaf.example.com", "ttl": "12h"}).as_object().unwrap().clone(),
+    )
+    .await;
     let ca_chain = issued["ca_chain"].as_array().unwrap();
     assert_eq!(ca_chain.len(), 2, "leaf chains through int up to root");
 }
@@ -147,15 +166,25 @@ async fn test_config_ca_certs_only_trust_import() {
 
     // No private key at all — both CAs import as trust anchors.
     let bundle = format!("{int_pem}{root_pem}");
-    let resp = write_ok(&core, &token, "pki/config/ca", json!({"pem_bundle": bundle}).as_object().unwrap().clone()).await;
+    let resp =
+        write_ok(&core, &token, "pki/config/ca", json!({"pem_bundle": bundle}).as_object().unwrap().clone()).await;
     assert_eq!(resp["imported_issuers"].as_array().unwrap().len(), 2);
     assert!(resp["imported_keys"].as_array().unwrap().is_empty(), "no signing issuer without a key");
 
     // With no signing issuer and no default pointer, issuance must fail.
-    write_ok(&core, &token, "pki/roles/web",
-        json!({"ttl": "24h", "key_type": "ec", "allow_any_name": true, "server_flag": true}).as_object().unwrap().clone()).await;
-    let err = write(&core, &token, "pki/issue/web",
-        json!({"common_name": "leaf.example.com"}).as_object().unwrap().clone()).await;
+    write_ok(
+        &core,
+        &token,
+        "pki/roles/web",
+        json!({"ttl": "24h", "key_type": "ec", "allow_any_name": true, "server_flag": true})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .await;
+    let err =
+        write(&core, &token, "pki/issue/web", json!({"common_name": "leaf.example.com"}).as_object().unwrap().clone())
+            .await;
     assert!(err.is_err(), "cannot issue from a trust-only mount");
 }
 
@@ -207,7 +236,9 @@ async fn test_config_ca_idempotent_reimport() {
     // Then: import int(key) + int + root. Root is already present (by
     // serial) → skipped; only the intermediate is newly imported.
     let chain_bundle = format!("{int_kp_pem}{int_pem}{root_pem}");
-    let resp = write_ok(&core, &token, "pki/config/ca", json!({"pem_bundle": chain_bundle}).as_object().unwrap().clone()).await;
+    let resp =
+        write_ok(&core, &token, "pki/config/ca", json!({"pem_bundle": chain_bundle}).as_object().unwrap().clone())
+            .await;
     assert_eq!(resp["imported_issuers"].as_array().unwrap().len(), 1, "only the intermediate is new");
     let chain = resp["chain"].as_array().unwrap();
     let root_entry = chain.iter().find(|e| e["self_signed"].as_bool().unwrap()).unwrap();
@@ -255,7 +286,8 @@ async fn test_config_ca_renewed_same_key_picks_newest_cert() {
 
     // Oldest cert first — the order a `.p12` unwrap routinely produces.
     let bundle = format!("{old_pem}{new_pem}{kp_pem}");
-    let resp = write_ok(&core, &token, "pki/config/ca", json!({"pem_bundle": bundle}).as_object().unwrap().clone()).await;
+    let resp =
+        write_ok(&core, &token, "pki/config/ca", json!({"pem_bundle": bundle}).as_object().unwrap().clone()).await;
 
     let chain = resp["chain"].as_array().unwrap();
     assert_eq!(chain.len(), 2, "both certs import");
@@ -266,9 +298,22 @@ async fn test_config_ca_renewed_same_key_picks_newest_cert() {
     assert_eq!(resp["issuer_id"], signing["issuer_id"], "primary issuer is the reissued cert");
 
     // The imported issuer can actually sign.
-    write_ok(&core, &token, "pki/roles/web",
-        json!({"ttl": "24h", "key_type": "ec", "allow_any_name": true, "server_flag": true}).as_object().unwrap().clone()).await;
-    let issued = write_ok(&core, &token, "pki/issue/web",
-        json!({"common_name": "leaf.example.com", "ttl": "12h"}).as_object().unwrap().clone()).await;
+    write_ok(
+        &core,
+        &token,
+        "pki/roles/web",
+        json!({"ttl": "24h", "key_type": "ec", "allow_any_name": true, "server_flag": true})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .await;
+    let issued = write_ok(
+        &core,
+        &token,
+        "pki/issue/web",
+        json!({"common_name": "leaf.example.com", "ttl": "12h"}).as_object().unwrap().clone(),
+    )
+    .await;
     assert!(issued["certificate"].as_str().unwrap().contains("BEGIN CERTIFICATE"));
 }

@@ -28,10 +28,7 @@ fn gates() -> &'static GateMap {
 }
 
 fn gate_for(plugin: &str) -> Arc<RwLock<()>> {
-    gates()
-        .entry(plugin.to_string())
-        .or_insert_with(|| Arc::new(RwLock::new(())))
-        .clone()
+    gates().entry(plugin.to_string()).or_insert_with(|| Arc::new(RwLock::new(()))).clone()
 }
 
 /// Acquire an invocation gate. Held for the duration of the plugin's
@@ -40,19 +37,14 @@ fn gate_for(plugin: &str) -> Arc<RwLock<()>> {
 /// avoids the borrow-vs-move dance with a static-lifetime extension.
 pub async fn acquire_invoke(plugin: &str) -> InvokeGuard {
     let gate = gate_for(plugin);
-    InvokeGuard {
-        _guard: gate.read_owned().await,
-    }
+    InvokeGuard { _guard: gate.read_owned().await }
 }
 
 /// Acquire a reload gate. Drains every in-flight invocation before
 /// returning; if `timeout` elapses first, returns
 /// `Err(ReloadAcquireError::DrainTimeout)` and the caller should
 /// refuse the reload with `plugin_reloading`.
-pub async fn acquire_reload(
-    plugin: &str,
-    timeout: std::time::Duration,
-) -> Result<ReloadGuard, ReloadAcquireError> {
+pub async fn acquire_reload(plugin: &str, timeout: std::time::Duration) -> Result<ReloadGuard, ReloadAcquireError> {
     let gate = gate_for(plugin);
     match tokio::time::timeout(timeout, gate.write_owned()).await {
         Err(_elapsed) => Err(ReloadAcquireError::DrainTimeout),

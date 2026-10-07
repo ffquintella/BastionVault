@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{
-    validation::{create_hmac, verify_cidr_role_secret_id_subset, SecretIdStorageEntry},
+    validation::{create_hmac, reject_reserved_secret_id_meta, verify_cidr_role_secret_id_subset, SecretIdStorageEntry},
     AppRoleBackend, AppRoleBackendInner, HMAC_INPUT_LEN_MAX, SECRET_ID_LOCAL_PREFIX, SECRET_ID_PREFIX,
 };
 use crate::kernel_api::VaultCtx;
@@ -2508,6 +2508,7 @@ impl AppRoleBackendInner {
 
         if let Ok(metadata_value) = req.get_data("metadata") {
             secret_id_storage.metadata = metadata_value.as_map().ok_or(RvError::ErrRequestFieldInvalid)?;
+            reject_reserved_secret_id_meta(&secret_id_storage.metadata, &role.name)?;
         }
 
         if let Ok(environments_value) = req.get_data("environments") {

@@ -21,13 +21,9 @@ pub mod runner;
 pub mod schedule;
 pub mod store;
 
-pub use catalog::{
-    list_backups, BackupCatalog, BackupEntry, BackupRecord, NodeRef,
-};
+pub use catalog::{list_backups, BackupCatalog, BackupEntry, BackupRecord, NodeRef};
 pub use runner::start_scheduler;
-pub use schedule::{
-    DestinationKind, ExportFormat, PasswordRefKind, RunRecord, RunStatus, Schedule, ScheduleInput,
-};
+pub use schedule::{DestinationKind, ExportFormat, PasswordRefKind, RunRecord, RunStatus, Schedule, ScheduleInput};
 
 use crate::kernel_api::VaultCtx;
 pub use store::{ScheduleStore, STORE_PREFIX};
@@ -44,11 +40,7 @@ pub fn local_node(core: &dyn VaultCtx) -> NodeRef {
     // `cache.secret_cache_ttl_secs` is set. `None` means "not clustered".
     let node_id = crate::storage::cluster::node_id(core.physical().as_ref());
 
-    NodeRef {
-        node_id,
-        node_name: hostname(),
-        api_addr: crate::server_info::api_addr().map(|s| s.to_string()),
-    }
+    NodeRef { node_id, node_name: hostname(), api_addr: crate::server_info::api_addr().map(|s| s.to_string()) }
 }
 
 /// Best-effort host name, used as the human-readable half of [`NodeRef`].
@@ -63,7 +55,5 @@ fn hostname() -> String {
             return h.trim().to_string();
         }
     }
-    std::fs::read_to_string("/etc/hostname")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+    std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()).unwrap_or_default()
 }

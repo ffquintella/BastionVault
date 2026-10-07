@@ -93,6 +93,8 @@ bvault secrets disable app-secrets/
 bvault secrets move secret/ generic/
 ~~~
 
+Engines can also be provided by registered plugins (`type = "plugin:<name>"`). The optional self-accounts plugin, which lets operators keep personal accounts for Connect, has its own operator guide: [Self-accounts](self-accounts.md).
+
 ### Working with KV Secrets
 
 Write a secret:

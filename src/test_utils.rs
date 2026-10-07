@@ -29,12 +29,12 @@ use crate::{
     BastionVault,
 };
 
+#[cfg(test)]
+use crate::storage::Backend;
 /// Used only by `test_multi_routine`, which is `cfg(test)` because it drives
 /// a `TestHttpServer` from the dev-dependency.
 #[cfg(test)]
 use std::{str::FromStr, thread::sleep};
-#[cfg(test)]
-use crate::storage::Backend;
 
 /// The backend fixtures now live in `bv-storage`, next to the barrier and
 /// backend tests that use them; a test in that crate cannot import from this
@@ -50,7 +50,6 @@ pub use bv_storage::test_support::{new_test_backend, new_test_file_backend, new_
 /// feature on gets the fixtures below, not a web server.
 #[cfg(test)]
 pub use bv_server::test_support::{TestHttpServer, TestTlsClientAuth, TestTlsConfig};
-
 
 /// Process-wide fixture setup, run before any test's `main`.
 ///
@@ -163,7 +162,6 @@ pub async fn unseal_test_bastion_vault_core(core: &Core, keys: &[&[u8]]) -> bool
 #[maybe_async::maybe_async]
 pub async fn new_unseal_test_bastion_vault(name: &str) -> (BastionVault, Arc<Core>, String) {
     let seal_config = SealConfig { secret_shares: 9, secret_threshold: 5 };
-    
 
     let bvault = new_test_bastion_vault(name);
     let init_result = init_test_bastion_vault(&bvault, &seal_config).await;
@@ -189,9 +187,13 @@ pub async fn new_unseal_test_bastion_vault(name: &str) -> (BastionVault, Arc<Cor
     (bvault, core, root_token)
 }
 
-
 #[maybe_async::maybe_async]
-pub async fn test_list_api(core: &dyn VaultCtx, token: &str, path: &str, is_ok: bool) -> Result<Option<Response>, RvError> {
+pub async fn test_list_api(
+    core: &dyn VaultCtx,
+    token: &str,
+    path: &str,
+    is_ok: bool,
+) -> Result<Option<Response>, RvError> {
     let mut req = Request::new(path);
     req.operation = Operation::List;
     req.client_token = token.to_string();
@@ -287,7 +289,12 @@ pub fn test_multi_routine(backend: Arc<dyn Backend>) {
 }
 
 #[maybe_async::maybe_async]
-pub async fn test_read_api(core: &dyn VaultCtx, token: &str, path: &str, is_ok: bool) -> Result<Option<Response>, RvError> {
+pub async fn test_read_api(
+    core: &dyn VaultCtx,
+    token: &str,
+    path: &str,
+    is_ok: bool,
+) -> Result<Option<Response>, RvError> {
     let mut req = Request::new(path);
     req.operation = Operation::Read;
     req.client_token = token.to_string();

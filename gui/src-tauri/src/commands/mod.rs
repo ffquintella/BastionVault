@@ -105,6 +105,7 @@ pub mod cert_lifecycle;
 pub mod cloud_target;
 pub mod connect;
 pub mod connect_mfa;
+pub mod connect_provider;
 pub mod connect_web;
 pub mod connect_web_chrome;
 pub mod connect_web_http_auth;

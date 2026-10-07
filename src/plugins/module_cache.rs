@@ -77,11 +77,7 @@ impl ModuleCache {
         config.async_stack_size(1024 * 1024);
         config.max_wasm_stack(1024 * 1024);
         let engine = Engine::new(&config).map_err(|e| RuntimeError::Engine(e.to_string()))?;
-        Ok(Self {
-            engine,
-            order: Arc::new(Mutex::new(Vec::new())),
-            map: Arc::new(Mutex::new(HashMap::new())),
-        })
+        Ok(Self { engine, order: Arc::new(Mutex::new(Vec::new())), map: Arc::new(Mutex::new(HashMap::new())) })
     }
 
     pub fn engine(&self) -> &Engine {
@@ -92,18 +88,12 @@ impl ModuleCache {
     /// (cheap; `Module` is internally `Arc`-shared). Cache miss →
     /// compile + insert + return. Subsequent calls for the same
     /// `(name, sha)` skip compilation.
-    pub fn get_or_compile(
-        &self,
-        name: &str,
-        sha256: &str,
-        wasm_bytes: &[u8],
-    ) -> Result<Module, RuntimeError> {
+    pub fn get_or_compile(&self, name: &str, sha256: &str, wasm_bytes: &[u8]) -> Result<Module, RuntimeError> {
         let key = (name.to_string(), sha256.to_string());
         if let Some(m) = self.map.lock().unwrap().get(&key) {
             return Ok(m.clone());
         }
-        let module = Module::new(&self.engine, wasm_bytes)
-            .map_err(|e| RuntimeError::Compile(e.to_string()))?;
+        let module = Module::new(&self.engine, wasm_bytes).map_err(|e| RuntimeError::Compile(e.to_string()))?;
         self.insert_capped(key, module.clone());
         Ok(module)
     }
@@ -181,20 +171,12 @@ mod tests {
         let _m1 = c.get_or_compile("test-mc-hit-miss", "sha-aaa", &b1).unwrap();
         let _m1_again = c.get_or_compile("test-mc-hit-miss", "sha-aaa", &b1).unwrap();
         // Same sha → no growth for this name.
-        assert_eq!(
-            entries_for(&c, "test-mc-hit-miss"),
-            1,
-            "duplicate insert grew the cache",
-        );
+        assert_eq!(entries_for(&c, "test-mc-hit-miss"), 1, "duplicate insert grew the cache",);
 
         let b2 = tiny_wat_bytes(2);
         let _m2 = c.get_or_compile("test-mc-hit-miss", "sha-bbb", &b2).unwrap();
         // Fresh sha → one new entry.
-        assert_eq!(
-            entries_for(&c, "test-mc-hit-miss"),
-            2,
-            "fresh sha should miss + insert",
-        );
+        assert_eq!(entries_for(&c, "test-mc-hit-miss"), 2, "fresh sha should miss + insert",);
         c.invalidate("test-mc-hit-miss");
     }
 

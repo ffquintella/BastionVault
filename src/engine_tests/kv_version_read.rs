@@ -31,18 +31,11 @@ async fn boot_with_three_versions(name: &str) -> TestHttpServer {
     let mut server = TestHttpServer::new(name, false).await;
     server.token = server.root_token.clone();
 
-    server
-        .write("sys/mounts/secret/", obj(json!({"type": "kv-v2"})), None)
-        .unwrap();
+    server.write("sys/mounts/secret/", obj(json!({"type": "kv-v2"})), None).unwrap();
 
     for v in 1..=3 {
-        let (status, got) = server
-            .write(
-                "secret/data/app",
-                obj(json!({"data": {"which": format!("v{v}")}})),
-                None,
-            )
-            .unwrap();
+        let (status, got) =
+            server.write("secret/data/app", obj(json!({"data": {"which": format!("v{v}")}})), None).unwrap();
         assert_eq!(status, 200, "write v{v} failed: {got}");
     }
 
@@ -50,10 +43,7 @@ async fn boot_with_three_versions(name: &str) -> TestHttpServer {
 }
 
 /// The regression: a versioned read must return the version it asked for.
-#[maybe_async::test(
-    feature = "sync_handler",
-    async(all(not(feature = "sync_handler")), tokio::test)
-)]
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn kv_v2_versioned_read_honours_the_version_query_param() {
     let server = boot_with_three_versions("kv_v2_versioned_read_query").await;
 
@@ -67,15 +57,9 @@ async fn kv_v2_versioned_read_honours_the_version_query_param() {
     // Each historical version is reachable by query selector, and the
     // returned payload really is that version's — not the newest one.
     for v in 1..=3u64 {
-        let (status, got) = server
-            .read(&format!("secret/data/app?version={v}"), None)
-            .unwrap();
+        let (status, got) = server.read(&format!("secret/data/app?version={v}"), None).unwrap();
         assert_eq!(status, 200, "versioned read v{v} failed: {got}");
-        assert_eq!(
-            got["data"]["metadata"]["version"].as_u64(),
-            Some(v),
-            "?version={v} must report version {v}: {got}"
-        );
+        assert_eq!(got["data"]["metadata"]["version"].as_u64(), Some(v), "?version={v} must report version {v}: {got}");
         assert_eq!(
             got["data"]["data"]["which"].as_str(),
             Some(format!("v{v}").as_str()),
@@ -88,16 +72,11 @@ async fn kv_v2_versioned_read_honours_the_version_query_param() {
 /// same request is dropped by the HTTP layer and yields the latest version.
 /// Any future GUI code that sends `version` in a GET body is therefore
 /// wrong, however plausible it reads.
-#[maybe_async::test(
-    feature = "sync_handler",
-    async(all(not(feature = "sync_handler")), tokio::test)
-)]
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn kv_v2_version_in_a_get_body_is_dropped_by_the_http_layer() {
     let server = boot_with_three_versions("kv_v2_version_get_body").await;
 
-    let (status, got) = server
-        .request("GET", "secret/data/app", obj(json!({"version": 1})), None, None)
-        .unwrap();
+    let (status, got) = server.request("GET", "secret/data/app", obj(json!({"version": 1})), None, None).unwrap();
     assert_eq!(status, 200, "GET-with-body read failed: {got}");
     assert_eq!(
         got["data"]["metadata"]["version"].as_u64(),
@@ -113,17 +92,12 @@ async fn kv_v2_version_in_a_get_body_is_dropped_by_the_http_layer() {
 /// (`get_version_from_request` returns 0 when absent), and a non-numeric
 /// version is dropped by the allowlist rather than erroring — both resolve
 /// to the current version instead of 404-ing.
-#[maybe_async::test(
-    feature = "sync_handler",
-    async(all(not(feature = "sync_handler")), tokio::test)
-)]
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn kv_v2_version_zero_and_garbage_resolve_to_latest() {
     let server = boot_with_three_versions("kv_v2_version_edge").await;
 
     for selector in ["version=0", "version=latest"] {
-        let (status, got) = server
-            .read(&format!("secret/data/app?{selector}"), None)
-            .unwrap();
+        let (status, got) = server.read(&format!("secret/data/app?{selector}"), None).unwrap();
         assert_eq!(status, 200, "read with ?{selector} failed: {got}");
         assert_eq!(
             got["data"]["metadata"]["version"].as_u64(),
@@ -136,20 +110,11 @@ async fn kv_v2_version_zero_and_garbage_resolve_to_latest() {
 /// A version that does not exist must fail loudly rather than fall back to
 /// the latest — the whole point of the fix is that a version selector is
 /// never silently ignored.
-#[maybe_async::test(
-    feature = "sync_handler",
-    async(all(not(feature = "sync_handler")), tokio::test)
-)]
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn kv_v2_unknown_version_is_not_silently_the_latest() {
     let server = boot_with_three_versions("kv_v2_version_unknown").await;
 
     let (status, got) = server.read("secret/data/app?version=99", None).unwrap();
-    assert_eq!(
-        status, 404,
-        "a nonexistent version must 404, not silently serve the latest: {got}"
-    );
-    assert!(
-        got["data"]["metadata"]["version"].as_u64().is_none(),
-        "a 404 must carry no version payload: {got}"
-    );
+    assert_eq!(status, 404, "a nonexistent version must 404, not silently serve the latest: {got}");
+    assert!(got["data"]["metadata"]["version"].as_u64().is_none(), "a 404 must carry no version payload: {got}");
 }

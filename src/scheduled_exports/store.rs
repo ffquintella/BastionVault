@@ -54,9 +54,9 @@ impl ScheduleStore {
         let key = format!("{SCHEDULES_PREFIX}{id}");
         match storage.get(&key).await? {
             None => Ok(None),
-            Some(entry) => serde_json::from_slice::<Schedule>(&entry.value)
-                .map(Some)
-                .map_err(|_| RvError::ErrRequestInvalid),
+            Some(entry) => {
+                serde_json::from_slice::<Schedule>(&entry.value).map(Some).map_err(|_| RvError::ErrRequestInvalid)
+            }
         }
     }
 
@@ -90,11 +90,7 @@ impl ScheduleStore {
         self.prune_runs(storage, &run.schedule_id).await
     }
 
-    pub async fn list_runs(
-        &self,
-        storage: &dyn Storage,
-        schedule_id: &str,
-    ) -> Result<Vec<RunRecord>, RvError> {
+    pub async fn list_runs(&self, storage: &dyn Storage, schedule_id: &str) -> Result<Vec<RunRecord>, RvError> {
         let prefix = format!("{RUNS_PREFIX}{schedule_id}/");
         let keys = storage.list(&prefix).await?;
         let mut out = Vec::with_capacity(keys.len());

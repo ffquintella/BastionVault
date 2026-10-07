@@ -4,10 +4,12 @@
  *
  * Restore resumes nothing. Each pane is opened exactly as a Connect click
  * opens it: the profile is re-read from the resource (so a deleted or
- * changed profile is noticed, not assumed), the server decides whether a
- * connect-time factor is needed (`gateConnect`), and the open goes through
- * the one launcher dispatch, `openProfileSession`, to `session_open_*` —
- * the connect gate, transport tier and MFA ticket check all apply.
+ * changed profile is noticed, not assumed), a credential-provider profile
+ * asks the operator to pick an account again (`pickProviderAccount`), the
+ * server decides whether a connect-time factor is needed (`gateConnect`),
+ * and the open goes through the one launcher sequence, `connectProfile`, to
+ * `session_open_*` — the connect gate, transport tier and MFA ticket check
+ * all apply.
  *
  * The only additions are `placement: workspace-tab` and the `restore`
  * context: the host refuses the open before reading anything if the active
@@ -16,15 +18,13 @@
  */
 
 import * as api from "./api";
+import { connectProfile, type ConnectFlowDeps } from "./connectFlow";
 import { needsOperatorPrompt, readProfiles } from "./connectionProfiles";
-import { openProfileSession } from "./sessionLaunch";
 import type { PendingPane } from "./sessionLayout";
-import type { ConnectMfaOutcome } from "../components/ConnectMfaPrompt";
 
-export interface ReopenDeps {
-  /** The connect-time MFA gate (`useConnectMfa().gateConnect`). */
-  gateConnect: (resourceName: string, profileId: string, profileName: string) => Promise<ConnectMfaOutcome>;
-}
+/** The connect-time MFA gate (`useConnectMfa().gateConnect`) and the
+ *  provider account picker (`useProviderAccountPicker().pickProviderAccount`). */
+export type ReopenDeps = ConnectFlowDeps;
 
 /** Re-open one saved pane. Throws a reason an operator can act on. */
 export async function reopenSavedPane(pane: PendingPane, deps: ReopenDeps): Promise<void> {
@@ -39,13 +39,11 @@ export async function reopenSavedPane(pane: PendingPane, deps: ReopenDeps): Prom
     // on the Resources page, not here.
     throw new Error("this profile needs a typed credential; open it from Resources");
   }
-  const mfa = await deps.gateConnect(pane.resource_name, profile.id, profile.name);
-  if (!mfa) throw new Error("connect cancelled");
-  await openProfileSession(profile, {
+  const outcome = await connectProfile(deps, profile, {
     resource_name: pane.resource_name,
     profile_id: profile.id,
     placement: "workspace-tab",
     restore: { namespace: pane.namespace, pane_ref: pane.ref },
-    ...mfa,
   });
+  if (outcome === "cancelled") throw new Error("connect cancelled");
 }

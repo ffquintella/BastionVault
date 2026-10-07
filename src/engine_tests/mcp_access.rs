@@ -135,17 +135,10 @@ mod mod_test {
         assert!(resp.is_err());
 
         // Grant the waiver (sudo -- root here) and retry.
-        let waiver_data = json!({ "reason": "no FerroGate agent on this CI runner", "expires_in_days": 7 })
-            .as_object()
-            .cloned();
-        let resp = test_write_api(
-            core,
-            &root_token,
-            "sys/mcp/apps/ci-secrets-reader/machine-waiver",
-            true,
-            waiver_data,
-        )
-        .await;
+        let waiver_data =
+            json!({ "reason": "no FerroGate agent on this CI runner", "expires_in_days": 7 }).as_object().cloned();
+        let resp =
+            test_write_api(core, &root_token, "sys/mcp/apps/ci-secrets-reader/machine-waiver", true, waiver_data).await;
         assert!(resp.unwrap().unwrap().data.unwrap()["machine_waiver"]["reason"].is_string());
 
         // A non-sudo caller may not grant a waiver.
@@ -405,12 +398,14 @@ mod mod_test {
             client_version: String::new(),
             waived_until,
         };
-        let expired = token_store.mint_mcp_token(&op, &[], 600, "t-expired".into(), binding(Some(unix_now() - 5))).await.unwrap();
+        let expired =
+            token_store.mint_mcp_token(&op, &[], 600, "t-expired".into(), binding(Some(unix_now() - 5))).await.unwrap();
         assert!(
             token_store.check_token("mcp/dispatch", &expired.client_token, "", true).await.is_err(),
             "a token whose waiver has expired must be refused at its next call"
         );
-        let live = token_store.mint_mcp_token(&op, &[], 600, "t-live".into(), binding(Some(unix_now() + 600))).await.unwrap();
+        let live =
+            token_store.mint_mcp_token(&op, &[], 600, "t-live".into(), binding(Some(unix_now() + 600))).await.unwrap();
         assert!(token_store.check_token("mcp/dispatch", &live.client_token, "", true).await.unwrap().is_some());
         let unwaived = token_store.mint_mcp_token(&op, &[], 600, "t-plain".into(), binding(None)).await.unwrap();
         assert!(token_store.check_token("mcp/dispatch", &unwaived.client_token, "", true).await.unwrap().is_some());
@@ -493,9 +488,8 @@ mod mod_test {
                 Some(&root),
             )
             .unwrap();
-        let (_, login) = server
-            .login("auth/userpass/login/felipe", json!({ "password": "pw" }).as_object().cloned(), None)
-            .unwrap();
+        let (_, login) =
+            server.login("auth/userpass/login/felipe", json!({ "password": "pw" }).as_object().cloned(), None).unwrap();
         let op = login["auth"]["client_token"].as_str().unwrap().to_string();
 
         let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} });
@@ -527,7 +521,11 @@ mod mod_test {
         server.url_prefix = server.url_prefix.replace("/v1", "/v2");
         let (status, _) = server.delete("sys/mcp/pairings/pair-one", None, Some(&op)).unwrap();
         assert!((200..300).contains(&status), "revoke answered {status}");
-        assert_eq!(http_post(&addr, "/v2/mcp", Some(&token), list.clone()).0, 403, "a revoked pairing's token must be dead");
+        assert_eq!(
+            http_post(&addr, "/v2/mcp", Some(&token), list.clone()).0,
+            403,
+            "a revoked pairing's token must be dead"
+        );
 
         // By accessor.
         let (token, accessor) = mint("pair-two");
@@ -573,9 +571,7 @@ mod mod_test {
             path "sys/mcp/token" { capabilities = ["update"] }
             path "secret/metadata/ai/*" { capabilities = ["read"] }
         "#;
-        server
-            .write("sys/policy/mcp-reader", json!({ "policy": policy_hcl }).as_object().cloned(), None)
-            .unwrap();
+        server.write("sys/policy/mcp-reader", json!({ "policy": policy_hcl }).as_object().cloned(), None).unwrap();
         server
             .write(
                 "auth/approle/role/reader-role",
@@ -608,11 +604,14 @@ mod mod_test {
 
         let (_, role_id_resp) = server.read("auth/approle/role/reader-role/role-id", None).unwrap();
         let role_id = role_id_resp["data"]["role_id"].as_str().unwrap().to_string();
-        let (_, secret_id_resp) =
-            server.write("auth/approle/role/reader-role/secret-id", None, None).unwrap();
+        let (_, secret_id_resp) = server.write("auth/approle/role/reader-role/secret-id", None, None).unwrap();
         let secret_id = secret_id_resp["data"]["secret_id"].as_str().unwrap().to_string();
         let (_, login_resp) = server
-            .write("auth/approle/login", json!({ "role_id": role_id, "secret_id": secret_id }).as_object().cloned(), None)
+            .write(
+                "auth/approle/login",
+                json!({ "role_id": role_id, "secret_id": secret_id }).as_object().cloned(),
+                None,
+            )
             .unwrap();
         let login_token = login_resp["auth"]["client_token"].as_str().unwrap().to_string();
 

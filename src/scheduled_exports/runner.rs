@@ -31,16 +31,9 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::kernel_api::VaultCtx;
-use crate::{
-    core::Core,
-    errors::RvError,
-    exchange,
-    storage::Storage,
-};
+use crate::{core::Core, errors::RvError, exchange, storage::Storage};
 
-use super::schedule::{
-    DestinationKind, ExportFormat, PasswordRefKind, RunRecord, RunStatus, Schedule,
-};
+use super::schedule::{DestinationKind, ExportFormat, PasswordRefKind, RunRecord, RunStatus, Schedule};
 use super::store::ScheduleStore;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(30);
@@ -56,8 +49,7 @@ const MAX_CATCHUP_SCAN: usize = 10_000;
 pub fn start_scheduler(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         let store = ScheduleStore::new();
-        let last_fired: Arc<Mutex<HashMap<String, DateTime<Utc>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let last_fired: Arc<Mutex<HashMap<String, DateTime<Utc>>>> = Arc::new(Mutex::new(HashMap::new()));
 
         log::info!("scheduled-exports: scheduler started (tick every {}s)", TICK_INTERVAL.as_secs());
 
@@ -88,10 +80,7 @@ async fn tick(
         let cron_expr = match CronSchedule::from_str(&sched.cron) {
             Ok(c) => c,
             Err(e) => {
-                log::warn!(
-                    "scheduled-exports: schedule {} has invalid cron `{}`: {e}",
-                    sched.id, sched.cron
-                );
+                log::warn!("scheduled-exports: schedule {} has invalid cron `{}`: {e}", sched.id, sched.cron);
                 continue;
             }
         };
@@ -185,11 +174,7 @@ async fn tick(
 /// is what the runner tracks. Returning only the *latest* due instant is what
 /// makes catch-up `single`: a schedule that missed five nights runs once, not
 /// five times.
-fn latest_due(
-    cron: &CronSchedule,
-    prev: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
+fn latest_due(cron: &CronSchedule, prev: DateTime<Utc>, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     let prev_local = prev.with_timezone(&Local);
     let now_local = now.with_timezone(&Local);
     let mut due = None;
@@ -205,25 +190,16 @@ fn latest_due(
 /// Timestamp of a schedule's most recent run record, used as the resume point
 /// on first sighting after process start. `None` when the schedule has never
 /// run or the record is unreadable.
-async fn resume_point(
-    core: &Arc<Core>,
-    store: &ScheduleStore,
-    schedule_id: &str,
-) -> Option<DateTime<Utc>> {
+async fn resume_point(core: &Arc<Core>, store: &ScheduleStore, schedule_id: &str) -> Option<DateTime<Utc>> {
     let runs = store.list_runs(core.barrier().as_storage(), schedule_id).await.ok()?;
     // `list_runs` sorts newest-first.
     let newest = runs.first()?;
-    DateTime::parse_from_rfc3339(&newest.run_at)
-        .ok()
-        .map(|t| t.with_timezone(&Utc))
+    DateTime::parse_from_rfc3339(&newest.run_at).ok().map(|t| t.with_timezone(&Utc))
 }
 
 /// Execute one schedule: build the export bytes, write to the destination,
 /// return (bytes_written, destination_used) on success.
-pub async fn run_once(
-    core: &Arc<Core>,
-    sched: &Schedule,
-) -> Result<(u64, DestinationKind), RvError> {
+pub async fn run_once(core: &Arc<Core>, sched: &Schedule) -> Result<(u64, DestinationKind), RvError> {
     let __barrier = core.barrier();
     let storage = __barrier.as_storage();
 
@@ -232,17 +208,11 @@ pub async fn run_once(
     //    prefix, which the root mount index cannot reach); every other scope
     //    resolves against the root namespace as before.
     let document = if sched.scope.kind == exchange::ScopeKind::AllNamespaces {
-        exchange::export_all_namespaces(core, exchange::ExporterInfo::default(), sched.scope.clone())
-            .await?
+        exchange::export_all_namespaces(core, exchange::ExporterInfo::default(), sched.scope.clone()).await?
     } else {
         let mounts = exchange::scope::MountIndex::from_core(core)?;
-        exchange::scope::export_to_document(
-            storage,
-            &mounts,
-            exchange::ExporterInfo::default(),
-            sched.scope.clone(),
-        )
-        .await?
+        exchange::scope::export_to_document(storage, &mounts, exchange::ExporterInfo::default(), sched.scope.clone())
+            .await?
     };
     let inner_bytes = exchange::canonical::to_canonical_vec(&document)?;
 
@@ -295,10 +265,7 @@ pub async fn run_once(
     Ok((bytes.len() as u64, sched.destination.clone()))
 }
 
-async fn resolve_password(
-    storage: &dyn Storage,
-    password_ref: Option<&PasswordRefKind>,
-) -> Result<String, RvError> {
+async fn resolve_password(storage: &dyn Storage, password_ref: Option<&PasswordRefKind>) -> Result<String, RvError> {
     match password_ref {
         None => Err(RvError::ErrRequestInvalid),
         Some(PasswordRefKind::Literal { password }) => Ok(password.clone()),
@@ -306,25 +273,15 @@ async fn resolve_password(
             let mount_norm = if mount.ends_with('/') { mount.clone() } else { format!("{mount}/") };
             let key = format!("{mount_norm}{}", path.trim_start_matches('/'));
             let entry = storage.get(&key).await?.ok_or(RvError::ErrRequestInvalid)?;
-            let value: Value = serde_json::from_slice(&entry.value)
-                .map_err(|_| RvError::ErrRequestInvalid)?;
-            value
-                .get("password")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .ok_or(RvError::ErrRequestInvalid)
+            let value: Value = serde_json::from_slice(&entry.value).map_err(|_| RvError::ErrRequestInvalid)?;
+            value.get("password").and_then(|v| v.as_str()).map(|s| s.to_string()).ok_or(RvError::ErrRequestInvalid)
         }
     }
 }
 
 /// Write one backup atomically (tmp file, fsync, rename) and return the bare
 /// file name it landed under, for the catalog record.
-fn write_local(
-    dir: &str,
-    schedule_id: &str,
-    format: &ExportFormat,
-    bytes: &[u8],
-) -> Result<String, RvError> {
+fn write_local(dir: &str, schedule_id: &str, format: &ExportFormat, bytes: &[u8]) -> Result<String, RvError> {
     use std::fs;
     use std::io::Write;
 
@@ -334,17 +291,23 @@ fn write_local(
         ExportFormat::Json => "json",
     };
     let dir_path = std::path::Path::new(dir);
-    fs::create_dir_all(dir_path)
-        .map_err(|e| { log::warn!("create_dir_all({dir}) failed: {e}"); RvError::ErrUnknown })?;
+    fs::create_dir_all(dir_path).map_err(|e| {
+        log::warn!("create_dir_all({dir}) failed: {e}");
+        RvError::ErrUnknown
+    })?;
     let filename = format!("{schedule_id}-{timestamp}.{ext}");
     let final_path = dir_path.join(&filename);
     let tmp_path = dir_path.join(format!(".{filename}.tmp"));
 
     {
-        let mut f = fs::File::create(&tmp_path)
-            .map_err(|e| { log::warn!("File::create({}) failed: {e}", tmp_path.display()); RvError::ErrUnknown })?;
-        f.write_all(bytes)
-            .map_err(|e| { log::warn!("write failed: {e}"); RvError::ErrUnknown })?;
+        let mut f = fs::File::create(&tmp_path).map_err(|e| {
+            log::warn!("File::create({}) failed: {e}", tmp_path.display());
+            RvError::ErrUnknown
+        })?;
+        f.write_all(bytes).map_err(|e| {
+            log::warn!("write failed: {e}");
+            RvError::ErrUnknown
+        })?;
         f.sync_all().ok();
     }
     fs::rename(&tmp_path, &final_path).map_err(|e| {
@@ -358,11 +321,7 @@ fn write_local(
     // when a schedule keeps succeeding but the directory turns up empty
     // (a destination that is not on persistent storage, e.g. a path inside a
     // container's ephemeral writable layer).
-    log::info!(
-        "scheduled-exports: wrote {} ({} bytes)",
-        final_path.display(),
-        bytes.len()
-    );
+    log::info!("scheduled-exports: wrote {} ({} bytes)", final_path.display(), bytes.len());
     Ok(filename)
 }
 
@@ -379,11 +338,7 @@ mod tests {
     /// A UTC instant for a known local wall-clock time, so assertions hold in
     /// any server timezone.
     fn local(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
-        Local
-            .with_ymd_and_hms(y, m, d, h, min, 0)
-            .single()
-            .expect("unambiguous local time")
-            .with_timezone(&Utc)
+        Local.with_ymd_and_hms(y, m, d, h, min, 0).single().expect("unambiguous local time").with_timezone(&Utc)
     }
 
     #[test]

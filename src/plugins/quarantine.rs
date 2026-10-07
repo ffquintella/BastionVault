@@ -48,21 +48,13 @@ pub async fn quarantine(
     actor_entity_id: &str,
     last_active_version: &str,
 ) -> Result<(), RvError> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let rec = QuarantineRecord {
         quarantined_at_unix_secs: now,
         actor_entity_id: actor_entity_id.to_string(),
         last_active_version: last_active_version.to_string(),
     };
-    storage
-        .put(&StorageEntry {
-            key: key(name),
-            value: serde_json::to_vec(&rec)?,
-        })
-        .await
+    storage.put(&StorageEntry { key: key(name), value: serde_json::to_vec(&rec)? }).await
 }
 
 pub async fn lookup(storage: &dyn Storage, name: &str) -> Result<Option<QuarantineRecord>, RvError> {

@@ -335,6 +335,8 @@ pub fn run() {
             commands::plugins::plugins_get_provider_grant,
             commands::plugins::plugins_set_provider_grant,
             commands::plugins::plugins_delete_provider_grant,
+            commands::plugins::plugins_entity_data_usage,
+            commands::plugins::plugins_purge_entity_data,
             commands::plugins::plugins_versions,
             commands::plugins::plugins_activate_version,
             commands::plugins::plugins_delete_version,
@@ -755,6 +757,11 @@ pub fn run() {
             commands::connect_mfa::connect_mfa_begin,
             commands::connect_mfa::connect_mfa_verify_totp,
             commands::connect_mfa::connect_mfa_verify_fido2,
+            // Credential providers at Connect (features/self-accounts.md §6):
+            // the profile editor's provider list and the picker's accounts,
+            // metadata only.
+            commands::connect_provider::connect_credential_providers,
+            commands::connect_provider::connect_provider_candidates,
             commands::ssh_security_key::ssh_security_key_self_read,
             commands::ssh_security_key::ssh_security_key_self_delete,
             commands::ssh_security_key::ssh_security_key_enroll,

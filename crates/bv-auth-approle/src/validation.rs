@@ -407,3 +407,84 @@ pub fn verify_cidr_role_secret_id_subset(
 
     Ok(())
 }
+
+// ── Backend-owned metadata on a secret-id ──────────────────────────────
+
+/// The backend-owned token metadata keys (`bv_logical::is_reserved_token_meta_key`)
+/// present in a secret-id's caller-supplied `metadata`, sorted.
+///
+/// A secret-id's metadata becomes the login token's metadata, so a key the
+/// backend owns there — `entity_id`, `username`, `spiffe_id`, `mount_path`,
+/// the `approle_env_*` scope, … — would let whoever creates a secret-id name
+/// another principal's identity entity, impersonate a user in templated
+/// policies and audit, or pass the machine-identity gate.
+pub fn reserved_secret_id_meta_keys(meta: &HashMap<String, String>) -> Vec<String> {
+    let mut keys: Vec<String> =
+        meta.keys().filter(|k| crate::logical::is_reserved_token_meta_key(k)).cloned().collect();
+    keys.sort_unstable();
+    keys
+}
+
+/// Refuse a secret-id whose `metadata` names a backend-owned key, naming
+/// every offending key (never a value: the caller controls them, and these
+/// keys name principals). Mirrors `auth/token/create`'s `meta` check.
+pub fn reject_reserved_secret_id_meta(meta: &HashMap<String, String>, role_name: &str) -> Result<(), RvError> {
+    let keys = reserved_secret_id_meta_keys(meta);
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let keys = keys.join("`, `");
+    log::warn!(
+        target: "security",
+        "approle secret-id refused: reserved metadata key(s) `{keys}` may only be set by the auth backend \
+         (role={role_name:?})"
+    );
+    Err(RvError::ErrResponse(format!(
+        "metadata key(s) `{keys}` are reserved: they are set by the auth backend when the secret-id is used \
+         to log in, never by its creator"
+    )))
+}
+
+/// Drop every backend-owned key from a stored secret-id's metadata before it
+/// becomes a token's. A secret-id stored before creation refused such keys
+/// would otherwise still forge them at every login. Returns the keys dropped.
+pub fn strip_reserved_secret_id_meta(meta: &mut HashMap<String, String>) -> Vec<String> {
+    let keys = reserved_secret_id_meta_keys(meta);
+    for k in &keys {
+        meta.remove(k);
+    }
+    keys
+}
+
+#[cfg(test)]
+mod reserved_meta_tests {
+    use super::*;
+
+    fn forged() -> HashMap<String, String> {
+        [("entity_id", "victim"), ("username", "alice"), ("spiffe_id", "spiffe://x"), ("approle_env_scoped", "x"), ("team", "ops")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn creation_refuses_backend_owned_keys_and_names_them_without_values() {
+        let e = reject_reserved_secret_id_meta(&forged(), "app").unwrap_err();
+        let m = format!("{e}");
+        for k in ["entity_id", "username", "spiffe_id", "approle_env_scoped"] {
+            assert!(m.contains(k), "{k} missing from {m}");
+        }
+        assert!(!m.contains("victim") && !m.contains("alice"), "values are never echoed: {m}");
+        let ok: HashMap<String, String> = [("team".to_string(), "ops".to_string())].into_iter().collect();
+        assert!(reject_reserved_secret_id_meta(&ok, "app").is_ok());
+    }
+
+    #[test]
+    fn login_strips_backend_owned_keys_from_a_stored_secret_id() {
+        let mut m = forged();
+        let dropped = strip_reserved_secret_id_meta(&mut m);
+        assert_eq!(dropped, vec!["approle_env_scoped", "entity_id", "spiffe_id", "username"]);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.get("team").map(String::as_str), Some("ops"));
+    }
+}

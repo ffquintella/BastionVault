@@ -96,10 +96,7 @@ async fn test_pki_phase4_1_auto_tidy_scheduler() {
         &core,
         &token,
         "pki/issue/short",
-        json!({"common_name": "x.example.com", "ttl": "1s"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "x.example.com", "ttl": "1s"}).as_object().unwrap().clone(),
     )
     .await
     .unwrap();
@@ -119,11 +116,7 @@ async fn test_pki_phase4_1_auto_tidy_scheduler() {
         .expect("tidy pass must not error when disabled");
 
     let status = read(&core, &token, "pki/tidy-status").await.unwrap();
-    assert_eq!(
-        status["last_run_at_unix"].as_u64().unwrap(),
-        0,
-        "scheduler must not fire when auto-tidy is disabled"
-    );
+    assert_eq!(status["last_run_at_unix"].as_u64().unwrap(), 0, "scheduler must not fire when auto-tidy is disabled");
 
     // ── Case 2: enable auto-tidy, force the first fire ─────────────────
     write(

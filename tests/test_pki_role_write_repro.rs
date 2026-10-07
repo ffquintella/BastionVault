@@ -112,10 +112,7 @@ async fn test_pki_role_write_with_ttl_missing_unit_repro() {
     // *not* a hang, *not* a panic. If this is the user-visible bug,
     // the GUI's surfacing path is what's broken (toast not firing).
     println!("pki_write_role result with ttl='720': {result:?}");
-    assert!(
-        result.is_err(),
-        "ttl '720' (no unit) must reject; got Ok which means humantime quietly accepted it"
-    );
+    assert!(result.is_err(), "ttl '720' (no unit) must reject; got Ok which means humantime quietly accepted it");
     let err = result.unwrap_err();
     let msg = format!("{err}");
     println!("error message: {msg}");
@@ -125,10 +122,7 @@ async fn test_pki_role_write_with_ttl_missing_unit_repro() {
     // emit and is what made the failure look silent.
     assert!(msg.contains("ttl"), "error must name the field, got: {msg}");
     assert!(msg.contains("'720'"), "error must echo the bad value, got: {msg}");
-    assert!(
-        msg.contains("720h") || msg.contains("unit"),
-        "error must point at the fix, got: {msg}"
-    );
+    assert!(msg.contains("720h") || msg.contains("unit"), "error must point at the fix, got: {msg}");
 
     // Sanity: with a valid TTL the same call must succeed. Establishes
     // that the only thing wrong with the original body is the TTL.
@@ -167,8 +161,5 @@ async fn test_pki_role_write_with_ttl_missing_unit_repro() {
     req.client_token = token.clone();
     req.body = Some(good_body);
     let ok = core.handle_request(&mut req).await;
-    assert!(
-        ok.is_ok(),
-        "the same body with ttl='720h' must succeed; got: {ok:?}"
-    );
+    assert!(ok.is_ok(), "the same body with ttl='720h' must succeed; got: {ok:?}");
 }

@@ -14,7 +14,7 @@ import {
   getTypeDef,
   mergeTypeConfig,
 } from "../lib/resourceTypes";
-import { openProfileSession } from "../lib/sessionLaunch";
+import { connectProfile } from "../lib/connectFlow";
 import { CONNECT_PALETTE_OPEN_EVENT, type ConnectPaletteOpenDetail } from "../lib/connectPaletteEvents";
 import type {
   ConnectionProfile,
@@ -25,6 +25,7 @@ import type {
 import { Badge } from "./ui/Badge";
 import { useToast } from "./ui/Toast";
 import { useConnectMfa } from "./ConnectMfaPrompt";
+import { useProviderAccountPicker, type ProviderAccountsLink } from "./ProviderAccountPicker";
 
 /**
  * Cmd-K Connect palette (Phase 7 polish).
@@ -46,6 +47,10 @@ import { useConnectMfa } from "./ConnectMfaPrompt";
  * those entries are listed but launching them sends the operator
  * back to the Resources page where the inline prompt lives. Keeps
  * the palette focused on one-keystroke connects.
+ *
+ * A credential-provider profile (`provider` source, SSH / RDP / web
+ * `form`) is launched here: its host-rendered account picker opens over
+ * the palette, like the MFA prompt does, before the MFA gate.
  */
 interface PaletteEntry {
   resource: ResourceMetadata;
@@ -57,6 +62,8 @@ interface PaletteEntry {
   resourceLabel: string;
   targetLabel: string;
   needsOperatorPrompt: boolean;
+  /** A `provider` profile: the operator picks an account at connect. */
+  picksAccount: boolean;
 }
 
 export interface ConnectPaletteProps {
@@ -68,12 +75,20 @@ export interface ConnectPaletteProps {
    * calls is refused by the host when nobody is logged in.
    */
   armed: boolean;
+  /**
+   * The provider account picker's "Add an account" link. Only the main
+   * window can show a plugin's page, so the Session Workspace passes none
+   * and its empty picker says what is missing without a link.
+   */
+  accountsLink?: ProviderAccountsLink;
 }
 
-export function ConnectPalette({ armed }: ConnectPaletteProps) {
+export function ConnectPalette({ armed, accountsLink }: ConnectPaletteProps) {
   const { toast } = useToast();
-  // Connect-time MFA gate; the prompt renders over the palette.
+  // Connect-time MFA gate and the provider account picker; both render
+  // over the palette.
   const { gateConnect, mfaPrompt } = useConnectMfa();
+  const { pickProviderAccount, providerPicker } = useProviderAccountPicker(accountsLink);
   const [open, setOpen] = useState(false);
   const [entries, setEntries] = useState<PaletteEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -175,6 +190,7 @@ export function ConnectPalette({ armed }: ConnectPaletteProps) {
                 resourceLabel,
                 targetLabel: origin,
                 needsOperatorPrompt: false,
+                picksAccount: p.credential_source.kind === "provider",
               });
               continue;
             }
@@ -195,13 +211,14 @@ export function ConnectPalette({ armed }: ConnectPaletteProps) {
             const port = p.target_port ?? defaultPort(p.protocol);
             const resourceLabel = String(meta.name || "");
             const targetLabel = `${host}:${port}`;
+            const picksAccount = kind === "provider";
             const haystack = [
               resourceLabel,
               p.name,
               p.protocol,
               host,
               String(port),
-              p.username || "",
+              picksAccount ? "" : p.username || "",
               kind,
               String(meta["tags"] || ""),
             ]
@@ -215,6 +232,7 @@ export function ConnectPalette({ armed }: ConnectPaletteProps) {
               resourceLabel,
               targetLabel,
               needsOperatorPrompt,
+              picksAccount,
             });
           }
         }
@@ -279,23 +297,18 @@ export function ConnectPalette({ armed }: ConnectPaletteProps) {
     const key = `${entry.resourceLabel}/${entry.profile.id}`;
     setConnecting(key);
     try {
-      // Connect-time MFA gate. The server decides whether this profile needs
-      // a factor; `{}` on an ungated one keeps the spread a no-op. The prompt
-      // renders over the palette, so unlike the operator-bind case above the
-      // palette can satisfy it inline.
-      const mfa = await gateConnect(
-        entry.resourceLabel,
-        entry.profile.id,
-        entry.profile.name,
-      );
-      if (!mfa) return; // operator cancelled — leave the palette open
-      await openProfileSession(entry.profile, {
+      // The shared sequence (`lib/connectFlow.ts`): a provider profile's
+      // account picker, then the connect-time MFA gate (the server decides
+      // whether this profile needs a factor), then the open. Both prompts
+      // render over the palette, so unlike the operator-bind case above the
+      // palette can satisfy them inline.
+      const outcome = await connectProfile({ pickProviderAccount, gateConnect }, entry.profile, {
         resource_name: entry.resourceLabel,
         profile_id: entry.profile.id,
         operator_credential: undefined,
         placement,
-        ...mfa,
       });
+      if (outcome === "cancelled") return; // leave the palette open
       setOpen(false);
     } catch (e) {
       toast("error", extractError(e));
@@ -386,13 +399,14 @@ export function ConnectPalette({ armed }: ConnectPaletteProps) {
                           <span className="truncate">{e.profile.name}</span>
                         </div>
                         <div className="text-xs text-[var(--color-text-muted)] font-mono truncate">
-                          {e.profile.username ? `${e.profile.username}@` : ""}
+                          {!e.picksAccount && e.profile.username ? `${e.profile.username}@` : ""}
                           {e.targetLabel}
                           {e.needsOperatorPrompt
                             ? e.profile.credential_source.kind === "default-account"
                               ? " · prompts for password"
                               : " · LDAP operator bind"
                             : ""}
+                          {e.picksAccount ? " · pick an account" : ""}
                         </div>
                       </div>
                       {isConnecting && (
@@ -414,6 +428,7 @@ export function ConnectPalette({ armed }: ConnectPaletteProps) {
           <span><kbd className="font-mono">esc</kbd> close</span>
         </div>
       </div>
+      {providerPicker}
       {mfaPrompt}
     </div>
   );

@@ -4,10 +4,7 @@ use std::io::Write;
 
 use hmac::Mac;
 
-use crate::{
-    errors::RvError,
-    storage::Backend,
-};
+use crate::{errors::RvError, storage::Backend};
 
 use super::format::{self, BackupHeader};
 
@@ -42,8 +39,8 @@ pub async fn create_backup(
     for key in &all_keys {
         if let Some(entry) = backend.get(key).await? {
             if compressed {
-                let compressed_value = zstd::encode_all(entry.value.as_slice(), 3)
-                    .map_err(|_| RvError::ErrBackupCorrupted)?;
+                let compressed_value =
+                    zstd::encode_all(entry.value.as_slice(), 3).map_err(|_| RvError::ErrBackupCorrupted)?;
                 format::write_entry_frame(&mut payload, key, &compressed_value)?;
             } else {
                 format::write_entry_frame(&mut payload, key, &entry.value)?;
@@ -109,8 +106,7 @@ mod tests {
     /// prefix, which would silently drop every tenant from operator backups.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn backup_captures_every_namespace() {
-        let (_bvault, core, root) =
-            new_unseal_test_bastion_vault("test_backup_all_namespaces").await;
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_backup_all_namespaces").await;
 
         let store = core
             .module_manager()
@@ -128,20 +124,12 @@ mod tests {
             json!({ "type": "kv" }).as_object().cloned(),
         )
         .await;
-        ns_req(
-            &core,
-            &root,
-            Operation::Write,
-            "cubby/foo",
-            "tenant-a",
-            json!({ "v": "from-a" }).as_object().cloned(),
-        )
-        .await;
+        ns_req(&core, &root, Operation::Write, "cubby/foo", "tenant-a", json!({ "v": "from-a" }).as_object().cloned())
+            .await;
 
         let hmac_key = core.barrier().derive_hmac_key().unwrap();
         let mut out = Vec::new();
-        let copied =
-            super::create_backup(core.physical().as_ref(), &hmac_key, &mut out, false).await.unwrap();
+        let copied = super::create_backup(core.physical().as_ref(), &hmac_key, &mut out, false).await.unwrap();
         assert!(copied > 0);
 
         // Walk the frames and collect the keys the backup actually carries.

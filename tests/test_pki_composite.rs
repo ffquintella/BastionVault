@@ -116,11 +116,7 @@ async fn test_pki_phase3_composite_end_to_end() {
 
     // Composite SPKI is a DER SEQUENCE of two BIT STRINGs (PQ then classical).
     // Pull them apart.
-    let spki_bits = root_cert
-        .tbs_certificate
-        .subject_public_key_info
-        .subject_public_key
-        .raw_bytes();
+    let spki_bits = root_cert.tbs_certificate.subject_public_key_info.subject_public_key.raw_bytes();
     let (pq_pk, classical_pk) = parse_two_bitstring_seq(spki_bits);
     assert_eq!(pq_pk.len(), ML_DSA_65_PK_LEN, "PQ half is 1952-byte ML-DSA-65 raw pk");
     assert_eq!(classical_pk.len(), 65, "classical half is 65-byte SEC1 uncompressed P-256 point");
@@ -169,10 +165,7 @@ async fn test_pki_phase3_composite_end_to_end() {
     let leaf_der = pem_decode_first(&leaf_pem);
     let leaf_cert = Certificate::from_der(&leaf_der).expect("parse leaf");
     assert_eq!(leaf_cert.signature_algorithm.oid.to_string(), COMPOSITE_OID);
-    assert_eq!(
-        leaf_cert.tbs_certificate.issuer.to_string(),
-        root_cert.tbs_certificate.subject.to_string()
-    );
+    assert_eq!(leaf_cert.tbs_certificate.issuer.to_string(), root_cert.tbs_certificate.subject.to_string());
 
     // Both halves of the leaf signature verify under the matching halves of
     // the root's composite public key.
@@ -191,28 +184,16 @@ async fn test_pki_phase3_composite_end_to_end() {
         .as_deref()
         .unwrap_or(&[])
         .iter()
-        .map(|r| {
-            r.serial_number
-                .as_bytes()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        })
+        .map(|r| r.serial_number.as_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>())
         .collect();
-    assert!(
-        revoked.iter().any(|s| s == &leaf_serial),
-        "revoked serial {leaf_serial} expected in CRL, got {revoked:?}"
-    );
+    assert!(revoked.iter().any(|s| s == &leaf_serial), "revoked serial {leaf_serial} expected in CRL, got {revoked:?}");
 
     // Mixed-chain rejection: a classical role cannot run on a composite CA.
     write(
         &core,
         &token,
         "pki/roles/classical-web",
-        json!({"ttl": "24h", "key_type": "ec", "allow_any_name": true})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"ttl": "24h", "key_type": "ec", "allow_any_name": true}).as_object().unwrap().clone(),
     )
     .await;
     let mut req = Request::new("pki/issue/classical-web");
@@ -288,10 +269,7 @@ fn verify_pq_half(msg: &[u8], pk_bytes: &[u8], sig: &[u8]) {
     let pk_arr: [u8; ML_DSA_65_PK_LEN] = pk_bytes.try_into().unwrap();
     let pk = ml_dsa_65::PublicKey::try_from_bytes(pk_arr).unwrap();
     let sig_arr: [u8; ML_DSA_65_SIG_LEN] = sig.try_into().unwrap();
-    assert!(
-        pk.verify(&prehashed, &sig_arr, &[]),
-        "PQ half (ML-DSA-65) of composite signature must verify"
-    );
+    assert!(pk.verify(&prehashed, &sig_arr, &[]), "PQ half (ML-DSA-65) of composite signature must verify");
 }
 
 fn verify_classical_half(msg: &[u8], pk_bytes: &[u8], sig: &[u8]) {

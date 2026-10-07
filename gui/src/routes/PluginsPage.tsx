@@ -35,6 +35,7 @@ export function PluginsPage() {
   const [versioning, setVersioning] = useState<PluginManifest | null>(null);
   const [networking, setNetworking] = useState<PluginManifest | null>(null);
   const [providerGranting, setProviderGranting] = useState<PluginManifest | null>(null);
+  const [entityData, setEntityData] = useState<PluginManifest | null>(null);
   const [reloading, setReloading] = useState<string | null>(null);
   const [acceptUnsigned, setAcceptUnsigned] = useState<boolean | null>(null);
   const [acceptUnsignedBusy, setAcceptUnsignedBusy] = useState(false);
@@ -285,6 +286,7 @@ export function PluginsPage() {
                   onVersions={() => setVersioning(p)}
                   onNetwork={() => setNetworking(p)}
                   onProvider={() => setProviderGranting(p)}
+                  onEntityData={() => setEntityData(p)}
                   onReload={async () => {
                     setReloading(p.name);
                     try {
@@ -368,6 +370,13 @@ export function PluginsPage() {
         />
       )}
 
+      {entityData && (
+        <EntityDataModal
+          plugin={entityData}
+          onClose={() => setEntityData(null)}
+        />
+      )}
+
       <ConfirmModal
         open={deletingName !== null}
         onClose={() => setDeletingName(null)}
@@ -390,6 +399,7 @@ function PluginRow({
   onDelete,
   onNetwork,
   onProvider,
+  onEntityData,
 }: {
   plugin: PluginManifest;
   reloading: boolean;
@@ -400,10 +410,12 @@ function PluginRow({
   onDelete: () => void;
   onNetwork: () => void;
   onProvider: () => void;
+  onEntityData: () => void;
 }) {
   const hasConfig = (plugin.config_schema?.length ?? 0) > 0;
   const requestsNet = (plugin.capabilities.app?.net?.hosts?.length ?? 0) > 0;
   const isProvider = !!plugin.capabilities.credential_provider;
+  const keepsPerUserData = plugin.capabilities.storage_scope === "entity";
   return (
     <div className="flex items-start justify-between p-3 border border-[var(--color-border)] rounded-md gap-3">
       <div className="flex-1 min-w-0">
@@ -435,6 +447,9 @@ function PluginRow({
         )}
         {isProvider && (
           <Button size="sm" variant="secondary" onClick={onProvider}>Credentials</Button>
+        )}
+        {keepsPerUserData && (
+          <Button size="sm" variant="ghost" onClick={onEntityData}>Per-user data</Button>
         )}
         <Button size="sm" variant="ghost" onClick={onReload} loading={reloading}>
           Reload
@@ -1615,6 +1630,130 @@ function ProviderGrantModal({
           <span>Approve this plugin as a credential provider for the block above</span>
         </label>
       </div>
+    </Modal>
+  );
+}
+
+/**
+ * Per-user data of an entity-scoped plugin (features/self-accounts.md
+ * Phase 5): how many records each user holds, and a purge for offboarding.
+ * Counts only, by design (Open question 2): the server lists keys and never
+ * reads a value, so no label, login name, target or secret is shown here.
+ */
+function EntityDataModal({ plugin, onClose }: { plugin: PluginManifest; onClose: () => void }) {
+  const { toast } = useToast();
+  const [usage, setUsage] = useState<api.PluginEntityDataUsage | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [purging, setPurging] = useState<api.PluginEntityUsage | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = React.useCallback(async () => {
+    try {
+      setUsage(await api.pluginEntityDataUsage(plugin.name));
+      setError(null);
+    } catch (e) {
+      setError(extractError(e));
+    }
+  }, [plugin.name]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const who = (e: api.PluginEntityUsage) => e.display_name || e.entity_id;
+
+  async function purge() {
+    if (!purging) return;
+    setBusy(true);
+    try {
+      await api.pluginPurgeEntityData(plugin.name, purging.entity_id);
+      toast("success", `Deleted ${plugin.name} data of ${who(purging)}.`);
+      setPurging(null);
+      await load();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      open={true}
+      onClose={onClose}
+      title={`Per-user data — ${plugin.name}`}
+      size="lg"
+      actions={<Button variant="ghost" onClick={onClose}>Close</Button>}
+    >
+      <div className="space-y-3 text-sm min-w-0">
+        <p className="text-[var(--color-text-muted)]">
+          How many records each user keeps in this plugin. Only counts are shown: what the records
+          contain is never read. Deleting a user&apos;s data is for offboarding and cannot be undone;
+          it is recorded in the audit log.
+        </p>
+
+        {error && (
+          <p role="alert" className="text-xs text-[var(--color-danger)] break-words">{error}</p>
+        )}
+
+        {usage && (
+          <>
+            <p className="text-xs" data-testid="entity-data-totals">
+              {usage.total_accounts} record{usage.total_accounts === 1 ? "" : "s"} across{" "}
+              {usage.total_entities} user{usage.total_entities === 1 ? "" : "s"}
+            </p>
+            {usage.pending_purges > 0 && (
+              <p role="status" className="rounded-md border border-[var(--color-warning)] p-2 text-xs">
+                {usage.pending_purges} automatic purge{usage.pending_purges === 1 ? " has" : "s have"} failed
+                and will be retried on the next purge. Deleting any user&apos;s data here retries
+                {usage.pending_purges === 1 ? " it" : " them"} now.
+              </p>
+            )}
+            {usage.entities.length === 0 ? (
+              <p className="text-xs text-[var(--color-text-muted)]">No user keeps data in this plugin.</p>
+            ) : (
+              <table className="w-full text-xs table-fixed">
+                <thead>
+                  <tr className="text-left text-[var(--color-text-muted)]">
+                    <th className="py-1 pr-2 font-medium">User</th>
+                    <th className="py-1 pr-2 font-medium">Entity</th>
+                    <th className="py-1 pr-2 font-medium w-20 text-right">Records</th>
+                    <th className="py-1 w-24" />
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[var(--color-border)]">
+                  {usage.entities.map((e) => (
+                    <tr key={e.entity_id}>
+                      <td className="py-1 pr-2 min-w-0 truncate" title={e.display_name ?? ""}>
+                        {e.display_name || <span className="text-[var(--color-text-muted)]">unknown</span>}
+                      </td>
+                      <td className="py-1 pr-2 min-w-0 truncate font-mono" title={e.entity_id}>{e.entity_id}</td>
+                      <td className="py-1 pr-2 text-right">{e.accounts}</td>
+                      <td className="py-1 text-right">
+                        <Button size="sm" variant="danger" onClick={() => setPurging(e)}>Delete</Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </>
+        )}
+      </div>
+
+      <ConfirmModal
+        open={purging !== null}
+        onClose={() => setPurging(null)}
+        onConfirm={purge}
+        loading={busy}
+        title="Delete per-user data"
+        message={
+          purging
+            ? `Delete every ${plugin.name} record of ${who(purging)} (${purging.accounts} record${purging.accounts === 1 ? "" : "s"}), including the secrets they hold? This cannot be undone.`
+            : ""
+        }
+        confirmLabel="Delete"
+      />
     </Modal>
   );
 }

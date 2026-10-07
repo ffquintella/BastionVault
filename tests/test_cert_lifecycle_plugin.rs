@@ -42,10 +42,7 @@ async fn write(
     req.operation = Operation::Write;
     req.client_token = token.to_string();
     req.body = Some(body);
-    core.handle_request(&mut req)
-        .await
-        .map(|r| r.and_then(|x| x.data))
-        .map_err(|e| format!("{e:?}"))
+    core.handle_request(&mut req).await.map(|r| r.and_then(|x| x.data)).map_err(|e| format!("{e:?}"))
 }
 
 #[maybe_async::maybe_async]
@@ -107,8 +104,8 @@ fn spawn_capture_server() -> (u16, Arc<Mutex<Option<String>>>) {
                     header_end = Some(idx);
                     let head_str = std::str::from_utf8(&total[..idx]).unwrap_or("");
                     for line in head_str.split("\r\n") {
-                        if let Some(rest) = line.strip_prefix("Content-Length:")
-                            .or_else(|| line.strip_prefix("content-length:"))
+                        if let Some(rest) =
+                            line.strip_prefix("Content-Length:").or_else(|| line.strip_prefix("content-length:"))
                         {
                             if let Ok(v) = rest.trim().parse::<usize>() {
                                 content_length = Some(v);
@@ -151,49 +148,78 @@ async fn test_cert_lifecycle_plugin_l7() {
     let token = init.root_token.clone();
 
     write(&core, &token, "sys/mounts/pki/", json!({"type": "pki"}).as_object().unwrap().clone())
-        .await.expect("mount pki");
-    write(&core, &token, "sys/mounts/cert-lifecycle/",
-        json!({"type": "cert-lifecycle"}).as_object().unwrap().clone(),
-    ).await.expect("mount cert-lifecycle");
-    write(&core, &token, "pki/root/generate/internal",
+        .await
+        .expect("mount pki");
+    write(&core, &token, "sys/mounts/cert-lifecycle/", json!({"type": "cert-lifecycle"}).as_object().unwrap().clone())
+        .await
+        .expect("mount cert-lifecycle");
+    write(
+        &core,
+        &token,
+        "pki/root/generate/internal",
         json!({"common_name": "L7 Root", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
-    ).await.expect("root");
-    write(&core, &token, "pki/roles/web",
+    )
+    .await
+    .expect("root");
+    write(
+        &core,
+        &token,
+        "pki/roles/web",
         json!({
             "ttl": "168h", "max_ttl": "720h", "key_type": "ec",
             "allow_any_name": true, "server_flag": true, "client_flag": true,
-        }).as_object().unwrap().clone(),
-    ).await.expect("role");
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await
+    .expect("role");
 
     // ── 1. sys/deliverers lists the built-ins ────────────────────────
     let listed = read(&core, &token, "cert-lifecycle/sys/deliverers").await;
-    let names: Vec<String> = listed["deliverers"].as_array().unwrap()
-        .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    let names: Vec<String> =
+        listed["deliverers"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
     assert!(names.contains(&"file".to_string()));
     assert!(names.contains(&"http-push".to_string()));
 
     // ── 2. http-push with non-URL address rejected ───────────────────
-    let bad = write(&core, &token, "cert-lifecycle/targets/bogus",
+    let bad = write(
+        &core,
+        &token,
+        "cert-lifecycle/targets/bogus",
         json!({
             "kind": "http-push",
             "role_ref": "web",
             "common_name": "bogus.example.com",
             "address": "/tmp/not-a-url",
-        }).as_object().unwrap().clone(),
-    ).await;
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await;
     assert!(bad.is_err(), "non-URL http-push must be rejected: {bad:?}");
 
     // ── 3 + 4. Real http-push end-to-end ─────────────────────────────
     let (port, captured) = spawn_capture_server();
     let url = format!("http://127.0.0.1:{port}/hook");
-    write(&core, &token, "cert-lifecycle/targets/web-hook",
+    write(
+        &core,
+        &token,
+        "cert-lifecycle/targets/web-hook",
         json!({
             "kind": "http-push",
             "role_ref": "web",
             "common_name": "web-hook.example.com",
             "address": &url,
-        }).as_object().unwrap().clone(),
-    ).await.expect("write http-push target");
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await
+    .expect("write http-push target");
 
     let resp = write_ok(&core, &token, "cert-lifecycle/renew/web-hook", Map::new()).await;
     assert_eq!(resp["delivery_kind"].as_str().unwrap(), "http-push");

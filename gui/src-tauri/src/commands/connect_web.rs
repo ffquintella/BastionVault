@@ -140,6 +140,11 @@ pub struct WebOpenRequest {
     /// the profile carries `require_mfa` (the server decides).
     #[serde(default)]
     pub connect_ticket: Option<String>,
+    /// `form` with a `provider` source: the account the operator picked
+    /// (`connect_provider_candidates`). Required for such a profile, refused
+    /// for any other. The server releases it into the launch bundle.
+    #[serde(default)]
+    pub provider_account_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -188,6 +193,18 @@ pub async fn session_open_web(
     ProfileProtocol::require(&profile, ProfileProtocol::Web).map_err(CommandError::from)?;
     let cfg = web_session::parse_web_profile(&profile)
         .map_err(|e| CommandError::from(format!("web profile `{}`: {e}", request.profile_id)))?;
+    // A `provider` source (form mode only, `parse_web_profile` refuses it
+    // elsewhere) carries the account the operator picked; checked before
+    // anything is reserved, authorised or released.
+    let provider_pick =
+        super::connect_provider::provider_pick_for_open(&profile, request.provider_account_id.as_deref())?;
+    // The checked (trimmed) id is the one sent to `launch`.
+    let request =
+        WebOpenRequest { provider_account_id: provider_pick.as_ref().map(|p| p.account_id.clone()), ..request };
+    let provider_audit = provider_pick
+        .as_ref()
+        .map(|p| format!(" provider={:?} account_id={:?}", p.provider, p.account_id))
+        .unwrap_or_default();
 
     // Early refusal, before the MFA pre-flight burns the operator's ticket.
     // The authoritative check is the one under the registry lock below.
@@ -235,6 +252,7 @@ pub async fn session_open_web(
             data_dir: None,
             opened_at: Instant::now(),
             kind,
+            credential_provider: provider_pick.is_some(),
             launch: None,
             shared: Arc::clone(&shared),
             relogin: None,
@@ -394,7 +412,7 @@ pub async fn session_open_web(
         (Some((start, plan)), _) => log::info!(
             target: "audit",
             "session.open: protocol=web login_mode=form resource={} profile={} origin={} fill_origins={} \
-             narrowed_out={} heuristic={} credential_source={} mfa={} launch_id_hash={} downloads={} popups={} \
+             narrowed_out={} heuristic={} credential_source={}{} mfa={} launch_id_hash={} downloads={} popups={} \
              clipboard={:?} tls_pins={} token={}",
             request.resource_name,
             request.profile_id,
@@ -403,6 +421,7 @@ pub async fn session_open_web(
             start.narrowed_out_count,
             plan.is_heuristic(),
             start.credential_source,
+            provider_audit,
             start.mfa_method.as_deref().unwrap_or("none"),
             start.launch.launch_id_hash(),
             cfg.allow_downloads,
@@ -556,6 +575,7 @@ async fn start_launch(
         profile_id: &request.profile_id,
         recipe_hash,
         connect_ticket: request.connect_ticket.as_deref(),
+        provider_account_id: request.provider_account_id.as_deref(),
         session_token: token,
     };
     let (launch, bundle) = web_launch::launch(channel, &launch_request).await.map_err(|e| {
@@ -983,7 +1003,7 @@ pub(crate) async fn relogin_web_session(state: &State<'_, AppState>, app: &AppHa
         let Some(SessionState::Web(w)) = sessions.get(token) else {
             return Err(CommandError::from("this web session has ended".to_string()));
         };
-        match relogin_availability(w.kind, w.shared.relogin_running()) {
+        match relogin_availability(w.kind, w.credential_provider, w.shared.relogin_running()) {
             Relogin::Available => {}
             Relogin::Running => {
                 return Err(CommandError::from("a sign-in re-run is already in progress".to_string()));
@@ -1003,8 +1023,14 @@ pub(crate) async fn relogin_web_session(state: &State<'_, AppState>, app: &AppHa
         "connect.web.relogin: state=requested resource={resource} profile={profile_id} token={token}"
     );
 
-    let request =
-        WebOpenRequest { resource_name: resource.clone(), profile_id: profile_id.clone(), connect_ticket: None };
+    // A credential-provider session never gets here (`relogin_availability`
+    // refuses it above), so the re-run carries no account.
+    let request = WebOpenRequest {
+        resource_name: resource.clone(),
+        profile_id: profile_id.clone(),
+        connect_ticket: None,
+        provider_account_id: None,
+    };
     let login = ExpectedLogin::Form { recipe_hash: &relogin.form.recipe_hash, plan: &relogin.form.plan };
     let start = match start_launch(state, &request, token, &relogin.origins, relogin.allow_insecure_http, login).await {
         Ok(s) => s,
@@ -1310,6 +1336,7 @@ pub async fn web_recipe_test(
             data_dir: None,
             opened_at: Instant::now(),
             kind: WebSessionKind::RecipeTest,
+            credential_provider: false,
             launch: None,
             shared: Arc::clone(&shared),
             relogin: None,

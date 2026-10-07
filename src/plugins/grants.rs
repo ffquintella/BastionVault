@@ -106,9 +106,7 @@ pub async fn put_net(
     granted_at: String,
 ) -> Result<NetGrant, RvError> {
     let requested = manifest.capabilities.app.net.as_ref().ok_or_else(|| {
-        RvError::ErrString(format!(
-            "plugin `{name}` requests no network capability; nothing to grant"
-        ))
+        RvError::ErrString(format!("plugin `{name}` requests no network capability; nothing to grant"))
     })?;
 
     let requested_set: std::collections::BTreeSet<&String> = requested.hosts.iter().collect();
@@ -123,19 +121,9 @@ pub async fn put_net(
     let capability_sha256 = net_capability_sha256(&manifest.capabilities.app.net)
         .expect("net is Some here, so the pin is always computable");
 
-    let grant = NetGrant {
-        hosts: granted_hosts,
-        granted_by: granted_by.to_string(),
-        granted_at,
-        capability_sha256,
-    };
+    let grant = NetGrant { hosts: granted_hosts, granted_by: granted_by.to_string(), granted_at, capability_sha256 };
     let record = PluginGrants { net: Some(grant.clone()) };
-    storage
-        .put(&StorageEntry {
-            key: key(name),
-            value: serde_json::to_vec(&record)?,
-        })
-        .await?;
+    storage.put(&StorageEntry { key: key(name), value: serde_json::to_vec(&record)? }).await?;
     Ok(grant)
 }
 
@@ -187,9 +175,7 @@ mod tests {
     impl Storage for MemStorage {
         async fn list(&self, prefix: &str) -> Result<Vec<String>, RvError> {
             let g = self.inner.lock().unwrap();
-            Ok(g.keys()
-                .filter_map(|k| k.strip_prefix(prefix).map(|r| r.to_string()))
-                .collect())
+            Ok(g.keys().filter_map(|k| k.strip_prefix(prefix).map(|r| r.to_string())).collect())
         }
         async fn get(&self, key: &str) -> Result<Option<StorageEntry>, RvError> {
             let g = self.inner.lock().unwrap();
@@ -223,10 +209,7 @@ mod tests {
             client_assets: vec![],
         };
         m.capabilities.app = AppCapabilities {
-            net: Some(NetCapabilities {
-                hosts: hosts.iter().map(|h| h.to_string()).collect(),
-                https_only: true,
-            }),
+            net: Some(NetCapabilities { hosts: hosts.iter().map(|h| h.to_string()).collect(), https_only: true }),
             ..Default::default()
         };
         m
@@ -281,16 +264,7 @@ mod tests {
     async fn active_hosts_honours_pin() {
         let s = MemStorage::default();
         let m = manifest_with_net(&["hooks.example.com", "extra.example.com"]);
-        put_net(
-            &s,
-            "webhook-notify",
-            &m,
-            vec!["hooks.example.com".into()],
-            "e",
-            "t".into(),
-        )
-        .await
-        .unwrap();
+        put_net(&s, "webhook-notify", &m, vec!["hooks.example.com".into()], "e", "t".into()).await.unwrap();
         // Same manifest → grant is live.
         let live = active_net_hosts(&s, "webhook-notify", &m).await.unwrap();
         assert_eq!(live, Some(vec!["hooks.example.com".to_string()]));

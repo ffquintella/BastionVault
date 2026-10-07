@@ -50,19 +50,13 @@ impl PublisherAllowlist {
     pub async fn load(storage: &dyn Storage) -> Result<Self, RvError> {
         match storage.get(PUBLISHERS_KEY).await? {
             None => Ok(Self::default()),
-            Some(entry) => serde_json::from_slice(&entry.value)
-                .map_err(|_| RvError::ErrRequestInvalid),
+            Some(entry) => serde_json::from_slice(&entry.value).map_err(|_| RvError::ErrRequestInvalid),
         }
     }
 
     pub async fn save(&self, storage: &dyn Storage) -> Result<(), RvError> {
         let bytes = serde_json::to_vec(self)?;
-        storage
-            .put(&StorageEntry {
-                key: PUBLISHERS_KEY.to_string(),
-                value: bytes,
-            })
-            .await
+        storage.put(&StorageEntry { key: PUBLISHERS_KEY.to_string(), value: bytes }).await
     }
 }
 
@@ -87,17 +81,10 @@ pub async fn write_accept_unsigned(storage: &dyn Storage, on: bool) -> Result<()
 /// Verify a plugin's publisher signature. Returns `Ok(())` when the
 /// plugin is acceptable for the current engine configuration, error
 /// otherwise.
-pub async fn verify(
-    storage: &dyn Storage,
-    manifest: &PluginManifest,
-    binary: &[u8],
-) -> Result<(), RvError> {
+pub async fn verify(storage: &dyn Storage, manifest: &PluginManifest, binary: &[u8]) -> Result<(), RvError> {
     if manifest.signature.is_empty() {
         if read_accept_unsigned(storage).await? {
-            log::warn!(
-                "plugin `{}` is unsigned; loaded under accept_unsigned = true",
-                manifest.name
-            );
+            log::warn!("plugin `{}` is unsigned; loaded under accept_unsigned = true", manifest.name);
             return Ok(());
         }
         return Err(RvError::ErrString(format!(
@@ -108,9 +95,7 @@ pub async fn verify(
     }
 
     if manifest.signing_key.is_empty() {
-        return Err(RvError::ErrString(
-            "manifest carries `signature` but no `signing_key` identifier".into(),
-        ));
+        return Err(RvError::ErrString("manifest carries `signature` but no `signing_key` identifier".into()));
     }
 
     let allow = PublisherAllowlist::load(storage).await?;
@@ -121,14 +106,10 @@ pub async fn verify(
         ))
     })?;
     let pk = hex_decode(pk_hex).ok_or_else(|| {
-        RvError::ErrString(format!(
-            "publisher `{}` allowlist entry is not valid hex",
-            manifest.signing_key
-        ))
+        RvError::ErrString(format!("publisher `{}` allowlist entry is not valid hex", manifest.signing_key))
     })?;
-    let sig = hex_decode(&manifest.signature).ok_or_else(|| {
-        RvError::ErrString("manifest.signature is not valid hex".into())
-    })?;
+    let sig = hex_decode(&manifest.signature)
+        .ok_or_else(|| RvError::ErrString("manifest.signature is not valid hex".into()))?;
 
     let message = super::manifest::signing_message(manifest, binary);
 
@@ -137,21 +118,13 @@ pub async fn verify(
     // the public key, which we don't have. The PK is what we keep on
     // the allowlist; verifying directly against PK is the standard
     // ML-DSA usage.
-    use ::fips204::traits::{SerDes, Verifier};
     use ::fips204::ml_dsa_65 as fdsa;
+    use ::fips204::traits::{SerDes, Verifier};
     let pk_arr: [u8; fdsa::PK_LEN] = pk.as_slice().try_into().map_err(|_| {
-        RvError::ErrString(format!(
-            "publisher public key must be {} bytes, got {}",
-            fdsa::PK_LEN,
-            pk.len()
-        ))
+        RvError::ErrString(format!("publisher public key must be {} bytes, got {}", fdsa::PK_LEN, pk.len()))
     })?;
     let sig_arr: [u8; fdsa::SIG_LEN] = sig.as_slice().try_into().map_err(|_| {
-        RvError::ErrString(format!(
-            "ml-dsa-65 signature must be {} bytes, got {}",
-            fdsa::SIG_LEN,
-            sig.len()
-        ))
+        RvError::ErrString(format!("ml-dsa-65 signature must be {} bytes, got {}", fdsa::SIG_LEN, sig.len()))
     })?;
     let pk_obj = fdsa::PublicKey::try_from_bytes(pk_arr)
         .map_err(|e| RvError::ErrString(format!("publisher public key parse: {e}")))?;

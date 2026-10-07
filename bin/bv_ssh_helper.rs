@@ -75,14 +75,10 @@ fn load_config() -> Result<Config, String> {
         }
     }
 
-    let pick = |key: &str| -> Option<String> {
-        env::var(key).ok().or_else(|| from_file.get(key).cloned())
-    };
+    let pick = |key: &str| -> Option<String> { env::var(key).ok().or_else(|| from_file.get(key).cloned()) };
 
-    let addr = pick("BV_VAULT_ADDR")
-        .ok_or_else(|| "BV_VAULT_ADDR not set (env or conf file)".to_string())?;
-    let token = pick("BV_VAULT_TOKEN")
-        .ok_or_else(|| "BV_VAULT_TOKEN not set (env or conf file)".to_string())?;
+    let addr = pick("BV_VAULT_ADDR").ok_or_else(|| "BV_VAULT_ADDR not set (env or conf file)".to_string())?;
+    let token = pick("BV_VAULT_TOKEN").ok_or_else(|| "BV_VAULT_TOKEN not set (env or conf file)".to_string())?;
     let mount = pick("BV_VAULT_MOUNT").unwrap_or_else(|| DEFAULT_MOUNT.to_string());
     let cacert = pick("BV_VAULT_CACERT");
 
@@ -98,12 +94,8 @@ fn read_otp_from_stdin() -> Result<String, String> {
     // PAM passes the password through stdin null-terminated when
     // `expose_authtok` is set. Strip the trailing NUL / newline.
     let mut buf = String::new();
-    io::stdin()
-        .read_to_string(&mut buf)
-        .map_err(|e| format!("read stdin: {e}"))?;
-    let trimmed = buf
-        .trim_end_matches(['\0', '\n', '\r'])
-        .to_string();
+    io::stdin().read_to_string(&mut buf).map_err(|e| format!("read stdin: {e}"))?;
+    let trimmed = buf.trim_end_matches(['\0', '\n', '\r']).to_string();
     if trimmed.is_empty() {
         return Err("empty OTP on stdin".into());
     }
@@ -113,9 +105,8 @@ fn read_otp_from_stdin() -> Result<String, String> {
 fn verify(cfg: &Config, otp: &str) -> Result<(), String> {
     let url = format!("{}/v1/{}/verify", cfg.addr, cfg.mount);
 
-    let builder = ureq::config::Config::builder()
-        .timeout_global(Some(Duration::from_secs(10)))
-        .http_status_as_error(false);
+    let builder =
+        ureq::config::Config::builder().timeout_global(Some(Duration::from_secs(10))).http_status_as_error(false);
     // CA pinning: when the operator provides a CA bundle, we point
     // ureq's TLS provider at it. Passing the path through is enough
     // for native-tls / rustls integrations that read PEM bundles via

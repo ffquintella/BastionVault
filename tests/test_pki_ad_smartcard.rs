@@ -54,10 +54,7 @@ async fn write(
     req.operation = Operation::Write;
     req.client_token = token.to_string();
     req.body = Some(body);
-    core.handle_request(&mut req)
-        .await
-        .map(|r| r.and_then(|x| x.data))
-        .map_err(|e| format!("{e:?}"))
+    core.handle_request(&mut req).await.map(|r| r.and_then(|x| x.data)).map_err(|e| format!("{e:?}"))
 }
 
 #[maybe_async::maybe_async]
@@ -116,11 +113,7 @@ fn cert_pem(resp: &Map<String, Value>) -> String {
 /// otherwise well-formed certificate.
 fn upn_sans(der: &[u8]) -> Vec<String> {
     let (_, parsed) = X509Certificate::from_der(der).expect("parse cert");
-    let san_exts: Vec<_> = parsed
-        .extensions()
-        .iter()
-        .filter(|e| e.oid.to_id_string() == "2.5.29.17")
-        .collect();
+    let san_exts: Vec<_> = parsed.extensions().iter().filter(|e| e.oid.to_id_string() == "2.5.29.17").collect();
     assert!(
         san_exts.len() <= 1,
         "a certificate must carry at most one subjectAltName extension, found {}",
@@ -140,11 +133,7 @@ fn upn_sans(der: &[u8]) -> Vec<String> {
             // Unwrap the explicit tag, then the UTF8String.
             assert_eq!(bytes[0], 0xA0, "UPN otherName value must be [0] EXPLICIT");
             let inner = &bytes[2..];
-            assert_eq!(
-                inner[0], 0x0C,
-                "UPN otherName value must be a UTF8String (tag 0x0C), got {:#04x}",
-                inner[0]
-            );
+            assert_eq!(inner[0], 0x0C, "UPN otherName value must be a UTF8String (tag 0x0C), got {:#04x}", inner[0]);
             let len = inner[1] as usize;
             out.push(String::from_utf8(inner[2..2 + len].to_vec()).expect("UPN is valid UTF-8"));
         }
@@ -178,11 +167,7 @@ fn ad_sid(der: &[u8]) -> Option<String> {
     );
     assert_eq!(rest[0], 0xA0, "SID otherName value must be [0] EXPLICIT");
     let inner = &rest[2..];
-    assert_eq!(
-        inner[0], 0x04,
-        "the SID must be an OCTET STRING (tag 0x04), got {:#04x}",
-        inner[0]
-    );
+    assert_eq!(inner[0], 0x04, "the SID must be an OCTET STRING (tag 0x04), got {:#04x}", inner[0]);
     let len = inner[1] as usize;
     Some(String::from_utf8(inner[2..2 + len].to_vec()).expect("SID is ASCII"))
 }
@@ -256,10 +241,7 @@ async fn test_ad_smartcard_profile_classical() {
         &core,
         &token,
         "pki/issue/plain",
-        json!({"common_name": "felipe", "upn_sans": "felipe@corp.example.com"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "felipe", "upn_sans": "felipe@corp.example.com"}).as_object().unwrap().clone(),
     )
     .await;
     assert!(denied_upn.is_err(), "upn_sans must be refused when allow_upn_sans=false");
@@ -301,10 +283,7 @@ async fn test_ad_smartcard_profile_classical() {
         &core,
         &token,
         "pki/config/urls",
-        json!({"crl_distribution_points": "http://pki.corp.example.com/bastionvault.crl"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"crl_distribution_points": "http://pki.corp.example.com/bastionvault.crl"}).as_object().unwrap().clone(),
     )
     .await
     .expect("write config/urls");
@@ -354,18 +333,12 @@ async fn test_ad_smartcard_profile_classical() {
     .await;
     let der = pem_first_der(&cert_pem(&issued));
 
-    assert_eq!(
-        upn_sans(&der),
-        vec!["felipe@corp.example.com".to_string()],
-        "the UPN must appear as an otherName SAN"
-    );
+    assert_eq!(upn_sans(&der), vec!["felipe@corp.example.com".to_string()], "the UPN must appear as an otherName SAN");
     // The DNS SAN must survive alongside it.
     let (_, parsed) = X509Certificate::from_der(&der).unwrap();
     let san = parsed.subject_alternative_name().unwrap().unwrap();
     assert!(
-        san.value.general_names.iter().any(
-            |n| matches!(n, GeneralName::DNSName(d) if *d == "felipe.corp.example.com")
-        ),
+        san.value.general_names.iter().any(|n| matches!(n, GeneralName::DNSName(d) if *d == "felipe.corp.example.com")),
         "the DNS SAN must coexist with the UPN otherName"
     );
 
@@ -376,15 +349,9 @@ async fn test_ad_smartcard_profile_classical() {
     );
 
     let ekus = eku_oids(&der);
-    assert!(
-        ekus.contains(&SMARTCARD_LOGON_EKU_OID.to_string()),
-        "Smart Card Logon EKU missing, got {ekus:?}"
-    );
+    assert!(ekus.contains(&SMARTCARD_LOGON_EKU_OID.to_string()), "Smart Card Logon EKU missing, got {ekus:?}");
     assert!(ekus.contains(&"1.3.6.1.5.5.7.3.2".to_string()), "Client Auth EKU missing, got {ekus:?}");
-    assert!(
-        ekus.contains(&"1.3.6.1.5.2.3.4".to_string()),
-        "raw OID from ext_key_usage_oids missing, got {ekus:?}"
-    );
+    assert!(ekus.contains(&"1.3.6.1.5.2.3.4".to_string()), "raw OID from ext_key_usage_oids missing, got {ekus:?}");
     assert!(
         !ekus.contains(&"1.3.6.1.5.5.7.3.1".to_string()),
         "server_flag=false must not emit Server Auth, got {ekus:?}"
@@ -423,10 +390,7 @@ async fn test_ad_smartcard_profile_classical() {
         &core,
         &token,
         "pki/issue/adsc",
-        json!({"common_name": "felipe", "upn_sans": "felipe@other.example.com"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "felipe", "upn_sans": "felipe@other.example.com"}).as_object().unwrap().clone(),
     )
     .await;
     assert!(wrong_realm.is_err(), "a realm outside allowed_upn_domains must be refused");
@@ -469,10 +433,7 @@ async fn test_ad_smartcard_role_write_validation() {
         &core,
         &token,
         "pki/roles/badoid",
-        json!({"key_type": "ec", "ext_key_usage_oids": "1.3.6.1.4.1.311..2"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"key_type": "ec", "ext_key_usage_oids": "1.3.6.1.4.1.311..2"}).as_object().unwrap().clone(),
     )
     .await;
     assert!(bad_oid.is_err(), "a doubled dot in an EKU OID must be refused at role write");
@@ -491,10 +452,7 @@ async fn test_ad_smartcard_role_write_validation() {
         &core,
         &token,
         "pki/roles/badsid",
-        json!({"key_type": "ec", "allow_ad_sid": true, "ad_sid": "S-9-nope"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"key_type": "ec", "allow_ad_sid": true, "ad_sid": "S-9-nope"}).as_object().unwrap().clone(),
     )
     .await;
     assert!(bad_sid.is_err(), "a malformed role-level ad_sid must be refused at role write");
@@ -551,10 +509,7 @@ async fn test_ad_smartcard_profile_ml_dsa() {
         &core,
         &token,
         "pki/root/generate/internal",
-        json!({"common_name": "AD SC PQC Root", "key_type": "ml-dsa-65", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "AD SC PQC Root", "key_type": "ml-dsa-65", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await;
 
@@ -562,10 +517,7 @@ async fn test_ad_smartcard_profile_ml_dsa() {
         &core,
         &token,
         "pki/config/urls",
-        json!({"crl_distribution_points": "http://pki.corp.example.com/pqc.crl"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"crl_distribution_points": "http://pki.corp.example.com/pqc.crl"}).as_object().unwrap().clone(),
     )
     .await
     .expect("write config/urls");

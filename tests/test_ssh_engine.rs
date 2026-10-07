@@ -16,12 +16,7 @@ use serde_json::{json, Map, Value};
 use ssh_key::{rand_core::OsRng, Algorithm, PrivateKey};
 
 #[maybe_async::maybe_async]
-async fn write(
-    core: &Core,
-    token: &str,
-    path: &str,
-    body: Map<String, Value>,
-) -> Option<Map<String, Value>> {
+async fn write(core: &Core, token: &str, path: &str, body: Map<String, Value>) -> Option<Map<String, Value>> {
     let mut req = Request::new(path);
     req.operation = Operation::Write;
     req.client_token = token.to_string();
@@ -39,10 +34,7 @@ async fn read(core: &Core, token: &str, path: &str) -> Option<Map<String, Value>
     resp.and_then(|r| r.data)
 }
 
-#[maybe_async::test(
-    feature = "sync_handler",
-    async(all(not(feature = "sync_handler")), tokio::test)
-)]
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn test_ssh_phase1_end_to_end() {
     let dir = env::temp_dir().join("bastion_vault_ssh_phase1");
     let _ = fs::remove_dir_all(&dir);
@@ -50,10 +42,7 @@ async fn test_ssh_phase1_end_to_end() {
     defer! ( let _ = fs::remove_dir_all(&dir); );
 
     let mut conf: HashMap<String, Value> = HashMap::new();
-    conf.insert(
-        "path".into(),
-        Value::String(dir.to_string_lossy().into_owned()),
-    );
+    conf.insert("path".into(), Value::String(dir.to_string_lossy().into_owned()));
     let backend = storage::new_backend("file", &conf).unwrap();
     let bvault = BastionVault::new(backend, None).unwrap();
     let core = bvault.core.load();
@@ -69,20 +58,13 @@ async fn test_ssh_phase1_end_to_end() {
     write(&core, &token, "sys/mounts/ssh/", mount_body).await;
 
     // Generate the CA (no body → auto-generate Ed25519).
-    let ca_resp = write(&core, &token, "ssh/config/ca", Map::new())
-        .await
-        .expect("CA generate returned no data");
+    let ca_resp = write(&core, &token, "ssh/config/ca", Map::new()).await.expect("CA generate returned no data");
     let ca_pub = ca_resp["public_key"].as_str().unwrap().to_string();
-    assert!(
-        ca_pub.starts_with("ssh-ed25519 "),
-        "CA public key not Ed25519: {ca_pub}"
-    );
+    assert!(ca_pub.starts_with("ssh-ed25519 "), "CA public key not Ed25519: {ca_pub}");
     assert_eq!(ca_resp["algorithm"].as_str().unwrap(), "ssh-ed25519");
 
     // Read-back via the dedicated public_key endpoint.
-    let pk_resp = read(&core, &token, "ssh/public_key")
-        .await
-        .expect("public_key read returned no data");
+    let pk_resp = read(&core, &token, "ssh/public_key").await.expect("public_key read returned no data");
     assert_eq!(pk_resp["public_key"].as_str().unwrap(), ca_pub);
 
     // Create a role: alice/bob principals, permit-pty extension on by
@@ -102,9 +84,7 @@ async fn test_ssh_phase1_end_to_end() {
     .clone();
     write(&core, &token, "ssh/roles/devs", role_body).await;
 
-    let role_back = read(&core, &token, "ssh/roles/devs")
-        .await
-        .expect("role read returned nothing");
+    let role_back = read(&core, &token, "ssh/roles/devs").await.expect("role read returned nothing");
     assert_eq!(role_back["allowed_users"].as_str().unwrap(), "alice,bob");
     assert_eq!(role_back["default_user"].as_str().unwrap(), "alice");
 
@@ -123,34 +103,19 @@ async fn test_ssh_phase1_end_to_end() {
     .as_object()
     .unwrap()
     .clone();
-    let sign_resp = write(&core, &token, "ssh/sign/devs", sign_body)
-        .await
-        .expect("sign returned no data");
+    let sign_resp = write(&core, &token, "ssh/sign/devs", sign_body).await.expect("sign returned no data");
 
     let signed_key = sign_resp["signed_key"].as_str().unwrap();
-    assert!(
-        signed_key.starts_with("ssh-ed25519-cert-v01@openssh.com "),
-        "unexpected cert prefix: {signed_key}"
-    );
+    assert!(signed_key.starts_with("ssh-ed25519-cert-v01@openssh.com "), "unexpected cert prefix: {signed_key}");
     let serial_hex = sign_resp["serial_number"].as_str().unwrap();
     assert_eq!(serial_hex.len(), 16, "serial not 16 hex chars");
 
     // Parse the cert and check policy actually landed.
     let cert = ssh_key::Certificate::from_openssh(signed_key).expect("cert parse failed");
     assert_eq!(cert.cert_type(), ssh_key::certificate::CertType::User);
-    assert_eq!(
-        cert.valid_principals(),
-        &vec!["bob".to_string()],
-        "principal subset filter broke"
-    );
-    assert!(
-        cert.extensions().contains_key("permit-pty"),
-        "default extension missing"
-    );
-    assert!(
-        cert.extensions().contains_key("permit-port-forwarding"),
-        "whitelisted caller-supplied extension missing"
-    );
+    assert_eq!(cert.valid_principals(), &vec!["bob".to_string()], "principal subset filter broke");
+    assert!(cert.extensions().contains_key("permit-pty"), "default extension missing");
+    assert!(cert.extensions().contains_key("permit-port-forwarding"), "whitelisted caller-supplied extension missing");
     assert_eq!(
         cert.critical_options().get("force-command").map(|s| s.as_str()),
         Some("/usr/bin/whoami"),
@@ -160,43 +125,23 @@ async fn test_ssh_phase1_end_to_end() {
     // Validity ≈ 5m.
     let validity = cert.valid_before() - cert.valid_after();
     // not_before backdates by 30s, so the window is ≈ 5m + 30s.
-    assert!(
-        (300..=400).contains(&validity),
-        "validity window out of range: {validity}s"
-    );
+    assert!((300..=400).contains(&validity), "validity window out of range: {validity}s");
 
     // ── Audit trail ─────────────────────────────────────────────────
     // The successful sign must surface on sys/audit/events under the
     // `ssh-sign` category, carrying the role, principal and the same
     // serial the caller received.
-    let audit = read(&core, &token, "sys/audit/events")
-        .await
-        .expect("audit events read returned nothing");
+    let audit = read(&core, &token, "sys/audit/events").await.expect("audit events read returned nothing");
     let events = audit["events"].as_array().expect("events not an array");
-    let sign_event = events
-        .iter()
-        .find(|e| e["category"].as_str() == Some("ssh-sign"))
-        .expect("no ssh-sign audit event recorded");
+    let sign_event =
+        events.iter().find(|e| e["category"].as_str() == Some("ssh-sign")).expect("no ssh-sign audit event recorded");
     assert_eq!(sign_event["op"].as_str(), Some("sign"));
     assert_eq!(sign_event["target"].as_str(), Some("sign/devs"));
-    let fields: Vec<&str> = sign_event["changed_fields"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
-    assert!(
-        fields.contains(&"principals=bob"),
-        "principal not in audit fields: {fields:?}"
-    );
-    assert!(
-        fields.iter().any(|f| *f == format!("serial={serial_hex}")),
-        "serial not in audit fields: {fields:?}"
-    );
-    assert!(
-        fields.contains(&"algorithm=ssh-ed25519"),
-        "algorithm not in audit fields: {fields:?}"
-    );
+    let fields: Vec<&str> =
+        sign_event["changed_fields"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+    assert!(fields.contains(&"principals=bob"), "principal not in audit fields: {fields:?}");
+    assert!(fields.iter().any(|f| *f == format!("serial={serial_hex}")), "serial not in audit fields: {fields:?}");
+    assert!(fields.contains(&"algorithm=ssh-ed25519"), "algorithm not in audit fields: {fields:?}");
 
     // ── Negative cases ──────────────────────────────────────────────
     // Caller asks for a principal not in allowed_users.
@@ -212,8 +157,5 @@ async fn test_ssh_phase1_end_to_end() {
     req.client_token = token.clone();
     req.body = Some(bad_body);
     let err = core.handle_request(&mut req).await.unwrap_err();
-    assert!(
-        format!("{err}").contains("carol"),
-        "expected disallowed-principal error, got: {err}"
-    );
+    assert!(format!("{err}").contains("carol"), "expected disallowed-principal error, got: {err}");
 }

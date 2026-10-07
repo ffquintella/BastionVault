@@ -38,10 +38,7 @@ async fn write(
     req.operation = Operation::Write;
     req.client_token = token.to_string();
     req.body = Some(body);
-    core.handle_request(&mut req)
-        .await
-        .map(|r| r.and_then(|x| x.data))
-        .map_err(|e| format!("{e:?}"))
+    core.handle_request(&mut req).await.map(|r| r.and_then(|x| x.data)).map_err(|e| format!("{e:?}"))
 }
 
 #[maybe_async::maybe_async]
@@ -96,22 +93,35 @@ async fn test_cert_lifecycle_basic_l5() {
     // registered globally via `module_manager`, so we mount it like
     // any other backend.
     write(&core, &token, "sys/mounts/pki/", json!({"type": "pki"}).as_object().unwrap().clone())
-        .await.expect("mount pki");
-    write(&core, &token, "sys/mounts/cert-lifecycle/",
-        json!({"type": "cert-lifecycle"}).as_object().unwrap().clone())
-        .await.expect("mount cert-lifecycle");
+        .await
+        .expect("mount pki");
+    write(&core, &token, "sys/mounts/cert-lifecycle/", json!({"type": "cert-lifecycle"}).as_object().unwrap().clone())
+        .await
+        .expect("mount cert-lifecycle");
 
     // Spin up a root + a permissive role.
-    write(&core, &token, "pki/root/generate/internal",
-        json!({"common_name": "L5 Root", "key_type": "ec", "ttl": "8760h"})
-            .as_object().unwrap().clone(),
-    ).await.expect("generate root");
-    write(&core, &token, "pki/roles/web",
+    write(
+        &core,
+        &token,
+        "pki/root/generate/internal",
+        json!({"common_name": "L5 Root", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
+    )
+    .await
+    .expect("generate root");
+    write(
+        &core,
+        &token,
+        "pki/roles/web",
         json!({
             "ttl": "24h", "max_ttl": "72h", "key_type": "ec",
             "allow_any_name": true, "server_flag": true, "client_flag": true,
-        }).as_object().unwrap().clone(),
-    ).await.expect("write role");
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await
+    .expect("write role");
 
     // Output directory the renewer will populate.
     let out_dir = dir.join("out");
@@ -119,34 +129,57 @@ async fn test_cert_lifecycle_basic_l5() {
     let out_str = out_dir.to_string_lossy().into_owned();
 
     // ── 5. Required-field validation ─────────────────────────────────
-    let missing_role = write(&core, &token, "cert-lifecycle/targets/svc",
+    let missing_role = write(
+        &core,
+        &token,
+        "cert-lifecycle/targets/svc",
         json!({"common_name": "svc.example.com", "address": &out_str}).as_object().unwrap().clone(),
-    ).await;
+    )
+    .await;
     assert!(missing_role.is_err(), "missing role_ref must reject: {missing_role:?}");
 
-    let missing_addr = write(&core, &token, "cert-lifecycle/targets/svc",
+    let missing_addr = write(
+        &core,
+        &token,
+        "cert-lifecycle/targets/svc",
         json!({"role_ref": "web", "common_name": "svc.example.com"}).as_object().unwrap().clone(),
-    ).await;
+    )
+    .await;
     assert!(missing_addr.is_err(), "missing address must reject: {missing_addr:?}");
 
-    let agent = write(&core, &token, "cert-lifecycle/targets/svc",
+    let agent = write(
+        &core,
+        &token,
+        "cert-lifecycle/targets/svc",
         json!({
             "role_ref": "web", "common_name": "svc.example.com",
             "address": &out_str, "key_policy": "agent-generates",
-        }).as_object().unwrap().clone(),
-    ).await;
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await;
     assert!(agent.is_err(), "agent-generates must reject in L5: {agent:?}");
 
     // ── 1. Create a valid target ─────────────────────────────────────
-    write(&core, &token, "cert-lifecycle/targets/svc",
+    write(
+        &core,
+        &token,
+        "cert-lifecycle/targets/svc",
         json!({
             "role_ref": "web",
             "common_name": "svc.example.com",
             "alt_names": "alt.example.com",
             "address": &out_str,
             "ttl": "12h",
-        }).as_object().unwrap().clone(),
-    ).await.expect("write target");
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await
+    .expect("write target");
 
     let listed = {
         let mut req = Request::new("cert-lifecycle/targets");
@@ -155,8 +188,8 @@ async fn test_cert_lifecycle_basic_l5() {
         let resp = core.handle_request(&mut req).await.unwrap();
         resp.and_then(|r| r.data).unwrap()
     };
-    let names: Vec<String> = listed["keys"].as_array().unwrap()
-        .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    let names: Vec<String> =
+        listed["keys"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
     assert!(names.contains(&"svc".to_string()));
 
     // ── 2. Manual renew writes the bundle ────────────────────────────
@@ -183,30 +216,50 @@ async fn test_cert_lifecycle_basic_l5() {
 
     // ── 4. key_policy = reuse pins SPKI across renewals ──────────────
     // First make a managed key + role that allows reuse.
-    let key = write_ok(&core, &token, "pki/keys/generate/internal",
+    let key = write_ok(
+        &core,
+        &token,
+        "pki/keys/generate/internal",
         json!({"key_type": "ec", "key_bits": 256, "name": "svc-key"}).as_object().unwrap().clone(),
-    ).await;
+    )
+    .await;
     let _key_id = key["key_id"].as_str().unwrap().to_string();
-    write(&core, &token, "pki/roles/reuse",
+    write(
+        &core,
+        &token,
+        "pki/roles/reuse",
         json!({
             "ttl": "24h", "max_ttl": "72h", "key_type": "ec",
             "allow_any_name": true, "server_flag": true, "client_flag": true,
             "allow_key_reuse": true, "allowed_key_refs": "svc-key",
-        }).as_object().unwrap().clone(),
-    ).await.expect("write reuse role");
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await
+    .expect("write reuse role");
 
     let out_dir2 = dir.join("out2");
     fs::create_dir_all(&out_dir2).unwrap();
     let out_str2 = out_dir2.to_string_lossy().into_owned();
-    write(&core, &token, "cert-lifecycle/targets/pinned",
+    write(
+        &core,
+        &token,
+        "cert-lifecycle/targets/pinned",
         json!({
             "role_ref": "reuse",
             "common_name": "pinned.example.com",
             "address": &out_str2,
             "key_policy": "reuse",
             "key_ref": "svc-key",
-        }).as_object().unwrap().clone(),
-    ).await.expect("write pinned target");
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await
+    .expect("write pinned target");
 
     let r1 = write_ok(&core, &token, "cert-lifecycle/renew/pinned", Map::new()).await;
     let cert1 = fs::read_to_string(out_dir2.join("cert.pem")).unwrap();
@@ -215,9 +268,5 @@ async fn test_cert_lifecycle_basic_l5() {
     let _r2 = write_ok(&core, &token, "cert-lifecycle/renew/pinned", Map::new()).await;
     let cert2 = fs::read_to_string(out_dir2.join("cert.pem")).unwrap();
 
-    assert_eq!(
-        cert_spki(&cert1),
-        cert_spki(&cert2),
-        "key_policy=reuse must produce certs sharing one SPKI",
-    );
+    assert_eq!(cert_spki(&cert1), cert_spki(&cert2), "key_policy=reuse must produce certs sharing one SPKI",);
 }

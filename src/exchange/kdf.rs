@@ -91,14 +91,12 @@ pub fn derive_key(password: &str, params: &KdfParams) -> Result<[u8; DERIVED_KEY
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon_params);
 
     let mut out = [0u8; DERIVED_KEY_LEN];
-    argon
-        .hash_password_into(password.as_bytes(), &salt, &mut out)
-        .map_err(|_| {
-            // Don't leak distinguishable failure reasons to the caller.
-            let mut tmp = out;
-            tmp.zeroize();
-            RvError::ErrRequestInvalid
-        })?;
+    argon.hash_password_into(password.as_bytes(), &salt, &mut out).map_err(|_| {
+        // Don't leak distinguishable failure reasons to the caller.
+        let mut tmp = out;
+        tmp.zeroize();
+        RvError::ErrRequestInvalid
+    })?;
 
     Ok(out)
 }

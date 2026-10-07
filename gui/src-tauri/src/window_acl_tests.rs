@@ -60,6 +60,9 @@ const WORKSPACE_EXTRA: &[&str] = &[
     "connect_mfa_begin",
     "connect_mfa_verify_fido2",
     "connect_mfa_verify_totp",
+    // The provider account picker (features/self-accounts.md §6): metadata
+    // only; the release happens inside `session_open_*`.
+    "connect_provider_candidates",
     "list_resources",
     "read_resource",
     "resource_types_read",

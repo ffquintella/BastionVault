@@ -91,7 +91,11 @@ pub struct ReleaseRequest {
 }
 
 /// One account the operator may pick. Metadata only.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+///
+/// `Default` exists so that a provider can write
+/// `Candidate { id, label, …, ..Default::default() }` and keep compiling when
+/// a later ABI minor adds an optional field.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct Candidate {
     pub id: String,
     pub label: String,
@@ -102,6 +106,14 @@ pub struct Candidate {
     pub has_totp: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_used_at: Option<String>,
+    /// The provider has no record of releasing this account for this target.
+    /// The host renders it as a "first use" hint in the picker; it is never a
+    /// protection (target binding is). Report `false` when unknown.
+    pub first_use_on_target: bool,
+    /// RFC 3339 time this account was last released for this same target,
+    /// so the picker can preselect it. A time only: never echo the target.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used_on_target: Option<String>,
 }
 
 /// The secret half of a released credential.
@@ -269,7 +281,7 @@ mod tests {
                 domain: None,
                 secret_kind: "password".into(),
                 has_totp: false,
-                last_used_at: None,
+                ..Default::default()
             }])
         }
         fn release(_c: &Caller, r: &ReleaseRequest, _h: &Host) -> Result<Released, ProviderError> {
@@ -315,6 +327,16 @@ mod tests {
         assert_eq!(ok.status, 0);
         let v: serde_json::Value = serde_json::from_slice(&ok.bytes).unwrap();
         assert_eq!(v["data"]["secret"]["kind"], "password");
+    }
+
+    #[test]
+    fn candidates_always_carry_the_first_use_flag() {
+        let r = run(&alloc::format!(
+            r#"{{"op":"provider.candidates",{CALLER},"data":{{"protocol":"ssh","resource":{{"type":"server"}},"target":{{"host":"h","port":22}}}}}}"#
+        ));
+        let v: serde_json::Value = serde_json::from_slice(&r.bytes).unwrap();
+        assert_eq!(v["data"]["candidates"][0]["first_use_on_target"], false);
+        assert!(v["data"]["candidates"][0].get("last_used_on_target").is_none());
     }
 
     #[test]

@@ -47,10 +47,7 @@ async fn write(core: &Core, token: &str, path: &str, body: Map<String, Value>) -
     req.operation = Operation::Write;
     req.client_token = token.to_string();
     req.body = Some(body);
-    let resp = core
-        .handle_request(&mut req)
-        .await
-        .unwrap_or_else(|e| panic!("write {path} failed: {e:?}"));
+    let resp = core.handle_request(&mut req).await.unwrap_or_else(|e| panic!("write {path} failed: {e:?}"));
     resp.and_then(|r| r.data)
 }
 
@@ -134,10 +131,7 @@ async fn test_pki_phase5_2_two_issuers_default_swap() {
         &core,
         &token,
         "pki/root/generate/internal",
-        json!({"common_name": "Root A", "key_type": "ec", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "Root A", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await;
     let root_a_pem = r1["certificate"].as_str().unwrap().to_string();
@@ -175,13 +169,7 @@ async fn test_pki_phase5_2_two_issuers_default_swap() {
     assert!(!eu["is_default"].as_bool().unwrap());
 
     // Swap default to eu-root.
-    write(
-        &core,
-        &token,
-        "pki/config/issuers",
-        json!({"default": "eu-root"}).as_object().unwrap().clone(),
-    )
-    .await;
+    write(&core, &token, "pki/config/issuers", json!({"default": "eu-root"}).as_object().unwrap().clone()).await;
     let ca_after = read(&core, &token, "pki/ca").await;
     assert_eq!(ca_after["certificate"].as_str().unwrap(), root_b_pem, "default should now be eu-root");
 
@@ -194,16 +182,9 @@ async fn test_pki_phase5_2_two_issuers_default_swap() {
     let mut req = Request::new("pki/root/generate/internal");
     req.operation = Operation::Write;
     req.client_token = token.clone();
-    req.body = Some(
-        json!({"common_name": "Dup", "key_type": "ec", "issuer_name": "default"})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
-    assert!(
-        core.handle_request(&mut req).await.is_err(),
-        "duplicate `issuer_name` must be rejected"
-    );
+    req.body =
+        Some(json!({"common_name": "Dup", "key_type": "ec", "issuer_name": "default"}).as_object().unwrap().clone());
+    assert!(core.handle_request(&mut req).await.is_err(), "duplicate `issuer_name` must be rejected");
 }
 
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
@@ -223,10 +204,7 @@ async fn test_pki_phase5_2_issue_with_issuer_ref() {
         &core,
         &token,
         "pki/root/generate/internal",
-        json!({"common_name": "Default Root", "key_type": "ec", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "Default Root", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await;
     let _ = write_ok(
@@ -270,10 +248,7 @@ async fn test_pki_phase5_2_issue_with_issuer_ref() {
         &core,
         &token,
         "pki/issue/web",
-        json!({"common_name": "default-leaf.example.com", "ttl": "12h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "default-leaf.example.com", "ttl": "12h"}).as_object().unwrap().clone(),
     )
     .await;
     assert_eq!(leaf_default["issuer_id"].as_str().unwrap(), default_id);
@@ -283,10 +258,7 @@ async fn test_pki_phase5_2_issue_with_issuer_ref() {
         &core,
         &token,
         "pki/issue/pinned-web",
-        json!({"common_name": "pinned-leaf.example.com", "ttl": "12h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "pinned-leaf.example.com", "ttl": "12h"}).as_object().unwrap().clone(),
     )
     .await;
     assert_ne!(leaf_pinned["issuer_id"].as_str().unwrap(), default_id);
@@ -315,13 +287,7 @@ async fn test_pki_phase5_2_issue_with_issuer_ref() {
     // (d) Per-issuer CRL: revoke the pinned-issuer leaf, confirm only that
     //     issuer's CRL lists the serial.
     let pinned_serial = leaf_pinned["serial_number"].as_str().unwrap().to_string();
-    write(
-        &core,
-        &token,
-        "pki/revoke",
-        json!({"serial_number": pinned_serial}).as_object().unwrap().clone(),
-    )
-    .await;
+    write(&core, &token, "pki/revoke", json!({"serial_number": pinned_serial}).as_object().unwrap().clone()).await;
 
     let pinned_crl = read(&core, &token, "pki/issuer/pinned/crl").await["crl"].as_str().unwrap().to_string();
     let default_crl = read(&core, &token, "pki/crl").await["crl"].as_str().unwrap().to_string();
@@ -352,10 +318,7 @@ async fn test_pki_phase5_2_rename_and_delete() {
         &core,
         &token,
         "pki/root/generate/internal",
-        json!({"common_name": "Root A", "key_type": "ec", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "Root A", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await;
     let r2 = write_ok(
@@ -371,13 +334,7 @@ async fn test_pki_phase5_2_rename_and_delete() {
     let secondary_id = r2["issuer_id"].as_str().unwrap().to_string();
 
     // Rename "secondary" → "uat-root".
-    write(
-        &core,
-        &token,
-        "pki/issuer/secondary",
-        json!({"issuer_name": "uat-root"}).as_object().unwrap().clone(),
-    )
-    .await;
+    write(&core, &token, "pki/issuer/secondary", json!({"issuer_name": "uat-root"}).as_object().unwrap().clone()).await;
     let after_rename = read(&core, &token, "pki/issuer/uat-root").await;
     assert_eq!(after_rename["issuer_id"].as_str().unwrap(), secondary_id);
     assert_eq!(after_rename["issuer_name"].as_str().unwrap(), "uat-root");
@@ -421,10 +378,7 @@ async fn test_pki_phase5_2_legacy_migration_shim() {
         &core,
         &token,
         "pki/root/generate/internal",
-        json!({"common_name": "Legacy Root", "key_type": "ec", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "Legacy Root", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await;
     let lifted_id = r["issuer_id"].as_str().unwrap().to_string();
@@ -459,12 +413,6 @@ fn parse_crl_serials(crl_pem: &str) -> Vec<String> {
     let der = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()).unwrap();
     let (_, crl) = x509_parser::parse_x509_crl(&der).unwrap();
     crl.iter_revoked_certificates()
-        .map(|c| {
-            c.user_certificate
-                .to_bytes_be()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        })
+        .map(|c| c.user_certificate.to_bytes_be().iter().map(|b| format!("{b:02x}")).collect::<String>())
         .collect()
 }

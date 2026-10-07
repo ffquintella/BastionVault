@@ -42,6 +42,12 @@ pub enum WebCredentialSource {
     LdapLibrarySet { mount: String, set: String },
     /// The caller's own default account: a username only.
     DefaultAccount,
+    /// A credential provider (`features/self-accounts.md` §6): one of the
+    /// caller's own accounts in an approved provider plugin, picked by the
+    /// operator and released by the server after the MFA ticket. `form` mode
+    /// only. `totp` is how the target computes codes from the account's seed,
+    /// as for a `secret` source.
+    Provider { provider: String, totp: TotpParams },
 }
 
 impl WebCredentialSource {
@@ -50,6 +56,15 @@ impl WebCredentialSource {
             Self::Secret { .. } => "secret",
             Self::LdapStaticRole { .. } | Self::LdapLibrarySet { .. } => "ldap",
             Self::DefaultAccount => "default-account",
+            Self::Provider { .. } => "provider",
+        }
+    }
+
+    /// The provider a `provider` source names.
+    pub fn provider(&self) -> Option<&str> {
+        match self {
+            Self::Provider { provider, .. } => Some(provider),
+            _ => None,
         }
     }
 }
@@ -230,6 +245,19 @@ fn credential_source(profile: &Map<String, Value>, mode: &str) -> Result<WebCred
             }
         }
         "default-account" => Ok(WebCredentialSource::DefaultAccount),
+        "provider" => {
+            // `http-auth` could adopt it later (spec, *Out of scope*); until
+            // then it is refused rather than quietly treated as `form`.
+            if mode == "http-auth" {
+                return Err(refuse(
+                    400,
+                    "credential_source_unsupported",
+                    "a credential provider source is available for the form login mode only",
+                ));
+            }
+            let provider = crate::kernel_api::provider::provider_name(cs).map_err(invalid)?;
+            Ok(WebCredentialSource::Provider { provider, totp: TotpParams::parse(cs.get("totp")).map_err(invalid)? })
+        }
         "none" => Err(refuse(
             400,
             "credential_source_unsupported",
@@ -587,6 +615,41 @@ mod tests {
         let mut v = form_profile();
         v["web"]["recipe"]["version"] = json!(9);
         assert_eq!(code(&v), "invalid_recipe");
+    }
+
+    #[test]
+    fn a_provider_source_parses_strictly_and_for_form_only() {
+        let mut v = form_profile();
+        v["credential_source"] = json!({ "kind": "provider", "provider": "self-accounts" });
+        let p = parse_launch_profile(&v).unwrap();
+        assert_eq!(p.source.kind(), "provider");
+        assert_eq!(p.source.provider(), Some("self-accounts"));
+        // The fill scope is what a provider's target binding is matched on.
+        assert_eq!(p.origins, vec!["https://fw01.example.com".to_string(), "https://sso.example.com".to_string()]);
+
+        // TOTP parameters are read like a `secret` source's.
+        v["credential_source"]["totp"] = json!({ "digits": 8 });
+        let WebCredentialSource::Provider { totp, .. } = parse_launch_profile(&v).unwrap().source else { panic!() };
+        assert_eq!(totp.digits, 8);
+
+        // Wrong-typed or missing fields fail closed.
+        for cs in [
+            json!({ "kind": "provider" }),
+            json!({ "kind": "provider", "provider": "" }),
+            json!({ "kind": "provider", "provider": 1 }),
+            json!({ "kind": "provider", "provider": { "name": "self-accounts" } }),
+            json!({ "kind": "provider", "provider": "self-accounts", "totp": { "digits": 7 } }),
+            json!({ "kind": "provider", "provider": "self-accounts", "totp": "sha1" }),
+        ] {
+            let mut v = form_profile();
+            v["credential_source"] = cs.clone();
+            assert_eq!(code(&v), "invalid_profile", "{cs}");
+        }
+
+        // `http-auth` does not take a provider (yet).
+        let mut v = http_auth_profile();
+        v["credential_source"] = json!({ "kind": "provider", "provider": "self-accounts" });
+        assert_eq!(code(&v), "credential_source_unsupported");
     }
 
     #[test]

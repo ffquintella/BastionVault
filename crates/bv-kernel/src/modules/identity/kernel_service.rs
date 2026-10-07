@@ -112,8 +112,9 @@ impl IdentityService for IdentityModule {
         // recreated principal gets a new entity), so whatever entity-scoped
         // plugin data it owns, such as personal credentials, is orphaned
         // secret material. Purge it. A failure is logged and does not undo the
-        // principal delete; `DELETE v2/sys/plugins/<name>/entity-data/<id>` is
-        // the manual retry.
+        // principal delete; the plugin host audits it and records a pending
+        // purge, retried by the next automatic purge and by every
+        // `DELETE v2/sys/plugins/<name>/entity-data/<id>`.
         if let Some(id) = entity_id {
             let still_reachable = store
                 .list_aliases()

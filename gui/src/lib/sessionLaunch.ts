@@ -19,6 +19,10 @@ export interface SessionLaunchRequest {
   profile_id: string;
   operator_credential?: api.OperatorCredential;
   connect_ticket?: string;
+  /** A `provider` profile: the account the operator picked in the
+   *  host-rendered picker. Required for such a profile, refused for any
+   *  other (see `lib/connectFlow.ts`). */
+  provider_account_id?: string;
   /** SSH/RDP only: where the session renders (T38). Absent = the
    *  operator's default. A web session always opens its own window. */
   placement?: api.SessionPlacement;
@@ -48,6 +52,7 @@ export async function openProfileSession(
         resource_name: request.resource_name,
         profile_id: request.profile_id,
         connect_ticket: request.connect_ticket,
+        provider_account_id: request.provider_account_id,
       });
       return;
     case null:

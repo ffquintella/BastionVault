@@ -173,13 +173,7 @@ async fn test_pki_phase1_end_to_end() {
     let (_, parsed_crl) = x509_parser::parse_x509_crl(&crl_der).unwrap();
     let revoked_serials: Vec<String> = parsed_crl
         .iter_revoked_certificates()
-        .map(|c| {
-            c.user_certificate
-                .to_bytes_be()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        })
+        .map(|c| c.user_certificate.to_bytes_be().iter().map(|b| format!("{b:02x}")).collect::<String>())
         .collect();
     assert!(
         revoked_serials.iter().any(|s| s == &serial),

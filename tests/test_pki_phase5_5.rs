@@ -101,20 +101,13 @@ async fn test_phase5_5_default_usages_all_enabled() {
         &core,
         &token,
         "pki/root/generate/internal",
-        json!({"common_name": "Root", "key_type": "ec", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "Root", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await;
 
     let issuer = read(&core, &token, "pki/issuer/default").await;
-    let usages: Vec<String> = issuer["usage"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect();
+    let usages: Vec<String> =
+        issuer["usage"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
     let mut sorted = usages.clone();
     sorted.sort();
     assert_eq!(
@@ -136,10 +129,7 @@ async fn test_phase5_5_issuing_only_blocks_crl_signing() {
         &core,
         &token,
         "pki/root/generate/internal",
-        json!({"common_name": "Root", "key_type": "ec", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "Root", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await;
     write(
@@ -154,13 +144,8 @@ async fn test_phase5_5_issuing_only_blocks_crl_signing() {
     .await;
 
     // Lock the default issuer to issuing-only.
-    write(
-        &core,
-        &token,
-        "pki/issuer/default",
-        json!({"usage": "issuing-certificates"}).as_object().unwrap().clone(),
-    )
-    .await;
+    write(&core, &token, "pki/issuer/default", json!({"usage": "issuing-certificates"}).as_object().unwrap().clone())
+        .await;
 
     // Issuance still works.
     let issued = write_ok(
@@ -174,17 +159,9 @@ async fn test_phase5_5_issuing_only_blocks_crl_signing() {
 
     // CRL signing now fails — the rebuild path is gated, and revoke
     // calls into rebuild after flipping the cert's `revoked_at_unix`.
-    let rejected = write_err(
-        &core,
-        &token,
-        "pki/revoke",
-        json!({"serial_number": serial}).as_object().unwrap().clone(),
-    )
-    .await;
-    assert!(
-        rejected,
-        "revoke must fail when the signing issuer's `crl-signing` usage is disabled"
-    );
+    let rejected =
+        write_err(&core, &token, "pki/revoke", json!({"serial_number": serial}).as_object().unwrap().clone()).await;
+    assert!(rejected, "revoke must fail when the signing issuer's `crl-signing` usage is disabled");
 
     // Reading the CRL also fails (rebuild on demand → gated).
     let mut req = Request::new("pki/crl");
@@ -208,10 +185,7 @@ async fn test_phase5_5_crl_only_blocks_issuance() {
         &core,
         &token,
         "pki/root/generate/internal",
-        json!({"common_name": "Root", "key_type": "ec", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "Root", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await;
     write(
@@ -226,13 +200,7 @@ async fn test_phase5_5_crl_only_blocks_issuance() {
     .await;
 
     // Lock the default issuer to crl-signing only.
-    write(
-        &core,
-        &token,
-        "pki/issuer/default",
-        json!({"usage": "crl-signing"}).as_object().unwrap().clone(),
-    )
-    .await;
+    write(&core, &token, "pki/issuer/default", json!({"usage": "crl-signing"}).as_object().unwrap().clone()).await;
 
     // Issuance must fail.
     assert!(
@@ -263,10 +231,7 @@ async fn test_phase5_5_round_trip_and_empty_rejection() {
         &core,
         &token,
         "pki/root/generate/internal",
-        json!({"common_name": "Root", "key_type": "ec", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "Root", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await;
 
@@ -279,12 +244,8 @@ async fn test_phase5_5_round_trip_and_empty_rejection() {
     )
     .await;
     let issuer = read(&core, &token, "pki/issuer/default").await;
-    let mut usages: Vec<String> = issuer["usage"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect();
+    let mut usages: Vec<String> =
+        issuer["usage"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
     usages.sort();
     assert_eq!(
         usages,

@@ -40,10 +40,7 @@ async fn write(
     req.operation = Operation::Write;
     req.client_token = token.to_string();
     req.body = Some(body);
-    core.handle_request(&mut req)
-        .await
-        .map(|r| r.and_then(|x| x.data))
-        .map_err(|e| format!("{e:?}"))
+    core.handle_request(&mut req).await.map(|r| r.and_then(|x| x.data)).map_err(|e| format!("{e:?}"))
 }
 
 #[maybe_async::maybe_async]
@@ -82,38 +79,60 @@ async fn test_cert_lifecycle_scheduler_l6() {
     let token = init.root_token.clone();
 
     write(core, &token, "sys/mounts/pki/", json!({"type": "pki"}).as_object().unwrap().clone())
-        .await.expect("mount pki");
-    write(core, &token, "sys/mounts/cert-lifecycle/",
-        json!({"type": "cert-lifecycle"}).as_object().unwrap().clone(),
-    ).await.expect("mount cert-lifecycle");
-    write(core, &token, "pki/root/generate/internal",
+        .await
+        .expect("mount pki");
+    write(core, &token, "sys/mounts/cert-lifecycle/", json!({"type": "cert-lifecycle"}).as_object().unwrap().clone())
+        .await
+        .expect("mount cert-lifecycle");
+    write(
+        core,
+        &token,
+        "pki/root/generate/internal",
         json!({"common_name": "L6 Root", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
-    ).await.expect("root");
-    write(core, &token, "pki/roles/web",
+    )
+    .await
+    .expect("root");
+    write(
+        core,
+        &token,
+        "pki/roles/web",
         json!({
             "ttl": "168h", "max_ttl": "720h", "key_type": "ec",
             "allow_any_name": true, "server_flag": true, "client_flag": true,
-        }).as_object().unwrap().clone(),
-    ).await.expect("role");
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await
+    .expect("role");
 
     // ── 1. Config validation: enabled without token rejected ─────────
-    let bad = write(core, &token, "cert-lifecycle/scheduler/config",
-        json!({"enabled": true}).as_object().unwrap().clone(),
-    ).await;
+    let bad =
+        write(core, &token, "cert-lifecycle/scheduler/config", json!({"enabled": true}).as_object().unwrap().clone())
+            .await;
     assert!(bad.is_err(), "enabled=true without token must reject: {bad:?}");
 
     // Set config disabled. Pass should be a no-op.
     let happy_dir = dir.join("happy");
     fs::create_dir_all(&happy_dir).unwrap();
     let happy_str = happy_dir.to_string_lossy().into_owned();
-    write(core, &token, "cert-lifecycle/targets/happy",
+    write(
+        core,
+        &token,
+        "cert-lifecycle/targets/happy",
         json!({
             "role_ref": "web",
             "common_name": "happy.example.com",
             "address": &happy_str,
             "renew_before": "1h",
-        }).as_object().unwrap().clone(),
-    ).await.expect("write happy target");
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await
+    .expect("write happy target");
 
     // ── 2. Disabled scheduler does nothing ───────────────────────────
     run_cert_lifecycle_pass(&core_arc, None).await.expect("disabled pass");
@@ -121,15 +140,23 @@ async fn test_cert_lifecycle_scheduler_l6() {
     assert_eq!(s0["current_serial"].as_str().unwrap(), "");
 
     // Configure scheduler with the root token (any valid token works).
-    write(core, &token, "cert-lifecycle/scheduler/config",
+    write(
+        core,
+        &token,
+        "cert-lifecycle/scheduler/config",
         json!({
             "enabled": true,
             "client_token": token.clone(),
             "tick_interval_seconds": 30,
             "base_backoff_seconds": 60,
             "max_backoff_seconds": 3600,
-        }).as_object().unwrap().clone(),
-    ).await.expect("write scheduler config");
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await
+    .expect("write scheduler config");
 
     // Confirm `client_token` is not echoed by the read endpoint.
     let cfg_read = read(core, &token, "cert-lifecycle/scheduler/config").await;
@@ -140,13 +167,14 @@ async fn test_cert_lifecycle_scheduler_l6() {
     // ── 3. Enabled + due target → fires ──────────────────────────────
     run_cert_lifecycle_pass(&core_arc, None).await.expect("first pass");
     let s1 = read(core, &token, "cert-lifecycle/state/happy").await;
-    assert!(!s1["current_serial"].as_str().unwrap().is_empty(),
-        "first pass should populate current_serial; state={s1:?}");
+    assert!(
+        !s1["current_serial"].as_str().unwrap().is_empty(),
+        "first pass should populate current_serial; state={s1:?}"
+    );
     assert!(s1["last_renewal"].as_u64().unwrap() > 0);
     assert_eq!(s1["last_error"].as_str().unwrap(), "");
     assert_eq!(s1["failure_count"].as_u64().unwrap(), 0);
-    assert!(s1["next_attempt"].as_u64().unwrap() > 0,
-        "scheduler must populate next_attempt; state={s1:?}");
+    assert!(s1["next_attempt"].as_u64().unwrap() > 0, "scheduler must populate next_attempt; state={s1:?}");
 
     // Files written.
     assert!(happy_dir.join("cert.pem").exists());
@@ -161,29 +189,38 @@ async fn test_cert_lifecycle_scheduler_l6() {
     let last_fired = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     run_cert_lifecycle_pass(&core_arc, Some(last_fired.clone())).await.expect("second pass");
     let s2 = read(core, &token, "cert-lifecycle/state/happy").await;
-    assert_eq!(s2["current_serial"].as_str().unwrap(), serial1,
-        "second pass must not re-renew a healthy target");
+    assert_eq!(s2["current_serial"].as_str().unwrap(), serial1, "second pass must not re-renew a healthy target");
 
     // ── 5. Failure path: invalid address → backoff ───────────────────
     let bogus_dir = dir.join("nope-does-not-exist");
     let bogus_str = bogus_dir.to_string_lossy().into_owned();
-    write(core, &token, "cert-lifecycle/targets/sad",
+    write(
+        core,
+        &token,
+        "cert-lifecycle/targets/sad",
         json!({
             "role_ref": "web",
             "common_name": "sad.example.com",
             "address": &bogus_str,
             "renew_before": "1h",
-        }).as_object().unwrap().clone(),
-    ).await.expect("write sad target");
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await
+    .expect("write sad target");
 
     run_cert_lifecycle_pass(&core_arc, None).await.expect("failing pass");
     let s_sad = read(core, &token, "cert-lifecycle/state/sad").await;
-    assert_eq!(s_sad["current_serial"].as_str().unwrap(), "",
-        "failing renew must not set current_serial");
+    assert_eq!(s_sad["current_serial"].as_str().unwrap(), "", "failing renew must not set current_serial");
     assert_eq!(s_sad["failure_count"].as_u64().unwrap(), 1);
-    assert!(s_sad["last_error"].as_str().unwrap().contains("delivery failed")
+    assert!(
+        s_sad["last_error"].as_str().unwrap().contains("delivery failed")
             || s_sad["last_error"].as_str().unwrap().contains("issuance failed"),
-        "expected meaningful last_error, got {:?}", s_sad["last_error"]);
+        "expected meaningful last_error, got {:?}",
+        s_sad["last_error"]
+    );
     let next1 = s_sad["next_attempt"].as_u64().unwrap();
     assert!(next1 > 0, "backoff must populate next_attempt");
 
@@ -193,6 +230,5 @@ async fn test_cert_lifecycle_scheduler_l6() {
     let last_fired2 = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     run_cert_lifecycle_pass(&core_arc, Some(last_fired2)).await.expect("backoff pass");
     let s_sad2 = read(core, &token, "cert-lifecycle/state/sad").await;
-    assert_eq!(s_sad2["failure_count"].as_u64().unwrap(), 1,
-        "in-backoff target must not retry");
+    assert_eq!(s_sad2["failure_count"].as_u64().unwrap(), 1, "in-backoff target must not retry");
 }

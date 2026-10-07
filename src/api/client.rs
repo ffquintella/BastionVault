@@ -1,11 +1,4 @@
-use std::{
-    collections::HashMap,
-    fmt, fs,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, fmt, fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use better_default::Default;
 use serde_json::{Map, Value};
@@ -155,8 +148,7 @@ impl TLSConfigBuilder {
                     _ => None,
                 })
                 .collect();
-            let client_key = PrivateKey::from_pem(client_key_pem)
-                .map_err(|e| RvError::ErrResponse(e.to_string()))?;
+            let client_key = PrivateKey::from_pem(client_key_pem).map_err(|e| RvError::ErrResponse(e.to_string()))?;
             tls_builder = tls_builder.client_cert(Some(ClientCert::new_with_certs(&client_certs, client_key)));
         }
 
@@ -258,11 +250,7 @@ impl Client {
 
         let config = config_builder.build();
         self.http_client = match self.override_socket_addr {
-            Some(addr) => ureq::Agent::with_parts(
-                config,
-                DefaultConnector::default(),
-                StaticAddrResolver(addr),
-            ),
+            Some(addr) => ureq::Agent::with_parts(config, DefaultConnector::default(), StaticAddrResolver(addr)),
             None => config.new_agent(),
         };
         self
@@ -311,8 +299,7 @@ impl Client {
             .body(body)?;
             self.http_client.run(req)
         } else {
-            let req = build_request(http::Request::builder().method(method_upper.as_str()).uri(&url))
-                .body(())?;
+            let req = build_request(http::Request::builder().method(method_upper.as_str()).uri(&url)).body(())?;
             self.http_client.run(req)
         };
 

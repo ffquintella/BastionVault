@@ -41,12 +41,7 @@ async fn write(core: &Core, token: &str, path: &str, body: Map<String, Value>) -
 }
 
 #[maybe_async::maybe_async]
-async fn write_expect_ok(
-    core: &Core,
-    token: &str,
-    path: &str,
-    body: Map<String, Value>,
-) -> Map<String, Value> {
+async fn write_expect_ok(core: &Core, token: &str, path: &str, body: Map<String, Value>) -> Map<String, Value> {
     let mut req = Request::new(path);
     req.operation = Operation::Write;
     req.client_token = token.to_string();
@@ -89,10 +84,7 @@ async fn test_pki_phase5_sign_csr_against_role() {
         &core,
         &token,
         "pki/root/generate/internal",
-        json!({"common_name": "csr-root.example.com", "key_type": "ec", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "csr-root.example.com", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await;
     write(
@@ -112,8 +104,8 @@ async fn test_pki_phase5_sign_csr_against_role() {
 
     // Build a CSR locally — this is what a real client would do.
     let kp = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
-    let mut params = CertificateParams::new(vec!["leaf.example.com".to_string(), "leaf-alt.example.com".to_string()])
-        .unwrap();
+    let mut params =
+        CertificateParams::new(vec!["leaf.example.com".to_string(), "leaf-alt.example.com".to_string()]).unwrap();
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, "leaf.example.com");
     params.distinguished_name = dn;
@@ -160,10 +152,7 @@ async fn test_pki_phase5_sign_csr_against_role() {
     req.operation = Operation::Write;
     req.client_token = token.clone();
     req.body = Some(json!({"csr": tampered}).as_object().unwrap().clone());
-    assert!(
-        core.handle_request(&mut req).await.is_err(),
-        "tampered CSR with broken self-signature must be rejected"
-    );
+    assert!(core.handle_request(&mut req).await.is_err(), "tampered CSR with broken self-signature must be rejected");
 }
 
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
@@ -198,10 +187,7 @@ async fn test_pki_phase5_intermediate_chain() {
         &core,
         &token,
         "pki-int/intermediate/generate/internal",
-        json!({"common_name": "Intermediate CA", "key_type": "ec"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "Intermediate CA", "key_type": "ec"}).as_object().unwrap().clone(),
     )
     .await;
     let int_csr_pem = gen["csr"].as_str().unwrap().to_string();
@@ -260,10 +246,7 @@ async fn test_pki_phase5_intermediate_chain() {
         &core,
         &token,
         "pki-int/issue/web",
-        json!({"common_name": "leaf.example.com", "ttl": "12h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "leaf.example.com", "ttl": "12h"}).as_object().unwrap().clone(),
     )
     .await;
     let leaf_pem = leaf["certificate"].as_str().unwrap().to_string();
@@ -284,26 +267,15 @@ async fn test_pki_phase5_intermediate_chain() {
         &core,
         &token,
         "pki-int/intermediate/generate/internal",
-        json!({"common_name": "another-int", "key_type": "ec"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "another-int", "key_type": "ec"}).as_object().unwrap().clone(),
     )
     .await;
     // Second pending in flight must fail.
     let mut req = Request::new("pki-int/intermediate/generate/internal");
     req.operation = Operation::Write;
     req.client_token = token.clone();
-    req.body = Some(
-        json!({"common_name": "third-int", "key_type": "ec"})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
-    assert!(
-        core.handle_request(&mut req).await.is_err(),
-        "two simultaneous pending intermediates must be rejected"
-    );
+    req.body = Some(json!({"common_name": "third-int", "key_type": "ec"}).as_object().unwrap().clone());
+    assert!(core.handle_request(&mut req).await.is_err(), "two simultaneous pending intermediates must be rejected");
 }
 
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
@@ -333,13 +305,7 @@ async fn test_pki_phase5_config_ca_import() {
 
     // Mount + import.
     write(&core, &token, "sys/mounts/pki/", json!({"type": "pki"}).as_object().unwrap().clone()).await;
-    write_expect_ok(
-        &core,
-        &token,
-        "pki/config/ca",
-        json!({"pem_bundle": bundle}).as_object().unwrap().clone(),
-    )
-    .await;
+    write_expect_ok(&core, &token, "pki/config/ca", json!({"pem_bundle": bundle}).as_object().unwrap().clone()).await;
 
     // Chain-import era: re-importing the same certificate (matched by
     // serial) is now an idempotent no-op — the cert is already present at
@@ -349,10 +315,7 @@ async fn test_pki_phase5_config_ca_import() {
     req.operation = Operation::Write;
     req.client_token = token.clone();
     req.body = Some(
-        json!({"pem_bundle": format!("{cert_pem}{key_pem}"), "issuer_name": "default"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"pem_bundle": format!("{cert_pem}{key_pem}"), "issuer_name": "default"}).as_object().unwrap().clone(),
     );
     let reimport = core
         .handle_request(&mut req)
@@ -360,10 +323,7 @@ async fn test_pki_phase5_config_ca_import() {
         .expect("re-importing an already-present cert is an idempotent no-op")
         .and_then(|r| r.data)
         .expect("response data");
-    assert!(
-        reimport["imported_issuers"].as_array().unwrap().is_empty(),
-        "no new issuer created on re-import"
-    );
+    assert!(reimport["imported_issuers"].as_array().unwrap().is_empty(), "no new issuer created on re-import");
     let chain = reimport["chain"].as_array().unwrap();
     assert!(
         chain.iter().all(|e| e["skipped"].as_bool().unwrap_or(false)),
@@ -385,10 +345,7 @@ async fn test_pki_phase5_config_ca_import() {
         &core,
         &token,
         "pki/issue/web",
-        json!({"common_name": "imported-leaf.example.com", "ttl": "12h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "imported-leaf.example.com", "ttl": "12h"}).as_object().unwrap().clone(),
     )
     .await;
     let leaf_der = pem_decode_first(issued["certificate"].as_str().unwrap());
@@ -406,10 +363,7 @@ async fn test_pki_phase5_config_ca_import() {
     req.operation = Operation::Write;
     req.client_token = token.clone();
     req.body = Some(json!({"pem_bundle": mismatched}).as_object().unwrap().clone());
-    assert!(
-        core.handle_request(&mut req).await.is_err(),
-        "mismatched cert/key bundle must be rejected"
-    );
+    assert!(core.handle_request(&mut req).await.is_err(), "mismatched cert/key bundle must be rejected");
 }
 
 fn pem_decode_first(pem: &str) -> Vec<u8> {

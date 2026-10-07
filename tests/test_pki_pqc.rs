@@ -97,18 +97,9 @@ async fn test_pki_phase2_ml_dsa_65_end_to_end() {
     // Parse the root, confirm its signatureAlgorithm OID is ML-DSA-65.
     let root_der = pem_decode_first(&root_pem);
     let root_cert = Certificate::from_der(&root_der).expect("parse root cert");
-    assert_eq!(
-        root_cert.signature_algorithm.oid.to_string(),
-        ML_DSA_65_OID,
-        "root cert must be signed with ML-DSA-65"
-    );
+    assert_eq!(root_cert.signature_algorithm.oid.to_string(), ML_DSA_65_OID, "root cert must be signed with ML-DSA-65");
     assert_eq!(root_cert.tbs_certificate.subject_public_key_info.algorithm.oid.to_string(), ML_DSA_65_OID);
-    let root_pk_bytes = root_cert
-        .tbs_certificate
-        .subject_public_key_info
-        .subject_public_key
-        .raw_bytes()
-        .to_vec();
+    let root_pk_bytes = root_cert.tbs_certificate.subject_public_key_info.subject_public_key.raw_bytes().to_vec();
     assert_eq!(root_pk_bytes.len(), ML_DSA_65_PUBLIC_KEY_LEN, "ML-DSA-65 raw pk is 1952 bytes");
     // Verify the root's self-signature using fips204 directly. This
     // exercises our own TBS DER path: if we encoded TBS wrong, the
@@ -147,10 +138,7 @@ async fn test_pki_phase2_ml_dsa_65_end_to_end() {
     req.operation = Operation::Write;
     req.client_token = token.clone();
     req.body = Some(json!({"key_type": "ml-dsa-65", "key_bits": 2048}).as_object().unwrap().clone());
-    assert!(
-        core.handle_request(&mut req).await.is_err(),
-        "ml-dsa role with key_bits != 0 must be rejected"
-    );
+    assert!(core.handle_request(&mut req).await.is_err(), "ml-dsa role with key_bits != 0 must be rejected");
 
     // Issue a leaf.
     let issued = write(
@@ -186,10 +174,7 @@ async fn test_pki_phase2_ml_dsa_65_end_to_end() {
         "leaf key OID matches role"
     );
     // Leaf chain check: issuer DN matches root subject DN.
-    assert_eq!(
-        leaf_cert.tbs_certificate.issuer.to_string(),
-        root_cert.tbs_certificate.subject.to_string()
-    );
+    assert_eq!(leaf_cert.tbs_certificate.issuer.to_string(), root_cert.tbs_certificate.subject.to_string());
     // And the leaf signature verifies under the root's public key.
     {
         let pk_arr: [u8; ML_DSA_65_PUBLIC_KEY_LEN] = root_pk_bytes.clone().try_into().unwrap();
@@ -212,13 +197,7 @@ async fn test_pki_phase2_ml_dsa_65_end_to_end() {
         .as_deref()
         .unwrap_or(&[])
         .iter()
-        .map(|r| {
-            r.serial_number
-                .as_bytes()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        })
+        .map(|r| r.serial_number.as_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>())
         .collect();
     assert!(
         revoked_serials.iter().any(|s| s == &leaf_serial),

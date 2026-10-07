@@ -259,7 +259,8 @@ pub trait PluginHost: Send + Sync {
     ) -> Result<ReleasedCredential, RvError>;
 
     /// Delete `core/plugins/<p>/data/entity/<entity_id>/` for every plugin
-    /// with `storage_scope = "entity"`. Called when an identity entity is
-    /// deleted.
+    /// with `storage_scope = "entity"`. Called when an identity entity loses
+    /// its last alias. The host audits the outcome; on failure it records a
+    /// pending purge that the next purge retries, and returns the error.
     async fn purge_entity_data(&self, entity_id: &str) -> Result<(), RvError>;
 }

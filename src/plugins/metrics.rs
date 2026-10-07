@@ -33,10 +33,24 @@ pub struct PluginLabels {
     pub plugin: String,
 }
 
+/// Labels of `bvault_plugin_provider_requests_total` (features/self-accounts.md
+/// §9). Every label is a closed set: `plugin` is a registered provider's name
+/// or `unregistered`, `op` is `candidates` / `release`, `protocol` is `ssh` /
+/// `rdp` / `web` / `other`, and `outcome` is `success` or a refusal reason
+/// code (`kernel_api::provider::reason`). Never an account id or a user.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct ProviderRequestLabels {
+    pub plugin: String,
+    pub op: &'static str,
+    pub protocol: &'static str,
+    pub outcome: &'static str,
+}
+
 pub struct PluginMetrics {
     pub invokes: Family<PluginInvokeLabels, Counter>,
     pub fuel_consumed: Family<PluginLabels, Counter>,
     pub invoke_duration: Family<PluginLabels, Histogram>,
+    pub provider_requests: Family<ProviderRequestLabels, Counter>,
 }
 
 static METRICS: OnceLock<PluginMetrics> = OnceLock::new();
@@ -51,9 +65,8 @@ pub fn metrics() -> &'static PluginMetrics {
     METRICS.get_or_init(|| PluginMetrics {
         invokes: Family::default(),
         fuel_consumed: Family::default(),
-        invoke_duration: Family::<PluginLabels, Histogram>::new_with_constructor(|| {
-            Histogram::new(latency_buckets())
-        }),
+        invoke_duration: Family::<PluginLabels, Histogram>::new_with_constructor(|| Histogram::new(latency_buckets())),
+        provider_requests: Family::default(),
     })
 }
 
@@ -64,11 +77,7 @@ pub fn metrics() -> &'static PluginMetrics {
 /// registry, which is fine for the test harness).
 pub fn register(registry: &mut Registry) {
     let m = metrics();
-    registry.register(
-        "bvault_plugin_invokes",
-        "Plugin invocations by outcome",
-        m.invokes.clone(),
-    );
+    registry.register("bvault_plugin_invokes", "Plugin invocations by outcome", m.invokes.clone());
     registry.register(
         "bvault_plugin_fuel_consumed",
         "Total fuel consumed by WASM plugin invocations",
@@ -79,27 +88,29 @@ pub fn register(registry: &mut Registry) {
         "Plugin invocation wall-clock duration",
         m.invoke_duration.clone(),
     );
+    registry.register(
+        "bvault_plugin_provider_requests",
+        "Credential-provider calls from Connect, by plugin, op, protocol and outcome",
+        m.provider_requests.clone(),
+    );
+}
+
+/// Count one credential-provider call (`candidates` / `release`). The caller
+/// guarantees every label comes from a closed set; see
+/// [`ProviderRequestLabels`].
+pub fn record_provider_request(plugin: &str, op: &'static str, protocol: &'static str, outcome: &'static str) {
+    metrics()
+        .provider_requests
+        .get_or_create(&ProviderRequestLabels { plugin: plugin.to_string(), op, protocol, outcome })
+        .inc();
 }
 
 pub fn record_invoke(plugin: &str, outcome: &'static str, duration_secs: f64, fuel: u64) {
     let m = metrics();
-    m.invokes
-        .get_or_create(&PluginInvokeLabels {
-            plugin: plugin.to_string(),
-            outcome,
-        })
-        .inc();
-    m.invoke_duration
-        .get_or_create(&PluginLabels {
-            plugin: plugin.to_string(),
-        })
-        .observe(duration_secs);
+    m.invokes.get_or_create(&PluginInvokeLabels { plugin: plugin.to_string(), outcome }).inc();
+    m.invoke_duration.get_or_create(&PluginLabels { plugin: plugin.to_string() }).observe(duration_secs);
     if fuel > 0 {
-        m.fuel_consumed
-            .get_or_create(&PluginLabels {
-                plugin: plugin.to_string(),
-            })
-            .inc_by(fuel);
+        m.fuel_consumed.get_or_create(&PluginLabels { plugin: plugin.to_string() }).inc_by(fuel);
     }
     // Phase 5.12: parallel read-side snapshot for the GUI panel.
     // `prometheus_client::metrics::family::Family` doesn't expose an
@@ -196,7 +207,27 @@ pub fn snapshot_for(plugin: &str) -> PluginMetricsSnapshot {
 /// GUI's per-plugin metrics panel as a one-shot read on page load.
 pub fn snapshot_all() -> Vec<PluginMetricsSnapshot> {
     let map = snapshots();
-    let names: std::collections::BTreeSet<String> =
-        map.iter().map(|e| e.key().clone()).collect();
+    let names: std::collections::BTreeSet<String> = map.iter().map(|e| e.key().clone()).collect();
     names.into_iter().map(|n| snapshot_for(&n)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_requests_are_exported_with_closed_labels() {
+        let mut registry = Registry::default();
+        register(&mut registry);
+        record_provider_request("metrics-test-provider", "release", "rdp", "no_match");
+        let mut out = String::new();
+        prometheus_client::encoding::text::encode(&mut out, &registry).unwrap();
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("bvault_plugin_provider_requests_total{") && l.contains("metrics-test-provider"))
+            .unwrap_or_else(|| panic!("metric missing from:\n{out}"));
+        for label in [r#"op="release""#, r#"protocol="rdp""#, r#"outcome="no_match""#] {
+            assert!(line.contains(label), "{label} missing from {line}");
+        }
+    }
 }

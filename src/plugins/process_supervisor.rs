@@ -60,9 +60,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
 use super::manifest::PluginManifest;
-use super::process_runtime::{
-    generate_bootstrap_token, handle_host_call, write_temp_executable, ProcessRuntimeError,
-};
+use super::process_runtime::{generate_bootstrap_token, handle_host_call, write_temp_executable, ProcessRuntimeError};
 use super::runtime::{InvokeOutcome, InvokeOutput};
 use crate::kernel_api::VaultCtx;
 
@@ -101,8 +99,9 @@ impl From<SupervisorError> for ProcessRuntimeError {
             SupervisorError::Io(s) => ProcessRuntimeError::Io(s),
             SupervisorError::Protocol(s) => ProcessRuntimeError::Protocol(s),
             SupervisorError::Timeout(d) => ProcessRuntimeError::Timeout(d),
-            SupervisorError::RestartBudgetExhausted { .. }
-            | SupervisorError::HandshakeFailed => ProcessRuntimeError::Spawn(format!("{e}")),
+            SupervisorError::RestartBudgetExhausted { .. } | SupervisorError::HandshakeFailed => {
+                ProcessRuntimeError::Spawn(format!("{e}"))
+            }
         }
     }
 }
@@ -112,8 +111,18 @@ impl From<SupervisorError> for ProcessRuntimeError {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum PluginMessage {
-    HostCall { id: u64, method: String, #[serde(default)] params: Value },
-    InvokeDone { id: u64, status: i32, #[serde(default)] data_b64: String },
+    HostCall {
+        id: u64,
+        method: String,
+        #[serde(default)]
+        params: Value,
+    },
+    InvokeDone {
+        id: u64,
+        status: i32,
+        #[serde(default)]
+        data_b64: String,
+    },
     /// Sent once after `Init`; carries the token the plugin received
     /// via `BV_PLUGIN_BOOTSTRAP_TOKEN`. Must match what the host
     /// supplied or the supervisor tears the child down.
@@ -155,7 +164,6 @@ struct Supervised {
     last_attempt_at: Option<Instant>,
 }
 
-
 impl Supervised {
     fn prune_window(&mut self) {
         let cutoff = Instant::now() - RESTART_WINDOW;
@@ -164,10 +172,7 @@ impl Supervised {
 
     fn budget_exhausted(&self) -> Option<SupervisorError> {
         if self.crashes.len() >= MAX_RESTARTS_IN_WINDOW {
-            Some(SupervisorError::RestartBudgetExhausted {
-                crashes: self.crashes.len(),
-                window: RESTART_WINDOW,
-            })
+            Some(SupervisorError::RestartBudgetExhausted { crashes: self.crashes.len(), window: RESTART_WINDOW })
         } else {
             None
         }
@@ -301,21 +306,14 @@ async fn drive_invoke(
     let id = worker.next_id;
     worker.next_id = worker.next_id.wrapping_add(1);
 
-    let invoke_msg = HostMessage::Invoke {
-        id,
-        input: base64::engine::general_purpose::STANDARD.encode(input),
-    };
+    let invoke_msg = HostMessage::Invoke { id, input: base64::engine::general_purpose::STANDARD.encode(input) };
     write_msg(&mut worker.stdin, &invoke_msg).await?;
 
     let timeout = DEFAULT_INVOKE_TIMEOUT;
     let outcome = tokio::time::timeout(timeout, async {
         loop {
             let mut buf = String::new();
-            let read = worker
-                .stdout
-                .read_line(&mut buf)
-                .await
-                .map_err(|e| SupervisorError::Io(format!("{e}")))?;
+            let read = worker.stdout.read_line(&mut buf).await.map_err(|e| SupervisorError::Io(format!("{e}")))?;
             if read == 0 {
                 return Err(SupervisorError::Io("stdout closed before invoke_done".into()));
             }
@@ -333,8 +331,7 @@ async fn drive_invoke(
                     return Err(SupervisorError::Protocol("unexpected hello mid-invoke"));
                 }
                 PluginMessage::HostCall { id: hid, method, params } => {
-                    let result =
-                        handle_host_call(manifest, core.as_ref(), config, &method, &params).await;
+                    let result = handle_host_call(manifest, core.as_ref(), config, &method, &params).await;
                     let reply = match result {
                         Ok(v) => HostMessage::HostReply { id: hid, result: v },
                         Err(e) => HostMessage::HostReplyError { id: hid, error: e },
@@ -352,11 +349,7 @@ async fn drive_invoke(
                             .decode(data_b64.as_bytes())
                             .map_err(|_| SupervisorError::Protocol("invoke_done data not base64"))?
                     };
-                    let outcome = if status == 0 {
-                        InvokeOutcome::Success
-                    } else {
-                        InvokeOutcome::PluginError(status)
-                    };
+                    let outcome = if status == 0 { InvokeOutcome::Success } else { InvokeOutcome::PluginError(status) };
                     return Ok(InvokeOutput { outcome, response, fuel_consumed: 0 });
                 }
             }
@@ -373,12 +366,9 @@ async fn drive_invoke(
 
 // ── Spawn helpers ─────────────────────────────────────────────────
 
-async fn spawn_worker(
-    manifest: &PluginManifest,
-    binary: &[u8],
-) -> Result<Worker, SupervisorError> {
-    let exe_path = write_temp_executable(&manifest.name, binary)
-        .map_err(|e| SupervisorError::Spawn(format!("temp file: {e}")))?;
+async fn spawn_worker(manifest: &PluginManifest, binary: &[u8]) -> Result<Worker, SupervisorError> {
+    let exe_path =
+        write_temp_executable(&manifest.name, binary).map_err(|e| SupervisorError::Spawn(format!("temp file: {e}")))?;
     // Note: the temp file persists across the worker's lifetime (the
     // process is exec'd from it; on Unix the inode stays valid until
     // the process exits even if the file is unlinked, but we don't
@@ -405,10 +395,21 @@ async fn spawn_worker(
     }
     #[cfg(target_os = "windows")]
     for var in &[
-        "SystemRoot", "SystemDrive", "windir", "TEMP", "TMP",
-        "USERPROFILE", "LOCALAPPDATA", "APPDATA", "ProgramData",
-        "ProgramFiles", "ProgramFiles(x86)", "COMSPEC",
-        "PATHEXT", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+        "SystemRoot",
+        "SystemDrive",
+        "windir",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "ProgramData",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "COMSPEC",
+        "PATHEXT",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
     ] {
         if let Ok(v) = std::env::var(var) {
             cmd.env(var, v);
@@ -443,12 +444,7 @@ async fn spawn_worker(
         }
     });
 
-    let mut worker = Worker {
-        child,
-        stdin,
-        stdout: BufReader::new(stdout),
-        next_id: 1,
-    };
+    let mut worker = Worker { child, stdin, stdout: BufReader::new(stdout), next_id: 1 };
 
     // Send Init + receive Hello handshake. The handshake is bounded
     // by a 60s timeout — a plugin that fails to send Hello in that
@@ -458,14 +454,8 @@ async fn spawn_worker(
     Ok(worker)
 }
 
-async fn handshake(
-    worker: &mut Worker,
-    manifest: &PluginManifest,
-    bootstrap: &str,
-) -> Result<(), SupervisorError> {
-    let init = HostMessage::Init {
-        plugin_name: &manifest.name,
-    };
+async fn handshake(worker: &mut Worker, manifest: &PluginManifest, bootstrap: &str) -> Result<(), SupervisorError> {
+    let init = HostMessage::Init { plugin_name: &manifest.name };
     write_msg(&mut worker.stdin, &init).await?;
 
     let timeout = Duration::from_secs(60);
@@ -473,11 +463,7 @@ async fn handshake(
         let mut buf = String::new();
         loop {
             buf.clear();
-            let read = worker
-                .stdout
-                .read_line(&mut buf)
-                .await
-                .map_err(|e| SupervisorError::Io(format!("{e}")))?;
+            let read = worker.stdout.read_line(&mut buf).await.map_err(|e| SupervisorError::Io(format!("{e}")))?;
             if read == 0 {
                 return Err(SupervisorError::Io("stdout closed before hello".into()));
             }
@@ -485,8 +471,8 @@ async fn handshake(
             if trimmed.is_empty() {
                 continue;
             }
-            let msg: PluginMessage = serde_json::from_str(trimmed)
-                .map_err(|_| SupervisorError::Protocol("hello not valid JSON"))?;
+            let msg: PluginMessage =
+                serde_json::from_str(trimmed).map_err(|_| SupervisorError::Protocol("hello not valid JSON"))?;
             return Ok(msg);
         }
     })
@@ -504,17 +490,10 @@ async fn write_msg<W>(writer: &mut W, msg: &HostMessage<'_>) -> Result<(), Super
 where
     W: AsyncWriteExt + Unpin,
 {
-    let mut line =
-        serde_json::to_vec(msg).map_err(|_| SupervisorError::Protocol("host message serialise"))?;
+    let mut line = serde_json::to_vec(msg).map_err(|_| SupervisorError::Protocol("host message serialise"))?;
     line.push(b'\n');
-    writer
-        .write_all(&line)
-        .await
-        .map_err(|e| SupervisorError::Io(format!("{e}")))?;
-    writer
-        .flush()
-        .await
-        .map_err(|e| SupervisorError::Io(format!("{e}")))?;
+    writer.write_all(&line).await.map_err(|e| SupervisorError::Io(format!("{e}")))?;
+    writer.flush().await.map_err(|e| SupervisorError::Io(format!("{e}")))?;
     Ok(())
 }
 
@@ -555,10 +534,7 @@ mod tests {
             s.record_crash();
         }
         s.prune_window();
-        assert!(matches!(
-            s.budget_exhausted(),
-            Some(SupervisorError::RestartBudgetExhausted { .. })
-        ));
+        assert!(matches!(s.budget_exhausted(), Some(SupervisorError::RestartBudgetExhausted { .. })));
     }
 
     #[test]

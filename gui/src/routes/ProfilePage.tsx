@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router";
 import { Layout } from "../components/Layout";
 import { Badge, Button, Card, Input, SecretInput, useToast } from "../components/ui";
 import * as api from "../lib/api";
@@ -7,6 +8,9 @@ import { extractError } from "../lib/error";
 import { SshSecurityKeyCard } from "../components/SshSecurityKeyCard";
 import { checkPasswordPolicy, describePolicy } from "../lib/password";
 import { usePasswordPolicyStore } from "../stores/passwordPolicyStore";
+import { usePluginSurfacesStore } from "../stores/pluginSurfacesStore";
+import { useCredentialProviders } from "../hooks/useCredentialProviders";
+import { providerAccountsRoute } from "../lib/credentialProviders";
 
 /**
  * My Profile — everything the signed-in operator can change about their own
@@ -402,13 +406,46 @@ export function ProfilePage() {
               </div>
             </Card>
 
-            {/* 4. The operator's own SSH security-key enrolment. Caller-scoped
+            {/* 4. A link to the operator's own accounts in each approved
+                credential provider that registers a management page
+                (features/self-accounts.md §7). A link only. */}
+            <ProviderAccountsCard />
+
+            {/* 5. The operator's own SSH security-key enrolment. Caller-scoped
                 server-side exactly like the cards above. */}
             <SshSecurityKeyCard />
           </>
         )}
       </div>
     </Layout>
+  );
+}
+
+/**
+ * "My accounts" for each approved, active credential provider whose plugin
+ * registers a management page. Renders nothing when there is none — no
+ * provider, no grant, an older server, or a plugin without a surface.
+ */
+function ProviderAccountsCard() {
+  const { providers } = useCredentialProviders(true);
+  const bundle = usePluginSurfacesStore((s) => s.bundle);
+  const links = providers
+    .map((p) => ({ provider: p, route: providerAccountsRoute(bundle, p.name) }))
+    .filter((l): l is { provider: api.CredentialProviderInfo; route: string } => l.route !== null);
+  if (links.length === 0) return null;
+  return (
+    <Card title="Accounts for Connect">
+      <ul className="space-y-1 text-sm">
+        {links.map(({ provider, route }) => (
+          <li key={provider.name} className="min-w-0 truncate">
+            <Link to={route} className="text-[var(--color-primary)] underline">
+              My accounts
+            </Link>{" "}
+            <span className="text-[var(--color-text-muted)]">({provider.display_name})</span>
+          </li>
+        ))}
+      </ul>
+    </Card>
   );
 }
 

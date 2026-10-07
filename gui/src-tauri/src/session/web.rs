@@ -416,7 +416,10 @@ fn opt_str<'a>(v: Option<&'a Value>, what: &str) -> Result<Option<&'a str>, Stri
 
 /// Credential sources a `form` launch can resolve (the server resolves and
 /// checks the details; the host only refuses a kind that cannot apply).
-const FORM_SOURCES: &[&str] = &["secret", "ldap", "default-account"];
+/// `provider` is the operator's own account in a credential-provider plugin,
+/// released by the server for the account picked at connect
+/// (features/self-accounts.md §6); it applies to `form` only.
+const FORM_SOURCES: &[&str] = &["secret", "ldap", "default-account", "provider"];
 
 /// Credential sources an `http-auth` launch can resolve: both need a username
 /// *and* a password, so a `default-account` (username only) cannot apply.
@@ -469,8 +472,8 @@ pub fn parse_web_profile(profile: &Value) -> Result<WebSessionConfig, String> {
         // `form` needs a source the server can release a credential from.
         if !FORM_SOURCES.contains(&source_kind) {
             return Err(format!(
-                "credential source `{source_kind}` cannot sign in a `form` login; use a secret, ldap or \
-                 default-account source"
+                "credential source `{source_kind}` cannot sign in a `form` login; use a secret, ldap, \
+                 default-account or credential-provider source"
             ));
         }
     } else if http_auth {
@@ -888,6 +891,10 @@ pub struct WebSessionState {
     pub data_dir: Option<PathBuf>,
     pub opened_at: Instant,
     pub kind: WebSessionKind,
+    /// The session signs in with an account from a credential provider
+    /// (features/self-accounts.md). Its sign-in cannot be re-run from the
+    /// toolbar: see `web_chrome::relogin_availability`.
+    pub credential_provider: bool,
     /// The form-mode launch, attached once `launch` succeeded. Teardown
     /// finishes it (`result` if still owed, then `close`).
     pub launch: Option<Arc<WebLaunch>>,
@@ -1322,7 +1329,7 @@ mod tests {
 
     #[test]
     fn open_mode_refuses_real_credential_sources_and_rustion() {
-        for kind in ["secret", "ldap", "default-account", "ssh-engine", "pki", "fido2"] {
+        for kind in ["secret", "ldap", "default-account", "provider", "ssh-engine", "pki", "fido2"] {
             let mut p = open_profile(json!({ "start_url": "https://a.example", "login_mode": "open" }));
             p["credential_source"] = json!({ "kind": kind });
             let err = parse_web_profile(&p).unwrap_err();
@@ -1370,7 +1377,7 @@ mod tests {
 
     #[test]
     fn a_form_profile_parses_with_the_servers_recipe_hash() {
-        for kind in ["secret", "ldap", "default-account"] {
+        for kind in ["secret", "ldap", "default-account", "provider"] {
             let cfg = parse_web_profile(&form_profile(json!({ "kind": kind }), Some(form_recipe()))).unwrap();
             let WebLogin::Form(f) = &cfg.login else { panic!("{kind}: not form") };
             assert_eq!(f.recipe_hash, recipe_hash(&form_recipe()).unwrap());
@@ -1432,7 +1439,8 @@ mod tests {
             let cfg = parse_web_profile(&http_auth_profile(json!({ "kind": kind }))).unwrap();
             assert!(matches!(cfg.login, WebLogin::HttpAuth), "{kind}");
         }
-        for kind in ["default-account", "none", "ssh-engine", "pki", "fido2", ""] {
+        // `provider` is form-only, as on the server.
+        for kind in ["default-account", "provider", "none", "ssh-engine", "pki", "fido2", ""] {
             let err = parse_web_profile(&http_auth_profile(json!({ "kind": kind }))).unwrap_err();
             assert!(err.contains("cannot answer"), "{kind}: {err}");
         }

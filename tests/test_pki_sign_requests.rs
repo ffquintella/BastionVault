@@ -25,10 +25,7 @@ async fn write(core: &Core, token: &str, path: &str, body: Map<String, Value>) -
     req.operation = Operation::Write;
     req.client_token = token.to_string();
     req.body = Some(body);
-    let resp = core
-        .handle_request(&mut req)
-        .await
-        .unwrap_or_else(|e| panic!("write {path} failed: {e:?}"));
+    let resp = core.handle_request(&mut req).await.unwrap_or_else(|e| panic!("write {path} failed: {e:?}"));
     resp.and_then(|r| r.data).unwrap_or_default()
 }
 
@@ -50,10 +47,7 @@ async fn read(core: &Core, token: &str, path: &str) -> Option<Map<String, Value>
     let mut req = Request::new(path);
     req.operation = Operation::Read;
     req.client_token = token.to_string();
-    let resp = core
-        .handle_request(&mut req)
-        .await
-        .unwrap_or_else(|e| panic!("read {path} failed: {e:?}"));
+    let resp = core.handle_request(&mut req).await.unwrap_or_else(|e| panic!("read {path} failed: {e:?}"));
     resp.and_then(|r| r.data)
 }
 
@@ -62,10 +56,7 @@ async fn list(core: &Core, token: &str, path: &str) -> Vec<String> {
     let mut req = Request::new(path);
     req.operation = Operation::List;
     req.client_token = token.to_string();
-    let resp = core
-        .handle_request(&mut req)
-        .await
-        .unwrap_or_else(|e| panic!("list {path} failed: {e:?}"));
+    let resp = core.handle_request(&mut req).await.unwrap_or_else(|e| panic!("list {path} failed: {e:?}"));
     resp.and_then(|r| r.data)
         .and_then(|d| d.get("keys").cloned())
         .and_then(|v| v.as_array().cloned())
@@ -78,9 +69,7 @@ async fn delete(core: &Core, token: &str, path: &str) {
     let mut req = Request::new(path);
     req.operation = Operation::Delete;
     req.client_token = token.to_string();
-    core.handle_request(&mut req)
-        .await
-        .unwrap_or_else(|e| panic!("delete {path} failed: {e:?}"));
+    core.handle_request(&mut req).await.unwrap_or_else(|e| panic!("delete {path} failed: {e:?}"));
 }
 
 fn obj(v: Value) -> Map<String, Value> {
@@ -107,8 +96,7 @@ fn rand_suffix() -> String {
 /// A CSR built the way a third party would: our own keypair, our own DN.
 fn build_csr(common_name: &str, sans: &[&str]) -> String {
     let kp = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
-    let mut params =
-        CertificateParams::new(sans.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
+    let mut params = CertificateParams::new(sans.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, common_name);
     params.distinguished_name = dn;
@@ -207,12 +195,8 @@ async fn test_sign_request_import_records_the_parsed_csr() {
     assert_eq!(imported["notes"], json!("TICKET-42"));
     assert_eq!(imported["suggested_role"], json!("open"));
     assert_eq!(imported["spki_sha256"].as_str().unwrap().len(), 64);
-    let sans: Vec<String> = imported["dns_sans"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect();
+    let sans: Vec<String> =
+        imported["dns_sans"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
     assert!(sans.contains(&"leaf-alt.example.com".to_string()), "SANs: {sans:?}");
     // The import response must never carry a private key — the engine
     // never had one for an inbound CSR.
@@ -225,34 +209,17 @@ async fn test_sign_request_import_records_the_parsed_csr() {
     assert!(record["csr"].as_str().unwrap().contains("BEGIN CERTIFICATE REQUEST"));
 
     // A resend of the same key is refused rather than silently parked twice.
-    let err = write_expect_err(
-        &core,
-        &token,
-        "pki/sign-request/import",
-        obj(json!({"csr": csr})),
-    )
-    .await;
+    let err = write_expect_err(&core, &token, "pki/sign-request/import", obj(json!({"csr": csr}))).await;
     assert!(err.contains(&id), "duplicate refusal should name the pending request: {err}");
     // …unless the operator says so explicitly.
-    let dup = write(
-        &core,
-        &token,
-        "pki/sign-request/import",
-        obj(json!({"csr": csr, "allow_duplicate": true})),
-    )
-    .await;
+    let dup = write(&core, &token, "pki/sign-request/import", obj(json!({"csr": csr, "allow_duplicate": true}))).await;
     assert_ne!(dup["request_id"], imported["request_id"]);
 
     // A CSR whose self-signature does not verify is refused outright, not
     // parked for someone to approve later.
     let before = list(&core, &token, "pki/sign-request").await.len();
-    let _ = write_expect_err(
-        &core,
-        &token,
-        "pki/sign-request/import",
-        obj(json!({"csr": csr.replace('A', "B")})),
-    )
-    .await;
+    let _ =
+        write_expect_err(&core, &token, "pki/sign-request/import", obj(json!({"csr": csr.replace('A', "B")}))).await;
     assert_eq!(list(&core, &token, "pki/sign-request").await.len(), before);
 }
 
@@ -269,13 +236,7 @@ async fn test_sign_request_preflight_reports_every_role() {
     let id = imported["request_id"].as_str().unwrap().to_string();
 
     // No mode, no role → verbatim plus every role on the mount.
-    let pre = write(
-        &core,
-        &token,
-        &format!("pki/sign-request/{id}/preflight"),
-        Map::new(),
-    )
-    .await;
+    let pre = write(&core, &token, &format!("pki/sign-request/{id}/preflight"), Map::new()).await;
     let verdicts = pre["verdicts"].as_array().unwrap().clone();
     assert_eq!(verdicts.len(), 3, "verbatim + 2 roles: {verdicts:?}");
 
@@ -336,24 +297,15 @@ async fn test_sign_request_approve_issues_and_is_terminal() {
 
     // A role that refuses the CN refuses the approval too, and the
     // request stays pending — a failed approval is not a decision.
-    let _ = write_expect_err(
-        &core,
-        &token,
-        &format!("pki/sign-request/{id}/approve"),
-        obj(json!({"role": "locked"})),
-    )
-    .await;
+    let _ = write_expect_err(&core, &token, &format!("pki/sign-request/{id}/approve"), obj(json!({"role": "locked"})))
+        .await;
     let still = read(&core, &token, &format!("pki/sign-request/{id}")).await.unwrap();
     assert_eq!(still["status"], json!("pending"));
 
     // Approving under the permissive role issues the cert and records it.
-    let approved = write(
-        &core,
-        &token,
-        &format!("pki/sign-request/{id}/approve"),
-        obj(json!({"role": "open", "ttl": "12h"})),
-    )
-    .await;
+    let approved =
+        write(&core, &token, &format!("pki/sign-request/{id}/approve"), obj(json!({"role": "open", "ttl": "12h"})))
+            .await;
     assert_eq!(approved["status"], json!("signed"));
     assert_eq!(approved["sign_mode"], json!("role"));
     assert_eq!(approved["role"], json!("open"));
@@ -376,13 +328,8 @@ async fn test_sign_request_approve_issues_and_is_terminal() {
     assert!(read(&core, &token, &format!("pki/cert/{serial}")).await.is_some());
 
     // The decision is terminal in both directions.
-    let err = write_expect_err(
-        &core,
-        &token,
-        &format!("pki/sign-request/{id}/approve"),
-        obj(json!({"role": "open"})),
-    )
-    .await;
+    let err =
+        write_expect_err(&core, &token, &format!("pki/sign-request/{id}/approve"), obj(json!({"role": "open"}))).await;
     assert!(err.contains("signed"), "re-approval should be refused: {err}");
     let err = write_expect_err(
         &core,
@@ -415,13 +362,7 @@ async fn test_sign_request_verbatim_bypasses_role_policy() {
     let imported = write(&core, &token, "pki/sign-request/import", obj(json!({"csr": csr}))).await;
     let id = imported["request_id"].as_str().unwrap().to_string();
 
-    let approved = write(
-        &core,
-        &token,
-        &format!("pki/sign-request/{id}/approve-verbatim"),
-        Map::new(),
-    )
-    .await;
+    let approved = write(&core, &token, &format!("pki/sign-request/{id}/approve-verbatim"), Map::new()).await;
     assert_eq!(approved["status"], json!("signed"));
     assert_eq!(approved["sign_mode"], json!("verbatim"));
     assert_eq!(approved["role"], json!(""));
@@ -446,10 +387,7 @@ async fn test_sign_request_verbatim_bypasses_role_policy() {
         obj(json!({"key_ref": "some-key"})),
     )
     .await;
-    assert!(
-        err.contains("role") || err.contains("required"),
-        "role-mode approval must require a role: {err}"
-    );
+    assert!(err.contains("role") || err.contains("required"), "role-mode approval must require a role: {err}");
 }
 
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
@@ -465,17 +403,9 @@ async fn test_sign_request_reject_requires_a_reason_and_is_recorded() {
     let id = imported["request_id"].as_str().unwrap().to_string();
 
     // No reason → refused. A rejection with no reason is not a record.
-    let _ = write_expect_err(
-        &core,
-        &token,
-        &format!("pki/sign-request/{id}/reject"),
-        obj(json!({"reason": "   "})),
-    )
-    .await;
-    assert_eq!(
-        read(&core, &token, &format!("pki/sign-request/{id}")).await.unwrap()["status"],
-        json!("pending")
-    );
+    let _ =
+        write_expect_err(&core, &token, &format!("pki/sign-request/{id}/reject"), obj(json!({"reason": "   "}))).await;
+    assert_eq!(read(&core, &token, &format!("pki/sign-request/{id}")).await.unwrap()["status"], json!("pending"));
 
     let rejected = write(
         &core,
@@ -489,13 +419,8 @@ async fn test_sign_request_reject_requires_a_reason_and_is_recorded() {
     assert!(rejected["decided_at"].as_u64().unwrap() > 0);
 
     // Terminal: a refusal cannot be quietly turned into an approval.
-    let err = write_expect_err(
-        &core,
-        &token,
-        &format!("pki/sign-request/{id}/approve"),
-        obj(json!({"role": "open"})),
-    )
-    .await;
+    let err =
+        write_expect_err(&core, &token, &format!("pki/sign-request/{id}/approve"), obj(json!({"role": "open"}))).await;
     assert!(err.contains("rejected"), "approval after rejection must be refused: {err}");
 
     // The record survives for the audit trail until explicitly deleted.
@@ -513,12 +438,7 @@ async fn test_sign_request_unknown_id_is_a_404_not_a_panic() {
     setup(&core, &token).await;
 
     assert!(read(&core, &token, "pki/sign-request/does-not-exist").await.is_none());
-    let err = write_expect_err(
-        &core,
-        &token,
-        "pki/sign-request/does-not-exist/approve",
-        obj(json!({"role": "open"})),
-    )
-    .await;
+    let err =
+        write_expect_err(&core, &token, "pki/sign-request/does-not-exist/approve", obj(json!({"role": "open"}))).await;
     assert!(err.contains("does-not-exist"), "error should name the id: {err}");
 }

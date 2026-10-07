@@ -734,18 +734,55 @@ impl super::ResourceBackendInner {
     /// operator who already holds `read` on the resource's secret from
     /// bypassing the GUI entirely; see the feature file's "where it stops"
     /// section. For that operator this call is the audit record.
+    ///
+    /// A profile whose credential source is `provider`
+    /// (`features/self-accounts.md` §6) also **releases** here: it requires
+    /// `provider_account_id`, and the response gains `credential` and
+    /// `target` (see `connect_provider::authorize_provider`). Every other
+    /// profile refuses `provider_account_id` and never carries a credential.
     pub async fn handle_connect_authorize(
         &self,
         _backend: &dyn crate::logical::Backend,
         req: &mut Request,
     ) -> Result<Option<crate::logical::Response>, RvError> {
-        let (resource, profile_id, profile) = self.connect_target(req).await?;
-        let profile = profile.ok_or_else(|| {
+        let (resource, profile_id, meta) = self.connect_target_record(req).await?;
+        let profile = meta.as_ref().and_then(|m| find_profile(m, &profile_id)).ok_or_else(|| {
             bv_error_response_status!(
                 404,
                 &format!("profile `{profile_id}` not found on resource `{resource}`")
             )
         })?;
+
+        let account_id = crate::connect_provider::account_id_field(req)?;
+        match crate::kernel_api::provider::profile_provider(&profile) {
+            Ok(Some(provider)) => {
+                let meta = meta.unwrap_or_default();
+                let target = crate::connect_provider::AuthorizeTarget {
+                    resource,
+                    profile_id,
+                    profile: &profile,
+                    meta: &meta,
+                    provider,
+                    account_id,
+                };
+                return self.authorize_provider(req, target).await;
+            }
+            Ok(None) => {}
+            Err(m) => {
+                return Err(crate::kernel_api::provider::refusal(
+                    422,
+                    crate::kernel_api::provider::reason::INVALID_PROFILE,
+                    m,
+                ))
+            }
+        }
+        if account_id.is_some() {
+            return Err(crate::kernel_api::provider::refusal(
+                400,
+                crate::kernel_api::provider::reason::INVALID_REQUEST,
+                "`provider_account_id` applies only to a profile whose credential source is `provider`",
+            ));
+        }
 
         let mut data = Map::new();
         data.insert("resource".into(), Value::String(resource.clone()));

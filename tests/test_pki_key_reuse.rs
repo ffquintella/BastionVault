@@ -40,10 +40,7 @@ async fn write(
     req.operation = Operation::Write;
     req.client_token = token.to_string();
     req.body = Some(body);
-    core.handle_request(&mut req)
-        .await
-        .map(|r| r.and_then(|x| x.data))
-        .map_err(|e| format!("{e:?}"))
+    core.handle_request(&mut req).await.map(|r| r.and_then(|x| x.data)).map_err(|e| format!("{e:?}"))
 }
 
 #[maybe_async::maybe_async]
@@ -86,9 +83,7 @@ fn boot() -> (BastionVault, std::path::PathBuf) {
 
 /// Decode the first PEM block of `pem_text` to DER bytes.
 fn pem_first_der(pem_text: &str) -> Vec<u8> {
-    pem::parse(pem_text.as_bytes())
-        .expect("PEM parse failed")
-        .into_contents()
+    pem::parse(pem_text.as_bytes()).expect("PEM parse failed").into_contents()
 }
 
 /// Pull the SubjectPublicKeyInfo DER out of an X.509 cert PEM.
@@ -115,75 +110,111 @@ async fn test_pki_key_reuse_l2() {
 
     // Generate a root + a base role.
     write(
-        &core, &token, "pki/root/generate/internal",
+        &core,
+        &token,
+        "pki/root/generate/internal",
         json!({"common_name": "L2 Root", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
-    ).await.expect("root generate").expect("root response had no data");
+    )
+    .await
+    .expect("root generate")
+    .expect("root response had no data");
 
     // Three managed keys: A and B are EC, C is RSA (used to verify the
     // algorithm-mismatch gate against an EC role).
     let key_a = write_ok(
-        &core, &token, "pki/keys/generate/internal",
+        &core,
+        &token,
+        "pki/keys/generate/internal",
         json!({"key_type": "ec", "key_bits": 256, "name": "key-a"}).as_object().unwrap().clone(),
-    ).await;
+    )
+    .await;
     let id_a = key_a["key_id"].as_str().unwrap().to_string();
     let key_b = write_ok(
-        &core, &token, "pki/keys/generate/internal",
+        &core,
+        &token,
+        "pki/keys/generate/internal",
         json!({"key_type": "ec", "key_bits": 256, "name": "key-b"}).as_object().unwrap().clone(),
-    ).await;
+    )
+    .await;
     let id_b = key_b["key_id"].as_str().unwrap().to_string();
     let _key_c = write_ok(
-        &core, &token, "pki/keys/generate/internal",
+        &core,
+        &token,
+        "pki/keys/generate/internal",
         json!({"key_type": "rsa", "key_bits": 2048, "name": "key-c-rsa"}).as_object().unwrap().clone(),
-    ).await;
+    )
+    .await;
 
     // ── 1. allow_key_reuse=false rejects key_ref ────────────────────
     write(
-        &core, &token, "pki/roles/closed",
+        &core,
+        &token,
+        "pki/roles/closed",
         json!({
             "ttl": "24h", "max_ttl": "72h", "key_type": "ec",
             "allow_any_name": true, "server_flag": true, "client_flag": true,
-        }).as_object().unwrap().clone(),
-    ).await.expect("write closed role");
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await
+    .expect("write closed role");
     let blocked = write(
-        &core, &token, "pki/issue/closed",
-        json!({"common_name": "leaf.example.com", "key_ref": id_a.clone()})
-            .as_object().unwrap().clone(),
-    ).await;
+        &core,
+        &token,
+        "pki/issue/closed",
+        json!({"common_name": "leaf.example.com", "key_ref": id_a.clone()}).as_object().unwrap().clone(),
+    )
+    .await;
     assert!(blocked.is_err(), "key_ref must be rejected on closed role: {blocked:?}");
 
     // ── 2. allow-list narrows reuse to specific keys ────────────────
     write(
-        &core, &token, "pki/roles/reuse",
+        &core,
+        &token,
+        "pki/roles/reuse",
         json!({
             "ttl": "24h", "max_ttl": "72h", "key_type": "ec",
             "allow_any_name": true, "server_flag": true, "client_flag": true,
             "allow_key_reuse": true,
             "allowed_key_refs": "key-a",
-        }).as_object().unwrap().clone(),
-    ).await.expect("write reuse role");
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await
+    .expect("write reuse role");
     // key-b not on allow-list → reject
     let blocked_b = write(
-        &core, &token, "pki/issue/reuse",
-        json!({"common_name": "leaf.example.com", "key_ref": id_b.clone()})
-            .as_object().unwrap().clone(),
-    ).await;
+        &core,
+        &token,
+        "pki/issue/reuse",
+        json!({"common_name": "leaf.example.com", "key_ref": id_b.clone()}).as_object().unwrap().clone(),
+    )
+    .await;
     assert!(blocked_b.is_err(), "off-allow-list key must be rejected: {blocked_b:?}");
 
     // ── 3. Renewal preserves SPKI ───────────────────────────────────
     let issued1 = write_ok(
-        &core, &token, "pki/issue/reuse",
-        json!({"common_name": "renew.example.com", "key_ref": "key-a"})
-            .as_object().unwrap().clone(),
-    ).await;
+        &core,
+        &token,
+        "pki/issue/reuse",
+        json!({"common_name": "renew.example.com", "key_ref": "key-a"}).as_object().unwrap().clone(),
+    )
+    .await;
     let cert1_pem = issued1["certificate"].as_str().unwrap().to_string();
     let serial1 = issued1["serial_number"].as_str().unwrap().to_string();
     assert_eq!(issued1["key_id"].as_str().unwrap(), id_a);
 
     let issued2 = write_ok(
-        &core, &token, "pki/issue/reuse",
-        json!({"common_name": "renew.example.com", "key_ref": id_a.clone()})
-            .as_object().unwrap().clone(),
-    ).await;
+        &core,
+        &token,
+        "pki/issue/reuse",
+        json!({"common_name": "renew.example.com", "key_ref": id_a.clone()}).as_object().unwrap().clone(),
+    )
+    .await;
     let cert2_pem = issued2["certificate"].as_str().unwrap().to_string();
     let serial2 = issued2["serial_number"].as_str().unwrap().to_string();
 
@@ -206,8 +237,7 @@ async fn test_pki_key_reuse_l2() {
     // Build a fresh local CSR (its SPKI does NOT match key-a, since the
     // engine never returned key-a's private key).
     let kp = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
-    let mut params =
-        CertificateParams::new(vec!["mismatch.example.com".to_string()]).unwrap();
+    let mut params = CertificateParams::new(vec!["mismatch.example.com".to_string()]).unwrap();
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, "mismatch.example.com");
     params.distinguished_name = dn;
@@ -215,24 +245,32 @@ async fn test_pki_key_reuse_l2() {
     let csr_pem = csr.pem().unwrap();
 
     let mismatch = write(
-        &core, &token, "pki/sign/reuse",
+        &core,
+        &token,
+        "pki/sign/reuse",
         json!({"csr": csr_pem, "key_ref": "key-a"}).as_object().unwrap().clone(),
-    ).await;
+    )
+    .await;
     assert!(mismatch.is_err(), "CSR/key SPKI mismatch must be rejected: {mismatch:?}");
 
     // ── 6. Algorithm-class mismatch is rejected ─────────────────────
     let alg_mismatch = write(
-        &core, &token, "pki/issue/reuse",
-        json!({"common_name": "leaf.example.com", "key_ref": "key-c-rsa"})
-            .as_object().unwrap().clone(),
-    ).await;
+        &core,
+        &token,
+        "pki/issue/reuse",
+        json!({"common_name": "leaf.example.com", "key_ref": "key-c-rsa"}).as_object().unwrap().clone(),
+    )
+    .await;
     assert!(alg_mismatch.is_err(), "RSA key on EC role must be rejected: {alg_mismatch:?}");
 
     // ── 7. Without key_ref, legacy fresh-key path still works ───────
     let fresh = write_ok(
-        &core, &token, "pki/issue/reuse",
+        &core,
+        &token,
+        "pki/issue/reuse",
         json!({"common_name": "fresh.example.com"}).as_object().unwrap().clone(),
-    ).await;
+    )
+    .await;
     assert!(fresh.get("key_id").is_none(), "fresh issue must not echo key_id");
     assert!(fresh["private_key"].as_str().unwrap().contains("BEGIN PRIVATE KEY"));
 }

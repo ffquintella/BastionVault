@@ -22,8 +22,7 @@ mod integration_tests {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_file_resource_create_read_roundtrip() {
-        let (_bv, core, root_token) =
-            new_unseal_test_bastion_vault("test_file_resource_create_read_roundtrip").await;
+        let (_bv, core, root_token) = new_unseal_test_bastion_vault("test_file_resource_create_read_roundtrip").await;
 
         let content = b"-----BEGIN CERTIFICATE-----\nMIIDtest\n-----END CERTIFICATE-----\n";
         let b64 = base64::engine::general_purpose::STANDARD.encode(content);
@@ -42,11 +41,7 @@ mod integration_tests {
             .expect("create must succeed")
             .expect("create returns data envelope");
         let data = resp.data.expect("data present");
-        let id = data
-            .get("id")
-            .and_then(|v| v.as_str())
-            .expect("id returned")
-            .to_string();
+        let id = data.get("id").and_then(|v| v.as_str()).expect("id returned").to_string();
         assert!(!id.is_empty());
         assert_eq!(data.get("size_bytes").and_then(|v| v.as_u64()), Some(content.len() as u64));
         let sha_returned = data.get("sha256").and_then(|v| v.as_str()).unwrap_or("");
@@ -59,10 +54,7 @@ mod integration_tests {
         let meta_resp = core.handle_request(&mut req).await.unwrap().unwrap();
         let meta = meta_resp.data.expect("meta data");
         assert_eq!(meta.get("name").and_then(|v| v.as_str()), Some("gateway-tls.pem"));
-        assert_eq!(
-            meta.get("mime_type").and_then(|v| v.as_str()),
-            Some("application/x-pem-file")
-        );
+        assert_eq!(meta.get("mime_type").and_then(|v| v.as_str()), Some("application/x-pem-file"));
         assert_eq!(
             meta.get("sha256").and_then(|v| v.as_str()),
             Some(sha_returned),
@@ -76,12 +68,7 @@ mod integration_tests {
         let content_resp = core.handle_request(&mut req).await.unwrap().unwrap();
         let cdata = content_resp.data.expect("content data");
         let decoded = base64::engine::general_purpose::STANDARD
-            .decode(
-                cdata
-                    .get("content_base64")
-                    .and_then(|v| v.as_str())
-                    .unwrap(),
-            )
+            .decode(cdata.get("content_base64").and_then(|v| v.as_str()).unwrap())
             .unwrap();
         assert_eq!(decoded, content, "round-tripped bytes must match");
     }
@@ -89,8 +76,7 @@ mod integration_tests {
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_file_repoint_resource_moves_only_matching_files() {
         let (_bv, core, root_token) =
-            new_unseal_test_bastion_vault("test_file_repoint_resource_moves_only_matching_files")
-                .await;
+            new_unseal_test_bastion_vault("test_file_repoint_resource_moves_only_matching_files").await;
 
         // Create two files on `old01` and one on an unrelated resource.
         let mk = |name: &str, resource: &str, content: &[u8]| {
@@ -108,12 +94,9 @@ mod integration_tests {
             .unwrap()
             .unwrap();
         let a_id = a.data.unwrap()["id"].as_str().unwrap().to_string();
-        let _ = test_write_api(&core, &root_token, "files/files", true, mk("b.pem", "old01", b"b"))
-            .await;
-        let c = test_write_api(&core, &root_token, "files/files", true, mk("c.pem", "other", b"c"))
-            .await
-            .unwrap()
-            .unwrap();
+        let _ = test_write_api(&core, &root_token, "files/files", true, mk("b.pem", "old01", b"b")).await;
+        let c =
+            test_write_api(&core, &root_token, "files/files", true, mk("c.pem", "other", b"c")).await.unwrap().unwrap();
         let c_id = c.data.unwrap()["id"].as_str().unwrap().to_string();
 
         // Re-point old01 -> new01.
@@ -122,9 +105,7 @@ mod integration_tests {
             &root_token,
             "files/files/repoint-resource",
             true,
-            json!({ "old_resource": "old01", "new_resource": "new01" })
-                .as_object()
-                .cloned(),
+            json!({ "old_resource": "old01", "new_resource": "new01" }).as_object().cloned(),
         )
         .await
         .unwrap()
@@ -160,16 +141,13 @@ mod integration_tests {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_file_resource_oversized_rejected_before_store() {
-        let (_bv, core, root_token) =
-            new_unseal_test_bastion_vault("test_file_resource_oversized_rejected").await;
+        let (_bv, core, root_token) = new_unseal_test_bastion_vault("test_file_resource_oversized_rejected").await;
 
         // One byte over the cap. base64 encoding inflates ~4/3; this
         // is still a valid but oversized payload.
         let oversized = vec![0u8; crate::modules::files::MAX_FILE_BYTES + 1];
         let b64 = base64::engine::general_purpose::STANDARD.encode(&oversized);
-        let body = json!({ "name": "huge.bin", "content_base64": b64 })
-            .as_object()
-            .cloned();
+        let body = json!({ "name": "huge.bin", "content_base64": b64 }).as_object().cloned();
 
         // test_write_api with `is_ok = false` asserts the call errors.
         let _ = test_write_api(&core, &root_token, "files/files", false, body).await;
@@ -177,8 +155,7 @@ mod integration_tests {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_file_resource_update_replaces_content() {
-        let (_bv, core, root_token) =
-            new_unseal_test_bastion_vault("test_file_resource_update_replaces_content").await;
+        let (_bv, core, root_token) = new_unseal_test_bastion_vault("test_file_resource_update_replaces_content").await;
 
         let v1 = b"version-1".to_vec();
         let v2 = b"VERSION-2-DIFFERENT".to_vec();
@@ -190,24 +167,13 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        let resp = test_write_api(&core, &root_token, "files/files", true, body)
-            .await
-            .unwrap()
-            .unwrap();
-        let id = resp
-            .data
-            .unwrap()
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
+        let resp = test_write_api(&core, &root_token, "files/files", true, body).await.unwrap().unwrap();
+        let id = resp.data.unwrap().get("id").and_then(|v| v.as_str()).unwrap().to_string();
 
         // PUT new content.
         let put_body = json!({ "content_base64": engine.encode(&v2) }).as_object().cloned();
-        let put = test_write_api(&core, &root_token, &format!("files/files/{id}"), true, put_body)
-            .await
-            .unwrap()
-            .unwrap();
+        let put =
+            test_write_api(&core, &root_token, &format!("files/files/{id}"), true, put_body).await.unwrap().unwrap();
         let put_data = put.data.unwrap();
         let new_sha = put_data.get("sha256").and_then(|v| v.as_str()).unwrap();
         assert_ne!(new_sha, crate::modules::files::sha256_hex(&v1), "sha must change on content replace");
@@ -218,16 +184,8 @@ mod integration_tests {
         req.operation = crate::logical::Operation::Read;
         req.client_token = root_token.clone();
         let content_resp = core.handle_request(&mut req).await.unwrap().unwrap();
-        let decoded = engine
-            .decode(
-                content_resp
-                    .data
-                    .unwrap()
-                    .get("content_base64")
-                    .and_then(|v| v.as_str())
-                    .unwrap(),
-            )
-            .unwrap();
+        let decoded =
+            engine.decode(content_resp.data.unwrap().get("content_base64").and_then(|v| v.as_str()).unwrap()).unwrap();
         assert_eq!(decoded, v2);
 
         // History must have two entries (create + update with
@@ -236,23 +194,13 @@ mod integration_tests {
         hist_req.operation = crate::logical::Operation::Read;
         hist_req.client_token = root_token.clone();
         let hist_resp = core.handle_request(&mut hist_req).await.unwrap().unwrap();
-        let entries = hist_resp
-            .data
-            .unwrap()
-            .get("entries")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let entries = hist_resp.data.unwrap().get("entries").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         assert!(entries.len() >= 2, "create + update must produce ≥2 history entries");
         let update_entry = entries
             .iter()
             .find(|e| e.get("op").and_then(|v| v.as_str()) == Some("update"))
             .expect("an update entry exists");
-        let changed = update_entry
-            .get("changed_fields")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let changed = update_entry.get("changed_fields").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         assert!(
             changed.iter().any(|v| v.as_str() == Some("content")),
             "content change must be recorded in changed_fields, got: {changed:?}"
@@ -261,8 +209,7 @@ mod integration_tests {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_file_resource_delete_then_read_is_gone() {
-        let (_bv, core, root_token) =
-            new_unseal_test_bastion_vault("test_file_resource_delete_gone").await;
+        let (_bv, core, root_token) = new_unseal_test_bastion_vault("test_file_resource_delete_gone").await;
         let engine = base64::engine::general_purpose::STANDARD;
 
         let body = json!({
@@ -271,17 +218,8 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        let resp = test_write_api(&core, &root_token, "files/files", true, body)
-            .await
-            .unwrap()
-            .unwrap();
-        let id = resp
-            .data
-            .unwrap()
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
+        let resp = test_write_api(&core, &root_token, "files/files", true, body).await.unwrap().unwrap();
+        let id = resp.data.unwrap().get("id").and_then(|v| v.as_str()).unwrap().to_string();
 
         // DELETE
         let mut del = crate::logical::Request::new(format!("files/files/{id}"));
@@ -308,8 +246,7 @@ mod integration_tests {
     async fn test_file_create_stamps_root_owner() {
         // Phase 2: a root-token write stamps `root` as the file's
         // owner. Mirrors `test_root_token_resource_write_captures_owner`.
-        let (_bv, core, root_token) =
-            new_unseal_test_bastion_vault("test_file_create_stamps_root_owner").await;
+        let (_bv, core, root_token) = new_unseal_test_bastion_vault("test_file_create_stamps_root_owner").await;
         let engine = base64::engine::general_purpose::STANDARD;
 
         let body = json!({
@@ -318,22 +255,11 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        let resp = crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body)
-            .await
-            .unwrap()
-            .unwrap();
-        let id = resp
-            .data
-            .unwrap()
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
+        let resp =
+            crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body).await.unwrap().unwrap();
+        let id = resp.data.unwrap().get("id").and_then(|v| v.as_str()).unwrap().to_string();
 
-        let identity = core
-            .module_manager()
-            .get_module::<IdentityModule>("identity")
-            .expect("identity module");
+        let identity = core.module_manager().get_module::<IdentityModule>("identity").expect("identity module");
         let owner_store = identity.owner_store().expect("owner store");
         let rec = owner_store
             .get_file_owner(&id)
@@ -345,8 +271,7 @@ mod integration_tests {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_file_delete_forgets_owner_and_cascades_shares() {
-        let (_bv, core, root_token) =
-            new_unseal_test_bastion_vault("test_file_delete_forgets_owner").await;
+        let (_bv, core, root_token) = new_unseal_test_bastion_vault("test_file_delete_forgets_owner").await;
         let engine = base64::engine::general_purpose::STANDARD;
 
         // Create a file.
@@ -356,22 +281,11 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        let resp = crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body)
-            .await
-            .unwrap()
-            .unwrap();
-        let id = resp
-            .data
-            .unwrap()
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
+        let resp =
+            crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body).await.unwrap().unwrap();
+        let id = resp.data.unwrap().get("id").and_then(|v| v.as_str()).unwrap().to_string();
 
-        let identity = core
-            .module_manager()
-            .get_module::<IdentityModule>("identity")
-            .expect("identity module");
+        let identity = core.module_manager().get_module::<IdentityModule>("identity").expect("identity module");
         let owner_store = identity.owner_store().expect("owner store");
         assert!(owner_store.get_file_owner(&id).await.unwrap().is_some());
 
@@ -396,29 +310,19 @@ mod integration_tests {
         core.handle_request(&mut del).await.unwrap();
 
         // Owner record gone.
-        assert!(
-            owner_store.get_file_owner(&id).await.unwrap().is_none(),
-            "delete must forget owner"
-        );
+        assert!(owner_store.get_file_owner(&id).await.unwrap().is_none(), "delete must forget owner");
 
         // Share cascade-revoked.
         let remaining = share_store
-            .list_shares_for_target(
-                crate::modules::identity::share_store::ShareTargetKind::File,
-                &id,
-            )
+            .list_shares_for_target(crate::modules::identity::share_store::ShareTargetKind::File, &id)
             .await
             .unwrap();
-        assert!(
-            remaining.is_empty(),
-            "share_store must drop shares targeting the deleted file, got: {remaining:?}"
-        );
+        assert!(remaining.is_empty(), "share_store must drop shares targeting the deleted file, got: {remaining:?}");
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_backfill_stamps_unowned_files() {
-        let (_bv, core, root_token) =
-            new_unseal_test_bastion_vault("test_backfill_files").await;
+        let (_bv, core, root_token) = new_unseal_test_bastion_vault("test_backfill_files").await;
 
         let body = json!({
             "entity_id": "root",
@@ -449,15 +353,9 @@ mod integration_tests {
         assert_eq!(invalid, vec!["has/slash/invalid".to_string()]);
 
         // The stamped records should now exist.
-        let identity = core
-            .module_manager()
-            .get_module::<IdentityModule>("identity")
-            .expect("identity module");
+        let identity = core.module_manager().get_module::<IdentityModule>("identity").expect("identity module");
         let owner_store = identity.owner_store().expect("owner store");
-        for id in [
-            "018f3b2a-abcd-1234-5678-000000000001",
-            "018f3b2a-abcd-1234-5678-000000000002",
-        ] {
+        for id in ["018f3b2a-abcd-1234-5678-000000000001", "018f3b2a-abcd-1234-5678-000000000002"] {
             let rec = owner_store.get_file_owner(id).await.unwrap();
             assert!(rec.is_some(), "{id} must be stamped");
             assert_eq!(rec.unwrap().entity_id, "root");
@@ -466,8 +364,7 @@ mod integration_tests {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_file_owner_transfer_admin_endpoint() {
-        let (_bv, core, root_token) =
-            new_unseal_test_bastion_vault("test_file_owner_transfer").await;
+        let (_bv, core, root_token) = new_unseal_test_bastion_vault("test_file_owner_transfer").await;
         let engine = base64::engine::general_purpose::STANDARD;
 
         let body = json!({
@@ -476,29 +373,15 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        let resp = crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body)
-            .await
-            .unwrap()
-            .unwrap();
-        let id = resp
-            .data
-            .unwrap()
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
+        let resp =
+            crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body).await.unwrap().unwrap();
+        let id = resp.data.unwrap().get("id").and_then(|v| v.as_str()).unwrap().to_string();
 
-        let identity = core
-            .module_manager()
-            .get_module::<IdentityModule>("identity")
-            .expect("identity module");
+        let identity = core.module_manager().get_module::<IdentityModule>("identity").expect("identity module");
         let owner_store = identity.owner_store().expect("owner store");
 
         // Pre: root is the owner.
-        assert_eq!(
-            owner_store.get_file_owner(&id).await.unwrap().unwrap().entity_id,
-            "root"
-        );
+        assert_eq!(owner_store.get_file_owner(&id).await.unwrap().unwrap().entity_id, "root");
 
         // Transfer to a different entity id.
         let xfer = json!({
@@ -507,15 +390,8 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        let _ = crate::test_utils::test_write_api(
-            &core,
-            &root_token,
-            "sys/file-owner/transfer",
-            true,
-            xfer,
-        )
-        .await
-        .unwrap();
+        let _ =
+            crate::test_utils::test_write_api(&core, &root_token, "sys/file-owner/transfer", true, xfer).await.unwrap();
 
         // Post: new owner recorded.
         assert_eq!(
@@ -529,8 +405,7 @@ mod integration_tests {
     async fn test_sync_target_local_fs_push_writes_file() {
         use std::fs;
 
-        let (_bv, core, root_token) =
-            new_unseal_test_bastion_vault("test_sync_local_fs_push").await;
+        let (_bv, core, root_token) = new_unseal_test_bastion_vault("test_sync_local_fs_push").await;
         let engine = base64::engine::general_purpose::STANDARD;
 
         // 1. Create a file.
@@ -541,17 +416,9 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        let resp = crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body)
-            .await
-            .unwrap()
-            .unwrap();
-        let id = resp
-            .data
-            .unwrap()
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
+        let resp =
+            crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body).await.unwrap().unwrap();
+        let id = resp.data.unwrap().get("id").and_then(|v| v.as_str()).unwrap().to_string();
 
         // 2. Configure a local-fs sync target.
         let tmp = std::env::temp_dir().join(format!("bvault-sync-{id}/key.pem"));
@@ -564,15 +431,10 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        let _ = crate::test_utils::test_write_api(
-            &core,
-            &root_token,
-            &format!("files/files/{id}/sync/primary"),
-            true,
-            cfg,
-        )
-        .await
-        .unwrap();
+        let _ =
+            crate::test_utils::test_write_api(&core, &root_token, &format!("files/files/{id}/sync/primary"), true, cfg)
+                .await
+                .unwrap();
 
         // 3. Push.
         let _ = crate::test_utils::test_write_api(
@@ -594,20 +456,11 @@ mod integration_tests {
         list_req.operation = crate::logical::Operation::Read;
         list_req.client_token = root_token.clone();
         let list_resp = core.handle_request(&mut list_req).await.unwrap().unwrap();
-        let targets = list_resp
-            .data
-            .unwrap()
-            .get("targets")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let targets = list_resp.data.unwrap().get("targets").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         assert_eq!(targets.len(), 1);
         let state = targets[0].get("state").expect("state node present");
         let last_ok = state.get("last_success_at").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(
-            !last_ok.is_empty(),
-            "last_success_at must be populated: {state:?}"
-        );
+        assert!(!last_ok.is_empty(), "last_success_at must be populated: {state:?}");
         assert_eq!(
             state.get("last_success_sha256").and_then(|v| v.as_str()),
             Some(crate::modules::files::sha256_hex(content).as_str())
@@ -623,8 +476,7 @@ mod integration_tests {
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_sync_on_write_inline_push() {
         use std::fs;
-        let (_bv, core, root_token) =
-            new_unseal_test_bastion_vault("test_sync_on_write_inline").await;
+        let (_bv, core, root_token) = new_unseal_test_bastion_vault("test_sync_on_write_inline").await;
         let engine = base64::engine::general_purpose::STANDARD;
 
         // Create the file.
@@ -635,17 +487,9 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        let resp = crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body)
-            .await
-            .unwrap()
-            .unwrap();
-        let id = resp
-            .data
-            .unwrap()
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
+        let resp =
+            crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body).await.unwrap().unwrap();
+        let id = resp.data.unwrap().get("id").and_then(|v| v.as_str()).unwrap().to_string();
 
         // Configure a local-fs sync target with sync_on_write = true.
         let tmp = std::env::temp_dir().join(format!("bvault-sow-{id}/config.yaml"));
@@ -657,15 +501,10 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        let _ = crate::test_utils::test_write_api(
-            &core,
-            &root_token,
-            &format!("files/files/{id}/sync/primary"),
-            true,
-            cfg,
-        )
-        .await
-        .unwrap();
+        let _ =
+            crate::test_utils::test_write_api(&core, &root_token, &format!("files/files/{id}/sync/primary"), true, cfg)
+                .await
+                .unwrap();
 
         // Update the file content. The write handler should fire
         // an inline push to the target.
@@ -676,22 +515,12 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        let resp = crate::test_utils::test_write_api(
-            &core,
-            &root_token,
-            &format!("files/files/{id}"),
-            true,
-            body,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let resp = crate::test_utils::test_write_api(&core, &root_token, &format!("files/files/{id}"), true, body)
+            .await
+            .unwrap()
+            .unwrap();
         let data = resp.data.unwrap();
-        let pushes = data
-            .get("sync_on_write")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let pushes = data.get("sync_on_write").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         assert_eq!(pushes.len(), 1, "exactly one target should have fired");
         assert_eq!(pushes[0].get("name").and_then(|v| v.as_str()), Some("primary"));
         assert_eq!(pushes[0].get("ok").and_then(|v| v.as_bool()), Some(true));
@@ -711,8 +540,7 @@ mod integration_tests {
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_manual_sync_tick_endpoint() {
         use std::fs;
-        let (_bv, core, root_token) =
-            new_unseal_test_bastion_vault("test_manual_sync_tick").await;
+        let (_bv, core, root_token) = new_unseal_test_bastion_vault("test_manual_sync_tick").await;
         let engine = base64::engine::general_purpose::STANDARD;
 
         let body = json!({
@@ -721,17 +549,9 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        let resp = crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body)
-            .await
-            .unwrap()
-            .unwrap();
-        let id = resp
-            .data
-            .unwrap()
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
+        let resp =
+            crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body).await.unwrap().unwrap();
+        let id = resp.data.unwrap().get("id").and_then(|v| v.as_str()).unwrap().to_string();
 
         let tmp = std::env::temp_dir().join(format!("bvault-tick-{id}/deploy.cfg"));
         let _ = fs::remove_file(&tmp);
@@ -772,16 +592,10 @@ mod integration_tests {
         .unwrap();
 
         // Trigger the tick.
-        let resp = crate::test_utils::test_write_api(
-            &core,
-            &root_token,
-            "files/sync-tick",
-            true,
-            None,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let resp = crate::test_utils::test_write_api(&core, &root_token, "files/sync-tick", true, None)
+            .await
+            .unwrap()
+            .unwrap();
         let data = resp.data.unwrap();
         let attempted = data.get("attempted").and_then(|v| v.as_u64()).unwrap_or(0);
         let succeeded = data.get("succeeded").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -809,8 +623,7 @@ mod integration_tests {
     #[cfg(all(feature = "files_smb", feature = "files_ssh_sync"))]
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_sync_target_unsupported_kind_rejected_at_save() {
-        let (_bv, core, root_token) =
-            new_unseal_test_bastion_vault("test_sync_unsupported_kind").await;
+        let (_bv, core, root_token) = new_unseal_test_bastion_vault("test_sync_unsupported_kind").await;
         let engine = base64::engine::general_purpose::STANDARD;
 
         let body = json!({
@@ -819,17 +632,9 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        let resp = crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body)
-            .await
-            .unwrap()
-            .unwrap();
-        let id = resp
-            .data
-            .unwrap()
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
+        let resp =
+            crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body).await.unwrap().unwrap();
+        let id = resp.data.unwrap().get("id").and_then(|v| v.as_str()).unwrap().to_string();
 
         let cfg = json!({
             "kind": "sftp",
@@ -920,8 +725,7 @@ mod integration_tests {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_file_versioning_snapshots_on_update() {
-        let (_bv, core, root_token) =
-            new_unseal_test_bastion_vault("test_file_versioning_snapshots").await;
+        let (_bv, core, root_token) = new_unseal_test_bastion_vault("test_file_versioning_snapshots").await;
         let engine = base64::engine::general_purpose::STANDARD;
 
         let v1 = b"content-v1".to_vec();
@@ -934,33 +738,20 @@ mod integration_tests {
             &root_token,
             "files/files",
             true,
-            json!({ "name": "versioned.txt", "content_base64": engine.encode(&v1) })
-                .as_object()
-                .cloned(),
+            json!({ "name": "versioned.txt", "content_base64": engine.encode(&v1) }).as_object().cloned(),
         )
         .await
         .unwrap()
         .unwrap();
-        let id = resp
-            .data
-            .unwrap()
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
+        let id = resp.data.unwrap().get("id").and_then(|v| v.as_str()).unwrap().to_string();
 
         // No versions yet — only one content write so far.
         let mut req = crate::logical::Request::new(format!("files/files/{id}/versions"));
         req.operation = crate::logical::Operation::Read;
         req.client_token = root_token.clone();
         let r = core.handle_request(&mut req).await.unwrap().unwrap();
-        let entries: Vec<serde_json::Value> = r
-            .data
-            .unwrap()
-            .get("versions")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let entries: Vec<serde_json::Value> =
+            r.data.unwrap().get("versions").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         assert!(entries.is_empty(), "no versions before first update");
 
         // First update: snapshots v1 as version 1, current = 2.
@@ -969,9 +760,7 @@ mod integration_tests {
             &root_token,
             &format!("files/files/{id}"),
             true,
-            json!({ "content_base64": engine.encode(&v2) })
-                .as_object()
-                .cloned(),
+            json!({ "content_base64": engine.encode(&v2) }).as_object().cloned(),
         )
         .await
         .unwrap();
@@ -982,9 +771,7 @@ mod integration_tests {
             &root_token,
             &format!("files/files/{id}"),
             true,
-            json!({ "content_base64": engine.encode(&v3) })
-                .as_object()
-                .cloned(),
+            json!({ "content_base64": engine.encode(&v3) }).as_object().cloned(),
         )
         .await
         .unwrap();
@@ -996,11 +783,8 @@ mod integration_tests {
         let r = core.handle_request(&mut req).await.unwrap().unwrap();
         let data = r.data.unwrap();
         let current_version = data.get("current_version").and_then(|v| v.as_u64()).unwrap();
-        let versions: Vec<serde_json::Value> = data
-            .get("versions")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let versions: Vec<serde_json::Value> =
+            data.get("versions").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         assert_eq!(current_version, 3);
         assert_eq!(versions.len(), 2);
         let v1_hash = crate::modules::files::sha256_hex(&v1);
@@ -1015,13 +799,7 @@ mod integration_tests {
         req.operation = crate::logical::Operation::Read;
         req.client_token = root_token.clone();
         let r = core.handle_request(&mut req).await.unwrap().unwrap();
-        let b64 = r
-            .data
-            .unwrap()
-            .get("content_base64")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
+        let b64 = r.data.unwrap().get("content_base64").and_then(|v| v.as_str()).unwrap().to_string();
         let decoded = engine.decode(&b64).unwrap();
         assert_eq!(decoded, v1);
 
@@ -1038,21 +816,14 @@ mod integration_tests {
         req.operation = crate::logical::Operation::Read;
         req.client_token = root_token.clone();
         let r = core.handle_request(&mut req).await.unwrap().unwrap();
-        let b64 = r
-            .data
-            .unwrap()
-            .get("content_base64")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
+        let b64 = r.data.unwrap().get("content_base64").and_then(|v| v.as_str()).unwrap().to_string();
         let decoded = engine.decode(&b64).unwrap();
         assert_eq!(decoded, v1, "restore must make v1 the live content");
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_file_versioning_retention_prunes_oldest() {
-        let (_bv, core, root_token) =
-            new_unseal_test_bastion_vault("test_file_versioning_retention").await;
+        let (_bv, core, root_token) = new_unseal_test_bastion_vault("test_file_versioning_retention").await;
         let engine = base64::engine::general_purpose::STANDARD;
 
         // Create.
@@ -1061,20 +832,12 @@ mod integration_tests {
             &root_token,
             "files/files",
             true,
-            json!({ "name": "churn.txt", "content_base64": engine.encode(b"v1") })
-                .as_object()
-                .cloned(),
+            json!({ "name": "churn.txt", "content_base64": engine.encode(b"v1") }).as_object().cloned(),
         )
         .await
         .unwrap()
         .unwrap();
-        let id = resp
-            .data
-            .unwrap()
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
+        let id = resp.data.unwrap().get("id").and_then(|v| v.as_str()).unwrap().to_string();
 
         // Seven updates → should retain only the last DEFAULT_VERSION_RETENTION (5).
         for i in 2..=8 {
@@ -1083,9 +846,7 @@ mod integration_tests {
                 &root_token,
                 &format!("files/files/{id}"),
                 true,
-                json!({ "content_base64": engine.encode(format!("v{i}").as_bytes()) })
-                    .as_object()
-                    .cloned(),
+                json!({ "content_base64": engine.encode(format!("v{i}").as_bytes()) }).as_object().cloned(),
             )
             .await
             .unwrap();
@@ -1096,11 +857,8 @@ mod integration_tests {
         req.client_token = root_token.clone();
         let r = core.handle_request(&mut req).await.unwrap().unwrap();
         let data = r.data.unwrap();
-        let versions: Vec<serde_json::Value> = data
-            .get("versions")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let versions: Vec<serde_json::Value> =
+            data.get("versions").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         assert_eq!(
             versions.len(),
             crate::modules::files::DEFAULT_VERSION_RETENTION,
@@ -1110,12 +868,7 @@ mod integration_tests {
         // versions[0] is version 4 (after pruning 1, 2, 3).
         // Total content writes = 1 create + 7 updates = 8 ⇒ current_version = 8, first retained = 4.
         let first = versions[0].get("version").and_then(|v| v.as_u64()).unwrap();
-        let last = versions
-            .last()
-            .unwrap()
-            .get("version")
-            .and_then(|v| v.as_u64())
-            .unwrap();
+        let last = versions.last().unwrap().get("version").and_then(|v| v.as_u64()).unwrap();
         assert_eq!(first, 3, "after 8 writes with retention=5, oldest retained is v3");
         assert_eq!(last, 7);
     }
@@ -1123,8 +876,7 @@ mod integration_tests {
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_file_delete_sweeps_versions() {
         use crate::logical::{Operation, Request as Lreq};
-        let (_bv, core, root_token) =
-            new_unseal_test_bastion_vault("test_file_delete_sweeps_versions").await;
+        let (_bv, core, root_token) = new_unseal_test_bastion_vault("test_file_delete_sweeps_versions").await;
         let engine = base64::engine::general_purpose::STANDARD;
 
         let resp = crate::test_utils::test_write_api(
@@ -1132,29 +884,19 @@ mod integration_tests {
             &root_token,
             "files/files",
             true,
-            json!({ "name": "x", "content_base64": engine.encode(b"a") })
-                .as_object()
-                .cloned(),
+            json!({ "name": "x", "content_base64": engine.encode(b"a") }).as_object().cloned(),
         )
         .await
         .unwrap()
         .unwrap();
-        let id = resp
-            .data
-            .unwrap()
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
+        let id = resp.data.unwrap().get("id").and_then(|v| v.as_str()).unwrap().to_string();
         // One update → one snapshot exists.
         let _ = crate::test_utils::test_write_api(
             &core,
             &root_token,
             &format!("files/files/{id}"),
             true,
-            json!({ "content_base64": engine.encode(b"b") })
-                .as_object()
-                .cloned(),
+            json!({ "content_base64": engine.encode(b"b") }).as_object().cloned(),
         )
         .await
         .unwrap();
@@ -1172,17 +914,12 @@ mod integration_tests {
         let r = core.handle_request(&mut req).await.unwrap().unwrap();
         let data = r.data.unwrap();
         assert_eq!(data.get("current_version").and_then(|v| v.as_u64()), Some(0));
-        assert!(data
-            .get("versions")
-            .and_then(|v| v.as_array())
-            .unwrap()
-            .is_empty());
+        assert!(data.get("versions").and_then(|v| v.as_array()).unwrap().is_empty());
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_identity_owner_file_read_endpoint() {
-        let (_bv, core, root_token) =
-            new_unseal_test_bastion_vault("test_identity_owner_file_read").await;
+        let (_bv, core, root_token) = new_unseal_test_bastion_vault("test_identity_owner_file_read").await;
         let engine = base64::engine::general_purpose::STANDARD;
 
         let body = json!({
@@ -1191,24 +928,15 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        let resp = crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body)
+        let resp =
+            crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body).await.unwrap().unwrap();
+        let id = resp.data.unwrap().get("id").and_then(|v| v.as_str()).unwrap().to_string();
+
+        // `identity/owner/file/<id>` returns { target_kind, target, owner }.
+        let resp = crate::test_utils::test_read_api(&core, &root_token, &format!("identity/owner/file/{id}"), true)
             .await
             .unwrap()
             .unwrap();
-        let id = resp
-            .data
-            .unwrap()
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
-
-        // `identity/owner/file/<id>` returns { target_kind, target, owner }.
-        let resp =
-            crate::test_utils::test_read_api(&core, &root_token, &format!("identity/owner/file/{id}"), true)
-                .await
-                .unwrap()
-                .unwrap();
         let data = resp.data.expect("owner envelope");
         assert_eq!(data.get("target_kind").and_then(|v| v.as_str()), Some("file"));
         assert_eq!(data.get("target").and_then(|v| v.as_str()), Some(id.as_str()));

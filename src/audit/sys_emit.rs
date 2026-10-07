@@ -121,10 +121,7 @@ pub async fn emit_sys_audit_with_response(
     req.auth = Some(auth.clone());
     req.name = auth.display_name;
 
-    let resp = response_data.map(|d| crate::logical::Response {
-        data: Some(d),
-        ..Default::default()
-    });
+    let resp = response_data.map(|d| crate::logical::Response { data: Some(d), ..Default::default() });
 
     let mut entry = AuditEntry::from_response(&req, &resp, error, broker.hmac_key(), false);
     log_or_warn(&broker, &mut entry).await;

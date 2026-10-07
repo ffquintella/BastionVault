@@ -16,6 +16,7 @@ use serde_json::{Map, Value};
 use tauri::{AppHandle, Emitter, Manager, State, Webview, WebviewUrl, WebviewWindowBuilder};
 use zeroize::Zeroizing;
 
+use crate::commands::connect_provider;
 use crate::error::{CmdResult, CommandError};
 use crate::preferences::SessionWorkspacePrefs;
 use crate::session::{
@@ -56,6 +57,13 @@ pub struct SshOpenRequest {
     /// `features/connect-mfa-and-fido2-ssh.md`.
     #[serde(default)]
     pub connect_ticket: Option<String>,
+    /// The account the operator picked in the provider account picker
+    /// (`connect_provider_candidates`). Required for a profile whose
+    /// credential source is `provider`, refused for any other. An opaque id:
+    /// the credential itself is released to this host (direct) or sealed by
+    /// the server (rustion), never sent by the webview.
+    #[serde(default)]
+    pub provider_account_id: Option<String>,
     /// Where the session should be rendered (T38). Absent = the GUI
     /// preference default (`workspace-tab` unless the operator chose
     /// otherwise). Parsed strictly: an unknown value fails the call.
@@ -152,10 +160,22 @@ pub async fn session_open_ssh(
     // client-side resolution path below (Secret + LDAP / SSH-engine / PKI).
     let credential_source = profile.get("credential_source").cloned().unwrap_or(Value::Null);
     let credential_source_kind = credential_source.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    // A `provider` profile carries the account the operator picked; checked
+    // here, before any credential is resolved or any ticket redeemed.
+    let provider_pick = connect_provider::provider_pick_for_open(&profile, request.provider_account_id.as_deref())?;
+    // ...and its account is a static credential, so the SSH login-class rule
+    // is settled before *either* route: on a brokered resource neither the
+    // bastion route below nor the direct path may have it released. (The
+    // server refuses it on both routes too, `brokered_requires_ssh_engine`.)
+    let mut provider_login_class = match provider_pick {
+        Some(_) => Some(enforce_ssh_login_class(&state, &request.resource_name, &meta, credential_source_kind).await?),
+        None => None,
+    };
 
-    // `secret`, `ssh-engine` and `default-account` sources resolve
-    // server-side on the v2 path: BastionVault either injects the stored
-    // secret (`secret`) or mints + signs an ephemeral cert (`ssh-engine` /
+    // `secret`, `ssh-engine`, `default-account` and `provider` sources
+    // resolve server-side on the v2 path: BastionVault either injects the
+    // stored secret (`secret`), releases the operator's picked account
+    // (`provider`), or mints + signs an ephemeral cert (`ssh-engine` /
     // `default-account`, brokered) and seals it into the envelope — the GUI
     // never holds the credential. `default-account` is an `ssh-engine` mint
     // whose principal is the connecting operator's own account, so
@@ -163,8 +183,8 @@ pub async fn session_open_ssh(
     // kind before it calls the server. When the policy doesn't route through
     // a bastion, `open_rustion_session_v2_ssh` returns `Direct` and we fall
     // back to the client-side path below (which mints locally for a direct
-    // dial).
-    let v2_resolvable = matches!(credential_source_kind, "secret" | "ssh-engine" | "default-account");
+    // dial, or, for `provider`, has `connect/authorize` release the account).
+    let v2_resolvable = matches!(credential_source_kind, "secret" | "ssh-engine" | "default-account" | "provider");
     let v2_route: Option<ConnectRoute> = if v2_resolvable {
         let r = open_rustion_session_v2_ssh(
             &state,
@@ -177,6 +197,7 @@ pub async fn session_open_ssh(
             port,
             &username,
             &credential_source,
+            provider_pick.as_ref().map(|p| p.account_id.as_str()),
         )
         .await?;
         match r {
@@ -196,6 +217,10 @@ pub async fn session_open_ssh(
     // tier chain. Left `None` on the v2 server-side path (the rustion
     // module stamps those fields server-side).
     let mut session_audit: Option<(EffectiveLoginClassView, Option<EngineMint>)> = None;
+    // Set on a direct provider launch: the account's login and the one target
+    // its credential was released for (the secret itself has moved into the
+    // dial credential below).
+    let mut provider_release: Option<connect_provider::ProviderRelease> = None;
     let (route, credential, username, on_close): (
         ConnectRoute,
         Option<SshCredential>,
@@ -206,6 +231,34 @@ pub async fn session_open_ssh(
         // MFA gate and burnt the ticket. Redeeming it again here would fail —
         // exactly one server-side consumer runs per connect.
         (r, None, username, None)
+    } else if let Some(pick) = &provider_pick {
+        // Direct, `provider`: the login-class rule was settled above, before
+        // any route, so a brokered resource has already refused.
+        let lc = provider_login_class
+            .take()
+            .ok_or_else(|| CommandError::from("the login class was not resolved for this launch".to_string()))?;
+        // One server call redeems the MFA ticket (gated profiles) and
+        // releases the picked account, for the target it names.
+        let mut release = connect_provider::authorize_provider_direct(
+            &state,
+            &request.resource_name,
+            &request.profile_id,
+            request.connect_ticket.as_deref(),
+            pick,
+            "ssh",
+        )
+        .await?;
+        let cred = release.take_ssh_credential()?;
+        // The released login name is authoritative; the profile's
+        // `username` is not used for a provider profile.
+        let username = release.username.clone();
+        session_audit = Some((lc, None));
+        provider_release = Some(release);
+        // No route resolution: `authorize` released this credential for a
+        // direct session only (it refuses under `rustion-required` or a lock
+        // violation, and the v2 path above already took any bastion route),
+        // so it is never handed to a bastion from here.
+        (ConnectRoute::Direct, Some(cred), username, None)
     } else {
         // Direct dial: this is the one place the ticket gets redeemed. Runs
         // before any credential is resolved or minted, so on a gated profile
@@ -265,13 +318,20 @@ pub async fn session_open_ssh(
     // no fingerprint (pre-v2 listener schema); the SSH dialler then logs
     // an unpinned-TOFU warning rather than failing, matching the direct
     // path's posture for an unset pin.
+    //
+    // A direct provider launch dials exactly the target `authorize`
+    // released the credential for — never the resource's other candidates.
+    let dial_plan = match &provider_release {
+        Some(r) => connect_provider::DialPlan::Pinned(r.target.clone()),
+        None => connect_provider::DialPlan::Candidates(host_candidates),
+    };
     let (host_candidates, port, username_for_dial, credential_for_dial, host_key_fingerprint, rustion_label) =
         match &route {
             ConnectRoute::Direct => {
                 let cred = credential
                     .clone()
                     .ok_or_else(|| CommandError::from("direct dial requires a resolved credential".to_string()))?;
-                (host_candidates, port, username.clone(), cred, host_key_fingerprint, None)
+                (dial_plan.hosts(), dial_plan.port(port), username.clone(), cred, host_key_fingerprint, None)
             }
             ConnectRoute::Rustion { bastion_host, bastion_port, ticket, bastion_name, bastion_pin, .. } => {
                 if bastion_pin.is_empty() {
@@ -303,63 +363,41 @@ pub async fn session_open_ssh(
     // Walk the host candidates in order (IP before hostname when
     // both are set on the resource). Fall back to the next candidate
     // only on network-layer failures — auth rejections short-circuit
-    // so we don't burn auth attempts on every candidate.
+    // so we don't burn auth attempts on every candidate. A pinned plan
+    // (provider launch) and a bastion route have exactly one host.
     let username = username_for_dial;
     let credential = credential_for_dial;
-    let (chosen_host, outcome): (String, SshOpenOutcome) = {
-        let mut last_err: Option<String> = None;
-        let mut found: Option<(String, SshOpenOutcome)> = None;
-        for (idx, host) in host_candidates.iter().enumerate() {
-            let is_last = idx + 1 == host_candidates.len();
-            let label = format!("ssh {username}@{host}:{port}");
-            let res = tokio::time::timeout(
-                CONNECT_TIMEOUT,
-                open_ssh_session(
-                    app.clone(),
-                    &state,
-                    SshOpenArgs {
-                        host: host.clone(),
-                        port,
-                        username: username.clone(),
-                        credential: credential.clone(),
-                        host_key_fingerprint: host_key_fingerprint.clone(),
-                        label: label.clone(),
-                        on_close: on_close.clone(),
-                        retain_output: layout_prefs.replay_buffer,
-                    },
-                ),
-            )
-            .await;
-            match res {
-                Ok(Ok(o)) => {
-                    found = Some((host.clone(), o));
-                    break;
-                }
-                Ok(Err(e)) => {
-                    if !is_last && is_connect_layer_error(&e) {
-                        log::warn!(
-                            "resource-connect/ssh: candidate {host}:{port} failed at network layer ({e}); trying next"
-                        );
-                        last_err = Some(e);
-                        continue;
+    let (chosen_host, outcome): (String, SshOpenOutcome) =
+        connect_provider::dial_in_order("ssh", &host_candidates, port, |host| {
+            let app = app.clone();
+            let state = &state;
+            let args = SshOpenArgs {
+                host: host.clone(),
+                port,
+                username: username.clone(),
+                credential: credential.clone(),
+                host_key_fingerprint: host_key_fingerprint.clone(),
+                label: format!("ssh {username}@{host}:{port}"),
+                on_close: on_close.clone(),
+                retain_output: layout_prefs.replay_buffer,
+            };
+            async move {
+                match tokio::time::timeout(CONNECT_TIMEOUT, open_ssh_session(app, state, args)).await {
+                    Ok(Ok(o)) => Ok(o),
+                    Ok(Err(e)) => {
+                        Err(connect_provider::DialFailure { network_layer: is_connect_layer_error(&e), message: e })
                     }
-                    return Err(CommandError::from(e));
-                }
-                Err(_) => {
-                    let msg =
-                        format!("ssh: connect+auth to {host}:{port} timed out after {}s", CONNECT_TIMEOUT.as_secs());
-                    if !is_last {
-                        log::warn!("resource-connect/ssh: {msg}; trying next candidate");
-                        last_err = Some(msg);
-                        continue;
-                    }
-                    return Err(CommandError::from(msg));
+                    Err(_) => Err(connect_provider::DialFailure {
+                        message: format!(
+                            "ssh: connect+auth to {host}:{port} timed out after {}s",
+                            CONNECT_TIMEOUT.as_secs()
+                        ),
+                        network_layer: true,
+                    }),
                 }
             }
-        }
-        found
-            .ok_or_else(|| CommandError::from(last_err.unwrap_or_else(|| "ssh: no host candidates succeeded".into())))?
-    };
+        })
+        .await?;
     let host = chosen_host;
     let label = match &rustion_label {
         Some(name) => format!(
@@ -375,6 +413,9 @@ pub async fn session_open_ssh(
     // class, the SSH-engine mode, and the minted cert serial so a brokered
     // session and the `ssh/sign` issuance row that authorized it are
     // joinable (the Rustion path stamps the equivalent fields server-side).
+    // A provider launch adds the provider, the account id and the released
+    // login name (names and ids only), so it joins the server's
+    // `connect.provider.release` line.
     if let Some((lc, mint)) = &session_audit {
         let (mode, serial) = match mint {
             Some(m) => (m.mode.as_str(), m.cert_serial.as_deref().unwrap_or("")),
@@ -383,7 +424,7 @@ pub async fn session_open_ssh(
         log::info!(
             target: "audit",
             "session.open: resource={} login_class={} login_class_source={} \
-             ssh_engine_mode={} cert_serial={} login_class_chain=[{}] token={} host={}:{}",
+             ssh_engine_mode={} cert_serial={} login_class_chain=[{}] token={} host={}:{}{}",
             request.resource_name,
             lc.login_class,
             lc.login_class_source,
@@ -393,6 +434,7 @@ pub async fn session_open_ssh(
             outcome.token,
             host,
             port,
+            provider_release.as_ref().map(connect_provider::ProviderRelease::audit_fields).unwrap_or_default(),
         );
     }
 
@@ -518,6 +560,9 @@ pub struct RdpOpenRequest {
     /// Same connect-time MFA ticket as `SshOpenRequest::connect_ticket`.
     #[serde(default)]
     pub connect_ticket: Option<String>,
+    /// See `SshOpenRequest::provider_account_id`.
+    #[serde(default)]
+    pub provider_account_id: Option<String>,
     /// See `SshOpenRequest::placement`.
     #[serde(default)]
     pub placement: Option<Placement>,
@@ -635,7 +680,11 @@ pub async fn session_open_rdp(
     // path below (Secret + LDAP / smart-card).
     let credential_source = profile.get("credential_source").cloned().unwrap_or(Value::Null);
     let credential_source_kind = credential_source.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-    let v2_route: Option<ConnectRoute> = if credential_source_kind == "secret" {
+    // See `session_open_ssh`: a `provider` profile carries the picked account.
+    let provider_pick = connect_provider::provider_pick_for_open(&profile, request.provider_account_id.as_deref())?;
+    // `secret` and `provider` resolve server-side on the v2 path (the server
+    // reads the secret / releases the picked account and seals it).
+    let v2_route: Option<ConnectRoute> = if matches!(credential_source_kind, "secret" | "provider") {
         let r = open_rustion_session_v2_rdp(
             &state,
             &request.resource_name,
@@ -647,6 +696,7 @@ pub async fn session_open_rdp(
             port,
             &username,
             &credential_source,
+            provider_pick.as_ref().map(|p| p.account_id.as_str()),
         )
         .await?;
         match r {
@@ -660,6 +710,7 @@ pub async fn session_open_rdp(
     // `credential` is `Some` only on the client-side path (direct dials and
     // non-secret kinds). The v2 server-side path dials the bastion with the
     // ticket and never resolves a target credential locally.
+    let mut provider_release: Option<connect_provider::ProviderRelease> = None;
     let (route, credential, username, domain, on_close): (
         ConnectRoute,
         Option<session::rdp::RdpCredential>,
@@ -671,6 +722,31 @@ pub async fn session_open_rdp(
         // profile's MFA gate and burnt the ticket. Redeeming it again here
         // would fail — exactly one server-side consumer runs per connect.
         (r, None, username, None, None)
+    } else if let Some(pick) = &provider_pick {
+        // Direct, `provider`: one server call redeems the MFA ticket (gated
+        // profiles) and releases the picked account for the target it names.
+        let mut release = connect_provider::authorize_provider_direct(
+            &state,
+            &request.resource_name,
+            &request.profile_id,
+            request.connect_ticket.as_deref(),
+            pick,
+            "rdp",
+        )
+        .await?;
+        let password = release.take_rdp_password()?;
+        // The released login is authoritative; its domain goes in the
+        // CredSSP domain slot. A login that carries its own `DOMAIN\user` /
+        // `user@realm` with no separate domain is split like every other
+        // source's.
+        let (username, domain) = match release.domain.clone() {
+            Some(d) => (release.username.clone(), Some(d)),
+            None => split_domain_user(&release.username),
+        };
+        provider_release = Some(release);
+        // No route resolution, as on the SSH path: released for a direct
+        // session only, never handed to a bastion from here.
+        (ConnectRoute::Direct, Some(session::rdp::RdpCredential::Password(password)), username, domain, None)
     } else {
         // Connect-time MFA gate — see the note on the SSH path above. RDP
         // has no FIDO2 authentication method of its own, so for RDP
@@ -720,6 +796,12 @@ pub async fn session_open_rdp(
             Err(e) => return Err(CommandError::from(e)),
         },
     };
+    // A direct provider launch dials exactly the target `authorize` released
+    // the credential for (see `session_open_ssh`).
+    let dial_plan = match &provider_release {
+        Some(r) => connect_provider::DialPlan::Pinned(r.target.clone()),
+        None => connect_provider::DialPlan::Candidates(host_candidates),
+    };
     let (
         host_candidates,
         port,
@@ -735,8 +817,8 @@ pub async fn session_open_rdp(
                 .clone()
                 .ok_or_else(|| CommandError::from("direct dial requires a resolved credential".to_string()))?;
             (
-                host_candidates,
-                port,
+                dial_plan.hosts(),
+                dial_plan.port(port),
                 username.clone(),
                 cred,
                 domain.clone(),
@@ -791,54 +873,49 @@ pub async fn session_open_rdp(
 
     // Walk the host candidates in order — IP first when present,
     // hostname as fallback. Only network-layer failures fall through
-    // to the next candidate.
-    let (host, outcome) = {
-        let mut last_err: Option<String> = None;
-        let mut found: Option<(String, session::rdp::RdpOpenOutcome)> = None;
-        for (idx, host) in host_candidates.iter().enumerate() {
-            let is_last = idx + 1 == host_candidates.len();
-            let label = format!("rdp {username}@{host}:{port}");
-            let res = session::rdp::open_rdp_session(
-                app.clone(),
-                &state,
-                session::rdp::RdpOpenArgs {
-                    host: host.clone(),
-                    port,
-                    username: username.clone(),
-                    credential: credential.clone(),
-                    domain: domain.clone(),
-                    label,
-                    on_close: on_close.clone(),
-                    aggressive_performance,
-                    enable_egfx,
-                    bulk_compression,
-                    clipboard,
-                    clipboard_audit: clipboard_audit.clone(),
-                    ticket_cookie: ticket_cookie.clone(),
-                    tls_pin_sha256: tls_pin_for_dial.clone(),
-                },
-            )
-            .await;
-            match res {
-                Ok(o) => {
-                    found = Some((host.clone(), o));
-                    break;
-                }
-                Err(e) => {
-                    if !is_last && is_connect_layer_error(&e) {
-                        log::warn!(
-                            "resource-connect/rdp: candidate {host}:{port} failed at network layer ({e}); trying next"
-                        );
-                        last_err = Some(e);
-                        continue;
-                    }
-                    return Err(CommandError::from(e));
-                }
+    // to the next candidate; a pinned plan has exactly one.
+    let (host, outcome): (String, session::rdp::RdpOpenOutcome) =
+        connect_provider::dial_in_order("rdp", &host_candidates, port, |host| {
+            let app = app.clone();
+            let state = &state;
+            let args = session::rdp::RdpOpenArgs {
+                host: host.clone(),
+                port,
+                username: username.clone(),
+                credential: credential.clone(),
+                domain: domain.clone(),
+                label: format!("rdp {username}@{host}:{port}"),
+                on_close: on_close.clone(),
+                aggressive_performance,
+                enable_egfx,
+                bulk_compression,
+                clipboard,
+                clipboard_audit: clipboard_audit.clone(),
+                ticket_cookie: ticket_cookie.clone(),
+                tls_pin_sha256: tls_pin_for_dial.clone(),
+            };
+            async move {
+                session::rdp::open_rdp_session(app, state, args).await.map_err(|e| connect_provider::DialFailure {
+                    network_layer: is_connect_layer_error(&e),
+                    message: e,
+                })
             }
-        }
-        found
-            .ok_or_else(|| CommandError::from(last_err.unwrap_or_else(|| "rdp: no host candidates succeeded".into())))?
-    };
+        })
+        .await?;
+    // The direct-path `session.open` line for a provider launch (names and
+    // ids only), so it joins the server's `connect.provider.release` line.
+    if let Some(r) = &provider_release {
+        log::info!(
+            target: "audit",
+            "session.open: protocol=rdp transport=direct resource={:?} profile={:?}{} token={} host={}:{}",
+            request.resource_name,
+            request.profile_id,
+            r.audit_fields(),
+            outcome.token,
+            host,
+            port,
+        );
+    }
     let label = match &rustion_label {
         Some(name) => format!(
             "rdp {target_user}@{target_host}:{target_port} via rustion[{name}]",
@@ -1278,8 +1355,21 @@ async fn resolve_rdp_credential(
                 on_close: None,
             })
         }
+        // Released by `connect/authorize` in `session_open_rdp`; see the SSH arm.
+        "provider" => Err(provider_not_resolved_locally()),
         other => Err(CommandError::from(format!("credential source `{other}` lands in a later phase"))),
     }
+}
+
+/// The local resolvers' refusal for a `provider` source: its credential is
+/// released by the server for one target and handed to the dial directly,
+/// so reaching a resolver means a code path skipped the release.
+fn provider_not_resolved_locally() -> CommandError {
+    CommandError::from(
+        "a credential-provider account is released by the server for the picked account only \
+         (`connect/authorize`); it is never resolved locally"
+            .to_string(),
+    )
 }
 
 /// Split `DOMAIN\\user` or `user@realm` into `(user, Some(domain))`,
@@ -2369,6 +2459,7 @@ async fn open_rustion_session_v2_ssh(
     target_port: u16,
     target_user: &str,
     credential_source: &Value,
+    provider_account_id: Option<&str>,
 ) -> Result<ConnectRoute, CommandError> {
     const BASTION_PROTOCOL: BastionProtocol = BastionProtocol::Ssh;
     let (resource_id, resource_type, asset_group_ids) = collect_policy_hints(state, resource_name, meta).await;
@@ -2436,6 +2527,12 @@ async fn open_rustion_session_v2_ssh(
         body.insert("connect_ticket".into(), Value::String(t.to_string()));
     }
     body.insert("credential_source".into(), credential_source.clone());
+    // `provider`: the account the operator picked. The server releases it,
+    // pins the envelope's target to the stored one and overwrites the
+    // credential kind and username with the released account's.
+    if let Some(id) = provider_account_id {
+        body.insert("provider_account_id".into(), Value::String(id.to_string()));
+    }
     body.insert("target_host".into(), Value::String(target_host.to_string()));
     body.insert("target_port".into(), Value::Number(target_port.into()));
     body.insert("target_protocol".into(), Value::String("ssh".to_string()));
@@ -2573,9 +2670,10 @@ async fn resolve_rdp_connect_route(
     parse_rustion_ticket_bundle(state, data, BASTION_PROTOCOL, max_renewals as u32).await
 }
 
-/// RDP analogue of [`open_rustion_session_v2_ssh`], for the `secret`
-/// credential kind only — `ldap` / `rdp-cert` are the operator's own, not
-/// the stored secret this feature protects, and keep resolving client-side.
+/// RDP analogue of [`open_rustion_session_v2_ssh`], for the `secret` and
+/// `provider` credential kinds only — `ldap` / `rdp-cert` are the operator's
+/// own, not the stored secret this feature protects, and keep resolving
+/// client-side.
 /// Returns [`ConnectRoute::Direct`] when the policy does not route through
 /// a bastion.
 #[allow(clippy::too_many_arguments)]
@@ -2590,6 +2688,7 @@ async fn open_rustion_session_v2_rdp(
     target_port: u16,
     target_user: &str,
     credential_source: &Value,
+    provider_account_id: Option<&str>,
 ) -> Result<ConnectRoute, CommandError> {
     const BASTION_PROTOCOL: BastionProtocol = BastionProtocol::Rdp;
     let (resource_id, resource_type, asset_group_ids) = collect_policy_hints(state, resource_name, meta).await;
@@ -2621,6 +2720,10 @@ async fn open_rustion_session_v2_rdp(
         body.insert("connect_ticket".into(), Value::String(t.to_string()));
     }
     body.insert("credential_source".into(), credential_source.clone());
+    // `provider`: see `open_rustion_session_v2_ssh`.
+    if let Some(id) = provider_account_id {
+        body.insert("provider_account_id".into(), Value::String(id.to_string()));
+    }
     body.insert("target_host".into(), Value::String(target_host.to_string()));
     body.insert("target_port".into(), Value::Number(target_port.into()));
     body.insert("target_protocol".into(), Value::String("rdp".to_string()));
@@ -2742,6 +2845,50 @@ struct ResolvedSshCredential {
     engine_mint: Option<EngineMint>,
 }
 
+/// Brokered login-class enforcement (direct path). If the resource resolves
+/// to `brokered`, every SSH login must be minted per-connect from the SSH
+/// engine; a `secret` (or any non-ssh-engine) source — `provider` included —
+/// is rejected fail-closed, never silently downgraded. Returns the resolved
+/// class for the `session.open` audit line.
+async fn enforce_ssh_login_class(
+    state: &State<'_, AppState>,
+    resource_name: &str,
+    meta: &Map<String, Value>,
+    kind: &str,
+) -> Result<EffectiveLoginClassView, CommandError> {
+    let (rid, rtype, ags) = collect_policy_hints(state, resource_name, meta).await;
+    let lc = read_effective_login_class(state, &rid, &rtype, &ags).await?;
+    match login_class_refusal(resource_name, &lc, kind) {
+        Some(refusal) => Err(refusal),
+        None => Ok(lc),
+    }
+}
+
+/// The decision [`enforce_ssh_login_class`] makes once the class is read:
+/// `None` when a `kind` source may log in, else the refusal.
+fn login_class_refusal(resource_name: &str, lc: &EffectiveLoginClassView, kind: &str) -> Option<CommandError> {
+    if lc.login_class != "brokered" {
+        return None;
+    }
+    if let Some(detail) = lc.lock_violation.as_ref() {
+        return Some(CommandError::from(format!("login_class_locked: {detail}")));
+    }
+    // `default-account` is itself a brokered SSH-engine mint (it only swaps
+    // the role's principal for the connecting operator's default account),
+    // so it satisfies the brokered requirement alongside `ssh-engine`.
+    if kind == "ssh-engine" || kind == "default-account" {
+        return None;
+    }
+    Some(CommandError::from(format!(
+        "brokered_requires_ssh_engine: resource `{resource_name}` is brokered \
+         (login_class via tier `{}`); its connection profile must use an \
+         `ssh-engine` (or `default-account`) credential source, not `{}`. Every \
+         SSH login to a brokered resource is minted per-connect from the SSH engine.",
+        lc.login_class_source,
+        if kind.is_empty() { "(unset)" } else { kind }
+    )))
+}
+
 async fn resolve_ssh_credential(
     state: &State<'_, AppState>,
     app: &AppHandle,
@@ -2755,30 +2902,7 @@ async fn resolve_ssh_credential(
         .ok_or_else(|| CommandError::from("profile is missing credential_source".to_string()))?;
     let kind = cs.get("kind").and_then(|v| v.as_str()).unwrap_or("");
 
-    // Brokered login-class enforcement (direct path). If the resource
-    // resolves to `brokered`, every SSH login must be minted per-connect
-    // from the SSH engine; a `secret` (or any non-ssh-engine) source is
-    // rejected fail-closed — never silently downgraded.
-    let (rid, rtype, ags) = collect_policy_hints(state, resource_name, meta).await;
-    let lc = read_effective_login_class(state, &rid, &rtype, &ags).await?;
-    if lc.login_class == "brokered" {
-        if let Some(detail) = lc.lock_violation.as_ref() {
-            return Err(CommandError::from(format!("login_class_locked: {detail}")));
-        }
-        // `default-account` is itself a brokered SSH-engine mint (it only swaps
-        // the role's principal for the connecting operator's default account),
-        // so it satisfies the brokered requirement alongside `ssh-engine`.
-        if kind != "ssh-engine" && kind != "default-account" {
-            return Err(CommandError::from(format!(
-                "brokered_requires_ssh_engine: resource `{resource_name}` is brokered \
-                 (login_class via tier `{}`); its connection profile must use an \
-                 `ssh-engine` (or `default-account`) credential source, not `{}`. Every \
-                 SSH login to a brokered resource is minted per-connect from the SSH engine.",
-                lc.login_class_source,
-                if kind.is_empty() { "(unset)" } else { kind }
-            )));
-        }
-    }
+    let lc = enforce_ssh_login_class(state, resource_name, meta, kind).await?;
 
     let resolved = match kind {
         "secret" => resolve_secret_ssh(state, resource_name, cs).await,
@@ -2787,6 +2911,9 @@ async fn resolve_ssh_credential(
         "ssh-engine" => resolve_ssh_engine_ssh(state, profile, meta, cs).await,
         "default-account" => resolve_default_account_ssh(state, profile, meta, cs).await,
         "fido2" => resolve_security_key_ssh(state, app).await,
+        // Released by `connect/authorize` in `session_open_ssh`, for the one
+        // target the server names; never resolved here.
+        "provider" => Err(provider_not_resolved_locally()),
         other => Err(CommandError::from(format!("unknown credential source `{other}`"))),
     }?;
     Ok((resolved, lc))
@@ -3576,6 +3703,37 @@ mod tests {
     #[test]
     fn single_cert_principal_rejects_malformed_cert() {
         assert!(single_cert_principal("ssh-ed25519-cert-v01@openssh.com AAAA garbage").is_err());
+    }
+
+    fn login_class(class: &str, lock_violation: Option<&str>) -> EffectiveLoginClassView {
+        EffectiveLoginClassView {
+            login_class: class.to_string(),
+            login_class_source: "type".to_string(),
+            login_class_chain: Vec::new(),
+            lock_violation: lock_violation.map(str::to_string),
+        }
+    }
+
+    /// A provider account is a static credential: a brokered resource refuses
+    /// it for SSH (the decision `session_open_ssh` now takes before either
+    /// route), while the engine-minted sources pass.
+    #[test]
+    fn a_brokered_resource_refuses_a_provider_source() {
+        let brokered = login_class("brokered", None);
+        let e = login_class_refusal("db01", &brokered, "provider").expect("refused");
+        assert!(e.message.starts_with("brokered_requires_ssh_engine:"), "{}", e.message);
+        assert!(e.message.contains("not `provider`"), "{}", e.message);
+        for kind in ["ssh-engine", "default-account"] {
+            assert!(login_class_refusal("db01", &brokered, kind).is_none(), "{kind}");
+        }
+        for kind in ["secret", "ldap", "pki", "fido2", ""] {
+            assert!(login_class_refusal("db01", &brokered, kind).is_some(), "{kind}");
+        }
+        // A shared-credential resource takes every source.
+        assert!(login_class_refusal("db01", &login_class("shared-credential", None), "provider").is_none());
+        // A lock violation refuses whatever the source.
+        let locked = login_class("brokered", Some("tier conflict"));
+        assert!(login_class_refusal("db01", &locked, "ssh-engine").unwrap().message.starts_with("login_class_locked:"));
     }
 
     #[test]

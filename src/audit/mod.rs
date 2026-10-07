@@ -16,8 +16,8 @@
 //! See roadmaps/workspace-decomposition.md § Phase 1.
 
 pub use bv_audit::{
-    broker, entry, file_device, hash_chain, AuditAuth, AuditBroker, AuditDevice,
-    AuditDeviceConfig, AuditEntry, AuditRequest, AuditResponse, DeviceEntry, FileAuditDevice,
+    broker, entry, file_device, hash_chain, AuditAuth, AuditBroker, AuditDevice, AuditDeviceConfig, AuditEntry,
+    AuditRequest, AuditResponse, DeviceEntry, FileAuditDevice,
 };
 
 pub mod sys_emit;

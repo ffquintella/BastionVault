@@ -38,6 +38,7 @@
 
 - Resource Connect
   - [Rustion bastion integration](rustion-integration.md)
+  - [Self-accounts (credential provider)](self-accounts.md)
 
 - Storage backends
   - [Overview](backend/database/overview.md)

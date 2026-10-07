@@ -19,8 +19,8 @@ use crate::{
     core::Core,
     errors::RvError,
     exchange::schema::{
-        AssetGroupItem, ExchangeDocument, ExchangeItems, ExporterInfo, FileItem, KvItem, PolicyItem,
-        RawEntry, ResourceGroupItem, ResourceItem, ScopeKind, ScopeSelector, ScopeSpec,
+        AssetGroupItem, ExchangeDocument, ExchangeItems, ExporterInfo, FileItem, KvItem, PolicyItem, RawEntry,
+        ResourceGroupItem, ResourceItem, ScopeKind, ScopeSelector, ScopeSpec,
     },
     mount::{LOGICAL_BARRIER_PREFIX, SYSTEM_BARRIER_PREFIX},
     storage::{Storage, StorageEntry},
@@ -71,18 +71,11 @@ impl Default for MountIndex {
 impl MountIndex {
     pub fn from_core(core: &Arc<Core>) -> Result<Self, RvError> {
         let mounts_router = core.mounts_router();
-        let entries = mounts_router
-            .mounts
-            .entries
-            .read()
-            .map_err(|_| RvError::ErrUnknown)?;
+        let entries = mounts_router.mounts.entries.read().map_err(|_| RvError::ErrUnknown)?;
         let mut by_type: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for (path, lock) in entries.iter() {
             let me = lock.read().map_err(|_| RvError::ErrUnknown)?;
-            by_type
-                .entry(me.logical_type.clone())
-                .or_default()
-                .push((path.clone(), me.uuid.clone()));
+            by_type.entry(me.logical_type.clone()).or_default().push((path.clone(), me.uuid.clone()));
         }
         Ok(Self {
             by_type,
@@ -112,10 +105,7 @@ impl MountIndex {
         let mut by_type: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for (path, lock) in entries.iter() {
             let me = lock.read().map_err(|_| RvError::ErrUnknown)?;
-            by_type
-                .entry(me.logical_type.clone())
-                .or_default()
-                .push((path.clone(), me.uuid.clone()));
+            by_type.entry(me.logical_type.clone()).or_default().push((path.clone(), me.uuid.clone()));
         }
         Ok(Self {
             by_type,
@@ -131,10 +121,7 @@ impl MountIndex {
     }
 
     pub fn mounts_of_type(&self, logical_type: &str) -> &[(String, String)] {
-        self.by_type
-            .get(logical_type)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.by_type.get(logical_type).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// Iterate every `(logical_type, mounts)` pair in the index. Used by the
@@ -162,11 +149,7 @@ impl MountIndex {
     /// Delegates the layout to the policy store so exporter, importer, and the
     /// live vault can never drift apart.
     pub fn policy_prefix(&self) -> String {
-        format!(
-            "{}{}",
-            self.root_system_prefix,
-            crate::modules::policy::policy_store::acl_keyspace(&self.ns_path)
-        )
+        format!("{}{}", self.root_system_prefix, crate::modules::policy::policy_store::acl_keyspace(&self.ns_path))
     }
 
     /// Barrier-storage prefix holding this namespace's saved policy effectivity
@@ -246,11 +229,7 @@ impl MountIndex {
     /// explicitly so a re-rooted (`namespaces/<uuid>/…`) layout can be
     /// exercised without a live `Core`.
     #[cfg(test)]
-    fn for_test(
-        by_type: HashMap<String, Vec<(String, String)>>,
-        logical_prefix: &str,
-        system_prefix: &str,
-    ) -> Self {
+    fn for_test(by_type: HashMap<String, Vec<(String, String)>>, logical_prefix: &str, system_prefix: &str) -> Self {
         Self {
             by_type,
             logical_prefix: logical_prefix.to_string(),
@@ -275,7 +254,6 @@ pub enum ConflictPolicy {
     /// suffix; original is preserved.
     Rename,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -434,7 +412,10 @@ fn sort_and_dedup(items: &mut ExchangeItems) {
 }
 
 #[derive(Copy, Clone)]
-enum GroupKind { Asset, Resource }
+enum GroupKind {
+    Asset,
+    Resource,
+}
 
 /// Enumerate the entire readable vault for a `ScopeKind::Full` export.
 ///
@@ -489,10 +470,7 @@ async fn resolve_full(
     // only in GUI labelling, so a full export records each as a resource
     // group; the member resources / secrets / files come along via
     // `resolve_group`.
-    let groups = storage
-        .list(&format!("{}resource-group/group/", mounts.system_prefix()))
-        .await
-        .unwrap_or_default();
+    let groups = storage.list(&format!("{}resource-group/group/", mounts.system_prefix())).await.unwrap_or_default();
     for name in groups {
         if name.ends_with('/') {
             continue;
@@ -514,9 +492,7 @@ async fn resolve_full(
         for (mount_path, _uuid) in mount_entries {
             let mount_norm = ensure_trailing_slash(mount_path);
             if let Err(e) = read_raw_mount(storage, mounts, &mount_norm, items).await {
-                warnings.push(format!(
-                    "raw capture of mount {mount_norm} (type {logical_type}) failed: {e:?}"
-                ));
+                warnings.push(format!("raw capture of mount {mount_norm} (type {logical_type}) failed: {e:?}"));
             }
         }
     }
@@ -537,15 +513,7 @@ async fn resolve_full(
 /// `sys/` store (captured via the groups loop); `system` and `identity` are
 /// control-plane views (mount table, seal config, entities) that an exchange
 /// document must never round-trip.
-const RAW_SKIP_TYPES: &[&str] = &[
-    "kv",
-    "kv-v2",
-    "resource",
-    "files",
-    "resource-group",
-    "system",
-    "identity",
-];
+const RAW_SKIP_TYPES: &[&str] = &["kv", "kv-v2", "resource", "files", "resource-group", "system", "identity"];
 
 /// Read a single resource (and its embedded secrets / metadata / version
 /// history) from the first `resource`-typed mount in the index. Records
@@ -560,9 +528,7 @@ async fn resolve_resource(
 ) -> Result<(), RvError> {
     let resource_mounts = mounts.mounts_of_type("resource");
     if resource_mounts.is_empty() {
-        warnings.push(format!(
-            "scope selector resource id={id} skipped: no mount of type \"resource\" found"
-        ));
+        warnings.push(format!("scope selector resource id={id} skipped: no mount of type \"resource\" found"));
         return Ok(());
     }
 
@@ -576,9 +542,7 @@ async fn resolve_resource(
         let meta_key = format!("{bp}meta/{id}");
         if let Some(meta_entry) = storage.get(&meta_key).await? {
             if found {
-                warnings.push(format!(
-                    "resource id={id} also exists on mount {mount_path}; first hit kept"
-                ));
+                warnings.push(format!("resource id={id} also exists on mount {mount_path}; first hit kept"));
                 break;
             }
             found = true;
@@ -598,10 +562,7 @@ async fn resolve_resource(
                 bundle.insert("secrets".to_string(), Value::Object(secrets));
             }
 
-            items.resources.push(ResourceItem {
-                id: id.to_string(),
-                data: Value::Object(bundle),
-            });
+            items.resources.push(ResourceItem { id: id.to_string(), data: Value::Object(bundle) });
         }
     }
     if !found {
@@ -625,16 +586,15 @@ async fn collect_resource_secrets(
         Err(_) => return Ok(out),
     };
     for name in names {
-        if name.ends_with('/') { continue; }
+        if name.ends_with('/') {
+            continue;
+        }
         let key_full = format!("{secret_prefix}{name}");
         let mut bundle = serde_json::Map::new();
         if let Some(e) = storage.get(&key_full).await? {
             bundle.insert("value".to_string(), parse_json_or_b64(&e.value));
         }
-        if let Ok(Some(meta)) = storage
-            .get(&format!("{barrier_prefix}smeta/{id}/{name}"))
-            .await
-        {
+        if let Ok(Some(meta)) = storage.get(&format!("{barrier_prefix}smeta/{id}/{name}")).await {
             bundle.insert("meta".to_string(), parse_json_or_b64(&meta.value));
         }
         // Version history (`sver/<id>/<key>/<version>`).
@@ -642,7 +602,9 @@ async fn collect_resource_secrets(
         if let Ok(versions) = storage.list(&sver_prefix).await {
             let mut vers = serde_json::Map::new();
             for v in versions {
-                if v.ends_with('/') { continue; }
+                if v.ends_with('/') {
+                    continue;
+                }
                 if let Some(ve) = storage.get(&format!("{sver_prefix}{v}")).await? {
                     vers.insert(v, parse_json_or_b64(&ve.value));
                 }
@@ -677,8 +639,7 @@ async fn resolve_group(
             return Ok(());
         }
     };
-    let group_value: Value = serde_json::from_slice(&entry.value)
-        .unwrap_or_else(|_| parse_json_or_b64(&entry.value));
+    let group_value: Value = serde_json::from_slice(&entry.value).unwrap_or_else(|_| parse_json_or_b64(&entry.value));
 
     // Drag in members.
     if let Some(members) = group_value.get("members").and_then(|v| v.as_array()) {
@@ -781,11 +742,7 @@ async fn resolve_file(
             } else {
                 String::new()
             };
-            items.files.push(FileItem {
-                id: id.to_string(),
-                metadata,
-                content_b64,
-            });
+            items.files.push(FileItem { id: id.to_string(), metadata, content_b64 });
             return Ok(());
         }
     }
@@ -821,10 +778,7 @@ async fn read_kv_mount(
     };
     let keys = list_recursive(storage, &scan_prefix).await?;
     for full_key in keys {
-        let relative = full_key
-            .strip_prefix(&scan_prefix)
-            .unwrap_or(&full_key)
-            .to_string();
+        let relative = full_key.strip_prefix(&scan_prefix).unwrap_or(&full_key).to_string();
         if let Some(lp) = logical_filter {
             let matches = if barrier_addressed {
                 kv_logical_key_matches(&relative, lp)
@@ -836,11 +790,7 @@ async fn read_kv_mount(
             }
         }
         if let Some(entry) = storage.get(&full_key).await? {
-            items.kv.push(KvItem {
-                mount: mount_norm.to_string(),
-                path: relative,
-                value: entry_value_to_json(&entry),
-            });
+            items.kv.push(KvItem { mount: mount_norm.to_string(), path: relative, value: entry_value_to_json(&entry) });
         }
     }
     Ok(())
@@ -866,10 +816,7 @@ async fn read_raw_mount(
     };
     let keys = list_recursive(storage, &scan_prefix).await?;
     for full_key in keys {
-        let relative = full_key
-            .strip_prefix(&scan_prefix)
-            .unwrap_or(&full_key)
-            .to_string();
+        let relative = full_key.strip_prefix(&scan_prefix).unwrap_or(&full_key).to_string();
         if let Some(entry) = storage.get(&full_key).await? {
             items.raw.push(RawEntry {
                 mount: mount_norm.to_string(),
@@ -890,11 +837,7 @@ async fn read_raw_mount(
 /// carries them invites the illusion that a restore can rewrite the built-ins.
 ///
 /// [`IMMUTABLE_POLICIES`]: crate::modules::policy::policy_store::IMMUTABLE_POLICIES
-async fn read_policies(
-    storage: &dyn Storage,
-    mounts: &MountIndex,
-    items: &mut ExchangeItems,
-) -> Result<(), RvError> {
+async fn read_policies(storage: &dyn Storage, mounts: &MountIndex, items: &mut ExchangeItems) -> Result<(), RvError> {
     let acl_prefix = mounts.policy_prefix();
     let tests_prefix = mounts.policy_tests_prefix();
 
@@ -908,10 +851,7 @@ async fn read_policies(
         };
         // Tests live in a sibling keyspace keyed by the same policy name; a
         // policy with none simply has no key there.
-        let tests = storage
-            .get(&format!("{tests_prefix}{name}"))
-            .await?
-            .map(|e| entry_value_to_json(&e));
+        let tests = storage.get(&format!("{tests_prefix}{name}")).await?.map(|e| entry_value_to_json(&e));
         items.policies.push(PolicyItem { name, value: entry_value_to_json(&entry), tests });
     }
     Ok(())
@@ -1037,29 +977,19 @@ pub(crate) async fn apply_items(
     for kv in &items.kv {
         let full_path = mounts.resolve_kv_key(&kv.mount, &kv.path);
         let new_bytes = json_value_to_storage_bytes(&kv.value)?;
-        apply_entry(
-            storage, &full_path, new_bytes, policy, dry_run, &qualify(&kv.mount), &kv.path, result,
-        )
-        .await?;
+        apply_entry(storage, &full_path, new_bytes, policy, dry_run, &qualify(&kv.mount), &kv.path, result).await?;
     }
 
     // Raw items — opaque barrier entries for non-KV engines.
     for raw in &items.raw {
         let full_path = mounts.resolve_raw_key(&raw.mount, &raw.path);
         let new_bytes = json_value_to_storage_bytes(&raw.value)?;
-        apply_entry(
-            storage, &full_path, new_bytes, policy, dry_run, &qualify(&raw.mount), &raw.path,
-            result,
-        )
-        .await?;
+        apply_entry(storage, &full_path, new_bytes, policy, dry_run, &qualify(&raw.mount), &raw.path, result).await?;
     }
 
     // Resources — reconstitute meta / history / per-secret bundles back under
     // the resource mount's barrier prefix.
-    let default_resource_mount = mounts
-        .mounts_of_type("resource")
-        .first()
-        .map(|(p, _)| p.clone());
+    let default_resource_mount = mounts.mounts_of_type("resource").first().map(|(p, _)| p.clone());
     for res in &items.resources {
         let mount_path = res
             .data
@@ -1070,28 +1000,19 @@ pub(crate) async fn apply_items(
             .unwrap_or_else(|| "resources/".to_string());
         for (rel, bytes) in flatten_resource_bundle(&res.id, &res.data)? {
             let full_path = mounts.resolve_raw_key(&mount_path, &rel);
-            apply_entry(
-                storage, &full_path, bytes, policy, dry_run, &qualify(&mount_path), &rel, result,
-            )
-            .await?;
+            apply_entry(storage, &full_path, bytes, policy, dry_run, &qualify(&mount_path), &rel, result).await?;
         }
     }
 
     // File blobs — metadata + raw blob bytes under the files mount.
-    let files_mount = mounts
-        .mounts_of_type("files")
-        .first()
-        .map(|(p, _)| p.clone())
-        .unwrap_or_else(|| "files/".to_string());
+    let files_mount =
+        mounts.mounts_of_type("files").first().map(|(p, _)| p.clone()).unwrap_or_else(|| "files/".to_string());
     for file in &items.files {
         let meta_rel = format!("meta/{}", file.id);
         let meta_bytes = json_value_to_storage_bytes(&file.metadata)?;
         let full_path = mounts.resolve_raw_key(&files_mount, &meta_rel);
-        apply_entry(
-            storage, &full_path, meta_bytes, policy, dry_run, &qualify(&files_mount), &meta_rel,
-            result,
-        )
-        .await?;
+        apply_entry(storage, &full_path, meta_bytes, policy, dry_run, &qualify(&files_mount), &meta_rel, result)
+            .await?;
         if !file.content_b64.is_empty() {
             use base64::Engine;
             let blob = base64::engine::general_purpose::STANDARD
@@ -1099,11 +1020,7 @@ pub(crate) async fn apply_items(
                 .map_err(|_| RvError::ErrRequestInvalid)?;
             let blob_rel = format!("blob/{}", file.id);
             let full_path = mounts.resolve_raw_key(&files_mount, &blob_rel);
-            apply_entry(
-                storage, &full_path, blob, policy, dry_run, &qualify(&files_mount), &blob_rel,
-                result,
-            )
-            .await?;
+            apply_entry(storage, &full_path, blob, policy, dry_run, &qualify(&files_mount), &blob_rel, result).await?;
         }
     }
 
@@ -1119,11 +1036,8 @@ pub(crate) async fn apply_items(
         let full_path = format!("{}resource-group/group/{canonical}", mounts.system_prefix());
         let bytes = json_value_to_storage_bytes(data)?;
         let display_path = format!("group/{canonical}");
-        apply_entry(
-            storage, &full_path, bytes, policy, dry_run, &qualify("resource-group/"),
-            &display_path, result,
-        )
-        .await?;
+        apply_entry(storage, &full_path, bytes, policy, dry_run, &qualify("resource-group/"), &display_path, result)
+            .await?;
     }
 
     // ACL policies (plus each one's saved effectivity tests) — written into the
@@ -1135,15 +1049,11 @@ pub(crate) async fn apply_items(
     for item in &items.policies {
         let name = item.name.trim().to_lowercase();
         if !policy_name_is_safe(&name) {
-            result
-                .warnings
-                .push(format!("policy {:?} skipped: unsafe policy name", item.name));
+            result.warnings.push(format!("policy {:?} skipped: unsafe policy name", item.name));
             continue;
         }
         if is_reserved_policy_name(&name) {
-            result.warnings.push(format!(
-                "policy {name:?} skipped: reserved policy names are owned by the vault"
-            ));
+            result.warnings.push(format!("policy {name:?} skipped: reserved policy names are owned by the vault"));
             continue;
         }
         let display_path = format!("policy/{name}");
@@ -1202,18 +1112,14 @@ async fn apply_entry(
     let (action, renamed_to) = match (&classification, policy) {
         (ImportClassification::New, _) => {
             if !dry_run {
-                storage
-                    .put(&StorageEntry { key: full_path.to_string(), value: new_bytes })
-                    .await?;
+                storage.put(&StorageEntry { key: full_path.to_string(), value: new_bytes }).await?;
             }
             (ImportAction::Written, None)
         }
         (ImportClassification::Identical, _) => (ImportAction::Unchanged, None),
         (ImportClassification::Conflict, ConflictPolicy::Overwrite) => {
             if !dry_run {
-                storage
-                    .put(&StorageEntry { key: full_path.to_string(), value: new_bytes })
-                    .await?;
+                storage.put(&StorageEntry { key: full_path.to_string(), value: new_bytes }).await?;
             }
             (ImportAction::Written, None)
         }
@@ -1222,9 +1128,7 @@ async fn apply_entry(
             let suffix = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
             let renamed = format!("{full_path}.imported.{suffix}");
             if !dry_run {
-                storage
-                    .put(&StorageEntry { key: renamed.clone(), value: new_bytes })
-                    .await?;
+                storage.put(&StorageEntry { key: renamed.clone(), value: new_bytes }).await?;
             }
             (ImportAction::Renamed, Some(renamed))
         }
@@ -1271,10 +1175,7 @@ fn flatten_resource_bundle(id: &str, data: &Value) -> Result<Vec<(String, Vec<u8
             }
             if let Some(Value::Object(versions)) = sb.get("versions") {
                 for (ver, vv) in versions {
-                    out.push((
-                        format!("sver/{id}/{name}/{ver}"),
-                        json_value_to_storage_bytes(vv)?,
-                    ));
+                    out.push((format!("sver/{id}/{name}/{ver}"), json_value_to_storage_bytes(vv)?));
                 }
             }
         }
@@ -1394,10 +1295,7 @@ mod tests {
     async fn populate(storage: &dyn Storage, kv: &[(&str, &Value)]) {
         for (k, v) in kv {
             let bytes = serde_json::to_vec(v).unwrap();
-            storage
-                .put(&StorageEntry { key: (*k).to_string(), value: bytes })
-                .await
-                .unwrap();
+            storage.put(&StorageEntry { key: (*k).to_string(), value: bytes }).await.unwrap();
         }
     }
 
@@ -1411,10 +1309,7 @@ mod tests {
     fn reroot_index(mounts: &[(&str, &str, &str)]) -> MountIndex {
         let mut by_type: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for (ty, path, uuid) in mounts {
-            by_type
-                .entry((*ty).to_string())
-                .or_default()
-                .push(((*path).to_string(), (*uuid).to_string()));
+            by_type.entry((*ty).to_string()).or_default().push(((*path).to_string(), (*uuid).to_string()));
         }
         MountIndex::for_test(by_type, ROOT_LOGICAL, ROOT_SYSTEM)
     }
@@ -1436,10 +1331,7 @@ mod tests {
             "namespaces/root-uuid/logical/u-secret/data/myapp/db",
         );
         // Unknown mount falls back to the bare mount path (legacy / hand-built).
-        assert_eq!(
-            mounts.resolve_kv_key("nope/", "data/x"),
-            "nope/data/x",
-        );
+        assert_eq!(mounts.resolve_kv_key("nope/", "data/x"), "nope/data/x",);
     }
 
     #[tokio::test]
@@ -1462,14 +1354,9 @@ mod tests {
 
         let scope = ScopeSpec {
             kind: ScopeKind::Selective,
-            include: vec![ScopeSelector::KvPath {
-                mount: "secret/".to_string(),
-                path: "myapp/".to_string(),
-            }],
+            include: vec![ScopeSelector::KvPath { mount: "secret/".to_string(), path: "myapp/".to_string() }],
         };
-        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope)
-            .await
-            .unwrap();
+        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope).await.unwrap();
         // Only the two `myapp/` secrets, captured as barrier-relative paths.
         assert_eq!(doc.items.kv.len(), 2);
         assert_eq!(doc.items.kv[0].path, "data/myapp/api");
@@ -1487,11 +1374,7 @@ mod tests {
         assert_eq!(result.unchanged, 0);
         assert_eq!(result.skipped, 0);
         assert_eq!(
-            dst.get("namespaces/root-uuid/logical/u-secret/data/myapp/db")
-                .await
-                .unwrap()
-                .unwrap()
-                .value,
+            dst.get("namespaces/root-uuid/logical/u-secret/data/myapp/db").await.unwrap().unwrap().value,
             serde_json::to_vec(&v1).unwrap()
         );
     }
@@ -1508,16 +1391,11 @@ mod tests {
             ],
         )
         .await;
-        let mounts = reroot_index(&[
-            ("kv", "secret/", "u-secret"),
-            ("kv-v2", "kv2/", "u-kv2"),
-        ]);
+        let mounts = reroot_index(&[("kv", "secret/", "u-secret"), ("kv-v2", "kv2/", "u-kv2")]);
 
         // `Full` with an empty include list must still enumerate everything.
         let scope = ScopeSpec { kind: ScopeKind::Full, include: vec![] };
-        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope)
-            .await
-            .unwrap();
+        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope).await.unwrap();
 
         assert_eq!(doc.items.kv.len(), 3);
         let paths: Vec<_> = doc.items.kv.iter().map(|k| (k.mount.as_str(), k.path.as_str())).collect();
@@ -1563,9 +1441,7 @@ mod tests {
         ]);
 
         let scope = ScopeSpec { kind: ScopeKind::Full, include: vec![] };
-        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope)
-            .await
-            .unwrap();
+        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope).await.unwrap();
 
         assert_eq!(doc.items.kv.len(), 1, "KV secret must be captured");
         assert_eq!(doc.items.kv[0].path, "data/myapp/db");
@@ -1575,9 +1451,7 @@ mod tests {
         assert_eq!(doc.items.files[0].id, "f1");
         use base64::Engine;
         assert_eq!(
-            base64::engine::general_purpose::STANDARD
-                .decode(doc.items.files[0].content_b64.as_bytes())
-                .unwrap(),
+            base64::engine::general_purpose::STANDARD.decode(doc.items.files[0].content_b64.as_bytes()).unwrap(),
             vec![1u8, 2, 3, 4]
         );
         assert_eq!(doc.items.resource_groups.len(), 1, "group must be captured");
@@ -1603,7 +1477,8 @@ mod tests {
             },
         );
 
-        let result = import_from_document(&store, &MountIndex::empty(), &doc, ConflictPolicy::Skip, false).await.unwrap();
+        let result =
+            import_from_document(&store, &MountIndex::empty(), &doc, ConflictPolicy::Skip, false).await.unwrap();
         assert_eq!(result.skipped, 1);
         assert_eq!(result.written, 0);
         let after = store.get("secret/x/y").await.unwrap().unwrap();
@@ -1629,7 +1504,8 @@ mod tests {
             },
         );
 
-        let result = import_from_document(&store, &MountIndex::empty(), &doc, ConflictPolicy::Rename, false).await.unwrap();
+        let result =
+            import_from_document(&store, &MountIndex::empty(), &doc, ConflictPolicy::Rename, false).await.unwrap();
         assert_eq!(result.renamed, 1);
         let after = store.get("secret/x/y").await.unwrap().unwrap();
         assert_eq!(after.value, serde_json::to_vec(&original).unwrap());
@@ -1649,16 +1525,13 @@ mod tests {
             ExporterInfo::default(),
             ScopeSpec { kind: ScopeKind::Full, include: vec![] },
             ExchangeItems {
-                kv: vec![KvItem {
-                    mount: "secret/".to_string(),
-                    path: "x".to_string(),
-                    value: v.clone(),
-                }],
+                kv: vec![KvItem { mount: "secret/".to_string(), path: "x".to_string(), value: v.clone() }],
                 ..Default::default()
             },
         );
 
-        let result = import_from_document(&store, &MountIndex::empty(), &doc, ConflictPolicy::Skip, false).await.unwrap();
+        let result =
+            import_from_document(&store, &MountIndex::empty(), &doc, ConflictPolicy::Skip, false).await.unwrap();
         assert_eq!(result.unchanged, 1);
         assert_eq!(result.written, 0);
     }
@@ -1671,11 +1544,7 @@ mod tests {
     async fn raw_engine_full_capture_and_restore() {
         let src = MemStorage::default();
         let key_meta = serde_json::json!({"type": "chacha20-poly1305", "version": 3});
-        populate(
-            &src,
-            &[("namespaces/root-uuid/logical/u-transit/keys/app", &key_meta)],
-        )
-        .await;
+        populate(&src, &[("namespaces/root-uuid/logical/u-transit/keys/app", &key_meta)]).await;
         // A raw (non-JSON) key-material blob addressed under the same mount.
         src.put(&StorageEntry {
             key: "namespaces/root-uuid/logical/u-transit/material/app/1".to_string(),
@@ -1686,9 +1555,7 @@ mod tests {
 
         let mounts = reroot_index(&[("transit", "transit/", "u-transit")]);
         let scope = ScopeSpec { kind: ScopeKind::Full, include: vec![] };
-        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope)
-            .await
-            .unwrap();
+        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope).await.unwrap();
 
         assert_eq!(doc.items.kv.len(), 0, "transit is not a KV mount");
         assert_eq!(doc.items.raw.len(), 2, "both transit keys captured as raw");
@@ -1700,24 +1567,14 @@ mod tests {
         // Restore into a fresh vault — bytes must land back under the barrier
         // prefix, blob included.
         let dst = MemStorage::default();
-        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Skip, false)
-            .await
-            .unwrap();
+        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Skip, false).await.unwrap();
         assert_eq!(result.written, 2);
         assert_eq!(
-            dst.get("namespaces/root-uuid/logical/u-transit/keys/app")
-                .await
-                .unwrap()
-                .unwrap()
-                .value,
+            dst.get("namespaces/root-uuid/logical/u-transit/keys/app").await.unwrap().unwrap().value,
             serde_json::to_vec(&key_meta).unwrap()
         );
         assert_eq!(
-            dst.get("namespaces/root-uuid/logical/u-transit/material/app/1")
-                .await
-                .unwrap()
-                .unwrap()
-                .value,
+            dst.get("namespaces/root-uuid/logical/u-transit/material/app/1").await.unwrap().unwrap().value,
             vec![0xDE, 0xAD, 0xBE, 0xEF],
         );
     }
@@ -1736,14 +1593,9 @@ mod tests {
             ],
         )
         .await;
-        let mounts = reroot_index(&[
-            ("system", "sys/", "u-sys"),
-            ("identity", "identity/", "u-id"),
-        ]);
+        let mounts = reroot_index(&[("system", "sys/", "u-sys"), ("identity", "identity/", "u-id")]);
         let scope = ScopeSpec { kind: ScopeKind::Full, include: vec![] };
-        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope)
-            .await
-            .unwrap();
+        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope).await.unwrap();
         assert_eq!(doc.items.raw.len(), 0, "system/identity must not be captured");
     }
 
@@ -1779,31 +1631,18 @@ mod tests {
 
         // Restore into a fresh vault and confirm every barrier key reappears.
         let dst = MemStorage::default();
-        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Skip, false)
-            .await
-            .unwrap();
+        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Skip, false).await.unwrap();
         assert!(result.written >= 3, "meta + secret value + secret meta written");
         assert_eq!(
-            dst.get("namespaces/root-uuid/logical/u-res/meta/t1")
-                .await
-                .unwrap()
-                .unwrap()
-                .value,
+            dst.get("namespaces/root-uuid/logical/u-res/meta/t1").await.unwrap().unwrap().value,
             serde_json::to_vec(&meta).unwrap()
         );
         assert_eq!(
-            dst.get("namespaces/root-uuid/logical/u-res/secret/t1/db")
-                .await
-                .unwrap()
-                .unwrap()
-                .value,
+            dst.get("namespaces/root-uuid/logical/u-res/secret/t1/db").await.unwrap().unwrap().value,
             serde_json::to_vec(&secret_val).unwrap()
         );
         assert!(
-            dst.get("namespaces/root-uuid/logical/u-res/smeta/t1/db")
-                .await
-                .unwrap()
-                .is_some(),
+            dst.get("namespaces/root-uuid/logical/u-res/smeta/t1/db").await.unwrap().is_some(),
             "per-secret metadata restored"
         );
     }
@@ -1826,16 +1665,11 @@ mod tests {
                 ..Default::default()
             },
         );
-        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Skip, true)
-            .await
-            .unwrap();
+        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Skip, true).await.unwrap();
         let (new, identical, conflict) = result.classification_counts();
         assert_eq!((new, identical, conflict), (1, 0, 0));
         assert!(
-            dst.get("namespaces/root-uuid/logical/u-transit/keys/app")
-                .await
-                .unwrap()
-                .is_none(),
+            dst.get("namespaces/root-uuid/logical/u-transit/keys/app").await.unwrap().is_none(),
             "dry run must not write"
         );
     }
@@ -1872,9 +1706,7 @@ mod tests {
 
         let mounts = reroot_index(&[("kv-v2", "secret/", "u-secret")]);
         let scope = ScopeSpec { kind: ScopeKind::Full, include: vec![] };
-        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope)
-            .await
-            .unwrap();
+        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope).await.unwrap();
 
         let names: Vec<&str> = doc.items.policies.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, vec!["admin", "team/dev"], "reserved names stay out");
@@ -1885,9 +1717,7 @@ mod tests {
 
         // Restore into a fresh vault: same keys, same bytes.
         let dst = MemStorage::default();
-        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Skip, false)
-            .await
-            .unwrap();
+        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Skip, false).await.unwrap();
         assert_eq!(result.written, 3, "two policies plus one test-case document");
         assert_eq!(
             dst.get("namespaces/root-uuid/sys/policy/admin").await.unwrap().unwrap().value,
@@ -1917,19 +1747,13 @@ mod tests {
                         value: serde_json::json!({"raw": "x"}),
                         tests: None,
                     },
-                    PolicyItem {
-                        name: "ROOT".to_string(),
-                        value: serde_json::json!({"raw": "x"}),
-                        tests: None,
-                    },
+                    PolicyItem { name: "ROOT".to_string(), value: serde_json::json!({"raw": "x"}), tests: None },
                 ],
                 ..Default::default()
             },
         );
 
-        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Overwrite, false)
-            .await
-            .unwrap();
+        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Overwrite, false).await.unwrap();
         assert_eq!(result.written, 0);
         assert_eq!(result.warnings.len(), 2, "{:?}", result.warnings);
         assert!(dst.get("namespaces/root-uuid/core/mounts").await.unwrap().is_none());

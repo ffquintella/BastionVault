@@ -436,8 +436,7 @@ mod path_role_test {
     // `super::super::` inside the backend: the sibling helpers live in the
     // block lifted from `lib.rs`, the two items in the crate root.
     use super::mod_test::{
-        generate_secret_id, login_from_connection, login_from_source_ip, test_delete_role, test_login,
-        test_write_role,
+        generate_secret_id, login_from_connection, login_from_source_ip, test_delete_role, test_login, test_write_role,
     };
     use bv_kernel_api::VaultCtx;
 
@@ -446,8 +445,8 @@ mod path_role_test {
     use crate::modules::credential::approle::{AppRoleModule, SECRET_ID_PREFIX};
     use crate::{
         errors::RvError,
-        logical::{Operation, Request},
         kernel_api::auth::MAX_LEASE_DURATION_SECS,
+        logical::{Operation, Request},
         storage::Storage,
         test_utils::{
             new_unseal_test_bastion_vault, test_delete_api, test_list_api, test_mount_auth_api, test_read_api,
@@ -972,8 +971,7 @@ mod path_role_test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_machine_binding_crud() {
-        let (_bvault, core, root_token) =
-            new_unseal_test_bastion_vault("test_approle_machine_binding_crud").await;
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_machine_binding_crud").await;
 
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
         test_write_role(&core, &root_token, "approle", "mrole", "mrole-id", "a,b", true).await;
@@ -1079,8 +1077,7 @@ mod path_role_test {
     /// role. The exemption is per role, persisted, and revocable.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_bypass_machine_binding() {
-        let (_bvault, core, root_token) =
-            new_unseal_test_bastion_vault("test_approle_bypass_machine_binding").await;
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_bypass_machine_binding").await;
 
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
 
@@ -1097,9 +1094,8 @@ mod path_role_test {
         let resp = test_read_api(&core, &root_token, "auth/approle/role/gated", true).await;
         assert_eq!(resp.unwrap().unwrap().data.unwrap()["bypass_machine_binding"], Value::Bool(false));
 
-        let login = |role_id: &str, secret_id: &str| {
-            json!({ "role_id": role_id, "secret_id": secret_id }).as_object().cloned()
-        };
+        let login =
+            |role_id: &str, secret_id: &str| json!({ "role_id": role_id, "secret_id": secret_id }).as_object().cloned();
 
         // The exempt role authenticates with role_id + secret_id only.
         let resp = test_write_api(&core, &root_token, "auth/approle/role/exempt/secret-id", true, None).await;
@@ -1125,7 +1121,8 @@ mod path_role_test {
         let resp = test_read_api(&core, &root_token, "auth/approle/role/exempt/bypass-machine-binding", true).await;
         assert_eq!(resp.unwrap().unwrap().data.unwrap()["bypass_machine_binding"], Value::Bool(true));
 
-        let _ = test_delete_api(&core, &root_token, "auth/approle/role/exempt/bypass-machine-binding", true, None).await;
+        let _ =
+            test_delete_api(&core, &root_token, "auth/approle/role/exempt/bypass-machine-binding", true, None).await;
         let resp = test_read_api(&core, &root_token, "auth/approle/role/exempt", true).await;
         assert_eq!(resp.unwrap().unwrap().data.unwrap()["bypass_machine_binding"], Value::Bool(false));
 
@@ -1234,10 +1231,7 @@ mod path_role_test {
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|f| f.as_str()).collect::<Vec<_>>())
             .unwrap_or_default();
-        assert!(
-            fields.contains(&"reason=machine-identity"),
-            "a machine-gate denial must name the gate: {fields:?}"
-        );
+        assert!(fields.contains(&"reason=machine-identity"), "a machine-gate denial must name the gate: {fields:?}");
     }
 
     /// The source-IP filter accepts a mixed list — single address, CIDR block,
@@ -1488,11 +1482,8 @@ mod path_role_test {
         req.operation = Operation::Write;
         req.client_token = root_token.clone();
         req.body = json!({ "token": child.jws, "dpop": proof }).as_object().cloned();
-        let resp = core
-            .handle_request(&mut req)
-            .await
-            .expect("ferrogate login request")
-            .expect("ferrogate login response");
+        let resp =
+            core.handle_request(&mut req).await.expect("ferrogate login request").expect("ferrogate login response");
         let mauth = resp.auth.expect("live MIA child token must mint a ferrogate token");
         let machine_token = mauth.client_token.clone();
         let spiffe_id = mauth.metadata.get("spiffe_id").cloned().unwrap_or_default();
@@ -1524,11 +1515,7 @@ mod path_role_test {
         })
         .as_object()
         .cloned();
-        let resp = core
-            .handle_request(&mut req)
-            .await
-            .expect("approle login request")
-            .expect("approle login response");
+        let resp = core.handle_request(&mut req).await.expect("approle login request").expect("approle login response");
         let auth = resp.auth.expect("approle login with a bound machine token mints a token");
         assert_eq!(auth.metadata.get("approle_env_scoped").map(String::as_str), Some("true"));
         assert_eq!(auth.metadata.get("spiffe_id"), Some(&spiffe_id));
@@ -1594,10 +1581,7 @@ mod path_role_test {
         // A request the server cannot attribute a source address to fails
         // closed rather than skipping the check.
         let err = use_token_from(&core, &token, "").await.unwrap_err();
-        assert!(
-            matches!(err, RvError::ErrPermissionDenied),
-            "an unknown client address must be refused, got: {err}"
-        );
+        assert!(matches!(err, RvError::ErrPermissionDenied), "an unknown client address must be refused, got: {err}");
 
         // Behind a trusted proxy the derived client IP decides, not the
         // proxy's own socket address.
@@ -1675,9 +1659,7 @@ mod path_role_test {
             &root_token,
             "kvenv/data/svc",
             true,
-            json!({ "data": { "host": "db.base" }, "envs": { "prod": { "host": "db.prod" } } })
-                .as_object()
-                .cloned(),
+            json!({ "data": { "host": "db.base" }, "envs": { "prod": { "host": "db.prod" } } }).as_object().cloned(),
         )
         .await;
 
@@ -1766,10 +1748,8 @@ mod path_role_test {
         let mut req = Request::new("auth/token/lookup-self");
         req.operation = Operation::Read;
         req.client_token = token.to_string();
-        req.connection = Some(crate::logical::connection::Connection {
-            peer_addr: peer_addr.to_string(),
-            ..Default::default()
-        });
+        req.connection =
+            Some(crate::logical::connection::Connection { peer_addr: peer_addr.to_string(), ..Default::default() });
         core.handle_request(&mut req).await.map(|_| ())
     }
 
@@ -2153,10 +2133,12 @@ mod path_role_test {
         .cloned();
         let _ = test_write_api(&core, &root_token, "auth/approle/role/role1", true, role_data).await;
 
-        let cases = [json!({"name": "finite num_uses and ttl", "payload": {"secret_id": "finite", "ttl": 5, "num_uses": 5}}),
+        let cases = [
+            json!({"name": "finite num_uses and ttl", "payload": {"secret_id": "finite", "ttl": 5, "num_uses": 5}}),
             json!({"name": "infinite num_uses and ttl", "payload": {"secret_id": "infinite", "ttl": 0, "num_uses": 0}}),
             json!({"name": "finite num_uses and infinite ttl", "payload": {"secret_id": "maxed1", "ttl": 0, "num_uses": 5}}),
-            json!({"name": "infinite num_uses and finite ttl", "payload": {"secret_id": "maxed2", "ttl": 5, "num_uses": 0}})];
+            json!({"name": "infinite num_uses and finite ttl", "payload": {"secret_id": "maxed2", "ttl": 5, "num_uses": 0}}),
+        ];
 
         for case in cases.iter() {
             let secret_id_data = case["payload"].as_object().unwrap().clone();
@@ -2204,7 +2186,8 @@ mod path_role_test {
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
 
-        let cases = [json!({
+        let cases = [
+            json!({
                 "name": "infinite role secret id ttl",
                 "options": {
                     "secret_id_num_uses": 1,
@@ -2256,7 +2239,8 @@ mod path_role_test {
                     "payload": {"secret_id": "abcd123", "ttl": 0, "num_uses": -1},
                     "expected": "num_uses cannot be negative",
                 }],
-            })];
+            }),
+        ];
 
         for (i, case) in cases.iter().enumerate() {
             let mut role_data = json!({
@@ -3038,9 +3022,11 @@ mod path_role_test {
         .unwrap()
         .clone();
 
-        let cases = [json!({"name": "zero ttl", "role_name": "role-zero-ttl", "ttl": 0, "sys_ttl_cap": false}),
+        let cases = [
+            json!({"name": "zero ttl", "role_name": "role-zero-ttl", "ttl": 0, "sys_ttl_cap": false}),
             json!({"name": "custom ttl", "role_name": "role-custom-ttl", "ttl": 60, "sys_ttl_cap": false}),
-            json!({"name": "system ttl capped", "role_name": "role-sys-ttl-cap", "ttl": 700000000, "sys_ttl_cap": true})];
+            json!({"name": "system ttl capped", "role_name": "role-sys-ttl-cap", "ttl": 700000000, "sys_ttl_cap": true}),
+        ];
 
         for case in cases.iter() {
             let role_name = case["role_name"].as_str().unwrap();

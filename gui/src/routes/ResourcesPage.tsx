@@ -79,9 +79,17 @@ import {
 } from "../lib/sshBroker";
 import type { ConnectProtocol, EffectiveLoginClass } from "../lib/types";
 import * as api from "../lib/api";
-import { openProfileSession } from "../lib/sessionLaunch";
+import { connectProfile } from "../lib/connectFlow";
+import { parseProviderOption } from "../lib/credentialProviders";
 import { WebProfileFields } from "../components/WebProfileFields";
 import { useConnectMfa } from "../components/ConnectMfaPrompt";
+import { useProviderAccountPicker } from "../components/ProviderAccountPicker";
+import {
+  ProviderSourceNotice,
+  credentialSourceSelectValue,
+  providerSourceOptions,
+} from "../components/ProviderSourceFields";
+import { useCredentialProviders, useProviderAccountsLink } from "../hooks/useCredentialProviders";
 import { extractError } from "../lib/error";
 import { useNamespaceStore } from "../stores/namespaceStore";
 import { useAssetGroupMap } from "../hooks/useAssetGroupMap";
@@ -328,6 +336,9 @@ export function ResourcesPage() {
   const { toast } = useToast();
   // Connect-time MFA gate for the card-level quick-Connect.
   const { gateConnect, mfaPrompt } = useConnectMfa();
+  // The credential-provider account picker (features/self-accounts.md §6),
+  // shown before the MFA gate for a `provider` profile.
+  const { pickProviderAccount, providerPicker } = useProviderAccountPicker(useProviderAccountsLink());
   const activeNamespace = useNamespaceStore((s) => s.active);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -782,18 +793,15 @@ export function ResourcesPage() {
     operatorCredential: { username: string; password: string } | undefined,
   ) {
     try {
-      // Server-side gate first: on a profile marked `require_mfa` nothing
-      // opens until the operator re-proves a factor. Returns `{}` when the
-      // profile is ungated, so the spread below is a no-op in that case.
-      const mfa = await gateConnect(name, profile.id, profile.name);
-      if (!mfa) return; // operator cancelled the prompt
-      // Strict dispatch: an unknown protocol throws instead of being
-      // opened as RDP (the old `ssh ? … : rdp` fallthrough).
-      await openProfileSession(profile, {
+      // The shared sequence (`lib/connectFlow.ts`): a `provider` profile's
+      // account picker, then the server-side MFA gate (on a profile marked
+      // `require_mfa` nothing opens until the operator re-proves a factor),
+      // then the strict dispatch — an unknown protocol throws instead of
+      // being opened as RDP. A cancel at either prompt simply stops.
+      await connectProfile({ pickProviderAccount, gateConnect }, profile, {
         resource_name: name,
         profile_id: profile.id,
         operator_credential: operatorCredential,
-        ...mfa,
       });
     } catch (e: unknown) {
       toast("error", extractError(e));
@@ -1033,6 +1041,7 @@ export function ResourcesPage() {
             onConfirm={handleDelete} title="Delete Resource"
             message={`Delete "${deleteTarget}" and all its secrets? This cannot be undone.`}
             confirmLabel="Delete" />
+          {providerPicker}
           {mfaPrompt}
         </div>
       </Layout>
@@ -1255,6 +1264,7 @@ export function ResourcesPage() {
             }}
           />
         )}
+        {providerPicker}
         {mfaPrompt}
       </div>
     </Layout>
@@ -1788,8 +1798,10 @@ function ConnectionProfilesPanel({
   // request's `operator_credential` field.
   const [operatorPrompt, setOperatorPrompt] = useState<ConnectionProfile | null>(null);
 
-  // Connect-time MFA gate for the Connection-tab launcher.
+  // Connect-time MFA gate for the Connection-tab launcher, and the
+  // credential-provider account picker that runs before it.
   const { gateConnect, mfaPrompt } = useConnectMfa();
+  const { pickProviderAccount, providerPicker } = useProviderAccountPicker(useProviderAccountsLink());
 
   async function handleConnect(profile: ConnectionProfile) {
     // LDAP operator-bind, and an RDP default account with no stored Windows
@@ -1808,19 +1820,12 @@ function ConnectionProfilesPanel({
   ) {
     setConnecting(profile.id);
     try {
-      // See the note on the card-level launcher: the gate is server-decided,
-      // and `{}` on an ungated profile keeps this a no-op.
-      const mfa = await gateConnect(
-        String(resource.name),
-        profile.id,
-        profile.name,
-      );
-      if (!mfa) return; // operator cancelled the prompt
-      await openProfileSession(profile, {
+      // See the note on the card-level launcher: picker (provider profiles),
+      // then the server-decided MFA gate, then the open.
+      await connectProfile({ pickProviderAccount, gateConnect }, profile, {
         resource_name: String(resource.name),
         profile_id: profile.id,
         operator_credential: operatorCredential,
-        ...mfa,
       });
     } catch (e: unknown) {
       toast("error", extractError(e));
@@ -1960,6 +1965,27 @@ function ConnectionProfilesPanel({
           </div>
         )}
 
+        {/* Profiles this build cannot read (an unknown protocol or credential
+            source, written by a newer client): never listed or launched, but
+            kept on every save (`profilesForWrite`). Said once, so their
+            absence from the list is not a mystery. */}
+        {unknownProfiles.length > 0 && (
+          <div
+            className="rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] px-3 py-2 text-sm"
+            role="note"
+          >
+            <strong className="text-[var(--color-text)]">
+              {unknownProfiles.length === 1
+                ? "1 profile uses an unsupported protocol or credential source."
+                : `${unknownProfiles.length} profiles use an unsupported protocol or credential source.`}
+            </strong>{" "}
+            {unknownProfiles.length === 1 ? "It was" : "They were"} saved by a newer
+            version of this app. {unknownProfiles.length === 1 ? "It is" : "They are"} kept
+            unchanged when you edit this list, but cannot be shown or launched here
+            — update the desktop app to use {unknownProfiles.length === 1 ? "it" : "them"}.
+          </div>
+        )}
+
         {/* One notice for both access gates — they very often apply
             together (a share that grants connect but not write), and two
             stacked boxes saying what you can't do buried the profile list
@@ -2076,7 +2102,9 @@ function ConnectionProfilesPanel({
                       {p.target_port ?? defaultPort(p.protocol)}
                     </dd>
                     <dt>user</dt>
-                    <dd className="font-mono">{p.username || "(default)"}</dd>
+                    <dd className="font-mono">
+                      {p.credential_source.kind === "provider" ? "(the picked account's)" : p.username || "(default)"}
+                    </dd>
                     <dt>cred</dt>
                     <dd className="font-mono">{describeCredentialSource(p.credential_source)}</dd>
                   </dl>
@@ -2235,6 +2263,7 @@ function ConnectionProfilesPanel({
         />
       )}
 
+      {providerPicker}
       {mfaPrompt}
     </Card>
   );
@@ -2398,6 +2427,8 @@ function describeCredentialSource(c: CredentialSource): string {
       return "fido2 • connecting user's security key";
     case "none":
       return "none • no credential released";
+    case "provider":
+      return c.provider ? `provider • ${c.provider} (picked at connect)` : "provider • (not set)";
   }
 }
 
@@ -2443,6 +2474,13 @@ function ConnectionProfileEditor({
     label: string;
   }>>([]);
   const [loadingSecrets, setLoadingSecrets] = useState(false);
+  // Approved credential providers (features/self-accounts.md §6), offered
+  // as `provider` sources for the protocols each one declares.
+  const {
+    providers: credentialProviders,
+    loaded: providersLoaded,
+    error: providersError,
+  } = useCredentialProviders(open);
   // Resolved effective SSH login class for this resource. When
   // `brokered`, the editor forces the SSH-engine source and disables the
   // static/secret options (the host enforces the same on connect +
@@ -2532,6 +2570,23 @@ function ConnectionProfileEditor({
     // `blankCredentialSource` is exhaustive over the union, so a new kind
     // can't reach the dropdown without a state shape to switch to.
     updateCredentialSource(blankCredentialSource(kind));
+  }
+
+  // The source select's value is the kind, or `provider:<name>` for a
+  // credential provider (one option per approved provider).
+  function handleCredSelect(value: string) {
+    const provider = parseProviderOption(value);
+    if (provider !== null) {
+      // The released account's login name is authoritative, so a provider
+      // profile carries no username of its own.
+      setProfile((p) => {
+        const next: ConnectionProfile = { ...p, credential_source: { kind: "provider", provider } };
+        delete next.username;
+        return next;
+      });
+      return;
+    }
+    handleCredKindChange(value as CredentialSource["kind"]);
   }
 
   // Switching to or from `web` swaps the whole shape (a web profile has no
@@ -2626,10 +2681,19 @@ function ConnectionProfileEditor({
                     secretCandidates={secretCandidates}
                     loadingSecrets={loadingSecrets}
                     mode={profile.web.login_mode}
+                    providers={credentialProviders}
                   />
                 ) : undefined
               }
             />
+            {profile.credential_source.kind === "provider" && (
+              <ProviderSourceNotice
+                profile={profile}
+                providers={credentialProviders}
+                loaded={providersLoaded}
+                error={providersError}
+              />
+            )}
             {validationError && (
               <p className="text-xs text-[var(--color-danger)]">{validationError}</p>
             )}
@@ -2672,21 +2736,25 @@ function ConnectionProfileEditor({
           />
         </div>
 
-        <Input
-          label="Username"
-          value={profile.username ?? ""}
-          onChange={(e) => update("username", e.target.value || undefined)}
-          placeholder={
-            profile.protocol === "rdp" ? "Administrator" : "root"
-          }
-          hint={
-            profile.credential_source.kind === "secret"
-              ? "Optional — used only as a fallback if the chosen secret has no `username` field. When the secret carries a username it wins."
-              : profile.credential_source.kind === "ldap"
-                ? "Ignored for LDAP — the credential source supplies the username (operator-typed, static-role, or checked-out account)."
-                : "Used as the SSH/RDP login user. PKI client certs don't carry the OS user, so this field is required."
-          }
-        />
+        {/* A provider profile has no username: the account the operator
+            picks at connect supplies it (spec §6 step 6). */}
+        {profile.credential_source.kind !== "provider" && (
+          <Input
+            label="Username"
+            value={profile.username ?? ""}
+            onChange={(e) => update("username", e.target.value || undefined)}
+            placeholder={
+              profile.protocol === "rdp" ? "Administrator" : "root"
+            }
+            hint={
+              profile.credential_source.kind === "secret"
+                ? "Optional — used only as a fallback if the chosen secret has no `username` field. When the secret carries a username it wins."
+                : profile.credential_source.kind === "ldap"
+                  ? "Ignored for LDAP — the credential source supplies the username (operator-typed, static-role, or checked-out account)."
+                  : "Used as the SSH/RDP login user. PKI client certs don't carry the OS user, so this field is required."
+            }
+          />
+        )}
 
         <hr className="border-[var(--color-border)]" />
 
@@ -2701,24 +2769,29 @@ function ConnectionProfileEditor({
 
         <Select
           label="Credential source"
-          value={profile.credential_source.kind}
+          value={credentialSourceSelectValue(profile.credential_source)}
           disabled={brokeredSsh}
-          onChange={(e) =>
-            handleCredKindChange(e.target.value as CredentialSource["kind"])
-          }
-          options={(
-            [
-              { value: "secret", label: "Resource secret" },
-              { value: "ldap", label: "LDAP / Active Directory" },
-              { value: "ssh-engine", label: "SSH secret engine (CA-signed cert / OTP)" },
-              { value: "pki", label: "PKI client cert (SSH publickey / RDP CredSSP smartcard)" },
-              { value: "default-account", label: "Connecting user's default account" },
-              { value: "fido2", label: "Connecting user's FIDO2 security key" },
-            ] as { value: CredentialSource["kind"]; label: string }[]
-          )
-            .filter((o) => credGate.allowedKinds.includes(o.value))
-            // FIDO2 authenticates SSH only; RDP has no equivalent method.
-            .filter((o) => o.value !== "fido2" || profile.protocol === "ssh")}
+          onChange={(e) => handleCredSelect(e.target.value)}
+          options={[
+            ...(
+              [
+                { value: "secret", label: "Resource secret" },
+                { value: "ldap", label: "LDAP / Active Directory" },
+                { value: "ssh-engine", label: "SSH secret engine (CA-signed cert / OTP)" },
+                { value: "pki", label: "PKI client cert (SSH publickey / RDP CredSSP smartcard)" },
+                { value: "default-account", label: "Connecting user's default account" },
+                { value: "fido2", label: "Connecting user's FIDO2 security key" },
+              ] as { value: CredentialSource["kind"]; label: string }[]
+            )
+              .filter((o) => credGate.allowedKinds.includes(o.value))
+              // FIDO2 authenticates SSH only; RDP has no equivalent method.
+              .filter((o) => o.value !== "fido2" || profile.protocol === "ssh"),
+            // Approved credential providers for this protocol, by their
+            // display name; a brokered SSH resource allows none.
+            ...(credGate.allowedKinds.includes("provider")
+              ? providerSourceOptions(credentialProviders, profile.protocol, profile.credential_source)
+              : []),
+          ]}
         />
 
         {profile.credential_source.kind === "secret" ? (
@@ -2773,6 +2846,13 @@ function ConnectionProfileEditor({
           <SshEngineCredentialEditor
             cs={profile.credential_source}
             onChange={updateCredentialSource}
+          />
+        ) : profile.credential_source.kind === "provider" ? (
+          <ProviderSourceNotice
+            profile={profile}
+            providers={credentialProviders}
+            loaded={providersLoaded}
+            error={providersError}
           />
         ) : null}
 
@@ -3424,25 +3504,33 @@ function WebFormCredentialEditor({
   secretCandidates,
   loadingSecrets,
   mode = "form",
+  providers = [],
 }: {
   cs: CredentialSource;
   onChange: (s: CredentialSource) => void;
   secretCandidates: Array<{ value: string; label: string }>;
   loadingSecrets: boolean;
   mode?: "form" | "http-auth";
+  /** Approved credential providers; offered in `form` mode only. */
+  providers?: api.CredentialProviderInfo[];
 }) {
   const httpAuth = mode === "http-auth";
-  const kind = cs.kind === "ldap" || (!httpAuth && cs.kind === "default-account") ? cs.kind : "secret";
+  const value =
+    cs.kind === "ldap" || (!httpAuth && (cs.kind === "default-account" || cs.kind === "provider"))
+      ? credentialSourceSelectValue(cs)
+      : "secret";
   return (
     <div className="space-y-2 min-w-0">
       <Select
         label="Credential source"
-        value={kind}
+        value={value}
         onChange={(e) => {
           // Web form blanks: no `ssh_*` leftovers, and an LDAP source that
           // releases something (operator-supplied bind releases nothing).
           const next = e.target.value;
-          if (next === "ldap") onChange({ kind: "ldap", ldap_mount: "", bind_mode: "static_role" });
+          const provider = parseProviderOption(next);
+          if (provider !== null) onChange({ kind: "provider", provider });
+          else if (next === "ldap") onChange({ kind: "ldap", ldap_mount: "", bind_mode: "static_role" });
           else if (next === "default-account") onChange({ kind: "default-account" });
           else onChange(blankCredentialSource("secret"));
         }}
@@ -3456,6 +3544,8 @@ function WebFormCredentialEditor({
                 { value: "secret", label: "Resource secret (username, password, optional TOTP seed)" },
                 { value: "ldap", label: "LDAP / Active Directory (static role or library check-out)" },
                 { value: "default-account", label: "Connecting user's default account (username only)" },
+                // The operator's own account, picked at connect.
+                ...providerSourceOptions(providers, "web", cs),
               ]
         }
       />
@@ -3547,6 +3637,49 @@ function WebFormCredentialEditor({
       {cs.kind === "ldap" && <LdapCredentialEditor cs={cs} onChange={onChange} allowOperator={false} />}
       {cs.kind === "default-account" && (
         <DefaultAccountCredentialEditor cs={cs} onChange={onChange} protocol="web" />
+      )}
+      {cs.kind === "provider" && !httpAuth && (
+        <details open={cs.totp !== undefined}>
+          <summary className="cursor-pointer text-xs font-medium text-[var(--color-text-muted)]">TOTP</summary>
+          <div className="mt-2 grid grid-cols-2 gap-3">
+            <p className="col-span-2 text-xs text-[var(--color-text-muted)]">
+              When the picked account carries a TOTP seed, how this application computes a code from it.
+              The seed never leaves the server: the host receives only the current code.
+            </p>
+            <Select
+              label="TOTP algorithm"
+              value={cs.totp?.algorithm ?? "SHA1"}
+              onChange={(e) =>
+                onChange({ ...cs, totp: { ...cs.totp, algorithm: e.target.value as "SHA1" | "SHA256" | "SHA512" } })
+              }
+              options={[
+                { value: "SHA1", label: "SHA1 (default)" },
+                { value: "SHA256", label: "SHA256" },
+                { value: "SHA512", label: "SHA512" },
+              ]}
+            />
+            <div className="grid grid-cols-2 gap-3">
+              <Select
+                label="Digits"
+                value={String(cs.totp?.digits ?? 6)}
+                onChange={(e) => onChange({ ...cs, totp: { ...cs.totp, digits: Number(e.target.value) as 6 | 8 } })}
+                options={[
+                  { value: "6", label: "6" },
+                  { value: "8", label: "8" },
+                ]}
+              />
+              <Select
+                label="Period (s)"
+                value={String(cs.totp?.period ?? 30)}
+                onChange={(e) => onChange({ ...cs, totp: { ...cs.totp, period: Number(e.target.value) as 30 | 60 } })}
+                options={[
+                  { value: "30", label: "30" },
+                  { value: "60", label: "60" },
+                ]}
+              />
+            </div>
+          </div>
+        </details>
       )}
     </div>
   );

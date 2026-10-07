@@ -166,8 +166,18 @@ pub enum Relogin {
 ///   could not take effect without rebuilding the window.
 /// * `open`: releases no credential; the application signs in by itself.
 /// * a recipe test holds no credential at all.
-pub fn relogin_availability(kind: WebSessionKind, running: bool) -> Relogin {
+/// * a `form` session signed in with a credential-provider account
+///   (`credential_provider`): the provider releases an account again only
+///   after a fresh connect-time MFA check, which the toolbar cannot run (its
+///   webview is granted three commands, none of them a factor ceremony), so a
+///   re-run would only be refused with `mfa_required` and leave a denied
+///   audit line. Connecting again runs the picker and the check.
+pub fn relogin_availability(kind: WebSessionKind, credential_provider: bool, running: bool) -> Relogin {
     match kind {
+        WebSessionKind::Form if credential_provider => Relogin::Unavailable(
+            "this session signed in with an account from a credential provider, which is released again only \
+             after a new connect-time MFA check; disconnect and connect again to sign in afresh",
+        ),
         WebSessionKind::Form if running => Relogin::Running,
         WebSessionKind::Form => Relogin::Available,
         WebSessionKind::HttpAuth => Relogin::Unavailable(
@@ -220,11 +230,12 @@ pub fn chrome_state(session: &WebSessionState, now: Instant) -> ChromeState {
     let shared = &session.shared;
     let view = shared.chrome_view();
     let lock = lock_state(view.url.as_ref(), |o| shared.accepted_on_pin(o));
-    let (relogin, relogin_reason) = match relogin_availability(session.kind, shared.relogin_running()) {
-        Relogin::Available => ("available", None),
-        Relogin::Running => ("running", None),
-        Relogin::Unavailable(reason) => ("unavailable", Some(reason)),
-    };
+    let (relogin, relogin_reason) =
+        match relogin_availability(session.kind, session.credential_provider, shared.relogin_running()) {
+            Relogin::Available => ("available", None),
+            Relogin::Running => ("running", None),
+            Relogin::Unavailable(reason) => ("unavailable", Some(reason)),
+        };
     ChromeState {
         resource: session.resource_name.clone(),
         origin: view.origin,
@@ -260,6 +271,7 @@ mod tests {
             data_dir: None,
             opened_at,
             kind,
+            credential_provider: false,
             launch: None,
             shared,
             relogin: None,
@@ -353,12 +365,33 @@ mod tests {
 
     #[test]
     fn relogin_is_offered_for_form_sessions_only() {
-        assert_eq!(relogin_availability(WebSessionKind::Form, false), Relogin::Available);
-        assert_eq!(relogin_availability(WebSessionKind::Form, true), Relogin::Running);
+        assert_eq!(relogin_availability(WebSessionKind::Form, false, false), Relogin::Available);
+        assert_eq!(relogin_availability(WebSessionKind::Form, false, true), Relogin::Running);
         for kind in [WebSessionKind::HttpAuth, WebSessionKind::Open, WebSessionKind::RecipeTest] {
-            assert!(matches!(relogin_availability(kind, false), Relogin::Unavailable(_)), "{kind:?}");
-            assert!(matches!(relogin_availability(kind, true), Relogin::Unavailable(_)), "{kind:?}");
+            for provider in [false, true] {
+                assert!(matches!(relogin_availability(kind, provider, false), Relogin::Unavailable(_)), "{kind:?}");
+                assert!(matches!(relogin_availability(kind, provider, true), Relogin::Unavailable(_)), "{kind:?}");
+            }
         }
+    }
+
+    /// A credential-provider account is released again only after a fresh
+    /// connect-time MFA check, which the toolbar cannot run: the re-run is
+    /// unavailable (and says why) rather than sent to fail with
+    /// `mfa_required`.
+    #[test]
+    fn relogin_is_unavailable_for_a_credential_provider_session() {
+        for running in [false, true] {
+            match relogin_availability(WebSessionKind::Form, true, running) {
+                Relogin::Unavailable(reason) => assert!(reason.contains("connect again"), "{reason}"),
+                other => panic!("{other:?}"),
+            }
+        }
+        let mut e = entry(WebSessionKind::Form, WebShared::new("fw01", "https://fw01.example.com"), Instant::now());
+        e.credential_provider = true;
+        let state = chrome_state(&e, Instant::now());
+        assert_eq!(state.relogin, "unavailable");
+        assert!(state.relogin_reason.is_some_and(|r| r.contains("credential provider")));
     }
 
     #[test]

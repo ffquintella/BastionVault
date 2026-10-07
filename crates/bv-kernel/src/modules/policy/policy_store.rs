@@ -416,6 +416,17 @@ path "ssh-broker/policy/effective" { capabilities = ["update"] }
 # re-authorizing the named resource's `connect` grant itself, so they are
 # granted on the same terms.
 #
+# `connect/provider/candidates` lists the caller's *own* accounts in a
+# credential-provider plugin that match a `provider` profile, metadata only
+# (features/self-accounts.md §6). It re-authorizes the named resource's
+# `connect` grant the same way, and the provider stores per identity entity,
+# so it reaches no account but the caller's.
+#
+# `connect/providers` (`read`) lists the credential providers a profile can
+# name -- approved, active plugins with their display name, protocols and
+# secret kinds -- for the connection-profile editor. It names no resource and
+# returns no account data.
+#
 # `connect/clipboard/audit` is where the desktop host records an RDP
 # session's clipboard transfers (metadata only). It re-authorizes the named
 # resource's `connect` grant the same way. The host fails *closed* on a
@@ -429,6 +440,8 @@ path "ssh-broker/policy/effective" { capabilities = ["update"] }
 path "resources/v2/connect/mfa/begin"  { capabilities = ["update"] }
 path "resources/v2/connect/mfa/verify" { capabilities = ["update"] }
 path "resources/v2/connect/authorize"  { capabilities = ["update"] }
+path "resources/v2/connect/provider/candidates" { capabilities = ["update"] }
+path "resources/v2/connect/providers"  { capabilities = ["read"] }
 path "resources/v2/connect/web/launch" { capabilities = ["update"] }
 path "resources/v2/connect/web/totp"   { capabilities = ["update"] }
 path "resources/v2/connect/web/result" { capabilities = ["update"] }
@@ -663,6 +676,8 @@ path "{{namespace.path}}/resource-group/groups/+" {
 path "{{namespace.path}}/resources/v2/connect/mfa/begin"  { capabilities = ["update"] }
 path "{{namespace.path}}/resources/v2/connect/mfa/verify" { capabilities = ["update"] }
 path "{{namespace.path}}/resources/v2/connect/authorize"  { capabilities = ["update"] }
+path "{{namespace.path}}/resources/v2/connect/provider/candidates" { capabilities = ["update"] }
+path "{{namespace.path}}/resources/v2/connect/providers"  { capabilities = ["read"] }
 path "{{namespace.path}}/resources/v2/connect/web/launch" { capabilities = ["update"] }
 path "{{namespace.path}}/resources/v2/connect/web/totp"   { capabilities = ["update"] }
 path "{{namespace.path}}/resources/v2/connect/web/result" { capabilities = ["update"] }
@@ -754,6 +769,8 @@ path "{{request.namespace}}/resource-group/groups/+" {
 path "{{request.namespace}}/resources/v2/connect/mfa/begin"  { capabilities = ["update"] }
 path "{{request.namespace}}/resources/v2/connect/mfa/verify" { capabilities = ["update"] }
 path "{{request.namespace}}/resources/v2/connect/authorize"  { capabilities = ["update"] }
+path "{{request.namespace}}/resources/v2/connect/provider/candidates" { capabilities = ["update"] }
+path "{{request.namespace}}/resources/v2/connect/providers"  { capabilities = ["read"] }
 path "{{request.namespace}}/resources/v2/connect/web/launch" { capabilities = ["update"] }
 path "{{request.namespace}}/resources/v2/connect/web/totp"   { capabilities = ["update"] }
 path "{{request.namespace}}/resources/v2/connect/web/result" { capabilities = ["update"] }
@@ -839,6 +856,8 @@ path "ssh-broker/policy/effective"        { capabilities = ["create", "read", "u
 path "resources/v2/connect/mfa/begin"     { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "resources/v2/connect/mfa/verify"    { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "resources/v2/connect/authorize"     { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "resources/v2/connect/provider/candidates" { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "resources/v2/connect/providers"     { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "resources/v2/connect/web/launch"    { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "resources/v2/connect/web/totp"      { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "resources/v2/connect/web/result"    { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
@@ -4323,10 +4342,11 @@ mod implicit_rustion_grant_tests {
         assert!(rule(&p, "rustion/session/open").is_none());
     }
 
-    const CONNECT_ENDPOINTS: [&str; 8] = [
+    const CONNECT_ENDPOINTS: [&str; 9] = [
         "resources/v2/connect/mfa/begin",
         "resources/v2/connect/mfa/verify",
         "resources/v2/connect/authorize",
+        "resources/v2/connect/provider/candidates",
         "resources/v2/connect/web/launch",
         "resources/v2/connect/web/totp",
         "resources/v2/connect/web/result",
@@ -4363,6 +4383,29 @@ mod implicit_rustion_grant_tests {
                 .unwrap_or_else(|| panic!("{templated} must be granted"));
             assert!(r.capabilities.contains(&Capability::Update));
         }
+    }
+
+    /// The connection-profile editor lists the credential providers a profile
+    /// can name (`GET resources/v2/connect/providers`, features/self-accounts.md
+    /// Phase 4). It is a read of the server's own provider list, granted in
+    /// every baseline the candidates endpoint is in, and read-only: no
+    /// baseline gives it `update`, so the rule cannot be mistaken for a
+    /// Connect pre-flight.
+    #[test]
+    fn the_baselines_grant_the_provider_listing_read_only() {
+        const PROVIDERS: &str = "resources/v2/connect/providers";
+        let default = Policy::from_str(DEFAULT_POLICY).expect("default policy must parse");
+        let r = rule(&default, PROVIDERS).unwrap_or_else(|| panic!("{PROVIDERS} must be granted"));
+        assert_eq!(r.capabilities, vec![Capability::Read], "{PROVIDERS} is a GET, so `read` and nothing else");
+
+        let shared = &*NAMESPACE_SHARED_POLICY_PARSED;
+        assert!(rule(shared, PROVIDERS).is_none(), "the tenant rule must be templated");
+        let r = rule(shared, &format!("{{{{namespace.path}}}}/{PROVIDERS}")).expect("tenant providers rule");
+        assert_eq!(r.capabilities, vec![Capability::Read]);
+
+        let access = Policy::from_str(SHARED_ACCESS_POLICY).expect("shared-access must parse");
+        let r = rule(&access, &format!("{{{{request.namespace}}}}/{PROVIDERS}")).expect("shared-access providers rule");
+        assert_eq!(r.capabilities, vec![Capability::Read]);
     }
 
     /// Every baseline rule that reaches `resources/` must carry `connect`, or
@@ -4406,6 +4449,9 @@ mod implicit_rustion_grant_tests {
             "{{request.namespace}}/resources/v2/connect/mfa/begin",
             "{{request.namespace}}/resources/v2/connect/mfa/verify",
             "{{request.namespace}}/resources/v2/connect/authorize",
+            "{{request.namespace}}/resources/v2/connect/provider/candidates",
+            // Not an object path: the server's own provider list.
+            "{{request.namespace}}/resources/v2/connect/providers",
             "{{request.namespace}}/resources/v2/connect/web/launch",
             "{{request.namespace}}/resources/v2/connect/web/totp",
             "{{request.namespace}}/resources/v2/connect/web/result",

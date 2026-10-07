@@ -35,9 +35,7 @@
 //! new versioned entry exists, so the operator can clean them up
 //! manually when convenient.
 
-use bv_plugin_surface::{
-    ActiveSurfaceBundle, ActiveSurfaceEntry, AppModuleRef, SurfaceGrant, SurfaceManifest,
-};
+use bv_plugin_surface::{ActiveSurfaceBundle, ActiveSurfaceEntry, AppModuleRef, SurfaceGrant, SurfaceManifest};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -96,11 +94,7 @@ impl PluginCatalog {
         Ok(Some(PluginRecord { manifest, binary: bin }))
     }
 
-    pub async fn get_manifest(
-        &self,
-        storage: &dyn Storage,
-        name: &str,
-    ) -> Result<Option<PluginManifest>, RvError> {
+    pub async fn get_manifest(&self, storage: &dyn Storage, name: &str) -> Result<Option<PluginManifest>, RvError> {
         if let Some(active) = self.read_active(storage, name).await? {
             return self.read_versioned_manifest(storage, name, &active).await;
         }
@@ -130,11 +124,7 @@ impl PluginCatalog {
     }
 
     /// List every registered version of `name`, sorted ascending.
-    pub async fn list_versions(
-        &self,
-        storage: &dyn Storage,
-        name: &str,
-    ) -> Result<Vec<PluginManifest>, RvError> {
+    pub async fn list_versions(&self, storage: &dyn Storage, name: &str) -> Result<Vec<PluginManifest>, RvError> {
         let prefix = format!("{}{}/versions/", PLUGIN_PREFIX, name);
         let entries = storage.list(&prefix).await.unwrap_or_default();
         let mut out = Vec::new();
@@ -162,11 +152,7 @@ impl PluginCatalog {
     /// Currently-active version string for `name`, if any. Falls back
     /// to the manifest's own `version` field for plugins still on the
     /// legacy un-versioned layout.
-    pub async fn get_active_version(
-        &self,
-        storage: &dyn Storage,
-        name: &str,
-    ) -> Result<Option<String>, RvError> {
+    pub async fn get_active_version(&self, storage: &dyn Storage, name: &str) -> Result<Option<String>, RvError> {
         if let Some(v) = self.read_active(storage, name).await? {
             return Ok(Some(v));
         }
@@ -177,19 +163,23 @@ impl PluginCatalog {
     /// plugin is currently un-registered or if no `active` pointer is
     /// present (legacy layout); otherwise leaves the active version
     /// alone so operators can stage without flipping production.
-    pub async fn put(
-        &self,
-        storage: &dyn Storage,
-        manifest: &PluginManifest,
-        binary: &[u8],
-    ) -> Result<(), RvError> {
+    pub async fn put(&self, storage: &dyn Storage, manifest: &PluginManifest, binary: &[u8]) -> Result<(), RvError> {
         manifest.validate().map_err(|_| RvError::ErrRequestInvalid)?;
         Self::verify_integrity(manifest, binary)?;
+        // A WASM module importing anything but the host's `bv` namespace
+        // (notably WASI, from a `wasm32-wasip1` build) can never be
+        // instantiated; refuse it now, not at first invoke.
+        // Gated on the `\0asm` magic so placeholder bytes (which cannot be
+        // instantiated either, and still fail at invoke) are not this
+        // check's concern.
+        if manifest.runtime == super::manifest::RuntimeKind::Wasm && binary.starts_with(b"\0asm") {
+            super::runtime::check_host_imports(binary)
+                .map_err(|e| RvError::ErrString(format!("cannot register plugin `{}`: {e}", manifest.name)))?;
+        }
         // Phase 5.4: host-side ABI version major check. Refuses
         // cross-major manifests (or future-minor manifests against
         // an older host) with a clear error.
-        super::manifest::check_abi_compatibility(&manifest.abi_version)
-            .map_err(RvError::ErrString)?;
+        super::manifest::check_abi_compatibility(&manifest.abi_version).map_err(RvError::ErrString)?;
         // Phase 5.5: net allowlist sanity.
         Self::validate_net_allowlist(manifest)?;
         // Phase 5.2: publisher signature verification (or
@@ -199,10 +189,7 @@ impl PluginCatalog {
         // active version. Operators who actually want broader caps
         // must DELETE + re-register.
         if let Some(active_version) = self.read_active(storage, &manifest.name).await? {
-            if let Some(prev) = self
-                .read_versioned_manifest(storage, &manifest.name, &active_version)
-                .await?
-            {
+            if let Some(prev) = self.read_versioned_manifest(storage, &manifest.name, &active_version).await? {
                 Self::check_capability_widening(&prev, manifest)?;
             }
         }
@@ -226,10 +213,7 @@ impl PluginCatalog {
         // Write binary first so a half-failed registration doesn't
         // leave a manifest pointing at nothing.
         storage
-            .put(&StorageEntry {
-                key: binary_versioned_key(&manifest.name, &manifest.version),
-                value: binary.to_vec(),
-            })
+            .put(&StorageEntry { key: binary_versioned_key(&manifest.name, &manifest.version), value: binary.to_vec() })
             .await?;
         let manifest_bytes = serde_json::to_vec(manifest)?;
         storage
@@ -279,9 +263,7 @@ impl PluginCatalog {
     fn validate_host_pattern(h: &str, field: &str) -> Result<(), RvError> {
         let trimmed = h.trim();
         if trimmed.is_empty() {
-            return Err(RvError::ErrString(format!(
-                "{field} entries must not be empty"
-            )));
+            return Err(RvError::ErrString(format!("{field} entries must not be empty")));
         }
         if trimmed == "*" {
             return Err(RvError::ErrString(format!(
@@ -289,9 +271,7 @@ impl PluginCatalog {
             )));
         }
         if trimmed.contains(':') {
-            return Err(RvError::ErrString(format!(
-                "{field} entry `{trimmed}` must not include a port",
-            )));
+            return Err(RvError::ErrString(format!("{field} entry `{trimmed}` must not include a port",)));
         }
         // `*` is allowed only as the entire first label.
         if trimmed.contains('*') {
@@ -311,24 +291,19 @@ impl PluginCatalog {
     /// previous one had none, or moving to a strictly-broader prefix;
     /// adding any `allowed_keys` or `allowed_hosts` entry that wasn't
     /// in the previous set.
-    fn check_capability_widening(
-        prev: &PluginManifest,
-        new: &PluginManifest,
-    ) -> Result<(), RvError> {
+    fn check_capability_widening(prev: &PluginManifest, new: &PluginManifest) -> Result<(), RvError> {
         let p = &prev.capabilities;
         let n = &new.capabilities;
 
         if !p.audit_emit && n.audit_emit {
             return Err(RvError::ErrString(
-                "capability widening: audit_emit cannot be enabled on re-register; DELETE + re-register"
-                    .into(),
+                "capability widening: audit_emit cannot be enabled on re-register; DELETE + re-register".into(),
             ));
         }
         match (&p.storage_prefix, &n.storage_prefix) {
             (None, Some(_)) => {
                 return Err(RvError::ErrString(
-                    "capability widening: storage_prefix cannot be added on re-register; DELETE + re-register"
-                        .into(),
+                    "capability widening: storage_prefix cannot be added on re-register; DELETE + re-register".into(),
                 ));
             }
             (Some(old), Some(new_prefix)) if !new_prefix.starts_with(old.as_str()) => {
@@ -363,8 +338,7 @@ impl PluginCatalog {
         let na = &n.app;
         if !pa.dynamic_menus && na.dynamic_menus {
             return Err(RvError::ErrString(
-                "capability widening: app.dynamic_menus cannot be enabled on re-register; DELETE + re-register"
-                    .into(),
+                "capability widening: app.dynamic_menus cannot be enabled on re-register; DELETE + re-register".into(),
             ));
         }
         if na.windows.max_open > pa.windows.max_open {
@@ -381,11 +355,8 @@ impl PluginCatalog {
                 )));
             }
         }
-        let prev_net: std::collections::BTreeSet<&String> = pa
-            .net
-            .as_ref()
-            .map(|c| c.hosts.iter().collect())
-            .unwrap_or_default();
+        let prev_net: std::collections::BTreeSet<&String> =
+            pa.net.as_ref().map(|c| c.hosts.iter().collect()).unwrap_or_default();
         if let Some(new_net) = &na.net {
             for h in &new_net.hosts {
                 if !prev_net.contains(h) {
@@ -403,14 +374,12 @@ impl PluginCatalog {
         // DELETE + re-register (which audits the change).
         if !p.notify_emit && n.notify_emit {
             return Err(RvError::ErrString(
-                "capability widening: notify_emit cannot be enabled on re-register; DELETE + re-register"
-                    .into(),
+                "capability widening: notify_emit cannot be enabled on re-register; DELETE + re-register".into(),
             ));
         }
         if !p.notify_read && n.notify_read {
             return Err(RvError::ErrString(
-                "capability widening: notify_read cannot be enabled on re-register; DELETE + re-register"
-                    .into(),
+                "capability widening: notify_read cannot be enabled on re-register; DELETE + re-register".into(),
             ));
         }
         let prev_channels: std::collections::BTreeSet<&String> =
@@ -431,30 +400,24 @@ impl PluginCatalog {
         // grant (pinned to its hash) until re-approved.
         if !p.caller_identity && n.caller_identity {
             return Err(RvError::ErrString(
-                "capability widening: caller_identity cannot be enabled on re-register; DELETE + re-register"
-                    .into(),
+                "capability widening: caller_identity cannot be enabled on re-register; DELETE + re-register".into(),
             ));
         }
         if p.storage_scope != n.storage_scope {
             return Err(RvError::ErrString(
-                "capability widening: storage_scope cannot change on re-register; DELETE + re-register"
-                    .into(),
+                "capability widening: storage_scope cannot change on re-register; DELETE + re-register".into(),
             ));
         }
         if p.credential_provider.is_none() && n.credential_provider.is_some() {
             return Err(RvError::ErrString(
-                "capability widening: credential_provider cannot be added on re-register; DELETE + re-register"
-                    .into(),
+                "capability widening: credential_provider cannot be added on re-register; DELETE + re-register".into(),
             ));
         }
         let prev_notify = pa.notify.unwrap_or_default();
         if let Some(new_notify) = na.notify {
-            if (new_notify.read && !prev_notify.read)
-                || (new_notify.windows && !prev_notify.windows)
-            {
+            if (new_notify.read && !prev_notify.read) || (new_notify.windows && !prev_notify.windows) {
                 return Err(RvError::ErrString(
-                    "capability widening: app.notify gained read/windows; DELETE + re-register"
-                        .into(),
+                    "capability widening: app.notify gained read/windows; DELETE + re-register".into(),
                 ));
             }
         }
@@ -463,32 +426,17 @@ impl PluginCatalog {
 
     /// Switch the active version. Refuses to point at a version that
     /// isn't registered.
-    pub async fn set_active(
-        &self,
-        storage: &dyn Storage,
-        name: &str,
-        version: &str,
-    ) -> Result<(), RvError> {
+    pub async fn set_active(&self, storage: &dyn Storage, name: &str, version: &str) -> Result<(), RvError> {
         if self.read_versioned_manifest(storage, name, version).await?.is_none() {
             return Err(RvError::ErrRequestInvalid);
         }
-        storage
-            .put(&StorageEntry {
-                key: active_key(name),
-                value: version.as_bytes().to_vec(),
-            })
-            .await
+        storage.put(&StorageEntry { key: active_key(name), value: version.as_bytes().to_vec() }).await
     }
 
     /// Drop a single version. Refuses to delete the active version
     /// (operator must `set_active` to a different version first).
     /// Per-name shared records (config, data) are preserved.
-    pub async fn delete_version(
-        &self,
-        storage: &dyn Storage,
-        name: &str,
-        version: &str,
-    ) -> Result<(), RvError> {
+    pub async fn delete_version(&self, storage: &dyn Storage, name: &str, version: &str) -> Result<(), RvError> {
         if let Some(active) = self.read_active(storage, name).await? {
             if active == version {
                 return Err(RvError::ErrRequestInvalid);
@@ -530,8 +478,7 @@ impl PluginCatalog {
                 let _ = storage.delete(&binary_versioned_key(name, version)).await;
                 let _ = storage.delete(&manifest_versioned_key(name, version)).await;
                 let _ = storage.delete(&surface_versioned_key(name, version)).await;
-                let asset_prefix =
-                    format!("{}{}/versions/{}/assets/", PLUGIN_PREFIX, name, version);
+                let asset_prefix = format!("{}{}/versions/{}/assets/", PLUGIN_PREFIX, name, version);
                 if let Ok(asset_keys) = storage.list(&asset_prefix).await {
                     for k in asset_keys {
                         let _ = storage.delete(&format!("{asset_prefix}{k}")).await;
@@ -605,25 +552,18 @@ impl PluginCatalog {
         // Ensure the bytes are valid surface JSON before persisting.
         // A bad surface should fail registration, not surface 500s on
         // every later read.
-        let parsed: SurfaceManifest = serde_json::from_slice(surface_bytes).map_err(|e| {
-            RvError::ErrString(format!("surface.json is not a valid SurfaceManifest: {e}"))
-        })?;
+        let parsed: SurfaceManifest = serde_json::from_slice(surface_bytes)
+            .map_err(|e| RvError::ErrString(format!("surface.json is not a valid SurfaceManifest: {e}")))?;
         // Names of declared client assets, for hook-reference checks.
         // We don't have the manifest here — caller is expected to have
         // validated against `manifest.client_assets` already; pass an
         // empty set so hook references that are present fall back to
         // the asset-store check at GET time.
-        let asset_names: std::collections::BTreeSet<&str> =
-            std::collections::BTreeSet::new();
+        let asset_names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         if let Err(e) = parsed.validate(name, &asset_names) {
             return Err(RvError::ErrString(format!("surface.json failed validation: {e}")));
         }
-        storage
-            .put(&StorageEntry {
-                key: surface_versioned_key(name, version),
-                value: surface_bytes.to_vec(),
-            })
-            .await
+        storage.put(&StorageEntry { key: surface_versioned_key(name, version), value: surface_bytes.to_vec() }).await
     }
 
     /// Read the surface JSON for the active version of `name`.
@@ -683,10 +623,7 @@ impl PluginCatalog {
             )));
         }
         storage
-            .put(&StorageEntry {
-                key: asset_versioned_key(name, version, expected_sha256),
-                value: bytes.to_vec(),
-            })
+            .put(&StorageEntry { key: asset_versioned_key(name, version, expected_sha256), value: bytes.to_vec() })
             .await
     }
 
@@ -760,11 +697,8 @@ impl PluginCatalog {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let assets: Vec<(String, String)> = m
-                .client_assets
-                .iter()
-                .map(|a| (a.name.clone(), a.sha256.clone()))
-                .collect();
+            let assets: Vec<(String, String)> =
+                m.client_assets.iter().map(|a| (a.name.clone(), a.sha256.clone())).collect();
             // Extensibility v2: ship the plugin's *live* network grant
             // in-band. `active_net_hosts` returns the granted hosts only
             // when the grant's pin still matches the active manifest's
@@ -779,18 +713,14 @@ impl PluginCatalog {
             // alone. Pair the `kind == "app-module"` client asset with the
             // manifest's app-capability gates.
             let app = &m.capabilities.app;
-            let app_module = m
-                .client_assets
-                .iter()
-                .find(|a| a.kind == "app-module")
-                .map(|a| AppModuleRef {
-                    asset_name: a.name.clone(),
-                    sha256: a.sha256.clone(),
-                    dynamic_menus: app.dynamic_menus,
-                    windows_max_open: app.windows.max_open,
-                    api_paths: app.api_paths.clone(),
-                    net_https_only: app.net.as_ref().map(|n| n.https_only).unwrap_or(true),
-                });
+            let app_module = m.client_assets.iter().find(|a| a.kind == "app-module").map(|a| AppModuleRef {
+                asset_name: a.name.clone(),
+                sha256: a.sha256.clone(),
+                dynamic_menus: app.dynamic_menus,
+                windows_max_open: app.windows.max_open,
+                api_paths: app.api_paths.clone(),
+                net_https_only: app.net.as_ref().map(|n| n.https_only).unwrap_or(true),
+            });
             entries.push(ActiveSurfaceEntry {
                 plugin: m.name.clone(),
                 version: m.version.clone(),
@@ -807,11 +737,7 @@ impl PluginCatalog {
 
     // ── Internal helpers ──────────────────────────────────────────────────
 
-    async fn read_active(
-        &self,
-        storage: &dyn Storage,
-        name: &str,
-    ) -> Result<Option<String>, RvError> {
+    async fn read_active(&self, storage: &dyn Storage, name: &str) -> Result<Option<String>, RvError> {
         let key = active_key(name);
         match storage.get(&key).await? {
             None => Ok(None),
@@ -830,22 +756,18 @@ impl PluginCatalog {
     ) -> Result<Option<PluginManifest>, RvError> {
         match storage.get(&manifest_versioned_key(name, version)).await? {
             None => Ok(None),
-            Some(entry) => serde_json::from_slice::<PluginManifest>(&entry.value)
-                .map(Some)
-                .map_err(|_| RvError::ErrRequestInvalid),
+            Some(entry) => {
+                serde_json::from_slice::<PluginManifest>(&entry.value).map(Some).map_err(|_| RvError::ErrRequestInvalid)
+            }
         }
     }
 
-    async fn read_legacy_manifest(
-        &self,
-        storage: &dyn Storage,
-        name: &str,
-    ) -> Result<Option<PluginManifest>, RvError> {
+    async fn read_legacy_manifest(&self, storage: &dyn Storage, name: &str) -> Result<Option<PluginManifest>, RvError> {
         match storage.get(&legacy_manifest_key(name)).await? {
             None => Ok(None),
-            Some(entry) => serde_json::from_slice::<PluginManifest>(&entry.value)
-                .map(Some)
-                .map_err(|_| RvError::ErrRequestInvalid),
+            Some(entry) => {
+                serde_json::from_slice::<PluginManifest>(&entry.value).map(Some).map_err(|_| RvError::ErrRequestInvalid)
+            }
         }
     }
 
@@ -942,6 +864,37 @@ mod tests {
         }
     }
 
+    /// Regression: a `wasm32-wasip1` build (WASI imports) must be refused at
+    /// registration with an actionable error, not accepted and then fail at
+    /// first invoke with an opaque "unknown import".
+    #[tokio::test]
+    async fn put_rejects_wasi_importing_module() {
+        let bin = wat::parse_str(
+            r#"(module
+                 (import "wasi_snapshot_preview1" "environ_get" (func (param i32 i32) (result i32)))
+                 (memory (export "memory") 1))"#,
+        )
+        .unwrap();
+        let m = manifest_with("wasi-plug", "0.1.0", &bin);
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let err = PluginCatalog::new().put(&s, &m, &bin).await.unwrap_err().to_string();
+        assert!(err.contains("wasi_snapshot_preview1::environ_get"), "{err}");
+        assert!(err.contains("wasm32-unknown-unknown"), "{err}");
+        // Nothing half-registered.
+        assert!(PluginCatalog::new().get(&s, "wasi-plug").await.unwrap().is_none());
+    }
+
+    #[test]
+    fn check_host_imports_accepts_bv_only_and_rejects_other_modules() {
+        use crate::plugins::runtime::check_host_imports;
+        let ok = wat::parse_str(r#"(module (import "bv" "now_unix_ms" (func (result i64))))"#).unwrap();
+        check_host_imports(&ok).unwrap();
+        let bad = wat::parse_str(r#"(module (import "env" "x" (func)))"#).unwrap();
+        let e = check_host_imports(&bad).unwrap_err().to_string();
+        assert!(e.contains("env::x") && e.contains("`bv` import module"), "{e}");
+    }
+
     #[test]
     fn verify_integrity_round_trip() {
         let bin = b"some-binary-content".to_vec();
@@ -990,8 +943,7 @@ mod tests {
         }
         async fn get(&self, key: &str) -> Result<Option<StorageEntry>, RvError> {
             let g = self.inner.lock().unwrap();
-            Ok(g.get(key)
-                .map(|v| StorageEntry { key: key.to_string(), value: v.clone() }))
+            Ok(g.get(key).map(|v| StorageEntry { key: key.to_string(), value: v.clone() }))
         }
         async fn put(&self, entry: &StorageEntry) -> Result<(), RvError> {
             self.inner.lock().unwrap().insert(entry.key.clone(), entry.value.clone());
@@ -1019,10 +971,7 @@ mod tests {
         let m = manifest_with("p", "0.1.0", &bin);
         cat.put(&s, &m, &bin).await.unwrap();
         // Active pointer set to the registered version.
-        assert_eq!(
-            cat.get_active_version(&s, "p").await.unwrap().as_deref(),
-            Some("0.1.0"),
-        );
+        assert_eq!(cat.get_active_version(&s, "p").await.unwrap().as_deref(), Some("0.1.0"),);
         let r = cat.get(&s, "p").await.unwrap().unwrap();
         assert_eq!(r.manifest.version, "0.1.0");
         assert_eq!(r.binary, bin);
@@ -1037,10 +986,7 @@ mod tests {
         let v2 = b"v2-different".to_vec();
         cat.put(&s, &manifest_with("p", "0.1.0", &v1), &v1).await.unwrap();
         cat.put(&s, &manifest_with("p", "0.2.0", &v2), &v2).await.unwrap();
-        assert_eq!(
-            cat.get_active_version(&s, "p").await.unwrap().as_deref(),
-            Some("0.1.0"),
-        );
+        assert_eq!(cat.get_active_version(&s, "p").await.unwrap().as_deref(), Some("0.1.0"),);
         let versions = cat.list_versions(&s, "p").await.unwrap();
         assert_eq!(versions.len(), 2);
         // Activate v2 explicitly.
@@ -1088,18 +1034,10 @@ mod tests {
         // no /versions/ subtree.
         let bin = b"legacy".to_vec();
         let m = manifest_with("legacy-plugin", "1.2.3", &bin);
-        s.put(&StorageEntry {
-            key: legacy_manifest_key("legacy-plugin"),
-            value: serde_json::to_vec(&m).unwrap(),
-        })
-        .await
-        .unwrap();
-        s.put(&StorageEntry {
-            key: legacy_binary_key("legacy-plugin"),
-            value: bin.clone(),
-        })
-        .await
-        .unwrap();
+        s.put(&StorageEntry { key: legacy_manifest_key("legacy-plugin"), value: serde_json::to_vec(&m).unwrap() })
+            .await
+            .unwrap();
+        s.put(&StorageEntry { key: legacy_binary_key("legacy-plugin"), value: bin.clone() }).await.unwrap();
 
         let cat = PluginCatalog::new();
         let got = cat.get(&s, "legacy-plugin").await.unwrap().unwrap();
@@ -1107,10 +1045,7 @@ mod tests {
         assert_eq!(got.binary, bin);
         // get_active_version falls back to the manifest's own version
         // when no /active pointer exists.
-        assert_eq!(
-            cat.get_active_version(&s, "legacy-plugin").await.unwrap().as_deref(),
-            Some("1.2.3"),
-        );
+        assert_eq!(cat.get_active_version(&s, "legacy-plugin").await.unwrap().as_deref(), Some("1.2.3"),);
         // list_versions surfaces the legacy entry as a single-version list.
         let versions = cat.list_versions(&s, "legacy-plugin").await.unwrap();
         assert_eq!(versions.len(), 1);
@@ -1176,10 +1111,7 @@ mod tests {
         let mut m = manifest_with(name, version, binary);
         m.abi_version = "1.1".to_string();
         m.capabilities.app = AppCapabilities {
-            net: Some(NetCapabilities {
-                hosts: hosts.iter().map(|h| h.to_string()).collect(),
-                https_only: true,
-            }),
+            net: Some(NetCapabilities { hosts: hosts.iter().map(|h| h.to_string()).collect(), https_only: true }),
             ..Default::default()
         };
         m
@@ -1217,10 +1149,7 @@ mod tests {
         assert!(format!("{err:?}").contains("caller_identity"));
 
         let bin3 = b"prov-3".to_vec();
-        let err = cat
-            .put(&s, &provider_manifest_with("prov", "0.3.0", &bin3), &bin3)
-            .await
-            .unwrap_err();
+        let err = cat.put(&s, &provider_manifest_with("prov", "0.3.0", &bin3), &bin3).await.unwrap_err();
         assert!(format!("{err:?}").contains("capability widening"));
     }
 
@@ -1393,9 +1322,7 @@ mod tests {
             size: surface_bytes.len() as u64,
         });
         cat.put(&s, &m, &bin).await.unwrap();
-        cat.put_surface(&s, "p", "0.1.0", &surface_bytes, &m.surface.as_ref().unwrap().sha256)
-            .await
-            .unwrap();
+        cat.put_surface(&s, "p", "0.1.0", &surface_bytes, &m.surface.as_ref().unwrap().sha256).await.unwrap();
         let (got_manifest, got_bytes) = cat.read_active_surface(&s, "p").await.unwrap().unwrap();
         assert_eq!(got_manifest.version, "0.1.0");
         assert_eq!(got_bytes, surface_bytes);
@@ -1406,10 +1333,7 @@ mod tests {
         let s = MemStorage::default();
         let cat = PluginCatalog::new();
         let surface_bytes = build_minimal_surface_json("p");
-        let err = cat
-            .put_surface(&s, "p", "0.1.0", &surface_bytes, &"0".repeat(64))
-            .await
-            .unwrap_err();
+        let err = cat.put_surface(&s, "p", "0.1.0", &surface_bytes, &"0".repeat(64)).await.unwrap_err();
         assert!(format!("{err:?}").contains("sha256 mismatch"));
     }
 
@@ -1428,10 +1352,7 @@ mod tests {
     async fn read_asset_returns_none_for_unknown_hash() {
         let s = MemStorage::default();
         let cat = PluginCatalog::new();
-        let got = cat
-            .read_asset(&s, "p", "0.1.0", &"a".repeat(64))
-            .await
-            .unwrap();
+        let got = cat.read_asset(&s, "p", "0.1.0", &"a".repeat(64)).await.unwrap();
         assert!(got.is_none());
     }
 
@@ -1450,28 +1371,20 @@ mod tests {
             size: surface_a.len() as u64,
         });
         cat.put(&s, &m_a, &bin_a).await.unwrap();
-        cat.put_surface(&s, "a", "1.0.0", &surface_a, &m_a.surface.as_ref().unwrap().sha256)
-            .await
-            .unwrap();
+        cat.put_surface(&s, "a", "1.0.0", &surface_a, &m_a.surface.as_ref().unwrap().sha256).await.unwrap();
         // Plugin B with no surface
         let bin_b = b"b-bin".to_vec();
         let m_b = manifest_with("b", "1.0.0", &bin_b);
         cat.put(&s, &m_b, &bin_b).await.unwrap();
 
-        let bundle = cat
-            .aggregated_active_surfaces(&s, |_| None)
-            .await
-            .unwrap();
+        let bundle = cat.aggregated_active_surfaces(&s, |_| None).await.unwrap();
         // Only `a` contributes — `b` has no surface.
         assert_eq!(bundle.entries.len(), 1);
         assert_eq!(bundle.entries[0].plugin, "a");
         assert!(!bundle.etag.is_empty());
 
         // Re-running with no changes yields the same etag.
-        let again = cat
-            .aggregated_active_surfaces(&s, |_| None)
-            .await
-            .unwrap();
+        let again = cat.aggregated_active_surfaces(&s, |_| None).await.unwrap();
         assert_eq!(bundle.etag, again.etag);
     }
 

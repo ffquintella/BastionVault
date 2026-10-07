@@ -23,14 +23,15 @@
 
 pub mod catalog;
 pub mod config;
+pub mod entity_data;
 pub mod grants;
 pub mod kernel_service;
 pub mod logical_backend;
 pub mod manifest;
-pub mod net_gate;
-pub mod net_http;
 pub mod metrics;
 pub mod module_cache;
+pub mod net_gate;
+pub mod net_http;
 pub mod process_runtime;
 pub mod process_supervisor;
 pub mod provider;
@@ -43,16 +44,16 @@ pub use catalog::{PluginCatalog, PluginRecord, PLUGIN_PREFIX};
 pub use config::ConfigStore;
 pub use kernel_service::PluginRuntimeHost;
 pub use logical_backend::{
-    factory_for as plugin_logical_backend_factory, invoke_active_plugin,
-    invoke_active_plugin_scoped, PluginLogicalBackend,
+    factory_for as plugin_logical_backend_factory, invoke_active_plugin, invoke_active_plugin_scoped,
+    PluginLogicalBackend,
 };
 pub use manifest::{ConfigField, ConfigFieldKind, PluginManifest, RuntimeKind};
 pub use module_cache::ModuleCache;
 pub use process_runtime::{
-    ensure_runtime_dir, plugin_runtime_dir, set_plugin_runtime_dir, ProcessRuntime,
-    ProcessRuntimeError, DEFAULT_INVOKE_TIMEOUT,
+    ensure_runtime_dir, plugin_runtime_dir, set_plugin_runtime_dir, ProcessRuntime, ProcessRuntimeError,
+    DEFAULT_INVOKE_TIMEOUT,
 };
-pub use runtime::{InvokeOutput, InvokeOutcome, RuntimeError, WasmRuntime, DEFAULT_FUEL, DEFAULT_MEMORY_BYTES};
+pub use runtime::{InvokeOutcome, InvokeOutput, RuntimeError, WasmRuntime, DEFAULT_FUEL, DEFAULT_MEMORY_BYTES};
 
 /// Mount type-prefix that triggers the [`PluginLogicalBackend`] path.
 /// A `plugin:<name>` mount type resolves to a backend bound to that plugin.

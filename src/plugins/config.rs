@@ -42,16 +42,11 @@ impl ConfigStore {
 
     /// Read the raw config map verbatim. **Includes secret values.**
     /// Plugin runtime uses this; HTTP / GUI must use [`get_redacted`].
-    pub async fn get(
-        &self,
-        storage: &dyn Storage,
-        plugin_name: &str,
-    ) -> Result<BTreeMap<String, String>, RvError> {
+    pub async fn get(&self, storage: &dyn Storage, plugin_name: &str) -> Result<BTreeMap<String, String>, RvError> {
         let key = config_key(plugin_name);
         match storage.get(&key).await? {
             None => Ok(BTreeMap::new()),
-            Some(entry) => serde_json::from_slice(&entry.value)
-                .map_err(|_| RvError::ErrRequestInvalid),
+            Some(entry) => serde_json::from_slice(&entry.value).map_err(|_| RvError::ErrRequestInvalid),
         }
     }
 
@@ -135,12 +130,7 @@ impl ConfigStore {
             if !v.is_empty() {
                 return v;
             }
-            manifest
-                .config_schema
-                .iter()
-                .find(|f| f.name == name)
-                .and_then(|f| f.default.clone())
-                .unwrap_or_default()
+            manifest.config_schema.iter().find(|f| f.name == name).and_then(|f| f.default.clone()).unwrap_or_default()
         };
 
         let mut out: BTreeMap<String, String> = BTreeMap::new();
@@ -174,9 +164,7 @@ impl ConfigStore {
             match field.kind {
                 ConfigFieldKind::Bool => {
                     if !(value == "true" || value == "false") {
-                        return Err(RvError::ErrResponse(format!(
-                            "{label} must be true or false"
-                        )));
+                        return Err(RvError::ErrResponse(format!("{label} must be true or false")));
                     }
                 }
                 ConfigFieldKind::Int => {
@@ -467,10 +455,7 @@ mod tests {
         let store = ConfigStore::new();
         let m = mode_manifest();
         let err = store.put(&s, &m, BTreeMap::new()).await.unwrap_err();
-        assert!(
-            err.to_string().contains("From address is required when Mode is \"smtp\""),
-            "unexpected error: {err}"
-        );
+        assert!(err.to_string().contains("From address is required when Mode is \"smtp\""), "unexpected error: {err}");
     }
 
     #[tokio::test]

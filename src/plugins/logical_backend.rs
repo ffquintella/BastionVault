@@ -53,9 +53,9 @@ use super::manifest::{PluginManifest, RuntimeKind};
 use super::process_runtime::ProcessRuntime;
 use super::runtime::{InvokeOutcome, InvokeOutput, WasmRuntime};
 use super::{PluginCatalog, PluginRecord};
-use crate::kernel_api::VaultCtx;
 use crate::context::Context;
 use crate::errors::RvError;
+use crate::kernel_api::VaultCtx;
 use crate::logical::{Backend, Operation, Request, Response};
 
 /// A `Backend` that routes every operation through a named plugin.
@@ -130,39 +130,25 @@ impl Backend for PluginLogicalBackend {
         let _invoke_guard = super::reload_lock::acquire_invoke(&self.plugin_name).await;
 
         let catalog = PluginCatalog::new();
-        let record: PluginRecord = catalog
-            .get(storage, &self.plugin_name)
-            .await?
-            .ok_or_else(|| {
-                RvError::ErrOther(::anyhow::anyhow!(
-                    "plugin {} is not registered (mount references a deleted plugin)",
-                    self.plugin_name
-                ))
-            })?;
+        let record: PluginRecord = catalog.get(storage, &self.plugin_name).await?.ok_or_else(|| {
+            RvError::ErrOther(::anyhow::anyhow!(
+                "plugin {} is not registered (mount references a deleted plugin)",
+                self.plugin_name
+            ))
+        })?;
 
         let manifest = record.manifest;
         let binary = record.binary;
 
         let config_store = ConfigStore::new();
-        let config = config_store
-            .get(storage, &self.plugin_name)
-            .await
-            .unwrap_or_default();
+        let config = config_store.get(storage, &self.plugin_name).await.unwrap_or_default();
 
         // ABI 1.3: attested caller. Built from the token, never from the
         // request body. An entity-scoped plugin is refused before it runs
         // when the caller has no identity entity.
-        let caller = manifest
-            .capabilities
-            .caller_identity
-            .then(|| super::provider::caller_from_request(req));
-        let entity_id: Option<String> = caller
-            .as_ref()
-            .map(|c| c.entity_id.clone())
-            .filter(|e| !e.is_empty());
-        if manifest.capabilities.storage_scope == super::manifest::StorageScope::Entity
-            && entity_id.is_none()
-        {
+        let caller = manifest.capabilities.caller_identity.then(|| super::provider::caller_from_request(req));
+        let entity_id: Option<String> = caller.as_ref().map(|c| c.entity_id.clone()).filter(|e| !e.is_empty());
+        if manifest.capabilities.storage_scope == super::manifest::StorageScope::Entity && entity_id.is_none() {
             return Err(RvError::ErrResponseStatus(
                 403,
                 "this plugin stores per-user data and needs an identity-backed login".to_string(),
@@ -170,18 +156,16 @@ impl Backend for PluginLogicalBackend {
         }
 
         let envelope = build_envelope(req, caller.as_ref())?;
-        let envelope_bytes = serde_json::to_vec(&envelope).map_err(|e| {
-            RvError::ErrOther(::anyhow::anyhow!("envelope serialise failed: {e}"))
-        })?;
+        let envelope_bytes = serde_json::to_vec(&envelope)
+            .map_err(|e| RvError::ErrOther(::anyhow::anyhow!("envelope serialise failed: {e}")))?;
 
         // Phase 5.10: per-plugin metrics — duration + outcome + fuel.
         let started = std::time::Instant::now();
         let runtime_kind = manifest.runtime;
         let result = match runtime_kind {
             RuntimeKind::Wasm => {
-                let runtime = WasmRuntime::new().map_err(|e| {
-                    RvError::ErrOther(::anyhow::anyhow!("wasm runtime: {e:?}"))
-                })?;
+                let runtime =
+                    WasmRuntime::new().map_err(|e| RvError::ErrOther(::anyhow::anyhow!("wasm runtime: {e:?}")))?;
                 runtime
                     .invoke_scoped(
                         &manifest,
@@ -193,10 +177,7 @@ impl Backend for PluginLogicalBackend {
                     )
                     .await
                     .map_err(|e| {
-                        RvError::ErrOther(::anyhow::anyhow!(
-                            "plugin {} (wasm) invoke failed: {e:?}",
-                            self.plugin_name,
-                        ))
+                        RvError::ErrOther(::anyhow::anyhow!("plugin {} (wasm) invoke failed: {e:?}", self.plugin_name,))
                     })
             }
             RuntimeKind::Process => {
@@ -218,13 +199,7 @@ impl Backend for PluginLogicalBackend {
                 } else {
                     let runtime = ProcessRuntime::new();
                     runtime
-                        .invoke_with_config(
-                            &manifest,
-                            &binary,
-                            &envelope_bytes,
-                            Some(self.core.clone()),
-                            config,
-                        )
+                        .invoke_with_config(&manifest, &binary, &envelope_bytes, Some(self.core.clone()), config)
                         .await
                         .map_err(|e| {
                             RvError::ErrOther(::anyhow::anyhow!(
@@ -247,12 +222,7 @@ impl Backend for PluginLogicalBackend {
             super::runtime::InvokeOutcome::Success => "success",
             super::runtime::InvokeOutcome::PluginError(_) => "plugin_error",
         };
-        super::metrics::record_invoke(
-            &self.plugin_name,
-            outcome_label,
-            elapsed,
-            output.fuel_consumed,
-        );
+        super::metrics::record_invoke(&self.plugin_name, outcome_label, elapsed, output.fuel_consumed);
 
         translate_response(&self.plugin_name, &manifest, &output)
     }
@@ -299,25 +269,21 @@ fn translate_response(
 ) -> Result<Option<Response>, RvError> {
     if let InvokeOutcome::PluginError(code) = output.outcome {
         let msg = if let Ok(v) = serde_json::from_slice::<Value>(&output.response) {
-            v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()).unwrap_or_else(
-                || String::from_utf8_lossy(&output.response).to_string(),
-            )
+            v.get("error")
+                .and_then(|e| e.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| String::from_utf8_lossy(&output.response).to_string())
         } else {
             String::from_utf8_lossy(&output.response).to_string()
         };
-        return Err(RvError::ErrOther(::anyhow::anyhow!(
-            "plugin {plugin_name} returned status {code}: {msg}"
-        )));
+        return Err(RvError::ErrOther(::anyhow::anyhow!("plugin {plugin_name} returned status {code}: {msg}")));
     }
 
     if output.response.is_empty() {
         return Ok(None);
     }
-    let parsed: Value = serde_json::from_slice(&output.response).map_err(|e| {
-        RvError::ErrOther(::anyhow::anyhow!(
-            "plugin {plugin_name} response is not valid JSON: {e}"
-        ))
-    })?;
+    let parsed: Value = serde_json::from_slice(&output.response)
+        .map_err(|e| RvError::ErrOther(::anyhow::anyhow!("plugin {plugin_name} response is not valid JSON: {e}")))?;
 
     // {"data": null} → no value; the router surfaces 404.
     let data = match parsed.get("data") {
@@ -344,37 +310,17 @@ fn translate_response(
     // via `build_envelope`; the host now records the lease so those
     // calls happen on schedule rather than only on caller demand.
     let secret = parsed.get("secret").and_then(|v| v.as_object()).map(|m| {
-        let lease_id = m
-            .get("lease_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let lease_id = m.get("lease_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let ttl_secs = m.get("ttl_secs").and_then(|v| v.as_u64()).unwrap_or(0);
-        let renewable = m
-            .get("renewable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let internal_data = m
-            .get("internal_data")
-            .and_then(|v| v.as_object())
-            .cloned()
-            .unwrap_or_default();
+        let renewable = m.get("renewable").and_then(|v| v.as_bool()).unwrap_or(false);
+        let internal_data = m.get("internal_data").and_then(|v| v.as_object()).cloned().unwrap_or_default();
         let mut lease = crate::logical::lease::Lease::default();
         lease.ttl = std::time::Duration::from_secs(ttl_secs);
         lease.renewable = renewable;
-        crate::logical::secret::SecretData {
-            lease,
-            lease_id,
-            internal_data,
-        }
+        crate::logical::secret::SecretData { lease, lease_id, internal_data }
     });
 
-    Ok(Some(Response {
-        data,
-        warnings,
-        secret,
-        ..Default::default()
-    }))
+    Ok(Some(Response { data, warnings, secret, ..Default::default() }))
 }
 
 /// Trait-object factory closure compatible with
@@ -441,57 +387,38 @@ pub async fn invoke_active_plugin_scoped(
     let _invoke_guard = super::reload_lock::acquire_invoke(plugin_name).await;
 
     let catalog = PluginCatalog::new();
-    let record: PluginRecord = catalog.get(storage, plugin_name).await?.ok_or_else(|| {
-        RvError::ErrOther(::anyhow::anyhow!(
-            "plugin {plugin_name} is not registered"
-        ))
-    })?;
+    let record: PluginRecord = catalog
+        .get(storage, plugin_name)
+        .await?
+        .ok_or_else(|| RvError::ErrOther(::anyhow::anyhow!("plugin {plugin_name} is not registered")))?;
     let manifest = record.manifest;
     let binary = record.binary;
 
-    let config = ConfigStore::new()
-        .get(storage, plugin_name)
-        .await
-        .unwrap_or_default();
+    let config = ConfigStore::new().get(storage, plugin_name).await.unwrap_or_default();
 
     match manifest.runtime {
         RuntimeKind::Wasm => {
-            let runtime = WasmRuntime::new()
-                .map_err(|e| RvError::ErrOther(::anyhow::anyhow!("wasm runtime: {e:?}")))?;
+            let runtime =
+                WasmRuntime::new().map_err(|e| RvError::ErrOther(::anyhow::anyhow!("wasm runtime: {e:?}")))?;
             runtime
                 .invoke_scoped(&manifest, &binary, input, Some(core.clone()), config, entity_id)
                 .await
-                .map_err(|e| {
-                    RvError::ErrOther(::anyhow::anyhow!(
-                        "plugin {plugin_name} (wasm) invoke failed: {e:?}"
-                    ))
-                })
+                .map_err(|e| RvError::ErrOther(::anyhow::anyhow!("plugin {plugin_name} (wasm) invoke failed: {e:?}")))
         }
         RuntimeKind::Process => {
             if manifest.capabilities.long_lived {
-                super::process_supervisor::invoke_with_config(
-                    &manifest,
-                    &binary,
-                    input,
-                    Some(core.clone()),
-                    config,
-                )
-                .await
-                .map_err(|e| {
-                    RvError::ErrOther(::anyhow::anyhow!(
-                        "plugin {plugin_name} (process, long-lived) invoke failed: {e:?}"
-                    ))
-                })
-            } else {
-                let runtime = ProcessRuntime::new();
-                runtime
-                    .invoke_with_config(&manifest, &binary, input, Some(core.clone()), config)
+                super::process_supervisor::invoke_with_config(&manifest, &binary, input, Some(core.clone()), config)
                     .await
                     .map_err(|e| {
                         RvError::ErrOther(::anyhow::anyhow!(
-                            "plugin {plugin_name} (process) invoke failed: {e:?}"
+                            "plugin {plugin_name} (process, long-lived) invoke failed: {e:?}"
                         ))
                     })
+            } else {
+                let runtime = ProcessRuntime::new();
+                runtime.invoke_with_config(&manifest, &binary, input, Some(core.clone()), config).await.map_err(|e| {
+                    RvError::ErrOther(::anyhow::anyhow!("plugin {plugin_name} (process) invoke failed: {e:?}"))
+                })
             }
         }
     }
@@ -554,10 +481,7 @@ mod tests {
         assert!(plain.get("caller").is_none());
         // The block, when present, is the attested one; the body's lookalike
         // stays inside `data`.
-        let attested = crate::kernel_api::provider::CallerIdentity {
-            entity_id: "real".into(),
-            ..Default::default()
-        };
+        let attested = crate::kernel_api::provider::CallerIdentity { entity_id: "real".into(), ..Default::default() };
         let env = build_envelope(&req, Some(&attested)).unwrap();
         assert_eq!(env["caller"]["entity_id"], "real");
         assert_eq!(env["data"]["caller"]["entity_id"], "attacker");
@@ -588,14 +512,8 @@ mod tests {
     #[test]
     fn translate_data_object_round_trip() {
         let m = manifest_for_test();
-        let body = serde_json::json!({"data": {"k": "v"}, "warnings": ["w1"]})
-            .to_string()
-            .into_bytes();
-        let out = InvokeOutput {
-            outcome: InvokeOutcome::Success,
-            response: body,
-            fuel_consumed: 0,
-        };
+        let body = serde_json::json!({"data": {"k": "v"}, "warnings": ["w1"]}).to_string().into_bytes();
+        let out = InvokeOutput { outcome: InvokeOutcome::Success, response: body, fuel_consumed: 0 };
         let resp = translate_response("demo", &m, &out).unwrap().expect("Some");
         assert_eq!(resp.data.unwrap()["k"], "v");
         assert_eq!(resp.warnings, vec!["w1".to_string()]);
@@ -605,11 +523,7 @@ mod tests {
     fn translate_null_data_means_not_found() {
         let m = manifest_for_test();
         let body = serde_json::json!({"data": null}).to_string().into_bytes();
-        let out = InvokeOutput {
-            outcome: InvokeOutcome::Success,
-            response: body,
-            fuel_consumed: 0,
-        };
+        let out = InvokeOutput { outcome: InvokeOutcome::Success, response: body, fuel_consumed: 0 };
         let resp = translate_response("demo", &m, &out).unwrap();
         assert!(resp.is_none(), "{{data: null}} must surface as Ok(None)");
     }
@@ -617,11 +531,7 @@ mod tests {
     #[test]
     fn translate_empty_response_is_none() {
         let m = manifest_for_test();
-        let out = InvokeOutput {
-            outcome: InvokeOutcome::Success,
-            response: vec![],
-            fuel_consumed: 0,
-        };
+        let out = InvokeOutput { outcome: InvokeOutcome::Success, response: vec![], fuel_consumed: 0 };
         assert!(translate_response("demo", &m, &out).unwrap().is_none());
     }
 
@@ -629,11 +539,7 @@ mod tests {
     fn translate_plugin_error_with_json_body() {
         let m = manifest_for_test();
         let body = serde_json::json!({"error": "not allowed"}).to_string().into_bytes();
-        let out = InvokeOutput {
-            outcome: InvokeOutcome::PluginError(7),
-            response: body,
-            fuel_consumed: 0,
-        };
+        let out = InvokeOutput { outcome: InvokeOutcome::PluginError(7), response: body, fuel_consumed: 0 };
         let err = translate_response("demo", &m, &out).unwrap_err();
         let msg = format!("{err:?}");
         assert!(msg.contains("status 7"), "{msg}");
@@ -643,11 +549,7 @@ mod tests {
     #[test]
     fn translate_plugin_error_with_plain_string_body() {
         let m = manifest_for_test();
-        let out = InvokeOutput {
-            outcome: InvokeOutcome::PluginError(1),
-            response: b"oops".to_vec(),
-            fuel_consumed: 0,
-        };
+        let out = InvokeOutput { outcome: InvokeOutcome::PluginError(1), response: b"oops".to_vec(), fuel_consumed: 0 };
         let err = translate_response("demo", &m, &out).unwrap_err();
         let msg = format!("{err:?}");
         assert!(msg.contains("oops"), "{msg}");
@@ -656,11 +558,7 @@ mod tests {
     #[test]
     fn translate_invalid_json_is_internal_error() {
         let m = manifest_for_test();
-        let out = InvokeOutput {
-            outcome: InvokeOutcome::Success,
-            response: b"not-json".to_vec(),
-            fuel_consumed: 0,
-        };
+        let out = InvokeOutput { outcome: InvokeOutcome::Success, response: b"not-json".to_vec(), fuel_consumed: 0 };
         assert!(translate_response("demo", &m, &out).is_err());
     }
 

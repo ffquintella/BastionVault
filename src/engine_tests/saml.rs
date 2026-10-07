@@ -11,8 +11,7 @@ mod integration_tests {
     use crate::{
         logical::{Operation, Request},
         test_utils::{
-            new_unseal_test_bastion_vault, test_delete_api, test_mount_auth_api, test_read_api,
-            test_write_api,
+            new_unseal_test_bastion_vault, test_delete_api, test_mount_auth_api, test_read_api, test_write_api,
         },
     };
 
@@ -22,8 +21,7 @@ mod integration_tests {
     /// wire up correctly. No live IdP required.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn saml_config_and_role_crud() {
-        let (_bvault, core, root_token) =
-            new_unseal_test_bastion_vault("test_saml_crud").await;
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_saml_crud").await;
 
         test_mount_auth_api(&core, &root_token, "saml", "saml").await;
 
@@ -39,28 +37,14 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        test_write_api(&core, &root_token, "auth/saml/config", true, cfg_body)
-            .await
-            .unwrap();
+        test_write_api(&core, &root_token, "auth/saml/config", true, cfg_body).await.unwrap();
 
-        let cfg_resp = test_read_api(&core, &root_token, "auth/saml/config", true)
-            .await
-            .unwrap()
-            .unwrap();
+        let cfg_resp = test_read_api(&core, &root_token, "auth/saml/config", true).await.unwrap().unwrap();
         let data = cfg_resp.data.unwrap();
-        assert_eq!(
-            data.get("idp_metadata_url").and_then(|v| v.as_str()),
-            Some("https://idp.example.com/metadata")
-        );
-        assert_eq!(
-            data.get("entity_id").and_then(|v| v.as_str()),
-            Some("https://bastionvault.example.com/saml")
-        );
+        assert_eq!(data.get("idp_metadata_url").and_then(|v| v.as_str()), Some("https://idp.example.com/metadata"));
+        assert_eq!(data.get("entity_id").and_then(|v| v.as_str()), Some("https://bastionvault.example.com/saml"));
         // Certificate must be redacted; a boolean hint indicates presence.
-        assert_eq!(
-            data.get("idp_cert_set").and_then(|v| v.as_bool()),
-            Some(true)
-        );
+        assert_eq!(data.get("idp_cert_set").and_then(|v| v.as_bool()), Some(true));
         assert!(data.get("idp_cert").is_none());
 
         // Write + read + list + delete a role.
@@ -75,32 +59,13 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        test_write_api(&core, &root_token, "auth/saml/role/user", true, role_body)
-            .await
-            .unwrap();
+        test_write_api(&core, &root_token, "auth/saml/role/user", true, role_body).await.unwrap();
 
-        let role_resp = test_read_api(&core, &root_token, "auth/saml/role/user", true)
-            .await
-            .unwrap()
-            .unwrap();
+        let role_resp = test_read_api(&core, &root_token, "auth/saml/role/user", true).await.unwrap().unwrap();
         let role_data = role_resp.data.unwrap();
-        assert_eq!(
-            role_data
-                .get("bound_subjects")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len()),
-            Some(2)
-        );
-        assert_eq!(
-            role_data
-                .get("groups_attribute")
-                .and_then(|v| v.as_str()),
-            Some("groups")
-        );
-        let policies = role_data
-            .get("policies")
-            .and_then(|v| v.as_array())
-            .unwrap();
+        assert_eq!(role_data.get("bound_subjects").and_then(|v| v.as_array()).map(|a| a.len()), Some(2));
+        assert_eq!(role_data.get("groups_attribute").and_then(|v| v.as_str()), Some("groups"));
+        let policies = role_data.get("policies").and_then(|v| v.as_array()).unwrap();
         assert!(policies.iter().any(|p| p.as_str() == Some("default")));
         assert!(policies.iter().any(|p| p.as_str() == Some("readonly")));
 
@@ -109,21 +74,12 @@ mod integration_tests {
         list_req.operation = Operation::List;
         list_req.client_token = root_token.clone();
         let list_resp = core.handle_request(&mut list_req).await.unwrap().unwrap();
-        let keys = list_resp
-            .data
-            .as_ref()
-            .and_then(|d| d.get("keys"))
-            .and_then(|k| k.as_array())
-            .unwrap();
+        let keys = list_resp.data.as_ref().and_then(|d| d.get("keys")).and_then(|k| k.as_array()).unwrap();
         assert!(keys.iter().any(|k| k.as_str() == Some("user")));
 
         // Delete and confirm it's gone.
-        test_delete_api(&core, &root_token, "auth/saml/role/user", true, None)
-            .await
-            .unwrap();
-        let deleted = test_read_api(&core, &root_token, "auth/saml/role/user", true)
-            .await
-            .unwrap();
+        test_delete_api(&core, &root_token, "auth/saml/role/user", true, None).await.unwrap();
+        let deleted = test_read_api(&core, &root_token, "auth/saml/role/user", true).await.unwrap();
         assert!(deleted.is_none());
     }
 
@@ -134,8 +90,7 @@ mod integration_tests {
     /// routing/field path rather than the unit-level check in `path_roles`.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn saml_role_refuses_reserved_attribute_mapping_target() {
-        let (_bvault, core, root_token) =
-            new_unseal_test_bastion_vault("test_saml_reserved_mapping").await;
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_saml_reserved_mapping").await;
 
         test_mount_auth_api(&core, &root_token, "saml", "saml").await;
 
@@ -147,18 +102,13 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        let err = test_write_api(&core, &root_token, "auth/saml/role/machiney", false, body)
-            .await
-            .unwrap_err();
+        let err = test_write_api(&core, &root_token, "auth/saml/role/machiney", false, body).await.unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("reserved token metadata key"), "{msg}");
         assert!(msg.contains("spiffe_id"), "{msg}");
 
         // Refused, not partially written.
-        assert!(test_read_api(&core, &root_token, "auth/saml/role/machiney", true)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(test_read_api(&core, &root_token, "auth/saml/role/machiney", true).await.unwrap().is_none());
 
         // `username` is the documented exception: it is how a SAML role names
         // the principal, and the login checks the namespace assignment against
@@ -169,8 +119,6 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        test_write_api(&core, &root_token, "auth/saml/role/named", true, body)
-            .await
-            .unwrap();
+        test_write_api(&core, &root_token, "auth/saml/role/named", true, body).await.unwrap();
     }
 }

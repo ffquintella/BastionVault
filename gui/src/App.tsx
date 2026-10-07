@@ -37,6 +37,7 @@ import { useAuthStore } from "./stores/authStore";
 import { ToastProvider } from "./components/ui";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ConnectPalette } from "./components/ConnectPalette";
+import { useProviderAccountsLink } from "./hooks/useCredentialProviders";
 import { ServerInfoModal } from "./components/ServerInfoModal";
 import { SessionMonitor } from "./components/SessionMonitor";
 
@@ -54,10 +55,12 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-/** The ⌘K palette, armed once the operator is authenticated. */
+/** The ⌘K palette, armed once the operator is authenticated. In this
+ *  window its provider account picker can link to the provider's own page. */
 function AuthedConnectPalette() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
-  return <ConnectPalette armed={isAuthenticated} />;
+  const accountsLink = useProviderAccountsLink();
+  return <ConnectPalette armed={isAuthenticated} accountsLink={accountsLink} />;
 }
 
 export default function App() {

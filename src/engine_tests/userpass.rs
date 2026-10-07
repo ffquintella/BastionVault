@@ -141,10 +141,8 @@ mod test {
         let mut req = Request::new("auth/token/lookup-self");
         req.operation = Operation::Read;
         req.client_token = token.to_string();
-        req.connection = Some(crate::logical::connection::Connection {
-            peer_addr: peer_addr.to_string(),
-            ..Default::default()
-        });
+        req.connection =
+            Some(crate::logical::connection::Connection { peer_addr: peer_addr.to_string(), ..Default::default() });
         core.handle_request(&mut req).await.map(|_| ())
     }
 
@@ -225,9 +223,8 @@ mod test {
         test_write_user(&core, &root_token, "pass", "alice", "correct-horse", 0).await;
 
         // Tighten the lockout policy: lock after 3 failures.
-        let cfg = json!({ "enabled": true, "max_failed_attempts": 3, "lockout_duration_secs": 600 })
-            .as_object()
-            .cloned();
+        let cfg =
+            json!({ "enabled": true, "max_failed_attempts": 3, "lockout_duration_secs": 600 }).as_object().cloned();
         assert!(test_write_api(&core, &root_token, "auth/pass/config/lockout", true, cfg).await.is_ok());
 
         // Disabled account refuses even the correct password.
@@ -243,7 +240,10 @@ mod test {
         // Three bad passwords trip the lock; the correct password is then
         // refused with the lockout message (proving lock precedes password check).
         for _ in 0..3 {
-            assert_eq!(login_error(&core, "pass", "alice", "wrong").await.as_deref(), Some("invalid username or password"));
+            assert_eq!(
+                login_error(&core, "pass", "alice", "wrong").await.as_deref(),
+                Some("invalid username or password")
+            );
         }
         let locked = login_error(&core, "pass", "alice", "correct-horse").await.unwrap();
         assert!(locked.contains("temporarily locked"), "expected lockout message, got: {locked}");

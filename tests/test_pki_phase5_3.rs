@@ -44,10 +44,7 @@ async fn write(core: &Core, token: &str, path: &str, body: Map<String, Value>) -
     req.operation = Operation::Write;
     req.client_token = token.to_string();
     req.body = Some(body);
-    let resp = core
-        .handle_request(&mut req)
-        .await
-        .unwrap_or_else(|e| panic!("write {path} failed: {e:?}"));
+    let resp = core.handle_request(&mut req).await.unwrap_or_else(|e| panic!("write {path} failed: {e:?}"));
     resp.and_then(|r| r.data)
 }
 
@@ -79,10 +76,7 @@ async fn test_pki_phase5_3_pqc_pkcs8_envelope() {
         &core,
         &token,
         "pki/root/generate/internal",
-        json!({"common_name": "PQC Root", "key_type": "ml-dsa-65", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "PQC Root", "key_type": "ml-dsa-65", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await;
     write(
@@ -100,10 +94,7 @@ async fn test_pki_phase5_3_pqc_pkcs8_envelope() {
         &core,
         &token,
         "pki/issue/web",
-        json!({"common_name": "leaf.example.com", "ttl": "12h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "leaf.example.com", "ttl": "12h"}).as_object().unwrap().clone(),
     )
     .await
     .unwrap();
@@ -120,13 +111,9 @@ async fn test_pki_phase5_3_pqc_pkcs8_envelope() {
 
     // (2) Algorithm-OID check inside the PKCS#8.
     let der = pem_decode_block(key_pem, "PRIVATE KEY");
-    use x509_cert::der::{Decode, asn1::OctetString};
+    use x509_cert::der::{asn1::OctetString, Decode};
     let info = pkcs8::PrivateKeyInfo::from_der(&der).expect("parse PKCS#8");
-    assert_eq!(
-        info.algorithm.oid.to_string(),
-        ML_DSA_65_OID,
-        "PKCS#8 AlgorithmIdentifier OID must be ML-DSA-65"
-    );
+    assert_eq!(info.algorithm.oid.to_string(), ML_DSA_65_OID, "PKCS#8 AlgorithmIdentifier OID must be ML-DSA-65");
 
     // (3) The 32-byte seed inside the OCTET STRING, run back through
     // fips204, must regenerate the same public key the cert advertises.
@@ -206,10 +193,7 @@ async fn test_pki_phase5_3_rsa_root_and_issue() {
         &core,
         &token,
         "pki/issue/web",
-        json!({"common_name": "rsa-leaf.example.com", "ttl": "12h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "rsa-leaf.example.com", "ttl": "12h"}).as_object().unwrap().clone(),
     )
     .await
     .unwrap();

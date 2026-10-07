@@ -15,7 +15,6 @@ pub enum ExportFormat {
     Json,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DestinationKind {
@@ -42,9 +41,7 @@ impl DestinationKind {
                     return Err("destination path must not be empty".to_string());
                 }
                 if !std::path::Path::new(path).is_absolute() {
-                    return Err(format!(
-                        "destination path must be absolute, got {path:?}"
-                    ));
+                    return Err(format!("destination path must be absolute, got {path:?}"));
                 }
                 Ok(())
             }

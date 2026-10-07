@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::{errors::RvError, bv_error_string};
+use crate::{bv_error_string, errors::RvError};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Secret {

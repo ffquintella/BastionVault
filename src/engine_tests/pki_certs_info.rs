@@ -28,9 +28,7 @@ async fn boot_with_leaves(name: &str, count: usize) -> (TestHttpServer, Vec<Stri
     let mut server = TestHttpServer::new(name, false).await;
     server.token = server.root_token.clone();
 
-    server
-        .write("sys/mounts/pki/", obj(json!({"type": "pki"})), None)
-        .unwrap();
+    server.write("sys/mounts/pki/", obj(json!({"type": "pki"})), None).unwrap();
     server
         .write(
             "pki/root/generate/internal",
@@ -58,19 +56,10 @@ async fn boot_with_leaves(name: &str, count: usize) -> (TestHttpServer, Vec<Stri
     let mut serials = Vec::with_capacity(count);
     for i in 0..count {
         let (status, issued) = server
-            .write(
-                "pki/issue/web",
-                obj(json!({"common_name": format!("leaf{i}.example.com"), "ttl": "12h"})),
-                None,
-            )
+            .write("pki/issue/web", obj(json!({"common_name": format!("leaf{i}.example.com"), "ttl": "12h"})), None)
             .unwrap();
         assert_eq!(status, 200, "issue {i} failed: {issued}");
-        serials.push(
-            issued["data"]["serial_number"]
-                .as_str()
-                .expect("issue response carries a serial")
-                .to_string(),
-        );
+        serials.push(issued["data"]["serial_number"].as_str().expect("issue response carries a serial").to_string());
     }
     (server, serials)
 }
@@ -96,16 +85,11 @@ async fn one_request_returns_every_summary_the_list_view_needs() {
 
     // Every issued serial is present, each with the identity and expiry the
     // list view renders — the whole point of the endpoint.
-    let by_serial: std::collections::HashMap<&str, &Value> = records
-        .iter()
-        .map(|r| (r["serial_number"].as_str().unwrap(), r))
-        .collect();
+    let by_serial: std::collections::HashMap<&str, &Value> =
+        records.iter().map(|r| (r["serial_number"].as_str().unwrap(), r)).collect();
     for s in &serials {
         let rec = by_serial.get(bare(s).as_str()).expect("issued serial in page");
-        assert!(
-            rec["common_name"].as_str().unwrap().starts_with("leaf"),
-            "CN parsed server-side: {rec}"
-        );
+        assert!(rec["common_name"].as_str().unwrap().starts_with("leaf"), "CN parsed server-side: {rec}");
         assert!(rec["not_after"].as_u64().unwrap() > 0, "expiry present: {rec}");
         assert_eq!(
             rec["issuer_dn"].as_str().unwrap(),
@@ -130,18 +114,11 @@ async fn summary_agrees_field_for_field_with_the_per_cert_read() {
     let single = &single["data"];
 
     for field in ["serial_number", "issued_at", "not_after", "issuer_id"] {
-        assert_eq!(
-            summary[field], single[field],
-            "`{field}` diverges between certs/info and cert/<serial>"
-        );
+        assert_eq!(summary[field], single[field], "`{field}` diverges between certs/info and cert/<serial>");
     }
     // `revoked_at` / `is_orphaned` / `source` are omit-when-absent in both.
     for field in ["revoked_at", "is_orphaned", "source"] {
-        assert_eq!(
-            summary.get(field).is_none(),
-            single.get(field).is_none(),
-            "`{field}` presence diverges"
-        );
+        assert_eq!(summary.get(field).is_none(), single.get(field).is_none(), "`{field}` presence diverges");
     }
 }
 
@@ -188,31 +165,15 @@ async fn a_cert_issued_mid_page_does_not_shift_the_boundary() {
     let (server, _) = boot_with_leaves("pki_certs_info_stable", 4).await;
 
     let (_, first) = server.read("pki/certs-info?limit=2", None).unwrap();
-    let page1: Vec<String> = first["data"]["keys"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|k| k.as_str().unwrap().to_string())
-        .collect();
+    let page1: Vec<String> =
+        first["data"]["keys"].as_array().unwrap().iter().map(|k| k.as_str().unwrap().to_string()).collect();
     let cursor = first["data"]["next"].as_str().unwrap().to_string();
 
-    server
-        .write(
-            "pki/issue/web",
-            obj(json!({"common_name": "inserted.example.com", "ttl": "12h"})),
-            None,
-        )
-        .unwrap();
+    server.write("pki/issue/web", obj(json!({"common_name": "inserted.example.com", "ttl": "12h"})), None).unwrap();
 
-    let (_, second) = server
-        .read(&format!("pki/certs-info?limit=2&after={cursor}"), None)
-        .unwrap();
-    let page2: Vec<String> = second["data"]["keys"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|k| k.as_str().unwrap().to_string())
-        .collect();
+    let (_, second) = server.read(&format!("pki/certs-info?limit=2&after={cursor}"), None).unwrap();
+    let page2: Vec<String> =
+        second["data"]["keys"].as_array().unwrap().iter().map(|k| k.as_str().unwrap().to_string()).collect();
 
     assert_eq!(second["data"]["total"].as_u64(), Some(5), "the new cert is counted");
     for k in &page2 {
@@ -248,9 +209,7 @@ async fn page_size_is_clamped_and_a_bad_cursor_is_refused() {
 async fn revocation_and_import_provenance_survive_the_projection() {
     let (server, serials) = boot_with_leaves("pki_certs_info_states", 2).await;
 
-    let (status, body) = server
-        .write("pki/revoke", obj(json!({"serial_number": serials[0]})), None)
-        .unwrap();
+    let (status, body) = server.write("pki/revoke", obj(json!({"serial_number": serials[0]})), None).unwrap();
     assert_eq!(status, 200, "revoke failed: {body}");
 
     let (_, page) = server.read("pki/certs-info", None).unwrap();
@@ -259,10 +218,7 @@ async fn revocation_and_import_provenance_survive_the_projection() {
         .iter()
         .find(|r| r["serial_number"].as_str() == Some(bare(&serials[0]).as_str()))
         .expect("revoked cert still listed");
-    assert!(
-        revoked["revoked_at"].as_u64().unwrap_or(0) > 0,
-        "revocation must be visible in the summary: {revoked}"
-    );
+    assert!(revoked["revoked_at"].as_u64().unwrap_or(0) > 0, "revocation must be visible in the summary: {revoked}");
 
     let live = records
         .iter()

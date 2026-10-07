@@ -41,7 +41,7 @@ endif
 # ── Ensure rustup's toolchain wins over any system Rust (e.g.
 # Homebrew's `rust` on macOS, distro packages on Linux, or a stray
 # MSI on Windows). System Rust packages typically ship only the host
-# std, so `cargo build --target wasm32-wasip1` fails with
+# std, so `cargo build --target wasm32-unknown-unknown` fails with
 # "can't find crate for `core`" even after `rustup target add` —
 # because the active rustc isn't the rustup one. Prepending rustup's
 # shim dir fixes both `cargo` and `rustc` lookups in one shot.
@@ -2179,11 +2179,15 @@ win-bootstrap: ## Install Windows build deps (Perl, NASM, Node) via winget and a
 
 # ── Reference plugins (plugins-ext/ submodule) ──────────────────────────
 # Build the BastionVault-Plugins reference plugins. WASM plugins compile
-# to wasm32-wasip1; process plugins compile native. Operators upload the
+# to wasm32-unknown-unknown; process plugins compile native. Operators upload the
 # resulting artefacts via the GUI's Plugins → Register flow.
 
 PLUGINS_DIR := plugins-ext
-PLUGINS_WASM_TARGET := wasm32-wasip1
+# Every plugin the WASM host loads builds for wasm32-unknown-unknown, NOT
+# wasm32-wasip1: the host links only the `bv` import module (no WASI), so a
+# module importing `wasi_snapshot_preview1` cannot be instantiated and the
+# catalog now refuses to register one. Do not switch this back to wasip1.
+PLUGINS_WASM_TARGET := wasm32-unknown-unknown
 PLUGINS_OUT := $(PLUGINS_DIR)/dist
 
 # Dedicated target directory for the `bv-plugin-pack` signer/packer.
@@ -2316,7 +2320,7 @@ plugins-init: ## Initialise the BastionVault-Plugins submodule (first-time setup
 		echo "==> plugins-ext already initialised"; \
 	fi
 
-plugins-target: ## Install the wasm32-wasip1 Rust target if missing
+plugins-target: ## Install the wasm32-unknown-unknown Rust target if missing
 	@rustup target list --installed | grep -q '^$(PLUGINS_WASM_TARGET)$$' || { \
 		echo "==> installing rustup target $(PLUGINS_WASM_TARGET)"; \
 		rustup target add $(PLUGINS_WASM_TARGET); \
@@ -2338,7 +2342,10 @@ plugins-wasm: plugins-init plugins-target ## Compile the WASM reference plugins 
 	cd $(PLUGINS_DIR) && cargo build --release --target $(PLUGINS_WASM_TARGET) -p bastion-plugin-totp
 	@echo "==> building bastion-plugin-webhook-notify ($(PLUGINS_WASM_TARGET))"
 	cd $(PLUGINS_DIR) && cargo build --release --target $(PLUGINS_WASM_TARGET) -p bastion-plugin-webhook-notify
+	@echo "==> building bastion-plugin-self-accounts ($(PLUGINS_WASM_TARGET))"
+	cd $(PLUGINS_DIR) && cargo build --release --target $(PLUGINS_WASM_TARGET) -p bastion-plugin-self-accounts
 	@mkdir -p $(PLUGINS_OUT)
+	@cp $(PLUGINS_DIR)/target/$(PLUGINS_WASM_TARGET)/release/bastion_plugin_self_accounts.wasm $(PLUGINS_OUT)/
 	@cp $(PLUGINS_DIR)/target/$(PLUGINS_WASM_TARGET)/release/bastion_plugin_totp.wasm $(PLUGINS_OUT)/ 2>/dev/null \
 		|| cp $(PLUGINS_DIR)/target/$(PLUGINS_WASM_TARGET)/release/bastion-plugin-totp.wasm $(PLUGINS_OUT)/
 	@cp $(PLUGINS_DIR)/target/$(PLUGINS_WASM_TARGET)/release/bastion_plugin_webhook_notify.wasm $(PLUGINS_OUT)/ 2>/dev/null \
@@ -2383,6 +2390,12 @@ plugins-pack: plugins-wasm plugins-process plugins-pack-build ## Pack each plugi
 		--manifest $(PLUGINS_DIR)/bastion-plugin-webhook-notify/plugin.toml \
 		--binary   $(PLUGINS_OUT)/bastion_plugin_webhook_notify.wasm \
 		--out      $(PLUGINS_OUT)/bastion-plugin-webhook-notify.bvplugin
+	@echo "==> packing bastion-plugin-self-accounts (wasm credential provider) into .bvplugin"
+	@echo "    note: the packer cannot embed surface.json yet; register it with the surface_b64 field (see the plugin README)"
+	$(BV_PLUGIN_PACK) \
+		--manifest $(PLUGINS_DIR)/bastion-plugin-self-accounts/plugin.toml \
+		--binary   $(PLUGINS_OUT)/bastion_plugin_self_accounts.wasm \
+		--out      $(PLUGINS_OUT)/bastion-plugin-self-accounts.bvplugin
 	@echo ""
 	@echo "==> Bundles ready in $(PLUGINS_OUT)/"
 	@ls -lh $(PLUGINS_OUT)/*.bvplugin 2>/dev/null || true
@@ -2447,6 +2460,13 @@ plugins-sign: plugins-wasm plugins-process plugins-pack-build ## Repack each plu
 		--out               $(PLUGINS_OUT)/bastion-plugin-webhook-notify.bvplugin \
 		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
 		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
+	@echo "==> signing bastion-plugin-self-accounts (wasm credential provider)"
+	$(BV_PLUGIN_PACK) \
+		--manifest          $(PLUGINS_DIR)/bastion-plugin-self-accounts/plugin.toml \
+		--binary            $(PLUGINS_OUT)/bastion_plugin_self_accounts.wasm \
+		--out               $(PLUGINS_OUT)/bastion-plugin-self-accounts.bvplugin \
+		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
+		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
 	@echo ""
 	@echo "==> Signed bundles ready in $(PLUGINS_OUT)/"
 	@echo "    Publisher pubkey to register on the host: $(PLUGINS_SIGNING_KEY).pub"
@@ -2508,7 +2528,7 @@ plugins: plugins-pack plugins-process ## Build every reference plugin (WASM + .b
 # Override the bump kind on the command line: `make plugin-bump type=minor`
 # (defaults to patch). Each plugin's current version is read from its own
 # Cargo.toml so plugins that have drifted out of lockstep stay independent.
-PLUGIN_NAMES := bastion-plugin-totp bastion-plugin-postgres bastion-plugin-xca bastion-plugin-pmp bastion-plugin-email bastion-plugin-webhook-notify
+PLUGIN_NAMES := bastion-plugin-totp bastion-plugin-postgres bastion-plugin-xca bastion-plugin-pmp bastion-plugin-email bastion-plugin-webhook-notify bastion-plugin-self-accounts
 type ?= patch
 
 plugin-bump: ## Bump plugin versions across plugins-ext (type=major|minor|patch, default patch)
@@ -2546,5 +2566,10 @@ plugins-test: require-nextest ## Run plugin unit tests: testkit, host ABI parity
 	cargo nextest run --test test_plugin_testkit_parity
 	@echo "==> host plugin substrate unit tests (src/plugins/*)"
 	cargo nextest run --lib -E 'test(/^plugins::/)'
+	@echo "==> bastion-plugin-self-accounts: handlers (host stubs), manifest + surface, wasm end to end"
+	cd $(PLUGINS_DIR) && cargo build --release --target $(PLUGINS_WASM_TARGET) -p bastion-plugin-self-accounts
+	cd $(PLUGINS_DIR) && cargo test --release -p bastion-plugin-self-accounts --features host_test
+	@echo "==> bastion-plugin-self-accounts on the REAL host, and Connect through it (needs the wasm built above)"
+	cargo nextest run -p bastion_vault --lib --run-ignored only -E 'test(/self_accounts_(host|connect)/)'
 	@echo ""
 	@echo "==> plugins-test complete."

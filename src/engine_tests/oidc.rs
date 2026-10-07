@@ -12,8 +12,7 @@ mod integration_tests {
     use crate::{
         logical::{Operation, Request},
         test_utils::{
-            new_unseal_test_bastion_vault, test_delete_api, test_mount_auth_api, test_read_api,
-            test_write_api,
+            new_unseal_test_bastion_vault, test_delete_api, test_mount_auth_api, test_read_api, test_write_api,
         },
     };
 
@@ -24,8 +23,7 @@ mod integration_tests {
     /// needing a live OIDC provider.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn oidc_config_and_role_crud() {
-        let (_bvault, core, root_token) =
-            new_unseal_test_bastion_vault("test_oidc_crud").await;
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_oidc_crud").await;
 
         test_mount_auth_api(&core, &root_token, "oidc", "oidc").await;
 
@@ -39,24 +37,13 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        test_write_api(&core, &root_token, "auth/oidc/config", true, cfg_body)
-            .await
-            .unwrap();
+        test_write_api(&core, &root_token, "auth/oidc/config", true, cfg_body).await.unwrap();
 
-        let cfg_resp = test_read_api(&core, &root_token, "auth/oidc/config", true)
-            .await
-            .unwrap()
-            .unwrap();
+        let cfg_resp = test_read_api(&core, &root_token, "auth/oidc/config", true).await.unwrap().unwrap();
         let data = cfg_resp.data.unwrap();
-        assert_eq!(
-            data.get("oidc_discovery_url").and_then(|v| v.as_str()),
-            Some("https://issuer.example.com")
-        );
+        assert_eq!(data.get("oidc_discovery_url").and_then(|v| v.as_str()), Some("https://issuer.example.com"));
         // Secret must be redacted.
-        assert_eq!(
-            data.get("oidc_client_secret_set").and_then(|v| v.as_bool()),
-            Some(true)
-        );
+        assert_eq!(data.get("oidc_client_secret_set").and_then(|v| v.as_bool()), Some(true));
         assert!(data.get("oidc_client_secret").is_none());
         // Default scopes get filled in.
         let scopes = data.get("oidc_scopes").and_then(|v| v.as_array()).unwrap();
@@ -74,32 +61,13 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        test_write_api(&core, &root_token, "auth/oidc/role/user", true, role_body)
-            .await
-            .unwrap();
+        test_write_api(&core, &root_token, "auth/oidc/role/user", true, role_body).await.unwrap();
 
-        let role_resp = test_read_api(&core, &root_token, "auth/oidc/role/user", true)
-            .await
-            .unwrap()
-            .unwrap();
+        let role_resp = test_read_api(&core, &root_token, "auth/oidc/role/user", true).await.unwrap().unwrap();
         let role_data = role_resp.data.unwrap();
-        assert_eq!(
-            role_data
-                .get("bound_audiences")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len()),
-            Some(1)
-        );
-        assert_eq!(
-            role_data
-                .get("user_claim")
-                .and_then(|v| v.as_str()),
-            Some("preferred_username")
-        );
-        let policies = role_data
-            .get("policies")
-            .and_then(|v| v.as_array())
-            .unwrap();
+        assert_eq!(role_data.get("bound_audiences").and_then(|v| v.as_array()).map(|a| a.len()), Some(1));
+        assert_eq!(role_data.get("user_claim").and_then(|v| v.as_str()), Some("preferred_username"));
+        let policies = role_data.get("policies").and_then(|v| v.as_array()).unwrap();
         assert!(policies.iter().any(|p| p.as_str() == Some("default")));
         assert!(policies.iter().any(|p| p.as_str() == Some("readonly")));
 
@@ -108,21 +76,12 @@ mod integration_tests {
         list_req.operation = Operation::List;
         list_req.client_token = root_token.clone();
         let list_resp = core.handle_request(&mut list_req).await.unwrap().unwrap();
-        let keys = list_resp
-            .data
-            .as_ref()
-            .and_then(|d| d.get("keys"))
-            .and_then(|k| k.as_array())
-            .unwrap();
+        let keys = list_resp.data.as_ref().and_then(|d| d.get("keys")).and_then(|k| k.as_array()).unwrap();
         assert!(keys.iter().any(|k| k.as_str() == Some("user")));
 
         // Delete and confirm it's gone.
-        test_delete_api(&core, &root_token, "auth/oidc/role/user", true, None)
-            .await
-            .unwrap();
-        let deleted = test_read_api(&core, &root_token, "auth/oidc/role/user", true)
-            .await
-            .unwrap();
+        test_delete_api(&core, &root_token, "auth/oidc/role/user", true, None).await.unwrap();
+        let deleted = test_read_api(&core, &root_token, "auth/oidc/role/user", true).await.unwrap();
         assert!(deleted.is_none());
     }
 
@@ -133,8 +92,7 @@ mod integration_tests {
     /// the unit-level check in `path_roles`.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn oidc_role_refuses_reserved_claim_mapping_target() {
-        let (_bvault, core, root_token) =
-            new_unseal_test_bastion_vault("test_oidc_reserved_mapping").await;
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_oidc_reserved_mapping").await;
 
         test_mount_auth_api(&core, &root_token, "oidc", "oidc").await;
 
@@ -147,18 +105,13 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        let err = test_write_api(&core, &root_token, "auth/oidc/role/machiney", false, body)
-            .await
-            .unwrap_err();
+        let err = test_write_api(&core, &root_token, "auth/oidc/role/machiney", false, body).await.unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("reserved token metadata key"), "{msg}");
         assert!(msg.contains("spiffe_id"), "{msg}");
 
         // Refused, not partially written.
-        assert!(test_read_api(&core, &root_token, "auth/oidc/role/machiney", true)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(test_read_api(&core, &root_token, "auth/oidc/role/machiney", true).await.unwrap().is_none());
 
         // `username` too: OIDC names the principal with `user_claim`, and it is
         // that name the login's namespace-assignment check runs against.
@@ -169,9 +122,7 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        let err = test_write_api(&core, &root_token, "auth/oidc/role/renamer", false, body)
-            .await
-            .unwrap_err();
+        let err = test_write_api(&core, &root_token, "auth/oidc/role/renamer", false, body).await.unwrap_err();
         assert!(format!("{err}").contains("user_claim"), "{err}");
     }
 
@@ -182,12 +133,9 @@ mod integration_tests {
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     #[ignore]
     async fn oidc_live_auth_url_roundtrip() {
-        let discovery =
-            std::env::var("BVAULT_TEST_OIDC_DISCOVERY").expect("BVAULT_TEST_OIDC_DISCOVERY");
-        let client_id =
-            std::env::var("BVAULT_TEST_OIDC_CLIENT_ID").expect("BVAULT_TEST_OIDC_CLIENT_ID");
-        let (_bvault, core, root_token) =
-            new_unseal_test_bastion_vault("test_oidc_live").await;
+        let discovery = std::env::var("BVAULT_TEST_OIDC_DISCOVERY").expect("BVAULT_TEST_OIDC_DISCOVERY");
+        let client_id = std::env::var("BVAULT_TEST_OIDC_CLIENT_ID").expect("BVAULT_TEST_OIDC_CLIENT_ID");
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_oidc_live").await;
         test_mount_auth_api(&core, &root_token, "oidc", "oidc").await;
 
         let cfg = json!({
@@ -198,32 +146,18 @@ mod integration_tests {
         })
         .as_object()
         .cloned();
-        test_write_api(&core, &root_token, "auth/oidc/config", true, cfg)
-            .await
-            .unwrap();
+        test_write_api(&core, &root_token, "auth/oidc/config", true, cfg).await.unwrap();
         let role = json!({
             "policies": "default",
             "user_claim": "preferred_username"
         })
         .as_object()
         .cloned();
-        test_write_api(&core, &root_token, "auth/oidc/role/user", true, role)
-            .await
-            .unwrap();
+        test_write_api(&core, &root_token, "auth/oidc/role/user", true, role).await.unwrap();
 
-        let body = json!({ "redirect_uri": "http://127.0.0.1:8200/oidc/callback" })
-            .as_object()
-            .cloned();
-        let resp = test_write_api(&core, &root_token, "auth/oidc/auth_url", true, body)
-            .await
-            .unwrap()
-            .unwrap();
-        let url = resp
-            .data
-            .as_ref()
-            .and_then(|d| d.get("auth_url"))
-            .and_then(|v| v.as_str())
-            .unwrap();
+        let body = json!({ "redirect_uri": "http://127.0.0.1:8200/oidc/callback" }).as_object().cloned();
+        let resp = test_write_api(&core, &root_token, "auth/oidc/auth_url", true, body).await.unwrap().unwrap();
+        let url = resp.data.as_ref().and_then(|d| d.get("auth_url")).and_then(|v| v.as_str()).unwrap();
         assert!(url.starts_with("http"));
         assert!(url.contains("code_challenge="));
         assert!(url.contains("state="));

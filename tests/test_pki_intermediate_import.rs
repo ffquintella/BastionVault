@@ -26,8 +26,8 @@ use bastion_vault::{
 };
 use go_defer::defer;
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+    PKCS_ECDSA_P256_SHA256,
 };
 use serde_json::{json, Map, Value};
 
@@ -137,20 +137,24 @@ async fn test_pki_intermediate_import_end_to_end() {
     // ── Import root via config/ca ─────────────────────────────────────
     let root_bundle = format!("{root_pem}{root_kp_pem}");
     let root_resp = write_ok(
-        &core, &token, "pki/config/ca",
-        json!({"pem_bundle": root_bundle, "issuer_name": "external-root"})
-            .as_object().unwrap().clone(),
-    ).await;
+        &core,
+        &token,
+        "pki/config/ca",
+        json!({"pem_bundle": root_bundle, "issuer_name": "external-root"}).as_object().unwrap().clone(),
+    )
+    .await;
     let root_id = root_resp["issuer_id"].as_str().unwrap().to_string();
     assert!(!root_id.is_empty());
 
     // ── Import intermediate via config/ca ─────────────────────────────
     let int_bundle = format!("{int_pem}{int_kp_pem}");
     let int_resp = write_ok(
-        &core, &token, "pki/config/ca",
-        json!({"pem_bundle": int_bundle, "issuer_name": "external-intermediate"})
-            .as_object().unwrap().clone(),
-    ).await;
+        &core,
+        &token,
+        "pki/config/ca",
+        json!({"pem_bundle": int_bundle, "issuer_name": "external-intermediate"}).as_object().unwrap().clone(),
+    )
+    .await;
     let int_id = int_resp["issuer_id"].as_str().unwrap().to_string();
     assert!(!int_id.is_empty());
     assert_ne!(root_id, int_id);
@@ -169,11 +173,7 @@ async fn test_pki_intermediate_import_end_to_end() {
         int_subject,
         "chain[0] must be the leaf-issuer (intermediate)",
     );
-    assert_eq!(
-        cert_subject(chain_arr[1].as_str().unwrap()),
-        root_subject,
-        "chain[1] must be the root",
-    );
+    assert_eq!(cert_subject(chain_arr[1].as_str().unwrap()), root_subject, "chain[1] must be the root",);
 
     // The root-only chain should still be length 1.
     let root_chain = read(&core, &token, "pki/issuer/external-root/chain").await;
@@ -181,33 +181,38 @@ async fn test_pki_intermediate_import_end_to_end() {
 
     // ── Issue a leaf pinned to the intermediate ──────────────────────
     write(
-        &core, &token, "pki/roles/web",
+        &core,
+        &token,
+        "pki/roles/web",
         json!({
             "ttl": "24h", "max_ttl": "72h", "key_type": "ec",
             "allow_any_name": true, "server_flag": true, "client_flag": true,
-        }).as_object().unwrap().clone(),
-    ).await.expect("write role");
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await
+    .expect("write role");
 
     let issued = write_ok(
-        &core, &token, "pki/issue/web",
+        &core,
+        &token,
+        "pki/issue/web",
         json!({
             "common_name": "leaf.example.com",
             "issuer_ref": "external-intermediate",
-        }).as_object().unwrap().clone(),
-    ).await;
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await;
 
     let leaf_pem = issued["certificate"].as_str().unwrap().to_string();
-    assert_eq!(
-        cert_issuer(&leaf_pem),
-        int_subject,
-        "leaf must be signed by the intermediate",
-    );
+    assert_eq!(cert_issuer(&leaf_pem), int_subject, "leaf must be signed by the intermediate",);
     let issued_chain = issued["ca_chain"].as_array().unwrap();
-    assert_eq!(
-        issued_chain.len(),
-        2,
-        "ca_chain on issue response must include intermediate + root",
-    );
+    assert_eq!(issued_chain.len(), 2, "ca_chain on issue response must include intermediate + root",);
 
     // ── Leaf certs are rejected by config/ca ──────────────────────────
     // Build a non-CA leaf signed by the root and try to import it as
@@ -222,12 +227,11 @@ async fn test_pki_intermediate_import_end_to_end() {
     let leaf_cert = leaf_params.signed_by(&leaf_kp, &root_issuer).unwrap();
     let leaf_bundle = format!("{}{leaf_kp_pem}", leaf_cert.pem());
     let blocked = write(
-        &core, &token, "pki/config/ca",
-        json!({"pem_bundle": leaf_bundle, "issuer_name": "should-not-land"})
-            .as_object().unwrap().clone(),
-    ).await;
-    assert!(
-        blocked.is_err(),
-        "leaf cert (BasicConstraints.cA=false) must be rejected by config/ca: {blocked:?}",
-    );
+        &core,
+        &token,
+        "pki/config/ca",
+        json!({"pem_bundle": leaf_bundle, "issuer_name": "should-not-land"}).as_object().unwrap().clone(),
+    )
+    .await;
+    assert!(blocked.is_err(), "leaf cert (BasicConstraints.cA=false) must be rejected by config/ca: {blocked:?}",);
 }

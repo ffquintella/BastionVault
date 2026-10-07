@@ -22,10 +22,8 @@ mod audit_integration_tests {
     /// Unique per-test log path under the system tempdir so
     /// parallel runs don't collide.
     fn tmp_log_path(tag: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+        let nanos =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         let mut p = std::env::temp_dir();
         p.push(format!("bv-audit-{tag}-{nanos}.log"));
         p
@@ -33,10 +31,7 @@ mod audit_integration_tests {
 
     /// Writing + reading via a file device produces a chain of
     /// entries whose `prev_hash` links verify end-to-end.
-    #[maybe_async::test(
-        feature = "sync_handler",
-        async(all(not(feature = "sync_handler")), tokio::test)
-    )]
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn file_device_hash_chain_verifies() {
         let log_path = tmp_log_path("chain");
 
@@ -66,10 +61,7 @@ mod audit_integration_tests {
 
         // Read back each line from the file and verify the chain.
         let body = tokio::fs::read_to_string(&log_path).await.unwrap();
-        let parsed: Vec<AuditEntry> = body
-            .lines()
-            .map(|l| serde_json::from_str(l).expect("valid entry"))
-            .collect();
+        let parsed: Vec<AuditEntry> = body.lines().map(|l| serde_json::from_str(l).expect("valid entry")).collect();
         assert_eq!(parsed.len(), 3);
         verify(&parsed, &genesis()).expect("chain verifies");
 
@@ -87,13 +79,9 @@ mod audit_integration_tests {
     /// Enabling a file audit device via `sys/audit/<path>` causes
     /// subsequent requests to be logged to the file. A follow-up
     /// `GET /sys/audit` lists the device. `DELETE` removes it.
-    #[maybe_async::test(
-        feature = "sync_handler",
-        async(all(not(feature = "sync_handler")), tokio::test)
-    )]
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn audit_device_enable_disable_via_api() {
-        let mut server =
-            TestHttpServer::new("audit_device_enable_disable_via_api", true).await;
+        let mut server = TestHttpServer::new("audit_device_enable_disable_via_api", true).await;
         server.token = server.root_token.clone();
 
         let log_path = tmp_log_path("api");
@@ -117,9 +105,7 @@ mod audit_integration_tests {
         let _ = server
             .write(
                 "sys/policies/acl/audit-target",
-                json!({ "policy": r#"path "x/*" { capabilities = ["read"] }"# })
-                    .as_object()
-                    .cloned(),
+                json!({ "policy": r#"path "x/*" { capabilities = ["read"] }"# }).as_object().cloned(),
                 None,
             )
             .unwrap();
@@ -128,34 +114,20 @@ mod audit_integration_tests {
         // device, so read straight back.
         let body = tokio::fs::read_to_string(&log_path).await.unwrap();
         let lines: Vec<&str> = body.lines().collect();
-        assert!(
-            !lines.is_empty(),
-            "audit log should have entries after enabling + performing a request",
-        );
+        assert!(!lines.is_empty(), "audit log should have entries after enabling + performing a request",);
 
         // `GET /sys/audit` lists the enabled device.
         let ret = server.read("sys/audit", None).unwrap().1;
-        let devs = ret
-            .get("devices")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let devs = ret.get("devices").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         assert!(
-            devs.iter().any(|d| d
-                .get("path")
-                .and_then(|v| v.as_str())
-                == Some("primary")),
+            devs.iter().any(|d| d.get("path").and_then(|v| v.as_str()) == Some("primary")),
             "list should contain `primary`, got {devs:?}",
         );
 
         // Disable the device.
         let _ = server.delete("sys/audit/primary", None, None).unwrap();
         let ret = server.read("sys/audit", None).unwrap().1;
-        let devs = ret
-            .get("devices")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let devs = ret.get("devices").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         assert!(devs.is_empty(), "list should be empty after disable");
     }
 
@@ -166,18 +138,10 @@ mod audit_integration_tests {
     /// logged. The plain root device sees only the root event; the tenant
     /// device sees only the tenant events; the mirror device sees all three.
     /// Each device file is an independently-verifiable hash chain.
-    #[maybe_async::test(
-        feature = "sync_handler",
-        async(all(not(feature = "sync_handler")), tokio::test)
-    )]
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn per_namespace_routing_and_mirror() {
         let (_v, core, _rt) = new_unseal_test_bastion_vault("audit_per_ns").await;
-        let broker = core
-            .audit_broker
-            .load()
-            .as_ref()
-            .cloned()
-            .expect("broker installed at unseal");
+        let broker = core.audit_broker.load().as_ref().cloned().expect("broker installed at unseal");
 
         let root_path = tmp_log_path("ns-root");
         let a_path = tmp_log_path("ns-a");
@@ -201,11 +165,8 @@ mod audit_integration_tests {
         broker.enable_device(dev_cfg("mirror-dev", &mirror_path, "", true)).await.unwrap();
 
         let mk = |ns: &str, i: usize| {
-            let mut e = AuditEntry {
-                time: format!("2026-06-17T00:00:0{i}Z"),
-                r#type: "response".into(),
-                ..Default::default()
-            };
+            let mut e =
+                AuditEntry { time: format!("2026-06-17T00:00:0{i}Z"), r#type: "response".into(), ..Default::default() };
             e.namespace = ns.to_string();
             e.request.operation = "update".into();
             e.request.path = format!("{ns}/p{i}");
@@ -234,10 +195,7 @@ mod audit_integration_tests {
         // Plain root device: only the root event.
         assert_eq!(paths(&root_entries), vec!["/p0".to_string()]);
         // Tenant device: only the two tenant events, none from root.
-        assert_eq!(
-            paths(&a_entries),
-            vec!["tenant-a/p1".to_string(), "tenant-a/p2".to_string()]
-        );
+        assert_eq!(paths(&a_entries), vec!["tenant-a/p1".to_string(), "tenant-a/p2".to_string()]);
         // Mirror device: root event + both tenant events, tenant attribution kept.
         assert_eq!(
             paths(&mirror_entries),
@@ -254,19 +212,11 @@ mod audit_integration_tests {
     /// Smoke test that the broker re-hydrates device configs on a
     /// fresh `Core::new`-then-unseal cycle. Covers persistence at
     /// `audit-devices/<path>`.
-    #[maybe_async::test(
-        feature = "sync_handler",
-        async(all(not(feature = "sync_handler")), tokio::test)
-    )]
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn broker_reload_drops_on_seal() {
         let (_v, core, _rt) = new_unseal_test_bastion_vault("broker_reload_drops_on_seal").await;
         // Broker is installed at post_unseal; empty device list.
-        let broker = core
-            .audit_broker
-            .load()
-            .as_ref()
-            .cloned()
-            .expect("broker installed at unseal");
+        let broker = core.audit_broker.load().as_ref().cloned().expect("broker installed at unseal");
         assert!(!broker.has_devices(), "starts with zero devices");
     }
 }

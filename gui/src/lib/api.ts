@@ -2319,6 +2319,34 @@ export const pluginSetProviderGrant = (name: string) =>
 export const pluginDeleteProviderGrant = (name: string) =>
   invoke<void>("plugins_delete_provider_grant", { name });
 
+// ── Entity-scoped plugin data: counts only (features/self-accounts.md Phase 5) ──
+
+export interface PluginEntityUsage {
+  entity_id: string;
+  /** The entity's name from the identity store, when it has one. */
+  display_name?: string | null;
+  /** Records (`accounts/<id>/meta`) this entity holds. A count, never content. */
+  accounts: number;
+}
+
+export interface PluginEntityDataUsage {
+  entities: PluginEntityUsage[];
+  total_accounts: number;
+  total_entities: number;
+  /** Automatic purges that failed and wait for a retry (any plugin). */
+  pending_purges: number;
+}
+
+/** `GET v2/sys/plugins/<name>/entity-data`: per-user record counts for an
+ *  entity-scoped plugin. Admin-only; lists keys and reads no value. */
+export const pluginEntityDataUsage = (name: string) =>
+  invoke<PluginEntityDataUsage>("plugins_entity_data_usage", { name });
+
+/** `DELETE v2/sys/plugins/<name>/entity-data/<entity_id>`: purge one user's
+ *  data under this plugin (offboarding). Also retries pending automatic purges. */
+export const pluginPurgeEntityData = (name: string, entityId: string) =>
+  invoke<void>("plugins_purge_entity_data", { name, entityId });
+
 export interface PluginNetCall {
   at_unix_ms: number;
   method: string;
@@ -2927,6 +2955,11 @@ export type SessionOpenSshRequest = {
    *  {@link connectMfaBegin} + {@link connectMfaVerifyTotp} /
    *  {@link connectMfaVerifyFido2}. */
   connect_ticket?: string;
+  /** The account picked in the provider account picker
+   *  ({@link connectProviderCandidates}). Required for a profile whose
+   *  credential source is `provider`, refused for any other. An opaque id;
+   *  the credential is released inside the host, never to the webview. */
+  provider_account_id?: string;
   /** See {@link SessionPlacement}. */
   placement?: SessionPlacement;
   /** Set only when re-opening a pane of a saved layout. */
@@ -2960,6 +2993,8 @@ export type SessionOpenRdpRequest = {
   operator_credential?: OperatorCredential;
   /** See {@link SessionOpenSshRequest.connect_ticket}. */
   connect_ticket?: string;
+  /** See {@link SessionOpenSshRequest.provider_account_id}. */
+  provider_account_id?: string;
   /** See {@link SessionPlacement}. */
   placement?: SessionPlacement;
   /** See {@link SessionOpenSshRequest.restore}. */
@@ -3124,6 +3159,9 @@ export type SessionOpenWebRequest = {
   profile_id: string;
   /** See {@link SessionOpenSshRequest.connect_ticket}. */
   connect_ticket?: string;
+  /** `form` with a `provider` source; see
+   *  {@link SessionOpenSshRequest.provider_account_id}. */
+  provider_account_id?: string;
 };
 
 export type SessionOpenWebResponse = {
@@ -3271,6 +3309,69 @@ export const connectMfaVerifyFido2 = (
     resourceName,
     profileId,
     challenge,
+  });
+
+// ── Credential providers at Connect (features/self-accounts.md §6) ──
+
+/** An approved, active credential provider a connection profile can name.
+ *  Protocols and secret kinds this build does not know are dropped by the
+ *  host. */
+export type CredentialProviderInfo = {
+  name: string;
+  display_name: string;
+  protocols: ("ssh" | "rdp" | "web")[];
+  secret_kinds: ("password" | "ssh-key")[];
+};
+
+/** The providers the profile editor may offer (`GET
+ *  resources/v2/connect/providers`, through the caller's token). */
+export const connectCredentialProviders = () =>
+  invoke<CredentialProviderInfo[]>("connect_credential_providers");
+
+/** What the operator is connecting to, as the *server* computed it from the
+ *  stored record. */
+export type ProviderTarget =
+  | { kind: "host"; host: string; port: number }
+  | { kind: "origins"; origins: string[] };
+
+/** One account the operator may pick. Metadata only; every string has been
+ *  checked by the host as safe to show as plain text. */
+export type ProviderCandidate = {
+  id: string;
+  label: string;
+  username: string;
+  domain: string | null;
+  secret_kind: "password" | "ssh-key";
+  has_totp: boolean;
+  /** RFC 3339, UTC; null when never used. */
+  last_used_at: string | null;
+  /** Never released for this target (Phase 5): the picker shows a caution.
+   *  Absent or false when the provider does not report it. */
+  first_use_on_target?: boolean;
+  /** RFC 3339, UTC: the last release for this same target; the picker
+   *  preselects the most recent. A time only, never the target. */
+  last_used_on_target?: string | null;
+};
+
+export type ProviderCandidates = {
+  provider: string;
+  display_name: string;
+  protocol: "ssh" | "rdp" | "web";
+  resource_type: string;
+  os_type: string | null;
+  target: ProviderTarget;
+  candidates: ProviderCandidate[];
+  /** Accounts the host withheld because a field could not be shown safely. */
+  hidden: number;
+};
+
+/** The operator's accounts that match a `provider` profile, for the
+ *  host-rendered picker. Never carries a secret: the release happens inside
+ *  `session_open_*` with the picked `provider_account_id`. */
+export const connectProviderCandidates = (resourceName: string, profileId: string) =>
+  invoke<ProviderCandidates>("connect_provider_candidates", {
+    resourceName,
+    profileId,
   });
 
 /** One principal's SSH security-key enrolment. Everything here is public

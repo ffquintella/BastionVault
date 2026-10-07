@@ -40,8 +40,7 @@ pub async fn restore_backup(
     let mut restored = 0u64;
     while let Some((key, value)) = format::read_entry_frame(&mut cursor)? {
         let final_value = if header.compressed {
-            zstd::decode_all(value.as_slice())
-                .map_err(|_| RvError::ErrBackupCorrupted)?
+            zstd::decode_all(value.as_slice()).map_err(|_| RvError::ErrBackupCorrupted)?
         } else {
             value
         };

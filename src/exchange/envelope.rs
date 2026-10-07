@@ -121,13 +121,9 @@ pub fn encrypt_bvx(
     let mut nonce_bytes = [0u8; XCHACHA_NONCE_LEN];
     rand::rng().fill_bytes(&mut nonce_bytes);
 
-    let cipher = XChaCha20Poly1305::new_from_slice(&derived.0)
-        .map_err(|_| RvError::ErrRequestInvalid)?;
+    let cipher = XChaCha20Poly1305::new_from_slice(&derived.0).map_err(|_| RvError::ErrRequestInvalid)?;
     let ciphertext = cipher
-        .encrypt(
-            XNonce::from_slice(&nonce_bytes),
-            Payload { msg: plaintext, aad: ENVELOPE_MAGIC.as_bytes() },
-        )
+        .encrypt(XNonce::from_slice(&nonce_bytes), Payload { msg: plaintext, aad: ENVELOPE_MAGIC.as_bytes() })
         .map_err(|_| RvError::ErrRequestInvalid)?;
 
     let envelope = Envelope {
@@ -153,18 +149,14 @@ pub fn encrypt_bvx(
 /// Decrypt a `.bvx` envelope, returning the inner plaintext bytes (the
 /// canonical bvx.v1 JSON document).
 pub fn decrypt_bvx(envelope_bytes: &[u8], password: &str) -> Result<Vec<u8>, RvError> {
-    let envelope: Envelope = serde_json::from_slice(envelope_bytes)
-        .map_err(|_| EnvelopeError::Malformed("not a bvx envelope"))?;
+    let envelope: Envelope =
+        serde_json::from_slice(envelope_bytes).map_err(|_| EnvelopeError::Malformed("not a bvx envelope"))?;
 
     if envelope.magic != ENVELOPE_MAGIC {
         return Err(EnvelopeError::Malformed("magic mismatch").into());
     }
     if envelope.version != ENVELOPE_VERSION {
-        return Err(EnvelopeError::UnsupportedVersion {
-            got: envelope.version,
-            supported: ENVELOPE_VERSION,
-        }
-        .into());
+        return Err(EnvelopeError::UnsupportedVersion { got: envelope.version, supported: ENVELOPE_VERSION }.into());
     }
     if envelope.aead.alg != AEAD_ALG_XCHACHA {
         return Err(EnvelopeError::Malformed("unsupported aead algorithm").into());
@@ -181,14 +173,10 @@ pub fn decrypt_bvx(envelope_bytes: &[u8], password: &str) -> Result<Vec<u8>, RvE
         .map_err(|_| EnvelopeError::Malformed("ciphertext not base64"))?;
 
     let derived = DerivedKey(derive_key(password, &envelope.kdf)?);
-    let cipher = XChaCha20Poly1305::new_from_slice(&derived.0)
-        .map_err(|_| RvError::ErrRequestInvalid)?;
+    let cipher = XChaCha20Poly1305::new_from_slice(&derived.0).map_err(|_| RvError::ErrRequestInvalid)?;
 
     let plaintext = cipher
-        .decrypt(
-            XNonce::from_slice(&nonce_bytes),
-            Payload { msg: &ciphertext, aad: ENVELOPE_MAGIC.as_bytes() },
-        )
+        .decrypt(XNonce::from_slice(&nonce_bytes), Payload { msg: &ciphertext, aad: ENVELOPE_MAGIC.as_bytes() })
         .map_err(|_| EnvelopeError::DecryptionFailed)?;
 
     Ok(plaintext)
@@ -226,9 +214,7 @@ mod tests {
         let bytes = encrypt_bvx(plaintext, test_password(), "", None).unwrap();
         let mut env: Envelope = serde_json::from_slice(&bytes).unwrap();
         // Flip one bit in the ciphertext.
-        let mut ct = base64::engine::general_purpose::STANDARD
-            .decode(env.ciphertext_b64.as_bytes())
-            .unwrap();
+        let mut ct = base64::engine::general_purpose::STANDARD.decode(env.ciphertext_b64.as_bytes()).unwrap();
         ct[0] ^= 0x01;
         env.ciphertext_b64 = base64::engine::general_purpose::STANDARD.encode(&ct);
         let tampered = serde_json::to_vec(&env).unwrap();
@@ -241,9 +227,7 @@ mod tests {
         let bytes = encrypt_bvx(plaintext, test_password(), "", None).unwrap();
         let mut env: Envelope = serde_json::from_slice(&bytes).unwrap();
         // Different salt -> different derived key -> AEAD tag check fails.
-        let mut salt = base64::engine::general_purpose::STANDARD
-            .decode(env.kdf.salt_b64.as_bytes())
-            .unwrap();
+        let mut salt = base64::engine::general_purpose::STANDARD.decode(env.kdf.salt_b64.as_bytes()).unwrap();
         salt[0] ^= 0x01;
         env.kdf.salt_b64 = base64::engine::general_purpose::STANDARD.encode(&salt);
         let tampered = serde_json::to_vec(&env).unwrap();
@@ -259,13 +243,8 @@ mod tests {
     #[test]
     fn fingerprint_and_comment_round_trip() {
         let plaintext = b"{}";
-        let bytes = encrypt_bvx(
-            plaintext,
-            test_password(),
-            "fingerprint-abc",
-            Some("nightly export".to_string()),
-        )
-        .unwrap();
+        let bytes =
+            encrypt_bvx(plaintext, test_password(), "fingerprint-abc", Some("nightly export".to_string())).unwrap();
         let env: Envelope = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(env.vault_fingerprint_b64, "fingerprint-abc");
         assert_eq!(env.comment.as_deref(), Some("nightly export"));

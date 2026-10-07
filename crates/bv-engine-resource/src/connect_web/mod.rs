@@ -24,6 +24,14 @@
 //!   dispatched through the full request pipeline **as the caller**, exactly
 //!   as the desktop host does on the direct path today, and the LDAP engine's
 //!   own ACL and check-in ownership apply.
+//! * `provider` — one of the **caller's own** accounts in an approved
+//!   credential-provider plugin (`features/self-accounts.md`), released through
+//!   `PluginHost` with the caller attested from the token and the target set
+//!   to this profile's fill origins. A resource editor cannot reach anyone
+//!   else's accounts this way: the provider stores per entity, and its target
+//!   binding is matched against the origins the server computed. A TOTP code
+//!   from a provider seed is computed once, at launch; `totp` refreshes are
+//!   not offered for it, because the seed is not kept anywhere server-side.
 //!
 //! ## What leaves the server
 //!
@@ -64,8 +72,14 @@ use self::launch_store::{
 };
 use self::profile::{parse_launch_profile, LaunchLogin, WebCredentialSource, WebLaunchProfile};
 use self::recipe::RecipeNeeds;
+use self::totp::TotpParams;
 use crate::connect_mfa::{caller_namespace, find_profile};
-use crate::kernel_api::{identity::caller_audit_actor, VaultCtx};
+use crate::connect_provider::{account_id_field, audit_reason, ProviderAudit, ProviderLaunch};
+use crate::kernel_api::{
+    identity::caller_audit_actor,
+    provider::{provider_resource, reason, ProviderNeeds, ProviderTarget, ReleasedCredential, ReleasedSecret},
+    VaultCtx,
+};
 use crate::{
     errors::RvError,
     logical::{connection::Connection, Backend, Operation, Request, Response},
@@ -102,7 +116,7 @@ impl WebRefusal {
         Self { status, code, message: String::new(), inner: Some(e) }
     }
 
-    fn into_rv(self) -> RvError {
+    pub(crate) fn into_rv(self) -> RvError {
         match self.inner {
             Some(e) => e,
             None => RvError::ErrResponseStatus(self.status, format!("{}: {}", self.code, self.message)),
@@ -169,6 +183,8 @@ struct LaunchAudit<'a> {
     exposure: &'a str,
     exposure_cap: &'a str,
     credential_source: &'a str,
+    /// The provider a `provider` source names (`None` for every other source).
+    provider: Option<&'a str>,
     recipe_hash: &'a str,
     heuristic: bool,
     mfa: &'a str,
@@ -184,7 +200,7 @@ struct LaunchAudit<'a> {
 fn launch_line(a: &LaunchAudit<'_>) -> String {
     format!(
         "connect.web.launch principal={:?} namespace={:?} resource={:?} profile={:?} login_mode={} \
-         exposure={} exposure_cap={} credential_source={} recipe_hash={} heuristic={} mfa={} \
+         exposure={} exposure_cap={} credential_source={} provider={} recipe_hash={} heuristic={} mfa={} \
          transport={} fill_origins={:?} released={} launch_id_hash={}",
         a.principal,
         a.namespace,
@@ -194,6 +210,7 @@ fn launch_line(a: &LaunchAudit<'_>) -> String {
         a.exposure,
         a.exposure_cap,
         a.credential_source,
+        a.provider.map(|p| format!("{p:?}")).unwrap_or_else(|| "none".into()),
         a.recipe_hash,
         a.heuristic,
         a.mfa,
@@ -492,6 +509,15 @@ enum PreparedCredential {
         mount: String,
         set: String,
     },
+    /// Everything but the release itself is checked: the account id is
+    /// present, the caller has an identity entity, and the provider is live
+    /// and declares `web`. The release runs after the ticket.
+    Provider {
+        launch: ProviderLaunch,
+        account_id: String,
+        needs: ProviderNeeds,
+        totp: TotpParams,
+    },
 }
 
 fn unavailable(message: impl Into<String>) -> WebRefusal {
@@ -513,6 +539,56 @@ fn demand(
         (true, None) if heuristic => Ok(None),
         (true, None) => Err(unavailable(format!("the credential source supplies no {what}, which this login needs"))),
     }
+}
+
+/// What a recipe needs, as a provider's `needs`. Heuristic mode takes a TOTP
+/// only "if the source has it", which a provider cannot answer before the
+/// release (asking for one the account lacks is refused), so a heuristic
+/// launch asks for none. An explicit recipe asks for exactly what it fills.
+fn provider_needs(needs: &RecipeNeeds) -> ProviderNeeds {
+    ProviderNeeds { password: needs.password, totp: needs.totp && !needs.heuristic }
+}
+
+/// Turn a provider's release into the parts the recipe fills: the released
+/// username is authoritative; an SSH key is refused (a web login cannot use
+/// one, and the host's shape check already refuses it for `web`); a TOTP
+/// seed becomes the code for `now_secs` and is dropped.
+fn provider_credential(
+    released: ReleasedCredential,
+    needs: &RecipeNeeds,
+    params: TotpParams,
+    now_secs: u64,
+) -> Result<ResolvedCredential, WebRefusal> {
+    let ReleasedCredential { username, secret, .. } = released;
+    let (password, seed) = match secret {
+        ReleasedSecret::Password { password, totp_seed } => (password, totp_seed),
+        ReleasedSecret::SshKey { .. } => {
+            return Err(unavailable("the credential provider released an SSH key, which a web login cannot use"))
+        }
+    };
+    let username = demand(needs.username, needs.heuristic, Some(Zeroizing::new(username)), "username")?;
+    let password = demand(needs.password, needs.heuristic, Some(password), "password")?;
+    let totp = match seed {
+        Some(seed) if needs.totp => {
+            let key = totp::decode_seed(&seed).map_err(|m| unavailable(format!("the provider's TOTP seed: {m}")))?;
+            Some(totp::code_at(&key, params, now_secs))
+        }
+        _ if needs.totp && !needs.heuristic => {
+            return Err(WebRefusal::new(
+                422,
+                "totp_not_configured",
+                "the recipe fills `totp`, but the credential provider released no TOTP seed",
+            ))
+        }
+        _ => None,
+    };
+    Ok(ResolvedCredential { username, password, totp, totp_source: None, ldap: None })
+}
+
+/// A provider-path error as a launch refusal: the reason code becomes the
+/// refusal's `code`, and the error itself is passed through.
+fn provider_refusal(e: RvError) -> WebRefusal {
+    WebRefusal::wrap(audit_reason(&e), e)
 }
 
 /// A complete LDAP library check-out: `(account, password, lease_id)`.
@@ -671,11 +747,43 @@ impl super::ResourceBackendInner {
                 })?;
                 Ok(PreparedCredential::Ready { username: Some(username), password: None, totp: None, source_detail })
             }
+
+            WebCredentialSource::Provider { provider, totp: params } => {
+                let account_id = account_id_field(req).map_err(provider_refusal)?.ok_or_else(|| {
+                    WebRefusal::new(
+                        400,
+                        reason::INVALID_REQUEST,
+                        "`provider_account_id` is required for a provider profile: the account the operator \
+                         picked from `resources/v2/connect/provider/candidates`",
+                    )
+                })?;
+                let resource_desc =
+                    provider_resource(meta).map_err(|m| WebRefusal::new(422, "invalid_profile", m))?;
+                // The fill scope the server just checked, start origin first:
+                // every origin the recipe may fill must match the account.
+                let target = ProviderTarget::Origins { origins: profile.origins.clone() };
+                let launch = self
+                    .provider_launch(req, provider, "web", resource_desc, target)
+                    .await
+                    .map_err(provider_refusal)?;
+                Ok(PreparedCredential::Provider {
+                    launch,
+                    account_id,
+                    needs: provider_needs(needs),
+                    totp: *params,
+                })
+            }
         }
     }
 
     /// Post-ticket half of resolution: compute the TOTP code, read an LDAP
-    /// static credential, or check a library account out.
+    /// static credential, check a library account out, or ask a credential
+    /// provider for the picked account. `mfa_verified` is true only when this
+    /// launch redeemed a connect MFA ticket; `provider_audit` is the
+    /// `connect.provider.release` line a provider source writes.
+    // Eight distinct inputs of one release step, each used by at least one
+    // source arm; a parameter struct would only rename them.
+    #[allow(clippy::too_many_arguments)]
     async fn release_web_credential(
         &self,
         prepared: PreparedCredential,
@@ -684,8 +792,44 @@ impl super::ResourceBackendInner {
         resource: &str,
         needs: &RecipeNeeds,
         now_secs: u64,
+        mfa_verified: bool,
+        mut provider_audit: ProviderAudit,
     ) -> Result<ResolvedCredential, WebRefusal> {
         match prepared {
+            PreparedCredential::Provider { launch, account_id, needs: provider_needs, totp: params } => {
+                provider_audit.protocol = launch.protocol.into();
+                provider_audit.provider = launch.provider.clone();
+                provider_audit.account_id = account_id.clone();
+                let released = match self
+                    .release_provider(&launch, &account_id, provider_needs, mfa_verified, "web")
+                    .await
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let r = provider_refusal(e);
+                        provider_audit.denied(r.code);
+                        return Err(r);
+                    }
+                };
+                let login = released.username.clone();
+                match provider_credential(released, needs, params, now_secs) {
+                    Ok(c) => {
+                        provider_audit.released(&login);
+                        log::info!(
+                            target: "security",
+                            "resource-connect-web-resolve: user={user:?} resource={resource:?} source=provider \
+                             provider={:?} account_id={account_id:?}",
+                            launch.provider
+                        );
+                        Ok(c)
+                    }
+                    Err(r) => {
+                        provider_audit.denied(reason::BAD_PROVIDER_OUTPUT);
+                        Err(r)
+                    }
+                }
+            }
+
             PreparedCredential::Ready { username, password, totp, source_detail } => {
                 log::info!(
                     target: "security",
@@ -822,7 +966,7 @@ impl super::ResourceBackendInner {
     /// other failure (the store unreadable, a tier record undecodable, an
     /// asset-group lookup error, a verdict this server cannot parse) — the
     /// launch is refused.
-    async fn effective_transport(
+    pub(crate) async fn effective_transport(
         &self,
         req: &Request,
         resource: &str,
@@ -985,24 +1129,50 @@ impl super::ResourceBackendInner {
         // (4c) Every credential check that can run before the ticket does:
         // `secret` and `default-account` are resolved here (no side effects,
         // nothing released yet); `ldap` gets its mount checked.
+        // A `provider` source writes its own `connect.provider.release` line
+        // for every outcome from here on, next to `connect.web.*`.
+        let mut provider_audit = ProviderAudit::new("release", "web", req);
+        provider_audit.resource = resource.clone();
+        provider_audit.profile_id = profile_id.clone();
+        provider_audit.protocol = "web".into();
+        provider_audit.provider = profile.source.provider().unwrap_or_default().to_string();
+        provider_audit.account_id = account_id_field(req).ok().flatten().unwrap_or_default();
+        let is_provider = profile.source.provider().is_some();
+
         let dispatch = CallerDispatch::new(self.core.clone(), req, &caller.namespace);
-        let prepared = self.prepare_web_credential(req, &dispatch, &resource, &meta, &profile).await?;
+        let prepared = match self.prepare_web_credential(req, &dispatch, &resource, &meta, &profile).await {
+            Ok(p) => p,
+            Err(r) => {
+                if is_provider {
+                    provider_audit.denied(r.code);
+                }
+                return Err(r);
+            }
+        };
 
         // (5) Connect-time MFA. Only now, so a profile that fails a static,
         // policy or credential pre-check never costs the operator their
         // ticket. What can still fail after it: the LDAP static-credential
-        // read or library check-out, and persisting the launch.
+        // read or library check-out, the provider release, and persisting the
+        // launch.
         let mfa_method = if profile.require_mfa {
-            let ticket = self
-                .redeem_connect_ticket(req, &resource, &profile_id)
-                .await
-                .map_err(|e| WebRefusal::wrap("mfa", e))?;
+            let ticket = match self.redeem_connect_ticket(req, &resource, &profile_id).await {
+                Ok(t) => t,
+                Err(e) => {
+                    if is_provider {
+                        provider_audit.denied(reason::MFA_REQUIRED);
+                    }
+                    return Err(WebRefusal::wrap("mfa", e));
+                }
+            };
             Some(ticket.method)
         } else {
             None
         };
 
-        // (6) Release: the TOTP code for `now`, or the LDAP read / check-out.
+        // (6) Release: the TOTP code for `now`, the LDAP read / check-out, or
+        // the provider release (attested as MFA-verified only when this launch
+        // redeemed a ticket).
         let user = caller_audit_actor(req);
         let mut cred = self
             .release_web_credential(
@@ -1012,6 +1182,8 @@ impl super::ResourceBackendInner {
                 &resource,
                 &profile.needs,
                 now.timestamp().max(0) as u64,
+                mfa_method.is_some(),
+                provider_audit,
             )
             .await?;
 
@@ -1074,6 +1246,7 @@ impl super::ResourceBackendInner {
                 exposure: exposure.as_str(),
                 exposure_cap: cap.as_str(),
                 credential_source: profile.source.kind(),
+                provider: profile.source.provider(),
                 recipe_hash: profile.recipe_hash().unwrap_or("none"),
                 heuristic: profile.needs.heuristic,
                 mfa: mfa_method.as_deref().unwrap_or("none"),
@@ -1307,6 +1480,7 @@ mod tests {
             exposure: "dom",
             exposure_cap: "dom",
             credential_source: "secret",
+            provider: None,
             recipe_hash: "sha256:ab",
             heuristic: false,
             mfa: "totp",
@@ -1316,6 +1490,7 @@ mod tests {
             launch_id_hash: "cd",
         });
         assert!(line.starts_with("connect.web.launch "));
+        assert!(line.contains(" provider=none "));
         for k in [
             "principal=",
             "namespace=",
@@ -1345,6 +1520,98 @@ mod tests {
         assert!(!line.contains('\n'));
         assert!(line.contains("reason=exposure_cap_exceeded"));
         assert!(line.contains(r#"resource="fw01 reason=ok\nconnect.web.launch""#));
+
+        // A provider launch names the provider (quoted) and, like every other
+        // source, the parts released — never their values. The line is built
+        // from names only: the released credential is not an input to it.
+        let line = launch_line(&LaunchAudit {
+            principal: "userpass/alice",
+            namespace: "",
+            resource: "fw01",
+            profile: "p_web",
+            login_mode: "form",
+            exposure: "dom",
+            exposure_cap: "dom",
+            credential_source: "provider",
+            provider: Some("self-accounts"),
+            recipe_hash: "sha256:ab",
+            heuristic: false,
+            mfa: "totp",
+            transport: "direct",
+            fill_origins: &["https://fw01.example.com".to_string()],
+            released: "username,password",
+            launch_id_hash: "cd",
+        });
+        assert!(line.contains(r#"credential_source=provider provider="self-accounts" "#), "{line}");
+        assert!(line.contains("released=username,password "));
+    }
+
+    #[test]
+    fn a_provider_release_fills_only_what_the_recipe_asks() {
+        let released = |seed: Option<&str>| ReleasedCredential {
+            username: "felipe".into(),
+            domain: Some("CORP".into()),
+            secret: ReleasedSecret::Password {
+                password: Zeroizing::new("hunter2-S3CRET".into()),
+                totp_seed: seed.map(|s| Zeroizing::new(s.to_string())),
+            },
+        };
+        let explicit = |username, password, totp| RecipeNeeds {
+            heuristic: false,
+            username,
+            password,
+            totp,
+            totp_steps: if totp { vec![1] } else { vec![] },
+            step_count: 2,
+        };
+
+        // Username + password: the domain is not a web fill.
+        let c = provider_credential(released(None), &explicit(true, true, false), TotpParams::default(), 59).unwrap();
+        assert_eq!(c.username.as_deref().map(String::as_str), Some("felipe"));
+        assert_eq!(c.password.as_deref().map(String::as_str), Some("hunter2-S3CRET"));
+        assert!(c.totp.is_none() && c.totp_source.is_none());
+
+        // A recipe that fills only the username gets no password.
+        let c = provider_credential(released(None), &explicit(true, false, false), TotpParams::default(), 59).unwrap();
+        assert!(c.password.is_none());
+        assert_eq!(c.released(), "username");
+
+        // A seed becomes the code for `now`, and no refresh source is kept.
+        let seed = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+        let c = provider_credential(released(Some(seed)), &explicit(true, true, true), TotpParams::default(), 59)
+            .unwrap();
+        assert_eq!(c.totp.unwrap().code.as_str(), "287082", "RFC 6238 SHA1 vector at t=59, 6 digits");
+        assert!(c.totp_source.is_none());
+
+        // A recipe that fills `totp` with no seed released is refused.
+        let r = provider_credential(released(None), &explicit(true, true, true), TotpParams::default(), 59).err().unwrap();
+        assert_eq!(r.code, "totp_not_configured");
+
+        // An SSH key is never a web credential.
+        let key = ReleasedCredential {
+            username: "u".into(),
+            domain: None,
+            secret: ReleasedSecret::SshKey { private_key: Zeroizing::new("k".into()) },
+        };
+        assert_eq!(
+            provider_credential(key, &explicit(true, true, false), TotpParams::default(), 59).err().unwrap().code,
+            "credential_unavailable"
+        );
+    }
+
+    #[test]
+    fn provider_needs_never_ask_a_heuristic_launch_for_a_totp() {
+        let heuristic = RecipeNeeds {
+            heuristic: true,
+            username: true,
+            password: true,
+            totp: true,
+            totp_steps: vec![0],
+            step_count: 1,
+        };
+        assert_eq!(provider_needs(&heuristic), ProviderNeeds { password: true, totp: false });
+        let explicit = RecipeNeeds { heuristic: false, ..heuristic.clone() };
+        assert_eq!(provider_needs(&explicit), ProviderNeeds { password: true, totp: true });
     }
 
     #[test]

@@ -705,12 +705,7 @@ async fn test_kv_v2_environments(core: &Core, token: &str) {
 
     // Helper: read with an optional env selector seeded into req.data, exactly
     // as the HTTP/embedded boundary does before routing.
-    async fn read_env(
-        core: &Core,
-        token: &str,
-        path: &str,
-        env: Option<&str>,
-    ) -> Option<Map<String, Value>> {
+    async fn read_env(core: &Core, token: &str, path: &str, env: Option<&str>) -> Option<Map<String, Value>> {
         let mut req = Request::new(path);
         req.operation = Operation::Read;
         req.client_token = token.to_string();
@@ -762,10 +757,7 @@ async fn test_kv_v2_environments(core: &Core, token: &str) {
     assert!(read_env(core, token, "kvenv/data/svc", Some("dev")).await.is_none());
 
     // --- Targeted patch: update only prod, carry base + staging forward ---
-    let body = json!({ "env": "prod", "data": { "host": "db.prod2" } })
-        .as_object()
-        .unwrap()
-        .clone();
+    let body = json!({ "env": "prod", "data": { "host": "db.prod2" } }).as_object().unwrap().clone();
     let mut req = Request::new("kvenv/data/svc");
     req.operation = Operation::Write;
     req.client_token = token.to_string();
@@ -791,10 +783,7 @@ async fn test_kv_v2_environments(core: &Core, token: &str) {
     assert_eq!(d["data"]["host"].as_str().unwrap(), "db.prod2"); // env survived
 
     // --- Ambiguous write (env + envs) is rejected ---
-    let body = json!({ "env": "prod", "data": { "x": 1 }, "envs": { "prod": {} } })
-        .as_object()
-        .unwrap()
-        .clone();
+    let body = json!({ "env": "prod", "data": { "x": 1 }, "envs": { "prod": {} } }).as_object().unwrap().clone();
     let mut req = Request::new("kvenv/data/svc");
     req.operation = Operation::Write;
     req.client_token = token.to_string();
@@ -881,10 +870,7 @@ async fn test_default_logical() {
 #[maybe_async::maybe_async]
 async fn test_kv_v2_version_history_tracking(core: &Core, token: &str) {
     // Mount a fresh kv-v2 engine for this test.
-    let mount_data = json!({"type": "kv-v2"})
-        .as_object()
-        .unwrap()
-        .clone();
+    let mount_data = json!({"type": "kv-v2"}).as_object().unwrap().clone();
     test_write_api(core, token, "sys/mounts/hist-kv/", true, Some(mount_data)).await;
 
     // v1 + v2 writes.
@@ -892,12 +878,7 @@ async fn test_kv_v2_version_history_tracking(core: &Core, token: &str) {
         let mut req = Request::new("hist-kv/data/app");
         req.operation = Operation::Write;
         req.client_token = token.to_string();
-        req.body = Some(
-            json!({ "data": { "k": format!("v{i}") } })
-                .as_object()
-                .unwrap()
-                .clone(),
-        );
+        req.body = Some(json!({ "data": { "k": format!("v{i}") } }).as_object().unwrap().clone());
         let resp = core.handle_request(&mut req).await;
         assert!(resp.is_ok(), "write v{i} failed: {:?}", resp.err());
     }
@@ -1010,12 +991,8 @@ async fn test_resource_metadata_history(core: &Core, token: &str) {
     // Newest first: the most recent entry is the hostname update.
     let latest = &entries[0];
     assert_eq!(latest["op"].as_str().unwrap(), "update");
-    let changed: Vec<String> = latest["changed_fields"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect();
+    let changed: Vec<String> =
+        latest["changed_fields"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
     assert_eq!(changed, vec!["hostname".to_string()]);
 
     let oldest = &entries[1];
@@ -1046,12 +1023,7 @@ async fn test_resource_secret_versioning(core: &Core, token: &str) {
     let mut req = Request::new("resources/resources/db-01");
     req.operation = Operation::Write;
     req.client_token = token.to_string();
-    req.body = Some(
-        json!({ "name": "db-01", "type": "database" })
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
+    req.body = Some(json!({ "name": "db-01", "type": "database" }).as_object().unwrap().clone());
     assert!(core.handle_request(&mut req).await.is_ok());
 
     // Write the secret three times -- three versions.
@@ -1059,12 +1031,7 @@ async fn test_resource_secret_versioning(core: &Core, token: &str) {
         let mut req = Request::new("resources/secrets/db-01/admin");
         req.operation = Operation::Write;
         req.client_token = token.to_string();
-        req.body = Some(
-            json!({ "password": pass })
-                .as_object()
-                .unwrap()
-                .clone(),
-        );
+        req.body = Some(json!({ "password": pass }).as_object().unwrap().clone());
         assert!(core.handle_request(&mut req).await.is_ok());
     }
 
@@ -1097,20 +1064,14 @@ async fn test_resource_secret_versioning(core: &Core, token: &str) {
     req.operation = Operation::Read;
     req.client_token = token.to_string();
     let resp = core.handle_request(&mut req).await.unwrap().unwrap();
-    assert_eq!(
-        resp.data.as_ref().unwrap()["data"]["password"].as_str().unwrap(),
-        "s3cr3t-b"
-    );
+    assert_eq!(resp.data.as_ref().unwrap()["data"]["password"].as_str().unwrap(), "s3cr3t-b");
 
     // Current read (non-versioned path) still returns the latest.
     let mut req = Request::new("resources/secrets/db-01/admin");
     req.operation = Operation::Read;
     req.client_token = token.to_string();
     let resp = core.handle_request(&mut req).await.unwrap().unwrap();
-    assert_eq!(
-        resp.data.as_ref().unwrap()["password"].as_str().unwrap(),
-        "s3cr3t-c"
-    );
+    assert_eq!(resp.data.as_ref().unwrap()["password"].as_str().unwrap(), "s3cr3t-c");
 
     // Delete the secret -> history is purged (we do not keep tombstones
     // after explicit deletion; current-value is also gone).
@@ -1124,8 +1085,5 @@ async fn test_resource_secret_versioning(core: &Core, token: &str) {
     req.client_token = token.to_string();
     let resp = core.handle_request(&mut req).await.unwrap().unwrap();
     assert_eq!(resp.data.as_ref().unwrap()["current_version"].as_u64().unwrap(), 0);
-    assert_eq!(
-        resp.data.as_ref().unwrap()["versions"].as_array().unwrap().len(),
-        0
-    );
+    assert_eq!(resp.data.as_ref().unwrap()["versions"].as_array().unwrap().len(), 0);
 }

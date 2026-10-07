@@ -692,6 +692,27 @@ export type CredentialSource =
        * RDP profiles.
        */
       kind: "none";
+    }
+  | {
+      /**
+       * One of the *connecting operator's own* accounts in a credential
+       * provider — an approved plugin such as `self-accounts`
+       * (features/self-accounts.md). At Connect the operator picks the
+       * account from a host-rendered list of their accounts that match this
+       * resource, protocol and target; the server then releases it (to the
+       * desktop host on the direct path, sealed for the bastion on the
+       * Rustion path, into the launch bundle for a web `form` login). The
+       * webview never receives the secret.
+       *
+       * SSH, RDP and web `form` only. The released username is
+       * authoritative: the profile's `username` is ignored.
+       */
+      kind: "provider";
+      /** The provider plugin's name, e.g. `self-accounts`. */
+      provider: string;
+      /** `form` web logins only: how a TOTP seed on the account turns into a
+       *  code, as for a `secret` source. Defaults SHA1 / 6 digits / 30 s. */
+      totp?: { algorithm?: "SHA1" | "SHA256" | "SHA512"; digits?: 6 | 8; period?: 30 | 60 };
     };
 
 /**

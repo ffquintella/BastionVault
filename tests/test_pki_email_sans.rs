@@ -51,10 +51,7 @@ async fn write(
     req.operation = Operation::Write;
     req.client_token = token.to_string();
     req.body = Some(body);
-    core.handle_request(&mut req)
-        .await
-        .map(|r| r.and_then(|x| x.data))
-        .map_err(|e| format!("{e:?}"))
+    core.handle_request(&mut req).await.map(|r| r.and_then(|x| x.data)).map_err(|e| format!("{e:?}"))
 }
 
 #[maybe_async::maybe_async]
@@ -114,8 +111,7 @@ fn cert_pem(resp: &Map<String, Value>) -> String {
 /// invisible to every mail client.
 fn email_sans(der: &[u8]) -> Vec<String> {
     let (_, parsed) = X509Certificate::from_der(der).expect("parse cert");
-    let san_exts: Vec<_> =
-        parsed.extensions().iter().filter(|e| e.oid.to_id_string() == "2.5.29.17").collect();
+    let san_exts: Vec<_> = parsed.extensions().iter().filter(|e| e.oid.to_id_string() == "2.5.29.17").collect();
     assert!(
         san_exts.len() <= 1,
         "a certificate must carry at most one subjectAltName extension, found {}",
@@ -154,8 +150,7 @@ fn dns_sans(der: &[u8]) -> Vec<String> {
 /// `extensionRequest` attribute.
 fn csr_email_sans(pem_text: &str) -> Vec<String> {
     let der = pem_first_der(pem_text);
-    let (_, csr) =
-        x509_parser::certification_request::X509CertificationRequest::from_der(&der).expect("parse CSR");
+    let (_, csr) = x509_parser::certification_request::X509CertificationRequest::from_der(&der).expect("parse CSR");
     let mut out = Vec::new();
     if let Some(exts) = csr.requested_extensions() {
         for ext in exts {
@@ -180,9 +175,7 @@ fn csr_with_emails(cn: &str, emails: &[&str]) -> String {
     dn.push(DnType::CommonName, cn);
     params.distinguished_name = dn;
     for addr in emails {
-        params.subject_alt_names.push(rcgen::SanType::Rfc822Name(
-            rcgen::string::Ia5String::try_from(*addr).unwrap(),
-        ));
+        params.subject_alt_names.push(rcgen::SanType::Rfc822Name(rcgen::string::Ia5String::try_from(*addr).unwrap()));
     }
     params.serialize_request(&kp).unwrap().pem().unwrap()
 }
@@ -277,10 +270,7 @@ async fn test_email_sans_classical() {
     // — the pre-feature failure mode was an address arriving as a dNSName.
     let dns = dns_sans(&der);
     assert!(dns.contains(&"felipe.example.com".to_string()));
-    assert!(
-        !dns.iter().any(|d| d.contains('@')),
-        "an address must never be emitted as a dNSName, got {dns:?}"
-    );
+    assert!(!dns.iter().any(|d| d.contains('@')), "an address must never be emitted as a dNSName, got {dns:?}");
 
     // Domain allow-list: exact match, case-insensitive, subdomains not implied.
     let wrong_domain = write(
@@ -336,10 +326,7 @@ async fn test_email_sans_from_csr() {
         &core,
         &token,
         "pki/root/generate/internal",
-        json!({"common_name": "S/MIME CSR Root", "key_type": "ec", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "S/MIME CSR Root", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await;
 
@@ -361,13 +348,9 @@ async fn test_email_sans_from_csr() {
     .await
     .expect("write strict role");
 
-    let refused = write(
-        &core,
-        &token,
-        "pki/sign/strict",
-        json!({"csr": csr_pem, "ttl": "12h"}).as_object().unwrap().clone(),
-    )
-    .await;
+    let refused =
+        write(&core, &token, "pki/sign/strict", json!({"csr": csr_pem, "ttl": "12h"}).as_object().unwrap().clone())
+            .await;
     assert!(
         refused.is_err(),
         "a CSR requesting an rfc822Name must be refused by a role with allow_email_sans=false, not silently stripped"
@@ -392,13 +375,9 @@ async fn test_email_sans_from_csr() {
     .await
     .expect("write person role");
 
-    let signed = write_ok(
-        &core,
-        &token,
-        "pki/sign/person",
-        json!({"csr": csr_pem, "ttl": "12h"}).as_object().unwrap().clone(),
-    )
-    .await;
+    let signed =
+        write_ok(&core, &token, "pki/sign/person", json!({"csr": csr_pem, "ttl": "12h"}).as_object().unwrap().clone())
+            .await;
     assert_eq!(
         email_sans(&pem_first_der(&cert_pem(&signed))),
         vec!["felipe@fgv.br".to_string()],
@@ -497,10 +476,7 @@ async fn test_email_sans_in_generated_csr() {
         &core,
         &token,
         "pki/root/generate/internal",
-        json!({"common_name": "Outgoing CSR Root", "key_type": "ec", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "Outgoing CSR Root", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await;
 
@@ -537,10 +513,7 @@ async fn test_email_sans_in_generated_csr() {
         &core,
         &token,
         "pki/csr/generate",
-        json!({"role": "plain", "common_name": "felipe", "email_sans": "felipe@fgv.br"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"role": "plain", "common_name": "felipe", "email_sans": "felipe@fgv.br"}).as_object().unwrap().clone(),
     )
     .await;
     assert!(refused.is_err(), "csr/generate must apply the role's allow_email_sans gate");
@@ -577,10 +550,7 @@ async fn test_email_sans_pqc() {
         &core,
         &token,
         "pki/root/generate/internal",
-        json!({"common_name": "PQ S/MIME Root", "key_type": "ml-dsa-65", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "PQ S/MIME Root", "key_type": "ml-dsa-65", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await;
 
@@ -608,10 +578,7 @@ async fn test_email_sans_pqc() {
         &core,
         &token,
         "pki/issue/person",
-        json!({"common_name": "Felipe Quintella", "email_sans": "felipe@fgv.br"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "Felipe Quintella", "email_sans": "felipe@fgv.br"}).as_object().unwrap().clone(),
     )
     .await;
     assert_eq!(

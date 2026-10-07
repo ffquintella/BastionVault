@@ -43,13 +43,7 @@ pub struct ItemCounts {
 
 impl ItemCounts {
     pub fn total(&self) -> u64 {
-        self.kv
-            + self.resources
-            + self.files
-            + self.asset_groups
-            + self.resource_groups
-            + self.raw
-            + self.policies
+        self.kv + self.resources + self.files + self.asset_groups + self.resource_groups + self.raw + self.policies
     }
 }
 
@@ -101,9 +95,7 @@ pub struct VerifyReport {
 pub fn verify_backup_bytes(bytes: &[u8], password: Option<&str>) -> Result<VerifyReport, RvError> {
     // Classify: a `.bvx` is a JSON envelope whose `magic` is `BVX`. Anything
     // else we attempt to read as a bare `bvx.v1` document.
-    let is_envelope = serde_json::from_slice::<Envelope>(bytes)
-        .map(|e| e.magic == ENVELOPE_MAGIC)
-        .unwrap_or(false);
+    let is_envelope = serde_json::from_slice::<Envelope>(bytes).map(|e| e.magic == ENVELOPE_MAGIC).unwrap_or(false);
 
     let (format, decrypted, inner) = if is_envelope {
         let pw = password.ok_or_else(|| {
@@ -120,15 +112,12 @@ pub fn verify_backup_bytes(bytes: &[u8], password: Option<&str>) -> Result<Verif
     // Envelope-level metadata (best-effort; the envelope already parsed above
     // when `is_envelope`).
     let (created_at, comment) = if is_envelope {
-        serde_json::from_slice::<Envelope>(bytes)
-            .map(|e| (Some(e.created_at), e.comment))
-            .unwrap_or((None, None))
+        serde_json::from_slice::<Envelope>(bytes).map(|e| (Some(e.created_at), e.comment)).unwrap_or((None, None))
     } else {
         (None, None)
     };
 
-    let document: ExchangeDocument =
-        serde_json::from_slice(&inner).map_err(|_| RvError::ErrRequestInvalid)?;
+    let document: ExchangeDocument = serde_json::from_slice(&inner).map_err(|_| RvError::ErrRequestInvalid)?;
 
     let schema_ok = document.validate_schema_tag().is_ok();
 
@@ -165,11 +154,7 @@ pub fn verify_backup_bytes(bytes: &[u8], password: Option<&str>) -> Result<Verif
         .chain(document.items.namespaces.iter().flat_map(|b| b.items.files.iter()))
         .collect();
     for f in &all_files {
-        let name = f
-            .metadata
-            .get("name")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let name = f.metadata.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
         let raw = match base64::engine::general_purpose::STANDARD.decode(f.content_b64.as_bytes()) {
             Ok(b) => b,
             Err(_) => {
@@ -197,10 +182,7 @@ pub fn verify_backup_bytes(bytes: &[u8], password: Option<&str>) -> Result<Verif
                 file_issues.push(FileIssue {
                     id: f.id.clone(),
                     name,
-                    problem: format!(
-                        "size mismatch: metadata={expected} actual={}",
-                        raw.len()
-                    ),
+                    problem: format!("size mismatch: metadata={expected} actual={}", raw.len()),
                 });
             }
         }
@@ -208,9 +190,7 @@ pub fn verify_backup_bytes(bytes: &[u8], password: Option<&str>) -> Result<Verif
 
     let mut warnings = document.warnings.clone();
     if total_items == 0 {
-        warnings.push(
-            "document contains zero items — the backup captured no data".to_string(),
-        );
+        warnings.push("document contains zero items — the backup captured no data".to_string());
     }
 
     let ok = schema_ok && file_issues.is_empty() && total_items > 0;
@@ -257,11 +237,7 @@ mod tests {
     use serde_json::json;
 
     fn doc_with(items: ExchangeItems) -> ExchangeDocument {
-        ExchangeDocument::new(
-            ExporterInfo::default(),
-            ScopeSpec { kind: ScopeKind::Full, include: vec![] },
-            items,
-        )
+        ExchangeDocument::new(ExporterInfo::default(), ScopeSpec { kind: ScopeKind::Full, include: vec![] }, items)
     }
 
     fn file_item(bytes: &[u8]) -> FileItem {

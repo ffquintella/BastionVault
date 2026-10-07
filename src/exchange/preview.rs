@@ -64,10 +64,7 @@ pub struct PreviewStore {
 
 impl Default for PreviewStore {
     fn default() -> Self {
-        Self {
-            inner: Arc::new(DashMap::new()),
-            ttl: DEFAULT_PREVIEW_TTL,
-        }
+        Self { inner: Arc::new(DashMap::new()), ttl: DEFAULT_PREVIEW_TTL }
     }
 }
 
@@ -80,14 +77,7 @@ impl PreviewStore {
     pub fn insert(&self, document: ExchangeDocument, owner: String) -> String {
         self.sweep_expired();
         let token = generate_token();
-        self.inner.insert(
-            token.clone(),
-            StoredPreview {
-                document,
-                owner,
-                expires_at: Instant::now() + self.ttl,
-            },
-        );
+        self.inner.insert(token.clone(), StoredPreview { document, owner, expires_at: Instant::now() + self.ttl });
         token
     }
 
@@ -95,11 +85,7 @@ impl PreviewStore {
     /// or owned by a different actor.
     pub fn consume(&self, token: &str, owner: &str) -> Result<ExchangeDocument, RvError> {
         self.sweep_expired();
-        let stored = self
-            .inner
-            .remove(token)
-            .ok_or(RvError::ErrRequestInvalid)?
-            .1;
+        let stored = self.inner.remove(token).ok_or(RvError::ErrRequestInvalid)?.1;
         if stored.expires_at < Instant::now() {
             return Err(RvError::ErrRequestInvalid);
         }

@@ -134,11 +134,7 @@ impl BackupCatalog {
     }
 
     /// Every recorded backup for a schedule, across all nodes.
-    pub async fn list(
-        &self,
-        storage: &dyn Storage,
-        schedule_id: &str,
-    ) -> Result<Vec<BackupRecord>, RvError> {
+    pub async fn list(&self, storage: &dyn Storage, schedule_id: &str) -> Result<Vec<BackupRecord>, RvError> {
         let prefix = format!("{BACKUPS_PREFIX}{schedule_id}/");
         let keys = storage.list(&prefix).await?;
         let mut out = Vec::with_capacity(keys.len());
@@ -152,22 +148,13 @@ impl BackupCatalog {
         Ok(out)
     }
 
-    pub async fn delete(
-        &self,
-        storage: &dyn Storage,
-        schedule_id: &str,
-        filename: &str,
-    ) -> Result<(), RvError> {
+    pub async fn delete(&self, storage: &dyn Storage, schedule_id: &str, filename: &str) -> Result<(), RvError> {
         storage.delete(&format!("{BACKUPS_PREFIX}{schedule_id}/{filename}")).await
     }
 
     /// Drop every record belonging to a schedule — called when the schedule
     /// itself is deleted so the catalog does not outlive it.
-    pub async fn delete_schedule(
-        &self,
-        storage: &dyn Storage,
-        schedule_id: &str,
-    ) -> Result<(), RvError> {
+    pub async fn delete_schedule(&self, storage: &dyn Storage, schedule_id: &str) -> Result<(), RvError> {
         let prefix = format!("{BACKUPS_PREFIX}{schedule_id}/");
         if let Ok(keys) = storage.list(&prefix).await {
             for k in keys {
@@ -238,8 +225,7 @@ pub async fn list_backups(
     let records = catalog.list(storage, &sched.id).await.unwrap_or_default();
 
     // What this node can see on disk, by file name.
-    let mut on_disk: std::collections::HashMap<String, (u64, Option<String>)> =
-        std::collections::HashMap::new();
+    let mut on_disk: std::collections::HashMap<String, (u64, Option<String>)> = std::collections::HashMap::new();
     if let Ok(read_dir) = std::fs::read_dir(&dir) {
         for entry in read_dir.flatten() {
             let meta = match entry.metadata() {
@@ -251,10 +237,7 @@ pub async fn list_backups(
             if name.starts_with('.') || format_of(&name).is_none() {
                 continue;
             }
-            let modified = meta
-                .modified()
-                .ok()
-                .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+            let modified = meta.modified().ok().map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
             on_disk.insert(name, (meta.len(), modified));
         }
     }
@@ -305,9 +288,7 @@ pub async fn list_backups(
 
     // Newest first: by timestamp when known, then name descending so the
     // runner's timestamp-suffixed names fall in chronological order.
-    entries.sort_by(|a, b| {
-        b.modified.cmp(&a.modified).then_with(|| b.name.cmp(&a.name))
-    });
+    entries.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| b.name.cmp(&a.name)));
 
     Ok((dir, entries))
 }
@@ -372,11 +353,7 @@ mod tests {
     }
 
     fn node(id: u64, name: &str) -> NodeRef {
-        NodeRef {
-            node_id: Some(id),
-            node_name: name.to_string(),
-            api_addr: Some(format!("https://{name}:5200")),
-        }
+        NodeRef { node_id: Some(id), node_name: name.to_string(), api_addr: Some(format!("https://{name}:5200")) }
     }
 
     fn schedule(dir: &str) -> Schedule {
@@ -461,10 +438,7 @@ mod tests {
         let sched = schedule(&dir_path);
         let me = node(1, "bv-1");
 
-        BackupCatalog::new()
-            .put(&storage, &record("gone.bvx", &dir_path, me.clone()))
-            .await
-            .expect("put");
+        BackupCatalog::new().put(&storage, &record("gone.bvx", &dir_path, me.clone())).await.expect("put");
 
         let (_, entries) = list_backups(&storage, &sched, &me).await.expect("list");
         assert_eq!(entries.len(), 1);

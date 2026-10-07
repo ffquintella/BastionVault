@@ -2957,10 +2957,43 @@ async fn sys_plugins_entity_data_delete_handler(
             return Ok(response_error(StatusCode::BAD_REQUEST, "invalid plugin name or entity id"));
         };
         crate::plugins::provider::delete_prefix(core.barrier().as_storage(), &root).await?;
+        // An administrator purge is also the retry point for automatic purges
+        // that failed earlier (spec §4.7). Each retry is audited on its own;
+        // a failing one does not fail this request.
+        crate::plugins::entity_data::retry_pending_purges(core.as_ref(), None).await;
         Ok(response_ok(None, None))
     })
     .await;
     audit.finish(&result, &audit_path, Operation::Delete).await;
+    result
+}
+
+/// GET `/v2/sys/plugins/{name}/entity-data` — how many records each entity
+/// holds under an entity-scoped plugin (features/self-accounts.md Phase 5,
+/// Open question 2). **Counts only**: the handler lists keys, never reads a
+/// value and never invokes the plugin, so no label, login, target or secret
+/// can reach the administrator. 404 for a plugin that is not registered or
+/// does not declare `storage_scope = "entity"`.
+async fn sys_plugins_entity_data_get_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let name = req.match_info().get("name").unwrap_or("").to_string();
+    let audit_path = format!("sys/plugins/{name}/entity-data");
+    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
+
+    let result: Result<HttpResponse, HttpError> = (async move {
+        match crate::plugins::entity_data::entity_data_usage(core.as_ref(), &name).await? {
+            Some(usage) => Ok(response_json_ok(None, usage)),
+            None => Ok(response_error(
+                StatusCode::NOT_FOUND,
+                "plugin not found, or it does not keep per-user (entity-scoped) data",
+            )),
+        }
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Read).await;
     result
 }
 
@@ -4735,6 +4768,9 @@ pub fn init_sys_service(cfg: &mut web::ServiceConfig) {
                     .route(web::get().to(sys_plugins_provider_grant_get_handler))
                     .route(web::put().to(sys_plugins_provider_grant_put_handler))
                     .route(web::delete().to(sys_plugins_provider_grant_delete_handler)),
+            )
+            .service(
+                web::resource("/plugins/{name}/entity-data").route(web::get().to(sys_plugins_entity_data_get_handler)),
             )
             .service(
                 web::resource("/plugins/{name}/entity-data/{entity_id}")

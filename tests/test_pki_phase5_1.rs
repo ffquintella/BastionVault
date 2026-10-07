@@ -39,10 +39,7 @@ async fn write(core: &Core, token: &str, path: &str, body: Map<String, Value>) -
     req.operation = Operation::Write;
     req.client_token = token.to_string();
     req.body = Some(body);
-    let resp = core
-        .handle_request(&mut req)
-        .await
-        .unwrap_or_else(|e| panic!("write {path} failed: {e:?}"));
+    let resp = core.handle_request(&mut req).await.unwrap_or_else(|e| panic!("write {path} failed: {e:?}"));
     resp.and_then(|r| r.data)
 }
 
@@ -121,14 +118,10 @@ async fn test_pki_phase5_1_pqc_csr_sign() {
     assert!(pk.verify(&cri_der, &sig_arr, &[]), "self-test of CSR signature must pass");
 
     // Sign via the engine.
-    let signed = write(
-        &core,
-        &token,
-        "pki/sign/pqc-web",
-        json!({"csr": csr_pem, "ttl": "12h"}).as_object().unwrap().clone(),
-    )
-    .await
-    .unwrap();
+    let signed =
+        write(&core, &token, "pki/sign/pqc-web", json!({"csr": csr_pem, "ttl": "12h"}).as_object().unwrap().clone())
+            .await
+            .unwrap();
     let cert_pem = signed["certificate"].as_str().unwrap().to_string();
     assert!(cert_pem.contains("BEGIN CERTIFICATE"));
     assert!(signed.get("private_key").is_none(), "sign/:role must not return a private key");
@@ -137,21 +130,13 @@ async fn test_pki_phase5_1_pqc_csr_sign() {
     let leaf_der = pem_decode_first(&cert_pem);
     use x509_cert::der::Decode;
     let cert = x509_cert::Certificate::from_der(&leaf_der).unwrap();
-    assert_eq!(
-        cert.signature_algorithm.oid.to_string(),
-        "2.16.840.1.101.3.4.3.18",
-        "leaf signed with ML-DSA-65"
-    );
+    assert_eq!(cert.signature_algorithm.oid.to_string(), "2.16.840.1.101.3.4.3.18", "leaf signed with ML-DSA-65");
     assert_eq!(
         cert.tbs_certificate.subject_public_key_info.algorithm.oid.to_string(),
         "2.16.840.1.101.3.4.3.18",
         "leaf SPKI carries ML-DSA-65 OID"
     );
-    let leaf_pk = cert
-        .tbs_certificate
-        .subject_public_key_info
-        .subject_public_key
-        .raw_bytes();
+    let leaf_pk = cert.tbs_certificate.subject_public_key_info.subject_public_key.raw_bytes();
     assert_eq!(leaf_pk, &pk_bytes[..], "leaf SPKI key bytes match the CSR's pubkey");
 
     // Tampered CSR — flip a byte in the body and confirm rejection.
@@ -174,10 +159,7 @@ async fn test_pki_phase5_1_pqc_csr_sign() {
         &core,
         &token,
         "pki-ec/root/generate/internal",
-        json!({"common_name": "ec-root.example.com", "key_type": "ec", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "ec-root.example.com", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await;
     write(
@@ -200,10 +182,7 @@ async fn test_pki_phase5_1_pqc_csr_sign() {
     req.operation = Operation::Write;
     req.client_token = token.clone();
     req.body = Some(json!({"csr": csr_pem}).as_object().unwrap().clone());
-    assert!(
-        core.handle_request(&mut req).await.is_err(),
-        "PQC CSR on classical CA mount must be rejected"
-    );
+    assert!(core.handle_request(&mut req).await.is_err(), "PQC CSR on classical CA mount must be rejected");
 }
 
 // ── hand-rolled DER for the ML-DSA CSR ───────────────────────────────────

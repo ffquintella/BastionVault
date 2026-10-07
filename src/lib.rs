@@ -54,10 +54,9 @@ pub mod backup;
 pub mod exchange;
 pub mod plugins;
 pub mod scheduled_exports;
-/// The read caches, now a module of the Tier 0 `bv-storage` crate — they and
-/// `storage` reference each other, so they are one compilation unit either
-/// way. Re-exported here so `bastion_vault::cache::*` paths are unchanged.
-pub use bv_storage::cache;
+/// Moved to the Tier 0 `bv-context` crate. Not in the roadmap's Tier 0 list,
+/// but it belongs there and `bv-logical` needs it.
+pub use bv_context as context;
 /// The command-line client moved to the `bvault-cli` crate in Phase 4, which
 /// sits above this one and above `bv-server`. It carried 111 of the last 300
 /// commits' churn inside this compilation unit.
@@ -66,15 +65,25 @@ pub use bv_storage::cache;
 /// never CLI code. It travelled into `bv-core` in Phase 4.5, next to the
 /// `Core` that takes one.
 pub use bv_core::config;
-/// Moved to the Tier 0 `bv-context` crate. Not in the roadmap's Tier 0 list,
-/// but it belongs there and `bv-logical` needs it.
-pub use bv_context as context;
 /// The vault kernel — `Core`, the mount table, the module registry, the seal
 /// path and the server config model — now the Tier 2 `bv-core` crate. It sits
 /// *below* the kernel tier, which is what makes the split work: `Core` does
 /// not name a module. See roadmaps/workspace-decomposition.md § Phase 4.5.
 pub use bv_core::core;
+/// The read caches, now a module of the Tier 0 `bv-storage` crate — they and
+/// `storage` reference each other, so they are one compilation unit either
+/// way. Re-exported here so `bastion_vault::cache::*` paths are unchanged.
+pub use bv_storage::cache;
 pub mod dos;
+/// HSM backends for the seal path — a module of `bv-core`.
+pub use bv_core::hsm;
+/// The HTTP(S) API surface moved to the `bv-server` crate in Phase 4, which
+/// sits *above* this one — it is the assembly layer, and it is what took
+/// `actix-web` and `actix-tls` out of this crate's dependency graph. There is
+/// deliberately no re-export: a shim here would put the web framework back.
+/// Structured logging setup — a module of `bv-core`, which needs
+/// `default_audit_options` when it bootstraps the audit device at unseal.
+pub use bv_core::logging;
 /// `RvError` now lives in the Tier 0 `bv-errors` crate. Re-exported here so
 /// `crate::errors::RvError` and `bastion_vault::errors::RvError` keep
 /// resolving unchanged. See roadmaps/workspace-decomposition.md § Phase 1.
@@ -85,25 +94,16 @@ pub use bv_errors as errors;
 /// `bv_error_string!(...)` call sites resolve through, and keeps the
 /// `crate::bv_error_string!(...)` form working too.
 pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
-/// The request-pipeline hook traits, now in `bv-logical` alongside the
-/// `Request` that carries an `Arc<dyn Handler>`.
-pub use bv_logical::handler;
-/// HSM backends for the seal path — a module of `bv-core`.
-pub use bv_core::hsm;
 /// The kernel contract modules depend on instead of `Core` — the Tier 1
 /// `bv-kernel-api` crate. `impl VaultCtx for Core` travelled into `bv-core`
 /// with the `Core` it implements for; the orphan rule allows it there and
 /// nowhere else.
 pub use bv_kernel_api as kernel_api;
-/// The HTTP(S) API surface moved to the `bv-server` crate in Phase 4, which
-/// sits *above* this one — it is the assembly layer, and it is what took
-/// `actix-web` and `actix-tls` out of this crate's dependency graph. There is
-/// deliberately no re-export: a shim here would put the web framework back.
-/// Structured logging setup — a module of `bv-core`, which needs
-/// `default_audit_options` when it bootstraps the audit device at unseal.
-pub use bv_core::logging;
 /// Request/Response/Backend/Path/Field — the Tier 0 `bv-logical` crate.
 pub use bv_logical as logical;
+/// The request-pipeline hook traits, now in `bv-logical` alongside the
+/// `Request` that carries an `Arc<dyn Handler>`.
+pub use bv_logical::handler;
 /// The eight backend-definition macros are `#[macro_export]`ed by
 /// `bv-logical`, which places them at *that* crate's root. Re-exporting them
 /// here restores the crate-root macro namespace every engine's
@@ -111,8 +111,8 @@ pub use bv_logical as logical;
 /// arrangement as `bv_error_string!` above; the `_internal` halves are the
 /// recursive arms the public macros expand into and must travel with them.
 pub use bv_logical::{
-    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
-    new_path_internal, new_secret, new_secret_internal,
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
+    new_secret, new_secret_internal,
 };
 pub mod metrics;
 /// The module registry — a module of `bv-core`.
@@ -121,28 +121,28 @@ pub mod modules;
 /// The mount table's management operations — a module of `bv-core`. The
 /// engine-facing view is `bv_kernel_api::mount`, which this re-exports.
 pub use bv_core::mount;
-/// The request router, moved into `bv-kernel-api`: engines reach it through
-/// [`kernel_api::VaultCtx::router`], so it sits below them.
-pub use bv_kernel_api::router;
-/// Diesel's generated table definition, moved into `bv-storage` alongside its
-/// only reader (the MySQL backend).
-#[cfg(feature = "storage_mysql")]
-pub use bv_storage::schema;
 /// Seal/unseal and the KEK providers — a module of `bv-core`.
 pub use bv_core::seal;
 /// Process-level server facts (version, uptime, listen address) — a module of
 /// `bv-core`.
 pub use bv_core::server_info;
-/// Moved to the Tier 0 `bv-shamir` crate — the one directory in the original
-/// Phase 1 list that really did reference nothing but `crate::errors`.
-pub use bv_shamir as shamir;
+/// The request router, moved into `bv-kernel-api`: engines reach it through
+/// [`kernel_api::VaultCtx::router`], so it sits below them.
+pub use bv_kernel_api::router;
 /// Dashboard counters, moved into `bv-kernel-api` alongside
 /// [`kernel_api::VaultCtx::stats`], which hands them out.
 pub use bv_kernel_api::stats;
+/// Moved to the Tier 0 `bv-shamir` crate — the one directory in the original
+/// Phase 1 list that really did reference nothing but `crate::errors`.
+pub use bv_shamir as shamir;
 /// Barriers, physical backends and the read caches — the Tier 0 `bv-storage`
 /// crate, and the extraction that takes hiqlite, diesel and rusty-s3 out of
 /// the monolith's compilation unit.
 pub use bv_storage as storage;
+/// Diesel's generated table definition, moved into `bv-storage` alongside its
+/// only reader (the MySQL backend).
+#[cfg(feature = "storage_mysql")]
+pub use bv_storage::schema;
 /// Shared helpers — the Tier 1 `bv-utils` crate.
 pub use bv_utils as utils;
 
@@ -213,12 +213,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// reference its store.
 pub fn default_modules() -> Vec<Box<dyn crate::module_manager::ModuleFactory>> {
     use crate::modules::{
-        cert_lifecycle::CertLifecycleModule, files::FilesModule, identity::IdentityModule,
-        kv::KvModule, kv_v2::KvV2Module, ldap::LdapModule, namespace::NamespaceModule,
-        notifications::NotificationsModule, pki::PkiModule, resource::ResourceModule,
-        resource_group::ResourceGroupModule, rustion::RustionModule, ssh::SshModule,
-        ssh_broker::SshBrokerModule, system::SystemModule, totp::TotpModule,
-        transit::TransitModule, Module,
+        cert_lifecycle::CertLifecycleModule, files::FilesModule, identity::IdentityModule, kv::KvModule,
+        kv_v2::KvV2Module, ldap::LdapModule, namespace::NamespaceModule, notifications::NotificationsModule,
+        pki::PkiModule, resource::ResourceModule, resource_group::ResourceGroupModule, rustion::RustionModule,
+        ssh::SshModule, ssh_broker::SshBrokerModule, system::SystemModule, totp::TotpModule, transit::TransitModule,
+        Module,
     };
 
     // One `Box::new(...)` per engine. The closure shape is what the blanket
@@ -305,15 +304,14 @@ impl BastionVault {
         // exists to have published it, and deliberately before any system view
         // or root mount table is built. Registered here for the same reason
         // the plugin host is: this is the assembly point.
-        core.kernel_services
-            .set_reroot(Arc::new(crate::modules::namespace::kernel_service::NamespaceReroot));
+        core.kernel_services.set_reroot(Arc::new(crate::modules::namespace::kernel_service::NamespaceReroot));
 
         // The scheduled-export tick loop, which `Core::post_unseal` used to
         // start by name. A `Weak` handle, so registering it does not keep the
         // vault alive through the registry that lives on it.
-        core.kernel_services.add_unseal_hook(Arc::new(
-            crate::scheduled_exports::runner::ScheduledExportsHook::new(Arc::downgrade(&core)),
-        ));
+        core.kernel_services.add_unseal_hook(Arc::new(crate::scheduled_exports::runner::ScheduledExportsHook::new(
+            Arc::downgrade(&core),
+        )));
 
         core.module_manager().set_modules(default_modules(), core.clone())?;
 

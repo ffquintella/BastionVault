@@ -59,13 +59,9 @@ pub async fn all_namespace_indexes(
     core: &Arc<Core>,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<NamespaceIndex>, RvError> {
-    let mut out = vec![NamespaceIndex {
-        path: String::new(),
-        mounts: MountIndex::from_core(core)?,
-    }];
+    let mut out = vec![NamespaceIndex { path: String::new(), mounts: MountIndex::from_core(core)? }];
 
-    let Some(module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
-    else {
+    let Some(module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME) else {
         return Ok(out);
     };
     let Some(store) = module.store() else {
@@ -81,14 +77,11 @@ pub async fn all_namespace_indexes(
             continue;
         }
         match module.registry.ensure_router(core.clone(), &ns.uuid, &ns.path).await {
-            Ok(router) => match MountIndex::from_namespace_router(core, &router, &ns.uuid, &ns.path)
-            {
+            Ok(router) => match MountIndex::from_namespace_router(core, &router, &ns.uuid, &ns.path) {
                 Ok(mounts) => out.push(NamespaceIndex { path: ns.path.clone(), mounts }),
-                Err(e) => warnings
-                    .push(format!("namespace {:?} skipped: mount index failed: {e:?}", ns.path)),
+                Err(e) => warnings.push(format!("namespace {:?} skipped: mount index failed: {e:?}", ns.path)),
             },
-            Err(e) => warnings
-                .push(format!("namespace {:?} skipped: mount router failed: {e:?}", ns.path)),
+            Err(e) => warnings.push(format!("namespace {:?} skipped: mount router failed: {e:?}", ns.path)),
         }
     }
     Ok(out)
@@ -158,12 +151,8 @@ pub async fn import_document(
     let indexes = all_namespace_indexes(core, &mut warnings).await?;
     result.warnings.append(&mut warnings);
 
-    let root = indexes
-        .iter()
-        .find(|n| n.path.is_empty())
-        .ok_or(RvError::ErrUnknown)?;
-    scope::apply_items(storage, &root.mounts, &document.items, policy, dry_run, "", &mut result)
-        .await?;
+    let root = indexes.iter().find(|n| n.path.is_empty()).ok_or(RvError::ErrUnknown)?;
+    scope::apply_items(storage, &root.mounts, &document.items, policy, dry_run, "", &mut result).await?;
 
     for bundle in &document.items.namespaces {
         match indexes.iter().find(|n| n.path == bundle.path) {
@@ -193,8 +182,7 @@ pub async fn import_document(
     // the entry is evicted or the vault is sealed — an authorization decision
     // made on data the operator has already replaced.
     if !dry_run && document_carries_policies(document) {
-        if let Some(policy_module) =
-            core.module_manager().get_module::<crate::modules::policy::PolicyModule>("policy")
+        if let Some(policy_module) = core.module_manager().get_module::<crate::modules::policy::PolicyModule>("policy")
         {
             policy_module.policy_store.load().flush_caches();
         }
@@ -206,8 +194,7 @@ pub async fn import_document(
 /// Did this document ask for a policy write anywhere — root namespace or any
 /// bundle? Drives the post-import cache flush.
 fn document_carries_policies(document: &ExchangeDocument) -> bool {
-    !document.items.policies.is_empty()
-        || document.items.namespaces.iter().any(|b| !b.items.policies.is_empty())
+    !document.items.policies.is_empty() || document.items.namespaces.iter().any(|b| !b.items.policies.is_empty())
 }
 
 #[cfg(test)]
@@ -252,25 +239,11 @@ mod tests {
     }
 
     async fn put_secret(core: &Arc<Core>, token: &str, ns: &str, path: &str, value: &str) {
-        ns_req(
-            core,
-            token,
-            Operation::Write,
-            path,
-            ns,
-            json!({ "v": value }).as_object().cloned(),
-        )
-        .await
-        .unwrap();
+        ns_req(core, token, Operation::Write, path, ns, json!({ "v": value }).as_object().cloned()).await.unwrap();
     }
 
     async fn read_secret(core: &Arc<Core>, token: &str, ns: &str, path: &str) -> String {
-        ns_req(core, token, Operation::Read, path, ns, None)
-            .await
-            .unwrap()
-            .unwrap()
-            .data
-            .unwrap()["v"]
+        ns_req(core, token, Operation::Read, path, ns, None).await.unwrap().unwrap().data.unwrap()["v"]
             .as_str()
             .unwrap()
             .to_string()
@@ -281,8 +254,7 @@ mod tests {
     /// back in its own namespace rather than collapsing them into the root.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn all_namespaces_export_round_trips_each_tenant() {
-        let (_bvault, core, root) =
-            new_unseal_test_bastion_vault("test_exchange_all_namespaces").await;
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_exchange_all_namespaces").await;
         let store = store_of(&core);
         store.create("tenant-a", NamespaceQuotas::default(), false).await.unwrap();
         store.create("tenant-b", NamespaceQuotas::default(), false).await.unwrap();
@@ -315,24 +287,17 @@ mod tests {
 
         // One bundle per tenant, in sorted order, and neither tenant's secret
         // leaked into the root namespace's own items.
-        let paths: Vec<&str> =
-            doc.items.namespaces.iter().map(|b| b.path.as_str()).collect();
+        let paths: Vec<&str> = doc.items.namespaces.iter().map(|b| b.path.as_str()).collect();
         assert_eq!(paths, vec!["tenant-a", "tenant-b"]);
-        let root_values: Vec<String> =
-            doc.items.kv.iter().map(|k| k.value.to_string()).collect();
+        let root_values: Vec<String> = doc.items.kv.iter().map(|k| k.value.to_string()).collect();
         assert!(root_values.iter().any(|v| v.contains("from-root")));
         assert!(
             !root_values.iter().any(|v| v.contains("from-a") || v.contains("from-b")),
             "tenant data must not appear in the root namespace's items: {root_values:?}"
         );
         for (bundle, expected) in doc.items.namespaces.iter().zip(["from-a", "from-b"]) {
-            let joined: String =
-                bundle.items.kv.iter().map(|k| k.value.to_string()).collect();
-            assert!(
-                joined.contains(expected),
-                "bundle {} must carry {expected}, got {joined}",
-                bundle.path
-            );
+            let joined: String = bundle.items.kv.iter().map(|k| k.value.to_string()).collect();
+            assert!(joined.contains(expected), "bundle {} must carry {expected}, got {joined}", bundle.path);
         }
 
         // Clobber both tenants, then restore from the document: each bundle
@@ -340,14 +305,9 @@ mod tests {
         put_secret(&core, &root, "tenant-a", "cubby/foo", "clobbered-a").await;
         put_secret(&core, &root, "tenant-b", "cubby/foo", "clobbered-b").await;
 
-        let result =
-            import_document(&core, &doc, ConflictPolicy::Overwrite, false).await.unwrap();
+        let result = import_document(&core, &doc, ConflictPolicy::Overwrite, false).await.unwrap();
         assert!(result.written > 0);
-        assert!(
-            result.warnings.is_empty(),
-            "no namespace should be skipped: {:?}",
-            result.warnings
-        );
+        assert!(result.warnings.is_empty(), "no namespace should be skipped: {:?}", result.warnings);
         assert_eq!(read_secret(&core, &root, "tenant-a", "cubby/foo").await, "from-a");
         assert_eq!(read_secret(&core, &root, "tenant-b", "cubby/foo").await, "from-b");
         assert_eq!(read_secret(&core, &root, "", "cubby/foo").await, "from-root");
@@ -358,8 +318,7 @@ mod tests {
     /// the root index address namespace prefixes.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn full_export_stays_inside_the_root_namespace() {
-        let (_bvault, core, root) =
-            new_unseal_test_bastion_vault("test_exchange_full_is_root_only").await;
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_exchange_full_is_root_only").await;
         let store = store_of(&core);
         store.create("tenant-a", NamespaceQuotas::default(), false).await.unwrap();
         ns_req(
@@ -396,8 +355,7 @@ mod tests {
     /// rather than from the policy store's stale LRU entry.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn all_namespaces_export_round_trips_policies() {
-        let (_bvault, core, root) =
-            new_unseal_test_bastion_vault("test_exchange_ns_policies").await;
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_exchange_ns_policies").await;
         let store = store_of(&core);
         store.create("tenant-a", NamespaceQuotas::default(), false).await.unwrap();
         ns_req(
@@ -415,9 +373,7 @@ mod tests {
         let root_hcl = "path \"secret/*\" { capabilities = [\"read\"] }";
         // A namespace policy must address its own namespace-prefixed paths.
         let tenant_hcl = "path \"tenant-a/cubby/*\" { capabilities = [\"read\"] }";
-        for (ns, name, hcl) in
-            [("", "reader", root_hcl), ("tenant-a", "tenant-reader", tenant_hcl)]
-        {
+        for (ns, name, hcl) in [("", "reader", root_hcl), ("tenant-a", "tenant-reader", tenant_hcl)] {
             ns_req(
                 &core,
                 &root,
@@ -438,21 +394,14 @@ mod tests {
         .await
         .unwrap();
 
-        let root_names: Vec<&str> =
-            doc.items.policies.iter().map(|p| p.name.as_str()).collect();
+        let root_names: Vec<&str> = doc.items.policies.iter().map(|p| p.name.as_str()).collect();
         assert!(root_names.contains(&"reader"), "root policies: {root_names:?}");
         assert!(
             !root_names.contains(&"tenant-reader"),
             "a tenant's policy must not surface as the root namespace's: {root_names:?}"
         );
-        let bundle = doc
-            .items
-            .namespaces
-            .iter()
-            .find(|b| b.path == "tenant-a")
-            .expect("tenant-a bundle");
-        let tenant_names: Vec<&str> =
-            bundle.items.policies.iter().map(|p| p.name.as_str()).collect();
+        let bundle = doc.items.namespaces.iter().find(|b| b.path == "tenant-a").expect("tenant-a bundle");
+        let tenant_names: Vec<&str> = bundle.items.policies.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(tenant_names, vec!["tenant-reader"], "tenant policies");
 
         // Clobber both policies, then restore from the document. Reading back
@@ -460,11 +409,7 @@ mod tests {
         // the import must have invalidated.
         for (ns, name, clobbered) in [
             ("", "reader", "path \"clobbered/*\" { capabilities = [\"list\"] }"),
-            (
-                "tenant-a",
-                "tenant-reader",
-                "path \"tenant-a/clobbered/*\" { capabilities = [\"list\"] }",
-            ),
+            ("tenant-a", "tenant-reader", "path \"tenant-a/clobbered/*\" { capabilities = [\"list\"] }"),
         ] {
             ns_req(
                 &core,
@@ -478,17 +423,12 @@ mod tests {
             .unwrap();
         }
 
-        let result =
-            import_document(&core, &doc, ConflictPolicy::Overwrite, false).await.unwrap();
+        let result = import_document(&core, &doc, ConflictPolicy::Overwrite, false).await.unwrap();
         assert!(result.written > 0);
 
-        for (ns, name, expected) in
-            [("", "reader", root_hcl), ("tenant-a", "tenant-reader", tenant_hcl)]
-        {
-            let resp = ns_req(&core, &root, Operation::Read, &format!("sys/policy/{name}"), ns, None)
-                .await
-                .unwrap()
-                .unwrap();
+        for (ns, name, expected) in [("", "reader", root_hcl), ("tenant-a", "tenant-reader", tenant_hcl)] {
+            let resp =
+                ns_req(&core, &root, Operation::Read, &format!("sys/policy/{name}"), ns, None).await.unwrap().unwrap();
             let rules = resp.data.unwrap()["rules"].as_str().unwrap().to_string();
             assert_eq!(rules, expected, "policy {name:?} in namespace {ns:?}");
         }
@@ -498,8 +438,7 @@ mod tests {
     /// silently written into the root namespace.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn import_skips_bundles_for_unknown_namespaces() {
-        let (_bvault, core, _root) =
-            new_unseal_test_bastion_vault("test_exchange_unknown_namespace").await;
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_exchange_unknown_namespace").await;
 
         let mut items = ExchangeItems::default();
         items.namespaces.push(NamespaceBundle {

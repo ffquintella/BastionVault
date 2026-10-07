@@ -671,9 +671,10 @@ raw `credential_material`, BastionVault resolves the secret server-side:
 }
 ~~~
 
-Only the `secret` credential kind (ssh-password shape) is resolved
-server-side today. v1 `POST /v1/rustion/session/open` (raw
-`credential_material`) is unchanged.
+The `secret` (ssh-password shape), `ssh-engine` and `provider` credential
+kinds are resolved server-side; `provider` takes `provider_account_id` (see
+*Credential providers at Connect* below). v1 `POST /v1/rustion/session/open`
+(raw `credential_material`) is unchanged.
 
 ### Web Connect (`form` and `http-auth` modes)
 
@@ -893,6 +894,174 @@ carry names, enum values, origins (`fill_origins`) and `launch_id_hash` (hex
 SHA-256 of the `launch_id`) — never a credential, a TOTP code, a raw
 `launch_id`, a full token hash, or a URL path or query. Expired records are
 reaped from `launch`, at most once a minute per server process.
+
+### Credential providers at Connect (v2)
+
+A connection profile can take its credential from an approved
+credential-provider plugin ([features/self-accounts.md](../features/self-accounts.md)
+§6), the first being `bastion-plugin-self-accounts`:
+
+~~~json
+{ "credential_source": { "kind": "provider", "provider": "self-accounts" } }
+~~~
+
+The operator picks one of **their own** accounts in that provider, and the
+server releases it on the Connect route. Every call needs the `connect` grant
+on the resource (the baseline policies grant `update` on
+`connect/provider/candidates` wherever they grant `connect/authorize`), an
+identity-backed login (a token with no identity entity gets `403 no_entity`),
+and a provider that is registered, active, not quarantined, admin-approved
+(`v2/sys/plugins/{name}/grants/credential-provider`) and declares the
+profile's protocol. Nothing falls back to another credential source.
+
+**What the provider is told comes from the stored record, never the request.**
+The resource `type` and `os_type`, and the target: for SSH / RDP the profile's
+`target_host`, else the resource's `ip_address`, else its `hostname` — one
+lower-case ASCII host, refused (`invalid_profile`) with a trailing dot, `*`,
+`%`, brackets, whitespace or a `:` other than a bare IPv6 address — with the
+profile's `target_port` or the protocol default (22 / 3389); for web every
+origin the profile's recipe may fill (the start URL's origin and
+`allowed_origins`). Accounts bound to other targets are neither offered nor
+released, so a resource edited to point at another host gets nothing.
+
+Every refusal on these paths is an HTTP error whose message starts with a
+stable reason code: `no_entity`, `not_granted`, `unsupported_protocol`,
+`no_match` (404: no account of yours matches, also a forged or stale id),
+`mfa_required` (403: the provider releases only after connect-time MFA — set
+`require_mfa` on the profile, or relax the provider's `require_connect_mfa`),
+`bad_request` (400), `bad_provider_output` (502), `provider_error` (500),
+`invalid_profile`, `invalid_request`, `transport_policy`,
+`brokered_requires_ssh_engine` (403: the resource's SSH login class is
+`brokered`, so every SSH login to it is minted by the SSH engine and no
+provider account is listed or released for SSH; RDP and web are unaffected —
+refused on `candidates`, `authorize` and `rustion/v2/session/open` before any
+MFA ticket is redeemed).
+
+**`POST /v2/resources/v2/connect/provider/candidates`** —
+`{ "resource": "dc01", "profile_id": "p_rdp" }`. Any other body field is
+ignored. Metadata only:
+
+~~~json
+{
+  "resource": "dc01", "profile_id": "p_rdp",
+  "provider": "self-accounts", "display_name": "Self-account",
+  "protocol": "rdp", "resource_type": "server", "os_type": "windows",
+  "target": { "host": "dc01.corp.example.com", "port": 3389 },
+  "candidates": [
+    { "id": "sa_…", "label": "Domain admin", "username": "felipe.adm",
+      "domain": "CORP", "secret_kind": "password", "has_totp": false,
+      "last_used_at": "2026-10-01T09:12:00Z",
+      "first_use_on_target": false,
+      "last_used_on_target": "2026-10-01T09:12:00Z" }
+  ]
+}
+~~~
+
+For a web profile `target` is `{ "origins": ["https://…", …] }`.
+
+`first_use_on_target` is `true` when the provider has no record of releasing
+that account for this target (the picker shows a caution), and
+`last_used_on_target` is when it last did (the picker preselects the most
+recent). Both are hints, never protections, and are `false` / absent when a
+provider does not report them. The self-accounts plugin keeps only
+domain-separated SHA-256 digests of targets (the canonical dial host for SSH /
+RDP, the origin set for web), never the target text, and records a target only
+on a successful release.
+
+**`GET /v2/resources/v2/connect/providers`** — the providers a connection
+profile can name, for the profile editor: every registered, active, not
+quarantined and admin-approved provider, sorted by name. Declarations only; no
+account, config or grant data:
+
+~~~json
+{
+  "providers": [
+    { "name": "self-accounts", "display_name": "Self-account",
+      "protocols": ["ssh", "rdp", "web"], "secret_kinds": ["password", "ssh-key"] }
+  ]
+}
+~~~
+
+A server with no approved provider (or no plugin runtime) answers
+`{ "providers": [] }`. The baseline policies (`default`, `shared-access`, the
+namespace baseline, `administrator`) grant `read` on it; it takes no write.
+
+**`POST /v2/resources/v2/connect/authorize`** gains `provider_account_id`
+(direct SSH / RDP). It is required for a `provider` profile and refused
+(`400 invalid_request`) for any other. Order: every check that can fail without
+the provider runs first; then the MFA ticket is redeemed (and spent, whatever
+happens next); then the provider releases. The release is refused with
+`403 transport_policy` when the resource's Rustion transport policy is
+`rustion-required` or carries a lock violation — such a credential is released
+only through `rustion/v2/session/open`. For a `provider` profile the response
+adds:
+
+~~~json
+{
+  "credential_source": "provider", "provider": "self-accounts",
+  "provider_account_id": "sa_…",
+  "target": { "host": "dc01.corp.example.com", "port": 3389 },
+  "credential": { "username": "felipe.adm", "domain": "CORP",
+                  "secret": { "kind": "password", "password": "…" } }
+}
+~~~
+
+`secret` is `{ "kind": "ssh-key", "private_key": "…" }` for a key account, and
+never carries a TOTP seed. The released `username` is authoritative (the
+profile's own `username` is ignored). The client must dial **exactly**
+`target` with this credential, never another host candidate. No other profile's
+response carries `credential` or `target`.
+
+**`POST /v2/resources/v2/connect/web/launch`** gains `provider_account_id` for
+a `form` profile with a `provider` source (`http-auth` refuses the source with
+`credential_source_unsupported`). The bundle's `credential` carries the
+released `username` and `password` and, when the recipe fills `totp` and the
+account holds a seed, the current code; `credential_source` is `"provider"`.
+`credential_source.totp` sets the TOTP parameters as for `secret`. A provider
+seed is not kept server-side, so `totp_refresh_steps` is always `[]` and
+`connect/web/totp` refuses. A heuristic recipe never asks the provider for a
+TOTP.
+
+**`POST /v2/rustion/session/open`** accepts
+`credential_source = {"kind": "provider", "provider": "<plugin>"}` with
+`provider_account_id` and `profile_id`. The source must equal the stored
+profile's, `credential_material` must be absent, and `target_host` /
+`target_port` / `target_protocol` must equal the stored target or be omitted —
+they are overwritten with it. The server releases the account, seals it into
+the envelope as `ssh-password`, `ssh-key` (unencrypted OpenSSH keys only; a
+passphrase-protected key is refused) or `rdp-password` (a domain travels as
+`DOMAIN\user`), and returns the usual ticket bundle; the caller never holds the
+credential.
+
+Audit (`target: "audit"`): `connect.provider.release` per release attempt and
+`connect.provider.candidates` per listing, with `outcome` (`success` /
+`denied`), `reason`, `principal`, `entity_id`, `resource`, `profile_id`,
+`protocol`, `transport` (`direct` / `web` / `rustion`), `provider`,
+`account_id`, `login_name` (successful releases) and `candidates` (count) —
+never a secret or a TOTP code. `connect.web.launch` carries
+`credential_source=provider provider="…"`, and Rustion's `session.open` line
+names the credential source. The audit devices record the `authorize` and
+`web/launch` responses HMAC-redacted, like every response. Metric:
+`bvault_plugin_provider_requests_total{plugin, op, protocol, outcome}`
+(`op` = `candidates` / `release`, `outcome` = `success` or a reason code).
+
+**Desktop app (Tauri commands).** `connect_credential_providers()` wraps
+`connect/providers`; `connect_provider_candidates(resource_name, profile_id)`
+wraps `connect/provider/candidates` and returns metadata only, after the host
+checked every string for plain-text display (a candidate whose label, login or
+domain carries control or invisible formatting characters is withheld and
+counted in `hidden`). `session_open_ssh`, `session_open_rdp` and
+`session_open_web` take an optional `provider_account_id`: required for a
+`provider` profile, refused for any other. On the direct path the host calls
+`connect/authorize`, keeps the released secret in `Zeroizing` buffers inside
+the host, and dials exactly the returned `target` (no fallback to another host
+candidate, not even on a network error); no command returns the secret to the
+webview; the released login and domain are held to the same plain-text rule
+as the candidates, since they appear in the session's label. The host's
+direct-path `session.open` audit line then adds
+`credential_source=provider provider="…" account_id="…" login_name="…"`. A web
+`form` session signed in with a provider account offers no toolbar sign-in
+re-run: the provider releases again only after a new connect-time MFA check.
 
 ### Session Recordings + Keystroke Transcripts
 
@@ -1611,6 +1780,7 @@ spelling out:
 | `POST /v1/sys/cluster/failover` | `sys/cluster/failover` | `create`/`update` |
 | `GET`/`POST` `/v1/sys/plugins…` | `sys/plugins…` | per method |
 | `GET`/`PUT`/`DELETE` `/v2/sys/plugins/{name}/grants/credential-provider` | `sys/plugins/{name}/grants/credential-provider` | `read` / `update` / `delete` |
+| `GET /v2/sys/plugins/{name}/entity-data` | `sys/plugins/{name}/entity-data` | `read` |
 | `DELETE /v2/sys/plugins/{name}/entity-data/{entity_id}` | `sys/plugins/{name}/entity-data/{entity_id}` | `delete` |
 | `GET`/`POST` `/v1/sys/scheduled-exports…` | `sys/scheduled-exports…` | per method |
 
@@ -1642,8 +1812,34 @@ DELETE /v2/sys/plugins/{name}/entity-data/{entity_id}
 ~~~
 
 Deletes one identity entity's data under one entity-scoped plugin, for
-offboarding. There is no read counterpart. The same data is removed
-automatically when an entity loses its last alias.
+offboarding. The same data is removed automatically when an entity loses its
+last alias. Each automatic purge is audited at
+`sys/plugins/entity-data/{entity_id}` (`delete`, with `trigger` and `outcome`);
+one that fails leaves a pending-purge marker, which the next automatic purge
+and every call to this route retry.
+
+~~~
+GET /v2/sys/plugins/{name}/entity-data
+~~~
+
+How many records each entity holds under an entity-scoped plugin — **counts
+only** (features/self-accounts.md Phase 5). The server lists keys, reads no
+value and does not invoke the plugin, so no label, login name, target or
+secret is returned. A record is an `accounts/<id>/meta` key; an entity holding
+other data is listed with `0`. `display_name` is the entity's name from the
+identity store, when known. `pending_purges` counts failed automatic purges
+across every plugin. `404` for a plugin that is not registered or does not
+declare `storage_scope = "entity"`. No user baseline policy grants it; the
+built-in `administrator` policy reaches it through `path "*"`.
+
+~~~json
+{
+  "entities": [ { "entity_id": "4f0c…", "display_name": "felipe", "accounts": 3 } ],
+  "total_accounts": 3,
+  "total_entities": 1,
+  "pending_purges": 0
+}
+~~~
 
 ## Error Responses
 

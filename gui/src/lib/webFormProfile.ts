@@ -12,6 +12,7 @@
 //! `credential_source_unsupported`, `credential_unavailable`,
 //! `totp_not_configured`).
 
+import { isProviderName } from "./credentialProviders";
 import type { ConnectionProfile, WebLoginRecipe, WebProfileSettings } from "./types";
 import {
   checkRecipeOrigins,
@@ -172,8 +173,18 @@ export function formCredentialSourceError(
     }
     case "default-account":
       break;
+    case "provider":
+      // The operator's own account, picked at connect. What it can fill is
+      // known only then (a password, and a TOTP code when the account has a
+      // seed), so the recipe is checked against the release, not here.
+      if (!isProviderName(cs.provider)) return "Pick the credential provider the operator's account comes from";
+      {
+        const e = totpParamsError(cs.totp);
+        if (e) return e;
+      }
+      break;
     case "none":
-      return "credential_source `none` releases nothing; a form-mode profile needs secret, ldap or default-account";
+      return "credential_source `none` releases nothing; a form-mode profile needs secret, ldap, default-account or a credential provider";
     case "ssh-engine":
     case "pki":
     case "fido2":
@@ -234,6 +245,8 @@ export function httpAuthCredentialSourceError(cs: ConnectionProfile["credential_
       );
     case "none":
       return "credential_source `none` releases nothing; an http-auth profile needs a secret or ldap source";
+    case "provider":
+      return "a credential provider source is available for the form login mode only; use a secret or ldap source here";
     case "ssh-engine":
     case "pki":
     case "fido2":

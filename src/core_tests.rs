@@ -27,19 +27,14 @@ mod test {
     /// the unseal key has been released.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_core_flush_caches_empties_token_cache() {
-        use crate::modules::auth::{
-            token_store::TokenEntry, AuthModule,
-        };
+        use crate::modules::auth::{token_store::TokenEntry, AuthModule};
 
         let (_bvault, core, root_token) =
             new_unseal_test_bastion_vault("test_core_flush_caches_empties_token_cache").await;
 
-        let auth_module = core
-            .module_manager
-            .get_module::<AuthModule>("auth")
-            .expect("auth module must exist in a default unseal");
-        let token_store =
-            auth_module.token_store.load_full().expect("token store must be installed");
+        let auth_module =
+            core.module_manager.get_module::<AuthModule>("auth").expect("auth module must exist in a default unseal");
+        let token_store = auth_module.token_store.load_full().expect("token store must be installed");
 
         // The root token is already in storage; force a cache-populating
         // lookup, then verify the cache has it.

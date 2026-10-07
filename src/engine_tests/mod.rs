@@ -10,6 +10,7 @@
 //! `src/dos/store_tests.rs`. See roadmaps/workspace-decomposition.md § Phase 3.
 
 mod approle;
+mod approle_reserved_meta;
 mod audit_events_window;
 mod bulk_info_endpoints;
 mod cache_version;
@@ -18,14 +19,16 @@ mod files;
 mod kv_version_read;
 mod mcp_access;
 mod notifications;
-mod resource;
-mod resource_connect_web;
 mod oidc;
 mod pki_certs_info;
 mod pki_export;
 mod rdp_clipboard;
+mod resource;
+mod resource_connect_web;
 mod rustion;
 mod saml;
+mod self_accounts_connect;
+mod self_accounts_host;
 mod userpass;
 
 // ── Kernel-tier tests lifted in Phase 4.5 ────────────────────────────

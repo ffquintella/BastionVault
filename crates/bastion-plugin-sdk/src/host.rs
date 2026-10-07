@@ -181,6 +181,23 @@ impl Host {
         bindings::now_unix_ms()
     }
 
+    /// `n` bytes from the host's OS random source (`bv.crypto_random`). Not
+    /// capability-gated. At most 4096 bytes per call. Under `host_test` the
+    /// bytes are only unique, not secure: never rely on them in a test for
+    /// anything but shape.
+    pub fn random_bytes(&self, n: usize) -> Result<Vec<u8>, HostError> {
+        if n > 4096 {
+            return Err(HostError::Internal);
+        }
+        let mut buf = alloc::vec![0u8; n];
+        let rc = bindings::crypto_random(n as i32, &mut buf);
+        if rc == n as i32 {
+            Ok(buf)
+        } else {
+            Err(HostError::Internal)
+        }
+    }
+
     /// Read the operator-supplied value for a config key the plugin
     /// declared in `manifest.config_schema`. Returns `None` when the
     /// key is unset (the operator hasn't configured it yet, or the
@@ -264,6 +281,7 @@ mod bindings {
             pub fn storage_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_max: i32) -> i32;
             pub fn audit_emit(payload_ptr: i32, payload_len: i32) -> i32;
             pub fn now_unix_ms() -> i64;
+            pub fn crypto_random(n_bytes: i32, out_ptr: i32, out_max: i32) -> i32;
             pub fn config_get(key_ptr: i32, key_len: i32, out_ptr: i32, out_max: i32) -> i32;
             pub fn notify_send(req_ptr: i32, req_len: i32, out_ptr: i32, out_max: i32) -> i32;
             pub fn notify_list(req_ptr: i32, req_len: i32, out_ptr: i32, out_max: i32) -> i32;
@@ -351,6 +369,10 @@ mod bindings {
 
     pub fn audit_emit(payload: &[u8]) -> i32 {
         unsafe { raw::audit_emit(payload.as_ptr() as i32, payload.len() as i32) }
+    }
+
+    pub fn crypto_random(n: i32, out: &mut [u8]) -> i32 {
+        unsafe { raw::crypto_random(n, out.as_mut_ptr() as i32, out.len() as i32) }
     }
 
     pub fn now_unix_ms() -> i64 {
@@ -502,6 +524,23 @@ mod bindings {
         0
     }
 
+    /// Test stub: unique, NOT secure (counter mixed through SplitMix64).
+    pub fn crypto_random(n: i32, out: &mut [u8]) -> i32 {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static CTR: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
+        if n < 0 || n as usize > out.len() {
+            return -3;
+        }
+        for chunk in out[..n as usize].chunks_mut(8) {
+            let mut z = CTR.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            chunk.copy_from_slice(&z.to_le_bytes()[..chunk.len()]);
+        }
+        n
+    }
+
     pub fn now_unix_ms() -> i64 {
         let s = STATE.lock().unwrap();
         if let Some(mock) = s.mock_now_ms {
@@ -576,6 +615,14 @@ mod bindings {
             s.mock_now_ms = None;
             s.config = None;
             s.notifications = None;
+        }
+
+        /// Model a plugin whose manifest declares `storage_prefix = ""`: storage
+        /// exists and is empty. Without this call (or a prior put) every
+        /// storage import answers "forbidden".
+        pub fn enable_storage() {
+            let mut s = STATE.lock().unwrap();
+            s.storage_mut();
         }
 
         /// The `bv.notify_send` payloads the plugin raised during the

@@ -6,6 +6,7 @@
 //! resource backend accepts this without schema changes — the field
 //! is opaque to the host.
 
+import { isProviderName } from "./credentialProviders";
 import { validateFormWebProfile, validateHttpAuthWebProfile } from "./webFormProfile";
 import { validateTlsPins } from "./webTlsPin";
 import type {
@@ -109,9 +110,39 @@ export function detectSecretShape(data: Record<string, unknown>): ResourceSecret
   };
 }
 
+/** Every credential-source kind this build understands. A kind outside
+ *  this list was written by a newer client (or by hand). */
+export const KNOWN_CREDENTIAL_SOURCE_KINDS: readonly CredentialSource["kind"][] = [
+  "secret",
+  "ldap",
+  "ssh-engine",
+  "pki",
+  "fido2",
+  "default-account",
+  "none",
+  "provider",
+];
+
+/** Whether a raw `credential_source` is one this build can read: an object
+ *  whose `kind` is known — and, for `provider`, whose `provider` is a string
+ *  (an empty or malformed name is a validation error the editor shows). */
+export function isKnownCredentialSource(cs: unknown): cs is CredentialSource {
+  if (typeof cs !== "object" || cs === null || Array.isArray(cs)) return false;
+  const kind = (cs as { kind?: unknown }).kind;
+  if (typeof kind !== "string" || !(KNOWN_CREDENTIAL_SOURCE_KINDS as readonly string[]).includes(kind)) {
+    return false;
+  }
+  if (kind === "provider" && typeof (cs as { provider?: unknown }).provider !== "string") return false;
+  return true;
+}
+
 /** Whether a raw `connection_profiles` entry is one this build can show and
- *  launch. Strict: an unknown protocol, or a missing id / name /
- *  credential source, makes it not-ours (fail closed — never read as SSH). */
+ *  launch. Strict: an unknown protocol, a missing id / name, or a credential
+ *  source this build does not know makes it not-ours (fail closed — never
+ *  read as SSH, never launched with a source the host would have to guess
+ *  at). Such entries are kept on every write (see `readUnknownProfiles`),
+ *  so a newer client's profiles survive an edit made here (T102 rule; spec
+ *  features/self-accounts.md §10). */
 function isKnownProfile(p: unknown): p is ConnectionProfile {
   return (
     typeof p === "object" &&
@@ -119,8 +150,7 @@ function isKnownProfile(p: unknown): p is ConnectionProfile {
     typeof (p as ConnectionProfile).id === "string" &&
     typeof (p as ConnectionProfile).name === "string" &&
     parseSessionProtocol((p as ConnectionProfile).protocol) !== null &&
-    typeof (p as ConnectionProfile).credential_source === "object" &&
-    (p as ConnectionProfile).credential_source !== null
+    isKnownCredentialSource((p as ConnectionProfile).credential_source)
   );
 }
 
@@ -140,7 +170,7 @@ export function readProfiles(meta: Record<string, unknown>): ConnectionProfile[]
 }
 
 /** The raw entries {@link readProfiles} excluded — profiles written by a
- *  newer client (unknown protocol or shape). Writers must hand these back
+ *  newer client (unknown protocol, credential source or shape). Writers must hand these back
  *  to {@link profilesForWrite} so saving, deleting or re-defaulting a known
  *  profile never deletes a profile this build merely cannot read. */
 export function readUnknownProfiles(meta: Record<string, unknown>): unknown[] {
@@ -282,6 +312,11 @@ export function validateProfile(p: ConnectionProfile): string | null {
       return null;
     case "none":
       return "SSH and RDP profiles need a credential source";
+    case "provider":
+      if (!isProviderName(p.credential_source.provider)) {
+        return "Pick the credential provider the operator's account comes from";
+      }
+      return null;
   }
 }
 
@@ -294,8 +329,9 @@ const LAUNCHABLE_WEB_LOGIN_MODES = ["open", "form", "http-auth"] as const;
 const NEVER_WEB_SOURCES: CredentialSource["kind"][] = ["ssh-engine", "pki", "fido2"];
 
 /** Credential sources a `form` web login can be signed in with; the server
- *  releases the credential at `v2/connect/web/launch`. */
-const FORM_WEB_SOURCES: CredentialSource["kind"][] = ["secret", "ldap", "default-account"];
+ *  releases the credential at `v2/connect/web/launch`. `provider` releases
+ *  the account the operator picks at connect (features/self-accounts.md). */
+const FORM_WEB_SOURCES: CredentialSource["kind"][] = ["secret", "ldap", "default-account", "provider"];
 
 /** Credential sources an `http-auth` login can answer a challenge with: both
  *  supply a username *and* a password (a default account supplies only the
@@ -568,6 +604,11 @@ export function isLaunchableProfile(p: ConnectProfileHint): boolean {
     case "none":
       // Only meaningful on a web profile (handled above).
       return false;
+    case "provider":
+      // The operator picks one of their own accounts at connect; the server
+      // releases it on every transport (`connect/authorize` direct,
+      // `rustion/v2/session/open` brokered).
+      return true;
   }
 }
 
@@ -584,6 +625,7 @@ const SERVER_RESOLVED_SOURCES: CredentialSource["kind"][] = [
   "secret",
   "ssh-engine",
   "default-account",
+  "provider",
 ];
 
 /**
@@ -626,6 +668,12 @@ export function isLaunchableForCaller(
   // gate (and MFA, when required) is the whole check.
   if (p.protocol === "web") return true;
   if (p.kind === "rustion") return true;
+  // A `provider` profile releases the operator's *own* account — one they
+  // typed in themselves — never a resource secret, and only behind the
+  // `connect` grant (and MFA, by the provider's default). Connect-only
+  // access protects the resource's secrets, which this source never reads,
+  // so it is launchable on the direct path too (spec "Where it stops").
+  if (p.credential_source.kind === "provider") return true;
   return (
     brokeredByPolicy &&
     p.protocol === "ssh" &&
@@ -701,6 +749,10 @@ export function blankCredentialSource(
       return { kind: "fido2" };
     case "none":
       return { kind: "none" };
+    case "provider":
+      // The editor picks the provider from the approved list; an empty name
+      // is a validation error until it does.
+      return { kind: "provider", provider: "" };
   }
 }
 
@@ -740,6 +792,7 @@ export function loginClassGate(loginClass: SshLoginClass | undefined): {
       "pki",
       "default-account",
       "fido2",
+      "provider",
     ],
     forcedKind: null,
   };
@@ -789,7 +842,27 @@ export function needsOperatorPrompt(p: ConnectionProfile): boolean {
   if (p.credential_source.kind === "default-account" && p.protocol === "rdp") {
     return true;
   }
+  // A `provider` profile's account picker is not a credential prompt: it is
+  // host-rendered over whichever launcher started the connect (the palette
+  // and a layout restore included), and nothing is typed into it.
   return false;
+}
+
+/**
+ * The editor's hint for a `provider` profile without `require_mfa`: the
+ * self-accounts provider refuses to release an account unless a connect-time
+ * MFA ticket was redeemed for that very launch (its `require_connect_mfa`,
+ * on by default), so such a profile would be refused with `mfa_required`
+ * at every connect. Null when there is nothing to say. Advice only — an
+ * administrator may have turned the provider's requirement off.
+ */
+export function providerMfaHint(p: ConnectionProfile): string | null {
+  if (p.credential_source.kind !== "provider" || p.require_mfa) return null;
+  return (
+    "Tick \u201cRequire MFA re-validation\u201d below. A credential provider normally releases an account only " +
+    "after the operator re-proves a second factor for this connect; without it, connects are refused " +
+    "(mfa_required) unless an administrator turned that requirement off."
+  );
 }
 
 /**

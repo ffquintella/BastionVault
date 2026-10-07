@@ -14,8 +14,8 @@ mod ha_tests {
     use std::collections::HashMap;
     use std::env;
     use std::fs;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU16, Ordering};
+    use std::sync::Arc;
 
     use serde_json::Value;
     use serial_test::serial;
@@ -82,9 +82,7 @@ mod ha_tests {
             .map(|id| {
                 let raft_port = raft_port(port_base, id);
                 let api_port = api_port(port_base, id);
-                Value::String(format!(
-                    "{id}:127.0.0.1:{raft_port}:127.0.0.1:{api_port}"
-                ))
+                Value::String(format!("{id}:127.0.0.1:{raft_port}:127.0.0.1:{api_port}"))
             })
             .collect();
         Value::Array(nodes)
@@ -97,10 +95,7 @@ mod ha_tests {
     /// pristine node that is still listed in the membership triggers hiqlite's
     /// remote leave-and-rejoin flow, which needs quorum and panics without it.
     fn make_node_conf(test_name: &str, node_id: u64, port_base: u16) -> HashMap<String, Value> {
-        let dir = env::temp_dir()
-            .join("bvault_ha_test")
-            .join(test_name)
-            .join(format!("node{node_id}"));
+        let dir = env::temp_dir().join("bvault_ha_test").join(test_name).join(format!("node{node_id}"));
         fs::create_dir_all(&dir).unwrap();
 
         let raft_port = raft_port(port_base, node_id);
@@ -138,26 +133,19 @@ mod ha_tests {
             let mut nodes: Vec<Option<Arc<HiqliteBackend>>> = Vec::new();
             for id in 1..=3u64 {
                 let conf = make_node_conf(test_name, id, port_base);
-                let backend = HiqliteBackend::new(&conf)
-                    .unwrap_or_else(|e| panic!("Failed to create node {id}: {e}"));
+                let backend = HiqliteBackend::new(&conf).unwrap_or_else(|e| panic!("Failed to create node {id}: {e}"));
                 nodes.push(Some(Arc::new(backend)));
             }
 
             // Wait for leader election to stabilize.
             tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
-            Self {
-                nodes,
-                test_name: test_name.to_string(),
-                port_base,
-            }
+            Self { nodes, test_name: test_name.to_string(), port_base }
         }
 
         /// Get a reference to a running node (1-indexed).
         fn node(&self, id: usize) -> &HiqliteBackend {
-            self.nodes[id - 1]
-                .as_ref()
-                .unwrap_or_else(|| panic!("Node {id} is stopped"))
+            self.nodes[id - 1].as_ref().unwrap_or_else(|| panic!("Node {id} is stopped"))
         }
 
         /// Find the leader node ID (1-indexed). Returns None if no leader.
@@ -197,39 +185,28 @@ mod ha_tests {
         /// Block until a stopped node's detached shutdown has completed,
         /// observed as its listeners being released (1-indexed).
         fn wait_node_stopped(&self, id: usize) {
-            wait_for_ports_free(&[
-                raft_port(self.port_base, id as u64),
-                api_port(self.port_base, id as u64),
-            ]);
+            wait_for_ports_free(&[raft_port(self.port_base, id as u64), api_port(self.port_base, id as u64)]);
         }
 
         /// Restart a stopped node (1-indexed). Waits for the old instance's
         /// detached shutdown to release the node's ports before rebinding.
         fn restart_node(&mut self, id: usize) {
-            wait_for_ports_free(&[
-                raft_port(self.port_base, id as u64),
-                api_port(self.port_base, id as u64),
-            ]);
+            wait_for_ports_free(&[raft_port(self.port_base, id as u64), api_port(self.port_base, id as u64)]);
             let conf = make_node_conf(&self.test_name, id as u64, self.port_base);
-            let backend = HiqliteBackend::new(&conf)
-                .unwrap_or_else(|e| panic!("Failed to restart node {id}: {e}"));
+            let backend = HiqliteBackend::new(&conf).unwrap_or_else(|e| panic!("Failed to restart node {id}: {e}"));
             self.nodes[id - 1] = Some(Arc::new(backend));
         }
 
         /// Clear the test table on all running nodes.
         async fn clear_all(&self) {
             for node in self.nodes.iter().flatten() {
-                let _ = node
-                    .client()
-                    .batch(Cow::Borrowed("DELETE FROM vault_ha_test"))
-                    .await;
+                let _ = node.client().batch(Cow::Borrowed("DELETE FROM vault_ha_test")).await;
             }
         }
 
         /// Wait for a leader to be elected with timeout.
         async fn wait_for_leader(&self, timeout_secs: u64) -> Option<usize> {
-            let deadline = tokio::time::Instant::now()
-                + tokio::time::Duration::from_secs(timeout_secs);
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
             loop {
                 if let Some(id) = self.find_leader().await {
                     return Some(id);
@@ -262,10 +239,7 @@ mod ha_tests {
 
         // All nodes should report healthy.
         for id in 1..=3 {
-            assert!(
-                cluster.node(id).is_healthy().await,
-                "Node {id} is not healthy"
-            );
+            assert!(cluster.node(id).is_healthy().await, "Node {id} is not healthy");
         }
 
         // There should be exactly 2 followers.
@@ -293,10 +267,7 @@ mod ha_tests {
         assert!(!followers.is_empty(), "No followers found");
 
         // Write via leader.
-        let entry = BackendEntry {
-            key: "ha/test/key1".to_string(),
-            value: b"leader_wrote_this".to_vec(),
-        };
+        let entry = BackendEntry { key: "ha/test/key1".to_string(), value: b"leader_wrote_this".to_vec() };
         cluster.node(leader_id).put(&entry).await.unwrap();
 
         // Small delay for replication.
@@ -339,10 +310,7 @@ mod ha_tests {
 
         // Writes should succeed on the new leader.
         cluster.clear_all().await;
-        let entry = BackendEntry {
-            key: "ha/after_failover".to_string(),
-            value: b"still_works".to_vec(),
-        };
+        let entry = BackendEntry { key: "ha/after_failover".to_string(), value: b"still_works".to_vec() };
         cluster.node(new_leader_id).put(&entry).await.unwrap();
 
         let result = cluster.node(new_leader_id).get("ha/after_failover").await.unwrap();
@@ -370,10 +338,7 @@ mod ha_tests {
         let follower_id = followers[0];
 
         // Write data via leader.
-        let entry = BackendEntry {
-            key: "ha/persist/data".to_string(),
-            value: b"must_survive_restart".to_vec(),
-        };
+        let entry = BackendEntry { key: "ha/persist/data".to_string(), value: b"must_survive_restart".to_vec() };
         cluster.node(leader_id).put(&entry).await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
@@ -409,10 +374,7 @@ mod ha_tests {
         let old_leader_id = cluster.find_leader().await.expect("No leader");
 
         // Write data via leader before it goes down.
-        let entry = BackendEntry {
-            key: "ha/before_crash".to_string(),
-            value: b"written_before_leader_crash".to_vec(),
-        };
+        let entry = BackendEntry { key: "ha/before_crash".to_string(), value: b"written_before_leader_crash".to_vec() };
         cluster.node(old_leader_id).put(&entry).await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
@@ -422,10 +384,7 @@ mod ha_tests {
         // Wait for new leader election from remaining 2 nodes.
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         let new_leader_id = cluster.wait_for_leader(15).await;
-        assert!(
-            new_leader_id.is_some(),
-            "No new leader elected after leader crash"
-        );
+        assert!(new_leader_id.is_some(), "No new leader elected after leader crash");
         let new_leader_id = new_leader_id.unwrap();
         assert_ne!(new_leader_id, old_leader_id, "Old leader shouldn't be leader while stopped");
 
@@ -435,10 +394,7 @@ mod ha_tests {
         assert_eq!(result.unwrap().value, b"written_before_leader_crash");
 
         // Writes should succeed on new leader.
-        let entry2 = BackendEntry {
-            key: "ha/after_crash".to_string(),
-            value: b"written_after_leader_crash".to_vec(),
-        };
+        let entry2 = BackendEntry { key: "ha/after_crash".to_string(), value: b"written_after_leader_crash".to_vec() };
         cluster.node(new_leader_id).put(&entry2).await.unwrap();
 
         // Restart old leader.
@@ -474,10 +430,7 @@ mod ha_tests {
         cluster.stop_node(old_leader_id);
 
         // Immediately try to write on a follower -- may fail transiently.
-        let entry = BackendEntry {
-            key: "ha/during_election".to_string(),
-            value: b"election_write".to_vec(),
-        };
+        let entry = BackendEntry { key: "ha/during_election".to_string(), value: b"election_write".to_vec() };
         let _immediate_write = cluster.node(follower_id).put(&entry).await;
         // We don't assert success here -- it may fail during election.
 
@@ -488,10 +441,7 @@ mod ha_tests {
         let new_leader_id = new_leader_id.unwrap();
 
         // Now writes should succeed.
-        let entry2 = BackendEntry {
-            key: "ha/after_election".to_string(),
-            value: b"post_election_write".to_vec(),
-        };
+        let entry2 = BackendEntry { key: "ha/after_election".to_string(), value: b"post_election_write".to_vec() };
         cluster.node(new_leader_id).put(&entry2).await.unwrap();
 
         let result = cluster.node(new_leader_id).get("ha/after_election").await.unwrap();
@@ -517,10 +467,7 @@ mod ha_tests {
         let leader_id = cluster.find_leader().await.expect("No leader");
 
         // Write some data first.
-        let entry = BackendEntry {
-            key: "ha/pre_quorum_loss".to_string(),
-            value: b"before_quorum_lost".to_vec(),
-        };
+        let entry = BackendEntry { key: "ha/pre_quorum_loss".to_string(), value: b"before_quorum_lost".to_vec() };
         cluster.node(leader_id).put(&entry).await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
@@ -536,19 +483,13 @@ mod ha_tests {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
         // Writes should fail (no quorum).
-        let entry2 = BackendEntry {
-            key: "ha/during_quorum_loss".to_string(),
-            value: b"should_fail".to_vec(),
-        };
-        let write_result = tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            cluster.node(leader_id).put(&entry2),
-        )
-        .await;
+        let entry2 = BackendEntry { key: "ha/during_quorum_loss".to_string(), value: b"should_fail".to_vec() };
+        let write_result =
+            tokio::time::timeout(tokio::time::Duration::from_secs(5), cluster.node(leader_id).put(&entry2)).await;
         // Should either timeout or return an error.
         let write_failed = match write_result {
-            Err(_) => true, // timeout
-            Ok(Err(_)) => true, // error
+            Err(_) => true,      // timeout
+            Ok(Err(_)) => true,  // error
             Ok(Ok(())) => false, // unexpectedly succeeded
         };
         assert!(write_failed, "Write should fail without quorum");
@@ -562,27 +503,16 @@ mod ha_tests {
         assert!(recovered_leader.is_some(), "No leader after quorum recovery");
 
         // Writes should succeed again.
-        let entry3 = BackendEntry {
-            key: "ha/after_recovery".to_string(),
-            value: b"quorum_restored".to_vec(),
-        };
+        let entry3 = BackendEntry { key: "ha/after_recovery".to_string(), value: b"quorum_restored".to_vec() };
         let recovered_leader_id = recovered_leader.unwrap();
         cluster.node(recovered_leader_id).put(&entry3).await.unwrap();
 
-        let result = cluster
-            .node(recovered_leader_id)
-            .get("ha/after_recovery")
-            .await
-            .unwrap();
+        let result = cluster.node(recovered_leader_id).get("ha/after_recovery").await.unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().value, b"quorum_restored");
 
         // Pre-quorum-loss data should still be available.
-        let old_result = cluster
-            .node(recovered_leader_id)
-            .get("ha/pre_quorum_loss")
-            .await
-            .unwrap();
+        let old_result = cluster.node(recovered_leader_id).get("ha/pre_quorum_loss").await.unwrap();
         assert!(old_result.is_some(), "Pre-quorum-loss data should survive");
     }
 
@@ -606,10 +536,7 @@ mod ha_tests {
         let leaving_id = followers[0];
 
         // Write data before leave.
-        let entry = BackendEntry {
-            key: "ha/before_leave".to_string(),
-            value: b"pre_leave_data".to_vec(),
-        };
+        let entry = BackendEntry { key: "ha/before_leave".to_string(), value: b"pre_leave_data".to_vec() };
         cluster.node(leader_id).put(&entry).await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
@@ -630,10 +557,7 @@ mod ha_tests {
         assert!(result.is_some(), "Data lost after graceful leave");
 
         // Writes should still succeed with 2 nodes.
-        let entry2 = BackendEntry {
-            key: "ha/after_leave".to_string(),
-            value: b"post_leave_data".to_vec(),
-        };
+        let entry2 = BackendEntry { key: "ha/after_leave".to_string(), value: b"post_leave_data".to_vec() };
         cluster.node(leader_id).put(&entry2).await.unwrap();
 
         let result = cluster.node(leader_id).get("ha/after_leave").await.unwrap();

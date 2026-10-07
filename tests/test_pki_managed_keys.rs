@@ -41,10 +41,7 @@ async fn write(
     req.operation = Operation::Write;
     req.client_token = token.to_string();
     req.body = Some(body);
-    core.handle_request(&mut req)
-        .await
-        .map(|r| r.and_then(|x| x.data))
-        .map_err(|e| format!("{e:?}"))
+    core.handle_request(&mut req).await.map(|r| r.and_then(|x| x.data)).map_err(|e| format!("{e:?}"))
 }
 
 #[maybe_async::maybe_async]
@@ -135,26 +132,21 @@ async fn test_pki_managed_keys_l1() {
         &core,
         &token,
         "pki/keys/generate/internal",
-        json!({"key_type": "ec", "key_bits": 256, "name": "ec-internal"})
-            .as_object().unwrap().clone(),
+        json!({"key_type": "ec", "key_bits": 256, "name": "ec-internal"}).as_object().unwrap().clone(),
     )
     .await;
     let id_internal = g_int["key_id"].as_str().unwrap().to_string();
     assert_eq!(g_int["key_type"], "ec");
     assert_eq!(g_int["exported"], false);
     assert!(g_int.get("private_key").is_none(), "internal mode must not return private key");
-    assert!(
-        g_int["public_key"].as_str().unwrap().contains("BEGIN PUBLIC KEY"),
-        "public key PEM should be returned",
-    );
+    assert!(g_int["public_key"].as_str().unwrap().contains("BEGIN PUBLIC KEY"), "public key PEM should be returned",);
 
     // ── 2. generate/exported returns PKCS#8 once ─────────────────────
     let g_exp = write_ok(
         &core,
         &token,
         "pki/keys/generate/exported",
-        json!({"key_type": "ed25519", "name": "ed-exported"})
-            .as_object().unwrap().clone(),
+        json!({"key_type": "ed25519", "name": "ed-exported"}).as_object().unwrap().clone(),
     )
     .await;
     let id_exported = g_exp["key_id"].as_str().unwrap().to_string();
@@ -164,8 +156,8 @@ async fn test_pki_managed_keys_l1() {
 
     // ── 3. LIST returns both ids ─────────────────────────────────────
     let listed = list(&core, &token, "pki/keys").await;
-    let key_ids: Vec<String> = listed["keys"].as_array().unwrap()
-        .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    let key_ids: Vec<String> =
+        listed["keys"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
     assert!(key_ids.contains(&id_internal));
     assert!(key_ids.contains(&id_exported));
 
@@ -182,8 +174,7 @@ async fn test_pki_managed_keys_l1() {
         &core,
         &token,
         "pki/keys/generate/internal",
-        json!({"key_type": "ec", "name": "ec-internal"})
-            .as_object().unwrap().clone(),
+        json!({"key_type": "ec", "name": "ec-internal"}).as_object().unwrap().clone(),
     )
     .await;
     assert!(dup.is_err(), "duplicate name must be rejected, got {dup:?}");
@@ -193,8 +184,7 @@ async fn test_pki_managed_keys_l1() {
         &core,
         &token,
         "pki/keys/generate/exported",
-        json!({"key_type": "rsa", "key_bits": 2048, "name": "rsa-2048"})
-            .as_object().unwrap().clone(),
+        json!({"key_type": "rsa", "key_bits": 2048, "name": "rsa-2048"}).as_object().unwrap().clone(),
     )
     .await;
     assert_eq!(g_rsa["key_type"], "rsa");
@@ -205,8 +195,7 @@ async fn test_pki_managed_keys_l1() {
         &core,
         &token,
         "pki/keys/import",
-        json!({"private_key": rsa_pkcs8, "name": "rsa-2048-reimport"})
-            .as_object().unwrap().clone(),
+        json!({"private_key": rsa_pkcs8, "name": "rsa-2048-reimport"}).as_object().unwrap().clone(),
     )
     .await;
     assert_eq!(imp_rsa["key_type"], "rsa");
@@ -217,8 +206,7 @@ async fn test_pki_managed_keys_l1() {
         &core,
         &token,
         "pki/keys/import",
-        json!({"private_key": RSA_1024_PKCS8_PEM, "name": "rsa-weak"})
-            .as_object().unwrap().clone(),
+        json!({"private_key": RSA_1024_PKCS8_PEM, "name": "rsa-weak"}).as_object().unwrap().clone(),
     )
     .await;
     assert!(weak.is_err(), "RSA-1024 must be rejected, got {weak:?}");
@@ -228,8 +216,7 @@ async fn test_pki_managed_keys_l1() {
         &core,
         &token,
         "pki/keys/generate/exported",
-        json!({"key_type": "ml-dsa-65", "name": "ml-dsa-65"})
-            .as_object().unwrap().clone(),
+        json!({"key_type": "ml-dsa-65", "name": "ml-dsa-65"}).as_object().unwrap().clone(),
     )
     .await;
     assert_eq!(g_pqc["key_type"], "ml-dsa-65");
@@ -239,8 +226,7 @@ async fn test_pki_managed_keys_l1() {
         &core,
         &token,
         "pki/keys/import",
-        json!({"private_key": pqc_pkcs8, "name": "ml-dsa-65-reimport"})
-            .as_object().unwrap().clone(),
+        json!({"private_key": pqc_pkcs8, "name": "ml-dsa-65-reimport"}).as_object().unwrap().clone(),
     )
     .await;
     assert_eq!(imp_pqc["key_type"], "ml-dsa-65");
@@ -248,8 +234,8 @@ async fn test_pki_managed_keys_l1() {
     // ── 9. DELETE removes an unreferenced key ────────────────────────
     delete_req(&core, &token, &format!("pki/key/{id_exported}")).await.expect("delete failed");
     let listed_after = list(&core, &token, "pki/keys").await;
-    let ids_after: Vec<String> = listed_after["keys"].as_array().unwrap()
-        .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    let ids_after: Vec<String> =
+        listed_after["keys"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
     assert!(!ids_after.contains(&id_exported), "deleted id still listed: {ids_after:?}");
 
     // After deletion, name lookup should fail too.

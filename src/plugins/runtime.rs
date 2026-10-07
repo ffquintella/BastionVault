@@ -69,10 +69,7 @@ use std::sync::Arc;
 use wasmtime::{AsContextMut, Caller, Linker, Memory, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
 
 use crate::kernel_api::VaultCtx;
-use crate::{
-    audit,
-    storage::StorageEntry,
-};
+use crate::{audit, storage::StorageEntry};
 
 use super::manifest::PluginManifest;
 use super::module_cache::ModuleCache;
@@ -93,6 +90,40 @@ const CRYPTO_FORBIDDEN: i32 = -2;
 /// gets a single error code; the host log carries the detail.
 const CRYPTO_BACKEND_ERROR: i32 = -5;
 
+/// The only import module the host links (see `register_host_imports`).
+const HOST_IMPORT_MODULE: &str = "bv";
+
+/// Registration-time import check: refuse a module that imports anything
+/// outside the host's `bv` namespace, naming the offending import.
+///
+/// The host deliberately provides no WASI. A module built for `wasm32-wasip1`
+/// imports `wasi_snapshot_preview1::*` and would otherwise be accepted into the
+/// catalog and only fail at first invoke with an opaque "unknown import". This
+/// surfaces it at upload with the fix. Compiles the module once on a throwaway
+/// engine (also rejects malformed wasm); registration is rare, invoke is hot.
+pub fn check_host_imports(wasm_bytes: &[u8]) -> Result<(), RuntimeError> {
+    let module = wasmtime::Module::new(&wasmtime::Engine::default(), wasm_bytes)
+        .map_err(|e| RuntimeError::Compile(e.to_string()))?;
+    let foreign: Vec<String> = module
+        .imports()
+        .filter(|i| i.module() != HOST_IMPORT_MODULE)
+        .map(|i| format!("{}::{}", i.module(), i.name()))
+        .collect();
+    if foreign.is_empty() {
+        return Ok(());
+    }
+    let wasi = foreign.iter().any(|i| i.starts_with("wasi_"));
+    Err(RuntimeError::UnsupportedImports(format!(
+        "{}{}",
+        foreign.join(", "),
+        if wasi {
+            " — the host provides no WASI; build the plugin for `wasm32-unknown-unknown`, not `wasm32-wasip1`"
+        } else {
+            " — the host links only the `bv` import module"
+        }
+    )))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     #[error("wasmtime configuration failed: {0}")]
@@ -101,6 +132,8 @@ pub enum RuntimeError {
     Compile(String),
     #[error("required export `{0}` missing")]
     MissingExport(&'static str),
+    #[error("module imports are not provided by the host: {0}")]
+    UnsupportedImports(String),
     #[error("instantiation failed: {0}")]
     Instantiate(String),
     #[error("invocation failed: {0}")]
@@ -188,9 +221,7 @@ impl PluginCtx {
             // The plugin's view: every key it touches must start with
             // its declared prefix. Reject `..`, absolute slashes, etc.
             // by checking literal prefix membership.
-            if !(req_norm == prefix_norm
-                || req_norm.starts_with(&format!("{prefix_norm}/")))
-            {
+            if !(req_norm == prefix_norm || req_norm.starts_with(&format!("{prefix_norm}/"))) {
                 return None;
             }
         }
@@ -204,12 +235,19 @@ impl PluginCtx {
 /// Barrier prefix of one entity's data for an entity-scoped plugin.
 /// `None` when `entity_id` is empty or contains anything but ASCII
 /// alphanumerics, `-` and `_`: the id is interpolated into a storage
-/// path, so it must not be able to carry `/` or `..`.
+/// path, so it must not be able to carry `/` or `..`. The plugin name is
+/// interpolated too and, on the administrator purge routes, comes from the
+/// request path, so a name that is empty or carries a path separator or `..`
+/// is refused as well (no catalog name can be one: the catalog lays plugins
+/// out one directory per name).
 pub fn entity_data_root(plugin_name: &str, entity_id: &str) -> Option<String> {
-    let ok = !entity_id.is_empty()
-        && entity_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    let name_ok = !plugin_name.is_empty()
+        && !plugin_name.contains('/')
+        && !plugin_name.contains('\\')
+        && !plugin_name.contains("..");
+    let ok = name_ok
+        && !entity_id.is_empty()
+        && entity_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     ok.then(|| format!("core/plugins/{plugin_name}/data/entity/{entity_id}/"))
 }
 
@@ -255,8 +293,7 @@ impl WasmRuntime {
         input: &[u8],
         core: Option<Arc<dyn VaultCtx>>,
     ) -> Result<InvokeOutput, RuntimeError> {
-        self.invoke_with_config(manifest, wasm_bytes, input, core, Default::default())
-            .await
+        self.invoke_with_config(manifest, wasm_bytes, input, core, Default::default()).await
     }
 
     /// Like `invoke`, but also exposes `config` to the plugin via
@@ -270,8 +307,7 @@ impl WasmRuntime {
         core: Option<Arc<dyn VaultCtx>>,
         config: std::collections::BTreeMap<String, String>,
     ) -> Result<InvokeOutput, RuntimeError> {
-        self.invoke_scoped(manifest, wasm_bytes, input, core, config, None)
-            .await
+        self.invoke_scoped(manifest, wasm_bytes, input, core, config, None).await
     }
 
     /// Like [`invoke_with_config`](Self::invoke_with_config), with the
@@ -288,25 +324,18 @@ impl WasmRuntime {
         config: std::collections::BTreeMap<String, String>,
         entity_id: Option<&str>,
     ) -> Result<InvokeOutput, RuntimeError> {
-        let data_root = if manifest.capabilities.storage_scope == super::manifest::StorageScope::Entity
-        {
+        let data_root = if manifest.capabilities.storage_scope == super::manifest::StorageScope::Entity {
             entity_data_root(&manifest.name, entity_id.unwrap_or("")).ok_or_else(|| {
-                RuntimeError::Engine(
-                    "entity-scoped plugin invoked without a valid caller entity".to_string(),
-                )
+                RuntimeError::Engine("entity-scoped plugin invoked without a valid caller entity".to_string())
             })?
         } else {
             format!("core/plugins/{}/data/", manifest.name)
         };
         // Reuse a previously-compiled module when one is cached for
         // this `(name, sha256)` pair; otherwise compile + insert.
-        let module = self
-            .cache
-            .get_or_compile(&manifest.name, &manifest.sha256, wasm_bytes)?;
+        let module = self.cache.get_or_compile(&manifest.name, &manifest.sha256, wasm_bytes)?;
 
-        let limits = StoreLimitsBuilder::new()
-            .memory_size(self.memory_budget)
-            .build();
+        let limits = StoreLimitsBuilder::new().memory_size(self.memory_budget).build();
 
         // Extensibility v2 (Phase 7): load the live network grant (if
         // any) so `bv.net_http` is gated by the same admin-approved
@@ -319,13 +348,7 @@ impl WasmRuntime {
                 .unwrap_or_default(),
             None => Vec::new(),
         };
-        let net_https_only = manifest
-            .capabilities
-            .app
-            .net
-            .as_ref()
-            .map(|n| n.https_only)
-            .unwrap_or(true);
+        let net_https_only = manifest.capabilities.app.net.as_ref().map(|n| n.https_only).unwrap_or(true);
 
         let ctx = PluginCtx {
             plugin_name: manifest.name.clone(),
@@ -337,12 +360,7 @@ impl WasmRuntime {
             limits,
             core,
             config,
-            allowed_keys: manifest
-                .capabilities
-                .allowed_keys
-                .iter()
-                .cloned()
-                .collect(),
+            allowed_keys: manifest.capabilities.allowed_keys.iter().cloned().collect(),
             net_hosts,
             net_https_only,
             notify_emit: manifest.capabilities.notify_emit,
@@ -351,9 +369,7 @@ impl WasmRuntime {
 
         let mut store: Store<PluginCtx> = Store::new(self.cache.engine(), ctx);
         store.limiter(|c| &mut c.limits);
-        store
-            .set_fuel(self.fuel_budget)
-            .map_err(|e| RuntimeError::Engine(e.to_string()))?;
+        store.set_fuel(self.fuel_budget).map_err(|e| RuntimeError::Engine(e.to_string()))?;
 
         let mut linker: Linker<PluginCtx> = Linker::new(self.cache.engine());
         register_host_imports(&mut linker, manifest)?;
@@ -363,30 +379,19 @@ impl WasmRuntime {
             .await
             .map_err(|e| RuntimeError::Instantiate(e.to_string()))?;
 
-        let memory = instance
-            .get_memory(&mut store, "memory")
-            .ok_or(RuntimeError::MissingExport("memory"))?;
-        let alloc: TypedFunc<i32, i32> = instance
-            .get_typed_func(&mut store, "bv_alloc")
-            .map_err(|_| RuntimeError::MissingExport("bv_alloc"))?;
-        let run: TypedFunc<(i32, i32), i32> = instance
-            .get_typed_func(&mut store, "bv_run")
-            .map_err(|_| RuntimeError::MissingExport("bv_run"))?;
+        let memory = instance.get_memory(&mut store, "memory").ok_or(RuntimeError::MissingExport("memory"))?;
+        let alloc: TypedFunc<i32, i32> =
+            instance.get_typed_func(&mut store, "bv_alloc").map_err(|_| RuntimeError::MissingExport("bv_alloc"))?;
+        let run: TypedFunc<(i32, i32), i32> =
+            instance.get_typed_func(&mut store, "bv_run").map_err(|_| RuntimeError::MissingExport("bv_run"))?;
 
-        let input_len: i32 = input
-            .len()
-            .try_into()
-            .map_err(|_| RuntimeError::Memory("input too large".to_string()))?;
-        let input_ptr = alloc
-            .call_async(&mut store, input_len)
-            .await
-            .map_err(|e| RuntimeError::Invoke(e.to_string()))?;
+        let input_len: i32 = input.len().try_into().map_err(|_| RuntimeError::Memory("input too large".to_string()))?;
+        let input_ptr =
+            alloc.call_async(&mut store, input_len).await.map_err(|e| RuntimeError::Invoke(e.to_string()))?;
         if input_ptr < 0 {
             return Err(RuntimeError::Invoke("bv_alloc returned negative pointer".to_string()));
         }
-        memory
-            .write(&mut store, input_ptr as usize, input)
-            .map_err(|e| RuntimeError::Memory(e.to_string()))?;
+        memory.write(&mut store, input_ptr as usize, input).map_err(|e| RuntimeError::Memory(e.to_string()))?;
 
         let status = run
             .call_async(&mut store, (input_ptr, input_len))
@@ -401,62 +406,47 @@ impl WasmRuntime {
         let fuel_remaining = store.get_fuel().unwrap_or(0);
         let fuel_consumed = self.fuel_budget.saturating_sub(fuel_remaining);
 
-        let outcome = if status == 0 {
-            InvokeOutcome::Success
-        } else {
-            InvokeOutcome::PluginError(status)
-        };
+        let outcome = if status == 0 { InvokeOutcome::Success } else { InvokeOutcome::PluginError(status) };
 
         Ok(InvokeOutput { outcome, response, fuel_consumed })
     }
 }
 
-fn register_host_imports(
-    linker: &mut Linker<PluginCtx>,
-    manifest: &PluginManifest,
-) -> Result<(), RuntimeError> {
+fn register_host_imports(linker: &mut Linker<PluginCtx>, manifest: &PluginManifest) -> Result<(), RuntimeError> {
     // bv.log — sync; capability-gated by log_emit.
     linker
-        .func_wrap(
-            "bv",
-            "log",
-            |mut caller: Caller<'_, PluginCtx>, level: i32, ptr: i32, len: i32| {
-                if !caller.data().log_emit {
-                    return;
-                }
-                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    Some(m) => m,
-                    None => return,
-                };
-                let mut buf = vec![0u8; len.max(0) as usize];
-                if memory.read(&caller, ptr as usize, &mut buf).is_err() {
-                    return;
-                }
-                let line = String::from_utf8_lossy(&buf).into_owned();
-                let plugin = caller.data().plugin_name.clone();
-                match level {
-                    1 => log::trace!(target: "plugin", "[{plugin}] {line}"),
-                    2 => log::debug!(target: "plugin", "[{plugin}] {line}"),
-                    3 => log::info!(target: "plugin", "[{plugin}] {line}"),
-                    4 => log::warn!(target: "plugin", "[{plugin}] {line}"),
-                    _ => log::error!(target: "plugin", "[{plugin}] {line}"),
-                }
-            },
-        )
+        .func_wrap("bv", "log", |mut caller: Caller<'_, PluginCtx>, level: i32, ptr: i32, len: i32| {
+            if !caller.data().log_emit {
+                return;
+            }
+            let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return,
+            };
+            let mut buf = vec![0u8; len.max(0) as usize];
+            if memory.read(&caller, ptr as usize, &mut buf).is_err() {
+                return;
+            }
+            let line = String::from_utf8_lossy(&buf).into_owned();
+            let plugin = caller.data().plugin_name.clone();
+            match level {
+                1 => log::trace!(target: "plugin", "[{plugin}] {line}"),
+                2 => log::debug!(target: "plugin", "[{plugin}] {line}"),
+                3 => log::info!(target: "plugin", "[{plugin}] {line}"),
+                4 => log::warn!(target: "plugin", "[{plugin}] {line}"),
+                _ => log::error!(target: "plugin", "[{plugin}] {line}"),
+            }
+        })
         .map_err(|e| RuntimeError::Engine(e.to_string()))?;
 
     // bv.set_response — sync.
     linker
-        .func_wrap(
-            "bv",
-            "set_response",
-            |mut caller: Caller<'_, PluginCtx>, ptr: i32, len: i32| {
-                if ptr < 0 || len < 0 {
-                    return;
-                }
-                caller.data_mut().response_window = Some((ptr as u32, len as u32));
-            },
-        )
+        .func_wrap("bv", "set_response", |mut caller: Caller<'_, PluginCtx>, ptr: i32, len: i32| {
+            if ptr < 0 || len < 0 {
+                return;
+            }
+            caller.data_mut().response_window = Some((ptr as u32, len as u32));
+        })
         .map_err(|e| RuntimeError::Engine(e.to_string()))?;
 
     // bv.config_get — sync. Reads the operator-supplied config map
@@ -495,17 +485,10 @@ fn register_host_imports(
     // than emitting a negative number; plugins shouldn't see a
     // negative timestamp from this import.
     linker
-        .func_wrap(
-            "bv",
-            "now_unix_ms",
-            |_caller: Caller<'_, PluginCtx>| -> i64 {
-                use std::time::{SystemTime, UNIX_EPOCH};
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0)
-            },
-        )
+        .func_wrap("bv", "now_unix_ms", |_caller: Caller<'_, PluginCtx>| -> i64 {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+        })
         .map_err(|e| RuntimeError::Engine(e.to_string()))?;
 
     // bv.storage_*. Async because they touch the barrier. Registered
@@ -516,67 +499,39 @@ fn register_host_imports(
     // selective registration so a plugin that imports a storage symbol
     // it didn't declare a prefix for is rejected at instantiate time.
     linker
-        .func_wrap_async(
-            "bv",
-            "storage_get",
-            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
-                let (key_ptr, key_len, out_ptr, out_max) = args;
-                Box::new(async move {
-                    storage_get_impl(&mut caller, key_ptr, key_len, out_ptr, out_max).await
-                })
-            },
-        )
+        .func_wrap_async("bv", "storage_get", |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
+            let (key_ptr, key_len, out_ptr, out_max) = args;
+            Box::new(async move { storage_get_impl(&mut caller, key_ptr, key_len, out_ptr, out_max).await })
+        })
         .map_err(|e| RuntimeError::Engine(e.to_string()))?;
 
     linker
-        .func_wrap_async(
-            "bv",
-            "storage_put",
-            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
-                let (key_ptr, key_len, val_ptr, val_len) = args;
-                Box::new(async move {
-                    storage_put_impl(&mut caller, key_ptr, key_len, val_ptr, val_len).await
-                })
-            },
-        )
+        .func_wrap_async("bv", "storage_put", |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
+            let (key_ptr, key_len, val_ptr, val_len) = args;
+            Box::new(async move { storage_put_impl(&mut caller, key_ptr, key_len, val_ptr, val_len).await })
+        })
         .map_err(|e| RuntimeError::Engine(e.to_string()))?;
 
     linker
-        .func_wrap_async(
-            "bv",
-            "storage_delete",
-            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32)| {
-                let (key_ptr, key_len) = args;
-                Box::new(async move {
-                    storage_delete_impl(&mut caller, key_ptr, key_len).await
-                })
-            },
-        )
+        .func_wrap_async("bv", "storage_delete", |mut caller: Caller<'_, PluginCtx>, args: (i32, i32)| {
+            let (key_ptr, key_len) = args;
+            Box::new(async move { storage_delete_impl(&mut caller, key_ptr, key_len).await })
+        })
         .map_err(|e| RuntimeError::Engine(e.to_string()))?;
 
     linker
-        .func_wrap_async(
-            "bv",
-            "storage_list",
-            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
-                let (prefix_ptr, prefix_len, out_ptr, out_max) = args;
-                Box::new(async move {
-                    storage_list_impl(&mut caller, prefix_ptr, prefix_len, out_ptr, out_max).await
-                })
-            },
-        )
+        .func_wrap_async("bv", "storage_list", |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
+            let (prefix_ptr, prefix_len, out_ptr, out_max) = args;
+            Box::new(async move { storage_list_impl(&mut caller, prefix_ptr, prefix_len, out_ptr, out_max).await })
+        })
         .map_err(|e| RuntimeError::Engine(e.to_string()))?;
 
     // bv.audit_emit. Async because the broker's `log` is async.
     linker
-        .func_wrap_async(
-            "bv",
-            "audit_emit",
-            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32)| {
-                let (ptr, len) = args;
-                Box::new(async move { audit_emit_impl(&mut caller, ptr, len).await })
-            },
-        )
+        .func_wrap_async("bv", "audit_emit", |mut caller: Caller<'_, PluginCtx>, args: (i32, i32)| {
+            let (ptr, len) = args;
+            Box::new(async move { audit_emit_impl(&mut caller, ptr, len).await })
+        })
         .map_err(|e| RuntimeError::Engine(e.to_string()))?;
 
     // bv.crypto_random — sync. Pulls random bytes from OsRng. Not
@@ -674,14 +629,10 @@ fn register_host_imports(
     // enforced by the shared `net_gate` + `net_http` (same code path as
     // the client `bvx.net_http`). Ungranted → `NET_NOT_GRANTED`.
     linker
-        .func_wrap_async(
-            "bv",
-            "net_http",
-            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
-                let (rp, rl, op, om) = args;
-                Box::new(async move { net_http_impl(&mut caller, rp, rl, op, om).await })
-            },
-        )
+        .func_wrap_async("bv", "net_http", |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
+            let (rp, rl, op, om) = args;
+            Box::new(async move { net_http_impl(&mut caller, rp, rl, op, om).await })
+        })
         .map_err(|e| RuntimeError::Engine(e.to_string()))?;
 
     // ABI minor 2: notifications. `bv.notify_send` raises a notification
@@ -691,34 +642,22 @@ fn register_host_imports(
     // inbox. All three use the standard (in_ptr, in_len, out_ptr,
     // out_max) buffer-retry convention.
     linker
-        .func_wrap_async(
-            "bv",
-            "notify_send",
-            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
-                let (rp, rl, op, om) = args;
-                Box::new(async move { notify_send_impl(&mut caller, rp, rl, op, om).await })
-            },
-        )
+        .func_wrap_async("bv", "notify_send", |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
+            let (rp, rl, op, om) = args;
+            Box::new(async move { notify_send_impl(&mut caller, rp, rl, op, om).await })
+        })
         .map_err(|e| RuntimeError::Engine(e.to_string()))?;
     linker
-        .func_wrap_async(
-            "bv",
-            "notify_list",
-            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
-                let (rp, rl, op, om) = args;
-                Box::new(async move { notify_list_impl(&mut caller, rp, rl, op, om).await })
-            },
-        )
+        .func_wrap_async("bv", "notify_list", |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
+            let (rp, rl, op, om) = args;
+            Box::new(async move { notify_list_impl(&mut caller, rp, rl, op, om).await })
+        })
         .map_err(|e| RuntimeError::Engine(e.to_string()))?;
     linker
-        .func_wrap_async(
-            "bv",
-            "notify_get",
-            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
-                let (rp, rl, op, om) = args;
-                Box::new(async move { notify_get_impl(&mut caller, rp, rl, op, om).await })
-            },
-        )
+        .func_wrap_async("bv", "notify_get", |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
+            let (rp, rl, op, om) = args;
+            Box::new(async move { notify_get_impl(&mut caller, rp, rl, op, om).await })
+        })
         .map_err(|e| RuntimeError::Engine(e.to_string()))?;
 
     // Suppress unused-variable warning when the manifest is not consulted
@@ -779,7 +718,8 @@ async fn net_http_impl(
             let path = format!("sys/plugins/{plugin}/net");
             // Fire-and-forget: audit-emit must not fail the call.
             tokio::spawn(async move {
-                crate::audit::emit_sys_audit(c.as_ref(), "", &path, crate::logical::Operation::Write, Some(body), None).await;
+                crate::audit::emit_sys_audit(c.as_ref(), "", &path, crate::logical::Operation::Write, Some(body), None)
+                    .await;
             });
         }
     };
@@ -1030,11 +970,7 @@ async fn storage_put_impl(
     }
 }
 
-async fn storage_delete_impl(
-    caller: &mut Caller<'_, PluginCtx>,
-    key_ptr: i32,
-    key_len: i32,
-) -> i32 {
+async fn storage_delete_impl(caller: &mut Caller<'_, PluginCtx>, key_ptr: i32, key_len: i32) -> i32 {
     let key = match read_string(caller, key_ptr, key_len) {
         Some(s) => s,
         None => return STORAGE_INTERNAL_ERROR,
@@ -1075,17 +1011,9 @@ async fn storage_list_impl(
         if prefix.contains("..") {
             return STORAGE_FORBIDDEN;
         }
-        let prefix_norm = caller
-            .data()
-            .storage_prefix
-            .as_deref()
-            .unwrap_or("")
-            .trim_end_matches('/');
+        let prefix_norm = caller.data().storage_prefix.as_deref().unwrap_or("").trim_end_matches('/');
         let req_norm = prefix.trim_start_matches('/').trim_end_matches('/');
-        if !prefix_norm.is_empty()
-            && req_norm != prefix_norm
-            && !req_norm.starts_with(&format!("{prefix_norm}/"))
-        {
+        if !prefix_norm.is_empty() && req_norm != prefix_norm && !req_norm.starts_with(&format!("{prefix_norm}/")) {
             return STORAGE_FORBIDDEN;
         }
         full_prefix.push_str(req_norm);
@@ -1101,11 +1029,7 @@ async fn storage_list_impl(
     write_to_buffer(caller, joined.as_bytes(), out_ptr, out_max)
 }
 
-async fn audit_emit_impl(
-    caller: &mut Caller<'_, PluginCtx>,
-    ptr: i32,
-    len: i32,
-) -> i32 {
+async fn audit_emit_impl(caller: &mut Caller<'_, PluginCtx>, ptr: i32, len: i32) -> i32 {
     if !caller.data().audit_emit {
         return AUDIT_FORBIDDEN;
     }
@@ -1124,18 +1048,10 @@ async fn audit_emit_impl(
     // the UTF-8 form.
     let mut body = serde_json::Map::new();
     let payload_str = String::from_utf8_lossy(&payload).into_owned();
-    let parsed = serde_json::from_str::<serde_json::Value>(&payload_str)
-        .unwrap_or(serde_json::Value::String(payload_str));
+    let parsed =
+        serde_json::from_str::<serde_json::Value>(&payload_str).unwrap_or(serde_json::Value::String(payload_str));
     body.insert("plugin_event".to_string(), parsed);
-    audit::emit_sys_audit(
-        core.as_ref(),
-        "",
-        &path,
-        crate::logical::Operation::Write,
-        Some(body),
-        None,
-    )
-    .await;
+    audit::emit_sys_audit(core.as_ref(), "", &path, crate::logical::Operation::Write, Some(body), None).await;
     0
 }
 
@@ -1231,8 +1147,7 @@ async fn notify_list_impl(
     };
     match service.list_authored_by_plugin(&plugin_name, "").await {
         Ok(list) => {
-            let bytes = serde_json::to_vec(&serde_json::json!({ "notifications": list }))
-                .unwrap_or_default();
+            let bytes = serde_json::to_vec(&serde_json::json!({ "notifications": list })).unwrap_or_default();
             write_to_buffer(caller, &bytes, out_ptr, out_max)
         }
         Err(_) => STORAGE_INTERNAL_ERROR,
@@ -1482,12 +1397,14 @@ mod tests {
 
     #[test]
     fn entity_data_root_rejects_path_tricks() {
-        assert_eq!(
-            entity_data_root("p", "4f0c-AA_1").as_deref(),
-            Some("core/plugins/p/data/entity/4f0c-AA_1/")
-        );
+        assert_eq!(entity_data_root("p", "4f0c-AA_1").as_deref(), Some("core/plugins/p/data/entity/4f0c-AA_1/"));
         for bad in ["", "..", "a/b", "../x", "a..b/", "a b", "a\\nb", "é"] {
             assert!(entity_data_root("p", bad).is_none(), "{bad:?}");
+        }
+        // The plugin name is interpolated too (the admin purge takes it from
+        // the request path).
+        for bad in ["", "..", "../sys", "a/b", "a\\b", "x/../../core"] {
+            assert!(entity_data_root(bad, "e1").is_none(), "{bad:?}");
         }
     }
 
@@ -1500,16 +1417,11 @@ mod tests {
         m.capabilities.storage_scope = crate::plugins::manifest::StorageScope::Entity;
         let rt = WasmRuntime::new().unwrap();
         for entity in [None, Some(""), Some("../x"), Some("a/b")] {
-            let r = rt
-                .invoke_scoped(&m, &bytes, b"{}", None, Default::default(), entity)
-                .await;
+            let r = rt.invoke_scoped(&m, &bytes, b"{}", None, Default::default(), entity).await;
             assert!(r.is_err(), "{entity:?} must be refused before the plugin runs");
         }
         // A valid entity runs.
-        let ok = rt
-            .invoke_scoped(&m, &bytes, b"{}", None, Default::default(), Some("e-1"))
-            .await
-            .unwrap();
+        let ok = rt.invoke_scoped(&m, &bytes, b"{}", None, Default::default(), Some("e-1")).await.unwrap();
         assert_eq!(ok.response, b"{}");
     }
 
@@ -1518,10 +1430,7 @@ mod tests {
         let bytes = wat::parse_str(echo_wat()).unwrap();
         let m = manifest_for(&bytes);
         let rt = WasmRuntime::new().unwrap();
-        let out = rt
-            .invoke_scoped(&m, &bytes, b"x", None, Default::default(), None)
-            .await
-            .unwrap();
+        let out = rt.invoke_scoped(&m, &bytes, b"x", None, Default::default(), None).await.unwrap();
         assert_eq!(out.response, b"x");
     }
 
@@ -1633,15 +1542,9 @@ mod tests {
         let bytes = wat::parse_str(now_unix_ms_wat()).unwrap();
         let manifest = manifest_for(&bytes);
         let runtime = WasmRuntime::new().unwrap();
-        let before = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
         let out = runtime.invoke(&manifest, &bytes, b"", None).await.unwrap();
-        let after = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let after = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
 
         assert!(matches!(out.outcome, InvokeOutcome::Success));
         assert_eq!(out.response.len(), 8);
@@ -1651,10 +1554,7 @@ mod tests {
 
         // The host's now should fall within the host's [before, after]
         // window the test took on either side of `runtime.invoke`.
-        assert!(
-            plugin_now >= before && plugin_now <= after,
-            "plugin now {plugin_now} outside [{before}, {after}]"
-        );
+        assert!(plugin_now >= before && plugin_now <= after, "plugin now {plugin_now} outside [{before}, {after}]");
     }
 
     #[tokio::test]
@@ -1663,12 +1563,7 @@ mod tests {
         let manifest = manifest_for(&bytes);
         let runtime = WasmRuntime::new().unwrap();
         let out = runtime
-            .invoke(
-                &manifest,
-                &bytes,
-                b"hello",
-                Some(test_core("plugin-storage-forbidden").await),
-            )
+            .invoke(&manifest, &bytes, b"hello", Some(test_core("plugin-storage-forbidden").await))
             .await
             .unwrap();
         // No capability => storage_get returns -2; the plugin then
@@ -1687,10 +1582,7 @@ mod tests {
         manifest.capabilities.storage_prefix = Some("".to_string());
         let runtime = WasmRuntime::new().unwrap();
         let core = test_core("plugin-storage-round-trip").await;
-        let out = runtime
-            .invoke(&manifest, &bytes, b"hello-storage", Some(core))
-            .await
-            .unwrap();
+        let out = runtime.invoke(&manifest, &bytes, b"hello-storage", Some(core)).await.unwrap();
         assert!(matches!(out.outcome, InvokeOutcome::Success));
         assert_eq!(out.response, b"hello-storage");
     }

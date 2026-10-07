@@ -15,6 +15,7 @@
 
 pub mod connect_clipboard;
 pub mod connect_mfa;
+pub mod connect_provider;
 pub mod connect_web;
 pub mod kernel_service;
 
@@ -324,6 +325,8 @@ impl ResourceBackend {
         let h_mfa_begin = self.inner.clone();
         let h_mfa_verify = self.inner.clone();
         let h_authorize = self.inner.clone();
+        let h_provider_candidates = self.inner.clone();
+        let h_providers = self.inner.clone();
         let h_web_launch = self.inner.clone();
         let h_web_totp = self.inner.clone();
         let h_web_result = self.inner.clone();
@@ -572,13 +575,56 @@ impl ResourceBackend {
                             field_type: FieldType::SecretStr,
                             required: false,
                             description: "Ticket from connect/mfa/verify. Required for gated profiles."
+                        },
+                        "provider_account_id": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Account picked from connect/provider/candidates. Required for a \
+                                          `provider` profile, refused for any other."
                         }
                     },
                     operations: [
                         {op: Operation::Write, handler: h_authorize.handle_connect_authorize}
                     ],
                     help: "Authorize a direct-path session open, consuming the connect \
-                           MFA ticket when the profile requires re-validation."
+                           MFA ticket when the profile requires re-validation. For a `provider` \
+                           profile, also release the picked account's credential."
+                },
+                {
+                    // Credential providers (features/self-accounts.md §6):
+                    // the caller's accounts that match this profile, as
+                    // metadata only. Type, OS and target come from the stored
+                    // record; the body names only the resource and profile.
+                    pattern: r"v2/connect/provider/candidates$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name the profile lives on."
+                        },
+                        "profile_id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Connection-profile id of a `provider` profile."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_provider_candidates.handle_connect_provider_candidates}
+                    ],
+                    help: "List the caller's credential-provider accounts that match a profile \
+                           (metadata only), with the target they would be released for."
+                },
+                {
+                    // The granted, active credential providers, for the
+                    // connection-profile editor's source list
+                    // (features/self-accounts.md §6, Phase 4). Names and the
+                    // declared protocols / secret kinds only; no account data.
+                    pattern: r"v2/connect/providers$",
+                    operations: [
+                        {op: Operation::Read, handler: h_providers.handle_connect_providers}
+                    ],
+                    help: "List the credential providers a connection profile can name: approved, \
+                           active plugins with their display name, protocols and secret kinds."
                 },
                 {
                     // Web Application Connect, `form` mode: authorise, enforce
@@ -606,6 +652,12 @@ impl ResourceBackend {
                             field_type: FieldType::SecretStr,
                             required: false,
                             description: "Ticket from connect/mfa/verify. Required for gated profiles."
+                        },
+                        "provider_account_id": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Account picked from connect/provider/candidates. Required for a \
+                                          `provider` profile."
                         }
                     },
                     operations: [

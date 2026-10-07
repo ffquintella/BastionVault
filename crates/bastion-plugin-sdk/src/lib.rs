@@ -414,6 +414,18 @@ mod tests {
         assert!(host::test_support::take_response().is_none());
     }
 
+    #[cfg(feature = "host_test")]
+    #[test]
+    fn random_bytes_has_the_requested_length_and_is_not_constant() {
+        let h = Host::new();
+        let a = h.random_bytes(16).unwrap();
+        let b = h.random_bytes(16).unwrap();
+        assert_eq!((a.len(), b.len()), (16, 16));
+        assert_ne!(a, b);
+        assert!(h.random_bytes(0).unwrap().is_empty());
+        assert!(h.random_bytes(4097).is_err());
+    }
+
     #[test]
     fn response_err_normalises_zero_status() {
         let r = Response::err(0, b"failure".to_vec());

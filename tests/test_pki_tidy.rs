@@ -75,10 +75,7 @@ async fn test_pki_phase4_tidy_end_to_end() {
         &core,
         &token,
         "pki/root/generate/internal",
-        json!({"common_name": "tidy-root.example.com", "key_type": "ec", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "tidy-root.example.com", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await;
 
@@ -107,10 +104,7 @@ async fn test_pki_phase4_tidy_end_to_end() {
         &core,
         &token,
         "pki/issue/short",
-        json!({"common_name": "a.example.com", "ttl": "1s"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "a.example.com", "ttl": "1s"}).as_object().unwrap().clone(),
     )
     .await
     .unwrap();
@@ -120,10 +114,7 @@ async fn test_pki_phase4_tidy_end_to_end() {
         &core,
         &token,
         "pki/issue/short",
-        json!({"common_name": "b.example.com", "ttl": "1s"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "b.example.com", "ttl": "1s"}).as_object().unwrap().clone(),
     )
     .await
     .unwrap();
@@ -173,13 +164,7 @@ async fn test_pki_phase4_tidy_end_to_end() {
     let (_, crl) = x509_parser::parse_x509_crl(&crl_der).unwrap();
     let revoked: Vec<String> = crl
         .iter_revoked_certificates()
-        .map(|c| {
-            c.user_certificate
-                .to_bytes_be()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        })
+        .map(|c| c.user_certificate.to_bytes_be().iter().map(|b| format!("{b:02x}")).collect::<String>())
         .collect();
     assert!(
         !revoked.iter().any(|s| s == &serial_a),

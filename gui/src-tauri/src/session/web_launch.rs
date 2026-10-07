@@ -415,6 +415,9 @@ pub struct LaunchRequest<'a> {
     /// (the server refuses a hash for a profile without a recipe).
     pub recipe_hash: Option<&'a str>,
     pub connect_ticket: Option<&'a str>,
+    /// `provider` source: the account the operator picked. The server
+    /// releases it into the bundle; `None` for every other source.
+    pub provider_account_id: Option<&'a str>,
     pub session_token: &'a str,
 }
 
@@ -431,6 +434,9 @@ pub async fn launch(channel: LaunchChannel, req: &LaunchRequest<'_>) -> Result<(
     }
     if let Some(t) = req.connect_ticket.map(str::trim).filter(|t| !t.is_empty()) {
         body.insert("connect_ticket".into(), Value::String(t.to_string()));
+    }
+    if let Some(id) = req.provider_account_id {
+        body.insert("provider_account_id".into(), Value::String(id.to_string()));
     }
     let mut data = channel.write("launch", body).await?;
     let launch_id = match web_recipe::take_launch_id(&mut data) {

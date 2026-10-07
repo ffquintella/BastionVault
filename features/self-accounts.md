@@ -77,16 +77,16 @@ GUI only, like the rest of Resource Connect.
 
 ## Current State
 
-**Status: In progress (2026-10-07). Phase 1, the host substrate, is implemented apart from the items listed under it; Phases 2–5 are not started. Nothing a user can see yet: no plugin uses the substrate and Connect does not know the `provider` source.**
+**Status: In progress (2026-10-07). All five phases are implemented apart from the items listed under each: the host substrate (1), the plugin (2), Connect integration on the server (3) and in the GUI and desktop host (4), and hardening and UX (5: the first-use badge, preselection of the account last used on the target, per-user counts for administrators, an audited and retried entity purge, and the operator guide `docs/self-accounts.md`). The feature stays in progress until the review gate closes: the L4 `make test-release` run, the manual per-platform checks against real SSH / RDP / web / Rustion targets (none run yet), and the security-review sign-off.**
 
 | Phase | Status |
 |---|---|
 | Phase 0 — verification spike | Partly answered (see the phase) |
 | Phase 1 — host substrate: caller identity, entity storage scope, credential providers | Done except the items listed under the phase |
-| Phase 2 — the `bastion-plugin-self-accounts` plugin | Todo |
-| Phase 3 — Connect integration, server side | Todo |
-| Phase 4 — Connect integration, GUI and Tauri host | Todo |
-| Phase 5 — hardening and UX follow-ups | Todo |
+| Phase 2 — the `bastion-plugin-self-accounts` plugin | Done except the items listed under the phase |
+| Phase 3 — Connect integration, server side | Done except the items listed under the phase |
+| Phase 4 — Connect integration, GUI and Tauri host | Done except the items listed under the phase |
+| Phase 5 — hardening and UX follow-ups | Done except the items listed under the phase |
 
 ### Context this feature builds on (verified 2026-10-05)
 
@@ -120,9 +120,10 @@ GUI only, like the rest of Resource Connect.
   It burns the MFA ticket for gated profiles and is the one server round trip
   every direct SSH/RDP launch makes.
 - **Older GUIs do not check `credential_source.kind`.** `isKnownProfile`
-  ([gui/src/lib/connectionProfiles.ts:114](../gui/src/lib/connectionProfiles.ts:114))
-  checks only that the field is an object, so an older client would show a
-  `provider` profile as launchable. Phase 0 settles what that client then does.
+  ([gui/src/lib/connectionProfiles.ts](../gui/src/lib/connectionProfiles.ts))
+  checked only that the field is an object, so an older client would show a
+  `provider` profile as launchable. Phase 0 settles what that client then does;
+  Phase 4 hardened this build (a known `kind` is required).
 - **The declarative surface form renders a small subset** of JSON Schema:
   `string`/`integer`/`boolean`, `format: "password"` (masked), `format:
   "textarea"` (not masked) and a single-select `enum`
@@ -172,8 +173,8 @@ GUI only, like the rest of Resource Connect.
   commands.
 - **Migration from `default-account`.** The two features coexist. Folding
   `default-account` into a provider is listed under *Alternatives considered*.
-- **Admin visibility into other users' account metadata.** See *Open
-  questions*.
+- **Admin visibility into other users' account metadata.** Decided in Phase 5
+  (*Open questions* 2): administrators see per-user counts only.
 
 ## Design
 
@@ -477,10 +478,14 @@ once, in Phase 1, and nothing in Phases 2–4 touches it again.
 - **Delete.** When the identity module deletes an entity, it calls
   `purge_entity_data`. A purge failure is logged at `ERROR` and audited, but
   it does not block the entity delete. A retry runs on the next plugin-runtime
-  tidy pass, recorded as a pending-purge marker.
+  tidy pass, recorded as a pending-purge marker. (As built, Phase 0 and
+  Phase 5: the trigger is the removal of the entity's last alias, and the
+  retry runs on the next automatic purge and on every administrator purge;
+  there is no plugin-runtime tidy pass.)
 - **Administrator purge.** `DELETE v2/sys/plugins/<name>/entity-data/<entity_id>`
   (granted by the `plugin-admin` policy) is used for offboarding and for the
-  merge case below. It is audited. There is no read counterpart.
+  merge case below. It is audited. Its only read counterpart is the per-user
+  *count* (`GET v2/sys/plugins/<name>/entity-data`, Phase 5).
 - **Merge.** See *Open questions*. Until that is decided, data under a
   merged-away entity id is retained and reachable only by the purge route.
 
@@ -509,7 +514,8 @@ So each account can carry `applies_to.targets`:
   those protocols. An account without targets is then never a candidate for
   them. With `require_targets = all`, SSH and RDP need targets too.
 - The picker shows the target next to the list (§6). Phase 5 adds a
-  "first use on this target" badge.
+  "first use on this target" badge, a hint on top of the binding, never a
+  replacement for it.
 
 The plugin does the matching, because it owns the patterns. The host supplies
 the target and is the only party that computes it.
@@ -656,14 +662,18 @@ accounts* when the provider is active and granted. It shows nothing else.
 | `self-accounts/v2/accounts/<id>/totp` | delete | the owner | 2 |
 | `self-accounts/v2/settings` | read | the owner | 2 |
 | `resources/v2/connect/provider/candidates` | update | `connect` grant on the resource | 3 |
+| `resources/v2/connect/providers` | read | baseline policies (names and declarations only) | 4 |
 | `resources/v2/connect/authorize` | update, new field `provider_account_id`, new response field `credential` | unchanged | 3 |
 | `resources/v2/connect/web/launch` | update, new field `provider_account_id` | unchanged | 3 |
 | `rustion/v2/session/open` | update, new field `provider_account_id` | unchanged | 3 |
 | `v2/sys/plugins/<name>/grants/credential-provider` | read, write, delete | `plugin-admin` | 1 |
 | `v2/sys/plugins/<name>/entity-data/<entity_id>` | delete | `plugin-admin` | 1 |
+| `v2/sys/plugins/<name>/entity-data` | read (counts only) | `plugin-admin` | 5 |
 
-Tauri commands: `connect_provider_candidates` (new); `session_open_ssh`,
-`session_open_rdp` and `session_open_web` gain `provider_account_id`.
+Tauri commands: `connect_provider_candidates` and `connect_credential_providers`
+(new); `session_open_ssh`, `session_open_rdp` and `session_open_web` gain
+`provider_account_id`. Phase 5: `plugins_entity_data_usage` and
+`plugins_purge_entity_data` (embedded, and remote pinned to `/v2`).
 Document all of it in `docs/api.md`, and the plugin in its own README under
 `plugins-ext/`.
 
@@ -686,10 +696,23 @@ Answer the questions this spec defers, and record the answers here:
   so an older GUI lists a `provider` profile as launchable. The older Tauri host
   then fails closed in `resolve_ssh_credential` with *"unknown credential source"*
   (`gui/src-tauri/src/commands/connect.rs`, the `other =>` arm), which is the
-  behaviour §10 asks for. **Not yet checked:** that the older profile editor
-  round-trips an unknown `credential_source` without rewriting it. Until that is
-  run, ship the `isKnownProfile` hardening (a known `kind` is required) before
-  the first release that can create `provider` profiles.
+  behaviour §10 asks for. Read again for Phase 4 (from the code, not run):
+  against a Phase 3 server the older host never gets that far on the direct
+  path — its `connect/authorize` call carries no `provider_account_id`, and the
+  server refuses with `invalid_request: provider_account_id is required for a
+  provider profile …` before any ticket is redeemed or anything released; the
+  older GUI shows that text in its toast. It has already run the MFA ceremony
+  by then (it gates before opening), so a gated profile costs that operator a
+  factor prompt, not a ticket. The older RDP arm says *"credential source
+  `provider` lands in a later phase"* (reached only against a pre-Phase 3
+  server); the older web host refuses the profile before anything with
+  *"credential source `provider` cannot sign in a `form` login"*. The older
+  editor keeps an unknown `credential_source` as long as its source select is
+  not touched (its `validateProfile` returns `undefined` for the kind, which
+  does not block Save); changing the select replaces it. This build hardens
+  `isKnownProfile` (Phase 4): a profile whose source kind it does not know is
+  hidden, kept byte-for-byte on every write, and counted in a notice on the
+  Connection tab.
 - **`.bvx` exports.** `src/exchange/` and `src/backup/` reference no
   `core/plugins/` key, so exchange exports do not carry plugin data. BVBK full
   backups copy the barrier and do include it, as §10 says.
@@ -733,29 +756,200 @@ Answer the questions this spec defers, and record the answers here:
 - The consent panel and the three grant commands exist (embedded and remote);
   the remote calls pin `/v2` because the route is not on the v1 scope.
 - **Not done:** the audit event and the pending-purge retry marker for a failed
-  entity purge (a failure is only logged, and the admin route is the retry); the
+  entity purge (done in Phase 5); the
   `plugin-admin` policy entries (no such policy exists in the tree, so the new
-  `v2/sys/plugins/*` routes are covered only by the default deny); the
-  `bvault_plugin_provider_requests_total` metric; and a test that drives
-  `forget_alias` through a real plugin host.
+  `v2/sys/plugins/*` routes are covered only by the default deny); and a test
+  that drives `forget_alias` through a real plugin host. (The
+  `bvault_plugin_provider_requests_total` metric listed here landed with
+  Phase 3.)
 - **Not run:** the `provider` SDK feature was only built and tested on the host.
   The `wasm32-wasip1` target is not installed here, so its `no_std` build is
   unverified.
 
-### Phase 2 — the plugin — **Todo**
+### Phase 2 — the plugin — **Done except the items below (2026-10-07)**
 
 `plugins-ext/bastion-plugin-self-accounts`: the data model, CRUD, the
 matching rules (type, OS, protocol, targets), config, the surface, the
 signed `.bvplugin`, and testkit-driven tests.
 
-### Phase 3 — Connect integration, server — **Todo**
+Tested at four levels: handlers against the SDK's host stubs (29), the shipped
+`plugin.toml` and `surface.json` as artefacts (6), the compiled wasm in the
+testkit's mirror of the host (7), and the compiled wasm in the **real** host
+(`engine_tests::self_accounts_host`, 4, `#[ignore]`d until the wasm is built;
+`make plugins-test` does both). The last level is the one that proves the
+testkit's mirror has not drifted from `PluginCtx`: entity prefixes, the 403 for
+a token with no entity, the grant gate, the shape check on a release, and the
+purge when a principal's last alias goes.
+
+**Where the implementation differs from the spec, and what is left:**
+
+- **Built for `wasm32-unknown-unknown`, not `wasm32-wasip1`.** The host links
+  only the `bv` import module. A `wasip1` build imports
+  `wasi_snapshot_preview1` (`environ_get`, `fd_write`, `proc_exit`) and fails to
+  instantiate with *unknown import*. `plugins-wasm` and `plugins-test` build
+  this plugin for `PLUGINS_WASM_TARGET`, which is now `wasm32-unknown-unknown`
+  for every reference wasm plugin (an earlier draft of this note named a
+  separate `PLUGINS_NOWASI_TARGET`, which does not exist). **The `wasip1`
+  builds of the other reference plugins imported the same four functions.** The `totp` build made
+  here fails to instantiate in the testkit (which mirrors the host's linker)
+  with the same *unknown import*; the real host was not run against it.
+- **`list` returns `data.entries`, not `data.keys`**, because the management
+  table prefers `keys` and would render bare ids.
+- **The management page cannot edit an account**, only add and delete: a
+  surface row action cannot open a form. Editing is `write v2/accounts/<id>`.
+  The password form always carries a TOTP field (a static surface cannot hide
+  it); the plugin refuses a seed with a clear message unless allowed.
+- **Form fields are flat** (`resource_types`, `targets`, …) rather than a nested
+  `applies_to`, because that is what a surface form submits. `targets` is one
+  comma- or newline-separated text field.
+- **OpenSSH keys only.** A PKCS#8 PEM is refused with a precise message; the SSH
+  session reads the OpenSSH form.
+- **A write that stores an account which can never be offered** (no `https://`
+  origin for web, or no host target under `require_targets = all`) succeeds
+  with a `warnings` entry instead of failing.
+- **Not done:** the signed `.bvplugin` carries no surface, because
+  `bv-plugin-pack` cannot embed `surface.json` yet. Registering it needs a
+  `[surface]` table (`schema_version`, `sha256`, `size`) in `plugin.toml`
+  before packing and signing, plus `surface_b64` on `POST /v1/sys/plugins`:
+  the register handler ignores `surface_b64` when the manifest declares no
+  surface, and the GUI's Register dialog never sends it (found while writing
+  the Phase 5 operator guide); the plugin was not signed or registered through the GUI by
+  hand; `plugin.toml` and the host test's `manifest()` are two copies of one
+  manifest (the plugin's own test checks the file, the host test mirrors it);
+  and the SDK gained `Host::random_bytes` and `test_support::enable_storage`,
+  which are new public API of `bastion-plugin-sdk`.
+
+### Phase 3 — Connect integration, server — **Done except the items below (2026-10-07)**
 
 The `provider` source in `bv-engine-resource` (candidates endpoint, release on
 `authorize` and `web/launch`) and in `bv-engine-rustion` (`session/open`).
 Target computation from stored metadata, audit, metrics and baseline policy
 grants.
 
-### Phase 4 — Connect integration, GUI and Tauri host — **Todo**
+What landed:
+
+- `POST resources/v2/connect/provider/candidates` (`connect_provider.rs`). Reads
+  `resource` and `profile_id` from the body and nothing else; checks the
+  `connect` grant, loads the stored profile, requires a `provider` source naming
+  a live, granted provider that declares the profile's protocol, builds the
+  query from the stored record, and returns metadata only (`candidates`, the
+  `target`, `resource_type`, `os_type`, `display_name`).
+- `authorize` (direct SSH / RDP): `provider_account_id`, release after the
+  ticket, `credential` in the response. `web/launch` (`form`):
+  `WebCredentialSource::Provider`, `provider_account_id`, the release in the
+  launch bundle. `rustion/v2/session/open`: the `provider` source, released and
+  sealed server-side. Every pre-check that can fail without the provider runs
+  before the MFA ticket is redeemed on all three routes; the provider is told
+  `mfa_verified = true` only when a ticket was redeemed for that very call.
+- The host bridge maps the SDK's statuses to `404 no_match`, `403
+  mfa_required`, `400 bad_request` and `500 provider_error`, never echoing the
+  plugin's text, and a failed shape check to `502 bad_provider_output`. Every
+  provider-path error starts with a stable reason code (`<reason>: …`).
+- `connect.provider.release` and `connect.provider.candidates` audit lines, the
+  `bvault_plugin_provider_requests_total` metric, and the candidates endpoint in
+  the baseline policies (`default`, `shared-access`, the namespace baseline,
+  `administrator`).
+- Tests: pure ones in `bv-kernel-api` (target rule, caller attestation, reason
+  codes, audit line), `bv-engine-resource` (profile parsing, needs, the bundle
+  credential, the `credential` object), `bv-engine-rustion` (envelope kinds,
+  encrypted-key refusal) and the facade (status mapping, metric export); and
+  `engine_tests::self_accounts_connect`, four tests against the real wasm through
+  the full pipeline (`#[ignore]`d like `self_accounts_host`, run by `make
+  plugins-test`). They assert that the released password appears in no audit
+  device entry, captured log line, refusal text or candidates response.
+
+**Where the implementation differs from §4–§9, and why:**
+
+- **The dial target is the desktop host's first candidate**: the profile's
+  `target_host`, else the resource's `ip_address`, else its `hostname`
+  (`profile_host_candidates` puts the IP before the name). §5 said "hostname or
+  IP". It is normalised the way `recipe::origin_key` normalises an origin's
+  host: ASCII only, lower-cased, no trailing dot, no `*`, `%`, `[`, `]`,
+  userinfo, path or surrounding whitespace, and a `:` only when the whole value
+  is an IPv6 address, so the provider matches exactly one spelling of one
+  host. So a resource with both set is matched on its IP, and an account bound
+  only by DNS pattern does not match it. Only that one host is bound: the
+  `authorize` response carries `target`, and **Phase 4 must dial exactly it**,
+  with no fallback to another host candidate — otherwise a resource whose IP
+  matches and whose hostname is hostile would receive the credential on a
+  network-layer fallback.
+- **`authorize` refuses to release when the transport policy forbids a direct
+  session** (`rustion-required` or a lock violation, `403 transport_policy`).
+  Not in the spec, but without it *Where it stops*'s advice to route these
+  profiles through Rustion would not hold against a client that calls
+  `authorize` directly.
+- **`rustion/v2/session/open` pins the envelope's target.** The request's
+  `target_host` / `target_port` / `target_protocol` must equal the stored target
+  (or be omitted) and are overwritten with it; `credential_material` with a
+  `provider` source is refused; the request's `credential_source.provider` must
+  equal the stored profile's. The envelope kind is `ssh-password`, `ssh-key` or
+  `rdp-password`; RDP has no password-domain field on the wire, so a domain
+  travels as `DOMAIN\user`, and SSH ignores it.
+- **Web**: `http-auth` refuses a `provider` source (§ *Out of scope*);
+  `credential_source.totp` is read as for `secret`; a TOTP code from a provider
+  seed is computed once at launch and `connect/web/totp` offers no refresh for it
+  (the seed is not kept server-side); heuristic recipes never ask the provider
+  for a TOTP (asking for one the account lacks is refused); the domain is not a
+  web fill.
+- **Shared rules live in `bv-kernel-api::provider`**, not in either engine:
+  `CallerIdentity::from_request` (the facade's `caller_from_request` now
+  delegates to it), the reason codes, `host_target`, `provider_resource`,
+  `profile_provider` and the `ProviderAudit` line. The `PluginHost` trait itself
+  is unchanged.
+- **Audit lines are `target: "audit"` log lines** next to `connect.web.*`, not
+  audit-broker entries. Reasons beyond §9's list: `unsupported_protocol`,
+  `bad_request`, `provider_error`, `invalid_profile`, `invalid_request`,
+  `connect_denied`, `transport_policy`. A refused connect grant on `authorize`
+  writes no `connect.provider.release` line: the profile cannot be read before
+  the grant, so the call is not known to be a provider launch (the pipeline's
+  own audit entry records it).
+- **The metric counts calls that reach the host bridge.** A refusal an engine
+  makes first (no entity, provider not live) is in the audit line only. A
+  provider name that is not in the catalog is counted as `plugin="unregistered"`.
+
+**AppRole identity fix (found in the Phase 3 review).** `CallerIdentity` takes
+`entity_id` and `username` from the token metadata, and an AppRole token's
+metadata started as a copy of the secret-id's caller-supplied `metadata`, with
+`entity_id` overwritten only when entity resolution succeeded and `username`
+never. Whoever could create a secret-id could name another person's entity and
+release their accounts. Secret-id creation now refuses every reserved key
+(`bv_logical::is_reserved_token_meta_key`) and login drops any a stored
+secret-id still carries (`engine_tests::approle_reserved_meta`). Tokens issued
+before the fix keep their metadata until they expire or are revoked.
+
+**Audit-pipeline check.** The `authorize` response now carries a secret. The
+request pipeline builds its audit-device entry with `log_raw = false` hard-coded
+(`bv-core` `handle_log_phase`), and `bv-audit` HMACs every string in the
+response body, nested objects included, so `credential.secret.password` reaches
+a device as `hmac:<hex>`. No change was needed; `self_accounts_connect` asserts
+it.
+
+**Known limits left from the Phase 3 review (not fixed):**
+
+- On `rustion/v2/session/open` the MFA ticket is redeemed, and the release is
+  audited `outcome=success` (stamping `last_used_at`), before a bastion is
+  chosen. With no bastion available the caller sees a 502/503 after a
+  "successful" release. The fix is to check bastion availability before the MFA
+  gate.
+- A forged or stale `provider_account_id` costs the caller an MFA ticket
+  (`no_match` is reported after the redeem; a test asserts this). Checking the
+  id against `provider_candidates` before redeeming would avoid it.
+
+**Not done:**
+
+- The GUI and Tauri host (Phase 4), including the direct-path `session.open`
+  line with `credential_source = provider`, which the desktop host writes.
+  (Done in Phase 4.)
+- `tests/test_self_accounts_connect.rs` with a signed fixture plugin (§ Testing
+  Plan): the engine test covers the same flow in-process with an unsigned
+  registration.
+- `make test-release` (L4), which the review gate requires before merge.
+- AppRole `login_renew` still looks the role up by `metadata["username"]`, which
+  an AppRole token never carries legitimately, so renewal never applies the
+  role's current TTLs. Pre-existing and left alone; with reserved keys stripped
+  at login it can no longer be pointed at another role.
+
+### Phase 4 — Connect integration, GUI and Tauri host — **Done except the items below (2026-10-07)**
 
 - `CredentialSource` gains `{ kind: "provider"; provider: string }`.
 - The profile editor offers each granted provider by its `display_name`
@@ -765,8 +959,150 @@ grants.
 - Build `ProviderAccountPicker`, `connect_provider_candidates`, and the
   `provider` arms in `resolve_ssh_credential` / `resolve_rdp_credential` and
   in the web launcher.
+- **Dial exactly the `target` that `connect/authorize` returns** for a
+  provider profile, and never fall back to another host candidate
+  (`profile_host_candidates`) on a network-layer error: the credential is
+  released for that one host (Phase 3, *Where the implementation differs*).
 
-### Phase 5 — hardening and UX — **Todo**
+What landed:
+
+- **GUI** (`gui/src/`): `CredentialSource` `provider` (with the optional
+  `totp` parameters the server reads for a web `form` source); the
+  `connectionProfiles.ts` helpers and `webFormProfile.ts` checks for it;
+  `components/ProviderAccountPicker.tsx` (the picker and
+  `useProviderAccountPicker`); `lib/connectFlow.ts` (`connectProfile`, the one
+  sequence picker → MFA → open that the Connection tab, the card
+  quick-Connect, the ⌘K palette and a Session Workspace layout restore all
+  use); `components/ProviderSourceFields.tsx` (the editor's provider options
+  and notice); `lib/credentialProviders.ts` (pure helpers, refusal-code
+  wording, the provider page route); `hooks/useCredentialProviders.ts`; the
+  *Accounts for Connect* link card on My Profile.
+- **Desktop host** (`gui/src-tauri/src/commands/connect_provider.rs`):
+  `connect_credential_providers`, `connect_provider_candidates`, the direct
+  release (`authorize_provider_direct`), `DialPlan` / `dial_in_order`, which the
+  SSH and RDP open paths now share. `session_open_ssh` / `_rdp` / `_web` take
+  `provider_account_id`; `provider` joins the `v2_resolvable` set (SSH) and the
+  RDP v2 route; the web launcher sends the id to `connect/web/launch`.
+- **Server**: `GET resources/v2/connect/providers` (see below) and its
+  baseline-policy `read` rule; the SSH login-class rule on every provider
+  route (see *Review fixes*).
+- **Tests**: vitest — `credentialProviders.test.ts` (helpers, the hardened
+  `isKnownProfile` and the unknown-source round trip, web-form checks),
+  `providerAccountPicker.test.tsx` (rendering, empty state, preselection,
+  keyboard, hostile strings as text, and the call order candidates → picker →
+  MFA → open, with a cancelled picker never reaching MFA),
+  `providerResources.test.tsx` (the card quick-Connect, the editor's offer and
+  filtering, the Connection-tab notice and a save keeping an unknown profile).
+  Rust — `commands::connect_provider::tests` (target pinning with a fake
+  dialler, the redacted `Debug`, a missing or malformed `provider_account_id`,
+  release/candidate parsing, hostile display strings), the web profile parser,
+  the window ACL; `bv-engine-resource` (`providers_listing`), `bv-kernel`
+  (`the_baselines_grant_the_provider_listing_read_only`), the facade
+  (`gate_tests::the_provider_listing_is_a_baseline_read` over HTTP, and the
+  listing before and after a revoked grant in the `#[ignore]`d
+  `self_accounts_connect` test).
+
+**Where the implementation differs from the spec, and why:**
+
+- **The provider list is `GET resources/v2/connect/providers`**, a logical path
+  on the resource engine, not a `v2/sys/…` route. The editor needs the list
+  in both the embedded and the remote mode; a logical path goes through the
+  same pipeline (token, ACL, namespace rewrite) in both, needs no actix
+  surface, and its baseline rule sits next to the other Connect endpoints'.
+  It returns names and declarations only.
+- **The candidate list is fetched before the picker opens.** A refusal
+  (`not_granted`, `no_entity`, …) is an error toast with operator text, not an
+  empty modal.
+- **The host withholds candidates it cannot show as text**: a label, login or
+  domain carrying control or invisible formatting characters (bidi overrides,
+  zero-width), an id with whitespace, a key for RDP, an unknown kind, a
+  duplicate id, anything past 256. The picker says how many were withheld.
+  Only one candidate is preselected, and only when it is the only one; with
+  several, Connect stays disabled until the operator picks.
+- **The *Add a self-account* link exists only in the main window** (Resources
+  page and its ⌘K palette). The Session Workspace shows no plugin pages, so its
+  picker states the empty case without a link. The route is the provider's
+  own registered surface page under `/plugin/<provider>/`, else no link.
+- **A connect-only caller may launch a provider profile on the direct path.**
+  Connect-only protects the resource's stored secrets, which this source never
+  reads; what reaches the desktop is the operator's own account, behind the
+  `connect` grant and (by default) MFA — the boundary *Where it stops*
+  describes.
+- **A brokered SSH resource refuses a provider profile**: every SSH login to
+  such a resource must be minted by the SSH engine, and a provider account is a
+  static credential. The editor does not offer the source there; the desktop
+  host settles the login class before *either* route (direct or Rustion); and
+  the server refuses it on every provider route — candidates, `authorize` and
+  `rustion/v2/session/open` — with `403 brokered_requires_ssh_engine`, before
+  any MFA ticket is redeemed, audited as `outcome=denied`. RDP and web are not
+  governed by the SSH login class and still release on a brokered resource.
+- **The direct path never re-routes a released credential.** After
+  `authorize` the host does not consult the Rustion policy again (the v2 route
+  already took any bastion route, and the server refuses a direct release under
+  `rustion-required`), so the credential cannot be handed to the v1
+  `rustion/session/open`.
+- **RDP**: the released `domain` goes in the CredSSP domain slot; a login of
+  the form `DOMAIN\user` / `user@realm` with no separate domain is split like
+  every other source's.
+- **Audit**: the SSH direct `session.open` line gains
+  `credential_source=provider provider=… account_id=… login_name=…`; the RDP
+  direct path had no `session.open` line, and gets one for provider launches
+  only; the web form line adds `provider` and `account_id`.
+- **Unknown profiles are announced**: the Connection tab says how many
+  profiles use a protocol or credential source this version cannot read.
+- **No sign-in re-run for a provider web session.** The toolbar's *Re-run
+  login* is unavailable, with the reason shown, for a `form` session that
+  signed in with a provider account: the provider releases again only after a
+  fresh connect-time MFA check, which the toolbar cannot run (its webview is
+  granted three commands, none a factor ceremony). Sent anyway, every re-run
+  would fail with `mfa_required` and leave a denied audit line. Disconnecting
+  and connecting again runs the picker and the check. Chosen over running the
+  MFA gate from the toolbar because it widens nothing.
+
+**Review fixes (2026-10-07).** An independent review of the Phase 4 diff found
+four issues, all fixed:
+
+1. *Brokered resources could still get a provider credential* on the Rustion
+   route: the host settled the SSH login class only on its direct branch,
+   after the bastion route, and no server route checked it. Now the host
+   settles it before either route, and the resource and Rustion engines refuse
+   a provider account for SSH on a brokered resource
+   (`bv_kernel_api::provider::require_not_brokered_for`, reason
+   `brokered_requires_ssh_engine`), on the candidates endpoint as well.
+   `engine_tests::self_accounts_connect::a_brokered_resource_never_releases_an_account_for_ssh`
+   covers both release routes, the candidates refusal, the unspent tickets, the
+   audit lines and RDP on the same brokered resource.
+2. *The released login and domain* end up in the session label and window
+   title, so they are now held to the picker's plain-text rule; a release
+   whose login or domain carries a bidi override or an invisible character is
+   refused (no secret in the refusal).
+3. *The invisible-character rule* is now by category: every `Cc` and `Cf`
+   code point, `Zl` / `Zp`, and every other `Default_Ignorable_Code_Point`
+   (variation selectors, the combining grapheme joiner, Hangul and Khmer
+   fillers, tags, the reserved ignorable ranges), from the Unicode 16.0
+   tables, with a test per code point class.
+4. *The web sign-in re-run* is unavailable for provider sessions (above).
+
+**Not done:**
+
+- **Not run against real targets.** No SSH, RDP or web session was opened with
+  a released account; the manual checks under *Testing Plan* (SSH password, SSH
+  key, RDP with a domain account, web `form` with a TOTP seed, Rustion SSH) are
+  outstanding, on every platform. The GUI was not driven in the desktop app
+  either: the picker and editor were checked through vitest only.
+- `make test-release` (L4), which the review gate requires before merge.
+- A Rustion-routed provider session's window label shows the profile's (empty)
+  username: the released login is known only server-side on that route.
+- The direct RDP path still writes no `session.open` line for the other
+  credential sources (pre-existing).
+- An older GUI facing a provider profile sees the server's
+  `invalid_request: provider_account_id is required …` (see Phase 0). Wording it
+  as *"this app is too old for this profile"* would need a server change.
+- The released secret is moved out of the response map, but the HTTP client's
+  own read buffer (remote mode) is not under the host's control; the same holds
+  for the web launch bundle.
+
+### Phase 5 — hardening and UX — **Done except the items below (2026-10-07)**
 
 - A "first use on this target" badge (the plugin keeps a per-account set of
   target hashes).
@@ -774,6 +1110,137 @@ grants.
 - Per-user account counts on the admin Plugins page (counts only, never
   metadata).
 - The operator guide.
+
+What landed:
+
+- **The seen-target record** (`plugins-ext/bastion-plugin-self-accounts/src/seen.rs`).
+  Per account, a separate key `accounts/<id>/seen` (so `meta` and the listing
+  stay small and secret-free) holding `{v: 1, targets: [{h, at}]}`: at most 64
+  entries, each a lowercase-hex SHA-256 and the unix-ms time of the last
+  release there; past 64 the least recently used entry is evicted. The digest
+  is domain-separated (`bastionvault/self-accounts/seen-target/v1`) and
+  length-framed over the target kind and its canonical form: for SSH / RDP the
+  dial host the host computed (trimmed, no trailing dot, lower case; **no
+  port**, and SSH and RDP share the kind, because the credential reaches the
+  same machine either way), for web the sorted, de-duplicated origin set
+  (lower case, no trailing `/`, `:443` dropped). Never the target text. A
+  record from a newer plugin is left untouched; an unreadable one reads as
+  empty and is replaced on the next release. The account's delete removes it.
+- **Recording**: only in `provider.release`, after every check passed (match,
+  MFA, the TOTP request, the secret), next to the `last_used_at` stamp; never
+  in `provider.candidates`, never for a refused release. Bookkeeping failures
+  are logged and never fail a launch. The release response is unchanged.
+- **Candidates** carry `first_use_on_target` (`true` when the record has no
+  entry for this target; an unreadable record errs toward `true`) and
+  `last_used_on_target` (RFC 3339, the time only). Both are additive and
+  serde-defaulted in `bv-kernel-api::provider::ProviderCandidate` (`false` /
+  absent from a provider that predates them) and the SDK's `Candidate`, which
+  now derives `Default` so a provider can write `..Default::default()`. The
+  host bridge and the resource engine pass them through unchanged; the
+  desktop host types them (a non-boolean flag withholds the candidate, a time
+  that does not parse is dropped) like `has_totp` and `last_used_at`.
+- **The picker** (`ProviderAccountPicker.tsx`, `credentialProviders.ts`)
+  shows a warning badge *First use on this host* (web: *on this site*) on
+  each such account and, while the selected account is a first use, the line
+  *You have not used this account on this host before. Check that <target> is
+  where you mean to sign in.* It preselects the candidate with the most recent
+  `last_used_on_target`, else a single candidate, else none; the list keeps
+  the provider's (label) order, and arrows and Enter are unchanged.
+- **Why the preselection is server-side**: the record lives in the plugin's
+  entity scope rather than in the desktop's `localStorage`, because
+  `localStorage` is per device and not replicated — the history would not
+  follow the operator to another desktop, and a Rustion-routed or remote
+  session could not contribute to it. It also keeps the plugin from learning
+  the resource *name* (§4.4): the plugin keys the history by the target it is
+  already told, so "last used on this resource" is, as built, "last used on
+  this target".
+- **Per-user counts**: `GET v2/sys/plugins/<name>/entity-data` (actix,
+  `crates/bv-server/src/sys.rs`; logic in `src/plugins/entity_data.rs`). For a
+  registered plugin with `storage_scope = "entity"` it lists
+  `core/plugins/<name>/data/entity/` and, per entity, counts the
+  `accounts/<id>/` directories that hold a `meta` key — **listing only, no
+  value is read and the plugin is not invoked** (a unit test fails on any
+  `get`). An entity holding other data is listed with `0` so it can still be
+  purged; an emptied directory the file backend keeps is not data.
+  `display_name` is the entity's primary name (else its first alias name)
+  from `IdentityService::entity_profile`. The response also counts pending
+  purges. ACL path `sys/plugins/<name>/entity-data`, `read`, audited like the
+  other sys reads, `404` for any other plugin, v2 only. Tauri:
+  `plugins_entity_data_usage` / `plugins_purge_entity_data` (embedded:
+  in-process with a sys audit entry; remote: pinned to `/v2`). The Plugins
+  page shows a *Per-user data* button on entity-scoped plugins: totals, a
+  table of user / entity id / record count, a *Delete* per user behind a
+  confirm dialog (the existing purge route), and a notice when purges are
+  pending.
+- **The failed-purge audit and retry marker** (Phase 1 leftover). The
+  automatic purge (`PluginHost::purge_entity_data`, called when an entity
+  loses its last alias) now goes through `entity_data::purge_orphaned_entity`:
+  every purge is audited at `sys/plugins/entity-data/<entity_id>` (`delete`,
+  `trigger` = `last-alias-removed` | `pending-purge-retry`, `outcome` =
+  `purged` | `failed`, the error on failure). A failure writes
+  `core/plugins/engine/pending-purges/<entity_id>` (`v`, `entity_id`,
+  first/last failure time, attempt count; no plugin data) and returns the
+  error, which the identity module logs without undoing the principal delete.
+  Markers are retried, at most 16 per pass, by the next automatic purge and by
+  every administrator `DELETE …/entity-data/<entity_id>` (server and
+  embedded). This is the smallest mechanism that needs no new scheduler: the
+  plugin runtime has no tidy pass, and both retry points already run with the
+  barrier unsealed. A retry purges without re-checking the identity store,
+  because a marker is written only for an entity the identity module found
+  with no alias left and the store never re-attaches an alias to an existing
+  entity (a recreated principal gets a new entity).
+- **Plugin names in entity-data paths are checked.** `runtime::entity_data_root`
+  now also refuses an empty plugin name or one carrying `/`, `\` or `..`: the
+  administrator purge takes the name from the request path and interpolates it
+  into a storage prefix (before, only the entity id was checked). The counts
+  route additionally requires the stored manifest's name to equal the
+  requested one.
+- **Operator guide**: `docs/self-accounts.md`, linked from the docs sidebar
+  and `docs/administration.md`.
+- Tests: the plugin's host-stub suite (+7: the flag flips only after a
+  successful release and never after a refused one, candidates never write,
+  `seen` holds digests only and never sits in `meta` or the listing, the cap
+  and eviction through the handler, origin sets in any order, delete removes
+  the record, a newer record is not downgraded) and `seen` unit tests (+5:
+  canonicalisation, domain separation, framing, cap, version handling); the
+  testkit e2e (`seen` is per entity and a refused release records nothing);
+  the real-host tests (`self_accounts_connect`: the flag before and after a
+  release through `authorize`; `self_accounts_host`: no marker after a
+  successful purge, and the counts after it); `plugins::entity_data` (counting
+  by listing only, markers created / bumped / cleared, an automatic purge
+  retrying an earlier failure, counts with names, and the HTTP route:
+  admin-only, counts only against stored values that would show if read,
+  `404`, v2 only); `bv-kernel-api` and the SDK (old and new candidate shapes);
+  the desktop host's candidate parser; vitest for the badge, the caution,
+  preselection and order, the helpers and the *Per-user data* panel.
+
+**Where the implementation differs, and why:**
+
+- **"Last used on this resource" is "last used on this target".** The plugin
+  never learns the resource name (§4.4), so two resources with the same dial
+  host share their history. Accepted: the badge's question is "has this
+  credential gone to this host before", which is exactly that.
+- **The counts route is generic over entity-scoped plugins but counts the
+  provider record layout** (`accounts/<id>/meta`), now a documented
+  convention of the provider contract rather than self-accounts knowledge in
+  the host. A plugin with another layout gets its entities listed with `0`.
+- **First use is recorded when the plugin releases**, so a release the host
+  then refuses (bad output shape), a Rustion open that then finds no bastion,
+  or a session that fails to open still counts as used.
+
+**Not done:**
+
+- GUI row-edit of accounts, PKCS#8 / passphrase keys and packer surface
+  embedding stay the documented limits of Phases 2 and 4.
+- `tests/test_self_accounts_connect.rs` with a signed fixture (skipped as
+  optional; the `#[ignore]`d engine tests run by `make plugins-test` cover the
+  same flow in-process).
+- The `plugin-admin` policy still does not exist; the new `GET` route, like
+  the other `v2/sys/plugins/*` routes, is reachable by root, the built-in
+  `administrator` policy (`path "*"`) and policies
+  granting `sys/plugins/*` explicitly.
+- Not run against real targets, not driven in the desktop app, and no L4
+  `make test-release` (the review gate).
 
 ## Dependencies
 
@@ -915,11 +1382,19 @@ phase, and route the Phase 1 and Phase 3 diffs through a security review.
 
 1. **Entity merge.** Should a merge move the merged-away entity's records to
    the surviving entity? Moving credentials between identities on an
-   operator's mistake is dangerous. The current proposal is to retain them
-   and let the administrator purge them.
+   operator's mistake is dangerous. **Decided (Phase 5): no.** Records under a
+   merged-away entity are retained, never moved, and reachable only by the
+   administrator purge; the per-user counts list them so the administrator
+   can find and purge them. (No merge operation exists in the identity store
+   today, so nothing triggers this yet.)
 2. **Administrator visibility.** Should an administrator be able to list
    another user's account *metadata* (labels, usernames, targets) for audit?
-   The current proposal is no; Phase 5 adds counts only.
+   **Decided (Phase 5): no — counts only.** `GET v2/sys/plugins/<name>/entity-data`
+   returns per-entity record counts and the entity's identity name, by
+   listing keys; it reads no value and never invokes the plugin. Which
+   account was used where is already in the server's `connect.provider.*`
+   audit lines (account id and login name), so the audit need is met without
+   a metadata read path.
 3. **Profile-side narrowing.** Should a profile be able to restrict which
    accounts qualify (for example, a `username_pattern` such as `*-adm`)?
 4. **Defaults.** Is `require_connect_mfa = true` the right default for every

@@ -495,11 +495,7 @@ path "rustion/*" {
 
         // …and yet it conveys no session. `read` is not `connect`: the grantor
         // shared visibility, not the right to open sessions as the credential.
-        assert_eq!(
-            open(&token),
-            403,
-            "a share granting only `read` must NOT pass the connect gate"
-        );
+        assert_eq!(open(&token), 403, "a share granting only `read` must NOT pass the connect gate");
 
         // Re-grant with `connect` and the same principal, same policy, same
         // resource now reaches dispatch.
@@ -676,9 +672,7 @@ path "rustion/*" {
             server
                 .write(
                     &format!("resources/resources/{name}"),
-                    serde_json::json!({ "type": "server", "hostname": format!("{name}.example") })
-                        .as_object()
-                        .cloned(),
+                    serde_json::json!({ "type": "server", "hostname": format!("{name}.example") }).as_object().cloned(),
                     Some(&root),
                 )
                 .unwrap();
@@ -763,10 +757,7 @@ path "rustion/*" {
             // ...while the tier-only shape stays open: no object to authorize,
             // and it is the same admin-authored chain the caller's own sessions
             // already obey.
-            assert!(
-                resolve(route, &viewer, None) < 300,
-                "{route} tier-only resolution must stay ungated"
-            );
+            assert!(resolve(route, &viewer, None) < 300, "{route} tier-only resolution must stay ungated");
 
             // The connect-only caller holds nothing on the record, only
             // `connect` on the secret path — the second gate arm.
@@ -812,11 +803,7 @@ path "rustion/*" {
                 resolve(route, &viewer, Some("shown")) < 300,
                 "{route} must resolve a resource shared with the caller"
             );
-            assert_eq!(
-                resolve(route, &viewer, Some("hidden")),
-                403,
-                "{route} must still refuse the unshared resource"
-            );
+            assert_eq!(resolve(route, &viewer, Some("hidden")), 403, "{route} must still refuse the unshared resource");
         }
     }
 }
@@ -826,9 +813,9 @@ mod recordings_namespace_scope_tests {
 
     use serde_json::json;
 
+    use crate::logical::{Operation, Request};
     use crate::modules::rustion::recordings::RecordingEntry;
     use crate::modules::rustion::RustionModule;
-    use crate::logical::{Operation, Request};
     use crate::test_utils::new_unseal_test_bastion_vault;
 
     fn rec(id: &str, host: &str) -> RecordingEntry {
@@ -869,13 +856,9 @@ mod recordings_namespace_scope_tests {
     /// the handler instead of 404-ing with "Router mount not found".
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_recordings_list_scoped_to_namespace_resources() {
-        let (_bvault, core, root) =
-            new_unseal_test_bastion_vault("test_recordings_ns_scope").await;
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_recordings_ns_scope").await;
 
-        let call = |op: Operation,
-                    path: &str,
-                    ns: &str,
-                    body: Option<serde_json::Map<String, serde_json::Value>>| {
+        let call = |op: Operation, path: &str, ns: &str, body: Option<serde_json::Map<String, serde_json::Value>>| {
             let core = core.clone();
             let token = root.clone();
             let path = path.to_string();
@@ -904,9 +887,7 @@ mod recordings_namespace_scope_tests {
             Operation::Write,
             "resources/resources/web01",
             "team-alpha",
-            json!({ "type": "server", "hostname": "web01.corp", "ip_address": "10.1.2.3" })
-                .as_object()
-                .cloned(),
+            json!({ "type": "server", "hostname": "web01.corp", "ip_address": "10.1.2.3" }).as_object().cloned(),
         )
         .await
         .expect("create resource in namespace");
@@ -929,8 +910,7 @@ mod recordings_namespace_scope_tests {
         );
 
         // team-alpha sees only recordings matching its resources.
-        let ns_ids =
-            ids_of(&call(Operation::Read, "rustion/recordings", "team-alpha", None).await.unwrap());
+        let ns_ids = ids_of(&call(Operation::Read, "rustion/recordings", "team-alpha", None).await.unwrap());
         assert!(ns_ids.contains(&"rec_host".to_string()), "namespace sees hostname match");
         assert!(ns_ids.contains(&"rec_ip".to_string()), "namespace sees ip match");
         assert!(
@@ -961,12 +941,9 @@ mod recordings_namespace_scope_tests {
     /// things off it.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_keystroke_routes_resolve_and_report_their_state() {
-        let (_bvault, core, root) =
-            new_unseal_test_bastion_vault("test_keystroke_routes").await;
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_keystroke_routes").await;
 
-        let call = |op: Operation,
-                    path: &str,
-                    body: Option<serde_json::Map<String, serde_json::Value>>| {
+        let call = |op: Operation, path: &str, body: Option<serde_json::Map<String, serde_json::Value>>| {
             let core = core.clone();
             let token = root.clone();
             let path = path.to_string();
@@ -1000,10 +977,7 @@ mod recordings_namespace_scope_tests {
             Some("not-indexed"),
             "an unindexed recording must say so, not return an empty transcript"
         );
-        assert_eq!(
-            data.get("runs").and_then(|v| v.as_array()).map(|a| a.len()),
-            Some(0)
-        );
+        assert_eq!(data.get("runs").and_then(|v| v.as_array()).map(|a| a.len()), Some(0));
 
         // An unknown recording is a 404, not an empty transcript.
         let missing = call(Operation::Read, "rustion/recordings/rec_nope/keystrokes", None).await;
@@ -1014,12 +988,9 @@ mod recordings_namespace_scope_tests {
         // The sibling literal route is reached even though a `Read`-only
         // catch-all sits next to it, and an empty query is refused
         // rather than sweeping every transcript.
-        let empty = call(
-            Operation::Write,
-            "rustion/recordings/keystroke-search",
-            json!({ "query": "" }).as_object().cloned(),
-        )
-        .await;
+        let empty =
+            call(Operation::Write, "rustion/recordings/keystroke-search", json!({ "query": "" }).as_object().cloned())
+                .await;
         assert!(empty.is_err(), "an empty keystroke query must be refused");
 
         let resp = call(
@@ -1036,9 +1007,7 @@ mod recordings_namespace_scope_tests {
         assert_eq!(data.get("unindexed").and_then(|v| v.as_u64()), Some(1));
         assert_eq!(data.get("scanned").and_then(|v| v.as_u64()), Some(0));
         assert!(
-            data.get("redaction_disclaimer")
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| s.contains("best-effort")),
+            data.get("redaction_disclaimer").and_then(|v| v.as_str()).is_some_and(|s| s.contains("best-effort")),
             "the response must state that upstream redaction is best-effort"
         );
 
@@ -1048,13 +1017,9 @@ mod recordings_namespace_scope_tests {
         // recording pending; it cannot fetch the artifact (no bastion
         // is enrolled in this test vault), so it reports a failure
         // rather than claiming success.
-        let resp = call(
-            Operation::Write,
-            "rustion/recordings/keystrokes/index",
-            json!({}).as_object().cloned(),
-        )
-        .await
-        .expect("keystrokes/index route resolves");
+        let resp = call(Operation::Write, "rustion/recordings/keystrokes/index", json!({}).as_object().cloned())
+            .await
+            .expect("keystrokes/index route resolves");
         let data = resp.and_then(|r| r.data).expect("index response has data");
         assert_eq!(
             data.get("considered").and_then(|v| v.as_u64()),
@@ -1073,13 +1038,9 @@ mod recordings_namespace_scope_tests {
         let asciicast = rec("rec_ssh", "web01");
         assert_eq!(asciicast.format, "asciicast");
         store.put(&asciicast).await.unwrap();
-        let resp = call(
-            Operation::Write,
-            "rustion/recordings/keystrokes/index",
-            json!({}).as_object().cloned(),
-        )
-        .await
-        .unwrap();
+        let resp = call(Operation::Write, "rustion/recordings/keystrokes/index", json!({}).as_object().cloned())
+            .await
+            .unwrap();
         let data = resp.and_then(|r| r.data).unwrap();
         assert_eq!(data.get("considered").and_then(|v| v.as_u64()), Some(1));
         assert_eq!(data.get("skipped_format").and_then(|v| v.as_u64()), Some(1));
@@ -1098,8 +1059,7 @@ mod recordings_namespace_scope_tests {
     /// two are asserted apart rather than treated as "it errored".
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_recording_blob_chunk_route_resolves() {
-        let (_bvault, core, root) =
-            new_unseal_test_bastion_vault("test_recording_blob_chunk").await;
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_recording_blob_chunk").await;
 
         let call = |path: &str| {
             let core = core.clone();
@@ -1133,19 +1093,13 @@ mod recordings_namespace_scope_tests {
 
         // Same handler, same failure, for the single-shot route — the
         // chunk route is an addition, not a replacement.
-        let err = call("rustion/recordings/rec_chunk/blob")
-            .await
-            .expect_err("no bastion is enrolled");
+        let err = call("rustion/recordings/rec_chunk/blob").await.expect_err("no bastion is enrolled");
         assert!(err.to_string().contains("not enrolled"));
 
         // An unknown recording is refused before any fetch.
-        let err = call("rustion/recordings/rec_nope/blob/chunk/0")
-            .await
-            .expect_err("unknown recording must not be served");
-        assert!(
-            err.to_string().contains("not in index"),
-            "expected the index miss, got: {err}"
-        );
+        let err =
+            call("rustion/recordings/rec_nope/blob/chunk/0").await.expect_err("unknown recording must not be served");
+        assert!(err.to_string().contains("not in index"), "expected the index miss, got: {err}");
 
         // A non-numeric chunk index does not match the route at all, so
         // it must fail in routing rather than reaching a handler that
@@ -1176,11 +1130,10 @@ mod recordings_namespace_scope_tests {
     /// the cache would fail with "not enrolled" instead of answering.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_recording_blob_reports_digest_verification() {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
         use crate::modules::rustion::blob_cache::Artifact;
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
 
-        let (_bvault, core, root) =
-            new_unseal_test_bastion_vault("test_recording_blob_verified").await;
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_recording_blob_verified").await;
 
         let call = |path: &str| {
             let core = core.clone();
@@ -1293,8 +1246,8 @@ mod namespace_credential_scope_tests {
 
     use serde_json::json;
 
-    use crate::modules::rustion::RustionBackendInner;
     use crate::logical::{Operation, Request};
+    use crate::modules::rustion::RustionBackendInner;
     use crate::test_utils::new_unseal_test_bastion_vault;
 
     /// The namespace split for a Rustion session: **bastion authentication is

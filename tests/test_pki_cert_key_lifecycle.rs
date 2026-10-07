@@ -48,19 +48,11 @@ async fn write(
     req.operation = Operation::Write;
     req.client_token = token.to_string();
     req.body = Some(body);
-    core.handle_request(&mut req)
-        .await
-        .map(|r| r.and_then(|x| x.data))
-        .map_err(|e| format!("{e:?}"))
+    core.handle_request(&mut req).await.map(|r| r.and_then(|x| x.data)).map_err(|e| format!("{e:?}"))
 }
 
 #[maybe_async::maybe_async]
-async fn write_ok(
-    core: &Core,
-    token: &str,
-    path: &str,
-    body: Map<String, Value>,
-) -> Map<String, Value> {
+async fn write_ok(core: &Core, token: &str, path: &str, body: Map<String, Value>) -> Map<String, Value> {
     write(core, token, path, body)
         .await
         .unwrap_or_else(|e| panic!("write {path}: {e}"))
@@ -72,12 +64,8 @@ async fn read(core: &Core, token: &str, path: &str) -> Map<String, Value> {
     let mut req = Request::new(path);
     req.operation = Operation::Read;
     req.client_token = token.to_string();
-    let resp = core
-        .handle_request(&mut req)
-        .await
-        .unwrap_or_else(|e| panic!("read {path}: {e:?}"));
-    resp.and_then(|r| r.data)
-        .unwrap_or_else(|| panic!("read {path}: empty response"))
+    let resp = core.handle_request(&mut req).await.unwrap_or_else(|e| panic!("read {path}: {e:?}"));
+    resp.and_then(|r| r.data).unwrap_or_else(|| panic!("read {path}: empty response"))
 }
 
 #[maybe_async::maybe_async]
@@ -85,10 +73,7 @@ async fn read_opt(core: &Core, token: &str, path: &str) -> Option<Map<String, Va
     let mut req = Request::new(path);
     req.operation = Operation::Read;
     req.client_token = token.to_string();
-    core.handle_request(&mut req)
-        .await
-        .ok()
-        .and_then(|r| r.and_then(|x| x.data))
+    core.handle_request(&mut req).await.ok().and_then(|r| r.and_then(|x| x.data))
 }
 
 #[maybe_async::maybe_async]
@@ -96,12 +81,8 @@ async fn list(core: &Core, token: &str, path: &str) -> Map<String, Value> {
     let mut req = Request::new(path);
     req.operation = Operation::List;
     req.client_token = token.to_string();
-    let resp = core
-        .handle_request(&mut req)
-        .await
-        .unwrap_or_else(|e| panic!("list {path}: {e:?}"));
-    resp.and_then(|r| r.data)
-        .unwrap_or_else(|| panic!("list {path}: empty response"))
+    let resp = core.handle_request(&mut req).await.unwrap_or_else(|e| panic!("list {path}: {e:?}"));
+    resp.and_then(|r| r.data).unwrap_or_else(|| panic!("list {path}: empty response"))
 }
 
 #[maybe_async::maybe_async]
@@ -109,27 +90,16 @@ async fn delete_req(core: &Core, token: &str, path: &str) -> Result<(), String> 
     let mut req = Request::new(path);
     req.operation = Operation::Delete;
     req.client_token = token.to_string();
-    core.handle_request(&mut req)
-        .await
-        .map(|_| ())
-        .map_err(|e| format!("{e:?}"))
+    core.handle_request(&mut req).await.map(|_| ()).map_err(|e| format!("{e:?}"))
 }
 
 #[maybe_async::maybe_async]
-async fn delete_with_body(
-    core: &Core,
-    token: &str,
-    path: &str,
-    body: Map<String, Value>,
-) -> Result<(), String> {
+async fn delete_with_body(core: &Core, token: &str, path: &str, body: Map<String, Value>) -> Result<(), String> {
     let mut req = Request::new(path);
     req.operation = Operation::Delete;
     req.client_token = token.to_string();
     req.body = Some(body);
-    core.handle_request(&mut req)
-        .await
-        .map(|_| ())
-        .map_err(|e| format!("{e:?}"))
+    core.handle_request(&mut req).await.map(|_| ()).map_err(|e| format!("{e:?}"))
 }
 
 fn boot() -> (BastionVault, std::path::PathBuf) {
@@ -155,22 +125,14 @@ async fn boot_with_root() -> (BastionVault, std::path::PathBuf, String) {
         bvault.unseal(&[&init.secret_shares[i as usize]]).await.unwrap();
     }
     let token = init.root_token.clone();
-    write(
-        &core,
-        &token,
-        "sys/mounts/pki/",
-        json!({"type": "pki"}).as_object().unwrap().clone(),
-    )
-    .await
-    .expect("mount pki failed");
+    write(&core, &token, "sys/mounts/pki/", json!({"type": "pki"}).as_object().unwrap().clone())
+        .await
+        .expect("mount pki failed");
     write(
         &core,
         &token,
         "pki/root/generate/internal",
-        json!({"common_name": "Lifecycle Root", "key_type": "ec", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "Lifecycle Root", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await
     .expect("root generate")
@@ -199,10 +161,7 @@ async fn boot_with_root() -> (BastionVault, std::path::PathBuf, String) {
 /// issuer's `issuers/<id>/key` copy, so the managed-key store is the
 /// only signing material the issuer has. Allowing force here would
 /// silently brick revoke / CRL rebuild for that issuer.
-#[maybe_async::test(
-    feature = "sync_handler",
-    async(all(not(feature = "sync_handler")), tokio::test)
-)]
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn test_force_delete_refuses_issuer_bound_key() {
     let (bvault, dir, token) = boot_with_root().await;
     defer!(let _ = fs::remove_dir_all(&dir););
@@ -229,10 +188,7 @@ async fn test_force_delete_refuses_issuer_bound_key() {
     )
     .await;
     let err_msg = blocked_force.expect_err("force-delete must refuse issuer-bound key");
-    assert!(
-        err_msg.to_lowercase().contains("issuer"),
-        "error must mention the issuer binding, got: {err_msg}"
-    );
+    assert!(err_msg.to_lowercase().contains("issuer"), "error must mention the issuer binding, got: {err_msg}");
 
     // Sanity: the key, the issuer, and the issuer's signing path
     // are all still intact — issue a cert to confirm.
@@ -240,10 +196,7 @@ async fn test_force_delete_refuses_issuer_bound_key() {
         &core,
         &token,
         "pki/issue/leaf",
-        json!({"common_name": "after-blocked-force.example.com"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "after-blocked-force.example.com"}).as_object().unwrap().clone(),
     )
     .await;
     assert!(issued["certificate"].as_str().unwrap().contains("BEGIN CERTIFICATE"));
@@ -254,10 +207,7 @@ async fn test_force_delete_refuses_issuer_bound_key() {
 /// phantom issuer reference and refuses every subsequent
 /// `DELETE pki/key/<id>` (even with `force=true`, by the rule
 /// established in test #1).
-#[maybe_async::test(
-    feature = "sync_handler",
-    async(all(not(feature = "sync_handler")), tokio::test)
-)]
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn test_delete_issuer_clears_key_refs() {
     let (bvault, dir, token) = boot_with_root().await;
     defer!(let _ = fs::remove_dir_all(&dir););
@@ -268,31 +218,19 @@ async fn test_delete_issuer_clears_key_refs() {
     assert_eq!(key_before["issuer_ref_count"], 1);
 
     // Delete the only issuer. The mount goes back to "no CA configured".
-    delete_req(&core, &token, "pki/issuer/default")
-        .await
-        .expect("delete issuer");
+    delete_req(&core, &token, "pki/issuer/default").await.expect("delete issuer");
 
     // The shadow managed-key entry is still there (issuer delete does
     // NOT cascade to the key — that's a separate explicit operation),
     // but its issuer_ref_count must now be zero.
     let key_after = read(&core, &token, &format!("pki/key/{key_id}")).await;
-    assert_eq!(
-        key_after["issuer_ref_count"], 0,
-        "issuer-delete must clear the issuer→key binding"
-    );
+    assert_eq!(key_after["issuer_ref_count"], 0, "issuer-delete must clear the issuer→key binding");
 
     // And now the key can be deleted without `force`, since refs are empty.
-    delete_req(&core, &token, &format!("pki/key/{key_id}"))
-        .await
-        .expect("delete unbound key");
+    delete_req(&core, &token, &format!("pki/key/{key_id}")).await.expect("delete unbound key");
 
     let listed = list(&core, &token, "pki/keys").await;
-    let ids: Vec<String> = listed["keys"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect();
+    let ids: Vec<String> = listed["keys"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
     assert!(!ids.contains(&key_id), "unbound key should be gone: {ids:?}");
 }
 
@@ -306,10 +244,7 @@ async fn test_delete_issuer_clears_key_refs() {
 /// - and: even if an operator force-drops the cert→key binding while
 ///   the cert was still active, the cert remains readable and
 ///   deletable (cert reads are independent of the signing key).
-#[maybe_async::test(
-    feature = "sync_handler",
-    async(all(not(feature = "sync_handler")), tokio::test)
-)]
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn test_cert_crud_with_key_ref() {
     let (bvault, dir, token) = boot_with_root().await;
     defer!(let _ = fs::remove_dir_all(&dir););
@@ -320,10 +255,7 @@ async fn test_cert_crud_with_key_ref() {
         &core,
         &token,
         "pki/keys/generate/internal",
-        json!({"key_type": "ec", "key_bits": 256, "name": "leaf-key"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"key_type": "ec", "key_bits": 256, "name": "leaf-key"}).as_object().unwrap().clone(),
     )
     .await;
     let leaf_key_id = leaf_key["key_id"].as_str().unwrap().to_string();
@@ -352,10 +284,7 @@ async fn test_cert_crud_with_key_ref() {
         &core,
         &token,
         "pki/issue/leaf",
-        json!({"common_name": "alpha.example.com", "key_ref": "leaf-key"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "alpha.example.com", "key_ref": "leaf-key"}).as_object().unwrap().clone(),
     )
     .await;
     let serial1 = issued1["serial_number"].as_str().unwrap().to_string();
@@ -365,10 +294,7 @@ async fn test_cert_crud_with_key_ref() {
         &core,
         &token,
         "pki/issue/leaf",
-        json!({"common_name": "beta.example.com", "key_ref": "leaf-key"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "beta.example.com", "key_ref": "leaf-key"}).as_object().unwrap().clone(),
     )
     .await;
     let serial2 = issued2["serial_number"].as_str().unwrap().to_string();
@@ -382,39 +308,20 @@ async fn test_cert_crud_with_key_ref() {
     assert_eq!(key_now["cert_ref_count"], 2, "two issuances bound to the same key");
 
     // ── DELETE-key while bound: refused without force. ──
-    let blocked =
-        delete_req(&core, &token, &format!("pki/key/{leaf_key_id}")).await;
+    let blocked = delete_req(&core, &token, &format!("pki/key/{leaf_key_id}")).await;
     assert!(blocked.is_err(), "key delete must refuse while certs are bound");
 
     // ── REVOKE serial1 → that cert's binding clears → ref count drops. ──
-    write(
-        &core,
-        &token,
-        "pki/revoke",
-        json!({"serial_number": serial1.clone()})
-            .as_object()
-            .unwrap()
-            .clone(),
-    )
-    .await
-    .expect("revoke serial1")
-    .expect("revoke response had no data");
+    write(&core, &token, "pki/revoke", json!({"serial_number": serial1.clone()}).as_object().unwrap().clone())
+        .await
+        .expect("revoke serial1")
+        .expect("revoke response had no data");
     let after_rev = read(&core, &token, "pki/key/leaf-key").await;
-    assert_eq!(
-        after_rev["cert_ref_count"], 1,
-        "revoke must clear the cert→key binding for serial1"
-    );
+    assert_eq!(after_rev["cert_ref_count"], 1, "revoke must clear the cert→key binding for serial1");
 
     // ── DELETE serial1: revoked records can be removed without force. ──
-    delete_req(&core, &token, &format!("pki/cert/{serial1}"))
-        .await
-        .expect("delete revoked serial1");
-    assert!(
-        read_opt(&core, &token, &format!("pki/cert/{serial1}"))
-            .await
-            .is_none(),
-        "deleted cert must be gone"
-    );
+    delete_req(&core, &token, &format!("pki/cert/{serial1}")).await.expect("delete revoked serial1");
+    assert!(read_opt(&core, &token, &format!("pki/cert/{serial1}")).await.is_none(), "deleted cert must be gone");
 
     // ── DELETE-key with force while serial2 is still active: allowed
     //    (force bypasses cert-level bindings). serial2's cert record
@@ -444,21 +351,11 @@ async fn test_cert_crud_with_key_ref() {
     // And serial2 must still be deletable; the issuer's own signing
     // key is independent of the leaf managed key, so revoke + delete
     // works end-to-end.
-    write(
-        &core,
-        &token,
-        "pki/revoke",
-        json!({"serial_number": serial2.clone()})
-            .as_object()
-            .unwrap()
-            .clone(),
-    )
-    .await
-    .expect("revoke serial2")
-    .expect("revoke response had no data");
-    delete_req(&core, &token, &format!("pki/cert/{serial2}"))
+    write(&core, &token, "pki/revoke", json!({"serial_number": serial2.clone()}).as_object().unwrap().clone())
         .await
-        .expect("delete revoked serial2");
+        .expect("revoke serial2")
+        .expect("revoke response had no data");
+    delete_req(&core, &token, &format!("pki/cert/{serial2}")).await.expect("delete revoked serial2");
 }
 
 /// L8 #4 — Sanity for the "cert with no managed-key binding" path:
@@ -466,10 +363,7 @@ async fn test_cert_crud_with_key_ref() {
 /// `record.key_id`, so revoke / delete / read all work without ever
 /// touching the managed-key store. Adds a regression guard that the
 /// fresh-key path stays decoupled from L3 binding bookkeeping.
-#[maybe_async::test(
-    feature = "sync_handler",
-    async(all(not(feature = "sync_handler")), tokio::test)
-)]
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn test_cert_crud_without_key_ref() {
     let (bvault, dir, token) = boot_with_root().await;
     defer!(let _ = fs::remove_dir_all(&dir););
@@ -479,10 +373,7 @@ async fn test_cert_crud_without_key_ref() {
         &core,
         &token,
         "pki/issue/leaf",
-        json!({"common_name": "fresh.example.com"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "fresh.example.com"}).as_object().unwrap().clone(),
     )
     .await;
     let serial = issued["serial_number"].as_str().unwrap().to_string();
@@ -491,40 +382,21 @@ async fn test_cert_crud_without_key_ref() {
 
     // List + read.
     let listed = list(&core, &token, "pki/certs").await;
-    let serials: Vec<String> = listed["keys"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect();
+    let serials: Vec<String> =
+        listed["keys"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
     assert!(serials.contains(&serial));
     let r = read(&core, &token, &format!("pki/cert/{serial}")).await;
     assert_eq!(r["serial_number"].as_str().unwrap(), serial);
 
     // Revoke + delete must succeed without ever touching managed-keys.
-    write(
-        &core,
-        &token,
-        "pki/revoke",
-        json!({"serial_number": serial.clone()})
-            .as_object()
-            .unwrap()
-            .clone(),
-    )
-    .await
-    .expect("revoke")
-    .expect("revoke response had no data");
-    delete_req(&core, &token, &format!("pki/cert/{serial}"))
+    write(&core, &token, "pki/revoke", json!({"serial_number": serial.clone()}).as_object().unwrap().clone())
         .await
-        .expect("delete revoked cert");
+        .expect("revoke")
+        .expect("revoke response had no data");
+    delete_req(&core, &token, &format!("pki/cert/{serial}")).await.expect("delete revoked cert");
 
     // Read after delete: gone (None / no data).
-    assert!(
-        read_opt(&core, &token, &format!("pki/cert/{serial}"))
-            .await
-            .is_none(),
-        "deleted cert must be gone"
-    );
+    assert!(read_opt(&core, &token, &format!("pki/cert/{serial}")).await.is_none(), "deleted cert must be gone");
 }
 
 /// Associate a managed key with a certificate whose record started with
@@ -538,10 +410,7 @@ async fn test_cert_crud_without_key_ref() {
 /// - binding a *non-matching* key is rejected (verify-and-reject);
 /// - `DELETE pki/cert/<serial>/key` clears the binding, freeing the key
 ///   for deletion.
-#[maybe_async::test(
-    feature = "sync_handler",
-    async(all(not(feature = "sync_handler")), tokio::test)
-)]
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn test_associate_key_with_certificate() {
     let (bvault, dir, token) = boot_with_root().await;
     defer!(let _ = fs::remove_dir_all(&dir););
@@ -553,20 +422,14 @@ async fn test_associate_key_with_certificate() {
         &core,
         &token,
         "pki/issue/leaf",
-        json!({"common_name": "assoc.example.com", "ttl": "24h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "assoc.example.com", "ttl": "24h"}).as_object().unwrap().clone(),
     )
     .await;
     let serial = issued["serial_number"].as_str().unwrap().to_string();
     let leaf_key_pem = issued["private_key"].as_str().unwrap().to_string();
 
     let before = read(&core, &token, &format!("pki/cert/{serial}")).await;
-    assert!(
-        before.get("key_id").is_none(),
-        "freshly issued (no key_ref) cert must have no key binding"
-    );
+    assert!(before.get("key_id").is_none(), "freshly issued (no key_ref) cert must have no key binding");
 
     // Import the leaf's own private key as a managed key → this is the
     // key that actually matches the cert.
@@ -574,10 +437,7 @@ async fn test_associate_key_with_certificate() {
         &core,
         &token,
         "pki/keys/import",
-        json!({"private_key": leaf_key_pem, "name": "assoc-match"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"private_key": leaf_key_pem, "name": "assoc-match"}).as_object().unwrap().clone(),
     )
     .await;
     let match_key_id = match_key["key_id"].as_str().unwrap().to_string();
@@ -587,10 +447,7 @@ async fn test_associate_key_with_certificate() {
         &core,
         &token,
         "pki/keys/generate/internal",
-        json!({"key_type": "ec", "name": "assoc-other"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"key_type": "ec", "name": "assoc-other"}).as_object().unwrap().clone(),
     )
     .await;
     let other_key_id = other_key["key_id"].as_str().unwrap().to_string();
@@ -605,10 +462,7 @@ async fn test_associate_key_with_certificate() {
     .await;
     assert!(bad.is_err(), "binding a non-matching key must be rejected: {bad:?}");
     assert!(
-        read(&core, &token, &format!("pki/cert/{serial}"))
-            .await
-            .get("key_id")
-            .is_none(),
+        read(&core, &token, &format!("pki/cert/{serial}")).await.get("key_id").is_none(),
         "a rejected association must not have written a binding"
     );
 
@@ -631,14 +485,9 @@ async fn test_associate_key_with_certificate() {
     let blocked = delete_req(&core, &token, &format!("pki/key/{match_key_id}")).await;
     assert!(blocked.is_err(), "bound key must not delete while referenced: {blocked:?}");
 
-    delete_req(&core, &token, &format!("pki/cert/{serial}/key"))
-        .await
-        .expect("clear association");
+    delete_req(&core, &token, &format!("pki/cert/{serial}/key")).await.expect("clear association");
     assert!(
-        read(&core, &token, &format!("pki/cert/{serial}"))
-            .await
-            .get("key_id")
-            .is_none(),
+        read(&core, &token, &format!("pki/cert/{serial}")).await.get("key_id").is_none(),
         "cleared association must drop the key binding"
     );
     delete_req(&core, &token, &format!("pki/key/{match_key_id}"))
@@ -653,10 +502,7 @@ async fn test_associate_key_with_certificate() {
 /// lose the orphan flag once a matching managed key is associated, and
 /// regain it when the key is cleared (it still has no issuer link). This is
 /// the behavior behind the GUI "orphan" badge.
-#[maybe_async::test(
-    feature = "sync_handler",
-    async(all(not(feature = "sync_handler")), tokio::test)
-)]
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn test_orphan_flag_reconciled_by_key_association() {
     let (bvault, dir, token) = boot_with_root().await;
     defer!(let _ = fs::remove_dir_all(&dir););
@@ -672,10 +518,7 @@ async fn test_orphan_flag_reconciled_by_key_association() {
         &core,
         &token,
         "pki2/root/generate/internal",
-        json!({"common_name": "Src Root", "key_type": "ec", "ttl": "8760h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "Src Root", "key_type": "ec", "ttl": "8760h"}).as_object().unwrap().clone(),
     )
     .await
     .expect("pki2 root");
@@ -694,10 +537,7 @@ async fn test_orphan_flag_reconciled_by_key_association() {
         &core,
         &token,
         "pki2/issue/leaf",
-        json!({"common_name": "orphan.example.com", "ttl": "24h"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"common_name": "orphan.example.com", "ttl": "24h"}).as_object().unwrap().clone(),
     )
     .await;
     let cert_pem = issued["certificate"].as_str().unwrap().to_string();
@@ -708,27 +548,18 @@ async fn test_orphan_flag_reconciled_by_key_association() {
         &core,
         &token,
         "pki/certs/import",
-        json!({"certificate": cert_pem, "source": "pkcs12-import"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"certificate": cert_pem, "source": "pkcs12-import"}).as_object().unwrap().clone(),
     )
     .await;
     let serial = imported["serial_number"].as_str().unwrap().to_string();
-    assert_eq!(
-        imported["is_orphaned"], json!(true),
-        "a freshly imported cert must be orphaned"
-    );
+    assert_eq!(imported["is_orphaned"], json!(true), "a freshly imported cert must be orphaned");
 
     // Import the matching key on the first mount.
     let match_key = write_ok(
         &core,
         &token,
         "pki/keys/import",
-        json!({"private_key": key_pem, "name": "orphan-match"})
-            .as_object()
-            .unwrap()
-            .clone(),
+        json!({"private_key": key_pem, "name": "orphan-match"}).as_object().unwrap().clone(),
     )
     .await;
     let match_key_id = match_key["key_id"].as_str().unwrap().to_string();
@@ -749,16 +580,12 @@ async fn test_orphan_flag_reconciled_by_key_association() {
     );
 
     // Clear the key → the cert has no issuer link, so it is an orphan again.
-    delete_req(&core, &token, &format!("pki/cert/{serial}/key"))
-        .await
-        .expect("clear association");
+    delete_req(&core, &token, &format!("pki/cert/{serial}/key")).await.expect("clear association");
     let after_clear = read(&core, &token, &format!("pki/cert/{serial}")).await;
-    assert!(
-        after_clear.get("key_id").is_none(),
-        "clearing must drop the key binding"
-    );
+    assert!(after_clear.get("key_id").is_none(), "clearing must drop the key binding");
     assert_eq!(
-        after_clear["is_orphaned"], json!(true),
+        after_clear["is_orphaned"],
+        json!(true),
         "clearing the key on an issuer-less cert must restore the orphan flag"
     );
 }

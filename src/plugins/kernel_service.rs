@@ -26,8 +26,8 @@ use crate::{
     kernel_api::{
         engines::{PluginChannel, PluginHost, PluginInvocation},
         provider::{
-            CallerIdentity, CredentialProviderDecl, ProviderCandidate, ProviderQuery,
-            ProviderReleaseRequest, ReleasedCredential,
+            CallerIdentity, CredentialProviderDecl, ProviderCandidate, ProviderQuery, ProviderReleaseRequest,
+            ReleasedCredential,
         },
         VaultCtx,
     },
@@ -115,6 +115,8 @@ impl PluginHost for PluginRuntimeHost {
     }
 
     async fn purge_entity_data(&self, entity_id: &str) -> Result<(), RvError> {
-        super::provider::purge_entity_data(&self.core, entity_id).await
+        // Audited, and on failure recorded as a pending purge that the next
+        // automatic or administrator purge retries (spec §4.7).
+        super::entity_data::purge_orphaned_entity(self.core.as_ref(), entity_id).await
     }
 }

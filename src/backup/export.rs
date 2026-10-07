@@ -3,10 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{
-    errors::RvError,
-    storage::Storage,
-};
+use crate::{errors::RvError, storage::Storage};
 
 /// JSON export format for a subtree of secrets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,11 +49,7 @@ fn list_all_storage_keys<'a>(
 ///
 /// The storage must be the barrier (decrypted) view, not the raw backend.
 /// Returns an `ExportData` struct that can be serialized to JSON.
-pub async fn export_secrets(
-    storage: &dyn Storage,
-    mount: &str,
-    prefix: &str,
-) -> Result<ExportData, RvError> {
+pub async fn export_secrets(storage: &dyn Storage, mount: &str, prefix: &str) -> Result<ExportData, RvError> {
     let full_prefix = format!("{mount}{prefix}");
     let all_keys = list_all_storage_keys(storage, &full_prefix).await?;
 
@@ -66,10 +59,9 @@ pub async fn export_secrets(
             // Try to parse the value as JSON; if it fails, store as base64 string.
             let value = match serde_json::from_slice::<Value>(&entry.value) {
                 Ok(v) => v,
-                Err(_) => Value::String(base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &entry.value,
-                )),
+                Err(_) => {
+                    Value::String(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &entry.value))
+                }
             };
 
             // Store key relative to the mount.

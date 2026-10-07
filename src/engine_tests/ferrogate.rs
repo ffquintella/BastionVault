@@ -26,15 +26,7 @@ mod test {
     }
 
     /// Mint a composite-signed child token, replicating the MIA wire format.
-    fn mint_child(
-        sk: &CompositeSecretKey,
-        kid: &str,
-        iss: &str,
-        aud: &str,
-        jkt: &str,
-        iat: i64,
-        exp: i64,
-    ) -> String {
+    fn mint_child(sk: &CompositeSecretKey, kid: &str, iss: &str, aud: &str, jkt: &str, iat: i64, exp: i64) -> String {
         let header = json!({ "alg": CHILD_ALG, "typ": CHILD_TYP, "kid": kid });
         let claims = json!({
             "iss": iss,
@@ -82,7 +74,13 @@ mod test {
     }
 
     #[maybe_async::maybe_async]
-    async fn do_request(core: &dyn VaultCtx, path: &str, token: &str, dpop: Option<&str>, client_token: &str) -> Option<Response> {
+    async fn do_request(
+        core: &dyn VaultCtx,
+        path: &str,
+        token: &str,
+        dpop: Option<&str>,
+        client_token: &str,
+    ) -> Option<Response> {
         let mut req = Request::new(path);
         req.operation = Operation::Write;
         if !client_token.is_empty() {
@@ -130,10 +128,8 @@ mod test {
         let r = do_login(&core, &jws, Some(&proof)).await.unwrap();
         assert!(r.auth.is_none(), "unknown machine must be denied");
         let id = machine_id(iss);
-        let show = test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}"), true)
-            .await
-            .unwrap()
-            .unwrap();
+        let show =
+            test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}"), true).await.unwrap().unwrap();
         let data = show.data.unwrap();
         assert_eq!(data["status"], status::PENDING);
         assert_eq!(data["spiffe_id"], iss);
@@ -141,9 +137,7 @@ mod test {
 
         // 2) admin approves with a policy + ttl
         let appr = json!({ "policies": "default", "ttl_seconds": 600 }).as_object().cloned();
-        test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/approve"), true, appr)
-            .await
-            .unwrap();
+        test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/approve"), true, appr).await.unwrap();
 
         // 3) login again → token minted with the approved policies
         let r = do_login(&core, &jws, Some(&proof)).await.unwrap();
@@ -169,9 +163,7 @@ mod test {
     #[maybe_async::maybe_async]
     async fn make_user_token(core: &dyn VaultCtx, root_token: &str, user: &str, policies: &str) -> String {
         let body = json!({ "password": "pw", "policies": policies }).as_object().cloned();
-        test_write_api(core, root_token, &format!("auth/userpass/users/{user}"), true, body)
-            .await
-            .unwrap();
+        test_write_api(core, root_token, &format!("auth/userpass/users/{user}"), true, body).await.unwrap();
         let mut req = Request::new(format!("auth/userpass/login/{user}"));
         req.operation = Operation::Write;
         req.body = Some(json!({ "password": "pw" }).as_object().cloned().unwrap());
@@ -211,9 +203,7 @@ mod test {
         do_login(&core, &jws, Some(&proof)).await.unwrap();
         let id = machine_id(iss);
         let appr = json!({ "policies": "shared,machineonly", "ttl_seconds": 600 }).as_object().cloned();
-        test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/approve"), true, appr)
-            .await
-            .unwrap();
+        test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/approve"), true, appr).await.unwrap();
 
         // A user whose policies overlap the machine's only on "shared".
         let user_token = make_user_token(&core, &root_token, "alice", "shared,useronly").await;
@@ -222,12 +212,7 @@ mod test {
         // never the machine-only or user-only ones. "default" is baseline.
         let mut req = Request::new("auth/ferrogate/login");
         req.operation = Operation::Write;
-        req.body = Some(
-            json!({ "token": jws, "dpop": proof, "user_token": user_token })
-                .as_object()
-                .cloned()
-                .unwrap(),
-        );
+        req.body = Some(json!({ "token": jws, "dpop": proof, "user_token": user_token }).as_object().cloned().unwrap());
         let resp = core.handle_request(&mut req).await.unwrap().unwrap();
         let auth = resp.auth.expect("combined login mints a token");
         assert!(auth.policies.contains(&"shared".to_string()), "policies = {:?}", auth.policies);
@@ -239,8 +224,7 @@ mod test {
         lk.operation = Operation::Read;
         lk.client_token = user_token.clone();
         assert!(
-            core.handle_request(&mut lk).await.is_err()
-                || core.handle_request(&mut lk).await.ok().flatten().is_none(),
+            core.handle_request(&mut lk).await.is_err() || core.handle_request(&mut lk).await.ok().flatten().is_none(),
             "bound user token must be revoked after binding"
         );
 
@@ -320,28 +304,19 @@ mod test {
         do_login(&core, &jws, Some(&proof)).await.unwrap();
         let id = machine_id(iss);
         let appr = json!({ "policies": "default", "ttl_seconds": 600 }).as_object().cloned();
-        test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/approve"), true, appr)
-            .await
-            .unwrap();
+        test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/approve"), true, appr).await.unwrap();
         let machine_token = {
             let mut req = Request::new("auth/ferrogate/login");
             req.operation = Operation::Write;
-            req.body = Some(
-                json!({ "token": jws, "dpop": proof, "user_token": user_token })
-                    .as_object()
-                    .cloned()
-                    .unwrap(),
-            );
+            req.body =
+                Some(json!({ "token": jws, "dpop": proof, "user_token": user_token }).as_object().cloned().unwrap());
             let resp = core.handle_request(&mut req).await.unwrap().unwrap();
             resp.auth.expect("combined login mints a machine-bound token").client_token
         };
         let mut lkm = Request::new("auth/token/lookup-self");
         lkm.operation = Operation::Read;
         lkm.client_token = machine_token;
-        assert!(
-            core.handle_request(&mut lkm).await.is_ok(),
-            "a FerroGate machine-bound token must be accepted"
-        );
+        assert!(core.handle_request(&mut lkm).await.is_ok(), "a FerroGate machine-bound token must be accepted");
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
@@ -375,10 +350,8 @@ mod test {
         let auth = r.auth.expect("first machine is bootstrap-approved and minted");
         assert!(auth.policies.contains(&"default".to_string()));
         let id1 = machine_id(iss1);
-        let show = test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id1}"), true)
-            .await
-            .unwrap()
-            .unwrap();
+        let show =
+            test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id1}"), true).await.unwrap().unwrap();
         let data = show.data.unwrap();
         assert_eq!(data["status"], status::APPROVED);
         assert_eq!(data["approver"], "bootstrap(root)");
@@ -390,10 +363,8 @@ mod test {
         let r = do_request(&core, "auth/ferrogate/login", &jws2, Some(&proof), &root_token).await.unwrap();
         assert!(r.auth.is_none(), "second machine must not bootstrap");
         let id2 = machine_id(iss2);
-        let show = test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id2}"), true)
-            .await
-            .unwrap()
-            .unwrap();
+        let show =
+            test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id2}"), true).await.unwrap().unwrap();
         assert_eq!(show.data.unwrap()["status"], status::PENDING);
 
         // Self-poll status endpoint: first machine is approved, an unseen one is unknown.
@@ -488,9 +459,7 @@ mod test {
         // 3) Approve, then the SVID login mints a token (CRL checked, host not revoked).
         let id = machine_id(sub);
         let appr = json!({ "policies": "default", "ttl_seconds": 600 }).as_object().cloned();
-        test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/approve"), true, appr)
-            .await
-            .unwrap();
+        test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/approve"), true, appr).await.unwrap();
         let r = do_login(&core, &svid, None).await.unwrap();
         let auth = r.auth.expect("approved SVID host mints a token");
         assert!(auth.policies.contains(&"default".to_string()));
@@ -534,7 +503,9 @@ mod test {
             ..Default::default()
         };
 
-        let json = crate::modules::credential::ferrogate::cmis::fetch_jwks_json(&cfg, "").await.expect("fetch JWKS from live CMIS");
+        let json = crate::modules::credential::ferrogate::cmis::fetch_jwks_json(&cfg, "")
+            .await
+            .expect("fetch JWKS from live CMIS");
         let jwks = JwkSet::from_json(&json).expect("live JWKS parses");
         assert!(jwks.keys.iter().any(|k| k.kty == "FERROGATE-COMPOSITE"), "expected a composite key");
         eprintln!(
@@ -568,28 +539,22 @@ mod test {
 
         // register a machine (admin pre-registration / Phase-1 seed)
         let reg = json!({ "spiffe_id": SPIFFE }).as_object().cloned();
-        let resp = test_write_api(&core, &root_token, "auth/ferrogate/register", true, reg)
-            .await
-            .unwrap()
-            .unwrap();
+        let resp = test_write_api(&core, &root_token, "auth/ferrogate/register", true, reg).await.unwrap().unwrap();
         let id = resp.data.unwrap()["id"].as_str().unwrap().to_string();
         assert_eq!(id, machine_id(SPIFFE));
 
         // show → pending
-        let resp = test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}"), true)
-            .await
-            .unwrap()
-            .unwrap();
+        let resp =
+            test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}"), true).await.unwrap().unwrap();
         assert_eq!(resp.data.unwrap()["status"], status::PENDING);
 
         // approve with policies + ttl
         let appr = json!({ "policies": "default,reader", "ttl_seconds": 3600 }).as_object().cloned();
-        let resp = test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/approve"), true, appr).await;
+        let resp =
+            test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/approve"), true, appr).await;
         assert!(resp.is_ok());
-        let resp = test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}"), true)
-            .await
-            .unwrap()
-            .unwrap();
+        let resp =
+            test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}"), true).await.unwrap().unwrap();
         let data = resp.data.unwrap();
         assert_eq!(data["status"], status::APPROVED);
         assert_eq!(data["ttl_seconds"], 3600);
@@ -598,10 +563,8 @@ mod test {
         let resp =
             test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/revoke"), true, None).await;
         assert!(resp.is_ok());
-        let resp = test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}"), true)
-            .await
-            .unwrap()
-            .unwrap();
+        let resp =
+            test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}"), true).await.unwrap().unwrap();
         assert_eq!(resp.data.unwrap()["status"], status::REVOKED);
 
         // login is stubbed in Phase 1
@@ -623,10 +586,8 @@ mod test {
         body.insert("spiffe_id".to_string(), json!(spiffe_id));
         req.body = Some(body);
         if !ip.is_empty() {
-            req.connection = Some(crate::logical::connection::Connection {
-                peer_addr: ip.to_string(),
-                ..Default::default()
-            });
+            req.connection =
+                Some(crate::logical::connection::Connection { peer_addr: ip.to_string(), ..Default::default() });
         }
         core.handle_request(&mut req).await.unwrap().expect("enroll response")
     }
@@ -671,10 +632,8 @@ mod test {
         let id = machine_id(iss);
         assert_eq!(data["id"], id);
 
-        let show = test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}"), true)
-            .await
-            .unwrap()
-            .unwrap();
+        let show =
+            test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}"), true).await.unwrap().unwrap();
         let sd = show.data.unwrap();
         assert_eq!(sd["status"], status::PENDING);
         assert_eq!(sd["self_enrolled"], true);
@@ -685,9 +644,7 @@ mod test {
 
         // Admin approves; the pre-approved machine now authenticates via login.
         let appr = json!({ "policies": "default", "ttl_seconds": 600 }).as_object().cloned();
-        test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/approve"), true, appr)
-            .await
-            .unwrap();
+        test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/approve"), true, appr).await.unwrap();
         let r = do_login(&core, &jws, Some(&proof)).await.unwrap();
         let auth = r.auth.expect("approved self-enrolled machine mints a token");
         assert!(auth.policies.contains(&"default".to_string()));
@@ -757,16 +714,21 @@ mod test {
     /// IP keeps its own budget.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_ferrogate_self_enroll_rate_limit() {
-        let (_bvault, core, root_token) =
-            new_unseal_test_bastion_vault("test_ferrogate_self_enroll_rate_limit").await;
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_ferrogate_self_enroll_rate_limit").await;
         test_mount_auth_api(&core, &root_token, "ferrogate", "ferrogate").await;
 
         let cfg = json!({ "self_enroll_enabled": true, "self_enroll_rate_limit_per_min": 2 }).as_object().cloned();
         test_write_api(&core, &root_token, "auth/ferrogate/config", true, cfg).await.unwrap();
 
         let ip = "192.0.2.7";
-        assert_eq!(do_enroll(&core, "spiffe://ferrogate.test/host/r1", ip).await.data.unwrap()["status"], status::PENDING);
-        assert_eq!(do_enroll(&core, "spiffe://ferrogate.test/host/r2", ip).await.data.unwrap()["status"], status::PENDING);
+        assert_eq!(
+            do_enroll(&core, "spiffe://ferrogate.test/host/r1", ip).await.data.unwrap()["status"],
+            status::PENDING
+        );
+        assert_eq!(
+            do_enroll(&core, "spiffe://ferrogate.test/host/r2", ip).await.data.unwrap()["status"],
+            status::PENDING
+        );
         let r = do_enroll(&core, "spiffe://ferrogate.test/host/r3", ip).await;
         assert!(enroll_error(&r).starts_with("rate_limited"), "3rd from same IP: {}", enroll_error(&r));
 

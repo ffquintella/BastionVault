@@ -26,12 +26,7 @@ mod inner {
 
     impl HiqliteWorld {
         fn new() -> Self {
-            Self {
-                backend: None,
-                last_get_result: None,
-                last_list_result: None,
-                data_dir: String::new(),
-            }
+            Self { backend: None, last_get_result: None, last_list_result: None, data_dir: String::new() }
         }
 
         fn backend(&self) -> &HiqliteBackend {
@@ -55,39 +50,22 @@ mod inner {
                 fs::create_dir_all(&dir).unwrap();
 
                 let mut conf: HashMap<String, Value> = HashMap::new();
-                conf.insert(
-                    "data_dir".to_string(),
-                    Value::String(dir.to_string_lossy().into_owned()),
-                );
+                conf.insert("data_dir".to_string(), Value::String(dir.to_string_lossy().into_owned()));
                 conf.insert("node_id".to_string(), Value::Number(1.into()));
-                conf.insert(
-                    "secret_raft".to_string(),
-                    Value::String("cucumber_raft_secret_".to_string()),
-                );
-                conf.insert(
-                    "secret_api".to_string(),
-                    Value::String("cucumber_api_secret_1".to_string()),
-                );
+                conf.insert("secret_raft".to_string(), Value::String("cucumber_raft_secret_".to_string()));
+                conf.insert("secret_api".to_string(), Value::String("cucumber_api_secret_1".to_string()));
                 conf.insert("table".to_string(), Value::String("vault".to_string()));
                 // `listen_addr_{api,raft}` are host-only; the port comes from
                 // the separate `port_{api,raft}` keys (HiqliteBackend builds
                 // the node address as `host:port`). Embedding the port in the
                 // host string yields a malformed `host:port:port` address that
                 // fails to resolve.
-                conf.insert(
-                    "listen_addr_api".to_string(),
-                    Value::String("127.0.0.1".to_string()),
-                );
-                conf.insert(
-                    "listen_addr_raft".to_string(),
-                    Value::String("127.0.0.1".to_string()),
-                );
+                conf.insert("listen_addr_api".to_string(), Value::String("127.0.0.1".to_string()));
+                conf.insert("listen_addr_raft".to_string(), Value::String("127.0.0.1".to_string()));
                 conf.insert("port_api".to_string(), Value::Number(28100.into()));
                 conf.insert("port_raft".to_string(), Value::Number(28200.into()));
 
-                Arc::new(
-                    HiqliteBackend::new(&conf).expect("failed to create hiqlite backend"),
-                )
+                Arc::new(HiqliteBackend::new(&conf).expect("failed to create hiqlite backend"))
             })
             .clone()
     }
@@ -95,29 +73,19 @@ mod inner {
     #[given("a hiqlite backend")]
     async fn given_a_hiqlite_backend(world: &mut HiqliteWorld) {
         let backend = shared_backend();
-        world.data_dir = env::temp_dir()
-            .join("bvault_cucumber_hiqlite")
-            .to_string_lossy()
-            .into_owned();
+        world.data_dir = env::temp_dir().join("bvault_cucumber_hiqlite").to_string_lossy().into_owned();
         world.backend = Some(backend);
     }
 
     #[given("the vault table is empty")]
     async fn given_table_empty(world: &mut HiqliteWorld) {
         let backend = world.backend();
-        backend
-            .client()
-            .batch(Cow::Borrowed("DELETE FROM vault"))
-            .await
-            .expect("failed to clear table");
+        backend.client().batch(Cow::Borrowed("DELETE FROM vault")).await.expect("failed to clear table");
     }
 
     #[when(expr = "I store key {string} with value {string}")]
     async fn when_store_key(world: &mut HiqliteWorld, key: String, value: String) {
-        let entry = BackendEntry {
-            key,
-            value: value.into_bytes(),
-        };
+        let entry = BackendEntry { key, value: value.into_bytes() };
         world.backend().put(&entry).await.expect("put failed");
     }
 
@@ -167,12 +135,7 @@ mod inner {
     #[then(expr = "the key list should contain {string}")]
     async fn then_list_contains(world: &mut HiqliteWorld, expected: String) {
         let result = world.last_list_result.as_ref().expect("no list result");
-        assert!(
-            result.contains(&expected),
-            "expected list to contain {:?}, got {:?}",
-            expected,
-            result
-        );
+        assert!(result.contains(&expected), "expected list to contain {:?}, got {:?}", expected, result);
     }
 
     pub async fn run() {

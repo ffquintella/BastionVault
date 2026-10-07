@@ -39,10 +39,7 @@ async fn write(
     req.operation = Operation::Write;
     req.client_token = token.to_string();
     req.body = Some(body);
-    core.handle_request(&mut req)
-        .await
-        .map(|r| r.and_then(|x| x.data))
-        .map_err(|e| format!("{e:?}"))
+    core.handle_request(&mut req).await.map(|r| r.and_then(|x| x.data)).map_err(|e| format!("{e:?}"))
 }
 
 #[maybe_async::maybe_async]
@@ -111,44 +108,59 @@ async fn test_pki_issuer_bound_keys_l3() {
     // ── Generate two managed keys: one EC for the root, one RSA used
     //    only to verify the algorithm-mismatch gate. ──
     let key_ec = write_ok(
-        &core, &token, "pki/keys/generate/internal",
+        &core,
+        &token,
+        "pki/keys/generate/internal",
         json!({"key_type": "ec", "key_bits": 256, "name": "root-key"}).as_object().unwrap().clone(),
-    ).await;
+    )
+    .await;
     let id_ec = key_ec["key_id"].as_str().unwrap().to_string();
     let key_ec_spki_pem = key_ec["public_key"].as_str().unwrap().to_string();
     let key_ec_spki = pem::parse(key_ec_spki_pem.as_bytes()).unwrap().into_contents();
 
     let _key_rsa = write_ok(
-        &core, &token, "pki/keys/generate/internal",
+        &core,
+        &token,
+        "pki/keys/generate/internal",
         json!({"key_type": "rsa", "key_bits": 2048, "name": "rsa-bystander"}).as_object().unwrap().clone(),
-    ).await;
+    )
+    .await;
 
     // ── 1. Algorithm-mismatch is rejected ────────────────────────────
     let bad = write(
-        &core, &token, "pki/root/generate/internal",
+        &core,
+        &token,
+        "pki/root/generate/internal",
         json!({
             "common_name": "L3 root", "key_type": "ec", "ttl": "8760h",
             "key_ref": "rsa-bystander",
-        }).as_object().unwrap().clone(),
-    ).await;
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await;
     assert!(bad.is_err(), "RSA key on EC root must be rejected: {bad:?}");
 
     // ── 2. Promote the EC managed key to root ────────────────────────
     let root_resp = write_ok(
-        &core, &token, "pki/root/generate/internal",
+        &core,
+        &token,
+        "pki/root/generate/internal",
         json!({
             "common_name": "L3 root", "key_type": "ec", "ttl": "8760h",
             "key_ref": "root-key",
-        }).as_object().unwrap().clone(),
-    ).await;
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await;
     let root_pem = root_resp["certificate"].as_str().unwrap().to_string();
     assert_eq!(root_resp["key_id"].as_str().unwrap(), id_ec);
     // exported field absent because we used internal mode AND key_ref;
     // the root response should NOT echo the private key.
-    assert!(
-        root_resp.get("private_key").is_none(),
-        "internal-mode root with key_ref must not return private_key"
-    );
+    assert!(root_resp.get("private_key").is_none(), "internal-mode root with key_ref must not return private_key");
 
     // The root's SPKI matches the managed key's SPKI.
     assert_eq!(cert_spki(&root_pem), key_ec_spki, "root SPKI must match managed key SPKI");
@@ -161,18 +173,27 @@ async fn test_pki_issuer_bound_keys_l3() {
 
     // ── 4. Issue a cert against this issuer using key_ref to bind cert→key ──
     write(
-        &core, &token, "pki/roles/web",
+        &core,
+        &token,
+        "pki/roles/web",
         json!({
             "ttl": "24h", "max_ttl": "72h", "key_type": "ec",
             "allow_any_name": true, "server_flag": true, "client_flag": true,
             "allow_key_reuse": true, "allowed_key_refs": "root-key",
-        }).as_object().unwrap().clone(),
-    ).await.expect("write role");
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await
+    .expect("write role");
     let issued = write_ok(
-        &core, &token, "pki/issue/web",
-        json!({"common_name": "leaf.example.com", "key_ref": "root-key"})
-            .as_object().unwrap().clone(),
-    ).await;
+        &core,
+        &token,
+        "pki/issue/web",
+        json!({"common_name": "leaf.example.com", "key_ref": "root-key"}).as_object().unwrap().clone(),
+    )
+    .await;
     let serial = issued["serial_number"].as_str().unwrap().to_string();
     // ca_chain on the response carries the issuer's chain (just root for now).
     let ca_chain = issued["ca_chain"].as_array().unwrap();
@@ -184,10 +205,7 @@ async fn test_pki_issuer_bound_keys_l3() {
     assert_eq!(key_after2["cert_ref_count"], 1);
 
     // ── 5. Revoke the cert: cert ref clears, issuer ref stays ────────
-    write_ok(
-        &core, &token, "pki/revoke",
-        json!({"serial_number": serial}).as_object().unwrap().clone(),
-    ).await;
+    write_ok(&core, &token, "pki/revoke", json!({"serial_number": serial}).as_object().unwrap().clone()).await;
     let key_after3 = read(&core, &token, "pki/key/root-key").await;
     assert_eq!(key_after3["cert_ref_count"], 0, "revoke must clear cert binding");
     assert_eq!(key_after3["issuer_ref_count"], 1, "issuer binding survives revoke");
@@ -198,10 +216,7 @@ async fn test_pki_issuer_bound_keys_l3() {
     let chain = read(&core, &token, "pki/issuer/default/chain").await;
     let chain_arr = chain["ca_chain"].as_array().unwrap();
     assert_eq!(chain_arr.len(), 1);
-    assert!(
-        chain_arr[0].as_str().unwrap().contains("BEGIN CERTIFICATE"),
-        "chain entry must be a PEM cert"
-    );
+    assert!(chain_arr[0].as_str().unwrap().contains("BEGIN CERTIFICATE"), "chain entry must be a PEM cert");
     let bundle = chain["certificate_bundle"].as_str().unwrap();
     assert!(bundle.contains("BEGIN CERTIFICATE"));
 }

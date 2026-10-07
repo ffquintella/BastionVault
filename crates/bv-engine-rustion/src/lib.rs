@@ -63,6 +63,7 @@ pub mod master;
 pub mod policy;
 pub mod poller;
 pub mod probe;
+mod provider_source;
 pub mod rdp_keystrokes;
 pub mod recordings;
 pub mod telemetry;
@@ -757,6 +758,7 @@ impl RustionBackend {
                         "profile_id": { field_type: FieldType::Str, required: false, description: "Connection-profile id. Required when the profile carries `require_mfa` — the server reads the flag off the stored profile, so omitting this on a gated profile fails closed." },
                         "connect_ticket": { field_type: FieldType::SecretStr, required: false, description: "Single-use ticket from `resources/v2/connect/mfa/verify`. Mandatory when the named profile requires MFA re-validation." },
                         "credential_source": { field_type: FieldType::Map, required: false, description: "Credential reference, e.g. {\"kind\":\"secret\",\"secret_id\":\"…\"}. When set and credential_material is empty, BastionVault resolves it server-side." },
+                        "provider_account_id": { field_type: FieldType::Str, required: false, description: "Account picked from resources/v2/connect/provider/candidates. Required with credential_source {\"kind\":\"provider\"}, refused with any other source. The server releases and seals it; the caller never holds it." },
                         "target_host": { field_type: FieldType::Str, default: "", description: "Target SSH/RDP destination host." },
                         "target_port": { field_type: FieldType::Int, default: 22, description: "Target SSH/RDP destination port." },
                         "target_protocol": { field_type: FieldType::Str, default: "ssh", description: "ssh | rdp" },
@@ -2080,8 +2082,34 @@ impl RustionBackendInner {
                         );
                     }
                 }
+                // Which credential source the session was opened with. The
+                // v1 route has no `credential_source` field, and material the
+                // caller sent itself (in the body, not resolved into `data`)
+                // wins over any source: both are `material`. On v2 a
+                // `provider` source was checked against the stored profile
+                // before anything was released.
+                let client_material = req
+                    .body
+                    .as_ref()
+                    .and_then(|b| b.get("credential_material"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
+                let source = req.get_data("credential_source").ok().filter(|_| !client_material);
+                let source_kind = source
+                    .as_ref()
+                    .and_then(|v| v.get("kind"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("material")
+                    .to_string();
+                let source_provider = source
+                    .as_ref()
+                    .filter(|_| source_kind == "provider")
+                    .and_then(|v| v.get("provider"))
+                    .and_then(|v| v.as_str())
+                    .map(|p| format!(" provider={p:?}"))
+                    .unwrap_or_default();
                 log::info!(
-                    "{}: session_id={} bastion={} candidates_tried={}",
+                    "{}: session_id={} bastion={} candidates_tried={} credential_source={:?}{}",
                     audit::SESSION_OPEN,
                     data.get("session_id")
                         .and_then(|v| v.as_str())
@@ -2092,7 +2120,9 @@ impl RustionBackendInner {
                     data.get("bastion_candidates_tried")
                         .and_then(|v| v.as_array())
                         .map(|a| a.len())
-                        .unwrap_or(0)
+                        .unwrap_or(0),
+                    source_kind,
+                    source_provider
                 );
                 Ok(Some(Response::data_response(Some(data))))
             }
@@ -2170,6 +2200,12 @@ impl RustionBackendInner {
         // attributes its privileged read to the connecting operator.
         let auth = req.auth.clone().ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
 
+        // (1a) A `provider` credential source (features/self-accounts.md §6):
+        // everything that can refuse without the provider runs here, before
+        // the MFA gate, so a fixable refusal costs the operator no ticket.
+        // `None` for every other source.
+        let provider_open = self.provider_open_preflight(req, &ns_prefix, &resource_name).await?;
+
         // (1b) Connect-time MFA gate. The `require_mfa` flag is read off the
         // *stored* connection profile, never from this request body, so a
         // patched client cannot declare itself exempt. Deliberately placed
@@ -2179,6 +2215,9 @@ impl RustionBackendInner {
         // A gated profile with no `profile_id` in the request fails closed —
         // `enforce` cannot find the profile, so the caller gets the explicit
         // "profile_id is required" refusal below rather than a silent pass.
+        // `mfa_verified` is attested to a credential provider only when the gate
+        // actually redeemed a ticket for this open.
+        let mut mfa_verified = false;
         {
             let profile_id = req
                 .get_data("profile_id")
@@ -2210,10 +2249,17 @@ impl RustionBackendInner {
                     }
                 } else {
                     let ticket_opt = if ticket.is_empty() { None } else { Some(ticket.as_str()) };
-                    if let Some(record) = gate
-                        .enforce(req, &ns_prefix, &resource_name, &profile_id, ticket_opt)
-                        .await?
-                    {
+                    let granted = match gate.enforce(req, &ns_prefix, &resource_name, &profile_id, ticket_opt).await {
+                        Ok(g) => g,
+                        Err(e) => {
+                            if let Some(open) = &provider_open {
+                                open.denied(crate::kernel_api::provider::reason::MFA_REQUIRED);
+                            }
+                            return Err(e);
+                        }
+                    };
+                    if let Some(record) = granted {
+                        mfa_verified = true;
                         log::info!(
                             "connect.mfa.authorized transport=rustion resource={resource_name} \
                              profile={profile_id} principal={} method={}",
@@ -2232,7 +2278,12 @@ impl RustionBackendInner {
         // connect-only caller never needs `read` on the secret.
         let cred_material_present =
             req.get_data("credential_material").ok().and_then(|v| v.as_str().map(|s| !s.is_empty())).unwrap_or(false);
-        if !cred_material_present {
+        let is_provider = provider_open.is_some();
+        if let Some(open) = provider_open {
+            // The provider releases the operator's account; it is sealed into
+            // the envelope like a resolved `secret`, and never returned.
+            self.provider_open_release(req, open, mfa_verified).await?;
+        } else if !cred_material_present {
             let cs = req.get_data("credential_source").ok().ok_or_else(|| {
                 bv_error_response_status!(400, "v2 session/open requires `credential_material` or `credential_source`")
             })?;
@@ -2348,7 +2399,11 @@ impl RustionBackendInner {
         // (3) Delegate to the shared brokering engine. Deliberately NOT
         // `handle_session_open` — that is the v1 entry point's own gate, and
         // the connect check above has already run.
-        self.brokered_session_open(b, req).await
+        let opened = self.brokered_session_open(b, req).await;
+        if is_provider {
+            provider_source::scrub_material(req);
+        }
+        opened
     }
 
     /// Resolve a resource-stored secret to base64-encoded password

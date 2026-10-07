@@ -72,10 +72,7 @@ use tokio::process::{Child, Command};
 use tokio::time::timeout;
 
 use crate::kernel_api::VaultCtx;
-use crate::{
-    audit,
-    storage::StorageEntry,
-};
+use crate::{audit, storage::StorageEntry};
 
 use super::manifest::PluginManifest;
 use super::runtime::{InvokeOutcome, InvokeOutput};
@@ -123,8 +120,7 @@ impl ProcessRuntime {
         input: &[u8],
         core: Option<Arc<dyn VaultCtx>>,
     ) -> Result<InvokeOutput, ProcessRuntimeError> {
-        self.invoke_with_config(manifest, binary, input, core, Default::default())
-            .await
+        self.invoke_with_config(manifest, binary, input, core, Default::default()).await
     }
 
     /// Like `invoke`, but also exposes `config` to the plugin via the
@@ -174,10 +170,21 @@ impl ProcessRuntime {
         // not arbitrary parent env.
         #[cfg(target_os = "windows")]
         for var in &[
-            "SystemRoot", "SystemDrive", "windir", "TEMP", "TMP",
-            "USERPROFILE", "LOCALAPPDATA", "APPDATA", "ProgramData",
-            "ProgramFiles", "ProgramFiles(x86)", "COMSPEC",
-            "PATHEXT", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+            "SystemRoot",
+            "SystemDrive",
+            "windir",
+            "TEMP",
+            "TMP",
+            "USERPROFILE",
+            "LOCALAPPDATA",
+            "APPDATA",
+            "ProgramData",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "COMSPEC",
+            "PATHEXT",
+            "NUMBER_OF_PROCESSORS",
+            "PROCESSOR_ARCHITECTURE",
         ] {
             if let Ok(v) = std::env::var(var) {
                 cmd.env(var, v);
@@ -187,27 +194,19 @@ impl ProcessRuntime {
         // plugin mode via env so the ctor in lib.rs picks it up.
         cmd.env("BV_PLUGIN_MODE", "1");
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| ProcessRuntimeError::Spawn(format!("{e}")))?;
+        let mut child = cmd.spawn().map_err(|e| ProcessRuntimeError::Spawn(format!("{e}")))?;
 
-        let result = match timeout(self.invoke_timeout, drive_invocation(
-            &mut child,
-            manifest,
-            &bootstrap,
-            input,
-            core,
-            config,
-        ))
-        .await
-        {
-            Ok(Ok(out)) => Ok(out),
-            Ok(Err(e)) => Err(e),
-            Err(_) => {
-                let _ = child.start_kill();
-                Err(ProcessRuntimeError::Timeout(self.invoke_timeout))
-            }
-        };
+        let result =
+            match timeout(self.invoke_timeout, drive_invocation(&mut child, manifest, &bootstrap, input, core, config))
+                .await
+            {
+                Ok(Ok(out)) => Ok(out),
+                Ok(Err(e)) => Err(e),
+                Err(_) => {
+                    let _ = child.start_kill();
+                    Err(ProcessRuntimeError::Timeout(self.invoke_timeout))
+                }
+            };
 
         // Best-effort cleanup of the temp file (the directory is the
         // OS temp dir, which is rotated; this is just being tidy).
@@ -220,9 +219,18 @@ impl ProcessRuntime {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum PluginMessage {
-    HostCall { id: u64, method: String, #[serde(default)] params: Value },
-    SetResponse { data_b64: String },
-    Done { status: i32 },
+    HostCall {
+        id: u64,
+        method: String,
+        #[serde(default)]
+        params: Value,
+    },
+    SetResponse {
+        data_b64: String,
+    },
+    Done {
+        status: i32,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -281,12 +289,10 @@ async fn drive_invocation(
 
     loop {
         buf.clear();
-        let read = stdout.read_line(&mut buf).await
-            .map_err(|e| ProcessRuntimeError::Io(format!("{e}")))?;
+        let read = stdout.read_line(&mut buf).await.map_err(|e| ProcessRuntimeError::Io(format!("{e}")))?;
         if read == 0 {
             // EOF before `done` — treat as crash.
-            let exit = child.wait().await
-                .map_err(|e| ProcessRuntimeError::Io(format!("{e}")))?;
+            let exit = child.wait().await.map_err(|e| ProcessRuntimeError::Io(format!("{e}")))?;
             return Err(ProcessRuntimeError::UnexpectedExit(exit.code()));
         }
         let trimmed = buf.trim_end();
@@ -298,8 +304,7 @@ async fn drive_invocation(
 
         match msg {
             PluginMessage::HostCall { id, method, params } => {
-                let result =
-                    handle_host_call(manifest, core.as_ref(), &config, &method, &params).await;
+                let result = handle_host_call(manifest, core.as_ref(), &config, &method, &params).await;
                 let reply = match result {
                     Ok(v) => HostMessage::HostReply { id, result: v },
                     Err(e) => HostMessage::HostReplyError { id, error: e },
@@ -322,11 +327,7 @@ async fn drive_invocation(
     // the caller while it's still running.
     let _ = child.wait().await;
 
-    let outcome = if status == 0 {
-        InvokeOutcome::Success
-    } else {
-        InvokeOutcome::PluginError(status)
-    };
+    let outcome = if status == 0 { InvokeOutcome::Success } else { InvokeOutcome::PluginError(status) };
     Ok(InvokeOutput { outcome, response, fuel_consumed: 0 })
 }
 
@@ -334,17 +335,10 @@ async fn write_msg<W>(writer: &mut W, msg: &HostMessage<'_>) -> Result<(), Proce
 where
     W: AsyncWriteExt + Unpin,
 {
-    let mut line = serde_json::to_vec(msg)
-        .map_err(|_| ProcessRuntimeError::Protocol("host message serialization"))?;
+    let mut line = serde_json::to_vec(msg).map_err(|_| ProcessRuntimeError::Protocol("host message serialization"))?;
     line.push(b'\n');
-    writer
-        .write_all(&line)
-        .await
-        .map_err(|e| ProcessRuntimeError::Io(format!("{e}")))?;
-    writer
-        .flush()
-        .await
-        .map_err(|e| ProcessRuntimeError::Io(format!("{e}")))?;
+    writer.write_all(&line).await.map_err(|e| ProcessRuntimeError::Io(format!("{e}")))?;
+    writer.flush().await.map_err(|e| ProcessRuntimeError::Io(format!("{e}")))?;
     Ok(())
 }
 
@@ -385,10 +379,7 @@ pub(super) async fn handle_host_call(
         }
         "now_unix_ms" => {
             use std::time::{SystemTime, UNIX_EPOCH};
-            let v = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
+            let v = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
             Ok(json!(v))
         }
         "storage_get" => {
@@ -440,11 +431,7 @@ pub(super) async fn handle_host_call(
                 Some(c) => c,
                 None => return Err("no core".to_string()),
             };
-            core.barrier()
-                .as_storage()
-                .delete(&full)
-                .await
-                .map_err(|_| "internal".to_string())?;
+            core.barrier().as_storage().delete(&full).await.map_err(|_| "internal".to_string())?;
             Ok(Value::Null)
         }
         "storage_list" => {
@@ -461,12 +448,7 @@ pub(super) async fn handle_host_call(
             };
             let mut full_prefix = format!("core/plugins/{}/data/", manifest.name);
             if !prefix.is_empty() {
-                let prefix_norm = manifest
-                    .capabilities
-                    .storage_prefix
-                    .as_deref()
-                    .unwrap_or("")
-                    .trim_end_matches('/');
+                let prefix_norm = manifest.capabilities.storage_prefix.as_deref().unwrap_or("").trim_end_matches('/');
                 let req_norm = prefix.trim_start_matches('/').trim_end_matches('/');
                 if !prefix_norm.is_empty()
                     && req_norm != prefix_norm
@@ -478,11 +460,7 @@ pub(super) async fn handle_host_call(
                 full_prefix.push('/');
             }
             let barrier = core.barrier();
-            let names = barrier
-                .as_storage()
-                .list(&full_prefix)
-                .await
-                .map_err(|_| "internal".to_string())?;
+            let names = barrier.as_storage().list(&full_prefix).await.map_err(|_| "internal".to_string())?;
             Ok(json!({"keys": names}))
         }
         "audit_emit" => {
@@ -518,20 +496,13 @@ fn rebase_key(manifest: &PluginManifest, requested: &str) -> Option<String> {
     let prefix = manifest.capabilities.storage_prefix.as_deref()?;
     let prefix_norm = prefix.trim_end_matches('/');
     let req_norm = requested.trim_start_matches('/');
-    if !prefix_norm.is_empty()
-        && req_norm != prefix_norm
-        && !req_norm.starts_with(&format!("{prefix_norm}/"))
-    {
+    if !prefix_norm.is_empty() && req_norm != prefix_norm && !req_norm.starts_with(&format!("{prefix_norm}/")) {
         return None;
     }
     if req_norm.contains("..") {
         return None;
     }
-    Some(format!(
-        "core/plugins/{name}/data/{rel}",
-        name = manifest.name,
-        rel = req_norm,
-    ))
+    Some(format!("core/plugins/{name}/data/{rel}", name = manifest.name, rel = req_norm,))
 }
 
 /// Operator-configured directory the process runtime stages plugin
@@ -589,10 +560,7 @@ pub fn plugin_runtime_dir() -> PathBuf {
 pub fn ensure_runtime_dir() -> Result<PathBuf, ProcessRuntimeError> {
     let path = plugin_runtime_dir();
     if let Err(e) = std::fs::create_dir_all(&path) {
-        return Err(ProcessRuntimeError::TempFile(format!(
-            "create plugin runtime dir {}: {e}",
-            path.display()
-        )));
+        return Err(ProcessRuntimeError::TempFile(format!("create plugin runtime dir {}: {e}", path.display())));
     }
     Ok(path)
 }
@@ -600,10 +568,7 @@ pub fn ensure_runtime_dir() -> Result<PathBuf, ProcessRuntimeError> {
 pub(super) fn write_temp_executable(name: &str, binary: &[u8]) -> Result<std::path::PathBuf, ProcessRuntimeError> {
     use std::io::Write;
     let mut path = ensure_runtime_dir()?;
-    let stem = name
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect::<String>();
+    let stem = name.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect::<String>();
     let unique = format!(
         "bv-plugin-{stem}-{ts}-{pid}{ext}",
         ts = chrono::Utc::now().format("%Y%m%dT%H%M%S%6f"),
@@ -611,10 +576,8 @@ pub(super) fn write_temp_executable(name: &str, binary: &[u8]) -> Result<std::pa
         ext = if cfg!(windows) { ".exe" } else { "" },
     );
     path.push(unique);
-    let mut f = std::fs::File::create(&path)
-        .map_err(|e| ProcessRuntimeError::TempFile(format!("{e}")))?;
-    f.write_all(binary)
-        .map_err(|e| ProcessRuntimeError::TempFile(format!("{e}")))?;
+    let mut f = std::fs::File::create(&path).map_err(|e| ProcessRuntimeError::TempFile(format!("{e}")))?;
+    f.write_all(binary).map_err(|e| ProcessRuntimeError::TempFile(format!("{e}")))?;
     drop(f);
     #[cfg(unix)]
     {
@@ -675,9 +638,7 @@ pub fn run_test_subprocess_plugin() -> ! {
     };
     let input_b64 = init.get("input").and_then(|v| v.as_str()).unwrap_or("");
     let plugin_name = init.get("plugin_name").and_then(|v| v.as_str()).unwrap_or("");
-    let input = base64::engine::general_purpose::STANDARD
-        .decode(input_b64)
-        .unwrap_or_default();
+    let input = base64::engine::general_purpose::STANDARD.decode(input_b64).unwrap_or_default();
 
     // Behaviour selector is the plugin_name suffix after `test-`. The
     // env-var path doesn't work because the runtime's `env_clear()`
@@ -747,22 +708,15 @@ pub fn run_test_subprocess_plugin() -> ! {
                 eprintln!("storage_get refused: {}", reply2_v.get("error").unwrap());
                 std::process::exit(12);
             }
-            let value_b64 = reply2_v
-                .get("result")
-                .and_then(|r| r.get("value_b64"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let value_b64 =
+                reply2_v.get("result").and_then(|r| r.get("value_b64")).and_then(|v| v.as_str()).unwrap_or("");
             writeln!(stdout, "{}", json!({"type": "set_response", "data_b64": value_b64})).unwrap();
             writeln!(stdout, "{}", json!({"type": "done", "status": 0})).unwrap();
         }
         "now_ms" => {
             // host_call now_unix_ms; set_response(le_bytes(result)); done(0)
-            writeln!(
-                stdout,
-                "{}",
-                json!({"type": "host_call", "id": 1, "method": "now_unix_ms", "params": {}})
-            )
-            .unwrap();
+            writeln!(stdout, "{}", json!({"type": "host_call", "id": 1, "method": "now_unix_ms", "params": {}}))
+                .unwrap();
             stdout.flush().unwrap();
             let mut reply = String::new();
             stdin.lock().read_line(&mut reply).unwrap();
@@ -873,25 +827,16 @@ mod tests {
     async fn crash_before_done_is_unexpected_exit() {
         let m = manifest_for("crash", "test-crash");
         let err = invoke_proc(m, b"", None).await.unwrap_err();
-        assert!(
-            matches!(err, ProcessRuntimeError::UnexpectedExit(_)),
-            "expected UnexpectedExit, got {err:?}",
-        );
+        assert!(matches!(err, ProcessRuntimeError::UnexpectedExit(_)), "expected UnexpectedExit, got {err:?}",);
     }
 
     #[tokio::test]
     #[serial_test::serial]
     async fn now_unix_ms_round_trip() {
         let m = manifest_for("now_ms", "test-now_ms");
-        let before = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
         let out = invoke_proc(m, b"", None).await.unwrap();
-        let after = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let after = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
         assert!(matches!(out.outcome, InvokeOutcome::Success));
         assert_eq!(out.response.len(), 8);
         let mut buf = [0u8; 8];
@@ -909,9 +854,7 @@ mod tests {
     async fn storage_round_trip_with_capability() {
         let mut m = manifest_for("storage_round_trip", "test-storage_round_trip");
         m.capabilities.storage_prefix = Some("".to_string());
-        let core = crate::test_utils::new_unseal_test_bastion_vault("plugin-process-storage")
-            .await
-            .1;
+        let core = crate::test_utils::new_unseal_test_bastion_vault("plugin-process-storage").await.1;
         let out = invoke_proc(m, b"hello-process-storage", Some(core)).await.unwrap();
         assert!(matches!(out.outcome, InvokeOutcome::Success));
         assert_eq!(out.response, b"hello-process-storage");
@@ -924,15 +867,10 @@ mod tests {
         // unwrap of the reply panics → child exits before sending
         // `done`. The runtime surfaces this as UnexpectedExit.
         let m = manifest_for("storage_round_trip", "test-storage_round_trip");
-        let core = crate::test_utils::new_unseal_test_bastion_vault(
-            "plugin-process-storage-forbidden",
-        )
-        .await
-        .1;
+        let core = crate::test_utils::new_unseal_test_bastion_vault("plugin-process-storage-forbidden").await.1;
         let result = invoke_proc(m, b"x", Some(core)).await;
         match result {
-            Err(ProcessRuntimeError::UnexpectedExit(_))
-            | Err(ProcessRuntimeError::Protocol(_)) => {}
+            Err(ProcessRuntimeError::UnexpectedExit(_)) | Err(ProcessRuntimeError::Protocol(_)) => {}
             other => panic!("expected UnexpectedExit or Protocol, got {other:?}"),
         }
     }

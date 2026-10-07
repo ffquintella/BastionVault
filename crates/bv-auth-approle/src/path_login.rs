@@ -2,7 +2,7 @@ use std::{collections::HashMap, mem, sync::Arc, time::SystemTime};
 
 use super::{
     path_role::RoleEntry,
-    validation::{create_hmac, verify_cidr_role_secret_id_subset},
+    validation::{create_hmac, strip_reserved_secret_id_meta, verify_cidr_role_secret_id_subset},
     AppRoleBackend, AppRoleBackendInner,
 };
 use crate::kernel_api::VaultCtx;
@@ -299,6 +299,19 @@ impl AppRoleBackendInner {
             secret_envs = secret_id_entry.environments.clone();
             secret_token_cidrs = secret_id_entry.token_cidr_list.clone();
             metadata = secret_id_entry.metadata;
+            // Backend-owned keys never come from a secret-id: `entity_id`,
+            // `username`, `spiffe_id` and the rest are set below by this
+            // backend or not at all. Creation refuses them now; a secret-id
+            // stored before that would otherwise forge them at every login.
+            let dropped = strip_reserved_secret_id_meta(&mut metadata);
+            if !dropped.is_empty() {
+                log::warn!(
+                    target: "security",
+                    "approle login: dropped reserved metadata key(s) `{}` stored on a secret-id of role {:?}",
+                    dropped.join("`, `"),
+                    role_entry.name
+                );
+            }
         }
 
         if !role_entry.secret_id_bound_cidrs.is_empty() {

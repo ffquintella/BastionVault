@@ -20,12 +20,7 @@ use go_defer::defer;
 use serde_json::{json, Map, Value};
 
 #[maybe_async::maybe_async]
-async fn write(
-    core: &Core,
-    token: &str,
-    path: &str,
-    body: Map<String, Value>,
-) -> Option<Map<String, Value>> {
+async fn write(core: &Core, token: &str, path: &str, body: Map<String, Value>) -> Option<Map<String, Value>> {
     let mut req = Request::new(path);
     req.operation = Operation::Write;
     req.client_token = token.to_string();
@@ -65,8 +60,7 @@ async fn rustion_master_issue_routes_through_pki_engine() {
     // (Ed25519) and one PQC (ML-DSA-65) — so each role lives under
     // its own issuer. The mixed-chain guard inside `pki/issue` would
     // otherwise refuse a PQC leaf on a classical CA.
-    write(&core, &token, "sys/mounts/pki/", json!({"type": "pki"}).as_object().unwrap().clone())
-        .await;
+    write(&core, &token, "sys/mounts/pki/", json!({"type": "pki"}).as_object().unwrap().clone()).await;
     let ed_root = write(
         &core,
         &token,
@@ -164,9 +158,7 @@ async fn rustion_master_issue_routes_through_pki_engine() {
 
     // Issue. Both halves must mint through the engine; the surfaced
     // serial must address a real cert in the PKI engine's storage.
-    let issued = write(&core, &token, "rustion/master/issue", Map::new())
-        .await
-        .expect("issue should succeed");
+    let issued = write(&core, &token, "rustion/master/issue", Map::new()).await.expect("issue should succeed");
     let serial = issued["serial"].as_str().unwrap().to_string();
     assert!(!serial.is_empty(), "issue must surface a serial");
     assert!(issued["rotated"].as_bool() == Some(false));
@@ -192,9 +184,7 @@ async fn rustion_master_issue_routes_through_pki_engine() {
     // Rotate cuts over to a fresh hybrid pair, also through the
     // engine. The new serial must again resolve to a cert in PKI
     // storage, and must differ from the original.
-    let rotated = write(&core, &token, "rustion/master/rotate", Map::new())
-        .await
-        .expect("rotate should succeed");
+    let rotated = write(&core, &token, "rustion/master/rotate", Map::new()).await.expect("rotate should succeed");
     let new_serial = rotated["serial"].as_str().unwrap().to_string();
     assert_ne!(new_serial, serial, "rotate must mint a new serial");
     assert!(rotated["rotated"].as_bool() == Some(true));
@@ -252,8 +242,5 @@ async fn rustion_master_issue_refuses_without_pqc_role_configured() {
         Ok(Some(r)) => format!("{:?}", r.data),
         Ok(None) => "no response".to_string(),
     };
-    assert!(
-        surfaced.contains("pki_role_pqc"),
-        "issue without pki_role_pqc must complain about it, got: {surfaced}"
-    );
+    assert!(surfaced.contains("pki_role_pqc"), "issue without pki_role_pqc must complain about it, got: {surfaced}");
 }

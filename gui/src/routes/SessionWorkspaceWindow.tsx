@@ -42,6 +42,7 @@ import { createPortal } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
 
 import { useConnectMfa } from "../components/ConnectMfaPrompt";
+import { useProviderAccountPicker } from "../components/ProviderAccountPicker";
 import { CloseConfirm } from "../components/session/CloseConfirm";
 import { RdpPane } from "../components/session/RdpPane";
 import { SshPane } from "../components/session/SshPane";
@@ -159,6 +160,11 @@ export function SessionWorkspaceWindow() {
   const { gateConnect, mfaPrompt } = useConnectMfa();
   const gateRef = useRef(gateConnect);
   gateRef.current = gateConnect;
+  // A restored credential-provider pane asks for its account again; this
+  // window shows no plugin pages, so the picker carries no account link.
+  const { pickProviderAccount, providerPicker } = useProviderAccountPicker();
+  const pickRef = useRef(pickProviderAccount);
+  pickRef.current = pickProviderAccount;
 
   const [previousRun, setPreviousRun] = useState<PreviousRun | null>(null);
   // No save until the earlier run's layout has been read: the first save
@@ -336,7 +342,10 @@ export function SessionWorkspaceWindow() {
       if (!placeholders(store().layout).some((p) => p.pending?.ref === pending.ref)) continue;
       store().dispatch({ type: "placeholderState", paneRef: pending.ref, state: "opening" });
       try {
-        await reopenSavedPane(pending, { gateConnect: (...a) => gateRef.current(...a) });
+        await reopenSavedPane(pending, {
+          gateConnect: (...a) => gateRef.current(...a),
+          pickProviderAccount: (...a) => pickRef.current(...a),
+        });
         // Fill the placeholder now rather than on the event, so the next
         // pane's turn starts from the restored shape.
         await reconcile();
@@ -684,6 +693,7 @@ export function SessionWorkspaceWindow() {
           />
         )
       )}
+      {providerPicker}
       {mfaPrompt}
     </div>
   );

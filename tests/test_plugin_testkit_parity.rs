@@ -54,12 +54,11 @@ async fn real_runtime_registers_every_testkit_import() {
     let wasm = wat::parse_str(conformance_wat()).expect("conformance wat parses");
     let manifest = manifest_for("testkit-conformance", &wasm);
     let runtime = WasmRuntime::new().expect("runtime");
-    let out = runtime
-        .invoke(&manifest, &wasm, b"ping", None)
-        .await
-        .expect("conformance module must instantiate against the real runtime — \
+    let out = runtime.invoke(&manifest, &wasm, b"ping", None).await.expect(
+        "conformance module must instantiate against the real runtime — \
                  if this fails, src/plugins/runtime.rs and bastion-plugin-testkit \
-                 disagree about the bv.* import surface");
+                 disagree about the bv.* import surface",
+    );
     assert!(matches!(out.outcome, InvokeOutcome::Success));
     assert_eq!(out.response, b"ping");
 }
@@ -72,11 +71,7 @@ async fn invoke_semantics_match_between_runtimes() {
     let manifest = manifest_for("testkit-echo", &wasm);
     let input = br#"{"op":"read","path":"x","data":{}}"#;
 
-    let real = WasmRuntime::new()
-        .expect("runtime")
-        .invoke(&manifest, &wasm, input, None)
-        .await
-        .expect("real invoke");
+    let real = WasmRuntime::new().expect("runtime").invoke(&manifest, &wasm, input, None).await.expect("real invoke");
 
     let host = TestHost::builder("testkit-echo").build();
     let mock = host.invoke_raw(&wasm, input).expect("testkit invoke");

@@ -87,10 +87,7 @@ async fn resolve_ips(host: &str, port: u16) -> Result<Vec<IpAddr>, ()> {
     let hostport = format!("{host}:{port}");
     tokio::task::spawn_blocking(move || {
         use std::net::ToSocketAddrs;
-        hostport
-            .to_socket_addrs()
-            .map(|it| it.map(|s| s.ip()).collect::<Vec<_>>())
-            .map_err(|_| ())
+        hostport.to_socket_addrs().map(|it| it.map(|s| s.ip()).collect::<Vec<_>>()).map_err(|_| ())
     })
     .await
     .map_err(|_| ())?
@@ -99,11 +96,7 @@ async fn resolve_ips(host: &str, port: u16) -> Result<Vec<IpAddr>, ()> {
 /// Execute `req` under the grant, following (and re-validating) up to
 /// [`MAX_REDIRECTS`] redirects. `granted` is the admin-authorized host
 /// allowlist; an empty slice means "no grant" → [`NetFetchError::NotGranted`].
-pub async fn fetch(
-    req: &NetRequest,
-    granted: &[String],
-    https_only: bool,
-) -> Result<NetResponse, NetFetchError> {
+pub async fn fetch(req: &NetRequest, granted: &[String], https_only: bool) -> Result<NetResponse, NetFetchError> {
     if granted.is_empty() {
         return Err(NetFetchError::NotGranted { host: String::new() });
     }
@@ -128,19 +121,15 @@ pub async fn fetch(
     loop {
         let host = url.host_str().unwrap_or_default().to_string();
         // Scheme / host allowlist / port.
-        let target =
-            net_gate::validate_url(url.scheme(), url.host_str(), url.port(), granted, https_only)
-                .map_err(|e| match e {
-                    net_gate::NetError::NotGranted => {
-                        NetFetchError::NotGranted { host: host.clone() }
-                    }
-                    net_gate::NetError::HostDenied => denied("host_denied", host.clone()),
-                })?;
+        let target = net_gate::validate_url(url.scheme(), url.host_str(), url.port(), granted, https_only).map_err(
+            |e| match e {
+                net_gate::NetError::NotGranted => NetFetchError::NotGranted { host: host.clone() },
+                net_gate::NetError::HostDenied => denied("host_denied", host.clone()),
+            },
+        )?;
         // SSRF: resolved IPs must be public unless explicitly granted.
         let port = url.port_or_known_default().unwrap_or(443);
-        let ips = resolve_ips(&target.host, port)
-            .await
-            .map_err(|_| denied("dns", host.clone()))?;
+        let ips = resolve_ips(&target.host, port).await.map_err(|_| denied("dns", host.clone()))?;
         net_gate::check_resolved_ips(&target, &ips).map_err(|_| denied("ssrf", host.clone()))?;
 
         let mut rb = client.request(method.clone(), url.clone());

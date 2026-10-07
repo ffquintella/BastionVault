@@ -28,10 +28,7 @@ fn obj(v: Value) -> Option<Map<String, Value>> {
 /// so here beats a later assertion failing on an empty listing.
 fn assert_written(result: Result<(u16, Value), bv_errors::RvError>, what: &str) {
     let (status, body) = result.unwrap_or_else(|e| panic!("{what}: request failed: {e}"));
-    assert!(
-        status == 200 || status == 204,
-        "{what}: write returned {status}: {body}"
-    );
+    assert!(status == 200 || status == 204, "{what}: write returned {status}: {body}");
 }
 
 /// The response's data map.
@@ -52,16 +49,8 @@ fn data_of(body: &Value) -> &Value {
 fn assert_envelope(body: &Value, expect_total: u64, expect_len: usize) {
     let data = data_of(body);
     assert_eq!(data["total"].as_u64(), Some(expect_total), "total: {body}");
-    assert_eq!(
-        data["records"].as_array().map(|a| a.len()),
-        Some(expect_len),
-        "record count: {body}"
-    );
-    assert_eq!(
-        data["keys"].as_array().map(|a| a.len()),
-        Some(expect_len),
-        "one key per record: {body}"
-    );
+    assert_eq!(data["records"].as_array().map(|a| a.len()), Some(expect_len), "record count: {body}");
+    assert_eq!(data["keys"].as_array().map(|a| a.len()), Some(expect_len), "one key per record: {body}");
 }
 
 // ── SSH roles ────────────────────────────────────────────────────────
@@ -71,9 +60,7 @@ async fn ssh_roles_info_returns_configs_in_one_request() {
     let mut server = TestHttpServer::new("ssh_roles_info", false).await;
     server.token = server.root_token.clone();
     server.write("sys/mounts/ssh/", obj(json!({"type": "ssh"})), None).unwrap();
-    server
-        .write("ssh/config/ca", obj(json!({"generate_signing_key": true})), None)
-        .unwrap();
+    server.write("ssh/config/ca", obj(json!({"generate_signing_key": true})), None).unwrap();
     for name in ["alpha", "bravo", "charlie"] {
         assert_written(
             server.write(
@@ -110,9 +97,7 @@ async fn ssh_roles_info_does_not_shadow_a_role_named_info() {
     let mut server = TestHttpServer::new("ssh_roles_info_name", false).await;
     server.token = server.root_token.clone();
     server.write("sys/mounts/ssh/", obj(json!({"type": "ssh"})), None).unwrap();
-    server
-        .write("ssh/config/ca", obj(json!({"generate_signing_key": true})), None)
-        .unwrap();
+    server.write("ssh/config/ca", obj(json!({"generate_signing_key": true})), None).unwrap();
     server
         .write(
             "ssh/roles/info",
@@ -140,9 +125,7 @@ async fn cert_lifecycle_targets_info_merges_target_and_state() {
     // a state read per row, so `1 + 2N` requests became one.
     let mut server = TestHttpServer::new("cl_targets_info", false).await;
     server.token = server.root_token.clone();
-    server
-        .write("sys/mounts/cert-lifecycle/", obj(json!({"type": "cert-lifecycle"})), None)
-        .unwrap();
+    server.write("sys/mounts/cert-lifecycle/", obj(json!({"type": "cert-lifecycle"})), None).unwrap();
 
     for name in ["web-a", "web-b"] {
         assert_written(
@@ -182,9 +165,7 @@ async fn cert_lifecycle_targets_info_merges_target_and_state() {
 async fn cert_lifecycle_targets_info_agrees_with_the_single_reads() {
     let mut server = TestHttpServer::new("cl_targets_info_parity", false).await;
     server.token = server.root_token.clone();
-    server
-        .write("sys/mounts/cert-lifecycle/", obj(json!({"type": "cert-lifecycle"})), None)
-        .unwrap();
+    server.write("sys/mounts/cert-lifecycle/", obj(json!({"type": "cert-lifecycle"})), None).unwrap();
     server
         .write(
             "cert-lifecycle/targets/only",
@@ -205,12 +186,8 @@ async fn cert_lifecycle_targets_info_agrees_with_the_single_reads() {
     let (_, page) = server.read("cert-lifecycle/targets-info", None).unwrap();
     let row = &page["data"]["records"][0];
 
-    for field in ["name", "kind", "address", "pki_mount", "role_ref", "common_name", "renew_before"]
-    {
-        assert_eq!(
-            row[field], target["data"][field],
-            "`{field}` diverges between targets-info and targets/<name>"
-        );
+    for field in ["name", "kind", "address", "pki_mount", "role_ref", "common_name", "renew_before"] {
+        assert_eq!(row[field], target["data"][field], "`{field}` diverges between targets-info and targets/<name>");
     }
     for field in ["current_serial", "current_not_after", "last_error", "failure_count"] {
         assert_eq!(
@@ -229,9 +206,7 @@ async fn userpass_users_info_carries_flags_and_key_counts_without_secrets() {
     // the same stored record.
     let mut server = TestHttpServer::new("userpass_users_info", false).await;
     server.token = server.root_token.clone();
-    server
-        .write("sys/auth/userpass/", obj(json!({"type": "userpass"})), None)
-        .unwrap();
+    server.write("sys/auth/userpass/", obj(json!({"type": "userpass"})), None).unwrap();
     for name in ["alice", "bob"] {
         assert_written(
             server.write(
@@ -273,9 +248,7 @@ async fn userpass_users_info_carries_flags_and_key_counts_without_secrets() {
 async fn userpass_users_info_matches_the_single_user_read() {
     let mut server = TestHttpServer::new("userpass_users_info_parity", false).await;
     server.token = server.root_token.clone();
-    server
-        .write("sys/auth/userpass/", obj(json!({"type": "userpass"})), None)
-        .unwrap();
+    server.write("sys/auth/userpass/", obj(json!({"type": "userpass"})), None).unwrap();
     assert_written(
         server.write(
             "auth/userpass/users/carol",
@@ -307,11 +280,7 @@ async fn namespaces_info_returns_child_records_in_one_request() {
     server.token = server.root_token.clone();
     for name in ["tenant-a", "tenant-b"] {
         assert_written(
-            server.write(
-                &format!("sys/namespaces/{name}"),
-                obj(json!({"max_mounts": 5})),
-                None,
-            ),
+            server.write(&format!("sys/namespaces/{name}"), obj(json!({"max_mounts": 5})), None),
             &format!("namespace {name}"),
         );
     }
@@ -331,9 +300,7 @@ async fn namespaces_info_returns_child_records_in_one_request() {
 async fn namespaces_info_matches_the_per_path_read() {
     let mut server = TestHttpServer::new("namespaces_info_parity", false).await;
     server.token = server.root_token.clone();
-    server
-        .write("sys/namespaces/solo", obj(json!({"max_leases": 12})), None)
-        .unwrap();
+    server.write("sys/namespaces/solo", obj(json!({"max_leases": 12})), None).unwrap();
 
     let (_, single) = server.read("sys/namespaces/solo", None).unwrap();
     let (_, page) = server.read("sys/namespaces-info", None).unwrap();
@@ -358,22 +325,12 @@ async fn pki_csr_info_omits_the_csr_bodies() {
             None,
         )
         .unwrap();
-    server
-        .write(
-            "pki/roles/web",
-            obj(json!({"ttl": "24h", "key_type": "ec", "allow_any_name": true})),
-            None,
-        )
-        .unwrap();
+    server.write("pki/roles/web", obj(json!({"ttl": "24h", "key_type": "ec", "allow_any_name": true})), None).unwrap();
 
     let mut ids = Vec::new();
     for i in 0..2 {
         let (status, body) = server
-            .write(
-                "pki/csr/generate",
-                obj(json!({"role": "web", "common_name": format!("csr{i}.example.com")})),
-                None,
-            )
+            .write("pki/csr/generate", obj(json!({"role": "web", "common_name": format!("csr{i}.example.com")})), None)
             .unwrap();
         assert_eq!(status, 200, "csr generate failed: {body}");
         ids.push(body["data"]["csr_id"].as_str().unwrap().to_string());
@@ -405,29 +362,15 @@ async fn pki_sign_request_info_reuses_the_single_reads_summary() {
             None,
         )
         .unwrap();
-    server
-        .write(
-            "pki/roles/web",
-            obj(json!({"ttl": "24h", "key_type": "ec", "allow_any_name": true})),
-            None,
-        )
-        .unwrap();
+    server.write("pki/roles/web", obj(json!({"ttl": "24h", "key_type": "ec", "allow_any_name": true})), None).unwrap();
     // A CSR to import: generate one through the outgoing flow and reuse it.
     let (_, generated) = server
-        .write(
-            "pki/csr/generate",
-            obj(json!({"role": "web", "common_name": "inbound.example.com"})),
-            None,
-        )
+        .write("pki/csr/generate", obj(json!({"role": "web", "common_name": "inbound.example.com"})), None)
         .unwrap();
     let csr_pem = generated["data"]["csr"].as_str().unwrap().to_string();
 
     let (status, imported) = server
-        .write(
-            "pki/sign-request/import",
-            obj(json!({"csr": csr_pem, "requester": "ops@example.com"})),
-            None,
-        )
+        .write("pki/sign-request/import", obj(json!({"csr": csr_pem, "requester": "ops@example.com"})), None)
         .unwrap();
     assert_eq!(status, 200, "import failed: {imported}");
     let id = imported["data"]["request_id"].as_str().unwrap().to_string();
@@ -458,12 +401,8 @@ async fn every_info_endpoint_shares_one_cursor_contract() {
     let mut server = TestHttpServer::new("info_cursor_contract", false).await;
     server.token = server.root_token.clone();
     server.write("sys/mounts/ssh/", obj(json!({"type": "ssh"})), None).unwrap();
-    server
-        .write("ssh/config/ca", obj(json!({"generate_signing_key": true})), None)
-        .unwrap();
-    server
-        .write("sys/auth/userpass/", obj(json!({"type": "userpass"})), None)
-        .unwrap();
+    server.write("ssh/config/ca", obj(json!({"generate_signing_key": true})), None).unwrap();
+    server.write("sys/auth/userpass/", obj(json!({"type": "userpass"})), None).unwrap();
     for i in 0..5 {
         server
             .write(

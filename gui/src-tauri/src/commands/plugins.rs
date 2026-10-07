@@ -798,6 +798,86 @@ pub async fn plugins_delete_provider_grant(state: State<'_, AppState>, name: Str
     outcome
 }
 
+// ── Entity-scoped plugin data: counts and purge (v2 only) ──
+//
+// Proxies GET /v2/sys/plugins/<name>/entity-data and
+// DELETE /v2/sys/plugins/<name>/entity-data/<entity_id>.
+// Spec: features/self-accounts.md §4.7 and Phase 5 (Open question 2: counts
+// only). Neither command reads a stored value or invokes the plugin.
+
+/// What `GET v2/sys/plugins/<name>/entity-data` returns: per-entity record
+/// counts, never metadata.
+pub type EntityDataUsageResult = bastion_vault::plugins::entity_data::EntityDataUsage;
+
+#[tauri::command]
+pub async fn plugins_entity_data_usage(state: State<'_, AppState>, name: String) -> CmdResult<EntityDataUsageResult> {
+    if is_remote(&state).await {
+        let json = remote_call_v2(&state, "GET", &format!("sys/plugins/{name}/entity-data"), None).await?;
+        return decode_json(json, "entity data usage");
+    }
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    drop(vault_guard);
+
+    let outcome = bastion_vault::plugins::entity_data::entity_data_usage(core_arc.as_ref(), &name)
+        .await
+        .map_err(CommandError::from)
+        .and_then(|u| {
+            u.ok_or_else(|| CommandError::from("plugin not found, or it does not keep per-user (entity-scoped) data"))
+        });
+    let token = state.token.lock().await.clone().unwrap_or_default();
+    let err_str = outcome.as_ref().err().map(|e| format!("{e:?}"));
+    bastion_vault::audit::emit_sys_audit(
+        core_arc.as_ref(),
+        &token,
+        &format!("sys/plugins/{name}/entity-data"),
+        bastion_vault::logical::Operation::Read,
+        None,
+        err_str.as_deref(),
+    )
+    .await;
+    outcome
+}
+
+#[tauri::command]
+pub async fn plugins_purge_entity_data(state: State<'_, AppState>, name: String, entity_id: String) -> CmdResult<()> {
+    if is_remote(&state).await {
+        remote_call_v2(&state, "DELETE", &format!("sys/plugins/{name}/entity-data/{entity_id}"), None).await?;
+        return Ok(());
+    }
+    let root = bastion_vault::plugins::runtime::entity_data_root(&name, &entity_id)
+        .ok_or("invalid plugin name or entity id")?;
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    drop(vault_guard);
+
+    let outcome = bastion_vault::plugins::provider::delete_prefix(core_arc.barrier.as_storage(), &root)
+        .await
+        .map_err(CommandError::from);
+    if outcome.is_ok() {
+        // The same retry point as the server route (spec §4.7).
+        bastion_vault::plugins::entity_data::retry_pending_purges(core_arc.as_ref(), None).await;
+    }
+    let token = state.token.lock().await.clone().unwrap_or_default();
+    let mut audit_body = serde_json::Map::new();
+    audit_body.insert("name".into(), Value::String(name.clone()));
+    let err_str = outcome.as_ref().err().map(|e| format!("{e:?}"));
+    bastion_vault::audit::emit_sys_audit(
+        core_arc.as_ref(),
+        &token,
+        &format!("sys/plugins/{name}/entity-data/{entity_id}"),
+        bastion_vault::logical::Operation::Delete,
+        Some(audit_body),
+        err_str.as_deref(),
+    )
+    .await;
+    outcome
+}
+
 /// [`remote_call`] against the `/v2` surface.
 async fn remote_call_v2(
     state: &State<'_, AppState>,

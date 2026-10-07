@@ -146,10 +146,7 @@ pub fn validate_url(
         _ => return Err(NetError::HostDenied),
     }
 
-    Ok(MatchedTarget {
-        host: host.to_ascii_lowercase(),
-        matched_entry: matched.to_string(),
-    })
+    Ok(MatchedTarget { host: host.to_ascii_lowercase(), matched_entry: matched.to_string() })
 }
 
 /// SSRF guard: every resolved IP must be publicly routable, unless the
@@ -158,10 +155,7 @@ pub fn validate_url(
 /// `.internal`-suffixed name the admin typed. A single blocked IP with
 /// no such exception fails the whole request (defeats DNS tricks that
 /// return one public + one private answer).
-pub fn check_resolved_ips(
-    target: &MatchedTarget,
-    ips: &[IpAddr],
-) -> Result<(), NetError> {
+pub fn check_resolved_ips(target: &MatchedTarget, ips: &[IpAddr]) -> Result<(), NetError> {
     if ips.is_empty() {
         return Err(NetError::HostDenied);
     }
@@ -228,10 +222,7 @@ mod tests {
         let grant = g(&["*.status.example.net"]);
         assert!(validate_url("https", Some("a.status.example.net"), None, &grant, true).is_ok());
         // http never allowed for a wildcard grant, even with https_only=false.
-        assert_eq!(
-            validate_url("http", Some("a.status.example.net"), None, &grant, false),
-            Err(NetError::HostDenied)
-        );
+        assert_eq!(validate_url("http", Some("a.status.example.net"), None, &grant, false), Err(NetError::HostDenied));
     }
 
     #[test]
@@ -239,10 +230,7 @@ mod tests {
         let grant = g(&["internal.example.com"]);
         assert!(validate_url("http", Some("internal.example.com"), None, &grant, false).is_ok());
         // https_only=true refuses cleartext even for an exact host.
-        assert_eq!(
-            validate_url("http", Some("internal.example.com"), None, &grant, true),
-            Err(NetError::HostDenied)
-        );
+        assert_eq!(validate_url("http", Some("internal.example.com"), None, &grant, true), Err(NetError::HostDenied));
     }
 
     #[test]
@@ -257,10 +245,7 @@ mod tests {
 
     #[test]
     fn empty_grant_is_not_granted() {
-        assert_eq!(
-            validate_url("https", Some("x.com"), None, &[], true),
-            Err(NetError::NotGranted)
-        );
+        assert_eq!(validate_url("https", Some("x.com"), None, &[], true), Err(NetError::NotGranted));
     }
 
     #[test]
@@ -271,10 +256,7 @@ mod tests {
         assert!(check_resolved_ips(&t, &["93.184.216.34".parse().unwrap()]).is_ok());
         // Rebinding: one public + one private answer → refused.
         assert_eq!(
-            check_resolved_ips(
-                &t,
-                &["93.184.216.34".parse().unwrap(), "10.0.0.1".parse().unwrap()]
-            ),
+            check_resolved_ips(&t, &["93.184.216.34".parse().unwrap(), "10.0.0.1".parse().unwrap()]),
             Err(NetError::HostDenied)
         );
     }
