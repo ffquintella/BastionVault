@@ -1,6 +1,6 @@
 [package]
 name = "bv-plugin-pack"
-version = "0.41.1"
+version = "0.41.2"
 edition = "2021"
 description = "Pack a plugin.toml + .wasm into a .bvplugin bundle so the GUI can self-configure on upload."
 license = "Apache-2.0"
@@ -28,3 +28,10 @@ bv_crypto = { version = "0.41.0", path = "../bv_crypto", registry = "uox-bastion
 # byte-identical message, so a signed bundle verifies.
 bv_plugin_manifest = { version = "0.41.0", path = "../bv-plugin-manifest", registry = "uox-bastionvault" }
 hex = "0.4"
+# `test` subcommand: verify a bundle offline. The testkit drives the
+# embedded module through the real `bv_run` ABI / process protocol on a
+# mock host; fips204 verifies the ML-DSA-65 signature against a
+# publisher public key (same crate the host verifier uses — bv_crypto's
+# verify takes a seed, not a public key).
+bastion-plugin-testkit = { version = "0.41.0", path = "../bastion-plugin-testkit", registry = "uox-bastionvault" }
+fips204 = { version = "0.4", default-features = false, features = ["default-rng", "ml-dsa-65"] }

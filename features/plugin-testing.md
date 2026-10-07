@@ -1,6 +1,6 @@
 # Plugin Unit-Test Infrastructure
 
-**Status:** Phase 1 shipped (testkit crate + ABI parity guard + `make plugins-test`).
+**Status:** Complete — all five phases shipped (testkit, parity guard, author ergonomics, process-runtime harness, `bvx` mocks, bundle checks).
 **Owner:** Felipe Quintella
 **Related:** [`features/plugin-system.md`](plugin-system.md) (the ABI under test), [`features/plugin-extensibility.md`](plugin-extensibility.md) (form hooks), [`features/plugin-app-extensions.md`](plugin-app-extensions.md) (future `bvx` surface).
 
@@ -73,7 +73,11 @@ Out-of-tree plugin authors (`plugins-ext/*` or third-party) add the crate as a d
 bastion-plugin-testkit = { path = "../../crates/bastion-plugin-testkit" }
 ```
 
-A typical author flow: `cargo build --target wasm32-wasip1 --release && cargo test` with a test that reads the built `.wasm`. (A `build.rs`-free convenience for this — auto-locating the artifact — is on the Phase 2 list.)
+A typical author flow: `cargo build --target wasm32-wasip1 --release && cargo test` with a test that reads the built `.wasm`. `artifact::load_wasm("my-plugin")` locates the built artifact (searches `target/wasm32-wasip1/{release,debug}`; override with `BV_PLUGIN_WASM`).
+
+```bash
+bv-plugin-pack test my-plugin.bvplugin --publisher-pub-hex <hex> [--op read --path p --data '{}' --expect-status 0]
+```
 
 ## Keeping the mock honest
 
@@ -89,12 +93,12 @@ Direction to remember: when adding a host import to `runtime.rs`, **add it to `H
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Testkit crate (mock host, envelope invoke, capability gates, mock crypto, form-hook runner, conformance fixtures), parity test, `make plugins-test` | **Done** |
-| 2 | Author ergonomics: artifact auto-location helper, `assert_` matchers, snapshot-friendly `TestInvocation` serialization; adopt in `plugins-ext/` reference plugins' CI | Todo |
-| 3 | Process-runtime harness: drive a process plugin binary over the stdio JSON-frame protocol with the same mock host semantics | Todo |
-| 4 | `bvx` app-module mocks (menus/windows/API/net) in lockstep with [plugin-app-extensions](plugin-app-extensions.md) Phase 6 | Todo (blocked on that feature) |
-| 5 | Bundle-level checks: `bv-plugin-pack test <bundle>` — unpack a `.bvplugin`, verify hashes/signature/manifest, smoke-invoke the module via the testkit | Todo |
+| 2 | Author ergonomics: `artifact::locate_wasm`, `assert_*` matchers, `TestInvocation::to_snapshot()` | **Done** (adopting these in `plugins-ext/` reference plugins is a follow-up in that separate workspace) |
+| 3 | Process-runtime harness: `TestHost::invoke_process` drives a process plugin binary over the stdio JSON-frame protocol against the same `HostState` | **Done** (unix; fixtures are `sh` scripts) |
+| 4 | `bvx` app-module mocks (menus/windows/API/net) in lockstep with [plugin-app-extensions](plugin-app-extensions.md) Phase 6 | **Done** (`AppTestHost`, shipped with that feature) |
+| 5 | Bundle-level checks: `bv-plugin-pack test <bundle>` — unpack a `.bvplugin`, verify hashes/signature/manifest, smoke-invoke the module via the testkit | **Done** |
 
-Phase 3 note: the process runtime's host-call set (`src/plugins/process_runtime.rs`) is a subset of the WASM one (no `crypto_*`); the harness should reuse the same `HostState` so both runtimes are tested against one mock.
+Phase 3 note: the process runtime's host-call set (`src/plugins/process_runtime.rs`) is a subset of the WASM one (no `crypto_*`); the harness reuses the same `HostState`, so both runtimes are tested against one mock. Unlike the WASM path there is no parity guard yet against the server's `handle_host_call` — when changing it, update `crates/bastion-plugin-testkit/src/process.rs` in the same PR.
 
 ## Testing requirements (of the infrastructure itself)
 

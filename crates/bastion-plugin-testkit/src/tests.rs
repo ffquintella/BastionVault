@@ -494,3 +494,160 @@ fn data_helper_mirrors_translate_response() {
     let none = host.invoke_raw(echo_wat().as_bytes(), br#"{"data": null}"#).unwrap();
     assert!(none.data().is_none());
 }
+
+// ── Phase 2: artifact location, matchers, snapshots ─────────────────
+
+#[test]
+fn assertions_chain_and_snapshot_is_stable() {
+    let host = TestHost::builder("echo").build();
+    let out = host.invoke(echo_wat().as_bytes(), "read", "p", serde_json::json!({})).unwrap();
+    out.assert_success().assert_audit_count(0);
+    let snap = out.to_snapshot();
+    assert_eq!(snap["status"], 0);
+    assert_eq!(snap["response"]["op"], "read");
+    assert!(snap.get("fuel_consumed").is_none(), "fuel must not enter snapshots");
+
+    let failed = host.invoke(fail_wat().as_bytes(), "read", "p", serde_json::json!({})).unwrap();
+    failed.assert_plugin_error(7);
+    assert_eq!(failed.to_snapshot()["status"], 7);
+    assert_eq!(failed.to_snapshot()["response"], serde_json::Value::Null);
+}
+
+#[test]
+#[should_panic(expected = "expected success")]
+fn assert_success_panics_with_context_on_failure() {
+    let host = TestHost::builder("f").build();
+    host.invoke(fail_wat().as_bytes(), "read", "p", serde_json::json!({})).unwrap().assert_success();
+}
+
+#[test]
+fn locate_in_finds_preferring_release_and_lists_tried_paths_on_miss() {
+    let root = std::env::temp_dir().join(format!("bvtk-art-{}", std::process::id()));
+    let rel = root.join("wasm32-wasip1/release");
+    let dbg = root.join("wasm32-wasip1/debug");
+    std::fs::create_dir_all(&rel).unwrap();
+    std::fs::create_dir_all(&dbg).unwrap();
+    std::fs::write(rel.join("my_plugin.wasm"), b"r").unwrap();
+    std::fs::write(dbg.join("my_plugin.wasm"), b"d").unwrap();
+    let found = artifact::locate_in("my_plugin", std::slice::from_ref(&root)).unwrap();
+    assert_eq!(found, rel.join("my_plugin.wasm"));
+
+    let err = artifact::locate_in("absent", std::slice::from_ref(&root)).unwrap_err().to_string();
+    assert!(err.contains("absent.wasm") && err.contains("wasm32-wasip1"), "{err}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ── Phase 3: process-runtime harness (unix: fixtures are `sh` scripts) ─
+
+#[cfg(unix)]
+mod process_runtime {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Write a fixture executable and return its path.
+    fn script(tag: &str, body: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("bvtk-proc-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("plugin.sh");
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    // Reads `init`, does one storage_put + one storage_get, logs, emits
+    // audit, sets response `{"data":{"v":"<value_b64>"}}`, reports 0.
+    const RT: &str = r#"
+read init
+echo '{"type":"host_call","id":1,"method":"storage_put","params":{"key":"k","value_b64":"aGk="}}'
+read r1
+echo '{"type":"host_call","id":2,"method":"storage_get","params":{"key":"k"}}'
+read r2
+echo '{"type":"host_call","id":3,"method":"log","params":{"level":3,"msg":"hello"}}'
+read r3
+echo '{"type":"host_call","id":4,"method":"audit_emit","params":{"payload":{"x":1}}}'
+read r4
+echo '{"type":"host_call","id":5,"method":"crypto_random","params":{}}'
+read r5
+echo "bye" >&2
+# base64 of {"seen":"<r5 is error>"} is fixed below
+echo '{"type":"set_response","data_b64":"eyJkYXRhIjp7Im9rIjp0cnVlfX0="}'
+echo '{"type":"done","status":0}'
+"#;
+
+    #[test]
+    fn host_calls_hit_shared_mock_state() {
+        let exe = script("rt", RT);
+        let host = TestHost::builder("proc").storage_prefix("").audit_emit(true).build();
+        let out = host.invoke_process(&exe, "read", "p", serde_json::json!({})).unwrap();
+        out.assert_success()
+            .assert_data_eq(serde_json::json!({"ok": true}))
+            .assert_logged("hello")
+            .assert_audit_count(1);
+        assert_eq!(host.storage_dump().get("k").map(Vec::as_slice), Some(&b"hi"[..]));
+        assert_eq!(host.process_stderr(), vec!["bye".to_string()]);
+    }
+
+    #[test]
+    fn capability_gates_reply_forbidden_and_unknown_method() {
+        let exe = script(
+            "gate",
+            r#"
+read init
+echo '{"type":"host_call","id":1,"method":"storage_put","params":{"key":"k","value_b64":"aGk="}}'
+read r1
+echo '{"type":"host_call","id":2,"method":"audit_emit","params":{"payload":{}}}'
+read r2
+echo '{"type":"host_call","id":3,"method":"crypto_random","params":{}}'
+read r3
+# Echo the three replies back as the response (JSON-escaped via base64 is
+# overkill; the harness only needs the replies to have been well-formed).
+echo "$r1" >&2
+echo "$r2" >&2
+echo "$r3" >&2
+echo '{"type":"done","status":3}'
+"#,
+        );
+        let host = TestHost::builder("proc").build(); // no storage, no audit
+        let out = host.invoke_process(&exe, "read", "p", serde_json::json!({})).unwrap();
+        out.assert_plugin_error(3).assert_audit_count(0);
+        assert!(host.storage_dump().is_empty());
+        let err = host.process_stderr();
+        assert!(err[0].contains(r#""error":"forbidden""#), "{err:?}");
+        assert!(err[1].contains(r#""error":"forbidden""#), "{err:?}");
+        assert!(err[2].contains(r#""error":"unknown_method""#), "{err:?}");
+    }
+
+    #[test]
+    fn storage_list_reports_immediate_children_with_dir_suffix() {
+        let exe = script(
+            "list",
+            r#"
+read init
+echo '{"type":"host_call","id":1,"method":"storage_list","params":{"prefix":""}}'
+read r1
+echo "$r1" >&2
+echo '{"type":"done","status":0}'
+"#,
+        );
+        let host = TestHost::builder("proc")
+            .storage_prefix("")
+            .storage("a", b"1".to_vec())
+            .storage("d/x", b"2".to_vec())
+            .storage("d/y", b"3".to_vec())
+            .build();
+        host.invoke_process(&exe, "list", "", serde_json::json!({})).unwrap().assert_success();
+        assert!(host.process_stderr()[0].contains(r#""keys":["a","d/"]"#), "{:?}", host.process_stderr());
+    }
+
+    #[test]
+    fn crash_before_done_and_timeout_are_errors() {
+        let crash = script("crash", "read init\nexit 1");
+        let host = TestHost::builder("proc").build();
+        let err = host.invoke_process(&crash, "read", "p", serde_json::json!({})).unwrap_err();
+        assert!(err.to_string().contains("before sending `done`"), "{err}");
+
+        let hang = script("hang", "read init\nsleep 30");
+        let err = host.invoke_process_raw(&hang, b"{}", std::time::Duration::from_millis(300)).unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+    }
+}

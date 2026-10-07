@@ -67,7 +67,10 @@ use wasmtime::{
 };
 
 pub mod app;
+pub mod artifact;
+mod assertions;
 pub mod hooks;
+pub mod process;
 
 /// Default per-invocation fuel budget — matches
 /// `bastion_vault::plugins::runtime::DEFAULT_FUEL`.
@@ -203,6 +206,8 @@ struct HostState {
     audit: Vec<serde_json::Value>,
     clock: TestClock,
     rng: SplitMix64,
+    /// Process-runtime plugins only; see `TestHost::process_stderr`.
+    stderr: Vec<String>,
 }
 
 /// Per-invocation store context — the testkit's `PluginCtx`.
@@ -355,6 +360,7 @@ impl TestHostBuilder {
                 audit: Vec::new(),
                 clock: self.clock,
                 rng: SplitMix64(self.rng_seed),
+                stderr: Vec::new(),
             })),
         }
     }

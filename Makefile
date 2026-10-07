@@ -2540,6 +2540,8 @@ plugins-clean: ## Remove plugins-ext build artefacts
 plugins-test: require-nextest ## Run plugin unit tests: testkit, host ABI parity, plugin substrate
 	@echo "==> bastion-plugin-testkit unit tests"
 	cargo nextest run -p bastion-plugin-testkit
+	@echo "==> bv-plugin-pack unit tests (bundle verification)"
+	cargo nextest run -p bv-plugin-pack
 	@echo "==> ABI parity: testkit vs src/plugins/runtime.rs"
 	cargo nextest run --test test_plugin_testkit_parity
 	@echo "==> host plugin substrate unit tests (src/plugins/*)"

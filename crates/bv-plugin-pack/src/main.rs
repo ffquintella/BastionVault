@@ -25,6 +25,8 @@
 //! converts the source `plugin.toml` and recomputes `sha256` over the
 //! binary so a tampered binary can't sneak past the bundle.
 
+mod bundle_test;
+
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -84,6 +86,32 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Verify a `.bvplugin` bundle offline: container, manifest, ABI,
+    /// binary hash, client assets, signature, and a smoke invoke of the
+    /// embedded module through the plugin testkit. Exits non-zero on any
+    /// failed check.
+    Test {
+        bundle: PathBuf,
+        /// Hex ML-DSA-65 publisher public key (the `.pub` from `keygen`).
+        /// Without it a signed bundle's signature is reported as skipped.
+        #[arg(long)]
+        publisher_pub_hex: Option<String>,
+        /// File holding the hex publisher public key.
+        #[arg(long, conflicts_with = "publisher_pub_hex")]
+        publisher_pub_file: Option<PathBuf>,
+        /// Smoke-invoke operation.
+        #[arg(long, default_value = "read")]
+        op: String,
+        /// Smoke-invoke request path.
+        #[arg(long, default_value = "")]
+        path: String,
+        /// Smoke-invoke request body (JSON object).
+        #[arg(long, default_value = "{}")]
+        data: String,
+        /// Require this exact `bv_run` status from the smoke invoke.
+        #[arg(long)]
+        expect_status: Option<i32>,
+    },
 }
 
 #[derive(Debug)]
@@ -100,6 +128,15 @@ fn main() {
     let cli = Cli::parse();
     let result = match cli.cmd {
         Some(Cmd::Keygen { out }) => keygen(out),
+        Some(Cmd::Test {
+            bundle,
+            publisher_pub_hex,
+            publisher_pub_file,
+            op,
+            path,
+            data,
+            expect_status,
+        }) => test_bundle(bundle, publisher_pub_hex, publisher_pub_file, op, path, data, expect_status),
         None => {
             let manifest = cli.manifest.expect(
                 "--manifest is required when no subcommand is given (use `keygen` to mint signing keys)",
@@ -259,6 +296,47 @@ fn resolve_signing_seed(args: &PackArgs) -> Result<Option<Vec<u8>>, Box<dyn std:
         .into());
     }
     Ok(Some(seed))
+}
+
+fn test_bundle(
+    bundle: PathBuf,
+    pub_hex: Option<String>,
+    pub_file: Option<PathBuf>,
+    op: String,
+    path: String,
+    data: String,
+    expect_status: Option<i32>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = fs::read(&bundle).map_err(|e| format!("reading {}: {e}", bundle.display()))?;
+    let pub_hex = match (pub_hex, pub_file) {
+        (Some(h), _) => Some(h),
+        (None, Some(p)) => Some(
+            fs::read_to_string(&p).map_err(|e| format!("reading {}: {e}", p.display()))?,
+        ),
+        (None, None) => None,
+    };
+    let publisher_pub = pub_hex
+        .map(|h| hex::decode(h.trim()).map_err(|e| format!("publisher key must be hex: {e}")))
+        .transpose()?;
+    let data: serde_json::Value =
+        serde_json::from_str(&data).map_err(|e| format!("--data is not valid JSON: {e}"))?;
+    let report = bundle_test::check_bundle(
+        &bytes,
+        publisher_pub.as_deref(),
+        &bundle_test::SmokeOpts { op, path, data, expect_status },
+    );
+    for c in &report.checks {
+        let tag = match c.status {
+            bundle_test::Status::Pass => "ok  ",
+            bundle_test::Status::Fail => "FAIL",
+            bundle_test::Status::Skip => "skip",
+        };
+        println!("[{tag}] {:<13} {}", c.name, c.detail);
+    }
+    if report.failed() {
+        return Err("bundle verification failed".into());
+    }
+    Ok(())
 }
 
 fn keygen(out: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
