@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/nicerdicer/tauri-docs/refs/heads/v2/tooling/cli/schema.json",
   "identifier": "default",
   "description": "Default permissions for the BastionVault GUI",
-  "windows": ["main", "ssh-*", "rdp-*", "plugin-*"],
+  "windows": ["main", "ssh-*", "rdp-*", "session-workspace", "plugin-*"],
   "permissions": [
     "core:default",
     "shell:allow-open",

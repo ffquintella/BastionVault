@@ -135,6 +135,7 @@ pub mod resources;
 pub mod rustion;
 pub mod scheduled_exports;
 pub mod secrets;
+pub mod session_workspace;
 pub mod sharing;
 pub mod ssh;
 pub mod ssh_security_key;

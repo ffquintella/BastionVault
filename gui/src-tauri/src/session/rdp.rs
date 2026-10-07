@@ -69,7 +69,7 @@ use ironrdp_core::{encode_buf, WriteBuf};
 use ironrdp_tokio::TokioFramed;
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
@@ -488,6 +488,27 @@ impl FrameSink {
         self.channel = Some(channel);
         self.needs_full = true;
     }
+
+    /// Drop the current window's channel when the session moves to another
+    /// window (T38 Phase 6), so no further frame reaches a webview that
+    /// gave the desktop up. The pump keeps painting into its framebuffer
+    /// and the next `attach` — the new window's — starts from a full frame.
+    pub fn detach(&mut self) {
+        self.channel = None;
+        self.needs_full = true;
+    }
+}
+
+/// Detach the frame channel of RDP session `token`, if it is one.
+pub async fn detach_frames(state: &crate::state::AppState, token: &str) {
+    let frames = match state.connect_sessions.lock().await.get(token) {
+        Some(SessionState::Rdp(s)) => Arc::clone(&s.frames),
+        _ => return,
+    };
+    match frames.lock() {
+        Ok(mut sink) => sink.detach(),
+        Err(poisoned) => poisoned.into_inner().detach(),
+    };
 }
 
 /// Accumulated damage between two flushes.
@@ -922,7 +943,10 @@ pub async fn open_rdp_session(
     // Stage 5: spawn the active-stage pump.
     let (tx, rx) = mpsc::channel::<RdpControl>(64);
     let frames = Arc::new(Mutex::new(FrameSink::new()));
-    let app_for_task = app.clone();
+    // Events go to the window that holds the session (T38; see
+    // `session::routing`). Frames already travel over a `Channel` bound
+    // to the webview that attached it.
+    let events_for_task = super::routing::SessionEvents::new(app.clone(), token.clone());
     let closed_event_for_task = closed_event.clone();
     let resize_event_for_task = resize_event.clone();
     let cursor_event_for_task = cursor_event_name(&token);
@@ -931,7 +955,7 @@ pub async fn open_rdp_session(
     #[cfg(not(feature = "rdp_egfx"))]
     let egfx_rx: Option<mpsc::UnboundedReceiver<EgfxEvent>> = None;
     tokio::spawn(active_stage_loop(
-        app_for_task,
+        events_for_task,
         framed,
         connection_result,
         rx,
@@ -1239,7 +1263,7 @@ impl ClipboardInbox {
 /// read future leaves any partial data in the `Framed` buffer.
 #[allow(clippy::too_many_arguments)]
 async fn active_stage_loop<S>(
-    app: AppHandle,
+    events: super::routing::SessionEvents,
     mut framed: TokioFramed<S>,
     connection_result: ConnectionResult,
     mut rx: mpsc::Receiver<RdpControl>,
@@ -1491,13 +1515,13 @@ async fn active_stage_loop<S>(
                         // right shape either way.
                         ActiveStageOutput::PointerBitmap(pointer) => {
                             let update = cursor_update_from(&pointer).unwrap_or(CursorUpdate::Default);
-                            let _ = app.emit(&cursor_event, update);
+                            events.emit(&cursor_event, update).await;
                         }
                         ActiveStageOutput::PointerHidden => {
-                            let _ = app.emit(&cursor_event, CursorUpdate::Hidden);
+                            events.emit(&cursor_event, CursorUpdate::Hidden).await;
                         }
                         ActiveStageOutput::PointerDefault => {
-                            let _ = app.emit(&cursor_event, CursorUpdate::Default);
+                            events.emit(&cursor_event, CursorUpdate::Default).await;
                         }
                         // Server-initiated pointer warp (snap-to-
                         // default-button and friends). A webview
@@ -1521,7 +1545,7 @@ async fn active_stage_loop<S>(
                             for frame in response_frames {
                                 let _ = framed.write_all(&frame).await;
                             }
-                            let _ = app.emit(&closed_event, ());
+                            events.emit(&closed_event, ()).await;
                             stats.log_session_total(&label, session_start);
                             return;
                         }
@@ -1554,10 +1578,7 @@ async fn active_stage_loop<S>(
                                 height,
                             );
                             egfx_fb.resize(width, height);
-                            let _ = app.emit(
-                                &resize_event,
-                                ResizePayload { width, height },
-                            );
+                            events.emit(&resize_event, ResizePayload { width, height }).await;
                             // The frame header carries the desktop size
                             // too, so the canvas can resize itself off
                             // the next frame even if this event loses
@@ -1581,7 +1602,7 @@ async fn active_stage_loop<S>(
                 if let Some(rx) = egfx_rx.as_mut() {
                     while let Ok(event) = rx.try_recv() {
                         if let Some(size) = apply_egfx_event(event, &mut egfx_fb, &mut dirty, &mut width, &mut height) {
-                            let _ = app.emit(&resize_event, size);
+                            events.emit(&resize_event, size).await;
                         }
                     }
                 }
@@ -1592,7 +1613,7 @@ async fn active_stage_loop<S>(
         }
     }
     stats.log_session_total(&label, session_start);
-    let _ = app.emit(&closed_event, ());
+    events.emit(&closed_event, ()).await;
 }
 
 /// RGBA byte count a damage rect covers, clamped to the desktop.
@@ -2456,6 +2477,8 @@ pub async fn drop_session(state: &crate::state::AppState, token: &str) -> Option
     let removed = sessions.remove(token);
     drop(sessions);
     state.rustion_session_bundles.lock().await.remove(token);
+    // See the matching line in `ssh::drop_session`.
+    state.session_attachments.lock().await.remove(token);
     match removed {
         Some(SessionState::Rdp(s)) => {
             log::info!("resource-connect/rdp: closed session token={token}");

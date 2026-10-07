@@ -10,8 +10,12 @@
 //! RDP (`ironrdp` + `<canvas>`) is Phase 4; LDAP / SSH-engine / PKI
 //! credential sources land in Phases 5–6.
 
+pub mod attachments;
+pub mod layouts;
+pub mod output;
 pub mod rdp;
 pub mod rdp_clipboard;
+pub mod routing;
 pub mod sk_signer;
 pub mod ssh;
 pub mod web;
@@ -22,6 +26,7 @@ pub mod web_launch;
 pub mod web_recipe;
 pub mod web_script;
 pub mod web_tls_pin;
+pub mod workspace;
 
 use tokio::sync::mpsc;
 
@@ -232,8 +237,11 @@ pub enum SessionCleanupKind {
 pub enum SshControl {
     /// Bytes from the local terminal heading to the remote PTY.
     Data(Vec<u8>),
-    /// Window resize from the local terminal.
-    Resize { cols: u16, rows: u16 },
+    /// Window resize from the local terminal. `epoch` is the holder epoch
+    /// the resize was authorised at (`attachments::AttachmentRegistry::
+    /// route_epoch`); the first resize a holder sends at an epoch is its
+    /// listener handshake (`session::output`).
+    Resize { cols: u16, rows: u16, epoch: u64 },
     /// Operator clicked Disconnect or closed the WebviewWindow.
     Close,
 }

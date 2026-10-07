@@ -13,13 +13,16 @@ use std::collections::HashMap;
 use bv_client::Operation;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, State, Webview, WebviewUrl, WebviewWindowBuilder};
 use zeroize::Zeroizing;
 
 use crate::error::{CmdResult, CommandError};
+use crate::preferences::SessionWorkspacePrefs;
 use crate::session::{
     self,
+    attachments::{own_window_label, SessionDescriptor},
     ssh::{open_ssh_session, SshCredential, SshOpenArgs, SshOpenOutcome, CONNECT_TIMEOUT},
+    workspace::{self, Placement},
     SshControl,
 };
 use crate::state::AppState;
@@ -53,6 +56,30 @@ pub struct SshOpenRequest {
     /// `features/connect-mfa-and-fido2-ssh.md`.
     #[serde(default)]
     pub connect_ticket: Option<String>,
+    /// Where the session should be rendered (T38). Absent = the GUI
+    /// preference default (`workspace-tab` unless the operator chose
+    /// otherwise). Parsed strictly: an unknown value fails the call.
+    #[serde(default)]
+    pub placement: Option<Placement>,
+    /// Set when this open re-creates a pane of a saved Session Workspace
+    /// layout (T38 Phase 5). See [`SessionRestoreRef`].
+    #[serde(default)]
+    pub restore: Option<SessionRestoreRef>,
+}
+
+/// A layout restore's per-pane context (T38 Phase 5). Restoring re-runs
+/// this normal open path for every pane — connect gate, transport tier and
+/// connect-time MFA included — and this only adds two things: the open is
+/// refused before anything is read if the active namespace is not the one
+/// the pane was saved in, and the session is tagged with the placeholder
+/// it fills in the workspace.
+#[derive(Deserialize, Debug, Clone)]
+pub struct SessionRestoreRef {
+    /// Namespace the pane was saved in (`""` = root).
+    pub namespace: String,
+    /// The workspace's placeholder id (`[A-Za-z0-9_-]{1,32}`), echoed in
+    /// the session listing so the workspace fills that placeholder.
+    pub pane_ref: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -75,6 +102,9 @@ pub async fn session_open_ssh(
     app: AppHandle,
     request: SshOpenRequest,
 ) -> CmdResult<SshOpenResponse> {
+    // Where this open happens (namespace, vault) — and, for a layout
+    // restore, the namespace check — before anything is read.
+    let opened_in = open_context(&state, request.restore.as_ref()).await?;
     // Load the resource metadata.
     let meta = read_resource_meta(&state, &request.resource_name).await?;
 
@@ -89,6 +119,10 @@ pub async fn session_open_ssh(
     // `web` (or unknown) profile handed to this command must not be
     // opened as SSH.
     session::ProfileProtocol::require(&profile, session::ProfileProtocol::Ssh).map_err(CommandError::from)?;
+    // Where it renders is decided before anything is resolved or dialled,
+    // so a placement this build cannot honour costs no dial and no ticket.
+    let (placement, layout_prefs) = resolve_session_layout(request.placement)?;
+    require_restore_in_workspace(&opened_in, placement)?;
 
     // Compute the effective target, user, port from the profile +
     // resource metadata defaults.
@@ -291,6 +325,7 @@ pub async fn session_open_ssh(
                         host_key_fingerprint: host_key_fingerprint.clone(),
                         label: label.clone(),
                         on_close: on_close.clone(),
+                        retain_output: layout_prefs.replay_buffer,
                     },
                 ),
             )
@@ -387,49 +422,43 @@ pub async fn session_open_ssh(
         );
     }
 
-    // Spawn the SessionSshWindow into a new WebviewWindow. The
-    // window's React route claims the session via the token + the
-    // event channel names returned in `outcome`.
-    let window_label = format!("ssh-{}", outcome.token);
+    // Render it: in the Session Workspace window (registered as attached
+    // to it, then `session://placed`), or — `own-window` — in a new
+    // WebviewWindow whose React route claims the session via the token +
+    // the event channel names returned in `outcome`.
+    //
     // We use HashRouter on the frontend, so the route fragment
     // sits inside the URL hash. Tauri's WebviewUrl::App takes a
     // path relative to the app's index — `index.html#/path` gets
     // the React router to match `/path`.
-    let url = format!(
-        "index.html#/session/ssh?token={}&stdout={}&closed={}&label={}",
-        urlencoding::encode(&outcome.token),
-        urlencoding::encode(&outcome.stdout_event),
-        urlencoding::encode(&outcome.closed_event),
-        urlencoding::encode(&label),
-    );
-    let win = WebviewWindowBuilder::new(&app, &window_label, WebviewUrl::App(url.into()))
-        .title(format!("BastionVault — {label}"))
-        .inner_size(900.0, 540.0)
-        .resizable(true)
-        .build()
-        .map_err(|e| CommandError::from(format!("spawn window: {e}")))?;
-    // Hook the close button so the operator x'ing the window
-    // tears down the SSH session as a side-effect.
-    let token_for_close = outcome.token.clone();
-    let app_for_close = app.clone();
-    win.on_window_event(move |ev| {
-        if let tauri::WindowEvent::CloseRequested { .. } = ev {
-            let token = token_for_close.clone();
-            let app = app_for_close.clone();
-            tauri::async_runtime::spawn(async move {
-                let s = app.state::<AppState>();
-                let _ = session::ssh::send_control(&s, &token, SshControl::Close).await;
-                let cleanup = session::ssh::drop_session(&s, &token).await;
-                if let Some(c) = cleanup {
-                    let s2 = app.state::<AppState>();
-                    run_cleanup(&s2, c).await;
-                }
-                log::info!("resource-connect/ssh: window-close → session drop {token}");
-            });
-        }
-    });
+    let descriptor = SessionDescriptor {
+        token: outcome.token.clone(),
+        protocol: session::ProfileProtocol::Ssh,
+        label: label.clone(),
+        resource_name: request.resource_name.clone(),
+        profile_id: request.profile_id.clone(),
+        stdout_event: Some(outcome.stdout_event.clone()),
+        closed_event: outcome.closed_event.clone(),
+        resize_event: None,
+        cursor_event: None,
+        width: None,
+        height: None,
+        opened_at: now_rfc3339(),
+        placement,
+        pane_ref: opened_in.pane_ref.clone(),
+        namespace: opened_in.namespace.clone(),
+        vault_id: opened_in.vault_id.clone(),
+    };
+    let window_label = if placement.is_workspace() {
+        place_in_workspace(&app, &state, descriptor).await?
+    } else {
+        spawn_own_session_window(&app, &state, descriptor, &layout_prefs).await?
+    };
 
-    log::info!("resource-connect/ssh: spawned window {window_label} for {label}");
+    log::info!(
+        "resource-connect/ssh: session for {label} rendered in window {window_label} (placement {})",
+        placement.as_str()
+    );
 
     let _ = record_recent_session(&state, &request.resource_name, &profile, SessionProtocolTag::Ssh).await;
 
@@ -449,7 +478,8 @@ pub struct SshInputRequest {
 }
 
 #[tauri::command]
-pub async fn session_input(state: State<'_, AppState>, request: SshInputRequest) -> CmdResult<()> {
+pub async fn session_input(state: State<'_, AppState>, webview: Webview, request: SshInputRequest) -> CmdResult<()> {
+    require_session_window(&state, &webview, &request.token).await?;
     let bytes = session::ssh::decode_b64(&request.bytes_b64).map_err(CommandError::from)?;
     session::ssh::send_control(&state, &request.token, SshControl::Data(bytes)).await.map_err(CommandError::from)
 }
@@ -462,10 +492,18 @@ pub struct SshResizeRequest {
 }
 
 #[tauri::command]
-pub async fn session_resize(state: State<'_, AppState>, request: SshResizeRequest) -> CmdResult<()> {
-    session::ssh::send_control(&state, &request.token, SshControl::Resize { cols: request.cols, rows: request.rows })
-        .await
-        .map_err(CommandError::from)
+pub async fn session_resize(state: State<'_, AppState>, webview: Webview, request: SshResizeRequest) -> CmdResult<()> {
+    // The holder epoch travels with the resize: the first one a holder
+    // sends at an epoch is its listener handshake (`session::output`).
+    let (route, epoch) = state.session_attachments.lock().await.route_epoch(&request.token);
+    session::attachments::authorize_input(&route, webview.label(), &request.token).map_err(CommandError::from)?;
+    session::ssh::send_control(
+        &state,
+        &request.token,
+        SshControl::Resize { cols: request.cols, rows: request.rows, epoch },
+    )
+    .await
+    .map_err(CommandError::from)
 }
 
 #[derive(Deserialize)]
@@ -480,6 +518,12 @@ pub struct RdpOpenRequest {
     /// Same connect-time MFA ticket as `SshOpenRequest::connect_ticket`.
     #[serde(default)]
     pub connect_ticket: Option<String>,
+    /// See `SshOpenRequest::placement`.
+    #[serde(default)]
+    pub placement: Option<Placement>,
+    /// See `SshOpenRequest::restore`.
+    #[serde(default)]
+    pub restore: Option<SessionRestoreRef>,
 }
 
 #[derive(Serialize)]
@@ -504,6 +548,8 @@ pub async fn session_open_rdp(
     app: AppHandle,
     request: RdpOpenRequest,
 ) -> CmdResult<RdpOpenResponse> {
+    // See `session_open_ssh`.
+    let opened_in = open_context(&state, request.restore.as_ref()).await?;
     let meta = read_resource_meta(&state, &request.resource_name).await?;
     let profile = find_profile(&meta, &request.profile_id).ok_or_else(|| {
         CommandError::from(format!(
@@ -513,6 +559,9 @@ pub async fn session_open_rdp(
     })?;
     // See `session_open_ssh`: refuse a profile of any other protocol.
     session::ProfileProtocol::require(&profile, session::ProfileProtocol::Rdp).map_err(CommandError::from)?;
+    // See `session_open_ssh`: placement is settled before anything is dialled.
+    let (placement, layout_prefs) = resolve_session_layout(request.placement)?;
+    require_restore_in_workspace(&opened_in, placement)?;
 
     // Web / RDP mutual exclusion (see `session::web_rdp_conflict`). Refused
     // early so nothing is resolved or dialled and no MFA ticket is burnt;
@@ -827,40 +876,31 @@ pub async fn session_open_rdp(
         );
     }
 
-    let window_label = format!("rdp-{}", outcome.token);
-    let url = format!(
-        "index.html#/session/rdp?token={}&closed={}&resize={}&cursor={}&label={}&w={}&h={}",
-        urlencoding::encode(&outcome.token),
-        urlencoding::encode(&outcome.closed_event),
-        urlencoding::encode(&outcome.resize_event),
-        urlencoding::encode(&session::rdp::cursor_event_name(&outcome.token)),
-        urlencoding::encode(&label),
-        outcome.width,
-        outcome.height,
-    );
-    let win = WebviewWindowBuilder::new(&app, &window_label, WebviewUrl::App(url.into()))
-        .title(format!("BastionVault — {label}"))
-        .inner_size((outcome.width as f64) + 8.0, (outcome.height as f64) + 50.0)
-        .resizable(true)
-        .build()
-        .map_err(|e| CommandError::from(format!("spawn window: {e}")))?;
-    let token_for_close = outcome.token.clone();
-    let app_for_close = app.clone();
-    win.on_window_event(move |ev| {
-        if let tauri::WindowEvent::CloseRequested { .. } = ev {
-            let token = token_for_close.clone();
-            let app = app_for_close.clone();
-            tauri::async_runtime::spawn(async move {
-                let s = app.state::<AppState>();
-                let _ = session::rdp::send_control(&s, &token, session::rdp::RdpControl::Close).await;
-                let cleanup = session::rdp::drop_session(&s, &token).await;
-                if let Some(c) = cleanup {
-                    let s2 = app.state::<AppState>();
-                    run_cleanup(&s2, c).await;
-                }
-            });
-        }
-    });
+    // Workspace or own window; see the matching comment in `session_open_ssh`.
+    let cursor_event = session::rdp::cursor_event_name(&outcome.token);
+    let descriptor = SessionDescriptor {
+        token: outcome.token.clone(),
+        protocol: session::ProfileProtocol::Rdp,
+        label: label.clone(),
+        resource_name: request.resource_name.clone(),
+        profile_id: request.profile_id.clone(),
+        stdout_event: None,
+        closed_event: outcome.closed_event.clone(),
+        resize_event: Some(outcome.resize_event.clone()),
+        cursor_event: Some(cursor_event),
+        width: Some(outcome.width),
+        height: Some(outcome.height),
+        opened_at: now_rfc3339(),
+        placement,
+        pane_ref: opened_in.pane_ref.clone(),
+        namespace: opened_in.namespace.clone(),
+        vault_id: opened_in.vault_id.clone(),
+    };
+    let window_label = if placement.is_workspace() {
+        place_in_workspace(&app, &state, descriptor).await?
+    } else {
+        spawn_own_session_window(&app, &state, descriptor, &layout_prefs).await?
+    };
 
     let _ = record_recent_session(&state, &request.resource_name, &profile, SessionProtocolTag::Rdp).await;
 
@@ -885,7 +925,12 @@ pub struct RdpInputMouseRequest {
 }
 
 #[tauri::command]
-pub async fn session_input_rdp_mouse(state: State<'_, AppState>, request: RdpInputMouseRequest) -> CmdResult<()> {
+pub async fn session_input_rdp_mouse(
+    state: State<'_, AppState>,
+    webview: Webview,
+    request: RdpInputMouseRequest,
+) -> CmdResult<()> {
+    require_session_window(&state, &webview, &request.token).await?;
     let ctl = match (request.button.as_deref(), request.button_index) {
         (Some("down"), Some(idx)) => {
             session::rdp::RdpControl::PointerButton { button_index: idx, pressed: true, x: request.x, y: request.y }
@@ -911,7 +956,12 @@ pub struct RdpInputWheelRequest {
 }
 
 #[tauri::command]
-pub async fn session_input_rdp_wheel(state: State<'_, AppState>, request: RdpInputWheelRequest) -> CmdResult<()> {
+pub async fn session_input_rdp_wheel(
+    state: State<'_, AppState>,
+    webview: Webview,
+    request: RdpInputWheelRequest,
+) -> CmdResult<()> {
+    require_session_window(&state, &webview, &request.token).await?;
     session::rdp::send_control(
         &state,
         &request.token,
@@ -934,7 +984,12 @@ pub struct RdpInputKeyRequest {
 }
 
 #[tauri::command]
-pub async fn session_input_rdp_key(state: State<'_, AppState>, request: RdpInputKeyRequest) -> CmdResult<()> {
+pub async fn session_input_rdp_key(
+    state: State<'_, AppState>,
+    webview: Webview,
+    request: RdpInputKeyRequest,
+) -> CmdResult<()> {
+    require_session_window(&state, &webview, &request.token).await?;
     session::rdp::send_control(
         &state,
         &request.token,
@@ -952,7 +1007,12 @@ pub struct RdpInputResizeRequest {
 }
 
 #[tauri::command]
-pub async fn session_input_rdp_resize(state: State<'_, AppState>, request: RdpInputResizeRequest) -> CmdResult<()> {
+pub async fn session_input_rdp_resize(
+    state: State<'_, AppState>,
+    webview: Webview,
+    request: RdpInputResizeRequest,
+) -> CmdResult<()> {
+    require_session_window(&state, &webview, &request.token).await?;
     session::rdp::send_control(
         &state,
         &request.token,
@@ -983,9 +1043,13 @@ pub struct RdpAttachFramesRequest {
 #[tauri::command]
 pub async fn session_attach_rdp_frames(
     state: State<'_, AppState>,
+    webview: Webview,
     request: RdpAttachFramesRequest,
     channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> CmdResult<()> {
+    // The frame channel is the desktop itself: only the window that holds
+    // the session may install one.
+    require_session_window(&state, &webview, &request.token).await?;
     {
         let sessions = state.connect_sessions.lock().await;
         // Defence in depth for the web/RDP exclusion: `session_open_*` keep
@@ -1311,7 +1375,12 @@ pub async fn resource_login_class(
 }
 
 #[tauri::command]
-pub async fn session_close(state: State<'_, AppState>, app: AppHandle, request: SshCloseRequest) -> CmdResult<()> {
+pub async fn session_close(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    webview: Webview,
+    request: SshCloseRequest,
+) -> CmdResult<()> {
     // A web session has no control channel to signal: closing it means
     // destroying its window and running its own teardown. Handled first so
     // the SSH/RDP fan-out below never sees a web token.
@@ -1325,17 +1394,331 @@ pub async fn session_close(state: State<'_, AppState>, app: AppHandle, request: 
     {
         return Ok(());
     }
-    // Best-effort fan-out: we don't know whether the token names
-    // an SSH or RDP session, so try both. The mismatched one
-    // returns an error we ignore. drop_session removes either kind
-    // and yields any captured cleanup hook.
-    let _ = session::ssh::send_control(&state, &request.token, SshControl::Close).await;
-    let _ = session::rdp::send_control(&state, &request.token, session::rdp::RdpControl::Close).await;
-    let cleanup_ssh = session::ssh::drop_session(&state, &request.token).await;
-    let cleanup_rdp = session::rdp::drop_session(&state, &request.token).await;
-    if let Some(c) = cleanup_ssh.or(cleanup_rdp) {
+    // SSH or RDP. Refused only when another window holds the session
+    // (`attachments::authorize_close`), so no window tears down a session
+    // rendered elsewhere.
+    let caller = webview.label().to_string();
+    let route = state.session_attachments.lock().await.route(&request.token);
+    if let Err(e) = session::attachments::authorize_close(&route, &caller, &request.token) {
+        log::warn!("resource-connect: session_close refused: {e}");
+        return Err(CommandError::from(e));
+    }
+    // The shared stop path (control-channel `Close`, drop from every
+    // registry including the window attachment, hand back the cleanup
+    // hook). A window close and the watchdog use the same one, so
+    // whichever runs first owns the cleanup.
+    if let Some(c) = session::attachments::stop_session(&state, &request.token).await {
         run_cleanup(&state, c).await;
     }
+    Ok(())
+}
+
+/// Read the session layout preference and resolve an open request's
+/// placement against it (T38). Returns the placement and the preferences
+/// the own-window builder reads.
+///
+/// An unreadable preferences file is logged and read as the *most
+/// isolated* layout — `windows` mode, every session in its own window —
+/// not as the defaults, which since Phase 3 pool sessions into the shared
+/// workspace realm: the operator may have chosen `windows` in the file
+/// that cannot be read. An explicit `workspace-*` request is then refused
+/// naming the unreadable file, never silently re-homed.
+pub(crate) fn resolve_session_layout(
+    requested: Option<Placement>,
+) -> Result<(Placement, SessionWorkspacePrefs), CommandError> {
+    let prefs = match crate::preferences::load() {
+        Ok(p) => p.session_workspace,
+        Err(e) => {
+            if let Some(p) = requested.filter(|p| p.is_workspace()) {
+                return Err(CommandError::from(format!(
+                    "session placement `{}` refused: the preferences file is unreadable ({e}), so the session layout \
+                     the operator chose is unknown; use `own-window` or fix the file",
+                    p.as_str()
+                )));
+            }
+            log::warn!(
+                "resource-connect: preferences unreadable ({e}); opening sessions in their own windows until it is fixed"
+            );
+            SessionWorkspacePrefs { layout_mode: "windows".into(), ..SessionWorkspacePrefs::default() }
+        }
+    };
+    let placement = workspace::resolve_placement(requested, &prefs).map_err(CommandError::from)?;
+    Ok((placement, prefs))
+}
+
+/// Where a session is being opened: the active namespace and vault
+/// profile, recorded on its descriptor so a saved layout knows both
+/// (T38 Phase 5), and the restore placeholder it fills, if any.
+pub(crate) struct OpenContext {
+    pub namespace: String,
+    pub vault_id: String,
+    pub pane_ref: Option<String>,
+}
+
+/// Capture the [`OpenContext`] at the very start of an open. For a layout
+/// restore this is also where the cross-namespace rule is enforced: a pane
+/// saved in another namespace is refused before its resource is read, so a
+/// same-named resource in the active namespace is never resolved in its
+/// place.
+async fn open_context(state: &State<'_, AppState>, restore: Option<&SessionRestoreRef>) -> CmdResult<OpenContext> {
+    let namespace =
+        session::layouts::normalize_namespace(&state.active_namespace.lock().await.clone().unwrap_or_default());
+    let pane_ref = match restore {
+        None => None,
+        Some(r) => {
+            if !session::layouts::pane_ref_ok(&r.pane_ref) {
+                return Err(CommandError::from(format!(
+                    "restore refused: `{}` is not a layout placeholder id",
+                    r.pane_ref.escape_debug()
+                )));
+            }
+            if let Err(e) = session::layouts::check_restore_namespace(&r.namespace, &namespace) {
+                log::warn!("resource-connect: {e}");
+                return Err(CommandError::from(e));
+            }
+            Some(r.pane_ref.clone())
+        }
+    };
+    Ok(OpenContext { namespace, vault_id: crate::embedded::current_vault_id(), pane_ref })
+}
+
+/// A restore re-creates a workspace pane; it never opens a window of its own.
+fn require_restore_in_workspace(ctx: &OpenContext, placement: Placement) -> CmdResult<()> {
+    if ctx.pane_ref.is_some() && !placement.is_workspace() {
+        return Err(CommandError::from(format!(
+            "restore refused: a saved layout re-opens its panes in the Session Workspace, not with placement `{}`",
+            placement.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// The calling webview must hold `token` (`attachments::authorize_input`).
+/// Every command that drives a session — keystrokes, paste, resize,
+/// pointer, the RDP frame channel — goes through here.
+async fn require_session_window(state: &State<'_, AppState>, webview: &Webview, token: &str) -> CmdResult<()> {
+    let route = state.session_attachments.lock().await.route(token);
+    session::attachments::authorize_input(&route, webview.label(), token).map_err(CommandError::from)
+}
+
+/// Render a session in the Session Workspace window (T38 Phase 3).
+///
+/// The session is registered attached to the workspace *before* the window
+/// is ensured or told, so the window's close hook and the watchdog always
+/// find it, and the workspace's handshake (`session_resize` /
+/// `session_attach_rdp_frames`) passes the holder check the moment its
+/// pane mounts. `session://placed` then carries no payload — the workspace
+/// reads the session from `session_list_open` — and doubles as nothing
+/// more than a wake-up: a workspace that is still loading reads the same
+/// list once its listener is live, so a session placed during that window
+/// is not lost.
+///
+/// Any failure stops the session: nothing would render or close it.
+async fn place_in_workspace(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    descriptor: SessionDescriptor,
+) -> Result<String, CommandError> {
+    let token = descriptor.token.clone();
+    let registered = state.session_attachments.lock().await.register(
+        descriptor,
+        Some(workspace::WORKSPACE_WINDOW_LABEL),
+        std::time::Instant::now(),
+    );
+    if let Err(e) = registered {
+        log::warn!("resource-connect: {e}; stopping session {token}");
+        if let Some(c) = session::attachments::stop_session(state, &token).await {
+            run_cleanup(state, c).await;
+        }
+        return Err(CommandError::from(e));
+    }
+    if let Err(e) = ensure_workspace_window(app) {
+        log::warn!("resource-connect: session workspace window unavailable ({e}); stopping session {token}");
+        if let Some(c) = session::attachments::stop_session(state, &token).await {
+            run_cleanup(state, c).await;
+        }
+        return Err(CommandError::from(format!("session workspace window: {e}")));
+    }
+    if let Err(e) = app.emit_to(workspace::WORKSPACE_WINDOW_LABEL, workspace::PLACED_EVENT, ()) {
+        // Not fatal: the workspace reads the list when it loads and on
+        // every later event. Worth a line for whoever is debugging it.
+        log::warn!("resource-connect: could not notify the session workspace: {e}");
+    }
+    Ok(workspace::WORKSPACE_WINDOW_LABEL.to_string())
+}
+
+/// Focus the singleton Session Workspace window, building it if it does
+/// not exist. Its close hook stops every session attached to it.
+pub(crate) fn ensure_workspace_window(app: &AppHandle) -> Result<(), String> {
+    let label = workspace::WORKSPACE_WINDOW_LABEL;
+    if let Some(win) = app.get_webview_window(label) {
+        // Best effort: a window that will not unminimise or take focus
+        // still renders the new session.
+        if let Err(e) = win.unminimize().and_then(|_| win.show()).and_then(|_| win.set_focus()) {
+            log::debug!("resource-connect: could not raise the session workspace: {e}");
+        }
+        return Ok(());
+    }
+    let built = WebviewWindowBuilder::new(app, label, WebviewUrl::App(workspace::WORKSPACE_WINDOW_URL.into()))
+        .title("BastionVault — Sessions")
+        .inner_size(1200.0, 760.0)
+        .min_inner_size(480.0, 320.0)
+        .resizable(true)
+        .build();
+    let win = match built {
+        Ok(w) => w,
+        // Two opens racing to build the window: the loser's build fails on
+        // the duplicate label, and the window it wanted exists.
+        Err(e) => {
+            return if app.get_webview_window(label).is_some() { Ok(()) } else { Err(e.to_string()) };
+        }
+    };
+    let app_for_close = app.clone();
+    win.on_window_event(move |ev| {
+        if let tauri::WindowEvent::CloseRequested { .. } = ev {
+            let app = app_for_close.clone();
+            tauri::async_runtime::spawn(async move {
+                super::session_workspace::close_window_sessions(
+                    &app,
+                    workspace::WORKSPACE_WINDOW_LABEL,
+                    None,
+                    super::session_workspace::WindowCloseCause::WindowClose,
+                )
+                .await;
+            });
+        }
+    });
+    log::info!("resource-connect: opened the session workspace window");
+    Ok(())
+}
+
+/// The `HashRouter` URL of a session's own window: the session's identity
+/// and event names as query parameters, as the one-pane routes read them.
+/// One builder for the open path and a move (T38 Phase 6), so a moved
+/// session's window is indistinguishable from one it was born in.
+pub(crate) fn own_window_url(d: &SessionDescriptor) -> String {
+    match d.protocol {
+        session::ProfileProtocol::Rdp => format!(
+            "index.html#/session/rdp?token={}&closed={}&resize={}&cursor={}&label={}&w={}&h={}",
+            urlencoding::encode(&d.token),
+            urlencoding::encode(&d.closed_event),
+            urlencoding::encode(d.resize_event.as_deref().unwrap_or_default()),
+            urlencoding::encode(d.cursor_event.as_deref().unwrap_or_default()),
+            urlencoding::encode(&d.label),
+            d.width.unwrap_or(1024),
+            d.height.unwrap_or(768),
+        ),
+        // We use HashRouter on the frontend, so the route fragment sits
+        // inside the URL hash. Tauri's WebviewUrl::App takes a path
+        // relative to the app's index — `index.html#/path` gets the React
+        // router to match `/path`.
+        _ => format!(
+            "index.html#/session/ssh?token={}&stdout={}&closed={}&label={}",
+            urlencoding::encode(&d.token),
+            urlencoding::encode(d.stdout_event.as_deref().unwrap_or_default()),
+            urlencoding::encode(&d.closed_event),
+            urlencoding::encode(&d.label),
+        ),
+    }
+}
+
+fn own_window_size(d: &SessionDescriptor) -> (f64, f64) {
+    match d.protocol {
+        session::ProfileProtocol::Rdp => {
+            (f64::from(d.width.unwrap_or(1024)) + 8.0, f64::from(d.height.unwrap_or(768)) + 50.0)
+        }
+        _ => (900.0, 540.0),
+    }
+}
+
+/// Build a session's own `WebviewWindow` and hand its teardown to the
+/// attachment registry (T38 Phase 2).
+///
+/// The session is registered — attached to the window's label — before
+/// the window exists, so the close hook always finds it; the watchdog's
+/// `WINDOW_GONE_GRACE` keeps it from judging a window still being built.
+/// A window that cannot be built stops the session at once: nothing would
+/// ever render or close it otherwise.
+async fn spawn_own_session_window(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    descriptor: SessionDescriptor,
+    layout_prefs: &SessionWorkspacePrefs,
+) -> Result<String, CommandError> {
+    let token = descriptor.token.clone();
+    let window_label = own_window_label(descriptor.protocol, &token);
+    let to_build = descriptor.clone();
+    let registered =
+        state.session_attachments.lock().await.register(descriptor, Some(&window_label), std::time::Instant::now());
+    if let Err(e) = registered {
+        // Unreachable with random tokens, but a session no registry
+        // entry points at would have no exact teardown: stop it.
+        log::warn!("resource-connect: {e}; stopping session {token}");
+        if let Some(c) = session::attachments::stop_session(state, &token).await {
+            run_cleanup(state, c).await;
+        }
+        return Err(CommandError::from(e));
+    }
+    if let Err(e) = build_own_session_window(app, &to_build, layout_prefs) {
+        log::warn!("resource-connect: window {window_label} could not be built ({e}); stopping session {token}");
+        if let Some(c) = session::attachments::stop_session(state, &token).await {
+            run_cleanup(state, c).await;
+        }
+        return Err(CommandError::from(format!("spawn window: {e}")));
+    }
+    Ok(window_label)
+}
+
+/// Build the own window for `d` (label `ssh-<token>` / `rdp-<token>`) with
+/// its close hook. The caller has already attached the session to that
+/// label — at open, or by a move — and decides what a failure means.
+///
+/// In `windows` layout mode on macOS the window joins the `bv-session`
+/// native tab group (Phase 0); the main window carries no identifier, so a
+/// session is never merged into the admin window.
+pub(crate) fn build_own_session_window(
+    app: &AppHandle,
+    d: &SessionDescriptor,
+    layout_prefs: &SessionWorkspacePrefs,
+) -> Result<(), String> {
+    let window_label = own_window_label(d.protocol, &d.token);
+    let (width, height) = own_window_size(d);
+    let builder = WebviewWindowBuilder::new(app, &window_label, WebviewUrl::App(own_window_url(d).into()))
+        .title(format!("BastionVault — {}", d.label))
+        .inner_size(width, height)
+        .resizable(true);
+    #[cfg(target_os = "macos")]
+    let builder = if workspace::wants_native_tabs(layout_prefs) {
+        builder.tabbing_identifier(workspace::SESSION_TABBING_IDENTIFIER)
+    } else {
+        builder
+    };
+    #[cfg(not(target_os = "macos"))]
+    let _ = layout_prefs;
+
+    let win = builder.build().map_err(|e| e.to_string())?;
+
+    // The operator x'ing the window stops every session attached to it —
+    // for an own window, its one session. The token is passed as the
+    // fail-safe: stopped too if the registry has lost track of it.
+    let app_for_close = app.clone();
+    let token = d.token.clone();
+    win.on_window_event(move |ev| {
+        if let tauri::WindowEvent::CloseRequested { .. } = ev {
+            let app = app_for_close.clone();
+            let label = window_label.clone();
+            let token = token.clone();
+            tauri::async_runtime::spawn(async move {
+                super::session_workspace::close_window_sessions(
+                    &app,
+                    &label,
+                    Some(&token),
+                    super::session_workspace::WindowCloseCause::WindowClose,
+                )
+                .await;
+            });
+        }
+    });
     Ok(())
 }
 
@@ -1343,7 +1726,7 @@ pub async fn session_close(state: State<'_, AppState>, app: AppHandle, request: 
 /// the only kind today; failures log a warning and swallow the
 /// error — the alternative would be to fail the close and leave
 /// the session record dangling, which is worse.
-async fn run_cleanup(state: &State<'_, AppState>, cleanup: crate::session::SessionCleanup) {
+pub(crate) async fn run_cleanup(state: &State<'_, AppState>, cleanup: crate::session::SessionCleanup) {
     match cleanup.kind {
         crate::session::SessionCleanupKind::LdapLibraryCheckIn { ldap_mount, library_set, account, lease_id } => {
             let path = format!("{ldap_mount}/library/{library_set}/check-in");
@@ -3105,7 +3488,7 @@ pub(super) async fn record_recent_session(
     Ok(())
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     use std::time::SystemTime;
     let secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
     let tm = libc_time_breakdown(secs);

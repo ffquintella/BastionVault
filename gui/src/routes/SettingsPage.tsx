@@ -39,6 +39,8 @@ import { RustionBastionsTab } from "../components/RustionBastionsTab";
 import { RustionPolicyPanel } from "../components/RustionPolicyPanel";
 import { DosProtectionPanel } from "../components/DosProtectionPanel";
 import { McpAssistantsPanel } from "../components/McpAssistantsPanel";
+import { SessionLayoutCard } from "../components/SessionLayoutCard";
+import { SessionKeyboardCard } from "../components/SessionKeyboardCard";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
@@ -512,6 +514,10 @@ export function SettingsPage() {
             )}
           </div>
         </Card>
+
+        {/* Session layout, chords and paste guard (T38) */}
+        <SessionLayoutCard />
+        <SessionKeyboardCard />
 
         {/* About */}
         <Card title="About">

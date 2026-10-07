@@ -186,6 +186,10 @@ pub fn run() {
             // env var still takes precedence, so an operator override
             // is preserved. Best-effort: a failure here just leaves
             // the crate default in place.
+            // T38 Phase 2: stop sessions whose rendering window is gone
+            // or has lost its renderer (see `session::attachments`).
+            commands::session_workspace::spawn_watchdog(app.handle().clone());
+
             match embedded::plugin_runtime_dir() {
                 Ok(dir) => bastion_vault::plugins::set_plugin_runtime_dir(dir),
                 Err(e) => eprintln!("embedded: could not resolve plugin runtime dir: {e}"),
@@ -620,6 +624,20 @@ pub fn run() {
             commands::connect::session_resize,
             commands::connect::session_close,
             commands::connect::session_rustion_info,
+            // Session Workspace (T38): layout preference, attachment
+            // registry and liveness.
+            commands::session_workspace::get_session_workspace_prefs,
+            commands::session_workspace::set_session_workspace_prefs,
+            commands::session_workspace::session_list_open,
+            commands::session_workspace::session_attach,
+            commands::session_workspace::session_detach,
+            commands::session_workspace::session_heartbeat,
+            // Phase 5: saved layouts; Phase 6: moving a live session.
+            commands::session_workspace::session_layout_save,
+            commands::session_workspace::session_layout_get,
+            commands::session_workspace::session_layout_forget,
+            commands::session_workspace::session_workspace_open,
+            commands::session_workspace::session_move,
             commands::connect::resource_login_class,
             commands::ldap::ldap_list_static_roles,
             commands::ldap::ldap_read_static_role,
@@ -737,6 +755,27 @@ pub fn run() {
             commands::fido2::fido2_list_credentials,
             commands::fido2::fido2_delete_credential,
         ]);
+
+    // T38 Phase 2: a window whose web content process dies keeps its
+    // native window, so no close event ever fires and its sessions would
+    // run on with nothing rendering them. macOS reports the death; stop
+    // that window's sessions on it. (Windows and Linux have no equivalent
+    // hook in Tauri 2.11; the heartbeat watchdog covers them.)
+    #[cfg(target_os = "macos")]
+    let builder = builder.on_web_content_process_terminate(|webview| {
+        use tauri::Manager;
+        let app = webview.app_handle().clone();
+        let label = webview.label().to_string();
+        tauri::async_runtime::spawn(async move {
+            commands::session_workspace::close_window_sessions(
+                &app,
+                &label,
+                None,
+                commands::session_workspace::WindowCloseCause::RendererTerminated,
+            )
+            .await;
+        });
+    });
 
     #[cfg(all(debug_assertions, feature = "mcp_local_dev"))]
     let builder = {

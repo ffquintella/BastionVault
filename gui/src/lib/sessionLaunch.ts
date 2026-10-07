@@ -19,6 +19,13 @@ export interface SessionLaunchRequest {
   profile_id: string;
   operator_credential?: api.OperatorCredential;
   connect_ticket?: string;
+  /** SSH/RDP only: where the session renders (T38). Absent = the
+   *  operator's default. A web session always opens its own window. */
+  placement?: api.SessionPlacement;
+  /** SSH/RDP only: set when re-opening a pane of a saved layout (T38
+   *  Phase 5). Restoring goes through this same dispatch, so it gets the
+   *  same open path as a Connect click. */
+  restore?: api.SessionRestoreRef;
 }
 
 export async function openProfileSession(
@@ -34,6 +41,7 @@ export async function openProfileSession(
       await api.sessionOpenRdp(request);
       return;
     case "web":
+      // No placement: a web session is never pooled into the workspace.
       // Never forward an operator credential: `open` releases none, and a
       // `form` login gets its credential from the server inside the host.
       await api.sessionOpenWeb({

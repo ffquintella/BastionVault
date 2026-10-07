@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::CommandError;
@@ -23,6 +25,58 @@ impl Default for PasswordPolicy {
             require_uppercase: true,
             require_digits: true,
             require_symbols: false,
+        }
+    }
+}
+
+/// Where Resource Connect sessions are rendered (features/session-workspace.md
+/// §5). A UX preference kept in the local preferences file next to
+/// `PasswordPolicy`; it never decides *whether* a session may open, only
+/// where it is drawn.
+///
+/// Both fields are strings on disk, as in the spec, and are parsed strictly
+/// where they are used (`session::workspace`): a value this build does not
+/// know is an error naming it, never a guess. `set_session_workspace_prefs`
+/// validates before it writes, so only a hand-edited file can carry one.
+///
+/// `#[serde(default)]` keeps files written by any phase readable by every
+/// other, in both directions (a missing key takes its default, an unknown
+/// one is ignored). Saved layouts (Phase 5) live in their own file, not
+/// here — see `session::layouts` for why.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SessionWorkspacePrefs {
+    /// `workspace` (default) or `windows`. `windows` keeps one
+    /// `WebviewWindow` per session; on macOS those windows carry a shared
+    /// tabbing identifier so they group as native window tabs.
+    pub layout_mode: String,
+    /// Placement used when an open request carries none: `workspace-tab`
+    /// (default since T38 Phase 3) or `own-window`; the two split
+    /// placements are accepted too.
+    pub default_placement: String,
+    /// Ask before a paste containing a line break reaches a terminal pane
+    /// (T38 Phase 4). On by default.
+    pub confirm_multiline_paste: bool,
+    /// Workspace action id → chord, overriding the platform default in
+    /// `gui/src/lib/reservedChords.ts`. A `BTreeMap` so the file is written
+    /// in a stable order.
+    pub chord_overrides: BTreeMap<String, String>,
+    /// Keep the most recent 256 KiB of each SSH session's output in host
+    /// memory after it is shown, so a session moved to another window
+    /// redraws it (T38 Phase 6, `session::output`). Off by default: it is
+    /// plaintext session output held for the life of the session. Read at
+    /// open, so it applies to sessions opened after it changes.
+    pub replay_buffer: bool,
+}
+
+impl Default for SessionWorkspacePrefs {
+    fn default() -> Self {
+        Self {
+            layout_mode: "workspace".to_string(),
+            default_placement: "workspace-tab".to_string(),
+            confirm_multiline_paste: true,
+            chord_overrides: BTreeMap::new(),
+            replay_buffer: false,
         }
     }
 }
@@ -97,6 +151,10 @@ pub struct Preferences {
     pub last_used_id: Option<String>,
     #[serde(default)]
     pub password_policy: PasswordPolicy,
+    /// Session layout preferences (T38). Absent in files written before
+    /// the Session Workspace; those load as the defaults.
+    #[serde(default)]
+    pub session_workspace: SessionWorkspacePrefs,
 
     // ── Legacy fields (pre-multi-vault preferences) ───────────────
     //
@@ -219,4 +277,72 @@ pub fn save(prefs: &Preferences) -> Result<(), CommandError> {
         .map_err(|e| CommandError::from(format!("Failed to serialize preferences: {e}")))?;
     std::fs::write(&path, data)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod session_workspace_prefs_tests {
+    use super::{Preferences, SessionWorkspacePrefs};
+
+    /// A preferences file written before T38 has no `session_workspace`
+    /// key; it must load, and load as the defaults (workspace tabs since
+    /// Phase 3, paste confirmation on, no chord overrides).
+    #[test]
+    fn file_without_session_workspace_loads_the_defaults() {
+        let prefs: Preferences = serde_json::from_str(r#"{ "vaults": [], "last_used_id": null }"#).unwrap();
+        assert_eq!(prefs.session_workspace, SessionWorkspacePrefs::default());
+        assert_eq!(prefs.session_workspace.layout_mode, "workspace");
+        assert_eq!(prefs.session_workspace.default_placement, "workspace-tab");
+        assert!(prefs.session_workspace.confirm_multiline_paste);
+        assert!(prefs.session_workspace.chord_overrides.is_empty());
+        // Phase 6: the output replay ring is opt-in.
+        assert!(!prefs.session_workspace.replay_buffer);
+    }
+
+    /// A file written by Phases 0–4 has no `replay_buffer`; it loads off.
+    #[test]
+    fn a_phase_4_file_loads_with_the_replay_buffer_off() {
+        let prefs: Preferences = serde_json::from_str(
+            r#"{ "session_workspace": { "layout_mode": "workspace", "default_placement": "workspace-tab",
+                 "confirm_multiline_paste": true, "chord_overrides": {} } }"#,
+        )
+        .unwrap();
+        assert!(!prefs.session_workspace.replay_buffer);
+    }
+
+    /// A file written by Phases 0–2 carries only the first two keys, with
+    /// the then-default `own-window` written out explicitly. It keeps that
+    /// choice, and gains the Phase 4 defaults.
+    #[test]
+    fn a_phase_2_file_keeps_its_placement_and_gains_the_new_defaults() {
+        let prefs: Preferences = serde_json::from_str(
+            r#"{ "session_workspace": { "layout_mode": "workspace", "default_placement": "own-window" } }"#,
+        )
+        .unwrap();
+        assert_eq!(prefs.session_workspace.default_placement, "own-window");
+        assert!(prefs.session_workspace.confirm_multiline_paste);
+        assert!(prefs.session_workspace.chord_overrides.is_empty());
+    }
+
+    /// A later phase may write only some of the keys (or more of them);
+    /// the missing ones default and the unknown ones are ignored.
+    #[test]
+    fn partial_and_future_session_workspace_objects_load() {
+        let prefs: Preferences = serde_json::from_str(
+            r#"{ "session_workspace": { "layout_mode": "windows", "confirm_multiline_paste": false, "saved_layouts": {} } }"#,
+        )
+        .unwrap();
+        assert_eq!(prefs.session_workspace.layout_mode, "windows");
+        assert_eq!(prefs.session_workspace.default_placement, "workspace-tab");
+        assert!(!prefs.session_workspace.confirm_multiline_paste);
+    }
+
+    #[test]
+    fn round_trips() {
+        let mut prefs = Preferences::default();
+        prefs.session_workspace.layout_mode = "windows".into();
+        prefs.session_workspace.confirm_multiline_paste = false;
+        prefs.session_workspace.chord_overrides.insert("splitRight".into(), "Ctrl+Shift+R".into());
+        let back: Preferences = serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
+        assert_eq!(back.session_workspace, prefs.session_workspace);
+    }
 }

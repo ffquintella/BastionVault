@@ -15,6 +15,7 @@ import {
   mergeTypeConfig,
 } from "../lib/resourceTypes";
 import { openProfileSession } from "../lib/sessionLaunch";
+import { CONNECT_PALETTE_OPEN_EVENT, type ConnectPaletteOpenDetail } from "../lib/connectPaletteEvents";
 import type {
   ConnectionProfile,
   ResourceMetadata,
@@ -71,6 +72,21 @@ export function ConnectPalette() {
   const [active, setActive] = useState(0);
   const [connecting, setConnecting] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  // Placement for the next launch, set when the Session Workspace opens
+  // the palette for a new tab or a split (T38). Cleared on close.
+  const [placement, setPlacement] = useState<api.SessionPlacement | undefined>(undefined);
+
+  // Opened by the Session Workspace's ⌘T / ⌘D / ⌘⇧D chords.
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const onOpen = (e: Event) => {
+      const detail = (e as CustomEvent<ConnectPaletteOpenDetail>).detail;
+      setPlacement(detail?.placement);
+      setOpen(true);
+    };
+    window.addEventListener(CONNECT_PALETTE_OPEN_EVENT, onOpen);
+    return () => window.removeEventListener(CONNECT_PALETTE_OPEN_EVENT, onOpen);
+  }, [isAuthenticated]);
 
   // Global ⌘K / Ctrl+K listener. Only armed once authenticated —
   // before login there's nothing to connect to.
@@ -99,6 +115,7 @@ export function ConnectPalette() {
     if (!open) {
       setQuery("");
       setActive(0);
+      setPlacement(undefined);
       return;
     }
     let cancelled = false;
@@ -267,6 +284,7 @@ export function ConnectPalette() {
         resource_name: entry.resourceLabel,
         profile_id: entry.profile.id,
         operator_credential: undefined,
+        placement,
         ...mfa,
       });
       setOpen(false);

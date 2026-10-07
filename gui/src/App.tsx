@@ -36,6 +36,7 @@ import { NotificationsAdminPage } from "./routes/NotificationsAdminPage";
 import { SurfaceRouter } from "./components/surface/SurfaceRouter";
 import { SessionSshWindow } from "./routes/SessionSshWindow";
 import { SessionRdpWindow } from "./routes/SessionRdpWindow";
+import { SessionWorkspaceWindow } from "./routes/SessionWorkspaceWindow";
 import { useAuthStore } from "./stores/authStore";
 import { ToastProvider } from "./components/ui";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -223,6 +224,10 @@ export default function App() {
             */}
             <Route path="/session/ssh" element={<SessionSshWindow />} />
             <Route path="/session/rdp" element={<SessionRdpWindow />} />
+            {/* The singleton Session Workspace window (T38): tabs and
+                splits of SSH / RDP panes. Same no-auth-gate reasoning:
+                the host registered every session it renders. */}
+            <Route path="/workspace" element={<SessionWorkspaceWindow />} />
             <Route path="/session-replay" element={<SessionReplayWindow />} />
           </Routes>
           {/* Phase 7 — global ⌘K Connect palette. Sits above the

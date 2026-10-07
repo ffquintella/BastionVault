@@ -2865,6 +2865,16 @@ export const ldapDeleteConfig = (mount: string) =>
   invoke<void>("ldap_delete_config", { mount });
 // ── Resource Connect — SSH session window ──────────────────────────
 
+/** Where a session renders (T38, features/session-workspace.md). Absent =
+ *  the operator's preference default (`workspace-tab` unless they chose
+ *  otherwise). In the *Separate windows* layout a `workspace-*` value is
+ *  refused before dialling. */
+export type SessionPlacement =
+  | "own-window"
+  | "workspace-tab"
+  | "workspace-split-right"
+  | "workspace-split-down";
+
 export type OperatorCredential = {
   username: string;
   password: string;
@@ -2883,6 +2893,21 @@ export type SessionOpenSshRequest = {
    *  {@link connectMfaBegin} + {@link connectMfaVerifyTotp} /
    *  {@link connectMfaVerifyFido2}. */
   connect_ticket?: string;
+  /** See {@link SessionPlacement}. */
+  placement?: SessionPlacement;
+  /** Set only when re-opening a pane of a saved layout. */
+  restore?: SessionRestoreRef;
+};
+
+/** A layout restore's per-pane context (T38 Phase 5). The host refuses
+ *  the open before reading anything when the active namespace is not
+ *  `namespace`, and tags the session with `pane_ref` so the workspace
+ *  fills that placeholder. */
+export type SessionRestoreRef = {
+  /** Namespace the pane was saved in (`""` = root). */
+  namespace: string;
+  /** The workspace's placeholder id (`[A-Za-z0-9_-]{1,32}`). */
+  pane_ref: string;
 };
 
 export type SessionOpenSshResponse = {
@@ -2901,6 +2926,10 @@ export type SessionOpenRdpRequest = {
   operator_credential?: OperatorCredential;
   /** See {@link SessionOpenSshRequest.connect_ticket}. */
   connect_ticket?: string;
+  /** See {@link SessionPlacement}. */
+  placement?: SessionPlacement;
+  /** See {@link SessionOpenSshRequest.restore}. */
+  restore?: SessionRestoreRef;
 };
 
 export type SessionOpenRdpResponse = {
@@ -2913,6 +2942,135 @@ export type SessionOpenRdpResponse = {
 
 export const sessionOpenRdp = (request: SessionOpenRdpRequest) =>
   invoke<SessionOpenRdpResponse>("session_open_rdp", { request });
+
+// ── Session Workspace (T38) ────────────────────────────────────────
+
+/** The session-layout preference. `windows` keeps one window (and webview)
+ *  per session — on macOS they group as native window tabs; `workspace`
+ *  lets sessions share the Session Workspace window. */
+export type SessionLayoutMode = "workspace" | "windows";
+
+export type SessionWorkspacePrefs = {
+  layout_mode: SessionLayoutMode;
+  default_placement: SessionPlacement;
+  /** Ask before a paste with a line break reaches a terminal pane. */
+  confirm_multiline_paste: boolean;
+  /** Workspace action id → chord string (`lib/reservedChords`). */
+  chord_overrides: Record<string, string>;
+  /** Keep the last 256 KiB of each SSH session's output in host memory so
+   *  a session moved between windows redraws it (T38 Phase 6). Off by
+   *  default; applies to sessions opened after it changes. */
+  replay_buffer: boolean;
+};
+
+export const getSessionWorkspacePrefs = () =>
+  invoke<SessionWorkspacePrefs>("get_session_workspace_prefs");
+export const setSessionWorkspacePrefs = (prefs: SessionWorkspacePrefs) =>
+  invoke<void>("set_session_workspace_prefs", { prefs });
+
+/** One live SSH/RDP session as `session_list_open` reports it: identity
+ *  and routing only — never a credential or session output. */
+export type OpenSessionListing = {
+  token: string;
+  protocol: "ssh" | "rdp";
+  label: string;
+  resource_name: string;
+  profile_id: string;
+  stdout_event: string | null;
+  closed_event: string;
+  resize_event: string | null;
+  cursor_event: string | null;
+  /** RDP: the desktop size negotiated at open. */
+  width: number | null;
+  height: number | null;
+  opened_at: string;
+  /** Where the open request asked for it to render. */
+  placement: SessionPlacement;
+  /** The restore placeholder it fills (T38 Phase 5); null otherwise. */
+  pane_ref: string | null;
+  /** Label of the window rendering it; null while detached. */
+  attached_to: string | null;
+  /** Moves on every change of holder (T38 Phase 6). */
+  attach_epoch: number;
+};
+
+/** Label of the Session Workspace window. */
+export const SESSION_WORKSPACE_LABEL = "session-workspace";
+/** Sent to the workspace when a session has been attached to it. Carries
+ *  no payload: the workspace reads the session from {@link sessionListOpen}. */
+export const SESSION_PLACED_EVENT = "session://placed";
+
+/** Stop a live SSH/RDP session. Refused when another window holds it. */
+export const sessionClose = (token: string) =>
+  invoke<void>("session_close", { request: { token } });
+
+/** Every live session. Only the main window and the Session Workspace may
+ *  call this; any other window is refused. */
+export const sessionListOpen = () => invoke<OpenSessionListing[]>("session_list_open");
+
+/** Claim a session for the calling window (its own window or the
+ *  workspace). The host identifies the window from the call. */
+export const sessionAttach = (token: string) =>
+  invoke<{ window_label: string; took_over_from: string | null }>("session_attach", {
+    request: { token },
+  });
+
+/** Release a session from the calling window without closing it. One
+ *  nothing re-attaches is closed by the host after a short grace. */
+export const sessionDetach = (token: string) =>
+  invoke<void>("session_detach", { request: { token } });
+
+/** Window liveness for the orphan watchdog — see `lib/sessionHeartbeat`. */
+export const sessionHeartbeat = () =>
+  invoke<{ attached: number }>("session_heartbeat");
+
+/** Move a live session from the calling window to its own window or to the
+ *  Session Workspace without stopping it (T38 Phase 6). Only the window
+ *  holding it may; moving into the workspace is refused in the *Separate
+ *  windows* layout. Moving to the workspace closes the calling window. */
+export const sessionMove = (token: string, to: "own-window" | "workspace") =>
+  invoke<{ window_label: string }>("session_move", { request: { token, to } });
+
+/** Open (or raise) the Session Workspace from the main window. */
+export const sessionWorkspaceOpen = () => invoke<void>("session_workspace_open");
+
+// ── Saved Session Workspace layouts (T38 Phase 5) ─────────────────
+
+/** The tree the workspace sends to be saved: each leaf names a live
+ *  session by token; the host writes only what the session was opened
+ *  from (resource, profile, protocol, namespace). */
+export type LayoutSaveNode =
+  | { kind: "pane"; token: string }
+  | { kind: "split"; dir: "row" | "col"; ratio: number; a: LayoutSaveNode; b: LayoutSaveNode };
+
+export type SavedLayoutPane = {
+  kind: "pane";
+  resource_name: string;
+  profile_id: string;
+  protocol: "ssh" | "rdp";
+  /** Namespace the session was opened in (`""` = root). */
+  namespace: string;
+};
+export type SavedLayoutNode =
+  | SavedLayoutPane
+  | { kind: "split"; dir: "row" | "col"; ratio: number; a: SavedLayoutNode; b: SavedLayoutNode };
+
+export type SavedLayout = { saved_at: string; tabs: { root: SavedLayoutNode }[] };
+
+export type SessionLayoutView = {
+  vault_id: string;
+  /** The session's active namespace (`""` = root). */
+  active_namespace: string;
+  layout: SavedLayout | null;
+};
+
+/** Save the workspace's layout skeleton (workspace window only). */
+export const sessionLayoutSave = (tabs: { root: LayoutSaveNode }[]) =>
+  invoke<{ saved_panes: number }>("session_layout_save", { layout: { tabs } });
+/** The open vault's saved layout and the active namespace. */
+export const sessionLayoutGet = () => invoke<SessionLayoutView>("session_layout_get");
+/** Forget the open vault's saved layout; whether there was one. */
+export const sessionLayoutForget = () => invoke<boolean>("session_layout_forget");
 
 /** Web Application Connect (T96). Neither login mode takes a credential
  *  from the GUI, so there is no `operator_credential` slot: `open` releases

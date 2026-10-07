@@ -198,6 +198,13 @@ pub struct AppState {
     /// via `session_rustion_info` to drive renew/kill UI; dropped
     /// alongside the session in `drop_session`.
     pub rustion_session_bundles: tokio::sync::Mutex<HashMap<String, RustionSessionBundle>>,
+    /// T38 Phase 2: which window renders each live SSH/RDP session, plus
+    /// the descriptor `session_list_open` reports. Teardown is keyed on
+    /// it (window close → every session attached to that label; the
+    /// watchdog → orphans). Written at open and by `session_attach` /
+    /// `session_detach`; an entry is removed by `drop_session`. Never held
+    /// across another of these locks.
+    pub session_attachments: tokio::sync::Mutex<crate::session::attachments::AttachmentRegistry>,
     /// Plugin Extensibility v1: per-vault on-disk surface cache.
     /// Resolved on first use from the Tauri app's cache directory
     /// (`<dirs::cache>/com.bastionvault.gui/plugins/<vault-id>/`).
@@ -243,6 +250,7 @@ impl AppState {
             oidc_sessions: std::sync::Mutex::new(HashMap::new()),
             connect_sessions: tokio::sync::Mutex::new(HashMap::new()),
             rustion_session_bundles: tokio::sync::Mutex::new(HashMap::new()),
+            session_attachments: tokio::sync::Mutex::new(crate::session::attachments::AttachmentRegistry::new()),
             plugin_surface_cache: Mutex::new(None),
             app_modules: Mutex::new(HashMap::new()),
         }

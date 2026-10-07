@@ -59,10 +59,126 @@ No server-side change: this is entirely GUI host + frontend.
 
 ## Current State
 
-**Status: Todo.** Nothing in this document is implemented; it is the design for
-the work.
+**Status: In progress — Phases 0–6 implemented; none of Phases 3–6 exercised
+by hand.** Sessions open as tabs and splits in one Session Workspace window by
+default (`default_placement = workspace-tab`); *Separate windows* keeps one
+window per session. The layout is saved as a skeleton and offered for an
+explicit restore (Phase 5); a live session can move between the workspace and
+a window of its own (Phase 6). Nothing from Phases 3–6 has been exercised by
+hand in a running desktop build yet: the evidence is the unit and component
+tests listed under each phase. The per-release manual checklist (Testing
+Plan) is still open, which is why T38 stays in progress; the work this
+feature still owes is split out as T108–T111 (see *What is not yet
+implemented*).
 
-What exists today:
+What Phases 0–6 delivered:
+
+- **Layout preference + macOS native tabs (Phase 0).** `session_workspace` in the
+  GUI preferences file (`gui/src-tauri/src/preferences.rs`,
+  `SessionWorkspacePrefs { layout_mode, default_placement,
+  confirm_multiline_paste, chord_overrides }`, parsed strictly where used,
+  validated on write by `set_session_workspace_prefs`; a file without the key
+  loads as the defaults `workspace` / `workspace-tab` / paste guard on / no
+  overrides). Settings → General → **Session layout**
+  (`gui/src/components/SessionLayoutCard.tsx`) switches `layout_mode` and, in
+  workspace mode, the default placement; in `windows` mode the own-window
+  builder sets `tabbing_identifier("bv-session")` on macOS. Grouping follows the
+  system's *Prefer tabs* setting or *Window → Merge All Windows* — tauri/tao set
+  only the identifier, not `NSWindow.tabbingMode`. Not yet checked by hand on a
+  Mac.
+- **Panes (Phase 1).** `SshPane`, `RdpPane`, `ReplayPane` and the shared
+  `SessionPaneHeader` in `gui/src/components/session/`; the three
+  `Session*Window.tsx` routes are one-pane wrappers that read URL params, own
+  the window title / `window.close()`, and send the window heartbeat.
+- **Attachment registry, placement, watchdog (Phase 2).**
+  `AppState::session_attachments` (`gui/src-tauri/src/session/attachments.rs`),
+  the four commands in `gui/src-tauri/src/commands/session_workspace.rs`,
+  `placement` on both open requests (`gui/src-tauri/src/session/workspace.rs`),
+  teardown re-homed onto the registry, the orphan watchdog, and a macOS
+  web-content-process hook in `lib.rs`. See §3 *Phase 2 as built*.
+- **The workspace window (Phase 3).** `/workspace` route
+  (`gui/src/routes/SessionWorkspaceWindow.tsx`) in the singleton
+  `session-workspace` window, which `default.json` now grants the same
+  capability set as `ssh-*` / `rdp-*`. Pure layout reducer
+  (`gui/src/lib/sessionLayout.ts`) behind a zustand store
+  (`gui/src/stores/sessionWorkspaceStore.ts`); `paneHosts` registry
+  (`gui/src/lib/paneHosts.ts`); split renderer, divider and slots
+  (`gui/src/components/session/workspace/SplitView.tsx`); tab strip
+  (`TabStrip.tsx`). Host: `place_in_workspace` / `ensure_workspace_window` in
+  `commands/connect.rs`, payload-less `session://placed`, per-event routing to
+  the holding window (`gui/src-tauri/src/session/routing.rs`), and the input
+  commands narrowed to the holding window. See §3 *Phase 3 as built*.
+- **Keybindings + paste guard (Phase 4).** `gui/src/lib/reservedChords.ts`,
+  consumed by the SSH pane's `attachCustomKeyEventHandler`, the RDP pane's
+  canvas keydown filter and the workspace's capture-phase handler; the RDP
+  keyboard-release chord; Settings → General → **Session keyboard & paste**
+  (`gui/src/components/SessionKeyboardCard.tsx`); the multi-line paste guard
+  (`gui/src/lib/pasteGuard.ts`, read per window by
+  `gui/src/lib/sessionInputPrefs.ts`). See §4 *Phase 4 as built*.
+- **Layout persistence + restore (Phase 5).** The workspace saves its
+  layout skeleton (debounced, 1 s) through `session_layout_save`; the host
+  resolves each pane's token against the attachment registry and writes only
+  `{resource_name, profile_id, protocol, namespace}` per pane, per vault
+  profile, to `session_layouts.json` (`gui/src-tauri/src/session/layouts.rs`).
+  The layout an earlier run saved is offered — in the empty state and next
+  to the tabs — as *Restore last layout (N panes)*, never applied on its
+  own; each pane is re-opened through the normal connect path into a
+  placeholder that holds its place in the saved shape
+  (`gui/src/lib/sessionRestore.ts`). Cross-namespace restore is refused for
+  the whole layout before anything opens, and again by the host on every
+  pane's open. Settings → Session layout can open the workspace on its own
+  and forget the saved layout. See §5 *Phase 5 as built*.
+- **Moving a live session (Phase 6).** *Pop out* on a workspace pane, or
+  dragging a tab out of the strip, moves the session to its own window;
+  *Move to workspace* in a session's own window moves it into the workspace.
+  The host hands the session straight from one window to the other
+  (`session_move`, `AttachmentRegistry::transfer`) and SSH output waits —
+  bounded, zeroed — for the new pane's listener handshake
+  (`gui/src-tauri/src/session/output.rs`). An opt-in replay buffer
+  (`session_workspace.replay_buffer`, off by default) keeps the last
+  256 KiB per SSH session so a moved session redraws recent output; RDP
+  drops the old window's frame channel and the new pane gets a full frame.
+  See §6 *Phase 6 as built*, including the security review.
+- **Phase 3–4 residuals.** Closing a pane or tab, or ⌘W, asks before it
+  ends a live session; SSH panes debounce the resize they send the host
+  (120 ms) so a divider drag is one `session_resize`, not a burst.
+
+Tests: Rust — `session::attachments` (incl. transfer and epochs),
+`session::output` (bounds, zeroing, handshake replay), `session::layouts`
+(skeleton, bounds, file versioning, namespace refusal), `session::workspace`,
+`session::routing` (incl. epoch-gated delivery), `preferences`,
+`commands::session_workspace`. Vitest — `gui/src/test/sessionLayout.test.ts`
+(reducer invariants, restore placeholders, skeleton, namespace refusal,
+adoption by placeholder and by epoch), `reservedChords.test.ts` (chord table,
+overrides, paste guard), `sessionPanes.test.tsx` (panes, incl. resize gating
+and debounce, replay notice, per-pane RDP keyboard, paste guard, *Move to
+workspace*), `sessionWorkspace.test.tsx` (adoption, DOM continuity, teardown,
+chords, close confirmation, save, restore, namespace refusal, pop-out,
+tear-off), `sessionLayoutCard.test.tsx` (both Settings cards, replay opt-in,
+open/forget).
+
+What is not yet implemented — split out of T38:
+
+- **T108** — a confirmation before a *window* closes with live sessions (the
+  native close button, Alt+F4, ⌘W in a session's own window). Pane, tab and
+  ⌘W closes inside the workspace ask; the native close does not, because the
+  host stops sessions on `CloseRequested`. Confirming there means moving the
+  teardown to `WindowEvent::Destroyed` behind a JS `onCloseRequested` veto,
+  with an escape hatch for a hung renderer — the teardown path the Security
+  section calls the highest-risk change in this feature, so not folded in.
+- **T109** — replay panes in the workspace. The `replay` pane kind exists in
+  the model; nothing places one. Needs a recording hand-off into the
+  workspace (placement is keyed on live session tokens today) and a
+  decision on whether a replay joins the saved layout.
+- **T110** — a workspace bundle that mounts only the session routes, and a
+  per-window app-command ACL (the Security section's mandatory mitigation,
+  not met as built).
+- **T111** — SSH output (live and replayed) over a per-webview IPC channel
+  instead of `emit_to`, which Tauri 2.11 also delivers to any default-target
+  `listen()` in any webview (see §3 *Phase 3 as built*). Must not reopen the
+  web/RDP channel-id exposure (`session::web_rdp_conflict`).
+
+What existed before T38:
 
 - `session_open_ssh` / `session_open_rdp` each build a dedicated
   `WebviewWindow` labelled `ssh-<token>` / `rdp-<token>`, pass
@@ -321,6 +437,118 @@ Teardown moves from "the spawning window's close hook" to the attachment:
 `own-window` placement keeps the current code path verbatim, so the whole
 existing surface (including every integration test that drives it) stays valid.
 
+#### Phase 2 as built — where it differs from the above, and why
+
+- **The calling webview is the window.** `session_attach`, `session_detach` and
+  `session_heartbeat` take no `window_label`: the host uses the label of the
+  webview that made the call. A label in the request would let any window with
+  IPC (a plugin window, another session's window) claim, release or keep alive
+  a session rendered elsewhere. `session_attach` further accepts only the
+  session's own window (`ssh-<token>` / `rdp-<token>`) or `session-workspace`;
+  never `main`, `plugin-*` or `web-*`.
+- **`session_list_open` is restricted** to `main` and `session-workspace`. A
+  token is enough to drive a session, and today no other window can learn
+  another session's token; listing must not change that.
+- **Sessions are attached from birth.** The own-window path registers the
+  descriptor attached to `ssh-<token>` / `rdp-<token>` *before* building the
+  window, so the `CloseRequested` hook always finds it. That hook now calls
+  `stop_window_sessions(label, own_token)`: every token attached to the label,
+  plus the window's own token if — and only if — the registry has no entry for
+  it but the session is still live (fail-safe against a registry bug). A token
+  the registry knows to be elsewhere, or detached, is left alone. A window that
+  fails to build now stops its session instead of leaving it dialled.
+- **One stop path, exactly once.** `session_close`, window close, the watchdog
+  and the macOS hook all go through `attachments::stop_session` (control
+  `Close` → `drop_session` → cleanup). Registry removals are atomic takes and
+  `drop_session` is the atomic take of the cleanup hook, so a racing second path
+  gets nothing.
+- **Watchdog thresholds (60 s in the design above) are not what shipped.**
+  Tick 30 s. A session is stopped when (a) its window label no longer exists
+  (after a 10 s grace, so a window still being built is not judged); (b) it has
+  been detached from every window for 60 s; (c) on Windows and Linux only, its
+  window is shown (visible, not minimised), has heartbeated at least once, and
+  has not for **180 s**. Minimised or hidden windows are never judged, and
+  neither is a window that never heartbeated. Reason: WebView2 limits a hidden
+  page to one timer wake-up a minute and WebKit can suspend a hidden page
+  outright (tauri's `background_throttling` docs), so a 60 s threshold would
+  stop live sessions whose window was merely minimised or covered.
+- **macOS uses the OS signal, not heartbeats.** `tauri::Builder::
+  on_web_content_process_terminate` stops every session attached to the dead
+  webview's label (`reason=renderer_terminated`); heartbeat staleness is not
+  judged on macOS at all, because an occluded window's page can be suspended
+  with no signal to the host. Windows and Linux have no such hook in Tauri
+  2.11, hence the heartbeat there.
+- **Log line.** Every reap is `WARN target=audit session.reaped: token=…
+  window=… reason=window_gone|heartbeat_stale|unattached|renderer_terminated
+  idle_secs=…`. There is still no host-side `session.close` line for SSH/RDP
+  (the spec's premise); the existing `resource-connect/{ssh,rdp}: closed
+  session` info line is unchanged.
+- **Workspace placements were refused, not half-built.** `resolve_placement`
+  runs before anything is resolved or dialled; until Phase 3 set
+  `workspace::WORKSPACE_WINDOW_AVAILABLE`, a `workspace-*` placement was
+  refused, and in `windows` layout mode it is always refused.
+
+#### Phase 3 as built — where it differs from the above, and why
+
+- **`session://placed` carries no payload.** Tauri 2.11 delivers an
+  `emit_to(label)` event to listeners in that webview *and* to every
+  `listen()` registered with the default `Any` target in any webview
+  (`match_any_or_filter` in tauri's `event/listener.rs`). A descriptor in the
+  payload would hand every session's token to any webview that subscribes to
+  the name. The event is only a wake-up: the workspace answers it (and its own
+  first load, once its listener is live) with `session_list_open`, which only
+  `main` and the workspace may call, and places every session attached to it
+  that has no pane yet. The requested placement travels in the listing
+  (`SessionDescriptor::placement`). A session placed while the window was still
+  loading is therefore not lost, and its split request is still honoured.
+- **`emit_to` is routing, not confidentiality.** The pumps now address SSH
+  output, the closed notice and RDP resize / cursor events to the holding
+  window (`session::routing::SessionEvents`, looked up per event so a session
+  that changes holder follows it; a session already dropped from the registry
+  falls back to its last holder so its closed notice still arrives; a detached
+  one is not addressed at all). By the caveat above this is not the "strict
+  narrowing" the Security section first claimed; the token remains the secret.
+  A real boundary would move SSH output onto a per-webview `Channel`, as RDP
+  frames already are — a follow-up, not done here.
+- **Input is narrowed to the holder.** `session_input`, `session_resize`,
+  `session_input_rdp_{key,mouse,wheel,resize}` and `session_attach_rdp_frames`
+  take the calling webview and refuse any window but the holder
+  (`attachments::authorize_input`), failing closed on an unknown token.
+  `session_close` is refused only when another window holds the session
+  (`authorize_close`); unknown stays a no-op success so closing twice is not an
+  error. Because the session is registered attached before its window is built
+  or told, the pane's handshake passes the check the moment it mounts.
+- **Unreadable preferences fall back to `windows`, not to the defaults.** The
+  defaults now pool sessions into the shared realm; a file the operator cannot
+  read must not decide that. An absent placement opens an own window and an
+  explicit `workspace-*` one is refused naming the file.
+- **Window creation race.** Two opens racing to build the window: the loser's
+  build fails on the duplicate label and is treated as success if the window
+  now exists. A session placed into a window that is mid-close lands in a
+  window that is about to vanish; the watchdog reaps it (`window_gone`) within
+  one tick after `WINDOW_GONE_GRACE`.
+- **Panes mount only once their host is in the document.** The portal for a
+  token renders after a slot has attached its host element (`hostReady`), so
+  xterm never opens on a detached node. A pane in a hidden tab measures 0×0
+  and is skipped; xterm re-measures its cell when it becomes visible and the
+  pane re-fits on the next frame. `session_resize` is sent only after the
+  handshake (both listeners live) and then only when cols/rows change — which
+  also closes a pre-existing race where a window resize could drain the
+  early-bytes buffer before the listeners were live. A divider drag was not
+  debounced for SSH in Phase 3; since the Phase 6 work the pane re-fits on
+  every frame but sends `session_resize` only once the grid has held still
+  for 120 ms (`SSH_RESIZE_DEBOUNCE_MS`), and only if it differs from what
+  the host last heard. The handshake resize is never delayed. RDP keeps its
+  250 ms debounce.
+- **Tab title and chips.** The tab shows the focused pane's label (+ count of
+  the others), a status dot and the unread / bell dot; the Rustion TTL chip
+  stays in each pane header rather than on the tab.
+- **Tab reorder uses pointer events**, not HTML5 drag-and-drop, which WebView2
+  swallows while Tauri's file-drop handler is on.
+- **Synthetic events and portals.** A pane is a portal whose React parent is
+  the workspace root, so the slot's click-to-focus is a native capture
+  listener; a React handler on the slot would never see the click.
+
 ### 4. Keybindings
 
 Defaults, matching Ghostty where Ghostty has an opinion:
@@ -334,7 +562,7 @@ Defaults, matching Ghostty where Ghostty has an opinion:
 | Resize focused divider | `⌘⌃` + arrow | `Ctrl+Alt` + arrow |
 | Zoom / un-zoom pane | `⌘⇧↵` | `Ctrl+Shift+Enter` |
 | Select tab 1–9 | `⌘1`…`⌘9` | `Alt+1`…`Alt+9` |
-| Prev / next tab | `⌘⇧[` / `⌘⇧]` | `Ctrl+PgUp` / `Ctrl+PgDn` |
+| Prev / next tab | `⌘⇧[` / `⌘⇧]` | `Ctrl+Shift+PgUp` / `Ctrl+Shift+PgDn` (see below) |
 | Release keyboard grab (RDP panes) | `⌘⌥⌃K` | `Ctrl+Alt+Shift+K` |
 
 `Ctrl` alone is never bound: it belongs to the remote shell. On Linux and
@@ -357,6 +585,51 @@ and gets typed into a Windows desktop instead. A vitest asserts that no reserved
 chord collides with a C0 control character an operator would need
 (`Ctrl+C`, `Ctrl+D`, `Ctrl+Z`, `Ctrl+[`, …) and that every declared action has a
 binding on both platforms.
+
+#### Phase 4 as built — where it differs from the above, and why
+
+- **Prev / next tab on Linux and Windows is `Ctrl+Shift+PgUp/PgDn`**, not
+  `Ctrl+PgUp/PgDn`: the latter binds Ctrl alone, which the rule above forbids,
+  and full-screen terminal programs read it (`CSI 5;5~`).
+- **Chords match on `KeyboardEvent.code`** plus the four modifiers — the
+  physical key, which is also what the RDP pane forwards as a scancode, and
+  which does not change with Shift or Option. On a non-QWERTY layout a letter
+  chord is the key in the QWERTY position.
+- **What a chord may not be** (`TERMINAL_CHORDS`, `APP_CHORDS`,
+  `chordProblem`): no modifier or Shift alone; Ctrl + any key that produces a
+  C0 control character (letters, `[ \ ]`, Space, `2`–`8`, `-`, `/`, backquote,
+  and the shifted `^@ ^^ ^_`); Alt + a letter, `.` or Backspace (readline Meta
+  keys); and chords the app or OS owns (⌘K palette, ⌘C/V/X/A/Q/H/M, ⌘Tab,
+  ⌘Space; Ctrl+Shift+C/V, Alt+F4, Alt+Tab). The defaults are tested against
+  all of it; an override is refused in Settings before saving, and one a
+  hand-edited file carries is not applied and is named (the host checks
+  overrides for shape only — bounded count and length, printable ASCII — so the
+  table has one owner).
+- **Three consumers, one table.** The workspace window handles chords in a
+  capture-phase `keydown` on `window`, so it sees them before the terminal or
+  the canvas; it always calls `preventDefault` (⌘W would otherwise reach the
+  native *Close Window* and close every session), and in a non-terminal text
+  field it swallows the chord without running it. The panes' own filters are
+  what keep a chord from the remote host in a session's own window, where no
+  workspace handler exists: there a reserved chord does nothing, except that
+  ⌘W still reaches the native menu and closes the window.
+- **⌘T / ⌘D / ⌘⇧D open the Connect palette** with the placement the chosen
+  session should get (`workspace-tab` / `-split-right` / `-split-down`); with
+  no tab open a split opens a tab.
+- **RDP keyboard.** The pane captures keys on its canvas, not the window; a
+  click grabs the keyboard, the header says whether it is grabbed, and the
+  release chord (or focus leaving the canvas) releases it. Key-ups are
+  forwarded only for keys whose key-down was, and every key still held when
+  the grab ends is released remotely. Known gap: on Linux and Windows a
+  `Ctrl+Shift+…` chord in an RDP pane still sends the remote desktop a bare
+  Ctrl / Shift press and release, because those modifiers are forwarded before
+  the chord's key arrives (⌘ is never forwarded, so macOS is unaffected).
+- **Paste guard.** A capture-phase `paste` listener on the terminal's container
+  holds any paste containing CR or LF — including a single command with a
+  trailing newline — and shows the target label, line and character counts and
+  the first five lines (200 characters each). Confirm calls `term.paste`, which
+  keeps bracketed-paste handling. Off only when the preference is explicitly
+  `false`; an unreadable preferences file leaves it on.
 
 ### 5. Persistence
 
@@ -387,6 +660,75 @@ namespace differs from the active one is refused with a clear message rather tha
 resolving same-named resources in the current namespace — the same class of bug
 as the namespace credential split already fixed in the Rustion path.
 
+#### Phase 5 as built — where it differs from the above, and why
+
+- **Own file, not the preferences file.** Saved layouts live in
+  `session_layouts.json` next to `preferences.json`
+  (`gui/src-tauri/src/session/layouts.rs`), not as
+  `SessionWorkspacePrefs::saved_layouts`. The layout is rewritten on every
+  (debounced) change, and the preferences file is read-modified-written by
+  many commands with no common lock, so a frequent writer there could drop a
+  concurrent vault-profile edit; and `set_session_workspace_prefs` writes the
+  whole struct the Settings page loaded, which would have written a stale
+  layout back. The file has one writer path behind a process-wide lock, is
+  written atomically (temp file + rename) and owner-only (`0600`) on Unix,
+  and carries `"version": 1`: a file of any other version is refused, named,
+  and left untouched, so a downgrade never destroys a newer build's layout.
+  Bounds: 32 tabs, 64 panes, 16 split levels, 256-byte names without control
+  characters, ratios in [0.1, 0.9] — checked on save and on read.
+- **The host builds the skeleton.** The workspace sends its tree with each
+  leaf naming a session by token (`session_layout_save`, workspace window
+  only). The host resolves every token against the attachment registry —
+  only sessions the workspace holds count — and writes `resource_name`,
+  `profile_id`, `protocol` and the namespace the session was opened in. No
+  token, no credential, no output reaches the file, and the frontend cannot
+  write a target list the registry does not vouch for. A pane whose session
+  is gone collapses its split; a save with nothing left keeps the saved
+  layout rather than replacing it with an empty one.
+- **Namespace per pane, vault per layout.** Each session's descriptor
+  records, at the start of its open, the active namespace and the vault
+  profile id the host treats as open (`last_used_id`, as the local keystore
+  does). The namespace is kept per pane because one workspace can hold
+  sessions opened in different namespaces (the switcher stays live). A
+  layout whose sessions come from more than one vault is not saved — it has
+  no single owner, and saving it under either vault would later re-open the
+  other vault's resource names there — and says so.
+- **Offered, never applied, and not lost to the first save.** The workspace
+  reads the layout an earlier run saved once, when it opens, and holds it
+  for its lifetime: the first save of this run replaces the file, but the
+  earlier layout stays restorable until used, forgotten or the window
+  closes. It is offered as *Restore last layout (N panes)* in the empty
+  state and at the end of the tab strip (sessions often arrive before the
+  operator thinks to restore). No save happens before that read lands.
+  Settings → Session layout gains *Open the Session Workspace*
+  (`session_workspace_open`, main window only, refused in *Separate
+  windows*) so the empty state is reachable, and *Forget the saved layout*.
+- **Restore = the normal open path, per pane, into placeholders.** Restore
+  lays out the saved tabs, splits and ratios at once with placeholder panes,
+  then re-opens them one at a time in reading order: re-read the resource
+  and profile (a deleted profile, a changed protocol or a profile that needs
+  a typed credential is reported, not guessed), the server-decided
+  connect-time MFA gate, then `openProfileSession` → `session_open_*` with
+  `placement: workspace-tab` and `restore: {namespace, pane_ref}`. The host
+  echoes `pane_ref` on the session's listing and the workspace fills that
+  placeholder — same pane id, so the geometry never shifts. A pane that
+  fails is dropped (its split collapses; the window stays open even if it
+  was the last) and named in one message. The restored shape is taken as the
+  baseline, so a partial restore does not overwrite the saved layout until
+  the operator changes something.
+- **Cross-namespace refusal, twice.** The workspace checks the whole layout
+  against the active namespace before opening anything or showing any MFA
+  prompt, and refuses naming both (`restoreRefusal`). The host enforces the
+  same rule on every pane's open, before the resource is read
+  (`layouts::check_restore_namespace`): a namespace switched in the main
+  window mid-restore cannot slip a same-named resource in. A restore is
+  also refused when the open vault is not the one the layout was read for,
+  and a `restore` open with an own-window placement is refused.
+- **What "last layout" means.** The skeleton is saved on every change of
+  shape (tab order, splits, ratios — not focus, zoom or unread state) and
+  never as empty. Closing panes one by one therefore leaves the last
+  non-empty shape saved; quitting with four panes open leaves four.
+
 ### 6. Detach / move between windows (Phase 6)
 
 Within one webview, a pane moves as a DOM node and keeps its scrollback. Across
@@ -402,23 +744,116 @@ output routinely contains secrets the operator printed. It gets its own security
 review, it is opt-in, and it is deliberately the last phase rather than folded
 into the layout work.
 
+#### Phase 6 as built — where it differs from the above, and why
+
+- **A move is a hand-off, not detach + attach.** `session_move {token, to:
+  own-window | workspace}` is called by the window holding the session; the
+  registry hands it straight to the destination
+  (`AttachmentRegistry::transfer`), so there is no detached gap: input stays
+  narrowed to exactly one window and the watchdog never sees the session
+  unattached (`session_detach` is unchanged and still unused by the GUI).
+  Only the holder may move a session and only to a window `attach` accepts
+  (its own `ssh-`/`rdp-<token>` or `session-workspace`). Moving into the
+  workspace is refused in *Separate windows* mode, like an open. The own
+  window is built from the same descriptor-derived URL as at open
+  (`own_window_url`); a destination that cannot be built hands the session
+  back. Moving into the workspace closes the source window, whose close
+  hook stops only what is still attached to it — nothing.
+- **Holder epochs instead of a replay command.** Every change of holder
+  bumps the session's epoch (listed as `attach_epoch`). `session_resize`
+  carries the epoch it was authorised at, and the first resize a holder
+  sends at an epoch is its listener handshake — every pane already sends it
+  only once both listeners are live. The SSH pump delivers output only to
+  the holder of the epoch that completed a handshake, through
+  `SessionEvents::emit_if_epoch`, which checks the epoch and calls `emit_to`
+  under the attachment lock so no transfer can slip between them. Anything
+  not delivered is kept for the next handshake. So a window that has just
+  been handed a session is never sent output before it listens, and one
+  that gave a session up is never sent more. The workspace uses the epoch to
+  tell a session moved back to it from a stale listing of a pane it closed.
+- **One bounded buffer per SSH session, always; replay opt-in.** The
+  pre-T38 early-bytes `Vec` (unbounded, cleared but never zeroed) is
+  replaced by a fixed 256 KiB ring (`session::output`). Without the
+  preference it holds only output no window has shown yet — before the
+  first handshake and during a move — and is zeroed as soon as it is
+  delivered; with `session_workspace.replay_buffer` it also keeps the most
+  recent output after delivery, so the next holder's handshake replays it.
+  A replay that starts inside a wrapped ring begins at the next line. A
+  host-composed notice (never remote data) goes with a replay: what was
+  dropped, or — without the preference — that earlier output is not kept.
+  The preference is read at open; changing it affects sessions opened
+  later.
+- **RDP needs no buffer.** The move drops the old window's frame channel at
+  once (`FrameSink::detach`), so no frame reaches a webview that gave the
+  desktop up; the new pane attaches its own channel, which already arms a
+  full-desktop repaint (`session_attach_rdp_frames` → `Repaint`). Resize and
+  cursor events follow the holder as before.
+- **The actions.** Workspace panes get *Pop out* (live sessions only — a
+  dead session's new window would never hear its closed notice); dragging a
+  tab out of the strip (released more than 48 px below it, or outside the
+  window; pointer capture keeps the drag) pops out every live pane in it;
+  a session's own window gets *Move to workspace* in workspace mode.
+
+#### Security review of the output buffer (Phase 6)
+
+The spec required this buffer to be reviewed on its own. The review, and the
+mitigations as built:
+
+| Concern | Mitigation as built |
+|---|---|
+| Unbounded growth (a detached session running `yes`) | Fixed 256 KiB per SSH session, allocated once at open and never reallocated; oldest bytes overwritten. The pending buffer, unbounded before, is now bounded too. |
+| Plaintext left in freed memory | No growth means no un-zeroed old allocation. `clear()` zeroes the whole allocation; `Drop` zeroes it; snapshots are `Zeroizing`. The pump task owns the buffer, so it is dropped — and zeroed — when the session ends, however it ends. Pre-shell bytes are zeroed once moved in. |
+| Retaining output the operator already saw | Off by default (`replay_buffer: false`); without it only not-yet-shown output is held, the same class of data the pre-T38 early buffer held. The Settings copy says the output can include secrets and that it is memory-only and wiped at close. |
+| Cross-session or cross-window disclosure | Per session, owned by its pump; no command reads it. The only way out is the holder's handshake, delivered by the same epoch-gated path as live output, to the window the registry says holds the session at that epoch. |
+| Persistence | Memory only. Never written to disk or logs; the saved layout carries no output. |
+| Replay starting mid escape sequence | A wrapped ring is replayed from its first line break. |
+
+Residual, stated rather than solved: the copies made to *deliver* output —
+the base64 string, the serialised event, the webview's JS heap and xterm's
+own scrollback — are not zeroed, exactly as for live output before this
+phase; and `emit_to` is still delivered to any default-target `listen()` in
+any webview, so the session token remains the confidentiality boundary for
+replayed output as for live output (T111). Not exercised by hand.
+
 ## Phases
 
-### Phase 0 — macOS native window tabbing — **Todo**
+| Phase | Scope | Status |
+|---|---|---|
+| 0 | macOS native window tabbing + layout-mode preference | **Complete** (not yet checked by hand on a Mac) |
+| 1 | Pane extraction | **Complete** |
+| 2 | Attachment registry + placement + watchdog | **Complete** (thresholds differ from §3; see *Phase 2 as built*) |
+| 3 | The workspace window | **Complete** (not yet exercised by hand; see §3 *Phase 3 as built*) |
+| 4 | Keybindings + paste guard | **Complete** (not yet exercised by hand; see §4 *Phase 4 as built*) |
+| 5 | Layout persistence + restore | **Complete** (not yet exercised by hand; see §5 *Phase 5 as built*) |
+| 6 | Detach / move between windows | **Complete** (not yet exercised by hand; see §6 *Phase 6 as built*) |
+| 7 | Deferred | — |
+
+### Phase 0 — macOS native window tabbing — **Complete**
 
 One builder line (`tabbing_identifier`) behind the `layout_mode = "windows"`
 preference, plus the Settings toggle. Delivers stacking on macOS immediately,
 with today's per-session webview isolation fully intact and effectively zero
 risk. Ships independently of everything below.
 
-### Phase 1 — pane extraction — **Todo**
+As built: Settings → General → Session layout; `SESSION_TABBING_IDENTIFIER`
+in `session/workspace.rs`. Grouping follows the macOS *Prefer tabs* setting
+(or *Window → Merge All Windows*); forcing `tabbingMode = preferred` would need
+an `unsafe` AppKit call and was left out.
+
+### Phase 1 — pane extraction — **Complete**
 
 `SshPane` / `RdpPane` / `ReplayPane` extracted from the three
 `Session*Window.tsx` routes; routes become one-pane wrappers that read URL params
 and render the pane. Pure refactor: same DOM, same handshake order, same close
 semantics. Vitest coverage for the panes lands here.
 
-### Phase 2 — attachment registry + placement + watchdog — **Todo**
+As built: `gui/src/components/session/`. Two window-scoped behaviours were
+kept as they were, and Phase 3 must change them before a window hosts more
+than one pane: `SshPane` fits on `window` resize only (a divider drag needs a
+`ResizeObserver` on the pane), and `RdpPane` captures keys on `window` (keys
+must go to the focused pane only). Both were changed in Phase 3.
+
+### Phase 2 — attachment registry + placement + watchdog — **Complete**
 
 `session_attachments` on `AppState`; `session_list_open` / `session_attach` /
 `session_detach` / `session_heartbeat`; `placement` on both open requests;
@@ -426,28 +861,54 @@ teardown re-homed onto the attachment with the orphan watchdog. Still no
 workspace UI — `own-window` remains the default until Phase 3 lands, so this
 phase is observable only through the new commands and the watchdog log line.
 
-### Phase 3 — the workspace window — **Todo**
+As built: see §3 *Phase 2 as built*.
+
+### Phase 3 — the workspace window — **Complete**
 
 `/workspace` route, `sessionWorkspaceStore` + reducer, tab strip, split tree
 renderer, `paneHosts` registry, divider drag, zoom, per-pane chrome, tab
 reorder, bell / unread dot. `default_placement` flips to `workspace-tab`.
 
-### Phase 4 — keybindings + paste guard — **Todo**
+Host work Phase 2 left for this phase: flip
+`workspace::WORKSPACE_WINDOW_AVAILABLE` (and `validate_prefs` with it); add
+`session-workspace` to the `windows` list in
+`gui/src-tauri/capabilities/default.json` (today the label has no IPC at all)
+and keep `capability_isolation_tests` green; ensure the singleton window at
+`index.html#/workspace`, register the session attached to
+`session-workspace` before emitting, and send `session://placed` with
+`emit_to(WORKSPACE_WINDOW_LABEL, …)` rather than a global `emit`; heartbeat
+from the workspace window with `useSessionHeartbeat`; hook its
+`CloseRequested` to `close_window_sessions(label, None, WindowClose)`.
+
+As built: all of the above, plus the Phase 2 carry-overs (`SshPane` fits with a
+`ResizeObserver` on its own box; `RdpPane` captures keys on its canvas; the
+input commands and the pumps' events go to the holding window). Departures in
+§3 *Phase 3 as built*.
+
+### Phase 4 — keybindings + paste guard — **Complete**
 
 `reservedChords.ts`, the SSH `attachCustomKeyEventHandler` filter, the RDP
 keydown filter, the RDP keyboard-release chord, the Settings chord list with
 override + conflict detection, multi-line paste confirmation.
 
-### Phase 5 — layout persistence + restore — **Todo**
+As built: all of the above; departures in §4 *Phase 4 as built*.
+
+### Phase 5 — layout persistence + restore — **Complete**
 
 `SessionWorkspacePrefs`, save-on-change (debounced), the empty-state restore
 action, per-pane reconnect through the normal open path, cross-namespace refusal.
 
-### Phase 6 — detach / move between windows — **Todo**
+As built: all of the above, with the layouts in their own versioned file
+rather than `SessionWorkspacePrefs`; departures in §5 *Phase 5 as built*.
+
+### Phase 6 — detach / move between windows — **Complete**
 
 Bounded per-session output ring + replay-on-attach for SSH, full-frame refresh
 for RDP, "Move to new window" / "Move to workspace" pane actions, drag a tab out
 of the strip. Gated on its own security review of the output buffer.
+
+As built: all of the above (the "Move to new window" action is labelled *Pop
+out*); the security review and the departures are in §6 *Phase 6 as built*.
 
 ### Phase 7 — deferred
 
@@ -476,7 +937,11 @@ to fight with Tailwind 4. The tree we need is 60 lines of reducer.
   context; a workspace puts N panes in one realm, so a renderer compromise in one
   pane can read another pane's terminal buffer. Mitigations, all mandatory:
   the workspace window mounts only the session routes (no admin pages, no vault
-  API surface beyond the `session_*` commands); session bytes are never
+  API surface beyond the `session_*` commands) — **not met as built**: the
+  workspace loads the same bundle as every window and gets the same capability
+  set (and so the same app-command surface) as `ssh-*` / `rdp-*` windows;
+  narrowing it needs a session-only bundle entry and a per-window app-command
+  ACL, a separate change; session bytes are never
   interpolated into HTML (xterm writes to its own DOM/canvas, RDP to a canvas —
   no `innerHTML` of remote data anywhere in a pane); and the `layout_mode =
   "windows"` preference (Phase 0) keeps per-session isolation available, with
@@ -494,27 +959,37 @@ to fight with Tailwind 4. The tree we need is 60 lines of reducer.
   how it is *resolved*. Every open still goes through the same resolver, connect
   gate, transport tier and MFA ticket check.
 - **Event scoping can be tightened once attachment exists.** `app.emit` is
-  global today, so any webview that knows a token's event names can subscribe.
-  With an authoritative attachment we can move to `emit_to(window_label)` — a
-  strict narrowing. It must land *with* the attach-before-handshake ordering
-  (attach → subscribe → `session_resize` → early-bytes drain), or the buffer
-  flushes to a window that is not listening yet.
+  global, so any webview that knows a token's event names can subscribe.
+  Phase 3 moved the pumps to `emit_to(holder)`, landing with the
+  attach-before-handshake ordering (attach → subscribe → `session_resize` →
+  early-bytes drain). It is **not** the strict narrowing this bullet first
+  claimed: Tauri 2.11 also delivers an `emit_to` event to any `listen()`
+  registered with the default `Any` target, in any webview. The token stays the
+  secret — it reaches only `main`, the rendering window and (by
+  `session_list_open`) the workspace — and `session://placed` carries none.
+  What Phase 3 did make strict is *input*: only the holding window may drive a
+  session (§3 *Phase 3 as built*).
 - **One keystroke can now reach the wrong host.** Six visible panes make
   mis-targeted input materially more likely than six overlapping windows did.
   Countermeasures are UX, and they are in scope for that reason: a clearly
   focused pane border, the target `user@host` in every pane's header (not just
   the tab), the multi-line paste guard on by default, and no broadcast input.
-- **Persisted layouts are a target list.** `saved_layouts` records which hosts an
-  operator connects to and which profiles they use — inventory metadata in a
-  local preferences file, not secrets, but worth stating: no tokens, no
-  credentials, no session output is persisted, and restore always re-authorises
-  through the live connect path (including MFA) rather than resuming anything.
-- **Cross-namespace restore fails closed.** A layout carries the namespace it was
-  built in; restoring it elsewhere is refused rather than silently resolving
-  same-named resources in the active namespace.
+- **Persisted layouts are a target list.** `session_layouts.json` records which
+  hosts an operator connects to and which profiles they use — inventory
+  metadata in a local file (owner-only on Unix), not secrets, but worth
+  stating: no tokens, no credentials, no session output is persisted — the
+  host writes it from its own registry, not from what the frontend sends —
+  and restore always re-authorises through the live connect path (including
+  MFA) rather than resuming anything.
+- **Cross-namespace restore fails closed.** Each saved pane carries the
+  namespace it was opened in; restoring it elsewhere is refused — by the
+  workspace for the whole layout, and by the host on every pane's open —
+  rather than silently resolving same-named resources in the active
+  namespace.
 - **Phase 6's output ring is the one new plaintext store.** Bounded, per-session,
-  memory-only, dropped with the session, opt-in, and reviewed on its own. Session
-  output contains whatever the operator printed.
+  memory-only, zeroed and dropped with the session, opt-in, and reviewed on its
+  own — see §6 *Security review of the output buffer*. Session output contains
+  whatever the operator printed.
 
 ## Testing Plan
 
@@ -534,7 +1009,15 @@ to fight with Tailwind 4. The tree we need is 60 lines of reducer.
   plain typing, `Ctrl+C`, `Ctrl+D`, `Ctrl+Z`.
 - Paste guard: single-line paste passes through; text containing `\n` prompts.
 - Restore: a layout with a foreign namespace is refused, with the message
-  naming both namespaces.
+  naming both namespaces (`sessionLayout.test.ts`, `sessionWorkspace.test.tsx`;
+  the host's per-pane check in `session::layouts`).
+- Restore keeps the saved shape and ratios, goes through the MFA gate and
+  `session_open_*` per pane with the `restore` context, drops a pane it
+  cannot open with the reason, and is not saved back as a change.
+- Save: the skeleton names sessions by token only and is debounced; focus
+  and unread state are not part of it.
+- Move: *Pop out* and tear-off call `session_move` and never `session_close`;
+  a stale listing does not resurrect a moved pane, a later epoch re-adopts it.
 
 ### Rust unit tests (`cargo nextest run -p bastion-vault-gui --lib`)
 
@@ -545,8 +1028,22 @@ to fight with Tailwind 4. The tree we need is 60 lines of reducer.
 - Watchdog: an attachment starved of heartbeats past the threshold is reaped;
   one that keeps heartbeating is not; a reap runs the same cleanup path as a
   clean close.
+- Output buffer (`session::output`): bounded, keeps the newest bytes in order,
+  zeroes on clear; handshake replay with and without the opt-in ring; an
+  undelivered handshake changes nothing.
+- Layouts (`session::layouts`): skeleton from tokens with no token in the
+  output, collapse of unknown tokens, two-vault refusal, bounds, file
+  round-trip with `0600`, another format version refused and left untouched.
+- Transfer and epochs (`session::attachments`), epoch-gated delivery
+  (`session::routing`).
 - Placement: `own-window` builds a window (existing behaviour, unchanged);
   `workspace-tab` builds no per-session window and emits `session://placed`.
+  (`session::workspace` tests placement resolution — absent → the preference
+  default, strict parsing, `windows`-mode refusals. The window-building half
+  needs a Tauri runtime and has no unit test; the registry side — registered
+  attached before the window, listing carries the placement, input and close
+  authorisation, event routing — is tested in `session::attachments` and
+  `session::routing`, and the workspace's side in `sessionWorkspace.test.tsx`.)
 
 ### Integration / manual
 

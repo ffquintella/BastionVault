@@ -25,7 +25,7 @@ use russh::client::{self, Config, Handler};
 use russh::keys::{decode_secret_key, PrivateKeyWithHashAlg, PublicKey};
 use russh::ChannelMsg;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
@@ -51,6 +51,10 @@ pub struct SshOpenArgs {
     /// the session record so `session_close` + the
     /// WindowEvent::CloseRequested hook can both fire it.
     pub on_close: Option<SessionCleanup>,
+    /// Keep recent output after it is delivered, so a window that takes
+    /// the session over can redraw it (T38 Phase 6, the opt-in
+    /// `session_workspace.replay_buffer`). See `session::output`.
+    pub retain_output: bool,
 }
 
 // The `SecurityKey` variant is materially larger than the others (an OpenSSH
@@ -354,22 +358,34 @@ pub async fn open_ssh_session(
 
     // Control channel — the per-session task pumps from here.
     let (tx, mut rx) = mpsc::channel::<SshControl>(64);
-    let app_for_task = app.clone();
+    // Output goes to the window that holds the session, not to every
+    // webview (T38; see `session::routing` for what that does and does
+    // not narrow).
+    let events = super::routing::SessionEvents::new(app.clone(), token.clone());
     let stdout_event_for_task = stdout_event.clone();
     let closed_event_for_task = closed_event.clone();
+    let retain_output = args.retain_output;
 
     tokio::spawn(async move {
         // The WebviewWindow takes a non-trivial amount of wall-time
         // to load + register its `listen()` handler for stdout
         // events — by the time the React effect runs, the remote
         // shell may have already printed its prompt + MOTD into a
-        // void. We buffer all PTY bytes that arrive before the
-        // window signals readiness, then flush them once the first
-        // Resize control message arrives (the React effect always
-        // fires a resize immediately after registering the
-        // listener, which makes it a reliable "ready" handshake).
-        let mut early_buf: Vec<u8> = pre_shell_buf;
-        let mut ready = false;
+        // void. Output is delivered only to a holder that has
+        // completed the listener handshake (the first Resize it sends,
+        // which every pane sends right after registering its
+        // listeners), and only at the holder epoch it handshook at;
+        // anything else is buffered for the next handshake. The same
+        // rule carries a session across a move between windows
+        // (T38 Phase 6): a transfer moves the epoch, so output waits
+        // for the new window instead of reaching one that is not
+        // listening yet. See `session::output`.
+        let mut output = super::output::SessionOutput::new(super::output::OUTPUT_BUFFER_CAPACITY, retain_output);
+        output.record(&pre_shell_buf, false);
+        {
+            use zeroize::Zeroize;
+            pre_shell_buf.zeroize();
+        }
         #[allow(unused_assignments)]
         let mut close_reason: String = "remote host closed the connection".into();
 
@@ -380,26 +396,21 @@ pub async fn open_ssh_session(
             tokio::select! {
                 msg = channel.wait() => {
                     match msg {
-                        Some(ChannelMsg::Data { data }) => {
-                            if ready {
-                                let _ = app_for_task.emit(
-                                    &stdout_event_for_task,
-                                    ChunkPayload { bytes_b64: encode_b64(&data) },
-                                );
-                            } else {
-                                early_buf.extend_from_slice(&data);
-                            }
-                        }
-                        Some(ChannelMsg::ExtendedData { data, .. }) => {
-                            // stderr — surface it on the same channel.
-                            if ready {
-                                let _ = app_for_task.emit(
-                                    &stdout_event_for_task,
-                                    ChunkPayload { bytes_b64: encode_b64(&data) },
-                                );
-                            } else {
-                                early_buf.extend_from_slice(&data);
-                            }
+                        // stdout and stderr surface on the same event.
+                        Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                            let delivered = match output.live_epoch() {
+                                Some(epoch) => {
+                                    events
+                                        .emit_if_epoch(
+                                            &stdout_event_for_task,
+                                            ChunkPayload { bytes_b64: encode_b64(&data), notice: None },
+                                            epoch,
+                                        )
+                                        .await
+                                }
+                                None => false,
+                            };
+                            output.record(&data, delivered);
                         }
                         Some(ChannelMsg::Eof) => {
                             close_reason = "remote sent EOF".into();
@@ -440,7 +451,7 @@ pub async fn open_ssh_session(
                                 break;
                             }
                         }
-                        Some(SshControl::Resize { cols, rows }) => {
+                        Some(SshControl::Resize { cols, rows, epoch }) => {
                             if let Err(e) = channel
                                 .window_change(cols as u32, rows as u32, 0, 0)
                                 .await
@@ -449,21 +460,21 @@ pub async fn open_ssh_session(
                                     "resource-connect/ssh: window_change failed: {e:?}"
                                 );
                             }
-                            // First Resize doubles as the "frontend
-                            // listener is live" signal: drain the
-                            // early-bytes buffer in one emit and
-                            // flip to live mode.
-                            if !ready {
-                                ready = true;
-                                if !early_buf.is_empty() {
-                                    let _ = app_for_task.emit(
-                                        &stdout_event_for_task,
-                                        ChunkPayload {
-                                            bytes_b64: encode_b64(&early_buf),
-                                        },
-                                    );
-                                    early_buf.clear();
-                                    early_buf.shrink_to_fit();
+                            // The first Resize a holder sends at an epoch
+                            // is its "listener is live" signal: deliver
+                            // what was buffered in one emit and go live.
+                            if let Some(replay) = output.handshake(epoch) {
+                                let delivered = if replay.is_empty() {
+                                    events.holder_epoch_is(epoch).await
+                                } else {
+                                    let payload = ChunkPayload {
+                                        bytes_b64: encode_b64(&replay.bytes),
+                                        notice: replay.notice.clone(),
+                                    };
+                                    events.emit_if_epoch(&stdout_event_for_task, payload, epoch).await
+                                };
+                                if delivered {
+                                    output.handshake_done(epoch);
                                 }
                             }
                         }
@@ -492,14 +503,14 @@ pub async fn open_ssh_session(
         // so the frontend picks it up no matter when its listener
         // came online.
         let payload = ClosedPayload { reason: close_reason };
-        let _ = app_for_task.emit(&closed_event_for_task, payload.clone());
-        let app_for_replay = app_for_task.clone();
+        events.emit(&closed_event_for_task, payload.clone()).await;
+        let events_for_replay = events.clone();
         let evt_for_replay = closed_event_for_task.clone();
         let payload_for_replay = payload.clone();
         tokio::spawn(async move {
             for delay in [200u64, 800, 2500] {
                 tokio::time::sleep(Duration::from_millis(delay)).await;
-                let _ = app_for_replay.emit(&evt_for_replay, payload_for_replay.clone());
+                events_for_replay.emit(&evt_for_replay, payload_for_replay.clone()).await;
             }
         });
         let _ = session.disconnect(russh::Disconnect::ByApplication, "", "").await;
@@ -540,6 +551,11 @@ struct ChunkPayload {
     /// frontend decodes from b64 → Uint8Array → TextDecoder before
     /// passing the result in.
     bytes_b64: String,
+    /// Host-composed note the pane shows before the bytes — set only on a
+    /// handshake replay (output dropped, or not kept across a move). Never
+    /// remote data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notice: Option<String>,
 }
 
 fn encode_b64(bytes: &[u8]) -> String {
@@ -615,6 +631,9 @@ pub async fn drop_session(state: &crate::state::AppState, token: &str) -> Option
     // rustion/session/kill so the bastion releases the slot; this just
     // clears the GUI-side mirror.
     state.rustion_session_bundles.lock().await.remove(token);
+    // T38: and its window attachment, so no later window close or
+    // watchdog tick finds the token and stops it a second time.
+    state.session_attachments.lock().await.remove(token);
     match removed {
         Some(SessionState::Ssh(s)) => {
             log::info!("resource-connect/ssh: closed session token={token}");
