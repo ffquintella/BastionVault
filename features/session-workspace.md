@@ -59,7 +59,7 @@ No server-side change: this is entirely GUI host + frontend.
 
 ## Current State
 
-**Status: In progress — Phases 0–6 implemented; none of Phases 3–6 exercised
+**Status: Complete (T38) — Phases 0–6 implemented; none of Phases 3–6 exercised
 by hand.** Sessions open as tabs and splits in one Session Workspace window by
 default (`default_placement = workspace-tab`); *Separate windows* keeps one
 window per session. The layout is saved as a skeleton and offered for an
