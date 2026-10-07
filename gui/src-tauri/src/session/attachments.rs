@@ -7,10 +7,15 @@
 //! session's cleanup hook):
 //!
 //! * pane / Disconnect → `session_close`;
-//! * a window closing → every session attached to its label;
+//! * a window destroyed → every session attached to its label (T108: on
+//!   `WindowEvent::Destroyed`, not on the close request, which the
+//!   window's page may veto to ask first — `session::close_guard`);
+//! * a close request the window's page does not answer → the same, before
+//!   the host destroys the window;
 //! * a renderer that dies without a close event → the watchdog
 //!   (`commands::session_workspace::spawn_watchdog`) or, on macOS, the
-//!   web-content-process-terminated hook.
+//!   web-content-process-terminated hook;
+//! * app exit → every session still live (`stop_all_sessions`).
 //!
 //! A missing `session.close` is an audit signal and, for the LDAP library
 //! credential source, an account never checked back in, so the registry is
@@ -629,6 +634,32 @@ pub async fn stop_window_sessions(
     stopped
 }
 
+/// Stop every SSH/RDP session still live — the app is exiting (T108).
+/// Every session the registry knows and, as the fail-safe
+/// [`stop_window_sessions`] applies to an own window, any live SSH/RDP
+/// session it has lost track of. A session a window teardown already took
+/// is stopped by whichever call reaches `drop_session` first, so each
+/// cleanup is still handed out once.
+pub async fn stop_all_sessions(state: &crate::state::AppState) -> Vec<(String, Option<SessionCleanup>)> {
+    let mut tokens: std::collections::BTreeSet<String> =
+        state.session_attachments.lock().await.list().into_iter().map(|row| row.descriptor.token).collect();
+    tokens.extend(
+        state
+            .connect_sessions
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, s)| matches!(s, super::SessionState::Ssh(_) | super::SessionState::Rdp(_)))
+            .map(|(t, _)| t.clone()),
+    );
+    let mut stopped = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        let cleanup = stop_session(state, &token).await;
+        stopped.push((token, cleanup));
+    }
+    stopped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1181,6 +1212,71 @@ mod teardown_tests {
         state.session_attachments.lock().await.detach("sess_3", "ssh-sess_3", Instant::now()).unwrap();
         assert!(stop_window_sessions(&state, "ssh-sess_3", Some("sess_3")).await.is_empty());
         assert!(state.connect_sessions.lock().await.contains_key("sess_3"));
+    }
+
+    /// T108: the window's teardown runs on `Destroyed`, after the page
+    /// confirmed. A window whose page cancelled the close keeps every
+    /// session; when it is later destroyed — or force-closed because its
+    /// page stopped answering, which stops its sessions and then destroys
+    /// it — each session stops once, and the second teardown finds nothing.
+    #[tokio::test]
+    async fn a_forced_close_and_the_destroyed_hook_stop_each_session_once() {
+        let state = AppState::new();
+        let mut rx1 = fake_session(&state, "sess_1", WORKSPACE_WINDOW_LABEL, Some(cleanup("a1"))).await;
+        let _rx2 = fake_session(&state, "sess_2", WORKSPACE_WINDOW_LABEL, None).await;
+        let _own = fake_session(&state, "sess_9", "ssh-sess_9", Some(cleanup("a9"))).await;
+
+        // Force path: the sessions first …
+        let forced = stop_window_sessions(&state, WORKSPACE_WINDOW_LABEL, None).await;
+        assert_eq!(forced.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(), ["sess_1", "sess_2"]);
+        assert_eq!(account(&forced[0].1), Some("a1".into()));
+        assert!(matches!(rx1.try_recv(), Ok(SshControl::Close)));
+        // … then the window's `Destroyed` hook: nothing left.
+        assert!(stop_window_sessions(&state, WORKSPACE_WINDOW_LABEL, None).await.is_empty());
+        // Another window's session is untouched.
+        assert!(state.connect_sessions.lock().await.contains_key("sess_9"));
+        assert!(state.session_attachments.lock().await.contains("sess_9"));
+    }
+
+    /// T108: an own window destroyed after its session moved to the
+    /// workspace (`session_move` destroys it rather than closing it) stops
+    /// nothing.
+    #[tokio::test]
+    async fn destroying_the_source_window_of_a_move_stops_nothing() {
+        let state = AppState::new();
+        let _rx = fake_session(&state, "sess_1", "ssh-sess_1", Some(cleanup("a1"))).await;
+        state
+            .session_attachments
+            .lock()
+            .await
+            .transfer("sess_1", "ssh-sess_1", WORKSPACE_WINDOW_LABEL, Instant::now())
+            .unwrap();
+        assert!(stop_window_sessions(&state, "ssh-sess_1", Some("sess_1")).await.is_empty());
+        assert!(state.connect_sessions.lock().await.contains_key("sess_1"));
+        assert_eq!(state.session_attachments.lock().await.holder("sess_1"), Some(WORKSPACE_WINDOW_LABEL));
+    }
+
+    /// T108 app exit: every live SSH/RDP session stops — registered ones
+    /// and one the registry lost — each cleanup once; web sessions are left
+    /// to their own exit path, and a second sweep finds nothing.
+    #[tokio::test]
+    async fn app_exit_stops_every_live_session_once() {
+        let state = AppState::new();
+        let _rx1 = fake_session(&state, "sess_1", WORKSPACE_WINDOW_LABEL, Some(cleanup("a1"))).await;
+        let _rx2 = fake_session(&state, "sess_2", "ssh-sess_2", Some(cleanup("a2"))).await;
+        let (tx, _rx3) = tokio::sync::mpsc::channel(4);
+        state.connect_sessions.lock().await.insert(
+            "sess_lost".into(),
+            SessionState::Ssh(SshSessionState { input_tx: tx, label: "x".into(), on_close: Some(cleanup("a3")) }),
+        );
+
+        let stopped = stop_all_sessions(&state).await;
+        let mut accounts: Vec<Option<String>> = stopped.iter().map(|(_, c)| account(c)).collect();
+        accounts.sort();
+        assert_eq!(accounts, vec![Some("a1".into()), Some("a2".into()), Some("a3".into())]);
+        assert!(state.connect_sessions.lock().await.is_empty());
+        assert!(state.session_attachments.lock().await.list().is_empty());
+        assert!(stop_all_sessions(&state).await.is_empty());
     }
 
     /// A reap runs the same stop path as a clean close.

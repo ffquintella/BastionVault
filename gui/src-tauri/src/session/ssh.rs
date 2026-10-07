@@ -48,8 +48,8 @@ pub struct SshOpenArgs {
     pub label: String,
     /// Optional cleanup task to run when the session closes
     /// (LDAP library check-in is the only kind today). Stored on
-    /// the session record so `session_close` + the
-    /// WindowEvent::CloseRequested hook can both fire it.
+    /// the session record so `session_close` + the window's
+    /// `WindowEvent::Destroyed` hook can both fire it.
     pub on_close: Option<SessionCleanup>,
     /// Keep recent output after it is delivered, so a window that takes
     /// the session over can redraw it (T38 Phase 6, the opt-in

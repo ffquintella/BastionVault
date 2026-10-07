@@ -1548,7 +1548,8 @@ async fn place_in_workspace(
 }
 
 /// Focus the singleton Session Workspace window, building it if it does
-/// not exist. Its close hook stops every session attached to it.
+/// not exist. When it is destroyed, every session attached to it stops
+/// (`session_workspace::hook_session_window_close`).
 pub(crate) fn ensure_workspace_window(app: &AppHandle) -> Result<(), String> {
     let label = workspace::WORKSPACE_WINDOW_LABEL;
     if let Some(win) = app.get_webview_window(label) {
@@ -1573,21 +1574,10 @@ pub(crate) fn ensure_workspace_window(app: &AppHandle) -> Result<(), String> {
             return if app.get_webview_window(label).is_some() { Ok(()) } else { Err(e.to_string()) };
         }
     };
-    let app_for_close = app.clone();
-    win.on_window_event(move |ev| {
-        if let tauri::WindowEvent::CloseRequested { .. } = ev {
-            let app = app_for_close.clone();
-            tauri::async_runtime::spawn(async move {
-                super::session_workspace::close_window_sessions(
-                    &app,
-                    workspace::WORKSPACE_WINDOW_LABEL,
-                    None,
-                    super::session_workspace::WindowCloseCause::WindowClose,
-                )
-                .await;
-            });
-        }
-    });
+    // Destroying the window stops every session attached to it; a close
+    // request goes to its page first, which asks when a session is live
+    // (T108).
+    super::session_workspace::hook_session_window_close(app, &win, None);
     log::info!("resource-connect: opened the session workspace window");
     Ok(())
 }
@@ -1700,27 +1690,12 @@ pub(crate) fn build_own_session_window(
 
     let win = builder.build().map_err(|e| e.to_string())?;
 
-    // The operator x'ing the window stops every session attached to it —
-    // for an own window, its one session. The token is passed as the
-    // fail-safe: stopped too if the registry has lost track of it.
-    let app_for_close = app.clone();
-    let token = d.token.clone();
-    win.on_window_event(move |ev| {
-        if let tauri::WindowEvent::CloseRequested { .. } = ev {
-            let app = app_for_close.clone();
-            let label = window_label.clone();
-            let token = token.clone();
-            tauri::async_runtime::spawn(async move {
-                super::session_workspace::close_window_sessions(
-                    &app,
-                    &label,
-                    Some(&token),
-                    super::session_workspace::WindowCloseCause::WindowClose,
-                )
-                .await;
-            });
-        }
-    });
+    // The window going away stops every session attached to it — for an
+    // own window, its one session. The operator's close goes to the page
+    // first, which asks while the session is live (T108). The token is
+    // passed as the fail-safe: stopped too if the registry has lost track
+    // of it.
+    super::session_workspace::hook_session_window_close(app, &win, Some(d.token.clone()));
     Ok(())
 }
 

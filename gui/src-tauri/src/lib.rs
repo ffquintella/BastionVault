@@ -645,6 +645,10 @@ pub fn run() {
             commands::session_workspace::session_layout_forget,
             commands::session_workspace::session_workspace_open,
             commands::session_workspace::session_move,
+            // T108: a session window's page answers its close request and
+            // closes itself, acting on the calling window only.
+            commands::session_workspace::session_window_closing,
+            commands::session_workspace::session_window_close,
             commands::connect::resource_login_class,
             commands::ldap::ldap_list_static_roles,
             commands::ldap::ldap_read_static_role,
@@ -767,21 +771,13 @@ pub fn run() {
     // native window, so no close event ever fires and its sessions would
     // run on with nothing rendering them. macOS reports the death; stop
     // that window's sessions on it. (Windows and Linux have no equivalent
-    // hook in Tauri 2.11; the heartbeat watchdog covers them.)
+    // hook in Tauri 2.11; the heartbeat watchdog covers them.) T108: the
+    // dead page's close veto is still registered, so the window's next
+    // close is forced at once rather than waiting for an answer.
     #[cfg(target_os = "macos")]
     let builder = builder.on_web_content_process_terminate(|webview| {
         use tauri::Manager;
-        let app = webview.app_handle().clone();
-        let label = webview.label().to_string();
-        tauri::async_runtime::spawn(async move {
-            commands::session_workspace::close_window_sessions(
-                &app,
-                &label,
-                None,
-                commands::session_workspace::WindowCloseCause::RendererTerminated,
-            )
-            .await;
-        });
+        commands::session_workspace::renderer_terminated(webview.app_handle(), webview.label());
     });
 
     #[cfg(all(debug_assertions, feature = "mcp_local_dev"))]
@@ -800,6 +796,9 @@ pub fn run() {
         // LDAP library account back in) within a short budget.
         if let tauri::RunEvent::Exit = event {
             commands::connect_web::close_web_sessions_on_exit(handle);
+            // T108: SSH/RDP sessions still live, and window teardowns still
+            // running, get their cleanup (LDAP library check-in) too.
+            commands::session_workspace::stop_sessions_on_exit(handle);
         }
     });
 }

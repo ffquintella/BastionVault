@@ -1,7 +1,9 @@
 //! Session Workspace host commands (features/session-workspace.md, T38):
 //! the session-layout preference (Phase 0), the attachment commands, the
 //! window-close fan-out and the orphan watchdog (Phase 2), saved layouts
-//! (Phase 5) and moving a live session between windows (Phase 6).
+//! (Phase 5), moving a live session between windows (Phase 6), and the
+//! native-close protocol that lets a session window ask before it closes
+//! (T108, §8).
 //!
 //! The window a command acts for is always the *calling* webview, never a
 //! label the caller names. A label in the request would let any webview
@@ -13,16 +15,19 @@
 //! orphan is stopped. Every open still goes through `session_open_*`.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, Webview};
+use tokio::sync::Notify;
 
 use crate::error::{CmdResult, CommandError};
 use crate::preferences::SessionWorkspacePrefs;
 use crate::session::attachments::{
     self, may_list_sessions, own_window_label, AttachOutcome, ReapPolicy, SessionListing, WindowState, WATCHDOG_TICK,
 };
+use crate::session::close_guard::{renders_sessions, CloseGuard, CloseRequest, CLOSE_ANSWER_TIMEOUT};
 use crate::session::layouts::{self, LayoutInput, PaneSource, SavedLayout};
 use crate::session::workspace::{Placement, WORKSPACE_WINDOW_LABEL};
 use crate::session::{workspace, ProfileProtocol, SessionState};
@@ -248,10 +253,13 @@ pub async fn session_move(
         if let Err(e) = app.emit_to(WORKSPACE_WINDOW_LABEL, workspace::PLACED_EVENT, ()) {
             log::warn!("resource-connect: could not notify the session workspace: {e}");
         }
-        // The session's own window has nothing left to render. Its close
-        // hook stops only what is still attached to it — nothing now.
+        // The session's own window has nothing left to render. Destroyed,
+        // not closed: a close would go to its page, which asks before it
+        // closes a window with a live session (T108) — and the session is
+        // no longer that window's. Its `Destroyed` hook stops only what is
+        // still attached to it — nothing now.
         if let Some(win) = app.get_webview_window(&caller) {
-            if let Err(e) = win.close() {
+            if let Err(e) = win.destroy() {
                 log::debug!("resource-connect: could not close window {caller} after a move: {e}");
             }
         }
@@ -373,15 +381,221 @@ pub async fn session_layout_forget(webview: Webview) -> CmdResult<bool> {
     layouts::forget_at(&path, &crate::embedded::current_vault_id()).map_err(CommandError::from)
 }
 
+// ── Native window close (T108) ────────────────────────────────────────
+//
+// A window that renders sessions stops them when it is *destroyed*, not
+// when the operator asks to close it: its page vetoes the native close
+// and asks first (`gui/src/lib/sessionWindowClose.ts`). `session::
+// close_guard` is the escape hatch for a page that cannot answer.
+
+fn close_guard(state: &AppState) -> std::sync::MutexGuard<'_, CloseGuard> {
+    // Plain bookkeeping, written in one step per call: a panic elsewhere
+    // while it was locked leaves nothing half-written, and a poisoned
+    // lock must not stop a window from closing.
+    state.session_close_guard.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The calling webview, when it is the main webview of a window that
+/// renders sessions. The close commands act on that window and no other.
+fn calling_session_window(webview: &Webview) -> CmdResult<String> {
+    let label = webview.label().to_string();
+    if !renders_sessions(&label) || webview.window().label() != label {
+        log::warn!("resource-connect: session window close command refused for window `{label}`");
+        return Err(CommandError::from(format!(
+            "window `{label}` does not render sessions; only a session window or the Session Workspace closes this way"
+        )));
+    }
+    Ok(label)
+}
+
+/// The calling window's page has its close request and is asking the
+/// operator: its confirmation is on screen. Cancels the forced close the
+/// request armed. Answers for the calling window only.
+#[tauri::command]
+pub async fn session_window_closing(state: State<'_, AppState>, webview: Webview) -> CmdResult<()> {
+    let label = calling_session_window(&webview)?;
+    let was_pending = close_guard(&state).answered(&label);
+    if !was_pending {
+        // Late (the close was already forced) or unprompted; either way
+        // there is nothing to cancel.
+        log::debug!("resource-connect: window {label} answered a close request that was not pending");
+    }
+    Ok(())
+}
+
+/// Close the calling window: the operator confirmed, or nothing in it is
+/// live. The host destroys the window, and its `Destroyed` hook stops
+/// every session still attached to it — the same stop path as every other
+/// exit. Never another window: the window is the caller, not a label in
+/// the request (a `core:window:allow-destroy` grant would let the page
+/// destroy any window by label).
+#[tauri::command]
+pub async fn session_window_close(state: State<'_, AppState>, webview: Webview) -> CmdResult<()> {
+    let label = calling_session_window(&webview)?;
+    close_guard(&state).answered(&label);
+    log::info!("resource-connect: closing window {label} at its page's request");
+    webview.window().destroy().map_err(|e| CommandError::from(format!("close window `{label}`: {e}")))
+}
+
+/// Install the close protocol on a window that renders sessions (its own
+/// window, or the workspace). `own_token` is an own window's session, the
+/// fail-safe [`attachments::stop_window_sessions`] describes.
+///
+/// * `CloseRequested` — Tauri has already vetoed the close if the page
+///   listens for it. Record the request and arm the escape hatch: if the
+///   page has not answered within [`CLOSE_ANSWER_TIMEOUT`], the window's
+///   sessions are stopped and the window destroyed. A close the page does
+///   not veto goes straight on to `Destroyed`, and the armed timer finds
+///   the request forgotten.
+/// * `Destroyed` — the window is gone, however it went: stop every session
+///   still attached to it.
+pub(crate) fn hook_session_window_close(app: &AppHandle, win: &tauri::WebviewWindow, own_token: Option<String>) {
+    let app = app.clone();
+    let label = win.label().to_string();
+    win.on_window_event(move |event| match event {
+        tauri::WindowEvent::CloseRequested { .. } => arm_close_escape_hatch(&app, &label, own_token.clone()),
+        tauri::WindowEvent::Destroyed => {
+            close_guard(&app.state::<AppState>()).forget(&label);
+            let app = app.clone();
+            let label = label.clone();
+            let own_token = own_token.clone();
+            tauri::async_runtime::spawn(async move {
+                close_window_sessions(&app, &label, own_token.as_deref(), WindowCloseCause::WindowDestroyed).await;
+            });
+        }
+        _ => {}
+    });
+}
+
+/// A window's web content process died (the macOS hook): stop its
+/// sessions now, and — for a window that renders sessions — mark it so its
+/// next close request is forced at once. Its page's close listener is still
+/// registered with Tauri, so that close is vetoed with nothing left to
+/// answer it.
+#[cfg(target_os = "macos")]
+pub(crate) fn renderer_terminated(app: &AppHandle, label: &str) {
+    if renders_sessions(label) {
+        close_guard(&app.state::<AppState>()).renderer_gone(label);
+    }
+    let app = app.clone();
+    let label = label.to_string();
+    tauri::async_runtime::spawn(async move {
+        close_window_sessions(&app, &label, None, WindowCloseCause::RendererTerminated).await;
+    });
+}
+
+/// Record a close request synchronously — before the page can answer it,
+/// since the answer arrives as IPC on the thread this hook runs on — and
+/// force the close if it goes unanswered.
+fn arm_close_escape_hatch(app: &AppHandle, label: &str, own_token: Option<String>) {
+    let request = close_guard(&app.state::<AppState>()).requested(label, Instant::now());
+    let app = app.clone();
+    let label = label.to_string();
+    tauri::async_runtime::spawn(async move {
+        let (cause, waited) = match request {
+            CloseRequest::ForceNow => (WindowCloseCause::RendererTerminated, Duration::ZERO),
+            CloseRequest::AwaitAnswer { id } => {
+                tokio::time::sleep(CLOSE_ANSWER_TIMEOUT).await;
+                let unanswered = close_guard(&app.state::<AppState>()).take_unanswered(&label, id, Instant::now());
+                match unanswered {
+                    Some(waited) => (WindowCloseCause::CloseUnanswered, waited),
+                    None => return,
+                }
+            }
+        };
+        force_close_window(&app, &label, own_token.as_deref(), cause, waited).await;
+    });
+}
+
+/// The escape hatch fired: the window's page did not answer its close
+/// request, or its renderer is known dead. Stop the window's sessions
+/// first — the operator asked for the window to go and nothing in it can
+/// confirm — then destroy it; its `Destroyed` hook finds nothing left. If
+/// the window cannot be destroyed, its sessions are stopped all the same.
+async fn force_close_window(
+    app: &AppHandle,
+    label: &str,
+    own_token: Option<&str>,
+    cause: WindowCloseCause,
+    waited: Duration,
+) {
+    log::warn!(
+        target: "audit",
+        "session.window_force_closed: window={label} reason={} waited_ms={}",
+        cause.as_str(),
+        waited.as_millis()
+    );
+    close_window_sessions(app, label, own_token, cause).await;
+    match app.get_webview_window(label) {
+        Some(win) => {
+            if let Err(e) = win.destroy() {
+                log::warn!(
+                    "resource-connect: window {label} could not be destroyed after an unanswered close ({e}); its \
+                     sessions are stopped"
+                );
+            }
+        }
+        None => log::debug!("resource-connect: window {label} was already gone when its close was forced"),
+    }
+}
+
 // ── Teardown ──────────────────────────────────────────────────────────
 
 /// Why a window's sessions are being stopped.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowCloseCause {
-    /// The operator closed the window (`WindowEvent::CloseRequested`).
-    WindowClose,
-    /// The window's web content process died (macOS hook).
+    /// The window is gone (`WindowEvent::Destroyed`): closed after its
+    /// page confirmed, closed with nothing live, or closed by the host.
+    WindowDestroyed,
+    /// The window's web content process died (macOS hook), or a close was
+    /// requested of a window whose renderer is known dead.
     RendererTerminated,
+    /// The window's page did not answer a close request in time (T108).
+    CloseUnanswered,
+}
+
+impl WindowCloseCause {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::WindowDestroyed => "window_destroyed",
+            Self::RendererTerminated => "renderer_terminated",
+            Self::CloseUnanswered => "close_unanswered",
+        }
+    }
+}
+
+/// Window teardowns started and not yet finished, so app exit can let them
+/// run their cleanups ([`stop_sessions_on_exit`]).
+static TEARDOWNS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+static TEARDOWNS_IDLE: Notify = Notify::const_new();
+
+struct InFlightTeardown;
+
+impl InFlightTeardown {
+    fn begin() -> Self {
+        TEARDOWNS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for InFlightTeardown {
+    fn drop(&mut self) {
+        if TEARDOWNS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst) == 1 {
+            TEARDOWNS_IDLE.notify_waiters();
+        }
+    }
+}
+
+async fn wait_for_teardowns() {
+    loop {
+        let idle = TEARDOWNS_IDLE.notified();
+        tokio::pin!(idle);
+        idle.as_mut().enable();
+        if TEARDOWNS_IN_FLIGHT.load(Ordering::SeqCst) == 0 {
+            return;
+        }
+        idle.await;
+    }
 }
 
 /// Stop every session attached to `window_label` and run each cleanup
@@ -393,6 +607,7 @@ pub(crate) async fn close_window_sessions(
     own_token: Option<&str>,
     cause: WindowCloseCause,
 ) {
+    let _in_flight = InFlightTeardown::begin();
     let state = app.state::<AppState>();
     let stopped = attachments::stop_window_sessions(&state, window_label, own_token).await;
     for (token, cleanup) in stopped {
@@ -400,14 +615,52 @@ pub(crate) async fn close_window_sessions(
             run_cleanup(&state, c).await;
         }
         match cause {
-            WindowCloseCause::WindowClose => {
-                log::info!("resource-connect: window-close → session drop {token} (window {window_label})")
+            WindowCloseCause::WindowDestroyed => {
+                log::info!("resource-connect: window destroyed → session drop {token} (window {window_label})")
             }
-            WindowCloseCause::RendererTerminated => log::warn!(
+            WindowCloseCause::RendererTerminated | WindowCloseCause::CloseUnanswered => log::warn!(
                 target: "audit",
-                "session.reaped: token={token} window={window_label} reason=renderer_terminated"
+                "session.reaped: token={token} window={window_label} reason={}",
+                cause.as_str()
             ),
         }
+    }
+}
+
+/// How long app exit waits for session teardown.
+const EXIT_STOP_BUDGET: Duration = Duration::from_secs(3);
+
+/// `RunEvent::Exit`: stop every SSH/RDP session still live, run its
+/// cleanup (the LDAP library check-in), and let the teardowns closing
+/// windows started finish — within [`EXIT_STOP_BUDGET`].
+///
+/// Closing the last window exits the app from inside that window's
+/// `Destroyed` event, so the teardown the event spawned would otherwise
+/// race the process exit. The connections die with the process either
+/// way; what this keeps is the check-in and the log line. Windows are not
+/// touched — they go with the process.
+pub fn stop_sessions_on_exit(app: &AppHandle) {
+    let app = app.clone();
+    let finished = tauri::async_runtime::block_on(async move {
+        tokio::time::timeout(EXIT_STOP_BUDGET, async {
+            let state = app.state::<AppState>();
+            for (token, cleanup) in attachments::stop_all_sessions(&state).await {
+                if let Some(c) = cleanup {
+                    run_cleanup(&state, c).await;
+                }
+                log::info!("resource-connect: app exit → session drop {token}");
+            }
+            wait_for_teardowns().await;
+        })
+        .await
+        .is_ok()
+    });
+    if !finished {
+        log::warn!(
+            target: "audit",
+            "session.exit_teardown_incomplete: not every SSH/RDP session teardown finished within {}s",
+            EXIT_STOP_BUDGET.as_secs()
+        );
     }
 }
 
@@ -496,6 +749,32 @@ mod tests {
     /// command (T110; what that capability grants is checked in
     /// `window_acl_tests`). (`capability_isolation_tests` in `connect_web.rs`
     /// keeps every capability away from web session windows.)
+    /// T108 regression: no session window stops its sessions on the close
+    /// *request* any more — that would end them before the page could ask,
+    /// or after the operator cancelled. Both window builders install the
+    /// one hook, which stops sessions on `Destroyed` and only arms the
+    /// escape hatch on `CloseRequested`; a move destroys its source window
+    /// rather than sending it a close its page would question.
+    #[test]
+    fn session_windows_stop_their_sessions_only_once_destroyed() {
+        let read = |rel: &str| std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).unwrap();
+        let connect = read("src/commands/connect.rs");
+        assert!(!connect.contains("CloseRequested"), "connect.rs hooks a close request again");
+        assert_eq!(connect.matches("session_workspace::hook_session_window_close(").count(), 2);
+
+        let this = read("src/commands/session_workspace.rs");
+        let hook = &this[this.find("pub(crate) fn hook_session_window_close").unwrap()..];
+        let hook = &hook[..hook.find("\n}\n").unwrap()];
+        let requested = &hook[hook.find("WindowEvent::CloseRequested").unwrap()..];
+        let requested = &requested[..requested.find('\n').unwrap()];
+        assert!(requested.contains("arm_close_escape_hatch"), "{requested}");
+        assert!(!requested.contains("close_window_sessions"), "{requested}");
+        assert!(hook.contains("WindowCloseCause::WindowDestroyed"));
+        let moved = &this[this.find("pub async fn session_move").unwrap()..];
+        let moved = &moved[..moved.find("\n}\n").unwrap()];
+        assert!(moved.contains("win.destroy()") && !moved.contains("win.close()"));
+    }
+
     #[test]
     fn the_workspace_capability_names_the_workspace_window_exactly() {
         assert_eq!(capability_windows("session-workspace.json"), [WORKSPACE_WINDOW_LABEL]);

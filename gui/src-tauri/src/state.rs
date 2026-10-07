@@ -205,6 +205,12 @@ pub struct AppState {
     /// `session_detach`; an entry is removed by `drop_session`. Never held
     /// across another of these locks.
     pub session_attachments: tokio::sync::Mutex<crate::session::attachments::AttachmentRegistry>,
+    /// T108: the close requests a session window's page has not answered
+    /// yet — the escape hatch that force-closes a window whose renderer
+    /// cannot answer its close veto. A plain mutex, because the window
+    /// event hook that records a request is synchronous; never held across
+    /// an `.await` or another lock.
+    pub session_close_guard: std::sync::Mutex<crate::session::close_guard::CloseGuard>,
     /// Plugin Extensibility v1: per-vault on-disk surface cache.
     /// Resolved on first use from the Tauri app's cache directory
     /// (`<dirs::cache>/com.bastionvault.gui/plugins/<vault-id>/`).
@@ -251,6 +257,7 @@ impl AppState {
             connect_sessions: tokio::sync::Mutex::new(HashMap::new()),
             rustion_session_bundles: tokio::sync::Mutex::new(HashMap::new()),
             session_attachments: tokio::sync::Mutex::new(crate::session::attachments::AttachmentRegistry::new()),
+            session_close_guard: std::sync::Mutex::new(crate::session::close_guard::CloseGuard::new()),
             plugin_surface_cache: Mutex::new(None),
             app_modules: Mutex::new(HashMap::new()),
         }

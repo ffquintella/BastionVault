@@ -20,8 +20,10 @@
  * Teardown. A pane's close button, the tab's close button and the
  * close-pane chord ask first when a session is still live, then call
  * `session_close` and drop the pane only once the host has stopped the
- * session. Closing the last tab closes the window; closing the window
- * stops every session still attached to it (host-side close hook).
+ * session. Closing the last tab closes the window. Closing the window
+ * natively (its close button, Alt+F4) asks first too when a session is
+ * live (T108, `lib/sessionWindowClose`); the host stops every session
+ * still attached to the window once it is destroyed.
  *
  * Layout persistence (Phase 5). The layout skeleton is saved, debounced,
  * whenever its shape changes; the host turns each pane's token into the
@@ -38,9 +40,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { useConnectMfa } from "../components/ConnectMfaPrompt";
+import { CloseConfirm } from "../components/session/CloseConfirm";
 import { RdpPane } from "../components/session/RdpPane";
 import { SshPane } from "../components/session/SshPane";
 import type { SessionPaneStatus } from "../components/session/SessionPaneHeader";
@@ -63,6 +65,7 @@ import { paneHost, releasePaneHost } from "../lib/paneHosts";
 import { activeChordBindings, formatChord, matchChord, type WorkspaceAction } from "../lib/reservedChords";
 import { useSessionHeartbeat } from "../lib/sessionHeartbeat";
 import { useSessionInputPrefs } from "../lib/sessionInputPrefs";
+import { isLiveStatus, useWindowCloseGuard } from "../lib/sessionWindowClose";
 import {
   activeTab,
   allPanes,
@@ -100,8 +103,17 @@ function chordHint(action: WorkspaceAction): string {
  *  status yet counts as connecting. */
 function isLive(pane: PaneNode, status: Readonly<Record<string, SessionPaneStatus>>): boolean {
   if (pane.pending || pane.protocol === "replay") return false;
-  const s = status[pane.token];
-  return s === undefined || s === "open" || s === "connecting";
+  return isLiveStatus(status[pane.token]);
+}
+
+/** Labels of every live session in the workspace — what closing the whole
+ *  window would end. Read from the store, so a session placed while the
+ *  window-close confirmation is open is named in it. */
+function liveSessionLabels(): string[] {
+  const st = useSessionWorkspaceStore.getState();
+  return allPanes(st.layout)
+    .filter((p) => isLive(p, st.status))
+    .map((p) => p.label);
 }
 
 const FOCUS: Partial<Record<WorkspaceAction, Direction>> = {
@@ -171,6 +183,21 @@ export function SessionWorkspaceWindow() {
 
   // One heartbeat for the whole window, not one per pane.
   useSessionHeartbeat(true);
+  // The native close (close button, Alt+F4) asks first while a session is
+  // live (T108).
+  const closeGuard = useWindowCloseGuard(liveSessionLabels);
+  const windowAskingRef = useRef(false);
+  windowAskingRef.current = closeGuard.asking;
+  useEffect(() => {
+    // The window question replaces a pane question that was open.
+    if (closeGuard.asking) setPendingClose(null);
+  }, [closeGuard.asking]);
+  const { error: closeError, dismissError: dismissCloseError } = closeGuard;
+  useEffect(() => {
+    if (!closeError) return;
+    setError(closeError);
+    dismissCloseError();
+  }, [closeError, dismissCloseError]);
   // Chord overrides + the paste guard, read once for this window.
   useSessionInputPrefs();
 
@@ -234,13 +261,13 @@ export function SessionWorkspaceWindow() {
     previousTokens.current = tokensInLayout;
   }, [tokensInLayout]);
 
-  // The last tab closed: so does the window.
+  // The last tab closed: so does the window. Every session in it has
+  // already been stopped, so there is nothing to ask.
+  const { closeNow } = closeGuard;
   useEffect(() => {
     if (!layout.closeWindow) return;
-    getCurrentWindow()
-      .close()
-      .catch((e: unknown) => setError(`Could not close the window: ${extractError(e)}`));
-  }, [layout.closeWindow]);
+    void closeNow();
+  }, [layout.closeWindow, closeNow]);
 
   // Save the layout skeleton when its shape changes (debounced). Not while
   // a restore is laying out placeholders, never an empty layout, and not
@@ -439,7 +466,8 @@ export function SessionWorkspaceWindow() {
           return openConnectPalette(current ? "workspace-split-down" : "workspace-tab");
         case "closePane":
           if (!current) {
-            void getCurrentWindow().close();
+            // No tab, so no session: the window just closes.
+            void closeNow();
             return;
           }
           requestClose([current.focusedPaneId]);
@@ -454,7 +482,7 @@ export function SessionWorkspaceWindow() {
           return releaseKeyboard();
       }
     },
-    [requestClose, releaseKeyboard],
+    [requestClose, releaseKeyboard, closeNow],
   );
 
   // Workspace chords. Capture phase on the window: the workspace sees a
@@ -469,7 +497,7 @@ export function SessionWorkspaceWindow() {
       if (!action) return;
       e.preventDefault();
       e.stopPropagation();
-      if (isForeignInput(e.target) || pendingCloseRef.current) return;
+      if (isForeignInput(e.target) || pendingCloseRef.current || windowAskingRef.current) return;
       runAction(action);
     };
     window.addEventListener("keydown", onKeyDown, true);
@@ -484,6 +512,7 @@ export function SessionWorkspaceWindow() {
 
   const current = activeTab(layout);
   const panes = allPanes(layout);
+  const liveLabels = panes.filter((p) => isLive(p, status)).map((p) => p.label);
   const savedCount = previousRun ? savedPanes(previousRun.layout).length : 0;
   const restoreLabel = `Restore last layout (${savedCount} ${savedCount === 1 ? "pane" : "panes"})`;
 
@@ -639,81 +668,23 @@ export function SessionWorkspaceWindow() {
             pane.token,
           ),
         )}
-      {pendingClose && (
+      {closeGuard.asking ? (
         <CloseConfirm
-          labels={pendingClose.labels}
-          onCancel={() => setPendingClose(null)}
-          onConfirm={() => void confirmClose()}
+          scope="window"
+          labels={liveLabels}
+          onCancel={closeGuard.cancel}
+          onConfirm={closeGuard.confirm}
         />
+      ) : (
+        pendingClose && (
+          <CloseConfirm
+            labels={pendingClose.labels}
+            onCancel={() => setPendingClose(null)}
+            onConfirm={() => void confirmClose()}
+          />
+        )
       )}
       {mfaPrompt}
-    </div>
-  );
-}
-
-function CloseConfirm({
-  labels,
-  onCancel,
-  onConfirm,
-}: {
-  labels: string[];
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  const n = labels.length;
-  return (
-    <div
-      role="alertdialog"
-      aria-label="Confirm disconnect"
-      onKeyDown={(e) => {
-        if (e.key === "Escape") onCancel();
-      }}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(5, 5, 10, 0.75)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 16,
-        zIndex: 50,
-      }}
-    >
-      <div
-        style={{
-          background: "#11121a",
-          border: "1px solid #3a3f6e",
-          borderRadius: 6,
-          padding: 16,
-          maxWidth: "min(560px, 100%)",
-          minWidth: 0,
-          fontSize: 12,
-        }}
-      >
-        <p style={{ margin: "0 0 8px", fontSize: 13 }}>
-          Disconnect {n === 1 ? "this session" : `these ${n} sessions`}? Closing ends{" "}
-          {n === 1 ? "it" : "them"} on the remote host.
-        </p>
-        <ul style={{ margin: "0 0 12px", paddingLeft: 18 }}>
-          {labels.map((l, i) => (
-            <li key={i} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {l}
-            </li>
-          ))}
-        </ul>
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <button type="button" autoFocus onClick={onCancel} style={paneButton}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            style={{ ...paneButton, background: "#5e1f1f", border: "1px solid #7a2a2a" }}
-          >
-            Disconnect
-          </button>
-        </div>
-      </div>
     </div>
   );
 }

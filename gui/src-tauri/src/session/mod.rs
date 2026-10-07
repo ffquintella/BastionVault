@@ -11,6 +11,7 @@
 //! credential sources land in Phases 5–6.
 
 pub mod attachments;
+pub mod close_guard;
 pub mod layouts;
 pub mod output;
 pub mod rdp;

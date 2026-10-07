@@ -48,5 +48,7 @@ vi.mock("@tauri-apps/api/window", () => ({
     minimize: async () => undefined,
     close: async () => undefined,
     onResized: async () => () => undefined,
+    // Session windows take over their own close request (T108).
+    listen: async () => () => undefined,
   }),
 }));

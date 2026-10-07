@@ -3034,6 +3034,15 @@ export const sessionMove = (token: string, to: "own-window" | "workspace") =>
 /** Open (or raise) the Session Workspace from the main window. */
 export const sessionWorkspaceOpen = () => invoke<void>("session_workspace_open");
 
+/** T108: tell the host this window's page has its native close request and
+ *  is asking the operator, so the host does not force the close. Answers for
+ *  the calling window only — see `lib/sessionWindowClose`. */
+export const sessionWindowClosing = () => invoke<void>("session_window_closing");
+
+/** T108: close the calling window (the host destroys it, and every session
+ *  still attached to it stops). Acts on the calling window only. */
+export const sessionWindowClose = () => invoke<void>("session_window_close");
+
 // ── Saved Session Workspace layouts (T38 Phase 5) ─────────────────
 
 /** The tree the workspace sends to be saved: each leaf names a live

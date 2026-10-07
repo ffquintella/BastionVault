@@ -14,6 +14,10 @@
  * and restored pane by pane through the normal open path into placeholders
  * that keep the saved shape; "Pop out" and dragging a tab out move a
  * session to its own window without closing it.
+ *
+ * T108 adds the window's native close: with a live session it asks first,
+ * answers the host only once the question is on screen, and closes through
+ * the host (`session_window_close`), never through Tauri's window plugin.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -54,7 +58,9 @@ const h = vi.hoisted(() => {
     }
   }
 
-  return { listeners, FakeTerminal, mockInvoke: vi.fn(), closeWindow: vi.fn() };
+  /** Listeners registered on the current window (`getCurrentWindow().listen`). */
+  const windowListeners = new Map<string, () => void>();
+  return { listeners, windowListeners, FakeTerminal, mockInvoke: vi.fn(), closeWindow: vi.fn() };
 });
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -69,7 +75,13 @@ vi.mock("@tauri-apps/api/event", () => ({
   emit: () => Promise.resolve(),
 }));
 vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => ({ close: h.closeWindow }),
+  getCurrentWindow: () => ({
+    close: h.closeWindow,
+    listen: (name: string, cb: () => void) => {
+      h.windowListeners.set(name, cb);
+      return Promise.resolve(() => h.windowListeners.delete(name));
+    },
+  }),
 }));
 vi.mock("@xterm/xterm", () => ({ Terminal: h.FakeTerminal }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
@@ -116,6 +128,9 @@ let listed: OpenSessionListing[];
 let closeRefusal: string | null;
 let savedView: { vault_id: string; active_namespace: string; layout: SavedLayout | null };
 let opened: number;
+let windowCloseRefusal: string | null;
+/** Whether the window-close question was on screen when the host was told. */
+let askingWhenAnswered: boolean[];
 
 function invokedWith(cmd: string) {
   return h.mockInvoke.mock.calls.filter((c) => c[0] === cmd);
@@ -144,6 +159,13 @@ function confirmDisconnect() {
   fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
 }
 
+/** The operator closes the window natively (close button, Alt+F4). */
+async function nativeClose() {
+  await act(async () => {
+    h.windowListeners.get("tauri://close-requested")!();
+  });
+}
+
 async function placed() {
   await act(async () => {
     h.listeners.get("session://placed")!({ payload: null });
@@ -152,6 +174,7 @@ async function placed() {
 
 beforeEach(() => {
   h.listeners.clear();
+  h.windowListeners.clear();
   h.FakeTerminal.instances.length = 0;
   h.closeWindow.mockReset().mockResolvedValue(undefined);
   useSessionWorkspaceStore.getState().reset();
@@ -161,6 +184,8 @@ beforeEach(() => {
   closeRefusal = null;
   savedView = { vault_id: "v1", active_namespace: "", layout: null };
   opened = 0;
+  windowCloseRefusal = null;
+  askingWhenAnswered = [];
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -206,6 +231,12 @@ beforeEach(() => {
         return Promise.resolve(undefined);
       case "session_heartbeat":
         return Promise.resolve({ attached: listed.length });
+      case "session_window_closing":
+        askingWhenAnswered.push(document.querySelector('[aria-label="Confirm close window"]') !== null);
+        return Promise.resolve(undefined);
+      case "session_window_close":
+        if (windowCloseRefusal) return Promise.reject({ message: windowCloseRefusal });
+        return Promise.resolve(undefined);
       case "get_session_workspace_prefs":
         return Promise.resolve({
           layout_mode: "workspace",
@@ -307,14 +338,17 @@ describe("SessionWorkspaceWindow", () => {
     expect(paneHostTokens()).toEqual(["A"]);
   });
 
-  it("closing the last tab closes the window", async () => {
+  it("closing the last tab closes the window, through the host", async () => {
     listed = [row("A")];
     render(<SessionWorkspaceWindow />);
     await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(1));
     fireEvent.click(screen.getByRole("button", { name: "Close tab ssh op@A:22" }));
     confirmDisconnect();
-    await waitFor(() => expect(h.closeWindow).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(invokedWith("session_window_close")).toHaveLength(1));
+    expect(invokedWith("session_window_close")[0][1]).toBeUndefined();
     expect(paneHostTokens()).toEqual([]);
+    // Never Tauri's window plugin, which the workspace is no longer granted.
+    expect(h.closeWindow).not.toHaveBeenCalled();
   });
 
   it("runs workspace chords, and keeps them from the page and the native menu", async () => {
@@ -395,6 +429,107 @@ describe("SessionWorkspaceWindow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close pane ssh op@B:22" }));
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     await waitFor(() => expect(paneHostTokens()).toEqual(["A"]));
+  });
+
+  // ── T108: the window's native close ──────────────────────────────
+
+  it("takes over its native close: with live sessions it asks, naming them, and Cancel keeps everything", async () => {
+    listed = [row("A"), row("B", "workspace-split-right")];
+    render(<SessionWorkspaceWindow />);
+    await waitFor(() => expect(h.FakeTerminal.instances).toHaveLength(2));
+    expect(h.windowListeners.has("tauri://close-requested")).toBe(true);
+
+    await nativeClose();
+    const dialog = screen.getByRole("alertdialog", { name: "Confirm close window" });
+    expect(dialog).toHaveTextContent("ssh op@A:22");
+    expect(dialog).toHaveTextContent("ssh op@B:22");
+    // The host is told only once the question is on screen.
+    await waitFor(() => expect(askingWhenAnswered).toEqual([true]));
+    expect(invokedWith("session_window_close")).toHaveLength(0);
+    // Chords are swallowed, not run, while it is open.
+    expect(chord("closePane").defaultPrevented).toBe(true);
+    expect(screen.queryByRole("alertdialog", { name: "Confirm disconnect" })).not.toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(invokedWith("session_window_close")).toHaveLength(0);
+    expect(invokedWith("session_close")).toHaveLength(0);
+    expect([...paneHostTokens()].sort()).toEqual(["A", "B"]);
+  });
+
+  it("Disconnect and close closes the window through the host, which stops the sessions", async () => {
+    listed = [row("A")];
+    render(<SessionWorkspaceWindow />);
+    await waitFor(() => expect(h.FakeTerminal.instances).toHaveLength(1));
+    await nativeClose();
+    const dialog = screen.getByRole("alertdialog", { name: "Confirm close window" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect and close" }));
+    await waitFor(() => expect(invokedWith("session_window_close")).toHaveLength(1));
+    // The host stops what is attached when the window is destroyed; the
+    // page does not close the sessions one by one.
+    expect(invokedWith("session_close")).toHaveLength(0);
+    expect(h.closeWindow).not.toHaveBeenCalled();
+  });
+
+  it("closes at once, without asking, when nothing in it is live", async () => {
+    listed = [row("A")];
+    render(<SessionWorkspaceWindow />);
+    await waitFor(() => expect(h.FakeTerminal.instances).toHaveLength(1));
+    act(() => useSessionWorkspaceStore.getState().setStatus("A", "closed"));
+    await nativeClose();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(invokedWith("session_window_close")).toHaveLength(1));
+    expect(invokedWith("session_window_closing")).toHaveLength(0);
+  });
+
+  it("answers every close request while it asks, so none is forced", async () => {
+    listed = [row("A")];
+    render(<SessionWorkspaceWindow />);
+    await waitFor(() => expect(h.FakeTerminal.instances).toHaveLength(1));
+    await nativeClose();
+    await nativeClose();
+    await waitFor(() => expect(askingWhenAnswered).toEqual([true, true]));
+    expect(screen.getAllByRole("alertdialog")).toHaveLength(1);
+  });
+
+  it("replaces an open pane question with the window question", async () => {
+    listed = [row("A")];
+    render(<SessionWorkspaceWindow />);
+    await waitFor(() => expect(h.FakeTerminal.instances).toHaveLength(1));
+    chord("closePane");
+    expect(screen.getByRole("alertdialog", { name: "Confirm disconnect" })).toBeInTheDocument();
+    await nativeClose();
+    expect(screen.getAllByRole("alertdialog")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    // Cancelling the window question does not bring the pane question back.
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(invokedWith("session_close")).toHaveLength(0);
+  });
+
+  it("says why when the host does not close the window", async () => {
+    listed = [row("A")];
+    windowCloseRefusal = "window `session-workspace` could not be destroyed";
+    render(<SessionWorkspaceWindow />);
+    await waitFor(() => expect(h.FakeTerminal.instances).toHaveLength(1));
+    await nativeClose();
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect and close" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("could not be destroyed");
+    expect(paneHostTokens()).toEqual(["A"]);
+  });
+
+  it("⌘W with no tab closes the empty window through the host", async () => {
+    render(<SessionWorkspaceWindow />);
+    await waitFor(() => expect(invokedWith("session_list_open")).toHaveLength(1));
+    chord("closePane");
+    await waitFor(() => expect(invokedWith("session_window_close")).toHaveLength(1));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("stops listening for the close request when it unmounts", async () => {
+    const { unmount } = render(<SessionWorkspaceWindow />);
+    await waitFor(() => expect(h.windowListeners.has("tauri://close-requested")).toBe(true));
+    unmount();
+    expect(h.windowListeners.has("tauri://close-requested")).toBe(false);
   });
 
   // ── Phase 6: moving a session out ─────────────────────────────────

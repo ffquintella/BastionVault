@@ -69,8 +69,11 @@ hand in a running desktop build yet: the evidence is the unit and component
 tests listed under each phase. The per-release manual checklist (Testing
 Plan) is still open, which is why T38 stays in progress; the work this
 feature still owed was split out as T108–T111. T110 — the session-only
-bundle and per-window command sets — is done (§7); T108, T109 and T111
-remain (see *What is not yet implemented*).
+bundle and per-window command sets — is done (§7), and so is T108 —
+confirming before a session window or the workspace closes natively with
+live sessions (§8); T109 and T111 remain (see *What is not yet
+implemented*). Neither T110 nor T108 has been exercised by hand in a
+desktop build.
 
 What Phases 0–6 delivered:
 
@@ -150,13 +153,25 @@ What Phases 0–6 delivered:
   vault token; the host has an app-command ACL, and each session window kind
   gets a capability naming exactly the commands its routes call. The main
   window keeps every command. See §7.
+- **Confirm before a window closes (T108).** The native close of a
+  session's own window or the workspace — close button, Alt+F4, ⌘W in a
+  session's own window — asks first while a session in it is live, naming
+  every session it would end. The page vetoes the close
+  (`gui/src/lib/sessionWindowClose.ts`); the host stops a window's sessions
+  when it is *destroyed*, not when a close is requested, and force-closes a
+  window whose page does not answer a close request within 5 s
+  (`gui/src-tauri/src/session/close_guard.rs`), so a hung or dead renderer
+  can never trap the window or keep its sessions running. App exit stops
+  every session still live. See §8.
 
 Tests: Rust — `session::attachments` (incl. transfer and epochs),
 `session::output` (bounds, zeroing, handshake replay), `session::layouts`
 (skeleton, bounds, file versioning, namespace refusal), `session::workspace`,
 `session::routing` (incl. epoch-gated delivery), `preferences`,
 `commands::session_workspace`, `window_acl_tests` (T110: each window's
-command set, checked against Tauri's own resolver). Vitest —
+command set, checked against Tauri's own resolver), `session::close_guard`
+and the T108 cases in `session::attachments::teardown_tests`. Vitest —
+`gui/src/test/sessionWindowClose.test.tsx` (T108: a session's own window),
 `gui/src/test/sessionBundle.test.tsx` (T110: route table, import graph,
 each window's calls equal its set), `gui/src/test/sessionLayout.test.ts`
 (reducer invariants, restore placeholders, skeleton, namespace refusal,
@@ -164,19 +179,15 @@ adoption by placeholder and by epoch), `reservedChords.test.ts` (chord table,
 overrides, paste guard), `sessionPanes.test.tsx` (panes, incl. resize gating
 and debounce, replay notice, per-pane RDP keyboard, paste guard, *Move to
 workspace*), `sessionWorkspace.test.tsx` (adoption, DOM continuity, teardown,
-chords, close confirmation, save, restore, namespace refusal, pop-out,
-tear-off), `sessionLayoutCard.test.tsx` (both Settings cards, replay opt-in,
-open/forget).
+chords, close confirmation, the window's native close, save, restore,
+namespace refusal, pop-out, tear-off), `sessionLayoutCard.test.tsx` (both
+Settings cards, replay opt-in, open/forget).
 
 What is not yet implemented — split out of T38:
 
-- **T108** — a confirmation before a *window* closes with live sessions (the
-  native close button, Alt+F4, ⌘W in a session's own window). Pane, tab and
-  ⌘W closes inside the workspace ask; the native close does not, because the
-  host stops sessions on `CloseRequested`. Confirming there means moving the
-  teardown to `WindowEvent::Destroyed` behind a JS `onCloseRequested` veto,
-  with an escape hatch for a hung renderer — the teardown path the Security
-  section calls the highest-risk change in this feature, so not folded in.
+- ~~**T108**~~ — done: the native close of a session window or the workspace
+  asks first while a session is live (§8). Not exercised by hand in a
+  desktop build; added to the manual checklist.
 - **T109** — replay panes in the workspace. The `replay` pane kind exists in
   the model; nothing places one. Needs a recording hand-off into the
   workspace (placement is keyed on live session tokens today) and a
@@ -472,7 +483,9 @@ existing surface (including every integration test that drives it) stays valid.
   plus the window's own token if — and only if — the registry has no entry for
   it but the session is still live (fail-safe against a registry bug). A token
   the registry knows to be elsewhere, or detached, is left alone. A window that
-  fails to build now stops its session instead of leaving it dialled.
+  fails to build now stops its session instead of leaving it dialled. (T108
+  moved this hook from `CloseRequested` to `Destroyed`, behind the page's
+  close veto — §8.)
 - **One stop path, exactly once.** `session_close`, window close, the watchdog
   and the macOS hook all go through `attachments::stop_session` (control
   `Close` → `drop_session` → cleanup). Registry removals are atomic takes and
@@ -878,8 +891,8 @@ any local webview could call every app command whatever its capability said.
   | Window | Capability | App commands | Plugin permissions |
   |---|---|---|---|
   | `main`, `plugin-*` | `default.json` | every command (`app-all-commands`) | unchanged: `core:default`, shell open, file dialogs, window drag / minimise / close / maximise / fullscreen |
-  | `ssh-*`, `rdp-*` | `session-window.json` | `session-window` (14): SSH / RDP input and resize, RDP frames, close, heartbeat, move, read the session prefs, Rustion info / renew / end | `core:event:allow-listen`, `allow-unlisten` |
-  | `session-workspace` | `session-workspace.json` | `session-workspace` (27): the above, plus `session_list_open`, `session_layout_save` / `_get` / `_forget`, `list_resources`, `read_resource`, `resource_types_read`, `connect_mfa_begin` / `_verify_totp` / `_verify_fido2`, `session_open_ssh` / `_rdp` / `_web` | the above, plus `core:window:allow-close` |
+  | `ssh-*`, `rdp-*` | `session-window.json` | `session-window` (16): SSH / RDP input and resize, RDP frames, close, heartbeat, move, read the session prefs, Rustion info / renew / end, and — since T108 — `session_window_closing` / `session_window_close` (§8) | `core:event:allow-listen`, `allow-unlisten` |
+  | `session-workspace` | `session-workspace.json` | `session-workspace` (29): the above, plus `session_list_open`, `session_layout_save` / `_get` / `_forget`, `list_resources`, `read_resource`, `resource_types_read`, `connect_mfa_begin` / `_verify_totp` / `_verify_fido2`, `session_open_ssh` / `_rdp` / `_web` | the above; T110 also granted `core:window:allow-close`, which T108 removed (§8) |
   | `replay-*` | `session-replay.json` | `session-replay` (4): read the recording it plays | none (as before) |
   | `webchrome-*` (webview) | `web-chrome-toolbar.json` | `web_chrome_state` / `_disconnect` / `_relogin` | none (as before) |
   | `web-*` | — | none | none |
@@ -927,6 +940,118 @@ any local webview could call every app command whatever its capability said.
   before it ships.
 - **Not exercised by hand** in a desktop build yet; added to the manual
   checklist.
+
+### 8. Confirm before a window closes (T108)
+
+Closing a pane or a tab, or ⌘W inside the workspace, asked before it ended
+a live session; the native close of a whole window — its close button,
+Alt+F4, ⌘W in a session's own window (the macOS *Close Window* menu item)
+— did not, because the host stopped every session in the window on
+`WindowEvent::CloseRequested`, before any page could ask. Asking there
+means letting the page veto the close, and the page is exactly what may be
+dead or hung when the operator reaches for the close button. So the change
+has two halves: the veto, and an escape hatch the page cannot hold shut.
+
+#### As built
+
+- **Teardown moved to `Destroyed`.** Both window builders install one hook
+  (`commands::session_workspace::hook_session_window_close`). On
+  `WindowEvent::Destroyed` it stops every session attached to the window
+  (`attachments::stop_window_sessions`, with an own window's token as the
+  fail-safe, unchanged); `CloseRequested` stops nothing any more. A
+  regression test reads `connect.rs` and the hook and fails if a close
+  request stops sessions again.
+- **The page vetoes and asks.** The session bundle listens for
+  `tauri://close-requested` on its own window
+  (`gui/src/lib/sessionWindowClose.ts`, used by `/session/ssh`,
+  `/session/rdp` and `/workspace`); while a listener is registered, Tauri
+  2.11 vetoes the native close and hands the request to the page
+  (`manager/window.rs`: `has_js_listener` → `prevent_close`). With nothing
+  live — every session ended or errored, or the workspace is empty — the
+  page closes the window at once. Otherwise it shows *Close this window?*
+  naming every live session (in the workspace, read from the store, so a
+  session placed while the question is open is named too), with Cancel
+  focused. *Disconnect and close* closes the window; Cancel keeps it and
+  every session. The window question replaces an open pane question.
+  "Live" is the panes' rule: open, connecting, or not yet reported.
+- **Closing goes through the host, for the calling window only.**
+  `session_window_close` destroys the window that calls it; its `Destroyed`
+  hook then stops the sessions. Tauri's own `onCloseRequested` is not used:
+  when its handler does not veto, it calls `destroy()`, which needs
+  `core:window:allow-destroy` — and the window plugin resolves its `label`
+  argument against every window, so that grant would let a session page
+  destroy `main` or another session's window (stopping its sessions without
+  asking). For the same reason the workspace loses the
+  `core:window:allow-close` T110 gave it (it closed itself through it when
+  its last tab closed); it now uses `session_window_close` there and for
+  ⌘W with no tab. No session window has a `core:window` permission.
+- **The escape hatch** (`session::close_guard`, state
+  `AppState::session_close_guard`). The `CloseRequested` hook records the
+  request synchronously and arms a timer. The page must answer within
+  `CLOSE_ANSWER_TIMEOUT` (5 s) — `session_window_closing`, sent only once
+  its question has rendered (so a page that cannot render it does not
+  answer), or `session_window_close`. Unanswered, the host logs
+  `WARN target=audit session.window_force_closed: window=… reason=close_unanswered waited_ms=…`,
+  stops the window's sessions (`session.reaped: … reason=close_unanswered`)
+  and destroys the window; if it cannot be destroyed, the sessions are
+  stopped all the same. A second click while a request is pending joins it
+  rather than restarting the clock, so clicking repeatedly on a hung window
+  cannot postpone the forced close. Request ids are unique across window
+  lifetimes and `Destroyed` forgets the window, so a timer from a window
+  that has since been rebuilt under the same label (a pop-out after a
+  move) cannot force the new one. A close the page does not veto (no
+  listener yet, or a route without one) closes natively and the timer
+  finds the request forgotten.
+- **Why the escape hatch is needed.** Tauri 2.11 never drops a dead
+  renderer's JS listeners (`event/listener.rs` removes them only on an
+  explicit `unlisten`), so after a renderer death every later close of
+  that window is vetoed with nothing to answer it. On macOS the
+  web-content-process hook now also marks the window, and its next close
+  is forced at once (`reason=renderer_terminated`) instead of after the
+  timeout. On Windows and Linux the timeout covers it; the heartbeat
+  watchdog still stops the sessions of a dead renderer on its own.
+- **Answers are bound to the caller.** Both commands take the window from
+  the calling webview, refuse any window that does not render sessions
+  (`close_guard::renders_sessions`: the workspace and `ssh-` / `rdp-`
+  windows) and any webview that is not its window's main webview. No
+  webview can answer — and so suppress the forced close — for another
+  window. Any webview with `core:event:allow-listen` can register a
+  close-request listener targeting another window, making Tauri veto that
+  window's close; the forced close still fires, because only the window
+  itself can answer.
+- **A move destroys its source window.** `session_move` into the workspace
+  used to `close()` the session's old window; that close would now reach
+  its page, which would ask about a session that is no longer its. The host
+  destroys it instead; its `Destroyed` hook stops nothing, the session being
+  attached to the workspace.
+- **App exit stops what is left.** Closing the last window exits the app
+  from inside that window's `Destroyed` event, so the teardown the event
+  spawned would race the process exit — slightly worse than when teardown
+  ran on the close request. `RunEvent::Exit` now stops every SSH/RDP
+  session still live (`attachments::stop_all_sessions`: the registry's and
+  any live one it lost) and waits for window teardowns already running,
+  within 3 s, so the LDAP library check-in still runs; past the budget it
+  logs `session.exit_teardown_incomplete`. The connections themselves die
+  with the process either way. This also covers ⌘Q, which closes no window.
+- **Decisions.**
+  - *The page asks, not the host.* As the roadmap note specified: the
+    confirmation matches the pane and tab confirmations, names sessions by
+    the panes' own status (the host cannot tell an SSH session the remote
+    ended from a live one — its entry stays until a close), and is
+    unit-tested in vitest. Rejected: a host-owned native dialog
+    (`tauri-plugin-dialog`) on `CloseRequested`, which keeps the page out of
+    the decision entirely. Its cost is the one residual below.
+  - *5 s, not longer.* The page answers after one render and one IPC round
+    trip. Erring short costs the confirmation for a page too busy to answer
+    — the window closes as it did before T108; erring long leaves a hung
+    window unclosable for longer.
+- **Residual, stated.** A page that answers but never closes — a
+  compromised renderer — can now keep its own window, and the sessions in
+  it, open through a close attempt, where before the close request stopped
+  them whatever the page did. It already drives those sessions; quitting
+  the app still stops them. Not exercised by hand in a desktop build; added
+  to the manual checklist. Quitting the app (⌘Q, the main window's Quit)
+  still does not ask.
 
 ## Phases
 
@@ -1068,6 +1193,11 @@ to fight with Tailwind 4. The tree we need is 60 lines of reducer.
   Hence: pane close, tab close, window close and *webview death* all converge on
   the same `drop_session` + `run_cleanup` path, the watchdog covers the death
   case that has no hook today, and the reaper logs at WARN with the window label.
+  T108 moved the window half once more — from the close *request* to the
+  window's destruction, behind a page veto — and added the escape hatch that
+  force-closes a window whose page does not answer, plus a stop-everything
+  pass at app exit (§8). The residual it leaves: a compromised page can keep
+  its own window and sessions open through a close attempt.
 - **Credentials are unaffected.** No credential material crosses into the
   frontend in any phase; placement changes where a session is *rendered*, never
   how it is *resolved*. Every open still goes through the same resolver, connect
@@ -1132,6 +1262,15 @@ to fight with Tailwind 4. The tree we need is 60 lines of reducer.
   and unread state are not part of it.
 - Move: *Pop out* and tear-off call `session_move` and never `session_close`;
   a stale listing does not resurrect a moved pane, a later epoch re-adopts it.
+- Window close (T108; `sessionWindowClose.test.tsx`, `sessionWorkspace.test.tsx`):
+  the window takes over its close request only when it has a session; with
+  a live session it asks, naming every one, and answers the host only once
+  the question is on screen; Cancel keeps everything; *Disconnect and
+  close* calls `session_window_close` (no window named) and never
+  `session_close` or the window plugin; nothing live closes at once without
+  answering; every repeated request is answered; the window question
+  replaces a pane question; a refused close is reported; unmounting stops
+  listening.
 
 ### Rust unit tests (`cargo nextest run -p bastion-vault-gui --lib`)
 
@@ -1150,6 +1289,18 @@ to fight with Tailwind 4. The tree we need is 60 lines of reducer.
   round-trip with `0600`, another format version refused and left untouched.
 - Transfer and epochs (`session::attachments`), epoch-gated delivery
   (`session::routing`).
+- Close guard (T108, `session::close_guard`): an answered request is never
+  forced; an unanswered one is forced exactly once; repeated requests do not
+  postpone it; a request after an answer is new; a destroyed window is
+  forgotten and a rebuilt one under the same label is not forced by the old
+  timer; a dead renderer is forced at once; answers are per window. Teardown
+  (`session::attachments::teardown_tests`): a forced close followed by the
+  `Destroyed` hook stops each session once; destroying a move's source
+  window stops nothing; app exit stops every live session, registered or
+  lost, once. `commands::session_workspace`: no window builder stops
+  sessions on a close request. `window_acl_tests`: the two close commands in
+  the session sets, and no `core:window` permission — close or destroy — in
+  any session window, checked against Tauri's resolver.
 - Placement: `own-window` builds a window (existing behaviour, unchanged);
   `workspace-tab` builds no per-session window and emits `session://placed`.
   (`session::workspace` tests placement resolution — absent → the preference
@@ -1173,7 +1324,16 @@ to fight with Tailwind 4. The tree we need is 60 lines of reducer.
   Disconnect, *Move to workspace*, *Pop out*), ⌘T opens the palette and
   connects, an MFA-gated profile prompts, *Restore last layout* re-opens
   panes, a recording replays — and no window's console shows `not allowed by
-  ACL`.
+  ACL`. T108, on each platform: the close button, Alt+F4 and (macOS) ⌘W on
+  a session's own window and on the workspace ask while a session is live,
+  Cancel keeps it, *Disconnect and close* ends it with one
+  `window destroyed → session drop` line per session (and an LDAP library
+  account checked back in); a window whose session has ended closes at
+  once; *Move to workspace* closes the old window without asking; closing
+  the workspace's last tab closes it; a renderer killed from the OS
+  (Activity Monitor / Task Manager) leaves a window that closes on the
+  first click within 5 s with `session.window_force_closed`; closing the
+  last window with a live LDAP-library session still checks the account in.
 - Regression: the whole existing Resource Connect suite runs unchanged against
   `placement = own-window`.
 

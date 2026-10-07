@@ -2,7 +2,7 @@
   "set": [
     {
       "identifier": "session-window",
-      "description": "A session's own window (ssh-<token> / rdp-<token>, session.html). Drives the one session it renders: SSH/RDP input and resize, the RDP frame channel, close, liveness, Move to workspace, the session-input preferences it reads, and the Rustion chip's renew / end. Every input command is further narrowed by the host to the window holding the session (attachments::authorize_input). No vault reads, no session opens, no token. Derived from what session.html's own-window routes call; gui/src/test/sessionBundle.test.ts keeps the two equal. Features/session-workspace.md, T110.",
+      "description": "A session's own window (ssh-<token> / rdp-<token>, session.html). Drives the one session it renders: SSH/RDP input and resize, the RDP frame channel, close, liveness, Move to workspace, asking before its native close and closing itself (session_window_closing / session_window_close, T108 — the calling window only, never another by label), the session-input preferences it reads, and the Rustion chip's renew / end. Every input command is further narrowed by the host to the window holding the session (attachments::authorize_input). No vault reads, no session opens, no token. Derived from what session.html's own-window routes call; gui/src/test/sessionBundle.test.ts keeps the two equal. Features/session-workspace.md, T110.",
       "permissions": [
         "allow-session-input",
         "allow-session-resize",
@@ -14,6 +14,8 @@
         "allow-session-input-rdp-resize",
         "allow-session-heartbeat",
         "allow-session-move",
+        "allow-session-window-closing",
+        "allow-session-window-close",
         "allow-session-rustion-info",
         "allow-get-session-workspace-prefs",
         "allow-rustion-session-renew",

@@ -49,6 +49,9 @@ const SESSION_WINDOW: &[&str] = &[
     "session_move",
     "session_resize",
     "session_rustion_info",
+    // T108: answer the window's own close request, and close itself.
+    "session_window_close",
+    "session_window_closing",
 ];
 
 /// The workspace: everything above, plus the listing, the saved layout,
@@ -339,9 +342,12 @@ fn the_workspace_gets_exactly_its_set() {
     let acl = Acl::load();
     let label = crate::session::workspace::WORKSPACE_WINDOW_LABEL;
     assert_eq!(acl.window(label), set_of(&[SESSION_WINDOW, WORKSPACE_EXTRA]));
+    // T108: no `core:window` permission any more. The workspace closes
+    // itself with `session_window_close`, which acts on the calling window;
+    // `core:window:allow-close` let it close any window by label.
     assert_eq!(
         acl.plugin_permissions(label, label),
-        set_of(&[&["core:event:allow-listen", "core:event:allow-unlisten", "core:window:allow-close"]])
+        set_of(&[&["core:event:allow-listen", "core:event:allow-unlisten"]])
     );
 }
 
@@ -515,14 +521,26 @@ fn tauri_resolves_the_same_acl_from_the_build_inputs() {
     for label in session_window_labels() {
         assert!(allowed("plugin:event|listen", &label, &label));
         assert!(allowed("plugin:event|unlisten", &label, &label));
-        for denied in ["plugin:window|close", "plugin:event|emit", "plugin:shell|open", "plugin:dialog|open"] {
+        for denied in [
+            "plugin:window|close",
+            "plugin:window|destroy",
+            "plugin:event|emit",
+            "plugin:shell|open",
+            "plugin:dialog|open",
+        ] {
             assert!(!allowed(denied, &label, &label), "{label}: {denied}");
         }
     }
     let ws = crate::session::workspace::WORKSPACE_WINDOW_LABEL;
     assert!(allowed("plugin:event|listen", ws, ws));
-    assert!(allowed("plugin:window|close", ws, ws));
-    for denied in ["plugin:event|emit", "plugin:shell|open", "plugin:window|set_title", "plugin:webview|create_webview"] {
+    for denied in [
+        "plugin:window|close",
+        "plugin:window|destroy",
+        "plugin:event|emit",
+        "plugin:shell|open",
+        "plugin:window|set_title",
+        "plugin:webview|create_webview",
+    ] {
         assert!(!allowed(denied, ws, ws), "{denied}");
     }
     for denied in ["plugin:event|listen", "plugin:window|close"] {
