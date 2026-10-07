@@ -68,8 +68,9 @@ a window of its own (Phase 6). Nothing from Phases 3–6 has been exercised by
 hand in a running desktop build yet: the evidence is the unit and component
 tests listed under each phase. The per-release manual checklist (Testing
 Plan) is still open, which is why T38 stays in progress; the work this
-feature still owes is split out as T108–T111 (see *What is not yet
-implemented*).
+feature still owed was split out as T108–T111. T110 — the session-only
+bundle and per-window command sets — is done (§7); T108, T109 and T111
+remain (see *What is not yet implemented*).
 
 What Phases 0–6 delivered:
 
@@ -98,8 +99,9 @@ What Phases 0–6 delivered:
   web-content-process hook in `lib.rs`. See §3 *Phase 2 as built*.
 - **The workspace window (Phase 3).** `/workspace` route
   (`gui/src/routes/SessionWorkspaceWindow.tsx`) in the singleton
-  `session-workspace` window, which `default.json` now grants the same
-  capability set as `ssh-*` / `rdp-*`. Pure layout reducer
+  `session-workspace` window (Phase 3 granted it the same capability as
+  `ssh-*` / `rdp-*`; since T110 it has a capability and command set of its
+  own, §7). Pure layout reducer
   (`gui/src/lib/sessionLayout.ts`) behind a zustand store
   (`gui/src/stores/sessionWorkspaceStore.ts`); `paneHosts` registry
   (`gui/src/lib/paneHosts.ts`); split renderer, divider and slots
@@ -142,12 +144,21 @@ What Phases 0–6 delivered:
 - **Phase 3–4 residuals.** Closing a pane or tab, or ⌘W, asks before it
   ends a live session; SSH panes debounce the resize they send the host
   (120 ms) so a divider drag is one `session_resize`, not a burst.
+- **Session-only bundle and per-window command sets (T110).** Every window
+  that renders a session or a recording loads `gui/session.html`, a second
+  Vite entry that mounts only the four session routes and never fetches the
+  vault token; the host has an app-command ACL, and each session window kind
+  gets a capability naming exactly the commands its routes call. The main
+  window keeps every command. See §7.
 
 Tests: Rust — `session::attachments` (incl. transfer and epochs),
 `session::output` (bounds, zeroing, handshake replay), `session::layouts`
 (skeleton, bounds, file versioning, namespace refusal), `session::workspace`,
 `session::routing` (incl. epoch-gated delivery), `preferences`,
-`commands::session_workspace`. Vitest — `gui/src/test/sessionLayout.test.ts`
+`commands::session_workspace`, `window_acl_tests` (T110: each window's
+command set, checked against Tauri's own resolver). Vitest —
+`gui/src/test/sessionBundle.test.tsx` (T110: route table, import graph,
+each window's calls equal its set), `gui/src/test/sessionLayout.test.ts`
 (reducer invariants, restore placeholders, skeleton, namespace refusal,
 adoption by placeholder and by epoch), `reservedChords.test.ts` (chord table,
 overrides, paste guard), `sessionPanes.test.tsx` (panes, incl. resize gating
@@ -170,9 +181,14 @@ What is not yet implemented — split out of T38:
   the model; nothing places one. Needs a recording hand-off into the
   workspace (placement is keyed on live session tokens today) and a
   decision on whether a replay joins the saved layout.
-- **T110** — a workspace bundle that mounts only the session routes, and a
-  per-window app-command ACL (the Security section's mandatory mitigation,
-  not met as built).
+- ~~**T110**~~ — done: the session-only bundle and per-window command sets
+  (§7). Follow-ups it leaves, not tracked as tasks yet: plugin windows
+  (`plugin-*`) still load the full vault UI with every command; `session.html`
+  has no Content-Security-Policy (the app sets `csp: null`), so a
+  compromised session realm can still `fetch` anywhere; and the workspace
+  holds the resource reads its ⌘K palette and restore need
+  (`list_resources`, `read_resource`, `resource_types_read`), which a
+  host-side "resolve and open this saved pane" command could remove.
 - **T111** — SSH output (live and replayed) over a per-webview IPC channel
   instead of `emit_to`, which Tauri 2.11 also delivers to any default-target
   `listen()` in any webview (see §3 *Phase 3 as built*). Must not reopen the
@@ -815,6 +831,103 @@ phase; and `emit_to` is still delivered to any default-target `listen()` in
 any webview, so the session token remains the confidentiality boundary for
 replayed output as for live output (T111). Not exercised by hand.
 
+
+### 7. Session-only bundle and per-window command sets (T110)
+
+The Security section makes "the workspace mounts only the session routes" a
+mandatory mitigation for the shared realm. Until T110 it did not hold, in two
+ways: every session window loaded `index.html` — the whole vault UI, whose
+root component asks the host for the operator's vault token on mount
+(`bootstrapAuth` → `get_current_token`) — and the app had no ACL manifest, so
+any local webview could call every app command whatever its capability said.
+
+#### As built
+
+- **A second page.** `gui/session.html` → `gui/src/sessionApp/main.tsx` →
+  `SessionApp`: an error boundary, the toast provider and a `HashRouter`
+  with four routes — `/session/ssh`, `/session/rdp`, `/workspace` (with the
+  ⌘K palette) and `/session-replay` — plus a catch-all that says the window
+  shows sessions only. No auth store, no session monitor, no server-info
+  modal, no admin page, no `ui` barrel. It is a Vite `rolldownOptions.input`
+  entry beside `index.html` and `web-chrome.html`. The host loads it for the
+  workspace (`WORKSPACE_WINDOW_URL`), a session's own window
+  (`own_window_url`) and a replay (`replay_window_url`), all through
+  `session::workspace::SESSION_PAGE`; `App.tsx` no longer mounts the session
+  routes. In a production build, none of the vault UI's page or auth-store
+  code is in the chunks `session.html` loads (checked by grepping `dist/`).
+- **No token in the session realm.** The ⌘K palette was armed by the auth
+  store, which is why every session window fetched the token.
+  `ConnectPalette` now takes an `armed` prop: the main window passes
+  `isAuthenticated`; the workspace arms it outright, because the host refuses
+  every command the palette calls when nobody is logged in.
+- **The app has an ACL manifest.** `build.rs` reads the
+  `tauri::generate_handler![…]` list in `src/lib.rs`
+  (`build_support/app_commands.rs` — strict: plain paths and `//` comments
+  only, anything else fails the build) and passes it to
+  `tauri_build::AppManifest::commands`. From then on Tauri checks app
+  commands as it does plugin commands: a webview may call one only when a
+  capability matching its window or webview label grants `allow-<command>`.
+  `build.rs` also writes the set `app-all-commands` — every registered
+  command — to `permissions/generated/` (gitignored, like Tauri's own
+  per-command files in `permissions/autogenerated/`), so a command added to
+  the handler is reachable from `main` at once and from no session window
+  until a set names it.
+- **Per-window capabilities** (`gui/src-tauri/capabilities/`; the sets are in
+  `gui/src-tauri/permissions/window-sets.json`):
+
+  | Window | Capability | App commands | Plugin permissions |
+  |---|---|---|---|
+  | `main`, `plugin-*` | `default.json` | every command (`app-all-commands`) | unchanged: `core:default`, shell open, file dialogs, window drag / minimise / close / maximise / fullscreen |
+  | `ssh-*`, `rdp-*` | `session-window.json` | `session-window` (14): SSH / RDP input and resize, RDP frames, close, heartbeat, move, read the session prefs, Rustion info / renew / end | `core:event:allow-listen`, `allow-unlisten` |
+  | `session-workspace` | `session-workspace.json` | `session-workspace` (27): the above, plus `session_list_open`, `session_layout_save` / `_get` / `_forget`, `list_resources`, `read_resource`, `resource_types_read`, `connect_mfa_begin` / `_verify_totp` / `_verify_fido2`, `session_open_ssh` / `_rdp` / `_web` | the above, plus `core:window:allow-close` |
+  | `replay-*` | `session-replay.json` | `session-replay` (4): read the recording it plays | none (as before) |
+  | `webchrome-*` (webview) | `web-chrome-toolbar.json` | `web_chrome_state` / `_disconnect` / `_relogin` | none (as before) |
+  | `web-*` | — | none | none |
+
+- **Decisions.**
+  - *The palette stays in the workspace, web entries included.* ⌘T / ⌘D
+    open it and restore re-runs the normal connect path, so the workspace
+    holds the resource reads, connect-time MFA and the three
+    `session_open_*` commands — each still behind the host's connect gate,
+    transport tier and MFA ticket check, with no credential returned to the
+    frontend. Rejected: filtering web profiles out and withholding
+    `session_open_web` — the same gate, and it would have changed what the
+    palette lists.
+  - *No palette in a session's own window or a replay.* Those windows hold
+    one session or one recording, and per-session isolation is the point of
+    *Separate windows*; ⌘K there now does nothing. Rejected: giving them the
+    workspace's set.
+  - *Narrow by omission, never `deny-`.* Tauri 2.11's `resolve_access`
+    refuses a command in every window as soon as any capability denies it,
+    so a `deny-` meant for a session window would cut `main` off too.
+  - *The web toolbar gets a capability.* Web Connect Phase 5 relied on the
+    app having no manifest; with one, the toolbar's three commands must be
+    granted. Its capability is matched by webview label only and grants no
+    plugin permission, so its plugin surface stays empty and its app surface
+    shrinks from every command to three.
+  - *Plugin windows unchanged.* They load the full UI at
+    `/plugin/<name>/…`; narrowing them needs their own bundle.
+- **Tests.** `window_acl_tests` (Rust) loads the capabilities and sets and
+  pins each window's app and plugin permissions; asserts that no session
+  window reaches a list of sensitive commands (the token, logins, secret and
+  credential reads, writes, exports, main-only session controls), that no
+  capability or set uses `deny-`, and that the session windows' URLs point at
+  `session.html` routes the bundle mounts; and runs Tauri's own
+  `Resolved::resolve` on the exact `acl-manifests.json` / `capabilities.json`
+  the build handed `generate_context!`, comparing Tauri's answer with the
+  model's for every registered command and every window kind.
+  `capability_isolation_tests` now lets exactly one capability reach
+  `webchrome-*`. `sessionBundle.test.tsx` (vitest) pins the route table,
+  walks the bundle's import graph statically (no vault page, auth store,
+  `ui` barrel or shell / dialog plugin; no token or login command) and
+  asserts each window's routes call exactly the commands its set grants.
+- **Failure mode.** A command a session window calls without a grant is
+  refused by Tauri (`Command <name> not allowed by ACL`) — an explicit error
+  in that window, never a silent fallback. The vitest exists to catch that
+  before it ships.
+- **Not exercised by hand** in a desktop build yet; added to the manual
+  checklist.
+
 ## Phases
 
 | Phase | Scope | Status |
@@ -937,11 +1050,12 @@ to fight with Tailwind 4. The tree we need is 60 lines of reducer.
   context; a workspace puts N panes in one realm, so a renderer compromise in one
   pane can read another pane's terminal buffer. Mitigations, all mandatory:
   the workspace window mounts only the session routes (no admin pages, no vault
-  API surface beyond the `session_*` commands) — **not met as built**: the
-  workspace loads the same bundle as every window and gets the same capability
-  set (and so the same app-command surface) as `ssh-*` / `rdp-*` windows;
-  narrowing it needs a session-only bundle entry and a per-window app-command
-  ACL, a separate change; session bytes are never
+  API surface beyond the `session_*` commands) — **met by T110** (§7): it
+  loads `session.html`, which mounts only the session routes and never
+  fetches the vault token, and it can call only its own command set — the
+  `session_*` commands plus the connect path its palette and restore use
+  (resource reads, connect-time MFA), nothing that reads a secret or a
+  credential; session bytes are never
   interpolated into HTML (xterm writes to its own DOM/canvas, RDP to a canvas —
   no `innerHTML` of remote data anywhere in a pane); and the `layout_mode =
   "windows"` preference (Phase 0) keeps per-session isolation available, with
@@ -1054,7 +1168,12 @@ to fight with Tailwind 4. The tree we need is 60 lines of reducer.
 - Manual checklist (documented, per release, like the existing RDP checklist):
   an RDP pane in a 50/50 split negotiates the reduced geometry and re-negotiates
   on divider drag; the RDP keyboard-release chord works; macOS native tabs group
-  in `windows` mode.
+  in `windows` mode; with the per-window command sets (T110), an SSH and an RDP
+  session each work in their own window and in the workspace (input, resize,
+  Disconnect, *Move to workspace*, *Pop out*), ⌘T opens the palette and
+  connects, an MFA-gated profile prompts, *Restore last layout* re-opens
+  panes, a recording replays — and no window's console shows `not allowed by
+  ACL`.
 - Regression: the whole existing Resource Connect suite runs unchanged against
   `placement = own-window`.
 

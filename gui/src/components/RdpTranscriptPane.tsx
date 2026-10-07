@@ -33,7 +33,9 @@
 
 import { useMemo, useState } from "react";
 
-import { Badge, Button } from "./ui";
+// Not the `./ui` barrel — session-only bundle (see ConnectMfaPrompt.tsx).
+import { Badge } from "./ui/Badge";
+import { Button } from "./ui/Button";
 import {
   readTranscript,
   type KeystrokeRun,

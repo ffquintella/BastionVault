@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicerdicer/tauri-docs/refs/heads/v2/tooling/cli/schema.json",
+  "identifier": "session-window",
+  "description": "A session's own window (session.html#/session/ssh, #/session/rdp). Event subscription for its session's output and the `session-window` command set — nothing else (features/session-workspace.md, T110).",
+  "windows": ["ssh-*", "rdp-*"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "session-window"
+  ]
+}

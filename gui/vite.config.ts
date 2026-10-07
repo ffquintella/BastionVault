@@ -16,13 +16,17 @@ export default defineConfig(async () => ({
   clearScreen: false,
   build: {
     rolldownOptions: {
-      // Two pages: the vault UI, and the web session toolbar the desktop
-      // host loads in its own webview above a web session's remote content
-      // (features/web-application-connect.md Phase 5). The toolbar is a
-      // separate entry so that webview loads none of the vault UI.
+      // Three pages: the vault UI; the web session toolbar the desktop host
+      // loads in its own webview above a web session's remote content
+      // (features/web-application-connect.md Phase 5); and the session
+      // windows — a session's own window, the Session Workspace and
+      // recording replays (features/session-workspace.md, T110). The last
+      // two are separate entries so those webviews load none of the vault
+      // UI. The host's URLs name these files (`session/workspace.rs`).
       input: {
         main: fileURLToPath(new URL("./index.html", import.meta.url)),
         webChrome: fileURLToPath(new URL("./web-chrome.html", import.meta.url)),
+        session: fileURLToPath(new URL("./session.html", import.meta.url)),
       },
     },
   },

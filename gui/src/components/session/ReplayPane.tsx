@@ -11,7 +11,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { Badge, Button } from "../ui";
+// Not the `../ui` barrel — session-only bundle (see ConnectMfaPrompt.tsx).
+import { Badge } from "../ui/Badge";
+import { Button } from "../ui/Button";
 import { RdpReplayCanvas } from "../RdpReplayCanvas";
 import { decodeRdpRec } from "../../lib/rdpDecoder";
 import { extractError } from "../../lib/error";

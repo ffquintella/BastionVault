@@ -69,8 +69,10 @@
 //! toolbar (`session::web_chrome`, `commands::connect_web_chrome`) above
 //! it, labelled `webchrome-<token>`, loading only the bundled
 //! `web-chrome.html`. Every rule above applies to the remote webview
-//! unchanged; the toolbar has no capability either. Without the feature the
-//! window is the single remote webview of Phases 1–4.
+//! unchanged. The toolbar's only capability (`web-chrome-toolbar.json`,
+//! matched by webview label) grants its three app commands and no plugin
+//! permission. Without the feature the window is the single remote webview
+//! of Phases 1–4.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1745,41 +1747,48 @@ mod transport_tests {
 /// silently handing remote content the vault's command surface.
 ///
 /// Phase 5 adds the session toolbar, a local webview labelled
-/// `webchrome-<token>` in the same `web-<token>` window. It needs no
-/// capability (it calls app commands only), so none may reach it either:
-/// its plugin surface — events, windows, webview creation — stays empty.
-/// Tauri resolves a capability by window label *or* webview label, which
-/// is why a `windows` glob matching `web-<token>` would reach both webviews
-/// of the window, and why the remote webview keeps the window's label.
+/// `webchrome-<token>` in the same `web-<token>` window. It calls three app
+/// commands and nothing else. Since the app has an ACL manifest (T110) it
+/// needs a capability for them; exactly one may reach it — by webview
+/// label — and that one may grant only the toolbar's command set, so its
+/// plugin surface (events, windows, webview creation) stays empty. Tauri
+/// resolves a capability by window label *or* webview label, which is why
+/// a `windows` glob matching `web-<token>` would reach both webviews of the
+/// window, and why the remote webview keeps the window's label.
 #[cfg(test)]
-mod capability_isolation_tests {
+pub(crate) mod capability_isolation_tests {
     use serde_json::Value;
     use std::path::{Path, PathBuf};
 
-    /// Labels a web session window, its remote webview and its toolbar
-    /// webview can take: `web-` / `webchrome-` + `sess_<32 hex>`.
-    const SAMPLE_LABELS: &[&str] = &[
-        "web-sess_0123456789abcdef0123456789abcdef",
-        "web-x",
-        "web-",
-        "webchrome-sess_0123456789abcdef0123456789abcdef",
-        "webchrome-x",
-        "webchrome-",
-    ];
+    /// Labels a web session window and its remote webview can take:
+    /// `web-` + `sess_<32 hex>`. No capability may match one.
+    const REMOTE_LABELS: &[&str] = &["web-sess_0123456789abcdef0123456789abcdef", "web-x", "web-"];
+
+    /// Labels a web session's toolbar webview can take: `webchrome-` +
+    /// `sess_<32 hex>`. Only the toolbar capability may match one (T110: the
+    /// app has an ACL manifest, so the toolbar needs a grant for its three
+    /// app commands), and it may grant nothing else.
+    const TOOLBAR_LABELS: &[&str] = &["webchrome-sess_0123456789abcdef0123456789abcdef", "webchrome-x", "webchrome-"];
+
+    /// The toolbar's capability: matched by webview label only, granting the
+    /// `web-chrome-toolbar` set (its three commands — resolved and checked
+    /// in `window_acl_tests`) and no plugin permission.
+    const TOOLBAR_CAPABILITY: &str = "web-chrome-toolbar";
+    const TOOLBAR_PERMISSIONS: &[&str] = &["web-chrome-toolbar"];
 
     #[test]
     fn the_samples_cover_the_labels_the_host_builds() {
         let token = "sess_0123456789abcdef0123456789abcdef";
         let window = format!("{}{token}", crate::session::web::WINDOW_LABEL_PREFIX);
         let chrome = crate::session::web_chrome::chrome_label(token);
-        assert!(SAMPLE_LABELS.contains(&window.as_str()), "{window}");
-        assert!(SAMPLE_LABELS.contains(&chrome.as_str()), "{chrome}");
+        assert!(REMOTE_LABELS.contains(&window.as_str()), "{window}");
+        assert!(TOOLBAR_LABELS.contains(&chrome.as_str()), "{chrome}");
     }
 
     /// Tauri matches window/webview labels with `glob::Pattern`. This covers
     /// `*` and `?`; any other metacharacter fails the test so it gets
     /// extended rather than quietly mis-evaluated.
-    fn glob_match(pattern: &str, label: &str) -> bool {
+    pub(crate) fn glob_match(pattern: &str, label: &str) -> bool {
         fn rec(p: &[char], l: &[char]) -> bool {
             match p.first() {
                 None => l.is_empty(),
@@ -1793,7 +1802,7 @@ mod capability_isolation_tests {
         rec(&p, &l)
     }
 
-    fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    pub(crate) fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
             let path = entry.unwrap().path();
             if path.is_dir() {
@@ -1810,6 +1819,7 @@ mod capability_isolation_tests {
             !obj.contains_key("remote"),
             "{source}: declares a `remote` URL list — remote origins must never be granted IPC"
         );
+        let mut reaches_toolbar = false;
         for key in ["windows", "webviews"] {
             let Some(list) = obj.get(key) else { continue };
             let list = list.as_array().unwrap_or_else(|| panic!("{source}: `{key}` is not an array"));
@@ -1820,13 +1830,40 @@ mod capability_isolation_tests {
                     "{source}: `{key}` pattern `{pattern}` uses glob syntax this test can't evaluate — extend \
                      `glob_match` before adding it"
                 );
-                for label in SAMPLE_LABELS {
+                for label in REMOTE_LABELS {
                     assert!(
                         !glob_match(pattern, label),
                         "{source}: `{key}` pattern `{pattern}` matches web session label `{label}`"
                     );
                 }
+                for label in TOOLBAR_LABELS {
+                    if glob_match(pattern, label) {
+                        assert_eq!(
+                            key, "webviews",
+                            "{source}: `windows` pattern `{pattern}` matches toolbar label `{label}` — the toolbar \
+                             is reached by webview label only"
+                        );
+                        reaches_toolbar = true;
+                    }
+                }
             }
+        }
+        if reaches_toolbar {
+            assert_eq!(
+                obj.get("identifier").and_then(Value::as_str),
+                Some(TOOLBAR_CAPABILITY),
+                "{source}: only the `{TOOLBAR_CAPABILITY}` capability may reach a web session toolbar"
+            );
+            let permissions: Vec<&str> = obj
+                .get("permissions")
+                .and_then(Value::as_array)
+                .map(|list| list.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            assert_eq!(
+                permissions, TOOLBAR_PERMISSIONS,
+                "{source}: the toolbar capability may grant its command set and nothing else — no plugin \
+                 permission (events, windows, webviews)"
+            );
         }
     }
 
@@ -1881,10 +1918,20 @@ mod capability_isolation_tests {
 
     #[test]
     fn the_shipped_window_globs_do_not_match_web_labels() {
-        for pattern in ["main", "ssh-*", "rdp-*", "plugin-*"] {
-            for label in SAMPLE_LABELS {
+        for pattern in ["main", "ssh-*", "rdp-*", "plugin-*", "session-workspace", "replay-*"] {
+            for label in REMOTE_LABELS.iter().chain(TOOLBAR_LABELS) {
                 assert!(!glob_match(pattern, label), "{pattern} vs {label}");
             }
+        }
+    }
+
+    #[test]
+    fn the_toolbar_glob_reaches_toolbars_and_no_remote_webview() {
+        for label in TOOLBAR_LABELS {
+            assert!(glob_match("webchrome-*", label), "{label}");
+        }
+        for label in REMOTE_LABELS {
+            assert!(!glob_match("webchrome-*", label), "{label}");
         }
     }
 }

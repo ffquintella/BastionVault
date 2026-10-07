@@ -18,7 +18,6 @@ import { SharingPage } from "./routes/SharingPage";
 import { AuditPage } from "./routes/AuditPage";
 import { RecordingsPage } from "./routes/RecordingsPage";
 import { RustionLiveSessionsPage } from "./routes/RustionLiveSessionsPage";
-import { SessionReplayWindow } from "./routes/SessionReplayWindow";
 import { PoliciesPage } from "./routes/PoliciesPage";
 import { NamespacesPage } from "./routes/NamespacesPage";
 import { MountsPage } from "./routes/MountsPage";
@@ -34,9 +33,6 @@ import { LdapPage } from "./routes/LdapPage";
 import { PluginsPage } from "./routes/PluginsPage";
 import { NotificationsAdminPage } from "./routes/NotificationsAdminPage";
 import { SurfaceRouter } from "./components/surface/SurfaceRouter";
-import { SessionSshWindow } from "./routes/SessionSshWindow";
-import { SessionRdpWindow } from "./routes/SessionRdpWindow";
-import { SessionWorkspaceWindow } from "./routes/SessionWorkspaceWindow";
 import { useAuthStore } from "./stores/authStore";
 import { ToastProvider } from "./components/ui";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -56,6 +52,12 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     return <Navigate to="/login" replace />;
   }
   return <>{children}</>;
+}
+
+/** The ⌘K palette, armed once the operator is authenticated. */
+function AuthedConnectPalette() {
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  return <ConnectPalette armed={isAuthenticated} />;
 }
 
 export default function App() {
@@ -216,23 +218,16 @@ export default function App() {
               element={<ProtectedRoute><LdapPage /></ProtectedRoute>}
             />
             {/*
-              Session windows are spawned by the Resource Connect
-              flow into a fresh Tauri WebviewWindow. They claim
-              their session via URL params; the host already
-              authenticated the credential and registered the
-              session before the window opens, so no auth gate.
+              No session routes here. SSH / RDP session windows, the
+              Session Workspace and recording replays load session.html
+              (src/sessionApp/SessionApp.tsx), a separate bundle that
+              mounts only those routes and holds no vault token
+              (features/session-workspace.md, T110).
             */}
-            <Route path="/session/ssh" element={<SessionSshWindow />} />
-            <Route path="/session/rdp" element={<SessionRdpWindow />} />
-            {/* The singleton Session Workspace window (T38): tabs and
-                splits of SSH / RDP panes. Same no-auth-gate reasoning:
-                the host registered every session it renders. */}
-            <Route path="/workspace" element={<SessionWorkspaceWindow />} />
-            <Route path="/session-replay" element={<SessionReplayWindow />} />
           </Routes>
           {/* Phase 7 — global ⌘K Connect palette. Sits above the
               router so the shortcut is armed everywhere post-auth. */}
-          <ConnectPalette />
+          <AuthedConnectPalette />
         </HashRouter>
       </ToastProvider>
     </ErrorBoundary>

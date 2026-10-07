@@ -13,12 +13,15 @@
 //!   [`build_chrome_window`] is not compiled and a web session is the single
 //!   remote webview of Phases 1–4; the commands below are still registered
 //!   and refuse every caller, because no toolbar webview exists.
-//! * **No capability.** The toolbar calls only the three app commands here.
-//!   Tauri lets a local origin call app commands when the app has no ACL
-//!   manifest (it has none) and refuses every plugin command without a
-//!   capability; `capability_isolation_tests` asserts none reaches
-//!   `webchrome-*`, so the toolbar cannot listen to events, create webviews
-//!   or touch windows. It polls its state instead of subscribing.
+//! * **Three commands, no plugin permission.** The toolbar calls only the
+//!   three app commands here. Since T110 the app has an ACL manifest, so a
+//!   webview may call an app command only when a capability grants it: the
+//!   toolbar's one capability (`capabilities/web-chrome-toolbar.json`,
+//!   matched by webview label) grants exactly these three.
+//!   `capability_isolation_tests` asserts no other capability reaches
+//!   `webchrome-*` and that this one carries no plugin permission, so the
+//!   toolbar cannot listen to events, create webviews or touch windows. It
+//!   polls its state instead of subscribing.
 //! * **Caller binding.** Each command takes the calling webview and maps it
 //!   to a session with [`chrome_caller`] (toolbar label *and* hosting
 //!   window), never from an argument.

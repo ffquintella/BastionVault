@@ -9,6 +9,8 @@ mod preferences;
 mod secure_store;
 mod session;
 mod state;
+#[cfg(test)]
+mod window_acl_tests;
 mod yubikey_bridge;
 
 use state::AppState;
@@ -209,6 +211,11 @@ pub fn run() {
             }
             Ok(())
         })
+        // App-command ACL (T110): build.rs reads this list (one plain
+        // `path::command,` per entry, `//` comments only) and registers it
+        // as the app's ACL manifest. A command added here is granted to the
+        // main and plugin windows (`app-all-commands`) and to no session
+        // window until a set in permissions/window-sets.json names it.
         .invoke_handler(tauri::generate_handler![
             // Cloud storage targets (OAuth consent orchestration)
             commands::cloud_target::cloud_target_start_connect,

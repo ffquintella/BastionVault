@@ -15,11 +15,12 @@
 //!   (`capability_isolation_tests`). It never shares a realm with the
 //!   toolbar.
 //! * The toolbar is a second webview in that window, labelled
-//!   `webchrome-<token>`, loading only the bundled `web-chrome.html`. It
-//!   needs no capability: it calls three app commands, and Tauri lets a local
-//!   origin call app commands when the app defines no ACL manifest (none is
-//!   defined), while no plugin command is reachable without one. The
-//!   capability test asserts no capability reaches it either, so its plugin
+//!   `webchrome-<token>`, loading only the bundled `web-chrome.html`. Its one
+//!   capability (`capabilities/web-chrome-toolbar.json`, matched by webview
+//!   label) grants the three app commands it calls and nothing else — the
+//!   app has an ACL manifest since T110, so without it the toolbar could
+//!   call nothing. The capability test asserts no other capability reaches
+//!   it and that this one carries no plugin permission, so its plugin
 //!   surface stays empty.
 //! * The commands derive the session from the calling webview's label *and*
 //!   the label of the window hosting it ([`chrome_caller`]), never from an

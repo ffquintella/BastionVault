@@ -57,7 +57,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { Button, Badge } from "./ui";
+// Not the `./ui` barrel — session-only bundle (see ConnectMfaPrompt.tsx).
+import { Badge } from "./ui/Badge";
+import { Button } from "./ui/Button";
 import { RdpTranscriptPane } from "./RdpTranscriptPane";
 import {
   COUNT_RLE16,

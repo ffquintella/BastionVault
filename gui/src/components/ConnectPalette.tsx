@@ -22,7 +22,6 @@ import type {
   ResourceTypeConfig,
   SessionProtocol,
 } from "../lib/types";
-import { useAuthStore } from "../stores/authStore";
 import { Badge } from "./ui/Badge";
 import { useToast } from "./ui/Toast";
 import { useConnectMfa } from "./ConnectMfaPrompt";
@@ -60,8 +59,18 @@ interface PaletteEntry {
   needsOperatorPrompt: boolean;
 }
 
-export function ConnectPalette() {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+export interface ConnectPaletteProps {
+  /**
+   * Whether ⌘K and the Session Workspace's open event are live. The main
+   * window arms the palette once the operator is authenticated. The
+   * Session Workspace (session.html, T110) arms it outright: that bundle
+   * holds no vault token and no auth store, and every command the palette
+   * calls is refused by the host when nobody is logged in.
+   */
+  armed: boolean;
+}
+
+export function ConnectPalette({ armed }: ConnectPaletteProps) {
   const { toast } = useToast();
   // Connect-time MFA gate; the prompt renders over the palette.
   const { gateConnect, mfaPrompt } = useConnectMfa();
@@ -78,7 +87,7 @@ export function ConnectPalette() {
 
   // Opened by the Session Workspace's ⌘T / ⌘D / ⌘⇧D chords.
   useEffect(() => {
-    if (!isAuthenticated) return;
+    if (!armed) return;
     const onOpen = (e: Event) => {
       const detail = (e as CustomEvent<ConnectPaletteOpenDetail>).detail;
       setPlacement(detail?.placement);
@@ -86,12 +95,12 @@ export function ConnectPalette() {
     };
     window.addEventListener(CONNECT_PALETTE_OPEN_EVENT, onOpen);
     return () => window.removeEventListener(CONNECT_PALETTE_OPEN_EVENT, onOpen);
-  }, [isAuthenticated]);
+  }, [armed]);
 
-  // Global ⌘K / Ctrl+K listener. Only armed once authenticated —
-  // before login there's nothing to connect to.
+  // Global ⌘K / Ctrl+K listener. Only while armed — in the main window,
+  // once authenticated: before login there's nothing to connect to.
   useEffect(() => {
-    if (!isAuthenticated) return;
+    if (!armed) return;
     const handler = (e: KeyboardEvent) => {
       const isCmdK =
         (e.metaKey || e.ctrlKey) &&
@@ -107,7 +116,7 @@ export function ConnectPalette() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [isAuthenticated, open]);
+  }, [armed, open]);
 
   // Lazy-load on first open. Refreshing on every open keeps the
   // list in sync with profile edits without polling.
@@ -309,7 +318,7 @@ export function ConnectPalette() {
     }
   }
 
-  if (!isAuthenticated || !open) return null;
+  if (!armed || !open) return null;
 
   return (
     <div

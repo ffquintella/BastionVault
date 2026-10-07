@@ -1,0 +1,7 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicerdicer/tauri-docs/refs/heads/v2/tooling/cli/schema.json",
+  "identifier": "session-replay",
+  "description": "A recording replay window (session.html#/session-replay). The `session-replay` command set and no plugin permission, as before the app had an ACL manifest (features/session-workspace.md, T110).",
+  "windows": ["replay-*"],
+  "permissions": ["session-replay"]
+}

@@ -483,19 +483,25 @@ mod tests {
 
     use crate::session::workspace::WORKSPACE_WINDOW_LABEL;
 
-    /// The workspace window needs IPC (session commands, events, its own
-    /// close) and gets it from the default capability, by exact label — not
-    /// by a glob that could also match a label a plugin or web window
-    /// could take. (`capability_isolation_tests` in `connect_web.rs` keeps
-    /// every capability away from web session windows.)
-    #[test]
-    fn the_default_capability_names_the_workspace_window_exactly() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities").join("default.json");
+    fn capability_windows(file: &str) -> Vec<String> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities").join(file);
         let cap: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let windows: Vec<&str> = cap["windows"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(windows.contains(&WORKSPACE_WINDOW_LABEL), "{windows:?}");
-        for pattern in &windows {
-            assert!(!pattern.starts_with("session-") || *pattern == WORKSPACE_WINDOW_LABEL, "{pattern}");
+        cap["windows"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect()
+    }
+
+    /// The workspace window needs IPC (its session commands, events, its
+    /// own close) and gets it from its own capability, by exact label — not
+    /// by a glob that could also match a label a plugin or web window could
+    /// take — and not from the default capability, which carries every app
+    /// command (T110; what that capability grants is checked in
+    /// `window_acl_tests`). (`capability_isolation_tests` in `connect_web.rs`
+    /// keeps every capability away from web session windows.)
+    #[test]
+    fn the_workspace_capability_names_the_workspace_window_exactly() {
+        assert_eq!(capability_windows("session-workspace.json"), [WORKSPACE_WINDOW_LABEL]);
+        let default = capability_windows("default.json");
+        for pattern in &default {
+            assert!(!pattern.starts_with("session-"), "default.json reaches the workspace: {pattern}");
         }
     }
 }

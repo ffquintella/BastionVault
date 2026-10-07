@@ -429,8 +429,8 @@ pub async fn session_open_ssh(
     //
     // We use HashRouter on the frontend, so the route fragment
     // sits inside the URL hash. Tauri's WebviewUrl::App takes a
-    // path relative to the app's index — `index.html#/path` gets
-    // the React router to match `/path`.
+    // path relative to the app's root — `session.html#/path` gets
+    // the React router to match `/path` (`own_window_url`).
     let descriptor = SessionDescriptor {
         token: outcome.token.clone(),
         protocol: session::ProfileProtocol::Ssh,
@@ -1595,11 +1595,13 @@ pub(crate) fn ensure_workspace_window(app: &AppHandle) -> Result<(), String> {
 /// The `HashRouter` URL of a session's own window: the session's identity
 /// and event names as query parameters, as the one-pane routes read them.
 /// One builder for the open path and a move (T38 Phase 6), so a moved
-/// session's window is indistinguishable from one it was born in.
+/// session's window is indistinguishable from one it was born in. The page
+/// is the session-only bundle, never the vault UI (T110).
 pub(crate) fn own_window_url(d: &SessionDescriptor) -> String {
+    use workspace::SESSION_PAGE;
     match d.protocol {
         session::ProfileProtocol::Rdp => format!(
-            "index.html#/session/rdp?token={}&closed={}&resize={}&cursor={}&label={}&w={}&h={}",
+            "{SESSION_PAGE}#/session/rdp?token={}&closed={}&resize={}&cursor={}&label={}&w={}&h={}",
             urlencoding::encode(&d.token),
             urlencoding::encode(&d.closed_event),
             urlencoding::encode(d.resize_event.as_deref().unwrap_or_default()),
@@ -1610,10 +1612,10 @@ pub(crate) fn own_window_url(d: &SessionDescriptor) -> String {
         ),
         // We use HashRouter on the frontend, so the route fragment sits
         // inside the URL hash. Tauri's WebviewUrl::App takes a path
-        // relative to the app's index — `index.html#/path` gets the React
+        // relative to the app's root — `session.html#/path` gets the React
         // router to match `/path`.
         _ => format!(
-            "index.html#/session/ssh?token={}&stdout={}&closed={}&label={}",
+            "{SESSION_PAGE}#/session/ssh?token={}&stdout={}&closed={}&label={}",
             urlencoding::encode(&d.token),
             urlencoding::encode(d.stdout_event.as_deref().unwrap_or_default()),
             urlencoding::encode(&d.closed_event),

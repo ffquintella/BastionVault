@@ -1,0 +1,7 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicerdicer/tauri-docs/refs/heads/v2/tooling/cli/schema.json",
+  "identifier": "web-chrome-toolbar",
+  "description": "A web session's toolbar webview (webchrome-<token>, web-chrome.html): its three app commands and no plugin permission. Matched by webview label only, so the session's remote webview (web-<token>) is never reached; capability_isolation_tests keeps it that way (features/web-application-connect.md Phase 5, T110).",
+  "webviews": ["webchrome-*"],
+  "permissions": ["web-chrome-toolbar"]
+}

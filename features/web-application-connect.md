@@ -357,6 +357,14 @@ is the single remote webview of Phases 1–4.
   like the main window, the toolbar's origin could call any app command;
   that is bounded by it loading only bundled code, rendering text only, and
   its navigation lock.
+  **Superseded by T110** ([session-workspace.md](session-workspace.md) §7):
+  the app now has an ACL manifest, so no webview may call an app command a
+  capability does not grant. The toolbar has exactly one capability,
+  `gui/src-tauri/capabilities/web-chrome-toolbar.json`, matched by webview
+  label (`webchrome-*`), granting its three commands and no plugin
+  permission; `capability_isolation_tests` allows no other capability to
+  reach it. Its plugin surface is still empty, and its app surface is now
+  those three commands instead of every one.
 - **Caller binding.** Each command takes the calling webview and maps it to
   a session only when its label is `webchrome-<well-formed token>` **and**
   the window hosting it is that session's `web-<token>` window

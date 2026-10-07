@@ -742,11 +742,7 @@ pub async fn rustion_open_replay_window(
         let _ = existing.set_focus();
         return Ok(());
     }
-    let at = match at_ms {
-        Some(ms) if ms > 0 => format!("&at={ms}"),
-        _ => String::new(),
-    };
-    let url = format!("index.html#/session-replay?recording={}{at}", urlencoding::encode(&recording_id));
+    let url = replay_window_url(&recording_id, at_ms);
     WebviewWindowBuilder::new(&app, &window_label, WebviewUrl::App(url.into()))
         .title(format!("BastionVault — Replay {recording_id}"))
         .inner_size(1200.0, 800.0)
@@ -754,6 +750,20 @@ pub async fn rustion_open_replay_window(
         .build()
         .map_err(|e| crate::error::CommandError::from(format!("spawn replay window: {e}")))?;
     Ok(())
+}
+
+/// The replay window's URL: the session-only bundle, not the vault UI
+/// (T110), at its `/session-replay` route.
+pub(crate) fn replay_window_url(recording_id: &str, at_ms: Option<u64>) -> String {
+    let at = match at_ms {
+        Some(ms) if ms > 0 => format!("&at={ms}"),
+        _ => String::new(),
+    };
+    format!(
+        "{}#/session-replay?recording={}{at}",
+        crate::session::workspace::SESSION_PAGE,
+        urlencoding::encode(recording_id)
+    )
 }
 
 fn sanitize_label(s: &str) -> String {

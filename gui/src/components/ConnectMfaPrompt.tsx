@@ -15,7 +15,12 @@ import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 
 import * as api from "../lib/api";
-import { Button, Input, Modal } from "./ui";
+// Not the `./ui` barrel: this file is in the session-only bundle
+// (session.html, T110), whose import graph `sessionBundle.test.ts` keeps
+// free of the barrel's vault-admin components.
+import { Button } from "./ui/Button";
+import { Input } from "./ui/Input";
+import { Modal } from "./ui/Modal";
 
 /** Resolved once per Connect click. `null` = the operator cancelled. */
 export type ConnectMfaOutcome = { connect_ticket?: string } | null;

@@ -19,8 +19,17 @@ use crate::preferences::SessionWorkspacePrefs;
 /// Label of the singleton Session Workspace window (Phase 3).
 pub const WORKSPACE_WINDOW_LABEL: &str = "session-workspace";
 
-/// Route the workspace window loads (`HashRouter` fragment).
-pub const WORKSPACE_WINDOW_URL: &str = "index.html#/workspace";
+/// The session-only frontend page (`gui/session.html`, T110). It mounts
+/// only the session routes and never fetches the vault token; every window
+/// that renders a session or a recording — a session's own window, the
+/// workspace, a replay — loads it instead of `index.html`. Each of those
+/// windows also has its own, narrow command set
+/// (`capabilities/session-*.json`), which is the actual boundary.
+pub const SESSION_PAGE: &str = "session.html";
+
+/// Route the workspace window loads (`HashRouter` fragment of
+/// [`SESSION_PAGE`]).
+pub const WORKSPACE_WINDOW_URL: &str = "session.html#/workspace";
 
 /// Event the host sends the workspace window when a session has been
 /// registered as attached to it. It carries **no payload**: a Tauri

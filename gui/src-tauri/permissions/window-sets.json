@@ -1,0 +1,63 @@
+{
+  "set": [
+    {
+      "identifier": "session-window",
+      "description": "A session's own window (ssh-<token> / rdp-<token>, session.html). Drives the one session it renders: SSH/RDP input and resize, the RDP frame channel, close, liveness, Move to workspace, the session-input preferences it reads, and the Rustion chip's renew / end. Every input command is further narrowed by the host to the window holding the session (attachments::authorize_input). No vault reads, no session opens, no token. Derived from what session.html's own-window routes call; gui/src/test/sessionBundle.test.ts keeps the two equal. Features/session-workspace.md, T110.",
+      "permissions": [
+        "allow-session-input",
+        "allow-session-resize",
+        "allow-session-close",
+        "allow-session-attach-rdp-frames",
+        "allow-session-input-rdp-key",
+        "allow-session-input-rdp-mouse",
+        "allow-session-input-rdp-wheel",
+        "allow-session-input-rdp-resize",
+        "allow-session-heartbeat",
+        "allow-session-move",
+        "allow-session-rustion-info",
+        "allow-get-session-workspace-prefs",
+        "allow-rustion-session-renew",
+        "allow-rustion-session-kill"
+      ]
+    },
+    {
+      "identifier": "session-workspace",
+      "description": "The Session Workspace window (session-workspace, session.html). Everything a session window may call, plus: the listing and placement hand-off (session_list_open), the saved layout (session_layout_save / _get / _forget), and the normal connect path its ⌘T palette and explicit layout restore go through — the resource reads that path needs (list_resources, read_resource, resource_types_read), connect-time MFA (connect_mfa_*) and session_open_ssh / _rdp / _web, each still behind the host's connect gate, transport tier and MFA ticket check. No secret reads, no credential release to the frontend, no admin command, no vault token. Derived from what the /workspace route calls; gui/src/test/sessionBundle.test.ts keeps the two equal. Features/session-workspace.md, T110.",
+      "permissions": [
+        "session-window",
+        "allow-session-list-open",
+        "allow-session-layout-save",
+        "allow-session-layout-get",
+        "allow-session-layout-forget",
+        "allow-list-resources",
+        "allow-read-resource",
+        "allow-resource-types-read",
+        "allow-connect-mfa-begin",
+        "allow-connect-mfa-verify-totp",
+        "allow-connect-mfa-verify-fido2",
+        "allow-session-open-ssh",
+        "allow-session-open-rdp",
+        "allow-session-open-web"
+      ]
+    },
+    {
+      "identifier": "session-replay",
+      "description": "A recording replay window (replay-<id>, session.html): reads the one recording it plays. Derived from what the /session-replay route calls; gui/src/test/sessionBundle.test.ts keeps the two equal. Features/session-workspace.md, T110.",
+      "permissions": [
+        "allow-rustion-recording-read",
+        "allow-rustion-recording-blob",
+        "allow-rustion-recording-blob-chunk",
+        "allow-rustion-recording-replay-log"
+      ]
+    },
+    {
+      "identifier": "web-chrome-toolbar",
+      "description": "A web session's toolbar webview (webchrome-<token>, web-chrome.html): its three commands, each bound by the host to the session the calling webview sits in (session::web_chrome::chrome_caller). Features/web-application-connect.md Phase 5.",
+      "permissions": [
+        "allow-web-chrome-state",
+        "allow-web-chrome-disconnect",
+        "allow-web-chrome-relogin"
+      ]
+    }
+  ]
+}

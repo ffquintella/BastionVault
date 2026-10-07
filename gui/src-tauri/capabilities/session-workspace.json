@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicerdicer/tauri-docs/refs/heads/v2/tooling/cli/schema.json",
+  "identifier": "session-workspace",
+  "description": "The Session Workspace window (session.html#/workspace). Event subscription, closing itself when its last tab closes, and the `session-workspace` command set — nothing else (features/session-workspace.md, T110).",
+  "windows": ["session-workspace"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-close",
+    "session-workspace"
+  ]
+}
