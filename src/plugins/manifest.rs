@@ -13,6 +13,6 @@
 
 pub use bv_plugin_manifest::{
     check_abi_compatibility, parse_abi, signing_message, AppCapabilities, Capabilities,
-    ClientAssetRef, ConfigCondition, ConfigField, ConfigFieldKind, NetCapabilities, PluginManifest,
+    ClientAssetRef, ConfigCondition, ConfigField, ConfigFieldKind, CredentialProviderCap, NetCapabilities, ProviderSelection, StorageScope, PluginManifest,
     RuntimeKind, SurfaceRef, WindowsCapabilities, HOST_ABI_MAJOR, HOST_ABI_MINOR, MAX_PLUGIN_WINDOWS,
 };

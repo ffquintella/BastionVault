@@ -213,6 +213,9 @@ struct HostState {
 /// Per-invocation store context — the testkit's `PluginCtx`.
 struct Ctx {
     plugin_name: String,
+    /// Barrier prefix of this invocation's storage scope (mirrors the
+    /// host's `PluginCtx::data_root`).
+    data_root: String,
     log_emit: bool,
     audit_emit: bool,
     storage_prefix: Option<String>,
@@ -237,12 +240,53 @@ impl Ctx {
         if req_norm.contains("..") {
             return None;
         }
-        Some(data_key(&self.plugin_name, req_norm))
+        Some(format!("{}{}", self.data_root, req_norm))
     }
 }
 
 fn data_key(name: &str, rel: &str) -> String {
     format!("core/plugins/{name}/data/{rel}")
+}
+
+/// Mirror of the host's `runtime::entity_data_root`: the storage prefix of
+/// one entity for a plugin declaring `storage_scope = "entity"`. `None` for an
+/// id that could carry a path separator or `..`.
+pub fn entity_data_root(name: &str, entity_id: &str) -> Option<String> {
+    let ok = !entity_id.is_empty()
+        && entity_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    ok.then(|| format!("core/plugins/{name}/data/entity/{entity_id}/"))
+}
+
+/// The attested caller a [`TestHost`] adds to the envelope when driven with
+/// [`TestHost::invoke_as`]. Mirrors the ABI 1.3 `caller` block.
+#[derive(Debug, Clone)]
+pub struct TestCaller {
+    pub entity_id: String,
+    pub display_name: String,
+    pub principal_mount: String,
+    pub principal_name: String,
+    pub namespace: String,
+}
+
+impl TestCaller {
+    pub fn new(entity_id: impl Into<String>) -> Self {
+        Self {
+            entity_id: entity_id.into(),
+            display_name: String::new(),
+            principal_mount: "userpass/".into(),
+            principal_name: "tester".into(),
+            namespace: String::new(),
+        }
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "entity_id": self.entity_id,
+            "display_name": self.display_name,
+            "principal": { "mount": self.principal_mount, "name": self.principal_name },
+            "namespace": self.namespace,
+        })
+    }
 }
 
 /// Builder for [`TestHost`]. The defaults mirror a manifest with
@@ -415,6 +459,51 @@ impl TestHost {
 
     /// Invoke `bv_run` with raw input bytes.
     pub fn invoke_raw(&self, wasm: &[u8], input: &[u8]) -> Result<TestInvocation, TestkitError> {
+        self.invoke_raw_in(wasm, input, data_key(&self.name, ""))
+    }
+
+    /// Invoke as `caller`, the way the host does for a plugin declaring
+    /// `caller_identity` and `storage_scope = "entity"`: the envelope carries
+    /// the caller block and every `bv.storage_*` call is rebased onto that
+    /// entity's prefix. A caller whose entity id cannot be used as a path
+    /// segment is refused before the plugin runs, like a caller with no entity.
+    pub fn invoke_as(
+        &self,
+        wasm: &[u8],
+        caller: &TestCaller,
+        op: &str,
+        path: &str,
+        data: serde_json::Value,
+    ) -> Result<TestInvocation, TestkitError> {
+        let root = entity_data_root(&self.name, &caller.entity_id).ok_or_else(|| {
+            TestkitError::Invoke("entity-scoped plugin invoked without a valid caller entity".into())
+        })?;
+        let mut env: serde_json::Value = serde_json::from_slice(&envelope(op, path, data))
+            .expect("envelope is valid JSON");
+        env["caller"] = caller.json();
+        self.invoke_raw_in(wasm, &serde_json::to_vec(&env).expect("envelope serialise"), root)
+    }
+
+    /// Snapshot of one entity's storage, keyed by plugin-relative key.
+    pub fn entity_storage_dump(&self, entity_id: &str) -> BTreeMap<String, Vec<u8>> {
+        let Some(root) = entity_data_root(&self.name, entity_id) else {
+            return BTreeMap::new();
+        };
+        self.state
+            .lock()
+            .unwrap()
+            .storage
+            .iter()
+            .filter_map(|(k, v)| k.strip_prefix(&root).map(|rel| (rel.to_string(), v.clone())))
+            .collect()
+    }
+
+    fn invoke_raw_in(
+        &self,
+        wasm: &[u8],
+        input: &[u8],
+        data_root: String,
+    ) -> Result<TestInvocation, TestkitError> {
         let module =
             Module::new(&self.engine, wasm).map_err(|e| TestkitError::Compile(e.to_string()))?;
 
@@ -425,6 +514,7 @@ impl TestHost {
 
         let ctx = Ctx {
             plugin_name: self.name.clone(),
+            data_root,
             log_emit: self.log_emit,
             audit_emit: self.audit_emit,
             storage_prefix: self.storage_prefix.clone(),
@@ -691,7 +781,7 @@ fn register_test_imports(linker: &mut Linker<Ctx>) -> Result<(), TestkitError> {
                     Some(s) => s,
                     None => return STORAGE_INTERNAL_ERROR,
                 };
-                let mut full_prefix = data_key(&caller.data().plugin_name, "");
+                let mut full_prefix = caller.data().data_root.clone();
                 if !prefix.is_empty() {
                     if prefix.contains("..") {
                         return STORAGE_FORBIDDEN;

@@ -1610,10 +1610,40 @@ spelling out:
 | `POST /v1/sys/cluster/leave` | `sys/cluster/leave` | `create`/`update` |
 | `POST /v1/sys/cluster/failover` | `sys/cluster/failover` | `create`/`update` |
 | `GET`/`POST` `/v1/sys/plugins…` | `sys/plugins…` | per method |
+| `GET`/`PUT`/`DELETE` `/v2/sys/plugins/{name}/grants/credential-provider` | `sys/plugins/{name}/grants/credential-provider` | `read` / `update` / `delete` |
+| `DELETE /v2/sys/plugins/{name}/entity-data/{entity_id}` | `sys/plugins/{name}/entity-data/{entity_id}` | `delete` |
 | `GET`/`POST` `/v1/sys/scheduled-exports…` | `sys/scheduled-exports…` | per method |
 
 `PUT /v1/sys/seal` is sudo-gated: `seal` is a `root_paths` entry, so it needs a
 root token or a policy granting `sudo` on that path.
+
+### Credential-provider grant (v2)
+
+A plugin that declares `[capabilities.credential_provider]` (ABI 1.3) can supply
+credentials to Connect only after an administrator approves it. The approval is
+pinned to the SHA-256 of the manifest's `credential_provider` block, so any later
+change to that block voids it until it is approved again. See
+[features/self-accounts.md](../features/self-accounts.md) §4.
+
+~~~
+GET    /v2/sys/plugins/{name}/grants/credential-provider
+PUT    /v2/sys/plugins/{name}/grants/credential-provider
+DELETE /v2/sys/plugins/{name}/grants/credential-provider
+~~~
+
+`GET` returns the manifest's requested block, whether the plugin also requests
+network access, the stored grant and whether it is `live` against the active
+version. `PUT` takes no body: it approves exactly what the active manifest
+declares, and answers `400` for a plugin that declares nothing. `DELETE` is
+idempotent.
+
+~~~
+DELETE /v2/sys/plugins/{name}/entity-data/{entity_id}
+~~~
+
+Deletes one identity entity's data under one entity-scoped plugin, for
+offboarding. There is no read counterpart. The same data is removed
+automatically when an entity loses its last alias.
 
 ## Error Responses
 

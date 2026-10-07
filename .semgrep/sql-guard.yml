@@ -1,0 +1,34 @@
+# Mechanical half of roadmaps/formal-verification-and-type-driven-security.md
+# § Phase 2.3. The types in `bv-sql-guard` stop the easy mistake; this catches a
+# driver call that builds its statement from a runtime string without them.
+#
+# Run: semgrep --config .semgrep/sql-guard.yml --error crates src
+rules:
+  - id: bv-unguarded-sql-statement
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      SQL statement built outside bv-sql-guard. Use sql!("...") — a literal,
+      optionally with SqlIdent substitution. If a constructed statement is
+      genuinely needed, use Sql::escape_hatch_reviewed and record it in
+      docs/sql-escape-hatches.md.
+    paths:
+      include:
+        - crates/**
+        - src/**
+    patterns:
+      - pattern-either:
+          - pattern: $C.execute($S, ...)
+          - pattern: $C.query_consistent_map($S, ...)
+          - pattern: $C.query_consistent_one($S, ...)
+          - pattern: $C.query_map($S, ...)
+          - pattern: $C.batch($S)
+          - pattern: diesel::sql_query($S)
+      - metavariable-pattern:
+          metavariable: $S
+          pattern-either:
+            - pattern: format!(...)
+            - pattern: $A + $B
+            - pattern: $X.to_string()
+            - pattern: Cow::Owned(...)
+            - pattern: std::borrow::Cow::Owned(...)

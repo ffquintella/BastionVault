@@ -202,6 +202,79 @@ pub struct Capabilities {
     /// Requires `abi_version` minor >= 2.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notification_channels: Vec<ChannelDecl>,
+
+    /// Credential providers: the host adds an attested `caller` block
+    /// (entity id, display name, principal, namespace) to every envelope.
+    /// Requires `abi_version` minor >= 3. Omitted from the canonical
+    /// signing message when false, so already-signed plugins keep
+    /// verifying.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub caller_identity: bool,
+    /// Where the plugin's `bv.storage_*` keys live. `Plugin` (default) is
+    /// one scope per plugin; `Entity` rebases every invocation onto the
+    /// attested caller's entity, so the plugin cannot address another
+    /// user's keys. `Entity` requires `caller_identity`.
+    #[serde(default, skip_serializing_if = "StorageScope::is_default")]
+    pub storage_scope: StorageScope,
+    /// Declares the plugin a connect-time credential provider. Needs an
+    /// admin grant (pinned to this block's hash) before it is usable.
+    /// Requires `abi_version` minor >= 3 and `storage_scope = "entity"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_provider: Option<CredentialProviderCap>,
+}
+
+/// Storage scope a plugin's `bv.storage_*` calls are confined to.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageScope {
+    #[default]
+    Plugin,
+    Entity,
+}
+
+impl StorageScope {
+    pub fn is_default(&self) -> bool {
+        matches!(self, StorageScope::Plugin)
+    }
+}
+
+/// How a credential provider's candidates are chosen. Only
+/// `operator` (the operator picks at Connect) is defined; any other
+/// value fails manifest parsing, so a future automatic-selection
+/// provider needs its own spec rather than an accidental default.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderSelection {
+    Operator,
+}
+
+/// `[capabilities.credential_provider]`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialProviderCap {
+    /// What the profile editor shows for this provider.
+    pub display_name: String,
+    pub selection: ProviderSelection,
+    /// Subset of `ssh`, `rdp`, `web`.
+    pub protocols: Vec<String>,
+    /// Subset of `password`, `ssh-key`.
+    pub secret_kinds: Vec<String>,
+}
+
+impl CredentialProviderCap {
+    pub const PROTOCOLS: [&'static str; 3] = ["ssh", "rdp", "web"];
+    pub const SECRET_KINDS: [&'static str; 2] = ["password", "ssh-key"];
+
+    /// SHA-256 (hex) over the canonical JSON of this block. The admin
+    /// provider grant is pinned to it, so any change — even a narrowing
+    /// one — voids the grant until re-approved.
+    pub fn canonical_sha256(&self) -> String {
+        use sha2::{Digest, Sha256};
+        // Struct field order is fixed, so serde_json output is stable.
+        let bytes = serde_json::to_vec(self).unwrap_or_default();
+        let digest = Sha256::digest(&bytes);
+        digest.iter().map(|b| format!("{b:02x}")).collect()
+    }
 }
 
 /// One notification-delivery channel a plugin provides. Declared in the
@@ -448,10 +521,12 @@ pub const HOST_ABI_MAJOR: u32 = 1;
 /// `abi_version = "1.1"`. Minor `2` adds the notification surface — the
 /// `bv.notify_*` host imports, plugin-provided `notification_channels`,
 /// and the `capabilities.app.notify` app-module access; those plugins
-/// target `abi_version = "1.2"`. Older hosts refuse a newer minor
+/// target `abi_version = "1.2"`. Minor `3` adds credential providers:
+/// the `caller` envelope block, `storage_scope = "entity"` and
+/// `[capabilities.credential_provider]`. Older hosts refuse a newer minor
 /// cleanly via [`check_abi_compatibility`] — the intended downgrade
 /// behavior.
-pub const HOST_ABI_MINOR: u32 = 2;
+pub const HOST_ABI_MINOR: u32 = 3;
 
 /// Phase 5.4 — parse `"major.minor"` from a manifest. Returns
 /// `Err(_)` for any non-numeric or missing component so a typo'd
@@ -583,6 +658,7 @@ impl PluginManifest {
         }
         self.validate_app_capabilities()?;
         self.validate_notify_capabilities()?;
+        self.validate_provider_capabilities()?;
         Ok(())
     }
 
@@ -621,6 +697,51 @@ impl PluginManifest {
             }
             if c.name.trim().is_empty() {
                 return Err("notification_channels entry name is required");
+            }
+        }
+        Ok(())
+    }
+
+    /// Static invariants on `caller_identity`, `storage_scope` and
+    /// `credential_provider`. All require the v3 ABI minor so an older
+    /// host refuses the plugin cleanly.
+    fn validate_provider_capabilities(&self) -> Result<(), &'static str> {
+        let caps = &self.capabilities;
+        let declared =
+            caps.caller_identity || caps.storage_scope == StorageScope::Entity || caps.credential_provider.is_some();
+        if !declared {
+            return Ok(());
+        }
+        let (_maj, min) = parse_abi(&self.abi_version).map_err(|_| "abi_version must be MAJOR.MINOR")?;
+        if min < 3 {
+            return Err(
+                "caller_identity / storage_scope / credential_provider require abi_version minor >= 3 (\"1.3\")"
+            );
+        }
+        if caps.storage_scope == StorageScope::Entity && !caps.caller_identity {
+            return Err("storage_scope = \"entity\" requires caller_identity = true");
+        }
+        // The entity prefix is applied by the WASM runtime's storage
+        // imports; the process runtimes have their own storage path.
+        if caps.storage_scope == StorageScope::Entity && self.runtime != RuntimeKind::Wasm {
+            return Err("storage_scope = \"entity\" is only supported for runtime = \"wasm\"");
+        }
+        if let Some(p) = &caps.credential_provider {
+            if caps.storage_scope != StorageScope::Entity {
+                return Err("credential_provider requires storage_scope = \"entity\"");
+            }
+            if p.display_name.trim().is_empty() || p.display_name.chars().count() > 64 {
+                return Err("credential_provider.display_name must be 1-64 chars");
+            }
+            if p.protocols.is_empty()
+                || p.protocols.iter().any(|x| !CredentialProviderCap::PROTOCOLS.contains(&x.as_str()))
+            {
+                return Err("credential_provider.protocols must be a non-empty subset of ssh, rdp, web");
+            }
+            if p.secret_kinds.is_empty()
+                || p.secret_kinds.iter().any(|x| !CredentialProviderCap::SECRET_KINDS.contains(&x.as_str()))
+            {
+                return Err("credential_provider.secret_kinds must be a non-empty subset of password, ssh-key");
             }
         }
         Ok(())
@@ -774,6 +895,89 @@ mod tests {
         assert!(m.validate().is_err());
         m.abi_version = "1.2".to_string();
         assert!(m.validate().is_ok());
+    }
+
+    fn provider_cap() -> CredentialProviderCap {
+        CredentialProviderCap {
+            display_name: "Self-account".into(),
+            selection: ProviderSelection::Operator,
+            protocols: vec!["ssh".into(), "rdp".into(), "web".into()],
+            secret_kinds: vec!["password".into(), "ssh-key".into()],
+        }
+    }
+
+    fn provider_manifest() -> PluginManifest {
+        let mut m = fixture();
+        m.abi_version = "1.3".into();
+        m.capabilities.caller_identity = true;
+        m.capabilities.storage_scope = StorageScope::Entity;
+        m.capabilities.credential_provider = Some(provider_cap());
+        m
+    }
+
+    #[test]
+    fn provider_manifest_validates() {
+        assert!(provider_manifest().validate().is_ok());
+    }
+
+    #[test]
+    fn provider_capabilities_require_abi_1_3() {
+        let mut m = provider_manifest();
+        m.abi_version = "1.2".into();
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn entity_scope_requires_caller_identity() {
+        let mut m = provider_manifest();
+        m.capabilities.caller_identity = false;
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn entity_scope_is_wasm_only() {
+        let mut m = provider_manifest();
+        m.runtime = RuntimeKind::Process;
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn provider_requires_entity_scope() {
+        let mut m = provider_manifest();
+        m.capabilities.storage_scope = StorageScope::Plugin;
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn provider_rejects_bad_protocol_and_kind() {
+        let mut m = provider_manifest();
+        m.capabilities.credential_provider.as_mut().unwrap().protocols = vec!["telnet".into()];
+        assert!(m.validate().is_err());
+        let mut m = provider_manifest();
+        m.capabilities.credential_provider.as_mut().unwrap().secret_kinds = vec![];
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn provider_unknown_selection_fails_to_parse() {
+        let j = r#"{"display_name":"x","selection":"automatic","protocols":["ssh"],"secret_kinds":["password"]}"#;
+        assert!(serde_json::from_str::<CredentialProviderCap>(j).is_err());
+    }
+
+    #[test]
+    fn provider_hash_changes_on_any_narrowing() {
+        let a = provider_cap();
+        let mut b = provider_cap();
+        b.protocols.pop();
+        assert_ne!(a.canonical_sha256(), b.canonical_sha256());
+    }
+
+    #[test]
+    fn provider_fields_omitted_from_signing_message_when_off() {
+        let v = serde_json::to_value(&fixture().capabilities).unwrap();
+        assert!(v.get("caller_identity").is_none());
+        assert!(v.get("storage_scope").is_none());
+        assert!(v.get("credential_provider").is_none());
     }
 
     #[test]

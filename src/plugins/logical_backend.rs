@@ -149,7 +149,27 @@ impl Backend for PluginLogicalBackend {
             .await
             .unwrap_or_default();
 
-        let envelope = build_envelope(req)?;
+        // ABI 1.3: attested caller. Built from the token, never from the
+        // request body. An entity-scoped plugin is refused before it runs
+        // when the caller has no identity entity.
+        let caller = manifest
+            .capabilities
+            .caller_identity
+            .then(|| super::provider::caller_from_request(req));
+        let entity_id: Option<String> = caller
+            .as_ref()
+            .map(|c| c.entity_id.clone())
+            .filter(|e| !e.is_empty());
+        if manifest.capabilities.storage_scope == super::manifest::StorageScope::Entity
+            && entity_id.is_none()
+        {
+            return Err(RvError::ErrResponseStatus(
+                403,
+                "this plugin stores per-user data and needs an identity-backed login".to_string(),
+            ));
+        }
+
+        let envelope = build_envelope(req, caller.as_ref())?;
         let envelope_bytes = serde_json::to_vec(&envelope).map_err(|e| {
             RvError::ErrOther(::anyhow::anyhow!("envelope serialise failed: {e}"))
         })?;
@@ -163,12 +183,13 @@ impl Backend for PluginLogicalBackend {
                     RvError::ErrOther(::anyhow::anyhow!("wasm runtime: {e:?}"))
                 })?;
                 runtime
-                    .invoke_with_config(
+                    .invoke_scoped(
                         &manifest,
                         &binary,
                         &envelope_bytes,
                         Some(self.core.clone()),
                         config,
+                        entity_id.as_deref(),
                     )
                     .await
                     .map_err(|e| {
@@ -240,7 +261,10 @@ impl Backend for PluginLogicalBackend {
 /// Build the host→plugin envelope from an inbound `Request`. The
 /// `path` field is the request path *relative to the mount* — the
 /// mounts router has already stripped the mount prefix.
-fn build_envelope(req: &Request) -> Result<Value, RvError> {
+fn build_envelope(
+    req: &Request,
+    caller: Option<&crate::kernel_api::provider::CallerIdentity>,
+) -> Result<Value, RvError> {
     let op = match req.operation {
         Operation::Read => "read",
         Operation::Write => "write",
@@ -252,11 +276,15 @@ fn build_envelope(req: &Request) -> Result<Value, RvError> {
         Operation::Rollback => "rollback",
     };
     let data = req.body.clone().unwrap_or_default();
-    Ok(json!({
+    let mut envelope = json!({
         "op": op,
         "path": req.path.clone(),
         "data": Value::Object(data),
-    }))
+    });
+    if let Some(c) = caller {
+        envelope["caller"] = super::provider::caller_json(c);
+    }
+    Ok(envelope)
 }
 
 /// Translate the plugin's response bytes into a `Response`. A
@@ -386,6 +414,18 @@ pub async fn invoke_active_plugin(
     plugin_name: &str,
     input: &[u8],
 ) -> Result<InvokeOutput, RvError> {
+    invoke_active_plugin_scoped(core, plugin_name, input, None).await
+}
+
+/// [`invoke_active_plugin`] on behalf of an attested caller entity. An
+/// entity-scoped plugin (`storage_scope = "entity"`) has its storage
+/// confined to `entity_id`'s prefix and is refused without one.
+pub async fn invoke_active_plugin_scoped(
+    core: Arc<dyn VaultCtx>,
+    plugin_name: &str,
+    input: &[u8],
+    entity_id: Option<&str>,
+) -> Result<InvokeOutput, RvError> {
     let barrier = core.barrier();
     let storage = barrier.as_storage();
 
@@ -419,7 +459,7 @@ pub async fn invoke_active_plugin(
             let runtime = WasmRuntime::new()
                 .map_err(|e| RvError::ErrOther(::anyhow::anyhow!("wasm runtime: {e:?}")))?;
             runtime
-                .invoke_with_config(&manifest, &binary, input, Some(core.clone()), config)
+                .invoke_scoped(&manifest, &binary, input, Some(core.clone()), config, entity_id)
                 .await
                 .map_err(|e| {
                     RvError::ErrOther(::anyhow::anyhow!(
@@ -485,10 +525,49 @@ mod tests {
     }
 
     #[test]
+    fn no_http_operation_can_produce_a_provider_op() {
+        for op in [
+            Operation::Read,
+            Operation::Write,
+            Operation::Delete,
+            Operation::List,
+            Operation::Renew,
+            Operation::Revoke,
+            Operation::Help,
+            Operation::Rollback,
+        ] {
+            let mut req = Request::new("provider.release");
+            req.operation = op;
+            let env = build_envelope(&req, None).unwrap();
+            assert!(!env["op"].as_str().unwrap().starts_with("provider."));
+        }
+    }
+
+    #[test]
+    fn caller_block_only_when_attested_and_never_from_the_body() {
+        let mut req = Request::new("v2/accounts");
+        let mut body = Map::new();
+        body.insert("caller".into(), serde_json::json!({"entity_id": "attacker"}));
+        req.body = Some(body);
+        // A plugin without `caller_identity` gets today's envelope.
+        let plain = build_envelope(&req, None).unwrap();
+        assert!(plain.get("caller").is_none());
+        // The block, when present, is the attested one; the body's lookalike
+        // stays inside `data`.
+        let attested = crate::kernel_api::provider::CallerIdentity {
+            entity_id: "real".into(),
+            ..Default::default()
+        };
+        let env = build_envelope(&req, Some(&attested)).unwrap();
+        assert_eq!(env["caller"]["entity_id"], "real");
+        assert_eq!(env["data"]["caller"]["entity_id"], "attacker");
+    }
+
+    #[test]
     fn envelope_carries_op_and_path() {
         let mut req = Request::new("users/alice");
         req.operation = Operation::Read;
-        let env = build_envelope(&req).unwrap();
+        let env = build_envelope(&req, None).unwrap();
         assert_eq!(env["op"], "read");
         assert_eq!(env["path"], "users/alice");
         assert_eq!(env["data"], serde_json::json!({}));
@@ -501,7 +580,7 @@ mod tests {
         let mut body = Map::new();
         body.insert("value".into(), Value::String("secret".into()));
         req.body = Some(body);
-        let env = build_envelope(&req).unwrap();
+        let env = build_envelope(&req, None).unwrap();
         assert_eq!(env["op"], "write");
         assert_eq!(env["data"]["value"], "secret");
     }

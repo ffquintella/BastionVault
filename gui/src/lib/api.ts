@@ -1834,6 +1834,12 @@ export interface PluginCapabilities {
   audit_emit: boolean;
   allowed_keys: string[];
   allowed_hosts: string[];
+  /** ABI 1.3: the host adds an attested `caller` block to every envelope. */
+  caller_identity?: boolean;
+  /** ABI 1.3: `"entity"` confines `bv.storage_*` to the caller's entity. */
+  storage_scope?: "plugin" | "entity";
+  /** ABI 1.3: declares the plugin a connect-time credential provider. */
+  credential_provider?: PluginCredentialProviderCap | null;
   /** Extensibility v2 app-module capabilities (absent for v1 plugins). */
   app?: {
     dynamic_menus?: boolean;
@@ -2284,6 +2290,34 @@ export const pluginSetGrants = (name: string, hosts: string[]) =>
 
 export const pluginDeleteGrants = (name: string) =>
   invoke<void>("plugins_delete_grants", { name });
+
+// ── Credential-provider grant (ABI 1.3) ──────────────────────────────
+
+export interface PluginCredentialProviderCap {
+  display_name: string;
+  selection: "operator";
+  protocols: string[];
+  secret_kinds: string[];
+}
+
+export interface PluginProviderGrantInfo {
+  /** The manifest's `credential_provider` block, or null if it has none. */
+  requested: PluginCredentialProviderCap | null;
+  /** The plugin also requests network egress; the consent panel warns. */
+  requests_network: boolean;
+  grant: { granted_by: string; granted_at: string; capability_sha256: string } | null;
+  /** The stored grant still matches the active manifest's block. */
+  live: boolean;
+}
+
+export const pluginGetProviderGrant = (name: string) =>
+  invoke<PluginProviderGrantInfo>("plugins_get_provider_grant", { name });
+
+export const pluginSetProviderGrant = (name: string) =>
+  invoke<void>("plugins_set_provider_grant", { name });
+
+export const pluginDeleteProviderGrant = (name: string) =>
+  invoke<void>("plugins_delete_provider_grant", { name });
 
 export interface PluginNetCall {
   at_unix_ms: number;

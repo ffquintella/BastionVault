@@ -1,0 +1,18 @@
+[package]
+name = "bv-sql-guard"
+version = "0.41.0"
+edition = "2021"
+description = "Literal-only SQL statements with allow-listed identifiers — BastionVault's SQL injection guard"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 0 leaf with NO dependencies, on purpose: the whole point of the crate is
+# that it is small enough to audit (and, later, to verify) in isolation from the
+# workspace. Do not add a dependency. roadmaps/formal-verification-and-type-driven-security.md § Phase 2.
+[dependencies]
+
+[dev-dependencies]
+# Dev/CI only — compile-fail proof that `sql!(runtime_string)` does not build.
+trybuild = "1"

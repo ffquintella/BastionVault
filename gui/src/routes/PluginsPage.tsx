@@ -34,6 +34,7 @@ export function PluginsPage() {
   const [configuring, setConfiguring] = useState<PluginManifest | null>(null);
   const [versioning, setVersioning] = useState<PluginManifest | null>(null);
   const [networking, setNetworking] = useState<PluginManifest | null>(null);
+  const [providerGranting, setProviderGranting] = useState<PluginManifest | null>(null);
   const [reloading, setReloading] = useState<string | null>(null);
   const [acceptUnsigned, setAcceptUnsigned] = useState<boolean | null>(null);
   const [acceptUnsignedBusy, setAcceptUnsignedBusy] = useState(false);
@@ -283,6 +284,7 @@ export function PluginsPage() {
                   onConfigure={() => setConfiguring(p)}
                   onVersions={() => setVersioning(p)}
                   onNetwork={() => setNetworking(p)}
+                  onProvider={() => setProviderGranting(p)}
                   onReload={async () => {
                     setReloading(p.name);
                     try {
@@ -359,6 +361,13 @@ export function PluginsPage() {
         />
       )}
 
+      {providerGranting && (
+        <ProviderGrantModal
+          plugin={providerGranting}
+          onClose={() => setProviderGranting(null)}
+        />
+      )}
+
       <ConfirmModal
         open={deletingName !== null}
         onClose={() => setDeletingName(null)}
@@ -380,6 +389,7 @@ function PluginRow({
   onReload,
   onDelete,
   onNetwork,
+  onProvider,
 }: {
   plugin: PluginManifest;
   reloading: boolean;
@@ -389,9 +399,11 @@ function PluginRow({
   onReload: () => void;
   onDelete: () => void;
   onNetwork: () => void;
+  onProvider: () => void;
 }) {
   const hasConfig = (plugin.config_schema?.length ?? 0) > 0;
   const requestsNet = (plugin.capabilities.app?.net?.hosts?.length ?? 0) > 0;
+  const isProvider = !!plugin.capabilities.credential_provider;
   return (
     <div className="flex items-start justify-between p-3 border border-[var(--color-border)] rounded-md gap-3">
       <div className="flex-1 min-w-0">
@@ -420,6 +432,9 @@ function PluginRow({
         <Button size="sm" variant="ghost" onClick={onVersions}>Versions</Button>
         {requestsNet && (
           <Button size="sm" variant="secondary" onClick={onNetwork}>Network</Button>
+        )}
+        {isProvider && (
+          <Button size="sm" variant="secondary" onClick={onProvider}>Credentials</Button>
         )}
         <Button size="sm" variant="ghost" onClick={onReload} loading={reloading}>
           Reload
@@ -1458,6 +1473,147 @@ function GrantsModal({
             </div>
           )}
         </div>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * ABI 1.3: the credential-provider consent panel. A plugin that declares
+ * `[capabilities.credential_provider]` can hand credentials to Connect only
+ * after an administrator approves it here; the approval is pinned to the
+ * declared block, so any later change to it voids the grant until re-approved.
+ */
+function ProviderGrantModal({
+  plugin,
+  onClose,
+}: {
+  plugin: PluginManifest;
+  onClose: () => void;
+}) {
+  const { toast } = useToast();
+  const [info, setInfo] = useState<api.PluginProviderGrantInfo | null>(null);
+  const [consent, setConsent] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const load = React.useCallback(async () => {
+    try {
+      setInfo(await api.pluginGetProviderGrant(plugin.name));
+    } catch (e) {
+      toast("error", extractError(e));
+    }
+  }, [plugin.name, toast]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const run = async (fn: () => Promise<void>, ok: string) => {
+    setBusy(true);
+    try {
+      await fn();
+      toast("success", ok);
+      setConsent(false);
+      await load();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const req = info?.requested ?? null;
+  return (
+    <Modal
+      open={true}
+      onClose={onClose}
+      title={`Credential provider — ${plugin.name}`}
+      size="lg"
+      actions={
+        <>
+          <Button variant="ghost" onClick={onClose}>Close</Button>
+          {info?.grant && (
+            <Button
+              variant="danger"
+              loading={busy}
+              onClick={() =>
+                run(() => api.pluginDeleteProviderGrant(plugin.name), "Credential-provider grant revoked.")
+              }
+            >
+              Revoke
+            </Button>
+          )}
+          <Button
+            variant="primary"
+            loading={busy}
+            disabled={!consent || !req}
+            onClick={() =>
+              run(() => api.pluginSetProviderGrant(plugin.name), `Credential provider approved for ${plugin.name}.`)
+            }
+          >
+            Approve
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4 text-sm">
+        <p className="text-[var(--color-text-muted)]">
+          A credential provider supplies logins to Connect on the operator's behalf. Approve it
+          only if you trust the publisher. Approval and revocation are recorded in the audit log.
+        </p>
+
+        {info?.requests_network && (
+          <p role="alert" className="rounded-md border border-[var(--color-warning)] p-3 text-xs">
+            This plugin also requests network access. A provider that can reach the network could
+            send the credentials it holds elsewhere. Review its Network panel before approving.
+          </p>
+        )}
+
+        {info && (
+          <div className="rounded-md border border-[var(--color-border)] p-3">
+            <p className="font-medium mb-1">Current approval</p>
+            {info.grant ? (
+              <div className="text-xs space-y-0.5">
+                <p>
+                  Status:{" "}
+                  {info.live ? (
+                    <Badge label="live" variant="success" />
+                  ) : (
+                    <Badge label="stale — re-approve" variant="warning" />
+                  )}
+                </p>
+                <p className="text-[var(--color-text-muted)]">
+                  Approved by {info.grant.granted_by || "—"} at {info.grant.granted_at}
+                </p>
+              </div>
+            ) : (
+              <p className="text-xs text-[var(--color-text-muted)]">
+                Not approved — Connect refuses every launch that names this provider.
+              </p>
+            )}
+          </div>
+        )}
+
+        {req && (
+          <div>
+            <p className="font-medium mb-1">Declared by the manifest</p>
+            <dl className="text-xs grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+              <dt className="text-[var(--color-text-muted)]">Shown as</dt>
+              <dd>{req.display_name}</dd>
+              <dt className="text-[var(--color-text-muted)]">Selection</dt>
+              <dd>{req.selection}</dd>
+              <dt className="text-[var(--color-text-muted)]">Protocols</dt>
+              <dd className="font-mono">{req.protocols.join(", ")}</dd>
+              <dt className="text-[var(--color-text-muted)]">Secret kinds</dt>
+              <dd className="font-mono">{req.secret_kinds.join(", ")}</dd>
+            </dl>
+          </div>
+        )}
+
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />
+          <span>Approve this plugin as a credential provider for the block above</span>
+        </label>
       </div>
     </Modal>
   );

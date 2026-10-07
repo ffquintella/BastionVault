@@ -50,6 +50,10 @@ use alloc::vec::Vec;
 mod host;
 pub use host::{Host, HostError, LogLevel};
 
+/// ABI 1.3: credential-provider authoring surface (`provider_module!`).
+#[cfg(feature = "provider")]
+pub mod provider;
+
 /// Extensibility v2 (Phase 6): app-module authoring surface.
 #[cfg(feature = "app")]
 pub mod app;

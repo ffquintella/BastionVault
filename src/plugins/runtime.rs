@@ -139,6 +139,12 @@ struct PluginCtx {
     log_emit: bool,
     audit_emit: bool,
     storage_prefix: Option<String>,
+    /// Barrier prefix every plugin-relative storage key is rebased onto.
+    /// `core/plugins/<name>/data/` for the default scope, or
+    /// `core/plugins/<name>/data/entity/<entity_id>/` for
+    /// `storage_scope = "entity"` — set by the host from the attested
+    /// caller, never by the plugin.
+    data_root: String,
     response_window: Option<(u32, u32)>,
     limits: StoreLimits,
     core: Option<Arc<dyn VaultCtx>>,
@@ -191,12 +197,20 @@ impl PluginCtx {
         if req_norm.contains("..") {
             return None;
         }
-        Some(format!(
-            "core/plugins/{name}/data/{rel}",
-            name = self.plugin_name,
-            rel = req_norm,
-        ))
+        Some(format!("{}{}", self.data_root, req_norm))
     }
+}
+
+/// Barrier prefix of one entity's data for an entity-scoped plugin.
+/// `None` when `entity_id` is empty or contains anything but ASCII
+/// alphanumerics, `-` and `_`: the id is interpolated into a storage
+/// path, so it must not be able to carry `/` or `..`.
+pub fn entity_data_root(plugin_name: &str, entity_id: &str) -> Option<String> {
+    let ok = !entity_id.is_empty()
+        && entity_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    ok.then(|| format!("core/plugins/{plugin_name}/data/entity/{entity_id}/"))
 }
 
 /// Reusable runtime. Holds the per-invoke fuel / memory budget. The
@@ -256,6 +270,34 @@ impl WasmRuntime {
         core: Option<Arc<dyn VaultCtx>>,
         config: std::collections::BTreeMap<String, String>,
     ) -> Result<InvokeOutput, RuntimeError> {
+        self.invoke_scoped(manifest, wasm_bytes, input, core, config, None)
+            .await
+    }
+
+    /// Like [`invoke_with_config`](Self::invoke_with_config), with the
+    /// attested caller entity. A plugin declaring `storage_scope =
+    /// "entity"` has its storage confined to that entity's prefix, and
+    /// the call is refused when no valid entity is supplied. For any
+    /// other plugin `entity_id` is ignored.
+    pub async fn invoke_scoped(
+        &self,
+        manifest: &PluginManifest,
+        wasm_bytes: &[u8],
+        input: &[u8],
+        core: Option<Arc<dyn VaultCtx>>,
+        config: std::collections::BTreeMap<String, String>,
+        entity_id: Option<&str>,
+    ) -> Result<InvokeOutput, RuntimeError> {
+        let data_root = if manifest.capabilities.storage_scope == super::manifest::StorageScope::Entity
+        {
+            entity_data_root(&manifest.name, entity_id.unwrap_or("")).ok_or_else(|| {
+                RuntimeError::Engine(
+                    "entity-scoped plugin invoked without a valid caller entity".to_string(),
+                )
+            })?
+        } else {
+            format!("core/plugins/{}/data/", manifest.name)
+        };
         // Reuse a previously-compiled module when one is cached for
         // this `(name, sha256)` pair; otherwise compile + insert.
         let module = self
@@ -290,6 +332,7 @@ impl WasmRuntime {
             log_emit: manifest.capabilities.log_emit,
             audit_emit: manifest.capabilities.audit_emit,
             storage_prefix: manifest.capabilities.storage_prefix.clone(),
+            data_root,
             response_window: None,
             limits,
             core,
@@ -1024,7 +1067,7 @@ async fn storage_list_impl(
         Some(c) => c,
         None => return STORAGE_FORBIDDEN,
     };
-    let mut full_prefix = format!("core/plugins/{}/data/", caller.data().plugin_name);
+    let mut full_prefix = caller.data().data_root.clone();
     if !prefix.is_empty() {
         // For the list call we don't need full prefix-membership check
         // (the plugin can only list under its own prefix), but we still
@@ -1435,6 +1478,51 @@ mod tests {
             (i32.const 0))
         )
         "#
+    }
+
+    #[test]
+    fn entity_data_root_rejects_path_tricks() {
+        assert_eq!(
+            entity_data_root("p", "4f0c-AA_1").as_deref(),
+            Some("core/plugins/p/data/entity/4f0c-AA_1/")
+        );
+        for bad in ["", "..", "a/b", "../x", "a..b/", "a b", "a\\nb", "é"] {
+            assert!(entity_data_root("p", bad).is_none(), "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn entity_scoped_plugin_is_refused_without_a_caller_entity() {
+        let bytes = wat::parse_str(echo_wat()).unwrap();
+        let mut m = manifest_for(&bytes);
+        m.abi_version = "1.3".to_string();
+        m.capabilities.caller_identity = true;
+        m.capabilities.storage_scope = crate::plugins::manifest::StorageScope::Entity;
+        let rt = WasmRuntime::new().unwrap();
+        for entity in [None, Some(""), Some("../x"), Some("a/b")] {
+            let r = rt
+                .invoke_scoped(&m, &bytes, b"{}", None, Default::default(), entity)
+                .await;
+            assert!(r.is_err(), "{entity:?} must be refused before the plugin runs");
+        }
+        // A valid entity runs.
+        let ok = rt
+            .invoke_scoped(&m, &bytes, b"{}", None, Default::default(), Some("e-1"))
+            .await
+            .unwrap();
+        assert_eq!(ok.response, b"{}");
+    }
+
+    #[tokio::test]
+    async fn default_scope_plugin_ignores_the_entity() {
+        let bytes = wat::parse_str(echo_wat()).unwrap();
+        let m = manifest_for(&bytes);
+        let rt = WasmRuntime::new().unwrap();
+        let out = rt
+            .invoke_scoped(&m, &bytes, b"x", None, Default::default(), None)
+            .await
+            .unwrap();
+        assert_eq!(out.response, b"x");
     }
 
     #[tokio::test]

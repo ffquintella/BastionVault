@@ -77,12 +77,12 @@ GUI only, like the rest of Resource Connect.
 
 ## Current State
 
-**Status: Planned. Spec only (2026-10-05); nothing is implemented.**
+**Status: In progress (2026-10-07). Phase 1, the host substrate, is implemented apart from the items listed under it; Phases 2–5 are not started. Nothing a user can see yet: no plugin uses the substrate and Connect does not know the `provider` source.**
 
 | Phase | Status |
 |---|---|
-| Phase 0 — verification spike | Todo |
-| Phase 1 — host substrate: caller identity, entity storage scope, credential providers | Todo |
+| Phase 0 — verification spike | Partly answered (see the phase) |
+| Phase 1 — host substrate: caller identity, entity storage scope, credential providers | Done except the items listed under the phase |
 | Phase 2 — the `bastion-plugin-self-accounts` plugin | Todo |
 | Phase 3 — Connect integration, server side | Todo |
 | Phase 4 — Connect integration, GUI and Tauri host | Todo |
@@ -669,7 +669,7 @@ Document all of it in `docs/api.md`, and the plugin in its own README under
 
 ## Phases
 
-### Phase 0 — verification spike — **Todo**
+### Phase 0 — verification spike — **Partly answered (2026-10-07)**
 
 Answer the questions this spec defers, and record the answers here:
 
@@ -680,7 +680,36 @@ Answer the questions this spec defers, and record the answers here:
 - Whether `resources/config/types` is readable by every operator who can
   connect.
 
-### Phase 1 — host substrate — **Todo**
+**Answers so far** (read from the code; none of them run):
+
+- **Older clients.** `isKnownProfile` accepts any object as `credential_source`,
+  so an older GUI lists a `provider` profile as launchable. The older Tauri host
+  then fails closed in `resolve_ssh_credential` with *"unknown credential source"*
+  (`gui/src-tauri/src/commands/connect.rs`, the `other =>` arm), which is the
+  behaviour §10 asks for. **Not yet checked:** that the older profile editor
+  round-trips an unknown `credential_source` without rewriting it. Until that is
+  run, ship the `isKnownProfile` hardening (a known `kind` is required) before
+  the first release that can create `provider` profiles.
+- **`.bvx` exports.** `src/exchange/` and `src/backup/` reference no
+  `core/plugins/` key, so exchange exports do not carry plugin data. BVBK full
+  backups copy the barrier and do include it, as §10 says.
+- **Entity deletion.** There is none. `EntityStore` has no delete: the entity
+  record is kept on purpose (share and owner records point at it), and deleting
+  a principal only calls `IdentityService::forget_alias`. §4.7's "when the
+  identity module deletes an entity" therefore had no hook. The purge now runs
+  when `forget_alias` removes an entity's **last** alias, since a recreated
+  principal gets a new entity and the old data could never be reached again.
+- **Passphrase-protected SSH keys.** The direct SSH path accepts one
+  (`SshCredential::PrivateKey { pem, passphrase }`). The Rustion path refuses it,
+  because the bastion envelope has no passphrase channel
+  (`connect.rs`, the `rustion-required` check). Phase 2 stays with unencrypted
+  keys; passphrases would be direct-only.
+- **`resources/config/types` readability.** Not determined. No baseline policy
+  mentions the path, so who may read it depends on the operator's own policies.
+  The `x-bv-options` option list reads it through the GUI's existing
+  `resource_types_read`, and falls back to the built-in types if that fails.
+
+### Phase 1 — host substrate — **Done except the items below (2026-10-07)**
 
 - Manifest: `caller_identity`, `storage_scope`, `[capabilities.credential_provider]`,
   with validation and the widening guard. `HOST_ABI_MINOR = 3`.
@@ -692,6 +721,26 @@ Answer the questions this spec defers, and record the answers here:
   `Caller` type, and a `provider_module!` macro. Testkit: drive the
   `provider.*` ops and entity scoping.
 - `SurfaceForm`: the three generic additions (§7).
+
+**Where the implementation differs from §4, and what is left:**
+
+- The grant is stored under `core/plugins/engine/provider-grants/<name>`, not
+  `grants/<name>/credential-provider`: a key and a directory of the same name
+  cannot coexist on the file backend, and the network grant keeps its record.
+- `storage_scope = "entity"` is accepted for `runtime = "wasm"` only. The
+  process runtimes have their own storage path and were not given the rebasing.
+- A granted provider that is also quarantined is treated as not approved.
+- The consent panel and the three grant commands exist (embedded and remote);
+  the remote calls pin `/v2` because the route is not on the v1 scope.
+- **Not done:** the audit event and the pending-purge retry marker for a failed
+  entity purge (a failure is only logged, and the admin route is the retry); the
+  `plugin-admin` policy entries (no such policy exists in the tree, so the new
+  `v2/sys/plugins/*` routes are covered only by the default deny); the
+  `bvault_plugin_provider_requests_total` metric; and a test that drives
+  `forget_alias` through a real plugin host.
+- **Not run:** the `provider` SDK feature was only built and tested on the host.
+  The `wasm32-wasip1` target is not installed here, so its `no_std` build is
+  unverified.
 
 ### Phase 2 — the plugin — **Todo**
 

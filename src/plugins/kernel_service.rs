@@ -25,6 +25,10 @@ use crate::{
     errors::RvError,
     kernel_api::{
         engines::{PluginChannel, PluginHost, PluginInvocation},
+        provider::{
+            CallerIdentity, CredentialProviderDecl, ProviderCandidate, ProviderQuery,
+            ProviderReleaseRequest, ReleasedCredential,
+        },
         VaultCtx,
     },
     plugins::{invoke_active_plugin, InvokeOutcome, PluginCatalog},
@@ -86,5 +90,31 @@ impl PluginHost for PluginRuntimeHost {
             _ => None,
         };
         Ok(PluginInvocation { response: output.response, error_status })
+    }
+
+    async fn credential_providers(&self) -> Vec<CredentialProviderDecl> {
+        super::provider::credential_providers(&self.core).await
+    }
+
+    async fn provider_candidates(
+        &self,
+        provider: &str,
+        caller: &CallerIdentity,
+        query: &ProviderQuery,
+    ) -> Result<Vec<ProviderCandidate>, RvError> {
+        super::provider::provider_candidates(&self.core, provider, caller, query).await
+    }
+
+    async fn provider_release(
+        &self,
+        provider: &str,
+        caller: &CallerIdentity,
+        req: &ProviderReleaseRequest,
+    ) -> Result<ReleasedCredential, RvError> {
+        super::provider::provider_release(&self.core, provider, caller, req).await
+    }
+
+    async fn purge_entity_data(&self, entity_id: &str) -> Result<(), RvError> {
+        super::provider::purge_entity_data(&self.core, entity_id).await
     }
 }

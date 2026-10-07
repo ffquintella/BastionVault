@@ -5,6 +5,7 @@ use serde_json::Value;
 use tokio::net::TcpListener;
 
 use bv_errors::RvError;
+use bv_sql_guard::{sql, SqlIdent};
 
 use crate::{Backend, BackendEntry};
 
@@ -34,67 +35,9 @@ const MAX_PUT_VALUE_BYTES: usize = (HIQLITE_WAL_SIZE as usize) - 1024 * 1024;
 /// healthy cluster, tight enough to flag a partitioned leader quickly.
 const QUORUM_ACK_STALE_MS: u64 = 3_000;
 
-/// Escape a literal key prefix for use in a SQL `LIKE` pattern.
-///
-/// Binding the pattern as a parameter stops SQL *injection* but not
-/// pattern *widening*: `LIKE` reads `_` as "any one character" and `%`
-/// as "any sequence". Vault keys carry `_` routinely, so listing
-/// `secret/my_app/` would also match — and return — `secret/myXapp/…`,
-/// another subtree entirely. Escape both wildcards and the escape
-/// character itself; every call site pairs this with `ESCAPE '\'`.
-///
-/// This is a narrowing optimization, not the authorization boundary:
-/// SQLite's `LIKE` is also ASCII-case-insensitive by default, so the
-/// authoritative prefix test is the `strip_prefix` filter each caller
-/// applies to the returned rows.
-fn escape_like_prefix(prefix: &str) -> String {
-    let mut out = String::with_capacity(prefix.len());
-    for c in prefix.chars() {
-        if matches!(c, '\\' | '%' | '_') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
-}
-
 /// `LIKE` pattern matching every key under `prefix`, wildcards escaped.
 fn like_prefix_pattern(prefix: &str) -> String {
-    format!("{}%", escape_like_prefix(prefix))
-}
-
-/// Validate the operator-configured `table` name before it is ever
-/// interpolated into a statement.
-///
-/// Every statement in this backend builds its SQL with `format!`, and
-/// one of the sites is `client.batch(..)`, which executes multiple
-/// `;`-separated statements. The value comes from the server config, so
-/// it is not remotely reachable — but that config is templated by
-/// Puppet/quadlet, and "operator-supplied string spliced into SQL that
-/// accepts multiple statements" is precisely the shape of a
-/// multi-statement injection. Constrain it to a plain SQL identifier so
-/// the shape cannot exist, rather than relying on the templating layer
-/// to stay well-behaved.
-fn validate_table_name(table: &str) -> Result<(), RvError> {
-    const MAX_TABLE_NAME_LEN: usize = 64;
-
-    let valid = !table.is_empty()
-        && table.len() <= MAX_TABLE_NAME_LEN
-        && table
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-
-    if valid {
-        Ok(())
-    } else {
-        Err(RvError::ErrString(format!(
-            "hiqlite storage: invalid `table` name {table:?}; expected a plain SQL identifier \
-             (ASCII letters, digits and `_`, not starting with a digit, at most \
-             {MAX_TABLE_NAME_LEN} characters)"
-        )))
-    }
+    format!("{}%", bv_sql_guard::escape_like(prefix))
 }
 
 fn map_hiqlite_error(e: hiqlite::Error) -> RvError {
@@ -140,7 +83,7 @@ fn map_hiqlite_error(e: hiqlite::Error) -> RvError {
 
 pub struct HiqliteBackend {
     client: Client,
-    table: String,
+    table: SqlIdent,
     /// Hiqlite API address for management HTTP calls (e.g., "https://127.0.0.1:8100")
     api_addr: String,
     /// Shared API secret for hiqlite management endpoints
@@ -201,10 +144,11 @@ impl Backend for HiqliteBackend {
         let rows: Vec<VaultRow> = self
             .client
             .query_consistent_map(
-                Cow::Owned(format!(
+                sql!(
                     "SELECT vault_key, vault_value FROM {} WHERE vault_key LIKE ? ESCAPE '\\'",
-                    self.table
-                )),
+                    &self.table
+                )
+                .into_cow(),
                 vec![Param::from(like_prefix_pattern(prefix))],
             )
             .await
@@ -254,10 +198,11 @@ impl Backend for HiqliteBackend {
             Some(start) => {
                 self.client
                     .query_consistent_map(
-                        Cow::Owned(format!(
+                        sql!(
                             "SELECT vault_key, vault_value FROM {} WHERE vault_key LIKE ? ESCAPE '\\' AND vault_key >= ?",
-                            self.table
-                        )),
+                            &self.table
+                        )
+                        .into_cow(),
                         vec![Param::from(like_prefix_pattern(prefix)), Param::from(start.to_string())],
                     )
                     .await
@@ -266,10 +211,11 @@ impl Backend for HiqliteBackend {
             None => {
                 self.client
                     .query_consistent_map(
-                        Cow::Owned(format!(
+                        sql!(
                             "SELECT vault_key, vault_value FROM {} WHERE vault_key LIKE ? ESCAPE '\\'",
-                            self.table
-                        )),
+                            &self.table
+                        )
+                        .into_cow(),
                         vec![Param::from(like_prefix_pattern(prefix))],
                     )
                     .await
@@ -296,10 +242,7 @@ impl Backend for HiqliteBackend {
         let result: Option<VaultRow> = self
             .client
             .query_consistent_map(
-                Cow::Owned(format!(
-                    "SELECT vault_key, vault_value FROM {} WHERE vault_key = ?",
-                    self.table
-                )),
+                sql!("SELECT vault_key, vault_value FROM {} WHERE vault_key = ?", &self.table).into_cow(),
                 vec![Param::from(key)],
             )
             .await
@@ -333,10 +276,7 @@ impl Backend for HiqliteBackend {
 
         self.client
             .execute(
-                Cow::Owned(format!(
-                    "INSERT OR REPLACE INTO {} (vault_key, vault_value) VALUES (?, ?)",
-                    self.table
-                )),
+                sql!("INSERT OR REPLACE INTO {} (vault_key, vault_value) VALUES (?, ?)", &self.table).into_cow(),
                 vec![Param::from(entry.key.clone()), Param::from(entry.value.clone())],
             )
             .await
@@ -352,7 +292,7 @@ impl Backend for HiqliteBackend {
 
         self.client
             .execute(
-                Cow::Owned(format!("DELETE FROM {} WHERE vault_key = ?", self.table)),
+                sql!("DELETE FROM {} WHERE vault_key = ?", &self.table).into_cow(),
                 vec![Param::from(key)],
             )
             .await
@@ -452,15 +392,14 @@ impl HiqliteBackend {
             .and_then(|v| v.as_str())
             .ok_or(RvError::ErrPhysicalConfigItemMissing)?;
 
-        let table = conf
-            .get("table")
-            .and_then(|v| v.as_str())
-            .unwrap_or("vault")
-            .to_string();
-
-        // Reject anything that is not a plain identifier before it
-        // reaches a `format!`-built statement — see `validate_table_name`.
-        validate_table_name(&table)?;
+        // Validated once, at the boundary: an invalid `table` is a startup
+        // error, never a statement fragment. `client.batch(..)` executes
+        // `;`-separated statements, so this value must not be able to
+        // terminate one.
+        let table = SqlIdent::new(conf.get("table").and_then(|v| v.as_str()).unwrap_or("vault"))
+            .map_err(|e| {
+                RvError::ErrString(format!("hiqlite storage: `table` is not a valid SQL identifier: {e}"))
+            })?;
 
         // hiqlite expects listen_addr to be host-only (e.g. "0.0.0.0");
         // it appends the port from the node's addr_raft/addr_api fields via build_listen_addr().
@@ -654,12 +593,17 @@ impl HiqliteBackend {
             .await
             .map_err(map_hiqlite_error)?;
 
-        // Create the vault table if it doesn't exist
+        // Create the vault table if it doesn't exist. NB: `batch` executes
+        // multiple `;`-separated statements — the identifier must stay a
+        // `SqlIdent` and the statement must stay a `sql!` literal.
         client
-            .batch(Cow::Owned(format!(
-                "CREATE TABLE IF NOT EXISTS {} (vault_key TEXT NOT NULL PRIMARY KEY, vault_value BLOB NOT NULL)",
-                table
-            )))
+            .batch(
+                sql!(
+                    "CREATE TABLE IF NOT EXISTS {} (vault_key TEXT NOT NULL PRIMARY KEY, vault_value BLOB NOT NULL)",
+                    &table
+                )
+                .into_cow(),
+            )
             .await
             .map_err(map_hiqlite_error)?;
 
@@ -937,7 +881,8 @@ mod test {
     use serde_json::Value;
     use serial_test::serial;
 
-    use super::{escape_like_prefix, like_prefix_pattern, validate_table_name, HiqliteBackend};
+    use super::{like_prefix_pattern, HiqliteBackend};
+    use bv_sql_guard::sql;
     use crate::test::{
         test_backend_curd, test_backend_list_prefix, test_backend_list_prefix_is_literal,
     };
@@ -992,7 +937,7 @@ mod test {
         // Clear the test table
         let _ = backend
             .client()
-            .batch(std::borrow::Cow::Borrowed("DELETE FROM vault_test"))
+            .batch(sql!("DELETE FROM vault_test").into_cow())
             .await;
 
         test_backend_curd(&backend).await;
@@ -1000,7 +945,7 @@ mod test {
         // Clear again before prefix test
         let _ = backend
             .client()
-            .batch(std::borrow::Cow::Borrowed("DELETE FROM vault_test"))
+            .batch(sql!("DELETE FROM vault_test").into_cow())
             .await;
 
         test_backend_list_prefix(&backend).await;
@@ -1025,7 +970,7 @@ mod test {
         let backend = HiqliteBackend::new(&conf).expect("backend creation failed");
         let _ = backend
             .client()
-            .batch(std::borrow::Cow::Borrowed("DELETE FROM vault_test"))
+            .batch(sql!("DELETE FROM vault_test").into_cow())
             .await;
 
         for key in [
@@ -1072,36 +1017,8 @@ mod test {
         assert_eq!(keys, vec!["db".to_string()]);
     }
 
-    /// A configured table name is a plain SQL identifier or the backend
-    /// refuses to start. One of the interpolation sites is
-    /// `client.batch(..)`, which executes `;`-separated statements.
-    #[test]
-    fn test_validate_table_name_rejects_non_identifiers() {
-        for good in ["vault", "vault_test", "_v1", "Vault2"] {
-            assert!(validate_table_name(good).is_ok(), "{good} should be accepted");
-        }
-        for bad in [
-            "",
-            "1vault",
-            "vault; DROP TABLE vault",
-            "vault--",
-            "vault vault",
-            "vault\"",
-            "vault`",
-            "va ult",
-            "vaúlt",
-            &"v".repeat(65),
-        ] {
-            assert!(validate_table_name(bad).is_err(), "{bad:?} should be rejected");
-        }
-    }
-
     #[test]
     fn test_escape_like_prefix_neutralizes_wildcards() {
-        assert_eq!(escape_like_prefix("secret/my_app/"), r"secret/my\_app/");
-        assert_eq!(escape_like_prefix("secret/my%app/"), r"secret/my\%app/");
-        assert_eq!(escape_like_prefix(r"secret/a\b"), r"secret/a\\b");
-        assert_eq!(escape_like_prefix("plain/"), "plain/");
         assert_eq!(like_prefix_pattern("secret/my_app/"), r"secret/my\_app/%");
         assert_eq!(like_prefix_pattern(""), "%");
     }
@@ -1210,7 +1127,7 @@ mod test {
         // Clear destination
         let dest_any = dest.as_ref() as &dyn std::any::Any;
         if let Some(hiqlite) = dest_any.downcast_ref::<HiqliteBackend>() {
-            let _ = hiqlite.client().batch(std::borrow::Cow::Borrowed("DELETE FROM vault_test")).await;
+            let _ = hiqlite.client().batch(sql!("DELETE FROM vault_test").into_cow()).await;
         }
 
         // Run migration

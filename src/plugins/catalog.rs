@@ -423,6 +423,30 @@ impl PluginCatalog {
                 )));
             }
         }
+        // ABI minor 3 (credential providers): caller_identity,
+        // storage_scope and credential_provider are capabilities. None can
+        // be gained on re-register, and the storage scope cannot change in
+        // either direction (it would re-home the plugin's data). A *changed*
+        // credential_provider block is allowed here: it voids the admin
+        // grant (pinned to its hash) until re-approved.
+        if !p.caller_identity && n.caller_identity {
+            return Err(RvError::ErrString(
+                "capability widening: caller_identity cannot be enabled on re-register; DELETE + re-register"
+                    .into(),
+            ));
+        }
+        if p.storage_scope != n.storage_scope {
+            return Err(RvError::ErrString(
+                "capability widening: storage_scope cannot change on re-register; DELETE + re-register"
+                    .into(),
+            ));
+        }
+        if p.credential_provider.is_none() && n.credential_provider.is_some() {
+            return Err(RvError::ErrString(
+                "capability widening: credential_provider cannot be added on re-register; DELETE + re-register"
+                    .into(),
+            ));
+        }
         let prev_notify = pa.notify.unwrap_or_default();
         if let Some(new_notify) = na.notify {
             if (new_notify.read && !prev_notify.read)
@@ -1159,6 +1183,60 @@ mod tests {
             ..Default::default()
         };
         m
+    }
+
+    fn provider_manifest_with(name: &str, version: &str, binary: &[u8]) -> PluginManifest {
+        use crate::plugins::manifest::{CredentialProviderCap, ProviderSelection, StorageScope};
+        let mut m = manifest_with(name, version, binary);
+        m.abi_version = "1.3".to_string();
+        m.capabilities.caller_identity = true;
+        m.capabilities.storage_scope = StorageScope::Entity;
+        m.capabilities.credential_provider = Some(CredentialProviderCap {
+            display_name: "P".into(),
+            selection: ProviderSelection::Operator,
+            protocols: vec!["ssh".into()],
+            secret_kinds: vec!["password".into()],
+        });
+        m
+    }
+
+    #[tokio::test]
+    async fn provider_capability_widening_refused() {
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let cat = PluginCatalog::new();
+        let bin = b"prov-1".to_vec();
+        cat.put(&s, &manifest_with("prov", "0.1.0", &bin), &bin).await.unwrap();
+
+        // Gaining caller_identity, entity scope or a provider block is refused.
+        let bin2 = b"prov-2".to_vec();
+        let mut m = manifest_with("prov", "0.2.0", &bin2);
+        m.abi_version = "1.3".to_string();
+        m.capabilities.caller_identity = true;
+        let err = cat.put(&s, &m, &bin2).await.unwrap_err();
+        assert!(format!("{err:?}").contains("caller_identity"));
+
+        let bin3 = b"prov-3".to_vec();
+        let err = cat
+            .put(&s, &provider_manifest_with("prov", "0.3.0", &bin3), &bin3)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("capability widening"));
+    }
+
+    #[tokio::test]
+    async fn provider_storage_scope_cannot_change() {
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let cat = PluginCatalog::new();
+        let bin = b"scope-1".to_vec();
+        cat.put(&s, &provider_manifest_with("scope", "0.1.0", &bin), &bin).await.unwrap();
+        let bin2 = b"scope-2".to_vec();
+        let mut m = provider_manifest_with("scope", "0.2.0", &bin2);
+        m.capabilities.credential_provider = None;
+        m.capabilities.storage_scope = crate::plugins::manifest::StorageScope::Plugin;
+        let err = cat.put(&s, &m, &bin2).await.unwrap_err();
+        assert!(format!("{err:?}").contains("storage_scope"));
     }
 
     #[tokio::test]

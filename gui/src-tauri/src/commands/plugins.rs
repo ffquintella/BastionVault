@@ -45,13 +45,25 @@ async fn remote_raw(
     path: &str,
     body: Option<Map<String, Value>>,
 ) -> Result<(u16, Value), CommandError> {
+    remote_raw_at(state, method, None, path, body).await
+}
+
+/// [`remote_raw`] with an explicit API prefix (`"/v2"`), for the routes that
+/// exist on the v2 surface only. `None` uses the session's own prefix.
+async fn remote_raw_at(
+    state: &State<'_, AppState>,
+    method: &str,
+    prefix: Option<&str>,
+    path: &str,
+    body: Option<Map<String, Value>>,
+) -> Result<(u16, Value), CommandError> {
     let client_guard = state.remote_client.lock().await;
     let client = client_guard.as_ref().ok_or("Not connected to remote server")?.clone();
     drop(client_guard);
 
     let token = state.token.lock().await.clone().unwrap_or_default();
     let bound = client.with_token(&token);
-    let url = format!("{}/{}", bound.api_prefix(), path);
+    let url = format!("{}/{}", prefix.unwrap_or_else(|| bound.api_prefix()), path);
 
     let resp = match method {
         "GET" => bound.request_read(url),
@@ -661,6 +673,144 @@ pub async fn plugins_delete_grants(state: State<'_, AppState>, name: String) -> 
     )
     .await;
     outcome
+}
+
+// ── Credential providers: admin grant (v2 only) ──
+//
+// Proxies GET/PUT/DELETE /v2/sys/plugins/<name>/grants/credential-provider.
+// Spec: features/self-accounts.md §4.5. The route exists on the v2 surface
+// only, so the remote path pins the prefix instead of using the session's.
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProviderGrantResult {
+    /// The manifest's `credential_provider` block, rendered verbatim in the
+    /// consent panel (null when the plugin declares none).
+    pub requested: Option<Value>,
+    /// Whether the plugin also requests network egress; the panel warns.
+    pub requests_network: bool,
+    /// The stored grant (null when never granted).
+    pub grant: Option<Value>,
+    /// Whether the grant still matches the active manifest's block.
+    pub live: bool,
+}
+
+#[tauri::command]
+pub async fn plugins_get_provider_grant(
+    state: State<'_, AppState>,
+    name: String,
+) -> CmdResult<ProviderGrantResult> {
+    if is_remote(&state).await {
+        let json =
+            remote_call_v2(&state, "GET", &format!("sys/plugins/{name}/grants/credential-provider"), None).await?;
+        return decode_json(json, "provider grant");
+    }
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let storage = core.barrier.as_storage();
+    let manifest = PluginCatalog::new()
+        .get_manifest(storage, &name)
+        .await
+        .map_err(CommandError::from)?
+        .ok_or("plugin not found")?;
+    let grant = bastion_vault::plugins::provider::get_grant(storage, &name).await.map_err(CommandError::from)?;
+    let live = bastion_vault::plugins::provider::grant_is_live(storage, &manifest).await;
+    Ok(ProviderGrantResult {
+        requested: manifest.capabilities.credential_provider.as_ref().and_then(|c| serde_json::to_value(c).ok()),
+        requests_network: manifest.capabilities.app.net.is_some(),
+        grant: grant.and_then(|g| serde_json::to_value(g).ok()),
+        live,
+    })
+}
+
+#[tauri::command]
+pub async fn plugins_set_provider_grant(state: State<'_, AppState>, name: String) -> CmdResult<()> {
+    if is_remote(&state).await {
+        remote_call_v2(&state, "PUT", &format!("sys/plugins/{name}/grants/credential-provider"), None).await?;
+        return Ok(());
+    }
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    drop(vault_guard);
+
+    let manifest = PluginCatalog::new()
+        .get_manifest(core_arc.barrier.as_storage(), &name)
+        .await
+        .map_err(CommandError::from)?
+        .ok_or("plugin not found")?;
+    let token = state.token.lock().await.clone().unwrap_or_default();
+    let actor = resolve_grant_actor(&core_arc, &token).await;
+    let outcome = bastion_vault::plugins::provider::put_grant(
+        core_arc.barrier.as_storage(),
+        &manifest,
+        &actor,
+        chrono::Utc::now().to_rfc3339(),
+    )
+    .await
+    .map(|_| ())
+    .map_err(CommandError::from);
+
+    let mut audit_body = serde_json::Map::new();
+    audit_body.insert("name".into(), Value::String(name.clone()));
+    let err_str = outcome.as_ref().err().map(|e| format!("{e:?}"));
+    bastion_vault::audit::emit_sys_audit(
+        core_arc.as_ref(),
+        &token,
+        &format!("sys/plugins/{name}/grants/credential-provider"),
+        bastion_vault::logical::Operation::Write,
+        Some(audit_body),
+        err_str.as_deref(),
+    )
+    .await;
+    outcome
+}
+
+#[tauri::command]
+pub async fn plugins_delete_provider_grant(state: State<'_, AppState>, name: String) -> CmdResult<()> {
+    if is_remote(&state).await {
+        remote_call_v2(&state, "DELETE", &format!("sys/plugins/{name}/grants/credential-provider"), None).await?;
+        return Ok(());
+    }
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    drop(vault_guard);
+
+    let outcome = bastion_vault::plugins::provider::delete_grant(core_arc.barrier.as_storage(), &name)
+        .await
+        .map_err(CommandError::from);
+    let token = state.token.lock().await.clone().unwrap_or_default();
+    let mut audit_body = serde_json::Map::new();
+    audit_body.insert("name".into(), Value::String(name.clone()));
+    let err_str = outcome.as_ref().err().map(|e| format!("{e:?}"));
+    bastion_vault::audit::emit_sys_audit(
+        core_arc.as_ref(),
+        &token,
+        &format!("sys/plugins/{name}/grants/credential-provider"),
+        bastion_vault::logical::Operation::Delete,
+        Some(audit_body),
+        err_str.as_deref(),
+    )
+    .await;
+    outcome
+}
+
+/// [`remote_call`] against the `/v2` surface.
+async fn remote_call_v2(
+    state: &State<'_, AppState>,
+    method: &str,
+    path: &str,
+    body: Option<Map<String, Value>>,
+) -> Result<Value, CommandError> {
+    let (status, json) = remote_raw_at(state, method, Some("/v2"), path, body).await?;
+    if (200..300).contains(&status) {
+        Ok(json)
+    } else {
+        Err(CommandError::from(remote_error_message(status, &json)))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

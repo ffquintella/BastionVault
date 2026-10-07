@@ -640,6 +640,28 @@ jobs:
       - name: Report unused direct dependencies
         run: make deps-unused-warn
 
+  # ── SQL injection gate (T31 Phase 2.3) ─────────────────────────
+  #
+  # No cargo, no target/ — a text/AST scan that costs seconds, so it runs on
+  # every push and PR rather than being planned. Two layers: a grep check with
+  # no dependencies, and the Semgrep ruleset for driver calls handed a runtime
+  # string. See roadmaps/formal-verification-and-type-driven-security.md.
+  sql-guard:
+    name: SQL guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Text gate
+        run: scripts/check-sql-guard.sh
+      - name: Semgrep ruleset
+        run: |
+          pip install --quiet semgrep
+          semgrep --config .semgrep/sql-guard.yml --error --metrics=off crates src
+
   # ── One status for branch protection ────────────────────────────
   #
   # Matrix job names change with the plan, so they cannot be named as required
@@ -662,6 +684,7 @@ jobs:
       - gui
       - gui-host
       - deps
+      - sql-guard
     runs-on: ubuntu-latest
     timeout-minutes: 5
 

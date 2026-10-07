@@ -24,10 +24,10 @@ Each phase is independently shippable and adds no runtime cost to the hot path. 
 | 1.1 | `SysRoute` trait + `Authorized<R>` extractor | `[ ]` Todo |
 | 1.2 | Migrate the 44 inline `sys` handlers to the witness | `[ ]` Todo |
 | 1.3 | Route table as data + anonymous-surface golden file | `[ ]` Todo |
-| 2 | SQL injection elimination (`SqlIdent` / `Sql` + lint gate) | `[/]` In progress — via 2.1 |
-| 2.1 | `bv-sql-guard` crate + `LIKE`-pattern fix | `[/]` In progress — `LIKE`-pattern + table-identifier fixes shipped (F3/F4/F5); the `SqlIdent` / `Sql` crate is still Todo |
-| 2.2 | Migrate hiqlite + MySQL backends to the guarded API | `[ ]` Todo |
-| 2.3 | Mechanical gate (Semgrep ruleset), escape-hatch registry | `[ ]` Todo |
+| 2 | SQL injection elimination (`SqlIdent` / `Sql` + lint gate) | `[x]` Done (2.4 is optional and not adopted) |
+| 2.1 | `bv-sql-guard` crate + `LIKE`-pattern fix | `[x]` Done — `SqlIdent` / `Sql` / `sql!` / `escape_like`, `trybuild` compile-fail cases |
+| 2.2 | Migrate hiqlite + MySQL backends to the guarded API | `[x]` Done |
+| 2.3 | Mechanical gate (Semgrep ruleset), escape-hatch registry | `[x]` Done — `sql-guard` CI job; Semgrep ruleset not yet run (no local Semgrep), text gate verified red/green |
 | 2.4 | Optional: `dylint` AST lint replacing the text gate | `[ ]` Todo |
 | 3 | Formal verification of the permission engine (Kani) | `[ ]` Todo |
 | 3.1 | Extract `bv-policy-core` (bounded, `no_std`, pure) | `[ ]` Todo |

@@ -1,6 +1,6 @@
 [package]
 name = "bv_plugin_manifest"
-version = "0.41.0"
+version = "0.41.1"
 edition = "2021"
 description = "Shared plugin manifest types + canonical signing-message construction, used by the host verifier and the bv-plugin-pack signer so a signed bundle verifies byte-for-byte."
 license = "Apache-2.0"

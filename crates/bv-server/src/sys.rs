@@ -2848,6 +2848,122 @@ async fn sys_plugins_grants_delete_handler(
     result
 }
 
+// ── Credential providers: admin grant + entity-data purge (v2 only) ──
+//
+// Spec: features/self-accounts.md §4.5 and §4.7. The grant is the second key
+// next to the manifest's `[capabilities.credential_provider]` block, pinned to
+// that block's hash. Registered on the `/v2/sys` scope only.
+
+async fn sys_plugins_provider_grant_get_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let name = req.match_info().get("name").unwrap_or("").to_string();
+    let audit_path = format!("sys/plugins/{name}/grants/credential-provider");
+    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
+
+    let result: Result<HttpResponse, HttpError> = (async move {
+        let barrier = core.barrier();
+        let storage = barrier.as_storage();
+        let manifest = match crate::plugins::PluginCatalog::new().get_manifest(storage, &name).await? {
+            Some(m) => m,
+            None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
+        };
+        let record = crate::plugins::provider::get_grant(storage, &name).await?;
+        let live = crate::plugins::provider::grant_is_live(storage, &manifest).await;
+        // The requested block, so the consent panel renders without a second
+        // fetch. `requests_network` lets it warn when a provider also asks
+        // for egress (spec §Security Considerations).
+        Ok(response_json_ok(
+            None,
+            json!({
+                "requested": manifest.capabilities.credential_provider,
+                "requests_network": manifest.capabilities.app.net.is_some(),
+                "grant": record,
+                "live": live,
+            }),
+        ))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Read).await;
+    result
+}
+
+async fn sys_plugins_provider_grant_put_handler(
+    req: HttpRequest,
+    body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let audit = SysAuditCtx::new(&req, &body, &core);
+    let name = req.match_info().get("name").unwrap_or("").to_string();
+    let token = request_auth(&req).client_token;
+    let audit_path = format!("sys/plugins/{name}/grants/credential-provider");
+    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
+
+    let result: Result<HttpResponse, HttpError> = (async move {
+        let barrier = core.barrier();
+        let storage = barrier.as_storage();
+        let manifest = match crate::plugins::PluginCatalog::new().get_manifest(storage, &name).await? {
+            Some(m) => m,
+            None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
+        };
+        let actor = resolve_actor_entity_id(core.as_ref(), &token).await;
+        let granted_at = chrono::Utc::now().to_rfc3339();
+        match crate::plugins::provider::put_grant(storage, &manifest, &actor, granted_at).await {
+            Ok(g) => Ok(response_json_ok(None, json!({ "grant": g }))),
+            Err(RvError::ErrString(msg)) => Ok(response_error(StatusCode::BAD_REQUEST, &msg)),
+            Err(e) => Err(e.into()),
+        }
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Write).await;
+    result
+}
+
+async fn sys_plugins_provider_grant_delete_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let name = req.match_info().get("name").unwrap_or("").to_string();
+    let audit_path = format!("sys/plugins/{name}/grants/credential-provider");
+    audit.authorize(&core, &req, &audit_path, Operation::Delete).await?;
+
+    let result: Result<HttpResponse, HttpError> = (async move {
+        crate::plugins::provider::delete_grant(core.barrier().as_storage(), &name).await?;
+        Ok(response_ok(None, None))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Delete).await;
+    result
+}
+
+/// DELETE `/v2/sys/plugins/{name}/entity-data/{entity_id}` — offboarding and
+/// entity-merge cleanup. Deletes that entity's data under `{name}` only. There
+/// is no read counterpart.
+async fn sys_plugins_entity_data_delete_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let name = req.match_info().get("name").unwrap_or("").to_string();
+    let entity_id = req.match_info().get("entity_id").unwrap_or("").to_string();
+    let audit_path = format!("sys/plugins/{name}/entity-data/{entity_id}");
+    audit.authorize(&core, &req, &audit_path, Operation::Delete).await?;
+
+    let result: Result<HttpResponse, HttpError> = (async move {
+        let Some(root) = crate::plugins::runtime::entity_data_root(&name, &entity_id) else {
+            return Ok(response_error(StatusCode::BAD_REQUEST, "invalid plugin name or entity id"));
+        };
+        crate::plugins::provider::delete_prefix(core.barrier().as_storage(), &root).await?;
+        Ok(response_ok(None, None))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Delete).await;
+    result
+}
+
 // ── Phase 5.2: publisher allowlist + accept_unsigned engine flag ──
 
 #[derive(Debug, Deserialize)]
@@ -4611,6 +4727,18 @@ pub fn init_sys_service(cfg: &mut web::ServiceConfig) {
             // is shared with `configure_sys_routes`, so it is registered here.
             .service(
                 web::resource("/mcp/pairings/{id}").route(web::delete().to(sys_mcp_pairing_delete_request_handler)),
+            )
+            // Credential-provider grant and entity-data purge
+            // (features/self-accounts.md §4.5, §4.7). v2-only.
+            .service(
+                web::resource("/plugins/{name}/grants/credential-provider")
+                    .route(web::get().to(sys_plugins_provider_grant_get_handler))
+                    .route(web::put().to(sys_plugins_provider_grant_put_handler))
+                    .route(web::delete().to(sys_plugins_provider_grant_delete_handler)),
+            )
+            .service(
+                web::resource("/plugins/{name}/entity-data/{entity_id}")
+                    .route(web::delete().to(sys_plugins_entity_data_delete_handler)),
             )
             // HSM seal status (features/hsm-support.md). v2-only, read-only.
             .service(web::resource("/hsm/status").route(web::get().to(sys_hsm_status_request_handler)))

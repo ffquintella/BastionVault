@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import * as api from "../../lib/api";
 import { extractError } from "../../lib/error";
 import { Button, Input, SecretInput, Textarea } from "../ui";
 import { usePluginSurfacesStore } from "../../stores/pluginSurfacesStore";
+import { DEFAULT_RESOURCE_TYPES, parseTypeConfig } from "../../lib/resourceTypes";
 
 /**
  * Schema-driven form. Honours a small subset of JSON Schema 2020-12
@@ -12,6 +13,12 @@ import { usePluginSurfacesStore } from "../../stores/pluginSurfacesStore";
  *   * per-property `type: "string" | "integer" | "number" | "boolean"`
  *   * per-property `format: "password"` → `<SecretInput>`
  *   * per-property `format: "textarea"` → `<Textarea>`
+ *   * per-property `format: "secret-textarea"` → masked multi-line input,
+ *     cleared from the form state after a successful submit
+ *   * per-property `type: "array"` with `items.enum` → multi-select
+ *   * per-property `x-bv-options: "resource-types" | "os-types"` → options
+ *     supplied by the host from the list the Resources page reads, so a
+ *     plugin that cannot read other mounts need not hard-code them
  *   * per-property `enum: [...]` → `<Select>`
  *   * per-property `title`, `description`, `default`
  *
@@ -36,7 +43,54 @@ type PropSchema = {
   format?: string;
   enum?: string[];
   default?: unknown;
+  items?: { enum?: string[] };
+  "x-bv-options"?: string;
 };
+
+/** Formats whose value must not outlive a successful submit in the DOM. */
+const SECRET_FORMATS = new Set(["password", "secret-textarea"]);
+
+/** Option lists the host can supply to a form field (`x-bv-options`). */
+export type HostOptionKind = "resource-types" | "os-types";
+
+export function isHostOptionKind(v: unknown): v is HostOptionKind {
+  return v === "resource-types" || v === "os-types";
+}
+
+/** The `os_type` choices of the built-in server type, minus "(unset)". */
+function osTypeOptions(): string[] {
+  const field = DEFAULT_RESOURCE_TYPES.server?.fields.find((f) => f.key === "os_type");
+  return (field?.options ?? []).map((o) => o.value).filter((v) => v !== "");
+}
+
+/**
+ * Options the host supplies for `x-bv-options`. Resource types come from the
+ * same saved configuration the Resources page reads (built-ins merged with
+ * operator-defined types). `null` while loading; falls back to the built-ins
+ * when the saved configuration cannot be read.
+ */
+export function useHostOptions(kind: HostOptionKind | undefined): string[] | null {
+  const [opts, setOpts] = useState<string[] | null>(null);
+  useEffect(() => {
+    if (!kind) return;
+    if (kind === "os-types") {
+      setOpts(osTypeOptions());
+      return;
+    }
+    let cancelled = false;
+    api
+      .resourceTypesRead()
+      .catch(() => null)
+      .then((config) => {
+        if (cancelled) return;
+        setOpts(Object.keys(parseTypeConfig(config).types).sort());
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [kind]);
+  return kind ? opts : null;
+}
 
 export function SurfaceForm({
   spec,
@@ -163,6 +217,15 @@ export function SurfaceForm({
         params,
         payload as Record<string, unknown>,
       );
+      // Secret fields must not stay in the form after a save: the owner can
+      // only replace them, never read them back.
+      setValues((prev) => {
+        const next = { ...prev };
+        for (const [k, p] of Object.entries(properties)) {
+          if (p.format && SECRET_FORMATS.has(p.format)) next[k] = "";
+        }
+        return next;
+      });
       onSubmitted?.(resp ?? null);
       // The server may have flipped a flag the surface depends on
       // (for example, a "first-time setup" wizard that the menu
@@ -221,8 +284,54 @@ function FieldRenderer({
   const label = prop.title ?? name;
   const hint = prop.description;
   const fieldId = `surface-form-${name}`;
+  const hostKind = isHostOptionKind(prop["x-bv-options"]) ? prop["x-bv-options"] : undefined;
+  const hostOptions = useHostOptions(hostKind);
 
-  if (prop.enum && prop.enum.length > 0) {
+  if (prop.type === "array") {
+    const options = prop.items?.enum ?? hostOptions ?? [];
+    const selected = Array.isArray(value) ? (value as string[]) : [];
+    return (
+      <fieldset className="space-y-1" aria-describedby={hint ? `${fieldId}-hint` : undefined}>
+        <legend className="block text-sm font-medium text-[var(--color-text-muted)]">
+          {label}
+          {required ? " *" : ""}
+        </legend>
+        <div className="flex flex-wrap gap-x-4 gap-y-1">
+          {options.map((opt) => (
+            <label key={opt} className="flex items-center gap-2 text-sm text-[var(--color-text)]">
+              <input
+                type="checkbox"
+                checked={selected.includes(opt)}
+                onChange={(e) =>
+                  onChange(
+                    e.target.checked
+                      ? [...selected, opt]
+                      : selected.filter((v) => v !== opt),
+                  )
+                }
+              />
+              <span>{opt}</span>
+            </label>
+          ))}
+          {options.length === 0 && (
+            <span className="text-xs text-[var(--color-text-muted)]">
+              {hostKind && hostOptions === null ? "Loading…" : "No options available."}
+            </span>
+          )}
+        </div>
+        {error && <p className="text-xs text-[var(--color-danger)]">{error}</p>}
+        {!error && hint && (
+          <p id={`${fieldId}-hint`} className="text-xs text-[var(--color-text-muted)]">
+            {hint}
+          </p>
+        )}
+      </fieldset>
+    );
+  }
+
+  const enumOptions = prop.enum && prop.enum.length > 0 ? prop.enum : hostOptions;
+
+  if (enumOptions && enumOptions.length > 0) {
     return (
       <div className="space-y-1">
         <label
@@ -245,7 +354,7 @@ function FieldRenderer({
           <option value="" disabled>
             Select…
           </option>
-          {prop.enum.map((opt) => (
+          {enumOptions.map((opt) => (
             <option key={opt} value={opt}>
               {opt}
             </option>
@@ -294,6 +403,33 @@ function FieldRenderer({
         value={typeof value === "string" ? value : ""}
         onChange={(e) => onChange(e.target.value)}
       />
+    );
+  }
+
+  if (prop.format === "secret-textarea") {
+    // Masked multi-line input (private keys). `-webkit-text-security` is
+    // what hides the characters; autocomplete and spellcheck are off so the
+    // browser neither stores nor sends the text anywhere.
+    return (
+      <div className="space-y-1">
+        <Textarea
+          id={fieldId}
+          label={label}
+          required={required}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          data-masked="true"
+          style={{ WebkitTextSecurity: "disc" } as React.CSSProperties}
+          value={typeof value === "string" ? value : ""}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        {error && <p className="text-xs text-[var(--color-danger)]">{error}</p>}
+        {!error && hint && (
+          <p className="text-xs text-[var(--color-text-muted)]">{hint}</p>
+        )}
+      </div>
     );
   }
 

@@ -33,6 +33,7 @@ pub mod metrics;
 pub mod module_cache;
 pub mod process_runtime;
 pub mod process_supervisor;
+pub mod provider;
 pub mod quarantine;
 pub mod reload_lock;
 pub mod runtime;
@@ -42,7 +43,8 @@ pub use catalog::{PluginCatalog, PluginRecord, PLUGIN_PREFIX};
 pub use config::ConfigStore;
 pub use kernel_service::PluginRuntimeHost;
 pub use logical_backend::{
-    factory_for as plugin_logical_backend_factory, invoke_active_plugin, PluginLogicalBackend,
+    factory_for as plugin_logical_backend_factory, invoke_active_plugin,
+    invoke_active_plugin_scoped, PluginLogicalBackend,
 };
 pub use manifest::{ConfigField, ConfigFieldKind, PluginManifest, RuntimeKind};
 pub use module_cache::ModuleCache;

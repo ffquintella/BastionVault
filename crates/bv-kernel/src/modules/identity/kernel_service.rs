@@ -103,7 +103,32 @@ impl IdentityService for IdentityModule {
         let Some(store) = self.entity_store() else {
             return Ok(());
         };
-        store.forget_alias(mount, name).await
+        // Resolve the entity first: once the alias index entry is gone the
+        // principal can no longer be traced to it.
+        let entity_id = store.get_by_alias(mount, name).await?.map(|e| e.id);
+        store.forget_alias(mount, name).await?;
+
+        // An entity with no alias left can never be logged into again (a
+        // recreated principal gets a new entity), so whatever entity-scoped
+        // plugin data it owns, such as personal credentials, is orphaned
+        // secret material. Purge it. A failure is logged and does not undo the
+        // principal delete; `DELETE v2/sys/plugins/<name>/entity-data/<id>` is
+        // the manual retry.
+        if let Some(id) = entity_id {
+            let still_reachable = store
+                .list_aliases()
+                .await?
+                .iter()
+                .any(|a| a.entity_id == id);
+            if !still_reachable {
+                if let Some(host) = crate::kernel_api::VaultCtx::plugin_host(self.core.as_ref()) {
+                    if let Err(e) = host.purge_entity_data(&id).await {
+                        log::error!("purging plugin data of orphaned entity {id} failed: {e}");
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn entity_profile(&self, entity_id: &str) -> Result<Option<EntityProfile>, RvError> {

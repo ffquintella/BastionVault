@@ -1,0 +1,11 @@
+error: no rules expected `user_input`
+ --> tests/ui/runtime_string.rs:3:32
+  |
+3 |     let _ = bv_sql_guard::sql!(user_input);
+  |                                ^^^^^^^^^^ no rules expected this token in macro call
+  |
+note: while trying to match meta-variable `$lit:literal`
+ --> src/lib.rs
+  |
+  |     ($lit:literal) => {
+  |      ^^^^^^^^^^^^

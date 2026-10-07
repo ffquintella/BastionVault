@@ -1,0 +1,14 @@
+error[E0308]: mismatched types
+ --> tests/ui/non_str_literal.rs:2:32
+  |
+2 |     let _ = bv_sql_guard::sql!(42);
+  |             -------------------^^-
+  |             |                  |
+  |             |                  expected `&str`, found integer
+  |             arguments to this function are incorrect
+  |
+note: associated function defined here
+ --> src/lib.rs
+  |
+  |     pub fn from_literal(lit: &'static str) -> Self {
+  |            ^^^^^^^^^^^^

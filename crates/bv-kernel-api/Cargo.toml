@@ -1,6 +1,6 @@
 [package]
 name = "bv-kernel-api"
-version = "0.41.1"
+version = "0.41.2"
 edition = "2021"
 description = "BastionVault's kernel contract: what an engine is allowed to know about the vault"
 license = "Apache-2.0"
@@ -49,6 +49,8 @@ maybe-async = "0.2"
 radix_trie = "0.2"
 serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
 serde_json = "^1.0"
+# `Zeroizing` buffers for a released provider credential (provider.rs).
+zeroize = "1.8.2"
 # `sync` for the change-epoch registry's `Notify` (see change_epochs.rs):
 # a long-polling watcher is woken by a mutating request rather than polling.
 tokio = { version = "1.52", features = ["rt", "time", "macros", "sync"] }

@@ -29,6 +29,11 @@ use serde_json::Value;
 use bv_errors::RvError;
 use bv_logical::Request;
 
+use crate::provider::{
+    CallerIdentity, CredentialProviderDecl, ProviderCandidate, ProviderQuery, ProviderReleaseRequest,
+    ReleasedCredential,
+};
+
 // ── resource → ssh_broker ──────────────────────────────────────────────
 
 /// How a resource's SSH logins are minted.
@@ -230,4 +235,31 @@ pub trait PluginHost: Send + Sync {
     /// Invoke `plugin`'s active version with `input` and hand back what it
     /// wrote. `Err` means the invocation could not complete at all.
     async fn invoke(&self, plugin: &str, input: &[u8]) -> Result<PluginInvocation, RvError>;
+
+    /// Credential providers that are registered, active and admin-granted
+    /// (spec §4.5). A catalog or grant read failure yields an empty list,
+    /// mirroring [`notification_channels`](Self::notification_channels).
+    async fn credential_providers(&self) -> Vec<CredentialProviderDecl>;
+
+    /// Ask `provider` which of `caller`'s accounts match `query`. Metadata only.
+    async fn provider_candidates(
+        &self,
+        provider: &str,
+        caller: &CallerIdentity,
+        query: &ProviderQuery,
+    ) -> Result<Vec<ProviderCandidate>, RvError>;
+
+    /// Ask `provider` for the credential of one account. The result has been
+    /// shape-validated by the host (see [`ReleasedCredential::validate`]).
+    async fn provider_release(
+        &self,
+        provider: &str,
+        caller: &CallerIdentity,
+        req: &ProviderReleaseRequest,
+    ) -> Result<ReleasedCredential, RvError>;
+
+    /// Delete `core/plugins/<p>/data/entity/<entity_id>/` for every plugin
+    /// with `storage_scope = "entity"`. Called when an identity entity is
+    /// deleted.
+    async fn purge_entity_data(&self, entity_id: &str) -> Result<(), RvError>;
 }

@@ -651,3 +651,64 @@ echo '{"type":"done","status":0}'
         assert!(err.to_string().contains("timed out"), "{err}");
     }
 }
+
+// ── ABI 1.3: caller block + entity storage scope ──
+
+#[test]
+fn entity_scope_isolates_two_callers_writing_the_same_key() {
+    let host = TestHost::builder("acct").storage_prefix("").build();
+    let wasm = storage_round_trip_wat().as_bytes();
+    let a = TestCaller::new("entity-a");
+    let b = TestCaller::new("entity-b");
+    let ra = host.invoke_as(wasm, &a, "write", "k", serde_json::json!({})).unwrap();
+    let rb = host.invoke_as(wasm, &b, "write", "k", serde_json::json!({})).unwrap();
+
+    // Each caller reads back its own envelope, which names its own entity.
+    assert!(String::from_utf8_lossy(&ra.response).contains("entity-a"));
+    assert!(String::from_utf8_lossy(&rb.response).contains("entity-b"));
+    assert!(host.entity_storage_dump("entity-a").contains_key("k"));
+    assert!(host.entity_storage_dump("entity-b").contains_key("k"));
+    // Nothing leaked into the plugin-wide scope.
+    assert!(host.storage_dump().keys().all(|k| k.starts_with("entity/")));
+    assert!(!host.storage_dump().contains_key("k"));
+}
+
+#[test]
+fn entity_scope_caller_block_is_in_the_envelope() {
+    let host = TestHost::builder("acct").storage_prefix("").build();
+    let out = host
+        .invoke_as(
+            storage_round_trip_wat().as_bytes(),
+            &TestCaller::new("e1"),
+            "list",
+            "v2/accounts",
+            serde_json::json!({}),
+        )
+        .unwrap();
+    let env: serde_json::Value = serde_json::from_slice(&out.response).unwrap();
+    assert_eq!(env["caller"]["entity_id"], "e1");
+    assert_eq!(env["caller"]["principal"]["mount"], "userpass/");
+    assert!(env["caller"].get("token").is_none());
+}
+
+#[test]
+fn entity_scope_refuses_ids_that_could_escape_the_prefix() {
+    let host = TestHost::builder("acct").storage_prefix("").build();
+    let wasm = storage_round_trip_wat().as_bytes();
+    for bad in ["", "..", "a/b", "../other", "a b"] {
+        let r = host.invoke_as(wasm, &TestCaller::new(bad), "read", "k", serde_json::json!({}));
+        assert!(r.is_err(), "{bad:?} must be refused");
+    }
+    assert!(host.storage_dump().is_empty());
+}
+
+#[test]
+fn entity_scope_list_stays_inside_the_entity_prefix() {
+    let host = TestHost::builder("acct").storage_prefix("").build();
+    let wasm = storage_round_trip_wat().as_bytes();
+    host.invoke_as(wasm, &TestCaller::new("e1"), "write", "k", serde_json::json!({})).unwrap();
+    host.invoke_as(wasm, &TestCaller::new("e2"), "write", "k", serde_json::json!({})).unwrap();
+    assert_eq!(host.entity_storage_dump("e1").len(), 1);
+    assert_eq!(host.entity_storage_dump("e2").len(), 1);
+    assert!(host.entity_storage_dump("e3").is_empty());
+}

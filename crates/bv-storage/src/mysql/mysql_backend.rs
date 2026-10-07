@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use super::new_db_pool;
 use bv_errors::RvError;
+use bv_sql_guard::sql;
 
 use crate::{
     schema::vault::{self, dsl::*, vault_key},
@@ -56,7 +57,7 @@ impl MysqlBackendLock {
     }
 
     fn get_lock(conn: &mut DbConn, lock_name: &str, timeout_secs: i32) -> Result<bool, RvError> {
-        let count = diesel::sql_query("SELECT GET_LOCK(?, ?) as result")
+        let count = diesel::sql_query(sql!("SELECT GET_LOCK(?, ?) as result").as_str())
             .bind::<Text, _>(lock_name)
             .bind::<Integer, _>(timeout_secs)
             .get_result::<GetLockResult>(conn)
@@ -69,7 +70,7 @@ impl MysqlBackendLock {
 
     fn release_lock(&mut self) -> Result<(), RvError> {
         let rows_affected =
-            diesel::sql_query("SELECT RELEASE_LOCK(?)").bind::<Text, _>(&self.lock_name).execute(&mut self.conn)?;
+            diesel::sql_query(sql!("SELECT RELEASE_LOCK(?)").as_str()).bind::<Text, _>(&self.lock_name).execute(&mut self.conn)?;
 
         if rows_affected == 0 {
             log::error!("MysqlBackendLock failed to release lock: {}", self.lock_name);
@@ -225,7 +226,7 @@ mod test {
     fn mysql_table_clear(backend: &MysqlBackend) -> Result<(), RvError> {
         let conn: &mut MysqlConnection = &mut backend.pool.get().unwrap();
 
-        match diesel::sql_query("TRUNCATE TABLE vault").execute(conn) {
+        match diesel::sql_query(sql!("TRUNCATE TABLE vault").as_str()).execute(conn) {
             Ok(_) => return Ok(()),
             Err(e) => return Err(RvError::ErrDatabaseExecuteEntry { source: (e) }),
         }

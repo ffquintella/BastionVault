@@ -1,6 +1,6 @@
 [package]
 name = "bastion-plugin-sdk"
-version = "0.41.0"
+version = "0.41.1"
 edition = "2021"
 description = "SDK for authoring BastionVault WASM plugins. See features/plugin-system.md."
 license = "Apache-2.0"
@@ -55,6 +55,11 @@ surface = ["dep:bv_plugin_surface", "json"]
 # module (`AppHost` typed `bvx.*` wrappers, the `AppModule` trait, and the
 # `app_module!` macro). Implies `json` for the request/response marshaling.
 app = ["json"]
+
+# ABI 1.3: credential-provider authoring — `bastion_plugin_sdk::provider` (typed
+# `provider.candidates` / `provider.release` ops, the `Caller` block, and the
+# `provider_module!` macro). Implies `json`.
+provider = ["json"]
 
 # Replace `extern "C"` host imports with thread-local stubs so plugin
 # authors can `cargo test` their handlers on the host. Implies the SDK

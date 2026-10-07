@@ -65,6 +65,7 @@ pub mod change_epochs;
 pub mod ctx;
 pub mod dos;
 pub mod engines;
+pub mod provider;
 pub mod identity;
 pub mod module;
 pub mod mount;
