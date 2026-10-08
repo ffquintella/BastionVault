@@ -63,13 +63,33 @@ runs:
         KANI_VERSION: ${{ steps.pin.outputs.version }}
       run: |
         set -euo pipefail
-        if ! cargo kani --version 2>/dev/null | grep -q "^Kani Rust Verifier ${KANI_VERSION} "; then
-          cargo install --locked kani-verifier --version "$KANI_VERSION"
+        expected_version="Kani Rust Verifier ${KANI_VERSION} "
+        cached_version=""
+        cached_probe_failed=0
+        if ! cached_version=$(cargo kani --version 2>&1); then
+          cached_probe_failed=1
         fi
-        if [ ! -x "$HOME/.kani/kani-${KANI_VERSION}/toolchain/bin/rustc" ]; then
+        if [ "$cached_probe_failed" -ne 0 ] || [[ "$cached_version" != "$expected_version"* ]]; then
+          printf 'Cached Kani driver is unavailable or has the wrong version; replacing it.\n%s\n' \
+            "$cached_version" >&2
+          # actions/cache restores executables but not Cargo's install metadata.
+          cargo install --locked --force kani-verifier --version "$KANI_VERSION"
+        fi
+        if [ "$cached_probe_failed" -ne 0 ] || \
+          [ ! -x "$HOME/.kani/kani-${KANI_VERSION}/toolchain/bin/rustc" ]; then
           cargo kani setup
         fi
-        cargo kani --version
+        final_version=""
+        if ! final_version=$(cargo kani --version 2>&1); then
+          printf 'Kani driver failed after installation:\n%s\n' "$final_version" >&2
+          exit 1
+        fi
+        if [[ "$final_version" != "$expected_version"* ]]; then
+          printf 'Kani driver version mismatch after installation (expected %s, got):\n%s\n' \
+            "$KANI_VERSION" "$final_version" >&2
+          exit 1
+        fi
+        printf '%s\n' "$final_version"
 
     - name: Save the Kani cache
       if: ${{ inputs.save-cache == 'true' && github.ref == 'refs/heads/main' && steps.restore.outputs.cache-hit != 'true' }}
