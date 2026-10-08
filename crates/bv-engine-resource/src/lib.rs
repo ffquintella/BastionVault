@@ -1070,14 +1070,15 @@ impl ResourceBackendInner {
         // caller's — the same convention the credential resolvers rely on);
         // those are left unfiltered. Every token-bearing request is filtered.
         //
-        // Cost: a caller holding an *ungated* grant (the admin case) is decided
-        // by `readable_targets`' first pass and adds no storage reads at all. A
-        // caller whose access is owner/share/group-scoped costs up to three
-        // extra reads per candidate, on top of the one metadata read the scan
-        // already does. If that shows up in profiling before the search index
-        // this comment block has long promised, the shape to build is the
-        // inverse query — enumerate what the caller owns and what is shared
-        // with them from the owner/share indexes, then intersect — rather than
+        // Cost: up to three extra reads per candidate (owner, shares, asset
+        // groups), on top of the one metadata read the scan already does —
+        // for every caller whose ACL has a gated or scoped rule, admins
+        // included, because a gated or scoped deny can revoke an ungated
+        // grant (T119). An ACL with no such rule adds no reads. If that shows
+        // up in profiling before the search index this comment block has long
+        // promised, the shape to build is the inverse query — enumerate what
+        // the caller owns and what is shared with them from the owner/share
+        // indexes, then intersect — rather than
         // probing every candidate.
         if req.auth.is_some() {
             // ACLs are evaluated against the *full* request path, but a backend
@@ -1952,5 +1953,4 @@ mod tests {
         assert!(!static_ssh_credential_shape(&obj(json!({ "token": "t" }))));
     }
 }
-
 

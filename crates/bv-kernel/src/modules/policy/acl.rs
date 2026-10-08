@@ -332,22 +332,23 @@ impl ACL {
     /// - checks the governing ungated rule: the exact rule, for LIST the
     ///   exact rule without the trailing `/`, else the most specific prefix
     ///   or segment-wildcard rule;
-    /// - unless that reported `deny`, layers in each group-gated rule whose
+    /// - unless that rule carries `deny`, layers in each group-gated rule whose
     ///   gate passes, then each scope-filtered rule. Capabilities are OR'd in;
-    ///   a rule reporting `deny` wipes the result. LIST is a special case: a
+    ///   a rule carrying `deny` wipes the result. LIST is a special case: a
     ///   list op targets a *collection*, not a single object, so the gate is
     ///   not consulted; the list is granted and the rule's `groups` /
     ///   `scopes` recorded as a filter the post-route pass narrows the
     ///   response keys to;
     /// - drops that filter when an ungated rule also grants LIST.
     ///
-    /// On enforcement (`check_only = false`) a deny rule reports no
-    /// capability rather than `deny`, so an ungated deny does not stop the
-    /// layers and a layered deny does not wipe — finding F6 in
-    /// `roadmaps/formal-verification-and-type-driven-security.md`. The
-    /// filter is dropped when *any* ungated rule found for the path lists,
-    /// not only the governing one — finding F7. Both are preserved here
-    /// unchanged; see the roadmap for the fix.
+    /// Whether a rule carries `deny` is read from its bitmap, not from what
+    /// its check reported, so a deny decides identically on enforcement
+    /// (`check_only = false`) and in a capability probe: the result is
+    /// exactly `deny`, and on enforcement `root_privs` is cleared too
+    /// (finding F6, closed by T119). The filter is dropped when *any*
+    /// ungated rule found for the path lists, not only the governing one —
+    /// finding F7, preserved unchanged; see
+    /// `roadmaps/formal-verification-and-type-driven-security.md`.
     ///
     /// # Arguments
     ///

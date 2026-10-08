@@ -40,15 +40,17 @@ pin cbmc 6.11.0
 #            and the task that fixes it.
 #
 # The fast set is every harness at or under 20 s. Measured 2026-10-08 with
-# Kani 0.68.0 / CBMC 6.11.0 on an Apple M-series Mac, full run 239 s wall:
-# the 15 fast harnesses sum to 84 s, the 3 slow ones to 140 s, and nothing
+# Kani 0.68.0 / CBMC 6.11.0 on an Apple M-series Mac after T119, full run
+# 219 s wall: the 14 fast harnesses sum to 72.4 s and the 4 slow ones to
+# 169.3 s. The new enforcement theorem measured 29.5 s on an exact run. Nothing
 # lands between 14.1 s and 26.3 s, so any threshold in that gap gives the same
-# split. Every theorem T1-T8 and both witnesses keep at least one fast harness.
+# split. Every theorem T1-T8 and the remaining witness keep at least one fast
+# harness.
 #
 # name                                                kind     set   covers  secs   label
 harness t1_deny_wins_in_capability_probes             theorem  fast  3       11.4   T1
 harness t1_a_governing_deny_grants_nothing            theorem  fast  1        8.7   T1
-harness f6_enforcement_lets_a_layered_grant_override_deny witness fast 2     11.5   F6 T119
+harness t1_deny_wins_on_enforcement                    theorem  slow  2       29.5   T1
 harness t2_no_rule_means_no_grant                     theorem  fast  2        8.4   T2
 harness t3_merge_keeps_deny_and_never_drops_a_capability theorem fast 3       0.1   T3 T1
 harness t3_an_added_layered_grant_never_removes_a_capability theorem slow 2  32.3   T3

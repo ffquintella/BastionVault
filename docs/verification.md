@@ -28,9 +28,8 @@ queries. The harnesses are in `crates/bv-policy-core/src/proofs.rs`.
 
 | # | Theorem | Harness(es) | Holds for |
 |---|---|---|---|
-| T1 | **Deny supremacy.** A deny that governs the path, or a gated/scoped deny rule that applies, yields exactly `deny`: not allowed, no other capability, no LIST filter, no granting policy. | `t1_deny_wins_in_capability_probes` | Capability probes (`check_only`: `sys/capabilities`, the policy dry-run, `capabilities()`). |
+| T1 | **Deny supremacy.** A deny that governs the path, or a gated/scoped deny rule that applies, yields exactly `deny`: not allowed, no other capability, no LIST filter, no granting policy — whatever gated or scoped grant competes with it. On enforcement it also yields no `root_privs`. | `t1_deny_wins_in_capability_probes`, `t1_deny_wins_on_enforcement` | Capability probes (`check_only`: `sys/capabilities`, the policy dry-run, `capabilities()`) and enforcement (`pre_route`, `readable_targets`). A probe keeps a `root_privs` it had already reported before a layered deny applied. Until T119 the enforcement half was refuted (F6, below). |
 | | A governing deny with no layered rule applying grants nothing, and deny is absorbing when two rules for the same path merge. | `t1_a_governing_deny_grants_nothing`, `t3_merge_keeps_deny_and_never_drops_a_capability` | Enforcement and probes. |
-| | **Not** for enforcement with layered rules — see F6 below. | `f6_enforcement_lets_a_layered_grant_override_deny` (defect witness) | — |
 | T2 | **Fail-closed.** No governing ungated rule and no layered rule that applies ⇒ not allowed, no capability, no `root_privs`, no filter, no granting policy. | `t2_no_rule_means_no_grant` | Everything except `help` (always allowed) and the root ACL. |
 | T3 | **Grant monotonicity.** Merging two same-path rules is a bitwise union unless one denies. Adding a non-deny gated or scoped rule never revokes `allowed`, `root_privs` or a capability bit. | `t3_merge_keeps_deny_and_never_drops_a_capability`, `t3_an_added_layered_grant_never_removes_a_capability` | Capability bits. Parameter constraints are *not* monotone under merge (a merged `required_parameters` / `allowed_parameters` can refuse what one rule alone allowed) — Vault-compatible, not a guarantee. |
 | T4 | **Specificity precedence and determinism.** The exact rule governs whenever one exists; for LIST the trailing-slash-trimmed exact rule is next; otherwise the most specific non-exact rule. "Most specific" is a strict total order (a later first wildcard wins; at the same position a rule without a trailing `*` wins; then fewer `+`; then longer; then the path), and the selected winner is the same in every iteration order of the segment-wildcard map. `+` matches exactly one non-empty segment; a rule without `*` matches only paths of its own length. | `t4_exact_rules_take_precedence`, `t4_specificity_is_a_strict_total_order`, `t4_the_most_specific_candidate_wins_in_any_order`, `t4_segment_wildcards_match_by_shape` | Precedence is *between* rules: a more specific grant beats a less specific deny (Vault-compatible). |
@@ -46,21 +45,29 @@ proves nothing, which fails the gate.
 
 ### Defect witnesses
 
-Two harnesses state no theorem; they `cover` behaviour the evaluator is not
-meant to have. `SATISFIED` means the defect is present (Kani
-prints the input). When the fix lands they turn `UNSATISFIABLE` — failing the
-gate on purpose — and become `assert`s (the text is in each harness).
+A defect witness states no theorem; it `cover`s behaviour the evaluator is
+not meant to have. `SATISFIED` means the defect is present (Kani prints the
+input). When the fix lands it turns `UNSATISFIABLE` — failing the gate on
+purpose — and becomes an `assert` (the text is in the harness).
 
 | | Defect | Witness | Reproduced on real HCL |
 |---|---|---|---|
-| F6 | Authorization-relevant finding. Details are withheld from this repository until the fix ships; the maintainer holds the write-up. | `f6_*` | `f6_current_behaviour_*` in `bv-kernel` `policy::differential` |
-| F7 | Evaluator finding. Details are withheld from this repository until the fix ships; the maintainer holds the write-up. | `f7_*` | `f7_current_behaviour_*` |
+| F7 | Evaluator finding. Details are withheld from this repository until the fix ships; the maintainer holds the write-up. | `f7_*` | `f7_current_behaviour_*` in `bv-kernel` `policy::differential` |
 
 F8 (outside the core): an evaluator finding in the host's matcher, pinned by
 `f8_current_behaviour_*`. Details withheld until the fix ships.
 
-All three are preserved unchanged by Phase 3 (no behaviour change) and are
+Both are preserved unchanged by Phase 3 (no behaviour change) and are
 recorded, with the proposed fixes, in the roadmap's Findings.
+
+**F6 — fixed (T119).** It was the third: deny supremacy refuted on
+enforcement. Its witness's covers turned `UNSATISFIABLE` with the fix and the
+harness became the theorem `t1_deny_wins_on_enforcement` (T1, above), keeping
+the two shapes it witnessed as covers. `f6_current_behaviour_*` became
+`f6_a_*` / `f6_b_*` in `policy::differential`, which assert the fixed
+verdict on HCL, and `src/engine_tests/kernel_policy_deny.rs` asserts it
+through `pre_route`, `readable_targets` and `may_connect_target` with the
+asset groups, owner and shares resolved from storage.
 
 ## Bounds
 
@@ -93,7 +100,9 @@ recorded, with the proposed fixes, in the roadmap's Findings.
 - **The `bare_mount` heuristic** behind `has_mount_access` (mount visibility,
   not authorization).
 - **Callers' interpretation of the result**, e.g. `readable_targets` treating
-  `root_privs` as readable.
+  `root_privs` as readable (sound for a deny since T119, which clears
+  `root_privs` on enforcement), or `may_connect_target` treating an ungated
+  `read` as `connect`.
 - **Concurrency** (`DashMap` interleavings) and wrapping-TTL enforcement
   (only the inverted-TTL refusal is decided).
 
@@ -174,7 +183,7 @@ Everything below fails the gate:
 | a harness missing from, or not listed in, the manifest | A proof cannot report its own disappearance. Also checked statically by `make verify-gates`, with every harness's explicit `#[kani::unwind]`. |
 | a Kani or CBMC version other than the pin | An unpinned verifier makes a claim unreproducible. |
 
-A **defect witness** (`f6_*`, `f7_*`) whose covers are all `SATISFIED` is a
+A **defect witness** (`f7_*`) whose covers are all `SATISFIED` is a
 **known open finding**: the gate passes, and prints and reports it as one.
 If a witness's cover becomes `UNSATISFIABLE`, the defect no longer
 reproduces and the gate fails on purpose — replace the cover with the
@@ -186,16 +195,17 @@ against synthetic logs. The gate was also checked against real output: the
 log of a full run passes; the same log with one theorem cover and the F7
 cover edited to `UNSATISFIABLE` fails with both problems named; and a mutant
 core (`d.caps = CAP_DENY` → `d.caps |= CAP_DENY` in the layer wipe, the
-roadmap's example) is caught by `t1_deny_wins_in_capability_probes` in the
-fast set.
+roadmap's example; since T119 that line is in `decide.rs`'s `denied`) is
+caught by `t1_deny_wins_in_capability_probes` in the fast set.
 
 ### The fast set
 
-Every harness measured at or under 20 s is in the fast set: 15 harnesses,
-84 s of verification time, including both witnesses and at least one harness
-for each of T1–T8. The three slow ones —
+Every harness measured at or under 20 s is in the fast set: 14 harnesses,
+72.4 s of verification time, including the remaining witness and at least one
+harness for each of T1–T8. The four slow ones —
 `t4_the_most_specific_candidate_wins_in_any_order` (81 s),
-`t3_an_added_layered_grant_never_removes_a_capability` (32 s) and
+`t3_an_added_layered_grant_never_removes_a_capability` (32 s),
+`t1_deny_wins_on_enforcement` (29.5 s), and
 `t5_t6_a_failed_gate_contributes_nothing` (26 s) — run in tier 2 only. No
 harness falls between 14.1 s and 26.3 s, so the split does not depend on the
 exact threshold. Re-measure before moving a row (the `secs` column).

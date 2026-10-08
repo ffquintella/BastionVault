@@ -43,5 +43,6 @@ mod kernel_identity_link;
 mod kernel_migrate;
 mod kernel_namespace;
 mod kernel_ns_assignment;
+mod kernel_policy_deny;
 mod kernel_resource_group;
 mod kernel_token_binding;

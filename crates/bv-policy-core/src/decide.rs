@@ -139,20 +139,22 @@ pub fn ungated_grants_list<U: Ungated>(ungated: &U) -> bool {
 /// Decide one request.
 ///
 /// 1. A root ACL is allowed everything; `help` is always allowed.
-/// 2. The [`governing`] ungated rule is [`check`]ed.
-/// 3. Unless the result so far carries `deny`, each group-gated rule whose
-///    path matches and whose gate passes is checked in turn. A check that
-///    reports `deny` wipes the result and ends the decision. Otherwise its
-///    capabilities are OR'd in, and `allowed` / `root_privs` can only become
-///    true. LIST waives the gate and instead marks the grant as filtered.
+/// 2. The [`governing`] ungated rule is [`check`]ed. If its permission set
+///    carries `deny`, the result is `deny` and the decision ends here.
+/// 3. Each group-gated rule whose path matches and whose gate passes is
+///    checked in turn. A rule whose permission set carries `deny` makes the
+///    result `deny` and ends the decision. Otherwise its capabilities are
+///    OR'd in, and `allowed` / `root_privs` can only become true. LIST waives
+///    the gate and instead marks the grant as filtered.
 /// 4. The same for the scope-filtered rules.
 /// 5. A filtered LIST becomes unfiltered when [`ungated_grants_list`].
 ///
-/// A check reports `deny` only in a capability probe: an enforcing check of
-/// a deny rule grants nothing and reports no capability, so on enforcement a
-/// governing deny does not stop step 3, and a gated or scoped deny does not
-/// wipe. That is finding F6; the `f6_*` harness in `src/proofs.rs` witnesses
-/// it, and `docs/verification.md` states what deny supremacy is proved for.
+/// "Carries `deny`" is read from the permission set's own bitmap, never from
+/// what [`check`] reported: an enforcing check of a deny rule grants nothing
+/// and reports no capability, so deciding on its output let a gated or scoped
+/// grant override a deny on enforcement (finding F6, closed by T119). The
+/// verdict is therefore the same in both modes: a deny that governs or applies
+/// is a deny, for a capability probe and for the request itself.
 pub fn decide<U, G, S, E>(q: &Query, ungated: &U, gated: &G, scoped: &S, fx: &mut E) -> Decision
 where
     U: Ungated,
@@ -171,12 +173,17 @@ where
     let mut d = Decision::default();
 
     if let Some(gov) = governing(is_list, ungated) {
-        let c = check(&gov.perm(), q.op, q.probe, &gov);
+        let perm = gov.perm();
+        let c = check(&perm, q.op, q.probe, &gov);
         d.allowed = c.allowed;
         d.caps = c.caps;
         d.root_privs = c.root_privs;
         if let Some(cap) = c.granting {
             fx.grant_base(&gov, cap);
+        }
+        if perm.caps & CAP_DENY != 0 {
+            denied(q, &mut d, fx);
+            return d;
         }
     }
 
@@ -195,6 +202,21 @@ where
     d
 }
 
+/// A deny governs the path or a layered deny rule applies: the result is
+/// exactly `deny` — not allowed, no other capability, no LIST filter, no
+/// granting policy. On enforcement `root_privs` is cleared too, because a
+/// caller reads it as a grant (`PolicyStore::readable_targets`). A capability
+/// probe keeps the `root_privs` it had already reported, as it always has.
+fn denied<C, E: Effects<C>>(q: &Query, d: &mut Decision, fx: &mut E) {
+    d.allowed = false;
+    d.caps = CAP_DENY;
+    d.filtered = false;
+    if !q.probe {
+        d.root_privs = false;
+    }
+    fx.wipe();
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Flow {
     Continue,
@@ -206,9 +228,6 @@ where
     L: Layer,
     E: Effects<C>,
 {
-    if d.caps & CAP_DENY != 0 {
-        return Flow::Continue;
-    }
     let is_list = q.op == Op::List;
     for i in 0..l.len() {
         if !l.matches(i) {
@@ -218,14 +237,12 @@ where
             continue;
         }
         let rule = l.rule(i);
-        let c = check(&rule.perm(), q.op, q.probe, &rule);
-        if c.caps & CAP_DENY != 0 {
-            d.allowed = false;
-            d.caps = CAP_DENY;
-            d.filtered = false;
-            fx.wipe();
+        let perm = rule.perm();
+        if perm.caps & CAP_DENY != 0 {
+            denied(q, d, fx);
             return Flow::Wiped;
         }
+        let c = check(&perm, q.op, q.probe, &rule);
         d.caps |= c.caps;
         d.allowed |= c.allowed;
         d.root_privs |= c.root_privs;
@@ -287,5 +304,28 @@ mod tests {
         let d = decide(&q(Op::Read, true), &idx, &gated, &Rules::default(), &mut fx);
         assert_eq!(d, Decision { allowed: false, root_privs: true, is_root: false, caps: CAP_DENY, filtered: false });
         assert_eq!(fx.wipes, 1);
+    }
+
+    // F6 (T119): on enforcement too, a deny is read from the rule's bitmap.
+
+    #[test]
+    fn an_enforced_governing_deny_stops_the_layers() {
+        let idx = Index { exact: Some(Cand::caps(CAP_DENY)), ..Index::default() };
+        let gated = Rules::of(&[Rule { matches: true, gate: true, has_filter: true, cand: Cand::caps(CAP_READ) }]);
+        let mut fx = Trace::default();
+        let d = decide(&q(Op::Read, false), &idx, &gated, &Rules::default(), &mut fx);
+        assert_eq!(d, Decision { allowed: false, root_privs: false, is_root: false, caps: CAP_DENY, filtered: false });
+        assert!(!fx.grants_live);
+    }
+
+    #[test]
+    fn an_enforced_gated_deny_wipes_and_clears_root_privs() {
+        let idx = Index { exact: Some(Cand::caps(CAP_READ | CAP_SUDO)), ..Index::default() };
+        let gated = Rules::of(&[Rule { matches: true, gate: true, has_filter: true, cand: Cand::caps(CAP_DENY) }]);
+        let mut fx = Trace::default();
+        let d = decide(&q(Op::Read, false), &idx, &gated, &Rules::default(), &mut fx);
+        assert_eq!(d, Decision { allowed: false, root_privs: false, is_root: false, caps: CAP_DENY, filtered: false });
+        assert_eq!(fx.wipes, 1);
+        assert!(!fx.grants_live);
     }
 }

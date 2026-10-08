@@ -29,13 +29,13 @@ Each phase is independently shippable and adds no runtime cost to the hot path. 
 | 2.2 | Migrate hiqlite + MySQL backends to the guarded API | `[x]` Done |
 | 2.3 | Mechanical gate (Semgrep ruleset), escape-hatch registry | `[x]` Done — `sql-guard` CI job; Semgrep ruleset not yet run (no local Semgrep), text gate verified red/green |
 | 2.4 | Optional: `dylint` AST lint replacing the text gate | `[ ]` Todo |
-| 3 | Formal verification of the permission engine (Kani) | `[/]` In progress — 3.1, 3.3, 3.4 done; 3.2 is open because model checking refuted two of the theorems as the code's comments state them (F6, F7, below), and the ESI notification is outstanding. See § Phase 3 → Implementation record |
+| 3 | Formal verification of the permission engine (Kani) | `[/]` In progress — 3.1, 3.3, 3.4 done; T119 fixed the F6 refutation, and 3.2 remains open for F7/T120 and the outstanding ESI notification. See § Phase 3 → Implementation record and § T119 |
 | 3.1 | Extract `bv-policy-core` (bounded, `no_std`, pure) | `[x]` Done — `crates/bv-policy-core`, no dependencies; decision code only, the index stays in the host |
-| 3.2 | Kani harnesses T1–T8 + vacuity guards | `[/]` 18 harnesses, all `SUCCESSFUL`, every cover `SATISFIED` (Kani 0.68.0). T1 holds for capability probes and ungated rules only and T5b for "some ungated rule lists" only; their stronger forms are refuted on enforcement — F6, F7 (defect witnesses) — so 3.2 closes with T119/T120 |
+| 3.2 | Kani harnesses T1–T8 + vacuity guards | `[/]` 18 harnesses, all `SUCCESSFUL`, every cover `SATISFIED` (Kani 0.68.0). T1 now holds on enforcement too (T119 fixed F6; its witness is the theorem `t1_deny_wins_on_enforcement`). T5b holds for "some ungated rule lists" only; its stronger form is refuted on enforcement — F7 (defect witness) — so 3.2 closes with T120 |
 | 3.3 | Differential equivalence vs. production `ACL` (proptest) | `[x]` Done — against a frozen copy of the pre-delegation evaluator; 100 000 cases green, no counterexample |
 | 3.4 | Production delegates to the verified core | `[x]` Done — `ACL::allow_operation`, `Permissions::check`, `Permissions::merge` (capabilities), the specificity sort and the segment matcher call the core; no behaviour change |
 | 4 | CI/CD orchestration + release verification report | `[/]` In progress — tiers, gate, workflow and report generator landed and were run locally (tiers 0–2 green; the report generated from real tier-1 evidence); the workflow has never run in CI, so the DoD items that need it are open. See § Phase 4 → Implementation record |
-| 4.1 | Tiers 0–2 as Make targets + the Kani gate | `[x]` Done — `make verify-fast` / `verify` / `verify-full`, `scripts/verify.py`, `scripts/kani-harnesses.txt`; fast set chosen by measurement (15 of 18 harnesses) |
+| 4.1 | Tiers 0–2 as Make targets + the Kani gate | `[x]` Done — `make verify-fast` / `verify` / `verify-full`, `scripts/verify.py`, `scripts/kani-harnesses.txt`; fast set chosen by measurement (14 of 18 harnesses after T119) |
 | 4.2 | `.github/workflows/verify.yml` | `[/]` Written and planned from `scripts/ci-plan.sh`; YAML and every `run:` script syntax-checked, the plan logic dry-run per event; never executed on a runner |
 | 4.3 | Tier 3: `verification-report.md` | `[/]` Generator done and run locally against real tier-1 evidence (a Kani fast-set result); not yet run on tier-2 evidence, produced by CI for a tag, or attached to a release |
 
@@ -62,7 +62,7 @@ Discovered while scoping. Each is a concrete instance of the class its phase clo
 
 **Status: F2–F5 are fixed** (see `CHANGELOG.md` → `[Unreleased]` → Security). They were authorization-affecting defects in shipped code, so under `03` §10 they were closed as standalone fix PRs ahead of the phases — the phases exist to make the *next* one impossible, not to schedule these. F1 was open by design until Phase 1: v0.37.6 fixed its instances, and Phase 1 (`[Unreleased]`) removes the class — a privileged handler without the witness no longer registers. See § Compliance for the ones that need an incident/ESI path rather than a normal fix.
 
-**F6–F8 are open.** Phase 3's model checking and code reading found three evaluator findings, preserved and pinned by tests rather than fixed because Phase 3 was a no-behaviour-change refactor. F6 is authorization-affecting — under `03` §10 it should be closed ahead of further feature work, as F2–F5 were — but it is a `Permissionamento` change that needs the `02` §6 change record and ESI involvement, so it is tracked as its own task (T119). Details are withheld from this repository until the fix ships; the maintainer holds the write-up.
+**F7–F8 are open; F6 is fixed (T119).** Phase 3's model checking and code reading found three evaluator findings, preserved and pinned by tests rather than fixed because Phase 3 was a no-behaviour-change refactor. F6 was authorization-affecting, so under `03` §10 it was closed ahead of further feature work, as F2–F5 were, as its own `Permissionamento` change with the `02` §6 change record (§ T119); the ESI notification is pending. Details of F7 and F8 are withheld from this repository until their fixes ship; the maintainer holds the write-up.
 
 | # | Finding | Location | Class | Phase |
 |---|---|---|---|---|
@@ -71,7 +71,7 @@ Discovered while scoping. Each is a concrete instance of the class its phase clo
 | F3 ✅ **fixed** | `list(prefix)` built `WHERE vault_key LIKE ?` with a bound `"{prefix}%"`. Binding prevents *syntax* injection but **not pattern semantics**: `_` is a single-character wildcard in a `LIKE` pattern. Vault keys routinely contain `_`, so listing `secret/my_app/` also matches `secret/myXapp/…`. | [src/storage/hiqlite/mod.rs](src/storage/hiqlite/mod.rs), [mysql_backend.rs](src/storage/mysql/mysql_backend.rs) | Over-return with authorization impact | Fixed ahead of 2.1 via Option A (escaped `LIKE` + `ESCAPE '\\'`), in `scan` as well as `list`, and in the MySQL backend. |
 | F4 ✅ **fixed** | The over-returned rows were **not** filtered out downstream: `entry.vault_key.trim_start_matches(prefix)` is a no-op on a key that does not start with `prefix`, so the foreign key is pushed into the result verbatim. `trim_start_matches` also strips *repeated* prefixes (`secret/secret/x` → `x`), where `strip_prefix` is meant. | [src/storage/hiqlite/mod.rs](src/storage/hiqlite/mod.rs) | Missing post-condition | Fixed ahead of 2.1: `strip_prefix` is now the authoritative membership test on every returned row. |
 | F5 ✅ **fixed** | The table identifier was `format!`-interpolated into every hiqlite statement, unvalidated, straight from config (`conf.get("table")`, default `vault`). One site is `client.batch(...)`, which executes multiple `;`-separated statements. Config is operator-controlled, so this is not remotely reachable — but this deployment templates config through Puppet/quadlets, and the shape is exactly a multi-statement injection. | [src/storage/hiqlite/mod.rs](src/storage/hiqlite/mod.rs) | Unvalidated identifier interpolation | Fixed ahead of 2.1 with a `validate_table_name` allow-list at construction (plain SQL identifier, ≤64 chars). `SqlIdent` in 2.1 supersedes it as a type-level guarantee. |
-| F6 ❌ **open** (T119) — found by Kani in Phase 3.2 | Authorization-relevant. Details are withheld from this repository until the fix ships; the maintainer holds the write-up. | `allow_operation` (now `bv_policy_core::decide`) | Withheld | Kani witness and differential tests in the tree pin the current behaviour. **Not fixed in Phase 3.** |
+| F6 ✅ **fixed** (T119) — found by Kani in Phase 3.2 | On enforcement a `deny` did not beat a `groups`/`scopes`-qualified grant, and an applying qualified `deny` did not revoke. The operator-facing statement is the `[Unreleased]` Security entry. | `bv_policy_core::decide`; callers `PolicyStore::readable_targets`, `PolicyStore::may_connect_target` | Deny supremacy refuted on enforcement | Fixed after Phase 3 as its own change (§ T119). The Kani witness is now the theorem `t1_deny_wins_on_enforcement`. |
 | F7 ❌ **open** (T120) — found by Kani in Phase 3.2 | Details are withheld from this repository until the fix ships; the maintainer holds the write-up. | `bv_policy_core::ungated_grants_list` | Withheld | Kani witness and differential tests pin the current behaviour. |
 | F8 ❌ **open** (T121) — found reading the code for 3.4 | Details are withheld from this repository until the fix ships; the maintainer holds the write-up. | `grouped_rule_matches` / `scoped_rule_matches` | Withheld | Differential tests pin the current behaviour. |
 
@@ -92,7 +92,7 @@ The standard failure of "we formally verified our authorization engine" is that 
 
 Until 3.4, every claim must be phrased "proved for the core, differentially checked against production", never "the ACL is formally verified".
 
-**3.4 has landed.** The accurate claim is now: "the ACL's decision is model-checked for the theorems and within the bounds listed in `docs/verification.md`; the index that feeds it is differentially tested, not proved". Still never "the ACL is formally verified" — F6 and F7 are theorems the code does *not* satisfy, and the proofs found them precisely because they are about the code that runs.
+**3.4 has landed.** The accurate claim is now: "the ACL's decision is model-checked for the theorems and within the bounds listed in `docs/verification.md`; the index that feeds it is differentially tested, not proved". Still never "the ACL is formally verified" — F7 is a theorem the code does *not* satisfy (F6 was one until T119), and the proofs found them precisely because they are about the code that runs.
 
 ## Compliance mapping (FGV NRM / G-002)
 
@@ -796,6 +796,10 @@ fn capability_bit_layout_matches_core() {
 
 ### Implementation record
 
+The record below captures Phase 3 when it landed, before T119 fixed F6. The
+current harness set and guarantees are recorded at the top of this roadmap,
+in `docs/verification.md`, and in the T119 record below.
+
 3.1, 3.3 and 3.4 landed in `[Unreleased]`; 3.2's harnesses landed and run green, but two theorems as the code's comments state them are refuted (F6, F7), so 3.2 stays open until T119 and T120. Code: `crates/bv-policy-core` (`check.rs`, `decide.rs`, `gate.rs`, `path.rs`, `rank.rs`, `merge.rs`; `model.rs` + `proofs.rs` under `cfg(kani)`), `crates/bv-kernel/src/modules/policy/core_bridge.rs` (the host side), `differential/` (3.3). The DoD, item by item:
 
 - **Kani.** `cargo kani -p bv-policy-core` (Kani 0.68.0, CBMC 6.11.0, default solver, 4 min 10 s wall on an M-series Mac): `Complete - 18 successfully verified harnesses, 0 failures, 18 total`; 34 of 34 covers `SATISFIED`, none `UNSATISFIABLE` or `UNDETERMINED`. Per harness:
@@ -836,12 +840,30 @@ Deviations from the sketch above (see also § Deviations, where the theorem rest
 | `decide(&[Rule; 4], &Query)` with paths in the abstract alphabet | `decide` generic over the index's answers; a separate path matcher proved over the alphabet | Production must call the proved function. Quantifying over every answer the index could give is a superset of every policy set. |
 | "One harness per theorem", 8 harnesses | 18: several per theorem, plus two defect witnesses | T1, T3, T4, T5b split where the statement has independent halves; the witnesses keep refuted theorems visible without a red gate that would hide new failures. |
 | `MAX_RULES = 4` rules in total | 4 per layer (gated, scoped) plus 3 ungated candidates | The layers are evaluated independently; a total of 4 could not put a deny and a grant in both. |
-| Deny supremacy proved outright (T1) | Proved for probes and ungated rules; refuted on enforcement with layers (F6) | The proof is about production, and production does not satisfy it. Fixing it is a behaviour change, out of scope for a no-behaviour-change refactor. |
+| Deny supremacy proved outright (T1) | At Phase 3 landing, proved for probes and ungated rules and refuted on enforcement with layers (F6); fixed later by T119 | The proof is about production, so the behaviour change was kept out of the no-behaviour-change refactor and delivered separately. |
 | `Permissions::check` / layering only | Also the specificity order, the segment matcher, the merge's deny decision | They decide which rule governs (T4) and whether two rules combine (T3); leaving them in the host would leave T3/T4 about a model. |
 
 **Behaviour.** None intended, none found: the differential suite above and the unmodified policy tests. Two performance notes: the non-exact lookup clones a candidate's permissions only for matching rules (as before) and selects in one pass instead of sorting; `allow_operation` now normalises the path before the root/`help` short-circuits (one extra allocation on those requests).
 
 **`02` §6 change record — `Permissionamento`.** Change: the ACL decision moves into `bv-policy-core`; the kernel keeps the rule index. Intended behavioural impact: none. Persisted formats, configuration, API paths: unchanged. Verification: Kani (above), the differential suite, the `bv-kernel` policy suite. Rollback: revert; nothing to migrate. ESI: outstanding. F6–F8 are recorded, not changed.
+
+---
+
+## T119 — Close F6: deny supremacy on enforcement
+
+**`02` §6 change record — `Permissionamento`.**
+
+| Field | Record |
+|---|---|
+| Version / classification | `[Unreleased]`; no release tag or publication date assigned. Proposed FGV level 4, subject to ESI validation as recorded in § Compliance. |
+| Change / requester | Close the authorization finding F6 under T119, requested by the maintainer as a security fix. |
+| Component and owner | `Permissionamento`; the officially responsible person for versioning the component remains a human ownership field and is not assigned by this change. |
+| What changes | A governing `deny`, and a `groups`- or `scopes`-qualified `deny` whose qualifier applies, refuse enforcement even when another layer grants the path. Per-target read and connect gates resolve target qualifiers before treating an unqualified grant as conclusive. |
+| Where | `bv-policy-core`'s decision core; `bv-kernel` policy ACL bridge, per-target filtering and connect gate; the Kani inventory and verification documentation. |
+| Resulting changes | Requests, resource-search results and session-connect checks that previously escaped an overlapping applicable `deny` are refused. Capability probes keep their existing result. No persisted format, configuration schema or API shape changes. |
+| Verification | Regression tests over real HCL and stored group/share facts; the 100,000-case differential; complete `bv-policy-core` Kani run (18/18); component check, clippy and lib tests; affected-package L3 (903 passed, 13 skipped across six binaries). |
+| Rollback | Revert the change; there is no data or configuration migration. Review policies with overlapping qualified rules before rollback because it would restore the authorization bypass. |
+| ESI | **Pending human action:** notify and obtain the required ESI verification before publication. This record does not close that gate. |
 
 ---
 
@@ -1027,7 +1049,7 @@ Deviations from the sketch above:
 | Workflows are `.disabled`; the workspace cannot resolve a lockfile | `verify.yml` is active, like `tests.yml`; Kani runs inside the workspace | Both prerequisites are stale: `tests.yml` runs and builds the workspace. `cargo kani -p bv-policy-core` resolves it from `Cargo.lock`, so the Kani job restores the registry cache. |
 | `KANI_VERSION: '0.56.0'` in the workflow | `pin kani 0.68.0` / `pin cbmc 6.11.0` in `scripts/kani-harnesses.txt` | One pin, read by the gate (which refuses other versions), the CI install and the report. |
 | `--solver cadical` for the heavy harnesses | no solver flag | CaDiCaL is Kani 0.68's default; the flag would also silently override any future per-harness `kani::solver`. |
-| Fast set T1, T2, T5, T7 | 15 of 18 harnesses: every one ≤ 20 s | Measured: 84 s for every theorem and both witnesses; nothing between 14.1 s and 26.3 s. The slow three cost 140 s. |
+| Fast set T1, T2, T5, T7 | 14 of 18 harnesses: every one ≤ 20 s | Re-measured after T119: the enforcement theorem costs 29.5 s and moved to the slow set; the 14 fast harnesses cost 72.4 s, the four slow ones 169.3 s, and the complete run took 219 s wall. Every theorem T1–T8 and the remaining witness retain a fast harness. |
 | `grep -c '#[kani::proof]'` == 8 | a manifest of names, kinds, sets and cover counts | A count misses a rename, and a deleted cover is the other silent failure. Checked statically (names, explicit unwind) and against every run. |
 | `--output-format terse`, exit status | regular output, parsed by the gate | `cargo kani` exits 0 on an `UNSATISFIABLE` cover, and terse output does not name covers. |
 | Tier 0 in CI = clippy + tests + Semgrep | `make verify-gates SEMGREP=0` | Semgrep is already `tests.yml`'s required `sql-guard` job and the `bv-server` route checks its `Unit bv-server` job; not run twice. Tier 3 runs both. |

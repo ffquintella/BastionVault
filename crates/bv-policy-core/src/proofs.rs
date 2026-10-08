@@ -1,6 +1,7 @@
 //! Kani harnesses for the ACL theorems of
 //! `roadmaps/formal-verification-and-type-driven-security.md` § Phase 3
-//! (T1–T8), plus two *defect witnesses* (F6, F7).
+//! (T1–T8), plus one *defect witness* (F7). F6 was a witness until T119
+//! fixed it; it is now `t1_deny_wins_on_enforcement`.
 //!
 //! Run: `cargo kani -p bv-policy-core`. Every harness must report
 //! `VERIFICATION:- SUCCESSFUL` and every `cover` `SATISFIED`; an
@@ -23,11 +24,11 @@
 //! universe) runs at most 4 times, and Kani's unwinding assertions — on by
 //! default — fail the harness if any loop could run longer.
 //!
-//! **Defect witnesses.** `f6_*` and `f7_*` state no property: they `cover`
-//! a behaviour the code's own comments say cannot happen. `SATISFIED` there
-//! means the defect is still present — Kani prints the concrete input. When
-//! a fix lands they turn `UNSATISFIABLE`, which fails the gate on purpose:
-//! replace each `cover` with the `assert` its doc comment gives.
+//! **Defect witnesses.** `f7_*` states no property: it `cover`s a behaviour
+//! the code's own comments say cannot happen. `SATISFIED` there means the
+//! defect is still present — Kani prints the concrete input. When a fix
+//! lands the cover turns `UNSATISFIABLE`, which fails the gate on purpose:
+//! replace it with the `assert` its doc comment gives, as T119 did for F6.
 
 use core::cmp::Ordering;
 
@@ -145,37 +146,54 @@ fn t1_a_governing_deny_grants_nothing() {
     }
 }
 
-/// F6 — DEFECT WITNESS. On enforcement (`check_only = false`, the mode
-/// `PolicyStore::pre_route` uses for every request) an enforcing check of a
-/// deny rule reports no capability rather than `deny`, so:
+/// T1 (enforcement) — the same as [`t1_deny_wins_in_capability_probes`] on
+/// enforcement (`check_only = false`, the mode `PolicyStore::pre_route` and
+/// `readable_targets` use): a deny that governs the path, or a gated or
+/// scoped deny rule that applies, yields exactly `deny` — no `allowed`, no
+/// other capability, no `root_privs`, no LIST filter, no granting policy —
+/// whatever gated or scoped grant competes with it.
 ///
-/// - (a) a governing ungated deny does not stop the gated/scoped layers, and a
-///   gated or scoped grant then allows the request;
-/// - (b) a gated or scoped deny rule that applies does not wipe the result.
-///
-/// The code's comments promise neither can happen. When fixed, replace the
-/// covers with:
-/// `assert!(!(gov_denies || gated_denies || scoped_denies) || !d.allowed);`
+/// This was the F6 defect witness: an enforcing check of a deny rule reports
+/// no capability, and `decide` used to read "is a deny" from that output, so
+/// (a) a gated or scoped grant overrode a governing deny and (b) an applying
+/// gated or scoped deny did not wipe. Its covers turned `UNSATISFIABLE` with
+/// the fix (T119) and became the first assertion below; the covers here are
+/// the two shapes it witnessed, kept as vacuity guards.
 #[kani::proof]
 #[kani::unwind(5)]
-fn f6_enforcement_lets_a_layered_grant_override_deny() {
+fn t1_deny_wins_on_enforcement() {
     let (idx, gated, scoped) = (any_index(), any_rules(), any_rules());
     let op: Op = kani::any();
     kani::assume(op != Op::Help);
     let q = Query { acl_is_root: false, op, probe: false };
     let is_list = op == Op::List;
 
-    let gov_denies = governing(is_list, &idx).is_some_and(|c| denies(&c));
-    let layer_denies =
-        applying(&gated, is_list, |r| denies(&r.cand)) || applying(&scoped, is_list, |r| denies(&r.cand));
+    let gov = governing(is_list, &idx);
+    let gov_denies = gov.is_some_and(|c| denies(&c));
+    let gated_denies = applying(&gated, is_list, |r| denies(&r.cand));
+    let scoped_denies = applying(&scoped, is_list, |r| denies(&r.cand));
+    let grants = |r: &Rule| !denies(&r.cand) && check(&r.cand.perm, op, false, &r.cand).allowed;
 
-    let (d, _) = run(&q, &idx, &gated, &scoped);
-
-    kani::cover!(gov_denies && d.allowed, "F6a: a gated or scoped grant overrides a governing deny");
     kani::cover!(
-        !gov_denies && layer_denies && d.allowed,
-        "F6b: an applying gated or scoped deny does not wipe a grant"
+        gov_denies && (applying(&gated, is_list, grants) || applying(&scoped, is_list, grants)),
+        "F6a: a governing deny competes with a gated or scoped grant that allows"
     );
+    kani::cover!(
+        !gov_denies
+            && (gated_denies || scoped_denies)
+            && gov.is_some_and(|c| c.perm.caps & CAP_SUDO != 0 && check(&c.perm, op, false, &c).allowed),
+        "F6b: an applying gated or scoped deny competes with an ungated sudo grant"
+    );
+
+    let (d, fx) = run(&q, &idx, &gated, &scoped);
+
+    assert!(!(gov_denies || gated_denies || scoped_denies) || !d.allowed, "a deny was overridden on enforcement");
+    if gov_denies || gated_denies || scoped_denies {
+        assert_eq!(d.caps, CAP_DENY, "deny did not clear the capability bitmap");
+        assert!(!d.root_privs, "deny left root_privs on enforcement");
+        assert!(!d.filtered && !fx.filters_live, "deny left a LIST filter behind");
+        assert!(!fx.grants_live, "deny left a granting policy behind");
+    }
 }
 
 // ── T2 — fail-closed default ───────────────────────────────────────

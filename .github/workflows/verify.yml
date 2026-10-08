@@ -45,9 +45,9 @@ name: Verification
 # FAILURE (a counterexample — re-run with concrete playback so the input is in
 # this log), UNDETERMINED, an UNSATISFIABLE or UNREACHABLE cover, a harness
 # with no result or not in scripts/kani-harnesses.txt, a different Kani/CBMC
-# version than pinned there. The two defect witnesses (f6_*, f7_*) are KNOWN
-# OPEN FINDINGS while their covers are SATISFIED and fail the gate the day
-# they stop reproducing (docs/verification.md § Defect witnesses).
+# version than pinned there. The defect witness (f7_*) is a KNOWN OPEN
+# FINDING while its covers are SATISFIED and fails the gate the day it stops
+# reproducing (docs/verification.md § Defect witnesses).
 #
 # ── INJECTION ─────────────────────────────────────────────────────
 #

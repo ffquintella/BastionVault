@@ -453,13 +453,6 @@ fn capability_bit_layout_matches_core() {
     assert_eq!(Capability::iter().count(), pairs.len(), "a Capability was added without a bv-policy-core constant");
 }
 
-// ── Open defects, pinned ───────────────────────────────────────────
-//
-// Characterizations, not endorsements: each asserts what the evaluator does
-// *today* on a concrete policy, so the defect the Kani witness found is
-// reproducible on real HCL, and a fix has to flip the marked assertion on
-// purpose (and update `legacy`). See the roadmap's Findings table.
-
 fn acl_of(policies: &[&str]) -> ACL {
     let parsed: Vec<Arc<Policy>> = policies
         .iter()
@@ -473,59 +466,110 @@ fn acl_of(policies: &[&str]) -> ACL {
     ACL::new(&parsed).unwrap()
 }
 
-/// F6 (a): an explicit ungated deny is overridden on enforcement by a gated
-/// grant, and by a share-scoped grant. Capability probes still report deny.
-#[test]
-fn f6_current_behaviour_a_layered_grant_overrides_an_ungated_deny() {
-    let gated = acl_of(&[
-        r#"path "secret/data/x" { capabilities = ["deny"] }"#,
-        r#"path "secret/data/*" {
-             capabilities = ["read"]
-             groups = ["g1"]
-           }"#,
-    ]);
-    let mut req = Request { operation: Operation::Read, path: "secret/data/x".into(), ..Default::default() };
-    req.asset_groups = vec!["g1".into()];
-    assert_eq!(gated.allow_operation(&req, true).unwrap().capabilities_bitmap, Capability::Deny.to_bits());
-    // DEFECT: deny should win. Flip to `!allowed` with the F6 fix.
-    assert!(gated.allow_operation(&req, false).unwrap().allowed);
+// ── F6, fixed (T119) ───────────────────────────────────────────────
+//
+// These replaced `f6_current_behaviour_*`, which pinned the defect. Each case
+// first shows the layered grant is live (its gate passes and it allows on its
+// own), so the deny is what refuses, not a gate that never opened.
 
-    let shared = acl_of(&[
-        r#"path "secret/data/x" { capabilities = ["deny"] }"#,
-        r#"path "secret/data/*" {
-             capabilities = ["read"]
-             scopes = ["shared"]
-           }"#,
-    ]);
-    let mut req = Request { operation: Operation::Read, path: "secret/data/x".into(), ..Default::default() };
+fn read_as(path: &str) -> Request {
+    Request { operation: Operation::Read, path: path.into(), ..Default::default() }
+}
+
+fn in_group(mut req: Request, group: &str) -> Request {
+    req.asset_groups = vec![group.into()];
+    req
+}
+
+fn with_share(mut req: Request, cap: &str) -> Request {
     let mut auth = Auth::default();
     auth.metadata.insert("entity_id".into(), "u1".into());
     req.auth = Some(auth);
-    req.target_shared_caps = vec!["read".into()];
-    // DEFECT: a share must not override an administrator's deny.
-    assert!(shared.allow_operation(&req, false).unwrap().allowed);
+    req.target_shared_caps = vec![cap.into()];
+    req
 }
 
-/// F6 (b): a gated deny that applies does not wipe a gated grant on
-/// enforcement.
-#[test]
-fn f6_current_behaviour_a_gated_deny_does_not_wipe_on_enforcement() {
-    let acl = acl_of(&[
-        r#"path "secret/data/*" {
-             capabilities = ["read"]
-             groups = ["g1"]
-           }"#,
-        r#"path "secret/data/x" {
-             capabilities = ["deny"]
-             groups = ["g1"]
-           }"#,
-    ]);
-    let mut req = Request { operation: Operation::Read, path: "secret/data/x".into(), ..Default::default() };
-    req.asset_groups = vec!["g1".into()];
-    assert_eq!(acl.allow_operation(&req, true).unwrap().capabilities_bitmap, Capability::Deny.to_bits());
-    // DEFECT: the gated deny should wipe the grant. Flip with the F6 fix.
-    assert!(acl.allow_operation(&req, false).unwrap().allowed);
+/// Enforcement and probe both report exactly `deny`: not allowed, no other
+/// capability, no `root_privs`, no granting policy, no LIST filter.
+fn assert_denied(acl: &ACL, req: &Request) {
+    for check_only in [false, true] {
+        let r = acl.allow_operation(req, check_only).unwrap();
+        assert!(!r.allowed, "check_only = {check_only}: a deny that applies was overridden");
+        assert_eq!(r.capabilities_bitmap, Capability::Deny.to_bits(), "check_only = {check_only}");
+        assert!(r.granting_policies.is_empty(), "check_only = {check_only}: {:?}", r.granting_policies);
+        assert!(r.list_filter_groups.is_empty() && r.list_filter_scopes.is_empty(), "check_only = {check_only}");
+    }
+    assert!(!acl.allow_operation(req, false).unwrap().root_privs, "a deny that applies left root_privs on enforcement");
 }
+
+const GATED_READ: &str = r#"path "secret/data/*" {
+     capabilities = ["read", "list"]
+     groups = ["g1"]
+   }"#;
+const SHARED_READ: &str = r#"path "secret/data/*" {
+     capabilities = ["read", "list"]
+     scopes = ["shared"]
+   }"#;
+
+/// F6 (a): an ungated deny that governs the path is not overridden on
+/// enforcement by a gated grant whose gate passes, nor by a share-scoped
+/// grant backed by an active share — for a read and for a LIST.
+#[test]
+fn f6_a_layered_grant_does_not_override_an_ungated_deny() {
+    let deny = r#"path "secret/data/x" { capabilities = ["deny"] }"#;
+
+    let gated_req = in_group(read_as("secret/data/x"), "g1");
+    assert!(acl_of(&[GATED_READ]).allow_operation(&gated_req, false).unwrap().allowed);
+    assert_denied(&acl_of(&[deny, GATED_READ]), &gated_req);
+
+    let shared_req = with_share(read_as("secret/data/x"), "read");
+    assert!(acl_of(&[SHARED_READ]).allow_operation(&shared_req, false).unwrap().allowed);
+    assert_denied(&acl_of(&[deny, SHARED_READ]), &shared_req);
+
+    // LIST waives the gate: a deny on the collection must still win.
+    let list_deny = r#"path "secret/data/" { capabilities = ["deny"] }"#;
+    let list = Request { operation: Operation::List, path: "secret/data/".into(), ..Default::default() };
+    assert!(acl_of(&[GATED_READ]).allow_operation(&list, false).unwrap().allowed);
+    assert_denied(&acl_of(&[list_deny, GATED_READ]), &list);
+    assert_denied(&acl_of(&[list_deny, SHARED_READ]), &list);
+}
+
+/// F6 (b): a gated or scoped deny rule that applies wipes the result on
+/// enforcement — a layered grant, an ungated grant, and `sudo` alike.
+#[test]
+fn f6_b_an_applying_layered_deny_wipes_on_enforcement() {
+    let gated_deny = r#"path "secret/data/x" {
+         capabilities = ["deny"]
+         groups = ["g1"]
+       }"#;
+    let shared_deny = r#"path "secret/data/x" {
+         capabilities = ["deny"]
+         scopes = ["shared"]
+       }"#;
+    let ungated_sudo = r#"path "secret/data/*" { capabilities = ["read", "sudo"] }"#;
+
+    let req = in_group(read_as("secret/data/x"), "g1");
+    assert_denied(&acl_of(&[GATED_READ, gated_deny]), &req);
+    let r = acl_of(&[ungated_sudo]).allow_operation(&req, false).unwrap();
+    assert!(r.allowed && r.root_privs);
+    assert_denied(&acl_of(&[ungated_sudo, gated_deny]), &req);
+
+    let req = with_share(read_as("secret/data/x"), "read");
+    assert_denied(&acl_of(&[ungated_sudo, shared_deny]), &req);
+    assert_denied(&acl_of(&[SHARED_READ, shared_deny]), &req);
+
+    // The deny's own gate still decides whether it applies: outside `g1`
+    // it contributes nothing and the ungated grant stands.
+    let outside = read_as("secret/data/x");
+    assert!(acl_of(&[ungated_sudo, gated_deny]).allow_operation(&outside, false).unwrap().allowed);
+}
+
+// ── Open defects, pinned ───────────────────────────────────────────
+//
+// Characterizations, not endorsements: each asserts what the evaluator does
+// *today* on a concrete policy, so the defect the Kani witness found is
+// reproducible on real HCL, and a fix has to flip the marked assertion on
+// purpose (and update `legacy`). See the roadmap's Findings table.
 
 /// F7: an exact rule withholds LIST on `secret/metadata/`; a broader
 /// `secret/*` rule (out-specified, so not governing) lists; a gated rule

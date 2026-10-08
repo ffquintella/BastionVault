@@ -2174,8 +2174,9 @@ impl PolicyStore {
     /// every object whose access comes from ownership or a share, which is
     /// precisely the access a filtered list exists to reveal.
     ///
-    /// Cost is one ACL build plus, per candidate, up to three store lookups.
-    /// Callers filtering a large candidate set should narrow it first.
+    /// Cost is one ACL build plus, per candidate, up to three store lookups
+    /// when the ACL has a gated or scoped rule. Callers filtering a large
+    /// candidate set should narrow it first.
     pub async fn readable_targets(
         &self,
         req: &Request,
@@ -2199,17 +2200,20 @@ impl PolicyStore {
             probe.namespace_path = req.namespace_path.clone();
             probe.api_version = req.api_version;
 
-            // First pass with the qualifiers left empty. A `groups` /
-            // `scopes` qualifier can only ever *gate* a rule — never grant
-            // beyond it — so an allow here (an ungated grant, or root) is
-            // already conclusive, and the three lookups below are skipped.
-            // That keeps the admin path at one ACL build and no extra reads.
-            let ungated = acl
-                .allow_operation(&probe, false)
-                .map(|r| r.allowed || r.root_privs)
-                .unwrap_or(false);
-            if ungated {
+            // The first pass is conclusive only for root, or when the ACL has
+            // no layered rule. Otherwise resolve the same qualifiers as a
+            // direct read and run the second pass even when an ungated rule
+            // granted: an applying gated/scoped deny can revoke that grant
+            // (T119).
+            let Ok(unqualified) = acl.allow_operation(&probe, false) else {
+                continue;
+            };
+            if unqualified.is_root {
                 out[i] = true;
+                continue;
+            }
+            if acl.grouped_rules.is_empty() && acl.scoped_rules.is_empty() {
+                out[i] = unqualified.allowed || unqualified.root_privs;
                 continue;
             }
 
@@ -2237,7 +2241,7 @@ impl PolicyStore {
     /// the share/owner-aware arm, so every share-grantee was refused at
     /// `connect/mfa/begin` while `session/open` let them through.
     ///
-    /// Three arms, in cost order:
+    /// Three arms:
     ///
     /// 1. An ungated `connect` grant in admin-authored policy.
     /// 2. An ungated `read` grant. A caller who may read the credential can
@@ -2245,14 +2249,16 @@ impl PolicyStore {
     ///    them would be theatre.
     /// 3. Ownership, or a share that carries `connect` **explicitly**.
     ///
-    /// Arms 1–2 use the identity-less dry-run, so scope-gated rules
-    /// contribute nothing there — they are answered by arm 3, which
-    /// populates the same qualifier inputs `post_auth` resolves for a real
-    /// request. `read` does *not* imply connect on that arm: a share is
-    /// user-authored delegation, and letting "see this secret" silently mean
-    /// "open sessions as it" would hand out the one capability a
-    /// connect-only grant exists to isolate. A grantor who wants both grants
-    /// both.
+    /// Arms 1–2 start with the identity-less dry-run, so scope-gated grants
+    /// contribute nothing there. When the ACL has any gated/scoped rule, the
+    /// target qualifiers are then resolved and both read- and connect-shaped
+    /// probes run again before either arm can grant. This is required because
+    /// a qualified deny only applies once its gate is judged; it must revoke
+    /// an ungated grant (T119). `read` does *not* imply connect through a
+    /// share: a share is user-authored delegation, and letting "see this
+    /// secret" silently mean "open sessions as it" would hand out the one
+    /// capability a connect-only grant exists to isolate. A grantor who wants
+    /// both grants both.
     ///
     /// Fails closed on a missing `auth` or an unbuildable ACL.
     pub async fn may_connect_target(&self, req: &Request, secret_prefix: &str) -> bool {
@@ -2271,12 +2277,13 @@ impl PolicyStore {
             return false;
         };
 
-        let connect = acl.explain_capability(secret_prefix, Capability::Connect);
-        if connect.allowed || connect.is_root {
+        let unqualified_connect = acl.explain_capability(secret_prefix, Capability::Connect);
+        if unqualified_connect.is_root {
             return true;
         }
-        if acl.explain_capability(secret_prefix, Capability::Read).allowed {
-            return true;
+        let unqualified_read = acl.explain_capability(secret_prefix, Capability::Read);
+        if acl.grouped_rules.is_empty() && acl.scoped_rules.is_empty() {
+            return unqualified_connect.allowed || unqualified_read.allowed;
         }
 
         let ns = req.namespace_path.as_deref();
@@ -2288,14 +2295,18 @@ impl PolicyStore {
         probe.asset_groups = resolve_asset_groups(&self.core, secret_prefix, ns).await;
         probe.asset_owner = resolve_asset_owner(&self.core, secret_prefix, ns).await;
         probe.target_shared_caps = resolve_target_shared_caps(&self.core, &probe).await;
+        let read = acl.explain_capability_for_request(&probe, Capability::Read);
         // Read op, `connect` capability: the probe rides on Read because
         // that is how every non-LIST capability is matched, while the
         // override makes a `scopes = ["shared"]` rule demand `connect` on
         // the share rather than the `read` the operation would imply.
         probe.share_capability_override = Some("connect".to_string());
 
-        let verdict = acl.explain_capability_for_request(&probe, Capability::Connect);
-        verdict.allowed || verdict.is_root
+        let connect = acl.explain_capability_for_request(&probe, Capability::Connect);
+        if connect.denied_by_deny || read.denied_by_deny {
+            return false;
+        }
+        connect.allowed || unqualified_read.allowed
     }
 
     /// The effective policy set for a hypothetical token in `ns_path`, built

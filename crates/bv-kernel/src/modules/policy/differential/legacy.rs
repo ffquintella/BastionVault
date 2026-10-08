@@ -9,6 +9,10 @@
 //! generated case. **Do not fix anything here.** A deliberate behaviour
 //! change (F6, F7, F8 in the roadmap) changes this file in the same commit,
 //! with the reason, so the suite keeps describing what shipped.
+//!
+//! Changed since it was frozen: F6 (T119) — the governing rule's and each
+//! layered rule's own bitmap decides whether it is a deny, and a deny yields
+//! exactly `deny` in both modes (`denied`), marked `T119 (F6)` below.
 
 use std::{sync::Arc, time::Duration};
 
@@ -175,21 +179,27 @@ pub fn allow_operation(acl: &ACL, req: &Request, check_only: bool) -> Result<ACL
 
     let path = ensure_no_leading_slash(&req.path);
 
-    let mut base = if let Some(perm) = acl.exact_rules.get(&path) {
-        check(perm, req, check_only)?
+    let governing = if let Some(perm) = acl.exact_rules.get(&path) {
+        Some(perm.clone())
     } else if req.operation == Operation::List {
         if let Some(perm) = acl.exact_rules.get(path.trim_end_matches('/')) {
-            check(perm, req, check_only)?
-        } else if let Some(perm) = get_none_exact_paths_permissions(acl, &path, false) {
-            check(&perm, req, check_only)?
+            Some(perm.clone())
         } else {
-            ACLResults::default()
+            get_none_exact_paths_permissions(acl, &path, false)
         }
-    } else if let Some(perm) = get_none_exact_paths_permissions(acl, &path, false) {
-        check(&perm, req, check_only)?
     } else {
-        ACLResults::default()
+        get_none_exact_paths_permissions(acl, &path, false)
     };
+    let mut base = match &governing {
+        Some(perm) => check(perm, req, check_only)?,
+        None => ACLResults::default(),
+    };
+
+    // T119 (F6): whether a rule denies is read from its bitmap, not from its
+    // check's output, which on enforcement reports no capability for a deny.
+    if governing.is_some_and(|perm| perm.capabilities_bitmap & Capability::Deny.to_bits() != 0) {
+        return Ok(denied(base, check_only));
+    }
 
     let is_list = req.operation == Operation::List;
     if !acl.grouped_rules.is_empty() && base.capabilities_bitmap & Capability::Deny.to_bits() == 0 {
@@ -201,14 +211,11 @@ pub fn allow_operation(acl: &ACL, req: &Request, check_only: bool) -> Result<ACL
             if !gate_passes {
                 continue;
             }
-            let sub = check(&rule.permissions, req, check_only)?;
-            if sub.capabilities_bitmap & Capability::Deny.to_bits() != 0 {
-                base.allowed = false;
-                base.capabilities_bitmap = Capability::Deny.to_bits();
-                base.granting_policies.clear();
-                base.list_filter_groups.clear();
-                return Ok(base);
+            // T119 (F6): the rule's bitmap, not `sub`, decides it is a deny.
+            if rule.permissions.capabilities_bitmap & Capability::Deny.to_bits() != 0 {
+                return Ok(denied(base, check_only));
             }
+            let sub = check(&rule.permissions, req, check_only)?;
             base.capabilities_bitmap |= sub.capabilities_bitmap;
             if sub.allowed {
                 base.allowed = true;
@@ -240,15 +247,11 @@ pub fn allow_operation(acl: &ACL, req: &Request, check_only: bool) -> Result<ACL
             if !scope_passes {
                 continue;
             }
-            let sub = check(&rule.permissions, req, check_only)?;
-            if sub.capabilities_bitmap & Capability::Deny.to_bits() != 0 {
-                base.allowed = false;
-                base.capabilities_bitmap = Capability::Deny.to_bits();
-                base.granting_policies.clear();
-                base.list_filter_groups.clear();
-                base.list_filter_scopes.clear();
-                return Ok(base);
+            // T119 (F6): the rule's bitmap, not `sub`, decides it is a deny.
+            if rule.permissions.capabilities_bitmap & Capability::Deny.to_bits() != 0 {
+                return Ok(denied(base, check_only));
             }
+            let sub = check(&rule.permissions, req, check_only)?;
             base.capabilities_bitmap |= sub.capabilities_bitmap;
             if sub.allowed {
                 base.allowed = true;
@@ -280,6 +283,20 @@ pub fn allow_operation(acl: &ACL, req: &Request, check_only: bool) -> Result<ACL
     }
 
     Ok(base)
+}
+
+/// T119 (F6): a deny that governs or applies yields exactly `deny`; on
+/// enforcement it also clears `root_privs`, which a probe keeps.
+fn denied(mut base: ACLResults, check_only: bool) -> ACLResults {
+    base.allowed = false;
+    base.capabilities_bitmap = Capability::Deny.to_bits();
+    base.granting_policies.clear();
+    base.list_filter_groups.clear();
+    base.list_filter_scopes.clear();
+    if !check_only {
+        base.root_privs = false;
+    }
+    base
 }
 
 pub fn get_none_exact_paths_permissions(acl: &ACL, path: &str, bare_mount: bool) -> Option<Permissions> {
