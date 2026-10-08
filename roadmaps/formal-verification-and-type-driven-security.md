@@ -19,22 +19,25 @@ Each phase is independently shippable and adds no runtime cost to the hot path. 
 
 | Phase | Title | Status |
 |---|---|---|
-| 0 | Baseline: route inventory + threat model sign-off | `[ ]` Todo |
-| 1 | Structural API hardening (`Authorized<R>` witness + route table) | `[ ]` Todo |
-| 1.1 | `SysRoute` trait + `Authorized<R>` extractor | `[ ]` Todo |
-| 1.2 | Migrate the 44 inline `sys` handlers to the witness | `[ ]` Todo |
-| 1.3 | Route table as data + anonymous-surface golden file | `[ ]` Todo |
+| 0 | Baseline: route inventory + threat model sign-off | `[/]` In progress — the inventory is code (Phase 1.3: route table + golden files, no `Unknown` rows) and F2–F4 shipped; the ESI premise-change request for phases 1 and 3.4 is a human process and is **outstanding** |
+| 1 | Structural API hardening (`Authorized<R>` witness + route table) | `[x]` Done — deviations in § Phase 1 → Implementation record |
+| 1.1 | `SysRoute` trait + `Authorized<R>` extractor | `[x]` Done — `crates/bv-server/src/authz.rs`; compile-fail doctests (not `trybuild`, see record) |
+| 1.2 | Migrate the 44 inline `sys` handlers to the witness | `[x]` Done — all 48 inline handlers in today's tree (44 at scoping time); `/metrics` and the Rustion webhook behind their own witnesses |
+| 1.3 | Route table as data + anonymous-surface golden file | `[x]` Done — `crates/bv-server/src/routes.rs`, `src/sys/routes.rs`, `tests/golden/{anonymous-routes,route-inventory}.txt` |
 | 2 | SQL injection elimination (`SqlIdent` / `Sql` + lint gate) | `[x]` Done (2.4 is optional and not adopted) |
 | 2.1 | `bv-sql-guard` crate + `LIKE`-pattern fix | `[x]` Done — `SqlIdent` / `Sql` / `sql!` / `escape_like`, `trybuild` compile-fail cases |
 | 2.2 | Migrate hiqlite + MySQL backends to the guarded API | `[x]` Done |
 | 2.3 | Mechanical gate (Semgrep ruleset), escape-hatch registry | `[x]` Done — `sql-guard` CI job; Semgrep ruleset not yet run (no local Semgrep), text gate verified red/green |
 | 2.4 | Optional: `dylint` AST lint replacing the text gate | `[ ]` Todo |
-| 3 | Formal verification of the permission engine (Kani) | `[ ]` Todo |
-| 3.1 | Extract `bv-policy-core` (bounded, `no_std`, pure) | `[ ]` Todo |
-| 3.2 | Kani harnesses T1–T8 + vacuity guards | `[ ]` Todo |
-| 3.3 | Differential equivalence vs. production `ACL` (proptest) | `[ ]` Todo |
-| 3.4 | Production delegates to the verified core | `[ ]` Todo |
-| 4 | CI/CD orchestration + release verification report | `[ ]` Todo |
+| 3 | Formal verification of the permission engine (Kani) | `[/]` In progress — 3.1, 3.3, 3.4 done; 3.2 is open because model checking refuted two of the theorems as the code's comments state them (F6, F7, below), and the ESI notification is outstanding. See § Phase 3 → Implementation record |
+| 3.1 | Extract `bv-policy-core` (bounded, `no_std`, pure) | `[x]` Done — `crates/bv-policy-core`, no dependencies; decision code only, the index stays in the host |
+| 3.2 | Kani harnesses T1–T8 + vacuity guards | `[/]` 18 harnesses, all `SUCCESSFUL`, every cover `SATISFIED` (Kani 0.68.0). T1 holds for capability probes and ungated rules only and T5b for "some ungated rule lists" only; their stronger forms are refuted on enforcement — F6, F7 (defect witnesses) — so 3.2 closes with T119/T120 |
+| 3.3 | Differential equivalence vs. production `ACL` (proptest) | `[x]` Done — against a frozen copy of the pre-delegation evaluator; 100 000 cases green, no counterexample |
+| 3.4 | Production delegates to the verified core | `[x]` Done — `ACL::allow_operation`, `Permissions::check`, `Permissions::merge` (capabilities), the specificity sort and the segment matcher call the core; no behaviour change |
+| 4 | CI/CD orchestration + release verification report | `[/]` In progress — tiers, gate, workflow and report generator landed and were run locally (tiers 0–2 green; the report generated from real tier-1 evidence); the workflow has never run in CI, so the DoD items that need it are open. See § Phase 4 → Implementation record |
+| 4.1 | Tiers 0–2 as Make targets + the Kani gate | `[x]` Done — `make verify-fast` / `verify` / `verify-full`, `scripts/verify.py`, `scripts/kani-harnesses.txt`; fast set chosen by measurement (15 of 18 harnesses) |
+| 4.2 | `.github/workflows/verify.yml` | `[/]` Written and planned from `scripts/ci-plan.sh`; YAML and every `run:` script syntax-checked, the plan logic dry-run per event; never executed on a runner |
+| 4.3 | Tier 3: `verification-report.md` | `[/]` Generator done and run locally against real tier-1 evidence (a Kani fast-set result); not yet run on tier-2 evidence, produced by CI for a tag, or attached to a release |
 
 ## Deviations from the original brief
 
@@ -46,24 +49,35 @@ Recorded up front, per `agent.md`'s "explain assumptions clearly".
 | **Axum** or Actix extractors | `actix-web 4.13` (`src/http/mod.rs`). | Actix `FromRequest` is the extractor mechanism. The witness pattern below is framework-idiomatic for both, so a future migration keeps the guarantee. |
 | **MIRAI** for taint analysis | MIRAI has had no release since 2023 and pins a specific old nightly. `agent.md` forbids components without vendor support; `03-codificacao-segura.md` §11 forbids discontinued dependencies outright. | **Rejected.** Taint analysis is replaced by *making the taint unrepresentable* (Phase 2 newtypes) plus a mechanical gate over the driver call sites. `dylint` (maintained, Trail of Bits) is the optional AST-precise tier. |
 | Kani on the permission engine directly | `ACL` holds `radix_trie::Trie<String, Permissions>` + `DashMap`, and `allow_operation` takes `&Request` — 25 fields including `Arc<dyn Storage>`, `Arc<dyn Handler>`, `Map<String, Value>`. Unbounded heap, trait objects, interior-mutability locks. | Kani cannot practically discharge that. Phase 3 **extracts a pure bounded core** (`agent.md`: "incremental extraction into `crates/`") and then makes production *use* it, so the proof is about shipped code. See §"The model-vs-code trap". |
+| `decide(&[Rule], &Query)` over abstract-alphabet paths (Phase 3 sketch) | Production rules are strings in tries; an abstract-alphabet `decide` is a function production cannot call, i.e. a model. | `decide` is generic over the **index's answers** (`Ungated`, `Layer`, `Params`, `Caller` traits). Production instantiates it with the tries and the request; the proofs with free values for every answer — strictly more inputs than any policy produces. Path shapes are proved on the matcher production calls (`segments_match`), over the abstract alphabet. |
+| 3-symbol alphabet `{A, B, C}` + `Plus` | Production depends on the empty segment (LIST paths end in `/`) and on string-prefix (`secret/fo*`). | `{Empty, A, Ab, B, Plus}`, with `A` a proper prefix of `Ab`: every relation the matcher can observe between two segments. |
+| T1 "a *matching* deny ⇒ denied" | Vault precedence: a more specific grant (`secret/foo` read) beats a less specific deny (`secret/*` deny) by design. | T1 is stated for the deny that *governs* the path, or a gated/scoped deny that *applies*. |
+| T4 "exact > segment-wildcard > prefix" | The non-exact order is by first-wildcard position, then literal tail, then fewer `+`, then length, then path; a prefix rule can beat a segment-wildcard rule. | T4 is stated as exact > trimmed exact (LIST) > the maximum of that order, which is strict and total. |
+| T7 "a non-root ACL never yields `root_privs`" | `root_privs` is `sudo` on the evaluated rule, by design. | T7: `is_root` only from the root ACL; `root_privs` only from an evaluated `sudo`. |
+| `KANI_VERSION: '0.56.0'` | 0.68.0 is what is installed (`make bootstrap`). | Verified with 0.68.0 / CBMC 6.11.0; Phase 4 pins that. |
 
 ## Findings that motivate this work
 
 Discovered while scoping. Each is a concrete instance of the class its phase closes.
 
-**Status: F2–F5 are fixed** (see `CHANGELOG.md` → `[Unreleased]` → Security). They were authorization-affecting defects in shipped code, so under `03` §10 they were closed as standalone fix PRs ahead of the phases — the phases exist to make the *next* one impossible, not to schedule these. F1 remains open by design: v0.37.6 fixed its instances, and Phase 1 removes the class. See § Compliance for the ones that need an incident/ESI path rather than a normal fix.
+**Status: F2–F5 are fixed** (see `CHANGELOG.md` → `[Unreleased]` → Security). They were authorization-affecting defects in shipped code, so under `03` §10 they were closed as standalone fix PRs ahead of the phases — the phases exist to make the *next* one impossible, not to schedule these. F1 was open by design until Phase 1: v0.37.6 fixed its instances, and Phase 1 (`[Unreleased]`) removes the class — a privileged handler without the witness no longer registers. See § Compliance for the ones that need an incident/ESI path rather than a normal fix.
+
+**F6–F8 are open.** Phase 3's model checking and code reading found three evaluator findings, preserved and pinned by tests rather than fixed because Phase 3 was a no-behaviour-change refactor. F6 is authorization-affecting — under `03` §10 it should be closed ahead of further feature work, as F2–F5 were — but it is a `Permissionamento` change that needs the `02` §6 change record and ESI involvement, so it is tracked as its own task (T119). Details are withheld from this repository until the fix ships; the maintainer holds the write-up.
 
 | # | Finding | Location | Class | Phase |
 |---|---|---|---|---|
-| F1 | 44 `sys` routes did privileged work inline and never crossed `pre_route` — fixed reactively in v0.37.6 by adding an `authorize_sys_request` call to each. The fix is a **convention**: a new handler that omits the call still compiles and still serves. | `src/http/sys.rs` | Missing structural guarantee | 1 |
+| F1 ✅ **closed structurally** (Phase 1) | 44 `sys` routes did privileged work inline and never crossed `pre_route` — fixed reactively in v0.37.6 by adding an `authorize_sys_request` call to each. The fix is a **convention**: a new handler that omits the call still compiles and still serves. | `src/http/sys.rs` | Missing structural guarantee | 1 |
 | F2 ✅ **fixed** | `GET /metrics` had **no authorization at all** — no token, no ACL, no IP filter. It serves the Prometheus registry of a secrets vault (per-mount operation counters, cache hit rates, login counters) to any caller that can reach the listener. | [src/http/metrics.rs](src/http/metrics.rs) | Unauthenticated privileged read | Fixed ahead of Phase 1: cluster-local socket peer **or** a configured CIDR **or** a token with `read` on `sys/metrics`; else 403. New `metrics { ... }` config block. Phase 1 still owns making it structural. |
 | F3 ✅ **fixed** | `list(prefix)` built `WHERE vault_key LIKE ?` with a bound `"{prefix}%"`. Binding prevents *syntax* injection but **not pattern semantics**: `_` is a single-character wildcard in a `LIKE` pattern. Vault keys routinely contain `_`, so listing `secret/my_app/` also matches `secret/myXapp/…`. | [src/storage/hiqlite/mod.rs](src/storage/hiqlite/mod.rs), [mysql_backend.rs](src/storage/mysql/mysql_backend.rs) | Over-return with authorization impact | Fixed ahead of 2.1 via Option A (escaped `LIKE` + `ESCAPE '\\'`), in `scan` as well as `list`, and in the MySQL backend. |
 | F4 ✅ **fixed** | The over-returned rows were **not** filtered out downstream: `entry.vault_key.trim_start_matches(prefix)` is a no-op on a key that does not start with `prefix`, so the foreign key is pushed into the result verbatim. `trim_start_matches` also strips *repeated* prefixes (`secret/secret/x` → `x`), where `strip_prefix` is meant. | [src/storage/hiqlite/mod.rs](src/storage/hiqlite/mod.rs) | Missing post-condition | Fixed ahead of 2.1: `strip_prefix` is now the authoritative membership test on every returned row. |
 | F5 ✅ **fixed** | The table identifier was `format!`-interpolated into every hiqlite statement, unvalidated, straight from config (`conf.get("table")`, default `vault`). One site is `client.batch(...)`, which executes multiple `;`-separated statements. Config is operator-controlled, so this is not remotely reachable — but this deployment templates config through Puppet/quadlets, and the shape is exactly a multi-statement injection. | [src/storage/hiqlite/mod.rs](src/storage/hiqlite/mod.rs) | Unvalidated identifier interpolation | Fixed ahead of 2.1 with a `validate_table_name` allow-list at construction (plain SQL identifier, ≤64 chars). `SqlIdent` in 2.1 supersedes it as a type-level guarantee. |
+| F6 ❌ **open** (T119) — found by Kani in Phase 3.2 | Authorization-relevant. Details are withheld from this repository until the fix ships; the maintainer holds the write-up. | `allow_operation` (now `bv_policy_core::decide`) | Withheld | Kani witness and differential tests in the tree pin the current behaviour. **Not fixed in Phase 3.** |
+| F7 ❌ **open** (T120) — found by Kani in Phase 3.2 | Details are withheld from this repository until the fix ships; the maintainer holds the write-up. | `bv_policy_core::ungated_grants_list` | Withheld | Kani witness and differential tests pin the current behaviour. |
+| F8 ❌ **open** (T121) — found reading the code for 3.4 | Details are withheld from this repository until the fix ships; the maintainer holds the write-up. | `grouped_rule_matches` / `scoped_rule_matches` | Withheld | Differential tests pin the current behaviour. |
 
 **Sequencing consequence (discharged):** F2 and F3/F4 were authorization-affecting defects in shipped code. Under `03-codificacao-segura.md` §10 a grave finding is fixed *before* other work, so they shipped as phase-0 fix PRs rather than phase deliverables. What the phases still owe:
 
-- Phase 1 must make the `/metrics` gate **structural** — today it is a hand-written check in the handler, exactly the convention-not-guarantee shape F1 describes.
+- Phase 1 must make the `/metrics` gate **structural** — it was a hand-written check in the handler, exactly the convention-not-guarantee shape F1 describes. Done: `metrics_routes::ScrapeAuthorized`.
 - Phase 2.1 must fold `escape_like_prefix` / `validate_table_name` into `bv-sql-guard` so `SqlIdent` is the type-level version of the runtime allow-list now in place.
 
 **Deviation from the 2.1 sketch below:** the sketch proposes returning `ErrPhysicalBackendPrefixInvalid` for a row that fails `strip_prefix`, on the reasoning that escaping makes such a row unreachable. It does not: SQLite's `LIKE` is ASCII-case-insensitive by default, so a key differing only in case legitimately matches the escaped pattern. Erroring there would break listing whenever two keys differ by case alone. The shipped code filters those rows instead, and the escaping remains a narrowing optimization rather than the membership test.
@@ -77,6 +91,8 @@ The standard failure of "we formally verified our authorization engine" is that 
 3. **3.4 removes the possibility of drift.** `Permissions::check` and the rule-layering loop in `allow_operation` delegate to `decide`. After 3.4, `bv-policy-core` is not a model of the evaluator — it *is* the evaluator, and the proofs are statements about production behaviour. Phase 3 is not Done until 3.4 lands.
 
 Until 3.4, every claim must be phrased "proved for the core, differentially checked against production", never "the ACL is formally verified".
+
+**3.4 has landed.** The accurate claim is now: "the ACL's decision is model-checked for the theorems and within the bounds listed in `docs/verification.md`; the index that feeds it is differentially tested, not proved". Still never "the ACL is formally verified" — F6 and F7 are theorems the code does *not* satisfy, and the proofs found them precisely because they are about the code that runs.
 
 ## Compliance mapping (FGV NRM / G-002)
 
@@ -120,6 +136,28 @@ This work is largely the *mechanization* of rules the FGV standard already impos
 - A table in this document listing every route and its class, with no `Unknown` rows.
 - F2/F3/F4 fix PRs merged, each with a regression test proving the old behaviour cannot return.
 - ESI premise-change request filed for phases 1 and 3.4.
+
+### Inventory (as code)
+
+The table this phase asks for is generated from the route table Phase 1.3 introduced, so it cannot drift from what is served, and lives in two checked-in files rather than in this document:
+
+- `crates/bv-server/tests/golden/route-inventory.txt` — all 292 (method, path) rows the listener serves, each with its class and what it is judged on: the policy path and operation for a privileged route, the logical path for a routed shim, the written justification for everything else.
+- `crates/bv-server/tests/golden/anonymous-routes.txt` — the 29 rows an anonymous caller can reach, with the threat-model paragraph (step 3) for each.
+
+Both are compared on every `cargo nextest run -p bv-server --lib`; there is no `Unknown` class to put a row in. The four Phase 0 classes did not cover the listener as it is, so the table adds four, each reviewed in the golden file like the others:
+
+| Class | Rows | Meaning |
+|---|---|---|
+| `privileged` | 95 | inline handler behind `Authorized<R>` — token + ACL before the body runs (48 markers, most served under `v1` and `v2`) |
+| `routed` | 168 | HTTP shim that builds one logical request and dispatches it through `Core::handle_request`; `pre_route` judges it on the listed logical path |
+| `routed-unauthenticated` | 4 | as `routed`, onto a path the system backend lists in `unauth_paths` (`sys/internal/ui/mounts[/…]`); a test checks the split against the router |
+| `dispatch` | 4 | carries caller-chosen logical requests — the `/v1` and `/v2` catch-alls, `v2/sys/batch`, `/v2/mcp` — each judged by `pre_route` on its own path |
+| `public-probe` | 15 | deliberately anonymous: `init`, `seal-status`, `health`, `unseal`, the RFC 9728 metadata document |
+| `tiered` | 2 | `sys/info` |
+| `cluster-local` | 3 | `sys/cluster-status` and `/metrics`: a token, or a waiver judged on the socket peer |
+| `signature-verified` | 1 | the Rustion `recording.ready` webhook, authenticated by its body signature |
+
+**Outstanding:** the ESI premise-change request for phases 1 and 3.4 (the third Definition of Done item above) is a human process; it has not been filed by this work and remains a pendency under § Compliance.
 
 ---
 
@@ -321,6 +359,34 @@ Cover the non-`sys` surfaces too: `metrics` (F2), `rustion_webhook` (signature-a
 - F2 **resolved ahead of this phase** (`/metrics` requires a token, a cluster-local peer, or a configured CIDR). What Phase 1 owes is making that gate structural rather than a hand-written check inside the handler.
 - Integration tests: for each of five sampled privileged routes, an unauthenticated request returns 403 and appears on the denial audit trail.
 - CHANGELOG entry under `[Unreleased]` → Security, plus the `02` §6 change record for `Permissionamento`.
+
+### Implementation record
+
+Landed in `[Unreleased]`. Code: `crates/bv-server/src/authz.rs` (witness, `privileged` / `guarded`), `src/routes.rs` (table shapes, the one builder, the inventory), `src/sys/routes.rs` (the `sys` table), `metrics_routes::ScrapeAuthorized`, `rustion_webhook::SignatureVerified`, `tests/golden/`. The DoD, item by item:
+
+- **Registration.** `init_service` registers `routes::LISTENER` and nothing else; every route is a `route!` entry whose arm is its class. `configure_sys_routes` no longer exists. The text gate is crate-wide: `routes::tests::no_route_is_registered_outside_the_route_builder` fails on any actix registration call (or hand-written `RouteSpec`) outside `routes.rs` / `authz.rs`, and `the_registration_gate_detects_raw_registration` shows it can fail.
+- **Compile-fail.** `compile_fail` doctests in `authz.rs` (run by `make test-doc`): no witness, the witness of another route, a payload-reading argument beside the witness, and a forged witness — each beside a compiling positive case that differs by that one mistake.
+- **Golden file.** `anonymous_surface_matches_golden_file` and `route_inventory_matches_golden_file` (`BV_BLESS_GOLDEN=1` regenerates both). `every_listed_route_is_served_by_its_own_resource` resolves every row through actix's own resource map, so a resource shadowed by an earlier wildcard fails.
+- **One caller.** `authz::tests::authorize_sys_request_has_exactly_one_caller`.
+- **F2 structural.** `/metrics` takes `ScrapeAuthorized` and is registered through `authz::guarded`; the same for the webhook's `SignatureVerified`.
+- **Integration.** `authz::tests::unauthenticated_privileged_requests_are_refused_and_audited`: `GET sys/plugins`, `GET sys/scheduled-exports`, `POST sys/exchange/export`, `GET sys/plugins/quarantine`, `DELETE sys/plugins/{name}/grants` each return 403 and leave an audit entry with that path, operation and an error.
+
+Deviations from the sketch above, each a decision rather than an omission:
+
+| Sketch | Shipped | Why |
+|---|---|---|
+| `fn policy_path(req) -> Result<String, RvError>` per marker | `const POLICY_PATH` template; `{name}` filled from the route capture | One string is both the path judged and the path the inventory prints. It expands exactly as the handlers' `format!` + `unwrap_or("")` did; a test checks every template names only segments its route captures. |
+| `trybuild` compile-fail case | `compile_fail` doctests | `trybuild` builds in its own target directory (`target/tests/trybuild`) — for `bv-server`, a cold build of the whole `bastion_vault` graph. Doctests link against the existing artefacts. Error codes are only checked on nightly, hence the positive control. |
+| `H: Handler<(Authorized<R>, T)>`, extra extractors nested in `T` | `Args: StartsWith<Authorized<R>>`, arities 1–6, the rest `PayloadFree` | No handler has to nest its arguments in a tuple, and a handler cannot read the body behind the witness. |
+| The witness never reads the body | `type Body = WithBody` routes have the witness read it first | Keeps the existing order (body read under the resource's limit, then authorization) and the HMAC-redacted body in a refusal's audit entry. |
+| Every refusal audited | `DenialAudit::NotRecorded` on the 8 routes that never audited one (`seal`, `backup`, `restore`, `export`, `import`, three cluster calls) | Pure refactor. Recording them is a one-word change per marker — follow-up. |
+| `Core::seal_authorized(&Authorized<SysSeal>, …)` push-down for `02` §2 operations | Not done | `Core` is in `bv-core`, two crates below `bv-server`. A witness defined there could not keep its constructor private to the authorization module, and an in-`bv-server` wrapper would be vacuous: the operations themselves (`backup::create`, `Core::seal`) stay callable from `bastion_vault`. Open item. |
+| Classes `privileged` / `public` / `tiered` / `cluster_local` | Plus `routed`, `routed_unauthenticated`, `dispatch`, `signature_verified` | What the listener actually has; see Phase 0 → Inventory. |
+| — | `sys/cluster-status` keeps its hand-written gate, declared `cluster_local` | Not in scope here; a witness like `/metrics`' is a follow-up. |
+
+**Behaviour.** No route added, removed or reordered; status codes and bodies unchanged (the 65 existing `bv-server` lib tests pass unmodified, 77 with the new ones). Differences a reviewer should know about: a `/metrics` refusal now leaves the extractor as an `InternalError` wrapping the same response, so actix's logger notes it at debug level; and in an app missing a non-`Core` registration (`PreviewStore`, the metrics manager — never the case in `bvault server`) an unauthorized call may now get 403 where it got 500, because actix polls extractors together. Public API of `bv-server`: new modules `authz` and `routes`, 48 public marker types in `sys`, and `metrics_routes::metrics_handler` takes the witness — a `MINOR` bump for `bv-server` at the next release.
+
+**`02` §6 change record — `Permissionamento`.** Change: the authorization call of the 48 inline `sys` handlers, the `/metrics` gate and the webhook signature check move from handler bodies into extractors; route registration becomes a table. Intended behavioural impact: none. Persisted formats, configuration, API paths: unchanged. Verification: the tests above plus the full `bv-server` suite. Rollback: revert; nothing to migrate. ESI: the premise-change request is still outstanding (§ Compliance).
 
 ---
 
@@ -728,6 +794,55 @@ fn capability_bit_layout_matches_core() {
 - `docs/verification.md` states, in operator-facing language: what is proved, the bounds (`MAX_RULES = 4`, `MAX_SEGMENTS = 4`, 3-symbol alphabet), and **what is therefore not proved** — policies with more than 4 rules matching one path, real string matching in the trie index, the async `post_auth` resolution of `asset_groups` / `asset_owner` / `target_shared_caps`, and everything upstream of the evaluator. An overclaimed guarantee is worse than none.
 - ESI notified: this changes `Permissionamento`, a componente básico (`02` §6).
 
+### Implementation record
+
+3.1, 3.3 and 3.4 landed in `[Unreleased]`; 3.2's harnesses landed and run green, but two theorems as the code's comments state them are refuted (F6, F7), so 3.2 stays open until T119 and T120. Code: `crates/bv-policy-core` (`check.rs`, `decide.rs`, `gate.rs`, `path.rs`, `rank.rs`, `merge.rs`; `model.rs` + `proofs.rs` under `cfg(kani)`), `crates/bv-kernel/src/modules/policy/core_bridge.rs` (the host side), `differential/` (3.3). The DoD, item by item:
+
+- **Kani.** `cargo kani -p bv-policy-core` (Kani 0.68.0, CBMC 6.11.0, default solver, 4 min 10 s wall on an M-series Mac): `Complete - 18 successfully verified harnesses, 0 failures, 18 total`; 34 of 34 covers `SATISFIED`, none `UNSATISFIABLE` or `UNDETERMINED`. Per harness:
+
+  | Harness | Theorem | Result | Covers | Time |
+  |---|---|---|---|---|
+  | `t1_deny_wins_in_capability_probes` | T1 | SUCCESSFUL | 3/3 | 10.5 s |
+  | `t1_a_governing_deny_grants_nothing` | T1 | SUCCESSFUL | 1/1 | 8.8 s |
+  | `f6_enforcement_lets_a_layered_grant_override_deny` | F6 witness | SUCCESSFUL (defect present) | 2/2 | 10.2 s |
+  | `t2_no_rule_means_no_grant` | T2 | SUCCESSFUL | 2/2 | 8.2 s |
+  | `t3_merge_keeps_deny_and_never_drops_a_capability` | T3 (+T1 merge) | SUCCESSFUL | 3/3 | 0.1 s |
+  | `t3_an_added_layered_grant_never_removes_a_capability` | T3 | SUCCESSFUL | 2/2 | 23.0 s |
+  | `t4_exact_rules_take_precedence` | T4 | SUCCESSFUL | 2/2 | 0.4 s |
+  | `t4_specificity_is_a_strict_total_order` | T4 | SUCCESSFUL | 1/1 | 0.5 s |
+  | `t4_the_most_specific_candidate_wins_in_any_order` | T4 | SUCCESSFUL | 2/2 | 100.7 s |
+  | `t4_segment_wildcards_match_by_shape` | T4 | SUCCESSFUL | 2/2 | 2.6 s |
+  | `t5_group_gate_is_sound` | T5 | SUCCESSFUL | 1/1 | 5.0 s |
+  | `t5_t6_a_failed_gate_contributes_nothing` | T5, T6 | SUCCESSFUL | 1/1 | 35.4 s |
+  | `t6_scope_gate_is_sound` | T6 | SUCCESSFUL | 4/4 | 1.9 s |
+  | `t5b_gated_list_always_carries_a_filter` | T5b | SUCCESSFUL | 1/1 | 4.8 s |
+  | `t5b_an_unfiltered_list_needs_an_ungated_list_grant` | T5b | SUCCESSFUL | 1/1 | 6.7 s |
+  | `f7_a_non_governing_list_rule_drops_the_filter` | F7 witness | SUCCESSFUL (defect present) | 1/1 | 5.1 s |
+  | `t7_root_isolation` | T7 | SUCCESSFUL | 1/1 | 10.6 s |
+  | `t8_parameter_constraints` | T8 | SUCCESSFUL | 4/4 | 0.4 s |
+
+  Re-run on the final (formatted) tree: identical results, 3 min 51 s; no check inside a harness is `UNREACHABLE` (the 106 that are sit in Kani's library models and in model helpers a given harness does not call). The first run failed `t8` on `unwinding assertion loop 0` (a 6-element well-formedness scan under `unwind(5)`); the scan was rewritten as one mask test. That is the bound check working, not a relaxed bound.
+- **Unwind.** Every harness carries `#[kani::unwind(5)]` = bound + 1, with the reason in the `proofs.rs` header; none relies on a default.
+- **No undischarged results.** None. The two refuted theorems are not left as failing harnesses: each is a *defect witness* that `cover`s the counterexample (Kani prints it), turns `UNSATISFIABLE` — failing the gate — once fixed, and names the `assert` that replaces it.
+- **3.3.** `production_agrees_with_the_frozen_evaluator`: 100 000 cases green in 82 s (`PROPTEST_CASES=100000`, fixed seed), every case 1–3 generated HCL policies × 1–4 requests × both modes, comparing verdict, bitmap, `root_privs`, granting-policy names, LIST filters and their order, `capabilities()`, `has_mount_access`, the scope diagnostics and the built index; plus `segment_matcher_agrees_with_the_frozen_one` and `capability_bit_layout_matches_core`. The oracle is `differential/legacy.rs`, a verbatim copy of the evaluator before it delegated, so "no behaviour change" is checked rather than asserted. No counterexample was found, so there is no fixed defect to record from it; F6 and F7 came from the model checker.
+- **3.4.** `ACL::allow_operation` is `bv_policy_core::decide` over `core_bridge`'s index adapters; `Permissions::check` is `bv_policy_core::check`; `Permissions::merge` and `ACL::new` take the deny decision from `merge_caps`; `WcPathDescr`'s order is `bv_policy_core::compare` and the winner `MostSpecific`; both segment matchers are `segments_match`. Deleting the crate breaks `bv-kernel`. No existing test was modified: `cargo nextest run -p bv-kernel --lib policy` passes 103 (8 of them new), and the whole `bv-kernel` lib suite passes.
+- **`docs/verification.md`.** Written (S108): what is proved, the bounds, and § "What is not proved".
+- **ESI.** Not notified by this work — a human process; outstanding with Phase 1's request (§ Compliance).
+
+Deviations from the sketch above (see also § Deviations, where the theorem restatements are):
+
+| Sketch | Shipped | Why |
+|---|---|---|
+| `decide(&[Rule; 4], &Query)` with paths in the abstract alphabet | `decide` generic over the index's answers; a separate path matcher proved over the alphabet | Production must call the proved function. Quantifying over every answer the index could give is a superset of every policy set. |
+| "One harness per theorem", 8 harnesses | 18: several per theorem, plus two defect witnesses | T1, T3, T4, T5b split where the statement has independent halves; the witnesses keep refuted theorems visible without a red gate that would hide new failures. |
+| `MAX_RULES = 4` rules in total | 4 per layer (gated, scoped) plus 3 ungated candidates | The layers are evaluated independently; a total of 4 could not put a deny and a grant in both. |
+| Deny supremacy proved outright (T1) | Proved for probes and ungated rules; refuted on enforcement with layers (F6) | The proof is about production, and production does not satisfy it. Fixing it is a behaviour change, out of scope for a no-behaviour-change refactor. |
+| `Permissions::check` / layering only | Also the specificity order, the segment matcher, the merge's deny decision | They decide which rule governs (T4) and whether two rules combine (T3); leaving them in the host would leave T3/T4 about a model. |
+
+**Behaviour.** None intended, none found: the differential suite above and the unmodified policy tests. Two performance notes: the non-exact lookup clones a candidate's permissions only for matching rules (as before) and selects in one pass instead of sorting; `allow_operation` now normalises the path before the root/`help` short-circuits (one extra allocation on those requests).
+
+**`02` §6 change record — `Permissionamento`.** Change: the ACL decision moves into `bv-policy-core`; the kernel keeps the rule index. Intended behavioural impact: none. Persisted formats, configuration, API paths: unchanged. Verification: Kani (above), the differential suite, the `bv-kernel` policy suite. Rollback: revert; nothing to migrate. ESI: outstanding. F6–F8 are recorded, not changed.
+
 ---
 
 ## Phase 4 — CI/CD orchestration
@@ -881,6 +996,50 @@ Not covered: see docs/verification.md § Limits.
 - `docs/verification.md` published, including the § Limits section.
 - CHANGELOG under `[Unreleased]` → Added, referencing this roadmap.
 
+### Implementation record
+
+Landed in `[Unreleased]`. Code: `Makefile` § Verification tiers (`verify-gates`, `verify-routes`, `verify-fast`, `verify-kani`, `verify-differential`, `verify`, `verify-full`, `verification-report`); `scripts/verify.py` (recorded steps, the Kani gate and its self-test, the report); `scripts/kani-harnesses.txt` (harness inventory and the pinned verifier); `.github/workflows/verify.yml` and `.github/actions/setup-kani/`; `scripts/ci-plan.sh` / `scripts/test-changed.sh` (`run_kani`, `run_differential`, `verify_files`). No product code, configuration, persisted format or API changed. What the tiers contain and the gate's failure policy are in `docs/verification.md` § Continuous verification.
+
+Measured locally (Apple M-series, warm `target/`, Kani 0.68.0 / CBMC 6.11.0; Semgrep is not installed on this machine, so every run is `SEMGREP=0` and records that step `SKIPPED`):
+
+| Run | Wall | Result |
+|---|---|---|
+| `cargo kani -p bv-policy-core` (all 18, for the fast-set split) | 239 s | 18/18 `SUCCESSFUL`, 34/34 covers `SATISFIED`, no `UNREACHABLE` check inside a harness |
+| `make verify-fast SEMGREP=0` | 33 s | every step `PASS`, Semgrep `SKIPPED` (`routes` 25 tests, witness doctests 5) |
+| `make verify SEMGREP=0` (tier 1) | 146 s | `PASS`: Kani fast set 15/15 in 92 s with F6 and F7 reported as known open findings; differential at 10 000 cases 8/8 |
+| `make verify-differential CASES=1000000`, proptest's default reject budget | 200 s | **FAIL** — both property tests aborted with "Too many local rejects" (the `+*` filter; 183 701 accepted cases before the abort). No disagreement. See the deviation below |
+| `make -k verify-full SEMGREP=0` (tier 2), reject budget scaled | 2 109 s | `PASS`, Semgrep `SKIPPED`: Kani full set 18/18 in 245 s with F6 and F7 as known open findings; differential at 1 000 000 cases 8/8 in 851 s of test time, after 9 min 40 s rebuilding the `bv-kernel` test harness (see the follow-up on `build.rs`) |
+
+The DoD, item by item:
+
+- **`verify.yml` green on `main`, tier 1 on every PR — open.** The workflow has never run: it is uncommitted. What was checked without a runner: the YAML parses, every `run:` script passes `bash -n`, the plan step's event logic was dry-run for each trigger, the `required` job's script against success / skipped / failure / cancelled inputs, and `scripts/ci-plan.sh` against four seeds (`run_kani` only for `bv-policy-core` and the tooling; `run_differential` for anything that reaches `bv-kernel`).
+- **Tier-1 wall clock under 8 min with a warm Kani cache — local only.** 146 s on the machine above. Runner time is unmeasured, and a PR's differential job also pays a `bv-kernel` test build from the `build` cache.
+- **A deliberate ACL bug caught by tier 1 — done locally, not on a scratch branch through CI.** `d.caps = CAP_DENY` → `d.caps |= CAP_DENY` in the layer wipe (`decide.rs`, the roadmap's example), in a copy of the crate outside the tree: the fast set fails `t1_deny_wins_in_capability_probes` and the gate exits 1 naming the harness and the failing check. The counterexample's input is **not** in the log: Kani 0.68.0's concrete playback generated tests for the three satisfied covers only (the failing `assert_eq!` has a runtime-formatted message and fails inside `core::panicking`), and CBMC's own `--trace` is 780 000 lines. The gate prints the playback test when Kani produces one and says so when it does not. A second mutant — dropping `d.allowed = false` from the wipe — survived and is equivalent: probes never report `allowed` (`check.rs`), and on enforcement the wipe is unreachable because a deny rule's check reports no capability, which is F6.
+- **`make verify` reproduces tier 1 on macOS and Linux — macOS only.** Not run on Linux.
+- **Tier-3 report for one release, attached to the tag — open.** `make verification-report` was run against the tier-1 evidence above: it rendered the real Kani fast-set result (per-harness table, F6/F7 as known open findings, bounds, route classes) and, once the tree had been edited, marked every record `STALE` and dropped the harness table rather than reporting it. It has not been run on tier-2 evidence: a second tier-2 run on the final tree was stopped, and its start had already replaced the tier-0 records and removed the earlier Kani record, so `target/verify/` holds no complete set. On this machine it can reach no tier anyway (Semgrep `SKIPPED` ⇒ verdict `INCOMPLETE`, the rule working), and the uncommitted tree is marked `DIRTY — not a release artifact`. No release was cut.
+- **`docs/verification.md` published, with the limits** — § Continuous verification added; linked from `docs/_sidebar.md`, where it was missing.
+- **CHANGELOG** — `[Unreleased]` → Added.
+
+Deviations from the sketch above:
+
+| Sketch | Shipped | Why |
+|---|---|---|
+| Workflows are `.disabled`; the workspace cannot resolve a lockfile | `verify.yml` is active, like `tests.yml`; Kani runs inside the workspace | Both prerequisites are stale: `tests.yml` runs and builds the workspace. `cargo kani -p bv-policy-core` resolves it from `Cargo.lock`, so the Kani job restores the registry cache. |
+| `KANI_VERSION: '0.56.0'` in the workflow | `pin kani 0.68.0` / `pin cbmc 6.11.0` in `scripts/kani-harnesses.txt` | One pin, read by the gate (which refuses other versions), the CI install and the report. |
+| `--solver cadical` for the heavy harnesses | no solver flag | CaDiCaL is Kani 0.68's default; the flag would also silently override any future per-harness `kani::solver`. |
+| Fast set T1, T2, T5, T7 | 15 of 18 harnesses: every one ≤ 20 s | Measured: 84 s for every theorem and both witnesses; nothing between 14.1 s and 26.3 s. The slow three cost 140 s. |
+| `grep -c '#[kani::proof]'` == 8 | a manifest of names, kinds, sets and cover counts | A count misses a rename, and a deleted cover is the other silent failure. Checked statically (names, explicit unwind) and against every run. |
+| `--output-format terse`, exit status | regular output, parsed by the gate | `cargo kani` exits 0 on an `UNSATISFIABLE` cover, and terse output does not name covers. |
+| Tier 0 in CI = clippy + tests + Semgrep | `make verify-gates SEMGREP=0` | Semgrep is already `tests.yml`'s required `sql-guard` job and the `bv-server` route checks its `Unit bv-server` job; not run twice. Tier 3 runs both. |
+| Route inventory in tier 0 | in local tier 0 (`verify-routes`), plus the `Authorized<R>` `compile_fail` doctests | ~20 s on a warm tree, so it fits; the doctests are the Phase 1 compile-fail cases (the sketch's `trybuild`). |
+| `cargo test --lib policy::differential -- --include-ignored` | `PROPTEST_CASES=N cargo nextest run -p bv-kernel --lib differential` | The suite is not `#[ignore]`d; the case count is the knob. |
+| Proptest at 1M cases | 1M, with `PROPTEST_MAX_LOCAL_REJECTS = max(65536, CASES)` | The default budget aborts at ~184k cases (the `+*` filter rejects ~6.7 % of rule-path draws). Scaling it keeps every accepted case and still aborts when rejects outnumber them. The cleaner fix — a generator that never draws `+*` — is the Phase 3 suite's, not changed here. |
+| "`kani::cover` coverage report" | the per-harness cover table, in the gate's output and the report | Kani's source coverage (`-Z source-coverage`) is unstable. |
+| Tier 3 on a release tag | on `releases/*` | The namespace `standalone-release.yml` and `macos-release.yml` publish GitHub releases under; the same create-or-upload step, retried for their race. |
+| A report template | generated from per-step evidence, each bound to the commit and a fingerprint of any uncommitted change | A report must not claim a check it did not see: no record is `NOT RUN`, another tree's record is `STALE`. |
+
+Follow-ups: the first CI run (runner timings, the two new cache keys, Kani setup on `ubuntu-latest`); the scratch-branch mutant through CI; making **All verification checks** a required status in branch protection (a repository setting); the differential generator drawing no `+*`; whether `make test-release` should run `verify-full`, which would also change `AGENTS.md` § 4; and the root `build.rs`, which prints no `cargo:rerun-if-changed`, so cargo reruns it — and rebuilds `bastion_vault` and every test harness above it — after an edit to *any* file of the root package, docs and scripts included. The warm-tree timings above assume no such edit; with one, `verify-routes` and `verify-differential` pay that rebuild (seconds to ~10 min measured).
+
 ---
 
 ## Cross-cutting decisions, made up front
@@ -909,6 +1068,6 @@ Stated explicitly so the guarantee is not read more broadly than it is.
 Per `CLAUDE.md`:
 
 - `ROADMAP.md` — registered under Core as *Formal Verification & Type-Driven Security* (`[ ]` Todo), and listed as a next-up initiative.
-- `CHANGELOG.md` — the phase-0 fix PRs (F2–F5) shipped in **v0.38.6** with Security entries. No phase has landed yet, so nothing further is recorded; each phase adds its own entry on completion.
+- `CHANGELOG.md` — the phase-0 fix PRs (F2–F5) shipped in **v0.38.6** with Security entries. Phase 2 has its entry under Changed and Phase 1 under Security, both in `[Unreleased]`; each remaining phase adds its own entry on completion.
 - Update the Status table above as sub-phases complete. A phase is Done only when every sub-phase is — Phase 3 in particular is **not** Done at 3.2, however good the Kani output looks (see § The model-vs-code trap).
 - Every PR touching `Login`, `Auditoria`, `Permissionamento`, or `Método de autenticação` needs the `02` §6 change record and an ESI signal in its compliance report.

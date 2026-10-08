@@ -24,6 +24,7 @@ use bv_mcp::{
 };
 use serde_json::{json, Map, Value};
 
+use crate::routes::{resource, route, BodyLimit, ResourceSpec};
 use crate::{
     config::McpConfig,
     core::Core,
@@ -34,32 +35,28 @@ use crate::{
     response_error, Connection, HttpError,
 };
 
+/// The MCP transport, as route-table entries (see [`crate::routes`]).
+/// Registered ahead of the `/v2/{path:.*}` logical catch-all so these exact
+/// paths win; any other method on the first two answers an empty 405.
+pub(crate) const RESOURCES: &[ResourceSpec] = &[
+    resource!("/v2/mcp/token", body_limit: BodyLimit::Payload(default_max_request_bytes()), fallback: MethodNotAllowed => [
+        route!(routed Post => mcp_token_exchange, "sys/mcp/token"),
+    ]),
+    resource!("/v2/mcp", body_limit: BodyLimit::Payload(default_max_request_bytes()), fallback: MethodNotAllowed => [
+        route!(dispatch Post => mcp_dispatch,
+            "JSON-RPC transport: 401 without a bearer token after the TLS, origin and size gates; each tools/call is a logical request judged by pre_route"),
+    ]),
+    resource!("/.well-known/oauth-protected-resource/v2/mcp" => [
+        route!(public_probe Get => protected_resource_metadata,
+            "RFC 9728 protected-resource metadata: an MCP client reads it before it can hold a token; names only the resource URL and its authorization servers"),
+    ]),
+];
+
 pub fn init_mcp_service(cfg: &mut web::ServiceConfig) {
-    // Registered ahead of the `/v2/{path:.*}` logical catch-all (see
-    // `init_service`) so these exact paths win.
-    cfg.service(
-        web::resource("/v2/mcp/token")
-            .app_data(web::PayloadConfig::default().limit(default_max_request_bytes()))
-            .route(web::post().to(mcp_token_exchange))
-            .default_service(web::route().to(method_not_allowed)),
-    );
-    cfg.service(
-        web::resource("/v2/mcp")
-            .app_data(web::PayloadConfig::default().limit(default_max_request_bytes()))
-            .route(web::post().to(mcp_dispatch))
-            .default_service(web::route().to(method_not_allowed)),
-    );
-    cfg.service(
-        web::resource("/.well-known/oauth-protected-resource/v2/mcp")
-            .route(web::get().to(protected_resource_metadata)),
-    );
+    crate::routes::register(cfg, crate::routes::MCP);
 }
 
-async fn method_not_allowed() -> HttpResponse {
-    response_error(actix_web::http::StatusCode::METHOD_NOT_ALLOWED, "")
-}
-
-fn default_max_request_bytes() -> usize {
+const fn default_max_request_bytes() -> usize {
     256 * 1024
 }
 

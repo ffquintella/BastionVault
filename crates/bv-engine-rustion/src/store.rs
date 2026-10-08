@@ -47,6 +47,23 @@ impl RustionStore {
 
     // ─── Targets ────────────────────────────────────────────────────
 
+    #[cfg(test)]
+    /// Test-only: build over a pre-unsealed system view, with the same
+    /// sub-paths `new` uses, so in-crate tests need no Core.
+    pub(crate) fn from_system_view(system_view: &BarrierView) -> Arc<Self> {
+        Arc::new(Self {
+            targets_view: Arc::new(system_view.new_sub_view(TARGET_SUB_PATH)),
+            health_view: Arc::new(system_view.new_sub_view(HEALTH_SUB_PATH)),
+        })
+    }
+
+    #[cfg(test)]
+    /// Test-only: persist a target record as-is, skipping the
+    /// enrolment validation (pubkey shape, endpoint syntax).
+    pub(crate) async fn put_target_for_test(&self, target: &RustionTarget) -> Result<(), RvError> {
+        self.put_target_record(target).await
+    }
+
     pub async fn list_target_ids(&self) -> Result<Vec<String>, RvError> {
         let mut keys = self.targets_view.get_keys().await?;
         keys.sort();

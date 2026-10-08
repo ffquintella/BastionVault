@@ -1,0 +1,22 @@
+[package]
+name = "bv-policy-core"
+version = "0.41.0"
+edition = "2021"
+description = "The model-checked decision core of BastionVault's ACL evaluator: capability checks, rule layering, gates and specificity"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 0 leaf with NO dependencies, on purpose: this crate is the part of the
+# ACL evaluator that `cargo kani -p bv-policy-core` proves things about, and
+# `bv-kernel` delegates every authorization verdict to it. A dependency here is
+# code the proofs silently trust. Do not add one.
+# roadmaps/formal-verification-and-type-driven-security.md § Phase 3,
+# docs/verification.md.
+[dependencies]
+
+[lints.rust]
+# `cfg(kani)` is set by `cargo kani` (the harnesses in `src/proofs.rs` and the
+# `kani::Arbitrary` derives); declare it so a normal build does not warn.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

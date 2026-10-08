@@ -17,6 +17,7 @@
 use std::{collections::HashMap, str::FromStr, time::Duration};
 
 use better_default::Default;
+use bv_policy_core::Merge;
 use dashmap::DashMap;
 use derive_more::Display;
 use hcl::{Body, Expression};
@@ -25,15 +26,17 @@ use serde_json::Value;
 use strum::IntoEnumIterator;
 use strum_macros::{Display as StrumDisplay, EnumIter, EnumString};
 
-use super::acl::ACLResults;
+use super::{acl::ACLResults, core_bridge};
+// `Permissions::check` no longer names an operation itself (the decision is
+// `bv_policy_core::check`), but the tests below reach `Operation` through
+// `use super::*`.
+#[cfg(test)]
+use crate::logical::Operation;
 use crate::{
     errors::RvError,
-    logical::{auth::PolicyInfo, Operation, Request, Response},
+    logical::{auth::PolicyInfo, Request, Response},
     bv_error_string,
-    utils::{
-        deserialize_duration,
-        string::{ensure_no_leading_slash, GlobContains},
-    },
+    utils::{deserialize_duration, string::ensure_no_leading_slash},
 };
 
 #[derive(Display, Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -495,138 +498,53 @@ impl Policy {
 
 impl Permissions {
     /// Checks the permissions against a request to determine if it is allowed.
-    /// Evaluates capabilities, required parameters, and allowed/denied parameters.
+    /// Evaluates capabilities, wrapping TTLs, required parameters, and
+    /// allowed/denied parameters.
+    ///
+    /// The decision is `bv_policy_core::check` (theorem T8 in
+    /// `docs/verification.md`); this only answers its questions about the
+    /// request's parameters and reports the granting policies for the
+    /// capability it names. Wrapping TTLs are not enforced beyond refusing a
+    /// rule whose maximum is below its minimum.
     pub fn check(&self, req: &Request, check_only: bool) -> Result<ACLResults, RvError> {
-        let mut ret = ACLResults::default();
-        let _path = ensure_no_leading_slash(&req.path);
+        let verdict = bv_policy_core::check(
+            &self.core_facts(),
+            core_bridge::core_op(req.operation),
+            check_only,
+            &core_bridge::ParamView { perm: self, req },
+        );
 
-        ret.root_privs = (self.capabilities_bitmap & Capability::Sudo.to_bits()) != 0;
-
-        if check_only {
-            ret.capabilities_bitmap = self.capabilities_bitmap;
-            return Ok(ret);
-        }
-
-        let cap = match req.operation {
-            Operation::Read => Capability::Read,
-            Operation::List => Capability::List,
-            Operation::Write => Capability::Update,
-            Operation::Delete => Capability::Delete,
-            Operation::Renew | Operation::Revoke | Operation::Rollback => Capability::Update,
-            _ => return Ok(ret),
+        let mut ret = ACLResults {
+            allowed: verdict.allowed,
+            root_privs: verdict.root_privs,
+            capabilities_bitmap: verdict.caps,
+            ..Default::default()
         };
-
-        if self.capabilities_bitmap & cap.to_bits() == 0
-            && (req.operation != Operation::Write || self.capabilities_bitmap & Capability::Create.to_bits() == 0)
-        {
-            return Ok(ret);
-        }
-
-        if let Some(value) = self.granting_policies_map.get(&cap.to_bits()) {
-            ret.granting_policies.clone_from(&value);
-        }
-
-        let zero_ttl = Duration::from_secs(0);
-
-        if self.max_wrapping_ttl > zero_ttl {
-            // TODO
-        }
-
-        if self.min_wrapping_ttl > zero_ttl {
-            // TODO
-        }
-
-        if self.min_wrapping_ttl != zero_ttl
-            && self.max_wrapping_ttl != zero_ttl
-            && self.max_wrapping_ttl < self.min_wrapping_ttl
-        {
-            return Ok(ret);
-        }
-
-        match req.operation {
-            // Only check parameter permissions for operations that can modify parameters.
-            Operation::Read | Operation::Write => {
-                for parameter in self.required_parameters.iter() {
-                    let key = parameter.to_lowercase();
-                    if let Some(data) = &req.data {
-                        if data.get(key.as_str()).is_some() {
-                            continue;
-                        }
-                    }
-                    if let Some(body) = &req.body {
-                        if body.get(key.as_str()).is_some() {
-                            continue;
-                        }
-                    }
-
-                    return Ok(ret);
-                }
-
-                // If there are no data fields, allow
-                if (req.data.is_none() || req.data.as_ref().unwrap().is_empty())
-                    && (req.body.is_none() || req.body.as_ref().unwrap().is_empty())
-                {
-                    ret.capabilities_bitmap = self.capabilities_bitmap;
-                    ret.allowed = true;
-                    return Ok(ret);
-                }
-
-                if self.denied_parameters.contains_key("*") {
-                    return Ok(ret);
-                }
-
-                for (param_key, param_value) in req.data_iter() {
-                    if let Some(denied_parameters) = self.denied_parameters.get(param_key.to_lowercase().as_str()) {
-                        if denied_parameters.glob_contains(param_value) {
-                            return Ok(ret);
-                        }
-                    }
-                }
-
-                let allowed_all = self.allowed_parameters.contains_key("*");
-
-                if self.allowed_parameters.is_empty() || (allowed_all && self.allowed_parameters.len() == 1) {
-                    ret.capabilities_bitmap = self.capabilities_bitmap;
-                    ret.allowed = true;
-                    return Ok(ret);
-                }
-
-                for (param_key, param_value) in req.data_iter() {
-                    if let Some(allowed_parameters) = self.allowed_parameters.get(param_key.to_lowercase().as_str()) {
-                        if !allowed_parameters.glob_contains(param_value) {
-                            return Ok(ret);
-                        }
-                    } else if !allowed_all {
-                        return Ok(ret);
-                    }
-                }
+        if let Some(cap) = verdict.granting {
+            if let Some(value) = self.granting_policies_map.get(&cap) {
+                ret.granting_policies.clone_from(&value);
             }
-            _ => {}
         }
-
-        ret.capabilities_bitmap = self.capabilities_bitmap;
-        ret.allowed = true;
 
         Ok(ret)
     }
 
     /// Merges another set of permissions into the current set.
     /// Ensures that deny capabilities override others and merges parameter rules.
+    /// The capability half is `bv_policy_core::merge_caps` (theorem T3).
     pub fn merge(&mut self, other: &Permissions) -> Result<(), RvError> {
-        let deny = Capability::Deny.to_bits();
-        if self.capabilities_bitmap & deny != 0 {
+        match bv_policy_core::merge_caps(self.capabilities_bitmap, other.capabilities_bitmap) {
             // If we are explicitly denied in the existing capability set, don't save anything else
-            return Ok(());
-        }
-        if other.capabilities_bitmap & deny != 0 {
+            Merge::KeepExisting => return Ok(()),
             // If this new policy explicitly denies, only save the deny value
-            self.capabilities_bitmap = deny;
-            self.allowed_parameters.clear();
-            self.denied_parameters.clear();
-            return Ok(());
+            Merge::Deny => {
+                self.capabilities_bitmap = Capability::Deny.to_bits();
+                self.allowed_parameters.clear();
+                self.denied_parameters.clear();
+                return Ok(());
+            }
+            Merge::Union(capabilities_bitmap) => self.capabilities_bitmap = capabilities_bitmap,
         }
-
-        self.capabilities_bitmap |= other.capabilities_bitmap;
 
         let zero_ttl = Duration::from_secs(0);
 

@@ -45,6 +45,12 @@ inputs:
 #            key would leave whichever job wrote it last with a cache missing
 #            the expensive half of its graph.
 #
+# verify.yml (T31 Phase 4) restores `build` and tests.yml's `plan` key
+# read-only and adds two small keys of its own, each with one writer:
+# `verify-gates` (the two zero-dependency crates + trybuild, written by its
+# tier0 job) and `kani-<version>-<os>-<arch>` (the pinned Kani bundle and its
+# nightly, written by its kani job via .github/actions/setup-kani).
+#
 # `check` and `build` are separate because `cargo check` emits `.rmeta` and
 # `cargo build` emits `.rlib`, under different metadata hashes. They do not
 # share artefacts in either direction, so a single key would mean whichever job

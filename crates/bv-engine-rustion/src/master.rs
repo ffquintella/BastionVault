@@ -756,6 +756,23 @@ impl MasterStore {
         }))
     }
 
+    /// The current signing key, or `Ok(None)` when no master keypair
+    /// has been initialised. Strictly read-only: unlike
+    /// `get_or_init_signing_key` it never mints a keypair and never
+    /// persists the legacy-record migration, so a background caller
+    /// (the health pinger) cannot create a master key as a side effect.
+    pub async fn read_current_signing_key(
+        &self,
+    ) -> Result<Option<bv_crypto::BvrgMasterSigningKey>, RvError> {
+        let Some(rec) = self.read_signing_record().await? else {
+            return Ok(None);
+        };
+        match rec.current.as_ref() {
+            Some(half) => signing_key_from_half(half).map(Some),
+            None => Ok(None),
+        }
+    }
+
     async fn write_signing_record(&self, rec: &MasterSigningRecord) -> Result<(), RvError> {
         let value = serde_json::to_vec(rec)
             .map_err(|e| bv_error_string!(&format!("encode rustion master signing-key: {e}")))?;

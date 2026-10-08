@@ -1,0 +1,419 @@
+name: Verification
+
+# The three guarantees of roadmaps/formal-verification-and-type-driven-security.md
+# (T31), run continuously in tiers of rising cost. Phase 4 of that roadmap.
+#
+# ── TIERS ─────────────────────────────────────────────────────────
+#
+#   tier 0  every push and PR   `make verify-gates`: SQL text gate, clippy
+#                               -D warnings + tests of bv-policy-core and
+#                               bv-sql-guard (incl. trybuild), the Kani
+#                               harness inventory and the gate's self-test
+#   tier 1  PRs, pushes to main + the Kani FAST harness set and the ACL
+#                               differential suite at 10k cases
+#   tier 2  nightly, dispatch   every Kani harness + 1M differential cases
+#   tier 3  releases/* tags     tier 2 in one job, then verification-report.md
+#                               attached to the GitHub release
+#
+# Every job runs a Makefile target, so each tier is reproducible locally with
+# the same command (`make verify-fast`, `make verify`, `make verify-full`,
+# `make verification-report`). Two parts of local tier 0 run elsewhere in CI,
+# on purpose, rather than twice:
+#
+#   * Semgrep: tests.yml's `sql-guard` job runs the same ruleset on every push
+#     and PR and is the required check for it, so tier 0 passes SEMGREP=0 and
+#     the step is recorded as SKIPPED. Tier 3 installs and runs it, because the
+#     release report must carry its own evidence.
+#   * the route inventory, golden files and Authorized<R> compile_fail
+#     doctests (`make verify-routes`): they need the bv-server test build,
+#     which is minutes in CI and seconds locally. tests.yml's `Unit bv-server`
+#     job runs them (`--lib` + `--doc`) whenever a change can reach bv-server.
+#     Tier 3 runs them again for the report.
+#
+# ── SCOPING ───────────────────────────────────────────────────────
+#
+# A PR plans tier 1 from the cargo dependency graph via scripts/ci-plan.sh, the
+# same plan tests.yml uses — `run_kani` when bv-policy-core (whose source the
+# proofs are about; it has no dependencies) or the verification tooling moved,
+# `run_differential` when bv-kernel or anything beneath it did. A skipped job
+# is green; a proof cannot change if the code it is about did not.
+#
+# ── THE GATE ──────────────────────────────────────────────────────
+#
+# A Kani run is judged by scripts/verify.py, not by cargo kani's exit status,
+# which is 0 on an UNSATISFIABLE cover. The failure policy, all blocking:
+# FAILURE (a counterexample — re-run with concrete playback so the input is in
+# this log), UNDETERMINED, an UNSATISFIABLE or UNREACHABLE cover, a harness
+# with no result or not in scripts/kani-harnesses.txt, a different Kani/CBMC
+# version than pinned there. The two defect witnesses (f6_*, f7_*) are KNOWN
+# OPEN FINDINGS while their covers are SATISFIED and fail the gate the day
+# they stop reproducing (docs/verification.md § Defect witnesses).
+#
+# ── INJECTION ─────────────────────────────────────────────────────
+#
+# As in tests.yml: no workflow expression is interpolated into a `run:` script.
+# Values reach scripts through `env:` and are read as shell variables.
+#
+# ── NOT VERIFIED BY ANY LOCAL RUN ─────────────────────────────────
+#
+# This file was written against the local tiers, which were run; the workflow
+# itself — runner timings, the caches, the release upload — has not run yet.
+# Its first run on main is the check. Tier-1 wall clock on a runner is
+# unmeasured until then (roadmap Phase 4 DoD).
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "releases/*"
+  pull_request:
+  schedule:
+    - cron: "0 4 * * *" # tier 2, nightly
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "1 = the per-PR set, 2 = every harness and 1M cases (the nightly)"
+        type: choice
+        options: ["2", "1"]
+        default: "2"
+
+# The event is part of the group, so a nightly or a release run never cancels
+# (or is cancelled by) a push. Superseded PR and main-push runs are cancelled,
+# as in tests.yml; a release report or a nightly is never cut short.
+concurrency:
+  group: verify-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+permissions:
+  contents: read
+
+jobs:
+  # ── What to run ─────────────────────────────────────────────────
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    outputs:
+      kani_set: ${{ steps.plan.outputs.kani_set }}
+      differential_tier: ${{ steps.plan.outputs.differential_tier }}
+      release: ${{ steps.plan.outputs.release }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          # merge-base against the PR's base branch needs real history.
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Registry and git checkouts only, restored from the key tests.yml's
+      # `plan` job writes (it is that key's one writer). `cargo metadata`
+      # resolves the graph; it compiles nothing.
+      - name: Cache the cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: plan
+          cache-targets: "false"
+          save-if: "false"
+
+      - name: Derive the plan
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DISPATCH_TIER: ${{ github.event.inputs.tier }}
+        run: |
+          set -euo pipefail
+          kani_set=skip
+          differential_tier=0
+          release=false
+          case "$EVENT" in
+            pull_request)
+              git fetch --no-tags origin \
+                "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+              graph=$(mktemp)
+              GITHUB_OUTPUT="$graph" scripts/ci-plan.sh --base "origin/$BASE_REF"
+              if grep -qx 'run_kani=true' "$graph"; then kani_set=fast; fi
+              if grep -qx 'run_differential=true' "$graph"; then differential_tier=1; fi
+              ;;
+            push)
+              case "$REF" in
+                refs/tags/releases/*) release=true ;;
+                refs/heads/main) kani_set=fast; differential_tier=1 ;;
+              esac
+              ;;
+            schedule)
+              kani_set=full; differential_tier=2
+              ;;
+            workflow_dispatch)
+              if [ "$DISPATCH_TIER" = "1" ]; then
+                kani_set=fast; differential_tier=1
+              else
+                kani_set=full; differential_tier=2
+              fi
+              ;;
+          esac
+          {
+            echo "kani_set=$kani_set"
+            echo "differential_tier=$differential_tier"
+            echo "release=$release"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Verification plan"
+            echo ""
+            echo "| job | plan |"
+            echo "|---|---|"
+            echo "| tier 0 | run |"
+            echo "| kani | $kani_set |"
+            echo "| differential | tier $differential_tier (0 = skipped) |"
+            echo "| tier 3 report | $release |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "kani_set=$kani_set differential_tier=$differential_tier release=$release"
+
+  # ── Tier 0 ──────────────────────────────────────────────────────
+  #
+  # Unplanned: two crates with no dependencies, a grep and two python scripts.
+  # Its own small cache key (`verify-gates`: trybuild and its dev-deps, the two
+  # crates); this job is that key's one writer, on main.
+  tier0:
+    name: Tier 0 — gates and the zero-dependency crates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: verify-gates
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: make verify-gates
+        run: make verify-gates SEMGREP=0
+
+      - name: Upload the evidence
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-tier0
+          path: target/verify/
+          if-no-files-found: warn
+
+  # ── Kani: fast set (tier 1) or every harness (tier 2) ───────────
+  kani:
+    name: Kani — ${{ needs.plan.outputs.kani_set }} harness set
+    needs: [plan, tier0]
+    if: needs.plan.outputs.kani_set != 'skip'
+    runs-on: ubuntu-latest
+    # Measured locally: fast set ~90 s, full set ~4 min (Apple M-series). The
+    # ceiling is for a hang; an undischarged proof is a failure either way.
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      # Stable cargo builds kani-verifier; Kani brings its own nightly.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # `cargo kani -p bv-policy-core` resolves the whole workspace from
+      # Cargo.lock, [patch] git forks included, before it compiles the one
+      # crate. Registry + git only, read-only, from tests.yml's `plan` key.
+      - name: Cache the cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: plan
+          cache-targets: "false"
+          save-if: "false"
+
+      - uses: ./.github/actions/setup-kani
+        with:
+          save-cache: "true"
+
+      - name: make verify-kani
+        env:
+          KANI_SET: ${{ needs.plan.outputs.kani_set }}
+        run: make verify-kani KANI_SET="$KANI_SET"
+
+      - name: Upload the Kani log and result
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-kani-${{ needs.plan.outputs.kani_set }}
+          path: target/verify/
+          if-no-files-found: warn
+
+  # ── The ACL differential suite (tier 1: 10k, tier 2: 1M cases) ──
+  #
+  # Production `ACL` against the frozen pre-delegation evaluator. Needs the
+  # bv-kernel test build, so it restores tests.yml's `build` cache read-only.
+  differential:
+    name: Differential suite — tier ${{ needs.plan.outputs.differential_tier }}
+    needs: plan
+    if: needs.plan.outputs.differential_tier != '0'
+    runs-on: ubuntu-latest
+    # Measured locally: 1M cases in 851 s of test time, on top of a bv-kernel
+    # test build.
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: build
+
+      - name: make verify-differential
+        env:
+          TIER: ${{ needs.plan.outputs.differential_tier }}
+        run: make verify-differential CASES="$(python3 scripts/verify.py cases "$TIER")"
+
+      - name: Upload the evidence
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-differential
+          path: target/verify/
+          if-no-files-found: warn
+
+  # ── Tier 3: the release verification report ─────────────────────
+  #
+  # `03-codificacao-segura.md` §10 asks for periodic source-code security
+  # verification and `02` §7–8 tie every installed version to a tag, so a
+  # release carries the evidence. Everything in one job, on the tagged tree,
+  # because the report only counts evidence recorded on the exact tree it
+  # describes. `make -k` keeps going past a failed step so the report has
+  # every result; a failed verification still produces (and attaches) a
+  # report whose verdict is FAIL, and the job goes red.
+  release:
+    name: Tier 3 — release verification report
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: build
+
+      # setup-rust installs rustfmt only; tier 0's core-lint step is clippy.
+      - name: Install clippy
+        run: rustup component add clippy
+
+      - uses: ./.github/actions/setup-kani
+
+      - name: Install Semgrep
+        run: pip install --quiet semgrep
+
+      - name: Tier 2 — make -k verify-full
+        id: tier2
+        continue-on-error: true
+        run: make -k verify-full
+
+      - name: make verification-report
+        id: report
+        continue-on-error: true
+        env:
+          TAG: ${{ github.ref_name }}
+        run: make verification-report TAG="$TAG" REQUIRE_TIER=2
+
+      - name: Upload the evidence
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-release
+          path: target/verify/
+          if-no-files-found: warn
+
+      # Same create-or-upload shape as standalone-release.yml and
+      # macos-release.yml, which publish to the same release; retried because
+      # the three race to create it.
+      - name: Attach the report to the GitHub release
+        if: success() || failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test -f target/verify/verification-report.md
+          files=(target/verify/verification-report.md)
+          [ -f target/verify/kani-full.json ] && files+=(target/verify/kani-full.json)
+          version="${TAG#releases/}"
+          for attempt in 1 2 3; do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release upload "$TAG" --clobber "${files[@]}" && exit 0
+            else
+              gh release create "$TAG" --title "BastionVault $version" \
+                --generate-notes "${files[@]}" && exit 0
+            fi
+            echo "attempt $attempt failed; retrying"
+            sleep 15
+          done
+          exit 1
+
+      - name: Fail unless tier 2 passed and the report says so
+        if: steps.tier2.outcome != 'success' || steps.report.outcome != 'success'
+        env:
+          TIER2: ${{ steps.tier2.outcome }}
+          REPORT: ${{ steps.report.outcome }}
+        run: |
+          echo "::error::verification did not pass (verify-full: $TIER2, report: $REPORT); the attached report says why"
+          exit 1
+
+  # ── One status for branch protection ────────────────────────────
+  #
+  # As in tests.yml: `skipped` counts as success (that is the plan), anything
+  # else that is not success fails.
+  required:
+    name: All verification checks
+    if: always()
+    needs:
+      - plan
+      - tier0
+      - kani
+      - differential
+      - release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Assert every job succeeded or was skipped
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          printenv NEEDS | python3 -c '
+          import json, sys
+          results = json.load(sys.stdin)
+          bad = {n: j["result"] for n, j in results.items() if j["result"] not in ("success", "skipped")}
+          for name, result in sorted(bad.items()):
+              print(f"FAILED: {name} -> {result}")
+          sys.exit(1 if bad else 0)
+          '

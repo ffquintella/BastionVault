@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.44.23"
+version = "0.44.24"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -43,6 +43,10 @@ members = [
     "crates/bv-context",
     "crates/bv-metrics",
     "crates/bv-sql-guard",
+    # The model-checked decision core of the ACL evaluator (T31 Phase 3);
+    # dependency-free, like bv-sql-guard, so `cargo kani -p bv-policy-core`
+    # verifies it in isolation.
+    "crates/bv-policy-core",
     "crates/bv-storage",
     "crates/bv-logical",
     "crates/bv-utils",

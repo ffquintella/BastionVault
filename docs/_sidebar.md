@@ -28,6 +28,7 @@
 - Architecture
   - [Design](design.md)
   - [Security structure](security-structure.md)
+  - [Verification of the ACL core](verification.md)
   - [Cryptography](crypto.md)
   - [Requirements](req.md)
 

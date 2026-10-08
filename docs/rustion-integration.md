@@ -296,6 +296,17 @@ bvault rustion authority attest --bastion-id rt_eu_1                # just one
 bvault rustion target deenrol --id rt_eu_1 --reason "retired"
 ```
 
+`target probe` reports the bastion's refusal code in `last_error` when a health probe is refused:
+
+| `last_error` | Meaning |
+|---|---|
+| `http 401 signature_invalid` | The probe is signed correctly, but the bastion pins a different master pubkey for this authority name. Compare the bastion's `GET /v1/authorities/self` with `GET rustion/master/pubkey` and re-approve the current pubkey (or re-attest). An enrolment problem, not a probe problem. |
+| `http 401 unknown_authority` | The bastion holds no authority record under this deployment's `authority_name`. |
+| `http 403 authority_revoked` / `authority_pending_approval` / `authority_tombstoned` | The authority record exists but is not active on that bastion. |
+| `http 409 nonce_replay`, `http 400 health_auth_malformed` | Never expected: every probe carries a fresh nonce. BV logs it at `warn` as a BastionVault bug. |
+
+Probes are signed with the current master key. While no master keypair exists, BV sends an anonymous probe (no `X-Rustion-Nonce` / `X-Rustion-Sig`) and Rustion answers with its public shape, so `uptime_secs` and `active_sessions` read `0`.
+
 The weekly re-attestation timer runs automatically once BV starts — there is nothing to configure. It ticks every 6 days and emits `rustion.master.attest` audit rows. Manual `attest` calls land on the same audit row.
 
 ---

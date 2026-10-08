@@ -58,6 +58,9 @@ pub use bastion_vault::{bv_error_response, bv_error_response_status, bv_error_st
 
 use crate::{core::Core, errors::RvError, logical::Request};
 
+/// Authorization witnesses: `Authorized<R>` and the registration constructors
+/// that refuse a privileged handler without one.
+pub mod authz;
 pub mod batch;
 pub mod client_ip;
 /// The `/v1/{path}` logical catch-all routes. Named `logical_routes`, not
@@ -71,6 +74,8 @@ pub mod mcp_routes;
 pub mod metrics_routes;
 pub mod middleware;
 pub mod proxy_protocol;
+/// Every route the listener serves, as data: the route inventory.
+pub mod routes;
 pub mod rustion_webhook;
 pub mod sys;
 
@@ -163,19 +168,17 @@ pub fn request_on_connect_handler(conn: &dyn Any, ext: &mut Extensions) {
     }
 }
 
+/// Register every route the listener serves: [`routes::LISTENER`], in order,
+/// and nothing else.
+///
+/// The order is the old call order and still matters: the Rustion
+/// recording.ready webhook must precede the `/v1/{path:.*}` logical catch-all
+/// so its purpose-built receiver (raw body + X-Rustion-Signature header) handles
+/// it rather than the generic logical plumbing, which can neither recover the
+/// signed bytes nor read the signature header; the MCP routes precede the
+/// `/v2/{path:.*}` catch-all for the same reason.
 pub fn init_service(cfg: &mut web::ServiceConfig) {
-    sys::init_sys_service(cfg);
-    // Must precede the `/v1/{path:.*}` logical catch-all so the Rustion
-    // recording.ready webhook is handled by its purpose-built receiver
-    // (raw body + X-Rustion-Signature header) rather than the generic
-    // logical plumbing, which can neither recover the signed bytes nor
-    // read the signature header.
-    rustion_webhook::init_rustion_webhook_service(cfg);
-    // Must precede the `/v2/{path:.*}` logical catch-all for the same
-    // reason as the webhook above.
-    mcp_routes::init_mcp_service(cfg);
-    logical_routes::init_logical_service(cfg);
-    metrics_routes::init_metrics_service(cfg);
+    routes::register_listener(cfg);
 }
 
 /// The HTTP layer's error type: a newtype around [`RvError`].

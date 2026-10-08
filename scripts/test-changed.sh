@@ -92,6 +92,9 @@
 #   ci_files               .github/** hits, which the interactive run ignores and
 #                          CI must not (you cannot validate a workflow edit with
 #                          an empty matrix)
+#   verify_files           the verification tooling (scripts/verify.py, the Kani
+#                          harness manifest, the Makefile), which plans
+#                          verify.yml's Kani and differential jobs
 #
 # Adding a field here is cheap; teaching CI a second way to compute one is not.
 
@@ -371,6 +374,16 @@ with open(os.path.join(work, "plan.json"), "w") as fh:
             # change to it; still ignored for test selection.
             "hsm_files": sorted(
                 f for f in files if f == "deploy/container/Containerfile"
+            ),
+            # The verification tooling (T31 Phase 4). For test selection
+            # scripts/ falls to the root package and the Makefile is ignored,
+            # which says nothing about whether the Kani gate, its harness
+            # manifest or the commands verify.yml runs still work. Reported so
+            # scripts/ci-plan.sh can plan verify.yml's tier-1 jobs on them.
+            "verify_files": sorted(
+                f
+                for f in files
+                if f in ("scripts/verify.py", "scripts/kani-harnesses.txt", "Makefile")
             ),
             # Any manifest, not just the root one GLOBAL catches. A
             # `crates/*/Cargo.toml` edit is package-local for test *selection*

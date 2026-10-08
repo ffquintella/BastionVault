@@ -40,8 +40,13 @@
 #   hsm            `make check-hsm`, when bv-core, a manifest or the image recipe
 #                  moved — the seal backends are off in every other job
 #   gui            tsc + vitest, when gui/ (not gui/src-tauri) moved
+#   kani           verify.yml's tier-1 Kani job, when bv-policy-core or the
+#                  verification tooling moved (output `run_kani`)
+#   differential   verify.yml's tier-1 ACL differential suite, when bv-kernel
+#                  or anything beneath it moved (output `run_differential`)
 #
 # The `check` gate job in tests.yml is unconditional and is not planned here.
+# verify.yml reads only the two verify outputs; tests.yml ignores them.
 
 set -euo pipefail
 
@@ -189,6 +194,15 @@ run_hsm = (
     or bool(plan["manifest_files"])
     or bool(plan["hsm_files"])
 )
+# verify.yml (T31 Phase 4). The Kani proofs are statements about
+# bv-policy-core's source and nothing else — the crate has no dependencies — so
+# a change that cannot reach it cannot change a Kani result. The differential
+# suite runs in bv-kernel against the real index and everything beneath it, so
+# bv-kernel in the affected set is its trigger. Both also run when the tooling
+# that judges them moved: a gate edit must be exercised before it is trusted.
+verify_tooling = bool(plan.get("verify_files"))
+run_kani = full or "bv-policy-core" in lib_pkgs or verify_tooling
+run_differential = full or "bv-kernel" in lib_pkgs or verify_tooling
 
 out = {
     "full": "true" if full else "false",
@@ -202,6 +216,8 @@ out = {
     "run_cucumber": "true" if run_cucumber else "false",
     "run_isolation": "true" if run_isolation else "false",
     "run_hsm": "true" if run_hsm else "false",
+    "run_kani": "true" if run_kani else "false",
+    "run_differential": "true" if run_differential else "false",
 }
 
 def write(path, text):
@@ -238,6 +254,8 @@ lines = [
     f"| isolation | {'run' if run_isolation else 'skipped (no manifest changed)'} |",
     f"| hsm | {'run' if run_hsm else 'skipped (bv-core, manifests and the image recipe all untouched)'} |",
     f"| gui | {'run' if run_gui else 'skipped (gui/ not touched)'} |",
+    f"| verify: kani (fast set on a PR) | {'run' if run_kani else 'skipped (bv-policy-core and the verification tooling untouched)'} |",
+    f"| verify: differential | {'run' if run_differential else 'skipped (bv-kernel not affected)'} |",
 ]
 if plan["global_hits"]:
     lines += ["", "Full run forced by: " + ", ".join(f"`{f}`" for f in plan["global_hits"])]

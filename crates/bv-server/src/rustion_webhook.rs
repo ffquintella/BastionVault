@@ -24,9 +24,10 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{dev::Payload, web, FromRequest, HttpRequest, HttpResponse};
 use serde_json::{Map, Value};
 
+use crate::routes::{resource, route, ResourceSpec};
 use crate::{
     bv_error_response_status,
     core::Core,
@@ -37,21 +38,63 @@ use crate::{
 
 const SIG_HEADER: &str = "X-Rustion-Signature";
 
+/// The webhook, as a route-table entry (see [`crate::routes`]). Registered
+/// before the `/v1/{path:.*}` logical catch-all so this exact path wins; any
+/// other path falls through to the logical backend.
+pub(crate) const RESOURCES: &[ResourceSpec] = &[resource!("/v1/rustion/webhooks/recording-ready" => [
+    route!(signature_verified SignatureVerified: Post => recording_ready,
+        "Rustion recording.ready delivery: no token; the hybrid Ed25519 + ML-DSA-65 signature over the raw body must verify against an enrolled bastion's pinned key, or the request is refused"),
+])];
+
 pub fn init_rustion_webhook_service(cfg: &mut web::ServiceConfig) {
-    // Registered before the `/v1/{path:.*}` logical catch-all (see
-    // `init_service`) so this exact path wins. Any other path
-    // falls through to the logical backend.
-    cfg.service(
-        web::resource("/v1/rustion/webhooks/recording-ready")
-            .route(web::post().to(recording_ready)),
-    );
+    crate::routes::register(cfg, crate::routes::RUSTION_WEBHOOK);
 }
 
-async fn recording_ready(
-    req: HttpRequest,
+/// Proof that the request body carries a valid `X-Rustion-Signature` from an
+/// enrolled bastion — the webhook's authenticator, in place of a token.
+///
+/// A witness rather than the first lines of the handler (Phase 1 of
+/// `roadmaps/formal-verification-and-type-driven-security.md`): it reads the
+/// raw body itself, verifies it before the handler body runs, and is the only
+/// way the handler can get the verified bytes.
+pub struct SignatureVerified {
+    bastion_id: String,
     body: web::Bytes,
-    core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, HttpError> {
+}
+
+impl SignatureVerified {
+    /// The enrolled bastion whose pinned key verified the signature.
+    pub fn bastion_id(&self) -> &str {
+        &self.bastion_id
+    }
+
+    /// The exact bytes the signature covers.
+    pub fn body(&self) -> &web::Bytes {
+        &self.body
+    }
+}
+
+impl crate::authz::sealed::Sealed for SignatureVerified {}
+impl crate::authz::Witness for SignatureVerified {}
+
+impl FromRequest for SignatureVerified {
+    type Error = actix_web::Error;
+    type Future = crate::authz::WitnessFuture<Self>;
+
+    fn from_request(req: &HttpRequest, payload: &mut Payload) -> Self::Future {
+        let req = req.clone();
+        let body = <web::Bytes as FromRequest>::from_request(&req, payload);
+        Box::pin(async move {
+            let core = web::Data::<Arc<Core>>::extract(&req).await?;
+            let body = body.await?;
+            let bastion_id = verify_signature(&req, &body, core.get_ref()).await?;
+            Ok(SignatureVerified { bastion_id, body })
+        })
+    }
+}
+
+/// Resolve which enrolled target's pinned key verifies `body`, or refuse.
+async fn verify_signature(req: &HttpRequest, body: &web::Bytes, core: &Arc<Core>) -> Result<String, HttpError> {
     let sig = req
         .headers()
         .get(SIG_HEADER)
@@ -76,7 +119,7 @@ async fn recording_ready(
         .and_then(|q| q.get("bastion_id").map(|s| s.trim().to_string()))
         .filter(|s| !s.is_empty());
 
-    let targets = RustionStore::new(core.get_ref()).await?;
+    let targets = RustionStore::new(core).await?;
 
     // Resolve which enrolled target's pinned key verifies the payload.
     let bastion_id = match &bastion_hint {
@@ -88,7 +131,7 @@ async fn recording_ready(
                 &target.public_key.ed25519,
                 &target.public_key.mldsa65,
                 &sig,
-                &body,
+                body,
             )
             .map_err(|e| bv_error_response_status!(401, &format!("signature verify: {e}")))?;
             bid.clone()
@@ -102,7 +145,7 @@ async fn recording_ready(
                     &t.public_key.ed25519,
                     &t.public_key.mldsa65,
                     &sig,
-                    &body,
+                    body,
                 )
                 .is_ok()
                 {
@@ -116,8 +159,18 @@ async fn recording_ready(
         }
     };
 
+    Ok(bastion_id)
+}
+
+async fn recording_ready(
+    verified: SignatureVerified,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let bastion_id = verified.bastion_id().to_string();
+    let body = verified.body();
+
     // Parse the verified sidecar.
-    let sidecar: Value = serde_json::from_slice(&body)
+    let sidecar: Value = serde_json::from_slice(body)
         .map_err(|e| bv_error_response_status!(400, &format!("sidecar parse: {e}")))?;
     let sd = sidecar
         .as_object()

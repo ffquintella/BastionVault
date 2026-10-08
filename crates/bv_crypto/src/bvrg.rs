@@ -66,6 +66,13 @@ const MAX_PAYLOAD_BYTES: usize = 12 * 1024;
 const ED25519_SIG_LEN: usize = 64;
 const MLDSA65_SIG_LEN: usize = ml_dsa_65::SIG_LEN;
 
+/// Length of a framed hybrid signature:
+/// `ed_len:u16 || ed25519_sig || ml_len:u16 || mldsa65_sig` = 3377 bytes.
+/// Every hybrid signature this module emits — the BVRG-v1 envelope's
+/// `sig` field and the detached form `sign_detached_hybrid` returns —
+/// has exactly this length.
+pub const HYBRID_SIG_LEN: usize = 2 + ED25519_SIG_LEN + 2 + MLDSA65_SIG_LEN;
+
 // ─── Public types ──────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
@@ -254,19 +261,10 @@ pub fn build(
     // different version byte or a smaller length prefix.
     let tbs = tbs_hash(BVRG_MAGIC, ct_len, &ct);
 
-    // 4. Sign both halves of the hybrid pair. Ed25519 first, ML-DSA-65
-    // second — the wire order is fixed.
-    let ed_sig = master.ed25519.sign(&tbs);
-    let mldsa_sig = sign_mldsa65(master.mldsa65_seed.as_ref(), &tbs)?;
-
-    // 5. Frame the hybrid sig: ed25519 length-prefixed, then mldsa65
-    // length-prefixed. The outer `sig_len` covers both segments +
-    // their length prefixes.
-    let mut sig = Vec::with_capacity(2 + ED25519_SIG_LEN + 2 + MLDSA65_SIG_LEN);
-    sig.extend_from_slice(&(ED25519_SIG_LEN as u16).to_be_bytes());
-    sig.extend_from_slice(&ed_sig.to_bytes());
-    sig.extend_from_slice(&(mldsa_sig.len() as u16).to_be_bytes());
-    sig.extend_from_slice(&mldsa_sig);
+    // 4-5. Sign the TBS hash with both halves and frame the hybrid
+    // sig. The outer `sig_len` covers both segments + their length
+    // prefixes.
+    let sig = sign_detached_hybrid(master, &tbs)?;
     let sig_len = u16::try_from(sig.len()).map_err(|_| BvrgError::EnvelopeTooLong)?;
 
     // 6. Frame the envelope.
@@ -339,21 +337,11 @@ pub fn verify(
     }
     let ct = &envelope[cursor..];
 
-    // Parse the hybrid signature: 2 + 64 + 2 + 3309 expected.
-    let (ed_sig_bytes, mldsa_sig_bytes) = split_hybrid_sig(sig_bytes)?;
-
     let tbs = tbs_hash(BVRG_MAGIC, ct_len, ct);
 
-    // Verify both halves of the hybrid pair. Both must succeed —
-    // there is no fallback, no "Ed25519 ok skip ML-DSA" path.
-    let ed_sig =
-        Ed25519Signature::from_slice(ed_sig_bytes).map_err(|_| BvrgError::Ed25519SignatureInvalid)?;
-    master_pub
-        .ed25519
-        .verify(&tbs, &ed_sig)
-        .map_err(|_| BvrgError::Ed25519SignatureInvalid)?;
-
-    verify_mldsa65(&master_pub.mldsa65, &tbs, mldsa_sig_bytes)?;
+    // Parse the hybrid signature (2 + 64 + 2 + 3309 expected) and
+    // verify both halves over the TBS hash.
+    verify_detached_hybrid(&tbs, sig_bytes, master_pub)?;
 
     // Decrypt the inner KEM-DEM envelope.
     let kem_envelope = decode_kem_envelope(ct)?;
@@ -374,6 +362,60 @@ pub fn verify(
         payload,
         envelope_fingerprint: tbs,
     })
+}
+
+// ─── Detached hybrid signature ─────────────────────────────────────
+
+/// Sign `message` with both halves of the master keypair and return
+/// the framed hybrid signature (`HYBRID_SIG_LEN` bytes):
+///
+/// ```text
+/// ed_len:u16 (=64) || ed25519_sig || ml_len:u16 (=3309) || mldsa65_sig
+/// ```
+///
+/// Lengths are big-endian. `message` is signed as given — there is no
+/// pre-hash here. The BVRG-v1 envelope passes its `tbs_hash`; Rustion's
+/// signed health probe passes the raw `nonce || authority_name` bytes.
+/// ML-DSA-65 is FIPS 204 pure mode with an empty context.
+pub fn sign_detached_hybrid(
+    master: &BvrgMasterSigningKey,
+    message: &[u8],
+) -> Result<Vec<u8>, BvrgError> {
+    // Ed25519 first, ML-DSA-65 second — the wire order is fixed.
+    let ed_sig = master.ed25519.sign(message);
+    let mldsa_sig = sign_mldsa65(master.mldsa65_seed.as_ref(), message)?;
+    if mldsa_sig.len() != MLDSA65_SIG_LEN {
+        return Err(BvrgError::HybridSignatureMalformed);
+    }
+
+    let mut sig = Vec::with_capacity(HYBRID_SIG_LEN);
+    sig.extend_from_slice(&(ED25519_SIG_LEN as u16).to_be_bytes());
+    sig.extend_from_slice(&ed_sig.to_bytes());
+    sig.extend_from_slice(&(MLDSA65_SIG_LEN as u16).to_be_bytes());
+    sig.extend_from_slice(&mldsa_sig);
+    Ok(sig)
+}
+
+/// Verify a framed hybrid signature produced by `sign_detached_hybrid`
+/// over `message`. Both halves must verify against `master_pub`; a
+/// blob missing either half, or with any length prefix other than the
+/// expected one, is refused at the framing stage. There is no
+/// classical-only acceptance path.
+pub fn verify_detached_hybrid(
+    message: &[u8],
+    sig_blob: &[u8],
+    master_pub: &BvrgMasterPublicKey,
+) -> Result<(), BvrgError> {
+    let (ed_sig_bytes, mldsa_sig_bytes) = split_hybrid_sig(sig_blob)?;
+
+    let ed_sig =
+        Ed25519Signature::from_slice(ed_sig_bytes).map_err(|_| BvrgError::Ed25519SignatureInvalid)?;
+    master_pub
+        .ed25519
+        .verify(message, &ed_sig)
+        .map_err(|_| BvrgError::Ed25519SignatureInvalid)?;
+
+    verify_mldsa65(&master_pub.mldsa65, message, mldsa_sig_bytes)
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────

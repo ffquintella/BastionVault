@@ -148,10 +148,16 @@ Next-up list recorded before the migration, in its order:
 - [x] T30 Export Prometheus metrics (S85)
   - source: roadmap.md feature row "Metrics (Prometheus)", status `[x]` Done
   - old-notes: Standard `/metrics` endpoint. **v0.38.6** closes it: it was served to any caller that could reach the listener (no token, no ACL, no IP filter) — the registry of a secrets vault is free reconnaissance. Now served to a cluster-local socket peer (same predicate as `sys/cluster-status`), to a CIDR in the new `metrics { allow_unauthenticated_cidrs }` block, or to a token with `read` on `sys/metrics`; else 403. `allow_cluster_local` defaults on because it is the only path that survives a seal (no barrier ⇒ no token validation). GUI unaffected — its plugin-metrics panel never scrapes the endpoint. [config docs](docs/configuration.md#metrics-access-optional)
-- [/] T31 Make security guarantees structural through formal verification (S65)
-  - note: old roadmap said Todo; Phase 0 fix PRs shipped and 2.1 is part-done, so status inferred during PTF migration
+- [x] T31 Make security guarantees structural through formal verification (S65)
+  - note: closed at the owner's direction with items still open, all tracked elsewhere. Phases 1 and 2 done; Phase 3 delivered (`bv-policy-core` decides every ACL verdict, 18 Kani harnesses green, differential suite green to 1 000 000 cases, docs/verification.md S108) with sub-phase 3.2 left `[/]` until T119/T120 land; Phase 4 delivered (tiers `make verify-fast` / `verify` / `verify-full`, Kani gate, report generator, all run locally) but `.github/workflows/verify.yml` has never run on a runner and the tier-3 report has not been produced from tier-2 evidence or attached to a release; the ESI premise-change request for Phases 1 and 3.4 is outstanding (human process); T119–T121 (evaluator findings, withheld until fixed) are open
   - source: roadmap.md feature row "Formal Verification & Type-Driven Security", status `[ ]` Todo
   - old-notes: [roadmap](roadmaps/formal-verification-and-type-driven-security.md) — four phases making three guarantees mechanical rather than conventional: an `Authorized<R>` witness extractor + route-table-as-data so no privileged route can be served without crossing `authorize_sys_request` (the v0.37.6 44-route bypass becomes a compile error, not a review finding); a zero-dep `bv-sql-guard` (`SqlIdent` allow-list + literal-only `Sql`) plus a Semgrep gate over every driver call site; and Kani model checking of an extracted, bounded `bv-policy-core` for eight ACL theorems (deny supremacy, fail-closed default, group/scope-gate soundness, specificity precedence, root isolation, parameter constraints), with production delegating to the verified core so the proofs describe shipped code. Scoping surfaced four defects to fix first (F2–F5); **all four shipped in v0.38.6** ahead of the phases, per `03` §10: `/metrics` is authorization-gated, `list`/`scan` escape the `LIKE` pattern and make `strip_prefix` the authoritative membership test (hiqlite + MySQL), and the storage table identifier is allow-listed at construction. The phases now own making those guarantees *structural* rather than hand-written.
+- [ ] T119 Close the authorization-relevant evaluator finding recorded as F6 (S65, S108)
+  - note: finding F6, split out of T31 Phase 3.2. Details are withheld from this repository until the fix ships; the maintainer holds the write-up. A `Permissionamento` change: needs the `02` §6 change record and ESI. A Kani witness for it is in `bv-policy-core`.
+- [ ] T120 Close the evaluator finding recorded as F7 (S65, S108)
+  - note: finding F7, split out of T31 Phase 3.2. Details are withheld from this repository until the fix ships; the maintainer holds the write-up.
+- [ ] T121 Close the evaluator finding recorded as F8 (S65, S108)
+  - note: finding F8. Details are withheld from this repository until the fix ships; the maintainer holds the write-up.
 
 ## [M5] Resources
 > outcome: Done when operators can inventory resources and files, connect to them in-app over SSH/RDP and web without seeing credentials, and work in a tabbed session workspace.
@@ -369,6 +375,8 @@ Next-up list recorded before the migration, in its order:
   - note: split out of T75. Version-3 recordings carry decoded pixels, so replay no longer needs these codecs; they remain undecoded on the legacy `0x01` path, and AVC420/AVC444 over EGFX is counted by the bastion but not decoded.
 - [ ] T118 Capture clipboard pastes and route SMB through Rustion (S51)
   - note: split out of T75. Clipboard-paste capture (`cliprdr`) is not keyboard input and is out of scope for `.rdp-rec` version 4; SMB-through-Rustion has no transport yet. Each is its own track.
+- [x] T122 Sign Rustion health probes with the master key, or send them anonymous (S51, S98)
+  - note: Rustion ≥ 0.16 refuses a probe carrying `X-Rustion-Nonce` or `X-Rustion-Sig` that does not authenticate; the pinger sent an empty signature and a URL-safe nonce, so every target stayed out of `up` and Connect failed with `bastion_unavailable` (homolog, 2026-10-08). The probe now signs `nonce || authority_name` with `bv_crypto::bvrg::sign_detached_hybrid`, or carries neither header when no master key exists.
 - [x] T76 Ship the Tauri desktop GUI (S75, S90)
   - source: roadmap.md feature row "Web UI / Desktop GUI (Tauri)", status `[x]` Done
   - initiative: [Tauri GUI with FIDO2 / YubiKey Support](roadmaps/tauri-gui-fido2.md) — 9 phases, 55 Tauri commands, 49 frontend tests, 79 React modules, 10 pages.
@@ -574,3 +582,4 @@ Next-up list recorded before the migration, in its order:
 | S105 | Feature: Web Application Connect — in-app web sessions with injected login or SSO | features/web-application-connect.md |
 | S106 | Prompt: prepare Rustion for BastionVault web browser isolation | roadmaps/prompts/rustion-browser-isolation.md |
 | S107 | Feature: Self-Accounts — operator-registered accounts, picked at Connect (plugin) | features/self-accounts.md |
+| S108 | Verification of the ACL decision core | docs/verification.md |

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::AUTH_COOKIE_NAME;
+use crate::routes::{route, BodyLimit, CatchAllSpec};
 use crate::{
     core::Core,
     errors::RvError,
@@ -209,29 +210,37 @@ fn response_logical(resp: &Response, path: &str) -> Result<HttpResponse, HttpErr
     }
 }
 
+// Bump the per-request body limit off actix's 256 KiB default. The logical
+// surface includes file uploads (`files/files` POST carries a base64-encoded
+// blob inline) and PKI workflows (CSRs, certificate chains) that routinely
+// exceed that ceiling. 32 MiB matches `sys/batch`'s explicit limit and gives
+// operators headroom for normal file workloads without making the server an
+// unbounded sink. Larger uploads should chunk via a dedicated engine later;
+// for now this is the pragmatic ceiling.
+
+/// `/v1/{path:.*}`, as a route-table entry (see [`crate::routes`]).
+pub(crate) const V1_CATCH_ALL: CatchAllSpec = CatchAllSpec {
+    scope: "/v1",
+    path: "/{path:.*}",
+    body_limit: BodyLimit::Payload(default_logical_body_limit()),
+    route: route!(dispatch Any => logical_request_handler_v1,
+        "the logical API: every request is judged by pre_route on its own path; anonymous only where the mounted backend lists the path in unauth_paths (logins, for example)"),
+};
+
+/// `/v2/{path:.*}`, as a route-table entry.
+pub(crate) const V2_CATCH_ALL: CatchAllSpec = CatchAllSpec {
+    scope: "/v2",
+    path: "/{path:.*}",
+    body_limit: BodyLimit::Payload(default_logical_body_limit()),
+    route: route!(dispatch Any => logical_request_handler_v2,
+        "the logical API: every request is judged by pre_route on its own path; anonymous only where the mounted backend lists the path in unauth_paths (logins, for example)"),
+};
+
 pub fn init_logical_service(cfg: &mut web::ServiceConfig) {
-    // Bump the per-request body limit off actix's 256 KiB default.
-    // The logical surface includes file uploads (`files/files` POST
-    // carries a base64-encoded blob inline) and PKI workflows (CSRs,
-    // certificate chains) that routinely exceed that ceiling. 32 MiB
-    // matches `sys/batch`'s explicit limit and gives operators
-    // headroom for normal file workloads without making the server
-    // an unbounded sink. Larger uploads should chunk via a dedicated
-    // engine later; for now this is the pragmatic ceiling.
-    let payload_cfg = web::PayloadConfig::default().limit(default_logical_body_limit());
-    cfg.service(
-        web::scope("/v1")
-            .app_data(payload_cfg.clone())
-            .route("/{path:.*}", web::route().to(logical_request_handler_v1)),
-    );
-    cfg.service(
-        web::scope("/v2")
-            .app_data(payload_cfg)
-            .route("/{path:.*}", web::route().to(logical_request_handler_v2)),
-    );
+    crate::routes::register(cfg, crate::routes::LOGICAL);
 }
 
-fn default_logical_body_limit() -> usize {
+const fn default_logical_body_limit() -> usize {
     32 * 1024 * 1024
 }
 

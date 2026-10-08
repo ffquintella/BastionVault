@@ -1,0 +1,31 @@
+# Every route an anonymous caller can reach, and why. Generated from the route table
+# (crates/bv-server/src/routes.rs); regenerate with BV_BLESS_GOLDEN=1 and review the diff.
+GET    /v1/sys/init [public-probe] -- bootstrap: whether the vault is initialized is needed before any token can exist
+POST   /v1/sys/init [public-probe] -- one-time bootstrap that mints the root token and unseal shares; no token can exist before it, and Core::init refuses an initialized vault
+PUT    /v1/sys/init [public-probe] -- one-time bootstrap that mints the root token and unseal shares; no token can exist before it, and Core::init refuses an initialized vault
+GET    /v1/sys/seal-status [public-probe] -- unseal workflow: sealed, share counts and unseal progress are needed while no token can be validated; no secret material
+GET    /v1/sys/health [public-probe] -- load-balancer probe; exposes only initialized, sealed, standby and cluster_healthy
+GET    /v1/sys/info [tiered] -- initialized and sealed are needed before a token can exist; version, started_at, uptime_seconds and storage_type require a live token (v0.37.6)
+GET    /v1/sys/cluster-status [cluster-local] -- Raft role and membership: a live token, or a cluster-local socket peer (loopback or a configured node, never X-Forwarded-For); anyone else gets 403
+POST   /v1/sys/unseal [public-probe] -- the unseal key share is the credential: no token can be validated while the barrier is sealed
+PUT    /v1/sys/unseal [public-probe] -- the unseal key share is the credential: no token can be validated while the barrier is sealed
+GET    /v1/sys/internal/ui/mounts [routed-unauthenticated] -> sys/internal/ui/mounts -- Vault-compatible UI bootstrap in the system backend's unauth_paths; the handler judges any token itself and lists no mount to an anonymous caller
+GET    /v1/sys/internal/ui/mounts/{name:.*} [routed-unauthenticated] -> sys/internal/ui/mounts/{name} -- Vault-compatible UI bootstrap in the system backend's unauth_paths; the handler refuses an anonymous caller and checks mount access for a token
+GET    /v2/sys/init [public-probe] -- bootstrap: whether the vault is initialized is needed before any token can exist
+POST   /v2/sys/init [public-probe] -- one-time bootstrap that mints the root token and unseal shares; no token can exist before it, and Core::init refuses an initialized vault
+PUT    /v2/sys/init [public-probe] -- one-time bootstrap that mints the root token and unseal shares; no token can exist before it, and Core::init refuses an initialized vault
+GET    /v2/sys/seal-status [public-probe] -- unseal workflow: sealed, share counts and unseal progress are needed while no token can be validated; no secret material
+GET    /v2/sys/health [public-probe] -- load-balancer probe; exposes only initialized, sealed, standby and cluster_healthy
+GET    /v2/sys/info [tiered] -- initialized and sealed are needed before a token can exist; version, started_at, uptime_seconds and storage_type require a live token (v0.37.6)
+GET    /v2/sys/cluster-status [cluster-local] -- Raft role and membership: a live token, or a cluster-local socket peer (loopback or a configured node, never X-Forwarded-For); anyone else gets 403
+POST   /v2/sys/unseal [public-probe] -- the unseal key share is the credential: no token can be validated while the barrier is sealed
+PUT    /v2/sys/unseal [public-probe] -- the unseal key share is the credential: no token can be validated while the barrier is sealed
+GET    /v2/sys/internal/ui/mounts [routed-unauthenticated] -> sys/internal/ui/mounts -- Vault-compatible UI bootstrap in the system backend's unauth_paths; the handler judges any token itself and lists no mount to an anonymous caller
+GET    /v2/sys/internal/ui/mounts/{name:.*} [routed-unauthenticated] -> sys/internal/ui/mounts/{name} -- Vault-compatible UI bootstrap in the system backend's unauth_paths; the handler refuses an anonymous caller and checks mount access for a token
+POST   /v2/sys/batch [dispatch] -- carries caller-chosen logical operations; each is judged by pre_route on its own path through Core::handle_request
+POST   /v1/rustion/webhooks/recording-ready [signature-verified] -- Rustion recording.ready delivery: no token; the hybrid Ed25519 + ML-DSA-65 signature over the raw body must verify against an enrolled bastion's pinned key, or the request is refused
+POST   /v2/mcp [dispatch] -- JSON-RPC transport: 401 without a bearer token after the TLS, origin and size gates; each tools/call is a logical request judged by pre_route
+GET    /.well-known/oauth-protected-resource/v2/mcp [public-probe] -- RFC 9728 protected-resource metadata: an MCP client reads it before it can hold a token; names only the resource URL and its authorization servers
+ANY    /v1/{path:.*} [dispatch] -- the logical API: every request is judged by pre_route on its own path; anonymous only where the mounted backend lists the path in unauth_paths (logins, for example)
+ANY    /v2/{path:.*} [dispatch] -- the logical API: every request is judged by pre_route on its own path; anonymous only where the mounted backend lists the path in unauth_paths (logins, for example)
+GET    /metrics [cluster-local] -- Prometheus scrape: a token with read on sys/metrics, a cluster-local socket peer (metrics.allow_cluster_local), or a source in metrics.allow_unauthenticated_cidrs; anyone else gets 403

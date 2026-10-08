@@ -1485,8 +1485,10 @@ impl RustionBackendInner {
         // Reuse the same client + state-machine path the background
         // pinger uses so single-target test = exactly one tick of
         // the regular probe loop.
-        let authority = self.resolve_master_store()?.authority_name().await?;
-        probe::probe_target_now(&store, &authority, &target).await;
+        let master = self.resolve_master_store()?;
+        let authority = master.authority_name().await?;
+        let signer = probe::load_probe_signer(Some(&master)).await;
+        probe::probe_target_now(&store, &authority, signer.as_ref(), &target).await;
         let health = store.get_health(&id).await?.unwrap_or_default();
         let mut data = Map::new();
         data.insert("id".into(), Value::String(target.id.clone()));

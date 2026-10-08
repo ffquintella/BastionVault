@@ -24,6 +24,12 @@ pub mod kernel_service;
 pub use policy_store::{PolicyHistoryEntry, PolicyStore};
 
 pub mod acl;
+// The ACL's index answering `bv_policy_core`'s questions (T31 Phase 3.4).
+mod core_bridge;
+// The verified core against a frozen copy of the pre-delegation evaluator
+// (T31 Phase 3.3).
+#[cfg(test)]
+mod differential;
 
 #[derive(Default)]
 pub struct PolicyModule {

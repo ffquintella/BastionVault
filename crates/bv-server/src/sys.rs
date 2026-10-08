@@ -17,6 +17,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::kernel_api::VaultCtx;
 use crate::{
+    authz::{sys_route, Authorized, SysAuditCtx},
     core::{Core, SealConfig},
     errors::RvError,
     HttpError,
@@ -26,8 +27,12 @@ use crate::{
         response_error,
         response_json_ok,
         response_ok,
-    logical::{Connection as ReqConnection, Operation, Request},
+    logical::{Operation, Request},
 };
+
+/// The route table for this module's handlers (Phase 1.3 of
+/// `roadmaps/formal-verification-and-type-driven-security.md`).
+pub(crate) mod routes;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthResponse {
@@ -182,15 +187,21 @@ async fn sys_seal_status_request_handler(
     }
 }
 
+sys_route! {
+    /// `POST|PUT /v{1,2}/sys/seal` — drop the master key and go sealed.
+    SysSeal { op: Write, path: "sys/seal", body: NoBody, denial: NotRecorded }
+}
+
 /// `POST /sys/seal` — drop the master key and go sealed.
 ///
-/// `seal` is listed in the system backend's `root_paths`, so the gate below
+/// `seal` is listed in the system backend's `root_paths`, so the witness
 /// demands a sudo-capable token. It previously ran for any caller who could
 /// reach the listener, which made a one-line unauthenticated request a complete
 /// outage.
-async fn sys_seal_request_handler(_req: HttpRequest, core: web::Data<Arc<Core>>) -> Result<HttpResponse, HttpError> {
-    authorize_sys_request(&core, &_req, "sys/seal", Operation::Write).await?;
-
+async fn sys_seal_request_handler(
+    _authz: Authorized<SysSeal>,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
     #[cfg(not(feature = "sync_handler"))]
     core.seal().await?;
     #[cfg(feature = "sync_handler")]
@@ -339,20 +350,13 @@ async fn sys_owner_backfill_request_handler(
     handle_request(core, &mut r).await
 }
 
-/// The non-standard `LIST` HTTP verb the BastionVault clients use for
-/// `Operation::List`. Mirrors the verb the `/v1/{path:.*}` logical
-/// catch-all matches in `logical.rs`.
-fn list_method() -> actix_web::http::Method {
-    actix_web::http::Method::from_bytes(b"LIST").expect("LIST is a valid HTTP method token")
-}
-
 /// Copy the multi-tenancy namespace selector (`X-BastionVault-Namespace`)
 /// into a forwarded logical request. `request_auth` only carries the token,
 /// so sys-layer HTTP shims that target namespace-scoped logical routes must
 /// replicate the header copy the `/v1/{path:.*}` catch-all performs in
 /// `logical.rs`; otherwise child-namespace scoping silently always resolves
-/// to root.
-fn copy_namespace_header(req: &HttpRequest, r: &mut Request) {
+/// to root. The authorization witness uses it for the same reason.
+pub(crate) fn copy_namespace_header(req: &HttpRequest, r: &mut Request) {
     if let Some(ns) = req
         .headers()
         .get("x-bastionvault-namespace")
@@ -1475,97 +1479,6 @@ async fn caller_has_live_token(core: &dyn VaultCtx, req: &HttpRequest) -> bool {
     matches!(tokens.lookup(&token).await, Ok(Some(_)))
 }
 
-/// The logical `Connection` for an inline `sys` handler, resolved the same way
-/// [`crate::logical_routes`] resolves it for a routed request: the socket peer
-/// from the on-connect hook (falling back to actix's `peer_addr` when that hook
-/// did not run, as in the test harness), plus the trusted-proxy-aware derived
-/// client IP.
-///
-/// Returns `None` only when no peer address can be determined at all, which
-/// `TokenStore::check_token` treats as a refusal for any token that carries a
-/// source-address binding.
-fn sys_request_connection(req: &HttpRequest) -> Option<ReqConnection> {
-    let hook_conn = req.conn_data::<crate::Connection>();
-    let socket_peer = hook_conn.map(|c| c.peer).or_else(|| req.peer_addr())?;
-
-    let default_trusted;
-    let trusted = match req.app_data::<web::Data<crate::client_ip::TrustedProxies>>() {
-        Some(d) => d.get_ref(),
-        None => {
-            default_trusted = crate::client_ip::TrustedProxies::default();
-            &default_trusted
-        }
-    };
-
-    Some(ReqConnection {
-        peer_addr: socket_peer.to_string(),
-        peer_addr_derived: crate::client_ip::ClientIp::resolve(socket_peer, req, trusted).derived.to_string(),
-        peer_tls_cert: hook_conn.and_then(|c| c.tls.as_ref()).and_then(|tls| tls.client_cert_chain.clone()),
-    })
-}
-
-/// Run the real authentication + ACL gate for `path` / `operation` without
-/// dispatching a logical request.
-///
-/// Nearly every `sys` handler reaches the policy engine through
-/// [`handle_request`], which crosses `TokenStore::pre_route` — the single
-/// chokepoint that validates the presented token and asks the ACL whether the
-/// operation is permitted. The handlers in this file that do their work inline
-/// (binary backup streams, plugin uploads, filesystem exports, cluster
-/// membership calls) never call it, so until this gate existed they executed
-/// for *any* caller who could reach the listener: `POST /v1/sys/backup`
-/// handed a full vault dump to an anonymous client and `POST /v1/sys/seal`
-/// sealed the vault. Calling this first makes them behave exactly like a
-/// logical path — same token validation, same policy evaluation, same
-/// `root_paths` sudo rules, same denial bookkeeping.
-///
-/// `path` must be the mount-relative logical path (`"sys/backup"`), matching
-/// what a policy author writes in `path "sys/backup" { ... }`.
-async fn authorize_sys_request(
-    core: &web::Data<Arc<Core>>,
-    req: &HttpRequest,
-    path: &str,
-    operation: Operation,
-) -> Result<(), RvError> {
-    let mut r = request_auth(req);
-    r.path = path.to_string();
-    r.operation = operation;
-    // Namespaced callers must be judged in their own namespace, exactly as the
-    // handle_request-backed siblings are.
-    copy_namespace_header(req, &mut r);
-    // ...and from the same source address, so a token carrying a
-    // `token_bound_cidrs` restriction is judged against the address it
-    // actually arrived from. `request_auth` builds a bare `Request` with no
-    // connection, and `check_token` fails closed on an unknown address — so
-    // without this a legitimately bound token would be refused on every
-    // route that authorizes through this helper (`sys/backup`, `sys/seal`,
-    // plugin uploads, filesystem exports, cluster membership). Mirrors the
-    // resolution in `logical_routes::logical_request_handler_inner`.
-    r.connection = sys_request_connection(req);
-
-    let auth_module = core
-        .module_manager()
-        .get_module::<crate::modules::auth::AuthModule>("auth")
-        .ok_or(RvError::ErrPermissionDenied)?;
-    let token_store = auth_module
-        .token_store
-        .load_full()
-        .ok_or(RvError::ErrPermissionDenied)?;
-
-    // `pre_route` runs pre_auth → check_token → post_auth (the ACL check in
-    // `PolicyStore::post_auth`). `Ok(_)` means the caller is cleared.
-    match crate::handler::Handler::pre_route(token_store.as_ref(), &mut r).await {
-        Ok(_) => Ok(()),
-        // A privileged route reached with no token at all is a permission
-        // failure, not a malformed request: `ErrRequestClientTokenMissing`
-        // renders as 400, which tells a client to fix its body when what it
-        // actually needs to do is authenticate. Collapse it onto the 403 every
-        // other refusal on these routes returns.
-        Err(RvError::ErrRequestClientTokenMissing) => Err(RvError::ErrPermissionDenied),
-        Err(e) => Err(e),
-    }
-}
-
 /// Is the TCP peer one of this cluster's own machines?
 ///
 /// `peer` is the *socket* address, deliberately not the
@@ -1730,12 +1643,29 @@ async fn sys_cluster_status_request_handler(
     Ok(response_json_ok(None, resp))
 }
 
+sys_route! {
+    /// `POST /v{1,2}/sys/cluster/remove-node` — remove a Raft member.
+    SysClusterRemoveNode { op: Write, path: "sys/cluster/remove-node", body: WithBody, denial: NotRecorded }
+    /// `POST /v{1,2}/sys/cluster/leave` — this node leaves the cluster.
+    SysClusterLeave { op: Write, path: "sys/cluster/leave", body: NoBody, denial: NotRecorded }
+    /// `POST /v{1,2}/sys/cluster/failover` — hand leadership away.
+    SysClusterFailover { op: Write, path: "sys/cluster/failover", body: NoBody, denial: NotRecorded }
+    /// `POST /v{1,2}/sys/backup` — full BVBK backup stream.
+    SysBackup { op: Write, path: "sys/backup", body: NoBody, denial: NotRecorded }
+    /// `POST /v{1,2}/sys/restore` — overwrite storage from a BVBK backup.
+    SysRestore { op: Write, path: "sys/restore", body: WithBody, denial: NotRecorded }
+    /// `GET /v{1,2}/sys/export/{path}` — decrypted mount export. Judged on the
+    /// full path, so `sys/export/*` in a policy cannot be narrowed by accident.
+    SysExport { op: Read, path: "sys/export/{path}", body: NoBody, denial: NotRecorded }
+    /// `POST /v{1,2}/sys/import/{mount}` — write an export back into a mount.
+    SysImport { op: Write, path: "sys/import/{mount}", body: WithBody, denial: NotRecorded }
+}
+
 async fn sys_cluster_remove_node_request_handler(
-    req: HttpRequest,
-    mut body: web::Bytes,
+    authz: Authorized<SysClusterRemoveNode>,
     _core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    authorize_sys_request(&_core, &req, "sys/cluster/remove-node", Operation::Write).await?;
+    let mut body = authz.into_body();
 
     #[derive(Deserialize)]
     #[allow(dead_code)]
@@ -1760,11 +1690,9 @@ async fn sys_cluster_remove_node_request_handler(
 }
 
 async fn sys_cluster_leave_request_handler(
-    req: HttpRequest,
+    _authz: Authorized<SysClusterLeave>,
     _core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    authorize_sys_request(&_core, &req, "sys/cluster/leave", Operation::Write).await?;
-
     if let Some(result) = crate::storage::cluster::leave(_core.physical().as_ref()).await {
         result?;
         return Ok(response_ok(None, None));
@@ -1774,11 +1702,9 @@ async fn sys_cluster_leave_request_handler(
 }
 
 async fn sys_cluster_failover_request_handler(
-    req: HttpRequest,
+    _authz: Authorized<SysClusterFailover>,
     _core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    authorize_sys_request(&_core, &req, "sys/cluster/failover", Operation::Write).await?;
-
     if let Some(result) = crate::storage::cluster::failover(_core.physical().as_ref()).await {
         result?;
         return Ok(response_ok(None, None));
@@ -1788,11 +1714,9 @@ async fn sys_cluster_failover_request_handler(
 }
 
 async fn sys_backup_request_handler(
-    req: HttpRequest,
+    _authz: Authorized<SysBackup>,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    authorize_sys_request(&core, &req, "sys/backup", Operation::Write).await?;
-
     let hmac_key = core.barrier().derive_hmac_key()?;
     let mut buf = Vec::new();
 
@@ -1811,11 +1735,10 @@ async fn sys_backup_request_handler(
 }
 
 async fn sys_restore_request_handler(
-    req: HttpRequest,
-    body: web::Bytes,
+    authz: Authorized<SysRestore>,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    authorize_sys_request(&core, &req, "sys/restore", Operation::Write).await?;
+    let body = authz.into_body();
 
     let hmac_key = core.barrier().derive_hmac_key()?;
     let mut reader = std::io::Cursor::new(body.as_ref());
@@ -1831,11 +1754,11 @@ async fn sys_restore_request_handler(
 }
 
 async fn sys_export_request_handler(
+    _authz: Authorized<SysExport>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
     let path = req.match_info().get("path").unwrap_or("");
-    authorize_sys_request(&core, &req, &format!("sys/export/{path}"), Operation::Read).await?;
 
     // Split path into mount and prefix at the first '/' after removing leading slash
     let (mount, prefix) = if let Some(idx) = path.find('/') {
@@ -1875,110 +1798,27 @@ fn default_format() -> String {
     "bvx".to_string()
 }
 
+sys_route! {
+    /// `POST /v{1,2}/sys/exchange/export` — build a `bvx.v1` document.
+    SysExchangeExport { op: Write, path: "sys/exchange/export", body: WithBody, denial: Recorded }
+    /// `POST /v{1,2}/sys/exchange/import` — single-shot import.
+    SysExchangeImport { op: Write, path: "sys/exchange/import", body: WithBody, denial: Recorded }
+    /// `POST /v{1,2}/sys/exchange/import/preview` — decrypt, parse, classify.
+    SysExchangeImportPreview { op: Write, path: "sys/exchange/import/preview", body: WithBody, denial: Recorded }
+    /// `POST /v{1,2}/sys/exchange/import/apply` — write a previewed document.
+    SysExchangeImportApply { op: Write, path: "sys/exchange/import/apply", body: WithBody, denial: Recorded }
+}
+
 /// `POST /v1/sys/exchange/export` — produce a `bvx.v1` JSON document
 /// describing the requested scope; optionally wrap it in a password-encrypted
 /// `.bvx` envelope. See `features/import-export-module.md`.
-/// Parse the bytes that will be audit-logged into a JSON map, when
-/// possible. Audit redaction (HMAC-per-string-leaf) runs against this
-/// map inside `AuditEntry::from_response`, so passwords, file_b64,
-/// payloads, etc. are HMAC'd in the persisted entry without us having
-/// to teach the audit layer anything about exchange/plugin schemas.
-fn body_to_audit_map(body: &web::Bytes) -> Option<serde_json::Map<String, serde_json::Value>> {
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.as_object().cloned())
-}
-
-/// Capture the bits each sys-level handler needs for audit emit before
-/// the request body is consumed by the work closure. Returned struct is
-/// fed to `emit_sys_audit` after the work completes (success or
-/// failure) so every operation produces exactly one audit entry.
-struct SysAuditCtx {
-    core: Arc<Core>,
-    token: String,
-    body_for_audit: Option<serde_json::Map<String, serde_json::Value>>,
-}
-
-impl SysAuditCtx {
-    fn new(req: &HttpRequest, body: &web::Bytes, core: &web::Data<Arc<Core>>) -> Self {
-        Self {
-            core: core.get_ref().clone(),
-            token: request_auth(req).client_token,
-            body_for_audit: body_to_audit_map(body),
-        }
-    }
-
-    /// Variant for handlers without a request body (GET / DELETE / list
-    /// endpoints). The audit entry's `data` field will be empty.
-    fn new_no_body(req: &HttpRequest, core: &web::Data<Arc<Core>>) -> Self {
-        Self {
-            core: core.get_ref().clone(),
-            token: request_auth(req).client_token,
-            body_for_audit: None,
-        }
-    }
-
-    async fn finish(
-        self,
-        result: &Result<HttpResponse, HttpError>,
-        path: &str,
-        op: Operation,
-    ) {
-        self.emit(result, path, op).await;
-    }
-
-    /// Borrowing form of [`Self::finish`], so a denial can be audited before
-    /// the handler body (which owns the ctx) ever runs.
-    async fn emit(
-        &self,
-        result: &Result<HttpResponse, HttpError>,
-        path: &str,
-        op: Operation,
-    ) {
-        let err_str = result.as_ref().err().map(|e| format!("{e}"));
-        crate::audit::emit_sys_audit(
-            self.core.as_ref(),
-            &self.token,
-            path,
-            op,
-            self.body_for_audit.clone(),
-            err_str.as_deref(),
-        )
-        .await;
-    }
-
-    /// Authenticate and ACL-check the caller before the handler does any work.
-    ///
-    /// Delegates to [`authorize_sys_request`] and, on refusal, records the
-    /// attempt on the audit trail under the same path/operation the handler
-    /// would have audited — a rejected call against a privileged `sys` route is
-    /// precisely the event an operator needs to see — then propagates the 403.
-    async fn authorize(
-        &self,
-        core: &web::Data<Arc<Core>>,
-        req: &HttpRequest,
-        path: &str,
-        op: Operation,
-    ) -> Result<(), HttpError> {
-        match authorize_sys_request(core, req, path, op).await {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let denied: Result<HttpResponse, HttpError> = Err(e.into());
-                self.emit(&denied, path, op).await;
-                denied.map(|_| ())
-            }
-        }
-    }
-}
-
 async fn sys_exchange_export_request_handler(
+    authz: Authorized<SysExchangeExport>,
     req: HttpRequest,
-    body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new(&req, &body, &core);
-
-    audit.authorize(&core, &req, "sys/exchange/export", Operation::Write).await?;
+    let audit = SysAuditCtx::new(&authz, &req, &core);
+    let body = authz.into_body();
 
     let result: Result<HttpResponse, HttpError> = (async move {
         // Surface the parse error instead of collapsing it to a generic
@@ -2070,7 +1910,7 @@ async fn sys_exchange_export_request_handler(
     ))
     })
     .await;
-    audit.finish(&result, "sys/exchange/export", Operation::Write).await;
+    audit.finish(&result).await;
     result
 }
 
@@ -2129,12 +1969,13 @@ async fn classify_exchange_items(
 /// Stores the parsed document keyed by an opaque token; the apply call
 /// must present the same token within the configured TTL.
 async fn sys_exchange_import_preview_handler(
+    authz: Authorized<SysExchangeImportPreview>,
     req: HttpRequest,
-    body: web::Bytes,
     core: web::Data<Arc<Core>>,
     preview_store: web::Data<crate::exchange::PreviewStore>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new(&req, &body, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
+    let body = authz.into_body();
     // Owner header is needed inside the work block but `req` is not moved
     // into the closure (we only own a few captures), so resolve it now.
     let owner_header = req
@@ -2143,8 +1984,6 @@ async fn sys_exchange_import_preview_handler(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-
-    audit.authorize(&core, &req, "sys/exchange/import/preview", Operation::Write).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let mut payload: ExchangeImportRequest =
@@ -2203,7 +2042,7 @@ async fn sys_exchange_import_preview_handler(
     ))
     })
     .await;
-    audit.finish(&result, "sys/exchange/import/preview", Operation::Write).await;
+    audit.finish(&result).await;
     result
 }
 
@@ -2217,8 +2056,8 @@ struct ExchangeApplyRequest {
 }
 
 async fn sys_exchange_import_apply_handler(
+    authz: Authorized<SysExchangeImportApply>,
     req: HttpRequest,
-    body: web::Bytes,
     core: web::Data<Arc<Core>>,
     // App data, not a field on `Core`: this is an in-memory, per-node,
     // TTL-bounded cache for the two-step preview → apply flow, and this crate
@@ -2226,15 +2065,14 @@ async fn sys_exchange_import_apply_handler(
     // of three edges pointing from the kernel down into a facade subsystem.
     preview_store: web::Data<crate::exchange::PreviewStore>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new(&req, &body, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
+    let body = authz.into_body();
     let owner_header = req
         .headers()
         .get("X-BastionVault-Actor")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-
-    audit.authorize(&core, &req, "sys/exchange/import/apply", Operation::Write).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let payload: ExchangeApplyRequest =
@@ -2263,7 +2101,7 @@ async fn sys_exchange_import_apply_handler(
         ))
     })
     .await;
-    audit.finish(&result, "sys/exchange/import/apply", Operation::Write).await;
+    audit.finish(&result).await;
     result
 }
 
@@ -2300,12 +2138,69 @@ struct PluginRegisterAsset {
     bytes_b64: String,
 }
 
+sys_route! {
+    /// `GET /v{1,2}/sys/plugins` — the plugin catalog.
+    SysPluginsList { op: List, path: "sys/plugins", body: NoBody, denial: Recorded }
+    /// `POST /v{1,2}/sys/plugins` — register a plugin (manifest + binary).
+    SysPluginRegister { op: Write, path: "sys/plugins/register", body: WithBody, denial: Recorded }
+    /// `GET /v{1,2}/sys/plugins/{name}` — one manifest.
+    SysPluginRead { op: Read, path: "sys/plugins/{name}", body: NoBody, denial: Recorded }
+    /// `DELETE /v{1,2}/sys/plugins/{name}` — unregister.
+    SysPluginDelete { op: Delete, path: "sys/plugins/{name}", body: NoBody, denial: Recorded }
+    /// `GET /v{1,2}/sys/plugins/{name}/versions` — registered versions.
+    SysPluginVersions { op: List, path: "sys/plugins/{name}/versions", body: NoBody, denial: Recorded }
+    /// `POST /v{1,2}/sys/plugins/{name}/versions/{version}/activate`.
+    SysPluginVersionActivate { op: Write, path: "sys/plugins/{name}/versions/{version}/activate", body: NoBody, denial: Recorded }
+    /// `DELETE /v{1,2}/sys/plugins/{name}/versions/{version}`.
+    SysPluginVersionDelete { op: Delete, path: "sys/plugins/{name}/versions/{version}", body: NoBody, denial: Recorded }
+    /// `POST /v{1,2}/sys/plugins/{name}/reload` — drain and swap.
+    SysPluginReload { op: Write, path: "sys/plugins/{name}/reload", body: NoBody, denial: Recorded }
+    /// `GET /v{1,2}/sys/plugins/{name}/config` — redacted config values.
+    SysPluginConfigRead { op: Read, path: "sys/plugins/{name}/config", body: NoBody, denial: Recorded }
+    /// `PUT /v{1,2}/sys/plugins/{name}/config`.
+    SysPluginConfigWrite { op: Write, path: "sys/plugins/{name}/config", body: WithBody, denial: Recorded }
+    /// `GET /v{1,2}/sys/plugins/{name}/grants` — admin network grant.
+    SysPluginGrantsRead { op: Read, path: "sys/plugins/{name}/grants", body: NoBody, denial: Recorded }
+    /// `PUT /v{1,2}/sys/plugins/{name}/grants`.
+    SysPluginGrantsWrite { op: Write, path: "sys/plugins/{name}/grants", body: WithBody, denial: Recorded }
+    /// `DELETE /v{1,2}/sys/plugins/{name}/grants`.
+    SysPluginGrantsDelete { op: Delete, path: "sys/plugins/{name}/grants", body: NoBody, denial: Recorded }
+    /// `GET /v2/sys/plugins/{name}/grants/credential-provider`.
+    SysPluginProviderGrantRead { op: Read, path: "sys/plugins/{name}/grants/credential-provider", body: NoBody, denial: Recorded }
+    /// `PUT /v2/sys/plugins/{name}/grants/credential-provider`.
+    SysPluginProviderGrantWrite { op: Write, path: "sys/plugins/{name}/grants/credential-provider", body: WithBody, denial: Recorded }
+    /// `DELETE /v2/sys/plugins/{name}/grants/credential-provider`.
+    SysPluginProviderGrantDelete { op: Delete, path: "sys/plugins/{name}/grants/credential-provider", body: NoBody, denial: Recorded }
+    /// `DELETE /v2/sys/plugins/{name}/entity-data/{entity_id}` — purge.
+    SysPluginEntityDataPurge { op: Delete, path: "sys/plugins/{name}/entity-data/{entity_id}", body: NoBody, denial: Recorded }
+    /// `GET /v2/sys/plugins/{name}/entity-data` — per-entity record counts.
+    SysPluginEntityDataUsage { op: Read, path: "sys/plugins/{name}/entity-data", body: NoBody, denial: Recorded }
+    /// `GET /v{1,2}/sys/plugins/publishers` — publisher allowlist.
+    SysPluginPublishersRead { op: Read, path: "sys/plugins/publishers", body: NoBody, denial: Recorded }
+    /// `PUT /v{1,2}/sys/plugins/publishers`.
+    SysPluginPublishersWrite { op: Write, path: "sys/plugins/publishers", body: WithBody, denial: Recorded }
+    /// `PUT /v{1,2}/sys/plugins/accept_unsigned` — the development-mode flag.
+    SysPluginAcceptUnsigned { op: Write, path: "sys/plugins/accept_unsigned", body: WithBody, denial: Recorded }
+    /// `GET /v{1,2}/sys/plugins/{name}/surface` — the active UI surface.
+    SysPluginSurface { op: Read, path: "sys/plugins/{name}/surface", body: NoBody, denial: Recorded }
+    /// `GET /v{1,2}/sys/plugins/active-surfaces` — the aggregated bundle.
+    SysPluginActiveSurfaces { op: Read, path: "sys/plugins/active-surfaces", body: NoBody, denial: Recorded }
+    /// `GET /v{1,2}/sys/plugins/{name}/versions/{version}/asset/{sha256}`.
+    /// Judged on `sys/plugins/{name}/{version}/asset/{sha256}` — no
+    /// `versions/` segment — exactly as before Phase 1.
+    SysPluginAsset { op: Read, path: "sys/plugins/{name}/{version}/asset/{sha256}", body: NoBody, denial: Recorded }
+    /// `GET /v{1,2}/sys/plugins/quarantine` — quarantined plugins.
+    SysPluginQuarantine { op: Read, path: "sys/plugins/quarantine", body: NoBody, denial: Recorded }
+    /// `POST /v{1,2}/sys/plugins/{name}/invoke` — run a plugin.
+    SysPluginInvoke { op: Write, path: "sys/plugins/{name}/invoke", body: WithBody, denial: Recorded }
+}
+
 async fn sys_plugins_list_handler(
+    authz: Authorized<SysPluginsList>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
-    audit.authorize(&core, &req, "sys/plugins", Operation::List).await?;
+    let audit = SysAuditCtx::new(&authz, &req, &core);
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
@@ -2313,17 +2208,17 @@ async fn sys_plugins_list_handler(
         Ok(response_json_ok(None, json!({ "plugins": manifests })))
     })
     .await;
-    audit.finish(&result, "sys/plugins", Operation::List).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_plugins_register_handler(
+    authz: Authorized<SysPluginRegister>,
     req: HttpRequest,
-    body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new(&req, &body, &core);
-    audit.authorize(&core, &req, "sys/plugins/register", Operation::Write).await?;
+    let audit = SysAuditCtx::new(&authz, &req, &core);
+    let body = authz.into_body();
 
     let result: Result<HttpResponse, HttpError> = (async move {
         use base64::Engine;
@@ -2413,18 +2308,17 @@ async fn sys_plugins_register_handler(
         Ok(response_json_ok(None, json!({ "manifest": payload.manifest })))
     })
     .await;
-    audit.finish(&result, "sys/plugins/register", Operation::Write).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_plugins_get_handler(
+    authz: Authorized<SysPluginRead>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
-    let audit_path = format!("sys/plugins/{name}");
-    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
@@ -2434,18 +2328,17 @@ async fn sys_plugins_get_handler(
         }
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Read).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_plugins_delete_handler(
+    authz: Authorized<SysPluginDelete>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
-    let audit_path = format!("sys/plugins/{name}");
-    audit.authorize(&core, &req, &audit_path, Operation::Delete).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
@@ -2453,7 +2346,7 @@ async fn sys_plugins_delete_handler(
         Ok(response_ok(None, None))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Delete).await;
+    audit.finish(&result).await;
     result
 }
 
@@ -2470,13 +2363,12 @@ struct PluginInvokeRequest {
 }
 
 async fn sys_plugins_versions_list_handler(
+    authz: Authorized<SysPluginVersions>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
-    let audit_path = format!("sys/plugins/{name}/versions");
-    audit.authorize(&core, &req, &audit_path, Operation::List).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
@@ -2490,19 +2382,18 @@ async fn sys_plugins_versions_list_handler(
         ))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::List).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_plugins_versions_activate_handler(
+    authz: Authorized<SysPluginVersionActivate>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let version = req.match_info().get("version").unwrap_or("").to_string();
-    let audit_path = format!("sys/plugins/{name}/versions/{version}/activate");
-    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
@@ -2520,19 +2411,18 @@ async fn sys_plugins_versions_activate_handler(
         ))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Write).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_plugins_versions_delete_handler(
+    authz: Authorized<SysPluginVersionDelete>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let version = req.match_info().get("version").unwrap_or("").to_string();
-    let audit_path = format!("sys/plugins/{name}/versions/{version}");
-    audit.authorize(&core, &req, &audit_path, Operation::Delete).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
@@ -2542,18 +2432,17 @@ async fn sys_plugins_versions_delete_handler(
         Ok(response_ok(None, None))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Delete).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_plugins_reload_handler(
+    authz: Authorized<SysPluginReload>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
-    let audit_path = format!("sys/plugins/{name}/reload");
-    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         // Phase 5.6: drain-and-swap. Acquire the per-plugin reload
@@ -2599,18 +2488,17 @@ async fn sys_plugins_reload_handler(
         ))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Write).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_plugins_config_get_handler(
+    authz: Authorized<SysPluginConfigRead>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
-    let audit_path = format!("sys/plugins/{name}/config");
-    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
@@ -2634,7 +2522,7 @@ async fn sys_plugins_config_get_handler(
         ))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Read).await;
+    audit.finish(&result).await;
     result
 }
 
@@ -2644,14 +2532,13 @@ struct PluginConfigPutRequest {
 }
 
 async fn sys_plugins_config_put_handler(
+    authz: Authorized<SysPluginConfigWrite>,
     req: HttpRequest,
-    body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new(&req, &body, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
+    let body = authz.into_body();
     let name = req.match_info().get("name").unwrap_or("").to_string();
-    let audit_path = format!("sys/plugins/{name}/config");
-    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let payload: PluginConfigPutRequest =
@@ -2671,7 +2558,7 @@ async fn sys_plugins_config_put_handler(
         Ok(response_ok(None, None))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Write).await;
+    audit.finish(&result).await;
     result
 }
 
@@ -2726,13 +2613,12 @@ async fn resolve_actor_entity_id(core: &dyn VaultCtx, token: &str) -> String {
 }
 
 async fn sys_plugins_grants_get_handler(
+    authz: Authorized<SysPluginGrantsRead>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
-    let audit_path = format!("sys/plugins/{name}/grants");
-    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
@@ -2772,20 +2658,19 @@ async fn sys_plugins_grants_get_handler(
         ))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Read).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_plugins_grants_put_handler(
+    authz: Authorized<SysPluginGrantsWrite>,
     req: HttpRequest,
-    body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new(&req, &body, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
+    let body = authz.into_body();
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let token = request_auth(&req).client_token;
-    let audit_path = format!("sys/plugins/{name}/grants");
-    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let payload: GrantsPutRequest =
@@ -2826,25 +2711,24 @@ async fn sys_plugins_grants_put_handler(
         Ok(response_json_ok(None, json!({ "net": grant })))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Write).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_plugins_grants_delete_handler(
+    authz: Authorized<SysPluginGrantsDelete>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
-    let audit_path = format!("sys/plugins/{name}/grants");
-    audit.authorize(&core, &req, &audit_path, Operation::Delete).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         crate::plugins::grants::delete(core.barrier().as_storage(), &name).await?;
         Ok(response_ok(None, None))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Delete).await;
+    audit.finish(&result).await;
     result
 }
 
@@ -2855,13 +2739,12 @@ async fn sys_plugins_grants_delete_handler(
 // that block's hash. Registered on the `/v2/sys` scope only.
 
 async fn sys_plugins_provider_grant_get_handler(
+    authz: Authorized<SysPluginProviderGrantRead>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
-    let audit_path = format!("sys/plugins/{name}/grants/credential-provider");
-    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let barrier = core.barrier();
@@ -2886,20 +2769,20 @@ async fn sys_plugins_provider_grant_get_handler(
         ))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Read).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_plugins_provider_grant_put_handler(
+    authz: Authorized<SysPluginProviderGrantWrite>,
     req: HttpRequest,
-    body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new(&req, &body, &core);
+    // The body carries nothing this handler reads; the witness still reads
+    // it, as the `web::Bytes` argument did, so the audit entry records it.
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let token = request_auth(&req).client_token;
-    let audit_path = format!("sys/plugins/{name}/grants/credential-provider");
-    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let barrier = core.barrier();
@@ -2917,25 +2800,24 @@ async fn sys_plugins_provider_grant_put_handler(
         }
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Write).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_plugins_provider_grant_delete_handler(
+    authz: Authorized<SysPluginProviderGrantDelete>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
-    let audit_path = format!("sys/plugins/{name}/grants/credential-provider");
-    audit.authorize(&core, &req, &audit_path, Operation::Delete).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         crate::plugins::provider::delete_grant(core.barrier().as_storage(), &name).await?;
         Ok(response_ok(None, None))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Delete).await;
+    audit.finish(&result).await;
     result
 }
 
@@ -2943,14 +2825,13 @@ async fn sys_plugins_provider_grant_delete_handler(
 /// entity-merge cleanup. Deletes that entity's data under `{name}` only. There
 /// is no read counterpart.
 async fn sys_plugins_entity_data_delete_handler(
+    authz: Authorized<SysPluginEntityDataPurge>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let entity_id = req.match_info().get("entity_id").unwrap_or("").to_string();
-    let audit_path = format!("sys/plugins/{name}/entity-data/{entity_id}");
-    audit.authorize(&core, &req, &audit_path, Operation::Delete).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let Some(root) = crate::plugins::runtime::entity_data_root(&name, &entity_id) else {
@@ -2964,7 +2845,7 @@ async fn sys_plugins_entity_data_delete_handler(
         Ok(response_ok(None, None))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Delete).await;
+    audit.finish(&result).await;
     result
 }
 
@@ -2975,13 +2856,12 @@ async fn sys_plugins_entity_data_delete_handler(
 /// can reach the administrator. 404 for a plugin that is not registered or
 /// does not declare `storage_scope = "entity"`.
 async fn sys_plugins_entity_data_get_handler(
+    authz: Authorized<SysPluginEntityDataUsage>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
-    let audit_path = format!("sys/plugins/{name}/entity-data");
-    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         match crate::plugins::entity_data::entity_data_usage(core.as_ref(), &name).await? {
@@ -2993,7 +2873,7 @@ async fn sys_plugins_entity_data_get_handler(
         }
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Read).await;
+    audit.finish(&result).await;
     result
 }
 
@@ -3006,12 +2886,11 @@ struct PublishersPutRequest {
 }
 
 async fn sys_plugins_publishers_get_handler(
+    authz: Authorized<SysPluginPublishersRead>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
-    let audit_path = "sys/plugins/publishers".to_string();
-    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
+    let audit = SysAuditCtx::new(&authz, &req, &core);
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let allow =
@@ -3027,18 +2906,17 @@ async fn sys_plugins_publishers_get_handler(
         ))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Read).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_plugins_publishers_put_handler(
+    authz: Authorized<SysPluginPublishersWrite>,
     req: HttpRequest,
-    body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new(&req, &body, &core);
-    let audit_path = "sys/plugins/publishers".to_string();
-    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
+    let audit = SysAuditCtx::new(&authz, &req, &core);
+    let body = authz.into_body();
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let payload: PublishersPutRequest =
@@ -3050,7 +2928,7 @@ async fn sys_plugins_publishers_put_handler(
         Ok(response_json_ok(None, json!({ "ok": true })))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Write).await;
+    audit.finish(&result).await;
     result
 }
 
@@ -3060,13 +2938,12 @@ struct AcceptUnsignedPutRequest {
 }
 
 async fn sys_plugins_accept_unsigned_put_handler(
+    authz: Authorized<SysPluginAcceptUnsigned>,
     req: HttpRequest,
-    body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new(&req, &body, &core);
-    let audit_path = "sys/plugins/accept_unsigned".to_string();
-    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
+    let audit = SysAuditCtx::new(&authz, &req, &core);
+    let body = authz.into_body();
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let payload: AcceptUnsignedPutRequest =
@@ -3087,25 +2964,24 @@ async fn sys_plugins_accept_unsigned_put_handler(
         ))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Write).await;
+    audit.finish(&result).await;
     result
 }
 
 // ── Plugin Extensibility v1: surface + assets ────────────────────────
 
 async fn sys_plugins_surface_get_handler(
+    authz: Authorized<SysPluginSurface>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
-    let audit_path = format!("sys/plugins/{name}/surface");
     let if_none_match = req
         .headers()
         .get("If-None-Match")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim_matches('"').to_string());
-    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
@@ -3142,7 +3018,7 @@ async fn sys_plugins_surface_get_handler(
         }
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Read).await;
+    audit.finish(&result).await;
     result
 }
 
@@ -3251,11 +3127,11 @@ fn add_etag(mut resp: HttpResponse, etag: &str) -> HttpResponse {
 }
 
 async fn sys_plugins_active_surfaces_handler(
+    authz: Authorized<SysPluginActiveSurfaces>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
-    let audit_path = "sys/plugins/active-surfaces".to_string();
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let if_none_match = req
         .headers()
         .get("If-None-Match")
@@ -3272,8 +3148,6 @@ async fn sys_plugins_active_surfaces_handler(
     let query = req.query_string();
     let watch_requested =
         query.split('&').any(|kv| matches!(kv, "watch=1" | "watch=true"));
-
-    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
@@ -3318,25 +3192,24 @@ async fn sys_plugins_active_surfaces_handler(
             .json(json!({ "data": bundle })))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Read).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_plugins_asset_get_handler(
+    authz: Authorized<SysPluginAsset>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let version = req.match_info().get("version").unwrap_or("").to_string();
     let sha256 = req.match_info().get("sha256").unwrap_or("").to_string();
-    let audit_path = format!("sys/plugins/{name}/{version}/asset/{sha256}");
     // Defence-in-depth: the regex on the route already constrains
     // shape, but reject anything that isn't lowercase hex of length
     // 64 here too.
     let valid_hash =
         sha256.len() == 64 && sha256.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
-    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         if !valid_hash {
@@ -3356,19 +3229,18 @@ async fn sys_plugins_asset_get_handler(
         }
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Read).await;
+    audit.finish(&result).await;
     result
 }
 
 // ── Phase 5.7: list quarantined plugins (recovery aid) ──
 
 async fn sys_plugins_quarantine_list_handler(
+    authz: Authorized<SysPluginQuarantine>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
-    let audit_path = "sys/plugins/quarantine".to_string();
-    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
+    let audit = SysAuditCtx::new(&authz, &req, &core);
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let names = crate::plugins::quarantine::list(core.barrier().as_storage()).await?;
@@ -3383,20 +3255,18 @@ async fn sys_plugins_quarantine_list_handler(
         Ok(response_json_ok(None, json!({ "quarantined": entries })))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Read).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_plugins_invoke_handler(
+    authz: Authorized<SysPluginInvoke>,
     req: HttpRequest,
-    body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new(&req, &body, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
+    let body = authz.into_body();
     let name = req.match_info().get("name").unwrap_or("").to_string();
-    let audit_path = format!("sys/plugins/{name}/invoke");
-
-    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
     use base64::Engine;
@@ -3494,7 +3364,7 @@ async fn sys_plugins_invoke_handler(
     ))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Write).await;
+    audit.finish(&result).await;
     result
 }
 
@@ -3505,12 +3375,35 @@ async fn sys_plugins_invoke_handler(
 // `scheduled_exports::runner::start_scheduler`); these endpoints are the
 // management surface. See `features/scheduled-exports.md`.
 
+sys_route! {
+    /// `GET /v{1,2}/sys/scheduled-exports` — every schedule.
+    SysScheduledExportsList { op: List, path: "sys/scheduled-exports", body: NoBody, denial: Recorded }
+    /// `POST /v{1,2}/sys/scheduled-exports` — create a schedule.
+    SysScheduledExportCreate { op: Write, path: "sys/scheduled-exports/create", body: WithBody, denial: Recorded }
+    /// `GET /v{1,2}/sys/scheduled-exports/{id}`.
+    SysScheduledExportRead { op: Read, path: "sys/scheduled-exports/{id}", body: NoBody, denial: Recorded }
+    /// `PUT|POST /v{1,2}/sys/scheduled-exports/{id}`.
+    SysScheduledExportUpdate { op: Write, path: "sys/scheduled-exports/{id}", body: WithBody, denial: Recorded }
+    /// `DELETE /v{1,2}/sys/scheduled-exports/{id}`.
+    SysScheduledExportDelete { op: Delete, path: "sys/scheduled-exports/{id}", body: NoBody, denial: Recorded }
+    /// `GET /v{1,2}/sys/scheduled-exports/{id}/runs` — run history.
+    SysScheduledExportRuns { op: List, path: "sys/scheduled-exports/{id}/runs", body: NoBody, denial: Recorded }
+    /// `POST /v{1,2}/sys/scheduled-exports/{id}/run-now`.
+    SysScheduledExportRunNow { op: Write, path: "sys/scheduled-exports/{id}/run-now", body: NoBody, denial: Recorded }
+    /// `GET /v{1,2}/sys/scheduled-exports/{id}/backups` — backups cluster-wide.
+    SysScheduledExportBackups { op: List, path: "sys/scheduled-exports/{id}/backups", body: NoBody, denial: Recorded }
+    /// `GET /v{1,2}/sys/scheduled-exports/{id}/backups/{filename}/fetch`.
+    SysScheduledExportBackupFetch { op: Read, path: "sys/scheduled-exports/{id}/backups/{filename}/fetch", body: NoBody, denial: Recorded }
+    /// `POST /v{1,2}/sys/scheduled-exports/{id}/restore`.
+    SysScheduledExportRestore { op: Write, path: "sys/scheduled-exports/{id}/restore", body: WithBody, denial: Recorded }
+}
+
 async fn sys_scheduled_exports_list_handler(
+    authz: Authorized<SysScheduledExportsList>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
-    audit.authorize(&core, &req, "sys/scheduled-exports", Operation::List).await?;
+    let audit = SysAuditCtx::new(&authz, &req, &core);
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
@@ -3518,17 +3411,17 @@ async fn sys_scheduled_exports_list_handler(
         Ok(response_json_ok(None, json!({ "schedules": list })))
     })
     .await;
-    audit.finish(&result, "sys/scheduled-exports", Operation::List).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_scheduled_exports_create_handler(
+    authz: Authorized<SysScheduledExportCreate>,
     req: HttpRequest,
-    body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new(&req, &body, &core);
-    audit.authorize(&core, &req, "sys/scheduled-exports/create", Operation::Write).await?;
+    let audit = SysAuditCtx::new(&authz, &req, &core);
+    let body = authz.into_body();
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let input: crate::scheduled_exports::ScheduleInput =
@@ -3561,18 +3454,17 @@ async fn sys_scheduled_exports_create_handler(
         Ok(response_json_ok(None, json!({ "schedule": sched })))
     })
     .await;
-    audit.finish(&result, "sys/scheduled-exports/create", Operation::Write).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_scheduled_exports_get_handler(
+    authz: Authorized<SysScheduledExportRead>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
-    let audit_path = format!("sys/scheduled-exports/{id}");
-    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
@@ -3583,19 +3475,18 @@ async fn sys_scheduled_exports_get_handler(
         }
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Read).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_scheduled_exports_update_handler(
+    authz: Authorized<SysScheduledExportUpdate>,
     req: HttpRequest,
-    body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new(&req, &body, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
+    let body = authz.into_body();
     let id = req.match_info().get("id").unwrap_or("").to_string();
-    let audit_path = format!("sys/scheduled-exports/{id}");
-    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let input: crate::scheduled_exports::ScheduleInput =
@@ -3631,18 +3522,17 @@ async fn sys_scheduled_exports_update_handler(
         Ok(response_json_ok(None, json!({ "schedule": sched })))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Write).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_scheduled_exports_delete_handler(
+    authz: Authorized<SysScheduledExportDelete>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
-    let audit_path = format!("sys/scheduled-exports/{id}");
-    audit.authorize(&core, &req, &audit_path, Operation::Delete).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
@@ -3650,18 +3540,17 @@ async fn sys_scheduled_exports_delete_handler(
         Ok(response_ok(None, None))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Delete).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_scheduled_exports_runs_handler(
+    authz: Authorized<SysScheduledExportRuns>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
-    let audit_path = format!("sys/scheduled-exports/{id}/runs");
-    audit.authorize(&core, &req, &audit_path, Operation::List).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
@@ -3669,20 +3558,19 @@ async fn sys_scheduled_exports_runs_handler(
         Ok(response_json_ok(None, json!({ "runs": runs })))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::List).await;
+    audit.finish(&result).await;
     result
 }
 
 /// Trigger an immediate one-off run, separate from the cron cadence.
 /// Useful for "test my schedule" workflows in the GUI.
 async fn sys_scheduled_exports_run_now_handler(
+    authz: Authorized<SysScheduledExportRunNow>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
-    let audit_path = format!("sys/scheduled-exports/{id}/run-now");
-    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
@@ -3713,7 +3601,7 @@ async fn sys_scheduled_exports_run_now_handler(
     Ok(response_json_ok(None, json!({ "run": record })))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Write).await;
+    audit.finish(&result).await;
     result
 }
 
@@ -3857,13 +3745,12 @@ fn valid_backup_filename(name: &str) -> bool {
 /// whose file has since vanished). Files with no catalog record — pre-catalog
 /// runs, or an operator's manual copy — are still listed from the local scan.
 async fn sys_scheduled_exports_backups_list_handler(
+    authz: Authorized<SysScheduledExportBackups>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
-    let audit_path = format!("sys/scheduled-exports/{id}/backups");
-    audit.authorize(&core, &req, &audit_path, Operation::List).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
@@ -3886,7 +3773,7 @@ async fn sys_scheduled_exports_backups_list_handler(
         ))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::List).await;
+    audit.finish(&result).await;
     result
 }
 
@@ -3899,14 +3786,13 @@ async fn sys_scheduled_exports_backups_list_handler(
 /// fetch loop between nodes. Operators can call it directly too; it is
 /// ordinary authenticated `sys` surface, audited like the rest.
 async fn sys_scheduled_exports_backup_fetch_handler(
+    authz: Authorized<SysScheduledExportBackupFetch>,
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
     let filename = req.match_info().get("filename").unwrap_or("").to_string();
-    let audit_path = format!("sys/scheduled-exports/{id}/backups/{filename}/fetch");
-    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         if !valid_backup_filename(&filename) {
@@ -3958,7 +3844,7 @@ async fn sys_scheduled_exports_backup_fetch_handler(
         ))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Read).await;
+    audit.finish(&result).await;
     result
 }
 
@@ -3982,17 +3868,16 @@ struct ScheduledExportRestoreRequest {
 /// it classifies without writing (preview); otherwise it applies under the
 /// supplied conflict policy.
 async fn sys_scheduled_exports_restore_handler(
+    authz: Authorized<SysScheduledExportRestore>,
     req: HttpRequest,
-    body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new(&req, &body, &core);
+    let audit = SysAuditCtx::new(&authz, &req, &core);
+    let body = authz.into_body();
     let id = req.match_info().get("id").unwrap_or("").to_string();
-    let audit_path = format!("sys/scheduled-exports/{id}/restore");
     // The caller's own token is what authorises a cross-node fetch on the far
     // side, so capture it before the request is moved out of scope.
     let caller_token = crate::get_token_from_req(&req).unwrap_or_default();
-    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let mut payload: ScheduledExportRestoreRequest =
@@ -4139,7 +4024,7 @@ async fn sys_scheduled_exports_restore_handler(
         ))
     })
     .await;
-    audit.finish(&result, &audit_path, Operation::Write).await;
+    audit.finish(&result).await;
     result
 }
 
@@ -4147,13 +4032,12 @@ async fn sys_scheduled_exports_restore_handler(
 /// (CLI scripts, automation pipelines) that don't want to round-trip a
 /// preview token. The two-step flow above is the GUI default.
 async fn sys_exchange_import_request_handler(
+    authz: Authorized<SysExchangeImport>,
     req: HttpRequest,
-    body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let audit = SysAuditCtx::new(&req, &body, &core);
-
-    audit.authorize(&core, &req, "sys/exchange/import", Operation::Write).await?;
+    let audit = SysAuditCtx::new(&authz, &req, &core);
+    let body = authz.into_body();
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let mut payload: ExchangeImportRequest =
@@ -4209,17 +4093,17 @@ async fn sys_exchange_import_request_handler(
         ))
     })
     .await;
-    audit.finish(&result, "sys/exchange/import", Operation::Write).await;
+    audit.finish(&result).await;
     result
 }
 
 async fn sys_import_request_handler(
+    authz: Authorized<SysImport>,
     req: HttpRequest,
-    mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
+    let mut body = authz.into_body();
     let mount = req.match_info().get("mount").unwrap_or("").to_string();
-    authorize_sys_request(&core, &req, &format!("sys/import/{mount}"), Operation::Write).await?;
     let mount = if mount.ends_with('/') { mount } else { format!("{mount}/") };
 
     #[derive(serde::Deserialize)]
@@ -4258,368 +4142,6 @@ async fn sys_import_request_handler(
             "skipped": result.skipped,
         }),
     ))
-}
-
-fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
-    scope
-        .service(
-            web::resource("/init")
-                .route(web::get().to(sys_init_get_request_handler))
-                .route(web::post().to(sys_init_put_request_handler))
-                .route(web::put().to(sys_init_put_request_handler)),
-        )
-        .service(web::resource("/seal-status").route(web::get().to(sys_seal_status_request_handler)))
-        .service(web::resource("/health").route(web::get().to(sys_health_request_handler)))
-        .service(web::resource("/info").route(web::get().to(sys_info_request_handler)))
-        .service(web::resource("/cluster-status").route(web::get().to(sys_cluster_status_request_handler)))
-        .service(web::resource("/cluster/remove-node").route(web::post().to(sys_cluster_remove_node_request_handler)))
-        .service(web::resource("/cluster/leave").route(web::post().to(sys_cluster_leave_request_handler)))
-        .service(web::resource("/cluster/failover").route(web::post().to(sys_cluster_failover_request_handler)))
-        .service(web::resource("/backup").route(web::post().to(sys_backup_request_handler)))
-        .service(web::resource("/restore").route(web::post().to(sys_restore_request_handler)))
-        .service(web::resource("/export/{path:.*}").route(web::get().to(sys_export_request_handler)))
-        .service(web::resource("/import/{mount:.*}").route(web::post().to(sys_import_request_handler)))
-        .service(web::resource("/exchange/export").route(web::post().to(sys_exchange_export_request_handler)))
-        .service(web::resource("/exchange/import").route(web::post().to(sys_exchange_import_request_handler)))
-        .service(web::resource("/exchange/import/preview").route(web::post().to(sys_exchange_import_preview_handler)))
-        .service(web::resource("/exchange/import/apply").route(web::post().to(sys_exchange_import_apply_handler)))
-        .service(
-            web::resource("/scheduled-exports")
-                .route(web::get().to(sys_scheduled_exports_list_handler))
-                .route(web::post().to(sys_scheduled_exports_create_handler)),
-        )
-        .service(
-            web::resource("/scheduled-exports/{id}")
-                .route(web::get().to(sys_scheduled_exports_get_handler))
-                .route(web::put().to(sys_scheduled_exports_update_handler))
-                // POST alias: the GUI's remote backend maps a logical Write
-                // to POST, so accept it here too (PUT kept for REST clients).
-                .route(web::post().to(sys_scheduled_exports_update_handler))
-                .route(web::delete().to(sys_scheduled_exports_delete_handler)),
-        )
-        .service(
-            web::resource("/scheduled-exports/{id}/runs")
-                .route(web::get().to(sys_scheduled_exports_runs_handler)),
-        )
-        .service(
-            web::resource("/scheduled-exports/{id}/run-now")
-                .route(web::post().to(sys_scheduled_exports_run_now_handler)),
-        )
-        .service(
-            web::resource("/scheduled-exports/{id}/backups")
-                .route(web::get().to(sys_scheduled_exports_backups_list_handler)),
-        )
-        .service(
-            // Peer side of a cross-node restore: hands back one backup file
-            // this node holds. Local-only by design — it never forwards.
-            web::resource("/scheduled-exports/{id}/backups/{filename}/fetch")
-                .route(web::get().to(sys_scheduled_exports_backup_fetch_handler)),
-        )
-        .service(
-            web::resource("/scheduled-exports/{id}/restore")
-                .route(web::post().to(sys_scheduled_exports_restore_handler)),
-        )
-        .service(
-            // Plugin registration uploads the manifest + binary (and
-            // optionally a surface + client assets) inline as base64
-            // inside one JSON body. A real `.bvplugin` is comfortably
-            // bigger than actix's default 256 KiB `web::Bytes` limit;
-            // without an explicit `PayloadConfig` the server resets
-            // the connection mid-upload (Windows surfaces this as
-            // `ConnectionAborted` / WSAECONNABORTED 10053). Use the
-            // same 32 MiB ceiling logical and batch already settled
-            // on so operators don't hit a different limit on a
-            // different route.
-            web::resource("/plugins")
-                .app_data(web::PayloadConfig::default().limit(default_plugin_register_body_limit()))
-                .route(web::get().to(sys_plugins_list_handler))
-                .route(web::post().to(sys_plugins_register_handler)),
-        )
-        // Literal `/plugins/<word>` resources MUST be registered before
-        // the `/plugins/{name}` wildcard — actix-web matches resources
-        // in registration order, so a wildcard registered first would
-        // swallow `publishers`, `accept_unsigned`, `quarantine`, and
-        // `active-surfaces` and answer 404 "plugin not found".
-        .service(
-            web::resource("/plugins/publishers")
-                .route(web::get().to(sys_plugins_publishers_get_handler))
-                .route(web::put().to(sys_plugins_publishers_put_handler)),
-        )
-        .service(
-            web::resource("/plugins/accept_unsigned")
-                .route(web::put().to(sys_plugins_accept_unsigned_put_handler)),
-        )
-        .service(
-            web::resource("/plugins/quarantine")
-                .route(web::get().to(sys_plugins_quarantine_list_handler)),
-        )
-        .service(
-            web::resource("/plugins/active-surfaces")
-                .route(web::get().to(sys_plugins_active_surfaces_handler)),
-        )
-        .service(
-            web::resource("/plugins/{name}")
-                .route(web::get().to(sys_plugins_get_handler))
-                .route(web::delete().to(sys_plugins_delete_handler)),
-        )
-        .service(
-            // Plugin invocations carry their input inline as base64
-            // inside the JSON body. Some plugins (e.g. `xca-import`)
-            // legitimately receive multi-MiB blobs — an entire XCA
-            // `.xdb` database — so we'd otherwise blow through actix's
-            // 256 KiB `web::Bytes` default and the server would reset
-            // the connection mid-upload (ureq surfaces this as
-            // `BrokenPipe` / EPIPE on macOS, `ConnectionAborted` on
-            // Windows). Reuse the 32 MiB ceiling already established
-            // for registration / logical / batch.
-            web::resource("/plugins/{name}/invoke")
-                .app_data(web::PayloadConfig::default().limit(default_plugin_invoke_body_limit()))
-                .route(web::post().to(sys_plugins_invoke_handler)),
-        )
-        .service(
-            web::resource("/plugins/{name}/config")
-                .route(web::get().to(sys_plugins_config_get_handler))
-                .route(web::put().to(sys_plugins_config_put_handler)),
-        )
-        .service(
-            // Extensibility v2: admin network grants (admin ACL inherited
-            // from this scope). See src/plugins/grants.rs.
-            web::resource("/plugins/{name}/grants")
-                .route(web::get().to(sys_plugins_grants_get_handler))
-                .route(web::put().to(sys_plugins_grants_put_handler))
-                .route(web::delete().to(sys_plugins_grants_delete_handler)),
-        )
-        .service(
-            web::resource("/plugins/{name}/reload")
-                .route(web::post().to(sys_plugins_reload_handler)),
-        )
-        .service(
-            web::resource("/plugins/{name}/versions")
-                .route(web::get().to(sys_plugins_versions_list_handler)),
-        )
-        .service(
-            web::resource("/plugins/{name}/versions/{version}/activate")
-                .route(web::post().to(sys_plugins_versions_activate_handler)),
-        )
-        .service(
-            web::resource("/plugins/{name}/versions/{version}")
-                .route(web::delete().to(sys_plugins_versions_delete_handler)),
-        )
-        .service(
-            web::resource("/plugins/{name}/surface")
-                .route(web::get().to(sys_plugins_surface_get_handler)),
-        )
-        .service(
-            web::resource("/plugins/{name}/versions/{version}/asset/{sha256}")
-                .route(web::get().to(sys_plugins_asset_get_handler)),
-        )
-        .service(
-            web::resource("/seal")
-                .route(web::post().to(sys_seal_request_handler))
-                .route(web::put().to(sys_seal_request_handler)),
-        )
-        .service(
-            web::resource("/unseal")
-                .route(web::post().to(sys_unseal_request_handler))
-                .route(web::put().to(sys_unseal_request_handler)),
-        )
-        .service(
-            web::resource("/dashboard/summary")
-                .route(web::get().to(sys_dashboard_summary_request_handler)),
-        )
-        .service(web::resource("/mounts").route(web::get().to(sys_list_mounts_request_handler)))
-        .service(
-            web::resource("/mounts/{path:.*}")
-                .route(web::get().to(sys_list_mounts_request_handler))
-                .route(web::post().to(sys_mount_request_handler))
-                .route(web::delete().to(sys_unmount_request_handler)),
-        )
-        .service(
-            web::resource("/remount")
-                .route(web::post().to(sys_remount_request_handler))
-                .route(web::put().to(sys_remount_request_handler)),
-        )
-        .service(web::resource("/auth").route(web::get().to(sys_list_auth_mounts_request_handler)))
-        .service(
-            web::resource("/auth/{path:.*}")
-                .route(web::get().to(sys_list_auth_mounts_request_handler))
-                .route(web::post().to(sys_auth_enable_request_handler))
-                .route(web::delete().to(sys_auth_disable_request_handler)),
-        )
-        .service(web::resource("/policy").route(web::get().to(sys_list_policy_request_handler)))
-        .service(
-            web::resource("/policy/{name:.*}")
-                .route(web::get().to(sys_read_policy_request_handler))
-                .route(web::post().to(sys_write_policy_request_handler))
-                .route(web::delete().to(sys_delete_policy_request_handler)),
-        )
-        .service(web::resource("/policies/acl").route(web::get().to(sys_list_policies_request_handler)))
-        .service(
-            web::resource("/policies/acl/{name:.*}")
-                .route(web::get().to(sys_read_policies_request_handler))
-                .route(web::post().to(sys_write_policies_request_handler))
-                .route(web::delete().to(sys_delete_policies_request_handler)),
-        )
-        .service(
-            web::resource("/audit/events").route(web::get().to(sys_audit_events_request_handler)),
-        )
-        .service(web::resource("/audit").route(web::get().to(sys_audit_list_request_handler)))
-        .service(
-            web::resource("/audit/{path:.*}")
-                .route(web::post().to(sys_audit_enable_request_handler))
-                .route(web::delete().to(sys_audit_disable_request_handler)),
-        )
-        .service(
-            web::resource("/cache/flush").route(web::post().to(sys_cache_flush_request_handler)),
-        )
-        .service(
-            web::resource("/owner/backfill")
-                .route(web::post().to(sys_owner_backfill_request_handler)),
-        )
-        // Multi-tenancy namespace routes. Like the owner routes above, these
-        // live on the sys backend's logical route table but need an explicit
-        // HTTP shim — otherwise the `/v1/sys` scope 404s them before they
-        // reach the `/v1/{path:.*}` logical catch-all, so they only worked in
-        // embedded vault mode. `LIST` is the verb the clients use for list ops.
-        .service(
-            web::resource("/namespaces")
-                .route(web::method(list_method()).to(sys_namespace_list_request_handler))
-                .route(web::get().to(sys_namespace_list_request_handler)),
-        )
-        // Caller-introspecting namespace list. Distinct literal from
-        // `/namespaces/{path:.*}` (which cannot match `-self`), but registered
-        // first so the intent stays obvious.
-        .service(
-            web::resource("/namespaces-self")
-                .route(web::get().to(sys_namespaces_self_request_handler)),
-        )
-        // Cache-coherence channel. `GET` only; the long-poll and the ETag
-        // live in the handler.
-        .service(
-            web::resource("/cache/version")
-                .route(web::get().to(sys_cache_version_handler)),
-        )
-        // Bulk counterpart to the LIST above. Same reasoning as `-self`: a
-        // distinct literal that `/namespaces/{path:.*}` cannot match, but
-        // registered before it so the intent stays obvious.
-        .service(
-            web::resource("/namespaces-info")
-                .route(web::get().to(sys_namespaces_info_request_handler)),
-        )
-        .service(
-            web::resource("/namespaces/{path:.*}")
-                .route(web::get().to(sys_namespace_path_request_handler))
-                .route(web::post().to(sys_namespace_path_request_handler))
-                .route(web::put().to(sys_namespace_path_request_handler))
-                .route(web::delete().to(sys_namespace_path_request_handler)),
-        )
-        .service(
-            web::resource("/namespace-links")
-                .route(web::method(list_method()).to(sys_namespace_links_request_handler))
-                .route(web::get().to(sys_namespace_links_request_handler))
-                .route(web::post().to(sys_namespace_links_request_handler)),
-        )
-        .service(
-            web::resource("/namespace-links/{id}")
-                .route(web::get().to(sys_namespace_link_path_request_handler))
-                .route(web::delete().to(sys_namespace_link_path_request_handler)),
-        )
-        // Per-principal namespace assignment (login-restriction). Same
-        // embedded-vs-HTTP shimming rationale as the namespace routes above.
-        .service(
-            web::resource("/identity/ns-assignment")
-                .route(web::method(list_method()).to(sys_ns_assignment_list_request_handler))
-                .route(web::get().to(sys_ns_assignment_list_request_handler)),
-        )
-        .service(
-            web::resource("/identity/ns-assignment/{path:.*}")
-                .route(web::get().to(sys_ns_assignment_path_request_handler))
-                .route(web::post().to(sys_ns_assignment_path_request_handler))
-                .route(web::put().to(sys_ns_assignment_path_request_handler))
-                .route(web::delete().to(sys_ns_assignment_path_request_handler)),
-        )
-        // IP-based DoS / request-abuse protection. Same embedded-vs-HTTP
-        // shimming rationale as the routes above: without an explicit shim the
-        // sys scope 404s before the logical catch-all. Canonical form is
-        // `v2/sys/dos/*`; the v1 mirror is incidental (shared builder).
-        .service(
-            web::resource("/dos/config")
-                .route(web::get().to(sys_dos_config_request_handler))
-                .route(web::post().to(sys_dos_config_request_handler))
-                .route(web::put().to(sys_dos_config_request_handler)),
-        )
-        .service(web::resource("/dos/stats").route(web::get().to(sys_dos_stats_request_handler)))
-        .service(
-            web::resource("/dos/bans/{ip:.*}")
-                .route(web::post().to(sys_dos_ban_request_handler))
-                .route(web::put().to(sys_dos_ban_request_handler))
-                .route(web::delete().to(sys_dos_ban_request_handler)),
-        )
-        // Owner self-claim and admin transfer routes. These have always
-        // been registered on the sys backend's logical route table, but
-        // without an explicit HTTP-layer shim a request to
-        // `/v1/sys/kv-owner/claim` (and friends) is 404'd by the sys
-        // scope before reaching the `/v1/{path:.*}` logical catch-all.
-        .service(
-            web::resource("/kv-owner/transfer")
-                .route(web::post().to(sys_kv_owner_transfer_request_handler)),
-        )
-        .service(
-            web::resource("/kv-owner/claim")
-                .route(web::post().to(sys_kv_owner_claim_request_handler)),
-        )
-        .service(
-            web::resource("/resource-owner/transfer")
-                .route(web::post().to(sys_resource_owner_transfer_request_handler)),
-        )
-        .service(
-            web::resource("/asset-group-owner/transfer")
-                .route(web::post().to(sys_asset_group_owner_transfer_request_handler)),
-        )
-        .service(
-            web::resource("/file-owner/transfer")
-                .route(web::post().to(sys_file_owner_transfer_request_handler)),
-        )
-        .service(
-            web::resource("/internal/ui/mounts").route(web::get().to(sys_get_internal_ui_mounts_request_handler)),
-        )
-        .service(
-            web::resource("/internal/ui/mounts/{name:.*}")
-                .route(web::get().to(sys_get_internal_ui_mount_request_handler)),
-        )
-        // MCP Access (features/mcp-access.md): HTTP shims over the sys
-        // backend's `mcp/*` logical routes (`crates/bv-kernel/.../mcp.rs`).
-        // Same "without an explicit shim the sys scope 404s" reason as
-        // `kv-owner/claim` above.
-        .service(
-            web::resource("/mcp/config")
-                .route(web::get().to(sys_mcp_config_request_handler))
-                .route(web::post().to(sys_mcp_config_request_handler)),
-        )
-        .service(
-            web::resource("/mcp/apps")
-                .route(web::method(list_method()).to(sys_mcp_apps_list_request_handler))
-                .route(web::get().to(sys_mcp_apps_list_request_handler)),
-        )
-        .service(
-            web::resource("/mcp/apps/{name}")
-                .route(web::get().to(sys_mcp_app_request_handler))
-                .route(web::post().to(sys_mcp_app_request_handler))
-                .route(web::delete().to(sys_mcp_app_request_handler)),
-        )
-        .service(
-            web::resource("/mcp/apps/{name}/machine-waiver")
-                .route(web::post().to(sys_mcp_app_waiver_request_handler))
-                .route(web::delete().to(sys_mcp_app_waiver_request_handler)),
-        )
-        .service(
-            web::resource("/mcp/tokens")
-                .route(web::method(list_method()).to(sys_mcp_tokens_list_request_handler))
-                .route(web::get().to(sys_mcp_tokens_list_request_handler)),
-        )
-        .service(
-            web::resource("/mcp/tokens/{accessor}").route(web::delete().to(sys_mcp_token_delete_request_handler)),
-        )
 }
 
 async fn sys_mcp_config_request_handler(
@@ -4727,127 +4249,15 @@ async fn sys_mcp_pairing_delete_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// Register `/v1/sys` and `/v2/sys`, generated from the tables in
+/// [`routes`]: a `sys` route exists if and only if it is listed there.
 pub fn init_sys_service(cfg: &mut web::ServiceConfig) {
-    cfg.service(configure_sys_routes(web::scope("/v1/sys")));
-    // Batch is a v2-only route per the project's forward-going HTTP API
-    // rule. Register it under the v2 scope only. The body-size limit is
-    // enforced by the per-route `PayloadConfig`; when `Config` is not
-    // available (tests without a loaded config) the default 32 MiB
-    // from actix + our handler-level size check applies.
-    cfg.service(
-        configure_sys_routes(web::scope("/v2/sys"))
-            .service(
-                web::resource("/batch")
-                    .app_data(web::JsonConfig::default().limit(default_batch_body_limit()))
-                    .route(web::post().to(crate::batch::sys_batch_v2_request_handler)),
-            )
-            // Effective-capabilities lookup. v2-only: registered here rather
-            // than in `configure_sys_routes` so `/v1/sys/capabilities-self`
-            // is not served.
-            .service(
-                web::resource("/capabilities-self")
-                    .route(web::post().to(sys_capabilities_self_request_handler)),
-            )
-            // Policy effectivity test-case persistence (graphical builder
-            // regression gate). v2-only; sibling to capabilities-self.
-            .service(
-                web::resource("/policy-tests/{name:.*}")
-                    .route(web::get().to(sys_policy_tests_read_request_handler))
-                    .route(web::post().to(sys_policy_tests_write_request_handler)),
-            )
-            // Revoke every MCP token minted for one local pairing. v2-only:
-            // new routes do not enter the frozen v1 surface, and this scope
-            // is shared with `configure_sys_routes`, so it is registered here.
-            .service(
-                web::resource("/mcp/pairings/{id}").route(web::delete().to(sys_mcp_pairing_delete_request_handler)),
-            )
-            // Credential-provider grant and entity-data purge
-            // (features/self-accounts.md §4.5, §4.7). v2-only.
-            .service(
-                web::resource("/plugins/{name}/grants/credential-provider")
-                    .route(web::get().to(sys_plugins_provider_grant_get_handler))
-                    .route(web::put().to(sys_plugins_provider_grant_put_handler))
-                    .route(web::delete().to(sys_plugins_provider_grant_delete_handler)),
-            )
-            .service(
-                web::resource("/plugins/{name}/entity-data").route(web::get().to(sys_plugins_entity_data_get_handler)),
-            )
-            .service(
-                web::resource("/plugins/{name}/entity-data/{entity_id}")
-                    .route(web::delete().to(sys_plugins_entity_data_delete_handler)),
-            )
-            // HSM seal status (features/hsm-support.md). v2-only, read-only.
-            .service(web::resource("/hsm/status").route(web::get().to(sys_hsm_status_request_handler)))
-            // Per-principal default resource accounts (Resource Connect).
-            // v2-only. Register the `self` and bare-list resources *before* the
-            // `{path:.*}` wildcard so they win the match.
-            .service(
-                web::resource("/identity/default-account")
-                    .route(web::method(list_method()).to(sys_default_account_list_request_handler))
-                    .route(web::get().to(sys_default_account_list_request_handler)),
-            )
-            .service(
-                web::resource("/identity/default-account/self")
-                    .route(web::get().to(sys_default_account_self_request_handler))
-                    .route(web::post().to(sys_default_account_self_request_handler))
-                    .route(web::put().to(sys_default_account_self_request_handler)),
-            )
-            // Self-service profile (features/self-service-profile.md). v2-only,
-            // caller-scoped: each handler resolves the principal from the
-            // request token. Registered before the default-account wildcard for
-            // the same ordering reason — distinct prefix, but keep them
-            // adjacent so the grouping stays obvious.
-            .service(
-                web::resource("/identity/profile/self")
-                    .route(web::get().to(sys_profile_self_request_handler)),
-            )
-            .service(
-                web::resource("/identity/profile/self/password")
-                    .route(web::post().to(sys_profile_self_password_request_handler))
-                    .route(web::put().to(sys_profile_self_password_request_handler)),
-            )
-            .service(
-                web::resource("/identity/profile/self/contact")
-                    .route(web::post().to(sys_profile_self_contact_request_handler))
-                    .route(web::put().to(sys_profile_self_contact_request_handler)),
-            )
-            .service(
-                web::resource("/identity/default-account/{path:.*}")
-                    .route(web::get().to(sys_default_account_path_request_handler))
-                    .route(web::post().to(sys_default_account_path_request_handler))
-                    .route(web::put().to(sys_default_account_path_request_handler))
-                    .route(web::delete().to(sys_default_account_path_request_handler)),
-            )
-            // Per-principal SSH security keys
-            // (features/connect-mfa-and-fido2-ssh.md). Same shape as the
-            // default-account routes above, and registered in the same order:
-            // the literal `/self` must precede the `{path:.*}` catch-all or the
-            // catch-all swallows it.
-            .service(
-                web::resource("/identity/ssh-security-key")
-                    .route(web::method(list_method()).to(sys_ssh_security_key_list_request_handler))
-                    .route(web::get().to(sys_ssh_security_key_list_request_handler)),
-            )
-            .service(
-                web::resource("/identity/ssh-security-key/self")
-                    .route(web::get().to(sys_ssh_security_key_self_request_handler))
-                    .route(web::post().to(sys_ssh_security_key_self_request_handler))
-                    .route(web::put().to(sys_ssh_security_key_self_request_handler))
-                    .route(web::delete().to(sys_ssh_security_key_self_request_handler)),
-            )
-            .service(
-                web::resource("/identity/ssh-security-key/{path:.*}")
-                    .route(web::get().to(sys_ssh_security_key_path_request_handler))
-                    .route(web::post().to(sys_ssh_security_key_path_request_handler))
-                    .route(web::put().to(sys_ssh_security_key_path_request_handler))
-                    .route(web::delete().to(sys_ssh_security_key_path_request_handler)),
-            ),
-    );
+    crate::routes::register(cfg, crate::routes::SYS);
 }
 
 /// Body-size limit for the batch route when no `Config` extension is
 /// present. Matches the documented default in `features/batch-operations.md`.
-fn default_batch_body_limit() -> usize {
+const fn default_batch_body_limit() -> usize {
     32 * 1024 * 1024
 }
 
@@ -4855,7 +4265,7 @@ fn default_batch_body_limit() -> usize {
 /// bundles routinely run a few MiB, so the actix default of 256 KiB
 /// rejects most uploads mid-stream. 32 MiB matches the logical and
 /// batch limits.
-fn default_plugin_register_body_limit() -> usize {
+const fn default_plugin_register_body_limit() -> usize {
     32 * 1024 * 1024
 }
 
@@ -4864,7 +4274,7 @@ fn default_plugin_register_body_limit() -> usize {
 /// `xca-import`) receive multi-MiB blobs inline, so the actix 256 KiB
 /// `web::Bytes` default would reset the connection mid-upload. 32 MiB
 /// matches the register / logical / batch limits.
-fn default_plugin_invoke_body_limit() -> usize {
+const fn default_plugin_invoke_body_limit() -> usize {
     32 * 1024 * 1024
 }
 
@@ -5182,7 +4592,7 @@ mod namespace_route_tests {
     //! These routes live on the sys backend's *logical* route table and were
     //! only reachable in embedded vault mode: over HTTP the explicit `/v1/sys`
     //! actix scope 404'd them before they could fall through to the
-    //! `/v1/{path:.*}` logical catch-all. The shims in `configure_sys_routes`
+    //! `/v1/{path:.*}` logical catch-all. The shims in the `sys::routes` table
     //! fix that — these tests drive the real HTTP pipeline to lock it in so a
     //! `LIST /v1/sys/namespaces` never silently 404s again.
 

@@ -25,6 +25,7 @@ The two are complementary: the builder reduces the chance of writing a bad polic
 - **Multi-policy effectivity is implemented** (see the section below): a case is evaluated against the draft plus the policies a token carries alongside it, defaulting to `default`, and the response names the policy that contributed the winning rule.
 - Client: [`gui/src/lib/policyHcl.ts`](../gui/src/lib/policyHcl.ts) (parser/serializer/lint/multi-policy preview, 31 `vitest` cases in [`policyHcl.test.ts`](../gui/src/test/policyHcl.test.ts)); [`PolicyBlockEditor.tsx`](../gui/src/components/PolicyBlockEditor.tsx) and [`PolicyValidatorPanel.tsx`](../gui/src/components/PolicyValidatorPanel.tsx); Tauri commands `policy_test` / `read_policy_tests` / `write_policy_tests`.
 - The Policies page now has four tabs: **Visual builder**, **HCL source**, **Validate & test**, **History**. Interactive (live-app) verification requires `make run-dev-gui` — the browser preview has no Tauri `invoke` bridge.
+- **The evaluator the dry-run calls is now model-checked** (T31 Phase 3): `ACL::allow_operation` delegates every verdict to `bv-policy-core`, and the precedence below is theorem T4 in [docs/verification.md](../docs/verification.md). One open finding (T119) is tracked; Details are withheld from this repository until the fix ships; the maintainer holds the write-up.
 
 ### Parity with the request pipeline (fixed)
 
@@ -104,7 +105,7 @@ The simulator and the lint both encode the ACL's evaluation order:
 2. **Prefix** rules (trailing `*`) — longest matching prefix wins.
 3. **Segment-wildcard** rules (`+` matches exactly one *non-empty* path segment). The non-empty part matters: a LIST is issued against a collection path with a trailing slash (`rustion/targets/`), which splits to a trailing empty segment, so `path "x/+"` governs the *children* of `x` and never the collection itself. Grant a collection explicitly (`path "x"` or `path "x/*"`). Before this was enforced, `+` swallowed the empty segment and a read-only child rule became the most specific match for the collection — and since precedence picks one winner rather than unioning across policies, `default`'s `rustion/targets/+` silently downgraded every non-root token holding `path "*"`.
 4. **Group-gated** (`groups = [...]`) and **scope-filtered** (`scopes = [...]`) rules are evaluated as additional gates at authorize time, not merged into the base trie.
-5. `deny` on any matching rule overrides all granted capabilities.
+5. `deny` on the *winning* rule, or on a group-gated / scope-filtered rule that applies, overrides all granted capabilities — a `deny` on a less specific rule does not beat a more specific grant (precedence, as in Vault). One open finding (T119) affects this on the enforcement path; the dry-run may not match the pipeline until it is fixed. Proof scope: [docs/verification.md](../docs/verification.md) (T1, T4).
 
 The illegal `+*` combination (a segment wildcard immediately followed by a prefix wildcard) is rejected by the parser and must be caught by the client lint before save.
 

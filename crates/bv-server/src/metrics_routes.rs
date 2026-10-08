@@ -49,7 +49,10 @@ use std::{
 };
 
 use actix_web::{
+    dev::Payload,
+    error::InternalError,
     web,
+    FromRequest,
     HttpRequest,
     HttpResponse,
     http::{StatusCode},
@@ -57,6 +60,7 @@ use actix_web::{
 use ipnetwork::IpNetwork;
 use prometheus_client::encoding::text::encode;
 
+use crate::routes::{resource, route, ResourceSpec};
 use crate::{
     core::Core,
     errors::RvError,
@@ -124,15 +128,43 @@ impl MetricsAccess {
     }
 }
 
+/// Proof that this scrape cleared [`authorize_scrape`].
+///
+/// The gate used to be the first statement of the handler — finding F2's fix,
+/// and exactly the convention-not-guarantee shape F1 describes. As a witness
+/// it runs before the handler body, cannot be constructed anywhere else, and
+/// the route table registers the handler through `authz::guarded`, which
+/// refuses one that does not take it (Phase 1 of
+/// `roadmaps/formal-verification-and-type-driven-security.md`).
+pub struct ScrapeAuthorized {
+    _private: (),
+}
+
+impl crate::authz::sealed::Sealed for ScrapeAuthorized {}
+impl crate::authz::Witness for ScrapeAuthorized {}
+
+impl FromRequest for ScrapeAuthorized {
+    type Error = actix_web::Error;
+    type Future = crate::authz::WitnessFuture<Self>;
+
+    fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
+        let req = req.clone();
+        Box::pin(async move {
+            let core = web::Data::<Arc<Core>>::extract(&req).await?;
+            match authorize_scrape(&req, core.get_ref()).await {
+                Ok(()) => Ok(ScrapeAuthorized { _private: () }),
+                // The refusal response is returned verbatim: same status, same
+                // body as when the handler returned it.
+                Err(denial) => Err(InternalError::from_response("metrics scrape refused", denial).into()),
+            }
+        })
+    }
+}
+
 pub async fn metrics_handler(
-    req: HttpRequest,
-    core: web::Data<Arc<Core>>,
+    _scrape: ScrapeAuthorized,
     metrics_manager: web::Data<Arc<RwLock<MetricsManager>>>,
 ) -> HttpResponse {
-    if let Err(denial) = authorize_scrape(&req, core.get_ref()).await {
-        return denial;
-    }
-
     let m = metrics_manager.read().unwrap();
     let registry = m.registry.lock().unwrap();
 
@@ -306,8 +338,14 @@ fn deny(msg: &str) -> HttpResponse {
     response_error(StatusCode::FORBIDDEN, msg)
 }
 
+/// `/metrics`, as a route-table entry (see [`crate::routes`]).
+pub(crate) const RESOURCES: &[ResourceSpec] = &[resource!("/metrics" => [
+    route!(cluster_local ScrapeAuthorized: Get => metrics_handler,
+        "Prometheus scrape: a token with read on sys/metrics, a cluster-local socket peer (metrics.allow_cluster_local), or a source in metrics.allow_unauthenticated_cidrs; anyone else gets 403"),
+])];
+
 pub fn init_metrics_service(cfg: &mut web::ServiceConfig) {
-    cfg.service(web::resource("/metrics").route(web::get().to(metrics_handler)));
+    crate::routes::register(cfg, crate::routes::METRICS);
 }
 
 #[cfg(test)]

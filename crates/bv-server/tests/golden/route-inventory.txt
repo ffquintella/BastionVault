@@ -1,0 +1,295 @@
+# Every route the listener serves: method, pattern, class, and what it is judged on.
+# Generated from the route table (crates/bv-server/src/routes.rs); regenerate with
+# BV_BLESS_GOLDEN=1 and review the diff.
+GET    /v1/sys/init [public-probe] -- bootstrap: whether the vault is initialized is needed before any token can exist
+POST   /v1/sys/init [public-probe] -- one-time bootstrap that mints the root token and unseal shares; no token can exist before it, and Core::init refuses an initialized vault
+PUT    /v1/sys/init [public-probe] -- one-time bootstrap that mints the root token and unseal shares; no token can exist before it, and Core::init refuses an initialized vault
+GET    /v1/sys/seal-status [public-probe] -- unseal workflow: sealed, share counts and unseal progress are needed while no token can be validated; no secret material
+GET    /v1/sys/health [public-probe] -- load-balancer probe; exposes only initialized, sealed, standby and cluster_healthy
+GET    /v1/sys/info [tiered] -- initialized and sealed are needed before a token can exist; version, started_at, uptime_seconds and storage_type require a live token (v0.37.6)
+GET    /v1/sys/cluster-status [cluster-local] -- Raft role and membership: a live token, or a cluster-local socket peer (loopback or a configured node, never X-Forwarded-For); anyone else gets 403
+POST   /v1/sys/cluster/remove-node [privileged] write sys/cluster/remove-node (SysClusterRemoveNode; denial not audited)
+POST   /v1/sys/cluster/leave [privileged] write sys/cluster/leave (SysClusterLeave; denial not audited)
+POST   /v1/sys/cluster/failover [privileged] write sys/cluster/failover (SysClusterFailover; denial not audited)
+POST   /v1/sys/backup [privileged] write sys/backup (SysBackup; denial not audited)
+POST   /v1/sys/restore [privileged] write sys/restore (SysRestore; denial not audited)
+GET    /v1/sys/export/{path:.*} [privileged] read sys/export/{path} (SysExport; denial not audited)
+POST   /v1/sys/import/{mount:.*} [privileged] write sys/import/{mount} (SysImport; denial not audited)
+POST   /v1/sys/exchange/export [privileged] write sys/exchange/export (SysExchangeExport)
+POST   /v1/sys/exchange/import [privileged] write sys/exchange/import (SysExchangeImport)
+POST   /v1/sys/exchange/import/preview [privileged] write sys/exchange/import/preview (SysExchangeImportPreview)
+POST   /v1/sys/exchange/import/apply [privileged] write sys/exchange/import/apply (SysExchangeImportApply)
+GET    /v1/sys/scheduled-exports [privileged] list sys/scheduled-exports (SysScheduledExportsList)
+POST   /v1/sys/scheduled-exports [privileged] write sys/scheduled-exports/create (SysScheduledExportCreate)
+GET    /v1/sys/scheduled-exports/{id} [privileged] read sys/scheduled-exports/{id} (SysScheduledExportRead)
+PUT    /v1/sys/scheduled-exports/{id} [privileged] write sys/scheduled-exports/{id} (SysScheduledExportUpdate)
+POST   /v1/sys/scheduled-exports/{id} [privileged] write sys/scheduled-exports/{id} (SysScheduledExportUpdate)
+DELETE /v1/sys/scheduled-exports/{id} [privileged] delete sys/scheduled-exports/{id} (SysScheduledExportDelete)
+GET    /v1/sys/scheduled-exports/{id}/runs [privileged] list sys/scheduled-exports/{id}/runs (SysScheduledExportRuns)
+POST   /v1/sys/scheduled-exports/{id}/run-now [privileged] write sys/scheduled-exports/{id}/run-now (SysScheduledExportRunNow)
+GET    /v1/sys/scheduled-exports/{id}/backups [privileged] list sys/scheduled-exports/{id}/backups (SysScheduledExportBackups)
+GET    /v1/sys/scheduled-exports/{id}/backups/{filename}/fetch [privileged] read sys/scheduled-exports/{id}/backups/{filename}/fetch (SysScheduledExportBackupFetch)
+POST   /v1/sys/scheduled-exports/{id}/restore [privileged] write sys/scheduled-exports/{id}/restore (SysScheduledExportRestore)
+GET    /v1/sys/plugins [privileged] list sys/plugins (SysPluginsList)
+POST   /v1/sys/plugins [privileged] write sys/plugins/register (SysPluginRegister)
+GET    /v1/sys/plugins/publishers [privileged] read sys/plugins/publishers (SysPluginPublishersRead)
+PUT    /v1/sys/plugins/publishers [privileged] write sys/plugins/publishers (SysPluginPublishersWrite)
+PUT    /v1/sys/plugins/accept_unsigned [privileged] write sys/plugins/accept_unsigned (SysPluginAcceptUnsigned)
+GET    /v1/sys/plugins/quarantine [privileged] read sys/plugins/quarantine (SysPluginQuarantine)
+GET    /v1/sys/plugins/active-surfaces [privileged] read sys/plugins/active-surfaces (SysPluginActiveSurfaces)
+GET    /v1/sys/plugins/{name} [privileged] read sys/plugins/{name} (SysPluginRead)
+DELETE /v1/sys/plugins/{name} [privileged] delete sys/plugins/{name} (SysPluginDelete)
+POST   /v1/sys/plugins/{name}/invoke [privileged] write sys/plugins/{name}/invoke (SysPluginInvoke)
+GET    /v1/sys/plugins/{name}/config [privileged] read sys/plugins/{name}/config (SysPluginConfigRead)
+PUT    /v1/sys/plugins/{name}/config [privileged] write sys/plugins/{name}/config (SysPluginConfigWrite)
+GET    /v1/sys/plugins/{name}/grants [privileged] read sys/plugins/{name}/grants (SysPluginGrantsRead)
+PUT    /v1/sys/plugins/{name}/grants [privileged] write sys/plugins/{name}/grants (SysPluginGrantsWrite)
+DELETE /v1/sys/plugins/{name}/grants [privileged] delete sys/plugins/{name}/grants (SysPluginGrantsDelete)
+POST   /v1/sys/plugins/{name}/reload [privileged] write sys/plugins/{name}/reload (SysPluginReload)
+GET    /v1/sys/plugins/{name}/versions [privileged] list sys/plugins/{name}/versions (SysPluginVersions)
+POST   /v1/sys/plugins/{name}/versions/{version}/activate [privileged] write sys/plugins/{name}/versions/{version}/activate (SysPluginVersionActivate)
+DELETE /v1/sys/plugins/{name}/versions/{version} [privileged] delete sys/plugins/{name}/versions/{version} (SysPluginVersionDelete)
+GET    /v1/sys/plugins/{name}/surface [privileged] read sys/plugins/{name}/surface (SysPluginSurface)
+GET    /v1/sys/plugins/{name}/versions/{version}/asset/{sha256} [privileged] read sys/plugins/{name}/{version}/asset/{sha256} (SysPluginAsset)
+POST   /v1/sys/seal [privileged] write sys/seal (SysSeal; denial not audited)
+PUT    /v1/sys/seal [privileged] write sys/seal (SysSeal; denial not audited)
+POST   /v1/sys/unseal [public-probe] -- the unseal key share is the credential: no token can be validated while the barrier is sealed
+PUT    /v1/sys/unseal [public-probe] -- the unseal key share is the credential: no token can be validated while the barrier is sealed
+GET    /v1/sys/dashboard/summary [routed] -> sys/dashboard/summary
+GET    /v1/sys/mounts [routed] -> sys/mounts
+GET    /v1/sys/mounts/{path:.*} [routed] -> sys/mounts
+POST   /v1/sys/mounts/{path:.*} [routed] -> sys/mounts/{path}
+DELETE /v1/sys/mounts/{path:.*} [routed] -> sys/mounts/{path}
+POST   /v1/sys/remount [routed] -> sys/remount
+PUT    /v1/sys/remount [routed] -> sys/remount
+GET    /v1/sys/auth [routed] -> sys/auth
+GET    /v1/sys/auth/{path:.*} [routed] -> sys/auth
+POST   /v1/sys/auth/{path:.*} [routed] -> sys/auth/{path}
+DELETE /v1/sys/auth/{path:.*} [routed] -> sys/auth/{path}
+GET    /v1/sys/policy [routed] -> sys/policy
+GET    /v1/sys/policy/{name:.*} [routed] -> sys/policy/{name}
+POST   /v1/sys/policy/{name:.*} [routed] -> sys/policy/{name}
+DELETE /v1/sys/policy/{name:.*} [routed] -> sys/policy/{name}
+GET    /v1/sys/policies/acl [routed] -> sys/policies/acl
+GET    /v1/sys/policies/acl/{name:.*} [routed] -> sys/policies/acl/{name}
+POST   /v1/sys/policies/acl/{name:.*} [routed] -> sys/policies/acl/{name}
+DELETE /v1/sys/policies/acl/{name:.*} [routed] -> sys/policies/acl/{name}
+GET    /v1/sys/audit/events [routed] -> sys/audit/events
+GET    /v1/sys/audit [routed] -> sys/audit
+POST   /v1/sys/audit/{path:.*} [routed] -> sys/audit/{path}
+DELETE /v1/sys/audit/{path:.*} [routed] -> sys/audit/{path}
+POST   /v1/sys/cache/flush [routed] -> sys/cache/flush
+POST   /v1/sys/owner/backfill [routed] -> sys/owner/backfill
+LIST   /v1/sys/namespaces [routed] -> sys/namespaces
+GET    /v1/sys/namespaces [routed] -> sys/namespaces
+GET    /v1/sys/namespaces-self [routed] -> sys/namespaces-self
+GET    /v1/sys/cache/version [routed] -> sys/cache/version
+GET    /v1/sys/namespaces-info [routed] -> sys/namespaces-info
+GET    /v1/sys/namespaces/{path:.*} [routed] -> sys/namespaces/{path}
+POST   /v1/sys/namespaces/{path:.*} [routed] -> sys/namespaces/{path}
+PUT    /v1/sys/namespaces/{path:.*} [routed] -> sys/namespaces/{path}
+DELETE /v1/sys/namespaces/{path:.*} [routed] -> sys/namespaces/{path}
+LIST   /v1/sys/namespace-links [routed] -> sys/namespace-links
+GET    /v1/sys/namespace-links [routed] -> sys/namespace-links
+POST   /v1/sys/namespace-links [routed] -> sys/namespace-links
+GET    /v1/sys/namespace-links/{id} [routed] -> sys/namespace-links/{id}
+DELETE /v1/sys/namespace-links/{id} [routed] -> sys/namespace-links/{id}
+LIST   /v1/sys/identity/ns-assignment [routed] -> sys/identity/ns-assignment
+GET    /v1/sys/identity/ns-assignment [routed] -> sys/identity/ns-assignment
+GET    /v1/sys/identity/ns-assignment/{path:.*} [routed] -> sys/identity/ns-assignment/{path}
+POST   /v1/sys/identity/ns-assignment/{path:.*} [routed] -> sys/identity/ns-assignment/{path}
+PUT    /v1/sys/identity/ns-assignment/{path:.*} [routed] -> sys/identity/ns-assignment/{path}
+DELETE /v1/sys/identity/ns-assignment/{path:.*} [routed] -> sys/identity/ns-assignment/{path}
+GET    /v1/sys/dos/config [routed] -> sys/dos/config
+POST   /v1/sys/dos/config [routed] -> sys/dos/config
+PUT    /v1/sys/dos/config [routed] -> sys/dos/config
+GET    /v1/sys/dos/stats [routed] -> sys/dos/stats
+POST   /v1/sys/dos/bans/{ip:.*} [routed] -> sys/dos/bans/{ip}
+PUT    /v1/sys/dos/bans/{ip:.*} [routed] -> sys/dos/bans/{ip}
+DELETE /v1/sys/dos/bans/{ip:.*} [routed] -> sys/dos/bans/{ip}
+POST   /v1/sys/kv-owner/transfer [routed] -> sys/kv-owner/transfer
+POST   /v1/sys/kv-owner/claim [routed] -> sys/kv-owner/claim
+POST   /v1/sys/resource-owner/transfer [routed] -> sys/resource-owner/transfer
+POST   /v1/sys/asset-group-owner/transfer [routed] -> sys/asset-group-owner/transfer
+POST   /v1/sys/file-owner/transfer [routed] -> sys/file-owner/transfer
+GET    /v1/sys/internal/ui/mounts [routed-unauthenticated] -> sys/internal/ui/mounts -- Vault-compatible UI bootstrap in the system backend's unauth_paths; the handler judges any token itself and lists no mount to an anonymous caller
+GET    /v1/sys/internal/ui/mounts/{name:.*} [routed-unauthenticated] -> sys/internal/ui/mounts/{name} -- Vault-compatible UI bootstrap in the system backend's unauth_paths; the handler refuses an anonymous caller and checks mount access for a token
+GET    /v1/sys/mcp/config [routed] -> sys/mcp/config
+POST   /v1/sys/mcp/config [routed] -> sys/mcp/config
+LIST   /v1/sys/mcp/apps [routed] -> sys/mcp/apps
+GET    /v1/sys/mcp/apps [routed] -> sys/mcp/apps
+GET    /v1/sys/mcp/apps/{name} [routed] -> sys/mcp/apps/{name}
+POST   /v1/sys/mcp/apps/{name} [routed] -> sys/mcp/apps/{name}
+DELETE /v1/sys/mcp/apps/{name} [routed] -> sys/mcp/apps/{name}
+POST   /v1/sys/mcp/apps/{name}/machine-waiver [routed] -> sys/mcp/apps/{name}/machine-waiver
+DELETE /v1/sys/mcp/apps/{name}/machine-waiver [routed] -> sys/mcp/apps/{name}/machine-waiver
+LIST   /v1/sys/mcp/tokens [routed] -> sys/mcp/tokens
+GET    /v1/sys/mcp/tokens [routed] -> sys/mcp/tokens
+DELETE /v1/sys/mcp/tokens/{accessor} [routed] -> sys/mcp/tokens/{accessor}
+GET    /v2/sys/init [public-probe] -- bootstrap: whether the vault is initialized is needed before any token can exist
+POST   /v2/sys/init [public-probe] -- one-time bootstrap that mints the root token and unseal shares; no token can exist before it, and Core::init refuses an initialized vault
+PUT    /v2/sys/init [public-probe] -- one-time bootstrap that mints the root token and unseal shares; no token can exist before it, and Core::init refuses an initialized vault
+GET    /v2/sys/seal-status [public-probe] -- unseal workflow: sealed, share counts and unseal progress are needed while no token can be validated; no secret material
+GET    /v2/sys/health [public-probe] -- load-balancer probe; exposes only initialized, sealed, standby and cluster_healthy
+GET    /v2/sys/info [tiered] -- initialized and sealed are needed before a token can exist; version, started_at, uptime_seconds and storage_type require a live token (v0.37.6)
+GET    /v2/sys/cluster-status [cluster-local] -- Raft role and membership: a live token, or a cluster-local socket peer (loopback or a configured node, never X-Forwarded-For); anyone else gets 403
+POST   /v2/sys/cluster/remove-node [privileged] write sys/cluster/remove-node (SysClusterRemoveNode; denial not audited)
+POST   /v2/sys/cluster/leave [privileged] write sys/cluster/leave (SysClusterLeave; denial not audited)
+POST   /v2/sys/cluster/failover [privileged] write sys/cluster/failover (SysClusterFailover; denial not audited)
+POST   /v2/sys/backup [privileged] write sys/backup (SysBackup; denial not audited)
+POST   /v2/sys/restore [privileged] write sys/restore (SysRestore; denial not audited)
+GET    /v2/sys/export/{path:.*} [privileged] read sys/export/{path} (SysExport; denial not audited)
+POST   /v2/sys/import/{mount:.*} [privileged] write sys/import/{mount} (SysImport; denial not audited)
+POST   /v2/sys/exchange/export [privileged] write sys/exchange/export (SysExchangeExport)
+POST   /v2/sys/exchange/import [privileged] write sys/exchange/import (SysExchangeImport)
+POST   /v2/sys/exchange/import/preview [privileged] write sys/exchange/import/preview (SysExchangeImportPreview)
+POST   /v2/sys/exchange/import/apply [privileged] write sys/exchange/import/apply (SysExchangeImportApply)
+GET    /v2/sys/scheduled-exports [privileged] list sys/scheduled-exports (SysScheduledExportsList)
+POST   /v2/sys/scheduled-exports [privileged] write sys/scheduled-exports/create (SysScheduledExportCreate)
+GET    /v2/sys/scheduled-exports/{id} [privileged] read sys/scheduled-exports/{id} (SysScheduledExportRead)
+PUT    /v2/sys/scheduled-exports/{id} [privileged] write sys/scheduled-exports/{id} (SysScheduledExportUpdate)
+POST   /v2/sys/scheduled-exports/{id} [privileged] write sys/scheduled-exports/{id} (SysScheduledExportUpdate)
+DELETE /v2/sys/scheduled-exports/{id} [privileged] delete sys/scheduled-exports/{id} (SysScheduledExportDelete)
+GET    /v2/sys/scheduled-exports/{id}/runs [privileged] list sys/scheduled-exports/{id}/runs (SysScheduledExportRuns)
+POST   /v2/sys/scheduled-exports/{id}/run-now [privileged] write sys/scheduled-exports/{id}/run-now (SysScheduledExportRunNow)
+GET    /v2/sys/scheduled-exports/{id}/backups [privileged] list sys/scheduled-exports/{id}/backups (SysScheduledExportBackups)
+GET    /v2/sys/scheduled-exports/{id}/backups/{filename}/fetch [privileged] read sys/scheduled-exports/{id}/backups/{filename}/fetch (SysScheduledExportBackupFetch)
+POST   /v2/sys/scheduled-exports/{id}/restore [privileged] write sys/scheduled-exports/{id}/restore (SysScheduledExportRestore)
+GET    /v2/sys/plugins [privileged] list sys/plugins (SysPluginsList)
+POST   /v2/sys/plugins [privileged] write sys/plugins/register (SysPluginRegister)
+GET    /v2/sys/plugins/publishers [privileged] read sys/plugins/publishers (SysPluginPublishersRead)
+PUT    /v2/sys/plugins/publishers [privileged] write sys/plugins/publishers (SysPluginPublishersWrite)
+PUT    /v2/sys/plugins/accept_unsigned [privileged] write sys/plugins/accept_unsigned (SysPluginAcceptUnsigned)
+GET    /v2/sys/plugins/quarantine [privileged] read sys/plugins/quarantine (SysPluginQuarantine)
+GET    /v2/sys/plugins/active-surfaces [privileged] read sys/plugins/active-surfaces (SysPluginActiveSurfaces)
+GET    /v2/sys/plugins/{name} [privileged] read sys/plugins/{name} (SysPluginRead)
+DELETE /v2/sys/plugins/{name} [privileged] delete sys/plugins/{name} (SysPluginDelete)
+POST   /v2/sys/plugins/{name}/invoke [privileged] write sys/plugins/{name}/invoke (SysPluginInvoke)
+GET    /v2/sys/plugins/{name}/config [privileged] read sys/plugins/{name}/config (SysPluginConfigRead)
+PUT    /v2/sys/plugins/{name}/config [privileged] write sys/plugins/{name}/config (SysPluginConfigWrite)
+GET    /v2/sys/plugins/{name}/grants [privileged] read sys/plugins/{name}/grants (SysPluginGrantsRead)
+PUT    /v2/sys/plugins/{name}/grants [privileged] write sys/plugins/{name}/grants (SysPluginGrantsWrite)
+DELETE /v2/sys/plugins/{name}/grants [privileged] delete sys/plugins/{name}/grants (SysPluginGrantsDelete)
+POST   /v2/sys/plugins/{name}/reload [privileged] write sys/plugins/{name}/reload (SysPluginReload)
+GET    /v2/sys/plugins/{name}/versions [privileged] list sys/plugins/{name}/versions (SysPluginVersions)
+POST   /v2/sys/plugins/{name}/versions/{version}/activate [privileged] write sys/plugins/{name}/versions/{version}/activate (SysPluginVersionActivate)
+DELETE /v2/sys/plugins/{name}/versions/{version} [privileged] delete sys/plugins/{name}/versions/{version} (SysPluginVersionDelete)
+GET    /v2/sys/plugins/{name}/surface [privileged] read sys/plugins/{name}/surface (SysPluginSurface)
+GET    /v2/sys/plugins/{name}/versions/{version}/asset/{sha256} [privileged] read sys/plugins/{name}/{version}/asset/{sha256} (SysPluginAsset)
+POST   /v2/sys/seal [privileged] write sys/seal (SysSeal; denial not audited)
+PUT    /v2/sys/seal [privileged] write sys/seal (SysSeal; denial not audited)
+POST   /v2/sys/unseal [public-probe] -- the unseal key share is the credential: no token can be validated while the barrier is sealed
+PUT    /v2/sys/unseal [public-probe] -- the unseal key share is the credential: no token can be validated while the barrier is sealed
+GET    /v2/sys/dashboard/summary [routed] -> sys/dashboard/summary
+GET    /v2/sys/mounts [routed] -> sys/mounts
+GET    /v2/sys/mounts/{path:.*} [routed] -> sys/mounts
+POST   /v2/sys/mounts/{path:.*} [routed] -> sys/mounts/{path}
+DELETE /v2/sys/mounts/{path:.*} [routed] -> sys/mounts/{path}
+POST   /v2/sys/remount [routed] -> sys/remount
+PUT    /v2/sys/remount [routed] -> sys/remount
+GET    /v2/sys/auth [routed] -> sys/auth
+GET    /v2/sys/auth/{path:.*} [routed] -> sys/auth
+POST   /v2/sys/auth/{path:.*} [routed] -> sys/auth/{path}
+DELETE /v2/sys/auth/{path:.*} [routed] -> sys/auth/{path}
+GET    /v2/sys/policy [routed] -> sys/policy
+GET    /v2/sys/policy/{name:.*} [routed] -> sys/policy/{name}
+POST   /v2/sys/policy/{name:.*} [routed] -> sys/policy/{name}
+DELETE /v2/sys/policy/{name:.*} [routed] -> sys/policy/{name}
+GET    /v2/sys/policies/acl [routed] -> sys/policies/acl
+GET    /v2/sys/policies/acl/{name:.*} [routed] -> sys/policies/acl/{name}
+POST   /v2/sys/policies/acl/{name:.*} [routed] -> sys/policies/acl/{name}
+DELETE /v2/sys/policies/acl/{name:.*} [routed] -> sys/policies/acl/{name}
+GET    /v2/sys/audit/events [routed] -> sys/audit/events
+GET    /v2/sys/audit [routed] -> sys/audit
+POST   /v2/sys/audit/{path:.*} [routed] -> sys/audit/{path}
+DELETE /v2/sys/audit/{path:.*} [routed] -> sys/audit/{path}
+POST   /v2/sys/cache/flush [routed] -> sys/cache/flush
+POST   /v2/sys/owner/backfill [routed] -> sys/owner/backfill
+LIST   /v2/sys/namespaces [routed] -> sys/namespaces
+GET    /v2/sys/namespaces [routed] -> sys/namespaces
+GET    /v2/sys/namespaces-self [routed] -> sys/namespaces-self
+GET    /v2/sys/cache/version [routed] -> sys/cache/version
+GET    /v2/sys/namespaces-info [routed] -> sys/namespaces-info
+GET    /v2/sys/namespaces/{path:.*} [routed] -> sys/namespaces/{path}
+POST   /v2/sys/namespaces/{path:.*} [routed] -> sys/namespaces/{path}
+PUT    /v2/sys/namespaces/{path:.*} [routed] -> sys/namespaces/{path}
+DELETE /v2/sys/namespaces/{path:.*} [routed] -> sys/namespaces/{path}
+LIST   /v2/sys/namespace-links [routed] -> sys/namespace-links
+GET    /v2/sys/namespace-links [routed] -> sys/namespace-links
+POST   /v2/sys/namespace-links [routed] -> sys/namespace-links
+GET    /v2/sys/namespace-links/{id} [routed] -> sys/namespace-links/{id}
+DELETE /v2/sys/namespace-links/{id} [routed] -> sys/namespace-links/{id}
+LIST   /v2/sys/identity/ns-assignment [routed] -> sys/identity/ns-assignment
+GET    /v2/sys/identity/ns-assignment [routed] -> sys/identity/ns-assignment
+GET    /v2/sys/identity/ns-assignment/{path:.*} [routed] -> sys/identity/ns-assignment/{path}
+POST   /v2/sys/identity/ns-assignment/{path:.*} [routed] -> sys/identity/ns-assignment/{path}
+PUT    /v2/sys/identity/ns-assignment/{path:.*} [routed] -> sys/identity/ns-assignment/{path}
+DELETE /v2/sys/identity/ns-assignment/{path:.*} [routed] -> sys/identity/ns-assignment/{path}
+GET    /v2/sys/dos/config [routed] -> sys/dos/config
+POST   /v2/sys/dos/config [routed] -> sys/dos/config
+PUT    /v2/sys/dos/config [routed] -> sys/dos/config
+GET    /v2/sys/dos/stats [routed] -> sys/dos/stats
+POST   /v2/sys/dos/bans/{ip:.*} [routed] -> sys/dos/bans/{ip}
+PUT    /v2/sys/dos/bans/{ip:.*} [routed] -> sys/dos/bans/{ip}
+DELETE /v2/sys/dos/bans/{ip:.*} [routed] -> sys/dos/bans/{ip}
+POST   /v2/sys/kv-owner/transfer [routed] -> sys/kv-owner/transfer
+POST   /v2/sys/kv-owner/claim [routed] -> sys/kv-owner/claim
+POST   /v2/sys/resource-owner/transfer [routed] -> sys/resource-owner/transfer
+POST   /v2/sys/asset-group-owner/transfer [routed] -> sys/asset-group-owner/transfer
+POST   /v2/sys/file-owner/transfer [routed] -> sys/file-owner/transfer
+GET    /v2/sys/internal/ui/mounts [routed-unauthenticated] -> sys/internal/ui/mounts -- Vault-compatible UI bootstrap in the system backend's unauth_paths; the handler judges any token itself and lists no mount to an anonymous caller
+GET    /v2/sys/internal/ui/mounts/{name:.*} [routed-unauthenticated] -> sys/internal/ui/mounts/{name} -- Vault-compatible UI bootstrap in the system backend's unauth_paths; the handler refuses an anonymous caller and checks mount access for a token
+GET    /v2/sys/mcp/config [routed] -> sys/mcp/config
+POST   /v2/sys/mcp/config [routed] -> sys/mcp/config
+LIST   /v2/sys/mcp/apps [routed] -> sys/mcp/apps
+GET    /v2/sys/mcp/apps [routed] -> sys/mcp/apps
+GET    /v2/sys/mcp/apps/{name} [routed] -> sys/mcp/apps/{name}
+POST   /v2/sys/mcp/apps/{name} [routed] -> sys/mcp/apps/{name}
+DELETE /v2/sys/mcp/apps/{name} [routed] -> sys/mcp/apps/{name}
+POST   /v2/sys/mcp/apps/{name}/machine-waiver [routed] -> sys/mcp/apps/{name}/machine-waiver
+DELETE /v2/sys/mcp/apps/{name}/machine-waiver [routed] -> sys/mcp/apps/{name}/machine-waiver
+LIST   /v2/sys/mcp/tokens [routed] -> sys/mcp/tokens
+GET    /v2/sys/mcp/tokens [routed] -> sys/mcp/tokens
+DELETE /v2/sys/mcp/tokens/{accessor} [routed] -> sys/mcp/tokens/{accessor}
+POST   /v2/sys/batch [dispatch] -- carries caller-chosen logical operations; each is judged by pre_route on its own path through Core::handle_request
+POST   /v2/sys/capabilities-self [routed] -> sys/capabilities-self
+GET    /v2/sys/policy-tests/{name:.*} [routed] -> sys/policy-tests/{name}
+POST   /v2/sys/policy-tests/{name:.*} [routed] -> sys/policy-tests/{name}
+DELETE /v2/sys/mcp/pairings/{id} [routed] -> sys/mcp/pairings/{id}
+GET    /v2/sys/plugins/{name}/grants/credential-provider [privileged] read sys/plugins/{name}/grants/credential-provider (SysPluginProviderGrantRead)
+PUT    /v2/sys/plugins/{name}/grants/credential-provider [privileged] write sys/plugins/{name}/grants/credential-provider (SysPluginProviderGrantWrite)
+DELETE /v2/sys/plugins/{name}/grants/credential-provider [privileged] delete sys/plugins/{name}/grants/credential-provider (SysPluginProviderGrantDelete)
+GET    /v2/sys/plugins/{name}/entity-data [privileged] read sys/plugins/{name}/entity-data (SysPluginEntityDataUsage)
+DELETE /v2/sys/plugins/{name}/entity-data/{entity_id} [privileged] delete sys/plugins/{name}/entity-data/{entity_id} (SysPluginEntityDataPurge)
+GET    /v2/sys/hsm/status [routed] -> sys/hsm/status
+LIST   /v2/sys/identity/default-account [routed] -> sys/identity/default-account
+GET    /v2/sys/identity/default-account [routed] -> sys/identity/default-account
+GET    /v2/sys/identity/default-account/self [routed] -> sys/identity/default-account/self
+POST   /v2/sys/identity/default-account/self [routed] -> sys/identity/default-account/self
+PUT    /v2/sys/identity/default-account/self [routed] -> sys/identity/default-account/self
+GET    /v2/sys/identity/profile/self [routed] -> sys/identity/profile/self
+POST   /v2/sys/identity/profile/self/password [routed] -> sys/identity/profile/self/password
+PUT    /v2/sys/identity/profile/self/password [routed] -> sys/identity/profile/self/password
+POST   /v2/sys/identity/profile/self/contact [routed] -> sys/identity/profile/self/contact
+PUT    /v2/sys/identity/profile/self/contact [routed] -> sys/identity/profile/self/contact
+GET    /v2/sys/identity/default-account/{path:.*} [routed] -> sys/identity/default-account/{path}
+POST   /v2/sys/identity/default-account/{path:.*} [routed] -> sys/identity/default-account/{path}
+PUT    /v2/sys/identity/default-account/{path:.*} [routed] -> sys/identity/default-account/{path}
+DELETE /v2/sys/identity/default-account/{path:.*} [routed] -> sys/identity/default-account/{path}
+LIST   /v2/sys/identity/ssh-security-key [routed] -> sys/identity/ssh-security-key
+GET    /v2/sys/identity/ssh-security-key [routed] -> sys/identity/ssh-security-key
+GET    /v2/sys/identity/ssh-security-key/self [routed] -> sys/identity/ssh-security-key/self
+POST   /v2/sys/identity/ssh-security-key/self [routed] -> sys/identity/ssh-security-key/self
+PUT    /v2/sys/identity/ssh-security-key/self [routed] -> sys/identity/ssh-security-key/self
+DELETE /v2/sys/identity/ssh-security-key/self [routed] -> sys/identity/ssh-security-key/self
+GET    /v2/sys/identity/ssh-security-key/{path:.*} [routed] -> sys/identity/ssh-security-key/{path}
+POST   /v2/sys/identity/ssh-security-key/{path:.*} [routed] -> sys/identity/ssh-security-key/{path}
+PUT    /v2/sys/identity/ssh-security-key/{path:.*} [routed] -> sys/identity/ssh-security-key/{path}
+DELETE /v2/sys/identity/ssh-security-key/{path:.*} [routed] -> sys/identity/ssh-security-key/{path}
+POST   /v1/rustion/webhooks/recording-ready [signature-verified] -- Rustion recording.ready delivery: no token; the hybrid Ed25519 + ML-DSA-65 signature over the raw body must verify against an enrolled bastion's pinned key, or the request is refused
+POST   /v2/mcp/token [routed] -> sys/mcp/token
+POST   /v2/mcp [dispatch] -- JSON-RPC transport: 401 without a bearer token after the TLS, origin and size gates; each tools/call is a logical request judged by pre_route
+GET    /.well-known/oauth-protected-resource/v2/mcp [public-probe] -- RFC 9728 protected-resource metadata: an MCP client reads it before it can hold a token; names only the resource URL and its authorization servers
+ANY    /v1/{path:.*} [dispatch] -- the logical API: every request is judged by pre_route on its own path; anonymous only where the mounted backend lists the path in unauth_paths (logins, for example)
+ANY    /v2/{path:.*} [dispatch] -- the logical API: every request is judged by pre_route on its own path; anonymous only where the mounted backend lists the path in unauth_paths (logins, for example)
+GET    /metrics [cluster-local] -- Prometheus scrape: a token with read on sys/metrics, a cluster-local socket peer (metrics.allow_cluster_local), or a source in metrics.allow_unauthenticated_cidrs; anyone else gets 403

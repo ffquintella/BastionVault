@@ -21,11 +21,13 @@
 use std::sync::Arc;
 
 use better_default::Default;
+use bv_policy_core::{Merge, MostSpecific, Query, Ranked, Specificity};
 use dashmap::DashMap;
 use radix_trie::{Trie, TrieCommon};
 use strum::IntoEnumIterator;
 
 use super::{
+    core_bridge::{self, GatedLayer, Payload, ScopeCaller, ScopedLayer, UngatedIndex},
     policy::{to_granting_capabilities, Capability},
     Permissions, Policy, PolicyPathRules, PolicyType,
 };
@@ -150,14 +152,28 @@ impl PartialOrd for WcPathDescr {
     }
 }
 
+/// The specificity order is the verified one (`bv_policy_core::compare`,
+/// theorem T4); this impl only supplies its inputs.
 impl Ord for WcPathDescr {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.first_wc_or_glob
-            .cmp(&other.first_wc_or_glob)
-            .then_with(|| other.is_prefix.cmp(&self.is_prefix))
-            .then_with(|| other.wildcards.cmp(&self.wildcards))
-            .then_with(|| self.wc_path.len().cmp(&other.wc_path.len()))
-            .then_with(|| self.wc_path.cmp(&other.wc_path))
+        bv_policy_core::compare(self, other)
+    }
+}
+
+impl Ranked for WcPathDescr {
+    type Tiebreak = str;
+
+    fn specificity(&self) -> Specificity {
+        Specificity {
+            first_wildcard: self.first_wc_or_glob,
+            is_prefix: self.is_prefix,
+            wildcards: self.wildcards,
+            len: self.wc_path.len(),
+        }
+    }
+
+    fn tiebreak(&self) -> &str {
+        &self.wc_path
     }
 }
 
@@ -228,8 +244,9 @@ impl ACL {
                 }
 
                 if let Some(mut existing_perms) = acl.get_permissions(pr)? {
-                    let deny = Capability::Deny.to_bits();
-                    if existing_perms.capabilities_bitmap & deny != 0 {
+                    if bv_policy_core::merge_caps(existing_perms.capabilities_bitmap, pr.permissions.capabilities_bitmap)
+                        == Merge::KeepExisting
+                    {
                         // If we are explicitly denied in the existing capability set, don't save anything else
                         continue;
                     }
@@ -303,178 +320,58 @@ impl ACL {
 
     /// Checks if an operation is allowed based on the ACL rules.
     ///
-    /// This function checks various rules (exact matches, lists, prefixes, and wildcards) to determine
-    /// if the operation specified in the request is allowed.
+    /// The decision is `bv_policy_core::decide` — the model-checked core
+    /// (`cargo kani -p bv-policy-core`, theorems T1–T8 in
+    /// `docs/verification.md`). This ACL only answers its questions: which
+    /// exact, prefix and segment-wildcard rule the tries find for the path,
+    /// which group-gated and scope-filtered rules match, whether their gates
+    /// pass, and how the request's parameters compare with each rule's lists
+    /// (see `core_bridge`). In order, the core:
+    ///
+    /// - allows everything for the root ACL, and `help` always;
+    /// - checks the governing ungated rule: the exact rule, for LIST the
+    ///   exact rule without the trailing `/`, else the most specific prefix
+    ///   or segment-wildcard rule;
+    /// - unless that reported `deny`, layers in each group-gated rule whose
+    ///   gate passes, then each scope-filtered rule. Capabilities are OR'd in;
+    ///   a rule reporting `deny` wipes the result. LIST is a special case: a
+    ///   list op targets a *collection*, not a single object, so the gate is
+    ///   not consulted; the list is granted and the rule's `groups` /
+    ///   `scopes` recorded as a filter the post-route pass narrows the
+    ///   response keys to;
+    /// - drops that filter when an ungated rule also grants LIST.
+    ///
+    /// On enforcement (`check_only = false`) a deny rule reports no
+    /// capability rather than `deny`, so an ungated deny does not stop the
+    /// layers and a layered deny does not wipe — finding F6 in
+    /// `roadmaps/formal-verification-and-type-driven-security.md`. The
+    /// filter is dropped when *any* ungated rule found for the path lists,
+    /// not only the governing one — finding F7. Both are preserved here
+    /// unchanged; see the roadmap for the fix.
     ///
     /// # Arguments
     ///
     /// * `req` - A reference to the `Request` being checked.
-    /// * `check_only` - A boolean indicating if the function should only perform a check without modifying state.
+    /// * `check_only` - A capability probe: report the governing bitmap without testing the operation,
+    ///   TTLs or parameters.
     ///
     /// # Returns
     ///
     /// * `Result<ACLResults, RvError>` - The result of the ACL check, indicating allowed operations and other details.
     pub fn allow_operation(&self, req: &Request, check_only: bool) -> Result<ACLResults, RvError> {
-        if self.root {
-            return Ok(ACLResults {
-                allowed: true,
-                root_privs: true,
-                is_root: true,
-                granting_policies: vec![PolicyInfo {
-                    name: "root".into(),
-                    namespace_id: "root".into(),
-                    policy_type: "acl".into(),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            });
-        }
-
-        if req.operation == Operation::Help {
-            return Ok(ACLResults { allowed: true, ..Default::default() });
-        }
-
+        let query = Query { acl_is_root: self.root, op: core_bridge::core_op(req.operation), probe: check_only };
         let path = ensure_no_leading_slash(&req.path);
 
-        let mut base = if let Some(perm) = self.exact_rules.get(&path) {
-            perm.check(req, check_only)?
-        } else if req.operation == Operation::List {
-            if let Some(perm) = self.exact_rules.get(path.trim_end_matches('/')) {
-                perm.check(req, check_only)?
-            } else if let Some(perm) = self.get_none_exact_paths_permissions(&path, false) {
-                perm.check(req, check_only)?
-            } else {
-                ACLResults::default()
-            }
-        } else if let Some(perm) = self.get_none_exact_paths_permissions(&path, false) {
-            perm.check(req, check_only)?
-        } else {
-            ACLResults::default()
-        };
+        let mut payload = Payload::new(self);
+        let decision = bv_policy_core::decide(
+            &query,
+            &UngatedIndex { acl: self, path: &path, req },
+            &GatedLayer { rules: &self.grouped_rules, path: &path, req },
+            &ScopedLayer { rules: &self.scoped_rules, path: &path, req },
+            &mut payload,
+        );
 
-        // Layer in group-gated rules. Each gated rule is evaluated on
-        // its own; its capabilities only contribute when the request
-        // target is a member of one of the rule's listed asset groups.
-        // A gated grant never overrides an existing ungated deny
-        // (explicit deny wins), but it can grant caps that ungated
-        // rules denied by omission.
-        //
-        // LIST is a special case: a list op targets a *collection*,
-        // not a single object, so the caller's `Request::asset_groups`
-        // is not a meaningful gate input (the collection path is not
-        // itself a resource or KV secret). Instead, when a gated rule
-        // matches a LIST path we grant the list and record the rule's
-        // `groups` as a filter set. A post-route pass filters the
-        // response keys to members of those groups.
-        let is_list = req.operation == Operation::List;
-        if !self.grouped_rules.is_empty()
-            && base.capabilities_bitmap & Capability::Deny.to_bits() == 0
-        {
-            for rule in self.grouped_rules.iter() {
-                if !grouped_rule_matches(rule, &path) {
-                    continue;
-                }
-                let gate_passes = is_list || rule_gate_passes(rule, req);
-                if !gate_passes {
-                    continue;
-                }
-                let sub = rule.permissions.check(req, check_only)?;
-                if sub.capabilities_bitmap & Capability::Deny.to_bits() != 0 {
-                    // Honor explicit deny in a gated rule the same way as
-                    // an ungated rule: it wipes the grant entirely.
-                    base.allowed = false;
-                    base.capabilities_bitmap = Capability::Deny.to_bits();
-                    base.granting_policies.clear();
-                    base.list_filter_groups.clear();
-                    return Ok(base);
-                }
-                base.capabilities_bitmap |= sub.capabilities_bitmap;
-                if sub.allowed {
-                    base.allowed = true;
-                }
-                if sub.root_privs {
-                    base.root_privs = true;
-                }
-                for g in sub.granting_policies {
-                    if !base.granting_policies.iter().any(|p| p.name == g.name) {
-                        base.granting_policies.push(g);
-                    }
-                }
-                if is_list
-                    && sub.capabilities_bitmap & Capability::List.to_bits() != 0
-                {
-                    for g in rule.permissions.groups.iter() {
-                        if !base.list_filter_groups.iter().any(|x| x == g) {
-                            base.list_filter_groups.push(g.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        // Layer in scope-filtered rules (per-user-scoping). Same
-        // structure as the gated-rules pass: each rule is evaluated
-        // individually, with ownership/shared checks replacing the
-        // asset-group intersection. LIST ops defer the filter to
-        // `post_route` via `list_filter_scopes`.
-        if !self.scoped_rules.is_empty()
-            && base.capabilities_bitmap & Capability::Deny.to_bits() == 0
-        {
-            for rule in self.scoped_rules.iter() {
-                if !scoped_rule_matches(rule, &path) {
-                    continue;
-                }
-                let scope_passes = is_list || scope_passes(rule, req);
-                if !scope_passes {
-                    continue;
-                }
-                let sub = rule.permissions.check(req, check_only)?;
-                if sub.capabilities_bitmap & Capability::Deny.to_bits() != 0 {
-                    base.allowed = false;
-                    base.capabilities_bitmap = Capability::Deny.to_bits();
-                    base.granting_policies.clear();
-                    base.list_filter_groups.clear();
-                    base.list_filter_scopes.clear();
-                    return Ok(base);
-                }
-                base.capabilities_bitmap |= sub.capabilities_bitmap;
-                if sub.allowed {
-                    base.allowed = true;
-                }
-                if sub.root_privs {
-                    base.root_privs = true;
-                }
-                for g in sub.granting_policies {
-                    if !base.granting_policies.iter().any(|p| p.name == g.name) {
-                        base.granting_policies.push(g);
-                    }
-                }
-                if is_list
-                    && sub.capabilities_bitmap & Capability::List.to_bits() != 0
-                {
-                    for s in rule.permissions.scopes.iter() {
-                        if !base.list_filter_scopes.iter().any(|x| x == s) {
-                            base.list_filter_scopes.push(s.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        // If the list is also granted by an ungated rule (no filter
-        // needed), drop both filters so we don't accidentally restrict
-        // a request that had broader access too.
-        if is_list
-            && (!base.list_filter_groups.is_empty() || !base.list_filter_scopes.is_empty())
-        {
-            let ungated_list = matches_ungated_list(self, &path);
-            if ungated_list {
-                base.list_filter_groups.clear();
-                base.list_filter_scopes.clear();
-            }
-        }
-
-        Ok(base)
+        Ok(payload.into_results(decision))
     }
 
     /// Retrieves permissions for a path that does not have an exact match.
@@ -490,7 +387,9 @@ impl ACL {
     ///
     /// * `Option<Permissions>` - Returns permissions if found, otherwise `None`.
     pub fn get_none_exact_paths_permissions(&self, path: &str, bare_mount: bool) -> Option<Permissions> {
-        let mut wc_path_descrs = Vec::with_capacity(self.segment_wildcard_paths.len() + 1);
+        // The most specific candidate wins, by the verified order
+        // (`bv_policy_core::compare`, T4) — a single winner, never a union.
+        let mut best = MostSpecific::new();
 
         if let Some(item) = self.prefix_rules.get_ancestor(path) {
             if self.segment_wildcard_paths.is_empty() {
@@ -498,17 +397,13 @@ impl ACL {
             }
 
             let prefix = item.key().unwrap().clone();
-            wc_path_descrs.push(WcPathDescr {
+            best.offer(WcPathDescr {
                 first_wc_or_glob: prefix.len() as isize,
                 wc_path: prefix,
                 is_prefix: true,
                 perms: item.value().cloned(),
                 ..Default::default()
             });
-        }
-
-        if self.segment_wildcard_paths.is_empty() {
-            return None;
         }
 
         if self.segment_wildcard_paths.is_empty() {
@@ -538,41 +433,37 @@ impl ACL {
 
             let split_curr_wc_path: Vec<&str> = curr_wc_path.split('/').collect();
 
-            if !bare_mount && path_parts.len() < split_curr_wc_path.len() {
+            if !bare_mount {
+                // Authorization. `+` is exactly one *non-empty* segment
+                // (`bv_policy_core::segments_match`, proved for every shape
+                // up to MAX_SEGMENTS). The LIST form of a collection path
+                // (`rustion/targets/`) splits to a trailing empty segment;
+                // matching it let a rule written for a named child
+                // out-specify -- and therefore *replace*, since a single
+                // winner is picked rather than a union -- any broader grant
+                // on the collection itself. `default`'s read-only
+                // `rustion/targets/+` silently downgraded every non-root
+                // token holding `path "*"` to read on `rustion/targets/`, so
+                // LIST 403'd for administrators as well as the share-grantees
+                // it was written to withhold it from.
+                if let Some(wildcards) = bv_policy_core::segments_match(&split_curr_wc_path, pd.is_prefix, &path_parts) {
+                    pd.wildcards = wildcards;
+                    pd.perms = Some(permissions.clone());
+                    best.offer(pd);
+                }
                 continue;
             }
 
-            if !bare_mount && !pd.is_prefix && split_curr_wc_path.len() != path_parts.len() {
-                continue;
-            }
-
-            let mut skip = false;
+            // `bare_mount`: mount visibility for `has_mount_access` only, not
+            // authorization, and deliberately looser — it matches a rule
+            // against a *shorter* mount path, so that `secret/foo/+` makes
+            // the `secret/` mount visible, and an empty segment satisfies
+            // `+`. Unchanged; not covered by the proofs.
             let mut segments = Vec::with_capacity(split_curr_wc_path.len());
 
             for (i, acl_part) in split_curr_wc_path.iter().enumerate() {
                 match *acl_part {
                     "+" => {
-                        // `+` is exactly one *non-empty* segment. The LIST
-                        // form of a collection path (`rustion/targets/`)
-                        // splits to a trailing empty segment; matching it
-                        // here let a rule written for a named child
-                        // out-specify -- and therefore *replace*, since the
-                        // sort below picks a single winner rather than
-                        // unioning -- any broader grant on the collection
-                        // itself. `default`'s read-only `rustion/targets/+`
-                        // silently downgraded every non-root token holding
-                        // `path "*"` to read on `rustion/targets/`, so LIST
-                        // 403'd for administrators as well as the
-                        // share-grantees it was written to withhold it from.
-                        //
-                        // `bare_mount` is exempt: that mode matches a rule
-                        // against a *shorter* mount path on purpose, so that
-                        // `secret/foo/+` makes the `secret/` mount visible.
-                        if !bare_mount && path_parts[i].is_empty() {
-                            skip = true;
-                            break;
-                        }
-                        pd.wildcards += 1;
                         segments.push(path_parts[i]);
                     }
                     _ if *acl_part == path_parts[i] => {
@@ -581,14 +472,10 @@ impl ACL {
                     _ if pd.is_prefix && i == split_curr_wc_path.len() - 1 && path_parts[i].starts_with(acl_part) => {
                         segments.extend_from_slice(&path_parts[i..]);
                     }
-                    _ if !bare_mount => {
-                        skip = true;
-                        break;
-                    }
                     _ => {}
                 }
 
-                if bare_mount && i == path_parts.len() - 2 {
+                if i == path_parts.len() - 2 {
                     let joined_path = segments.join("/") + "/";
                     if joined_path.starts_with(path)
                         && permissions.capabilities_bitmap & Capability::Deny.to_bits() == 0
@@ -596,24 +483,16 @@ impl ACL {
                     {
                         return Some(permissions.clone());
                     }
-                    skip = true;
                     break;
                 }
             }
-
-            if !skip {
-                pd.perms = Some(permissions.clone());
-                wc_path_descrs.push(pd);
-            }
         }
 
-        if bare_mount || wc_path_descrs.is_empty() {
+        if bare_mount {
             return None;
         }
 
-        wc_path_descrs.sort();
-
-        wc_path_descrs.into_iter().next_back().and_then(|pd| pd.perms)
+        best.into_winner().and_then(|pd| pd.perms)
     }
 
     pub fn capabilities<S: Into<String>>(&self, path: S) -> Vec<String> {
@@ -1022,7 +901,13 @@ impl MatchKind {
 /// Does `path` match this group-gated rule's path shape?
 /// Mirrors the match logic used for the ungated tries: exact for literal
 /// rules, prefix for globbed rules, segment-aware for `+` wildcards.
-fn grouped_rule_matches(rule: &GroupGatedRule, path: &str) -> bool {
+///
+/// A segment-wildcard rule keeps its trailing `*` in `path` with
+/// `is_prefix = false` (`Policy::init` only strips the glob from rules
+/// without `+`), so here that `*` is compared as a literal segment and such a
+/// gated rule matches no real path — fail-closed, recorded as finding F8 in
+/// `roadmaps/formal-verification-and-type-driven-security.md`. Unchanged.
+pub(super) fn grouped_rule_matches(rule: &GroupGatedRule, path: &str) -> bool {
     if rule.has_segment_wildcards {
         segment_wildcard_matches(&rule.path, rule.is_prefix, path)
     } else if rule.is_prefix {
@@ -1032,72 +917,24 @@ fn grouped_rule_matches(rule: &GroupGatedRule, path: &str) -> bool {
     }
 }
 
-/// Minimal segment-wildcard matcher: `+` matches exactly one *non-empty*
-/// path segment; if `is_prefix` is true the rule path may end with a `*`
-/// glob and we match any suffix on the final segment.
+/// Segment-wildcard matcher for group-gated and share-scoped rules: `+`
+/// matches exactly one *non-empty* path segment; if `is_prefix` is true the
+/// rule's final segment only needs to be a prefix of the path's.
 ///
-/// The non-empty requirement must stay in step with the `"+"` arm of
-/// [`ACL::get_none_exact_paths_permissions`]: this function decides
-/// group-gated and share-scoped rules, so letting `+` swallow the trailing
-/// empty segment of a LIST path here while the ungated matcher rejects it
-/// would make the two disagree on the same rule.
-fn segment_wildcard_matches(rule_path: &str, is_prefix: bool, req_path: &str) -> bool {
+/// The decision is `bv_policy_core::segments_match` — the same function the
+/// ungated matcher in [`ACL::get_none_exact_paths_permissions`] uses, so the
+/// two cannot disagree on the same rule (letting `+` swallow the trailing
+/// empty segment of a LIST path here while the ungated matcher rejected it
+/// once did).
+pub(super) fn segment_wildcard_matches(rule_path: &str, is_prefix: bool, req_path: &str) -> bool {
     let rule_parts: Vec<&str> = rule_path.split('/').collect();
     let req_parts: Vec<&str> = req_path.split('/').collect();
-
-    if !is_prefix && rule_parts.len() != req_parts.len() {
-        return false;
-    }
-    if is_prefix && req_parts.len() < rule_parts.len() {
-        return false;
-    }
-
-    for (i, rp) in rule_parts.iter().enumerate() {
-        if *rp == "+" {
-            if req_parts[i].is_empty() {
-                return false;
-            }
-            continue;
-        }
-        if is_prefix && i == rule_parts.len() - 1 {
-            if !req_parts[i].starts_with(rp) {
-                return false;
-            }
-        } else if *rp != req_parts[i] {
-            return false;
-        }
-    }
-    true
-}
-
-/// Does any ungated rule (exact/prefix/segment-wildcard) grant LIST on
-/// `path`? Used to decide whether a gated-rule filter should still
-/// apply — if the caller has broader ungated list access, filtering
-/// the response would be *more* restrictive than the operator
-/// intended, so we drop the filter.
-fn matches_ungated_list(acl: &ACL, path: &str) -> bool {
-    let list_bit = Capability::List.to_bits();
-    if let Some(p) = acl.exact_rules.get(path) {
-        if p.capabilities_bitmap & list_bit != 0 {
-            return true;
-        }
-    }
-    if let Some(p) = acl.exact_rules.get(path.trim_end_matches('/')) {
-        if p.capabilities_bitmap & list_bit != 0 {
-            return true;
-        }
-    }
-    if let Some(p) = acl.get_none_exact_paths_permissions(path, false) {
-        if p.capabilities_bitmap & list_bit != 0 {
-            return true;
-        }
-    }
-    false
+    bv_policy_core::segments_match(&rule_parts, is_prefix, &req_parts).is_some()
 }
 
 /// Does `path` match this scoped rule's path shape? Same matching
-/// logic as `grouped_rule_matches`.
-fn scoped_rule_matches(rule: &ScopedRule, path: &str) -> bool {
+/// logic as `grouped_rule_matches`, F8 included.
+pub(super) fn scoped_rule_matches(rule: &ScopedRule, path: &str) -> bool {
     if rule.has_segment_wildcards {
         segment_wildcard_matches(&rule.path, rule.is_prefix, path)
     } else if rule.is_prefix {
@@ -1107,17 +944,21 @@ fn scoped_rule_matches(rule: &ScopedRule, path: &str) -> bool {
     }
 }
 
-/// Does the caller pass any of the rule's listed scopes?
+/// Does the caller pass any of the rule's listed scopes? Decided by
+/// `bv_policy_core::scope_passes` (theorem T6):
 ///   - "owner": target's `asset_owner` equals caller's entity_id, *or*
 ///     the target has no owner record yet and the request is a `Write`
 ///     (first-write captures ownership via the owner-store hook in
 ///     `PolicyStore::post_route`). The exception is necessary so a
 ///     user granted only `scopes = ["owner"]` can create their very
 ///     first object — without it, ownership-gated policies would be
-///     unusable for all-new deployments.
+///     unusable for all-new deployments. Read / Delete / List / Update on
+///     an unowned target are *not* granted.
 ///   - "shared": grants the rule's capabilities iff an explicit
 ///     `SecretShare` exists for `(target, caller)` with the capability
-///     that corresponds to the current operation — or with
+///     that corresponds to the current operation
+///     (`bv_policy_core::share_capability`: read / list / update / delete;
+///     help, renew, revoke and rollback are not shareable) — or with
 ///     `req.share_capability_override` when the caller set one, which
 ///     is how `connect` (a capability with no operation of its own) is
 ///     required explicitly rather than inferred from `read`. Resolved
@@ -1126,87 +967,23 @@ fn scoped_rule_matches(rule: &ScopedRule, path: &str) -> bool {
 ///
 /// Unknown scope values are ignored (treated as not matching) so a
 /// typo doesn't silently widen access.
-fn scope_passes(rule: &ScopedRule, req: &Request) -> bool {
-    let caller_id = match req
-        .auth
-        .as_ref()
-        .and_then(|a| a.metadata.get("entity_id"))
-    {
-        Some(id) if !id.is_empty() => id.as_str(),
-        _ => return false,
-    };
-    for s in rule.permissions.scopes.iter() {
-        match s.as_str() {
-            "owner" => {
-                if !req.asset_owner.is_empty() && req.asset_owner == caller_id {
-                    return true;
-                }
-                // First-write carve-out: an unowned target accepts a
-                // Write from any caller with `scopes = ["owner"]`.
-                // Read / Delete / List / Update on an unowned target
-                // are *not* granted — caller must own (or a share
-                // must exist).
-                if req.asset_owner.is_empty()
-                    && matches!(req.operation, Operation::Write)
-                {
-                    return true;
-                }
-            }
-            "shared" => {
-                if req.target_shared_caps.is_empty() {
-                    continue;
-                }
-                // `share_capability_override` wins when the caller is
-                // probing a capability no operation maps to (`connect`);
-                // otherwise the operation decides, exactly as before.
-                let required = req
-                    .share_capability_override
-                    .as_deref()
-                    .or_else(|| operation_share_capability(req.operation));
-                if let Some(cap) = required {
-                    if req.target_shared_caps.iter().any(|c| c == cap) {
-                        return true;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-/// Map a request `Operation` onto the capability-name vocabulary used
-/// by `SecretShare.capabilities`. Returns `None` for operations that
-/// are not shareable (Help, Renew, Rollback, Revoke) — the evaluator
-/// then refuses the `shared` scope for them, which is the right
-/// default: shares describe user-level access, not lifecycle hooks.
-fn operation_share_capability(op: Operation) -> Option<&'static str> {
-    match op {
-        Operation::Read => Some("read"),
-        Operation::List => Some("list"),
-        Operation::Write => Some("update"),
-        Operation::Delete => Some("delete"),
-        _ => None,
-    }
+pub(super) fn scope_passes(rule: &ScopedRule, req: &Request) -> bool {
+    bv_policy_core::scope_passes(
+        rule.permissions.scopes.iter().map(|s| core_bridge::parse_scope(s)),
+        core_bridge::core_op(req.operation),
+        &ScopeCaller::of(req),
+    )
 }
 
 /// Is the request target in any of the rule's listed asset groups?
 /// `groups` is always non-empty here (gated rules live in `grouped_rules`
-/// only when they carry a filter). Comparison is case-insensitive.
-fn rule_gate_passes(rule: &GroupGatedRule, req: &Request) -> bool {
-    if rule.permissions.groups.is_empty() {
-        return true;
-    }
-    if req.asset_groups.is_empty() {
-        return false;
-    }
-    for g in rule.permissions.groups.iter() {
+/// only when they carry a filter). Comparison is case-insensitive. Decided
+/// by `bv_policy_core::group_gate_passes` (theorem T5).
+pub(super) fn rule_gate_passes(rule: &GroupGatedRule, req: &Request) -> bool {
+    bv_policy_core::group_gate_passes(rule.permissions.groups.iter(), !req.asset_groups.is_empty(), |g| {
         let gl = g.trim().to_lowercase();
-        if req.asset_groups.iter().any(|x| x.trim().to_lowercase() == gl) {
-            return true;
-        }
-    }
-    false
+        req.asset_groups.iter().any(|x| x.trim().to_lowercase() == gl)
+    })
 }
 
 fn check_path_capability(rules: &Trie<String, Permissions>, path: &str) -> bool {

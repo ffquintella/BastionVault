@@ -1,0 +1,83 @@
+name: Set up Kani for BastionVault CI
+description: >-
+  The pinned Kani model checker (scripts/kani-harnesses.txt), its CBMC bundle
+  and the nightly toolchain it drives, cached by version. Used by the Kani
+  jobs in verify.yml.
+
+inputs:
+  save-cache:
+    description: >-
+      Pass 'true' for the ONE job allowed to write the Kani cache. Saving is
+      additionally gated on `main`.
+    required: false
+    default: "false"
+
+# ── Caching ───────────────────────────────────────────────────────
+#
+# `cargo kani setup` downloads the Kani bundle (CBMC and Kani's compiler,
+# ~350 MB unpacked under ~/.kani) and installs the pinned nightly it needs
+# through rustup. Uncached that is minutes of every Kani job; cached it is a
+# restore. The key is the pinned version, so a version bump is a cold start by
+# construction and nothing from the old verifier can leak into the new one.
+#
+# One writer, like the keys in .github/actions/setup-rust: the caller passes
+# save-cache only from verify.yml's `kani` job, and only on main. A PR restores
+# the key main wrote and never saves (a PR-scoped cache would be invisible to
+# every other PR anyway).
+#
+# Trust: `cargo install kani-verifier` builds the driver from crates.io source,
+# as every other tool here is built. `cargo kani setup` then fetches the
+# prebuilt bundle from the model-checking/kani GitHub release for that
+# version; there is no source-build path for CBMC that would fit a CI budget.
+# That download is the one prebuilt binary this workflow trusts.
+
+runs:
+  using: composite
+  steps:
+    - name: Read the pinned Kani version
+      id: pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        version=$(python3 scripts/verify.py pin kani)
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "Pinned Kani: $version"
+
+    # ~/.rustup/toolchains/nightly-*: Kani's toolchain symlink points into
+    # rustup. The runner image ships no nightly of its own, so the glob only
+    # ever matches the one `cargo kani setup` installed.
+    - name: Restore the Kani cache
+      id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ~/.kani
+          ~/.cargo/bin/cargo-kani
+          ~/.cargo/bin/kani
+          ~/.rustup/toolchains/nightly-*
+        key: kani-${{ steps.pin.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+
+    - name: Install Kani
+      shell: bash
+      env:
+        KANI_VERSION: ${{ steps.pin.outputs.version }}
+      run: |
+        set -euo pipefail
+        if ! cargo kani --version 2>/dev/null | grep -q "^Kani Rust Verifier ${KANI_VERSION} "; then
+          cargo install --locked kani-verifier --version "$KANI_VERSION"
+        fi
+        if [ ! -x "$HOME/.kani/kani-${KANI_VERSION}/toolchain/bin/rustc" ]; then
+          cargo kani setup
+        fi
+        cargo kani --version
+
+    - name: Save the Kani cache
+      if: ${{ inputs.save-cache == 'true' && github.ref == 'refs/heads/main' && steps.restore.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          ~/.kani
+          ~/.cargo/bin/cargo-kani
+          ~/.cargo/bin/kani
+          ~/.rustup/toolchains/nightly-*
+        key: kani-${{ steps.pin.outputs.version }}-${{ runner.os }}-${{ runner.arch }}

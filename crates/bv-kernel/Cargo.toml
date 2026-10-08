@@ -30,6 +30,11 @@ bv-audit = { path = "../bv-audit", version = "0.41.0", registry = "uox-bastionva
 bv-metrics = { path = "../bv-metrics", version = "0.41.0", registry = "uox-bastionvault" }
 bv-kernel-api = { path = "../bv-kernel-api", version = "0.41.0", registry = "uox-bastionvault" }
 bv-core = { path = "../bv-core", version = "0.41.0", registry = "uox-bastionvault" }
+# The model-checked decision core: `ACL::allow_operation` and
+# `Permissions::check` delegate every verdict to it, so the Kani proofs in
+# that crate are statements about this evaluator (T31 Phase 3.4,
+# docs/verification.md). Dependency-free.
+bv-policy-core = { path = "../bv-policy-core", version = "0.41.0", registry = "uox-bastionvault" }
 # MCP Access (features/mcp-access.md): the non-secret, hex accessor derived
 # from a token id for `sys/mcp/tokens`. Already vetted and used elsewhere in
 # the workspace (bv-storage, bv-utils, bv-auth-ferrogate).
@@ -91,6 +96,16 @@ bastion_vault = { path = "../..", features = ["test-support"] }
 # configures `bv-server`'s own routes and so has to live there.
 bv-server = { path = "../bv-server", features = ["test-support"] }
 serial_test = "3.4"
+# Dev/CI only — never in a shipped binary. The differential suite
+# (src/modules/policy/differential) runs `ACL::allow_operation`, now a thin
+# host over bv-policy-core, against a frozen copy of the pre-delegation
+# evaluator over generated policy sets and requests: the anti-drift net of
+# T31 Phase 3.3. It lives here and not in bv-policy-core because it needs the
+# real ACL (HCL parser, radix tries, JSON parameters), and because the core
+# must stay dependency-free so it verifies in isolation. proptest shrinks a
+# failing case to a minimal policy set, which a hand-rolled fuzzer would not.
+# `fork`/`timeout` (rusty-fork, tempfile) are not used, hence no defaults.
+proptest = { version = "1.11", default-features = false, features = ["std"] }
 
 [features]
 default = []
