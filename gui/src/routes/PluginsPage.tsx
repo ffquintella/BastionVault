@@ -13,6 +13,7 @@ import type {
   PluginConfigResult,
 } from "../lib/api";
 import { extractError } from "../lib/error";
+import { bytesToBase64, parsePluginBundle, sha256Hex } from "../lib/pluginBundle";
 
 /**
  * Admin page for the WASM plugin catalog.
@@ -522,87 +523,49 @@ function RegisterModal({
   // below can't represent `signature` / `signing_key`).
   const [bundleManifest, setBundleManifest] =
     useState<api.PluginManifest | null>(null);
+  const [bundleSurface, setBundleSurface] = useState<Uint8Array | null>(null);
   const [configSchema, setConfigSchema] = useState<
     api.PluginConfigField[] | undefined
   >(undefined);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
+  const fileGenerationRef = React.useRef(0);
 
-  /// Parse a `.bvplugin` container if the bytes start with the magic
-  /// header; otherwise return null and treat the bytes as a raw `.wasm`.
-  /// Format documented in `crates/bv-plugin-pack/src/main.rs`.
-  function parseBundle(
+  async function ingestFile(
     buf: Uint8Array,
-  ): { manifest: api.PluginManifest; wasm: Uint8Array } | null {
-    if (
-      buf.length < 12 ||
-      buf[0] !== 0x42 || // 'B'
-      buf[1] !== 0x56 || // 'V'
-      buf[2] !== 0x50 || // 'P'
-      buf[3] !== 0x4c    // 'L'
-    ) {
-      return null;
-    }
-    const formatVersion = buf[4];
-    if (formatVersion !== 1) {
-      throw new Error(
-        `unsupported bundle format version: ${formatVersion} (this build supports v1)`,
-      );
-    }
-    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-    const manifestLen = dv.getUint32(8, true);
-    if (12 + manifestLen > buf.length) {
-      throw new Error("bundle truncated: manifest length exceeds file size");
-    }
-    const manifestBytes = buf.subarray(12, 12 + manifestLen);
-    const manifestText = new TextDecoder("utf-8", { fatal: true }).decode(
-      manifestBytes,
-    );
-    const manifest = JSON.parse(manifestText) as api.PluginManifest;
-    const wasm = buf.subarray(12 + manifestLen);
-    return { manifest, wasm };
-  }
-
-  async function ingestFile(buf: Uint8Array, displayName: string) {
+    displayName: string,
+    generation: number,
+  ) {
     let wasm = buf;
     let bundleManifest: api.PluginManifest | null = null;
+    let surface: Uint8Array | null = null;
     try {
-      const parsed = parseBundle(buf);
+      const parsed = await parsePluginBundle(buf);
       if (parsed) {
         bundleManifest = parsed.manifest;
-        wasm = parsed.wasm;
+        wasm = parsed.binary;
+        surface = parsed.surface;
       }
     } catch (e) {
-      toast("error", `Bundle is invalid: ${(e as Error).message}`);
+      if (generation === fileGenerationRef.current) {
+        toast("error", `Bundle is invalid: ${(e as Error).message}`);
+      }
       return;
     }
 
     // sha256 is always over the WASM payload — never over the bundle
     // header — so re-registering after extracting from the bundle
     // produces the same hash as a raw .wasm upload.
-    const digest = await crypto.subtle.digest("SHA-256", wasm as BufferSource);
-    const hex = Array.from(new Uint8Array(digest))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    const hex = await sha256Hex(wasm);
+    if (generation !== fileGenerationRef.current) return;
 
     setFileBytes(wasm);
     setFileName(displayName);
     setSha256(hex);
     setFromBundle(bundleManifest !== null);
     setBundleManifest(bundleManifest);
+    setBundleSurface(surface);
 
     if (bundleManifest) {
-      // Sanity-check the embedded sha256 against what we just computed
-      // — catches tampering between pack and upload.
-      if (bundleManifest.sha256 && bundleManifest.sha256 !== hex) {
-        toast(
-          "error",
-          `Bundle sha256 (${bundleManifest.sha256.slice(0, 16)}…) does not match the embedded WASM (${hex.slice(0, 16)}…). Refusing.`,
-        );
-        setFileBytes(null);
-        setFromBundle(false);
-        setBundleManifest(null);
-        return;
-      }
       // Prefill every field the manifest declared. Operators can still
       // tweak before clicking Register; we don't lock them out.
       setName(bundleManifest.name ?? "");
@@ -630,6 +593,7 @@ function RegisterModal({
       // wasm in the raw-file case (process plugins never use a .wasm
       // extension; if you have a process plugin, pack it).
       setConfigSchema(undefined);
+      setBundleSurface(null);
       setRuntime("wasm");
       if (!name) {
         const leaf = displayName.split(/[\\/]/).pop() ?? displayName;
@@ -641,8 +605,25 @@ function RegisterModal({
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     if (!f) return;
-    const buf = new Uint8Array(await f.arrayBuffer());
-    await ingestFile(buf, f.name);
+    const generation = ++fileGenerationRef.current;
+    // Clear the previous candidate before reading or hashing. This keeps
+    // Register disabled for an invalid replacement and prevents a slower,
+    // earlier selection from becoming active after a newer one.
+    setFileBytes(null);
+    setFileName(f.name);
+    setSha256("");
+    setFromBundle(false);
+    setBundleManifest(null);
+    setBundleSurface(null);
+    try {
+      const buf = new Uint8Array(await f.arrayBuffer());
+      if (generation !== fileGenerationRef.current) return;
+      await ingestFile(buf, f.name, generation);
+    } catch (e) {
+      if (generation === fileGenerationRef.current) {
+        toast("error", `Reading plugin file failed: ${(e as Error).message}`);
+      }
+    }
   }
 
   /// Trigger the hidden <input type="file"> via a styled button. The
@@ -664,16 +645,32 @@ function RegisterModal({
     }
     setBusy(true);
     try {
-      // A signed bundle's signature was computed over the publisher's
-      // exact manifest. Editing any field would invalidate it, and the
-      // form can't even represent `signature` / `signing_key`, so we
-      // forward the parsed manifest verbatim (only sha256/size are
-      // re-stamped from the bytes we actually read, and they already
-      // matched the embedded values via the check in `ingestFile`).
-      // Unsigned bundles and raw `.wasm` still build from the form.
-      const manifest: PluginManifest =
-        bundleManifest && bundleManifest.signature
+      // A bundle is the plugin author's complete manifest. Preserve capability
+      // fields that this form does not represent (caller identity, entity
+      // storage, credential-provider declarations, and future additions).
+      // Signed manifests are forwarded unchanged; unsigned development bundles
+      // retain those fields while applying the form's explicitly editable
+      // basics. Raw `.wasm` uploads build from the operator form below.
+      const manifest: PluginManifest = bundleManifest
+        ? bundleManifest.signature
           ? { ...bundleManifest, sha256, size: fileBytes.length }
+          : {
+              ...bundleManifest,
+              name: name.trim(),
+              version: version.trim() || "0.1.0",
+              plugin_type: pluginType.trim() || "secret-engine",
+              runtime,
+              sha256,
+              size: fileBytes.length,
+              description: description.trim(),
+              capabilities: {
+                ...bundleManifest.capabilities,
+                log_emit: logEmit,
+                storage_prefix: storageEnabled ? storagePrefix : null,
+                audit_emit: auditEmit,
+              },
+              config_schema: configSchema ?? bundleManifest.config_schema,
+            }
           : {
               name: name.trim(),
               version: version.trim() || "0.1.0",
@@ -698,9 +695,7 @@ function RegisterModal({
                 : {}),
             };
       // Base64-encode the binary for the Tauri command boundary.
-      let bin = "";
-      for (let i = 0; i < fileBytes.length; i++) bin += String.fromCharCode(fileBytes[i]);
-      const binaryB64 = btoa(bin);
+      const binaryB64 = bytesToBase64(fileBytes);
       // Extensibility v2: an app-module plugin re-declares its embedded
       // WASM as a `client_assets` entry (kind "app-module"). The asset
       // bytes ARE the binary we just read — the pack tool stamped the
@@ -721,7 +716,10 @@ function RegisterModal({
           return;
         }
       }
-      await api.pluginsRegister(manifest, binaryB64, clientAssets);
+      const surfaceB64 = bundleSurface
+        ? bytesToBase64(bundleSurface)
+        : undefined;
+      await api.pluginsRegister(manifest, binaryB64, clientAssets, surfaceB64);
       toast("success", `Registered "${manifest.name}".`);
       onRegistered();
     } catch (e) {

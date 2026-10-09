@@ -77,7 +77,7 @@ GUI only, like the rest of Resource Connect.
 
 ## Current State
 
-**Status: In progress (2026-10-07). All five phases are implemented apart from the items listed under each: the host substrate (1), the plugin (2), Connect integration on the server (3) and in the GUI and desktop host (4), and hardening and UX (5: the first-use badge, preselection of the account last used on the target, per-user counts for administrators, an audited and retried entity purge, and the operator guide `docs/self-accounts.md`). The feature stays in progress until the review gate closes: the L4 `make test-release` run, the manual per-platform checks against real SSH / RDP / web / Rustion targets (none run yet), and the security-review sign-off.**
+**Status: In progress (2026-10-09). All five phases are implemented apart from the items listed under each: the host substrate (1), the plugin (2), Connect integration on the server (3) and in the GUI and desktop host (4), and hardening and UX (5: the first-use badge, preselection of the account last used on the target, per-user counts for administrators, an audited and retried entity purge, and the operator guide `docs/self-accounts.md`). The signed plugin bundle now carries its management surface through the normal GUI registration flow. The feature stays in progress until the review gate closes: the L4 `make test-release` run, the manual per-platform checks against real SSH / RDP / web / Rustion targets (none run yet), and the security-review sign-off.**
 
 | Phase | Status |
 |---|---|
@@ -807,14 +807,13 @@ purge when a principal's last alias goes.
 - **A write that stores an account which can never be offered** (no `https://`
   origin for web, or no host target under `require_targets = all`) succeeds
   with a `warnings` entry instead of failing.
-- **Not done:** the signed `.bvplugin` carries no surface, because
-  `bv-plugin-pack` cannot embed `surface.json` yet. Registering it needs a
-  `[surface]` table (`schema_version`, `sha256`, `size`) in `plugin.toml`
-  before packing and signing, plus `surface_b64` on `POST /v1/sys/plugins`:
-  the register handler ignores `surface_b64` when the manifest declares no
-  surface, and the GUI's Register dialog never sends it (found while writing
-  the Phase 5 operator guide); the plugin was not signed or registered through the GUI by
-  hand; `plugin.toml` and the host test's `manifest()` are two copies of one
+- **The signed `.bvplugin` now carries the surface.** A manifest with
+  `[surface]` makes the packer validate sibling `surface.json`, stamp its
+  content address before signing and emit bundle v2. The GUI verifies and
+  forwards those bytes through the existing registration command; v1 bundles
+  without surfaces remain readable. Registration has automated coverage, but
+  the plugin was not signed or registered through a running GUI by hand.
+  `plugin.toml` and the host test's `manifest()` remain two copies of one
   manifest (the plugin's own test checks the file, the host test mirrors it);
   and the SDK gained `Host::random_bytes` and `test_support::enable_storage`,
   which are new public API of `bastion-plugin-sdk`.
@@ -1230,8 +1229,8 @@ What landed:
 
 **Not done:**
 
-- GUI row-edit of accounts, PKCS#8 / passphrase keys and packer surface
-  embedding stay the documented limits of Phases 2 and 4.
+- GUI row-edit of accounts and PKCS#8 / passphrase keys stay the documented
+  limits of Phases 2 and 4.
 - `tests/test_self_accounts_connect.rs` with a signed fixture (skipped as
   optional; the `#[ignore]`d engine tests run by `make plugins-test` cover the
   same flow in-process).

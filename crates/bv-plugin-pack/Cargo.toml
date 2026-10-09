@@ -1,6 +1,6 @@
 [package]
 name = "bv-plugin-pack"
-version = "0.41.2"
+version = "0.41.3"
 edition = "2021"
 description = "Pack a plugin.toml + .wasm into a .bvplugin bundle so the GUI can self-configure on upload."
 license = "Apache-2.0"
@@ -27,6 +27,10 @@ bv_crypto = { version = "0.41.0", path = "../bv_crypto", registry = "uox-bastion
 # the host verifier. Signing through it guarantees the host re-derives a
 # byte-identical message, so a signed bundle verifies.
 bv_plugin_manifest = { version = "0.41.0", path = "../bv-plugin-manifest", registry = "uox-bastionvault" }
+# Parse and semantically validate an embedded surface before it is signed.
+# The host repeats this validation at registration; doing it here prevents a
+# publisher from producing a correctly signed bundle the GUI can never render.
+bv_plugin_surface = { version = "0.41.0", path = "../bv_plugin_surface", registry = "uox-bastionvault" }
 hex = "0.4"
 # `test` subcommand: verify a bundle offline. The testkit drives the
 # embedded module through the real `bv_run` ABI / process protocol on a

@@ -55,27 +55,18 @@ The bundle is `plugins-ext/dist/bastion-plugin-self-accounts.bvplugin`. Both tar
 
 Register the bundle under **Plugins → Register**, or with the API (`POST /v1/sys/plugins`).
 
-**The packed bundle carries no management surface.** `bv-plugin-pack` cannot embed `surface.json`, and the shipped `plugin.toml` has no `[surface]` table, so a bundle registered as it is gives you the credential provider (Connect works) but no **My accounts** page. Accounts can then only be managed through the API (section 10). To get the page you register the surface alongside the plugin, and the GUI's Register dialog cannot do that: it never sends the surface. Use the API:
+The shipped manifest declares its management surface. During packing,
+`bv-plugin-pack` validates the sibling `surface.json`, stamps its SHA-256 and
+size into the manifest before signing, and emits a surface-bearing v2 bundle.
+The Register dialog verifies the embedded binary and surface, then sends both
+to the host. The host repeats the hash, size and surface-schema checks before
+storing them. A missing or modified surface is refused; it never falls back to
+registering the provider without its management page.
 
-1. Compute the surface's hash and size: `shasum -a 256 surface.json` and `wc -c < surface.json`.
-2. Add a `[surface]` table to `plugin.toml` **before** packing and signing, because the signature covers the manifest:
-
-   ~~~toml
-   [surface]
-   schema_version = 1
-   sha256 = "<sha256 of surface.json, hex>"
-   size   = <size of surface.json in bytes>
-   ~~~
-
-3. Pack (and sign) again, then `POST /v1/sys/plugins` with a JSON body:
-
-   | Field | Meaning |
-   |---|---|
-   | `manifest` | The manifest as JSON (the one embedded in the `.bvplugin`, including `surface`) |
-   | `binary_b64` | The `.wasm` module, base64 |
-   | `surface_b64` | `surface.json`, base64 |
-
-The host checks that the uploaded bytes hash to `manifest.surface.sha256`. A manifest that declares a `surface` but a request without `surface_b64` is refused. The opposite, `surface_b64` sent with a manifest that has no `surface`, is **ignored without an error**, and the page silently does not appear.
+After the plugin is mounted and its credential-provider grant is live, open
+**My Profile → Accounts for Connect → My accounts**. The link opens
+`/plugin/self-accounts/accounts`. Legacy v1 bundles that declare no surface
+continue to register normally, but do not contribute a management page.
 
 ### 2.4 Mount
 
@@ -269,7 +260,6 @@ Data under a merged-away entity is **retained** and reachable only by the admini
 - **No edit in the GUI.** **My accounts** adds and deletes. To edit an account, write `self-accounts/v2/accounts/<id>`; secret fields are write-preserve (an absent or empty value keeps the stored one), and `DELETE .../<id>/totp` clears a seed.
 - **OpenSSH private keys only.** A PKCS#8 PEM is refused with a precise message, because the SSH session reads the OpenSSH form.
 - **No passphrase-protected keys.** Store an unencrypted key; the barrier is the at-rest protection.
-- **The signed `.bvplugin` carries no surface** (section 2.3), and the Register dialog cannot upload one.
 - **TOTP from a provider seed is computed once at launch.** There is no refresh for it, and the seed is not kept server-side. The password form always shows a TOTP field; a seed is refused with a clear message unless `allow_totp_seeds` is on.
 - **No sign-in re-run for a provider web session.** The toolbar's re-run login is unavailable (the provider releases again only after a fresh MFA check, which the toolbar cannot run). Disconnect and connect again.
 - **First use is recorded when the plugin releases.** A release the host later refuses (an output of the wrong shape), a Rustion open that then finds no bastion, or a session that then fails to open still counts as used.

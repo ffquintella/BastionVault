@@ -2518,7 +2518,7 @@ plugins-pack: plugins-wasm plugins-process plugins-pack-build ## Pack each plugi
 		--binary   $(PLUGINS_OUT)/bastion_plugin_webhook_notify.wasm \
 		--out      $(PLUGINS_OUT)/bastion-plugin-webhook-notify.bvplugin
 	@echo "==> packing bastion-plugin-self-accounts (wasm credential provider) into .bvplugin"
-	@echo "    note: the packer cannot embed surface.json yet; register it with the surface_b64 field (see the plugin README)"
+	@echo "    embeds the validated sibling surface.json in the v2 bundle"
 	$(BV_PLUGIN_PACK) \
 		--manifest $(PLUGINS_DIR)/bastion-plugin-self-accounts/plugin.toml \
 		--binary   $(PLUGINS_OUT)/bastion_plugin_self_accounts.wasm \

@@ -9,22 +9,29 @@
 //! 1. container: magic, format version, reserved bytes, manifest length
 //! 2. manifest parses and passes `PluginManifest::validate`
 //! 3. `abi_version` is accepted by `check_abi_compatibility`
-//! 4. `manifest.sha256` / `manifest.size` match the embedded binary
-//! 5. every `app-module` client asset matches the embedded binary
-//! 6. signature: verified against `--publisher-pub` when given; when the
+//! 4. an embedded surface is present exactly when declared, validates,
+//!    and matches `manifest.surface.sha256` / `size`
+//! 5. `manifest.sha256` / `manifest.size` match the embedded binary
+//! 6. every `app-module` client asset matches the embedded binary
+//! 7. signature: verified against `--publisher-pub` when given; when the
 //!    bundle is signed but no key is supplied it is reported as skipped
 //!    (never silently "ok"); an unsigned bundle is reported as such
-//! 7. smoke invoke through `bastion-plugin-testkit` with the manifest's
+//! 8. smoke invoke through `bastion-plugin-testkit` with the manifest's
 //!    own capabilities and config defaults
+
+use std::collections::BTreeSet;
 
 use bastion_plugin_testkit::TestHost;
 use bv_plugin_manifest::{check_abi_compatibility, signing_message, PluginManifest, RuntimeKind};
+use bv_plugin_surface::SurfaceManifest;
 use fips204::ml_dsa_65 as fdsa;
 use fips204::traits::{SerDes, Verifier};
 use sha2::{Digest, Sha256};
 
 const MAGIC: &[u8; 4] = b"BVPL";
-const FORMAT_VERSION: u8 = 1;
+const LEGACY_FORMAT_VERSION: u8 = 1;
+const SURFACE_FORMAT_VERSION: u8 = 2;
+const LEGACY_HEADER_LEN: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -73,29 +80,88 @@ impl Default for SmokeOpts {
     }
 }
 
-/// Split a bundle into `(manifest_json, binary)`.
-pub fn unpack(bundle: &[u8]) -> Result<(&[u8], &[u8]), String> {
-    if bundle.len() < 12 || &bundle[0..4] != MAGIC {
+/// Borrowed sections of a structurally valid bundle.
+pub struct BundleParts<'a> {
+    pub manifest_json: &'a [u8],
+    pub surface_json: Option<&'a [u8]>,
+    pub binary: &'a [u8],
+}
+
+/// Split either the legacy v1 bundle or a surface-bearing v2 bundle.
+pub fn unpack(bundle: &[u8]) -> Result<BundleParts<'_>, String> {
+    if bundle.len() < LEGACY_HEADER_LEN || &bundle[0..4] != MAGIC {
         return Err("not a .bvplugin bundle (bad magic)".into());
-    }
-    if bundle[4] != FORMAT_VERSION {
-        return Err(format!("unsupported bundle format version {} (this tool reads {FORMAT_VERSION})", bundle[4]));
     }
     if bundle[5..8] != [0, 0, 0] {
         return Err("reserved header bytes are non-zero".into());
     }
     let mlen = u32::from_le_bytes(bundle[8..12].try_into().expect("4 bytes")) as usize;
-    let end =
-        12usize.checked_add(mlen).filter(|e| *e <= bundle.len()).ok_or("manifest length runs past end of bundle")?;
-    Ok((&bundle[12..end], &bundle[end..]))
+    match bundle[4] {
+        LEGACY_FORMAT_VERSION => {
+            let manifest_end = LEGACY_HEADER_LEN
+                .checked_add(mlen)
+                .filter(|end| *end <= bundle.len())
+                .ok_or("manifest length runs past end of bundle")?;
+            Ok(BundleParts {
+                manifest_json: &bundle[LEGACY_HEADER_LEN..manifest_end],
+                surface_json: None,
+                binary: &bundle[manifest_end..],
+            })
+        }
+        SURFACE_FORMAT_VERSION => {
+            let manifest_end = LEGACY_HEADER_LEN
+                .checked_add(mlen)
+                .filter(|end| *end <= bundle.len())
+                .ok_or("manifest length runs past end of bundle")?;
+            let binary_len_end = manifest_end
+                .checked_add(4)
+                .filter(|end| *end <= bundle.len())
+                .ok_or("bundle is missing the v2 binary length")?;
+            let binary_len = u32::from_le_bytes(
+                bundle[manifest_end..binary_len_end]
+                    .try_into()
+                    .expect("4 bytes"),
+            ) as usize;
+            let binary_end = binary_len_end
+                .checked_add(binary_len)
+                .filter(|end| *end <= bundle.len())
+                .ok_or("binary length runs past end of bundle")?;
+            let surface_len_end = binary_end
+                .checked_add(4)
+                .filter(|end| *end <= bundle.len())
+                .ok_or("bundle is missing the v2 surface length")?;
+            let surface_len = u32::from_le_bytes(
+                bundle[binary_end..surface_len_end]
+                    .try_into()
+                    .expect("4 bytes"),
+            ) as usize;
+            let surface_end = surface_len_end
+                .checked_add(surface_len)
+                .filter(|end| *end <= bundle.len())
+                .ok_or("surface length runs past end of bundle")?;
+            if surface_end != bundle.len() {
+                return Err("unsupported trailing sections in surface bundle".into());
+            }
+            Ok(BundleParts {
+                manifest_json: &bundle[LEGACY_HEADER_LEN..manifest_end],
+                surface_json: Some(&bundle[surface_len_end..surface_end]),
+                binary: &bundle[binary_len_end..binary_end],
+            })
+        }
+        version => Err(format!("unsupported bundle format version {version} (this tool reads v1 and v2)")),
+    }
 }
 
 pub fn check_bundle(bundle: &[u8], publisher_pub: Option<&[u8]>, smoke: &SmokeOpts) -> Report {
     let mut r = Report::default();
 
-    let (manifest_json, binary) = match unpack(bundle) {
+    let parts = match unpack(bundle) {
         Ok(p) => {
-            r.push("container", Status::Pass, format!("{} byte binary", p.1.len()));
+            r.push(
+                "container",
+                Status::Pass,
+                format!("{} byte surface, {} byte binary", p.surface_json.map_or(0, <[u8]>::len), p.binary.len()),
+            );
             p
         }
         Err(e) => {
@@ -104,7 +170,7 @@ pub fn check_bundle(bundle: &[u8], publisher_pub: Option<&[u8]>, smoke: &SmokeOp
         }
     };
 
-    let manifest: PluginManifest = match serde_json::from_slice(manifest_json) {
+    let manifest: PluginManifest = match serde_json::from_slice(parts.manifest_json) {
         Ok(m) => m,
         Err(e) => {
             r.push("manifest", Status::Fail, format!("embedded manifest does not parse: {e}"));
@@ -124,6 +190,9 @@ pub fn check_bundle(bundle: &[u8], publisher_pub: Option<&[u8]>, smoke: &SmokeOp
         Err(e) => r.push("abi", Status::Fail, e),
     }
 
+    check_surface(&mut r, &manifest, parts.surface_json);
+
+    let binary = parts.binary;
     let actual_sha = hex::encode(Sha256::digest(binary));
     if manifest.sha256 != actual_sha {
         r.push(
@@ -156,6 +225,65 @@ pub fn check_bundle(bundle: &[u8], publisher_pub: Option<&[u8]>, smoke: &SmokeOp
     check_signature(&mut r, &manifest, binary, publisher_pub);
     smoke_invoke(&mut r, &manifest, binary, smoke);
     r
+}
+
+fn check_surface(r: &mut Report, manifest: &PluginManifest, surface_json: Option<&[u8]>) {
+    let (surface_ref, bytes) = match (&manifest.surface, surface_json) {
+        (None, None) => {
+            r.push("surface", Status::Skip, "bundle declares no management surface");
+            return;
+        }
+        (Some(_), None) => {
+            r.push("surface", Status::Fail, "manifest declares a surface but the bundle does not embed it");
+            return;
+        }
+        (None, Some(_)) => {
+            r.push("surface", Status::Fail, "bundle embeds a surface that the manifest does not declare");
+            return;
+        }
+        (Some(surface_ref), Some(bytes)) => (surface_ref, bytes),
+    };
+
+    let actual_sha = hex::encode(Sha256::digest(bytes));
+    if surface_ref.sha256 != actual_sha {
+        r.push(
+            "surface",
+            Status::Fail,
+            format!("manifest surface sha256 {} != embedded surface sha256 {actual_sha}", surface_ref.sha256),
+        );
+        return;
+    }
+    if surface_ref.size != bytes.len() as u64 {
+        r.push(
+            "surface",
+            Status::Fail,
+            format!("manifest surface size {} != embedded surface size {}", surface_ref.size, bytes.len()),
+        );
+        return;
+    }
+    let surface: SurfaceManifest = match serde_json::from_slice(bytes) {
+        Ok(surface) => surface,
+        Err(e) => {
+            r.push("surface", Status::Fail, format!("embedded surface does not parse: {e}"));
+            return;
+        }
+    };
+    if surface.schema_version != surface_ref.schema_version {
+        r.push(
+            "surface",
+            Status::Fail,
+            format!(
+                "embedded surface schema_version {} != manifest schema_version {}",
+                surface.schema_version, surface_ref.schema_version
+            ),
+        );
+        return;
+    }
+    let declared_assets: BTreeSet<&str> = manifest.client_assets.iter().map(|asset| asset.name.as_str()).collect();
+    match surface.validate(&manifest.name, &declared_assets) {
+        Ok(()) => r.push("surface", Status::Pass, actual_sha),
+        Err(e) => r.push("surface", Status::Fail, format!("embedded surface failed validation: {e}")),
+    }
 }
 
 fn check_signature(r: &mut Report, manifest: &PluginManifest, binary: &[u8], publisher_pub: Option<&[u8]>) {
@@ -311,6 +439,41 @@ description = "echo fixture"
 log_emit = true
 "#;
 
+    const SURFACE_MANIFEST: &str = r#"
+name = "echo"
+version = "0.1.0"
+plugin_type = "secret"
+runtime = "wasm"
+abi_version = "1.0"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 0
+description = "echo fixture"
+
+[capabilities]
+log_emit = true
+
+[surface]
+schema_version = 1
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 0
+"#;
+
+    const SURFACE: &str = r#"{
+      "schema_version": 1,
+      "title": "Echo",
+      "menus": [{
+        "id": "echo.main",
+        "label": "Echo",
+        "section": "secrets",
+        "route": "/plugin/echo/main"
+      }],
+      "pages": [{
+        "route": "/plugin/echo/main",
+        "title": "Echo",
+        "components": []
+      }]
+    }"#;
+
     fn tempdir(tag: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("bv-pack-bt-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
@@ -323,6 +486,23 @@ log_emit = true
         std::fs::write(dir.join("plugin.toml"), MANIFEST).unwrap();
         // The testkit's `Module::new` accepts WebAssembly text, so the
         // fixture bundle can embed the WAT as its binary.
+        std::fs::write(dir.join("plugin.wasm"), ECHO_WAT).unwrap();
+        run(PackArgs {
+            manifest: dir.join("plugin.toml"),
+            binary: dir.join("plugin.wasm"),
+            out: Some(dir.join("plugin.bvplugin")),
+            signing_seed_hex: seed_hex.map(str::to_string),
+            signing_seed_file: None,
+            signing_key_name: seed_hex.map(|_| "acme".to_string()),
+        })
+        .unwrap();
+        std::fs::read(dir.join("plugin.bvplugin")).unwrap()
+    }
+
+    fn pack_surface(tag: &str, seed_hex: Option<&str>) -> Vec<u8> {
+        let dir = tempdir(tag);
+        std::fs::write(dir.join("plugin.toml"), SURFACE_MANIFEST).unwrap();
+        std::fs::write(dir.join("surface.json"), SURFACE).unwrap();
         std::fs::write(dir.join("plugin.wasm"), ECHO_WAT).unwrap();
         run(PackArgs {
             manifest: dir.join("plugin.toml"),
@@ -358,6 +538,44 @@ log_emit = true
         let r = check_bundle(&bundle, None, &SmokeOpts::default());
         assert!(r.failed());
         assert_eq!(status_of(&r, "binary-hash").status, Status::Fail);
+    }
+
+    #[test]
+    fn signed_surface_bundle_verifies_stamped_metadata_and_signature() {
+        let provider = bv_crypto::MlDsa65Provider;
+        let keypair = provider.generate_keypair().unwrap();
+        let bundle = pack_surface("surface-signed", Some(&hex::encode(keypair.secret_seed())));
+
+        let report = check_bundle(&bundle, Some(keypair.public_key()), &SmokeOpts::default());
+        assert!(!report.failed(), "{report:?}");
+        assert_eq!(status_of(&report, "surface").status, Status::Pass);
+        assert_eq!(status_of(&report, "signature").status, Status::Pass);
+
+        let parts = unpack(&bundle).unwrap();
+        let manifest: PluginManifest = serde_json::from_slice(parts.manifest_json).unwrap();
+        let surface_ref = manifest.surface.expect("surface reference");
+        let surface = parts.surface_json.expect("embedded surface");
+        assert_eq!(surface_ref.size, surface.len() as u64);
+        assert_eq!(surface_ref.sha256, hex::encode(Sha256::digest(surface)));
+    }
+
+    #[test]
+    fn tampered_surface_fails_its_hash_check() {
+        let mut bundle = pack_surface("surface-tamper", None);
+        let manifest_len = u32::from_le_bytes(bundle[8..12].try_into().unwrap()) as usize;
+        let binary_len_start = LEGACY_HEADER_LEN + manifest_len;
+        let binary_len = u32::from_le_bytes(
+            bundle[binary_len_start..binary_len_start + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let surface_start = binary_len_start + 4 + binary_len + 4;
+        bundle[surface_start] ^= 0x01;
+
+        let report = check_bundle(&bundle, None, &SmokeOpts::default());
+        assert!(report.failed());
+        assert_eq!(status_of(&report, "surface").status, Status::Fail);
+        assert_eq!(status_of(&report, "binary-hash").status, Status::Pass);
     }
 
     #[test]

@@ -24,6 +24,7 @@ The `.bvplugin` packer emits this layout when any v2 section is present:
 ```
 "BVPL"                            (4 bytes magic)
 fmt = 2                           (u8)
+reserved = [0, 0, 0]             (3 bytes, must be zero)
 manifest_len                      (u32 LE)
 manifest                          (JSON, UTF-8)
 server_binary_len                 (u32 LE)
@@ -309,22 +310,24 @@ The `[`examples/totp_form_hook.rs`](../crates/bastion-plugin-sdk/examples/totp_f
 
 ### 3. Pack the bundle
 
-The packer (`bv-plugin-pack`) consumes the manifest, server binary, surface JSON, and any client assets, and emits a single `.bvplugin` file in the [v2 layout](#bundle-layout-format-version-2):
+The packer (`bv-plugin-pack`) consumes the manifest and server binary. When
+the manifest declares `[surface]`, it reads the sibling `surface.json`,
+validates it, stamps its content address before signing, and emits a single
+`.bvplugin` file in the [v2 layout](#bundle-layout-format-version-2):
 
 ```bash
-bv-plugin-pack pack \
+bv-plugin-pack \
   --manifest plugin.toml \
-  --binary target/wasm32-wasip1/release/totp.wasm \
-  --surface surface.json \
-  --asset totp-form-hooks.wasm=target/wasm32-unknown-unknown/release/examples/totp_form_hook.wasm \
+  --binary target/wasm32-unknown-unknown/release/totp.wasm \
   --signing-seed-file ./acme.seed \
   --signing-key-name acme-corp \
   --out totp-1.4.0.bvplugin
 ```
 
-`--asset` accepts repeated `name=path` pairs; the packer computes each `sha256` and bakes the matching `client_assets[]` entry into the manifest.
-
-> Packer support for the v2 sections is on the Phase 7 follow-up list — until then, register the surface bytes via the JSON `surface_b64` / `client_assets_b64` fields on `POST /v1/sys/plugins`.
+The packer supports the surface section of the v2 layout. Arbitrary client
+asset files remain a follow-up; register those bytes via
+`client_assets_b64` on `POST /v1/sys/plugins`. The existing app-module bundle
+continues to use its server binary as the declared app-module asset.
 
 ### 4. Register and activate
 

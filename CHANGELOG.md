@@ -231,6 +231,7 @@ Phase 6 of [Web Application Connect](features/web-application-connect.md) §10 w
 
 ### Fixed
 
+- **Install the Self-Accounts management page from its normal signed bundle** -- a manifest that declares a surface now makes `bv-plugin-pack` validate and embed sibling `surface.json` in bundle v2, with its hash and size stamped before signing; the Plugins Register dialog verifies and forwards those bytes to the host, while legacy bundles without surfaces remain v1-compatible. After mount and provider approval, **My Profile → Accounts for Connect → My accounts** opens `/plugin/self-accounts/accounts` without a manual API registration. (T103, S107)
 - **A session whose window fails to open is stopped instead of left running** -- the host used to return the window error and keep the dialled SSH/RDP session, with no window to render or close it. (T38)
 - **The RDP clipboard channel now initialises whatever the direction or the host clipboard holds** -- `CLIPRDR` reaches Ready only after the client answers the server's Monitor Ready with a format list, and Phase 1 sent one only when the host had text and the direction allowed ingress, so a `session-to-host` session, or one opened with an image or nothing on the host clipboard, never got a working clipboard. The host now always answers with an empty list, which also stops the pre-session clipboard being offered to the remote on connect. Built to the `ironrdp-cliprdr` state machine; not yet confirmed against a live Windows host. (T35)
 

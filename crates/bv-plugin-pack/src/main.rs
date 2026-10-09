@@ -9,8 +9,14 @@
 //! process plugin embeds the native executable. The host distinguishes
 //! at registration time via `manifest.runtime`.
 //!
-//! ## Format (v1)
+//! ## Format
 //!
+//! Bundles without a surface remain v1 so existing readers keep accepting
+//! them byte-for-byte. A manifest that declares `[surface]` produces v2 and
+//! must have a sibling `surface.json`; the packer validates it, stamps its
+//! digest/size into the manifest, and embeds it after the binary.
+//!
+//! v1 (legacy, no surface):
 //! ```text
 //! offset 0:    "BVPL"        4 bytes magic
 //! offset 4:    0x01          format version (u8)
@@ -20,6 +26,19 @@
 //! offset 12+m: <binary>      rest of file = plugin binary
 //! ```
 //!
+//! v2 (surface-bearing):
+//! ```text
+//! offset 0:        "BVPL"       4 bytes magic
+//! offset 4:        0x02         format version (u8)
+//! offset 5:        [0,0,0]      reserved (must be zero)
+//! offset 8:        u32 LE       manifest_json_length
+//! offset 12:       <manifest>   JSON, length above
+//! offset 12+m:     u32 LE       server_binary_length
+//! offset 16+m:     <binary>     raw bytes, length above
+//! offset 16+m+b:   u32 LE       surface_json_length
+//! offset 20+m+b:   <surface>    JSON, length above
+//! ```
+//!
 //! The embedded manifest is JSON because the host's existing
 //! `POST /v1/sys/plugins/<name>` endpoint consumes JSON; the packer
 //! converts the source `plugin.toml` and recomputes `sha256` over the
@@ -27,17 +46,22 @@
 
 mod bundle_test;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bv_crypto::MlDsa65Provider;
 use bv_plugin_manifest::{signing_message, PluginManifest};
+use bv_plugin_surface::SurfaceManifest;
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
 
 const MAGIC: &[u8; 4] = b"BVPL";
-const FORMAT_VERSION: u8 = 1;
+const LEGACY_FORMAT_VERSION: u8 = 1;
+const SURFACE_FORMAT_VERSION: u8 = 2;
+#[cfg(test)]
+const LEGACY_HEADER_LEN: usize = 12;
 
 #[derive(Parser, Debug)]
 #[command(name = "bv-plugin-pack", version, about, long_about = None)]
@@ -216,6 +240,17 @@ fn run(args: PackArgs) -> Result<(), Box<dyn std::error::Error>> {
         asset.size = bin_len;
     }
 
+    // A manifest that declares a surface must ship the conventional sibling
+    // `surface.json`. Validate its typed shape and route scope before signing,
+    // then stamp its content address into the manifest. The signature therefore
+    // authenticates the surface transitively, while the host still re-hashes
+    // the uploaded bytes at registration and on read.
+    let surface = load_declared_surface(&args.manifest, &mut manifest)?;
+
+    manifest
+        .validate()
+        .map_err(|e| format!("manifest validation failed after stamping bundle content: {e}"))?;
+
     // Optional signing pass — runs *after* sha256/size are stamped so
     // the canonical message the host re-derives matches byte-for-byte.
     let seed = resolve_signing_seed(&args)?;
@@ -240,6 +275,8 @@ fn run(args: PackArgs) -> Result<(), Box<dyn std::error::Error>> {
     let manifest_json = serde_json::to_vec(&manifest)?;
     let manifest_len = u32::try_from(manifest_json.len())
         .map_err(|_| "manifest larger than 4 GiB — not supported")?;
+    let binary_len = u32::try_from(binary.len())
+        .map_err(|_| "binary larger than 4 GiB — not supported")?;
 
     let out = args.out.unwrap_or_else(|| {
         let mut p = args.binary.clone();
@@ -247,20 +284,41 @@ fn run(args: PackArgs) -> Result<(), Box<dyn std::error::Error>> {
         p
     });
 
+    let surface_len = surface
+        .as_ref()
+        .map(|bytes| {
+            u32::try_from(bytes.len())
+                .map_err(|_| "surface larger than 4 GiB — not supported")
+        })
+        .transpose()?;
+    let format_version = if surface.is_some() {
+        SURFACE_FORMAT_VERSION
+    } else {
+        LEGACY_FORMAT_VERSION
+    };
     let mut f = fs::File::create(&out)
         .map_err(|e| format!("creating {}: {e}", out.display()))?;
     f.write_all(MAGIC)?;
-    f.write_all(&[FORMAT_VERSION, 0, 0, 0])?;
+    f.write_all(&[format_version, 0, 0, 0])?;
     f.write_all(&manifest_len.to_le_bytes())?;
-    f.write_all(&manifest_json)?;
-    f.write_all(&binary)?;
+    if let Some(surface_len) = surface_len {
+        f.write_all(&manifest_json)?;
+        f.write_all(&binary_len.to_le_bytes())?;
+        f.write_all(&binary)?;
+        f.write_all(&surface_len.to_le_bytes())?;
+        f.write_all(surface.as_ref().expect("surface length came from surface"))?;
+    } else {
+        f.write_all(&manifest_json)?;
+        f.write_all(&binary)?;
+    }
     f.sync_all()?;
 
     println!(
-        "wrote {} ({} byte header + {} byte manifest + {} byte binary){}",
+        "wrote {} (v{}: {} byte manifest + {} byte surface + {} byte binary){}",
         out.display(),
-        12,
+        format_version,
         manifest_json.len(),
+        surface.as_ref().map_or(0, Vec::len),
         binary.len(),
         if manifest.signature.is_empty() {
             ""
@@ -269,6 +327,67 @@ fn run(args: PackArgs) -> Result<(), Box<dyn std::error::Error>> {
         },
     );
     Ok(())
+}
+
+fn load_declared_surface(
+    manifest_path: &Path,
+    manifest: &mut PluginManifest,
+) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+    let Some(surface_ref) = manifest.surface.as_mut() else {
+        return Ok(None);
+    };
+    let surface_path = manifest_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("surface.json");
+    let bytes = fs::read(&surface_path).map_err(|e| {
+        format!(
+            "manifest declares [surface], but reading sibling {} failed: {e}",
+            surface_path.display()
+        )
+    })?;
+    let parsed: SurfaceManifest = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("parsing {}: {e}", surface_path.display()))?;
+    if parsed.schema_version != surface_ref.schema_version {
+        return Err(format!(
+            "surface schema_version {} does not match manifest [surface] schema_version {}",
+            parsed.schema_version, surface_ref.schema_version
+        )
+        .into());
+    }
+    let declared_assets: BTreeSet<&str> = manifest
+        .client_assets
+        .iter()
+        .map(|asset| asset.name.as_str())
+        .collect();
+    parsed
+        .validate(&manifest.name, &declared_assets)
+        .map_err(|e| format!("{} failed validation: {e}", surface_path.display()))?;
+
+    let actual_sha = hex::encode(Sha256::digest(&bytes));
+    if !surface_ref.sha256.is_empty()
+        && !is_placeholder_sha(&surface_ref.sha256)
+        && surface_ref.sha256 != actual_sha
+    {
+        return Err(format!(
+            "manifest surface sha256 ({}) does not match {} ({actual_sha})",
+            surface_ref.sha256,
+            surface_path.display()
+        )
+        .into());
+    }
+    if surface_ref.size != 0 && surface_ref.size != bytes.len() as u64 {
+        return Err(format!(
+            "manifest surface size ({}) does not match {} ({} bytes)",
+            surface_ref.size,
+            surface_path.display(),
+            bytes.len()
+        )
+        .into());
+    }
+    surface_ref.sha256 = actual_sha;
+    surface_ref.size = bytes.len() as u64;
+    Ok(Some(bytes))
 }
 
 /// Resolve an ML-DSA-65 secret seed from one of the two CLI flags
@@ -540,7 +659,7 @@ default = "6"
         let mut bundle = Vec::new();
         fs::File::open(&out_path).unwrap().read_to_end(&mut bundle).unwrap();
         assert_eq!(&bundle[0..4], MAGIC);
-        assert_eq!(bundle[4], FORMAT_VERSION);
+        assert_eq!(bundle[4], LEGACY_FORMAT_VERSION);
         let mlen =
             u32::from_le_bytes(bundle[8..12].try_into().unwrap()) as usize;
         let manifest_json = &bundle[12..12 + mlen];
@@ -554,6 +673,126 @@ default = "6"
 
         let wasm = &bundle[12 + mlen..];
         assert_eq!(wasm, b"\x00asm\x01\x00\x00\x00");
+    }
+
+    #[test]
+    fn declared_surface_is_stamped_and_embedded_in_v2_bundle() {
+        let dir = tempdir();
+        let manifest_path = dir.join("plugin.toml");
+        let binary_path = dir.join("plugin.wasm");
+        let surface_path = dir.join("surface.json");
+        let out_path = dir.join("plugin.bvplugin");
+        let surface = br#"{
+          "schema_version": 1,
+          "title": "Accounts",
+          "menus": [{
+            "id": "accounts.main",
+            "label": "My accounts",
+            "section": "secrets",
+            "route": "/plugin/accounts/manage"
+          }],
+          "pages": [{
+            "route": "/plugin/accounts/manage",
+            "title": "My accounts",
+            "components": []
+          }]
+        }"#;
+
+        fs::write(
+            &manifest_path,
+            r#"
+name = "accounts"
+version = "0.1.0"
+plugin_type = "secret"
+runtime = "wasm"
+abi_version = "1.0"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 0
+description = "surface fixture"
+
+[capabilities]
+log_emit = true
+
+[surface]
+schema_version = 1
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 0
+"#,
+        )
+        .unwrap();
+        fs::write(&binary_path, b"\x00asm\x01\x00\x00\x00").unwrap();
+        fs::write(&surface_path, surface).unwrap();
+
+        run(PackArgs {
+            manifest: manifest_path,
+            binary: binary_path,
+            out: Some(out_path.clone()),
+            signing_seed_hex: None,
+            signing_seed_file: None,
+            signing_key_name: None,
+        })
+        .unwrap();
+
+        let bundle = fs::read(out_path).unwrap();
+        assert_eq!(bundle[4], SURFACE_FORMAT_VERSION);
+        let manifest_len = u32::from_le_bytes(bundle[8..12].try_into().unwrap()) as usize;
+        let manifest_end = LEGACY_HEADER_LEN + manifest_len;
+        let binary_len =
+            u32::from_le_bytes(bundle[manifest_end..manifest_end + 4].try_into().unwrap()) as usize;
+        let binary_end = manifest_end + 4 + binary_len;
+        let surface_len =
+            u32::from_le_bytes(bundle[binary_end..binary_end + 4].try_into().unwrap()) as usize;
+        let surface_start = binary_end + 4;
+        let surface_end = surface_start + surface_len;
+        let parsed: PluginManifest =
+            serde_json::from_slice(&bundle[LEGACY_HEADER_LEN..manifest_end]).unwrap();
+        let surface_ref = parsed.surface.expect("surface reference is retained");
+        assert_eq!(surface_ref.size, surface.len() as u64);
+        assert_eq!(surface_ref.sha256, hex::encode(Sha256::digest(surface)));
+        assert_eq!(&bundle[manifest_end + 4..binary_end], b"\x00asm\x01\x00\x00\x00");
+        assert_eq!(&bundle[surface_start..surface_end], surface);
+        assert_eq!(surface_end, bundle.len());
+    }
+
+    #[test]
+    fn declared_surface_is_required_next_to_the_manifest() {
+        let dir = tempdir();
+        let manifest_path = dir.join("plugin.toml");
+        let binary_path = dir.join("plugin.wasm");
+        fs::write(
+            &manifest_path,
+            r#"
+name = "accounts"
+version = "0.1.0"
+plugin_type = "secret"
+runtime = "wasm"
+abi_version = "1.0"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 0
+description = "surface fixture"
+
+[capabilities]
+log_emit = true
+
+[surface]
+schema_version = 1
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 0
+"#,
+        )
+        .unwrap();
+        fs::write(&binary_path, b"\x00asm\x01\x00\x00\x00").unwrap();
+
+        let error = run(PackArgs {
+            manifest: manifest_path,
+            binary: binary_path,
+            out: Some(dir.join("plugin.bvplugin")),
+            signing_seed_hex: None,
+            signing_seed_file: None,
+            signing_key_name: None,
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("manifest declares [surface]"));
     }
 
     #[test]
