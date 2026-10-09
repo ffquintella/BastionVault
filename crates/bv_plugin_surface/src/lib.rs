@@ -459,6 +459,11 @@ impl ActiveSurfaceBundle {
             hasher.update(b"\0");
             hasher.update(e.version.as_bytes());
             hasher.update(b"\0");
+            // Mounts are namespace-local and can change independently of a
+            // plugin version. Include the resolved path so mount, unmount and
+            // remount operations invalidate clients' active-surface bundles.
+            hasher.update(e.mount.as_bytes());
+            hasher.update(b"\0");
             hasher.update(surface_etag(&e.surface).as_bytes());
             hasher.update(b"\0");
             for (n, h) in &e.assets {
@@ -653,6 +658,28 @@ mod tests {
         }];
         let etag = ActiveSurfaceBundle::compute_etag(&entries);
         assert_eq!(etag.len(), 64); // sha256 hex
+    }
+
+    #[test]
+    fn mount_changes_bundle_etag() {
+        let base = ActiveSurfaceEntry {
+            plugin: "self-accounts".into(),
+            version: "0.1.1".into(),
+            mount: String::new(),
+            surface: minimal_surface(),
+            assets: vec![],
+            grant: None,
+            app_module: None,
+        };
+        let unmounted = ActiveSurfaceBundle::compute_etag(std::slice::from_ref(&base));
+        let mut mounted = base;
+        mounted.mount = "self-accounts/".into();
+
+        assert_ne!(
+            unmounted,
+            ActiveSurfaceBundle::compute_etag(std::slice::from_ref(&mounted)),
+            "mounting a plugin must wake active-surface watchers"
+        );
     }
 
     #[test]

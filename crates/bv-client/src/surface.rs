@@ -298,12 +298,18 @@ pub async fn fetch_with_namespace<B: Backend + ?Sized>(
     let etag = cached.as_ref().map(|b| b.etag.as_str());
     match backend.active_surfaces_with_namespace(token, etag, namespace).await? {
         SurfaceFetch::NotModified => match cached {
-            Some(b) => Ok(b),
-            None => {
+            // The disk cache retains the hashed surface documents and ETag,
+            // but intentionally does not persist the namespace-local mount or
+            // live grant/app-module envelope. Returning a reconstructed,
+            // non-empty bundle here would turn every mount into `""` and can
+            // also resurrect stale capability metadata. Revalidate it once
+            // without an ETag and return only the backend's authoritative
+            // envelope. An empty cached bundle is complete as-is.
+            Some(b) if b.entries.is_empty() => Ok(b),
+            Some(_) | None => {
                 // Server said 304 but we have nothing on disk. Fall
-                // through to a force-fetch by clearing our etag and
-                // calling once more — defensive, shouldn't normally
-                // trigger.
+                // through to a force-fetch by clearing our etag. The same
+                // path handles a deliberately lossy non-empty disk cache.
                 match backend.active_surfaces_with_namespace(token, None, namespace).await? {
                     SurfaceFetch::Bundle(b) => Ok(b),
                     SurfaceFetch::NotModified => Ok(ActiveSurfaceBundle {
@@ -616,22 +622,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn warm_cache_sends_etag_and_short_circuits() {
+    async fn warm_cache_revalidates_the_lossy_envelope_before_returning_it() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = SurfaceCache::new(tmp.path(), "vault-a");
-        // Two refreshes against a backend that responds with the same
-        // etag both times — second call should round-trip with the
-        // etag and resolve via NotModified.
-        let backend =
-            StubBackend::new(vec![bundle_with("totp", "etag-1"), bundle_with("totp", "etag-1")]);
+        // The disk cache intentionally stores the hashed surface bytes but
+        // not the namespace-local mount/grant envelope. A 304 therefore has
+        // to be followed by one unconditional fetch before the cached entry
+        // can be returned to the renderer.
+        let backend = StubBackend::new(vec![
+            bundle_with("totp", "etag-1"),
+            bundle_with("totp", "etag-1"),
+            bundle_with("totp", "etag-1"),
+        ]);
         let _ = refresh(&backend, &cache, "tok").await.unwrap();
         let bundle = refresh(&backend, &cache, "tok").await.unwrap();
         assert_eq!(bundle.etag, "etag-1");
+        assert_eq!(bundle.entries[0].mount, "secret/totp");
 
         let calls = backend.surface_calls.lock().unwrap();
-        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.len(), 3);
         assert_eq!(calls[0], None);
         assert_eq!(calls[1].as_deref(), Some("etag-1"));
+        assert_eq!(calls[2], None);
     }
 
     #[tokio::test]

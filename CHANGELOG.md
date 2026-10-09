@@ -56,6 +56,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.27] - 2026-10-09
+
 ### Added
 
 #### Continuous verification: tiers, the Kani gate and the release verification report (roadmaps/formal-verification-and-type-driven-security.md, Phase 4)
@@ -231,6 +233,7 @@ Phase 6 of [Web Application Connect](features/web-application-connect.md) §10 w
 
 ### Fixed
 
+- **Load mounted Self-Accounts surfaces in local desktop vaults without losing their mount after a cache validation** -- the embedded backend now applies the same token, policy and namespace checks as the privileged active-surfaces API before resolving the local catalog and mount table; mount, unmount and remount changes invalidate the surface ETag; and a `304 Not Modified` never turns a cached namespace-local mount into an empty path. Its bounded watcher also waits instead of busy-looping the desktop renderer. (T103, S107)
 - **Keep the Self-Accounts management page bounded and namespace-scoped** -- active-surface discovery now returns the plugin's one unambiguous mount from the selected namespace, and the desktop sends that namespace on surface discovery, long-poll and binding dispatch. A missing or multiply-mounted engine shows one actionable **Mount Engine** message without issuing account or resource-type requests; watcher errors no longer remount the page and repeat a failing 404 until the app freezes. (T103, S107)
 - **Install the Self-Accounts management page from its normal signed bundle** -- a manifest that declares a surface now makes `bv-plugin-pack` validate and embed sibling `surface.json` in bundle v2, with its hash and size stamped before signing; the Plugins Register dialog verifies and forwards those bytes to the host, while legacy bundles without surfaces remain v1-compatible. After mount and provider approval, **My Profile → Accounts for Connect → My accounts** opens `/plugin/self-accounts/accounts` without a manual API registration. (T103, S107)
 - **A session whose window fails to open is stopped instead of left running** -- the host used to return the window error and keep the dialled SSH/RDP session, with no window to render or close it. (T38)
@@ -7731,7 +7734,8 @@ Bulk dependency upgrade across the workspace (`Cargo.toml`, `crates/bv-plugin-pa
 
 - Abandon the SQLx storage backend: `libsqlite3-sys` conflicts at link time with hiqlite's `rusqlite`, so `storage "sqlx"` was removed (T5, M2)
 
-[Unreleased]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.15...HEAD
+[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.27...HEAD
+[0.44.27]: https://github.com/ffquintella/BastionVault/compare/v0.44.19...v0.44.27
 [0.44.15]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.14...releases/0.44.15
 [0.44.14]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.13...releases/0.44.14
 [0.44.13]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.12...releases/0.44.13

@@ -226,6 +226,7 @@ Next-up list recorded before the migration, in its order:
   - note: closed by the maintainer's decision with the review gate still open: the L4 `make test-release` run, the manual per-platform checks against real SSH, RDP, web and Rustion targets (docs/self-accounts.md §12) and the Phase 5 security-review sign-off were NOT done at close. Known limits are in features/self-accounts.md.
   - note: the signed Self-Accounts bundle now embeds its declarative management surface and the normal GUI registration flow forwards it to the host; this does not close the review gate above.
   - note: active-surface discovery and dispatch now use the selected namespace's one unambiguous plugin mount; an absent or duplicate mount is a stable setup message rather than a repeating 404. The review gate above remains open.
+  - note: local desktop discovery now reads the embedded catalog and namespace mount table behind the same token and policy checks as the remote endpoint; cache revalidation preserves the authoritative mount, and mount-table changes wake the bounded watcher. The review gate above remains open.
 
 ## [M6] Authentication
 > outcome: Done when every listed auth method (token, AppID, userpass, cert, OIDC, SAML, FIDO2, FerroGate) is shipped and workforce identity can be brokered downstream.
