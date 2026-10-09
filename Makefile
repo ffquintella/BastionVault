@@ -2401,7 +2401,7 @@ _exe := $(if $(_is_windows_target),.exe,)
 # `cd plugins-ext && cross build` runs cargo inside a container whose
 # project root is the plugins-ext workspace, so neither this repo's
 # `Cross.toml` nor its `.cargo/config.toml` is on the config-discovery
-# path any more. Two things break:
+# path any more. Three things break:
 #
 #   - the SDK manifest (`crates/bastion-plugin-sdk`) declares its deps
 #     with `registry = "uox-bastionvault"`, and the container has no
@@ -2410,15 +2410,22 @@ _exe := $(if $(_is_windows_target),.exe,)
 #   - `Cross.toml`'s glibc 2.17 image pin is ignored, so plugins would
 #     silently link against the default image's glibc 2.39 and refuse
 #     to start on RHEL 8/9 — the exact trap that pin exists to avoid.
+#   - the manylinux image is multi-arch, but cross 0.2.5 mounts an x86_64
+#     Linux Rust toolchain regardless of the host architecture. Docker Desktop
+#     otherwise selects the native arm64 image on Apple Silicon, where that
+#     toolchain cannot start because its x86_64 ELF loader is absent.
 #
 # `CROSS_CONFIG` points cross back at the repo-root `Cross.toml`, whose
 # `[build.env] passthrough` forwards the two registry indexes into the
-# container. The indexes are read out of `.cargo/config.toml` so this
-# stays a single source of truth. Harmless when the runner is bare
-# `cargo`: the values match what it reads from the file anyway.
+# container. `DOCKER_DEFAULT_PLATFORM` selects the matching x86_64 image
+# variant for cross without changing the operator's global Docker settings.
+# The indexes are read out of `.cargo/config.toml` so this stays a single
+# source of truth. Harmless when the runner is bare `cargo`: the values match
+# what it reads from the file anyway, and cargo ignores the Docker variable.
 _registry_index = $(shell sed -n 's/^$(1) = { index = "\(.*\)" }.*/\1/p' .cargo/config.toml)
 _plugins_cross_env := \
 	CROSS_CONFIG=$(CURDIR)/Cross.toml \
+	DOCKER_DEFAULT_PLATFORM=linux/amd64 \
 	CARGO_REGISTRIES_UOX_BASTIONVAULT_INDEX=$(call _registry_index,uox-bastionvault) \
 	CARGO_REGISTRIES_UOX_FERROGATE_INDEX=$(call _registry_index,uox-ferrogate)
 
