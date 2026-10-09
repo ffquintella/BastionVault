@@ -2369,6 +2369,17 @@ PLUGINS_HAS_CROSS := $(shell command -v cross >/dev/null 2>&1 && echo 1)
 # (`PLUGINS_CARGO=cross`).
 PLUGINS_CARGO ?= $(if $(and $(PLUGINS_IS_CROSS),$(PLUGINS_HAS_CROSS)),cross,cargo)
 
+# `cross` runs cargo from an x86_64 Linux container and therefore mirrors the
+# active host toolchain as `<channel>-x86_64-unknown-linux-gnu`.  On non-Linux
+# hosts, rustup 1.29+ refuses to install that executable toolchain unless the
+# caller explicitly acknowledges it with `--force-non-host`.  cross 0.2.5 does
+# not pass the flag itself (cross-rs/cross#1649), so install the exact sysroot
+# name cross will request before invoking it.  This is separate from adding the
+# process plugin's compilation target to the native host toolchain below.
+PLUGINS_CROSS_HOST_TARGET := x86_64-unknown-linux-gnu
+PLUGINS_CROSS_TOOLCHAIN := $(subst $(PLUGINS_HOST_TARGET),$(PLUGINS_CROSS_HOST_TARGET),$(notdir $(shell rustc --print sysroot 2>/dev/null)))
+PLUGINS_NEEDS_CROSS_TOOLCHAIN := $(if $(and $(PLUGINS_IS_CROSS),$(filter cross,$(notdir $(PLUGINS_CARGO))),$(filter-out $(PLUGINS_CROSS_HOST_TARGET),$(PLUGINS_HOST_TARGET))),1,)
+
 # Derived helpers so the recipes below stay readable.
 #
 # `_target_arg`   — empty when building for host, `--target <triple>`
@@ -2430,6 +2441,16 @@ plugins-process-target: ## Install the cross-compile target for process plugins 
 		rustup target list --installed | grep -q '^$(PLUGINS_PROCESS_TARGET)$$' || { \
 			echo "==> installing rustup target $(PLUGINS_PROCESS_TARGET)"; \
 			rustup target add $(PLUGINS_PROCESS_TARGET); \
+		}; \
+	fi
+	@if [ -n "$(PLUGINS_NEEDS_CROSS_TOOLCHAIN)" ]; then \
+		if [ -z "$(PLUGINS_CROSS_TOOLCHAIN)" ]; then \
+			echo "ERROR: could not determine the Linux toolchain required by cross."; \
+			exit 1; \
+		fi; \
+		rustup toolchain list | sed 's/ (.*)$$//' | grep -q '^$(PLUGINS_CROSS_TOOLCHAIN)$$' || { \
+			echo "==> installing cross container toolchain $(PLUGINS_CROSS_TOOLCHAIN)"; \
+			rustup toolchain add $(PLUGINS_CROSS_TOOLCHAIN) --profile minimal --force-non-host; \
 		}; \
 	fi
 
