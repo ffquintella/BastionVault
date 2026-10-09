@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{atomic::AtomicU64, Arc},
+};
 
 use bastion_vault::api::Client;
 use bastion_vault::storage::physical::file::oauth::{ConsentSession, OAuthCredentials, OAuthProvider};
@@ -169,6 +172,10 @@ pub struct AppState {
     /// `X-BastionVault-Namespace` header so the session operates inside that
     /// tenant. Set by the GUI namespace switcher; not applied to login flows.
     pub active_namespace: Mutex<Option<String>>,
+    /// Increments whenever `active_namespace` changes. Long-running surface
+    /// discovery/watch calls capture it so a response from the namespace the
+    /// user just left cannot replace the current bundle or app modules.
+    pub active_namespace_generation: AtomicU64,
     /// Channel for receiving PIN input from the frontend during FIDO2 ceremonies.
     /// The status handler thread stores a sender here; the `fido2_submit_pin` command
     /// sends the user-entered PIN (or empty string for cancel) through it.
@@ -251,6 +258,7 @@ impl AppState {
             backend: Mutex::new(None),
             token: Mutex::new(None),
             active_namespace: Mutex::new(None),
+            active_namespace_generation: AtomicU64::new(0),
             pin_sender: std::sync::Arc::new(std::sync::Mutex::new(None)),
             cloud_sessions: std::sync::Mutex::new(HashMap::new()),
             oidc_sessions: std::sync::Mutex::new(HashMap::new()),

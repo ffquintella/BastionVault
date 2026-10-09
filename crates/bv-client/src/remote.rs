@@ -925,7 +925,16 @@ impl Backend for RemoteBackend {
         token: &str,
         etag: Option<&str>,
     ) -> Result<crate::backend::SurfaceFetch, ClientError> {
-        self.fetch_active_surfaces(token, etag, false).await
+        self.fetch_active_surfaces(token, etag, false, None).await
+    }
+
+    async fn active_surfaces_with_namespace(
+        &self,
+        token: &str,
+        etag: Option<&str>,
+        namespace: Option<&str>,
+    ) -> Result<crate::backend::SurfaceFetch, ClientError> {
+        self.fetch_active_surfaces(token, etag, false, namespace).await
     }
 
     async fn watch_active_surfaces(
@@ -933,7 +942,16 @@ impl Backend for RemoteBackend {
         token: &str,
         etag: Option<&str>,
     ) -> Result<crate::backend::SurfaceFetch, ClientError> {
-        self.fetch_active_surfaces(token, etag, true).await
+        self.fetch_active_surfaces(token, etag, true, None).await
+    }
+
+    async fn watch_active_surfaces_with_namespace(
+        &self,
+        token: &str,
+        etag: Option<&str>,
+        namespace: Option<&str>,
+    ) -> Result<crate::backend::SurfaceFetch, ClientError> {
+        self.fetch_active_surfaces(token, etag, true, namespace).await
     }
 
     async fn fetch_asset(
@@ -953,6 +971,7 @@ impl RemoteBackend {
         token: &str,
         etag: Option<&str>,
         watch: bool,
+        namespace: Option<&str>,
     ) -> Result<crate::backend::SurfaceFetch, ClientError> {
         // Trailing slash + leading slash hygiene matches `build_url`.
         let url = if watch {
@@ -963,6 +982,7 @@ impl RemoteBackend {
         let inner = Arc::clone(&self.inner);
         let token = token.to_string();
         let etag = etag.map(|s| s.to_string());
+        let namespace = namespace.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
 
         let (status, body, etag_header) = tokio::task::spawn_blocking(move || {
             let mut builder = Request::builder()
@@ -971,6 +991,9 @@ impl RemoteBackend {
                 .header("Accept", "application/json");
             if !token.is_empty() {
                 builder = builder.header("X-BastionVault-Token", &token);
+            }
+            if let Some(namespace) = &namespace {
+                builder = builder.header("X-BastionVault-Namespace", namespace);
             }
             for (k, v) in &inner.headers {
                 builder = builder.header(k, v);

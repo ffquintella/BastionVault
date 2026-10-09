@@ -7,6 +7,22 @@ import { SurfaceTable } from "./SurfaceTable";
 import { SurfaceForm } from "./SurfaceForm";
 import { SurfaceDetail } from "./SurfaceDetail";
 
+function SurfaceFrame({
+  children,
+  pluginWindow,
+}: {
+  children: ReactNode;
+  pluginWindow: boolean;
+}) {
+  return pluginWindow ? (
+    <div className="min-h-screen bg-[var(--color-bg)] text-[var(--color-text)]">
+      {children}
+    </div>
+  ) : (
+    <Layout>{children}</Layout>
+  );
+}
+
 /**
  * Top-level renderer for plugin-contributed pages. Looks up the
  * current path in the active-surface bundle and walks the matching
@@ -31,29 +47,21 @@ export function SurfaceRouter() {
   // components so they consume `plugin-window-data-<handle>` events.
   const pluginWindow = searchParams.get("pluginWindow");
   const isPluginWindow = pluginWindow != null;
-  const Frame = ({ children }: { children: ReactNode }) =>
-    isPluginWindow ? (
-      <div className="min-h-screen bg-[var(--color-bg)] text-[var(--color-text)]">
-        {children}
-      </div>
-    ) : (
-      <Layout>{children}</Layout>
-    );
 
   const match = pageByRoute(location.pathname);
 
   if (loading && !match) {
     return (
-      <Frame>
+      <SurfaceFrame pluginWindow={isPluginWindow}>
         <div className="p-6 text-sm text-[var(--color-text-muted)]">
           Loading plugin surfaces…
         </div>
-      </Frame>
+      </SurfaceFrame>
     );
   }
   if (error && !match) {
     return (
-      <Frame>
+      <SurfaceFrame pluginWindow={isPluginWindow}>
         <div className="p-6">
           <Card>
             <div className="p-4 text-sm text-[var(--color-danger)]">
@@ -61,27 +69,40 @@ export function SurfaceRouter() {
             </div>
           </Card>
         </div>
-      </Frame>
+      </SurfaceFrame>
     );
   }
   if (!match) {
     return (
-      <Frame>
+      <SurfaceFrame pluginWindow={isPluginWindow}>
         <div className="p-6">
           <EmptyState
             title="Plugin page not found"
             description={`No registered plugin contributes a page at ${location.pathname}.`}
           />
         </div>
-      </Frame>
+      </SurfaceFrame>
     );
   }
 
   const { page, entry } = match;
   const refresh = usePluginSurfacesStore.getState().refresh;
 
+  if (!entry.mount.trim()) {
+    return (
+      <SurfaceFrame pluginWindow={isPluginWindow}>
+        <div className="p-6">
+          <EmptyState
+            title="Plugin mount required"
+            description={`${entry.plugin} is not mounted in the active namespace. Open Admin → Mounts, choose Mount Engine, and select ${entry.plugin} as the engine type.`}
+          />
+        </div>
+      </SurfaceFrame>
+    );
+  }
+
   return (
-    <Frame>
+    <SurfaceFrame pluginWindow={isPluginWindow}>
       <div className="p-6 space-y-4">
         <div className="flex items-baseline justify-between">
           <h1 className="text-2xl font-bold">{page.title}</h1>
@@ -119,6 +140,6 @@ export function SurfaceRouter() {
           ))}
         </div>
       </div>
-    </Frame>
+    </SurfaceFrame>
   );
 }

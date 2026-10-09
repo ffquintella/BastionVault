@@ -29,6 +29,9 @@ pub mod types;
 pub use backend::{Backend, SurfaceFetch};
 pub use error::ClientError;
 pub use remote::RemoteBackend;
-pub use surface::{ensure_asset, refresh, vault_id_for, watch_once, CacheError, SurfaceCache};
+pub use surface::{
+    ensure_asset, fetch_with_namespace, refresh, refresh_with_namespace, vault_id_for, watch_once,
+    watch_once_with_namespace, watch_once_with_namespace_uncommitted, CacheError, SurfaceCache,
+};
 pub use tls::TLSConfigBuilder;
 pub use types::{JsonResponse, Operation};

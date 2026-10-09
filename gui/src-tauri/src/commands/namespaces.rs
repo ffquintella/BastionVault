@@ -333,6 +333,9 @@ pub async fn set_active_namespace(state: State<'_, AppState>, path: String) -> C
     let trimmed = path.trim().trim_matches('/').to_string();
     let mut guard = state.active_namespace.lock().await;
     *guard = if trimmed.is_empty() { None } else { Some(trimmed) };
+    state
+        .active_namespace_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
     Ok(())
 }
 

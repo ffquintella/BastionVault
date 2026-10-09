@@ -266,9 +266,37 @@ pub async fn refresh<B: Backend + ?Sized>(
     cache: &SurfaceCache,
     token: &str,
 ) -> Result<ActiveSurfaceBundle, ClientError> {
+    refresh_with_namespace(backend, cache, token, None).await
+}
+
+/// Namespace-aware variant of [`refresh`]. Surface bindings include the
+/// selected namespace's plugin mount path, so the fetch must carry the same
+/// selector as the logical requests the rendered page will issue.
+pub async fn refresh_with_namespace<B: Backend + ?Sized>(
+    backend: &B,
+    cache: &SurfaceCache,
+    token: &str,
+    namespace: Option<&str>,
+) -> Result<ActiveSurfaceBundle, ClientError> {
+    let bundle = fetch_with_namespace(backend, cache, token, namespace).await?;
+    // Best-effort cache write — a disk error here doesn't block returning the
+    // bundle the GUI is about to render.
+    let _ = cache.write_bundle(&bundle);
+    Ok(bundle)
+}
+
+/// Fetch a namespace's surface bundle without committing it to the cache.
+/// Hosts use this when the active namespace can change during the request: the
+/// caller validates its generation, then writes the returned bundle.
+pub async fn fetch_with_namespace<B: Backend + ?Sized>(
+    backend: &B,
+    cache: &SurfaceCache,
+    token: &str,
+    namespace: Option<&str>,
+) -> Result<ActiveSurfaceBundle, ClientError> {
     let cached = cache.read_bundle();
     let etag = cached.as_ref().map(|b| b.etag.as_str());
-    match backend.active_surfaces(token, etag).await? {
+    match backend.active_surfaces_with_namespace(token, etag, namespace).await? {
         SurfaceFetch::NotModified => match cached {
             Some(b) => Ok(b),
             None => {
@@ -276,11 +304,8 @@ pub async fn refresh<B: Backend + ?Sized>(
                 // through to a force-fetch by clearing our etag and
                 // calling once more — defensive, shouldn't normally
                 // trigger.
-                match backend.active_surfaces(token, None).await? {
-                    SurfaceFetch::Bundle(b) => {
-                        let _ = cache.write_bundle(&b);
-                        Ok(b)
-                    }
+                match backend.active_surfaces_with_namespace(token, None, namespace).await? {
+                    SurfaceFetch::Bundle(b) => Ok(b),
                     SurfaceFetch::NotModified => Ok(ActiveSurfaceBundle {
                         etag: String::new(),
                         entries: Vec::new(),
@@ -288,12 +313,7 @@ pub async fn refresh<B: Backend + ?Sized>(
                 }
             }
         },
-        SurfaceFetch::Bundle(b) => {
-            // Best-effort cache write — a disk error here doesn't
-            // block returning the bundle the GUI is about to render.
-            let _ = cache.write_bundle(&b);
-            Ok(b)
-        }
+        SurfaceFetch::Bundle(b) => Ok(b),
     }
 }
 
@@ -314,16 +334,38 @@ pub async fn watch_once<B: Backend + ?Sized>(
     cache: &SurfaceCache,
     token: &str,
 ) -> Result<Option<ActiveSurfaceBundle>, ClientError> {
+    watch_once_with_namespace(backend, cache, token, None).await
+}
+
+/// Namespace-aware variant of [`watch_once`].
+pub async fn watch_once_with_namespace<B: Backend + ?Sized>(
+    backend: &B,
+    cache: &SurfaceCache,
+    token: &str,
+    namespace: Option<&str>,
+) -> Result<Option<ActiveSurfaceBundle>, ClientError> {
+    let bundle = watch_once_with_namespace_uncommitted(backend, cache, token, namespace).await?;
+    if let Some(ref bundle) = bundle {
+        // Best-effort persist; a write failure doesn't change the in-memory
+        // bundle the caller is about to render.
+        let _ = cache.write_bundle(bundle);
+    }
+    Ok(bundle)
+}
+
+/// Namespace-aware long poll without committing a changed bundle. See
+/// [`fetch_with_namespace`] for why hosts need the uncommitted form.
+pub async fn watch_once_with_namespace_uncommitted<B: Backend + ?Sized>(
+    backend: &B,
+    cache: &SurfaceCache,
+    token: &str,
+    namespace: Option<&str>,
+) -> Result<Option<ActiveSurfaceBundle>, ClientError> {
     let cached = cache.read_bundle();
     let etag = cached.as_ref().map(|b| b.etag.as_str());
-    match backend.watch_active_surfaces(token, etag).await? {
+    match backend.watch_active_surfaces_with_namespace(token, etag, namespace).await? {
         SurfaceFetch::NotModified => Ok(None),
-        SurfaceFetch::Bundle(b) => {
-            // Best-effort persist; a write failure doesn't change
-            // the in-memory bundle the caller is about to render.
-            let _ = cache.write_bundle(&b);
-            Ok(Some(b))
-        }
+        SurfaceFetch::Bundle(b) => Ok(Some(b)),
     }
 }
 
@@ -421,6 +463,7 @@ mod tests {
         bundles: std::sync::Mutex<Vec<ActiveSurfaceBundle>>,
         assets: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
         surface_calls: std::sync::Mutex<Vec<Option<String>>>,
+        surface_namespaces: std::sync::Mutex<Vec<Option<String>>>,
         asset_calls: std::sync::Mutex<Vec<String>>,
         idx: std::sync::Mutex<usize>,
     }
@@ -431,6 +474,7 @@ mod tests {
                 bundles: std::sync::Mutex::new(bundles),
                 assets: std::sync::Mutex::new(Default::default()),
                 surface_calls: std::sync::Mutex::new(Vec::new()),
+                surface_namespaces: std::sync::Mutex::new(Vec::new()),
                 asset_calls: std::sync::Mutex::new(Vec::new()),
                 idx: std::sync::Mutex::new(0),
             }
@@ -475,6 +519,19 @@ mod tests {
                 }
             }
             Ok(SurfaceFetch::Bundle(next))
+        }
+
+        async fn active_surfaces_with_namespace(
+            &self,
+            token: &str,
+            etag: Option<&str>,
+            namespace: Option<&str>,
+        ) -> Result<SurfaceFetch, ClientError> {
+            self.surface_namespaces
+                .lock()
+                .unwrap()
+                .push(namespace.map(str::to_string));
+            self.active_surfaces(token, etag).await
         }
 
         async fn fetch_asset(
@@ -703,6 +760,72 @@ mod tests {
         assert!(got.is_some());
         assert_eq!(got.as_ref().unwrap().etag, "etag-2");
         assert_eq!(cache.read_meta().etag, "etag-2");
+    }
+
+    #[tokio::test]
+    async fn refresh_forwards_the_active_namespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = SurfaceCache::new(tmp.path(), "vault-a");
+        let backend = StubBackend::new(vec![bundle_with("self-accounts", "etag-tenant")]);
+
+        let bundle = refresh_with_namespace(&backend, &cache, "tok", Some("dti/esi"))
+            .await
+            .unwrap();
+
+        assert_eq!(bundle.etag, "etag-tenant");
+        assert_eq!(
+            backend.surface_namespaces.lock().unwrap().as_slice(),
+            &[Some("dti/esi".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn namespace_watch_preserves_a_legacy_watch_override() {
+        struct LegacyWatchBackend {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait]
+        impl Backend for LegacyWatchBackend {
+            async fn handle(
+                &self,
+                _op: Operation,
+                _path: &str,
+                _body: Option<Map<String, Value>>,
+                _token: &str,
+            ) -> Result<Option<JsonResponse>, ClientError> {
+                unimplemented!("stub doesn't dispatch logical requests")
+            }
+
+            async fn active_surfaces(
+                &self,
+                _token: &str,
+                _etag: Option<&str>,
+            ) -> Result<SurfaceFetch, ClientError> {
+                panic!("the namespaced watch adapter must preserve the legacy watch override")
+            }
+
+            async fn watch_active_surfaces(
+                &self,
+                _token: &str,
+                _etag: Option<&str>,
+            ) -> Result<SurfaceFetch, ClientError> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(SurfaceFetch::Bundle(bundle_with("self-accounts", "watch-etag")))
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = SurfaceCache::new(tmp.path(), "vault-a");
+        let backend = LegacyWatchBackend { calls: std::sync::atomic::AtomicUsize::new(0) };
+
+        let bundle = watch_once_with_namespace(&backend, &cache, "tok", Some("dti/esi"))
+            .await
+            .unwrap()
+            .expect("legacy watch override returned a changed bundle");
+
+        assert_eq!(bundle.etag, "watch-etag");
+        assert_eq!(backend.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

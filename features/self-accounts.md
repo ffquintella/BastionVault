@@ -77,7 +77,7 @@ GUI only, like the rest of Resource Connect.
 
 ## Current State
 
-**Status: In progress (2026-10-09). All five phases are implemented apart from the items listed under each: the host substrate (1), the plugin (2), Connect integration on the server (3) and in the GUI and desktop host (4), and hardening and UX (5: the first-use badge, preselection of the account last used on the target, per-user counts for administrators, an audited and retried entity purge, and the operator guide `docs/self-accounts.md`). The signed plugin bundle now carries its management surface through the normal GUI registration flow. The feature stays in progress until the review gate closes: the L4 `make test-release` run, the manual per-platform checks against real SSH / RDP / web / Rustion targets (none run yet), and the security-review sign-off.**
+**Status: In progress (2026-10-09). All five phases are implemented apart from the items listed under each: the host substrate (1), the plugin (2), Connect integration on the server (3) and in the GUI and desktop host (4), and hardening and UX (5: the first-use badge, preselection of the account last used on the target, per-user counts for administrators, an audited and retried entity purge, and the operator guide `docs/self-accounts.md`). The signed plugin bundle now carries its management surface through the normal GUI registration flow; discovery and binding dispatch resolve its mount in the active namespace and fail visibly without issuing requests when that mount is absent or ambiguous. The feature stays in progress until the review gate closes: the L4 `make test-release` run, the manual per-platform checks against real SSH / RDP / web / Rustion targets (none run yet), and the security-review sign-off.**
 
 | Phase | Status |
 |---|---|
@@ -593,6 +593,13 @@ Fields for secrets submit write-preserve: an empty value on edit means
 
 The **My Profile** page (features/self-service-profile.md) gets a link to *My
 accounts* when the provider is active and granted. It shows nothing else.
+
+The host resolves `{mount}` from the active namespace on discovery and uses
+that same namespace for every surface binding. Exactly one mount of the plugin
+must exist there. With none (or more than one), the page shows an actionable
+mount message and does not dispatch a guessed path. Transport or watcher
+errors remain visible without remounting the component tree and retrying the
+failed binding in a tight loop.
 
 ### 8. Policy
 

@@ -107,10 +107,36 @@ pub async fn plugin_surfaces_refresh<R: Runtime>(
     let cache = resolve_cache(&app, &state).await?;
     let backend = current_backend(&state).await?;
     let token = current_token(&state).await;
-    let bundle = bv_client::refresh(&*backend, &cache, &token).await.map_err(CommandError::from)?;
+    let (namespace, namespace_generation) = {
+        let namespace = state.active_namespace.lock().await;
+        (
+            namespace.clone(),
+            state.active_namespace_generation.load(std::sync::atomic::Ordering::Acquire),
+        )
+    };
+    let bundle = bv_client::fetch_with_namespace(&*backend, &cache, &token, namespace.as_deref())
+        .await
+        .map_err(CommandError::from)?;
+    let namespace_guard = state.active_namespace.lock().await;
+    if *namespace_guard != namespace
+        || state.active_namespace_generation.load(std::sync::atomic::Ordering::Acquire) != namespace_generation
+    {
+        return Err(CommandError::from("active namespace changed while plugin surfaces were loading"));
+    }
+    let _ = cache.write_bundle(&bundle);
     // Extensibility v2: (re)instantiate app modules to match the fresh
     // bundle and emit their dynamic menus.
-    crate::plugin_apps::sync_from_bundle(&app, &state, &bundle, backend.clone(), &cache, &token).await;
+    crate::plugin_apps::sync_from_bundle(
+        &app,
+        &state,
+        &bundle,
+        backend.clone(),
+        &cache,
+        &token,
+        namespace.clone(),
+    )
+    .await;
+    drop(namespace_guard);
     Ok(PluginSurfacesResult { bundle })
 }
 
@@ -174,14 +200,45 @@ pub async fn plugin_surface_watch_tick<R: Runtime>(
     let cache = resolve_cache(&app, &state).await?;
     let backend = current_backend(&state).await?;
     let token = current_token(&state).await;
-    let new_bundle = bv_client::watch_once(&*backend, &cache, &token).await.map_err(CommandError::from)?;
+    let (namespace, namespace_generation) = {
+        let namespace = state.active_namespace.lock().await;
+        (
+            namespace.clone(),
+            state.active_namespace_generation.load(std::sync::atomic::Ordering::Acquire),
+        )
+    };
+    let new_bundle = bv_client::watch_once_with_namespace_uncommitted(
+        &*backend,
+        &cache,
+        &token,
+        namespace.as_deref(),
+    )
+        .await
+        .map_err(CommandError::from)?;
+    let namespace_guard = state.active_namespace.lock().await;
+    if *namespace_guard != namespace
+        || state.active_namespace_generation.load(std::sync::atomic::Ordering::Acquire) != namespace_generation
+    {
+        return Err(CommandError::from("active namespace changed while plugin surfaces were loading"));
+    }
     // Extensibility v2: on a bundle change, re-sync app modules; every
     // tick, give live modules a chance to run `bvx_tick` (30 s floor).
     if let Some(ref bundle) = new_bundle {
-        crate::plugin_apps::sync_from_bundle(&app, &state, bundle, backend.clone(), &cache, &token).await;
+        let _ = cache.write_bundle(bundle);
+        crate::plugin_apps::sync_from_bundle(
+            &app,
+            &state,
+            bundle,
+            backend.clone(),
+            &cache,
+            &token,
+            namespace.clone(),
+        )
+        .await;
     } else {
         crate::plugin_apps::tick_all(&app, &state).await;
     }
+    drop(namespace_guard);
     Ok(PluginSurfaceWatchResult { updated: new_bundle.is_some(), bundle: new_bundle })
 }
 
@@ -323,6 +380,10 @@ pub async fn plugin_surface_dispatch(
 
     let backend = current_backend(&state).await?;
     let token = current_token(&state).await;
-    let resp = backend.handle(op, &resolved, args.body, &token).await.map_err(CommandError::from)?;
+    let namespace = state.active_namespace.lock().await.clone();
+    let resp = backend
+        .handle_with_namespace(op, &resolved, args.body, &token, namespace.as_deref())
+        .await
+        .map_err(CommandError::from)?;
     Ok(PluginSurfaceDispatchResult { data: resp.and_then(|r| r.data) })
 }

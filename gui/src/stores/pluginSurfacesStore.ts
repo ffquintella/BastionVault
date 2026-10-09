@@ -69,6 +69,8 @@ interface PluginSurfacesState {
 // shouldn't trigger a re-render; the watcher loop reads it on each
 // iteration to decide whether to keep going.
 let watchRunning = false;
+let watchGeneration = 0;
+let refreshGeneration = 0;
 
 export const usePluginSurfacesStore = create<PluginSurfacesState>((set, get) => ({
   bundle: null,
@@ -78,11 +80,14 @@ export const usePluginSurfacesStore = create<PluginSurfacesState>((set, get) => 
   dynamicMenus: [],
 
   async refresh() {
+    const generation = ++refreshGeneration;
     set({ loading: true, error: null });
     try {
       const bundle = await api.pluginSurfacesRefresh();
+      if (generation !== refreshGeneration) return;
       set({ bundle, loading: false, error: null });
     } catch (e) {
+      if (generation !== refreshGeneration) return;
       set({
         loading: false,
         error: e instanceof Error ? e.message : String(e),
@@ -93,17 +98,18 @@ export const usePluginSurfacesStore = create<PluginSurfacesState>((set, get) => 
   startWatch() {
     if (watchRunning) return;
     watchRunning = true;
+    const generation = ++watchGeneration;
     void (async () => {
       // Backoff for transport errors so a flaky network doesn't
       // hammer the server. Resets to zero after every successful
       // tick (whether the bundle changed or not).
       let backoffMs = 0;
       const maxBackoffMs = 60_000;
-      while (watchRunning) {
+      while (watchRunning && generation === watchGeneration) {
         try {
           const tick = await api.pluginSurfaceWatchTick();
           backoffMs = 0;
-          if (!watchRunning) break;
+          if (!watchRunning || generation !== watchGeneration) break;
           if (tick.updated && tick.bundle) {
             const prev = get().bundle;
             const prevByPlugin = new Map(
@@ -119,6 +125,7 @@ export const usePluginSurfacesStore = create<PluginSurfacesState>((set, get) => 
             });
           }
         } catch (e) {
+          if (!watchRunning || generation !== watchGeneration) break;
           // Don't spam the console on every failed tick; surface
           // through `error` so the GUI can render an unobtrusive
           // hint if it wants to.
@@ -134,10 +141,13 @@ export const usePluginSurfacesStore = create<PluginSurfacesState>((set, get) => 
 
   stopWatch() {
     watchRunning = false;
+    watchGeneration += 1;
   },
 
   clear() {
     watchRunning = false;
+    watchGeneration += 1;
+    refreshGeneration += 1;
     set({
       bundle: null,
       loading: false,

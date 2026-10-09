@@ -66,6 +66,19 @@ pub trait Backend: Send + Sync {
         }))
     }
 
+    /// Namespace-scoped variant of [`Backend::active_surfaces`]. The default
+    /// keeps existing backends source-compatible and delegates to the
+    /// deployment-wide method; remote backends override it to send the active
+    /// namespace header.
+    async fn active_surfaces_with_namespace(
+        &self,
+        token: &str,
+        etag: Option<&str>,
+        _namespace: Option<&str>,
+    ) -> Result<SurfaceFetch, ClientError> {
+        self.active_surfaces(token, etag).await
+    }
+
     /// Plugin Extensibility v1 / Phase 5 — long-poll variant of
     /// `active_surfaces`. The remote server upgrades to a `?watch=1`
     /// request that returns when the aggregate ETag changes (or
@@ -79,6 +92,17 @@ pub trait Backend: Send + Sync {
         etag: Option<&str>,
     ) -> Result<SurfaceFetch, ClientError> {
         self.active_surfaces(token, etag).await
+    }
+
+    /// Namespace-scoped long poll. Existing backends degrade to the scoped
+    /// non-watch fetch; remote backends preserve the server's long-poll path.
+    async fn watch_active_surfaces_with_namespace(
+        &self,
+        token: &str,
+        etag: Option<&str>,
+        _namespace: Option<&str>,
+    ) -> Result<SurfaceFetch, ClientError> {
+        self.watch_active_surfaces(token, etag).await
     }
 
     /// Plugin Extensibility v1 — download a single client asset by

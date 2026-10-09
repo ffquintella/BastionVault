@@ -1014,6 +1014,7 @@ pub async fn sync_from_bundle<R: Runtime>(
     backend: Arc<dyn Backend>,
     cache: &SurfaceCache,
     token: &str,
+    namespace: Option<String>,
 ) {
     use std::collections::HashSet;
 
@@ -1021,9 +1022,6 @@ pub async fn sync_from_bundle<R: Runtime>(
     let desired: Vec<&bv_plugin_surface::ActiveSurfaceEntry> =
         bundle.entries.iter().filter(|e| e.app_module.is_some()).collect();
     let desired_names: HashSet<&str> = desired.iter().map(|e| e.plugin.as_str()).collect();
-
-    // Session context every app module's api/net imports ride.
-    let namespace = state.active_namespace.lock().await.clone();
 
     // Snapshot current instances (brief lock) to decide what to rebuild.
     let current: Vec<(String, String)> = {

@@ -204,6 +204,9 @@ pub async fn logout(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdRes
     // place: the next login silently lands back in that namespace, and the
     // only recovery is a full app restart (which drops the AppState).
     *state.active_namespace.lock().await = None;
+    state
+        .active_namespace_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
     // Extensibility v2: drop app-module instances + their windows.
     crate::plugin_apps::teardown_all(&app, &state).await;
     Ok(())

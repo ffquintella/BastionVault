@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::{IpAddr, ToSocketAddrs},
     sync::Arc,
     time::{Duration, Instant},
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::kernel_api::VaultCtx;
+use crate::kernel_api::{mount::MountsRouter, VaultCtx};
 use crate::{
     authz::{sys_route, Authorized, SysAuditCtx},
     core::{Core, SealConfig},
@@ -3151,12 +3151,10 @@ async fn sys_plugins_active_surfaces_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
-        // Mount lookup is wired in Phase 1 with a placeholder (empty
-        // string) — the GUI tolerates an empty mount because it only
-        // resolves bindings client-side. A future Phase 1 follow-up
-        // will inject the actual mount registry here.
+        let mounts_router = plugin_surface_mount_router(&req, &core).await?;
+        let mounts = active_plugin_mounts(&mounts_router)?;
         let mut bundle = catalog
-            .aggregated_active_surfaces(core.barrier().as_storage(), |_| None)
+            .aggregated_active_surfaces(core.barrier().as_storage(), |plugin| mounts.get(plugin).cloned())
             .await?;
 
         if watch_requested && if_none_match.as_deref() == Some(bundle.etag.as_str()) {
@@ -3171,8 +3169,9 @@ async fn sys_plugins_active_surfaces_handler(
             let poll_interval = std::time::Duration::from_millis(2000);
             while started.elapsed() < max_wait {
                 tokio::time::sleep(poll_interval).await;
+                let mounts = active_plugin_mounts(&mounts_router)?;
                 let next = catalog
-                    .aggregated_active_surfaces(core.barrier().as_storage(), |_| None)
+                    .aggregated_active_surfaces(core.barrier().as_storage(), |plugin| mounts.get(plugin).cloned())
                     .await?;
                 if next.etag != bundle.etag {
                     bundle = next;
@@ -3194,6 +3193,72 @@ async fn sys_plugins_active_surfaces_handler(
     .await;
     audit.finish(&result).await;
     result
+}
+
+/// Resolve the mount table selected by the request's namespace header.
+///
+/// Plugin registrations and their surface manifests are deployment-wide, but
+/// plugin engine mounts are namespace-local. Falling back to the root mount
+/// table for an unknown child namespace would expose the wrong binding path,
+/// so any explicit namespace must resolve successfully.
+async fn plugin_surface_mount_router(req: &HttpRequest, core: &Core) -> Result<Arc<MountsRouter>, RvError> {
+    let Some(raw_header) = req.headers().get("x-bastionvault-namespace") else {
+        return Ok(core.mounts_router());
+    };
+    let raw = raw_header
+        .to_str()
+        .map_err(|_| {
+            RvError::ErrResponseStatus(400, "X-BastionVault-Namespace must be valid UTF-8".to_string())
+        })?
+        .trim();
+    if raw.is_empty() {
+        return Ok(core.mounts_router());
+    }
+
+    let namespaces = core.namespaces().ok_or_else(|| {
+        RvError::ErrResponseStatus(404, format!("namespace support is unavailable; cannot resolve {raw:?}"))
+    })?;
+    let namespace = namespaces
+        .resolve(raw)
+        .await?
+        .ok_or_else(|| RvError::ErrResponseStatus(404, format!("no such namespace: {raw:?}")))?;
+    namespaces.ensure_router(&namespace.uuid, &namespace.path).await
+}
+
+/// Read one unambiguous mount path per active plugin from a namespace router.
+/// A plugin mounted more than once is deliberately omitted: a surface binding
+/// has only one `{mount}` slot, so selecting either instance would be an
+/// implicit and potentially cross-tenant choice.
+fn active_plugin_mounts(router: &MountsRouter) -> Result<HashMap<String, String>, RvError> {
+    let entries = router.mounts.entries.read()?;
+    let mut paths = Vec::with_capacity(entries.len());
+    for entry in entries.values() {
+        let entry = entry.read()?;
+        paths.push((entry.logical_type.clone(), entry.path.clone()));
+    }
+    Ok(plugin_surface_mount_map(
+        paths.iter().map(|(logical_type, path)| (logical_type.as_str(), path.as_str())),
+    ))
+}
+
+fn plugin_surface_mount_map<'a>(
+    entries: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> HashMap<String, String> {
+    let mut mounts = HashMap::new();
+    let mut ambiguous = HashSet::new();
+    for (logical_type, path) in entries {
+        let Some(plugin) = logical_type.strip_prefix("plugin:") else {
+            continue;
+        };
+        if ambiguous.contains(plugin) {
+            continue;
+        }
+        if mounts.insert(plugin.to_string(), path.to_string()).is_some() {
+            mounts.remove(plugin);
+            ambiguous.insert(plugin.to_string());
+        }
+    }
+    mounts
 }
 
 async fn sys_plugins_asset_get_handler(
@@ -4276,6 +4341,97 @@ const fn default_plugin_register_body_limit() -> usize {
 /// matches the register / logical / batch limits.
 const fn default_plugin_invoke_body_limit() -> usize {
     32 * 1024 * 1024
+}
+
+#[cfg(test)]
+mod plugin_surface_mount_tests {
+    use actix_web::test::TestRequest;
+    use serde_json::json;
+
+    use super::{active_plugin_mounts, plugin_surface_mount_map, plugin_surface_mount_router};
+    use crate::test_utils::TestHttpServer;
+
+    #[test]
+    fn plugin_surface_mounts_use_the_registered_plugin_path() {
+        let mounts = plugin_surface_mount_map([
+            ("kv", "secret/"),
+            ("plugin:self-accounts", "my-accounts/"),
+            ("plugin:totp", "one-time-passwords/"),
+        ]);
+
+        assert_eq!(mounts.get("self-accounts").map(String::as_str), Some("my-accounts/"));
+        assert_eq!(mounts.get("totp").map(String::as_str), Some("one-time-passwords/"));
+        assert!(!mounts.contains_key("kv"));
+    }
+
+    #[test]
+    fn duplicate_plugin_mounts_are_omitted_instead_of_guessed() {
+        let mounts = plugin_surface_mount_map([
+            ("plugin:self-accounts", "team-a-accounts/"),
+            ("plugin:self-accounts", "team-b-accounts/"),
+        ]);
+
+        assert!(!mounts.contains_key("self-accounts"));
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn request_namespace_selects_its_mount_instead_of_roots() {
+        let mut server = TestHttpServer::new("test_plugin_surface_namespace_mount", true).await;
+        server.token = server.root_token.clone();
+        let root = server.root_token.clone();
+
+        let (status, response) = server.mount("root-accounts", "plugin:self-accounts").unwrap();
+        assert!(status == 200 || status == 204, "root plugin mount failed: {status} {response:?}");
+        let (status, response) = server
+            .request(
+                "POST",
+                "sys/namespaces/tenant-a",
+                json!({}).as_object().cloned(),
+                Some(&root),
+                None,
+            )
+            .unwrap();
+        assert!(status == 200 || status == 204, "namespace create failed: {status} {response:?}");
+        let (status, response) = server
+            .request_with_headers(
+                "POST",
+                "sys/mounts/tenant-accounts",
+                json!({ "type": "plugin:self-accounts" }).as_object().cloned(),
+                Some(&root),
+                None,
+                &[("X-BastionVault-Namespace", "tenant-a")],
+            )
+            .unwrap();
+        assert!(status == 200 || status == 204, "tenant plugin mount failed: {status} {response:?}");
+
+        let request = TestRequest::default()
+            .insert_header(("X-BastionVault-Namespace", "tenant-a"))
+            .to_http_request();
+        let router = plugin_surface_mount_router(&request, &server.core).await.unwrap();
+        let mounts = active_plugin_mounts(&router).unwrap();
+        assert_eq!(mounts.get("self-accounts").map(String::as_str), Some("tenant-accounts/"));
+        assert_ne!(mounts.get("self-accounts").map(String::as_str), Some("root-accounts/"));
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn unknown_namespace_does_not_fall_back_to_root_mounts() {
+        let mut server = TestHttpServer::new("test_plugin_surface_unknown_namespace", true).await;
+        server.token = server.root_token.clone();
+        let (status, response) = server.mount("root-accounts", "plugin:self-accounts").unwrap();
+        assert!(status == 200 || status == 204, "root plugin mount failed: {status} {response:?}");
+
+        let request = TestRequest::default()
+            .insert_header(("X-BastionVault-Namespace", "missing-tenant"))
+            .to_http_request();
+        let error = match plugin_surface_mount_router(&request, &server.core).await {
+            Ok(_) => panic!("unknown namespace must not receive the root mount table"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, crate::errors::RvError::ErrResponseStatus(404, _)),
+            "unknown namespace should be a 404, got {error:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -5530,4 +5686,3 @@ mod exchange_export_route_tests {
         );
     }
 }
-

@@ -195,8 +195,10 @@ export function Layout({ children }: LayoutProps) {
   // the store stays empty and the sidebar slots render nothing.
   const refreshPluginSurfaces = usePluginSurfacesStore((s) => s.refresh);
   const startWatchPluginSurfaces = usePluginSurfacesStore((s) => s.startWatch);
+  const stopWatchPluginSurfaces = usePluginSurfacesStore((s) => s.stopWatch);
   const clearPluginSurfaces = usePluginSurfacesStore((s) => s.clear);
   useEffect(() => {
+    stopWatchPluginSurfaces();
     if (!isAuthenticated) {
       clearPluginSurfaces();
       return;
@@ -212,7 +214,9 @@ export function Layout({ children }: LayoutProps) {
     isAuthenticated,
     refreshPluginSurfaces,
     startWatchPluginSurfaces,
+    stopWatchPluginSurfaces,
     clearPluginSurfaces,
+    activeNamespace,
   ]);
 
   // Plugin App Extensions v2 (Phase 2): the Tauri backend pushes the

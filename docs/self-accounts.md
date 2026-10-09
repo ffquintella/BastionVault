@@ -72,11 +72,21 @@ continue to register normally, but do not contribute a management page.
 
 The plugin is mounted like an engine, with type `plugin:self-accounts`, at `self-accounts/` by convention:
 
+In the GUI, open **Admin → Mounts → Secret Engines**, choose **Mount Engine**,
+set **Path** to `self-accounts/`, and select
+**self-accounts v0.1.1 (plugin · secret)** under **Engine Type**. The table on
+that page lists engines that are already mounted; the plugin appears in the
+**Engine Type** selector before it appears in the table. Mount it once in each
+namespace whose operators use the management page.
+
 ~~~bash
 bvault write sys/mounts/self-accounts type=plugin:self-accounts
 ~~~
 
 All its paths are `v2/` under the mount, for example `self-accounts/v2/accounts`.
+The management surface resolves that mount from the currently selected
+namespace. If it is absent, or the plugin is mounted more than once there, the
+page asks the administrator to fix the mount and sends no account requests.
 
 ### 2.5 Approve the credential provider
 
