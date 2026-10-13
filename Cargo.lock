@@ -1021,7 +1021,7 @@ dependencies = [
 
 [[package]]
 name = "bastion-vault-gui"
-version = "0.44.32"
+version = "0.44.33"
 dependencies = [
  "arboard",
  "argon2 0.5.3",
@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "bastion_vault"
-version = "0.44.32"
+version = "0.44.33"
 dependencies = [
  "actix-rt",
  "anyhow",
@@ -1132,6 +1132,7 @@ dependencies = [
  "bv-kernel",
  "bv-kernel-api",
  "bv-logical",
+ "bv-mcp",
  "bv-metrics",
  "bv-server",
  "bv-shamir",
@@ -2270,7 +2271,7 @@ dependencies = [
 
 [[package]]
 name = "bv-mcp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2280,6 +2281,7 @@ dependencies = [
  "bv-logical",
  "bv_crypto",
  "hex",
+ "libc",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -2323,11 +2325,9 @@ dependencies = [
  "actix-rt",
  "actix-tls",
  "actix-web",
- "async-trait",
  "base64 0.22.1",
  "bastion_vault",
  "blake3",
- "bv-client",
  "bv-mcp",
  "bv-metrics",
  "bv-server",
@@ -2478,7 +2478,7 @@ dependencies = [
 
 [[package]]
 name = "bvault-cli"
-version = "0.44.32"
+version = "0.44.33"
 dependencies = [
  "actix-rt",
  "actix-web",
@@ -2504,7 +2504,6 @@ dependencies = [
  "httparse",
  "humantime",
  "lazy_static",
- "libc",
  "log",
  "maybe-async",
  "prettytable",

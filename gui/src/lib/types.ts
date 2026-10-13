@@ -2347,6 +2347,76 @@ export interface McpCatalogue {
   tools: McpCatalogueTool[];
 }
 
+/** The AI-assistant server this app hosts (Settings → AI Assistants). */
+export interface McpServerStatus {
+  /** This platform can host it (Unix domain sockets). */
+  supported: boolean;
+  /** Saved switch: serve whenever a (non-root) session is unlocked. */
+  enabled: boolean;
+  running: boolean;
+  socket_path: string | null;
+  started_at: number | null;
+  /** Why it last stopped or failed to start. Never carries a token. */
+  last_error: string | null;
+}
+
+/** How an assistant is pointed at this app. No secret in any of it. */
+export interface McpClientSetup {
+  binary_path: string;
+  socket_path: string;
+  claude_code_command: string;
+  claude_desktop_config: string;
+}
+
+/** A local client asking to be paired, shown in the consent dialog. */
+export interface McpPairingPrompt {
+  kind: "pairing";
+  id: string;
+  client_name: string;
+  client_version: string;
+  transport: string;
+  peer_uid: number | null;
+  /** The kernel confirmed it runs as the same OS user as this app. */
+  same_user: boolean;
+  /** The vault this session is signed in to (remote address, or local). */
+  vault: string;
+  deadline_unix_ms: number;
+  default_tools: string[];
+  default_ttl_secs: number;
+  max_ttl_secs: number;
+}
+
+/** A paired client's call that needs the operator's yes. */
+export interface McpConfirmPrompt {
+  kind: "confirm";
+  id: string;
+  client_name: string;
+  tool: string;
+  tool_description: string;
+  /** What the call touches (mount, path, key…), never a value it carries. */
+  summary: string;
+  reveals: boolean;
+  destructive: boolean;
+  deadline_unix_ms: number;
+}
+
+export type McpPrompt = McpPairingPrompt | McpConfirmPrompt;
+
+/** The scope an operator grants when approving a pairing. */
+export interface McpGrantInput {
+  tool_allowlist: string[];
+  path_scope: string[];
+  reveal_allowed: boolean;
+  destructive_allowed: boolean;
+  confirm_reveal: boolean;
+  confirm_destructive: boolean;
+  ttl_secs: number;
+}
+
+export type McpPromptAnswer =
+  | { kind: "pairing"; approved: boolean; grant?: McpGrantInput }
+  | { kind: "confirm"; allow: boolean };
+
 /** A client the operator approved on this workstation. Carries no secret. */
 export interface McpPairing {
   id: string;

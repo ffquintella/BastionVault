@@ -15,9 +15,10 @@ use derive_more::Deref;
 use serde_json::{json, Map, Value};
 use sysexits::ExitCode;
 
+use bv_mcp::local::{build_record, vault_error_text, LocalServer, PairingDecision, PairingRequest, Prompter};
+
 use super::mcp_serve::{
-    self, bind_http, build_record, delete_status, parse_loopback_addr, serve_stdio, vault_error_text, HttpConfig,
-    HttpVaultLink, LocalServer, PairingDecision, PairingRequest, Prompter, TtyPrompter, HTTP_PATH,
+    self, bind_http, delete_status, parse_loopback_addr, serve_stdio, HttpConfig, HttpVaultLink, TtyPrompter, HTTP_PATH,
 };
 use crate::{bv_error_string, command, command::CommandExecutor, errors::RvError, EXIT_CODE_INSUFFICIENT_PARAMS};
 
@@ -178,8 +179,10 @@ impl CommandExecutor for Serve {
             ));
         }
         let store = pairing_store(&self.pairings_file)?;
-        let server =
-            Arc::new(LocalServer::new(Box::new(HttpVaultLink::new(client)), Box::new(TtyPrompter::default()), store));
+        let server = Arc::new(
+            LocalServer::new(Box::new(HttpVaultLink::new(client)), Box::new(TtyPrompter::default()), store)
+                .with_server_version(env!("CARGO_PKG_VERSION")),
+        );
 
         if let Some(addr) = self.listen {
             let bound = bind_http(addr)?;
@@ -546,10 +549,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{
-        command::mcp_serve::{ConfirmRequest, ConnInfo, PairingGrant},
-        test_utils::TestHttpServer,
-    };
+    use bv_mcp::local::{ConfirmRequest, ConnInfo, PairingGrant};
+
+    use crate::test_utils::TestHttpServer;
 
     // ── command line ─────────────────────────────────────────────────────
 

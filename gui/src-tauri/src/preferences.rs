@@ -137,6 +137,16 @@ fn default_local_storage_kind() -> String {
     "file".to_string()
 }
 
+/// The desktop app's local MCP server (features/mcp-access.md Phase 5,
+/// T131). Off unless the operator turns it on; absent in files written
+/// before it existed, which load as off.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct McpLocalServerPrefs {
+    /// Serve AI assistants whenever a (non-root) vault session is unlocked.
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[derive(Default)]
 pub struct Preferences {
@@ -155,6 +165,9 @@ pub struct Preferences {
     /// the Session Workspace; those load as the defaults.
     #[serde(default)]
     pub session_workspace: SessionWorkspacePrefs,
+    /// The local MCP server's switch (T131). Absent in older files: off.
+    #[serde(default)]
+    pub mcp_local_server: McpLocalServerPrefs,
 
     // ── Legacy fields (pre-multi-vault preferences) ───────────────
     //
@@ -277,6 +290,23 @@ pub fn save(prefs: &Preferences) -> Result<(), CommandError> {
         .map_err(|e| CommandError::from(format!("Failed to serialize preferences: {e}")))?;
     std::fs::write(&path, data)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod mcp_local_server_prefs_tests {
+    use super::Preferences;
+
+    /// A preferences file written before T131 has no `mcp_local_server`
+    /// key; it loads with the server off, and the switch round-trips.
+    #[test]
+    fn the_server_is_off_unless_turned_on() {
+        let old: Preferences = serde_json::from_str(r#"{ "vaults": [], "last_used_id": null }"#).unwrap();
+        assert!(!old.mcp_local_server.enabled);
+        let mut prefs = old;
+        prefs.mcp_local_server.enabled = true;
+        let back: Preferences = serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
+        assert!(back.mcp_local_server.enabled);
+    }
 }
 
 #[cfg(test)]

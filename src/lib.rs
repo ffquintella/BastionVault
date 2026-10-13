@@ -52,6 +52,9 @@ pub mod api;
 pub mod audit;
 pub mod backup;
 pub mod exchange;
+/// `POST /v2/mcp`'s JSON-RPC handling with no HTTP in it: shared by
+/// `bv-server`'s route and the desktop app's embedded-vault MCP host.
+pub mod mcp_endpoint;
 pub mod plugins;
 pub mod scheduled_exports;
 /// Moved to the Tier 0 `bv-context` crate. Not in the roadmap's Tier 0 list,

@@ -10,8 +10,8 @@ There are two ways in, and they are deliberately different:
 | | **Local** — an assistant on your workstation | **Network** — an application calling the vault |
 |---|---|---|
 | Who acts | You, narrowed to a scope you approve per client | An *MCP app*: an AppID role plus an admin-set tool list and path scope |
-| Entry point | `bvault mcp serve` (stdio, Unix socket or loopback HTTP) | `POST /v2/mcp` on the vault |
-| Human in the loop | Pairing approval, and per-call confirmation for reveals and writes | None at call time; reveal and writes default off |
+| Entry point | The desktop app (`--mcp-stdio`), or `bvault mcp serve` (stdio, Unix socket or loopback HTTP) | `POST /v2/mcp` on the vault |
+| Human in the loop | Pairing approval, and per-call confirmation for reveals and writes — a dialog in the app, or a terminal prompt | None at call time; reveal and writes default off |
 | Token | Minted from your login, held in memory only | Exchanged from the app's AppID login |
 
 In both cases the client holds an **MCP-bound token**. It works against
@@ -122,7 +122,96 @@ to `POST /v2/mcp` (JSON-RPC, MCP revision 2026-07-28). Tokens last an hour by
 default and at most 24; revoke from Admin → MCP Apps → Tokens or
 `DELETE /v2/sys/mcp/tokens/<accessor>`.
 
-## Connecting a local assistant
+## Connecting a local assistant through the desktop app
+
+No `bvault` CLI is needed: the desktop app runs the local server itself, and
+the assistant reaches it by launching the app's own binary.
+
+1. In BastionVault, unlock your vault and **sign in as a regular user**. The
+   server does not run under a root token, because the vault never mints an
+   MCP token from one. A freshly initialised local vault signs you in as root,
+   so first create a user (Admin → Users) whose policy grants `update` on
+   `sys/mcp/token` and read on what the assistant should see:
+
+   ```hcl
+   path "sys/mcp/token"        { capabilities = ["update"] }
+   path "sys/mcp/pairings/*"   { capabilities = ["delete"] }   # to revoke from Settings
+   path "secret/metadata/ai/*" { capabilities = ["read", "list"] }
+   ```
+
+2. Settings → AI Assistants → **Serve AI assistants** → **Turn on**. The switch
+   is remembered: from then on the server starts when you sign in, and it stops
+   when you lock the vault, sign out, switch or reconnect vaults, forgetting
+   every token it minted. Turning it off also revokes those tokens on the vault where your
+   session may (`delete` on `sys/mcp/tokens/*`); otherwise they die with your
+   session at sign-out, or expire.
+3. Point the assistant at the app. Settings shows both snippets with this
+   machine's path filled in, ready to copy. Claude Code:
+
+   ```bash
+   claude mcp add bastionvault -s user -- /Applications/BastionVault.app/Contents/MacOS/bastion-vault-gui --mcp-stdio
+   ```
+
+   Claude Desktop (`claude_desktop_config.json`):
+
+   ```json
+   {
+     "mcpServers": {
+       "bastionvault": {
+         "command": "/Applications/BastionVault.app/Contents/MacOS/bastion-vault-gui",
+         "args": ["--mcp-stdio"]
+       }
+     }
+   }
+   ```
+
+   Nothing secret goes into either: no token, no address.
+4. The first time the assistant connects, the app shows **Approve an AI
+   assistant?** with the client's name and version, the vault you are signed in
+   to, and whether the kernel confirmed it runs as your user. Choose the tools (preselected: the read-only
+   ones that never reveal a value), the path scope (required), whether it may
+   reveal values or make changes, whether to confirm each such call (on by
+   default), and the token lifetime. **Deny**, closing the dialog, or no answer
+   within 3 minutes refuses it. An assistant that gave up waiting reconnects and
+   finds the approval recorded. An approval belongs to the assistant on this
+   computer, not to the vault: signed in to another vault later, the app serves
+   it without asking again, limited by that session's own policies. Revoke it
+   under *Paired assistants* if that is not what you want.
+5. A paired assistant's reveal or write, when you asked to confirm it, shows
+   **Allow this AI-assistant call?** naming the tool and what it touches (mount,
+   path, key — never a value). Deny is the default; no answer within 90 seconds
+   refuses the call.
+
+How it fits together: `--mcp-stdio` starts no window. It connects to the app's
+socket — `mcp-gui.sock` beside the pairing store (`$XDG_CONFIG_HOME/bvault/`,
+else `~/.config/bvault/`), 0600 in a 0700 directory — refuses one served by
+any other user, and relays stdin and stdout. The app checks the relay's uid
+before it reads a byte, answers the MCP `initialize` handshake, and mints
+MCP-bound tokens from your session. Against a remote vault it makes the same two
+calls `bvault mcp serve` makes (`POST /v2/mcp/token`, `POST /v2/mcp`), so the
+server's `mcp { enabled = true }` and TLS rules apply. Against the embedded vault
+the same exchange and the same `/v2/mcp` handling run in process; the Settings
+switch is the only enablement there is. Pairings are the records `bvault mcp`
+keeps (transport `uds`, your uid), listed and revocable under *Paired
+assistants*. Only the main window can turn the server on or answer a request.
+
+When the relay cannot connect it writes the reason to stderr (stdout is the MCP
+channel) and exits non-zero, so the assistant reports a failed server:
+
+| Exit | Meaning |
+|---|---|
+| 69 | The app is not running, its server is off, or the vault is locked — nothing is listening on the socket |
+| 75 | The app closed the connection: the server was turned off, or the vault was locked or signed out |
+| 77 | The socket is served by another user; not contacted |
+| 64 | Bad arguments (only `--mcp-stdio [--socket <path>]` is accepted) |
+
+If the assistant runs with a different `XDG_CONFIG_HOME` or `HOME` than the app,
+pass the socket path Settings shows: `--mcp-stdio --socket <path>`.
+
+macOS and Linux. On Windows the app reports the server as unsupported (no Unix
+domain sockets in this build); use `bvault mcp serve`.
+
+## Connecting a local assistant with the CLI
 
 1. Sign in: `bvault login`.
 2. Approve the assistant, **at a terminal**:
@@ -246,7 +335,7 @@ endpoint enforcement of `catalogue_pin`, the audit `mcp` enrichment block
 (every `tools/call` is still audited through the normal pipeline), `bvault_mcp_*`
 metrics, per-principal rate limits, a barrier-derived `requestState` key (it is
 process-local, so MRTR confirmations are not shared across an HA cluster or a
-restart), GUI-driven pairing consent (pairing is terminal-only for now), and
+restart), a log of recent local calls in the desktop app, and
 external/enterprise authorization (blocked on the Identity Provider feature).
 
 ## Troubleshooting
@@ -256,7 +345,10 @@ external/enterprise authorization (blocked on the Identity Provider feature).
 | `mcp_requires_tls` | Plaintext listener; use TLS or a loopback listener with `allow_plaintext_loopback` |
 | `mcp_hybrid_kex_unverifiable` | `require_hybrid_kex` is set; it cannot be verified yet |
 | `mcp_machine_identity_required` | No FerroGate identity on the login and no active waiver |
-| `mcp_pairing_requires_operator` | Client not paired and no terminal; run `bvault mcp pair` |
+| `mcp_pairing_requires_operator` | Client not paired and nobody approved it: no terminal (CLI; run `bvault mcp pair`), or the app's dialog was not answered in time, its window was closed or the vault locked |
+| `mcp_server_stopped` | The server stopped while the call was in flight (turned off, lock, sign-out, vault switch); reconnect once it runs |
+| "cannot be served from a root session" | The desktop app refuses to serve under a root token; sign in as a regular user |
+| `--mcp-stdio` exits 69 | The app is not serving: open it, unlock, turn on Settings → AI Assistants |
 | `mcp_client_info_required` | The client sent no `clientInfo`; pairing is matched on it |
 | `mcp_confirmation_denied` | Declined, or needed a confirmation with no terminal to give it |
 | `mcp_token_refused` | Token revoked, expired, or its waiver ended; retry mints a fresh one |

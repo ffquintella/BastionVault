@@ -1,14 +1,16 @@
 //! BastionVault's MCP (Model Context Protocol) dispatcher. See
 //! features/mcp-access.md for the design this crate implements (Phase 1 —
 //! `bv-mcp` core: JSON-RPC types, the read-only tool catalogue, the
-//! `tools/call` gates and result shaping). Deliberately depends on neither
-//! the vault stack nor the official Rust MCP SDK — see that spec's §
-//! Dependencies.
+//! `tools/call` gates and result shaping), plus the local server's
+//! gatekeeper ([`local`]) and pairing store ([`pairing`]) that `bvault mcp`
+//! and the desktop app share. Deliberately depends on neither the vault
+//! stack nor the official Rust MCP SDK — see that spec's § Dependencies.
 
 pub mod catalogue;
 pub mod dispatcher;
 pub mod error;
 pub mod jsonrpc;
+pub mod local;
 pub mod pairing;
 pub mod request_state;
 pub mod sanitize;

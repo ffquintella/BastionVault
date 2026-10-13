@@ -25,6 +25,9 @@ pub async fn get_mode(state: State<'_, AppState>) -> CmdResult<VaultMode> {
 
 #[tauri::command]
 pub async fn set_mode(state: State<'_, AppState>, mode: VaultMode) -> CmdResult<()> {
+    if *state.mode.lock().await != mode {
+        crate::mcp_host::session_ending(None, &state, "switched between the local and a remote vault");
+    }
     *state.mode.lock().await = mode;
     Ok(())
 }
@@ -55,6 +58,9 @@ pub async fn get_remote_profile(state: State<'_, AppState>) -> CmdResult<Option<
 /// behaviour and connects to the address as-is.
 #[tauri::command]
 pub async fn connect_remote(state: State<'_, AppState>, profile: RemoteProfile) -> CmdResult<()> {
+    // A new connection is a new vault: the AI-assistant server never carries
+    // over to it (the session token it was started with belongs elsewhere).
+    crate::mcp_host::session_ending(None, &state, "connected to another vault");
     // Resolve the operator-typed address into a concrete URL the
     // legacy `Client` can dial. This is the only place discovery
     // runs — once we've picked a node, every legacy / bv-client
@@ -551,6 +557,7 @@ fn build_legacy_tls(profile: &RemoteProfile) -> CmdResult<bastion_vault::api::cl
 /// Disconnect from remote server and reset to embedded mode.
 #[tauri::command]
 pub async fn disconnect_remote(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    crate::mcp_host::session_ending(Some(&app), &state, "disconnected from the remote vault");
     *state.mode.lock().await = VaultMode::Embedded;
     *state.remote_client.lock().await = None;
     *state.remote_profile.lock().await = None;

@@ -5,20 +5,27 @@
 //! * **Admin -> MCP Apps** -- the vault-side registry (`sys/mcp/apps`,
 //!   `sys/mcp/tokens`, `sys/mcp/config`). Each command routes through
 //!   `make_request`, so it works against an embedded or a remote vault alike.
-//! * **Settings -> AI Assistants** -- the workstation-side pairing store that
-//!   `bvault mcp` maintains. It is read through `bv_mcp::pairing`, the same
-//!   code and on-disk format the CLI uses, so the two can never disagree about
-//!   what a pairing is. The store holds no tokens, so nothing here can leak
-//!   one; a loopback-HTTP pairing's bearer is stored only as a hash and is not
-//!   even passed to the frontend.
+//! * **Settings -> AI Assistants** -- the local MCP server this app hosts
+//!   (`crate::mcp_host`, T131: its switch, client setup, and the operator's
+//!   answers to its pairing and confirmation prompts), and the
+//!   workstation-side pairing store it shares with `bvault mcp`. The store
+//!   is read through `bv_mcp::pairing`, the same code and on-disk format the
+//!   CLI uses, so the two can never disagree about what a pairing is. It
+//!   holds no tokens, and no command here returns one: a loopback-HTTP
+//!   pairing's bearer is stored only as a hash and is not even passed to the
+//!   frontend, and the server's minted tokens never leave its memory.
 
 use bv_client::Operation;
 use bv_mcp::pairing::{now_secs, PairingStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use tauri::State;
+use tauri::{AppHandle, State, Webview};
 
 use crate::error::CmdResult;
+use crate::mcp_host::{
+    prompter::{reply_for, McpPrompt, McpPromptAnswer},
+    McpClientSetup, McpServerStatus,
+};
 use crate::state::AppState;
 
 use super::make_request;
@@ -329,5 +336,93 @@ pub async fn mcp_revoke_pairing(state: State<'_, AppState>, id: String) -> CmdRe
             record.ttl_secs / 3600
         )
     })?;
+    Ok(())
+}
+
+// ── Settings -> AI Assistants (the local server this app hosts, T131) ──────
+
+/// Whether the app serves AI assistants, where, and the last reason it
+/// stopped or failed.
+#[tauri::command]
+pub async fn mcp_server_status(state: State<'_, AppState>) -> CmdResult<McpServerStatus> {
+    Ok(state.mcp_host.status())
+}
+
+/// The Settings switch. Turning it on starts the server for the session
+/// that is unlocked now -- and is saved only if that succeeds, so a switch
+/// that cannot take effect (no session, a root session) is not left on.
+/// Turning it off stops the server, revokes what it minted where the
+/// session may, and is saved.
+#[tauri::command]
+pub async fn mcp_server_set_enabled(
+    app: AppHandle,
+    webview: Webview,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> CmdResult<McpServerStatus> {
+    main_window_only(&webview)?;
+    if enabled {
+        state.mcp_host.start(&app, &state).await?;
+        crate::mcp_host::set_enabled_preference(true)?;
+    } else {
+        crate::mcp_host::set_enabled_preference(false)?;
+        state.mcp_host.stop_and_revoke(&app, &state).await;
+    }
+    Ok(state.mcp_host.status())
+}
+
+/// Called by the frontend once a session is unlocked: starts the server if
+/// the operator turned it on. Never fails the caller; a reason not to start
+/// is in the returned status.
+#[tauri::command]
+pub async fn mcp_server_autostart(
+    app: AppHandle,
+    webview: Webview,
+    state: State<'_, AppState>,
+) -> CmdResult<McpServerStatus> {
+    main_window_only(&webview)?;
+    Ok(crate::mcp_host::autostart(&app, &state).await)
+}
+
+/// What an assistant is configured with: this binary and `--mcp-stdio`.
+/// Carries no secret -- there is none to carry.
+#[tauri::command]
+pub fn mcp_client_setup() -> CmdResult<McpClientSetup> {
+    let binary = std::env::current_exe().map_err(|e| format!("cannot locate this app's executable: {e}"))?;
+    let socket = crate::mcp_host::default_socket_path()?;
+    Ok(crate::mcp_host::client_setup(&binary, &socket))
+}
+
+/// The pairing or confirmation waiting for an answer, if any -- for a main
+/// window that mounted after the `mcp-prompt` event was sent.
+#[tauri::command]
+pub fn mcp_prompt_pending(webview: Webview, state: State<'_, AppState>) -> CmdResult<Option<McpPrompt>> {
+    main_window_only(&webview)?;
+    Ok(state.mcp_host.prompts().pending())
+}
+
+/// The operator's answer to prompt `id`. Only the main window may answer --
+/// it is the only one the prompt is shown in. An approval whose grant does
+/// not validate is refused here and the prompt stays open for a correction.
+#[tauri::command]
+pub fn mcp_prompt_answer(
+    webview: Webview,
+    state: State<'_, AppState>,
+    id: String,
+    answer: McpPromptAnswer,
+) -> CmdResult<()> {
+    main_window_only(&webview)?;
+    let reply = reply_for(answer)?;
+    state.mcp_host.prompts().answer(&id, reply)?;
+    Ok(())
+}
+
+/// The AI-assistant server is run, and its requests answered, from the main
+/// window only. Plugin windows share the full command set (T110 left them
+/// un-narrowed); this keeps them out of a security decision regardless.
+fn main_window_only(webview: &Webview) -> CmdResult<()> {
+    if webview.label() != "main" {
+        return Err("the AI-assistant server is managed from the main window only".into());
+    }
     Ok(())
 }

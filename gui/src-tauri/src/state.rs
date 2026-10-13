@@ -228,6 +228,10 @@ pub struct AppState {
     /// `app-module` asset arrives; torn down on sign-out / vault-switch /
     /// seal / surface update. See `crate::plugin_apps`.
     pub app_modules: Mutex<HashMap<String, crate::plugin_apps::AppModuleInstance>>,
+    /// The local MCP server for AI assistants (T131, `crate::mcp_host`).
+    /// Off until the operator turns it on; stopped by every command that
+    /// ends the vault session.
+    pub mcp_host: crate::mcp_host::McpHost,
 }
 
 /// Persistent identity of a Rustion-mediated session, captured at
@@ -268,6 +272,7 @@ impl AppState {
             session_close_guard: std::sync::Mutex::new(crate::session::close_guard::CloseGuard::new()),
             plugin_surface_cache: Mutex::new(None),
             app_modules: Mutex::new(HashMap::new()),
+            mcp_host: crate::mcp_host::McpHost::new(),
         }
     }
 }

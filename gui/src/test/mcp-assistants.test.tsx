@@ -1,15 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { ToastProvider } from "../components/ui/Toast";
+import type { McpServerStatus } from "../lib/types";
 
 const mockInvoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
 }));
+const handlers: Record<string, (e: { payload: unknown }) => void> = {};
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: () => Promise.resolve(() => {}),
+  listen: (name: string, cb: (e: { payload: unknown }) => void) => {
+    handlers[name] = cb;
+    return Promise.resolve(() => {});
+  },
   emit: () => Promise.resolve(),
 }));
 
@@ -42,22 +47,60 @@ const PAIRING = {
   expired: false,
 };
 
+const BINARY = "/Applications/BastionVault.app/Contents/MacOS/bastion-vault-gui";
+const SOCKET = "/home/me/.config/bvault/mcp-gui.sock";
+
+const SETUP = {
+  binary_path: BINARY,
+  socket_path: SOCKET,
+  claude_code_command: `claude mcp add bastionvault -s user -- ${BINARY} --mcp-stdio`,
+  claude_desktop_config: JSON.stringify(
+    { mcpServers: { bastionvault: { command: BINARY, args: ["--mcp-stdio"] } } },
+    null,
+    2,
+  ),
+};
+
+const OFF: McpServerStatus = {
+  supported: true,
+  enabled: false,
+  running: false,
+  socket_path: SOCKET,
+  started_at: null,
+  last_error: null,
+};
+const RUNNING: McpServerStatus = { ...OFF, enabled: true, running: true, started_at: NOW };
+
 function calls(cmd: string) {
   return mockInvoke.mock.calls.filter((c) => c[0] === cmd);
 }
 
 describe("McpAssistantsPanel", () => {
   let pairings: unknown[];
+  let status: McpServerStatus;
+  let setEnabled: (args: { enabled: boolean }) => Promise<unknown>;
 
   beforeEach(() => {
     mockInvoke.mockReset();
+    for (const k of Object.keys(handlers)) delete handlers[k];
     pairings = [PAIRING];
-    mockInvoke.mockImplementation((cmd: string) => {
+    status = OFF;
+    setEnabled = ({ enabled }) => {
+      status = enabled ? RUNNING : OFF;
+      return Promise.resolve(status);
+    };
+    mockInvoke.mockImplementation((cmd: string, args?: unknown) => {
       switch (cmd) {
         case "mcp_list_pairings":
           return Promise.resolve(pairings);
         case "mcp_pairings_path":
           return Promise.resolve("/home/me/.config/bvault/mcp-pairings.json");
+        case "mcp_server_status":
+          return Promise.resolve(status);
+        case "mcp_client_setup":
+          return Promise.resolve(SETUP);
+        case "mcp_server_set_enabled":
+          return setEnabled(args as { enabled: boolean });
         case "mcp_revoke_pairing":
           pairings = [];
           return Promise.resolve();
@@ -72,6 +115,13 @@ describe("McpAssistantsPanel", () => {
     renderWithProviders(<McpAssistantsPanel />);
   }
 
+  /** The switch, once the server's status has loaded and it is live. */
+  async function switchButton(name: RegExp) {
+    const button = await screen.findByRole("button", { name });
+    await waitFor(() => expect(button).toBeEnabled());
+    return button;
+  }
+
   it("lists a paired assistant with its scope and switches", async () => {
     await mount();
     expect(await screen.findByText("claude-desktop 1.2.3")).toBeInTheDocument();
@@ -81,19 +131,71 @@ describe("McpAssistantsPanel", () => {
     expect(screen.getByText(/mcp-pairings\.json/)).toBeInTheDocument();
   });
 
-  it("explains that pairing needs a terminal instead of offering to do it", async () => {
+  it("offers no button that approves a client: that happens only in the consent dialog", async () => {
     await mount();
     await screen.findByText("claude-desktop 1.2.3");
-    expect(screen.getByText(/bvault mcp pair --client-name/)).toBeInTheDocument();
     expect(screen.getByText(/refused rather than waved through/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /pair|approve|allow/i })).not.toBeInTheDocument();
   });
 
-  it("shows the client configuration snippets", async () => {
+  it("shows the Claude Code command and Claude Desktop config for this app's own binary, with no secret", async () => {
     await mount();
-    await screen.findByText("claude-desktop 1.2.3");
+    expect(
+      await screen.findByText(`claude mcp add bastionvault -s user -- ${BINARY} --mcp-stdio`),
+    ).toBeInTheDocument();
     expect(screen.getByText(/"mcpServers"/)).toBeInTheDocument();
-    expect(screen.getByText("claude mcp add bastionvault -- bvault mcp serve")).toBeInTheDocument();
+    const text = document.body.textContent ?? "";
+    expect(text).not.toMatch(/VAULT_ADDR|VAULT_TOKEN|"env"/);
+  });
+
+  it("turns the server on and shows it running on its socket", async () => {
+    const user = userEvent.setup();
+    await mount();
+    await user.click(await switchButton(/turn on/i));
+    await waitFor(() => expect(calls("mcp_server_set_enabled")).toHaveLength(1));
+    expect(calls("mcp_server_set_enabled")[0][1]).toEqual({ enabled: true });
+    expect(await screen.findByText("Running")).toBeInTheDocument();
+    expect(screen.getByText(SOCKET)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /turn off/i })).toBeInTheDocument();
+  });
+
+  it("reports a refused start and stays off", async () => {
+    const user = userEvent.setup();
+    setEnabled = () =>
+      Promise.reject({ message: "AI assistants cannot be served from a root session" });
+    await mount();
+    await user.click(await switchButton(/turn on/i));
+    expect(await screen.findByText(/cannot be served from a root session/i)).toBeInTheDocument();
+    expect(screen.getByText("Off")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /turn on/i })).toBeInTheDocument();
+  });
+
+  it("turns a running server off", async () => {
+    const user = userEvent.setup();
+    status = RUNNING;
+    await mount();
+    await user.click(await switchButton(/turn off/i));
+    await waitFor(() => expect(calls("mcp_server_set_enabled")[0][1]).toEqual({ enabled: false }));
+    expect(await screen.findByText("Off")).toBeInTheDocument();
+  });
+
+  it("follows the server when it stops on its own, and says why", async () => {
+    status = RUNNING;
+    await mount();
+    expect(await screen.findByText("Running")).toBeInTheDocument();
+    await waitFor(() => expect(handlers["mcp-server-status"]).toBeDefined());
+    act(() => {
+      handlers["mcp-server-status"]({ payload: { ...RUNNING, running: false, last_error: "stopped: signed out" } });
+    });
+    expect(await screen.findByText("Off")).toBeInTheDocument();
+    expect(screen.getByText("stopped: signed out")).toBeInTheDocument();
+  });
+
+  it("says when this platform cannot host the server", async () => {
+    status = { ...OFF, supported: false };
+    await mount();
+    expect(await screen.findByText(/not supported on this platform/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /turn on/i })).not.toBeInTheDocument();
   });
 
   it("revokes a pairing only after confirmation, then refreshes the list", async () => {
@@ -113,19 +215,16 @@ describe("McpAssistantsPanel", () => {
 
   it("reports a vault-side revocation failure and still refreshes to the local truth", async () => {
     const user = userEvent.setup();
-    mockInvoke.mockImplementation((cmd: string) => {
-      switch (cmd) {
-        case "mcp_list_pairings":
-          return Promise.resolve(pairings);
-        case "mcp_pairings_path":
-          return Promise.resolve("/x/mcp-pairings.json");
-        case "mcp_revoke_pairing":
-          // The local record is gone, but the vault call failed.
-          pairings = [];
-          return Promise.reject({ message: "the pairing is removed from this machine, but the vault did not revoke its tokens" });
-        default:
-          return Promise.resolve({});
+    const base = mockInvoke.getMockImplementation()!;
+    mockInvoke.mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === "mcp_revoke_pairing") {
+        // The local record is gone, but the vault call failed.
+        pairings = [];
+        return Promise.reject({
+          message: "the pairing is removed from this machine, but the vault did not revoke its tokens",
+        });
       }
+      return base(cmd, args);
     });
     await mount();
     await screen.findByText("claude-desktop 1.2.3");
@@ -152,8 +251,9 @@ describe("McpAssistantsPanel", () => {
   it("never asks for, or renders, a token", async () => {
     await mount();
     await screen.findByText("claude-desktop 1.2.3");
+    const read = new Set(["mcp_list_pairings", "mcp_pairings_path", "mcp_server_status", "mcp_client_setup"]);
     const commands = mockInvoke.mock.calls.map((c) => c[0] as string);
-    expect(commands.every((c) => c === "mcp_list_pairings" || c === "mcp_pairings_path")).toBe(true);
+    expect(commands.every((c) => read.has(c))).toBe(true);
     expect(document.body.textContent ?? "").not.toMatch(/bearer\s+[a-f0-9]{16,}/i);
   });
 });

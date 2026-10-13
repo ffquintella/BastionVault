@@ -166,21 +166,27 @@ ordered, and hashed; a change to a tool's description is a release event.
 
 **Status: Mostly shipped.** Phases 1-3 (network mode) landed 2026-09-28;
 Phases 4-6 and 8 (local mode, the GUI, the write tools, docs and hardening)
-landed 2026-09-30. `docs/mcp.md` is the operator guide.
+landed 2026-09-30. On 2026-10-13 the desktop app began hosting the local
+server itself, with pairing-consent and per-call confirmation dialogs, so an
+assistant needs no `bvault` CLI (T131). `docs/mcp.md` is the operator guide.
 
 Deviations from the design below, all deliberate and disclosed:
 
 - **The local server is a gatekeeper and proxy, not a second dispatcher.**
-  `bvault mcp serve` identifies the client, checks the operator approved it,
-  mints a pairing-bound token from the operator's own session, and forwards the
-  JSON-RPC message to the vault's `POST /v2/mcp`. `bv_client::RemoteBackend`
+  It identifies the client, checks the operator approved it, mints a
+  pairing-bound token from the operator's own session, and forwards the
+  JSON-RPC message to the vault's `POST /v2/mcp`. The gatekeeper is
+  `bv_mcp::local`, shared by `bvault mcp serve` and the desktop app; each host
+  supplies only how it reaches the vault (`VaultLink`) and the operator
+  (`Prompter`). `bv_client::RemoteBackend`
   is not involved: an MCP-bound token is refused by every path except
   `/v2/mcp`, so a local dispatcher over ordinary REST paths could not use it.
   The vault's dispatcher remains the single enforcement point.
 - **Per-call confirmation is operator-side, not protocol-level MRTR.** In local
-  mode the server asks the operator on the controlling terminal
-  (`/dev/tty`, never stdin/stdout, which are the MCP channel on stdio) and
-  refuses when none exists. The vault-side MRTR path exists but is used only
+  mode the server asks the operator -- on the controlling terminal (`/dev/tty`,
+  never stdin/stdout, which are the MCP channel on stdio) for the CLI, in a
+  dialog in the main window for the desktop app -- and refuses when nobody
+  answers. The vault-side MRTR path exists but is used only
   when `confirm_reveal`/`confirm_destructive` are set on a context.
 - **The local server bridges stateful MCP clients.** The vault speaks only the
   stateless 2026-07-28 revision. Claude Code 2.1.277 (verified 2026-10-01) and
@@ -195,10 +201,37 @@ Deviations from the design below, all deliberate and disclosed:
   decapsulation key sits beside the data in the same 0600 file (no keychain in
   a headless CLI); permissions are the boundary and a readable store is refused.
   `Pairing` times are unix seconds, not RFC 3339.
-- **Pairing is terminal-only.** The GUI lists and revokes pairings but does not
-  run the local server or show a consent dialog; it needs an in-GUI server and
-  an embedded-mode dispatcher (T94). `exe_path` is not recorded for Unix-socket
-  peers, only the uid.
+- **The desktop app hosts the local server (T131).** Settings → AI Assistants
+  turns it on (off by default; the switch is saved). It serves the gatekeeper
+  on an owner-only Unix socket beside the pairing store
+  (`<config>/bvault/mcp-gui.sock`, 0600 in a 0700 directory). An assistant is
+  configured with the app's own binary and `--mcp-stdio`
+  (`claude mcp add bastionvault -s user -- <app binary> --mcp-stdio`): that
+  invocation starts no window, checks the socket is served by its own uid,
+  relays stdin/stdout, and exits non-zero with the reason on stderr when the
+  app is not serving. Pairing consent and per-call confirmation are dialogs in
+  the main window, one at a time, refused on timeout (180 s / 90 s), on close
+  and when no window or no unlocked session exists. The grant dialog defaults
+  to read-only non-revealing tools, no reveals, no writes, confirmation on;
+  the host validates the grant (`bv_mcp::local::normalize_grant`) before it
+  resolves a prompt. The server runs only under a non-root session (the vault
+  refuses `mcp/token` from root), is bound to that session's mode, vault
+  (remote address or open embedded vault) and token hash, stops on sign-out,
+  seal, vault switch, reconnect and reset -- and whenever a call finds the
+  session has ended -- and forgets every token it minted; turning it off also
+  revokes them by accessor where the session may. Pairings are the same
+  records the CLI keeps (transport `uds`, the user's uid) and, like the CLI's,
+  are not bound to a vault: an approved client is served under whichever
+  session the app later runs, within that session's own policies. The consent
+  dialog names the vault; binding a pairing to its vault and entity needs a
+  versioned record and is left open. Remote vaults
+  are reached exactly as the CLI reaches them (`POST /v2/mcp/token`,
+  `POST /v2/mcp`); an embedded vault, which has no HTTP listener, is answered
+  in process by `bastion_vault::mcp_endpoint`, the same code `/v2/mcp` now runs
+  after its transport gates, so the server's `mcp { enabled }` block has no
+  embedded equivalent beyond the Settings switch. Unix only: on Windows the
+  switch reports the platform unsupported. `exe_path` is not recorded for
+  Unix-socket peers, only the uid.
 - **Pairing revocation is by pairing id** (`DELETE /v2/sys/mcp/pairings/{id}`),
   since the serving process holds the token only in memory and a separate
   `pairings revoke` process has nothing to revoke by accessor.
@@ -785,7 +818,7 @@ Prometheus (`crates/bv-metrics/src/mcp_metrics.rs`):
 | 2 ✅ | **Kernel: binding, apps, exchange** | Done 2026-09-28. `TokenEntry.mcp_binding` (typed, `serde(default)`), `check_token`'s symmetric MCP-origin gate (a new `Request.mcp_dispatch` field carries the flag through `pre_route`, since a `tools/call` reaches the token store through the *normal* pipeline), `RESERVED_TOKEN_META_KEYS` additions, `sys/mcp/config|apps|tokens` storage + logical paths (`crates/bv-kernel/.../system/mcp.rs`), `mcp/token` exchange (app mode only — pairing mode is Phase 4/5), waiver two-key rule, revoke-on-delete via a hash-derived non-secret accessor index. Facade tests (`src/engine_tests/mcp_access.rs`) cover app CRUD, waiver grant/revoke incl. sudo enforcement, exchange success/failure (role mismatch, no waiver), and revocation-on-delete. `make test` (full workspace, 1625 tests) green. Metrics families (`bv-metrics/src/mcp_metrics.rs`) are not built. |
 | 3 ✅ | **Server transport** | Done 2026-09-28. `mcp_routes.rs`: `POST /v2/mcp` (JSON-RPC dispatch through an in-process `bv_client::Backend`), `POST /v2/mcp/token` (thin HTTP shim over the now-routed `sys/mcp/token`), PRM well-known, `Origin` allow-list, protocol-version check, bearer-header-only. New `mcp { }` HCL config block. End-to-end HTTP test in `src/engine_tests/mcp_access.rs` exercises exchange → `tools/list` → `tools/call` → cross-gate refusal over a real `TestHttpServer`. **Not enforced**: `require_hybrid_kex` (negotiated TLS group not yet in `TlsClientInfo`) and DoS-class negotiated-group capture. The `requestState` HMAC key and single-use guard are process-local, not barrier-derived. |
 | 4 ✅ | **CLI** | Done 2026-09-30. `bvault mcp serve` (stdio / Unix socket with a pre-read peer-uid gate / loopback HTTP with pairing token, `Origin` and `Host` checks), `pair`, `pairings list|revoke`, `token --app`, `catalogue`. Kernel: `mcp/token` pairing mode, `DELETE sys/mcp/pairings/{id}`, token index covers pairings. Pairing store in `bv-mcp` (`pairing.rs`). Tests: peer-uid mismatch drops pre-read; no terminal fails pairing closed; loopback `Origin`/`Host` 403 before the vault is contacted; the minted token is never on disk; a real-vault end to end (pair, exchange, relay, vault-side denials, revoke). `docs/cli-reference.md`. 2026-10-01: stdio and Unix-socket sessions accept the stateful `initialize` handshake of MCP 2025-03-26 to 2025-11-25 clients such as Claude Code (T95). |
-| 5 ✅ | **GUI** | Done 2026-09-30, reduced: *Admin → MCP Apps* (app CRUD, tool picker, waiver modal with mandatory reason and expiry, active tokens with revoke, catalogue hash with pin, limits) and *Settings → AI Assistants* (paired clients with revoke, client configuration snippets). `commands/mcp.rs`, `api.ts`, 22 vitest cases. **Not built**: running the local server from the GUI, the pairing-consent modal, per-call confirmation dialogs, recent calls (T94). |
+| 5 ✅ | **GUI** | Done 2026-09-30, reduced: *Admin → MCP Apps* (app CRUD, tool picker, waiver modal with mandatory reason and expiry, active tokens with revoke, catalogue hash with pin, limits) and *Settings → AI Assistants* (paired clients with revoke, client configuration snippets). `commands/mcp.rs`, `api.ts`, 22 vitest cases. 2026-10-13 (T131): the app hosts the local server -- gatekeeper extracted from `bvault-cli` into `bv_mcp::local`, `/v2/mcp`'s JSON-RPC handling into `bastion_vault::mcp_endpoint`; `gui/src-tauri/src/mcp_host/` (session-bound `VaultLink` for embedded and remote vaults, prompt broker and `GuiPrompter`, lifecycle, `--mcp-stdio` relay); commands `mcp_server_status`, `mcp_server_set_enabled`, `mcp_server_autostart`, `mcp_client_setup`, `mcp_prompt_pending`, `mcp_prompt_answer` (main window only); events `mcp-prompt`, `mcp-prompt-closed`, `mcp-server-status`; the server switch, Claude Code / Claude Desktop setup, a global pairing-consent dialog and a per-call confirmation dialog. Tests: gatekeeper and socket/relay in `bv-mcp`, the prompt broker and relay arguments in the GUI crate, the in-process endpoint in `src/engine_tests/mcp_access.rs`, 23 vitest cases (consent renders the peer and the narrow defaults, Escape denies, confirmation defaults to Deny, no token rendered). **Not built**: recent calls (T94). |
 | 6 ✅ | **Write tools + DPoP** | Done 2026-09-30 except DPoP. `bv_kv_write`, `bv_kv_delete`, `bv_pki_issue`, `bv_ssh_sign` appended to the catalogue (new hash in the CHANGELOG), gated by `destructive_allowed`; `bv_pki_issue` also by `reveal_allowed`, redacting `private_key` otherwise; one combined confirmation. Tests: destructive denied by default; a confirmed `requestState` is single-use; `bv_pki_issue` needs both grants. **DPoP sender-constraint is not built** (T94): it needs an MCP-specific expectation around `ferro-child-verify` rather than the FerroGate-role-specific wrapper, and was the open question this phase was to settle. |
 | 7 | **External / enterprise authorization** | PRM `authorization_servers`; accept AS-issued JWTs (`aud = canonical_url`) via the OIDC mount and exchange; Enterprise-Managed Authorization (ID-JAG) once the Identity Provider feature exists; CIMD for interactive clients. **Blocked on** [identity-provider.md](identity-provider.md). |
 | 8 ✅ | **Docs + hardening + release gate** | Done 2026-09-30 except the release gate. `docs/mcp.md`, `docs/cli-reference.md`, `docs/api.md`, `docs/configuration.md`, CHANGELOG, ROADMAP; waiver enforcement, TLS gate, body cap, tool timeout, fail-closed `require_hybrid_kex`. `make test-release` (required before a release, since this adds persisted `TokenEntry` state and touches authn) has **not** been run. |
@@ -830,11 +863,15 @@ local-mode release. 6 is opt-in power; 7 is external and tracked as T93.
   carries the namespace. If a deployment needs per-namespace PRM documents,
   extend PRM with a path segment later.
 - **Should the local server exist inside the GUI process or as a spawned
-  `bvault mcp serve`?** Undecided, and not needed yet: the GUI does not run a
-  local server in this release (the FerroGate MIA is a separately installed
-  daemon, not something the GUI spawns, so there is no precedent to follow).
-  The pairing store is shared through `bv-mcp`, which keeps either option open.
-  Decide with T94.
+  `bvault mcp serve`?** Decided (T131): **inside the GUI process**, on an
+  owner-only Unix socket, with a stdio relay mode in the GUI binary
+  (`--mcp-stdio`) for assistants that launch their server. The app already
+  holds the vault session and is where a human answers, so consent dialogs
+  need no second channel, and an embedded vault is reachable at all (a spawned
+  CLI could not open it). Rejected: spawning `bvault mcp serve`, which needs
+  the CLI installed and logged in separately (a second token source) and has
+  no operator channel but a terminal it does not have. The gatekeeper itself
+  is one implementation, `bv_mcp::local`, so the two hosts cannot drift.
 - **DPoP mandatory for waived apps?** A waived app has no FerroGate key. Option:
   require the app to generate and register a DPoP key at first exchange when
   waived, so *something* sender-constrains its token. Still open; DPoP is T94.

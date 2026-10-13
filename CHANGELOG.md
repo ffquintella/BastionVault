@@ -56,6 +56,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### MCP Access: AI assistants through the desktop app (features/mcp-access.md)
+
+- **Serve AI assistants from the desktop app, with no `bvault` CLI** -- Settings → AI Assistants → *Serve AI assistants* runs the local MCP server inside the app on an owner-only Unix socket beside the pairing store (`mcp-gui.sock`, 0600 in a 0700 directory). Point Claude Code at it with `claude mcp add bastionvault -s user -- <app binary> --mcp-stdio`; Settings shows the exact command and a Claude Desktop snippet, neither carrying a token or an address. `--mcp-stdio` opens no window: it relays stdin/stdout to the running app after checking the socket is served by your own user, and exits non-zero with the reason on stderr (69 when the app is not serving, 75 when it closed the connection). Off by default; the switch is remembered. It serves remote and embedded vaults, runs only under a non-root session, and stops — forgetting every token it minted — on sign-out, seal, vault switch, reconnect or reset. An approval belongs to the assistant, not the vault, as with `bvault mcp`. macOS and Linux only. (T131, S26)
+- **Approve AI assistants and their sensitive calls in dialogs** -- the first connection from an unpaired assistant opens *Approve an AI assistant?* in the main window: client name and version, the vault you are signed in to, whether the kernel confirmed it runs as you, and the grant to give it, defaulting to read-only tools that never reveal a value, no reveals, no writes and confirmation per call. A path scope is required. A reveal or write you asked to confirm opens *Allow this AI-assistant call?* naming the tool and what it touches, never a value. Deny is the default; closing a dialog, or leaving it unanswered (3 minutes for a pairing, 90 seconds for a call), refuses. Only the main window can answer, and the app validates every grant before accepting it. (T131, S26)
+- **Document connecting an assistant through the desktop app** -- `docs/mcp.md` covers setup, the non-root sign-in the server needs, how the relay and socket fit together, and the relay's exit codes. (T131, S104)
+
+### Changed
+
+#### MCP Access internals
+
+- **Share one local-server gatekeeper between `bvault mcp serve` and the desktop app** -- pairing, the stateful `initialize` handshake, per-call confirmation, token minting, the line framing and the owner-only socket moved from `bvault-cli` into `bv_mcp::local`, and `POST /v2/mcp`'s JSON-RPC handling moved from `bv-server` into `bastion_vault::mcp_endpoint`. `bvault mcp` and `/v2/mcp` behave as before. `bv-mcp` now depends on `libc` (Unix only) for the socket's peer-uid check; `bv-server` no longer depends on `bv-client` or `async-trait`. (T131, S26)
+
 ## [0.44.32] - 2026-10-13
 
 ### Added

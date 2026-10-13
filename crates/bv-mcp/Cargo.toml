@@ -1,6 +1,6 @@
 [package]
 name = "bv-mcp"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "BastionVault's MCP (Model Context Protocol) dispatcher: JSON-RPC types, the read-only tool catalogue, and the tools/call gates. See features/mcp-access.md."
 license = "Apache-2.0"
@@ -11,7 +11,9 @@ publish = ["uox-bastionvault"]
 # A dispatcher, not an engine mounted at a `Path`: depends only on
 # `bv-logical` (the shared `McpBinding` type) and `bv-client` (the `Backend`
 # trait it dispatches through), so it is unit-testable with a mock
-# `Backend` and none of the vault stack. See features/mcp-access.md.
+# `Backend` and none of the vault stack. The local server's gatekeeper
+# (`local`) is likewise transport- and vault-agnostic: each host supplies how
+# it reaches the vault and the operator. See features/mcp-access.md.
 
 [dependencies]
 bv-errors = { path = "../bv-errors", version = "0.41.1", registry = "uox-bastionvault" }
@@ -31,6 +33,14 @@ async-trait = "0.1"
 thiserror = "2"
 hex = "0.4"
 zeroize = "1.8"
+
+# The local server's Unix-socket transport (`local::uds`) asks the kernel
+# which uid is on the far end of a connection (`getpeereid` /
+# `SO_PEERCRED`), which has no safe std wrapper. Moved here from
+# `bvault-cli` with the gatekeeper it serves; already in the lockfile via
+# `bv-storage` and the CLI.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }

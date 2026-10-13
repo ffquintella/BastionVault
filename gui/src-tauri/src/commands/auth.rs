@@ -193,6 +193,9 @@ pub async fn logout(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdRes
     // backend briefly unreachable) must not trap the user in a
     // logged-in UI, so we clear local state regardless. Routes through
     // the active backend, so it works in both embedded and remote mode.
+    // The AI-assistant server serves this session only: stop it first, so
+    // no assistant call races the revocation below.
+    crate::mcp_host::session_ending(Some(&app), &state, "signed out");
     let token = state.token.lock().await.clone();
     if let Some(token) = token.filter(|t| !t.is_empty()) {
         let _ = dispatch_with_token(&state, Operation::Write, "auth/token/revoke-self".to_string(), None, &token).await;

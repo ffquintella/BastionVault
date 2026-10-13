@@ -41,6 +41,7 @@ import { ConnectPalette } from "./components/ConnectPalette";
 import { useProviderAccountsLink } from "./hooks/useCredentialProviders";
 import { ServerInfoModal } from "./components/ServerInfoModal";
 import { SessionMonitor } from "./components/SessionMonitor";
+import { McpPromptHost } from "./components/McpPromptHost";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -87,6 +88,10 @@ export default function App() {
             token and bounces to /login. Mounted inside ToastProvider
             so it can surface the "session expired" toast. */}
         <SessionMonitor />
+        {/* The AI-assistant server's pairing-consent and per-call
+            confirmation dialogs (T131). Mounted once so a request can be
+            answered from any page; renders nothing until one arrives. */}
+        <McpPromptHost />
         <HashRouter>
           <Routes>
             <Route path="/" element={<Navigate to="/connect" replace />} />

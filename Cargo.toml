@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.44.32"
+version = "0.44.33"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -179,6 +179,11 @@ bv_plugin_manifest = { path = "crates/bv-plugin-manifest" }
 # dispatch, plugin surface fetch, etc.) is GUI-only; the CLI only
 # touches `discovery` + `health`.
 bv-client = { path = "crates/bv-client" }
+# MCP Access (features/mcp-access.md): the dispatcher, catalogue and JSON-RPC
+# types `mcp_endpoint` answers `/v2/mcp` with in process, for `bv-server`'s
+# route and the desktop app's embedded vault alike. Already in the graph
+# through `bv-server`; its own deps are a subset of this crate's.
+bv-mcp = { path = "crates/bv-mcp" }
 anyhow = { version = "^1.0" }
 thiserror = { version = "^2.0" }
 serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }

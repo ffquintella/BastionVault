@@ -3,6 +3,7 @@ mod commands;
 mod embedded;
 mod error;
 mod local_keystore;
+mod mcp_host;
 mod plugin_apps;
 mod plugin_hooks;
 mod preferences;
@@ -59,6 +60,14 @@ fn harden_webview_autofill(window: &tauri::WebviewWindow) -> Result<(), Box<dyn 
         }
     })?;
     Ok(())
+}
+
+/// `bastion-vault-gui --mcp-stdio`: `Some(exit status)` when this process
+/// was launched by an AI assistant as its MCP server (it relays to the
+/// running app and must not start a window), `None` to start the app. Call
+/// before anything else in `main`. See `mcp_host::relay`.
+pub fn mcp_stdio_relay(args: Vec<std::ffi::OsString>) -> Option<i32> {
+    mcp_host::relay::main(args)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -503,6 +512,14 @@ pub fn run() {
             commands::mcp::mcp_pairings_path,
             commands::mcp::mcp_list_pairings,
             commands::mcp::mcp_revoke_pairing,
+            // The desktop-hosted local MCP server (T131): lifecycle, client
+            // setup, and the operator's answers to its prompts.
+            commands::mcp::mcp_server_status,
+            commands::mcp::mcp_server_set_enabled,
+            commands::mcp::mcp_server_autostart,
+            commands::mcp::mcp_client_setup,
+            commands::mcp::mcp_prompt_pending,
+            commands::mcp::mcp_prompt_answer,
             // PKI Secret Engine
             commands::pki::pki_list_mounts,
             commands::pki::pki_enable_mount,
@@ -805,6 +822,11 @@ pub fn run() {
         // reported and closed (`v2/connect/web/close`, which also checks an
         // LDAP library account back in) within a short budget.
         if let tauri::RunEvent::Exit = event {
+            // The AI-assistant server: cut its clients, remove its socket.
+            {
+                use tauri::Manager;
+                handle.state::<AppState>().mcp_host.stop(None, "the app is quitting");
+            }
             commands::connect_web::close_web_sessions_on_exit(handle);
             // T108: SSH/RDP sessions still live, and window teardowns still
             // running, get their cleanup (LDAP library check-in) too.

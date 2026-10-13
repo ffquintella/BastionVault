@@ -296,6 +296,75 @@ mod mod_test {
         assert_eq!(resp.unwrap().unwrap().data.unwrap()["tokens"], json!([]));
     }
 
+    /// The in-process `/v2/mcp` handling (`crate::mcp_endpoint`) the desktop
+    /// app answers an assistant with when its vault is embedded: a pairing
+    /// token is served gate for gate as over HTTP, and anything that is not
+    /// a live MCP-bound token is refused before a tool runs.
+    #[tokio::test]
+    async fn test_mcp_in_process_endpoint_serves_a_pairing_token_and_nothing_else() {
+        use crate::mcp_endpoint::{handle_jsonrpc, McpEndpoint, McpEndpointOutcome};
+        use bv_mcp::request_state::SingleUseGuard;
+
+        let (_bvault, core_arc, root_token) = new_unseal_test_bastion_vault("test_mcp_in_process_endpoint").await;
+        let core: &crate::core::Core = &core_arc;
+        let op = operator_token(core, &root_token, "felipe").await;
+        let resp = test_write_api(core, &op, "sys/mcp/token", true, pairing_body("in-proc")).await;
+        let mcp_token = resp.unwrap().unwrap().data.unwrap()["auth"]["client_token"].as_str().unwrap().to_string();
+
+        let guard = SingleUseGuard::new();
+        let ep = McpEndpoint {
+            core: &core_arc,
+            client_ip: "",
+            tool_timeout: std::time::Duration::from_secs(30),
+            server_version: "9.9",
+            request_state_key: b"in-process-test-key",
+            single_use_guard: &guard,
+        };
+        let answer = |outcome: McpEndpointOutcome| match outcome {
+            McpEndpointOutcome::Answer(r) => serde_json::to_value(r).unwrap(),
+            other => panic!("expected a JSON-RPC answer, got {other:?}"),
+        };
+        let rpc = |id: u64, method: &str, params: Value| {
+            serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).unwrap()
+        };
+
+        let list = answer(handle_jsonrpc(&ep, &mcp_token, &rpc(1, "tools/list", json!({}))).await.unwrap());
+        assert!(list["result"]["tools"].as_array().unwrap().iter().any(|t| t["name"] == "bv_kv_read_metadata"));
+        let discover = answer(handle_jsonrpc(&ep, &mcp_token, &rpc(2, "server/discover", json!({}))).await.unwrap());
+        assert_eq!(discover["result"]["serverInfo"]["version"], json!("9.9"));
+
+        // The binding's gates apply: a tool outside the grant, a path outside
+        // its scope.
+        let not_granted =
+            rpc(3, "tools/call", json!({ "name": "bv_kv_read", "arguments": { "mount": "secret", "path": "ai/x" } }));
+        let refused = answer(handle_jsonrpc(&ep, &mcp_token, &not_granted).await.unwrap());
+        assert_eq!(refused["error"]["data"]["code"], json!("mcp_tool_not_allowed"), "{refused}");
+        let out_of_scope = rpc(
+            4,
+            "tools/call",
+            json!({ "name": "bv_kv_read_metadata", "arguments": { "mount": "secret", "path": "other/y" } }),
+        );
+        let refused = answer(handle_jsonrpc(&ep, &mcp_token, &out_of_scope).await.unwrap());
+        assert_eq!(refused["error"]["data"]["code"], json!("mcp_path_out_of_scope"), "{refused}");
+
+        // A wrong protocol revision is a JSON-RPC error; a non-JSON-RPC body is
+        // a bad request.
+        let old = rpc(5, "tools/list", json!({ "_meta": { "io.modelcontextprotocol/protocolVersion": "1999-01-01" } }));
+        assert!(answer(handle_jsonrpc(&ep, &mcp_token, &old).await.unwrap())["error"].is_object());
+        assert!(matches!(
+            handle_jsonrpc(&ep, &mcp_token, b"{not json").await.unwrap(),
+            McpEndpointOutcome::BadRequest(_)
+        ));
+
+        // The operator's own login token is not MCP-bound: refused outright.
+        assert!(handle_jsonrpc(&ep, &op, &rpc(6, "tools/list", json!({}))).await.is_err());
+
+        // Revoking the pairing cuts the token off here too.
+        let _ = test_delete_api(core, &op, "sys/mcp/pairings/in-proc", true, None).await;
+        let after = handle_jsonrpc(&ep, &mcp_token, &rpc(7, "tools/list", json!({}))).await;
+        assert!(!matches!(after, Ok(McpEndpointOutcome::Answer(_))), "a revoked token is not answered: {after:?}");
+    }
+
     /// Pairing is an operator-session feature: AppRole and root callers are
     /// refused, and so is an MCP-bound token or a malformed grant.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

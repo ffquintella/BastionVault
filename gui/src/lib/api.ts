@@ -59,6 +59,10 @@ import type {
   McpConfig,
   McpCatalogue,
   McpPairing,
+  McpServerStatus,
+  McpClientSetup,
+  McpPrompt,
+  McpPromptAnswer,
   GroupKind,
   GroupListResult,
   GroupInfo,
@@ -3686,3 +3690,12 @@ export const mcpCatalogue = () => invoke<McpCatalogue>("mcp_catalogue");
 export const mcpPairingsPath = () => invoke<string>("mcp_pairings_path");
 export const mcpListPairings = () => invoke<McpPairing[]>("mcp_list_pairings");
 export const mcpRevokePairing = (id: string) => invoke<void>("mcp_revoke_pairing", { id });
+// The AI-assistant server this app hosts (T131). None of these carries a token.
+export const mcpServerStatus = () => invoke<McpServerStatus>("mcp_server_status");
+export const mcpServerSetEnabled = (enabled: boolean) =>
+  invoke<McpServerStatus>("mcp_server_set_enabled", { enabled });
+export const mcpServerAutostart = () => invoke<McpServerStatus>("mcp_server_autostart");
+export const mcpClientSetup = () => invoke<McpClientSetup>("mcp_client_setup");
+export const mcpPromptPending = () => invoke<McpPrompt | null>("mcp_prompt_pending");
+export const mcpPromptAnswer = (id: string, answer: McpPromptAnswer) =>
+  invoke<void>("mcp_prompt_answer", { id, answer });

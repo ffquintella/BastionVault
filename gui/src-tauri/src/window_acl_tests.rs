@@ -124,6 +124,14 @@ const NEVER_IN_A_SESSION_WINDOW: &[&str] = &[
     "session_detach",
     "rustion_open_replay_window",
     "fido2_submit_pin",
+    // The AI-assistant server (T131): starting it, and answering its pairing
+    // and per-call prompts, are the operator's alone. These commands also
+    // refuse any window but `main` itself (`commands::mcp`).
+    "mcp_server_set_enabled",
+    "mcp_server_autostart",
+    "mcp_prompt_pending",
+    "mcp_prompt_answer",
+    "mcp_revoke_pairing",
 ];
 
 /// The main window's plugin permissions before T110, unchanged by it.
