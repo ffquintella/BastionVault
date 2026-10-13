@@ -56,6 +56,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.31] - 2026-10-13
+
+### Added
+
+#### Self-Accounts: edit accounts on My accounts (features/self-accounts.md)
+
+- **Edit an account from My accounts** -- each row now has **Edit** next to **Delete**. It opens the form for the account's kind (password or SSH key) filled from the account's metadata and saves with `write self-accounts/v2/accounts/<id>`. The password, TOTP seed and private key fields start empty and are optional: leave one empty to keep the stored secret (it is left out of the request, not sent as `""`); the page never receives a secret, so it cannot show one. The kind cannot be changed in the dialog. Warnings from the save, such as an account that would never be offered, are shown before the dialog closes. (T123, S107)
+- **Add an account from a dialog** -- the two inline *Add a password account* / *Add an SSH-key account* forms are gone from the page; **Add account** asks which kind and opens that kind's form in a dialog. Requires `bastion-plugin-self-accounts` 0.1.2, whose `read v2/accounts/<id>` also returns the applicability lists flat (`resource_types`, `os_types`, `protocols`, `targets`) for the Edit form. (T123, S107)
+
+#### Plugin surfaces: schema 2 (features/plugin-extensibility.md)
+
+- **Modal forms, table actions and row actions that open a form** -- a surface declaring `schema_version: 2` can mark a form `"presentation": "modal"`, give a table `actions` (buttons that open one of a set of modal forms, with a choose-one step when there are several) and give a row action `open_form` (`form`, or `select_by` a row field plus `forms_by_value`), whose `binding` must then be a `read` that prefills the form. `bv-plugin-pack` and the host's registration check every referenced form exists as a modal form on the same page, every modal form is reachable, bindings stay under `{mount}/`, and that these features are not used under `schema_version: 1`. A v1 surface validates, serialises and renders exactly as before. A host older than schema 2 refuses a schema-2 bundle at registration, and the desktop app shows an *Update BastionVault* message for a page whose schema is newer than it renders instead of rendering it as something else. (T123, S40)
+- **Plugin page actions return warnings** -- the desktop app's `plugin_surface_dispatch` command now also returns the response's `warnings`; existing callers ignore them. (T123, S40)
+
 ## [0.44.30] - 2026-10-13
 
 ### Fixed

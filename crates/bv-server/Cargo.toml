@@ -21,7 +21,7 @@ publish = ["uox-bastionvault"]
 # framework.
 
 [dependencies]
-bastion_vault = { path = "../..", version = "0.44.30", registry = "uox-bastionvault", default-features = false }
+bastion_vault = { path = "../..", version = "0.44.31", registry = "uox-bastionvault", default-features = false }
 # The Prometheus families, named directly rather than through
 # `bastion_vault::metrics`: this crate owns the module name `metrics` (the
 # `/metrics` scrape endpoint), so the alias would collide. Same collision
@@ -29,7 +29,7 @@ bastion_vault = { path = "../..", version = "0.44.30", registry = "uox-bastionva
 bv-metrics = { path = "../bv-metrics", version = "0.41.0", registry = "uox-bastionvault" }
 # The plugin client-surface manifest, parsed by the `sys/plugins/.../surface`
 # route before it is handed to the GUI.
-bv_plugin_surface = { path = "../bv_plugin_surface", version = "0.41.0", registry = "uox-bastionvault" }
+bv_plugin_surface = { path = "../bv_plugin_surface", version = "0.42.0", registry = "uox-bastionvault" }
 # MCP Access (features/mcp-access.md, Phase 3): the JSON-RPC types, tool
 # catalogue and dispatcher `/v2/mcp` drives.
 bv-mcp = { path = "../bv-mcp", version = "0.1.0", registry = "uox-bastionvault" }

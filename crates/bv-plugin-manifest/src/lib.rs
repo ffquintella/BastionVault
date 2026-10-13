@@ -1196,6 +1196,22 @@ mod tests {
     }
 
     #[test]
+    fn accepts_modal_form_surfaces_and_refuses_the_next_schema_version() {
+        // Schema v2 (modal forms, table actions, form-opening row
+        // actions) registers; whatever comes after it is refused by name
+        // rather than parsed and silently half-rendered.
+        let mut m = fixture();
+        m.surface = Some(SurfaceRef {
+            schema_version: bv_plugin_surface::MODAL_FORMS_SCHEMA_VERSION,
+            sha256: "0".repeat(64),
+            size: 0,
+        });
+        m.validate().unwrap();
+        m.surface.as_mut().unwrap().schema_version = bv_plugin_surface::CURRENT_SCHEMA_VERSION + 1;
+        assert_eq!(m.validate().unwrap_err(), "surface.schema_version is newer than this host supports");
+    }
+
+    #[test]
     fn rejects_duplicate_client_asset_names() {
         let mut m = fixture();
         m.client_assets.push(ClientAssetRef {

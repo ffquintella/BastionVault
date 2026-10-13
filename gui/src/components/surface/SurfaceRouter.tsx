@@ -1,6 +1,7 @@
 import { useCallback, useState, type ReactNode } from "react";
 import { useLocation, useSearchParams } from "react-router";
 import { usePluginSurfacesStore } from "../../stores/pluginSurfacesStore";
+import { SUPPORTED_SURFACE_SCHEMA_VERSION, type SurfaceForm as SurfaceFormSpec } from "../../lib/api";
 import { Layout } from "../Layout";
 import { Card, EmptyState } from "../ui";
 import { SurfaceTable } from "./SurfaceTable";
@@ -94,6 +95,33 @@ export function SurfaceRouter() {
   const { page, entry } = match;
   const refresh = usePluginSurfacesStore.getState().refresh;
 
+  // A surface newer than this GUI is not rendered: the keys it relies on
+  // were dropped on the way here, so it would render as something else
+  // (e.g. modal forms inline, an Edit button that only reads).
+  const schemaVersion = entry.surface.schema_version;
+  if (typeof schemaVersion === "number" && schemaVersion > SUPPORTED_SURFACE_SCHEMA_VERSION) {
+    return (
+      <SurfaceFrame pluginWindow={isPluginWindow}>
+        <div className="p-6">
+          <EmptyState
+            title="Update BastionVault to open this page"
+            description={`${entry.plugin} v${entry.version} uses plugin page schema ${schemaVersion}; this version of BastionVault renders up to ${SUPPORTED_SURFACE_SCHEMA_VERSION}.`}
+          />
+        </div>
+      </SurfaceFrame>
+    );
+  }
+
+  // Schema v2: modal forms stay off the page; table actions and row
+  // actions on the same page open them.
+  const modalForms: Record<string, SurfaceFormSpec> = {};
+  for (const c of page.components) {
+    if (c.kind === "form" && c.presentation === "modal") modalForms[c.id] = c;
+  }
+  const inlineComponents = page.components.filter(
+    (c) => !(c.kind === "form" && c.presentation === "modal"),
+  );
+
   if (!entry.mount.trim()) {
     return (
       <SurfaceFrame pluginWindow={isPluginWindow}>
@@ -117,7 +145,7 @@ export function SurfaceRouter() {
           </span>
         </div>
         <div className="space-y-4">
-          {page.components.map((c) => (
+          {inlineComponents.map((c) => (
             <Card key={c.id}>
               <div className="p-4">
                 {c.kind === "table" && (
@@ -129,6 +157,8 @@ export function SurfaceRouter() {
                       markDataChanged();
                       void refresh();
                     }}
+                    entry={entry}
+                    forms={modalForms}
                   />
                 )}
                 {c.kind === "form" && (

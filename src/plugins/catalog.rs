@@ -1337,6 +1337,88 @@ mod tests {
         assert!(format!("{err:?}").contains("sha256 mismatch"));
     }
 
+    /// Schema v2 surface: an *Add* action with a kind chooser and an *Edit*
+    /// row action that opens a prefilled modal form. `edit_form` is the form
+    /// the row action names for kind `b`.
+    fn build_modal_forms_surface_json(plugin: &str, edit_form: &str) -> Vec<u8> {
+        let form = |id: &str, path: &str| {
+            serde_json::json!({
+                "kind": "form", "id": id, "title": id, "presentation": "modal",
+                "schema": { "type": "object", "properties": {} },
+                "submit": { "label": "Save", "binding": { "op": "write", "path": path } }
+            })
+        };
+        let s = serde_json::json!({
+            "schema_version": 2,
+            "title": plugin,
+            "menus": [{
+                "id": format!("{plugin}.main"),
+                "label": "Main",
+                "section": "secrets",
+                "route": format!("/plugin/{plugin}/accounts"),
+            }],
+            "pages": [{
+                "route": format!("/plugin/{plugin}/accounts"),
+                "title": "Accounts",
+                "components": [
+                    {
+                        "kind": "table",
+                        "id": "list",
+                        "binding": { "op": "list", "path": "{mount}/v2/accounts" },
+                        "columns": [{ "field": "label", "label": "Label" }],
+                        "actions": [{ "label": "Add", "forms": ["add-a", "add-b"] }],
+                        "row_actions": [{
+                            "label": "Edit",
+                            "binding": { "op": "read", "path": "{mount}/v2/accounts/{id}" },
+                            "open_form": { "select_by": "kind", "forms_by_value": { "a": "edit-a", "b": edit_form } }
+                        }],
+                    },
+                    form("add-a", "{mount}/v2/accounts"),
+                    form("add-b", "{mount}/v2/accounts"),
+                    form("edit-a", "{mount}/v2/accounts/{id}"),
+                    form("edit-b", "{mount}/v2/accounts/{id}"),
+                ],
+            }],
+        });
+        serde_json::to_vec(&s).unwrap()
+    }
+
+    #[tokio::test]
+    async fn modal_form_surface_registers_and_is_served_with_its_actions() {
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let cat = PluginCatalog::new();
+        let bin = b"v2-surface".to_vec();
+        let surface_bytes = build_modal_forms_surface_json("p", "edit-b");
+        let mut m = manifest_with("p", "0.1.0", &bin);
+        m.surface = Some(super::super::manifest::SurfaceRef {
+            schema_version: 2,
+            sha256: sha256_hex(&surface_bytes),
+            size: surface_bytes.len() as u64,
+        });
+        cat.put(&s, &m, &bin).await.unwrap();
+        cat.put_surface(&s, "p", "0.1.0", &surface_bytes, &m.surface.as_ref().unwrap().sha256).await.unwrap();
+
+        // The aggregator re-serialises the parsed manifest, so the new keys
+        // must survive the host's own types or the GUI never sees them.
+        let bundle = cat.aggregated_active_surfaces(&s, |_| None).await.unwrap();
+        let served = serde_json::to_value(&bundle.entries[0].surface).unwrap();
+        let table = &served["pages"][0]["components"][0];
+        assert_eq!(table["actions"][0]["forms"], serde_json::json!(["add-a", "add-b"]));
+        assert_eq!(table["row_actions"][0]["open_form"]["forms_by_value"]["b"], "edit-b");
+        assert_eq!(served["pages"][0]["components"][3]["presentation"], "modal");
+    }
+
+    #[tokio::test]
+    async fn put_surface_rejects_a_dangling_modal_form_reference() {
+        let s = MemStorage::default();
+        let cat = PluginCatalog::new();
+        let surface_bytes = build_modal_forms_surface_json("p", "edit-missing");
+        let err = cat.put_surface(&s, "p", "0.1.0", &surface_bytes, &sha256_hex(&surface_bytes)).await.unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("failed validation") && msg.contains("edit-missing"), "{msg}");
+    }
+
     #[tokio::test]
     async fn put_asset_content_addressed_round_trip() {
         let s = MemStorage::default();

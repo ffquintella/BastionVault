@@ -2068,6 +2068,13 @@ export const pluginsMetrics = () =>
 export type SurfaceOp = "read" | "write" | "delete" | "list";
 export type SurfaceSection = "secrets" | "sharing" | "admin" | "settings";
 
+/** Highest surface `schema_version` this GUI renders (mirrors
+ *  `bv_plugin_surface::CURRENT_SCHEMA_VERSION`). A page from a newer
+ *  surface is not rendered: its keys would be dropped on the way here,
+ *  so it would render as something else. v2 adds modal forms, table
+ *  actions and row actions that open a form. */
+export const SUPPORTED_SURFACE_SCHEMA_VERSION = 2;
+
 export interface SurfaceBinding {
   op: SurfaceOp;
   path: string;
@@ -2099,8 +2106,29 @@ export interface SurfaceColumn {
 
 export interface SurfaceRowAction {
   label: string;
+  /** The operation the action issues; a `read` that prefills the form
+   *  when `open_form` is set. */
   binding: SurfaceBinding;
   confirm?: boolean;
+  /** Schema v2: open a modal form for the row instead of issuing
+   *  `binding` as the action. */
+  open_form?: SurfaceOpenForm | null;
+}
+
+/** Schema v2: which modal form a row action opens — `form` for every
+ *  row, or the row's `select_by` field looked up in `forms_by_value`. */
+export interface SurfaceOpenForm {
+  form?: string;
+  select_by?: string;
+  forms_by_value?: Record<string, string>;
+}
+
+/** Schema v2: a button shown with a table that opens a modal form; with
+ *  several `forms` the modal first asks which one. */
+export interface SurfaceTableAction {
+  label: string;
+  forms: string[];
+  prompt?: string;
 }
 
 export interface SurfaceTable {
@@ -2110,6 +2138,8 @@ export interface SurfaceTable {
   columns: SurfaceColumn[];
   row_actions?: SurfaceRowAction[];
   empty_text?: string;
+  /** Schema v2: toolbar buttons that open modal forms. */
+  actions?: SurfaceTableAction[];
   /** Extensibility v2 (Phase 3): in a plugin window, refresh from
    *  `plugin-window-data-<handle>` events instead of polling. */
   subscribe?: boolean;
@@ -2127,6 +2157,9 @@ export interface SurfaceForm {
   schema: Record<string, unknown>;
   submit: SurfaceSubmit;
   hook?: string;
+  /** Schema v2: `modal` keeps the form off the page until a table action
+   *  or a row action opens it. Absent means inline. */
+  presentation?: "inline" | "modal";
 }
 
 export interface SurfaceDetailField {
@@ -2206,6 +2239,25 @@ export const pluginSurfaceDispatch = (
   invoke<{ data: Record<string, unknown> | null }>("plugin_surface_dispatch", {
     args: { op, path, mount, params, body: body ?? null },
   }).then((r) => r.data);
+
+/** Same dispatch, also returning the warnings the plugin attached to a
+ *  successful response (shown by modal forms after a save). */
+export const pluginSurfaceDispatchWithWarnings = (
+  op: SurfaceOp,
+  path: string,
+  mount: string,
+  params: Record<string, string> = {},
+  body?: Record<string, unknown>,
+) =>
+  invoke<{ data: Record<string, unknown> | null; warnings?: string[] }>(
+    "plugin_surface_dispatch",
+    { args: { op, path, mount, params, body: body ?? null } },
+  ).then((r) => ({
+    data: r?.data ?? null,
+    warnings: Array.isArray(r?.warnings)
+      ? r.warnings.filter((w): w is string => typeof w === "string")
+      : [],
+  }));
 
 /**
  * Run one form-hook export inside the Tauri-side wasmtime sandbox.

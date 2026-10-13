@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import * as api from "../../lib/api";
 import { extractError } from "../../lib/error";
 import { Button, Table, EmptyState } from "../ui";
+import { SurfaceFormModal, rowParams, type SurfaceModalRequest } from "./SurfaceFormModal";
 
 /**
  * Generic table renderer driven by a plugin's surface manifest.
@@ -17,21 +18,32 @@ import { Button, Table, EmptyState } from "../ui";
  * `revision` is the page's data revision: when it changes the list is
  * re-read, so writes made by sibling components (a form on the same
  * page) show up without remounting the table.
+ *
+ * Schema v2: `actions` render as buttons above the table (also when it is
+ * empty) and a row action with `open_form` opens a modal form instead of
+ * dispatching; both need `entry` and the page's modal `forms`.
  */
 export function SurfaceTable({
   spec,
   mount,
   revision = 0,
   onAction,
+  entry,
+  forms = {},
 }: {
   spec: api.SurfaceTable;
   mount: string;
   revision?: number;
   onAction?: () => void;
+  /** The owning plugin's entry; required to open modal forms. */
+  entry?: api.ActiveSurfaceEntry;
+  /** The page's modal forms, by id. */
+  forms?: Record<string, api.SurfaceForm>;
 }) {
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const [modal, setModal] = useState<SurfaceModalRequest | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -70,14 +82,17 @@ export function SurfaceTable({
   }, [reload, revision]);
 
   async function runRowAction(action: api.SurfaceRowAction, row: Record<string, unknown>) {
+    if (action.open_form) {
+      // Never fall back to dispatching the binding: for an action that
+      // opens a form it is the prefill `read`, not the action.
+      setModal({ kind: "edit", action, row });
+      return;
+    }
     if (action.confirm && !window.confirm(`${action.label} this row?`)) return;
     // Build `{field}` substitutions from the row's fields. Only
     // string-valued fields are eligible (server-side validation
     // refuses anything else).
-    const params: Record<string, string> = {};
-    for (const [k, v] of Object.entries(row)) {
-      if (typeof v === "string") params[k] = v;
-    }
+    const params = rowParams(row);
     try {
       await api.pluginSurfaceDispatch(
         action.binding.op,
@@ -95,22 +110,58 @@ export function SurfaceTable({
     }
   }
 
+  const toolbar = spec.actions ?? [];
+  // Wraps every state (loading, error, empty, rows) once the table has
+  // toolbar actions or modal row actions; a v1 table renders bare, as
+  // before.
+  const hasModal = toolbar.length > 0 || (spec.row_actions ?? []).some((a) => a.open_form);
+  const frame = (body: ReactNode) =>
+    hasModal ? (
+      <div className="space-y-3">
+        {toolbar.length > 0 && (
+          <div className="flex flex-wrap justify-end gap-2">
+            {toolbar.map((a) => (
+              <Button key={a.label} size="sm" onClick={() => setModal({ kind: "create", action: a })}>
+                {a.label}
+              </Button>
+            ))}
+          </div>
+        )}
+        {body}
+        {modal &&
+          (entry ? (
+            <SurfaceFormModal
+              request={modal}
+              forms={forms}
+              entry={entry}
+              onClose={() => setModal(null)}
+              onSaved={() => {
+                if (onAction) onAction();
+                else void reload();
+              }}
+            />
+          ) : null)}
+      </div>
+    ) : (
+      body
+    );
+
   if (loading && rows.length === 0) {
-    return (
-      <div className="text-sm text-[var(--color-text-muted)] p-4">Loading…</div>
+    return frame(
+      <div className="text-sm text-[var(--color-text-muted)] p-4">Loading…</div>,
     );
   }
   if (err) {
-    return (
-      <div className="text-sm text-[var(--color-danger)] p-4">{err}</div>
+    return frame(
+      <div className="text-sm text-[var(--color-danger)] p-4">{err}</div>,
     );
   }
   if (rows.length === 0) {
-    return (
+    return frame(
       <EmptyState
         title="No data"
         description={spec.empty_text || "Nothing to show yet."}
-      />
+      />,
     );
   }
 
@@ -155,7 +206,7 @@ export function SurfaceTable({
         ]
       : columns;
 
-  return (
+  return frame(
     <Table<Record<string, unknown>>
       columns={allColumns}
       data={rows}
@@ -164,6 +215,6 @@ export function SurfaceTable({
         (typeof r.id === "string" && r.id) ||
         JSON.stringify(r)
       }
-    />
+    />,
   );
 }

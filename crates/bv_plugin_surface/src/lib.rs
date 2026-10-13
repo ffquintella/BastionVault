@@ -21,16 +21,34 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Current surface schema version. Bumped when a backwards-incompatible
-/// change to the on-disk shape lands. Clients that see a higher
-/// `schema_version` than this constant ignore the surface — they do
-/// **not** attempt to render an unknown shape.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+/// Current surface schema version. Bumped when a change lands that an
+/// older host or client would otherwise mis-render. Clients that see a
+/// higher `schema_version` than this constant ignore the surface — they
+/// do **not** attempt to render an unknown shape.
+///
+/// * `1` — menus, pages, inline tables / forms / details.
+/// * `2` — adds modal forms ([`SurfacePresentation::Modal`]), table
+///   toolbar actions ([`SurfaceTable::actions`]) and row actions that open
+///   a prefilled form ([`SurfaceRowAction::open_form`]). A v1 surface is
+///   still a valid v2 surface and renders exactly as before.
+///
+/// The bump is what makes the new keys fail loudly on an older host: the
+/// structs here do not deny unknown fields and the server re-serialises
+/// the parsed manifest, so a host that predates v2 would silently drop
+/// them (rendering every modal form inline and turning an *Edit* row
+/// action into a bare `read`). Declaring `schema_version = 2` instead
+/// gets the bundle refused at registration by such a host.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+
+/// First schema version that may use modal forms, table actions and
+/// row actions that open a form. [`SurfaceManifest::validate`] refuses
+/// those features in a surface declaring anything lower.
+pub const MODAL_FORMS_SCHEMA_VERSION: u32 = 2;
 
 /// Top-level surface manifest. Stored alongside the plugin's server
 /// binary and served verbatim to clients.
@@ -120,6 +138,10 @@ pub struct SurfaceTable {
     pub row_actions: Vec<SurfaceRowAction>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub empty_text: String,
+    /// Schema v2: buttons shown with the table (also when it is empty)
+    /// that open modal forms, e.g. *Add account*.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<SurfaceTableAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -131,11 +153,79 @@ pub struct SurfaceColumn {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SurfaceRowAction {
     pub label: String,
+    /// The operation the action issues with the row's string fields
+    /// as `{<field>}` substitutions. When [`Self::open_form`] is set
+    /// this must be a `read`: its response prefills the form.
     pub binding: SurfaceBinding,
     /// When true, the GUI shows a confirm dialog before issuing
-    /// the bound operation.
+    /// the bound operation. Not allowed together with `open_form`.
     #[serde(default)]
     pub confirm: bool,
+    /// Schema v2: open a modal form for this row instead of issuing
+    /// `binding` as the action. The renderer reads `binding`, prefills
+    /// the form from the response (never a secret-format field), and
+    /// submits the form's own `submit.binding` with the row's fields
+    /// taking precedence for path placeholders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_form: Option<SurfaceOpenForm>,
+}
+
+/// Schema v2: a toolbar button on a table that opens a modal form.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SurfaceTableAction {
+    pub label: String,
+    /// Ids of modal forms on the same page. With one, the button opens
+    /// it directly; with more, the modal first asks which one, listing
+    /// each form's `title` (a "choose the kind" step).
+    pub forms: Vec<String>,
+    /// Shown above the choices when `forms` has more than one entry.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prompt: String,
+}
+
+/// Schema v2: which modal form a row action opens. Exactly one of the
+/// two shapes is allowed:
+///
+/// * `form` — the same form for every row;
+/// * `select_by` + `forms_by_value` — the row's string field
+///   `select_by` picks the form, e.g. `secret_kind` → `password` /
+///   `ssh-key`. A row whose value has no entry gets an explicit error,
+///   never a fallback form.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceOpenForm {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub form: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub select_by: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub forms_by_value: BTreeMap<String, String>,
+}
+
+impl SurfaceOpenForm {
+    /// Every form id this reference can open.
+    pub fn form_ids(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.form.as_str())
+            .filter(|f| !f.is_empty())
+            .chain(self.forms_by_value.values().map(String::as_str))
+    }
+}
+
+/// Schema v2: how a form is presented.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfacePresentation {
+    /// Rendered in place on its page (the v1 behaviour).
+    #[default]
+    Inline,
+    /// Not rendered on the page; opened in a modal by a table action or
+    /// a row action on the same page.
+    Modal,
+}
+
+impl SurfacePresentation {
+    fn is_inline(&self) -> bool {
+        *self == SurfacePresentation::Inline
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -150,6 +240,11 @@ pub struct SurfaceForm {
     /// Optional `<asset_name>#<export>` form-hook reference.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub hook: String,
+    /// Schema v2: `modal` keeps the form off the page until an action
+    /// opens it. Omitted (inline) on the wire, so a v1 form serialises
+    /// byte-for-byte as before and its ETag does not move.
+    #[serde(default, skip_serializing_if = "SurfacePresentation::is_inline")]
+    pub presentation: SurfacePresentation,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -180,7 +275,9 @@ pub struct SurfaceDetailField {
 ///
 /// * `{mount}` — replaced with this plugin's actual mount path.
 /// * `{<form_field>}` — only legal in `submit.binding` and
-///   `row_actions[].binding`.
+///   `row_actions[].binding`. A row action substitutes the row's string
+///   fields; a form opened by a row action substitutes the row's fields
+///   first and its own values only for placeholders the row lacks.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SurfaceBinding {
     pub op: SurfaceOp,
@@ -216,6 +313,18 @@ pub enum SurfaceError {
     DuplicateComponentId(String),
     #[error("duplicate menu id `{0}`")]
     DuplicateMenuId(String),
+    #[error("{feature} needs schema_version {min} or later, but the surface declares {got}")]
+    FeatureNeedsSchemaVersion { feature: &'static str, min: u32, got: u32 },
+    #[error("`{component}` references form `{form}`, which is not a modal form on the same page")]
+    UnknownModalForm { component: String, form: String },
+    #[error("modal form `{0}` is not opened by any table action or row action on its page")]
+    UnreachableModalForm(String),
+    #[error("config_form `{0}` cannot be a modal form")]
+    ModalConfigForm(String),
+    #[error("table `{table}` action `{label}`: {reason}")]
+    BadTableAction { table: String, label: String, reason: &'static str },
+    #[error("table `{table}` row action `{label}`: {reason}")]
+    BadOpenForm { table: String, label: String, reason: &'static str },
 }
 
 impl SurfaceManifest {
@@ -264,14 +373,19 @@ impl SurfaceManifest {
                 return Err(SurfaceError::OrphanPageRoute(p.route.clone()));
             }
             for c in &p.components {
-                check_component(c, &mut comp_ids, declared_asset_names)?;
+                check_component(c, self.schema_version, &mut comp_ids, declared_asset_names)?;
             }
+            check_modal_forms(p)?;
         }
 
         if let Some(cf) = &self.config_form {
             // config_form lives outside the page tree but still
             // participates in the global ID namespace.
             check_component_id(&cf.id, &mut comp_ids)?;
+            // The admin panel renders it in place; nothing could open it.
+            if cf.presentation == SurfacePresentation::Modal {
+                return Err(SurfaceError::ModalConfigForm(cf.id.clone()));
+            }
             check_binding(&cf.submit.binding)?;
             check_hook(&cf.hook, declared_asset_names)?;
         }
@@ -286,6 +400,7 @@ fn is_subroute_of_any(route: &str, menus: &BTreeSet<&str>) -> bool {
 
 fn check_component(
     c: &SurfaceComponent,
+    schema_version: u32,
     seen: &mut BTreeSet<String>,
     asset_names: &BTreeSet<&str>,
 ) -> Result<(), SurfaceError> {
@@ -293,19 +408,107 @@ fn check_component(
         SurfaceComponent::Table(t) => {
             check_component_id(&t.id, seen)?;
             check_binding(&t.binding)?;
+            if !t.actions.is_empty() {
+                require_schema_version("table actions", schema_version)?;
+            }
             for ra in &t.row_actions {
                 check_binding(&ra.binding)?;
+                if ra.open_form.is_some() {
+                    require_schema_version("row actions that open a form", schema_version)?;
+                }
             }
         }
         SurfaceComponent::Form(f) => {
             check_component_id(&f.id, seen)?;
             check_binding(&f.submit.binding)?;
             check_hook(&f.hook, asset_names)?;
+            if f.presentation == SurfacePresentation::Modal {
+                require_schema_version("modal forms", schema_version)?;
+            }
         }
         SurfaceComponent::Detail(d) => {
             check_component_id(&d.id, seen)?;
             check_binding(&d.binding)?;
         }
+    }
+    Ok(())
+}
+
+fn require_schema_version(feature: &'static str, got: u32) -> Result<(), SurfaceError> {
+    if got < MODAL_FORMS_SCHEMA_VERSION {
+        return Err(SurfaceError::FeatureNeedsSchemaVersion {
+            feature,
+            min: MODAL_FORMS_SCHEMA_VERSION,
+            got,
+        });
+    }
+    Ok(())
+}
+
+/// Every form a table action or row action names must be a modal form
+/// on the same page, and every modal form must be opened by something
+/// (an unreachable form is an authoring mistake, like an orphan page).
+fn check_modal_forms(page: &SurfacePage) -> Result<(), SurfaceError> {
+    let modal: BTreeSet<&str> = page
+        .components
+        .iter()
+        .filter_map(|c| match c {
+            SurfaceComponent::Form(f) if f.presentation == SurfacePresentation::Modal => Some(f.id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let require_modal = |component: &str, form: &str| -> Result<(), SurfaceError> {
+        if modal.contains(form) {
+            Ok(())
+        } else {
+            Err(SurfaceError::UnknownModalForm { component: component.to_string(), form: form.to_string() })
+        }
+    };
+
+    let mut opened: BTreeSet<&str> = BTreeSet::new();
+    for c in &page.components {
+        let SurfaceComponent::Table(t) = c else { continue };
+        for a in &t.actions {
+            let bad = |reason| SurfaceError::BadTableAction { table: t.id.clone(), label: a.label.clone(), reason };
+            if a.label.trim().is_empty() {
+                return Err(bad("label is empty"));
+            }
+            if a.forms.is_empty() {
+                return Err(bad("lists no forms"));
+            }
+            let mut listed: BTreeSet<&str> = BTreeSet::new();
+            for f in &a.forms {
+                if !listed.insert(f.as_str()) {
+                    return Err(bad("lists the same form twice"));
+                }
+                require_modal(&t.id, f)?;
+                opened.insert(f.as_str());
+            }
+        }
+        for ra in &t.row_actions {
+            let Some(of) = &ra.open_form else { continue };
+            let bad = |reason| SurfaceError::BadOpenForm { table: t.id.clone(), label: ra.label.clone(), reason };
+            if ra.binding.op != SurfaceOp::Read {
+                return Err(bad("an action that opens a form must bind a `read`, which prefills the form"));
+            }
+            if ra.confirm {
+                return Err(bad("`confirm` does not apply to an action that opens a form"));
+            }
+            match (of.form.is_empty(), of.select_by.is_empty(), of.forms_by_value.is_empty()) {
+                (false, true, true) | (true, false, false) => {}
+                _ => return Err(bad("open_form needs either `form`, or `select_by` with `forms_by_value`")),
+            }
+            if of.forms_by_value.keys().any(|k| k.is_empty()) {
+                return Err(bad("forms_by_value has an empty value"));
+            }
+            for f in of.form_ids() {
+                require_modal(&t.id, f)?;
+                opened.insert(f);
+            }
+        }
+    }
+    if let Some(unreached) = modal.difference(&opened).next() {
+        return Err(SurfaceError::UnreachableModalForm(unreached.to_string()));
     }
     Ok(())
 }
@@ -532,6 +735,7 @@ mod tests {
                     columns: vec![SurfaceColumn { field: "name".into(), label: "Name".into() }],
                     row_actions: vec![],
                     empty_text: String::new(),
+                    actions: vec![],
                 })],
             }],
             config_form: None,
@@ -552,7 +756,7 @@ mod tests {
         let assets = BTreeSet::new();
         assert_eq!(
             s.validate("totp", &assets).unwrap_err(),
-            SurfaceError::UnsupportedSchemaVersion { got: 99, max: 1 }
+            SurfaceError::UnsupportedSchemaVersion { got: 99, max: CURRENT_SCHEMA_VERSION }
         );
     }
 
@@ -602,6 +806,7 @@ mod tests {
             columns: vec![],
             row_actions: vec![],
             empty_text: String::new(),
+            actions: vec![],
         }));
         let assets = BTreeSet::new();
         assert!(matches!(
@@ -622,6 +827,7 @@ mod tests {
                 binding: SurfaceBinding { op: SurfaceOp::Write, path: "{mount}/codes/{name}".into() },
             },
             hook: "nope.wasm#go".into(),
+            presentation: SurfacePresentation::Inline,
         }));
         let assets = BTreeSet::new();
         assert!(matches!(
@@ -711,5 +917,264 @@ mod tests {
         let bytes = serde_json::to_vec(&s).unwrap();
         let back: SurfaceManifest = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(s, back);
+    }
+
+    // ── Schema v2: modal forms, table actions, row actions opening a form ──
+
+    fn form(id: &str, submit_path: &str, modal: bool) -> serde_json::Value {
+        let mut f = json!({
+            "kind": "form",
+            "id": id,
+            "title": id,
+            "schema": { "type": "object", "properties": { "label": { "type": "string" } } },
+            "submit": { "label": "Save", "binding": { "op": "write", "path": submit_path } },
+        });
+        if modal {
+            f["presentation"] = json!("modal");
+        }
+        f
+    }
+
+    /// The self-accounts shape: an *Add* button with a kind chooser and an
+    /// *Edit* row action that picks the edit form by `secret_kind`.
+    fn v2_json() -> serde_json::Value {
+        json!({
+            "schema_version": 2,
+            "title": "Accounts",
+            "menus": [{ "id": "a.main", "label": "Accounts", "section": "secrets", "route": "/plugin/acc/list" }],
+            "pages": [{
+                "route": "/plugin/acc/list",
+                "title": "Accounts",
+                "components": [
+                    {
+                        "kind": "table",
+                        "id": "accounts",
+                        "binding": { "op": "list", "path": "{mount}/v2/accounts" },
+                        "columns": [{ "field": "label", "label": "Label" }],
+                        "actions": [{ "label": "Add account", "prompt": "Kind?", "forms": ["add-pw", "add-key"] }],
+                        "row_actions": [
+                            {
+                                "label": "Edit",
+                                "binding": { "op": "read", "path": "{mount}/v2/accounts/{id}" },
+                                "open_form": {
+                                    "select_by": "secret_kind",
+                                    "forms_by_value": { "password": "edit-pw", "ssh-key": "edit-key" }
+                                }
+                            },
+                            {
+                                "label": "Delete",
+                                "binding": { "op": "delete", "path": "{mount}/v2/accounts/{id}" },
+                                "confirm": true
+                            }
+                        ]
+                    },
+                    form("add-pw", "{mount}/v2/accounts", true),
+                    form("add-key", "{mount}/v2/accounts", true),
+                    form("edit-pw", "{mount}/v2/accounts/{id}", true),
+                    form("edit-key", "{mount}/v2/accounts/{id}", true),
+                ]
+            }]
+        })
+    }
+
+    fn parse(v: &serde_json::Value) -> SurfaceManifest {
+        serde_json::from_value(v.clone()).expect("fixture deserialises")
+    }
+
+    fn check(v: &serde_json::Value) -> Result<(), SurfaceError> {
+        parse(v).validate("acc", &BTreeSet::new())
+    }
+
+    fn table_mut(v: &mut serde_json::Value) -> &mut serde_json::Value {
+        &mut v["pages"][0]["components"][0]
+    }
+
+    /// Drop a key (a JSON `null` would not hit the `serde(default)`).
+    fn remove(v: &mut serde_json::Value, key: &str) {
+        v.as_object_mut().expect("object").remove(key);
+    }
+
+    #[test]
+    fn v2_modal_forms_validate_and_round_trip() {
+        let v = v2_json();
+        check(&v).unwrap();
+        let s = parse(&v);
+        let SurfaceComponent::Table(t) = &s.pages[0].components[0] else { panic!("table") };
+        assert_eq!(t.actions[0].forms, ["add-pw", "add-key"]);
+        let of = t.row_actions[0].open_form.as_ref().unwrap();
+        assert_eq!(of.select_by, "secret_kind");
+        assert_eq!(of.forms_by_value["ssh-key"], "edit-key");
+        assert!(t.row_actions[1].open_form.is_none());
+        let SurfaceComponent::Form(f) = &s.pages[0].components[1] else { panic!("form") };
+        assert_eq!(f.presentation, SurfacePresentation::Modal);
+        // The server re-serialises the parsed manifest: the new keys must survive.
+        let back: SurfaceManifest = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
+        assert_eq!(s, back);
+    }
+
+    #[test]
+    fn single_form_open_form_validates() {
+        let mut v = v2_json();
+        table_mut(&mut v)["row_actions"][0]["open_form"] = json!({ "form": "edit-pw" });
+        // `edit-key` is now opened by nothing.
+        assert_eq!(check(&v).unwrap_err(), SurfaceError::UnreachableModalForm("edit-key".into()));
+        v["pages"][0]["components"].as_array_mut().unwrap().pop();
+        check(&v).unwrap();
+    }
+
+    #[test]
+    fn v1_surface_is_unchanged_on_the_wire_and_still_valid() {
+        // A v1 surface: inline forms, delete row action. Same bytes out,
+        // same ETag as before the v2 fields existed.
+        let v1 = json!({
+            "schema_version": 1,
+            "title": "Accounts",
+            "menus": [{ "id": "a.main", "label": "Accounts", "section": "secrets", "route": "/plugin/acc/list" }],
+            "pages": [{
+                "route": "/plugin/acc/list",
+                "title": "Accounts",
+                "components": [
+                    {
+                        "kind": "table",
+                        "id": "accounts",
+                        "binding": { "op": "list", "path": "{mount}/v2/accounts" },
+                        "columns": [{ "field": "label", "label": "Label" }],
+                        "row_actions": [{
+                            "label": "Delete",
+                            "binding": { "op": "delete", "path": "{mount}/v2/accounts/{id}" },
+                            "confirm": true
+                        }]
+                    },
+                    form("add", "{mount}/v2/accounts", false),
+                ]
+            }]
+        });
+        check(&v1).unwrap();
+        let wire = serde_json::to_value(parse(&v1)).unwrap();
+        assert_eq!(wire, v1, "no v2 key is emitted for a v1 surface");
+    }
+
+    #[test]
+    fn v2_features_need_schema_version_2() {
+        for (mutate, feature) in [
+            (
+                (|v: &mut serde_json::Value| {
+                    remove(&mut table_mut(v)["row_actions"][0], "open_form");
+                    remove(table_mut(v), "actions");
+                }) as fn(&mut serde_json::Value),
+                "modal forms",
+            ),
+            (
+                |v: &mut serde_json::Value| remove(&mut table_mut(v)["row_actions"][0], "open_form"),
+                "table actions",
+            ),
+            (|v: &mut serde_json::Value| remove(table_mut(v), "actions"), "row actions that open a form"),
+        ] {
+            let mut v = v2_json();
+            v["schema_version"] = json!(1);
+            mutate(&mut v);
+            let err = check(&v).unwrap_err();
+            assert!(
+                matches!(&err, SurfaceError::FeatureNeedsSchemaVersion { feature: f, min: 2, got: 1 } if *f == feature),
+                "{feature}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_dangling_form_references() {
+        let mut v = v2_json();
+        table_mut(&mut v)["actions"][0]["forms"][1] = json!("nope");
+        assert_eq!(
+            check(&v).unwrap_err(),
+            SurfaceError::UnknownModalForm { component: "accounts".into(), form: "nope".into() }
+        );
+
+        let mut v = v2_json();
+        table_mut(&mut v)["row_actions"][0]["open_form"]["forms_by_value"]["ssh-key"] = json!("missing");
+        assert_eq!(
+            check(&v).unwrap_err(),
+            SurfaceError::UnknownModalForm { component: "accounts".into(), form: "missing".into() }
+        );
+
+        // An inline form is not something an action can open.
+        let mut v = v2_json();
+        remove(&mut v["pages"][0]["components"][3], "presentation");
+        assert!(matches!(check(&v), Err(SurfaceError::UnknownModalForm { form, .. }) if form == "edit-pw"));
+    }
+
+    #[test]
+    fn rejects_a_form_on_another_page() {
+        let mut v = v2_json();
+        let moved = v["pages"][0]["components"].as_array_mut().unwrap().remove(4);
+        v["pages"].as_array_mut().unwrap().push(json!({
+            "route": "/plugin/acc/list/other",
+            "title": "Other",
+            "components": [moved],
+        }));
+        assert!(matches!(check(&v), Err(SurfaceError::UnknownModalForm { form, .. }) if form == "edit-key"));
+    }
+
+    #[test]
+    fn rejects_unreachable_modal_form() {
+        let mut v = v2_json();
+        v["pages"][0]["components"].as_array_mut().unwrap().push(form("orphan", "{mount}/v2/x", true));
+        assert_eq!(check(&v).unwrap_err(), SurfaceError::UnreachableModalForm("orphan".into()));
+    }
+
+    #[test]
+    fn rejects_bad_bindings_in_modal_forms_and_form_opening_actions() {
+        let mut v = v2_json();
+        v["pages"][0]["components"][3]["submit"]["binding"]["path"] = json!("sys/policies/acl/x");
+        assert!(matches!(check(&v), Err(SurfaceError::BadBindingPath(_))));
+
+        let mut v = v2_json();
+        table_mut(&mut v)["row_actions"][0]["binding"]["path"] = json!("{mount}/../other/{id}");
+        assert!(matches!(check(&v), Err(SurfaceError::BadBindingPath(_))));
+    }
+
+    #[test]
+    fn rejects_malformed_actions() {
+        type Mutation = fn(&mut serde_json::Value);
+        let cases: [(Mutation, &str); 7] = [
+            (|v| table_mut(v)["actions"][0]["forms"] = json!([]), "lists no forms"),
+            (|v| table_mut(v)["actions"][0]["forms"] = json!(["add-pw", "add-pw", "add-key"]), "twice"),
+            (|v| table_mut(v)["actions"][0]["label"] = json!(" "), "label is empty"),
+            (|v| table_mut(v)["row_actions"][0]["binding"]["op"] = json!("write"), "must bind a `read`"),
+            (|v| table_mut(v)["row_actions"][0]["confirm"] = json!(true), "`confirm`"),
+            (|v| table_mut(v)["row_actions"][0]["open_form"]["form"] = json!("edit-pw"), "either `form`"),
+            (
+                |v| table_mut(v)["row_actions"][0]["open_form"]["forms_by_value"][""] = json!("edit-pw"),
+                "empty value",
+            ),
+        ];
+        for (mutate, needle) in cases {
+            let mut v = v2_json();
+            mutate(&mut v);
+            let err = check(&v).unwrap_err();
+            assert!(
+                matches!(err, SurfaceError::BadTableAction { .. } | SurfaceError::BadOpenForm { .. }),
+                "{needle}: {err}"
+            );
+            assert!(err.to_string().contains(needle), "{needle}: {err}");
+        }
+
+        let mut v = v2_json();
+        table_mut(&mut v)["row_actions"][0]["open_form"] = json!({});
+        assert!(check(&v).unwrap_err().to_string().contains("either `form`"));
+    }
+
+    #[test]
+    fn rejects_modal_config_form() {
+        let mut v = v2_json();
+        v["config_form"] = form("cfg", "{mount}/config", true);
+        assert_eq!(check(&v).unwrap_err(), SurfaceError::ModalConfigForm("cfg".into()));
+    }
+
+    #[test]
+    fn unknown_presentation_is_a_parse_error() {
+        let mut v = v2_json();
+        v["pages"][0]["components"][1]["presentation"] = json!("drawer");
+        assert!(serde_json::from_value::<SurfaceManifest>(v).is_err());
     }
 }

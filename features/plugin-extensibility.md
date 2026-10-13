@@ -72,7 +72,7 @@ The v2 manifest grows two optional sibling fields to `runtime`:
 
 `surface.ref` is the asset name within the bundle. `client_assets[].sha256` is computed at pack time and verified before the GUI ever instantiates the WASM.
 
-## Surface schema (v1)
+## Surface schema (v1 and v2)
 
 The full schema lives in the [`bv_plugin_surface`](../crates/bv_plugin_surface/src/lib.rs) crate. The crate is the single source of truth — both server and GUI deserialize against the same Rust types.
 
@@ -89,7 +89,14 @@ The full schema lives in the [`bv_plugin_surface`](../crates/bv_plugin_surface/s
 }
 ```
 
-`schema_version` is a hard fence: a GUI that doesn't understand a `schema_version` greater than its own ignores the surface (the plugin still works via the admin page) and surfaces a single warning toast. **Never silently render an unknown schema.**
+`schema_version` is a hard fence: a GUI that doesn't understand a `schema_version` greater than its own does not render the surface's pages (the plugin still works via the admin page); the desktop app shows *Update BastionVault to open this page* in their place. A host refuses to register a bundle whose `schema_version` is newer than `bv_plugin_surface::CURRENT_SCHEMA_VERSION`. **Never silently render an unknown schema.**
+
+| `schema_version` | Adds |
+|---|---|
+| `1` | Menus, pages, inline `table` / `form` / `detail`. |
+| `2` | Modal forms, table `actions`, row actions with `open_form` (see [Schema v2](#schema-v2-modal-forms-and-actions)). A v1 surface is a valid v2 surface and renders identically. |
+
+Declare the lowest version your surface needs: `bv-plugin-pack` and the host refuse v2 features under `schema_version: 1`, and a v1 surface still registers on hosts that predate v2.
 
 ### Menus
 
@@ -185,6 +192,51 @@ Every binding is a `{op, path}` envelope identical to what the existing `Logical
 - `{<form_field>}` — replaced with the form's value for that field at submit time. Only legal in `submit.binding` and `row_actions[].binding`.
 
 Absolute paths (anything starting with `/`) and paths that don't begin with `{mount}` are rejected at registration. A plugin cannot bind to another plugin's mount, the audit log, or `sys/` paths.
+
+### Schema v2: modal forms and actions
+
+Lets a page keep its forms off the page and open them from the table: an *Add* button with a "choose the kind" step, and an *Edit* row action that opens a prefilled form. The self-accounts plugin's [`surface.json`](../plugins-ext/bastion-plugin-self-accounts/surface.json) is the reference.
+
+```json
+{
+  "kind": "table",
+  "id": "accounts",
+  "binding": { "op": "list", "path": "{mount}/v2/accounts" },
+  "columns": [ { "field": "label", "label": "Label" } ],
+  "actions": [
+    { "label": "Add account", "prompt": "What kind of account?",
+      "forms": ["add-password", "add-ssh-key"] }
+  ],
+  "row_actions": [
+    { "label": "Edit",
+      "binding": { "op": "read", "path": "{mount}/v2/accounts/{id}" },
+      "open_form": { "select_by": "secret_kind",
+                     "forms_by_value": { "password": "edit-password", "ssh-key": "edit-ssh-key" } } },
+    { "label": "Delete",
+      "binding": { "op": "delete", "path": "{mount}/v2/accounts/{id}" }, "confirm": true }
+  ]
+}
+```
+
+```json
+{ "kind": "form", "id": "edit-password", "title": "Edit password account",
+  "presentation": "modal",
+  "schema": { "...": "JSON Schema, as for any form" },
+  "submit": { "label": "Save changes", "binding": { "op": "write", "path": "{mount}/v2/accounts/{id}" } } }
+```
+
+- **`presentation: "modal"`** (form; default `inline`) — the form is not rendered on the page. Not allowed on `config_form`.
+- **`actions`** (table) — buttons above the table, shown also when it is empty. `forms` lists modal forms on the same page: one opens directly; several first show a chooser listing each form's `title` under `prompt`.
+- **`open_form`** (row action) — either `form` (one form for every row) or `select_by` (a row field) with `forms_by_value` (value → form id). A row whose value has no entry gets an error in the dialog, never another form. The row action's `binding` must be a `read`: the renderer issues it with the row's fields and prefills the form from the response. `confirm` is not allowed with `open_form`.
+
+Rules checked by `SurfaceManifest::validate` (so by `bv-plugin-pack` and at host registration): every form an action names exists as a modal form **on the same page**; every modal form is opened by at least one action; an action lists at least one form, no form twice, and has a label; `open_form` uses exactly one of its two shapes; bindings follow the usual `{mount}/` rules; and none of this appears under `schema_version: 1`.
+
+How the GUI renders a form opened by a row action (edit mode), whatever the schema says:
+
+- It is prefilled from the `read` response: only the form's own properties, only in a shape the field can show (a list in a text field is joined, one per line in a textarea). Schema `default`s are not applied, so a field the record lacks stays empty.
+- **Secret-format fields** (`format: "password"`, `"secret-textarea"`) are never prefilled — even if a plugin returned a value — are never `required`, show *Leave empty to keep the current secret.*, and are **left out of the request when empty** rather than sent as `""`. A plugin's update path should treat an absent secret as "keep".
+- The submit path's `{field}` placeholders take the **row's** values first; the form's own values fill only the placeholders the row lacks, so editing a field cannot retarget the write.
+- After a successful submit the page's tables re-list. The dialog closes, unless the response carries `warnings`, which it shows first. Errors stay in the dialog.
 
 ### Allowed sections
 
@@ -375,3 +427,4 @@ A plugin that ships **no** `surface` block in its manifest keeps working exactly
 | 5 | Auto-update via long-poll watcher | **Done** |
 | 6 | Operator UX redesign | **Done** |
 | 7 | Reference plugin (TOTP) + SDK + docs | **Done** |
+| 8 | Schema v2: modal forms, table actions, row actions that open a prefilled form (T123) | **Done** |

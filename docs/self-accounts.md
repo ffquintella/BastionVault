@@ -74,7 +74,7 @@ The plugin is mounted like an engine, with type `plugin:self-accounts`, at `self
 
 In the GUI, open **Admin → Mounts → Secret Engines**, choose **Mount Engine**,
 set **Path** to `self-accounts/`, and select
-**self-accounts v0.1.1 (plugin · secret)** under **Engine Type**. The table on
+**self-accounts v0.1.2 (plugin · secret)** under **Engine Type**. The table on
 that page lists engines that are already mounted; the plugin appears in the
 **Engine Type** selector before it appears in the table. Mount it once in each
 namespace whose operators use the management page.
@@ -267,7 +267,7 @@ Data under a merged-away entity is **retained** and reachable only by the admini
 
 ## 10. Known limits
 
-- **No edit in the GUI.** **My accounts** adds and deletes. To edit an account, write `self-accounts/v2/accounts/<id>`; secret fields are write-preserve (an absent or empty value keeps the stored one), and `DELETE .../<id>/totp` clears a seed.
+- **The kind is fixed in the GUI, and a TOTP seed cannot be cleared there.** **My accounts** adds (**Add account**, then the kind), edits (**Edit** on a row, with the secret fields empty: leave them empty to keep the stored secret) and deletes. To change a password account into a key account, write `self-accounts/v2/accounts/<id>` with `secret_kind` and the new secret in the same request; `DELETE .../<id>/totp` clears a seed. The page needs plugin 0.1.2 and a server and desktop app that render plugin surface schema 2.
 - **OpenSSH private keys only.** A PKCS#8 PEM is refused with a precise message, because the SSH session reads the OpenSSH form.
 - **No passphrase-protected keys.** Store an unencrypted key; the barrier is the at-rest protection.
 - **TOTP from a provider seed is computed once at launch.** There is no refresh for it, and the seed is not kept server-side. The password form always shows a TOTP field; a seed is refused with a clear message unless `allow_totp_seeds` is on.

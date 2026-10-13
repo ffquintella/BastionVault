@@ -67,8 +67,10 @@ fn main() {
                         path: "{mount}/codes/{name}".to_string(),
                     },
                     confirm: true,
+                    open_form: None,
                 }],
                 empty_text: "No TOTP codes registered yet.".to_string(),
+                actions: vec![],
             }),
             // Create form. The `hook` reference points at the
             // form-hook WASM module declared in
@@ -109,6 +111,7 @@ fn main() {
                     },
                 },
                 hook: "totp-form-hooks.wasm#validate_create".to_string(),
+                presentation: Default::default(),
             }),
         ],
     });

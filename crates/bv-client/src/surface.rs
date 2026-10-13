@@ -580,6 +580,7 @@ mod tests {
                     }],
                     row_actions: vec![],
                     empty_text: String::new(),
+                    actions: vec![],
                 })],
             }],
             config_form: None,

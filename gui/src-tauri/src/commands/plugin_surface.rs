@@ -340,6 +340,10 @@ pub struct PluginSurfaceDispatchResult {
     /// `data` field of the backend response, when present. The
     /// frontend renders this as a table / detail view.
     pub data: Option<Map<String, Value>>,
+    /// Warnings the plugin attached to a successful response (e.g. "this
+    /// account would never be offered"). Modal forms show them after a
+    /// save; callers that ignore them behave exactly as before.
+    pub warnings: Vec<String>,
 }
 
 #[tauri::command]
@@ -385,5 +389,9 @@ pub async fn plugin_surface_dispatch(
         .handle_with_namespace(op, &resolved, args.body, &token, namespace.as_deref())
         .await
         .map_err(CommandError::from)?;
-    Ok(PluginSurfaceDispatchResult { data: resp.and_then(|r| r.data) })
+    let (data, warnings) = match resp {
+        Some(r) => (r.data, r.warnings),
+        None => (None, Vec::new()),
+    };
+    Ok(PluginSurfaceDispatchResult { data, warnings })
 }

@@ -218,20 +218,26 @@ pub mod surface {
     //! for the schema reference.
     pub use bv_plugin_surface::{
         ActiveSurfaceBundle, ActiveSurfaceEntry, CURRENT_SCHEMA_VERSION,
-        SurfaceBinding, SurfaceColumn, SurfaceComponent, SurfaceDetail,
-        SurfaceDetailField, SurfaceError, SurfaceForm, SurfaceManifest,
-        SurfaceMenu, SurfaceOp, SurfacePage, SurfaceRowAction,
-        SurfaceSection, SurfaceSubmit, SurfaceTable,
+        MODAL_FORMS_SCHEMA_VERSION, SurfaceBinding, SurfaceColumn,
+        SurfaceComponent, SurfaceDetail, SurfaceDetailField, SurfaceError,
+        SurfaceForm, SurfaceManifest, SurfaceMenu, SurfaceOp, SurfaceOpenForm,
+        SurfacePage, SurfacePresentation, SurfaceRowAction, SurfaceSection,
+        SurfaceSubmit, SurfaceTable, SurfaceTableAction,
     };
 
     /// Build a minimal-shaped [`SurfaceManifest`] with sensible
-    /// defaults: current schema version, the supplied title, and
-    /// empty menu/page lists. Chain the returned struct's fields
-    /// (the fields are public on `SurfaceManifest`) to add menus
-    /// and pages.
+    /// defaults: schema version 1, the supplied title, and empty
+    /// menu/page lists. Chain the returned struct's fields (the fields
+    /// are public on `SurfaceManifest`) to add menus and pages.
+    ///
+    /// Version 1 is the widest-compatible choice: hosts that predate
+    /// schema v2 still accept it. Set `schema_version` to
+    /// [`MODAL_FORMS_SCHEMA_VERSION`] when the surface uses modal forms,
+    /// table actions or row actions that open a form;
+    /// [`SurfaceManifest::validate`] refuses those below it.
     pub fn surface_builder(title: &str) -> SurfaceManifest {
         SurfaceManifest {
-            schema_version: CURRENT_SCHEMA_VERSION,
+            schema_version: 1,
             title: title.to_string(),
             icon: String::new(),
             menus: Vec::new(),

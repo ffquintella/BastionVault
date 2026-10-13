@@ -77,7 +77,7 @@ GUI only, like the rest of Resource Connect.
 
 ## Current State
 
-**Status: In progress (2026-10-09). All five phases are implemented apart from the items listed under each: the host substrate (1), the plugin (2), Connect integration on the server (3) and in the GUI and desktop host (4), and hardening and UX (5: the first-use badge, preselection of the account last used on the target, per-user counts for administrators, an audited and retried entity purge, and the operator guide `docs/self-accounts.md`). The signed plugin bundle now carries its management surface through the normal GUI registration flow; remote and local embedded discovery apply the caller's token, policy and namespace before resolving its mount, preserve that authoritative mount across cache revalidation, and fail visibly without issuing requests when the mount is absent or ambiguous. The feature stays in progress until the review gate closes: the L4 `make test-release` run, the manual per-platform checks against real SSH / RDP / web / Rustion targets (none run yet), and the security-review sign-off.**
+**Status: In progress (2026-10-09). All five phases are implemented apart from the items listed under each: the host substrate (1), the plugin (2), Connect integration on the server (3) and in the GUI and desktop host (4), and hardening and UX (5: the first-use badge, preselection of the account last used on the target, per-user counts for administrators, an audited and retried entity purge, and the operator guide `docs/self-accounts.md`). The signed plugin bundle now carries its management surface through the normal GUI registration flow; remote and local embedded discovery apply the caller's token, policy and namespace before resolving its mount, preserve that authoritative mount across cache revalidation, and fail visibly without issuing requests when the mount is absent or ambiguous. Since plugin 0.1.2 (T123) the management page edits accounts: **Add account** opens a kind chooser and the kind's form in a dialog, and **Edit** on a row opens that kind's form prefilled from `read v2/accounts/<id>`, with the secret fields empty, optional and left out of the write when empty (surface schema 2, features/plugin-extensibility.md). The feature stays in progress until the review gate closes: the L4 `make test-release` run, the manual per-platform checks against real SSH / RDP / web / Rustion targets (none run yet), and the security-review sign-off.**
 
 | Phase | Status |
 |---|---|
@@ -573,11 +573,19 @@ module and no custom code in the webview.
 
 - **Menu**: *My accounts* (key icon) in the `secrets` section.
 - **Page**: a `table` bound to `{mount}/v2/accounts` (`list`), with columns
-  for label, username, kind, resource types, targets and last used, and row
-  actions *Edit* and *Delete* (`{mount}/v2/accounts/{id}`).
-- **Forms**: two forms, *Add password account* and *Add SSH-key account*, so
-  that no conditional fields are needed. The password form gets an optional
-  TOTP field only when `v2/settings` reports `allow_totp_seeds`.
+  for label, username, kind, resource types, targets and last used, a toolbar
+  action *Add account*, and row actions *Edit* and *Delete*
+  (`{mount}/v2/accounts/{id}`).
+- **Forms**: four modal forms (surface schema 2), none rendered on the page.
+  *Add account* asks for the kind and opens *Add a password account* or *Add
+  an SSH-key account*, so that no conditional fields are needed. *Edit* reads
+  `{mount}/v2/accounts/{id}` and opens *Edit password account* or *Edit SSH-key
+  account* by the row's `secret_kind`; the edit forms have no kind field (the
+  kind is fixed) and do not require a secret. `read` carries the
+  applicability lists flat (`resource_types`, `os_types`, `protocols`,
+  `targets`) for the prefill. The password forms always carry the TOTP field
+  (a static surface cannot hide it); the plugin refuses a seed unless
+  `allow_totp_seeds` is on.
 
 Phase 1 adds three **generic** keywords to the `SurfaceForm` subset, each
 useful to any plugin:
@@ -589,7 +597,8 @@ useful to any plugin:
 | `x-bv-options: "resource-types" \| "os-types"` | options filled by the host from the list the Resources page already reads (`resources/config/types`) | the plugin cannot read other mounts, and should not have to |
 
 Fields for secrets submit write-preserve: an empty value on edit means
-"keep".
+"keep". The GUI never prefills a secret field on edit, does not require it,
+and leaves it out of the write when empty rather than sending `""`.
 
 The **My Profile** page (features/self-service-profile.md) gets a link to *My
 accounts* when the provider is active and granted. It shows nothing else.
@@ -802,9 +811,10 @@ purge when a principal's last alias goes.
   with the same *unknown import*; the real host was not run against it.
 - **`list` returns `data.entries`, not `data.keys`**, because the management
   table prefers `keys` and would render bare ids.
-- **The management page cannot edit an account**, only add and delete: a
-  surface row action cannot open a form. Editing is `write v2/accounts/<id>`.
-  The password form always carries a TOTP field (a static surface cannot hide
+- **The management page could not edit an account** until plugin 0.1.2: a
+  surface row action could not open a form. Surface schema 2 (T123) added
+  modal forms and row actions that open a prefilled form; the page now edits.
+  The password forms always carry a TOTP field (a static surface cannot hide
   it); the plugin refuses a seed with a clear message unless allowed.
 - **Form fields are flat** (`resource_types`, `targets`, …) rather than a nested
   `applies_to`, because that is what a surface form submits. `targets` is one
@@ -1236,8 +1246,8 @@ What landed:
 
 **Not done:**
 
-- GUI row-edit of accounts and PKCS#8 / passphrase keys stay the documented
-  limits of Phases 2 and 4.
+- PKCS#8 / passphrase keys stay a documented limit of Phase 2. (GUI row-edit
+  of accounts landed with plugin 0.1.2, T123.)
 - `tests/test_self_accounts_connect.rs` with a signed fixture (skipped as
   optional; the `#[ignore]`d engine tests run by `make plugins-test` cover the
   same flow in-process).

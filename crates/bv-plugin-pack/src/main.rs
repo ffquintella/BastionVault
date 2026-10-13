@@ -855,6 +855,112 @@ size = 0
         assert_eq!(asset.size, parsed.size);
     }
 
+    /// Pack a fixture plugin whose sibling `surface.json` is `surface`
+    /// and whose `[surface] schema_version` matches the surface's own.
+    fn pack_with_surface(surface: &serde_json::Value) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir();
+        let manifest_path = dir.join("plugin.toml");
+        let binary_path = dir.join("plugin.wasm");
+        fs::write(
+            &manifest_path,
+            format!(
+                r#"
+name = "accounts"
+version = "0.1.0"
+plugin_type = "secret"
+runtime = "wasm"
+abi_version = "1.0"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 0
+description = "surface fixture"
+
+[capabilities]
+log_emit = true
+
+[surface]
+schema_version = {}
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 0
+"#,
+                surface["schema_version"]
+            ),
+        )
+        .unwrap();
+        fs::write(&binary_path, b"\x00asm\x01\x00\x00\x00").unwrap();
+        fs::write(dir.join("surface.json"), serde_json::to_vec(surface).unwrap()).unwrap();
+        run(PackArgs {
+            manifest: manifest_path,
+            binary: binary_path,
+            out: Some(dir.join("plugin.bvplugin")),
+            signing_seed_hex: None,
+            signing_seed_file: None,
+            signing_key_name: None,
+        })
+    }
+
+    /// Schema v2: an *Add* button with a kind chooser and an *Edit* row
+    /// action that opens the edit form matching the row's `kind`.
+    fn modal_forms_surface() -> serde_json::Value {
+        let form = |id: &str, path: &str| {
+            serde_json::json!({
+                "kind": "form", "id": id, "title": id, "presentation": "modal",
+                "schema": { "type": "object", "properties": {} },
+                "submit": { "label": "Save", "binding": { "op": "write", "path": path } }
+            })
+        };
+        serde_json::json!({
+            "schema_version": 2,
+            "title": "Accounts",
+            "menus": [{ "id": "accounts.main", "label": "My accounts", "section": "secrets",
+                        "route": "/plugin/accounts/manage" }],
+            "pages": [{
+                "route": "/plugin/accounts/manage",
+                "title": "My accounts",
+                "components": [
+                    {
+                        "kind": "table", "id": "list",
+                        "binding": { "op": "list", "path": "{mount}/v2/accounts" },
+                        "columns": [{ "field": "label", "label": "Label" }],
+                        "actions": [{ "label": "Add account", "forms": ["add-a", "add-b"] }],
+                        "row_actions": [{
+                            "label": "Edit",
+                            "binding": { "op": "read", "path": "{mount}/v2/accounts/{id}" },
+                            "open_form": { "select_by": "kind", "forms_by_value": { "a": "edit-a", "b": "edit-b" } }
+                        }]
+                    },
+                    form("add-a", "{mount}/v2/accounts"),
+                    form("add-b", "{mount}/v2/accounts"),
+                    form("edit-a", "{mount}/v2/accounts/{id}"),
+                    form("edit-b", "{mount}/v2/accounts/{id}")
+                ]
+            }]
+        })
+    }
+
+    #[test]
+    fn schema_v2_modal_form_surface_packs() {
+        pack_with_surface(&modal_forms_surface()).unwrap();
+    }
+
+    #[test]
+    fn surface_with_a_dangling_form_reference_is_refused() {
+        let mut s = modal_forms_surface();
+        s["pages"][0]["components"][0]["row_actions"][0]["open_form"]["forms_by_value"]["b"] =
+            serde_json::json!("edit-c");
+        let err = pack_with_surface(&s).unwrap_err().to_string();
+        assert!(err.contains("failed validation") && err.contains("`edit-c`"), "{err}");
+    }
+
+    #[test]
+    fn modal_forms_under_schema_v1_are_refused() {
+        // Packed as v1, an older host would drop the modal keys and render
+        // every form inline; the packer refuses it instead.
+        let mut s = modal_forms_surface();
+        s["schema_version"] = serde_json::json!(1);
+        let err = pack_with_surface(&s).unwrap_err().to_string();
+        assert!(err.contains("needs schema_version 2"), "{err}");
+    }
+
     fn tempdir() -> PathBuf {
         let p = std::env::temp_dir().join(format!(
             "bv-plugin-pack-test-{}-{}",

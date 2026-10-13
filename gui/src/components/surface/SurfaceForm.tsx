@@ -29,6 +29,14 @@ import { DEFAULT_RESOURCE_TYPES, parseTypeConfig } from "../../lib/resourceTypes
  * Form-hook integration is wired in Phase 4. For now, the `hook`
  * field is read off the spec and surfaced through `console.warn`
  * if present so plugin authors notice the missing wiring early.
+ *
+ * `mode: "edit"` (a schema-v2 form opened by a row action) changes how
+ * secret-format fields behave, whatever the schema says: they are never
+ * prefilled, never required, carry "Leave empty to keep the current
+ * secret.", and are left out of the request when empty, so an untouched
+ * secret is kept rather than overwritten with "". Edit mode does not
+ * apply schema `default`s either: a field the record lacks stays empty
+ * instead of being silently set.
  */
 type Schema = {
   type?: string;
@@ -49,6 +57,56 @@ type PropSchema = {
 
 /** Formats whose value must not outlive a successful submit in the DOM. */
 const SECRET_FORMATS = new Set(["password", "secret-textarea"]);
+
+function isSecretProp(prop: PropSchema): boolean {
+  return prop.format !== undefined && SECRET_FORMATS.has(prop.format);
+}
+
+/** Fields that take the full row in the two-column (modal) layout. */
+function isWideField(prop: PropSchema): boolean {
+  return (
+    prop.type === "array" ||
+    prop.type === "boolean" ||
+    prop.format === "textarea" ||
+    prop.format === "secret-textarea"
+  );
+}
+
+export const KEEP_SECRET_HINT = "Leave empty to keep the current secret.";
+
+/**
+ * Form values for edit mode, from the record a row action read. Only the
+ * form's own properties are taken, each only when the record's value has
+ * a shape the field can show; a list shown in a text field is joined (one
+ * per line in a textarea). Secret-format fields are never taken, even if
+ * a plugin returned one.
+ */
+export function prefillValues(
+  schema: Record<string, unknown> | undefined,
+  record: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  const properties = ((schema as Schema | undefined)?.properties ?? {}) as Record<string, PropSchema>;
+  const out: Record<string, unknown> = {};
+  if (!record) return out;
+  for (const [name, prop] of Object.entries(properties)) {
+    if (isSecretProp(prop)) continue;
+    const v = record[name];
+    if (v === undefined || v === null) continue;
+    const strings = Array.isArray(v) && v.every((x) => typeof x === "string") ? (v as string[]) : null;
+    if (prop.type === "array") {
+      if (strings) out[name] = strings;
+    } else if (prop.type === "boolean") {
+      if (typeof v === "boolean") out[name] = v;
+    } else if (prop.type === "integer" || prop.type === "number") {
+      if (typeof v === "number") out[name] = v;
+    } else if (typeof v === "string") {
+      out[name] = v;
+    } else if (strings) {
+      out[name] = strings.join(prop.format === "textarea" ? "\n" : ", ");
+    }
+  }
+  return out;
+}
 
 /** Option lists the host can supply to a form field (`x-bv-options`). */
 export type HostOptionKind = "resource-types" | "os-types";
@@ -96,26 +154,60 @@ export function SurfaceForm({
   spec,
   entry,
   onSubmitted,
+  mode = "create",
+  initialValues,
+  pathParams,
+  onCancel,
+  hideTitle = false,
+  layout = "stack",
 }: {
   spec: api.SurfaceForm;
   /** The owning plugin's active-surface entry. Carries the mount the
    *  binding's `{mount}` placeholder resolves to, plus the assets
    *  table the form-hook reference is looked up in. */
   entry: api.ActiveSurfaceEntry;
-  onSubmitted?: (resp: Record<string, unknown> | null) => void;
+  onSubmitted?: (resp: Record<string, unknown> | null, warnings: string[]) => void;
+  /** `edit`: opened on an existing record (see the component doc). */
+  mode?: "create" | "edit";
+  /** Edit mode: the values to start from (see `prefillValues`). */
+  initialValues?: Record<string, unknown>;
+  /** `{field}` substitutions for the submit path that take precedence
+   *  over the form's own values — the row a row action was opened on,
+   *  so editing a field cannot retarget the write. */
+  pathParams?: Record<string, string>;
+  /** Renders a Cancel button next to submit (modal forms). */
+  onCancel?: () => void;
+  /** The modal shows the title in its header. */
+  hideTitle?: boolean;
+  /** `grid`: two columns, multi-line and multi-choice fields full width
+   *  (modal forms). `stack` (inline forms) keeps the v1 layout. */
+  layout?: "stack" | "grid";
 }) {
   const mount = entry.mount;
+  const editing = mode === "edit";
+  const grid = layout === "grid";
   const schema = (spec.schema as Schema) ?? {};
   const properties = schema.properties ?? {};
-  const required = new Set(schema.required ?? []);
+  const required = new Set(
+    (schema.required ?? []).filter(
+      (name) => !(editing && properties[name] && isSecretProp(properties[name])),
+    ),
+  );
 
   const initial = useMemo(() => {
+    if (editing) {
+      const out = { ...(initialValues ?? {}) };
+      for (const [k, prop] of Object.entries(properties)) {
+        if (isSecretProp(prop)) delete out[k];
+      }
+      return out;
+    }
     const out: Record<string, unknown> = {};
     for (const [k, prop] of Object.entries(properties)) {
       if (prop.default !== undefined) out[k] = prop.default;
     }
     return out;
-  }, [properties]);
+  }, [properties, editing, initialValues]);
 
   const [values, setValues] = useState<Record<string, unknown>>(initial);
   const [busy, setBusy] = useState(false);
@@ -204,13 +296,28 @@ export function SurfaceForm({
         }
       }
 
+      if (editing) {
+        // An empty secret means "keep the stored one": leave it out of the
+        // request rather than sending "" (which a plugin could read as
+        // "clear").
+        const kept: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(payload)) {
+          const prop = properties[k];
+          if (prop && isSecretProp(prop) && (v === undefined || v === null || v === "")) continue;
+          kept[k] = v;
+        }
+        payload = kept;
+      }
+
       // Build `{<field>}` path substitutions from string fields,
-      // mirroring the SurfaceTable row-action behaviour.
+      // mirroring the SurfaceTable row-action behaviour. The row a form
+      // was opened on wins over the form's own values.
       const params: Record<string, string> = {};
       for (const [k, v] of Object.entries(payload)) {
         if (typeof v === "string") params[k] = v;
       }
-      const resp = await api.pluginSurfaceDispatch(
+      Object.assign(params, pathParams ?? {});
+      const { data: resp, warnings } = await api.pluginSurfaceDispatchWithWarnings(
         spec.submit.binding.op,
         spec.submit.binding.path,
         mount,
@@ -226,7 +333,7 @@ export function SurfaceForm({
         }
         return next;
       });
-      onSubmitted?.(resp ?? null);
+      onSubmitted?.(resp ?? null, warnings);
       // The server may have flipped a flag the surface depends on
       // (for example, a "first-time setup" wizard that the menu
       // hides afterwards). Cheap to ask; bundle ETag short-circuits
@@ -240,23 +347,51 @@ export function SurfaceForm({
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
-      {spec.title && (
-        <h3 className="text-base font-semibold">{spec.title}</h3>
+    <form
+      onSubmit={handleSubmit}
+      className={grid ? "grid grid-cols-2 gap-3" : "space-y-4"}
+    >
+      {spec.title && !hideTitle && (
+        <h3 className={`text-base font-semibold${grid ? " col-span-2" : ""}`}>{spec.title}</h3>
       )}
-      {Object.entries(properties).map(([name, prop]) => (
-        <FieldRenderer
-          key={name}
-          name={name}
-          prop={prop}
-          value={values[name]}
-          required={required.has(name)}
-          error={fieldErrors[name]}
-          onChange={(v) => setField(name, v)}
-        />
-      ))}
-      {err && <p className="text-sm text-[var(--color-danger)]">{err}</p>}
-      <div className="flex justify-end">
+      {Object.entries(properties).map(([name, prop]) => {
+        const field = (
+          <FieldRenderer
+            key={name}
+            name={name}
+            prop={
+              editing && isSecretProp(prop)
+                ? {
+                    ...prop,
+                    description: prop.description
+                      ? `${KEEP_SECRET_HINT} ${prop.description}`
+                      : KEEP_SECRET_HINT,
+                  }
+                : prop
+            }
+            value={values[name]}
+            required={required.has(name)}
+            error={fieldErrors[name]}
+            onChange={(v) => setField(name, v)}
+          />
+        );
+        return grid ? (
+          <div key={name} className={`min-w-0 ${isWideField(prop) ? "col-span-2" : ""}`}>
+            {field}
+          </div>
+        ) : (
+          field
+        );
+      })}
+      {err && (
+        <p className={`text-sm text-[var(--color-danger)]${grid ? " col-span-2" : ""}`}>{err}</p>
+      )}
+      <div className={`flex justify-end gap-2${grid ? " col-span-2" : ""}`}>
+        {onCancel && (
+          <Button type="button" variant="ghost" onClick={onCancel} disabled={busy}>
+            Cancel
+          </Button>
+        )}
         <Button type="submit" disabled={busy}>
           {busy ? "Submitting…" : spec.submit.label}
         </Button>
