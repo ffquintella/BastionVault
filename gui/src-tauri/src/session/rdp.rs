@@ -1109,7 +1109,16 @@ fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
         // bastion's log because it drops the socket without an RDP
         // error PDU.
         request_data: args.ticket_cookie.as_ref().map(|t| NegoRequestData::cookie(t.clone())),
-        autologon: false,
+        // INFO_AUTOLOGON (MS-RDPBCGR 2.2.1.11.1.1). Password sessions
+        // run TLS-only (no CredSSP), so the Client Info PDU is the only
+        // place the password reaches the server — and without this flag
+        // Windows ignores it and shows its own logon screen with just the
+        // username filled in. An empty password (the Rustion-ticketed
+        // path, where the bastion drives upstream auth) would make the
+        // server attempt a blank-password logon, so it stays off there.
+        // Smart-card sessions authenticate inside CredSSP and are not
+        // affected.
+        autologon: matches!(&args.credential, RdpCredential::Password(pw) if !pw.is_empty()),
         enable_audio_playback: false,
         // Accelerated, not software. Software rendering composites the
         // sprite into the `DecodedImage`, which would make the cursor
@@ -2720,6 +2729,22 @@ mod nego_cookie_tests {
         // connector, which fills it with `Cookie: mstshash=<username>`.
         // Setting it here would override that default.
         assert!(build_connector_config(&a).request_data.is_none());
+    }
+
+    /// Regression: a direct password session (secret or self-account)
+    /// opened Windows' logon screen with only the username filled in,
+    /// because the password went out without INFO_AUTOLOGON.
+    #[test]
+    fn password_sessions_request_autologon() {
+        let mut a = args(None);
+        a.username = "alice".to_owned();
+        a.credential = RdpCredential::Password(Zeroizing::new("s3cret".to_owned()));
+        assert!(build_connector_config(&a).autologon);
+    }
+
+    #[test]
+    fn ticketed_sessions_with_no_password_do_not_request_autologon() {
+        assert!(!build_connector_config(&args(Some(TICKET.to_owned()))).autologon);
     }
 }
 

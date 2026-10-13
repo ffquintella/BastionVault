@@ -56,6 +56,14 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.30] - 2026-10-13
+
+### Fixed
+
+#### Resource Connect
+
+- **Log in to an RDP host automatically with a self-account or a stored password** -- a direct password session opened Windows' own logon screen with only the username filled in, because the password was sent without the auto-logon flag and the server ignored it. Password sessions now ask the server to log on with the credential they carry; Rustion-brokered sessions (no client-side password) and smart-card sessions are unchanged. (T103, S107)
+
 ## [0.44.29] - 2026-10-13
 
 ### Fixed
