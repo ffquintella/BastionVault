@@ -56,6 +56,22 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.32] - 2026-10-13
+
+### Added
+
+#### SQL Browser — specification (features/sql-browser.md)
+
+- **Specify the SQL browser for database resources** (`features/sql-browser.md`) -- design for querying and changing data on PostgreSQL, MySQL, MariaDB, SQL Server and Oracle `database` resources from the desktop GUI through a new long-lived process plugin, `dbms-management`. Every statement is classified by the plugin and authorized by the kernel's verified policy evaluator against new per-resource SQL capabilities (`sql_select` through `sql_admin`, with `sql_export` and `sql_script` granted separately), expressible in policies down to a table and in shares as chips and presets. The host releases an endpoint-bound database login to the plugin, never to the operator, and defaults to a database-enforced read-only login for read-only grants; dynamic per-session database accounts follow once the dynamic-secrets framework lands. Phase 0 only -- no code. Roadmap tasks added under Resources, the dynamic-credentials one blocked by the dynamic-secrets framework. (S109)
+
+### Security
+
+#### Lease endpoints (`sys/revoke`, `sys/revoke-prefix`, `sys/renew`)
+
+- **Revoke leases through `sys/revoke` and `sys/revoke-prefix` instead of reporting success for nothing** -- both were stubs that answered success without touching a lease, so a caller using `POST /v2/sys/batch`, embedded vault mode or the in-process API was told a lease had been revoked (for a token's lease, the token) when it was still live. They now revoke through the expiration manager. `sys/revoke/<lease_id>` deletes the lease and answers `400` for an id that names no lease. `sys/revoke-prefix/<prefix>` still needs `sudo` and revokes every lease under the prefix, matched on whole path segments. Both refuse a lease path containing `..`, a child-namespace `X-BastionVault-Namespace` header (`400`) and a token bound to a child namespace (`403`), because lease ids are deployment-wide. The `/v1/sys` and `/v2/sys` HTTP scopes still answer `404` for these paths. (M4, S81)
+  -- Any revocation issued through these paths before this release did nothing: re-issue it.
+- **Refuse `sys/renew` with `501` instead of reporting a renewal** -- it answered success without renewing anything. Lease renewal is not wired yet, because as written it would still report renewals that did not happen: token leases and unsupported secret types come back empty from the backend. It lands with the dynamic-secrets framework (T62). Renew tokens with `auth/token/renew-self` or `auth/token/renew`. (M4, S81)
+
 ## [0.44.31] - 2026-10-13
 
 ### Added

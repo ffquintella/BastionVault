@@ -211,6 +211,65 @@ Request body:
 DELETE /v1/sys/auth/{path}
 ~~~
 
+### Leases
+
+Vault's lease paths on the system backend. The `/v1/sys` and `/v2/sys` HTTP
+scopes do not route them, so a plain `PUT /v1/sys/revoke/{lease_id}` answers
+`404`. They are served in-process (embedded vault mode, the in-process API) and
+through `POST /v2/sys/batch`, one `write` operation per call. Vault's newer
+`sys/leases/*` paths, which `vault lease revoke` uses, are not implemented.
+
+~~~json
+POST /v2/sys/batch
+{
+  "operations": [
+    { "operation": "write", "path": "sys/revoke/kv/app/db/0f3c2a6e-…" }
+  ]
+}
+~~~
+
+A successful revocation is `204` in the operation's result. Inside a batch, a
+refusal currently reports `500` with the reason in `errors`; the statuses below
+are the ones the handlers raise.
+
+Lease ids share one deployment-wide keyspace, so these endpoints are not
+namespace-scoped yet. A request whose `X-BastionVault-Namespace` names a child
+namespace is refused with `400`, and a token bound to a child namespace with
+`403`. A namespaced secret's lease id starts with its namespace path, so a
+root-namespace operator revokes it by its full id.
+
+**Revoke a lease**
+
+~~~
+sys/revoke/{lease_id}            (write)
+~~~
+
+Needs `update` on `sys/revoke/{lease_id}`. Revokes the lease and deletes its
+record. Revoking a token's lease revokes the token and its children. `400` when
+no lease has that id (nothing was revoked), or when the id is empty, absolute or
+contains `..`. A secret backend's revoke error is still logged and the lease
+record removed anyway; every secret type in the tree revokes with a no-op today.
+
+**Revoke every lease under a prefix**
+
+~~~
+sys/revoke-prefix/{prefix}       (write)
+~~~
+
+Needs `update` **and `sudo`** on `sys/revoke-prefix/{prefix}`. Revokes every
+lease under `{prefix}/`, matched on whole path segments: `kv/team-a` does not
+touch `kv/team-ab/…`. As in Vault, a prefix with no leases under it is not an
+error.
+
+**Renew a lease**
+
+~~~
+sys/renew/{lease_id}             (write)
+~~~
+
+Not implemented: always `501`. Renew a token with `auth/token/renew-self` or
+`auth/token/renew`. Lease renewal lands with the dynamic-secrets framework.
+
 ### Policies
 
 **List all policies**

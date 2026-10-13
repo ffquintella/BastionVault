@@ -4,6 +4,7 @@
 pub mod access_audit_reconciler;
 pub mod access_audit_store;
 pub mod denial_audit_store;
+mod leases;
 pub mod mcp;
 pub mod self_profile;
 
@@ -13,7 +14,7 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use serde_json::{from_value, json, Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::kernel_api::VaultCtx;
 use crate::{
@@ -290,7 +291,7 @@ impl SystemBackend {
                     fields: {
                         "lease_id": {
                             field_type: FieldType::Str,
-                            description: "The lease identifier to renew. This is included with a lease."
+                            description: "The lease identifier to revoke. This is included with a lease."
                         }
                     },
                     operations: [
@@ -1599,28 +1600,6 @@ impl SystemBackend {
             return Err(bv_error_response_status!(409, &format!("no matching mount at {from_path}")));
         }
 
-        Ok(None)
-    }
-
-    pub async fn handle_renew(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let _lease_id = req.get_data("lease_id")?;
-        let _increment: i32 = from_value(req.get_data("increment")?)?;
-        //TODO
-        Ok(None)
-    }
-
-    pub async fn handle_revoke(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let _lease_id = req.get_data("lease_id")?;
-        //TODO
-        Ok(None)
-    }
-
-    pub async fn handle_revoke_prefix(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let _prefix = req.get_data("prefix")?;
         Ok(None)
     }
 

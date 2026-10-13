@@ -160,7 +160,7 @@ Next-up list recorded before the migration, in its order:
   - note: finding F8. Details are withheld from this repository until the fix ships; the maintainer holds the write-up.
 
 ## [M5] Resources
-> outcome: Done when operators can inventory resources and files, connect to them in-app over SSH/RDP and web without seeing credentials, and work in a tabbed session workspace.
+> outcome: Done when operators can inventory resources and files, connect to them in-app over SSH/RDP and web without seeing credentials, query and change data on database resources under SQL grants that BastionVault enforces, and work in a tabbed session workspace.
 
 - [x] T32 Manage a resource inventory with grouped secrets (S49)
   - source: roadmap.md feature row "Resource Management (inventory + grouped secrets)", status `[x]` Done
@@ -227,6 +227,23 @@ Next-up list recorded before the migration, in its order:
   - note: the signed Self-Accounts bundle now embeds its declarative management surface and the normal GUI registration flow forwards it to the host; this does not close the review gate above.
   - note: active-surface discovery and dispatch now use the selected namespace's one unambiguous plugin mount; an absent or duplicate mount is a stable setup message rather than a repeating 404. The review gate above remains open.
   - note: local desktop discovery now reads the embedded catalog and namespace mount table behind the same token and policy checks as the remote endpoint; cache revalidation preserves the authoritative mount, and mount-table changes wake the bounded watcher. The review gate above remains open.
+- [ ] T124 Grant SQL privileges in policies and shares, and let plugins ask the host to authorize statements and release database credentials (S109)
+  - initiative: Phases 0–1 of the [SQL Browser](features/sql-browser.md). Eleven probe-only capabilities (`sql_select`, `sql_insert`, `sql_update`, `sql_delete`, `sql_alter`, `sql_create`, `sql_drop`, `sql_execute`, `sql_admin`, `sql_export`, `sql_script`) evaluated by `bv_policy_core::decide` on `resources/resources/<r>/sql/{server,objects/…}`, the same names in the share vocabulary for resource and asset-group targets, and `PolicyGate::sql_privileges` with refusals in the denial store. Plugin ABI 1.4 adds caller-bound `resource_sql_authorize`, `resource_sql_credential` (endpoint-bound, admin-granted, audited release) and `connect_ticket_redeem`, host-stamped audit actors, seal/shutdown lifecycle messages and concurrent long-lived process invocations. Adds the `sql` Connect protocol to `database` resources.
+  - note: authz and plugin-ABI change — needs the L4 `make test-release` run and the Kani gate before merge; Phase 0 decides the capability model with the maintainer first.
+- [ ] T125 Browse, query and edit PostgreSQL databases in the SQL browser through the `dbms-management` plugin (S109)
+  - initiative: Phases 2–4 of the [SQL Browser](features/sql-browser.md): the pure `bv-sql-classify` crate (fail-closed statement classification, hazard corpus, fuzzing); the long-lived process plugin `bastion-plugin-dbms-management` with sessions, asynchronous runs, paging, cancel, transactions, object browser, structured grid edits, profile ceilings (`database-first` by default), read-only guards, audit and statement journal; and the host-rendered GUI SQL workspace (tree, editor, grid, messages, privilege chips, Session Workspace `sql` pane).
+  - note: depends on T124.
+- [ ] T126 Export query results and run SQL scripts only with their own grants (S109)
+  - initiative: Phase 5 of the [SQL Browser](features/sql-browser.md): streamed CSV / JSON Lines / SQL INSERT exports behind `sql_export`, multi-statement scripts behind `sql_script` with all-or-nothing authorization, and per-action MFA step-up.
+- [ ] T127 Add MySQL and MariaDB to the SQL browser (S109)
+  - initiative: Phase 6 of the [SQL Browser](features/sql-browser.md).
+- [ ] T128 Add SQL Server to the SQL browser (S109)
+  - initiative: Phase 7 of the [SQL Browser](features/sql-browser.md).
+- [ ] T129 Add Oracle Database to the SQL browser (S109)
+  - initiative: Phase 8 of the [SQL Browser](features/sql-browser.md); the driver path (pure-Rust thin driver or Instant Client loaded at run time) is a Phase 0 decision.
+- [!] T130 Open SQL browser sessions with dynamic database credentials (S109, S13)
+  - blocked-by: T62 (the dynamic-secrets framework, which also needs host-mediated issuance, early revoke, a revoke-failed state and engines for all five DBMSs — features/sql-browser.md §5.5)
+  - initiative: Phase 9 of the [SQL Browser](features/sql-browser.md): session-owned leases revoked at close, per-tier roles matched to profile ceilings, preferred over stored secrets when a dynamic profile can serve the caller.
 
 ## [M6] Authentication
 > outcome: Done when every listed auth method (token, AppID, userpass, cert, OIDC, SAML, FIDO2, FerroGate) is shipped and workforce identity can be brokered downstream.
@@ -588,3 +605,4 @@ Next-up list recorded before the migration, in its order:
 | S106 | Prompt: prepare Rustion for BastionVault web browser isolation | roadmaps/prompts/rustion-browser-isolation.md |
 | S107 | Feature: Self-Accounts — operator-registered accounts, picked at Connect (plugin) | features/self-accounts.md |
 | S108 | Verification of the ACL decision core | docs/verification.md |
+| S109 | Feature: SQL Browser — query and change data on database resources (`dbms-management` plugin) | features/sql-browser.md |

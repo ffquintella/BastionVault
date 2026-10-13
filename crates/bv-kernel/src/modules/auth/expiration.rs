@@ -443,6 +443,21 @@ impl ExpirationManager {
         Ok(())
     }
 
+    /// Revokes the lease an operator named (`sys/revoke/<lease_id>`).
+    ///
+    /// [`Self::revoke_lease_id`] treats an unknown lease as already revoked,
+    /// which the sweeper and token-tree revocation rely on when they reach the
+    /// same lease. An operator naming a lease that does not exist has a mistyped
+    /// or stale id, and answering "revoked" would report an effect that never
+    /// happened, so this returns [`RvError::ErrLeaseNotFound`] instead.
+    #[maybe_async::maybe_async]
+    pub async fn revoke_named_lease(&self, lease_id: &str) -> Result<(), RvError> {
+        if self.load_lease_entry(lease_id).await?.is_none() {
+            return Err(RvError::ErrLeaseNotFound);
+        }
+        self.revoke_lease_id(lease_id, true).await
+    }
+
     /// Revokes all lease entries with a given prefix.
     #[maybe_async::maybe_async]
     pub async fn revoke_prefix(&self, prefix: &str) -> Result<(), RvError> {
