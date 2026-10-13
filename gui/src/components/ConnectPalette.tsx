@@ -24,7 +24,7 @@ import type {
 } from "../lib/types";
 import { Badge } from "./ui/Badge";
 import { useToast } from "./ui/Toast";
-import { useConnectMfa } from "./ConnectMfaPrompt";
+import { useConnectMfa, type SubmitPin } from "./ConnectMfaPrompt";
 import { useProviderAccountPicker, type ProviderAccountsLink } from "./ProviderAccountPicker";
 
 /**
@@ -81,13 +81,19 @@ export interface ConnectPaletteProps {
    * and its empty picker says what is missing without a link.
    */
   accountsLink?: ProviderAccountsLink;
+  /**
+   * Relays a security-key PIN to the connect-time MFA ceremony. Only the
+   * main window may (`fido2_submit_pin` is in no session window's set), so
+   * the Session Workspace passes none and its prompt says so.
+   */
+  submitPin?: SubmitPin;
 }
 
-export function ConnectPalette({ armed, accountsLink }: ConnectPaletteProps) {
+export function ConnectPalette({ armed, accountsLink, submitPin }: ConnectPaletteProps) {
   const { toast } = useToast();
   // Connect-time MFA gate and the provider account picker; both render
   // over the palette.
-  const { gateConnect, mfaPrompt } = useConnectMfa();
+  const { gateConnect, mfaPrompt } = useConnectMfa(submitPin);
   const { pickProviderAccount, providerPicker } = useProviderAccountPicker(accountsLink);
   const [open, setOpen] = useState(false);
   const [entries, setEntries] = useState<PaletteEntry[]>([]);

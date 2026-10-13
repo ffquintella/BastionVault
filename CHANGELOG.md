@@ -56,6 +56,14 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.29] - 2026-10-13
+
+### Fixed
+
+#### Connect-time MFA
+
+- **Ask for a security key's PIN in the Connect MFA prompt** -- a PIN-protected key used to stop the prompt at "Your key is asking for its PIN…" with nowhere to type it and Cancel disabled, until the two-minute ceremony timeout. The prompt now shows a PIN field, says how many attempts remain after a wrong PIN, and Cancel aborts the ceremony at once. The PIN goes only to the key. The Session Workspace still cannot pass a PIN on, because `fido2_submit_pin` stays outside every session window's permissions. There the prompt says to connect from the main window or use an authenticator code, and Cancel works. (T36, S9)
+
 ## [0.44.28] - 2026-10-13
 
 ### Fixed
@@ -7746,7 +7754,8 @@ Bulk dependency upgrade across the workspace (`Cargo.toml`, `crates/bv-plugin-pa
 
 - Abandon the SQLx storage backend: `libsqlite3-sys` conflicts at link time with hiqlite's `rusqlite`, so `storage "sqlx"` was removed (T5, M2)
 
-[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.28...HEAD
+[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.29...HEAD
+[0.44.29]: https://github.com/ffquintella/BastionVault/compare/v0.44.28...v0.44.29
 [0.44.28]: https://github.com/ffquintella/BastionVault/compare/v0.44.27...v0.44.28
 [0.44.27]: https://github.com/ffquintella/BastionVault/compare/v0.44.19...v0.44.27
 [0.44.15]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.14...releases/0.44.15

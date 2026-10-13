@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { HashRouter, Routes, Route, Navigate } from "react-router";
 import { ConnectPage } from "./routes/ConnectPage";
+import { fido2SubmitPin } from "./lib/api";
 import { InitPage } from "./routes/InitPage";
 import { LoginPage } from "./routes/LoginPage";
 import { DashboardPage } from "./routes/DashboardPage";
@@ -60,7 +61,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 function AuthedConnectPalette() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const accountsLink = useProviderAccountsLink();
-  return <ConnectPalette armed={isAuthenticated} accountsLink={accountsLink} />;
+  return <ConnectPalette armed={isAuthenticated} accountsLink={accountsLink} submitPin={fido2SubmitPin} />;
 }
 
 export default function App() {

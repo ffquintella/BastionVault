@@ -335,7 +335,7 @@ async function operatorPromptRequired(
 export function ResourcesPage() {
   const { toast } = useToast();
   // Connect-time MFA gate for the card-level quick-Connect.
-  const { gateConnect, mfaPrompt } = useConnectMfa();
+  const { gateConnect, mfaPrompt } = useConnectMfa(api.fido2SubmitPin);
   // The credential-provider account picker (features/self-accounts.md §6),
   // shown before the MFA gate for a `provider` profile.
   const { pickProviderAccount, providerPicker } = useProviderAccountPicker(useProviderAccountsLink());
@@ -1800,7 +1800,7 @@ function ConnectionProfilesPanel({
 
   // Connect-time MFA gate for the Connection-tab launcher, and the
   // credential-provider account picker that runs before it.
-  const { gateConnect, mfaPrompt } = useConnectMfa();
+  const { gateConnect, mfaPrompt } = useConnectMfa(api.fido2SubmitPin);
   const { pickProviderAccount, providerPicker } = useProviderAccountPicker(useProviderAccountsLink());
 
   async function handleConnect(profile: ConnectionProfile) {
