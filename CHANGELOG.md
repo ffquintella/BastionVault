@@ -56,6 +56,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.28] - 2026-10-13
+
+### Fixed
+
+#### Plugin surfaces
+
+- **Show an account added on "My accounts" without leaving the page** -- a plugin page's tables now re-list after a form or row action on the same page changes data. Previously a submit only re-fetched the surface manifest, so the new record appeared only after navigating away and back. (T103, S107)
+
+#### Connect-time MFA
+
+- **Verify connect-time MFA against the namespace your token was issued in** -- `resources/v2/connect/mfa/begin` and `/verify` now send the second-factor step-up to `auth/<mount>/v2/step-up/*` in the token's own namespace, not the namespace the request targets. An operator who signed in at root and selected a child namespace got `HTTP 404: Router mount not found` on every MFA-gated Connect, and where the child namespace had its own userpass mount, the factor was checked against a same-named principal there. A token whose namespace no longer resolves is refused with 403. The ticket stays bound to the request namespace, as before. (T36, S9)
+
 ## [0.44.27] - 2026-10-09
 
 ### Added
@@ -7734,7 +7746,8 @@ Bulk dependency upgrade across the workspace (`Cargo.toml`, `crates/bv-plugin-pa
 
 - Abandon the SQLx storage backend: `libsqlite3-sys` conflicts at link time with hiqlite's `rusqlite`, so `storage "sqlx"` was removed (T5, M2)
 
-[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.27...HEAD
+[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.28...HEAD
+[0.44.28]: https://github.com/ffquintella/BastionVault/compare/v0.44.27...v0.44.28
 [0.44.27]: https://github.com/ffquintella/BastionVault/compare/v0.44.19...v0.44.27
 [0.44.15]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.14...releases/0.44.15
 [0.44.14]: https://github.com/ffquintella/BastionVault/compare/releases/0.44.13...releases/0.44.14

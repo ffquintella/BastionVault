@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import { useLocation, useSearchParams } from "react-router";
 import { usePluginSurfacesStore } from "../../stores/pluginSurfacesStore";
 import { Layout } from "../Layout";
@@ -39,6 +39,12 @@ export function SurfaceRouter() {
   const pageByRoute = usePluginSurfacesStore((s) => s.pageByRoute);
   const loading = usePluginSurfacesStore((s) => s.loading);
   const error = usePluginSurfacesStore((s) => s.error);
+  // Bumped whenever a component on the page changes server data (a form
+  // submit, a table row action). Every table re-issues its `list` binding
+  // when it moves, so a record added by a form shows up without leaving
+  // the page.
+  const [dataRevision, setDataRevision] = useState(0);
+  const markDataChanged = useCallback(() => setDataRevision((r) => r + 1), []);
 
   // Extensibility v2 (Phase 3): when rendered inside a plugin-owned
   // window (`?pluginWindow=<handle>`), drop the host sidebar/chrome and
@@ -118,14 +124,18 @@ export function SurfaceRouter() {
                   <SurfaceTable
                     spec={c}
                     mount={entry.mount}
-                    onAction={() => void refresh()}
+                    revision={dataRevision}
+                    onAction={() => {
+                      markDataChanged();
+                      void refresh();
+                    }}
                   />
                 )}
                 {c.kind === "form" && (
                   <SurfaceForm
                     spec={c}
                     entry={entry}
-                    onSubmitted={() => void refresh()}
+                    onSubmitted={markDataChanged}
                   />
                 )}
                 {c.kind === "detail" && (

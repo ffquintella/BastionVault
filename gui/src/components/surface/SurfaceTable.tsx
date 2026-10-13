@@ -13,14 +13,20 @@ import { Button, Table, EmptyState } from "../ui";
  * supplies `{<field>}` placeholders. `confirm: true` row actions
  * prompt with `window.confirm` — a future revision will route
  * through the project's existing `ConfirmModal`.
+ *
+ * `revision` is the page's data revision: when it changes the list is
+ * re-read, so writes made by sibling components (a form on the same
+ * page) show up without remounting the table.
  */
 export function SurfaceTable({
   spec,
   mount,
+  revision = 0,
   onAction,
 }: {
   spec: api.SurfaceTable;
   mount: string;
+  revision?: number;
   onAction?: () => void;
 }) {
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
@@ -61,7 +67,7 @@ export function SurfaceTable({
 
   useEffect(() => {
     void reload();
-  }, [reload]);
+  }, [reload, revision]);
 
   async function runRowAction(action: api.SurfaceRowAction, row: Record<string, unknown>) {
     if (action.confirm && !window.confirm(`${action.label} this row?`)) return;
@@ -79,8 +85,11 @@ export function SurfaceTable({
         mount,
         params,
       );
-      await reload();
-      onAction?.();
+      // The page owner bumps `revision` from `onAction`, which reloads
+      // this table along with its siblings; reload directly only when
+      // rendered without one.
+      if (onAction) onAction();
+      else await reload();
     } catch (e) {
       setErr(extractError(e));
     }

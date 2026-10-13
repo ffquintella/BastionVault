@@ -446,15 +446,51 @@ pub async fn enforce(
 
 // ── Resource-mount handlers ────────────────────────────────────────
 
-/// Namespace *request prefix* (`""` or `"tenant-a/"`) for sub-requests, as
-/// opposed to the bare comparison key [`caller_namespace`] returns.
-async fn ns_request_prefix(core: &dyn VaultCtx, req: &Request) -> Result<String, RvError> {
-    let ns = caller_namespace(core, req).await?;
-    Ok(if ns.is_empty() { String::new() } else { format!("{ns}/") })
+/// The namespace the caller's token was issued in, canonical (`""` = root).
+///
+/// This is where the token's auth mount lives, and so where the principal's
+/// enrolled factors are. It is *not* the namespace the request targets: an
+/// operator who signed in at root and selected `tenant-a` sends every request
+/// to `tenant-a`, but their userpass record is root's. Addressing the step-up
+/// by the request namespace reached `tenant-a/auth/userpass/`, which is
+/// either absent (`Router mount not found`) or — worse — a different
+/// principal who happens to share the username.
+fn token_namespace(req: &Request) -> Result<String, RvError> {
+    let auth = req.auth.as_ref().ok_or_else(|| {
+        bv_error_response_status!(401, "connect MFA requires an authenticated caller")
+    })?;
+    let (ns, _child_visible) = crate::kernel_api::namespace::binding_from_metadata(&auth.metadata);
+    crate::kernel_api::namespace::normalize_path(&ns)
 }
 
-/// The logical path of the step-up ceremony for the calling principal's own
-/// auth mount, in the caller's namespace.
+/// Request prefix (`""` or `"tenant-a/"`) of [`token_namespace`], with that
+/// namespace's mount router wired so the step-up sub-request can reach it.
+///
+/// Fails closed when the token names a namespace that no longer resolves:
+/// there is no factor to verify against, and falling back to root would
+/// verify a different principal.
+async fn step_up_ns_prefix(core: &dyn VaultCtx, req: &Request) -> Result<String, RvError> {
+    let ns = token_namespace(req)?;
+    if ns.is_empty() {
+        return Ok(String::new());
+    }
+    let unresolvable = || {
+        bv_error_response_status!(
+            403,
+            &format!(
+                "the namespace your token was issued in (`{ns}`) cannot be resolved, so \
+                 your second factor cannot be verified. Sign in again."
+            )
+        )
+    };
+    let registry = core.namespaces().ok_or_else(unresolvable)?;
+    let resolved = registry.resolve(&ns).await?.ok_or_else(unresolvable)?;
+    registry.ensure_router(&resolved.uuid, &resolved.path).await?;
+    Ok(resolved.request_prefix())
+}
+
+/// The logical path of the step-up ceremony on the calling principal's own
+/// auth mount, in the namespace their token was issued in.
 fn step_up_path(ns_prefix: &str, mount: &str, leaf: &str) -> String {
     let m = mount.trim_end_matches('/');
     format!("{ns_prefix}auth/{m}/v2/step-up/{leaf}")
@@ -615,7 +651,7 @@ impl super::ResourceBackendInner {
         data.insert("required".into(), Value::Bool(true));
 
         let (mount, _principal) = caller_principal(req)?;
-        let ns_prefix = ns_request_prefix(&self.core, req).await?;
+        let ns_prefix = step_up_ns_prefix(&self.core, req).await?;
 
         let mut sub = Request::new(step_up_path(&ns_prefix, &mount, "begin"));
         sub.operation = Operation::Write;
@@ -676,7 +712,7 @@ impl super::ResourceBackendInner {
             .ok_or_else(|| bv_error_response_status!(400, "`method` is required"))?;
 
         let (mount, principal) = caller_principal(req)?;
-        let ns_prefix = ns_request_prefix(&self.core, req).await?;
+        let ns_prefix = step_up_ns_prefix(&self.core, req).await?;
 
         let mut body = Map::new();
         body.insert("method".into(), Value::String(method.clone()));
@@ -885,6 +921,29 @@ mod tests {
             caller_principal(&req).unwrap(),
             ("userpass/".to_string(), "alice".to_string())
         );
+    }
+
+    /// Regression: a root-issued userpass token operating in a child namespace
+    /// had its step-up sent to `<child>/auth/userpass/…` — `Router mount not
+    /// found`, or a same-named principal in the child. The step-up follows the
+    /// token's own namespace, whatever the request targets.
+    #[test]
+    fn step_up_follows_the_token_namespace_not_the_request_namespace() {
+        let mut req = Request::new("resources/v2/connect/mfa/begin");
+        req.namespace_path = Some("dti/esi".into());
+        assert!(token_namespace(&req).is_err(), "no auth, no namespace");
+
+        let mut auth = Auth::default();
+        auth.metadata.insert("mount_path".into(), "userpass/".into());
+        auth.metadata.insert("username".into(), "felipe".into());
+        req.auth = Some(auth.clone());
+        // No binding recorded: the token is root's.
+        assert_eq!(token_namespace(&req).unwrap(), "");
+        assert_eq!(step_up_path("", "userpass/", "begin"), "auth/userpass/v2/step-up/begin");
+
+        auth.metadata.insert(crate::kernel_api::namespace::NS_PATH_META.into(), "/tenant-a/".into());
+        req.auth = Some(auth);
+        assert_eq!(token_namespace(&req).unwrap(), "tenant-a");
     }
 
 }
