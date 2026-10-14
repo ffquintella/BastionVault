@@ -446,7 +446,8 @@ export function ResourcesPage() {
 
   async function loadTypeConfig() {
     try {
-      const saved = await api.resourceTypesRead();
+      // Effective: a namespace that saved none inherits the root's types.
+      const { types: saved } = await api.resourceTypesReadEffective();
       setTypeConfig(mergeTypeConfig(saved as ResourceTypeConfig | null));
     } catch {
       setTypeConfig(DEFAULT_RESOURCE_TYPES);

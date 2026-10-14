@@ -84,6 +84,7 @@ use crate::{
     errors::RvError,
     logical::{connection::Connection, Backend, Operation, Request, Response},
     storage::Storage,
+    type_config::{effective_type_config, TypeConfigError, TypeConfigSource},
     SECRET_PREFIX,
 };
 
@@ -923,28 +924,28 @@ impl super::ResourceBackendInner {
         }
     }
 
-    /// The resource's entry in `config/types`, if its type was ever saved.
-    async fn resource_type_def(
-        &self,
-        req: &mut Request,
-        meta: &Map<String, Value>,
-    ) -> Result<Option<Value>, WebRefusal> {
+    /// The resource's entry in the effective `config/types` — the mount's
+    /// own, or the root namespace's when a child namespace saved none
+    /// (`crate::type_config`) — if its type was ever saved.
+    async fn resource_type_def(&self, req: &Request, meta: &Map<String, Value>) -> Result<Option<Value>, WebRefusal> {
         let rtype = meta.get("type").and_then(Value::as_str).unwrap_or_default();
         if rtype.is_empty() {
             return Ok(None);
         }
-        let Some(entry) = req.storage_get("config/types").await.map_err(|e| WebRefusal::wrap("storage_error", e))?
-        else {
-            return Ok(None);
-        };
-        let types: Map<String, Value> = serde_json::from_slice(&entry.value).map_err(|_| {
-            WebRefusal::new(
+        let config = effective_type_config(self.core.as_ref(), req).await.map_err(|e| match e {
+            TypeConfigError::Storage(e) => WebRefusal::wrap("storage_error", e),
+            TypeConfigError::Malformed(source) => WebRefusal::new(
                 422,
                 "exposure_policy_invalid",
-                "the stored resource type configuration is not a JSON object",
-            )
+                if source == TypeConfigSource::Root {
+                    "the root namespace's stored resource type configuration (which this namespace inherits) \
+                     is not a JSON object"
+                } else {
+                    "the stored resource type configuration is not a JSON object"
+                },
+            ),
         })?;
-        Ok(types.get(rtype).cloned())
+        Ok(config.type_def(rtype).cloned())
     }
 
     /// The resource's effective Rustion transport policy, from Rustion's own

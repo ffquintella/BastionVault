@@ -23,6 +23,7 @@ import { PoliciesPage } from "./routes/PoliciesPage";
 import { NamespacesPage } from "./routes/NamespacesPage";
 import { MountsPage } from "./routes/MountsPage";
 import { SettingsPage } from "./routes/SettingsPage";
+import { ResourceTypesPage } from "./routes/ResourceTypesPage";
 import { ProfilePage } from "./routes/ProfilePage";
 import { HsmStatusPage } from "./routes/HsmStatusPage";
 import { ExchangePage } from "./routes/ExchangePage";
@@ -169,6 +170,10 @@ export default function App() {
             <Route
               path="/namespaces"
               element={<ProtectedRoute><NamespacesPage /></ProtectedRoute>}
+            />
+            <Route
+              path="/resource-types"
+              element={<ProtectedRoute><ResourceTypesPage /></ProtectedRoute>}
             />
             <Route
               path="/settings"

@@ -92,7 +92,7 @@ beforeEach(() => {
     if (command === "plugin_surface_dispatch") {
       return Promise.reject(new Error("404 not found"));
     }
-    if (command === "resource_types_read") {
+    if (command === "resource_types_read_effective") {
       return Promise.reject(new Error("resource types unavailable"));
     }
     return Promise.resolve({});
@@ -123,7 +123,7 @@ describe("plugin surface runtime failures", () => {
         },
       ],
     ]);
-    expect(callsFor("resource_types_read")).toHaveLength(1);
+    expect(callsFor("resource_types_read_effective")).toHaveLength(1);
 
     await act(async () => {
       usePluginSurfacesStore.setState({ error: "watch failed once" });
@@ -133,7 +133,7 @@ describe("plugin surface runtime failures", () => {
 
     await waitFor(() => expect(screen.getByText("404 not found")).toBeInTheDocument());
     expect(callsFor("plugin_surface_dispatch")).toHaveLength(1);
-    expect(callsFor("resource_types_read")).toHaveLength(1);
+    expect(callsFor("resource_types_read_effective")).toHaveLength(1);
   });
 
   it("does not dispatch bindings until the plugin is mounted", async () => {
@@ -144,7 +144,7 @@ describe("plugin surface runtime failures", () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/Admin.*Mounts.*Mount Engine/i)).toBeInTheDocument();
     expect(callsFor("plugin_surface_dispatch")).toHaveLength(0);
-    expect(callsFor("resource_types_read")).toHaveLength(0);
+    expect(callsFor("resource_types_read_effective")).toHaveLength(0);
   });
 
   it("does not let a delayed refresh from the previous namespace overwrite the current bundle", async () => {

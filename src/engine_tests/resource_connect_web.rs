@@ -862,3 +862,69 @@ async fn http_auth_launch_releases_username_and_password_at_handler_exposure() {
     assert_eq!((b["exposure"].as_str(), b["exposure_cap"].as_str()), (Some("dom"), Some("dom")));
     assert_eq!(b["fill_scope"]["allow_insecure_http"], json!(true));
 }
+
+/// As [`call`], with the namespace header set.
+async fn call_ns(
+    core: &dyn VaultCtx,
+    token: &str,
+    ns: &str,
+    path: &str,
+    body: Value,
+) -> Result<Map<String, Value>, (u16, String)> {
+    let mut req = Request::new(path);
+    req.operation = Operation::Write;
+    req.client_token = token.to_string();
+    req.body = body.as_object().cloned();
+    req.headers = Some(std::collections::HashMap::from([("x-bastionvault-namespace".to_string(), ns.to_string())]));
+    match core.handle_request(&mut req).await {
+        Ok(resp) => Ok(resp.and_then(|r| r.data).unwrap_or_default()),
+        Err(RvError::ErrResponseStatus(s, m)) => Err((s, m)),
+        Err(RvError::ErrPermissionDenied) => Err((403, "permission denied".into())),
+        Err(e) => Err((0, e.to_string())),
+    }
+}
+
+/// Regression: resource types are edited on a root-namespace page, so a type
+/// opted in at root must govern a child namespace that saved no type
+/// configuration of its own. Before the fallback every form launch in a
+/// child namespace was refused `exposure_not_permitted`. A namespace that
+/// saves its own configuration is authoritative again.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn form_launch_in_a_namespace_inherits_the_root_type_opt_in() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("test_web_connect_ns_type_fallback").await;
+    call(&core, &root, "sys/namespaces/tenant", json!({})).await.expect("create namespace");
+    let r = recipe(false);
+    let profile = web_profile("p_web", r.clone(), secret_source());
+    let ns_write = |path: &'static str, body: Value| {
+        let core = core.clone();
+        let root = root.clone();
+        async move { call_ns(&core, &root, "tenant", path, body).await.expect(path) }
+    };
+    ns_write(
+        "resources/resources/fw01",
+        json!({ "name": "fw01", "type": "web_application", "connection_profiles": [profile] }),
+    )
+    .await;
+    ns_write(
+        "resources/secrets/fw01/admin",
+        json!({ "username": "admin", "password": APP_PASSWORD, "totp_seed": APP_SEED }),
+    )
+    .await;
+
+    // Nothing saved anywhere: denied.
+    refused(call_ns(&core, &root, "tenant", LAUNCH, launch_body("p_web", &r)).await, 403, "exposure_not_permitted");
+
+    // Opted in at root only: the namespace inherits it and the launch passes.
+    opt_in_web_application(&core, &root).await;
+    let launched = call_ns(&core, &root, "tenant", LAUNCH, launch_body("p_web", &r)).await;
+    assert!(launched.is_ok(), "a root opt-in must reach a namespace with no saved types: {launched:?}");
+
+    // The namespace saves its own configuration without the cap: it is
+    // authoritative, so the root's `dom` no longer applies.
+    ns_write(
+        "resources/config/types",
+        types(json!({ "id": "web_application", "fields": [], "connect": { "enabled": true } })),
+    )
+    .await;
+    refused(call_ns(&core, &root, "tenant", LAUNCH, launch_body("p_web", &r)).await, 403, "exposure_not_permitted");
+}

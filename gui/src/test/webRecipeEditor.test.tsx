@@ -65,8 +65,10 @@ function mockTypes(saved: unknown, extra: (cmd: string, args: unknown) => unknow
   mockInvoke.mockImplementation((cmd: string, args: unknown) => {
     const e = extra(cmd, args);
     if (e !== undefined) return e;
-    if (cmd === "resource_types_read") {
-      return saved instanceof Error ? Promise.reject(saved) : Promise.resolve(saved);
+    if (cmd === "resource_types_read_effective") {
+      return saved instanceof Error
+        ? Promise.reject(saved)
+        : Promise.resolve({ source: saved ? "mount" : "none", types: saved });
     }
     return Promise.reject(new Error(`unexpected invoke ${cmd}`));
   });
@@ -433,7 +435,7 @@ describe("recipe editor — Test recipe (dry run)", () => {
     expect(request.tls_pin_sha256).toEqual([]);
     // Nothing that could carry a credential, and no vault call besides the type read.
     expect(JSON.stringify(request)).not.toMatch(/password":|totp_code|secret_id/);
-    expect(mockInvoke.mock.calls.map((c) => c[0])).toEqual(["resource_types_read", "web_recipe_test"]);
+    expect(mockInvoke.mock.calls.map((c) => c[0])).toEqual(["resource_types_read_effective", "web_recipe_test"]);
   });
 
   it("shows the host's error when the test cannot run", async () => {

@@ -817,6 +817,20 @@ export const resourceTypesRead = () =>
   invoke<Record<string, unknown> | null>("resource_types_read");
 export const resourceTypesWrite = (types: Record<string, unknown>) =>
   invoke<void>("resource_types_write", { types });
+/** Where the effective type configuration comes from: the active
+ *  namespace's own saved one (`mount`), the root namespace's because this
+ *  namespace saved none (`root`), or nothing saved at all (`none`). */
+export type TypeConfigSource = "mount" | "root" | "none";
+export interface EffectiveTypeConfig {
+  source: TypeConfigSource;
+  /** The raw saved object (same shape as `resourceTypesRead`), or null. */
+  types: Record<string, unknown> | null;
+}
+/** The type configuration the server enforces for the active namespace —
+ *  what the connect path reads. Use this, not `resourceTypesRead`, wherever
+ *  the answer feeds a policy decision or its preview. */
+export const resourceTypesReadEffective = () =>
+  invoke<EffectiveTypeConfig>("resource_types_read_effective");
 
 // Resources — uses dedicated resource engine (auto-mounted at resources/)
 export const listResources = () =>

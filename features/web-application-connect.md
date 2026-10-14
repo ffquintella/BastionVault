@@ -1690,6 +1690,16 @@ WebExposure = "none"     // open, sso
   `web_application` and `website` types ship with `dom`. A type saved before
   that keeps its saved shape and stays denied until an administrator sets the
   cap.
+- **Namespaces.** Each namespace has its own `resources/` mount and so its own
+  `config/types`. A child namespace that has saved none is governed by the
+  root namespace's saved configuration — Settings, where types are edited, is
+  a root-namespace page, so without this no resource in a child namespace
+  could be opted in. The fallback is all-or-nothing: once a namespace saves
+  any configuration it is authoritative, with no per-type fallback, so a
+  tenant can deny what the root allows. Only the root table's `resources/`
+  mount is consulted, and only when it is an untainted `resource` mount. A
+  child namespace edits its own types from *Admin → Resource Types*;
+  `resources/v2/config/types/effective` reports which configuration applies.
 - **Enforcement.**
   - The profile editor rejects a profile whose login mode exceeds the cap.
   - The server enforces the cap again in `v2/connect/web/launch`. GUI-side

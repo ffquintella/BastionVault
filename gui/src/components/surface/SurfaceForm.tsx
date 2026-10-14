@@ -137,7 +137,8 @@ export function useHostOptions(kind: HostOptionKind | undefined): string[] | nul
     }
     let cancelled = false;
     api
-      .resourceTypesRead()
+      .resourceTypesReadEffective()
+      .then((effective) => effective.types)
       .catch(() => null)
       .then((config) => {
         if (cancelled) return;

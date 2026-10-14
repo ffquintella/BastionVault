@@ -47,10 +47,13 @@ function dispatched(): Record<string, unknown> | undefined {
 beforeEach(() => {
   mockInvoke.mockReset();
   mockInvoke.mockImplementation((cmd: string) => {
-    if (cmd === "resource_types_read") {
+    if (cmd === "resource_types_read_effective") {
       return Promise.resolve({
-        server: DEFAULT_RESOURCE_TYPES.server,
-        custom_db: { id: "custom_db", label: "Custom DB", color: "info", fields: [] },
+        source: "mount",
+        types: {
+          server: DEFAULT_RESOURCE_TYPES.server,
+          custom_db: { id: "custom_db", label: "Custom DB", color: "info", fields: [] },
+        },
       });
     }
     if (cmd === "plugin_surfaces_refresh") return Promise.resolve({ bundle: { entries: [] } });

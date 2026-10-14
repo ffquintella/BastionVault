@@ -221,7 +221,7 @@ export function PmpImportPage() {
       })(),
       (async () => {
         try {
-          const saved = await api.resourceTypesRead();
+          const { types: saved } = await api.resourceTypesReadEffective();
           setTypeConfig(mergeTypeConfig(saved as ResourceTypeConfig | null));
         } catch {
           setTypeConfig(DEFAULT_RESOURCE_TYPES);

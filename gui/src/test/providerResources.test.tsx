@@ -50,8 +50,8 @@ const PROVIDERS = [
 function mockVault(profiles: unknown[]) {
   mockInvoke.mockImplementation((cmd: string) => {
     switch (cmd) {
-      case "resource_types_read":
-        return Promise.resolve(null);
+      case "resource_types_read_effective":
+        return Promise.resolve({ source: "none", types: null });
       case "list_asset_groups":
       case "asset_groups_for_resource":
         return Promise.resolve({ groups: [] });

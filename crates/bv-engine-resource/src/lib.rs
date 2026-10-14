@@ -18,6 +18,7 @@ pub mod connect_mfa;
 pub mod connect_provider;
 pub mod connect_web;
 pub mod kernel_service;
+pub mod type_config;
 
 // The substrate, under the names this engine already spells it by. Private:
 // `crate::errors::RvError` and `crate::logical::Path` keep resolving inside
@@ -332,6 +333,7 @@ impl ResourceBackend {
         let h_web_result = self.inner.clone();
         let h_web_close = self.inner.clone();
         let h_clipboard_audit = self.inner.clone();
+        let h_cfg_effective = self.inner.clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -343,6 +345,16 @@ impl ResourceBackend {
                         {op: Operation::Write, handler: h_cfg_write.handle_config_types_write}
                     ],
                     help: "Read or write the resource type definitions (fields per type)."
+                },
+                {
+                    // The type configuration this mount is governed by: its
+                    // own, or the root namespace's when a child namespace
+                    // saved none (`type_config`).
+                    pattern: r"v2/config/types/effective$",
+                    operations: [
+                        {op: Operation::Read, handler: h_cfg_effective.handle_config_types_effective}
+                    ],
+                    help: "Read the effective resource type definitions and where they come from (mount, root, none)."
                 },
                 {
                     // List all resources
@@ -909,6 +921,29 @@ impl ResourceBackendInner {
             }
             None => Ok(None), // no config yet — frontend uses defaults
         }
+    }
+
+    /// `GET resources/v2/config/types/effective`. `source` is `mount`,
+    /// `root` (a child namespace inheriting the root namespace's saved
+    /// configuration) or `none`; `types` is the raw saved object, or null.
+    /// The root configuration is type metadata (labels, fields, connect
+    /// policy), and when inherited it *is* this namespace's policy.
+    pub async fn handle_config_types_effective(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let config = type_config::effective_type_config(self.core.as_ref(), req).await.map_err(|e| match e {
+            type_config::TypeConfigError::Storage(e) => e,
+            type_config::TypeConfigError::Malformed(source) => bv_error_response_status!(
+                422,
+                &format!("the {} resource type configuration is not a JSON object", source.as_str())
+            ),
+        })?;
+        let mut data = Map::new();
+        data.insert("source".into(), Value::String(config.source.as_str().into()));
+        data.insert("types".into(), config.types.map(Value::Object).unwrap_or(Value::Null));
+        Ok(Some(Response::data_response(Some(data))))
     }
 
     pub async fn handle_config_types_write(

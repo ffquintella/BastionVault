@@ -57,6 +57,12 @@ type NavItem = {
    * path…"), so surfacing the link there is misleading.
    */
   rootOnly?: boolean;
+  /**
+   * The inverse: show this item only inside a child namespace. For
+   * per-namespace config whose root-namespace editor lives in Settings
+   * (root-only), so each namespace still has a way to reach its own.
+   */
+  nsOnly?: boolean;
 };
 
 // `SUPER_ADMIN` and the admin-policy set now live in `lib/access` so the
@@ -150,6 +156,9 @@ const adminNav: NavItem[] = [
   // child-namespace header ("Router mount not found" 404 storm). Same
   // rationale as FerroGate — hide the link outside the root namespace.
   { path: "/settings", label: "Settings", rootOnly: true },
+  // A child namespace's own `resources/config/types` (Settings → Resources
+  // edits the root's). Until a namespace saves one it inherits the root's.
+  { path: "/resource-types", label: "Resource Types", nsOnly: true },
 ];
 
 // Match a NavItem's `requiresMountType` against the live mount table.
@@ -359,6 +368,7 @@ export function Layout({ children }: LayoutProps) {
     // child namespace — their root paths can't be reached with a
     // child-namespace header attached.
     if (item.rootOnly && activeNamespace !== "") return false;
+    if (item.nsOnly && activeNamespace === "") return false;
     return true;
   }
 

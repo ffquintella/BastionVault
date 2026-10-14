@@ -48,7 +48,7 @@ describe("SettingsPage FIDO2 config", () => {
       if (cmd === "yubikey_list_devices") return Promise.resolve([]);
       if (cmd === "get_sso_settings") return Promise.resolve(false);
       if (cmd === "sso_admin_list") return Promise.resolve([]);
-      if (cmd === "resource_types_read") return Promise.resolve(null);
+      if (cmd === "resource_types_read_effective") return Promise.resolve({ source: "none", types: null });
       if (cmd === "get_password_policy")
         return Promise.resolve({ min_length: 12, require_upper: true, require_lower: true, require_digit: true, require_symbol: false });
       // Unknown commands resolve with `null` rather than reject — the

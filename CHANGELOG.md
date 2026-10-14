@@ -70,6 +70,13 @@ EXAMPLE ENTRY:
 
 - **Share one local-server gatekeeper between `bvault mcp serve` and the desktop app** -- pairing, the stateful `initialize` handshake, per-call confirmation, token minting, the line framing and the owner-only socket moved from `bvault-cli` into `bv_mcp::local`, and `POST /v2/mcp`'s JSON-RPC handling moved from `bv-server` into `bastion_vault::mcp_endpoint`. `bvault mcp` and `/v2/mcp` behave as before. `bv-mcp` now depends on `libc` (Unix only) for the socket's peer-uid check; `bv-server` no longer depends on `bv-client` or `async-trait`. (T131, S26)
 
+### Fixed
+
+#### Web Application Connect — resource types in namespaces (features/web-application-connect.md)
+
+- **Let a root-namespace type opt-in reach resources in child namespaces** -- form and HTTP-auth web logins for a resource in a child namespace were always refused `exposure_not_permitted`, even with its type saved with `connect.web_exposure_max` in Settings, because the server read the type configuration only from the namespace's own `resources/` mount and Settings (root-only) writes the root's. A namespace that has saved no type configuration now inherits the root namespace's; one that has saved its own is authoritative, with no per-type fallback, so a tenant can still deny what the root allows. `GET resources/v2/config/types/effective` reports which configuration applies (`mount`, `root` or `none`). (T96, S105)
+- **Edit a child namespace's resource types in the GUI** -- *Admin → Resource Types* appears inside a child namespace and edits that namespace's own types; Settings → Resources still edits the root's. Both say when the types shown are inherited from the root namespace, or are unsaved built-in defaults the server does not enforce — previously the editor showed a built-in `dom` cap the server never saw. The connection-profile editor's exposure warning and the Resources page now use the configuration the server enforces. (T96, S105)
+
 ## [0.44.32] - 2026-10-13
 
 ### Added

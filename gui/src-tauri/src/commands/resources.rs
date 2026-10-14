@@ -46,6 +46,18 @@ pub async fn resource_types_read(state: State<'_, AppState>) -> CmdResult<Option
     }
 }
 
+/// The type configuration the server enforces for the active namespace:
+/// `{ source: "mount" | "root" | "none", types: object | null }`. A child
+/// namespace that saved none inherits the root namespace's.
+#[tauri::command]
+pub async fn resource_types_read_effective(state: State<'_, AppState>) -> CmdResult<Value> {
+    let path = format!("{RESOURCE_MOUNT}v2/config/types/effective");
+    let resp = make_request(&state, Operation::Read, path, None).await?;
+    resp.and_then(|r| r.data)
+        .map(Value::Object)
+        .ok_or_else(|| CommandError::from("the effective resource type configuration read returned no data"))
+}
+
 #[tauri::command]
 pub async fn resource_types_write(state: State<'_, AppState>, types: Value) -> CmdResult<()> {
     let path = format!("{RESOURCE_MOUNT}config/types");

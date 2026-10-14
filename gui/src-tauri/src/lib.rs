@@ -439,6 +439,7 @@ pub fn run() {
             commands::dos::unban_ip,
             // Resources
             commands::resources::resource_types_read,
+            commands::resources::resource_types_read_effective,
             commands::resources::resource_types_write,
             commands::resources::list_resources,
             commands::resources::search_resources,

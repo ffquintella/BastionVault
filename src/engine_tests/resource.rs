@@ -831,3 +831,106 @@ mod broker_namespace_scope_tests {
         assert_eq!(at_root.get("login_class").and_then(|v| v.as_str()), Some("brokered"));
     }
 }
+
+mod type_config_namespace_fallback_tests {
+    use std::collections::HashMap;
+
+    use serde_json::{json, Map, Value};
+
+    use crate::errors::RvError;
+    use crate::kernel_api::VaultCtx;
+    use crate::logical::Request;
+    use crate::logical::{Operation, Response};
+    use crate::test_utils::new_unseal_test_bastion_vault;
+
+    async fn call(
+        core: &dyn VaultCtx,
+        token: &str,
+        op: Operation,
+        path: &str,
+        ns: &str,
+        body: Option<Value>,
+    ) -> Result<Option<Response>, RvError> {
+        let mut req = Request::new(path);
+        req.operation = op;
+        req.client_token = token.to_string();
+        req.body = body.and_then(|b| b.as_object().cloned());
+        if !ns.is_empty() {
+            req.headers = Some(HashMap::from([("x-bastionvault-namespace".to_string(), ns.to_string())]));
+        }
+        core.handle_request(&mut req).await
+    }
+
+    async fn effective(core: &dyn VaultCtx, token: &str, ns: &str) -> Map<String, Value> {
+        call(core, token, Operation::Read, "resources/v2/config/types/effective", ns, None)
+            .await
+            .expect("effective type config read")
+            .and_then(|r| r.data)
+            .expect("effective type config carries data")
+    }
+
+    fn website(cap: Option<&str>) -> Value {
+        let mut connect = json!({ "protocols": ["web"] });
+        if let Some(c) = cap {
+            connect["web_exposure_max"] = json!(c);
+        }
+        json!({ "website": { "id": "website", "fields": [], "connect": connect } })
+    }
+
+    /// Regression: Settings (where resource types are edited) is a
+    /// root-namespace page, and the connect path read `config/types` only from
+    /// the namespace's own `resources/` mount — so a `website` opted in to
+    /// `dom` at root was still refused `exposure_not_permitted` for every
+    /// resource in a child namespace. A namespace with nothing saved now
+    /// inherits the root's configuration; one that saved its own is
+    /// authoritative, so a tenant can still deny where the root allows.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_namespace_inherits_root_type_config_until_it_saves_its_own() {
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_type_config_ns_fallback").await;
+        call(&core, &root, Operation::Write, "sys/namespaces/tenant", "", Some(json!({})))
+            .await
+            .expect("create namespace");
+
+        // Nothing saved anywhere: no source, no types — deny.
+        let e = effective(&core, &root, "tenant").await;
+        assert_eq!(e["source"], json!("none"), "{e:?}");
+        assert_eq!(e["types"], Value::Null);
+
+        // Root opts `website` in; the namespace has saved nothing → inherits.
+        call(&core, &root, Operation::Write, "resources/config/types", "", Some(website(Some("dom"))))
+            .await
+            .expect("root types write");
+        let e = effective(&core, &root, "tenant").await;
+        assert_eq!(e["source"], json!("root"), "{e:?}");
+        assert_eq!(e["types"]["website"]["connect"]["web_exposure_max"], json!("dom"));
+
+        // The root itself reads its own mount, not a fallback.
+        let e = effective(&core, &root, "").await;
+        assert_eq!(e["source"], json!("mount"), "{e:?}");
+
+        // The namespace's own raw config is still empty: the fallback is a
+        // read-time view, never a copy into the tenant's mount.
+        let own = call(&core, &root, Operation::Read, "resources/config/types", "tenant", None)
+            .await
+            .expect("namespace types read");
+        assert!(own.and_then(|r| r.data).is_none(), "the namespace must not have a saved config yet");
+
+        // The namespace saves its own config without the cap: authoritative,
+        // no per-type fallback to the root's `dom`.
+        call(&core, &root, Operation::Write, "resources/config/types", "tenant", Some(website(None)))
+            .await
+            .expect("namespace types write");
+        let e = effective(&core, &root, "tenant").await;
+        assert_eq!(e["source"], json!("mount"), "{e:?}");
+        assert_eq!(e["types"]["website"]["connect"].get("web_exposure_max"), None);
+
+        // A namespace config that omits the type entirely also does not fall
+        // back per key.
+        call(&core, &root, Operation::Write, "resources/config/types", "tenant", Some(json!({})))
+            .await
+            .expect("namespace types write (empty)");
+        let e = effective(&core, &root, "tenant").await;
+        assert_eq!(e["source"], json!("mount"), "{e:?}");
+        assert_eq!(e["types"], json!({}));
+    }
+}

@@ -167,7 +167,8 @@ export function evaluateWebExposure(input: ExposureInput): ExposureVerdict {
           ? "web credential release is off by default: this resource's type does not set " +
               "`connect.web_exposure_max`. Set it on the type (`dom` for form mode, `handler` for http-auth) to opt in"
           : "web credential release is off by default: this resource's type is not in the saved " +
-              "resource type configuration, so it has not opted in. Save the type with " +
+              "resource type configuration, so it has not opted in. (A namespace uses its own saved " +
+              "configuration, or the root namespace's when it has saved none.) Save the type with " +
               "`connect.web_exposure_max` set (`dom` for form mode, `handler` for http-auth)",
         "type",
       );

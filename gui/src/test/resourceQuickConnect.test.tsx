@@ -37,8 +37,8 @@ const PROFILE = {
 function mockVault({ hasWindowsPassword }: { hasWindowsPassword: boolean }) {
   mockInvoke.mockImplementation((cmd: string) => {
     switch (cmd) {
-      case "resource_types_read":
-        return Promise.resolve(null);
+      case "resource_types_read_effective":
+        return Promise.resolve({ source: "none", types: null });
       case "list_asset_groups":
         return Promise.resolve({ groups: [] });
       case "asset_groups_for_resource":

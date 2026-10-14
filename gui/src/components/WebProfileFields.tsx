@@ -33,9 +33,10 @@ const IS_MACOS =
 /**
  * What the server's policy will say about a `form` or `http-auth` launch of
  * this resource.
- * Read from the *saved* `config/types` (the server never sees the builtins
- * the GUI merges in), so a type the GUI shows as opted in can still be
- * refused. `unknown` means the saved configuration could not be read; then
+ * Read from the *saved* `config/types` the server enforces — the active
+ * namespace's own, or the root namespace's when it saved none (the server
+ * never sees the builtins the GUI merges in), so a type the GUI shows as
+ * opted in can still be refused. `unknown` means the saved configuration could not be read; then
  * the editor says it can't tell rather than guessing either way.
  */
 export type WebExposureState =
@@ -55,10 +56,12 @@ export function useWebExposureState(
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
+    // The effective configuration — a child namespace that saved none is
+    // governed by the root namespace's — so the preview matches the server.
     api
-      .resourceTypesRead()
-      .then((config) => {
-        if (!cancelled) setSaved({ kind: "ok", config });
+      .resourceTypesReadEffective()
+      .then((effective) => {
+        if (!cancelled) setSaved({ kind: "ok", config: effective.types });
       })
       .catch((e: unknown) => {
         if (!cancelled) setSaved({ kind: "error", reason: e instanceof Error ? e.message : String(e) });

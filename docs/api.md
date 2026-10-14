@@ -871,7 +871,13 @@ Response:
   http-auth `handler` (so `handler`, `proxy` or `dom` admit it). An
   unset cap, a type missing from the saved configuration, or a
   configuration never saved leaves the cap at `none` and refuses with
-  `exposure_not_permitted`. The resource tier can only lower the type's cap
+  `exposure_not_permitted`. "Saved" means the resource mount's own
+  `config/types`, or — for a child namespace whose mount has saved none —
+  the root namespace's `resources/config/types`. A namespace that has saved
+  any configuration is authoritative: there is no per-type fallback, so a
+  tenant can deny where the root allows. `GET
+  resources/v2/config/types/effective` returns what applies:
+  `{ "source": "mount" | "root" | "none", "types": <saved object> | null }`. The resource tier can only lower the type's cap
   (`exposure_cap_exceeded`), never opt in by itself. An unreadable or
   unparseable `config/types`, or a value outside the enum, refuses with
   `exposure_policy_invalid`. `allow_heuristic_fill` on the same two tiers:
