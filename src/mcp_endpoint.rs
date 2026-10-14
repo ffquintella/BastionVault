@@ -96,7 +96,7 @@ pub async fn handle_jsonrpc(ep: &McpEndpoint<'_>, token: &str, body: &[u8]) -> R
             list["cacheScope"] = json!("private");
             JsonRpcResponse::success(rpc.id, list)
         }
-        "tools/call" => handle_tools_call(ep, rpc.id.clone(), rpc.params, token, &binding, &meta).await,
+        "tools/call" => handle_tools_call(ep, rpc.id.clone(), rpc.params, token, &auth, &binding, &meta).await,
         other => JsonRpcResponse::failure(rpc.id, JsonRpcError::new(-32601, format!("method not found: {other}"))),
     };
     Ok(McpEndpointOutcome::Answer(response))
@@ -107,6 +107,7 @@ async fn handle_tools_call(
     id: Value,
     params: Value,
     token: &str,
+    auth: &Auth,
     binding: &McpBinding,
     meta: &RequestMeta,
 ) -> JsonRpcResponse {
@@ -118,7 +119,9 @@ async fn handle_tools_call(
     let principal = PrincipalInfo {
         accessor: mcp_accessor(token),
         display_name: meta.client_info.as_ref().map(|c| c.name.clone()).unwrap_or_default(),
-        policies: Vec::new(),
+        // The token entry's own policies, which are what the ACL evaluates
+        // every routed call against.
+        policies: auth.policies.clone(),
     };
     let ctx = DispatchContext {
         binding,

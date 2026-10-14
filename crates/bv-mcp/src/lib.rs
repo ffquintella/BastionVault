@@ -38,6 +38,7 @@ mod dispatch_tests {
     #[derive(Default)]
     struct FakeBackend {
         responses: HashMap<String, Map<String, Value>>,
+        calls: std::sync::Mutex<Vec<(Operation, String, Option<Map<String, Value>>)>>,
     }
 
     impl FakeBackend {
@@ -45,17 +46,25 @@ mod dispatch_tests {
             self.responses.insert(path.to_string(), data.as_object().unwrap().clone());
             self
         }
+
+        /// The one call this backend received, as (operation, path, body).
+        fn only_call(&self) -> (Operation, String, Option<Map<String, Value>>) {
+            let calls = self.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1, "expected exactly one backend call, got {calls:?}");
+            calls[0].clone()
+        }
     }
 
     #[async_trait]
     impl Backend for FakeBackend {
         async fn handle(
             &self,
-            _operation: Operation,
+            operation: Operation,
             path: &str,
-            _body: Option<Map<String, Value>>,
+            body: Option<Map<String, Value>>,
             _token: &str,
         ) -> Result<Option<JsonResponse>, ClientError> {
+            self.calls.lock().unwrap().push((operation, path.to_string(), body));
             Ok(self.responses.get(path).map(|d| JsonResponse { data: Some(d.clone()), ..Default::default() }))
         }
     }
@@ -255,12 +264,12 @@ mod dispatch_tests {
 
     #[tokio::test]
     async fn sys_prefix_in_path_argument_is_out_of_scope() {
-        let b = binding(&["bv_resource_describe"], &["resource/*"]);
+        let b = binding(&["bv_resource_describe"], &["resources/*"]);
         let backend = FakeBackend::default();
         let p = principal();
         let guard = SingleUseGuard::new();
         let mut args = Map::new();
-        args.insert("path".into(), json!("sys/seal-status"));
+        args.insert("name".into(), json!("sys/seal-status"));
         let err =
             dispatcher::call("bv_resource_describe", args, None, &ctx(&b, &backend, &p, &guard)).await.unwrap_err();
         assert_eq!(err.code(), "mcp_path_out_of_scope");
@@ -268,12 +277,13 @@ mod dispatch_tests {
 
     #[tokio::test]
     async fn ansi_in_response_value_is_stripped() {
-        let b = binding(&["bv_resource_describe"], &["resource/*"]);
-        let backend = FakeBackend::default().with("resource/foo", json!({ "note": "\u{1b}[31mred\u{1b}[0m" }));
+        let b = binding(&["bv_resource_describe"], &["resources/*"]);
+        let backend =
+            FakeBackend::default().with("resources/resources/foo", json!({ "note": "\u{1b}[31mred\u{1b}[0m" }));
         let p = principal();
         let guard = SingleUseGuard::new();
         let mut args = Map::new();
-        args.insert("path".into(), json!("foo"));
+        args.insert("name".into(), json!("foo"));
         let result =
             dispatcher::call("bv_resource_describe", args, None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
         assert_eq!(result.structured_content.unwrap()["note"], json!("red"));
@@ -384,5 +394,154 @@ mod dispatch_tests {
         args.insert("common_name".into(), json!("example.com"));
         let result = dispatcher::call("bv_pki_issue", args, None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
         assert_eq!(result.structured_content.unwrap()["private_key"], json!("<redacted>"));
+    }
+
+    fn kv_list_args(path: Option<&str>) -> Map<String, Value> {
+        let mut args = Map::new();
+        args.insert("mount".into(), json!("secret"));
+        if let Some(path) = path {
+            args.insert("path".into(), json!(path));
+        }
+        args
+    }
+
+    /// Regression: KV v2 lists only `metadata/<prefix>/`. Without the
+    /// trailing slash the request hit the single-key route, which has no
+    /// list operation, and every `bv_kv_list` failed with "operation not
+    /// supported".
+    #[tokio::test]
+    async fn kv_list_lists_the_directory_with_a_trailing_slash() {
+        let b = binding(&["bv_kv_list"], &["secret/*"]);
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        for path in ["ai", "ai/", "/ai/"] {
+            let backend = FakeBackend::default().with("secret/metadata/ai/", json!({ "keys": ["x"] }));
+            let result = dispatcher::call("bv_kv_list", kv_list_args(Some(path)), None, &ctx(&b, &backend, &p, &guard))
+                .await
+                .unwrap();
+            assert_eq!(result.structured_content.unwrap()["keys"], json!(["x"]), "path {path:?}");
+            let (op, routed, _) = backend.only_call();
+            assert_eq!((op, routed.as_str()), (Operation::List, "secret/metadata/ai/"), "path {path:?}");
+        }
+    }
+
+    /// Regression: an empty `path` was refused, so a mount's top level
+    /// could not be listed at all. Absent, empty and `/` all list it now.
+    #[tokio::test]
+    async fn kv_list_without_a_path_lists_the_mount_top_level() {
+        let b = binding(&["bv_kv_list"], &["secret/*"]);
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        for path in [None, Some(""), Some("/")] {
+            let backend = FakeBackend::default().with("secret/metadata/", json!({ "keys": ["ai/"] }));
+            let result =
+                dispatcher::call("bv_kv_list", kv_list_args(path), None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
+            assert_eq!(result.structured_content.unwrap()["keys"], json!(["ai/"]), "path {path:?}");
+            assert_eq!(backend.only_call().1, "secret/metadata/", "path {path:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn kv_list_keeps_the_path_gates() {
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        let backend = FakeBackend::default();
+        let b = binding(&["bv_kv_list"], &["secret/metadata/ai/*"]);
+        let err =
+            dispatcher::call("bv_kv_list", kv_list_args(None), None, &ctx(&b, &backend, &p, &guard)).await.unwrap_err();
+        assert_eq!(err.code(), "mcp_path_out_of_scope", "the top level is outside a sub-directory grant");
+        let err =
+            dispatcher::call("bv_kv_list", kv_list_args(Some("ai/../../x")), None, &ctx(&b, &backend, &p, &guard))
+                .await
+                .unwrap_err();
+        assert_eq!(err.code(), "mcp_invalid_argument");
+        let mut args = kv_list_args(None);
+        args.insert("path".into(), json!(7));
+        let err = dispatcher::call("bv_kv_list", args, None, &ctx(&b, &backend, &p, &guard)).await.unwrap_err();
+        assert_eq!(err.code(), "mcp_invalid_argument");
+        assert!(backend.calls.lock().unwrap().is_empty(), "no refused call reaches the vault");
+    }
+
+    /// Regression: `bv_capabilities` sent a read with a `path` string, but
+    /// `sys/capabilities-self` is a write taking a `paths` array, so every
+    /// call was refused whatever the policy said.
+    #[tokio::test]
+    async fn capabilities_writes_a_paths_array_to_capabilities_self() {
+        let b = binding(&["bv_capabilities"], &["secret/*"]);
+        let backend = FakeBackend::default()
+            .with("sys/capabilities-self", json!({ "capabilities": { "secret/data/ai/x": ["read"] } }));
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        let mut args = Map::new();
+        args.insert("path".into(), json!("secret/data/ai/x"));
+        let result = dispatcher::call("bv_capabilities", args, None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
+        assert_eq!(result.structured_content.unwrap()["capabilities"]["secret/data/ai/x"], json!(["read"]));
+        let (op, routed, body) = backend.only_call();
+        assert_eq!((op, routed.as_str()), (Operation::Write, "sys/capabilities-self"));
+        assert_eq!(Value::Object(body.unwrap()), json!({ "paths": ["secret/data/ai/x"] }));
+    }
+
+    /// The scope covers the path asked about, not the `sys/` endpoint:
+    /// a probe outside the grant is refused, and a grant naming
+    /// `sys/capabilities-self` does not open every path.
+    #[tokio::test]
+    async fn capabilities_is_scoped_by_the_path_asked_about() {
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        let backend = FakeBackend::default();
+        let mut args = Map::new();
+        args.insert("path".into(), json!("kv/data/other"));
+        for scope in [&["secret/*"][..], &["sys/capabilities-self"][..]] {
+            let b = binding(&["bv_capabilities"], scope);
+            let err = dispatcher::call("bv_capabilities", args.clone(), None, &ctx(&b, &backend, &p, &guard))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), "mcp_path_out_of_scope", "scope {scope:?}");
+        }
+        args.insert("path".into(), json!("sys/policy/root"));
+        let b = binding(&["bv_capabilities"], &["*"]);
+        let err = dispatcher::call("bv_capabilities", args, None, &ctx(&b, &backend, &p, &guard)).await.unwrap_err();
+        assert_eq!(err.code(), "mcp_path_out_of_scope", "sys/ stays unreachable from a tool argument");
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
+    /// Regression: the resource tools routed to `resource/<path>`, a mount
+    /// that does not exist, so neither ever answered. The engine is mounted
+    /// at `resources/` and keeps its records under `resources/resources/`.
+    #[tokio::test]
+    async fn resource_tools_route_to_the_resource_engine() {
+        let b = binding(&["bv_resource_list", "bv_resource_describe"], &["resources/*"]);
+        let p = principal();
+        let guard = SingleUseGuard::new();
+
+        let backend = FakeBackend::default().with("resources/resources/", json!({ "keys": ["db1"] }));
+        let result =
+            dispatcher::call("bv_resource_list", Map::new(), None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
+        assert_eq!(result.structured_content.unwrap()["keys"], json!(["db1"]));
+        assert_eq!(backend.only_call().0, Operation::List);
+
+        let backend = FakeBackend::default().with("resources/resources/db1", json!({ "hostname": "db1.example" }));
+        let mut args = Map::new();
+        args.insert("name".into(), json!("db1"));
+        let result =
+            dispatcher::call("bv_resource_describe", args, None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
+        assert_eq!(result.structured_content.unwrap()["hostname"], json!("db1.example"));
+        assert_eq!(backend.only_call().0, Operation::Read);
+    }
+
+    #[tokio::test]
+    async fn resource_describe_takes_a_single_segment_name() {
+        let b = binding(&["bv_resource_describe"], &["resources/*"]);
+        let backend = FakeBackend::default();
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        for name in ["db1/history", "a/b"] {
+            let mut args = Map::new();
+            args.insert("name".into(), json!(name));
+            let err =
+                dispatcher::call("bv_resource_describe", args, None, &ctx(&b, &backend, &p, &guard)).await.unwrap_err();
+            assert_eq!(err.code(), "mcp_invalid_argument", "name {name:?}");
+        }
+        assert!(backend.calls.lock().unwrap().is_empty());
     }
 }

@@ -27,6 +27,21 @@ normal vault token presented to `/v2/mcp` is refused too. There is no way to
 `bv_totp_code`, `bv_pki_list_certs`, `bv_pki_read_cert`. The write tools:
 `bv_kv_write`, `bv_kv_delete` (soft-delete only), `bv_pki_issue`, `bv_ssh_sign`.
 
+A grant's **path scope** is matched against the path the tool sends to the
+vault, not the argument the assistant typed. Each line is an exact path or a
+prefix ending in `*`:
+
+| Tool | Path checked against the scope |
+|---|---|
+| `bv_kv_list` (`mount`, optional `path`) | `<mount>/metadata/<path>/`; no `path` lists `<mount>/metadata/` |
+| `bv_kv_read_metadata`, `bv_kv_read` | `<mount>/metadata/<path>`, `<mount>/data/<path>` |
+| `bv_resource_list` (no arguments) | `resources/resources/` |
+| `bv_resource_describe` (`name`) | `resources/resources/<name>` |
+| `bv_capabilities` (`path`) | the `path` asked about, not `sys/capabilities-self` |
+
+So `secret/*` covers every KV tool on the `secret` mount, and `resources/*`
+covers both resource tools.
+
 Secret **values** come back only when the grant allows `reveal` *and* the call
 asks for it; by default "read a secret" returns its metadata. A tool that
 returns plaintext or a private key (`bv_transit_decrypt`, `bv_totp_code`,

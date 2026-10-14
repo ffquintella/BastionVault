@@ -56,6 +56,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.36] - 2026-10-14
+
+### Fixed
+
+#### MCP Access — read tools that never answered (features/mcp-access.md)
+
+- **Make `bv_resource_list` and `bv_resource_describe` reach the resource engine** -- both routed to `resource/<path>`, a mount that does not exist, so neither ever returned a resource. They now read `resources/resources/`; `bv_resource_list` takes no arguments and `bv_resource_describe` takes the resource's `name` (one segment) instead of `path`. A grant's path scope must cover `resources/resources/…`, which `resources/*` does. (T80, S26, S104)
+- **List KV v2 directories with `bv_kv_list`, including a mount's top level** -- the tool listed `<mount>/metadata/<path>` without a trailing slash, which is KV v2's single-key route and has no list operation, so every call failed with "operation not supported"; an empty `path` was refused. It now lists `<mount>/metadata/<path>/`, and `path` is optional: absent, empty or `/` lists the top level. (T80, S26, S104)
+- **Make `bv_capabilities` work, scoped by the path asked about** -- the tool sent a read with a `path` field to `sys/capabilities-self`, which accepts only a write with a `paths` array, so it was refused whatever the policy said. It now sends that write. The grant's path scope is checked against the path asked about rather than the `sys/` endpoint, so a grant no longer needs to name `sys/capabilities-self`, and naming it no longer opens every path. (T80, S26, S104)
+- **Report the token's policies from `bv_whoami`** -- the endpoint always answered `policies: []`, which made a working token look powerless. (T80, S26, S104)
+- The tool catalogue changed (`bv_kv_list`'s and both resource tools' schemas and descriptions), so its hash changed: an operator who pinned `catalogue_pin` sees it as not matching until they pin again. Nothing enforces the pin yet (T94). (T80, S26)
+
 ## [0.44.35] - 2026-10-14
 
 ### Added
@@ -7851,7 +7863,8 @@ Bulk dependency upgrade across the workspace (`Cargo.toml`, `crates/bv-plugin-pa
 
 - Abandon the SQLx storage backend: `libsqlite3-sys` conflicts at link time with hiqlite's `rusqlite`, so `storage "sqlx"` was removed (T5, M2)
 
-[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.35...HEAD
+[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.36...HEAD
+[0.44.36]: https://github.com/ffquintella/BastionVault/compare/v0.44.35...v0.44.36
 [0.44.35]: https://github.com/ffquintella/BastionVault/compare/v0.44.34...v0.44.35
 [0.44.34]: https://github.com/ffquintella/BastionVault/compare/v0.44.33...v0.44.34
 [0.44.33]: https://github.com/ffquintella/BastionVault/compare/v0.44.32...v0.44.33

@@ -365,6 +365,101 @@ mod mod_test {
         assert!(!matches!(after, Ok(McpEndpointOutcome::Answer(_))), "a revoked token is not answered: {after:?}");
     }
 
+    /// Regression for tools that never worked against a real vault:
+    /// `bv_whoami` reported no policies, the resource tools routed to a
+    /// `resource/` mount that does not exist, `bv_kv_list` hit the KV v2
+    /// single-key route (no list operation) and could not list a mount's top
+    /// level, and `bv_capabilities` sent a read that `sys/capabilities-self`
+    /// does not accept.
+    #[tokio::test]
+    async fn test_mcp_in_process_whoami_kv_list_and_capabilities_against_a_real_vault() {
+        use crate::mcp_endpoint::{handle_jsonrpc, McpEndpoint, McpEndpointOutcome};
+        use bv_mcp::request_state::SingleUseGuard;
+
+        let (_bvault, core_arc, root_token) = new_unseal_test_bastion_vault("test_mcp_in_process_tools").await;
+        let core: &crate::core::Core = &core_arc;
+        let op = operator_token(core, &root_token, "felipe").await;
+        let mount = json!({ "type": "kv-v2" }).as_object().cloned();
+        let _ = test_write_api(core, &root_token, "sys/mounts/mcpkv/", true, mount).await;
+        let secret = json!({ "data": { "k": "v" } }).as_object().cloned();
+        let _ = test_write_api(core, &root_token, "mcpkv/data/ai/x", true, secret).await;
+        let resource = json!({ "type": "server", "hostname": "gw-01.example" }).as_object().cloned();
+        let _ = test_write_api(core, &root_token, "resources/resources/gw", true, resource).await;
+        let policy_hcl = r#"
+            path "sys/mcp/token"         { capabilities = ["update"] }
+            path "sys/capabilities-self" { capabilities = ["update"] }
+            path "mcpkv/metadata/*"      { capabilities = ["read", "list"] }
+            path "mcpkv/data/ai/*"       { capabilities = ["read"] }
+            path "resources/resources/*" { capabilities = ["read", "list"] }
+        "#;
+        let policy = json!({ "policy": policy_hcl }).as_object().cloned();
+        let _ = test_write_api(core, &root_token, "sys/policy/mcp-pairer", true, policy).await;
+
+        let pairing = json!({
+            "pairing": {
+                "id": "tools",
+                "client_name": "claude-code",
+                "tool_allowlist": ["bv_whoami", "bv_kv_list", "bv_capabilities", "bv_resource_list", "bv_resource_describe"],
+                "path_scope": ["mcpkv/*", "resources/*"],
+            },
+        })
+        .as_object()
+        .cloned();
+        let resp = test_write_api(core, &op, "sys/mcp/token", true, pairing).await;
+        let mcp_token = resp.unwrap().unwrap().data.unwrap()["auth"]["client_token"].as_str().unwrap().to_string();
+
+        let guard = SingleUseGuard::new();
+        let ep = McpEndpoint {
+            core: &core_arc,
+            client_ip: "",
+            tool_timeout: std::time::Duration::from_secs(30),
+            server_version: "9.9",
+            request_state_key: b"in-process-test-key",
+            single_use_guard: &guard,
+        };
+        let call = |id: u64, tool: &str, arguments: Value| {
+            serde_json::to_vec(&json!({
+                "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": { "name": tool, "arguments": arguments },
+            }))
+            .unwrap()
+        };
+        let result = |outcome: McpEndpointOutcome| match outcome {
+            McpEndpointOutcome::Answer(r) => {
+                let v = serde_json::to_value(r).unwrap();
+                assert!(v["error"].is_null(), "tool call failed: {v}");
+                v["result"]["structuredContent"].clone()
+            }
+            other => panic!("expected a JSON-RPC answer, got {other:?}"),
+        };
+
+        let whoami = result(handle_jsonrpc(&ep, &mcp_token, &call(1, "bv_whoami", json!({}))).await.unwrap());
+        assert!(
+            whoami["policies"].as_array().unwrap().contains(&json!("mcp-pairer")),
+            "whoami reports the token's policies: {whoami}"
+        );
+
+        let listed = call(2, "bv_kv_list", json!({ "mount": "mcpkv", "path": "ai" }));
+        let listed = result(handle_jsonrpc(&ep, &mcp_token, &listed).await.unwrap());
+        assert_eq!(listed["keys"], json!(["x"]));
+        let top =
+            result(handle_jsonrpc(&ep, &mcp_token, &call(3, "bv_kv_list", json!({ "mount": "mcpkv" }))).await.unwrap());
+        assert_eq!(top["keys"], json!(["ai/"]));
+
+        let caps = call(4, "bv_capabilities", json!({ "path": "mcpkv/data/ai/x" }));
+        let caps = result(handle_jsonrpc(&ep, &mcp_token, &caps).await.unwrap());
+        assert!(
+            caps["capabilities"]["mcpkv/data/ai/x"].as_array().unwrap().contains(&json!("read")),
+            "capabilities on a granted path: {caps}"
+        );
+
+        let resources = result(handle_jsonrpc(&ep, &mcp_token, &call(5, "bv_resource_list", json!({}))).await.unwrap());
+        assert!(resources["keys"].as_array().unwrap().contains(&json!("gw")), "resource list: {resources}");
+        let gw = call(6, "bv_resource_describe", json!({ "name": "gw" }));
+        let gw = result(handle_jsonrpc(&ep, &mcp_token, &gw).await.unwrap());
+        assert_eq!(gw["hostname"], json!("gw-01.example"), "resource describe: {gw}");
+    }
+
     /// Pairing is an operator-session feature: AppRole and root callers are
     /// refused, and so is an MCP-bound token or a malformed grant.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

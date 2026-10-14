@@ -169,9 +169,20 @@ Phases 4-6 and 8 (local mode, the GUI, the write tools, docs and hardening)
 landed 2026-09-30. On 2026-10-13 the desktop app began hosting the local
 server itself, with pairing-consent and per-call confirmation dialogs, so an
 assistant needs no `bvault` CLI (T131). `docs/mcp.md` is the operator guide.
+On 2026-10-14 the first run by hand against a real vault found that five read
+tools had never answered (`bv_resource_list`, `bv_resource_describe`,
+`bv_kv_list`, `bv_capabilities` routed to paths or operations the vault does not
+serve, and `bv_whoami` reported no policies); they were fixed with a test that
+drives each through `/v2/mcp` against a real vault, which the unit tests'
+fake backend could not catch.
 
 Deviations from the design below, all deliberate and disclosed:
 
+- **`bv_capabilities` is scoped by the path asked about.** The § 6 rule
+  scopes the routed path; for this tool that is always
+  `sys/capabilities-self`, which would make the tool usable only by a grant
+  naming a `sys/` path, and then for every path. The scope is checked against
+  the `path` argument instead.
 - **The local server is a gatekeeper and proxy, not a second dispatcher.**
   It identifies the client, checks the operator approved it, mints a
   pairing-bound token from the operator's own session, and forwards the

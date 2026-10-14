@@ -41,6 +41,17 @@ struct ToolRequest {
     operation: Operation,
     path: String,
     body: Option<Map<String, Value>>,
+    /// The path the grant's `path_scope` must cover when it is not `path`
+    /// itself. Only `bv_capabilities` sets it: its endpoint is always
+    /// `sys/capabilities-self`, and scoping that would make the tool usable
+    /// only by a grant naming a `sys/` path -- and then for every path.
+    scope_subject: Option<String>,
+}
+
+impl ToolRequest {
+    fn scope_subject(&self) -> &str {
+        self.scope_subject.as_deref().unwrap_or(&self.path)
+    }
 }
 
 pub async fn call(
@@ -57,7 +68,7 @@ pub async fn call(
     }
 
     let req = build_tool_request(tool, &args)?;
-    check_path_scope(&req.path, ctx.binding)?;
+    check_path_scope(req.scope_subject(), ctx.binding)?;
 
     // Destructiveness is a property of the tool itself (write/delete/issue),
     // not an opt-in request argument the way `reveal` is — a destructive
@@ -257,6 +268,34 @@ fn normalize_component(raw: &str) -> Result<String, McpError> {
     Ok(trimmed.to_string())
 }
 
+/// KV v2 lists only a directory: `metadata/` for the mount's top level,
+/// `metadata/<prefix>/` below it. `metadata/<name>` without the slash is the
+/// single-key route, which has no list operation. `path` is optional, and
+/// absent, empty or `/` lists the top level.
+fn kv_list_path(mount: &str, args: &Map<String, Value>) -> Result<String, McpError> {
+    let raw = match args.get("path") {
+        None | Some(Value::Null) => "",
+        Some(Value::String(s)) => s.as_str(),
+        Some(_) => return Err(McpError::InvalidArgument("non-string `path`".into())),
+    };
+    let prefix = raw.trim_matches('/');
+    if prefix.is_empty() {
+        return Ok(format!("{mount}/metadata/"));
+    }
+    let prefix = normalize_component(prefix)?;
+    Ok(format!("{mount}/metadata/{prefix}/"))
+}
+
+/// A resource name is one path segment: the engine's record route is
+/// `resources/<name>` with no deeper level.
+fn resource_name(args: &Map<String, Value>) -> Result<String, McpError> {
+    let name = normalize_component(arg_str(args, "name")?)?;
+    if name.contains('/') {
+        return Err(McpError::InvalidArgument("a resource name may not contain `/`".into()));
+    }
+    Ok(name)
+}
+
 fn arg_str<'a>(args: &'a Map<String, Value>, key: &str) -> Result<&'a str, McpError> {
     args.get(key)
         .and_then(Value::as_str)
@@ -266,33 +305,63 @@ fn arg_str<'a>(args: &'a Map<String, Value>, key: &str) -> Result<&'a str, McpEr
 fn build_tool_request(tool: &str, args: &Map<String, Value>) -> Result<ToolRequest, McpError> {
     match tool {
         "bv_capabilities" => {
+            // `sys/capabilities-self` is a write that takes a `paths` array;
+            // a read is refused by the ACL and has no route besides.
             let path = normalize_component(arg_str(args, "path")?)?;
             let mut body = Map::new();
-            body.insert("path".into(), Value::String(path));
-            Ok(ToolRequest { operation: Operation::Read, path: "sys/capabilities-self".to_string(), body: Some(body) })
+            body.insert("paths".into(), Value::Array(vec![Value::String(path.clone())]));
+            Ok(ToolRequest {
+                operation: Operation::Write,
+                path: "sys/capabilities-self".to_string(),
+                body: Some(body),
+                scope_subject: Some(path),
+            })
         }
         "bv_kv_list" => {
             let mount = normalize_component(arg_str(args, "mount")?)?;
-            let path = normalize_component(arg_str(args, "path")?)?;
-            Ok(ToolRequest { operation: Operation::List, path: format!("{mount}/metadata/{path}"), body: None })
+            Ok(ToolRequest {
+                operation: Operation::List,
+                path: kv_list_path(&mount, args)?,
+                body: None,
+                scope_subject: None,
+            })
         }
         "bv_kv_read_metadata" => {
             let mount = normalize_component(arg_str(args, "mount")?)?;
             let path = normalize_component(arg_str(args, "path")?)?;
-            Ok(ToolRequest { operation: Operation::Read, path: format!("{mount}/metadata/{path}"), body: None })
+            Ok(ToolRequest {
+                operation: Operation::Read,
+                path: format!("{mount}/metadata/{path}"),
+                body: None,
+                scope_subject: None,
+            })
         }
         "bv_kv_read" => {
             let mount = normalize_component(arg_str(args, "mount")?)?;
             let path = normalize_component(arg_str(args, "path")?)?;
-            Ok(ToolRequest { operation: Operation::Read, path: format!("{mount}/data/{path}"), body: None })
+            Ok(ToolRequest {
+                operation: Operation::Read,
+                path: format!("{mount}/data/{path}"),
+                body: None,
+                scope_subject: None,
+            })
         }
-        "bv_resource_list" => {
-            let path = normalize_component(arg_str(args, "path")?)?;
-            Ok(ToolRequest { operation: Operation::List, path: format!("resource/{path}"), body: None })
-        }
+        // The resource engine is mounted at `resources/` and keeps its
+        // records, flat, under `resources/resources/<name>`.
+        "bv_resource_list" => Ok(ToolRequest {
+            operation: Operation::List,
+            path: "resources/resources/".to_string(),
+            body: None,
+            scope_subject: None,
+        }),
         "bv_resource_describe" => {
-            let path = normalize_component(arg_str(args, "path")?)?;
-            Ok(ToolRequest { operation: Operation::Read, path: format!("resource/{path}"), body: None })
+            let name = resource_name(args)?;
+            Ok(ToolRequest {
+                operation: Operation::Read,
+                path: format!("resources/resources/{name}"),
+                body: None,
+                scope_subject: None,
+            })
         }
         "bv_transit_encrypt" => {
             let key = normalize_component(arg_str(args, "key")?)?;
@@ -301,37 +370,70 @@ fn build_tool_request(tool: &str, args: &Map<String, Value>) -> Result<ToolReque
             if let Some(ctx) = args.get("context").and_then(Value::as_str) {
                 body.insert("context".into(), Value::String(ctx.to_string()));
             }
-            Ok(ToolRequest { operation: Operation::Write, path: format!("transit/encrypt/{key}"), body: Some(body) })
+            Ok(ToolRequest {
+                operation: Operation::Write,
+                path: format!("transit/encrypt/{key}"),
+                body: Some(body),
+                scope_subject: None,
+            })
         }
         "bv_transit_decrypt" => {
             let key = normalize_component(arg_str(args, "key")?)?;
             let mut body = Map::new();
             body.insert("ciphertext".into(), Value::String(arg_str(args, "ciphertext")?.to_string()));
-            Ok(ToolRequest { operation: Operation::Write, path: format!("transit/decrypt/{key}"), body: Some(body) })
+            Ok(ToolRequest {
+                operation: Operation::Write,
+                path: format!("transit/decrypt/{key}"),
+                body: Some(body),
+                scope_subject: None,
+            })
         }
         "bv_transit_sign" => {
             let key = normalize_component(arg_str(args, "key")?)?;
             let mut body = Map::new();
             body.insert("input".into(), Value::String(arg_str(args, "input")?.to_string()));
-            Ok(ToolRequest { operation: Operation::Write, path: format!("transit/sign/{key}"), body: Some(body) })
+            Ok(ToolRequest {
+                operation: Operation::Write,
+                path: format!("transit/sign/{key}"),
+                body: Some(body),
+                scope_subject: None,
+            })
         }
         "bv_transit_verify" => {
             let key = normalize_component(arg_str(args, "key")?)?;
             let mut body = Map::new();
             body.insert("input".into(), Value::String(arg_str(args, "input")?.to_string()));
             body.insert("signature".into(), Value::String(arg_str(args, "signature")?.to_string()));
-            Ok(ToolRequest { operation: Operation::Write, path: format!("transit/verify/{key}"), body: Some(body) })
+            Ok(ToolRequest {
+                operation: Operation::Write,
+                path: format!("transit/verify/{key}"),
+                body: Some(body),
+                scope_subject: None,
+            })
         }
         "bv_totp_code" => {
             let name = normalize_component(arg_str(args, "name")?)?;
-            Ok(ToolRequest { operation: Operation::Read, path: format!("totp/code/{name}"), body: None })
+            Ok(ToolRequest {
+                operation: Operation::Read,
+                path: format!("totp/code/{name}"),
+                body: None,
+                scope_subject: None,
+            })
         }
-        "bv_pki_list_certs" => {
-            Ok(ToolRequest { operation: Operation::List, path: "pki/certs".to_string(), body: None })
-        }
+        "bv_pki_list_certs" => Ok(ToolRequest {
+            operation: Operation::List,
+            path: "pki/certs".to_string(),
+            body: None,
+            scope_subject: None,
+        }),
         "bv_pki_read_cert" => {
             let serial = normalize_component(arg_str(args, "serial")?)?;
-            Ok(ToolRequest { operation: Operation::Read, path: format!("pki/cert/{serial}"), body: None })
+            Ok(ToolRequest {
+                operation: Operation::Read,
+                path: format!("pki/cert/{serial}"),
+                body: None,
+                scope_subject: None,
+            })
         }
         "bv_kv_write" => {
             let mount = normalize_component(arg_str(args, "mount")?)?;
@@ -343,14 +445,24 @@ fn build_tool_request(tool: &str, args: &Map<String, Value>) -> Result<ToolReque
                 .ok_or_else(|| McpError::InvalidArgument("missing or non-object `data`".into()))?;
             let mut body = Map::new();
             body.insert("data".into(), Value::Object(data));
-            Ok(ToolRequest { operation: Operation::Write, path: format!("{mount}/data/{path}"), body: Some(body) })
+            Ok(ToolRequest {
+                operation: Operation::Write,
+                path: format!("{mount}/data/{path}"),
+                body: Some(body),
+                scope_subject: None,
+            })
         }
         "bv_kv_delete" => {
             let mount = normalize_component(arg_str(args, "mount")?)?;
             let path = normalize_component(arg_str(args, "path")?)?;
             // Soft-delete only — the current version's data endpoint, never
             // `metadata` (which would also erase version history).
-            Ok(ToolRequest { operation: Operation::Delete, path: format!("{mount}/data/{path}"), body: None })
+            Ok(ToolRequest {
+                operation: Operation::Delete,
+                path: format!("{mount}/data/{path}"),
+                body: None,
+                scope_subject: None,
+            })
         }
         "bv_pki_issue" => {
             let role = normalize_component(arg_str(args, "role")?)?;
@@ -363,7 +475,12 @@ fn build_tool_request(tool: &str, args: &Map<String, Value>) -> Result<ToolReque
             if let Some(alt_names) = args.get("alt_names").and_then(Value::as_str) {
                 body.insert("alt_names".into(), Value::String(alt_names.to_string()));
             }
-            Ok(ToolRequest { operation: Operation::Write, path: format!("pki/issue/{role}"), body: Some(body) })
+            Ok(ToolRequest {
+                operation: Operation::Write,
+                path: format!("pki/issue/{role}"),
+                body: Some(body),
+                scope_subject: None,
+            })
         }
         "bv_ssh_sign" => {
             let role = normalize_component(arg_str(args, "role")?)?;
@@ -373,7 +490,12 @@ fn build_tool_request(tool: &str, args: &Map<String, Value>) -> Result<ToolReque
             if let Some(principals) = args.get("valid_principals").and_then(Value::as_str) {
                 body.insert("valid_principals".into(), Value::String(principals.to_string()));
             }
-            Ok(ToolRequest { operation: Operation::Write, path: format!("ssh/sign/{role}"), body: Some(body) })
+            Ok(ToolRequest {
+                operation: Operation::Write,
+                path: format!("ssh/sign/{role}"),
+                body: Some(body),
+                scope_subject: None,
+            })
         }
         other => Err(McpError::UnknownTool(other.to_string())),
     }
