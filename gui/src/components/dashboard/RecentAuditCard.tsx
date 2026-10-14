@@ -23,18 +23,24 @@ const opGlyph: Record<string, string> = {
 };
 
 interface RecentAuditCardProps {
+  /** Newest-first rows from the server's precomputed statistics. */
   events: AuditEvent[];
   nowMs: number;
   loading?: boolean;
+  /** The server has not computed the statistics yet. */
+  pending?: boolean;
+  /** The caller may not see audit rows (or there are no statistics). */
+  unavailable?: boolean;
   limit?: number;
 }
 
-/** The last N change-history events, op-colored, linking to the full
- *  Audit page. */
+/** The last N audit events, op-colored, linking to the full Audit page. */
 export function RecentAuditCard({
   events,
   nowMs,
   loading,
+  pending,
+  unavailable,
   limit = 6,
 }: RecentAuditCardProps) {
   const rows = events.slice(0, limit);
@@ -52,6 +58,12 @@ export function RecentAuditCard({
             <div key={i} className="h-4 rounded bg-[var(--color-surface-hover)] animate-pulse" />
           ))}
         </div>
+      ) : pending ? (
+        <div className="text-xs text-[var(--color-text-muted)] py-2">
+          Statistics are being computed — check back in a few minutes.
+        </div>
+      ) : unavailable ? (
+        <div className="text-xs text-[var(--color-text-muted)] py-2">Recent activity unavailable.</div>
       ) : rows.length === 0 ? (
         <div className="text-xs text-[var(--color-text-muted)] py-2">No recent activity.</div>
       ) : (

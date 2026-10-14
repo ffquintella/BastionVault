@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.44.34"
+version = "0.44.35"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -726,20 +726,32 @@ debug = false
 # particular.
 sspi = { git = "https://github.com/ffquintella/sspi-rs", branch = "fix-deps-next" }
 
-# hiqlite raft-client socket-leak fix. Stock hiqlite leaks one ESTABLISHED
-# TCP socket per openraft client rebuild: aborting the parent `ws_handler`
-# task only *detaches* (does not abort) its spawned reader/writer tasks,
-# which keep the upgraded WebSocket's socket halves alive. On the HML cluster
-# the follower accumulated ~28k leaked sockets to the leader's raft port
-# (8210), exhausted the ephemeral range, and Raft lost quorum ("Cannot assign
-# requested address (os error 99)"). Our fork carries a one-struct
-# `AbortOnDrop` guard so the child tasks are torn down on every drop path.
+# hiqlite fork. It was created for the raft-client socket-leak fix: stock
+# hiqlite <= 0.15.0 leaks one ESTABLISHED TCP socket per openraft client
+# rebuild, because aborting the parent `ws_handler` task only *detaches* its
+# spawned reader/writer tasks. On the HML cluster the follower accumulated
+# ~28k leaked sockets to the leader's raft port (8210), exhausted the
+# ephemeral range, and Raft lost quorum ("Cannot assign requested address
+# (os error 99)").
 #
 # Consumed as a git patch (same pattern as the sspi/picky forks above) rather
 # than a path patch: hiqlite's repo is itself a Cargo workspace and the crate
 # uses `workspace = true` inheritance, which cargo cannot resolve when a path
 # patch points inside a nested/excluded workspace. The fork is ALSO checked
 # out as a git submodule at `third_party/hiqlite` for local editing — edit
-# there on `main-local`, push, then `cargo update -p hiqlite`. Drop this patch
-# once the fix is upstreamed (github.com/sebadob/hiqlite).
+# there on `main-local`, push, then `cargo update -p hiqlite`.
+#
+# Upstream v0.15.1 shipped the AbortOnDrop fix itself (#373), so since the
+# v0.15.3 merge the fork carries only: the `/cluster/step_down/{raft_type}`
+# route (BastionVault's sys/step-down), a non-panicking final shutdown
+# notify, `cryptr` without its `s3` feature unless hiqlite's `s3` is on,
+# error-level logging of every WebSocket reader exit (FrameTooLarge named
+# explicitly) plus a ReaderExit signal so the client API stream reconnects
+# at once instead of after its 35 s deadline, and a fix for 0.15.x refusing
+# every restart of a `start_node` + `dlock` node ("The Cache cleanup must be
+# done ...": the `cache_index.meta` marker was never written for an empty
+# cache enum) — caught by tests/hiqlite_ha_fault_injection.rs.
+#
+# `main-local` carries the 0.15.3 merge (fast-forwarded 2026-10-14; the
+# `main-local-0.15.3` branch marks the same commit).
 hiqlite = { git = "https://github.com/ffquintella/hiqlite", branch = "main-local" }

@@ -3,7 +3,10 @@
 
 pub mod access_audit_reconciler;
 pub mod access_audit_store;
+pub mod audit_retention;
+pub mod dashboard_stats;
 pub mod denial_audit_store;
+pub mod housekeeping;
 mod leases;
 pub mod mcp;
 pub mod self_profile;
@@ -11,7 +14,10 @@ pub mod self_profile;
 use std::{
     any::Any,
     collections::HashMap,
-    sync::{Arc, Weak},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Weak,
+    },
 };
 
 use serde_json::{json, Map, Value};
@@ -87,6 +93,17 @@ impl AuditEventBuilder {
     }
 }
 
+/// One audit source's events, or why the source could not be read.
+type AuditSourceResult = Result<Vec<AuditEventBuilder>, String>;
+
+/// Every audit source's events since an instant, in the fixed source order of
+/// `SystemBackend::AUDIT_SOURCE_NAMES`, plus the sources whose read failed
+/// (their group is empty).
+struct AuditEventGroups {
+    groups: [Vec<AuditEventBuilder>; 11],
+    failed: Vec<&'static str>,
+}
+
 static SYSTEM_BACKEND_HELP: &str = r#"
 The system backend is built-in to BastionVault and cannot be remounted or
 unmounted. It contains the paths that are used to configure BastionVault itself
@@ -96,6 +113,10 @@ as well as perform core operations.
 pub struct SystemModule {
     pub name: String,
     pub backend: Arc<SystemBackend>,
+    /// `start_background` runs on every unseal; the housekeeping task
+    /// survives a seal (it skips while sealed), so it is started once per
+    /// module instance.
+    housekeeping_started: AtomicBool,
 }
 
 pub struct SystemBackend {
@@ -152,6 +173,8 @@ impl SystemBackend {
         let sys_backend_file_owner_transfer = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_table = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_events = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_audit_retention_read = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_audit_retention_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_enable = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_disable = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_raw_read = self.self_ptr.upgrade().unwrap().clone();
@@ -584,6 +607,30 @@ impl SystemBackend {
                     },
                     operations: [
                         {op: Operation::Read, handler: sys_backend_audit_events.handle_audit_events}
+                    ]
+                },
+                {
+                    // Retention of the replicated audit stores and the state of
+                    // the daily housekeeping run. Deployment-wide, sudo-gated
+                    // via `root_paths`. A sibling of `audit/…` rather than a
+                    // child so it can never collide with an audit device named
+                    // `retention`. HTTP shim under /v2/sys only.
+                    pattern: "audit-retention$",
+                    fields: {
+                        "retention_days": {
+                            required: false,
+                            field_type: FieldType::Int,
+                            description: "Delete audit records older than this many days (1-36500)."
+                        },
+                        "enabled": {
+                            required: false,
+                            field_type: FieldType::Bool,
+                            description: "false keeps every audit record forever."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_audit_retention_read.handle_audit_retention_read},
+                        {op: Operation::Write, handler: sys_backend_audit_retention_write.handle_audit_retention_write}
                     ]
                 },
                 {
@@ -1456,7 +1503,7 @@ impl SystemBackend {
             // Admin reads/writes are gated by policy on the explicit
             // mount/name paths instead. `identity/profile/*` is caller-scoped
             // for the same reason and is likewise never root-scoped.
-            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*", "identity/ns-assignment", "identity/ns-assignment/*", "dos/config", "dos/stats", "dos/bans/*", "mcp/config"],
+            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "audit-retention", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*", "identity/ns-assignment", "identity/ns-assignment/*", "dos/config", "dos/stats", "dos/bans/*", "mcp/config"],
             // NB: `mcp/apps/<name>/machine-waiver` is NOT listed here even
             // though it is sudo-gated: `root_paths` only supports an exact
             // path or a trailing-`*` prefix (`new_radix_from_paths` in
@@ -2026,7 +2073,10 @@ impl SystemBackend {
     /// groups, and asset groups (resource-group store) — and presents
     /// them as a flat newest-first list. Admin-only (gated by the ACL
     /// on `sys/audit/events`). Optional `from` / `to` bound the time
-    /// window and `limit` caps response size (default 500). Over HTTP
+    /// window and `limit` caps response size (default 500). Without
+    /// `from` the window is the [`Self::AUDIT_EVENTS_DEFAULT_WINDOW_HOURS`]
+    /// hours before `to` (or before now): the read is always bounded, and
+    /// the bound actually applied is returned as `from`. Over HTTP
     /// all three may travel on the query string or in the request body
     /// — the endpoint's shim in `bv-server::sys` merges both, body
     /// winning — and on the embedded and in-process paths they arrive
@@ -2111,13 +2161,25 @@ impl SystemBackend {
 
         // Push the `from` bound into the collection so the append-only
         // stores range-scan only the recent tail instead of reading all
-        // history. Validated above, so a parse failure here is
-        // impossible; `None` means no bound was supplied.
-        let since = from
-            .as_deref()
-            .and_then(|f| chrono::DateTime::parse_from_rfc3339(f).ok())
-            .map(|dt| dt.with_timezone(&chrono::Utc));
-        let mut events = self.collect_audit_events_since(since).await;
+        // history. Both bounds were validated above. An absent `from` is
+        // not "everything": it is the default window ending at `to` (or
+        // now). An unbounded read of every audit store on every call is
+        // what took a 184k-row deployment's dashboard down.
+        let parse_utc = |raw: &str| {
+            chrono::DateTime::parse_from_rfc3339(raw).ok().map(|dt| dt.with_timezone(&chrono::Utc))
+        };
+        let since = match from.as_deref().and_then(parse_utc) {
+            Some(explicit) => explicit,
+            None => {
+                let end = to.as_deref().and_then(parse_utc).unwrap_or_else(chrono::Utc::now);
+                end - chrono::Duration::hours(Self::AUDIT_EVENTS_DEFAULT_WINDOW_HOURS)
+            }
+        };
+        // The string compare below needs the same RFC3339 spelling the
+        // producers write (`Utc::to_rfc3339`), so a defaulted bound is
+        // rendered that way; an explicit one is kept as the caller wrote it.
+        let from: String = from.unwrap_or_else(|| since.to_rfc3339());
+        let (mut events, failed_sources) = self.collect_audit_events_since(since).await;
 
         // Sort newest-first. Timestamps are RFC3339 strings;
         // lexicographic order matches chronological for that format.
@@ -2131,10 +2193,8 @@ impl SystemBackend {
         let filtered: Vec<_> = events
             .into_iter()
             .filter(|e| {
-                if let Some(f) = &from {
-                    if e.ts < *f {
-                        return false;
-                    }
+                if e.ts < from {
+                    return false;
                 }
                 if let Some(t) = &to {
                     if e.ts > *t {
@@ -2149,7 +2209,163 @@ impl SystemBackend {
         let arr = Value::Array(filtered.into_iter().map(|e| e.into_value()).collect());
         let mut data = Map::new();
         data.insert("events".into(), arr);
+        // The lower bound that was applied — the caller's, or the default.
+        data.insert("from".into(), Value::String(from));
+        // Sources that could not be read are named rather than silently
+        // dropped, so an empty or short trail is not mistaken for a quiet one.
+        data.insert(
+            "failed_sources".into(),
+            Value::Array(failed_sources.into_iter().map(|s| Value::String(s.to_string())).collect()),
+        );
         Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// Window `sys/audit/events` reads when the caller gives no `from`.
+    const AUDIT_EVENTS_DEFAULT_WINDOW_HOURS: i64 = 24;
+
+    /// `GET v2/sys/audit-retention` — the effective retention, where it came
+    /// from, the schedule, and the last housekeeping run. Sudo-gated.
+    pub async fn handle_audit_retention_read(
+        &self,
+        _backend: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let (cfg, source) = audit_retention::load_config(&self.core).await?;
+        let status = audit_retention::load_status(&self.core).await?;
+        Ok(Some(Response::data_response(Some(Self::audit_retention_response(
+            &cfg,
+            source,
+            &status,
+            chrono::Utc::now(),
+        )))))
+    }
+
+    /// `POST|PUT v2/sys/audit-retention` — change `retention_days` and/or
+    /// `enabled`. A partial write keeps the other field. Values are
+    /// validated, never clamped: `0`, negatives, fractions and anything over
+    /// [`audit_retention::MAX_RETENTION_DAYS`] are a 400. Takes effect at the
+    /// next scheduled run (00:00 UTC). Sudo-gated.
+    pub async fn handle_audit_retention_write(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let supplied = |name: &str| -> Result<Option<Value>, RvError> {
+            match req.get_data(name) {
+                Ok(Value::Null) => Ok(None),
+                Ok(v) => Ok(Some(v)),
+                Err(RvError::ErrRequestFieldInvalid) => {
+                    Err(bv_error_response_status!(400, "`{}` has the wrong type", name))
+                }
+                Err(_) => Ok(None),
+            }
+        };
+        let retention_days = match supplied("retention_days")? {
+            Some(v) => Some(
+                audit_retention::validate_retention_days(&v).map_err(|msg| bv_error_response_status!(400, msg))?,
+            ),
+            None => None,
+        };
+        let enabled = match supplied("enabled")? {
+            Some(Value::Bool(b)) => Some(b),
+            Some(_) => return Err(bv_error_response_status!(400, "`enabled` must be a boolean")),
+            None => None,
+        };
+        if retention_days.is_none() && enabled.is_none() {
+            return Err(bv_error_response_status!(400, "supply `retention_days` and/or `enabled`"));
+        }
+
+        // A partial update needs the current record. If it cannot be read the
+        // write may still replace it, but only when it states both fields —
+        // otherwise the missing one would silently become the default.
+        let current = match audit_retention::load_config(&self.core).await {
+            Ok((cfg, _)) => cfg,
+            Err(e) if retention_days.is_some() && enabled.is_some() => {
+                log::warn!(
+                    target: "security",
+                    "audit-retention: replacing a configuration that could not be read ({e})"
+                );
+                audit_retention::AuditRetentionConfig::default()
+            }
+            Err(e) => {
+                return Err(bv_error_response_status!(
+                    500,
+                    "the current audit retention configuration could not be read ({}); supply both `retention_days` and `enabled` to replace it",
+                    e
+                ))
+            }
+        };
+
+        let now = chrono::Utc::now();
+        let updated_by = req
+            .auth
+            .as_ref()
+            .map(|a| a.display_name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "(unknown)".to_string());
+        let next = audit_retention::AuditRetentionConfig {
+            version: audit_retention::RETENTION_RECORD_VERSION,
+            retention_days: retention_days.unwrap_or(current.retention_days),
+            enabled: enabled.unwrap_or(current.enabled),
+            updated_at: now.to_rfc3339(),
+            updated_by,
+        };
+        audit_retention::save_config(&self.core, &next).await?;
+        let status = audit_retention::load_status(&self.core).await?;
+        log::info!(
+            target: "security",
+            "audit-retention: configuration changed by {}: retention_days {} -> {}, enabled {} -> {}; applies from the run at {}",
+            next.updated_by,
+            current.retention_days,
+            next.retention_days,
+            current.enabled,
+            next.enabled,
+            audit_retention::next_run_at(&status, now).to_rfc3339()
+        );
+
+        Ok(Some(Response::data_response(Some(Self::audit_retention_response(
+            &next,
+            audit_retention::ConfigSource::Stored,
+            &status,
+            now,
+        )))))
+    }
+
+    fn audit_retention_response(
+        cfg: &audit_retention::AuditRetentionConfig,
+        source: audit_retention::ConfigSource,
+        status: &audit_retention::StoredStatus,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Map<String, Value> {
+        let (armed_at, last_run, status_error) = match status {
+            audit_retention::StoredStatus::Missing => (Value::Null, Value::Null, Value::Null),
+            audit_retention::StoredStatus::Present(st) => (
+                Value::String(st.armed_at.clone()),
+                st.last_run.as_ref().and_then(|r| serde_json::to_value(r).ok()).unwrap_or(Value::Null),
+                Value::Null,
+            ),
+            audit_retention::StoredStatus::Unreadable(reason) => {
+                (Value::Null, Value::Null, Value::String(reason.clone()))
+            }
+        };
+        json!({
+            "retention_days": cfg.retention_days,
+            "enabled": cfg.enabled,
+            "source": source.as_str(),
+            "updated_at": cfg.updated_at,
+            "updated_by": cfg.updated_by,
+            "min_retention_days": audit_retention::MIN_RETENTION_DAYS,
+            "max_retention_days": audit_retention::MAX_RETENTION_DAYS,
+            "schedule": "daily at 00:00 UTC",
+            "next_run_at": audit_retention::next_run_at(status, now).to_rfc3339(),
+            "armed_at": armed_at,
+            "last_run": last_run,
+            "status_error": status_error,
+            "stores": audit_retention::RETENTION_STORES.iter().map(|s| s.name).collect::<Vec<_>>(),
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_default()
     }
 
     /// Gather every change-history event across the subsystems we track
@@ -2158,22 +2374,19 @@ impl SystemBackend {
     /// Shared by `handle_audit_events` (which sorts / filters / serializes
     /// it) and `handle_dashboard_summary` (which counts a 24h window).
     ///
-    /// When `since` is set, restricts the result to events at or after
-    /// that instant. The flat timestamp-keyed stores (user/file/login/SSH/
+    /// Restricted to events at or after `since`; there is deliberately no
+    /// unbounded form. The flat timestamp-keyed stores (user/file/login/SSH/
     /// denial/access/share) push the bound into a range scan over their
     /// keys, so they read only the recent tail; the `{name}/{seq}` history
     /// sources (policy/identity-group/asset-group) are read as one bulk
-    /// subtree scan each and filtered by RFC3339 timestamp in memory. Pass
-    /// `None` for the full unbounded aggregation.
+    /// subtree scan each and filtered by RFC3339 timestamp in memory.
     ///
     /// The independent per-subsystem reads run concurrently (each is its
     /// own storage round-trip), so the wall-clock cost is the slowest
     /// single source rather than their sum.
-    async fn collect_audit_events_since(
-        &self,
-        since: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> Vec<AuditEventBuilder> {
-        self.collect_audit_event_groups_since(since).await.into_iter().flatten().collect()
+    async fn collect_audit_events_since(&self, since: chrono::DateTime<chrono::Utc>) -> (Vec<AuditEventBuilder>, Vec<&'static str>) {
+        let collected = self.collect_audit_event_groups_since(since).await;
+        (collected.groups.into_iter().flatten().collect(), collected.failed)
     }
 
     /// Index of the login-event group in
@@ -2181,6 +2394,20 @@ impl SystemBackend {
     const AUDIT_GROUP_LOGINS: usize = 6;
     /// Index of the denial-event group, likewise.
     const AUDIT_GROUP_DENIALS: usize = 9;
+    /// Operator-facing name of each source, in group order.
+    const AUDIT_SOURCE_NAMES: [&'static str; 11] = [
+        "policy",
+        "identity-group",
+        "asset-group",
+        "share",
+        "user",
+        "file",
+        "login",
+        "ssh-ca",
+        "ssh-sign",
+        "denial",
+        "access",
+    ];
 
     /// The per-source form of [`Self::collect_audit_events_since`], before
     /// the groups are flattened.
@@ -2190,22 +2417,24 @@ impl SystemBackend {
     /// on category strings, and re-reading the two stores (what it used to
     /// do) means two more linearizable scans for numbers this pass already
     /// holds. Indexing the group is exact and free.
-    async fn collect_audit_event_groups_since(
-        &self,
-        since: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> [Vec<AuditEventBuilder>; 11] {
+    ///
+    /// A source that cannot be read leaves its group empty and is named in
+    /// `failed`, so a caller can say its numbers are partial instead of
+    /// silently under-counting. A subsystem that is not present at all is
+    /// not a failure.
+    async fn collect_audit_event_groups_since(&self, since: chrono::DateTime<chrono::Utc>) -> AuditEventGroups {
         // RFC3339 cutoff for the in-memory-filtered history sources, and
         // the matching zero-padded-nanos key for the range-scanned append
         // logs (`hist_seq` keys are nanoseconds since the epoch).
-        let cutoff_rfc: Option<String> = since.map(|t| t.to_rfc3339());
-        let since_key: Option<String> = since.map(Self::hist_since_key);
-        let cutoff = cutoff_rfc.as_deref();
-        let skey = since_key.as_deref();
+        let cutoff_rfc = since.to_rfc3339();
+        let since_key = Self::hist_since_key(since);
+        let cutoff = cutoff_rfc.as_str();
+        let skey = since_key.as_str();
 
         // Group order is the array order below; the two indexed by the
         // dashboard are named so a reordering cannot silently repoint them.
         #[cfg(not(feature = "sync_handler"))]
-        let groups: [Vec<AuditEventBuilder>; 11] = {
+        let results: [AuditSourceResult; 11] = {
             let (policy, idgroups, assets, shares, users, files, logins, ssh_ca, ssh_sign, denials, access) = tokio::join!(
                 self.collect_policy_events(cutoff),
                 self.collect_identity_group_events(cutoff),
@@ -2226,7 +2455,7 @@ impl SystemBackend {
         // sources sequentially (these maybe-async methods resolve to
         // plain calls under `is_sync`).
         #[cfg(feature = "sync_handler")]
-        let groups: [Vec<AuditEventBuilder>; 11] = [
+        let results: [AuditSourceResult; 11] = [
             self.collect_policy_events(cutoff),
             self.collect_identity_group_events(cutoff),
             self.collect_asset_group_events(cutoff),
@@ -2240,7 +2469,20 @@ impl SystemBackend {
             self.collect_access_events(skey),
         ];
 
-        groups
+        let mut failed = Vec::new();
+        let mut names = Self::AUDIT_SOURCE_NAMES.into_iter();
+        let groups = results.map(|result| {
+            let name = names.next().unwrap_or("unknown");
+            match result {
+                Ok(events) => events,
+                Err(reason) => {
+                    log::warn!("audit events: the {name} source could not be read and is left out: {reason}");
+                    failed.push(name);
+                    Vec::new()
+                }
+            }
+        });
+        AuditEventGroups { groups, failed }
     }
 
     /// ACL policy change-history, read as one bulk subtree scan rather
@@ -2251,116 +2493,113 @@ impl SystemBackend {
     /// Still restricted to policies that currently exist: history outlives
     /// a deleted policy, and surfacing it here would change what the Audit
     /// page reports.
-    async fn collect_policy_events(&self, cutoff: Option<&str>) -> Vec<AuditEventBuilder> {
+    async fn collect_policy_events(&self, cutoff: &str) -> AuditSourceResult {
         use crate::modules::policy::PolicyModule;
         use std::collections::HashMap;
 
         let mut events = Vec::new();
-        if let Ok(policy_module) = self.get_module::<PolicyModule>("policy") {
-            let store = policy_module.policy_store.load();
-            if let Ok(names) = store.list_policy(crate::modules::policy::PolicyType::Acl).await {
-                // History keys carry the sanitized (lowercased) name; the
-                // event's `target` keeps the listed spelling, as before.
-                let live: HashMap<String, String> =
-                    names.into_iter().map(|n| (n.to_lowercase(), n)).collect();
-                if let Ok(entries) = store.list_history_all().await {
-                    for (key_name, e) in entries {
-                        let Some(target) = live.get(&key_name) else { continue };
-                        if cutoff.map(|c| e.ts.as_str() >= c).unwrap_or(true) {
-                            events.push(AuditEventBuilder {
-                                ts: e.ts,
-                                user: e.user,
-                                machine: String::new(),
-                                op: e.op,
-                                category: "policy".into(),
-                                target: target.clone(),
-                                changed_fields: Vec::new(),
-                                summary: String::new(),
-                            });
-                        }
-                    }
-                }
+        let Ok(policy_module) = self.get_module::<PolicyModule>("policy") else {
+            return Ok(events);
+        };
+        let store = policy_module.policy_store.load();
+        let names = store
+            .list_policy(crate::modules::policy::PolicyType::Acl)
+            .await
+            .map_err(|e| format!("the policy list could not be read: {e}"))?;
+        // History keys carry the sanitized (lowercased) name; the event's
+        // `target` keeps the listed spelling, as before.
+        let live: HashMap<String, String> = names.into_iter().map(|n| (n.to_lowercase(), n)).collect();
+        let entries =
+            store.list_history_all().await.map_err(|e| format!("the policy history could not be read: {e}"))?;
+        for (key_name, e) in entries {
+            let Some(target) = live.get(&key_name) else { continue };
+            if e.ts.as_str() >= cutoff {
+                events.push(AuditEventBuilder {
+                    ts: e.ts,
+                    user: e.user,
+                    machine: String::new(),
+                    op: e.op,
+                    category: "policy".into(),
+                    target: target.clone(),
+                    changed_fields: Vec::new(),
+                    summary: String::new(),
+                });
             }
         }
-        events
+        Ok(events)
     }
 
     /// Identity group change-history, both user and app kinds. One bulk
     /// subtree scan per kind rather than a `list_history` per group; see
     /// [`Self::collect_policy_events`] for why, and for why history of a
     /// deleted group stays out of the result.
-    async fn collect_identity_group_events(&self, cutoff: Option<&str>) -> Vec<AuditEventBuilder> {
+    async fn collect_identity_group_events(&self, cutoff: &str) -> AuditSourceResult {
         use crate::modules::identity::{GroupKind, IdentityModule};
         use std::collections::HashMap;
 
         let mut events = Vec::new();
-        if let Ok(identity_module) = self.get_module::<IdentityModule>("identity") {
-            if let Some(gs) = identity_module.group_store() {
-                for (kind, label) in [
-                    (GroupKind::User, "identity-group-user"),
-                    (GroupKind::App, "identity-group-app"),
-                ] {
-                    if let Ok(names) = gs.list_groups(kind).await {
-                        let live: HashMap<String, String> =
-                            names.into_iter().map(|n| (n.to_lowercase(), n)).collect();
-                        if let Ok(entries) = gs.list_history_all(kind).await {
-                            for (key_name, e) in entries {
-                                let Some(target) = live.get(&key_name) else { continue };
-                                if cutoff.map(|c| e.ts.as_str() >= c).unwrap_or(true) {
-                                    events.push(AuditEventBuilder {
-                                        ts: e.ts,
-                                        user: e.user,
-                                        machine: String::new(),
-                                        op: e.op,
-                                        category: label.into(),
-                                        target: target.clone(),
-                                        changed_fields: e.changed_fields,
-                                        summary: String::new(),
-                                    });
-                                }
-                            }
-                        }
-                    }
+        let Some(gs) = self.get_module::<IdentityModule>("identity").ok().and_then(|m| m.group_store()) else {
+            return Ok(events);
+        };
+        for (kind, label) in [(GroupKind::User, "identity-group-user"), (GroupKind::App, "identity-group-app")] {
+            let names =
+                gs.list_groups(kind).await.map_err(|e| format!("the {label} list could not be read: {e}"))?;
+            let live: HashMap<String, String> = names.into_iter().map(|n| (n.to_lowercase(), n)).collect();
+            let entries = gs
+                .list_history_all(kind)
+                .await
+                .map_err(|e| format!("the {label} history could not be read: {e}"))?;
+            for (key_name, e) in entries {
+                let Some(target) = live.get(&key_name) else { continue };
+                if e.ts.as_str() >= cutoff {
+                    events.push(AuditEventBuilder {
+                        ts: e.ts,
+                        user: e.user,
+                        machine: String::new(),
+                        op: e.op,
+                        category: label.into(),
+                        target: target.clone(),
+                        changed_fields: e.changed_fields,
+                        summary: String::new(),
+                    });
                 }
             }
         }
-        events
+        Ok(events)
     }
 
     /// Asset-group (resource-group) change-history. One bulk subtree scan
     /// rather than a `list_history` per group; see
     /// [`Self::collect_policy_events`].
-    async fn collect_asset_group_events(&self, cutoff: Option<&str>) -> Vec<AuditEventBuilder> {
+    async fn collect_asset_group_events(&self, cutoff: &str) -> AuditSourceResult {
         use crate::modules::resource_group::ResourceGroupModule;
         use std::collections::HashMap;
 
         let mut events = Vec::new();
-        if let Ok(module) = self.get_module::<ResourceGroupModule>("resource-group") {
-            if let Some(store) = module.store() {
-                if let Ok(names) = store.list_groups().await {
-                    let live: HashMap<String, String> =
-                        names.into_iter().map(|n| (n.to_lowercase(), n)).collect();
-                    if let Ok(entries) = store.list_history_all().await {
-                        for (key_name, e) in entries {
-                            let Some(target) = live.get(&key_name) else { continue };
-                            if cutoff.map(|c| e.ts.as_str() >= c).unwrap_or(true) {
-                                events.push(AuditEventBuilder {
-                                    ts: e.ts,
-                                    user: e.user,
-                                    machine: String::new(),
-                                    op: e.op,
-                                    category: "asset-group".into(),
-                                    target: target.clone(),
-                                    changed_fields: e.changed_fields,
-                                    summary: String::new(),
-                                });
-                            }
-                        }
-                    }
-                }
+        let Some(store) = self.get_module::<ResourceGroupModule>("resource-group").ok().and_then(|m| m.store())
+        else {
+            return Ok(events);
+        };
+        let names = store.list_groups().await.map_err(|e| format!("the asset-group list could not be read: {e}"))?;
+        let live: HashMap<String, String> = names.into_iter().map(|n| (n.to_lowercase(), n)).collect();
+        let entries =
+            store.list_history_all().await.map_err(|e| format!("the asset-group history could not be read: {e}"))?;
+        for (key_name, e) in entries {
+            let Some(target) = live.get(&key_name) else { continue };
+            if e.ts.as_str() >= cutoff {
+                events.push(AuditEventBuilder {
+                    ts: e.ts,
+                    user: e.user,
+                    machine: String::new(),
+                    op: e.op,
+                    category: "asset-group".into(),
+                    target: target.clone(),
+                    changed_fields: e.changed_fields,
+                    summary: String::new(),
+                });
             }
         }
-        events
+        Ok(events)
     }
 
     /// Share events — grants, revokes, cascade-revokes — drawn from the
@@ -2371,222 +2610,195 @@ impl SystemBackend {
     /// The share history view is keyed by bare nanoseconds, so `since_key`
     /// bounds the scan to the recent tail; `cutoff` still filters by the
     /// entry's own timestamp.
-    async fn collect_share_events(
-        &self,
-        cutoff: Option<&str>,
-        since_key: Option<&str>,
-    ) -> Vec<AuditEventBuilder> {
+    async fn collect_share_events(&self, cutoff: &str, since_key: &str) -> AuditSourceResult {
         use crate::modules::identity::IdentityModule;
 
         let mut events = Vec::new();
-        if let Ok(identity_module) = self.get_module::<IdentityModule>("identity") {
-            if let Some(store) = identity_module.share_store() {
-                let res = match since_key {
-                    Some(k) => store.list_history_since(k).await,
-                    None => store.list_all_history().await,
-                };
-                if let Ok(entries) = res {
-                    for e in entries {
-                        if cutoff.map(|c| e.ts.as_str() >= c).unwrap_or(true) {
-                            let target = format!("{}:{}", e.target_kind, e.target_path);
-                            // Include the grantee on the changed_fields row
-                            // so the search box matches recipient-centric
-                            // queries like "shared with felipe".
-                            let mut fields = Vec::new();
-                            fields.push(format!("grantee={}", e.grantee_entity_id));
-                            if !e.capabilities.is_empty() {
-                                fields.push(format!("caps={}", e.capabilities.join(",")));
-                            }
-                            if !e.expires_at.is_empty() {
-                                fields.push(format!("expires={}", e.expires_at));
-                            }
-                            events.push(AuditEventBuilder {
-                                ts: e.ts,
-                                user: e.actor_entity_id,
-                                machine: String::new(),
-                                op: e.op,
-                                category: "share".into(),
-                                target,
-                                changed_fields: fields,
-                                summary: String::new(),
-                            });
-                        }
-                    }
+        let Some(store) = self.get_module::<IdentityModule>("identity").ok().and_then(|m| m.share_store()) else {
+            return Ok(events);
+        };
+        let entries = store
+            .list_history_since(since_key)
+            .await
+            .map_err(|e| format!("the share history could not be read: {e}"))?;
+        for e in entries {
+            if e.ts.as_str() >= cutoff {
+                let target = format!("{}:{}", e.target_kind, e.target_path);
+                // Include the grantee on the changed_fields row
+                // so the search box matches recipient-centric
+                // queries like "shared with felipe".
+                let mut fields = Vec::new();
+                fields.push(format!("grantee={}", e.grantee_entity_id));
+                if !e.capabilities.is_empty() {
+                    fields.push(format!("caps={}", e.capabilities.join(",")));
                 }
+                if !e.expires_at.is_empty() {
+                    fields.push(format!("expires={}", e.expires_at));
+                }
+                events.push(AuditEventBuilder {
+                    ts: e.ts,
+                    user: e.actor_entity_id,
+                    machine: String::new(),
+                    op: e.op,
+                    category: "share".into(),
+                    target,
+                    changed_fields: fields,
+                    summary: String::new(),
+                });
             }
         }
-        events
+        Ok(events)
     }
 
     /// User / role lifecycle events. Mount distinguishes userpass
     /// (`userpass/`) from approle (`approle/`); we preserve it on the
     /// `target` so the GUI can still show "mount:name" at a glance.
-    async fn collect_user_events(&self, since_key: Option<&str>) -> Vec<AuditEventBuilder> {
+    async fn collect_user_events(&self, since_key: &str) -> AuditSourceResult {
         use crate::modules::identity::IdentityModule;
 
         let mut events = Vec::new();
-        if let Ok(identity_module) = self.get_module::<IdentityModule>("identity") {
-            if let Some(store) = identity_module.user_audit_store() {
-                let res = match since_key {
-                    Some(k) => store.list_since(k).await,
-                    None => store.list_all().await,
-                };
-                if let Ok(entries) = res {
-                    for e in entries {
-                        let mut fields = Vec::new();
-                        fields.push(format!("mount={}", e.mount));
-                        if !e.details.is_empty() {
-                            fields.push(e.details.clone());
-                        }
-                        events.push(AuditEventBuilder {
-                            ts: e.ts,
-                            user: e.actor_entity_id,
-                            machine: String::new(),
-                            op: e.op,
-                            category: "user".into(),
-                            target: format!("{}{}", e.mount, e.target),
-                            changed_fields: fields,
-                            summary: String::new(),
-                        });
-                    }
-                }
+        // No identity module or no store: the subsystem is absent, which is
+        // not a read failure.
+        let Some(store) = self.get_module::<IdentityModule>("identity").ok().and_then(|m| m.user_audit_store())
+        else {
+            return Ok(events);
+        };
+        let entries =
+            store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
+        for e in entries {
+            let mut fields = Vec::new();
+            fields.push(format!("mount={}", e.mount));
+            if !e.details.is_empty() {
+                fields.push(e.details.clone());
             }
+            events.push(AuditEventBuilder {
+                ts: e.ts,
+                user: e.actor_entity_id,
+                machine: String::new(),
+                op: e.op,
+                category: "user".into(),
+                target: format!("{}{}", e.mount, e.target),
+                changed_fields: fields,
+                summary: String::new(),
+            });
         }
-        events
+        Ok(events)
     }
 
     /// File-resource lifecycle events. Constructed lazily from the system
-    /// view (see `FileAuditStore::from_core`) — if the core is sealed or
-    /// the view hasn't been installed yet, we skip silently.
-    async fn collect_file_events(&self, since_key: Option<&str>) -> Vec<AuditEventBuilder> {
+    /// view (see `FileAuditStore::from_core`); a store that cannot be opened
+    /// or read is reported as a failed source, not skipped.
+    async fn collect_file_events(&self, since_key: &str) -> AuditSourceResult {
+        let store = crate::modules::files::files_audit_store::FileAuditStore::from_core(&self.core)
+            .map_err(|e| format!("the store could not be opened: {e}"))?;
+        let entries =
+            store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
         let mut events = Vec::new();
-        if let Ok(store) =
-            crate::modules::files::files_audit_store::FileAuditStore::from_core(&self.core)
-        {
-            let res = match since_key {
-                Some(k) => store.list_since(k).await,
-                None => store.list_all().await,
-            };
-            if let Ok(entries) = res {
-                for e in entries {
-                    let mut fields = Vec::new();
-                    if !e.details.is_empty() {
-                        fields.push(e.details.clone());
-                    }
-                    // Display the human name when present, and fall back
-                    // to the id so the row is never empty. The id is
-                    // always appended as a separate field so search still
-                    // matches it.
-                    let target = if e.name.is_empty() { e.file_id.clone() } else { e.name.clone() };
-                    fields.push(format!("id={}", e.file_id));
-                    events.push(AuditEventBuilder {
-                        ts: e.ts,
-                        user: e.actor_entity_id,
-                        machine: String::new(),
-                        op: e.op,
-                        category: "file".into(),
-                        target,
-                        changed_fields: fields,
-                        summary: String::new(),
-                    });
-                }
+        for e in entries {
+            let mut fields = Vec::new();
+            if !e.details.is_empty() {
+                fields.push(e.details.clone());
             }
+            // Display the human name when present, and fall back
+            // to the id so the row is never empty. The id is
+            // always appended as a separate field so search still
+            // matches it.
+            let target = if e.name.is_empty() { e.file_id.clone() } else { e.name.clone() };
+            fields.push(format!("id={}", e.file_id));
+            events.push(AuditEventBuilder {
+                ts: e.ts,
+                user: e.actor_entity_id,
+                machine: String::new(),
+                op: e.op,
+                category: "file".into(),
+                target,
+                changed_fields: fields,
+                summary: String::new(),
+            });
         }
-        events
+        Ok(events)
     }
 
     /// Authentication events (successful and failed logins, logouts) from
-    /// the credential backends. Lazy-from-core, skip-on-sealed.
-    async fn collect_login_events(&self, since_key: Option<&str>) -> Vec<AuditEventBuilder> {
+    /// the credential backends. Lazy-from-core, reported as failed when unreadable.
+    async fn collect_login_events(&self, since_key: &str) -> AuditSourceResult {
+        let store = crate::modules::credential::login_audit_store::LoginAuditStore::from_core(&self.core)
+            .map_err(|e| format!("the store could not be opened: {e}"))?;
+        let entries =
+            store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
         let mut events = Vec::new();
-        if let Ok(store) =
-            crate::modules::credential::login_audit_store::LoginAuditStore::from_core(&self.core)
-        {
-            let res = match since_key {
-                Some(k) => store.list_since(k).await,
-                None => store.list_all().await,
-            };
-            if let Ok(entries) = res {
-                for e in entries {
-                    let mut fields = Vec::new();
-                    if !e.remote_addr.is_empty() {
-                        fields.push(format!("from={}", e.remote_addr));
-                    }
-                    if !e.details.is_empty() {
-                        fields.push(e.details.clone());
-                    }
-                    events.push(AuditEventBuilder {
-                        ts: e.ts,
-                        // The principal name is the most useful "who" for a
-                        // login row; it is not an entity id, so the GUI
-                        // renders it verbatim.
-                        user: e.username.clone(),
-                        // logout entries carry action="logout"; logins map
-                        // to login / login-failed by success.
-                        machine: String::new(),
-                        op: match e.action.as_str() {
-                            "logout" => "logout".into(),
-                            _ if e.success => "login".into(),
-                            _ => "login-failed".into(),
-                        },
-                        category: "login".into(),
-                        target: format!("{}{}", e.mount, e.username),
-                        changed_fields: fields,
-                        summary: String::new(),
-                    });
-                }
+        for e in entries {
+            let mut fields = Vec::new();
+            if !e.remote_addr.is_empty() {
+                fields.push(format!("from={}", e.remote_addr));
             }
+            if !e.details.is_empty() {
+                fields.push(e.details.clone());
+            }
+            events.push(AuditEventBuilder {
+                ts: e.ts,
+                // The principal name is the most useful "who" for a
+                // login row; it is not an entity id, so the GUI
+                // renders it verbatim.
+                user: e.username.clone(),
+                // logout entries carry action="logout"; logins map
+                // to login / login-failed by success.
+                machine: String::new(),
+                op: match e.action.as_str() {
+                    "logout" => "logout".into(),
+                    _ if e.success => "login".into(),
+                    _ => "login-failed".into(),
+                },
+                category: "login".into(),
+                target: format!("{}{}", e.mount, e.username),
+                changed_fields: fields,
+                summary: String::new(),
+            });
         }
-        events
+        Ok(events)
     }
 
     /// Permission-denied requests from the core-level denial store.
-    /// Lazy-from-core, skip-on-sealed. `authenticated` distinguishes an
+    /// Lazy-from-core, reported as failed when unreadable. `authenticated` distinguishes an
     /// ACL rejection (valid token, insufficient policy) from a
     /// missing/invalid token — both render as op `denied`, with the
     /// reason carried in the fields column.
-    async fn collect_denial_events(&self, since_key: Option<&str>) -> Vec<AuditEventBuilder> {
+    async fn collect_denial_events(&self, since_key: &str) -> AuditSourceResult {
+        let store = crate::modules::system::denial_audit_store::DenialAuditStore::from_core(&self.core)
+            .map_err(|e| format!("the store could not be opened: {e}"))?;
+        let entries =
+            store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
         let mut events = Vec::new();
-        if let Ok(store) =
-            crate::modules::system::denial_audit_store::DenialAuditStore::from_core(&self.core)
-        {
-            let res = match since_key {
-                Some(k) => store.list_since(k).await,
-                None => store.list_all().await,
-            };
-            if let Ok(entries) = res {
-                for e in entries {
-                    let mut fields = Vec::new();
-                    if !e.operation.is_empty() {
-                        fields.push(format!("op={}", e.operation));
-                    }
-                    // `reason` is authoritative when present. Entries written
-                    // before the field existed fall back to the coarse
-                    // authenticated flag.
-                    fields.push(if !e.reason.is_empty() {
-                        format!("reason={}", e.reason)
-                    } else if e.authenticated {
-                        "reason=policy".to_string()
-                    } else {
-                        "reason=invalid-token".to_string()
-                    });
-                    if !e.remote_addr.is_empty() {
-                        fields.push(format!("from={}", e.remote_addr));
-                    }
-                    events.push(AuditEventBuilder {
-                        ts: e.ts,
-                        user: e.user,
-                        machine: e.machine,
-                        op: "denied".into(),
-                        category: "request".into(),
-                        target: e.path,
-                        changed_fields: fields,
-                        summary: String::new(),
-                    });
-                }
+        for e in entries {
+            let mut fields = Vec::new();
+            if !e.operation.is_empty() {
+                fields.push(format!("op={}", e.operation));
             }
+            // `reason` is authoritative when present. Entries written
+            // before the field existed fall back to the coarse
+            // authenticated flag.
+            fields.push(if !e.reason.is_empty() {
+                format!("reason={}", e.reason)
+            } else if e.authenticated {
+                "reason=policy".to_string()
+            } else {
+                "reason=invalid-token".to_string()
+            });
+            if !e.remote_addr.is_empty() {
+                fields.push(format!("from={}", e.remote_addr));
+            }
+            events.push(AuditEventBuilder {
+                ts: e.ts,
+                user: e.user,
+                machine: e.machine,
+                op: "denied".into(),
+                category: "request".into(),
+                target: e.path,
+                changed_fields: fields,
+                summary: String::new(),
+            });
         }
-        events
+        Ok(events)
     }
 
     /// Successful data-plane requests, reconciled from each node's local
@@ -2596,45 +2808,39 @@ impl SystemBackend {
     /// *successful* `secret/…` read now appears on the Audit page, not
     /// only a denied one. `op` carries the operation (`read`/`write`/…)
     /// so the GUI can colour it distinctly from a denial.
-    async fn collect_access_events(&self, since_key: Option<&str>) -> Vec<AuditEventBuilder> {
+    async fn collect_access_events(&self, since_key: &str) -> AuditSourceResult {
+        let store = crate::modules::system::access_audit_store::AccessAuditStore::from_core(&self.core)
+            .map_err(|e| format!("the store could not be opened: {e}"))?;
+        let entries =
+            store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
         let mut events = Vec::new();
-        if let Ok(store) =
-            crate::modules::system::access_audit_store::AccessAuditStore::from_core(&self.core)
-        {
-            let res = match since_key {
-                Some(k) => store.list_since(k).await,
-                None => store.list_all().await,
-            };
-            if let Ok(entries) = res {
-                for e in entries {
-                    let mut fields = Vec::new();
-                    if !e.operation.is_empty() {
-                        fields.push(format!("op={}", e.operation));
-                    }
-                    if !e.remote_addr.is_empty() {
-                        fields.push(format!("from={}", e.remote_addr));
-                    }
-                    if !e.namespace.is_empty() {
-                        fields.push(format!("ns={}", e.namespace));
-                    }
-                    events.push(AuditEventBuilder {
-                        ts: e.ts,
-                        user: e.user,
-                        machine: e.machine,
-                        op: if e.operation.is_empty() {
-                            "read".into()
-                        } else {
-                            e.operation
-                        },
-                        category: "access".into(),
-                        target: e.path,
-                        changed_fields: fields,
-                        summary: String::new(),
-                    });
-                }
+        for e in entries {
+            let mut fields = Vec::new();
+            if !e.operation.is_empty() {
+                fields.push(format!("op={}", e.operation));
             }
+            if !e.remote_addr.is_empty() {
+                fields.push(format!("from={}", e.remote_addr));
+            }
+            if !e.namespace.is_empty() {
+                fields.push(format!("ns={}", e.namespace));
+            }
+            events.push(AuditEventBuilder {
+                ts: e.ts,
+                user: e.user,
+                machine: e.machine,
+                op: if e.operation.is_empty() {
+                    "read".into()
+                } else {
+                    e.operation
+                },
+                category: "access".into(),
+                target: e.path,
+                changed_fields: fields,
+                summary: String::new(),
+            });
         }
-        events
+        Ok(events)
     }
 
     /// Zero-padded-nanoseconds key matching the append stores' `hist_seq`
@@ -2646,89 +2852,77 @@ impl SystemBackend {
     }
 
     /// SSH CA lifecycle (create / delete of the signing CA) from the SSH
-    /// engine's append store. Lazy-from-core, skip-on-sealed.
-    async fn collect_ssh_ca_events(&self, since_key: Option<&str>) -> Vec<AuditEventBuilder> {
+    /// engine's append store. Lazy-from-core, reported as failed when unreadable.
+    async fn collect_ssh_ca_events(&self, since_key: &str) -> AuditSourceResult {
+        let store = crate::modules::ssh::ssh_ca_audit_store::SshCaAuditStore::from_core(&self.core)
+            .map_err(|e| format!("the store could not be opened: {e}"))?;
+        let entries =
+            store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
         let mut events = Vec::new();
-        if let Ok(store) =
-            crate::modules::ssh::ssh_ca_audit_store::SshCaAuditStore::from_core(&self.core)
-        {
-            let res = match since_key {
-                Some(k) => store.list_since(k).await,
-                None => store.list_all().await,
-            };
-            if let Ok(entries) = res {
-                for e in entries {
-                    let mut fields = Vec::new();
-                    if !e.algorithm.is_empty() {
-                        fields.push(format!("algorithm={}", e.algorithm));
-                    }
-                    let target = if e.mount.is_empty() {
-                        "config/ca".to_string()
-                    } else {
-                        format!("{}config/ca", e.mount)
-                    };
-                    events.push(AuditEventBuilder {
-                        ts: e.ts,
-                        user: e.actor_entity_id,
-                        machine: String::new(),
-                        op: e.op,
-                        category: "ssh-ca".into(),
-                        target,
-                        changed_fields: fields,
-                        summary: String::new(),
-                    });
-                }
+        for e in entries {
+            let mut fields = Vec::new();
+            if !e.algorithm.is_empty() {
+                fields.push(format!("algorithm={}", e.algorithm));
             }
+            let target = if e.mount.is_empty() {
+                "config/ca".to_string()
+            } else {
+                format!("{}config/ca", e.mount)
+            };
+            events.push(AuditEventBuilder {
+                ts: e.ts,
+                user: e.actor_entity_id,
+                machine: String::new(),
+                op: e.op,
+                category: "ssh-ca".into(),
+                target,
+                changed_fields: fields,
+                summary: String::new(),
+            });
         }
-        events
+        Ok(events)
     }
 
     /// SSH certificate issuance (sign/:role) from the SSH engine's append
     /// store. Lazy-from-core, skip-on-sealed.
-    async fn collect_ssh_sign_events(&self, since_key: Option<&str>) -> Vec<AuditEventBuilder> {
+    async fn collect_ssh_sign_events(&self, since_key: &str) -> AuditSourceResult {
+        let store = crate::modules::ssh::ssh_sign_audit_store::SshSignAuditStore::from_core(&self.core)
+            .map_err(|e| format!("the store could not be opened: {e}"))?;
+        let entries =
+            store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
         let mut events = Vec::new();
-        if let Ok(store) =
-            crate::modules::ssh::ssh_sign_audit_store::SshSignAuditStore::from_core(&self.core)
-        {
-            let res = match since_key {
-                Some(k) => store.list_since(k).await,
-                None => store.list_all().await,
-            };
-            if let Ok(entries) = res {
-                for e in entries {
-                    let mut fields = Vec::new();
-                    if !e.principals.is_empty() {
-                        fields.push(format!("principals={}", e.principals));
-                    }
-                    if !e.cert_type.is_empty() {
-                        fields.push(format!("cert_type={}", e.cert_type));
-                    }
-                    if !e.serial.is_empty() {
-                        fields.push(format!("serial={}", e.serial));
-                    }
-                    if !e.algorithm.is_empty() {
-                        fields.push(format!("algorithm={}", e.algorithm));
-                    }
-                    let role = if e.role.is_empty() { "?".to_string() } else { e.role.clone() };
-                    let target = if e.mount.is_empty() {
-                        format!("sign/{role}")
-                    } else {
-                        format!("{}sign/{role}", e.mount)
-                    };
-                    events.push(AuditEventBuilder {
-                        ts: e.ts,
-                        user: e.actor_entity_id,
-                        machine: String::new(),
-                        op: e.op,
-                        category: "ssh-sign".into(),
-                        target,
-                        changed_fields: fields,
-                        summary: String::new(),
-                    });
-                }
+        for e in entries {
+            let mut fields = Vec::new();
+            if !e.principals.is_empty() {
+                fields.push(format!("principals={}", e.principals));
             }
+            if !e.cert_type.is_empty() {
+                fields.push(format!("cert_type={}", e.cert_type));
+            }
+            if !e.serial.is_empty() {
+                fields.push(format!("serial={}", e.serial));
+            }
+            if !e.algorithm.is_empty() {
+                fields.push(format!("algorithm={}", e.algorithm));
+            }
+            let role = if e.role.is_empty() { "?".to_string() } else { e.role.clone() };
+            let target = if e.mount.is_empty() {
+                format!("sign/{role}")
+            } else {
+                format!("{}sign/{role}", e.mount)
+            };
+            events.push(AuditEventBuilder {
+                ts: e.ts,
+                user: e.actor_entity_id,
+                machine: String::new(),
+                op: e.op,
+                category: "ssh-sign".into(),
+                target,
+                changed_fields: fields,
+                summary: String::new(),
+            });
         }
-        events
+        Ok(events)
     }
 
     pub async fn handle_audit_enable(
@@ -3345,12 +3539,16 @@ impl SystemBackend {
             .resolve_request_namespace(req)
             .await?
             .map(|(_, path)| path);
+        // `checked`, not `resolved`: this verdict is *reported* to the client,
+        // and the GUI turns `false` into "you have no allowed-namespace entry".
+        // A storage error (e.g. a hiqlite read timing out on an unhealthy
+        // cluster) must surface as an error, not as that claim.
         let operable = match active_ns.as_deref() {
             Some(ns_path) => {
-                crate::modules::namespace::token_binding::token_operable_resolved(
+                crate::modules::namespace::token_binding::token_operable_checked(
                     &self.core, &auth, ns_path,
                 )
-                .await
+                .await?
             }
             None => true,
         };
@@ -3473,11 +3671,14 @@ impl SystemBackend {
 
     /// `GET sys/dashboard/summary` — one-shot operational snapshot for
     /// the GUI Dashboard landing page. Aggregates seal state, ACL-gated
-    /// secret-engine / auth-method / policy / entity counts, and a 24h
-    /// audit-event total so the dashboard makes a single call instead of
-    /// fanning out N list requests. Every count respects the caller's
-    /// effective ACL and the active namespace; a caller only ever sees
-    /// totals their policies permit.
+    /// secret-engine / auth-method / policy / entity counts, and — for an
+    /// audit-capable caller — the precomputed audit statistics (24h totals,
+    /// hourly histogram, recent activity) so the dashboard makes a single
+    /// call instead of fanning out N list requests. Every count respects the
+    /// caller's effective ACL and the active namespace; a caller only ever
+    /// sees totals their policies permit. The audit statistics are
+    /// deployment-wide and read from `sys/dashboard-stats/record`, never
+    /// computed per request.
     pub async fn handle_dashboard_summary(
         &self,
         _backend: &dyn Backend,
@@ -3602,51 +3803,40 @@ impl SystemBackend {
         // sudo-gated via `root_paths` ("audit/*"), so an audit-capable operator
         // presents `sudo`. Accept all three or the admin Dashboard loses the
         // tiles it has always shown.
-        let audit_visible = acl
-            .as_ref()
-            .map(|a| {
-                a.capabilities("sys/audit/events")
-                    .iter()
-                    .any(|c| c == "root" || c == "sudo" || c == "read")
-            })
-            .unwrap_or(false);
+        let audit_caps: Vec<String> =
+            acl.as_ref().map(|a| a.capabilities("sys/audit/events")).unwrap_or_default();
+        let has_cap = |cap: &str| audit_caps.iter().any(|c| c == cap);
+        // The aggregate counters keep the gate they have always had.
+        let audit_visible = has_cap("root") || has_cap("sudo") || has_cap("read");
+        // The rows and the per-hour histogram are a different matter: they
+        // are what `sys/audit/events` itself serves (who did what, where,
+        // when — the histogram used to be built in the GUI from those rows),
+        // so they need exactly what that endpoint needs. It is a Read on a
+        // sudo-gated root path (`root_paths: "audit/*"`): `read` *and* `sudo`,
+        // or root. `read` alone gets a refusal there and must not get the 20
+        // newest rows here.
+        let audit_detail_visible = has_cap("root") || (has_cap("read") && has_cap("sudo"));
 
         let now = chrono::Utc::now();
-        // Change-history events from the last 24h. The bound is pushed into
-        // the collection: the timestamp-keyed stores range-scan only the
-        // recent tail, so this does not read (and decrypt) all history just
-        // to produce a count. One pass yields all three numbers — the total,
-        // the denial count and the failed-login count — instead of
-        // re-scanning the denial and login stores for the latter two.
-        let audit_counters = if audit_visible {
-            let hour_cutoff = (now - chrono::Duration::hours(1)).to_rfc3339();
-            let groups = self
-                .collect_audit_event_groups_since(Some(now - chrono::Duration::hours(24)))
-                .await;
-            let audit_24h = groups.iter().map(|g| g.len()).sum::<usize>();
-            let denied_24h = groups[Self::AUDIT_GROUP_DENIALS].len() as u64;
-            // `op == "login-failed"` is exactly the store's
-            // `!success && action != "logout"` (see `collect_login_events`).
-            // The 1h edge is decided by the entry's own timestamp rather than
-            // its storage key; the two are stamped microseconds apart.
-            let failed_logins_1h = groups[Self::AUDIT_GROUP_LOGINS]
-                .iter()
-                .filter(|e| e.op == "login-failed" && e.ts.as_str() >= hour_cutoff.as_str())
-                .count() as u64;
-            Some((audit_24h, denied_24h, failed_logins_1h))
+        // The audit numbers come from the precomputed statistics record that
+        // the housekeeping job refreshes every 10 minutes on the cluster's
+        // elected runner (`dashboard_stats`). This handler never scans an
+        // audit store: on a store of hundreds of thousands of rows that is
+        // what made every Dashboard load slow and memory-hungry. Without a
+        // usable record the summary says so (`audit_stats.state = "pending"`)
+        // and omits the counters rather than computing them here.
+        let audit_view = if audit_visible {
+            let stored = dashboard_stats::load(&self.core).await;
+            if let Err(e) = &stored {
+                log::warn!("dashboard-stats: the stored record could not be read for the summary: {e}");
+            }
+            Some(dashboard_stats::SummaryAuditView::from_stored(stored, now))
         } else {
             None
         };
 
-        // Request-level outcome counters. These are process-wide (not
-        // per-namespace) — they describe the server's health, which is the
-        // same question regardless of which tenant the operator is
-        // viewing. Denials and failed logins are counted from replicated
-        // storage (`sys/denial-audit`, `sys/login-audit`) so every HA node
-        // reports the same totals: the in-memory `stats` ring is per-node,
-        // so a denial or failed login handled by another node would be
-        // invisible to a summary served here. Audit-write failures have no
-        // backing store yet, so they stay on the in-memory counter.
+        // Audit-write failures have no backing store yet, so they stay on the
+        // in-memory, per-node counter and are read live.
         let now_secs = now.timestamp();
         let stats = &self.core.stats;
 
@@ -3670,19 +3860,24 @@ impl SystemBackend {
 
         // Privileged blocks are added only for an audit-capable caller, so the
         // response shape itself carries the verdict (see `audit_visible`).
-        if let Some((audit_24h, denied_24h, failed_logins_1h)) = audit_counters {
-            data.insert(
-                "audit_24h".to_string(),
-                json!({
-                    "total": audit_24h,
-                    "denied": denied_24h,
-                    "write_failures": stats.audit_write_failures_24h(now_secs),
-                }),
-            );
-            data.insert(
-                "attention".to_string(),
-                json!({ "failed_logins_1h": failed_logins_1h }),
-            );
+        // `audit_24h` / `attention` additionally require a ready record: a
+        // pending one has no counts to give, and a zero would be a claim.
+        if let Some(view) = audit_view {
+            if let dashboard_stats::SummaryAuditView::Ready { record, .. } = &view {
+                data.insert(
+                    "audit_24h".to_string(),
+                    json!({
+                        "total": record.audit_24h_total,
+                        "denied": record.audit_24h_denied,
+                        "write_failures": stats.audit_write_failures_24h(now_secs),
+                    }),
+                );
+                data.insert(
+                    "attention".to_string(),
+                    json!({ "failed_logins_1h": record.failed_logins_1h }),
+                );
+            }
+            data.insert("audit_stats".to_string(), view.to_json(audit_detail_visible));
         }
 
         let data = Some(data);
@@ -4100,10 +4295,12 @@ impl SystemBackend {
 
         let mut namespaces: Vec<String> = Vec::new();
         for ns in store.list_all().await? {
-            if crate::modules::namespace::token_binding::token_operable_resolved(
+            // `checked`: a storage error must fail the listing, not silently
+            // drop the namespaces whose assignment could not be read.
+            if crate::modules::namespace::token_binding::token_operable_checked(
                 &self.core, &auth, &ns.path,
             )
-            .await
+            .await?
             {
                 namespaces.push(ns.path);
             }
@@ -5164,7 +5361,7 @@ impl SystemBackend {
 
 impl SystemModule {
     pub fn new(core: Arc<Core>) -> Self {
-        Self { name: "system".to_string(), backend: SystemBackend::new(core) }
+        Self { name: "system".to_string(), backend: SystemBackend::new(core), housekeeping_started: AtomicBool::new(false) }
     }
 }
 
@@ -5190,12 +5387,19 @@ impl Module for SystemModule {
     /// per-node local tailing plus idempotent digest-keyed writes, so the
     /// union of every node's ingest is what the page reads and re-scans never
     /// duplicate.
+    ///
+    /// Also boots the housekeeping task (once per module instance): the
+    /// dashboard statistics refresh and the daily audit-retention run, both on
+    /// the cluster's elected runner only. See [`housekeeping`].
     fn start_background(&self, _core: Arc<dyn VaultCtx>) {
         // Kernel tier: the system module holds the concrete `Core` the
         // reconciler still takes, so it uses its own rather than the
         // trait-object parameter.
         // Detached on purpose: dropping the handle does not stop the task.
         drop(access_audit_reconciler::start_access_audit_reconciler(self.backend.core.clone()));
+        if !self.housekeeping_started.swap(true, Ordering::SeqCst) {
+            drop(housekeeping::start_housekeeping(Arc::downgrade(&self.backend)));
+        }
     }
 
     fn setup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
@@ -7307,51 +7511,6 @@ mod mod_system_tests {
         assert_eq!(count(&windowed), 0, "a future `from` must filter all events out: {windowed:?}");
     }
 
-    /// `sys/dashboard/summary` returns the operational snapshot: an
-    /// unsealed/initialized seal block, non-zero secret-engine and
-    /// policy counts (a default vault mounts `secret/` and we add a
-    /// policy here), and a 24h audit total that includes that policy's
-    /// create event.
-    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_dashboard_summary_basic() {
-        let mut server = TestHttpServer::new("test_dashboard_summary_basic", true).await;
-        server.token = server.root_token.clone();
-
-        let _ = server
-            .write(
-                "sys/policies/acl/dash-test-pol",
-                serde_json::json!({ "policy": r#"path "secret/*" { capabilities = ["read"] }"# })
-                    .as_object()
-                    .cloned(),
-                None,
-            )
-            .unwrap();
-
-        let ret = server.read("sys/dashboard/summary", None).unwrap().1;
-
-        let seal = ret.get("seal").and_then(|v| v.as_object()).expect("seal block");
-        assert_eq!(seal.get("sealed").and_then(|v| v.as_bool()), Some(false));
-        assert_eq!(seal.get("initialized").and_then(|v| v.as_bool()), Some(true));
-
-        let counts = ret.get("counts").and_then(|v| v.as_object()).expect("counts block");
-        assert!(
-            counts.get("secret_mounts").and_then(|v| v.as_u64()).unwrap_or(0) >= 1,
-            "root should see at least the secret/ engine: {ret:?}"
-        );
-        assert!(
-            counts.get("policies").and_then(|v| v.as_u64()).unwrap_or(0) >= 1,
-            "the policy we just wrote should be counted: {ret:?}"
-        );
-
-        let audit_total = ret
-            .get("audit_24h")
-            .and_then(|v| v.as_object())
-            .and_then(|m| m.get("total"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        assert!(audit_total >= 1, "the policy create should be in the 24h total: {ret:?}");
-    }
-
     /// A plain authenticated principal (only the built-in `default` policy) can
     /// read `sys/dashboard/summary` — the Dashboard is the landing page for every
     /// session, so without the grant its single fetch always 403'd and the page
@@ -7411,12 +7570,46 @@ mod mod_system_tests {
             "a default-only caller must not receive the failed-login rate: {ret:?}"
         );
 
-        // Root still sees them, so the admin Dashboard is unchanged.
-        let root_ret = server.read("sys/dashboard/summary", Some(&root)).unwrap().1;
+        assert!(
+            ret.get("audit_stats").is_none(),
+            "a default-only caller must not learn whether audit statistics exist: {ret:?}"
+        );
+
+        // Root still sees them, so the admin Dashboard is unchanged. The
+        // numbers come from the statistics record the housekeeping task
+        // computes on its first tick after unseal, so wait for it.
+        let root_ret = wait_for_dashboard_stats(&server, &root).await;
         assert!(
             root_ret.get("audit_24h").is_some() && root_ret.get("attention").is_some(),
             "an audit-capable caller must still get both blocks: {root_ret:?}"
         );
+    }
+
+    /// Poll `sys/dashboard/summary` as `token` until the housekeeping task's
+    /// startup computation has produced a statistics record, and return that
+    /// summary. The summary itself never computes statistics. Async on
+    /// purpose: the housekeeping task was spawned on this test's runtime by
+    /// the unseal, and only runs while the test yields.
+    async fn wait_for_dashboard_stats(server: &TestHttpServer, token: &str) -> Value {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let ret = server.read("sys/dashboard/summary", Some(token)).unwrap().1;
+            let state = ret.get("audit_stats").and_then(|s| s.get("state")).and_then(|v| v.as_str()).map(str::to_string);
+            if state.as_deref() == Some("ready") {
+                return ret;
+            }
+            assert_eq!(
+                state.as_deref(),
+                Some("pending"),
+                "an audit-capable caller always gets an audit_stats block: {ret:?}"
+            );
+            assert!(
+                ret.get("audit_24h").is_none() && ret.get("attention").is_none(),
+                "pending statistics must not carry counters: {ret:?}"
+            );
+            assert!(std::time::Instant::now() < deadline, "statistics never became ready: {ret:?}");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 
     /// The same grant, for a principal bound to a **child namespace** — the shape
@@ -7510,7 +7703,7 @@ mod mod_system_tests {
         // And the privileged blocks stay withheld — a tenant cannot read
         // `sys/audit/events`, so it must not receive deployment-wide telemetry.
         assert!(
-            ret.get("audit_24h").is_none() && ret.get("attention").is_none(),
+            ret.get("audit_24h").is_none() && ret.get("attention").is_none() && ret.get("audit_stats").is_none(),
             "a tenant must not receive deployment-wide audit counters: {ret:?}"
         );
 
@@ -7543,179 +7736,6 @@ mod mod_system_tests {
                  (header-scoped paths are not positionally root): {r:?}"
             );
         }
-    }
-
-    /// A permission-denied request and a failed login flow through the
-    /// request hot path into the in-memory stats aggregator, and show up
-    /// in `sys/dashboard/summary` as `audit_24h.denied` and
-    /// `attention.failed_logins_1h`.
-    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_dashboard_summary_counts_denials_and_failed_logins() {
-        let mut server =
-            TestHttpServer::new("test_dashboard_summary_counts_denials_and_failed_logins", true)
-                .await;
-        server.token = server.root_token.clone();
-
-        // Provision a low-privilege user (default policy only).
-        let _ = server
-            .write("sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), None)
-            .unwrap();
-        let _ = server
-            .write(
-                "auth/pass/users/lowpriv",
-                serde_json::json!({ "password": "hunter22XX!", "token_policies": "default", "ttl": 0 })
-                    .as_object()
-                    .cloned(),
-                None,
-            )
-            .unwrap();
-
-        // A failed login (wrong password) on a `/login` route → counted
-        // as an auth failure.
-        let _ = server.write(
-            "auth/pass/login/lowpriv",
-            serde_json::json!({ "password": "WRONG" }).as_object().cloned(),
-            None,
-        );
-
-        // A successful login to get a low-priv token.
-        let token = server
-            .write(
-                "auth/pass/login/lowpriv",
-                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
-                None,
-            )
-            .unwrap()
-            .1
-            .get("auth")
-            .and_then(|a| a.get("client_token"))
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
-
-        // A denied write — default policy cannot create ACL policies.
-        let denied = server
-            .write(
-                "sys/policies/acl/should-be-denied",
-                serde_json::json!({ "policy": r#"path "x" { capabilities = ["read"] }"# })
-                    .as_object()
-                    .cloned(),
-                Some(&token),
-            )
-            .unwrap();
-        assert_eq!(denied.0, 403, "low-priv policy write must be forbidden");
-
-        // Read the summary as root and confirm the counters moved.
-        let ret = server.read("sys/dashboard/summary", Some(&server.root_token)).unwrap().1;
-        let audit = ret.get("audit_24h").and_then(|v| v.as_object()).expect("audit_24h");
-        assert!(
-            audit.get("denied").and_then(|v| v.as_u64()).unwrap_or(0) >= 1,
-            "the forbidden write should be counted as denied: {ret:?}"
-        );
-        let attention = ret.get("attention").and_then(|v| v.as_object()).expect("attention");
-        assert!(
-            attention.get("failed_logins_1h").and_then(|v| v.as_u64()).unwrap_or(0) >= 1,
-            "the wrong-password login should be counted as a failed login: {ret:?}"
-        );
-    }
-
-    /// HA regression: the dashboard's `denied` and `failed_logins_1h`
-    /// counters must be derived from replicated storage, not the per-node
-    /// in-memory `stats` ring. In a cluster a denial handled by node A is
-    /// invisible to the ring on node B, so a summary served by B would
-    /// under-report. We simulate "an event another node recorded" by
-    /// appending directly to the replicated stores (bypassing the request
-    /// hot path that feeds the ring), then assert the summary reflects
-    /// them — proving the counts come from storage.
-    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_dashboard_summary_counters_come_from_storage_not_ring() {
-        use crate::modules::credential::login_audit_store::{LoginAuditEntry, LoginAuditStore};
-        use crate::modules::system::denial_audit_store::{DenialAuditEntry, DenialAuditStore};
-
-        let mut server = TestHttpServer::new(
-            "test_dashboard_summary_counters_come_from_storage_not_ring",
-            true,
-        )
-        .await;
-        server.token = server.root_token.clone();
-
-        // Baseline: no denials or failed logins have flowed through this
-        // process's request path, so the in-memory ring is empty.
-        let now_secs = chrono::Utc::now().timestamp();
-        assert_eq!(server.core.stats.denied_24h(now_secs), 0, "ring denials start at zero");
-        assert_eq!(
-            server.core.stats.failed_logins_1h(now_secs),
-            0,
-            "ring failed-logins start at zero"
-        );
-
-        // Append two denials and one failed login straight to the
-        // replicated stores, as a peer node's request handling would —
-        // without ever touching this node's stats ring.
-        let denial_store = DenialAuditStore::from_core(&server.core).expect("denial store");
-        for path in ["secret/data/a", "secret/data/b"] {
-            denial_store
-                .append(DenialAuditEntry {
-                    ts: String::new(),
-                    user: "peer-node-caller".into(),
-                    machine: String::new(),
-                    path: path.into(),
-                    operation: "read".into(),
-                    authenticated: true,
-                    remote_addr: String::new(),
-                    reason: "policy".into(),
-                })
-                .await
-                .expect("append denial");
-        }
-        let login_store = LoginAuditStore::from_core(&server.core).expect("login store");
-        login_store
-            .append(LoginAuditEntry {
-                ts: String::new(),
-                username: "peer-node-user".into(),
-                mount: "auth/pass/".into(),
-                success: false,
-                action: "login".into(),
-                remote_addr: String::new(),
-                details: "bad password".into(),
-            })
-            .await
-            .expect("append failed login");
-        // A logout must never count as a failed login. We give it
-        // success=false (atypical — real logouts record success=true) so
-        // the `!success` filter alone would let it through, proving the
-        // `action != "logout"` guard is what excludes it.
-        login_store
-            .append(LoginAuditEntry {
-                ts: String::new(),
-                username: "peer-node-user".into(),
-                mount: "auth/pass/".into(),
-                success: false,
-                action: "logout".into(),
-                remote_addr: String::new(),
-                details: String::new(),
-            })
-            .await
-            .expect("append logout");
-
-        // The ring is still empty — these events never went through it.
-        assert_eq!(server.core.stats.denied_24h(now_secs), 0, "ring stays empty");
-        assert_eq!(server.core.stats.failed_logins_1h(now_secs), 0, "ring stays empty");
-
-        // The summary must nonetheless report the storage-backed counts.
-        let ret = server.read("sys/dashboard/summary", Some(&server.root_token)).unwrap().1;
-        let audit = ret.get("audit_24h").and_then(|v| v.as_object()).expect("audit_24h");
-        assert_eq!(
-            audit.get("denied").and_then(|v| v.as_u64()).unwrap_or(0),
-            2,
-            "denied must count the two stored denials, not the empty ring: {ret:?}"
-        );
-        let attention = ret.get("attention").and_then(|v| v.as_object()).expect("attention");
-        assert_eq!(
-            attention.get("failed_logins_1h").and_then(|v| v.as_u64()).unwrap_or(0),
-            1,
-            "failed_logins_1h must count the one stored failure (not the logout): {ret:?}"
-        );
     }
 
     /// Regression: permission-denied requests must be persisted to the

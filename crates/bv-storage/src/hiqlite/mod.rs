@@ -9,6 +9,10 @@ use bv_sql_guard::{sql, SqlIdent};
 
 use crate::{Backend, BackendEntry};
 
+mod paging;
+
+use paging::{prefix_upper_bound, ListPager, PageLimits, PageStart, ScanPager, PAGE_ROW_OVERHEAD_BYTES};
+
 /// Hiqlite WAL segment size. Must be larger than any single Raft log entry we
 /// produce — hiqlite-wal panics rather than erroring when an entry exceeds the
 /// segment size. We cap files at 32 MiB; 64 MiB here leaves room for the
@@ -136,102 +140,28 @@ impl Backend for HiqliteBackend {
         "hiqlite"
     }
 
+    /// Immediate children of `prefix`, `dir/` entries de-duplicated, in
+    /// ascending order. Reads keys only, in bounded pages — see
+    /// [`paging`] for the bounds and why the pages are not a snapshot.
     async fn list(&self, prefix: &str) -> Result<Vec<String>, RvError> {
         if prefix.starts_with('/') {
             return Err(RvError::ErrPhysicalBackendPrefixInvalid);
         }
-
-        let rows: Vec<VaultRow> = self
-            .client
-            .query_consistent_map(
-                sql!(
-                    "SELECT vault_key, vault_value FROM {} WHERE vault_key LIKE ? ESCAPE '\\'",
-                    &self.table
-                )
-                .into_cow(),
-                vec![Param::from(like_prefix_pattern(prefix))],
-            )
-            .await
-            .map_err(map_hiqlite_error)?;
-
-        let mut keys: Vec<String> = Vec::new();
-        for entry in rows.iter() {
-            // Authoritative prefix test. `LIKE` narrows the scan but is
-            // not exact (ASCII-case-insensitive, and historically
-            // wildcard-widened), so a row that does not genuinely start
-            // with `prefix` is dropped here rather than passed through
-            // whole: `trim_start_matches` used to be a no-op on such a
-            // row, returning a foreign key verbatim to the caller. It is
-            // also `strip_prefix`, not `trim_start_matches`, so a key
-            // whose remainder repeats the prefix keeps that remainder.
-            let Some(key) = entry.vault_key.strip_prefix(prefix) else {
-                continue;
-            };
-            match key.find('/') {
-                Some(i) => {
-                    let key = &key[0..i + 1];
-                    if !keys.contains(&key.to_string()) {
-                        keys.push(key.to_string());
-                    }
-                }
-                None => {
-                    keys.push(key.to_string());
-                }
-            }
-        }
-        Ok(keys)
+        self.list_paged(prefix, PageLimits::DEFAULT).await
     }
 
-    /// Single-query subtree read. Returns every row whose `vault_key`
-    /// starts with `prefix` (optionally bounded below by `start_key`) in
-    /// one consistent query, replacing the recursive `list` + per-key
-    /// `get` walk — the 1+N linearizable reads that made audit/history
-    /// aggregation take seconds. `start_key` pushes the time-window lower
-    /// bound into SQL so chronologically-keyed logs scan only the recent
-    /// tail rather than all history.
+    /// Bulk subtree read: every row whose `vault_key` starts with `prefix`
+    /// (optionally bounded below by `start_key`), in ascending key order.
+    /// Replaces the recursive `list` + per-key `get` walk — the 1+N
+    /// linearizable reads that made audit/history aggregation take
+    /// seconds — with one consistent query per bounded page (see
+    /// [`paging`]). `start_key` pushes the time-window lower bound into
+    /// SQL so chronologically-keyed logs read only the recent tail.
     async fn scan(&self, prefix: &str, start_key: Option<&str>) -> Result<Vec<BackendEntry>, RvError> {
         if prefix.starts_with('/') {
             return Err(RvError::ErrPhysicalBackendPrefixInvalid);
         }
-
-        let rows: Vec<VaultRow> = match start_key {
-            Some(start) => {
-                self.client
-                    .query_consistent_map(
-                        sql!(
-                            "SELECT vault_key, vault_value FROM {} WHERE vault_key LIKE ? ESCAPE '\\' AND vault_key >= ?",
-                            &self.table
-                        )
-                        .into_cow(),
-                        vec![Param::from(like_prefix_pattern(prefix)), Param::from(start.to_string())],
-                    )
-                    .await
-                    .map_err(map_hiqlite_error)?
-            }
-            None => {
-                self.client
-                    .query_consistent_map(
-                        sql!(
-                            "SELECT vault_key, vault_value FROM {} WHERE vault_key LIKE ? ESCAPE '\\'",
-                            &self.table
-                        )
-                        .into_cow(),
-                        vec![Param::from(like_prefix_pattern(prefix))],
-                    )
-                    .await
-                    .map_err(map_hiqlite_error)?
-            }
-        };
-
-        // Same authoritative prefix test as `list`: `LIKE` narrows the
-        // scan, `starts_with` decides. Without it a subtree read could
-        // hand the caller rows from a sibling subtree whose key merely
-        // matched the pattern.
-        Ok(rows
-            .into_iter()
-            .filter(|row| row.vault_key.starts_with(prefix))
-            .map(|row| BackendEntry { key: row.vault_key, value: row.vault_value })
-            .collect())
+        self.scan_paged(prefix, start_key, PageLimits::DEFAULT).await
     }
 
     async fn get(&self, key: &str) -> Result<Option<BackendEntry>, RvError> {
@@ -308,6 +238,197 @@ impl Backend for HiqliteBackend {
             .await
             .map_err(map_hiqlite_error)?;
         Ok(Box::new(lock))
+    }
+}
+
+/// Parameters of the page queries, in their `?N` order:
+/// `?1` LIKE pattern, `?2` lower bound (`>=`), `?3` excluded key (`IS NOT`,
+/// `NULL` for none), `?4` exclusive upper bound — only when the range has
+/// one —, then per-row overhead, max candidate rows and byte budget.
+fn page_params(like: &str, start: &PageStart, upper: Option<&str>, limits: PageLimits) -> Vec<Param> {
+    let (from, exclude) = start.sql_bounds();
+    let mut params = vec![Param::from(like), Param::from(from), exclude.map_or(Param::Null, Param::from)];
+    if let Some(upper) = upper {
+        params.push(Param::from(upper));
+    }
+    params.extend([Param::from(PAGE_ROW_OVERHEAD_BYTES), Param::from(limits.max_rows), Param::from(limits.max_bytes)]);
+    params
+}
+
+fn page_row_error(e: hiqlite::Error) -> RvError {
+    RvError::ErrString(format!("hiqlite paged read: unexpected row shape: {e}"))
+}
+
+/// Paged reads behind `list` and `scan`; the paging rules live in
+/// [`paging`]. Each statement below is one page: the inner query picks at
+/// most `max_rows` keys of the range after the cursor, the window adds the
+/// running byte total, and the outer query keeps the rows that fit the
+/// budget (the first row always does) plus one all-`NULL` cut marker when
+/// the budget ended the page. The `ESCAPE`d `LIKE` is redundant with the
+/// range and kept as a second, independent narrowing; Rust's prefix test
+/// in the pagers stays authoritative.
+impl HiqliteBackend {
+    async fn list_paged(&self, prefix: &str, limits: PageLimits) -> Result<Vec<String>, RvError> {
+        let like = like_prefix_pattern(prefix);
+        let upper = prefix_upper_bound(prefix);
+        let mut pager = ListPager::new(prefix, limits);
+        while let Some(start) = pager.next_start().cloned() {
+            let rows = self.query_list_page(&like, &start, upper.as_deref(), limits).await?;
+            pager.accept(rows)?;
+        }
+        Ok(pager.finish())
+    }
+
+    async fn scan_paged(
+        &self,
+        prefix: &str,
+        start_key: Option<&str>,
+        limits: PageLimits,
+    ) -> Result<Vec<BackendEntry>, RvError> {
+        let like = like_prefix_pattern(prefix);
+        let upper = prefix_upper_bound(prefix);
+        let mut pager = ScanPager::new(prefix, start_key, limits);
+        while let Some(start) = pager.next_start().cloned() {
+            let rows = self.query_scan_page(&like, &start, upper.as_deref(), limits).await?;
+            pager.accept(rows)?;
+        }
+        Ok(pager.finish())
+    }
+
+    /// One page of full keys; `None` is the cut marker.
+    async fn query_list_page(
+        &self,
+        like: &str,
+        start: &PageStart,
+        upper: Option<&str>,
+        limits: PageLimits,
+    ) -> Result<Vec<Option<String>>, RvError> {
+        let stmt = match upper {
+            Some(_) => sql!(
+                "WITH page AS ( \
+                     SELECT vault_key, row_bytes, \
+                            ROW_NUMBER() OVER w AS page_row, \
+                            SUM(row_bytes) OVER w AS page_bytes \
+                     FROM ( \
+                         SELECT vault_key, length(CAST(vault_key AS BLOB)) + ?5 AS row_bytes \
+                         FROM {} \
+                         WHERE vault_key LIKE ?1 ESCAPE '\\' AND vault_key >= ?2 AND vault_key IS NOT ?3 \
+                           AND vault_key < ?4 \
+                         ORDER BY vault_key \
+                         LIMIT ?6 \
+                     ) \
+                     WINDOW w AS (ORDER BY vault_key ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) \
+                 ) \
+                 SELECT CASE WHEN page_row = 1 OR page_bytes <= ?7 THEN vault_key END AS vault_key \
+                 FROM page \
+                 WHERE page_row <= 2 OR page_bytes - row_bytes <= ?7 \
+                 ORDER BY page_row",
+                &self.table
+            ),
+            None => sql!(
+                "WITH page AS ( \
+                     SELECT vault_key, row_bytes, \
+                            ROW_NUMBER() OVER w AS page_row, \
+                            SUM(row_bytes) OVER w AS page_bytes \
+                     FROM ( \
+                         SELECT vault_key, length(CAST(vault_key AS BLOB)) + ?4 AS row_bytes \
+                         FROM {} \
+                         WHERE vault_key LIKE ?1 ESCAPE '\\' AND vault_key >= ?2 AND vault_key IS NOT ?3 \
+                         ORDER BY vault_key \
+                         LIMIT ?5 \
+                     ) \
+                     WINDOW w AS (ORDER BY vault_key ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) \
+                 ) \
+                 SELECT CASE WHEN page_row = 1 OR page_bytes <= ?6 THEN vault_key END AS vault_key \
+                 FROM page \
+                 WHERE page_row <= 2 OR page_bytes - row_bytes <= ?6 \
+                 ORDER BY page_row",
+                &self.table
+            ),
+        };
+        self.client
+            .query_consistent(stmt.into_cow(), page_params(like, start, upper, limits))
+            .await
+            .map_err(map_hiqlite_error)?
+            .into_iter()
+            .map(|mut row| row.try_get::<Option<String>>("vault_key").map_err(page_row_error))
+            .collect()
+    }
+
+    /// One page of entries; `None` is the cut marker.
+    async fn query_scan_page(
+        &self,
+        like: &str,
+        start: &PageStart,
+        upper: Option<&str>,
+        limits: PageLimits,
+    ) -> Result<Vec<Option<BackendEntry>>, RvError> {
+        let stmt = match upper {
+            Some(_) => sql!(
+                "WITH page AS ( \
+                     SELECT vault_key, row_bytes, \
+                            ROW_NUMBER() OVER w AS page_row, \
+                            SUM(row_bytes) OVER w AS page_bytes \
+                     FROM ( \
+                         SELECT vault_key, \
+                                length(CAST(vault_key AS BLOB)) + length(vault_value) + ?5 AS row_bytes \
+                         FROM {} \
+                         WHERE vault_key LIKE ?1 ESCAPE '\\' AND vault_key >= ?2 AND vault_key IS NOT ?3 \
+                           AND vault_key < ?4 \
+                         ORDER BY vault_key \
+                         LIMIT ?6 \
+                     ) \
+                     WINDOW w AS (ORDER BY vault_key ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) \
+                 ) \
+                 SELECT CASE WHEN page.page_row = 1 OR page.page_bytes <= ?7 THEN t.vault_key END AS vault_key, \
+                        CASE WHEN page.page_row = 1 OR page.page_bytes <= ?7 THEN t.vault_value END AS vault_value \
+                 FROM page JOIN {} AS t ON t.vault_key = page.vault_key \
+                 WHERE page.page_row <= 2 OR page.page_bytes - page.row_bytes <= ?7 \
+                 ORDER BY page.page_row",
+                &self.table,
+                &self.table
+            ),
+            None => sql!(
+                "WITH page AS ( \
+                     SELECT vault_key, row_bytes, \
+                            ROW_NUMBER() OVER w AS page_row, \
+                            SUM(row_bytes) OVER w AS page_bytes \
+                     FROM ( \
+                         SELECT vault_key, \
+                                length(CAST(vault_key AS BLOB)) + length(vault_value) + ?4 AS row_bytes \
+                         FROM {} \
+                         WHERE vault_key LIKE ?1 ESCAPE '\\' AND vault_key >= ?2 AND vault_key IS NOT ?3 \
+                         ORDER BY vault_key \
+                         LIMIT ?5 \
+                     ) \
+                     WINDOW w AS (ORDER BY vault_key ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) \
+                 ) \
+                 SELECT CASE WHEN page.page_row = 1 OR page.page_bytes <= ?6 THEN t.vault_key END AS vault_key, \
+                        CASE WHEN page.page_row = 1 OR page.page_bytes <= ?6 THEN t.vault_value END AS vault_value \
+                 FROM page JOIN {} AS t ON t.vault_key = page.vault_key \
+                 WHERE page.page_row <= 2 OR page.page_bytes - page.row_bytes <= ?6 \
+                 ORDER BY page.page_row",
+                &self.table,
+                &self.table
+            ),
+        };
+        self.client
+            .query_consistent(stmt.into_cow(), page_params(like, start, upper, limits))
+            .await
+            .map_err(map_hiqlite_error)?
+            .into_iter()
+            .map(|mut row| {
+                let key = row.try_get::<Option<String>>("vault_key").map_err(page_row_error)?;
+                let value = row.try_get::<Option<Vec<u8>>>("vault_value").map_err(page_row_error)?;
+                match (key, value) {
+                    (Some(key), Some(value)) => Ok(Some(BackendEntry { key, value })),
+                    (None, None) => Ok(None),
+                    _ => Err(RvError::ErrString(
+                        "hiqlite paged read: row with a key but no value, or a value but no key".to_string(),
+                    )),
+                }
+            })
+            .collect()
     }
 }
 
@@ -881,8 +1002,12 @@ mod test {
     use serde_json::Value;
     use serial_test::serial;
 
-    use super::{like_prefix_pattern, HiqliteBackend};
+    use super::{
+        like_prefix_pattern, prefix_upper_bound, HiqliteBackend, PageLimits, ScanPager, VaultRow,
+        PAGE_ROW_OVERHEAD_BYTES,
+    };
     use bv_sql_guard::sql;
+    use hiqlite::Param;
     use crate::test::{
         test_backend_curd, test_backend_list_prefix, test_backend_list_prefix_is_literal,
     };
@@ -1015,6 +1140,179 @@ mod test {
         // "every key under secret/my".
         let keys = backend.list("secret/my%app/").await.unwrap();
         assert_eq!(keys, vec!["db".to_string()]);
+    }
+
+    /// The pre-pagination read: the single unbounded `LIKE` query `list`
+    /// and `scan` used to run, kept here as the reference the paged reads
+    /// must reproduce.
+    async fn legacy_rows(backend: &HiqliteBackend, prefix: &str, start_key: Option<&str>) -> Vec<VaultRow> {
+        let like = Param::from(like_prefix_pattern(prefix));
+        match start_key {
+            Some(start) => backend
+                .client()
+                .query_consistent_map(
+                    sql!("SELECT vault_key, vault_value FROM vault_test WHERE vault_key LIKE ? ESCAPE '\\' AND vault_key >= ?")
+                        .into_cow(),
+                    vec![like, Param::from(start)],
+                )
+                .await
+                .unwrap(),
+            None => backend
+                .client()
+                .query_consistent_map(
+                    sql!("SELECT vault_key, vault_value FROM vault_test WHERE vault_key LIKE ? ESCAPE '\\'").into_cow(),
+                    vec![like],
+                )
+                .await
+                .unwrap(),
+        }
+    }
+
+    /// The pre-pagination `list` post-processing, verbatim in effect, sorted
+    /// because the legacy query had no `ORDER BY`.
+    async fn legacy_list(backend: &HiqliteBackend, prefix: &str) -> Vec<String> {
+        let mut keys: Vec<String> = Vec::new();
+        for row in legacy_rows(backend, prefix, None).await {
+            let Some(rest) = row.vault_key.strip_prefix(prefix) else { continue };
+            match rest.find('/') {
+                Some(i) => {
+                    let child = rest[..=i].to_string();
+                    if !keys.contains(&child) {
+                        keys.push(child);
+                    }
+                }
+                None => keys.push(rest.to_string()),
+            }
+        }
+        keys.sort();
+        keys
+    }
+
+    async fn legacy_scan(backend: &HiqliteBackend, prefix: &str, start_key: Option<&str>) -> Vec<BackendEntry> {
+        let mut entries: Vec<BackendEntry> = legacy_rows(backend, prefix, start_key)
+            .await
+            .into_iter()
+            .filter(|row| row.vault_key.starts_with(prefix))
+            .map(|row| BackendEntry { key: row.vault_key, value: row.vault_value })
+            .collect();
+        entries.sort_by(|a, b| a.key.cmp(&b.key));
+        entries
+    }
+
+    /// Paged `list`/`scan` return exactly what the single unbounded query
+    /// returned, on the real SQL, for page sizes from one row up to the
+    /// production defaults — and no page outgrows its byte budget.
+    #[serial]
+    #[tokio::test]
+    async fn test_hiqlite_paged_list_and_scan_match_unpaged() {
+        if !should_run() {
+            eprintln!("Skipping hiqlite test (set CARGO_TEST_HIQLITE=1 to enable)");
+            return;
+        }
+        let conf = make_test_conf("test_hiqlite_paged_list_scan");
+        let backend = HiqliteBackend::new(&conf).expect("backend creation failed");
+        let _ = backend.client().batch(sql!("DELETE FROM vault_test").into_cow()).await;
+
+        let mut keys: Vec<(String, usize)> = Vec::new();
+        // A chronologically keyed append log, values of uneven size, one
+        // value larger than any test budget below.
+        for i in 0..120usize {
+            keys.push((format!("audit/{:020}", 1_000 + i), (i * 37) % 600));
+        }
+        keys.push(("audit/00000000000000099999".to_string(), 8 * 1024));
+        // A tree: nested directories, a key equal to the listed prefix, a
+        // key ending in '/', and siblings sorting right around `kv/`.
+        for d in 0..4 {
+            for i in 0..6 {
+                keys.push((format!("kv/dir{d}/leaf{i}"), 16));
+                keys.push((format!("kv/dir{d}/sub/deep{i}"), 16));
+            }
+            keys.push((format!("kv/leaf{d}"), 16));
+        }
+        for k in ["kv/", "kv/dir0/", "kv", "kv.", "kv0"] {
+            keys.push((k.to_string(), 4));
+        }
+        // LIKE wildcards, the escape character, an ASCII-case variant that
+        // SQLite's LIKE matches, and their impostors.
+        for k in ["w/my_app/a", "w/my_app/b/c", "w/myXapp/a", "w/my%app/a", "w/myZZapp/a", r"w/my\app/a", "w/MY_APP/a"]
+        {
+            keys.push((k.to_string(), 4));
+        }
+        for k in ["u/é", "u/\u{D7FF}/x", "u/\u{E000}/y"] {
+            keys.push((k.to_string(), 4));
+        }
+        for (key, len) in &keys {
+            let value: Vec<u8> = (0..*len).map(|i| (i % 251) as u8).collect();
+            backend.put(&BackendEntry { key: key.clone(), value }).await.unwrap();
+        }
+
+        let limit_sets = [
+            PageLimits { max_rows: 1, max_bytes: 1 },
+            PageLimits { max_rows: 3, max_bytes: 600 },
+            PageLimits { max_rows: 7, max_bytes: 2048 },
+            PageLimits::DEFAULT,
+        ];
+
+        for prefix in ["", "audit/", "kv/", "kv/dir1/", "kv/dir0/sub/", "w/", "w/my_app/", "w/my%app/", r"w/my\app/", "u/", "none/"] {
+            let expected = legacy_list(&backend, prefix).await;
+            assert_eq!(backend.list(prefix).await.unwrap(), expected, "list {prefix:?}");
+            for limits in limit_sets {
+                assert_eq!(backend.list_paged(prefix, limits).await.unwrap(), expected, "list {prefix:?} {limits:?}");
+            }
+        }
+        assert_eq!(backend.list("w/my_app/").await.unwrap(), vec!["a".to_string(), "b/".to_string()]);
+
+        let scans: &[(&str, Option<&str>)] = &[
+            ("", None),
+            ("audit/", None),
+            ("audit/", Some("audit/00000000000000001050")),
+            ("audit/", Some("audit/000000000000000010505")), // between two keys
+            ("audit/", Some("a")),                              // below the prefix
+            ("audit/", Some("audit0")),                         // above the range
+            ("kv/", None),
+            ("kv/", Some("kv/dir2/")),
+            ("w/my_app/", None),
+            ("w/my%app/", None),
+            (r"w/my\app/", None),
+            ("u/", None),
+            ("none/", None),
+        ];
+        for (prefix, start) in scans {
+            let expected = legacy_scan(&backend, prefix, *start).await;
+            assert_eq!(backend.scan(prefix, *start).await.unwrap(), expected, "scan {prefix:?} {start:?}");
+            for limits in limit_sets {
+                assert_eq!(
+                    backend.scan_paged(prefix, *start, limits).await.unwrap(),
+                    expected,
+                    "scan {prefix:?} {start:?} {limits:?}"
+                );
+            }
+        }
+
+        // Drive the scan pager by hand to see each real page: the byte
+        // budget (not the row limit) splits it, the cut marker appears,
+        // and no page carries more than max(budget, its first row).
+        let limits = PageLimits { max_rows: 1_000, max_bytes: 2048 };
+        let like = like_prefix_pattern("audit/");
+        let upper = prefix_upper_bound("audit/");
+        let mut pager = ScanPager::new("audit/", None, limits);
+        let (mut pages, mut markers) = (0, 0);
+        while let Some(start) = pager.next_start().cloned() {
+            let rows = backend.query_scan_page(&like, &start, upper.as_deref(), limits).await.unwrap();
+            markers += rows.iter().filter(|r| r.is_none()).count();
+            let data: Vec<&BackendEntry> = rows.iter().flatten().collect();
+            let bytes: i64 =
+                data.iter().map(|e| (e.key.len() + e.value.len()) as i64 + PAGE_ROW_OVERHEAD_BYTES).sum();
+            assert!(data.len() == 1 || bytes <= limits.max_bytes, "page of {} rows carries {bytes} bytes", data.len());
+            pager.accept(rows).unwrap();
+            pages += 1;
+        }
+        assert_eq!(pager.finish(), legacy_scan(&backend, "audit/", None).await);
+        assert!(pages > 10 && markers > 0, "budget must split the scan: {pages} pages, {markers} cut markers");
+
+        // Malformed input is still rejected before any query.
+        assert!(backend.list("/audit/").await.is_err());
+        assert!(backend.scan("/audit/", None).await.is_err());
     }
 
     #[test]

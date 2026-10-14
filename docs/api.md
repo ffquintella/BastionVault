@@ -1356,6 +1356,131 @@ profile). The endpoint is granted by every baseline policy (`default`,
 session's clipboard if a batch is refused. Response:
 `{ "accepted": <transfers>, "seq": <seq> }`.
 
+### Audit Trail, Retention and Dashboard Statistics
+
+See [`features/audit-retention-and-dashboard-stats.md`](../features/audit-retention-and-dashboard-stats.md).
+
+**Unified audit trail** — `GET /v2/sys/audit/events` (also `/v1`), sudo-gated.
+Newest-first rows from every replicated audit store and change history.
+
+~~~
+GET /v2/sys/audit/events?from=<RFC3339>&to=<RFC3339>&limit=<n>
+~~~
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `from` | 24 hours before `to` (or before now) | Lower bound. Without it the read is the last 24 hours, never the whole history. |
+| `to` | none | Upper bound. |
+| `limit` | `500` | Maximum rows returned. |
+
+A bound that is not RFC3339, or a `limit` that is not a positive integer, is a
+400. The parameters may also travel in the request body (body wins). The
+response carries the bound that was applied, and names any source that could
+not be read (its events are missing, so the trail is incomplete):
+
+~~~json
+{ "events": [ { "ts": "...", "user": "...", "op": "read", "category": "access", "target": "secret/data/x", "changed_fields": [], "summary": "" } ],
+  "from": "2026-10-13T10:00:00+00:00",
+  "failed_sources": [] }
+~~~
+
+**Retention** — `v2` only, sudo-gated (`sys/audit-retention` is in the system
+backend's `root_paths`). Deployment-wide; replicated.
+
+~~~
+GET       /v2/sys/audit-retention    # effective setting, schedule, last run
+POST|PUT  /v2/sys/audit-retention    # { "retention_days": 90 } and/or { "enabled": false }
+~~~
+
+- `retention_days`: integer, 1–36500 (default 365). `0`, negatives, fractions and
+  larger values are refused with 400 — `0` is never "delete everything".
+- `enabled`: `false` keeps every record forever.
+- A write may carry either field; the other keeps its value. Changes apply from
+  the next run.
+
+Response:
+
+~~~json
+{
+  "retention_days": 365, "enabled": true, "source": "default",
+  "updated_at": "", "updated_by": "",
+  "min_retention_days": 1, "max_retention_days": 36500,
+  "schedule": "daily at 00:00 UTC", "next_run_at": "2026-10-15T00:00:00+00:00",
+  "armed_at": "2026-10-14T09:12:03+00:00",
+  "last_run": {
+    "started_at": "...", "finished_at": "...", "cutoff": "...", "retention_days": 365,
+    "outcome": "completed", "node_id": 1,
+    "stores": [ { "store": "access-audit", "deleted": 1200, "remaining": 183132, "unrecognised": 0, "batches": 3 } ]
+  },
+  "status_error": null,
+  "stores": ["access-audit", "denial-audit", "login-audit", "user-audit", "share-history", "files-audit", "ssh-sign-audit", "ssh-ca-audit"]
+}
+~~~
+
+`source` is `default` until a value has been written. `outcome` is one of
+`completed`, `partial` (a store failed; its `error` says why), `disabled`,
+`failed` (nothing deleted — e.g. the setting could not be read), `refused`
+(nothing deleted — this node's clock is more than 2 days past the newest audit
+record in the deployment, see below) or `interrupted` (the vault sealed
+mid-run). The run happens once a day at 00:00 UTC on the cluster's Raft leader
+(or the single node); a node that was down at midnight runs once when it comes
+back. After an install or upgrade the first run is the first 00:00 UTC at least
+24 hours after the leader first starts the new version (`next_run_at` shows
+it) — on the default that run is destructive, see
+[configuration](configuration.md#audit-retention-runtime-setting).
+
+**Clock check.** The cutoff is the runner's clock minus the retention, so a
+clock that jumped ahead would delete records early. Before deleting, the run
+compares its clock with the newest record in any pruned store; if it is more
+than 2 days ahead, it deletes nothing and reports `refused`. In a live
+deployment the access, denial and login stores are written continuously, so
+the gap is minutes; a deployment idle for more than 2 days simply waits for
+new records (nothing is growing meanwhile).
+
+**Dashboard summary** — `GET /v2/sys/dashboard/summary` (also `/v1`), readable
+by every authenticated token. Mount, policy and entity counts are live and
+scoped to the caller's ACL and namespace. The deployment-wide audit statistics
+come from a record the cluster leader recomputes every 10 minutes, in two
+tiers:
+
+- `audit_24h`, `attention` and the `audit_stats` freshness fields: a caller
+  holding `read`, `sudo` or root on `sys/audit/events` (unchanged).
+- `audit_stats.recent` and `audit_stats.histogram_24h`: exactly what
+  `sys/audit/events` itself requires — `read` **and** `sudo`, or root. They
+  are omitted otherwise.
+
+~~~json
+{
+  "version": "1", "namespace": "",
+  "seal": { "sealed": false, "initialized": true },
+  "counts": { "secret_mounts": 3, "auth_mounts": 2, "policies": 7, "entities": 11 },
+  "audit_24h": { "total": 5120, "denied": 14, "write_failures": 0 },
+  "attention": { "failed_logins_1h": 2 },
+  "audit_stats": {
+    "state": "ready", "version": 1,
+    "computed_at": "2026-10-14T10:00:00+00:00", "age_secs": 140, "stale": false,
+    "window_start": "2026-10-13T10:00:00+00:00",
+    "histogram_24h": [210, 198, 175, 160, 150, 149, 180, 260, 340, 410, 420, 395,
+                      380, 400, 415, 390, 350, 300, 260, 230, 220, 215, 205, 190],
+    "histogram_bucket_secs": 3600,
+    "recent": [ { "ts": "...", "user": "alice", "op": "read", "category": "access", "target": "secret/data/x", "changed_fields": [], "summary": "" } ],
+    "partial": false, "failed_sources": [],
+    "refresh_interval_secs": 600
+  }
+}
+~~~
+
+Until the first computation (or when the stored record has an unknown version
+or cannot be read) `audit_stats` is `{ "state": "pending", "reason":
+"not_computed" | "unsupported_version" | "unreadable" | "storage_error" }` and
+`audit_24h` / `attention` are omitted, not zeroed. `stale` is `true` when the
+record is 30 minutes old or more. `partial` is `true` when an audit source
+could not be read during the computation (`failed_sources` names them); the
+numbers are then a lower bound. `recent` holds the newest 20 rows of the last
+24 hours, looking back up to 7 days when the day has fewer. `write_failures` is
+the serving node's live counter. A caller without audit visibility gets none of
+`audit_24h`, `attention` or `audit_stats`.
+
 ### DoS / Abuse Protection
 
 IP-based request-abuse guard. Requests are counted per client IP over a sliding

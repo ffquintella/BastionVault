@@ -36,6 +36,7 @@ import { PluginsPage } from "./routes/PluginsPage";
 import { NotificationsAdminPage } from "./routes/NotificationsAdminPage";
 import { SurfaceRouter } from "./components/surface/SurfaceRouter";
 import { useAuthStore } from "./stores/authStore";
+import { useVaultStore } from "./stores/vaultStore";
 import { ToastProvider } from "./components/ui";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ConnectPalette } from "./components/ConnectPalette";
@@ -73,9 +74,13 @@ export default function App() {
   // other `location.reload()` no longer logs the operator out. See
   // `bootstrapAuth` in `stores/authStore.ts` for the contract.
   const bootstrapAuth = useAuthStore((s) => s.bootstrapAuth);
+  // Same for the connection (mode / remote profile / selected node),
+  // so a reload does not relabel a remote vault as "Local".
+  const bootstrapConnection = useVaultStore((s) => s.bootstrapConnection);
   useEffect(() => {
+    void bootstrapConnection();
     void bootstrapAuth();
-  }, [bootstrapAuth]);
+  }, [bootstrapAuth, bootstrapConnection]);
   return (
     <ErrorBoundary>
       <ToastProvider>

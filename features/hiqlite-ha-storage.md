@@ -23,7 +23,7 @@ With hiqlite, a BastionVault cluster **is** the Raft cluster. Each vault node em
 **Phase 1 -- Backend** (`crates/bv-storage/src/hiqlite/mod.rs`):
 - `HiqliteBackend` struct implementing the `Backend` trait.
 - CRUD operations via hiqlite's SQL interface:
-  - `list()` -- `SELECT ... WHERE vault_key LIKE ?` with prefix truncation logic.
+  - `list()` / `scan()` -- keyset-paginated consistent reads over the key range of the prefix (escaped `LIKE` kept as a second filter, `strip_prefix` authoritative). Each page holds at most 10,000 keys and 8 MiB (or one larger row) so no response approaches the 64 MiB WebSocket message limit between a follower and the leader; `list` reads keys only and skips the rest of each child directory. Results are in key order; a multi-page read is not a snapshot. See `crates/bv-storage/src/hiqlite/paging.rs`.
   - `get()` -- `SELECT ... WHERE vault_key = ?` via `query_consistent_map()` (strong consistency).
   - `put()` -- `INSERT OR REPLACE` via `client.execute()` (Raft-replicated write).
   - `delete()` -- `DELETE ... WHERE vault_key = ?` via `client.execute()`.
@@ -129,6 +129,29 @@ With hiqlite, a BastionVault cluster **is** the Raft cluster. Each vault node em
   6. Write during leader election (transient errors then recovery).
   7. Quorum loss and recovery (2 of 3 down, writes fail, restore 1, quorum restored).
   8. Graceful leave (follower departs, cluster continues with 2 nodes).
+
+### Upgrading to hiqlite 0.15.3 (from 0.14)
+
+BastionVault now embeds hiqlite **0.15.3**, through the fork
+`github.com/ffquintella/hiqlite` on branch **`main-local`** (upstream
+0.15.3 plus the fork deltas listed at the `[patch.crates-io]` entry in the root
+`Cargo.toml`). hiqlite 0.15 changed
+the Raft wire format and the cache WAL, so:
+
+- **No rolling upgrade.** Stop every node; a 0.15 node cannot join 0.14 peers.
+- **Clear the cache, not the database**, on every node before the first 0.15
+  start: delete `<data_dir>/logs_cache/` and `<data_dir>/state_machine_cache/`,
+  or start once with `HQL_CACHE_WAL_AUTO_MIGRATE=true` (hiqlite then checks that
+  no configured peer still runs 0.14 and clears the cache itself), then remove
+  the variable. `<data_dir>/logs/` and `<data_dir>/state_machine/` hold the vault
+  data and stay as they are. BastionVault enables the cache through `dlock`.
+- A 0.15 node over an uncleared 0.14 cache refuses to start ("The Cache cleanup
+  must be done …"). `HQL_CACHE_WAL_FORCE_MIGRATE=true` exists for recovery only
+  and must be removed right after use.
+- Take a backup (`sys/backup`) first.
+
+Operator procedure: `docs/configuration.md` → Hiqlite (HA) → *Upgrading from
+hiqlite 0.14*; changelog: Changed → Upgrade notes.
 
 ## Design
 

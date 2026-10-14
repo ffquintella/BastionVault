@@ -312,6 +312,15 @@ pub(crate) const V2_ONLY: &[ResourceSpec] = &[
         route!(dispatch Post => crate::batch::sys_batch_v2_request_handler,
             "carries caller-chosen logical operations; each is judged by pre_route on its own path through Core::handle_request"),
     ]),
+    // Retention of the replicated audit stores and the daily housekeeping
+    // state (features/audit-retention-and-dashboard-stats.md). A sibling of
+    // `/audit/…`, not a child, so the shared `/audit/{path:.*}` device route
+    // cannot swallow it. Sudo-gated by the sys backend's `root_paths`.
+    resource!("/audit-retention" => [
+        route!(routed Get => sys_audit_retention_request_handler, "sys/audit-retention"),
+        route!(routed Post => sys_audit_retention_request_handler, "sys/audit-retention"),
+        route!(routed Put => sys_audit_retention_request_handler, "sys/audit-retention"),
+    ]),
     // Effective-capabilities lookup.
     resource!("/capabilities-self" => [
         route!(routed Post => sys_capabilities_self_request_handler, "sys/capabilities-self"),

@@ -39,7 +39,9 @@ use crate::{
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
 };
 
-const LOGIN_AUDIT_SUB_PATH: &str = "login-audit/";
+/// System-view sub-path of this store. Public so the kernel's audit-retention
+/// housekeeping can prune it by key without a second copy of the string.
+pub const LOGIN_AUDIT_SUB_PATH: &str = "login-audit/";
 
 /// One row in the login-audit log.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

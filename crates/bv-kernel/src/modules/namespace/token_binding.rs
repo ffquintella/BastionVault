@@ -103,28 +103,57 @@ fn assignment_principal(meta: &HashMap<String, String>) -> Option<(String, Strin
 /// lookup is **live** (not a login-time snapshot), so granting or revoking an
 /// assignment takes effect on the next request without re-minting the token,
 /// and it **fails closed** on any store error.
+///
+/// A store error is logged, never silent: it denies the request exactly like a
+/// missing assignment would, but it is not one. Callers that *report* the
+/// verdict to a client (`sys/capabilities-self`, `sys/namespaces-self`) must
+/// use [`token_operable_checked`] instead, so a storage outage surfaces as an
+/// error rather than as a claim that the principal has no assignment.
 #[maybe_async::maybe_async]
 pub async fn token_operable_resolved(
     core: &crate::core::Core,
     auth: &crate::logical::Auth,
     request_ns_path: &str,
 ) -> bool {
+    match token_operable_checked(core, auth, request_ns_path).await {
+        Ok(operable) => operable,
+        Err(e) => {
+            log::warn!(
+                target: "security",
+                "namespace operability for {request_ns_path:?} denied: the namespace \
+                 assignment could not be read ({e}); failing closed"
+            );
+            false
+        }
+    }
+}
+
+/// [`token_operable_resolved`], with the assignment-store error propagated
+/// instead of folded into `false`.
+///
+/// `Ok(false)` means the token's binding does not cover `request_ns_path` and
+/// no assignment record grants it. `Err` means the record could not be read
+/// (e.g. the storage cluster timed out), so the answer is unknown.
+#[maybe_async::maybe_async]
+pub async fn token_operable_checked(
+    core: &crate::core::Core,
+    auth: &crate::logical::Auth,
+    request_ns_path: &str,
+) -> Result<bool, crate::errors::RvError> {
     if token_operable(auth, request_ns_path) {
-        return true;
+        return Ok(true);
     }
     let Some((mount, name)) = assignment_principal(&auth.metadata) else {
-        return false;
+        return Ok(false);
     };
-    let Ok(store) = super::ns_assignment::NsAssignmentStore::new(core) else {
-        return false;
-    };
-    match store.get(&mount, &name).await {
-        Ok(Some(assignment)) => {
-            super::ns_assignment::namespace_allowed(&assignment.namespaces, request_ns_path)
+    let store = super::ns_assignment::NsAssignmentStore::new(core)?;
+    match store.get(&mount, &name).await? {
+        Some(assignment) => {
+            Ok(super::ns_assignment::namespace_allowed(&assignment.namespaces, request_ns_path))
         }
-        // No record (unrestricted for *login*) or a read error: no explicit
-        // cross-namespace grant, so keep the strict binding verdict.
-        _ => false,
+        // No record (unrestricted for *login*): no explicit cross-namespace
+        // grant, so keep the strict binding verdict.
+        None => Ok(false),
     }
 }
 

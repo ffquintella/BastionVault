@@ -38,6 +38,8 @@ mod userpass;
 // the rlib `bastion_vault` links, so the two disagree on `TypeId` and every
 // `get_module::<T>()` returns `None`. They have to live where the vault is
 // built. See roadmaps/workspace-decomposition.md § Phase 4.5.
+mod audit_retention;
+mod dashboard_stats;
 mod kernel_identity;
 mod kernel_identity_link;
 mod kernel_migrate;

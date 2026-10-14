@@ -354,6 +354,29 @@ export const hsmStatus = () => invoke<HsmStatus>("hsm_status");
 export const listAuditEvents = (from: string, to: string, limit?: number) =>
   invoke<AuditEvent[]>("list_audit_events", { from, to, limit });
 
+/** Precomputed audit statistics (`audit_stats` of `sys/dashboard/summary`).
+ *  The server refreshes them every 10 minutes in the background, so the
+ *  Dashboard never reads the audit trail itself. */
+export interface DashboardAuditStats {
+  /** `pending` until the first computation has run (or when the stored
+   *  record cannot be used); counts are then absent, not zero. */
+  state: "ready" | "pending";
+  reason: string | null;
+  /** RFC3339 instant the statistics describe. */
+  computed_at: string | null;
+  /** True when the record is 30 minutes old or more. */
+  stale: boolean;
+  /** At least one audit source could not be read; the numbers under-count. */
+  partial: boolean;
+  /** The sources that could not be read. */
+  failed_sources: string[];
+  /** 24 hourly counts, oldest first, ending at `computed_at`. `null` when the
+   *  caller lacks what `sys/audit/events` requires (read + sudo). */
+  histogram_24h: number[] | null;
+  /** Newest audit rows, newest first. `null` under the same gate. */
+  recent: AuditEvent[] | null;
+}
+
 export interface DashboardSummary {
   version: string;
   namespace: string;
@@ -365,12 +388,15 @@ export interface DashboardSummary {
     entities: number;
   };
   /** Deployment-wide audit counters. `null` when the caller cannot read
-   *  `sys/audit/events` — the server omits them rather than reporting a zero,
-   *  which would be a false "nothing failed". Render as unavailable, not 0. */
+   *  `sys/audit/events`, or while `audit_stats.state` is `pending` — the
+   *  server omits them rather than reporting a zero, which would be a false
+   *  "nothing failed". Render as unavailable, not 0. */
   audit_24h_total: number | null;
   audit_24h_denied: number | null;
   audit_24h_write_failures: number | null;
   failed_logins_1h: number | null;
+  /** `null` when the caller cannot read the audit trail. */
+  audit_stats: DashboardAuditStats | null;
 }
 // One-shot operational snapshot for the Dashboard landing page. Routes
 // through the Backend trait server-side, so it works embedded + remote.

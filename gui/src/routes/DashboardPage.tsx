@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { Layout } from "../components/Layout";
 import { useVaultStore } from "../stores/vaultStore";
 import { useAuthStore } from "../stores/authStore";
-import type { AuditEvent } from "../lib/types";
 import * as api from "../lib/api";
 import type { DashboardSummary, ServerInfo } from "../lib/api";
 import {
@@ -14,7 +13,7 @@ import {
 import { extractError } from "../lib/error";
 import { KpiTile } from "../components/dashboard/KpiTile";
 import { HealthStrip } from "../components/dashboard/HealthStrip";
-import { SessionActivityChart } from "../components/dashboard/SessionActivityChart";
+import { SessionActivityChart, formatUpdatedAgo } from "../components/dashboard/SessionActivityChart";
 import { RecentAuditCard } from "../components/dashboard/RecentAuditCard";
 import { LiveSessionsCard } from "../components/dashboard/LiveSessionsCard";
 import { AttentionPanel } from "../components/dashboard/AttentionPanel";
@@ -41,7 +40,6 @@ export function DashboardPage() {
 
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [server, setServer] = useState<ServerInfo | null>(null);
-  const [audit, setAudit] = useState<AuditEvent[]>([]);
   const [telemetry, setTelemetry] = useState<RustionTelemetryTarget[] | null>(null);
   const [health, setHealth] = useState<RustionTargetHealth[] | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -84,16 +82,15 @@ export function DashboardPage() {
   }
 
   async function loadDashboard() {
-    // Fetch the latest events with no time window — the "Recent activity"
-    // feed shows the most recent happenings regardless of age (their
-    // relative-time labels make the age obvious), while the chart + KPI
-    // scope to 24h client-side. This keeps the dashboard correct even if
-    // the server were to ignore the window params.
-    const [st, sum, srv, ev, tel, hl] = await Promise.allSettled([
+    // Audit counts, the 24h histogram and the recent-activity rows all come
+    // from the summary's precomputed `audit_stats`, which the server
+    // refreshes every 10 minutes in the background. The Dashboard never
+    // reads the audit trail itself: an unwindowed `sys/audit/events` here
+    // scanned every audit store on every page load.
+    const [st, sum, srv, tel, hl] = await Promise.allSettled([
       api.getVaultStatus(),
       api.dashboardSummary(),
       api.getServerInfo(),
-      api.listAuditEvents("", "", 200),
       rustionTelemetryList(),
       rustionTargetHealthAll(),
     ]);
@@ -103,7 +100,6 @@ export function DashboardPage() {
 
     setSummary(sum.status === "fulfilled" ? sum.value : null);
     setServer(srv.status === "fulfilled" ? srv.value : null);
-    setAudit(ev.status === "fulfilled" ? ev.value : []);
     setTelemetry(tel.status === "fulfilled" ? tel.value : null);
     setHealth(hl.status === "fulfilled" ? hl.value : null);
     liveLoaded.current = true;
@@ -159,15 +155,19 @@ export function DashboardPage() {
   const activeSessions =
     telemetry?.reduce((n, t) => n + (t.stats?.active ?? t.active.length), 0) ?? null;
 
-  // Audit 24h: prefer the server-computed total; otherwise count the
-  // fetched events that fall within the last 24h (the fetch is unwindowed,
-  // so we must filter here, not use the raw length).
-  const cutoff24h = nowMs - 24 * 3600_000;
-  const audit24h = summary
-    ? summary.audit_24h_total
-    : audit.length > 0
-      ? audit.filter((e) => Date.parse(e.ts) >= cutoff24h).length
-      : null;
+  // Audit statistics: precomputed server-side. `null` when the caller cannot
+  // read the audit trail; `pending` until the first computation has run.
+  const auditStats = summary?.audit_stats ?? null;
+  const statsPending = auditStats?.state === "pending";
+  const statsReady = auditStats?.state === "ready";
+  const audit24h = summary ? summary.audit_24h_total : null;
+  const statsUpdated = statsReady ? formatUpdatedAgo(auditStats?.computed_at, nowMs) : null;
+  // Some audit source could not be read when the statistics were computed:
+  // the numbers are a lower bound, and the page says so.
+  const statsPartial = statsReady && auditStats.partial;
+  const partialTitle = statsPartial
+    ? `Partial: could not read ${auditStats.failed_sources.join(", ") || "some sources"}`
+    : undefined;
 
   return (
     <Layout>
@@ -246,10 +246,18 @@ export function DashboardPage() {
             sub={
               summary && summary.audit_24h_denied !== null && summary.audit_24h_denied > 0
                 ? `${summary.audit_24h_denied} denied`
-                : undefined
+                : statsPartial
+                  ? "partial"
+                  : statsUpdated ?? undefined
             }
-            subTone="danger"
-            unavailableHint="unavailable"
+            subTone={
+              summary && summary.audit_24h_denied !== null && summary.audit_24h_denied > 0
+                ? "danger"
+                : statsPartial || auditStats?.stale
+                  ? "warning"
+                  : "muted"
+            }
+            unavailableHint={statsPending ? "computing…" : "unavailable"}
             to="/audit"
             loading={loading}
           />
@@ -257,7 +265,15 @@ export function DashboardPage() {
 
         {/* Activity chart + attention */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <SessionActivityChart events={audit} nowMs={nowMs} loading={loading} />
+          <SessionActivityChart
+            buckets={statsReady ? auditStats.histogram_24h : null}
+            pending={statsPending}
+            computedAt={auditStats?.computed_at ?? null}
+            stale={auditStats?.stale ?? false}
+            partialTitle={partialTitle}
+            nowMs={nowMs}
+            loading={loading}
+          />
           <AttentionPanel
             sealed={sealed}
             health={health}
@@ -270,7 +286,13 @@ export function DashboardPage() {
         {/* Live sessions + recent audit */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <LiveSessionsCard targets={telemetry} nowMs={nowMs} loading={loading} />
-          <RecentAuditCard events={audit} nowMs={nowMs} loading={loading} />
+          <RecentAuditCard
+            events={statsReady ? (auditStats.recent ?? []) : []}
+            unavailable={!statsReady || auditStats.recent === null}
+            pending={statsPending}
+            nowMs={nowMs}
+            loading={loading}
+          />
         </div>
 
         <QuickActions

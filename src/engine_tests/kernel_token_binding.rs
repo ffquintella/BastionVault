@@ -146,6 +146,51 @@ async fn test_token_operable_resolved_honors_assignment() {
     assert!(!token_operable_resolved(&core, &anon, "dti/esi").await);
 }
 
+/// Regression: an unreadable assignment store is not "no assignment".
+///
+/// On a degraded hiqlite cluster the assignment read timed out, the error was
+/// folded into `false`, and `sys/capabilities-self` reported
+/// `namespace_operable = false` — which the GUI renders as "has no
+/// allowed-namespace entry covering dti/esi" for a principal whose record
+/// plainly lists it. The request-time verdict still fails closed; the
+/// *reported* verdict must surface the error. A sealed barrier stands in for
+/// the cluster timeout: both make `NsAssignmentStore::get` return `Err`.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_token_operable_checked_surfaces_store_error() {
+    use crate::logical::Auth;
+    use crate::modules::namespace::ns_assignment::NsAssignmentStore;
+    use crate::modules::namespace::store::NamespaceQuotas;
+    use crate::modules::namespace::{NamespaceModule, NAMESPACE_MODULE_NAME};
+    use crate::test_utils::new_unseal_test_bastion_vault;
+
+    let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_token_operable_checked_err").await;
+    let ns_store =
+        core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME).and_then(|m| m.store()).unwrap();
+    ns_store.create("dti", NamespaceQuotas::default(), false).await.unwrap();
+    ns_store.create("dti/esi", NamespaceQuotas::default(), false).await.unwrap();
+
+    let mut felipe = Auth { policies: vec!["administrator".into()], ..Default::default() };
+    stamp_binding(&mut felipe.metadata, "", "root-uuid", false);
+    felipe.metadata.insert(MOUNT_PATH_META.into(), "userpass/".into());
+    felipe.metadata.insert("username".into(), "felipe".into());
+
+    let store = NsAssignmentStore::new(&core).unwrap();
+    store.set(&ns_store, "userpass/", "felipe", vec!["".into(), "dti".into(), "dti/esi".into()]).await.unwrap();
+    assert_eq!(token_operable_checked(&core, &felipe, "dti/esi").await.unwrap(), true);
+
+    core.barrier().seal().unwrap();
+
+    // Binding alone still answers without storage.
+    assert_eq!(token_operable_checked(&core, &felipe, "").await.unwrap(), true);
+    // The assignment lookup cannot be answered: an error, not `Ok(false)`.
+    assert!(
+        token_operable_checked(&core, &felipe, "dti/esi").await.is_err(),
+        "a storage error must not be reported as 'no assignment'"
+    );
+    // Enforcement keeps failing closed.
+    assert!(!token_operable_resolved(&core, &felipe, "dti/esi").await);
+}
+
 /// The identifying metadata contract every auth backend owes
 /// [`token_operable_resolved`]: a token widens onto an assignment only when
 /// it carries both `mount_path` and a principal name. `userpass`/FIDO2 and

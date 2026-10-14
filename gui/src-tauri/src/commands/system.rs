@@ -888,29 +888,34 @@ pub async fn list_audit_events(
 
     let resp = crate::commands::make_request(&state, Operation::Read, path, body).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
-    let arr = data.get("events").and_then(|v| v.as_array()).cloned();
-    let out = arr
+    Ok(audit_events_from(data.get("events")))
+}
+
+/// Parse an array of audit-trail rows in the `sys/audit/events` shape. Shared
+/// with the dashboard summary's `audit_stats.recent`, which uses the same row.
+fn audit_events_from(value: Option<&Value>) -> Vec<AuditEvent> {
+    value
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(audit_event_from).collect())
         .unwrap_or_default()
-        .into_iter()
-        .filter_map(|v| {
-            let o = v.as_object()?;
-            Some(AuditEvent {
-                ts: o.get("ts").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                user: o.get("user").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                machine: o.get("machine").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string),
-                op: o.get("op").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                category: o.get("category").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                target: o.get("target").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                changed_fields: o
-                    .get("changed_fields")
-                    .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-                    .unwrap_or_default(),
-                summary: o.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            })
-        })
-        .collect();
-    Ok(out)
+}
+
+fn audit_event_from(v: &Value) -> Option<AuditEvent> {
+    let o = v.as_object()?;
+    Some(AuditEvent {
+        ts: o.get("ts").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        user: o.get("user").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        machine: o.get("machine").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string),
+        op: o.get("op").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        category: o.get("category").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        target: o.get("target").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        changed_fields: o
+            .get("changed_fields")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        summary: o.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    })
 }
 
 // ── Dashboard summary ──────────────────────────────────────────────
@@ -935,6 +940,32 @@ pub struct DashboardCounts {
     pub entities: u64,
 }
 
+/// The precomputed audit statistics block of `sys/dashboard/summary`
+/// (`audit_stats`). The server refreshes it every 10 minutes in the
+/// background; the Dashboard never reads the audit stores itself.
+#[derive(Serialize, Default)]
+pub struct DashboardAuditStats {
+    /// `"ready"` or `"pending"` (no usable record yet).
+    pub state: String,
+    /// Why the statistics are pending: `not_computed`, `unsupported_version`,
+    /// `unreadable` or `storage_error`. `None` when ready.
+    pub reason: Option<String>,
+    /// RFC3339 instant the statistics describe.
+    pub computed_at: Option<String>,
+    /// True when the record is 30 minutes old or more.
+    pub stale: bool,
+    /// At least one audit source could not be read when the statistics were
+    /// computed, so the numbers under-count.
+    pub partial: bool,
+    /// The sources that could not be read.
+    pub failed_sources: Vec<String>,
+    /// 24 hourly counts, oldest first, ending at `computed_at`. `None` when
+    /// the caller lacks what `sys/audit/events` requires (read + sudo).
+    pub histogram_24h: Option<Vec<u64>>,
+    /// Newest audit rows, newest first. `None` under the same gate.
+    pub recent: Option<Vec<AuditEvent>>,
+}
+
 #[derive(Serialize, Default)]
 pub struct DashboardSummary {
     pub version: String,
@@ -942,13 +973,17 @@ pub struct DashboardSummary {
     pub seal: DashboardSeal,
     pub counts: DashboardCounts,
     /// Deployment-wide audit counters. `None` when the server omitted the
-    /// `audit_24h` / `attention` blocks because the caller cannot read
-    /// `sys/audit/events`. Kept optional rather than defaulted to 0 so the UI
-    /// renders "unavailable" instead of asserting that nothing failed.
+    /// `audit_24h` / `attention` blocks — because the caller cannot read
+    /// `sys/audit/events`, or because the statistics are not computed yet
+    /// (`audit_stats.state == "pending"`). Kept optional rather than
+    /// defaulted to 0 so the UI renders "unavailable" instead of asserting
+    /// that nothing failed.
     pub audit_24h_total: Option<u64>,
     pub audit_24h_denied: Option<u64>,
     pub audit_24h_write_failures: Option<u64>,
     pub failed_logins_1h: Option<u64>,
+    /// `None` when the caller cannot read the audit trail.
+    pub audit_stats: Option<DashboardAuditStats>,
 }
 
 #[tauri::command]
@@ -980,6 +1015,23 @@ pub async fn dashboard_summary(state: State<'_, AppState>) -> CmdResult<Dashboar
         audit_24h_denied: audit.as_ref().map(|m| u(m, "denied")),
         audit_24h_write_failures: audit.as_ref().map(|m| u(m, "write_failures")),
         failed_logins_1h: attention.as_ref().map(|m| u(m, "failed_logins_1h")),
+        audit_stats: data.get("audit_stats").and_then(|v| v.as_object()).map(|m| DashboardAuditStats {
+            state: m.get("state").and_then(|v| v.as_str()).unwrap_or("pending").to_string(),
+            reason: m.get("reason").and_then(|v| v.as_str()).map(str::to_string),
+            computed_at: m.get("computed_at").and_then(|v| v.as_str()).map(str::to_string),
+            stale: b(m, "stale"),
+            partial: b(m, "partial"),
+            failed_sources: m
+                .get("failed_sources")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .unwrap_or_default(),
+            histogram_24h: m
+                .get("histogram_24h")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_u64()).collect()),
+            recent: m.get("recent").map(|v| audit_events_from(Some(v))),
+        }),
     })
 }
 

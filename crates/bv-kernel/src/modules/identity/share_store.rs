@@ -40,7 +40,7 @@ const SHARE_BY_GRANTEE_SUB_PATH: &str = "sharing/by-grantee/";
 /// cascade-revokes triggered by target deletion. Keyed by
 /// `<20-digit-nanos>` so a natural sort yields chronological order;
 /// the aggregator in the system backend walks this flat view.
-const SHARE_HISTORY_SUB_PATH: &str = "sharing/history/";
+pub(crate) const SHARE_HISTORY_SUB_PATH: &str = "sharing/history/";
 
 /// Target object for a share — a KV secret (by logical path) or a
 /// resource (by resource name).

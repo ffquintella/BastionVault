@@ -152,6 +152,38 @@ storage "hiqlite" {
 
 By default, both Raft and API channels use TLS with auto-generated self-signed certificates, providing post-quantum encryption (X25519MLKEM768 hybrid key exchange) for all inter-node traffic. Peer authentication is handled by the shared secrets (`secret_raft`/`secret_api`), while TLS provides confidentiality. Set `tls_raft_disable`/`tls_api_disable` to `true` only for development or testing.
 
+#### Upgrading from hiqlite 0.14 (BastionVault releases before hiqlite 0.15.3)
+
+The embedded hiqlite moved from 0.14 to **0.15.3**, which changed the Raft wire
+format and the cache WAL. **A rolling upgrade is not possible**: a 0.15 node
+cannot talk to a 0.14 node, and a 0.15 node started over a 0.14 cache WAL
+refuses to start ("The Cache cleanup must be done as mentioned in the
+changelog"). Plan a short full-cluster downtime:
+
+1. Take a backup (`POST /v1/sys/backup`) while the old cluster is healthy.
+2. Stop **every** node. None may run the old version while any node starts the
+   new one.
+3. On every node, clear the hiqlite **cache** (BastionVault uses it for
+   distributed locks) — either
+   - delete `<data_dir>/logs_cache/` and `<data_dir>/state_machine_cache/`, or
+   - start the node once with `HQL_CACHE_WAL_AUTO_MIGRATE=true` in its
+     environment: hiqlite then checks that no configured peer still runs the old
+     version and clears the cache itself (it refuses to start if one does).
+     Remove the variable afterwards.
+
+   Do **not** delete `<data_dir>/logs/` or `<data_dir>/state_machine/`: they
+   hold the vault data and are compatible. Deleting the cache by hand skips
+   hiqlite's old-peer check, so step 2 is then entirely on you.
+4. Start the nodes on the new version and check `bvault status` /
+   `sys/health` for a healthy leader.
+
+`HQL_CACHE_WAL_FORCE_MIGRATE=true` forces the cleanup even on a node already
+started on 0.15; use it only to recover from a failed migration and remove it
+immediately, since it clears the cache on every start. The BastionVault build
+pins its hiqlite fork (`github.com/ffquintella/hiqlite`) to branch
+`main-local` (upstream 0.15.3 plus the fork's deltas, listed in the root
+`Cargo.toml`).
+
 ### MySQL (legacy, opt-in)
 
 MySQL-backed storage using Diesel. Off by default — build with `--features storage_mysql` to enable. Kept for existing deployments not yet migrated to Hiqlite, which is now the recommended backend (see [Hiqlite (HA)](#hiqlite-ha) above).
@@ -286,6 +318,66 @@ mcp {
 | `max_request_bytes` | `0` (256 KiB) | Request body cap; 256 KiB is also the ceiling |
 | `tool_timeout_secs` | `0` (30) | Per-call timeout |
 | `require_hybrid_kex` | `false` | Not verifiable in this build: while `true`, `/v2/mcp` refuses to serve (503) rather than ignore it |
+
+## Audit Retention (runtime setting)
+
+How long the replicated audit stores keep records is **not** an HCL option: it
+is a cluster-wide runtime setting stored (encrypted, replicated) in the barrier,
+so every node applies the same value whichever one is the Raft leader. Read and
+change it with the sudo-gated `v2/sys/audit-retention` endpoint
+([API reference](api.md#audit-trail-retention-and-dashboard-statistics)):
+
+~~~bash
+curl -H "X-Vault-Token: $ROOT" https://vault:8200/v2/sys/audit-retention
+curl -H "X-Vault-Token: $ROOT" -X POST -d '{"retention_days": 90}' https://vault:8200/v2/sys/audit-retention
+curl -H "X-Vault-Token: $ROOT" -X POST -d '{"enabled": false}'     https://vault:8200/v2/sys/audit-retention
+~~~
+
+| Setting | Default | Description |
+|--------|---------|-------------|
+| `retention_days` | `365` | Records older than this many days are deleted. 1–36500; `0` is refused. |
+| `enabled` | `true` | `false` keeps every audit record forever. |
+
+> **Upgrading deletes audit records older than a year.** Retention is on by
+> default (365 days). A deployment that has never set it runs on the default,
+> and the first run after the upgrade permanently deletes every audit record in
+> the stores below that is older than 365 days. The endpoint only exists once
+> the new version runs, so you cannot set it beforehand; instead the first run
+> waits for the first 00:00 UTC **at least 24 hours** after the upgraded leader
+> starts. Within that window, if you need longer retention:
+>
+> ~~~bash
+> curl -H "X-Vault-Token: $ROOT" -X POST -d '{"retention_days": 3650}' https://vault:8200/v2/sys/audit-retention
+> # or keep everything:
+> curl -H "X-Vault-Token: $ROOT" -X POST -d '{"enabled": false}' https://vault:8200/v2/sys/audit-retention
+> ~~~
+>
+> Every node logs a `security` warning at startup while the default applies,
+> naming the time of the next run, and `GET v2/sys/audit-retention` reports
+> `source: "default"` and `next_run_at`. Take a backup (`sys/backup`) before
+> upgrading if in doubt.
+
+- **Schedule:** daily at **00:00 UTC**, on the Raft leader only (the single node
+  when not clustered). After an install or upgrade the first run is the first
+  00:00 UTC at least 24 hours away; a node that was down at midnight runs once
+  when it is back.
+- **Clock check:** a run deletes nothing (`outcome: "refused"`) when the
+  runner's clock is more than 2 days past the newest record in any pruned
+  store — a clock that jumped ahead would otherwise move the cutoff and delete
+  early. A deployment idle for that long just waits for new audit records.
+- **Stores pruned:** `access-audit`, `denial-audit`, `login-audit`,
+  `identity/user-audit`, `sharing/history`, `files-audit`, `ssh-sign-audit`,
+  `ssh-ca-audit`. Policy, identity-group and asset-group change histories are
+  kept, and the hash-chained `audit.log` file is governed by
+  `log_rotate_size_mb` / `log_rotate_keep` instead.
+- **Load:** deletes go out in batches of 500 with a 50 ms pause, oldest first.
+- **Observability:** one line per store on the `security` log (counts and the
+  cutoff, never record contents) and the `last_run` report on the endpoint.
+- If the stored setting cannot be read, the run deletes nothing and reports
+  `outcome: "failed"`; write the setting again (both fields) to repair it.
+
+The Dashboard's audit statistics are recomputed by the same background job
+every 10 minutes; there is nothing to configure.
 
 ## Environment Variables
 

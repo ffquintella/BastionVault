@@ -252,6 +252,9 @@ LIST   /v2/sys/mcp/tokens [routed] -> sys/mcp/tokens
 GET    /v2/sys/mcp/tokens [routed] -> sys/mcp/tokens
 DELETE /v2/sys/mcp/tokens/{accessor} [routed] -> sys/mcp/tokens/{accessor}
 POST   /v2/sys/batch [dispatch] -- carries caller-chosen logical operations; each is judged by pre_route on its own path through Core::handle_request
+GET    /v2/sys/audit-retention [routed] -> sys/audit-retention
+POST   /v2/sys/audit-retention [routed] -> sys/audit-retention
+PUT    /v2/sys/audit-retention [routed] -> sys/audit-retention
 POST   /v2/sys/capabilities-self [routed] -> sys/capabilities-self
 GET    /v2/sys/policy-tests/{name:.*} [routed] -> sys/policy-tests/{name}
 POST   /v2/sys/policy-tests/{name:.*} [routed] -> sys/policy-tests/{name}

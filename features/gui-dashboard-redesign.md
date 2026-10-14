@@ -56,6 +56,24 @@ The feature is **backend-first**: Phase 1 ships a single server-side aggregation
 - **Health-strip badges are an authenticated read.** The strip's storage / uptime / version pills come from `get_server_info` → `/v1/sys/info`, whose payload has been split into disclosure tiers since v0.37.6: an unauthenticated caller gets only `initialized` / `sealed`. The remote path therefore binds the session token with `with_token` (the badges silently degraded to `up --` / `v` / `storage` for as long as it did not). Embedded mode reads the in-process `server_info` helpers and needs no token. The strip omits any pill whose field came back withheld rather than rendering a placeholder.
 - **Tests.** Backend `test_dashboard_summary_basic` (`src/modules/system/mod.rs`) asserts the response shape + ACL/audit counts; `test_dashboard_summary_for_a_default_only_principal` asserts the `default` grant (200, `seal` + `counts` present), that the privileged blocks are absent for that caller, and that root still receives both; `test_dashboard_summary_for_a_namespace_bound_principal` does the same for a token bound to a nested tenant (`dti/esi`), which is the case the `default`-only grant missed — it was verified to fail with 403 before the `namespace-self` grant landed; the refactored `handle_audit_events` keeps its three existing tests green. GUI `gui/src/test/dashboard.test.tsx` covers `bucketByHour` (5 cases), `KpiTile` null/value states, and `AttentionPanel` severity rows (10 tests). Full suite: 130 vitest passing, `tsc` + `vite build` clean.
 
+### Precomputed audit statistics (T133, S110)
+
+The audit half of the Dashboard no longer reads the audit trail. `loadDashboard`
+used to call `listAuditEvents("", "", 200)` — an unwindowed `sys/audit/events`
+that read every audit store in full on each page view (184k access-audit rows in
+the production incident) — and bucket the 200 newest rows client-side, while the
+summary handler aggregated the same sources over 24h on every request.
+
+Now the cluster leader's housekeeping task recomputes one record,
+`sys/dashboard-stats/record`, every 10 minutes with bounded window reads, and
+`sys/dashboard/summary` serves it as `audit_stats` (`computed_at`, `stale`,
+`histogram_24h`, `recent`) alongside the unchanged `audit_24h` / `attention`
+blocks. `DashboardPage` renders the KPI, `SessionActivityChart` (now fed
+`buckets`, with an "updated N min ago" label from `formatUpdatedAgo`) and
+`RecentAuditCard` from that block alone; before the first computation it shows
+"computing…" instead of zeros. `bucketByHour` is gone — the buckets are the
+server's. Spec and record format: [audit-retention-and-dashboard-stats.md](audit-retention-and-dashboard-stats.md).
+
 ### Request-level statistics aggregator
 
 The original design's `audit_24h.denied` / `write_failures` / failed-login signals were initially deferred because BastionVault's audit *trail* is a change-history aggregation (policy/identity/share/file lifecycle), not a request-level allow/deny log. That gap is now closed by a **server-side stats aggregator** (`src/stats.rs`, `DashboardStats` on `Core`):

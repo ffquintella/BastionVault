@@ -158,6 +158,13 @@ Next-up list recorded before the migration, in its order:
   - note: finding F7, split out of T31 Phase 3.2. Details are withheld from this repository until the fix ships; the maintainer holds the write-up.
 - [ ] T121 Close the evaluator finding recorded as F8 (S65, S108)
   - note: finding F8. Details are withheld from this repository until the fix ships; the maintainer holds the write-up.
+- [x] T132 Expire replicated audit records after a configurable retention (S110, S3)
+  - note: production incident follow-up — `sys/access-audit/` reached 184k rows with no retention. Daily 00:00 UTC housekeeping on the Raft leader prunes the eight flat timestamp-keyed audit stores in batches; `v2/sys/audit-retention` (sudo) holds `retention_days` (default 365, 1–36500) and `enabled`. Change histories and the `audit.log` file device are out of scope.
+- [x] T133 Serve the Dashboard's audit statistics from a record refreshed every 10 minutes (S110, S3)
+  - note: `sys/dashboard-stats/record` (versioned) computed by the same housekeeping task with bounded window reads; `sys/dashboard/summary` reads it (`audit_stats`, pending state when absent) and the GUI Dashboard no longer calls `sys/audit/events`.
+- [x] T134 Bound `sys/audit/events` to the last 24 hours when no `from` is given (S110)
+- [x] T135 Upgrade the embedded hiqlite to 0.15.3 and bound hiqlite list/scan responses (S16)
+  - note: production incident follow-up — a follower's client-API WebSocket to the leader died whenever one consistent query returned >= 64 MiB (fastwebsockets `FrameTooLarge`), failing every in-flight request with 503. Fork `ffquintella/hiqlite` `main-local` now carries upstream 0.15.3 plus error-level logging of every WebSocket reader exit and a 0.15.x restart fix; `list`/`scan` page by key range (8 MiB / 10k rows per page). Requires a full cluster stop to upgrade (see CHANGELOG 0.44.35).
 
 ## [M5] Resources
 > outcome: Done when operators can inventory resources and files, connect to them in-app over SSH/RDP and web without seeing credentials, query and change data on database resources under SQL grants that BastionVault enforces, and work in a tabbed session workspace.
@@ -608,3 +615,4 @@ Next-up list recorded before the migration, in its order:
 | S107 | Feature: Self-Accounts — operator-registered accounts, picked at Connect (plugin) | features/self-accounts.md |
 | S108 | Verification of the ACL decision core | docs/verification.md |
 | S109 | Feature: SQL Browser — query and change data on database resources (`dbms-management` plugin) | features/sql-browser.md |
+| S110 | Feature: Audit Retention and Precomputed Dashboard Statistics | features/audit-retention-and-dashboard-stats.md |

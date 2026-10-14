@@ -24,7 +24,8 @@ use crate::{
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
 };
 
-const USER_AUDIT_SUB_PATH: &str = "identity/user-audit/";
+/// System-view sub-path of this store; read by the audit-retention housekeeping.
+pub(crate) const USER_AUDIT_SUB_PATH: &str = "identity/user-audit/";
 
 /// One row in the user-operation audit log.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -56,6 +56,51 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.35] - 2026-10-14
+
+### Added
+
+#### Audit retention and dashboard statistics (features/audit-retention-and-dashboard-stats.md)
+
+- **Expire audit records after a configurable retention, 365 days by default** -- the replicated audit stores (access, denial, login, user, share history, files, SSH sign, SSH CA) grew without bound. A housekeeping job now deletes records older than the retention every day at 00:00 UTC, on the cluster's Raft leader only (or the single node), in batches of 500 with a pause between them; a node that was down at midnight runs once when it comes back. A fresh install or an upgrade waits for the first 00:00 UTC at least 24 hours away, never deleting during the day of the upgrade — but see *Upgrade notes* under Changed: that first run is destructive. Read or change the setting with `GET`/`POST v2/sys/audit-retention` (sudo): `retention_days` from 1 to 36500, or `enabled: false` to keep everything; `0` is refused, never read as "delete all". An unreadable setting stops deletion rather than falling back to the default, and a run refuses to delete (`outcome: refused`) when the node's clock is more than 2 days past the newest audit record in the deployment. Each run is logged per store on the `security` log (counts only) and reported by the same endpoint (`last_run`); every node logs the effective retention and the next run when it starts. Policy, identity-group and asset-group change histories and the `audit.log` file device are not pruned. (T132, S110)
+- **Serve the Dashboard's audit numbers from statistics refreshed every 10 minutes** -- the Dashboard's 24-hour totals, denied count, failed logins in the last hour, hourly activity chart and recent activity now come from one stored record that the cluster leader recomputes every 10 minutes (and at startup when it is missing), using only bounded time-window reads. `sys/dashboard/summary` returns it as a new `audit_stats` block with `computed_at`, and the Dashboard shows "updated N min ago". The recent rows and the hourly chart need what `sys/audit/events` itself needs (`read` and `sudo`, or root); a caller with `read` alone keeps the totals it always saw. When an audit source cannot be read the record says so (`partial`, `failed_sources`) and the Dashboard marks the numbers *partial*, instead of silently under-counting; `sys/audit/events` names such sources in `failed_sources` too. Until the first computation, `audit_stats.state` is `pending` and the counters are absent rather than zero; the summary never scans the audit stores itself. (T133, S110)
+
+### Changed
+
+#### Upgrade notes — read before upgrading
+
+- **Upgrading permanently deletes audit records older than 365 days at the first scheduled run** -- *destructive on upgrade.* Audit retention is on by default with 365 days, and a deployment that has never written `v2/sys/audit-retention` runs on that default: the first run after the upgrade deletes every access, denial, login, user, share-history, files and SSH audit record older than a year, with no further operator action. That first run is the first 00:00 UTC at least 24 hours after the upgraded Raft leader starts (so 24–48 hours after the upgrade), and every node logs a `security` warning at startup naming the default and the time of that run. The setting cannot be written before upgrading — the endpoint is new — so if you must keep audit records longer than a year, set `POST v2/sys/audit-retention {"retention_days": <days>}` or `{"enabled": false}` right after the upgrade, inside that window, and export or back up (`sys/backup`) the audit trail before upgrading if in doubt. `GET v2/sys/audit-retention` shows `source: "default"` and `next_run_at` until you do. (T132, S110)
+- **Stop the whole hiqlite cluster to upgrade: no rolling upgrade from hiqlite 0.14** -- the embedded hiqlite moves from 0.14 to 0.15.3, which changes the Raft wire format and the cache WAL. Mixed versions cannot form a cluster and an old cache WAL corrupts the new one. Upgrade procedure: take a backup (`sys/backup`); stop **every** node; then either delete `<data_dir>/logs_cache/` and `<data_dir>/state_machine_cache/` on every node, or start each node once with `HQL_CACHE_WAL_AUTO_MIGRATE=true` (hiqlite then verifies that no old-version peer is still running before it clears the cache, and refuses to start if one is) and remove the variable afterwards; then start the nodes on the new version. Only the cache is cleared — never `<data_dir>/logs/` or `<data_dir>/state_machine/`, which hold the vault data and are compatible. A node started on 0.15.3 over an uncleared 0.14 cache refuses to start ("The Cache cleanup must be done …"). The hiqlite fork dependency now tracks branch `main-local` (at the 0.15.3 merge) of `github.com/ffquintella/hiqlite`. (T135, S16)
+
+#### Dashboard
+
+- **Stop the GUI Dashboard from reading the audit trail on every load** -- it fetched the 200 newest events through an unwindowed `sys/audit/events`, which read every audit store in full on each page view; it now renders the counts, chart and recent activity from `sys/dashboard/summary` alone. The chart now counts every event of the last 24 hours, not only those among the 200 newest. (T133, S110)
+
+### Fixed
+
+#### Hiqlite HA storage — bounded list and scan reads (features/hiqlite-ha-storage.md)
+
+- **Keep a follower's link to the leader up when listing or scanning a large prefix** -- `list` and `scan` on the hiqlite backend read a whole subtree in one consistent query, and `list` also shipped every value it then discarded, so a large prefix (an access-audit log of 184k rows came to ~67 MiB) produced a response at or above the 64 MiB WebSocket message limit. The follower's connection to the leader then closed and every request in flight on it failed with `503 Cluster node is unhealthy`. Both now read in pages of at most 10,000 keys and 8 MiB (or a single larger row), keyed on the last key returned, and `list` reads keys only and skips the rest of each child directory. Results are the same keys and entries as before, now in ascending key order. A multi-page read is no longer a point-in-time snapshot: a key written or deleted while it runs may or may not appear. (T135, S16)
+
+#### Audit trail — bounded reads (features/audit-retention-and-dashboard-stats.md)
+
+- **Read the last 24 hours from `sys/audit/events` when no `from` is given** -- without `from` the endpoint read every record of every audit store and then kept `limit` of them; on a deployment with 184k access-audit rows that was tens of megabytes per call. It now reads the 24 hours before `to` (or before now) and returns the bound it applied as `from`. An explicit `from` is honoured as before. The Audit page's *From* box says so. (T134, S110)
+
+#### Namespaces — operability check
+
+- **Report a storage error during the namespace-operability check as an error instead of as "no allowed-namespace entry"** -- `sys/capabilities-self` and `sys/namespaces-self` turned a failed read of the namespace-assignment record (e.g. a hiqlite read timing out on an unhealthy cluster) into "this principal may not operate here", which the GUI showed as a missing assignment. Both now fail the request with the storage error; request authorization still fails closed and now logs why. (T73, S27)
+
+## [0.44.34] - 2026-10-14
+
+### Fixed
+
+#### Web Application Connect — resource types in namespaces (features/web-application-connect.md)
+
+- **Let a root-namespace type opt-in reach resources in child namespaces** -- form and HTTP-auth web logins for a resource in a child namespace were always refused `exposure_not_permitted`, even with its type saved with `connect.web_exposure_max` in Settings, because the server read the type configuration only from the namespace's own `resources/` mount and Settings (root-only) writes the root's. A namespace that has saved no type configuration now inherits the root namespace's; one that has saved its own is authoritative, with no per-type fallback, so a tenant can still deny what the root allows. `GET resources/v2/config/types/effective` reports which configuration applies (`mount`, `root` or `none`). (T96, S105)
+- **Edit a child namespace's resource types in the GUI** -- *Admin → Resource Types* appears inside a child namespace and edits that namespace's own types; Settings → Resources still edits the root's. Both say when the types shown are inherited from the root namespace, or are unsaved built-in defaults the server does not enforce — previously the editor showed a built-in `dom` cap the server never saw. The connection-profile editor's exposure warning and the Resources page now use the configuration the server enforces. (T96, S105)
+
+## [0.44.33] - 2026-10-13
+
 ### Added
 
 #### MCP Access: AI assistants through the desktop app (features/mcp-access.md)
@@ -69,13 +114,6 @@ EXAMPLE ENTRY:
 #### MCP Access internals
 
 - **Share one local-server gatekeeper between `bvault mcp serve` and the desktop app** -- pairing, the stateful `initialize` handshake, per-call confirmation, token minting, the line framing and the owner-only socket moved from `bvault-cli` into `bv_mcp::local`, and `POST /v2/mcp`'s JSON-RPC handling moved from `bv-server` into `bastion_vault::mcp_endpoint`. `bvault mcp` and `/v2/mcp` behave as before. `bv-mcp` now depends on `libc` (Unix only) for the socket's peer-uid check; `bv-server` no longer depends on `bv-client` or `async-trait`. (T131, S26)
-
-### Fixed
-
-#### Web Application Connect — resource types in namespaces (features/web-application-connect.md)
-
-- **Let a root-namespace type opt-in reach resources in child namespaces** -- form and HTTP-auth web logins for a resource in a child namespace were always refused `exposure_not_permitted`, even with its type saved with `connect.web_exposure_max` in Settings, because the server read the type configuration only from the namespace's own `resources/` mount and Settings (root-only) writes the root's. A namespace that has saved no type configuration now inherits the root namespace's; one that has saved its own is authoritative, with no per-type fallback, so a tenant can still deny what the root allows. `GET resources/v2/config/types/effective` reports which configuration applies (`mount`, `root` or `none`). (T96, S105)
-- **Edit a child namespace's resource types in the GUI** -- *Admin → Resource Types* appears inside a child namespace and edits that namespace's own types; Settings → Resources still edits the root's. Both say when the types shown are inherited from the root namespace, or are unsaved built-in defaults the server does not enforce — previously the editor showed a built-in `dom` cap the server never saw. The connection-profile editor's exposure warning and the Resources page now use the configuration the server enforces. (T96, S105)
 
 ## [0.44.32] - 2026-10-13
 
@@ -7813,7 +7851,13 @@ Bulk dependency upgrade across the workspace (`Cargo.toml`, `crates/bv-plugin-pa
 
 - Abandon the SQLx storage backend: `libsqlite3-sys` conflicts at link time with hiqlite's `rusqlite`, so `storage "sqlx"` was removed (T5, M2)
 
-[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.29...HEAD
+[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.35...HEAD
+[0.44.35]: https://github.com/ffquintella/BastionVault/compare/v0.44.34...v0.44.35
+[0.44.34]: https://github.com/ffquintella/BastionVault/compare/v0.44.33...v0.44.34
+[0.44.33]: https://github.com/ffquintella/BastionVault/compare/v0.44.32...v0.44.33
+[0.44.32]: https://github.com/ffquintella/BastionVault/compare/v0.44.31...v0.44.32
+[0.44.31]: https://github.com/ffquintella/BastionVault/compare/v0.44.30...v0.44.31
+[0.44.30]: https://github.com/ffquintella/BastionVault/compare/v0.44.29...v0.44.30
 [0.44.29]: https://github.com/ffquintella/BastionVault/compare/v0.44.28...v0.44.29
 [0.44.28]: https://github.com/ffquintella/BastionVault/compare/v0.44.27...v0.44.28
 [0.44.27]: https://github.com/ffquintella/BastionVault/compare/v0.44.19...v0.44.27

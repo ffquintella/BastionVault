@@ -1,6 +1,6 @@
 [package]
 name = "bv-storage"
-version = "0.41.2"
+version = "0.41.3"
 edition = "2021"
 description = "BastionVault's storage barriers, physical backends and read caches"
 license = "Apache-2.0"
@@ -52,10 +52,14 @@ zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
 # moved down from the root manifest with the code that uses them.
 diesel = { version = "2.3.8", features = ["mysql", "r2d2"], optional = true }
 r2d2 = { version = "0.8.10", optional = true }
-# Pinned to our fork submodule (`third_party/hiqlite`, branch `main-local`):
-# upstream v0.14.0 stable plus the raft-client socket-leak fix
-# (AbortOnDrop), which is still not upstreamed as of 2026-07. See the
-# `[patch.crates-io]` entry in the workspace root manifest.
+# Pinned to our fork submodule (`third_party/hiqlite`): upstream v0.15.3
+# plus the fork deltas listed at the `[patch.crates-io]` entry in the
+# workspace root manifest. The raft-client socket-leak fix (AbortOnDrop) the
+# fork originally existed for is upstream since v0.15.1 (#373).
+# 0.15 changed the cache WAL and the Raft wire format: no rolling upgrade
+# from 0.14, and `<data_dir>/logs_cache` + `state_machine_cache` (we enable
+# the cache through `dlock`) must be cleared on a full cluster stop first —
+# see hiqlite's CHANGELOG, v0.15.0 "BREAKING".
 # `default-features = false` drops hiqlite's `backup` feature, which is what
 # pulled `cryptr/s3` -> `s3-simple` -> `quick-xml 0.39` into the tree
 # (RUSTSEC-2026-0194 / RUSTSEC-2026-0195, both DoS in XML parsing, no 0.39
@@ -63,7 +67,7 @@ r2d2 = { version = "0.8.10", optional = true }
 # own BVBK format in `bastion_vault::backup` — so the feature was dead
 # weight. The rest of hiqlite's defaults (`auto-heal`, `sqlite`, `toml`) are
 # re-listed explicitly so behaviour is unchanged.
-hiqlite = { version = "=0.14.0", optional = true, default-features = false, features = [
+hiqlite = { version = "=0.15.3", optional = true, default-features = false, features = [
     "auto-heal",
     "sqlite",
     "toml",

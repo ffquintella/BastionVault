@@ -1,6 +1,6 @@
 [package]
 name = "bv-auth-audit"
-version = "0.41.0"
+version = "0.41.1"
 edition = "2021"
 description = "BastionVault's login-audit store: the who/when/where record every auth backend writes"
 license = "Apache-2.0"

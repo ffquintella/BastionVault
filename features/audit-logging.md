@@ -27,6 +27,11 @@ Compliance frameworks (SOC 2, PCI-DSS, HIPAA, FedRAMP) require auditable access 
 
 ## Current State
 
+> **Retention of the replicated audit stores** (access, denial, login, user,
+> share history, files, SSH) is configurable and enforced daily since T132 —
+> see [audit-retention-and-dashboard-stats.md](audit-retention-and-dashboard-stats.md).
+> This document's file device and hash chain are unaffected.
+
 **Phase 1 shipped** — AuditEntry + AuditBroker + FileAuditDevice +
 tamper-evident hash chain + core pipeline hook + sys/audit HTTP
 API + persistence at `sys/audit-devices/<path>` + tests.

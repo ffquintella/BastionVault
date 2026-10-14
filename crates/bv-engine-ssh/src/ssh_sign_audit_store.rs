@@ -26,7 +26,9 @@ use crate::{
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
 };
 
-const SSH_SIGN_AUDIT_SUB_PATH: &str = "ssh-sign-audit/";
+/// System-view sub-path of this store. Public so the kernel's audit-retention
+/// housekeeping can prune it by key without a second copy of the string.
+pub const SSH_SIGN_AUDIT_SUB_PATH: &str = "ssh-sign-audit/";
 
 /// One row in the SSH sign audit log.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

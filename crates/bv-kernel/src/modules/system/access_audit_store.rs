@@ -50,7 +50,8 @@ use crate::{
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
 };
 
-const ACCESS_AUDIT_SUB_PATH: &str = "access-audit/";
+/// System-view sub-path of this store; read by the audit-retention housekeeping.
+pub(crate) const ACCESS_AUDIT_SUB_PATH: &str = "access-audit/";
 
 /// One row in the successful-access log. Carries only the non-secret
 /// metadata the Audit page renders; the audit line it is derived from

@@ -554,6 +554,30 @@ async fn sys_dos_config_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// GET / POST|PUT `/v2/sys/audit-retention` — read or change the retention of
+/// the replicated audit stores, and read the last housekeeping run. HTTP shim
+/// over the sys-backend logical route `audit-retention`, which is sudo-gated.
+/// Deployment-wide, so no namespace header is forwarded.
+async fn sys_audit_retention_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/audit-retention".to_string();
+    match *req.method() {
+        actix_web::http::Method::POST | actix_web::http::Method::PUT => {
+            r.operation = Operation::Write;
+            if !body.is_empty() {
+                r.body = Some(serde_json::from_slice(&body)?);
+                body.clear();
+            }
+        }
+        _ => r.operation = Operation::Read,
+    }
+    handle_request(core, &mut r).await
+}
+
 /// GET `/sys/dos/stats` — live per-IP request statistics and active bans. HTTP
 /// shim over the sys-backend logical route `dos/stats`.
 async fn sys_dos_stats_request_handler(

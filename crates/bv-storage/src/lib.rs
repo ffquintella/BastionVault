@@ -161,6 +161,13 @@ pub trait Backend: Send + Sync + std::any::Any {
     /// can return a whole subtree in one query (e.g. hiqlite) override
     /// this so the barrier's `scan` is a single round-trip instead of
     /// 1+N consistent reads.
+    ///
+    /// Neither `scan` nor `list` promises a point-in-time snapshot or a
+    /// result order. A backend may read in several bounded queries — hiqlite
+    /// does, because one oversized response kills the follower's link to the
+    /// leader (`hiqlite::paging`) — so a key written or deleted while the
+    /// call runs may or may not be reflected. Callers that need an order
+    /// sort; the barriers sort `list`.
     async fn scan(&self, prefix: &str, start_key: Option<&str>) -> Result<Vec<BackendEntry>, RvError> {
         let mut stack = vec![prefix.to_string()];
         let mut out = Vec::new();

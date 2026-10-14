@@ -231,6 +231,7 @@ export function AuditPage() {
                 value={from}
                 onChange={(e) => setFrom(e.target.value)}
                 placeholder="2026-01-01T00:00:00Z"
+                hint="Empty: the 24 hours before To (or now)"
               />
               <Input
                 label="To (RFC3339)"
