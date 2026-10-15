@@ -55,6 +55,12 @@ pub struct PageSnapshot {
     pub url: Option<Url>,
     /// A top-frame load has started and not finished.
     pub loading: bool,
+    /// The last top-frame navigation failed (`session::web_load`): its
+    /// `aborted:<check>`. The fill ends with it at once.
+    pub failed: Option<&'static str>,
+    /// The window is waiting on the operator (an untrusted-certificate
+    /// prompt): the engine's deadline does not run meanwhile.
+    pub held: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,8 +215,17 @@ impl<P: RecipePage, L: LaunchOps> FillRun<'_, P, L> {
         *self.cancel.borrow()
     }
 
+    /// One poll. Time spent while the window is held (an operator prompt)
+    /// is added back to the deadline: the recipe's timeout measures the
+    /// page, not how long the operator reads a certificate.
     async fn pause(&mut self) -> Option<&'static str> {
-        pause(&mut self.cancel, self.timing.poll).await
+        let held = self.page.snapshot().held;
+        let started = Instant::now();
+        let r = pause(&mut self.cancel, self.timing.poll).await;
+        if held {
+            self.deadline += started.elapsed();
+        }
+        r
     }
 
     async fn run(mut self) -> FillReport {
@@ -225,6 +240,9 @@ impl<P: RecipePage, L: LaunchOps> FillRun<'_, P, L> {
             }
             if self.page.closed() {
                 break Outcome::Aborted("window_closed");
+            }
+            if let Some(check) = self.page.snapshot().failed {
+                break Outcome::Aborted(check);
             }
             if Instant::now() >= self.deadline {
                 break Outcome::Timeout;
@@ -364,6 +382,9 @@ impl<P: RecipePage, L: LaunchOps> FillRun<'_, P, L> {
             loop {
                 if let Some(r) = self.cancelled() {
                     return Err(Outcome::Aborted(r));
+                }
+                if let Some(check) = self.page.snapshot().failed {
+                    return Err(Outcome::Aborted(check));
                 }
                 if Instant::now() >= self.deadline {
                     return Err(deadline_outcome(action.kind, last));
@@ -579,7 +600,7 @@ pub async fn run_check<P: RecipePage>(
     page: &P,
     timing: EngineTiming,
 ) -> CheckReport {
-    let deadline = Instant::now() + timing.deadline;
+    let mut deadline = Instant::now() + timing.deadline;
     let mut report = CheckReport {
         outcome: "timeout".into(),
         heuristic: plan.is_heuristic(),
@@ -597,6 +618,18 @@ pub async fn run_check<P: RecipePage>(
         if page.closed() {
             report.outcome = Outcome::Aborted("window_closed").wire();
             break;
+        }
+        let snapshot = page.snapshot();
+        if let Some(check) = snapshot.failed {
+            report.outcome = Outcome::Aborted(check).wire();
+            break;
+        }
+        if snapshot.held {
+            // An operator prompt: as in a fill, its time is not the page's.
+            let started = Instant::now();
+            pause(&mut cancel, timing.poll).await;
+            deadline += started.elapsed();
+            continue;
         }
         if Instant::now() >= deadline {
             break;
@@ -781,6 +814,8 @@ mod tests {
         url: Url,
         loading: bool,
         closed: bool,
+        failed: Option<&'static str>,
+        held: bool,
     }
 
     struct FakePage {
@@ -793,7 +828,13 @@ mod tests {
     impl FakePage {
         fn new(url: &str, responder: Responder) -> Self {
             Self {
-                state: Mutex::new(PageState { url: Url::parse(url).unwrap(), loading: false, closed: false }),
+                state: Mutex::new(PageState {
+                    url: Url::parse(url).unwrap(),
+                    loading: false,
+                    closed: false,
+                    failed: None,
+                    held: false,
+                }),
                 seen: Mutex::new(Vec::new()),
                 titles: Mutex::new(Vec::new()),
                 responder: Mutex::new(responder),
@@ -810,7 +851,7 @@ mod tests {
     impl RecipePage for FakePage {
         fn snapshot(&self) -> PageSnapshot {
             let s = self.state.lock().unwrap();
-            PageSnapshot { url: Some(s.url.clone()), loading: s.loading }
+            PageSnapshot { url: Some(s.url.clone()), loading: s.loading, failed: s.failed, held: s.held }
         }
         fn closed(&self) -> bool {
             self.state.lock().unwrap().closed
@@ -1166,6 +1207,47 @@ mod tests {
         let r = fill(&two_page(), &scope(&[FW]), &page, &launch_at(t0()), 2_000).await;
         assert_eq!(r.outcome, Outcome::Aborted("script_no_result"));
         assert_eq!(page.actions().iter().filter(|s| s.kind == Some(ActionKind::Click)).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_page_load_ends_the_fill_at_once_without_a_fill() {
+        // The window never got past `about:blank`: the start URL failed.
+        let page = FakePage::new("about:blank", Box::new(|_, _| ok(FW)));
+        page.state.lock().unwrap().failed = Some("load_tls_untrusted");
+        let started = std::time::Instant::now();
+        let r = fill(&two_page(), &scope(&[FW]), &page, &launch_at(t0()), 10_000).await;
+        assert_eq!(r.outcome, Outcome::Aborted("load_tls_untrusted"));
+        assert!(started.elapsed() < Duration::from_secs(5), "not left to time out");
+        assert!(page.seen().is_empty(), "no script ran: {:?}", page.seen());
+    }
+
+    #[tokio::test]
+    async fn a_held_window_does_not_spend_the_deadline() {
+        // About:blank behind an open certificate prompt for longer than the
+        // recipe's timeout; the prompt is accepted, the page loads, the fill
+        // completes.
+        let page = std::sync::Arc::new(FakePage::new("about:blank", happy_responder()));
+        page.state.lock().unwrap().held = true;
+        let release = {
+            let page = std::sync::Arc::clone(&page);
+            async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let mut st = page.state.lock().unwrap();
+                st.held = false;
+                st.url = Url::parse("https://fw01.example.com/login").unwrap();
+            }
+        };
+        let (plan, sc, launch) = (two_page(), scope(&[FW]), launch_at(t0()));
+        let (r, ()) = tokio::join!(fill(&plan, &sc, &page, &launch, 150), release);
+        assert_eq!(r.outcome, Outcome::Success);
+    }
+
+    #[tokio::test]
+    async fn a_failed_page_load_ends_a_dry_run() {
+        let page = FakePage::new("about:blank", Box::new(|_, _| ok(FW)));
+        page.state.lock().unwrap().failed = Some("load_dns");
+        let r = run_check(&two_page(), &scope(&[FW]), &page, fast(10_000)).await;
+        assert_eq!(r.outcome, "aborted:load_dns");
     }
 
     #[tokio::test]

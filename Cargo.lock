@@ -1005,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "bastion-vault-gui"
-version = "0.44.36"
+version = "0.44.37"
 dependencies = [
  "arboard",
  "argon2 0.5.3",
@@ -1047,6 +1047,7 @@ dependencies = [
  "rand 0.9.5",
  "rcgen",
  "russh",
+ "russh-sftp",
  "rustls",
  "security-framework",
  "serde",
@@ -1077,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "bastion_vault"
-version = "0.44.36"
+version = "0.44.37"
 dependencies = [
  "actix-rt",
  "anyhow",
@@ -1760,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "bv-core"
-version = "0.41.5"
+version = "0.41.6"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
@@ -1925,7 +1926,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-pki"
-version = "0.41.6"
+version = "0.41.7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1971,7 +1972,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-resource"
-version = "0.41.4"
+version = "0.41.5"
 dependencies = [
  "async-trait",
  "base32",
@@ -2233,7 +2234,7 @@ dependencies = [
 
 [[package]]
 name = "bv-logical"
-version = "0.41.4"
+version = "0.41.5"
 dependencies = [
  "actix-rt",
  "async-trait",
@@ -2396,7 +2397,7 @@ dependencies = [
 
 [[package]]
 name = "bv-utils"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "as-any",
  "better_default",
@@ -2464,7 +2465,7 @@ dependencies = [
 
 [[package]]
 name = "bvault-cli"
-version = "0.44.36"
+version = "0.44.37"
 dependencies = [
  "actix-rt",
  "actix-web",

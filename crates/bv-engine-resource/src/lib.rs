@@ -13,6 +13,8 @@
 //!   smeta/<resource>/<key>              -> ResourceSecretMeta JSON (version index)
 //!   sver/<resource>/<key>/<version>     -> ResourceSecretVersion JSON (old values)
 
+pub mod agent_access;
+pub mod agent_limits;
 pub mod connect_clipboard;
 pub mod connect_mfa;
 pub mod connect_provider;
@@ -799,6 +801,12 @@ impl ResourceBackend {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
+/// An agent opt-in refusal as a response error: the stable code first, so a
+/// client (and the profile editor) can match on it.
+fn agent_refusal_error(refusal: agent_access::AgentAccessRefusal) -> RvError {
+    bv_error_response_status!(refusal.status(), &format!("{}: {}", refusal.code(), refusal))
+}
+
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
 }
@@ -952,6 +960,10 @@ impl ResourceBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let body = req.body.as_ref().ok_or(RvError::ErrRequestNoDataField)?;
+        // `connect.agent_sessions_max` is the type tier of the MCP
+        // brokered-session opt-in; a typo there must be refused, not stored
+        // and read as `deny` later.
+        agent_access::validate_type_config(body).map_err(agent_refusal_error)?;
         let data = serde_json::to_string(body)?;
         let entry = StorageEntry {
             key: "config/types".to_string(),
@@ -1204,6 +1216,24 @@ impl ResourceBackendInner {
         };
         let mut op = if previous.is_some() { "update" } else { "create" };
         let mut changed_fields = diff_field_names(previous.as_ref(), &body);
+
+        // MCP brokered sessions (`features/mcp-brokered-sessions.md` §12): a
+        // profile that turns `agent_access` on needs the type's consent and
+        // its protocol's static requirements. Only new or changed profiles
+        // are vetted, and the type configuration is read only when one turns
+        // it on, so an ordinary write costs nothing extra.
+        if agent_access::write_needs_type_check(previous.as_ref(), &body) {
+            let type_id = body.get("type").and_then(Value::as_str).unwrap_or_default();
+            let types = type_config::effective_type_config(self.core.as_ref(), req).await.map_err(|e| match e {
+                type_config::TypeConfigError::Storage(e) => e,
+                type_config::TypeConfigError::Malformed(source) => bv_error_response_status!(
+                    422,
+                    &format!("the {} resource type configuration is not a JSON object", source.as_str())
+                ),
+            })?;
+            agent_access::validate_profiles_on_write(previous.as_ref(), &body, types.type_def(type_id))
+                .map_err(agent_refusal_error)?;
+        }
 
         // A write whose only diff is `recent_sessions` came from the
         // GUI's session-recorder (`record_recent_session` in

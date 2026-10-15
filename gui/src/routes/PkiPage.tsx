@@ -31,6 +31,7 @@ import type {
   PkiCertImportFormat,
 } from "../lib/types";
 import * as api from "../lib/api";
+import { PkiKeyRefPicker } from "../components/PkiKeyRefPicker";
 import { extractError, isRouteUnsupported } from "../lib/error";
 import { cachedRead, invalidateTopic } from "../lib/cache";
 import { watchTopic } from "../lib/changeWatcher";
@@ -2607,12 +2608,7 @@ function IssueTab({ mount }: { mount: string }) {
           onChange={(e) => setIssuerRef(e.target.value)}
           placeholder="default | uuid"
         />
-        <Input
-          label="Pin managed key (optional, requires role.allow_key_reuse)"
-          value={keyRef}
-          onChange={(e) => setKeyRef(e.target.value)}
-          placeholder="key-name | uuid"
-        />
+        <PkiKeyRefPicker mount={mount} role={role} value={keyRef} onChange={setKeyRef} />
       </div>
       <div className="mt-4">
         <Button onClick={submit} disabled={busy || !role || !commonName.trim()}>
@@ -2915,11 +2911,11 @@ function RenewCertModal({
             placeholder="default | uuid"
             disabled={!!result}
           />
-          <Input
-            label="Pin managed key (optional, requires role.allow_key_reuse)"
+          <PkiKeyRefPicker
+            mount={mount}
+            role={role}
             value={keyRef}
-            onChange={(e) => setKeyRef(e.target.value)}
-            placeholder="key-name | uuid"
+            onChange={setKeyRef}
             disabled={!!result}
           />
         </div>

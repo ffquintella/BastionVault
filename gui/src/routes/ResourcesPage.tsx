@@ -60,6 +60,7 @@ import {
   detectSecretShape,
   isLaunchableForCaller,
   isLaunchableProfile,
+  isSshTransport,
   loginClassGate,
   needsOperatorPrompt,
   pickDefaultProfile,
@@ -1697,7 +1698,8 @@ function ConnectionProfilesPanel({
   const osType = String(resource["os_type"] ?? "");
   const osTypeProtocol = protocolForOsType(osType);
   // The OS-type hints only concern SSH/RDP; a web-only type has no os_type.
-  const offersShellProtocols = protocols.includes("ssh") || protocols.includes("rdp");
+  const offersShellProtocols =
+    protocols.includes("ssh") || protocols.includes("sftp") || protocols.includes("rdp");
   const [editTarget, setEditTarget] = useState<ConnectionProfile | null>(null);
   const [creating, setCreating] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<ConnectionProfile | null>(null);
@@ -1734,7 +1736,7 @@ function ConnectionProfilesPanel({
   // Effective SSH login class across the four broker tiers. Only meaningful
   // for a resource that offers SSH; a failed resolve leaves it null and the
   // chip is simply not shown (the profile editor gates on its own copy).
-  const offersSsh = protocols.includes("ssh");
+  const offersSsh = protocols.includes("ssh") || protocols.includes("sftp");
   const [loginClass, setLoginClass] = useState<EffectiveLoginClass | null>(null);
   useEffect(() => {
     if (!offersSsh) return;
@@ -2125,7 +2127,9 @@ function ConnectionProfilesPanel({
                           ? "PKI + SSH: fresh leaf cert issued per session; SSH uses the private_key as a russh credential."
                           : p.protocol === "rdp"
                             ? "RDP: Standard Security with password, or NLA / CredSSP smartcard with PKI."
-                            : undefined
+                            : p.protocol === "sftp"
+                              ? "SFTP: opens a dual-pane file transfer window (this computer \u2194 the resource). Direct connections only."
+                              : undefined
                     }
                   >
                     {connecting === p.id ? "Connecting…" : "Connect"}
@@ -2502,7 +2506,7 @@ function ConnectionProfileEditor({
         // profile or one migrated from shared-credential).
         if (lc.login_class === "brokered") {
           setProfile((p) =>
-            p.protocol === "ssh" && p.credential_source.kind !== "ssh-engine"
+            isSshTransport(p.protocol) && p.credential_source.kind !== "ssh-engine"
               ? {
                   ...p,
                   credential_source: {
@@ -2527,9 +2531,9 @@ function ConnectionProfileEditor({
   }, [open, resource.name]);
 
   const brokeredSsh =
-    loginClass?.login_class === "brokered" && profile.protocol === "ssh";
+    loginClass?.login_class === "brokered" && isSshTransport(profile.protocol);
   const credGate = loginClassGate(
-    profile.protocol === "ssh" ? loginClass?.login_class : undefined,
+    isSshTransport(profile.protocol) ? loginClass?.login_class : undefined,
   );
 
   // Reload the candidate list of credential-shaped resource secrets
@@ -2609,9 +2613,12 @@ function ConnectionProfileEditor({
     });
   }
 
-  const protocolOptions = (["ssh", "rdp", "web"] as const)
+  const protocolOptions = (["ssh", "sftp", "rdp", "web"] as const)
     .filter((p) => protocols.includes(p) || p === profile.protocol || p === existing?.protocol)
-    .map((p) => ({ value: p, label: p === "web" ? "Web" : p.toUpperCase() }));
+    .map((p) => ({
+      value: p,
+      label: p === "web" ? "Web" : p === "sftp" ? "SFTP (file transfer)" : p.toUpperCase(),
+    }));
 
   // Unparseable text in the recipe's JSON view holds Save: the profile
   // keeps the last valid recipe meanwhile, which would silently save the
@@ -2622,7 +2629,7 @@ function ConnectionProfileEditor({
     validateProfile(profile) ??
     validateProfileForLoginClass(
       profile,
-      profile.protocol === "ssh" ? loginClass?.login_class : undefined,
+      isSshTransport(profile.protocol) ? loginClass?.login_class : undefined,
     );
   const canSave = validationError === null;
 
@@ -2786,7 +2793,7 @@ function ConnectionProfileEditor({
             )
               .filter((o) => credGate.allowedKinds.includes(o.value))
               // FIDO2 authenticates SSH only; RDP has no equivalent method.
-              .filter((o) => o.value !== "fido2" || profile.protocol === "ssh"),
+              .filter((o) => o.value !== "fido2" || isSshTransport(profile.protocol)),
             // Approved credential providers for this protocol, by their
             // display name; a brokered SSH resource allows none.
             ...(credGate.allowedKinds.includes("provider")
@@ -2870,7 +2877,7 @@ function ConnectionProfileEditor({
             update("host_key_pin", e.target.value || undefined)
           }
           placeholder={
-            profile.protocol === "ssh"
+            isSshTransport(profile.protocol)
               ? "SHA256:abc123…"
               : "RDP cert thumbprint"
           }
@@ -3269,7 +3276,7 @@ function PkiCredentialEditor({
           long the per-session cert is valid.
         </p>
       )}
-      {protocol === "ssh" && (
+      {isSshTransport(protocol) && (
         <p className="text-xs text-[var(--color-text-muted)]">
           SSH uses the issued <code>private_key</code> directly.
           The cert is delivered alongside (operators using

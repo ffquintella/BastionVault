@@ -1767,6 +1767,57 @@ validity included); the editor proposes any presented CA's pin, without
 telling whether the PKI engine issued it. See *Current State → What Phase 4
 shipped*.
 
+#### 8.1 Top-frame load failures (T139)
+
+WKWebView renders nothing for a navigation that fails before it commits, so an
+untrusted certificate, an unresolvable host or a refused connection used to
+leave the window blank while a form fill ran into its deadline as `timeout`.
+On macOS the session window's navigation delegate now reports a top-frame
+failure (`didFailProvisionalNavigation` / `didFailNavigation`, which wry does
+not implement):
+
+- the title shows a fixed notice (`page not loaded: the TLS certificate is not
+  trusted`, `… the host name does not resolve`, `… could not connect to the
+  server`, …), cleared by the next load;
+- the `audit` log gets `connect.web.load_failed` with the origin, the reason
+  and the platform's `domain:code` — never the URL path or the platform's
+  description, which can carry the full URL;
+- a form fill (and a recipe dry run) ends at once with `aborted:<reason>`
+  (`load_tls_untrusted`, `tls_declined`, `load_dns`, `load_connect`,
+  `load_timeout`, `load_offline`, `load_network`, `load_tls`, `load_failed`).
+
+WebKit reports a refused server-trust challenge as a *cancelled* navigation,
+which is not a failure by itself; the window records its own refusal (a pin
+refusal, or the operator declining) and reports the cancel as that reason.
+
+#### 8.2 Asking the operator about an untrusted certificate (T139)
+
+On macOS, a window whose profile has **no** `tls_pin_sha256` asks the operator
+when the platform rejects the certificate of one of the session's https
+origins, instead of refusing it outright. The question is a native sheet on
+the session window (the page cannot draw over or answer it) showing the
+origin, the platform's reason, the validity dates, subject, issuer and the key
+fingerprint, and — for `form` and `http-auth` sessions — that continuing sends
+the stored credential to that server.
+
+- **Continue** accepts that exact leaf key, for that origin, in that window,
+  until the session closes. A different key on the same origin is a new
+  question; nothing is saved, and the next session asks again.
+- **Don't Continue** refuses it for the rest of the session without asking
+  again; the page fails with `tls_declined`.
+- Both answers are audited (`connect.web.tls_override`, origin and key pin;
+  `decision=accepted` at `warn`).
+- A profile **with** pins never asks: a pin is the standing decision for that
+  resource, so a certificate that matches none is refused as before.
+- Origins outside the session's set are never offered; their rejection stands.
+- While the question is open the recipe engine's clock is stopped, so reading
+  the certificate does not spend the recipe's `timeout_secs`. The `http-auth`
+  answer window is not paused.
+
+Still no "accept any certificate" switch: an accept names one key. Windows
+and Linux keep the Phase 4 behaviour (refused without a matching pin): only
+the WKWebView shim can hold the challenge open for an answer.
+
 ### 9. `sso` mode (Phase 7, blocked by T52)
 
 Once S19 ships the SAML IdP and OIDC OP:
@@ -2086,6 +2137,13 @@ hosts, and the PKI-engine attribution of a suggested CA pin not done.
   helper (`web_tls_fingerprint`), proposing a presented CA's pin.
 - **Not done:** recognising that a CA belongs to this vault's PKI engine.
 - **Carried forward as caveats:** the per-platform manual checks.
+
+### Phase 4a — load failures and the untrusted-certificate question (T139) — **Implemented on macOS, not yet run live**
+
+See §8.1–8.2. Unit-tested (failure classification, the per-key operator
+override, the engine failing fast and pausing its deadline while held, the
+question's text); the WKWebView delegate and the native sheet have not been
+exercised in a live session yet. Windows and Linux unchanged.
 
 ### Phase 5 — session chrome — **Implemented behind an opt-in build feature, with caveats**
 

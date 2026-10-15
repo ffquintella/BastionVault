@@ -27,7 +27,7 @@ fn main() {
   "identifier": "mcp-bridge",
   "description": "Local Tauri MCP bridge — dev-only. Gated by the `mcp_local_dev` Cargo feature and `BASTION_TAURI_MCP=1` at runtime.",
   "local": true,
-  "windows": ["main", "ssh-*", "rdp-*"],
+  "windows": ["main", "ssh-*", "rdp-*", "sftp-*"],
   "permissions": ["mcp-bridge:default"]
 }
 "#;

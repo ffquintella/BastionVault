@@ -14,6 +14,7 @@ pub mod local;
 pub mod pairing;
 pub mod request_state;
 pub mod sanitize;
+pub mod untrusted;
 
 pub use bv_logical::{McpBinding, McpBindingKind};
 pub use dispatcher::{DispatchContext, PrincipalInfo};
@@ -80,6 +81,9 @@ mod dispatch_tests {
             client_name: "test-client".into(),
             client_version: "1.0".into(),
             waived_until: None,
+            connect_allowed: false,
+            confirm_connect: false,
+            operator: None,
         }
     }
 
@@ -527,6 +531,116 @@ mod dispatch_tests {
             dispatcher::call("bv_resource_describe", args, None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
         assert_eq!(result.structured_content.unwrap()["hostname"], json!("db1.example"));
         assert_eq!(backend.only_call().0, Operation::Read);
+    }
+
+    /// A test-only open-world entry. The catalogue carries no session tool
+    /// until `bv_resource_ssh_exec` ships, but the gate must already hold.
+    fn test_session_tool() -> catalogue::ToolMeta {
+        catalogue::ToolMeta {
+            name: "bv_test_session_tool",
+            description: "test-only",
+            read_only: false,
+            destructive: true,
+            idempotent: false,
+            is_reveal: false,
+            open_world: true,
+            input_schema: || json!({ "type": "object" }),
+            output_schema: || json!({ "type": "object" }),
+        }
+    }
+
+    fn session_binding(kind: McpBindingKind, connect_allowed: bool, confirm_connect: bool) -> McpBinding {
+        let mut b = binding(&["bv_test_session_tool"], &["resources/secrets/*"]);
+        b.kind = kind;
+        b.connect_allowed = connect_allowed;
+        b.confirm_connect = confirm_connect;
+        b
+    }
+
+    async fn dispatch_session_tool(b: &McpBinding) -> (McpError, usize) {
+        let backend = FakeBackend::default();
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        let mut args = Map::new();
+        args.insert("resource".into(), json!("web-01"));
+        args.insert("profile".into(), json!("agent"));
+        args.insert("command".into(), json!("uptime"));
+        let err =
+            dispatcher::dispatch(&test_session_tool(), args, None, &ctx(b, &backend, &p, &guard)).await.unwrap_err();
+        let calls = backend.calls.lock().unwrap().len();
+        (err, calls)
+    }
+
+    #[tokio::test]
+    async fn open_world_tool_needs_connect_allowed() {
+        let b = session_binding(McpBindingKind::Pairing("p".into()), false, false);
+        let (err, calls) = dispatch_session_tool(&b).await;
+        assert_eq!((err.code(), calls), ("mcp_connect_not_allowed", 0));
+    }
+
+    /// `connect_allowed` without `confirm_connect` is a binding no exchange
+    /// mints: refused, not trusted.
+    #[tokio::test]
+    async fn open_world_tool_needs_confirm_connect_too() {
+        let b = session_binding(McpBindingKind::Pairing("p".into()), true, false);
+        let (err, calls) = dispatch_session_tool(&b).await;
+        assert_eq!((err.code(), calls), ("mcp_connect_not_allowed", 0));
+    }
+
+    /// Network-mode apps never open sessions, whatever the binding claims.
+    #[tokio::test]
+    async fn open_world_tool_refuses_an_app_binding_permanently() {
+        let b = session_binding(McpBindingKind::App("ci".into()), true, true);
+        let (err, calls) = dispatch_session_tool(&b).await;
+        assert_eq!((err.code(), calls), ("mcp_connect_requires_local_operator", 0));
+    }
+
+    /// The allow-list is checked first: a binding that does not list the tool
+    /// is told so, not told about connect grants.
+    #[tokio::test]
+    async fn open_world_gate_runs_after_the_allow_list() {
+        let mut b = session_binding(McpBindingKind::App("ci".into()), false, false);
+        b.tool_allowlist.clear();
+        let (err, calls) = dispatch_session_tool(&b).await;
+        assert_eq!((err.code(), calls), ("mcp_tool_not_allowed", 0));
+    }
+
+    /// A pairing with both grants passes the gate; with no route for the
+    /// test-only tool, request building is what refuses it.
+    #[tokio::test]
+    async fn open_world_tool_passes_the_gate_for_a_confirmed_pairing() {
+        let mut b = session_binding(McpBindingKind::Pairing("p".into()), true, true);
+        b.reveal_allowed = true; // may coexist with connect (owner decision)
+        let (err, calls) = dispatch_session_tool(&b).await;
+        assert_eq!((err.code(), calls), ("mcp_unknown_tool", 0));
+    }
+
+    /// The connect flags gate only open-world tools: an ordinary tool on a
+    /// binding without them is unaffected.
+    #[tokio::test]
+    async fn closed_world_tools_ignore_the_connect_flags() {
+        let b = binding(&["bv_resource_describe"], &["resources/*"]);
+        assert!(!b.connect_allowed && !b.confirm_connect);
+        let backend = FakeBackend::default().with("resources/resources/db1", json!({ "hostname": "db1" }));
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        let mut args = Map::new();
+        args.insert("name".into(), json!("db1"));
+        assert!(dispatcher::call("bv_resource_describe", args, None, &ctx(&b, &backend, &p, &guard)).await.is_ok());
+    }
+
+    #[test]
+    fn args_hash_is_stable_and_key_order_independent() {
+        let mut a = Map::new();
+        a.insert("command".into(), json!("uptime"));
+        a.insert("resource".into(), json!("web-01"));
+        let mut b = Map::new();
+        b.insert("resource".into(), json!("web-01"));
+        b.insert("command".into(), json!("uptime"));
+        assert_eq!(dispatcher::args_hash(&a), dispatcher::args_hash(&b));
+        assert_eq!(dispatcher::args_hash(&a).len(), 64);
+        b.insert("command".into(), json!("uptime "));
+        assert_ne!(dispatcher::args_hash(&a), dispatcher::args_hash(&b), "one byte of the command changes it");
     }
 
     #[tokio::test]

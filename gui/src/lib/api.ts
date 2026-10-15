@@ -3083,6 +3083,105 @@ export type SessionOpenSshResponse = {
 export const sessionOpenSsh = (request: SessionOpenSshRequest) =>
   invoke<SessionOpenSshResponse>("session_open_ssh", { request });
 
+/** Open an SFTP session (features/sftp-connect.md). Always its own
+ *  dual-pane window; direct transport only. */
+export type SessionOpenSftpRequest = {
+  resource_name: string;
+  profile_id: string;
+  /** See {@link SessionOpenSshRequest.operator_credential}. */
+  operator_credential?: OperatorCredential;
+  /** See {@link SessionOpenSshRequest.connect_ticket}. */
+  connect_ticket?: string;
+};
+
+export type SessionOpenSftpResponse = {
+  token: string;
+  closed_event: string;
+  window_label: string;
+};
+
+export const sessionOpenSftp = (request: SessionOpenSftpRequest) =>
+  invoke<SessionOpenSftpResponse>("session_open_sftp", { request });
+
+// ── SFTP session window (features/sftp-connect.md) ───────────────────
+// Every call names the session token; the host refuses it unless the
+// calling window holds that live SFTP session.
+
+export type SftpEntryKind = "file" | "dir" | "symlink" | "other";
+
+export type SftpEntry = {
+  name: string;
+  kind: SftpEntryKind;
+  /** What a symlink points at (`dir` makes it navigable); else `kind`. */
+  target_kind: SftpEntryKind;
+  size: number;
+  /** Seconds since the Unix epoch. */
+  mtime: number | null;
+  permissions: number | null;
+};
+
+export type SftpListing = {
+  path: string;
+  entries: SftpEntry[];
+  /** Entries hidden because their name was unsafe. */
+  skipped_unsafe: number;
+};
+
+export type SftpDirection = "upload" | "download";
+
+export type SftpTransferProgress = {
+  transfer_id: string;
+  state: "planning" | "running" | "completed" | "cancelled" | "failed";
+  current: string;
+  files_done: number;
+  files_total: number;
+  bytes_done: number;
+  bytes_total: number;
+};
+
+export type SftpTransferOutcome = {
+  transfer_id: string;
+  outcome: "completed" | "cancelled" | "failed";
+  files: number;
+  bytes: number;
+  skipped: number;
+  error: string | null;
+};
+
+export const sftpHome = (token: string) => invoke<string>("sftp_home", { request: { token } });
+
+export const sftpList = (token: string, path: string) =>
+  invoke<SftpListing>("sftp_list", { request: { token, path } });
+
+export const sftpMkdir = (token: string, path: string, name: string) =>
+  invoke<string>("sftp_mkdir", { request: { token, path, name } });
+
+export const sftpRename = (token: string, path: string, name: string) =>
+  invoke<string>("sftp_rename", { request: { token, path, name } });
+
+export const sftpRemove = (token: string, path: string) =>
+  invoke<void>("sftp_remove", { request: { token, path } });
+
+export const sftpTransfer = (request: {
+  token: string;
+  transfer_id: string;
+  direction: SftpDirection;
+  sources: string[];
+  dest_dir: string;
+  overwrite?: boolean;
+}) => invoke<SftpTransferOutcome>("sftp_transfer", { request });
+
+export const sftpCancelTransfer = (token: string, transfer_id: string) =>
+  invoke<void>("sftp_cancel_transfer", { request: { token, transfer_id } });
+
+export const sftpLocalHome = (token: string) => invoke<string>("sftp_local_home", { request: { token } });
+
+export const sftpLocalList = (token: string, path: string) =>
+  invoke<SftpListing>("sftp_local_list", { request: { token, path } });
+
+export const sftpLocalMkdir = (token: string, path: string, name: string) =>
+  invoke<string>("sftp_local_mkdir", { request: { token, path, name } });
+
 export type SessionOpenRdpRequest = {
   resource_name: string;
   profile_id: string;

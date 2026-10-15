@@ -561,6 +561,9 @@ mod mod_test {
             client_name: String::new(),
             client_version: String::new(),
             waived_until,
+            connect_allowed: false,
+            confirm_connect: false,
+            operator: None,
         };
         let expired =
             token_store.mint_mcp_token(&op, &[], 600, "t-expired".into(), binding(Some(unix_now() - 5))).await.unwrap();
@@ -833,5 +836,218 @@ mod mod_test {
         // The MCP-bound token must be refused off the MCP dispatcher.
         let (status, _) = server.read("secret/metadata/ai/x", Some(&mcp_token)).unwrap();
         assert_eq!(status, 403);
+    }
+
+    // ── MCP brokered sessions, slice 1 (features/mcp-brokered-sessions.md) ──
+
+    // `get`/`put` on the sys mount's own barrier view, to plant records as
+    // an older server stored them.
+    use crate::storage::Storage as _;
+
+    /// The barrier view the `sys/` backend reads and writes (a logical mount
+    /// view, not the core's system view).
+    fn sys_mount_view(core: &crate::core::Core) -> std::sync::Arc<crate::storage::barrier_view::BarrierView> {
+        core.router.matching_view("sys/mcp/config").unwrap().expect("the sys mount has a view")
+    }
+
+    fn pairing_body_with(id: &str, extra: Value) -> Option<serde_json::Map<String, Value>> {
+        let mut body = pairing_body(id).unwrap();
+        for (k, v) in extra.as_object().unwrap() {
+            body["pairing"][k] = v.clone();
+        }
+        Some(body)
+    }
+
+    async fn exchanged_binding(core: &crate::core::Core, token: &str) -> crate::logical::McpBinding {
+        let auth_module = core.module_manager().get_module::<crate::modules::auth::AuthModule>("auth").unwrap();
+        let token_store = auth_module.token_store.load_full().unwrap();
+        token_store
+            .check_token("mcp/dispatch", token, "", true)
+            .await
+            .unwrap()
+            .expect("an exchanged token is live on the MCP dispatcher")
+            .mcp_binding
+            .expect("and carries its binding")
+    }
+
+    /// The pairing exchange grants `connect_allowed` together with
+    /// `reveal_allowed` (the owner's decision), forces `confirm_connect` on,
+    /// and records the operator from the session's own metadata.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_mcp_pairing_exchange_grants_connect_with_the_operator_recorded() {
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_mcp_pairing_connect").await;
+        let core: &crate::core::Core = &core;
+        let op = operator_token(core, &root_token, "felipe").await;
+
+        let body = pairing_body_with(
+            "with-connect",
+            json!({
+                "tool_allowlist": ["bv_kv_read", "bv_resource_ssh_exec"],
+                "reveal_allowed": true,
+                "connect_allowed": true,
+                "confirm_connect": true,
+            }),
+        );
+        let resp = test_write_api(core, &op, "sys/mcp/token", true, body).await;
+        let token = resp.unwrap().unwrap().data.unwrap()["auth"]["client_token"].as_str().unwrap().to_string();
+        let binding = exchanged_binding(core, &token).await;
+        assert!(binding.connect_allowed && binding.confirm_connect && binding.reveal_allowed);
+        let operator = binding.operator.expect("a pairing binding names its operator");
+        assert_eq!(operator.username, "felipe");
+        assert_eq!(operator.mount_path, "userpass/");
+        assert_eq!(operator.namespace, "", "root namespace");
+
+        // Without a connect grant: no sessions, but confirmation is still
+        // recorded as on — no pairing binding is ever minted without it.
+        let resp = test_write_api(core, &op, "sys/mcp/token", true, pairing_body("no-connect")).await;
+        let token = resp.unwrap().unwrap().data.unwrap()["auth"]["client_token"].as_str().unwrap().to_string();
+        let binding = exchanged_binding(core, &token).await;
+        assert!(!binding.connect_allowed);
+        assert!(binding.confirm_connect);
+        assert!(binding.operator.is_some());
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_mcp_pairing_exchange_connect_refusals() {
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_mcp_pairing_connect_refusals").await;
+        let core: &crate::core::Core = &core;
+        let op = operator_token(core, &root_token, "felipe").await;
+
+        for (id, extra, needle) in [
+            // connect_allowed without confirm_connect.
+            ("r-1", json!({ "connect_allowed": true }), "requires pairing.confirm_connect"),
+            // confirm_connect can never be turned off, with or without connect.
+            ("r-2", json!({ "connect_allowed": true, "confirm_connect": false }), "cannot be false"),
+            ("r-3", json!({ "confirm_connect": false }), "cannot be false"),
+            // A session tool in the allow-list needs connect_allowed.
+            ("r-4", json!({ "tool_allowlist": ["bv_resource_ssh_exec"] }), "requires pairing.connect_allowed"),
+            // Strictly typed.
+            ("r-5", json!({ "connect_allowed": "yes", "confirm_connect": true }), "must be a boolean"),
+            ("r-6", json!({ "connect_allowed": true, "confirm_connect": 1 }), "must be a boolean"),
+        ] {
+            let resp = test_write_api(core, &op, "sys/mcp/token", false, pairing_body_with(id, extra)).await;
+            let err = resp.expect_err(id).to_string();
+            assert!(err.contains(needle), "{id}: {err}");
+        }
+        // Nothing was minted for any of them.
+        let resp = test_list_api(core, &root_token, "sys/mcp/tokens", true).await;
+        assert_eq!(resp.unwrap().unwrap().data.unwrap()["tokens"], json!([]));
+    }
+
+    /// Network-mode apps never open sessions: `sys/mcp/apps` refuses a
+    /// session tool in `tool_allowlist` (array or comma form), and an app
+    /// record that already carries one — written before the rule — can
+    /// neither be updated nor exchanged.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_mcp_apps_refuse_open_world_tools() {
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_mcp_apps_open_world").await;
+        let core: &crate::core::Core = &core;
+
+        for allowlist in [
+            json!(["bv_kv_read_metadata", "bv_resource_ssh_exec"]),
+            json!("bv_kv_read_metadata,bv_resource_web_fetch"),
+            json!(["bv_resource_rdp_act"]),
+        ] {
+            let body = json!({ "approle_role": "reader-role", "tool_allowlist": allowlist }).as_object().cloned();
+            let err = test_write_api(core, &root_token, "sys/mcp/apps/net-app", false, body).await.unwrap_err();
+            assert!(err.to_string().contains("mcp_connect_requires_local_operator"), "{allowlist}: {err}");
+        }
+        let resp = test_read_api(core, &root_token, "sys/mcp/apps/net-app", false).await;
+        assert!(resp.is_err(), "a refused write stores nothing");
+
+        // A legacy record carrying a session tool, written straight to the
+        // system view as an older server would have stored it.
+        setup_app_role(core, &root_token, "reader-role").await;
+        register_mcp_app(core, &root_token, "legacy-app", "reader-role").await;
+        let view = sys_mount_view(core);
+        let mut record: Value =
+            serde_json::from_slice(&view.get("mcp/apps/legacy-app").await.unwrap().unwrap().value).unwrap();
+        record["tool_allowlist"] = json!(["bv_kv_read_metadata", "bv_resource_ssh_exec"]);
+        record["machine_waiver"] =
+            json!({ "reason": "ci", "granted_by": "root", "granted_at": 0, "expires_at": u64::MAX / 2 });
+        view.put(&crate::storage::StorageEntry::new("mcp/apps/legacy-app", &record).unwrap()).await.unwrap();
+
+        let login = login_as(core, &root_token, "reader-role").await;
+        let err =
+            test_write_api(core, &login, "sys/mcp/token", false, json!({ "app": "legacy-app" }).as_object().cloned())
+                .await
+                .unwrap_err();
+        assert!(err.to_string().contains("mcp_connect_requires_local_operator"), "{err}");
+
+        let update = json!({ "description": "touch" }).as_object().cloned();
+        let err = test_write_api(core, &root_token, "sys/mcp/apps/legacy-app", false, update).await.unwrap_err();
+        assert!(err.to_string().contains("bv_resource_ssh_exec"), "{err}");
+        let fixed = json!({ "tool_allowlist": ["bv_kv_read_metadata"] }).as_object().cloned();
+        assert!(test_write_api(core, &root_token, "sys/mcp/apps/legacy-app", true, fixed).await.is_ok());
+    }
+
+    async fn read_mcp_config(core: &crate::core::Core, token: &str) -> serde_json::Map<String, Value> {
+        test_read_api(core, token, "sys/mcp/config", true).await.unwrap().unwrap().data.unwrap()
+    }
+
+    async fn write_mcp_config(
+        core: &crate::core::Core,
+        token: &str,
+        body: Value,
+        ok: bool,
+    ) -> Result<Option<crate::logical::Response>, RvError> {
+        test_write_api(core, token, "sys/mcp/config", ok, body.as_object().cloned()).await
+    }
+
+    /// `sys/mcp/config`: the runtime switch and destination allow-list read
+    /// as off / not set on an old record, validate every entry on write
+    /// (leaving the record untouched on refusal), warn on an always-denied
+    /// overlap, and reset with `null`.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_mcp_config_brokered_session_keys() {
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_mcp_config_brokered").await;
+        let core: &crate::core::Core = &core;
+        let token = root_token.as_str();
+
+        // An old record (written before the keys existed) reads as off.
+        let view = sys_mount_view(core);
+        let old = json!({ "version": 1, "default_ttl_secs": 3600, "max_ttl_secs": 86400, "waiver_max_days": 90 });
+        view.put(&crate::storage::StorageEntry::new("mcp/config", &old).unwrap()).await.unwrap();
+        let data = read_mcp_config(core, token).await;
+        assert_eq!(data["brokered_sessions_enabled"], json!(false));
+        assert_eq!(data["brokered_sessions_allowed_target_cidrs"], Value::Null);
+
+        let body =
+            json!({ "brokered_sessions_enabled": true, "brokered_sessions_allowed_target_cidrs": ["10.20.0.0/16"] });
+        let resp = write_mcp_config(core, token, body, true).await.unwrap().unwrap();
+        assert!(resp.warnings.is_empty());
+        let data = read_mcp_config(core, token).await;
+        assert_eq!(data["brokered_sessions_enabled"], json!(true));
+        assert_eq!(data["brokered_sessions_allowed_target_cidrs"], json!(["10.20.0.0/16"]));
+        assert_eq!(data["waiver_max_days"], json!(90), "other keys are untouched");
+
+        // An invalid entry refuses the write, naming it, and changes nothing.
+        let body = json!({ "brokered_sessions_enabled": false, "brokered_sessions_allowed_target_cidrs": ["10.0.0.0/8", "10.0.0.1/33"] });
+        let err = write_mcp_config(core, token, body, false).await.unwrap_err();
+        assert!(err.to_string().contains("\"10.0.0.1/33\""), "{err}");
+        let data = read_mcp_config(core, token).await;
+        assert_eq!(data["brokered_sessions_enabled"], json!(true), "nothing was stored");
+        assert_eq!(data["brokered_sessions_allowed_target_cidrs"], json!(["10.20.0.0/16"]));
+        assert!(write_mcp_config(core, token, json!({ "brokered_sessions_enabled": "maybe" }), false).await.is_err());
+        assert!(write_mcp_config(core, token, json!({ "brokered_sessions_allowed_target_cidrs": 7 }), false)
+            .await
+            .is_err());
+
+        // An always-denied overlap is accepted with a warning (CLI comma form).
+        let body = json!({ "brokered_sessions_allowed_target_cidrs": "10.0.0.0/8, 169.254.169.254/32" });
+        let resp = write_mcp_config(core, token, body, true).await.unwrap().unwrap();
+        assert_eq!(resp.warnings.len(), 1, "{:?}", resp.warnings);
+        assert!(resp.warnings[0].contains("169.254.169.254/32"));
+        let data = read_mcp_config(core, token).await;
+        assert_eq!(data["brokered_sessions_allowed_target_cidrs"], json!(["10.0.0.0/8", "169.254.169.254/32"]));
+
+        // An empty list is a list; `null` resets to the server config.
+        write_mcp_config(core, token, json!({ "brokered_sessions_allowed_target_cidrs": [] }), true).await.unwrap();
+        assert_eq!(read_mcp_config(core, token).await["brokered_sessions_allowed_target_cidrs"], json!([]));
+        let body = json!({ "brokered_sessions_allowed_target_cidrs": null, "brokered_sessions_enabled": "false" });
+        write_mcp_config(core, token, body, true).await.unwrap();
+        let data = read_mcp_config(core, token).await;
+        assert_eq!(data["brokered_sessions_allowed_target_cidrs"], Value::Null);
+        assert_eq!(data["brokered_sessions_enabled"], json!(false));
     }
 }

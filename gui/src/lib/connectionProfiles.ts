@@ -25,6 +25,7 @@ import type {
 export function defaultPort(protocol: SessionProtocol): number {
   switch (protocol) {
     case "ssh":
+    case "sftp":
       return 22;
     case "rdp":
       return 3389;
@@ -45,10 +46,21 @@ export function parseSessionProtocol(raw: unknown): SessionProtocol | null {
     case "ssh":
     case "rdp":
     case "web":
+    case "sftp":
       return raw;
     default:
       return null;
   }
+}
+
+/**
+ * True for the protocols that ride an SSH transport (`ssh`, and `sftp`, which
+ * is the same connection with the `sftp` subsystem instead of a shell). They
+ * share credential sources, the SSH login-class rule and host-key pinning.
+ * See features/sftp-connect.md.
+ */
+export function isSshTransport(protocol: unknown): boolean {
+  return protocol === "ssh" || protocol === "sftp";
 }
 
 /** Map structured `os_type` to the protocol the Connect button
@@ -293,15 +305,15 @@ export function validateProfile(p: ConnectionProfile): string | null {
       // smartcard/PKINIT, which is the `pki` source. Blocking the save here
       // mirrors the host's own refusal, so the operator finds out in the
       // editor rather than at 3am on a locked-out connect.
-      if (p.protocol !== "ssh") {
-        return "FIDO2 security keys can only authenticate SSH sessions. For Windows, use the PKI (smartcard) source, and tick \u201cRequire MFA re-validation\u201d if you want a security-key prompt before the session opens.";
+      if (!isSshTransport(p.protocol)) {
+        return "FIDO2 security keys can only authenticate SSH and SFTP sessions. For Windows, use the PKI (smartcard) source, and tick \u201cRequire MFA re-validation\u201d if you want a security-key prompt before the session opens.";
       }
       return null;
     case "default-account":
       // SSH brokers a cert/OTP from the engine, so it needs the same
       // mount/role as `ssh-engine`. RDP carries no extra fields (the
       // password is prompted at connect).
-      if (p.protocol === "ssh") {
+      if (isSshTransport(p.protocol)) {
         if (!p.credential_source.ssh_mount?.trim()) {
           return "SSH-engine mount is required for the default-account source";
         }
@@ -313,6 +325,11 @@ export function validateProfile(p: ConnectionProfile): string | null {
     case "none":
       return "SSH and RDP profiles need a credential source";
     case "provider":
+      // The provider release (`connect/authorize`) speaks ssh / rdp / web;
+      // an SFTP launch has no release path yet (features/sftp-connect.md).
+      if (protocol === "sftp") {
+        return "SFTP profiles can't use a credential provider yet; pick a stored secret, LDAP, PKI or SSH-engine source";
+      }
       if (!isProviderName(p.credential_source.provider)) {
         return "Pick the credential provider the operator's account comes from";
       }
@@ -582,6 +599,10 @@ export function isLaunchableProfile(p: ConnectProfileHint): boolean {
       (p.credential_source.kind === "none" || FORM_WEB_SOURCES.includes(p.credential_source.kind))
     );
   }
+  // SFTP is direct-only in this release: there is no bastion path for the
+  // `sftp` subsystem (features/sftp-connect.md, Phase 4), so a profile pinned
+  // to the Rustion transport has nothing to launch.
+  if (protocol === "sftp" && p.kind === "rustion") return false;
   switch (p.credential_source.kind) {
     case "secret":
     case "ldap":
@@ -594,12 +615,12 @@ export function isLaunchableProfile(p: ConnectProfileHint): boolean {
       // message, but the other modes launch.
       return p.credential_source.mode !== "pqc";
     case "fido2":
-      // SSH only; see validateProfile.
-      return p.protocol === "ssh";
+      // SSH transport only; see validateProfile.
+      return isSshTransport(p.protocol);
     case "default-account":
       // SSH brokers via the engine (same pqc caveat as `ssh-engine`); RDP
       // prompts for the password at connect and launches.
-      if (p.protocol === "ssh") return p.credential_source.mode !== "pqc";
+      if (isSshTransport(p.protocol)) return p.credential_source.mode !== "pqc";
       return true;
     case "none":
       // Only meaningful on a web profile (handled above).
@@ -607,8 +628,8 @@ export function isLaunchableProfile(p: ConnectProfileHint): boolean {
     case "provider":
       // The operator picks one of their own accounts at connect; the server
       // releases it on every transport (`connect/authorize` direct,
-      // `rustion/v2/session/open` brokered).
-      return true;
+      // `rustion/v2/session/open` brokered) — for ssh / rdp, not sftp.
+      return protocol !== "sftp";
   }
 }
 
@@ -809,7 +830,7 @@ export function validateProfileForLoginClass(
   p: ConnectionProfile,
   loginClass: SshLoginClass | undefined,
 ): string | null {
-  if (p.protocol !== "ssh") return null;
+  if (!isSshTransport(p.protocol)) return null;
   if (loginClass !== "brokered") return null;
   if (
     p.credential_source.kind !== "ssh-engine" &&

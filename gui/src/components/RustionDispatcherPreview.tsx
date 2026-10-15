@@ -6,12 +6,20 @@
 // opens no session. Renders nothing when no bastion is involved (the
 // resource dials direct), so it stays out of the way for non-Rustion
 // resources.
+//
+// "No bastion involved" is decided by the effective *transport*, not by
+// whether the dispatcher can name a candidate: with no pinned list and no
+// group the dispatcher falls back to the whole registry as a random pool,
+// so it always has an answer. Showing that pool for a `direct` resource
+// claimed a route Connect never takes — the GUI dialed the target itself.
 
 import { useEffect, useState } from "react";
 
 import { Card } from "./ui";
+import { useEffectivePolicy } from "../hooks/useEffectivePolicy";
 import { extractError, isPermissionDenied } from "../lib/error";
 import {
+  brokersThroughBastion,
   rustionDispatcherPreview,
   type RustionDispatcherPreview as Preview,
   type RustionHealthStatus,
@@ -53,6 +61,7 @@ export function RustionDispatcherPreview({
   const [preview, setPreview] = useState<Preview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const effective = useEffectivePolicy(resourceId, resourceType, assetGroupIds);
 
   useEffect(() => {
     let cancelled = false;
@@ -82,7 +91,10 @@ export function RustionDispatcherPreview({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resourceId, resourceType, assetGroupIds.join(",")]);
 
-  if (loading) return null;
+  if (loading || effective.loading) return null;
+  // Same predicate the Connect path uses to choose a bastion. An unresolved
+  // policy (null) is "unknown", never "brokered", so it hides the panel too.
+  if (!brokersThroughBastion(effective.policy)) return null;
   if (error) {
     return (
       <Card>

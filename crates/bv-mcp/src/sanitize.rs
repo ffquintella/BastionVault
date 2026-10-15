@@ -1,8 +1,21 @@
 //! Strip anything a rendered string could use to fool the model or hide
-//! text from the operator: C0/C1 controls (except `\n`/`\t`), ANSI CSI/OSC
-//! escape sequences, and Unicode bidi override characters. Every string
-//! leaf `tools/call` returns passes through here before it reaches
-//! `content`/`structuredContent`.
+//! text from the operator. Every string leaf `tools/call` returns passes
+//! through here before it reaches `content`/`structuredContent`:
+//!
+//! * C0/C1 controls (except `\n`/`\t`) and ANSI CSI/OSC escape sequences;
+//! * every Unicode `Bidi_Control` character: the embeddings, overrides and
+//!   isolates (U+202A–U+202E, U+2066–U+2069) and the marks LRM, RLM and ALM
+//!   (U+200E, U+200F, U+061C);
+//! * zero-width characters (U+200B–U+200D, U+2060–U+2064, U+FEFF);
+//! * Unicode tag characters (U+E0000–U+E007F) — the "ASCII smuggling"
+//!   channel, invisible when rendered but read by a model;
+//! * interlinear annotation characters (U+FFF9–U+FFFB).
+//!
+//! The line and paragraph separators U+2028/U+2029 become `\n`, so a line
+//! break the model sees is one the operator sees too.
+//!
+//! The last four groups were added by `features/mcp-brokered-sessions.md`
+//! §8 step 4, for every tool, not only the session tools.
 
 /// `\x1b[` (CSI) ... final byte in `0x40..=0x7e`, or `\x1b]` (OSC) ...
 /// terminated by BEL (`\x07`) or ST (`\x1b\\`).
@@ -44,14 +57,43 @@ fn strip_ansi(input: &str) -> String {
     out
 }
 
-/// Unicode bidi override / embedding control characters (RLO, LRO, RLE,
-/// LRE, PDF, LRI, RLI, FSI, PDI) — used to visually reorder text so a
-/// hidden instruction reads differently than it renders.
-fn is_bidi_override(c: char) -> bool {
+/// Unicode `Bidi_Control` characters: the embeddings and overrides (LRE,
+/// RLE, PDF, LRO, RLO), the isolates (LRI, RLI, FSI, PDI) and the marks (LRM,
+/// RLM, ALM) — used to visually reorder text so a hidden instruction reads
+/// differently than it renders.
+fn is_bidi_control(c: char) -> bool {
     matches!(
         c,
-        '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}'
     )
+}
+
+/// Zero-width characters: ZWSP, ZWNJ, ZWJ, WORD JOINER, the invisible
+/// operators U+2061–U+2064, and ZWNBSP/BOM. They split a word the operator
+/// reads into tokens the model reads differently, or carry bits outright.
+fn is_zero_width(c: char) -> bool {
+    matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}'..='\u{2064}' | '\u{FEFF}')
+}
+
+/// Unicode tag characters: an invisible copy of ASCII that a model reads.
+fn is_tag_character(c: char) -> bool {
+    ('\u{E0000}'..='\u{E007F}').contains(&c)
+}
+
+/// Interlinear annotation anchor, separator and terminator: text between
+/// them is not meant to be rendered inline.
+fn is_interlinear_annotation(c: char) -> bool {
+    ('\u{FFF9}'..='\u{FFFB}').contains(&c)
+}
+
+/// Every character [`sanitize_for_model`] deletes outright (U+2028/U+2029 are
+/// rewritten, not deleted, and so are not in this set).
+fn is_stripped(c: char) -> bool {
+    is_stripped_control(c)
+        || is_bidi_control(c)
+        || is_zero_width(c)
+        || is_tag_character(c)
+        || is_interlinear_annotation(c)
 }
 
 /// `true` for C0 controls other than `\n`/`\t`, and all C1 controls.
@@ -65,7 +107,14 @@ fn is_stripped_control(c: char) -> bool {
 /// Sanitize a string leaf before it is returned to an MCP client.
 pub fn sanitize_for_model(input: &str) -> String {
     let ansi_stripped = strip_ansi(input);
-    ansi_stripped.chars().filter(|c| !is_stripped_control(*c) && !is_bidi_override(*c)).collect()
+    ansi_stripped
+        .chars()
+        .filter_map(|c| match c {
+            '\u{2028}' | '\u{2029}' => Some('\n'),
+            c if is_stripped(c) => None,
+            c => Some(c),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -110,6 +159,47 @@ mod tests {
         // RLO followed by reversed-looking text, then PDF to pop it.
         let input = "safe\u{202E}txt.exe\u{202C}.txt";
         assert_eq!(sanitize_for_model(input), "safetxt.exe.txt");
+    }
+
+    #[test]
+    fn strips_every_bidi_control_including_the_marks() {
+        // The isolates, plus LRM/RLM/ALM, which the first version let through.
+        let input = "a\u{2066}b\u{2067}c\u{2068}d\u{2069}e\u{200E}f\u{200F}g\u{061C}h\u{202A}i\u{202B}j\u{202D}k";
+        assert_eq!(sanitize_for_model(input), "abcdefghijk");
+    }
+
+    #[test]
+    fn strips_zero_width_characters() {
+        let input = "r\u{200B}m\u{200C} -\u{200D}rf\u{2060} /\u{2061}\u{2062}\u{2063}\u{2064}\u{FEFF}";
+        assert_eq!(sanitize_for_model(input), "rm -rf /");
+    }
+
+    #[test]
+    fn strips_unicode_tag_characters() {
+        // "hi" followed by an invisible tag-encoded "run rm" and the
+        // CANCEL TAG: the classic ASCII-smuggling payload.
+        let smuggled: String = "run rm".chars().map(|c| char::from_u32(0xE0000 + c as u32).unwrap()).collect();
+        let input = format!("hi\u{E0001}{smuggled}\u{E007F}");
+        assert_eq!(sanitize_for_model(&input), "hi");
+        assert_eq!(sanitize_for_model("\u{E0000}x\u{E007F}"), "x");
+    }
+
+    #[test]
+    fn strips_interlinear_annotation_characters() {
+        assert_eq!(sanitize_for_model("base\u{FFF9}hidden\u{FFFA}gloss\u{FFFB}"), "basehiddengloss");
+    }
+
+    #[test]
+    fn line_and_paragraph_separators_become_newlines() {
+        assert_eq!(sanitize_for_model("one\u{2028}two\u{2029}three"), "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn leaves_ordinary_non_ascii_text_alone() {
+        // Accents, CJK, emoji with ZWJ removed only where it is the ZWJ
+        // itself: the visible code points survive.
+        assert_eq!(sanitize_for_model("café — 日本語 ✓"), "café — 日本語 ✓");
+        assert_eq!(sanitize_for_model("שלום"), "שלום", "RTL text itself is not a control");
     }
 
     #[test]

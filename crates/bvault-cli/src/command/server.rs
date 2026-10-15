@@ -345,6 +345,12 @@ impl Server {
         // answer "not enabled" rather than 404ing in a way indistinguishable
         // from a build that doesn't have them.
         let mcp_config = web::Data::new(config.mcp.clone());
+        // `mcp.brokered_sessions.allowed_target_cidrs` entries that overlap an
+        // always-denied class (loopback, link-local, ...) were accepted at
+        // load and have no effect; say so once, now that the logger is up.
+        for warning in config.mcp.brokered_sessions.startup_warnings() {
+            log::warn!(target: "security", "{warning}");
+        }
         // One store for the whole server: the preview token minted by one
         // worker must be redeemable by whichever worker handles the apply.
         let exchange_preview_store =

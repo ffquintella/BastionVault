@@ -185,6 +185,155 @@ pub struct McpConfig {
     /// shape does not change shape later.
     #[serde(default)]
     pub authorization_servers: Vec<String>,
+    /// `mcp { brokered_sessions { … } }` (`features/mcp-brokered-sessions.md`
+    /// §12). Absent ⇒ the block's defaults, which are **off**: an old config
+    /// parses unchanged and opens no session.
+    #[serde(default)]
+    pub brokered_sessions: BrokeredSessionsConfig,
+}
+
+/// Protocols `mcp.brokered_sessions.protocols` may list.
+pub const BROKERED_SESSION_PROTOCOLS: &[&str] = &["ssh", "web", "rdp"];
+
+/// Ceilings of `mcp.brokered_sessions` (§11 "Limits"). A configured value
+/// above one, or zero, refuses to load: a limit is a security bound, so it is
+/// never clamped in silence.
+pub const BROKERED_MAX_CONCURRENT_CEILING: u32 = 32;
+pub const BROKERED_RATE_PER_BINDING_PER_MIN_CEILING: u32 = 60;
+pub const BROKERED_CALL_TIMEOUT_SECS_CEILING: u64 = 120;
+pub const BROKERED_MAX_OUTPUT_BYTES_CEILING: u64 = 262_144;
+
+/// `mcp { brokered_sessions { … } }` — the server-side switch for agent
+/// sessions to resources, and the limits that bound them. Every session call
+/// needs `enabled`, its protocol in `protocols`, *and* the runtime switch
+/// `sys/mcp/config.brokered_sessions_enabled`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct BrokeredSessionsConfig {
+    /// The static server switch. Off unless set.
+    #[serde(default, deserialize_with = "parse_bool_string")]
+    pub enabled: bool,
+    /// Subset of `["ssh", "web", "rdp"]`. Unlisted protocols are refused.
+    #[serde(default)]
+    pub protocols: Vec<String>,
+    /// The destination allow-list. `None` (the key absent) means the built-in
+    /// default, RFC 1918 plus `fc00::/7`; a list **replaces** that default
+    /// and is not merged with it, and an empty list allows no destination.
+    /// Loopback, link-local, multicast and the vault's own addresses are
+    /// denied whatever is listed: an entry overlapping them is accepted with a
+    /// startup warning and has no effect. A runtime value in
+    /// `sys/mcp/config` replaces this one in turn.
+    #[serde(default)]
+    pub allowed_target_cidrs: Option<Vec<String>>,
+    /// Concurrent sessions on this node. 1..=32.
+    #[serde(default = "default_brokered_max_concurrent")]
+    #[default(4)]
+    pub max_concurrent: u32,
+    /// Session calls per binding per minute, per node. 1..=60.
+    #[serde(default = "default_brokered_rate_per_binding_per_min")]
+    #[default(6)]
+    pub rate_per_binding_per_min: u32,
+    /// Call timeout for SSH and web sessions, seconds. 1..=120.
+    #[serde(default = "default_brokered_call_timeout_secs")]
+    #[default(20)]
+    pub call_timeout_secs: u64,
+    /// Call timeout for RDP sessions, seconds. 1..=120.
+    #[serde(default = "default_brokered_rdp_call_timeout_secs")]
+    #[default(45)]
+    pub rdp_call_timeout_secs: u64,
+    /// Output bytes returned to the model per call (SSH stdout+stderr
+    /// jointly). 1..=262144.
+    #[serde(default = "default_brokered_max_output_bytes")]
+    #[default(65_536)]
+    pub max_output_bytes: u64,
+    #[serde(default)]
+    pub ssh: BrokeredSshConfig,
+}
+
+/// `mcp { brokered_sessions { ssh { … } } }`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct BrokeredSshConfig {
+    /// The vault's egress addresses, written into a brokered certificate's
+    /// `source-address` critical option. Empty ⇒ the option is omitted.
+    #[serde(default)]
+    pub cert_source_addresses: Vec<String>,
+}
+
+fn default_brokered_max_concurrent() -> u32 {
+    4
+}
+
+fn default_brokered_rate_per_binding_per_min() -> u32 {
+    6
+}
+
+fn default_brokered_call_timeout_secs() -> u64 {
+    20
+}
+
+fn default_brokered_rdp_call_timeout_secs() -> u64 {
+    45
+}
+
+fn default_brokered_max_output_bytes() -> u64 {
+    65_536
+}
+
+fn brokered_bound_err(key: &str, value: u64, ceiling: u64) -> RvError {
+    RvError::ErrString(format!("mcp.brokered_sessions.{key} = {value} is out of range: it must be 1..={ceiling}"))
+}
+
+impl BrokeredSessionsConfig {
+    /// Check every value; on success return the warnings the block earns
+    /// (an `allowed_target_cidrs` entry overlapping an always-denied class).
+    /// The first invalid value refuses the whole config, naming the key and,
+    /// for a list, the entry.
+    pub fn validate(&self) -> Result<Vec<String>, RvError> {
+        for p in &self.protocols {
+            if !BROKERED_SESSION_PROTOCOLS.contains(&p.as_str()) {
+                return Err(RvError::ErrString(format!(
+                    "mcp.brokered_sessions.protocols: {p:?} is not one of {BROKERED_SESSION_PROTOCOLS:?}"
+                )));
+            }
+        }
+        let bounded: [(&str, u64, u64); 5] = [
+            ("max_concurrent", self.max_concurrent.into(), BROKERED_MAX_CONCURRENT_CEILING.into()),
+            (
+                "rate_per_binding_per_min",
+                self.rate_per_binding_per_min.into(),
+                BROKERED_RATE_PER_BINDING_PER_MIN_CEILING.into(),
+            ),
+            ("call_timeout_secs", self.call_timeout_secs, BROKERED_CALL_TIMEOUT_SECS_CEILING),
+            ("rdp_call_timeout_secs", self.rdp_call_timeout_secs, BROKERED_CALL_TIMEOUT_SECS_CEILING),
+            ("max_output_bytes", self.max_output_bytes, BROKERED_MAX_OUTPUT_BYTES_CEILING),
+        ];
+        for (key, value, ceiling) in bounded {
+            if value == 0 || value > ceiling {
+                return Err(brokered_bound_err(key, value, ceiling));
+            }
+        }
+        for entry in &self.ssh.cert_source_addresses {
+            if !bv_utils::destination_policy::is_address_or_cidr(entry) {
+                return Err(RvError::ErrString(format!(
+                    "mcp.brokered_sessions.ssh.cert_source_addresses: {entry:?} is not an address or CIDR"
+                )));
+            }
+        }
+        let warnings = match &self.allowed_target_cidrs {
+            Some(entries) => {
+                bv_utils::destination_policy::parse_target_cidrs(entries)
+                    .map_err(|e| RvError::ErrString(format!("mcp.brokered_sessions.{e}")))?
+                    .warnings
+            }
+            None => Vec::new(),
+        };
+        Ok(warnings.into_iter().map(|w| format!("mcp.brokered_sessions.{w}")).collect())
+    }
+
+    /// The warnings to log once the logger is up. Empty for an invalid block,
+    /// which `load_config` has already refused.
+    pub fn startup_warnings(&self) -> Vec<String> {
+        self.validate().unwrap_or_default()
+    }
 }
 
 /// `metrics { ... }` — access control for the `/metrics` scrape endpoint.
@@ -542,6 +691,11 @@ fn check_config(config: &Config) -> Result<(), RvError> {
         return Err(RvError::ErrConfigListenerNotFound);
     }
 
+    // Refuses an invalid `mcp.brokered_sessions` block at load, naming the
+    // key and entry; its warnings are logged at startup, once the logger is
+    // up (`BrokeredSessionsConfig::startup_warnings`).
+    config.mcp.brokered_sessions.validate()?;
+
     Ok(())
 }
 
@@ -859,6 +1013,151 @@ mod test {
             config.metrics.allow_unauthenticated_cidrs,
             vec!["10.20.0.0/16".to_string(), "::1/128".to_string()]
         );
+    }
+
+    const BROKERED_BASE: &str = r#"
+        storage "file" {
+          path    = "./vault/data"
+        }
+
+        listener "tcp" {
+          address     = "127.0.0.1:8200"
+        }
+    "#;
+
+    fn load_str(dir_name: &str, file: &str, body: &str) -> Result<Config, RvError> {
+        let dir = env::temp_dir().join(TEST_DIR).join(dir_name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(file);
+        write_file(path.to_str().unwrap(), body).unwrap();
+        load_config(path.to_str().unwrap())
+    }
+
+    /// An old config — no `mcp` block, or one without `brokered_sessions` —
+    /// parses unchanged, with sessions off and the spec's defaults.
+    #[test]
+    fn test_old_config_parses_with_brokered_sessions_off() {
+        let config = load_str("bs_old_none", "c.hcl", BROKERED_BASE).unwrap();
+        let bs = &config.mcp.brokered_sessions;
+        assert_eq!(bs, &BrokeredSessionsConfig::default());
+        assert!(!bs.enabled);
+        assert!(bs.protocols.is_empty());
+        assert_eq!(bs.allowed_target_cidrs, None, "absent means the built-in default list");
+        assert_eq!(
+            (
+                bs.max_concurrent,
+                bs.rate_per_binding_per_min,
+                bs.call_timeout_secs,
+                bs.rdp_call_timeout_secs,
+                bs.max_output_bytes
+            ),
+            (4, 6, 20, 45, 65_536)
+        );
+        assert!(bs.ssh.cert_source_addresses.is_empty());
+        assert!(bs.startup_warnings().is_empty());
+
+        let with_mcp =
+            format!("{BROKERED_BASE}\nmcp {{\n  enabled = true\n  canonical_url = \"https://v/v2/mcp\"\n}}\n");
+        let config = load_str("bs_old_mcp", "c.hcl", &with_mcp).unwrap();
+        assert!(config.mcp.enabled);
+        assert_eq!(config.mcp.brokered_sessions, BrokeredSessionsConfig::default());
+
+        // The JSON form, too.
+        let json = r#"{"storage":{"file":{"path":"./d"}},"listener":{"tcp":{"address":"127.0.0.1:8200"}},"mcp":{"enabled":true}}"#;
+        let config = load_str("bs_old_json", "c.json", json).unwrap();
+        assert_eq!(config.mcp.brokered_sessions, BrokeredSessionsConfig::default());
+    }
+
+    #[test]
+    fn test_brokered_sessions_block_parses_and_replaces_the_default_list() {
+        let body = format!(
+            r#"{BROKERED_BASE}
+            mcp {{
+              enabled = true
+              brokered_sessions {{
+                enabled                  = true
+                protocols                = ["ssh"]
+                allowed_target_cidrs     = ["10.20.0.0/16", "2001:db8::/32"]
+                max_concurrent           = 8
+                rate_per_binding_per_min = 10
+                call_timeout_secs        = 30
+                rdp_call_timeout_secs    = 60
+                max_output_bytes         = 131072
+                ssh {{
+                  cert_source_addresses = ["203.0.113.7", "203.0.113.0/24"]
+                }}
+              }}
+            }}
+        "#
+        );
+        let config = load_str("bs_full", "c.hcl", &body).unwrap();
+        let bs = &config.mcp.brokered_sessions;
+        assert!(bs.enabled);
+        assert_eq!(bs.protocols, vec!["ssh".to_string()]);
+        assert_eq!(
+            bs.allowed_target_cidrs,
+            Some(vec!["10.20.0.0/16".to_string(), "2001:db8::/32".to_string()]),
+            "a configured list replaces the default; it is not merged with it"
+        );
+        assert_eq!(
+            (
+                bs.max_concurrent,
+                bs.rate_per_binding_per_min,
+                bs.call_timeout_secs,
+                bs.rdp_call_timeout_secs,
+                bs.max_output_bytes
+            ),
+            (8, 10, 30, 60, 131_072)
+        );
+        assert_eq!(bs.ssh.cert_source_addresses.len(), 2);
+
+        // An empty list is a list: no destination at all.
+        let empty = format!("{BROKERED_BASE}\nmcp {{\n brokered_sessions {{\n allowed_target_cidrs = []\n }}\n}}\n");
+        let config = load_str("bs_empty_list", "c.hcl", &empty).unwrap();
+        assert_eq!(config.mcp.brokered_sessions.allowed_target_cidrs, Some(vec![]));
+    }
+
+    fn brokered_block(inner: &str) -> String {
+        format!("{BROKERED_BASE}\nmcp {{\n  brokered_sessions {{\n    {inner}\n  }}\n}}\n")
+    }
+
+    #[test]
+    fn test_brokered_sessions_invalid_values_refuse_to_load() {
+        for (name, inner, needle) in [
+            ("bs_bad_cidr", r#"allowed_target_cidrs = ["10.0.0.0/8", "10.0.0.300/8"]"#, "\"10.0.0.300/8\""),
+            ("bs_bare_ip", r#"allowed_target_cidrs = ["10.0.0.5"]"#, "\"10.0.0.5\""),
+            ("bs_host_bits", r#"allowed_target_cidrs = ["10.0.0.1/8"]"#, "host bits"),
+            ("bs_protocol", r#"protocols = ["ssh", "telnet"]"#, "telnet"),
+            ("bs_conc_zero", "max_concurrent = 0", "max_concurrent"),
+            ("bs_conc_high", "max_concurrent = 33", "max_concurrent"),
+            ("bs_rate_high", "rate_per_binding_per_min = 61", "rate_per_binding_per_min"),
+            ("bs_timeout_high", "call_timeout_secs = 121", "call_timeout_secs"),
+            ("bs_rdp_timeout_high", "rdp_call_timeout_secs = 121", "rdp_call_timeout_secs"),
+            ("bs_output_high", "max_output_bytes = 262145", "max_output_bytes"),
+            ("bs_cert_src", "ssh {\n cert_source_addresses = [\"egress.example\"]\n }", "cert_source_addresses"),
+        ] {
+            let err = load_str(name, "c.hcl", &brokered_block(inner)).unwrap_err().to_string();
+            assert!(err.contains(needle), "{name}: {err}");
+        }
+        // The ceilings themselves are accepted.
+        let at_ceiling = brokered_block(
+            "max_concurrent = 32\n rate_per_binding_per_min = 60\n call_timeout_secs = 120\n rdp_call_timeout_secs = 120\n max_output_bytes = 262144",
+        );
+        assert!(load_str("bs_ceiling", "c.hcl", &at_ceiling).is_ok());
+    }
+
+    /// An entry overlapping an always-denied class is accepted, with a
+    /// startup warning naming it.
+    #[test]
+    fn test_brokered_sessions_always_denied_overlap_warns() {
+        let body = brokered_block(r#"allowed_target_cidrs = ["10.0.0.0/8", "169.254.169.254/32", "127.0.0.0/8"]"#);
+        let config = load_str("bs_overlap", "c.hcl", &body).unwrap();
+        let warnings = config.mcp.brokered_sessions.startup_warnings();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("169.254.169.254/32") && warnings[0].contains("link-local"), "{warnings:?}");
+        assert!(warnings[1].contains("127.0.0.0/8") && warnings[1].contains("loopback"), "{warnings:?}");
+        assert!(warnings.iter().all(|w| w.starts_with("mcp.brokered_sessions.allowed_target_cidrs")));
     }
 
     #[test]

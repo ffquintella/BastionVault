@@ -1550,7 +1550,7 @@ pub(crate) struct OpenContext {
 /// saved in another namespace is refused before its resource is read, so a
 /// same-named resource in the active namespace is never resolved in its
 /// place.
-async fn open_context(state: &State<'_, AppState>, restore: Option<&SessionRestoreRef>) -> CmdResult<OpenContext> {
+pub(super) async fn open_context(state: &State<'_, AppState>, restore: Option<&SessionRestoreRef>) -> CmdResult<OpenContext> {
     let namespace =
         session::layouts::normalize_namespace(&state.active_namespace.lock().await.clone().unwrap_or_default());
     let pane_ref = match restore {
@@ -1586,7 +1586,7 @@ fn require_restore_in_workspace(ctx: &OpenContext, placement: Placement) -> CmdR
 /// The calling webview must hold `token` (`attachments::authorize_input`).
 /// Every command that drives a session — keystrokes, paste, resize,
 /// pointer, the RDP frame channel — goes through here.
-async fn require_session_window(state: &State<'_, AppState>, webview: &Webview, token: &str) -> CmdResult<()> {
+pub(super) async fn require_session_window(state: &State<'_, AppState>, webview: &Webview, token: &str) -> CmdResult<()> {
     let route = state.session_attachments.lock().await.route(token);
     session::attachments::authorize_input(&route, webview.label(), token).map_err(CommandError::from)
 }
@@ -1690,6 +1690,14 @@ pub(crate) fn own_window_url(d: &SessionDescriptor) -> String {
             d.width.unwrap_or(1024),
             d.height.unwrap_or(768),
         ),
+        // The dual-pane file window (features/sftp-connect.md): no output
+        // stream, the transfer progress event is derived from the token.
+        session::ProfileProtocol::Sftp => format!(
+            "{SESSION_PAGE}#/session/sftp?token={}&closed={}&label={}",
+            urlencoding::encode(&d.token),
+            urlencoding::encode(&d.closed_event),
+            urlencoding::encode(&d.label),
+        ),
         // We use HashRouter on the frontend, so the route fragment sits
         // inside the URL hash. Tauri's WebviewUrl::App takes a path
         // relative to the app's root — `session.html#/path` gets the React
@@ -1709,6 +1717,7 @@ fn own_window_size(d: &SessionDescriptor) -> (f64, f64) {
         session::ProfileProtocol::Rdp => {
             (f64::from(d.width.unwrap_or(1024)) + 8.0, f64::from(d.height.unwrap_or(768)) + 50.0)
         }
+        session::ProfileProtocol::Sftp => (1200.0, 760.0),
         _ => (900.0, 540.0),
     }
 }
@@ -1721,7 +1730,7 @@ fn own_window_size(d: &SessionDescriptor) -> (f64, f64) {
 /// `WINDOW_GONE_GRACE` keeps it from judging a window still being built.
 /// A window that cannot be built stops the session at once: nothing would
 /// ever render or close it otherwise.
-async fn spawn_own_session_window(
+pub(super) async fn spawn_own_session_window(
     app: &AppHandle,
     state: &State<'_, AppState>,
     descriptor: SessionDescriptor,
@@ -2055,7 +2064,7 @@ pub(super) async fn collect_policy_hints(
 #[derive(Default)]
 pub(super) struct EffectivePolicyView {
     pub(super) transport: String,
-    bastions: Vec<String>,
+    pub(super) bastions: Vec<String>,
     recording: String,
     pub(super) lock_violation: Option<String>,
 }
@@ -2177,13 +2186,13 @@ async fn read_rdp_clipboard_ceiling(
 
 /// Resolved SSH login-class verdict for the connect path. Mirrors the
 /// `ssh-broker/policy/effective` response.
-struct EffectiveLoginClassView {
-    login_class: String,
-    login_class_source: String,
+pub(super) struct EffectiveLoginClassView {
+    pub(super) login_class: String,
+    pub(super) login_class_source: String,
     /// Per-tier class contributions, in resolution order (for the
     /// `login_class_chain` audit field).
-    login_class_chain: Vec<String>,
-    lock_violation: Option<String>,
+    pub(super) login_class_chain: Vec<String>,
+    pub(super) lock_violation: Option<String>,
 }
 
 /// Resolve the effective SSH login class (`shared-credential` |
@@ -2777,7 +2786,7 @@ pub(super) fn find_profile(meta: &Map<String, Value>, profile_id: &str) -> Optio
 ///
 /// Duplicates are dropped so a profile that pins `target_host` to
 /// the same value as the resource's IP doesn't double-try.
-fn profile_host_candidates(profile: &Value, meta: &Map<String, Value>) -> Vec<String> {
+pub(super) fn profile_host_candidates(profile: &Value, meta: &Map<String, Value>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |s: &str| {
         if !s.is_empty() && !out.iter().any(|h| h == s) {
@@ -2800,7 +2809,7 @@ fn profile_host_candidates(profile: &Value, meta: &Map<String, Value>) -> Vec<St
 /// rather than at auth / protocol layer? Only network failures justify
 /// falling back to the next host candidate — re-trying after an auth
 /// rejection would just lock the account on the next host.
-fn is_connect_layer_error(err: &str) -> bool {
+pub(super) fn is_connect_layer_error(err: &str) -> bool {
     let e = err.to_ascii_lowercase();
     e.starts_with("connect ")
         || e.contains("tcp connect")
@@ -2810,11 +2819,11 @@ fn is_connect_layer_error(err: &str) -> bool {
         || e.contains("connect_begin")
 }
 
-fn profile_port(profile: &Value) -> u16 {
+pub(super) fn profile_port(profile: &Value) -> u16 {
     profile.get("target_port").and_then(|v| v.as_u64()).and_then(|n| u16::try_from(n).ok()).unwrap_or(22)
 }
 
-fn profile_username(profile: &Value) -> String {
+pub(super) fn profile_username(profile: &Value) -> String {
     profile.get("username").and_then(|v| v.as_str()).unwrap_or("").to_string()
 }
 
@@ -2824,25 +2833,25 @@ fn profile_username(profile: &Value) -> String {
 /// session and the `ssh/sign` issuance row that authorized it are
 /// joinable.
 #[derive(Default, Clone)]
-struct EngineMint {
+pub(super) struct EngineMint {
     /// `ca` | `otp` (the brokered mode used).
-    mode: String,
+    pub(super) mode: String,
     /// Hex serial of the minted cert (`ca` mode only).
-    cert_serial: Option<String>,
+    pub(super) cert_serial: Option<String>,
 }
 
-struct ResolvedSshCredential {
-    credential: SshCredential,
+pub(super) struct ResolvedSshCredential {
+    pub(super) credential: SshCredential,
     /// When the resolver knows the canonical username (e.g.
     /// LDAP static-role / library check-out returns one), the
     /// caller swaps it in over the profile's username.
-    effective_username: Option<String>,
+    pub(super) effective_username: Option<String>,
     /// LDAP library check-out registers a cleanup hook here so
     /// `session_close` can return the account to the pool.
-    on_close: Option<crate::session::SessionCleanup>,
+    pub(super) on_close: Option<crate::session::SessionCleanup>,
     /// Set by the `ssh-engine` resolvers (brokered minting); `None` for
     /// static / ldap / pki sources.
-    engine_mint: Option<EngineMint>,
+    pub(super) engine_mint: Option<EngineMint>,
 }
 
 /// Brokered login-class enforcement (direct path). If the resource resolves
@@ -2889,7 +2898,7 @@ fn login_class_refusal(resource_name: &str, lc: &EffectiveLoginClassView, kind: 
     )))
 }
 
-async fn resolve_ssh_credential(
+pub(super) async fn resolve_ssh_credential(
     state: &State<'_, AppState>,
     app: &AppHandle,
     resource_name: &str,
@@ -3546,6 +3555,7 @@ pub(super) enum SessionProtocolTag {
     Ssh,
     Rdp,
     Web,
+    Sftp,
 }
 
 impl SessionProtocolTag {
@@ -3554,6 +3564,7 @@ impl SessionProtocolTag {
             Self::Ssh => "ssh",
             Self::Rdp => "rdp",
             Self::Web => "web",
+            Self::Sftp => "sftp",
         }
     }
 }

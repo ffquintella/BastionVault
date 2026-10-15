@@ -2156,6 +2156,9 @@ mod mod_token_store_tests {
             client_name: "test-client".into(),
             client_version: "1.0".into(),
             waived_until: None,
+            connect_allowed: false,
+            confirm_connect: false,
+            operator: None,
         }
     }
 

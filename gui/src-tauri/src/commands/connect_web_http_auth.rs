@@ -50,12 +50,22 @@ use crate::session::web_tls_pin::TlsPinGate;
 pub(crate) struct NativeGates {
     /// `http-auth` sessions (Phase 3).
     pub http_auth: Option<Arc<HttpAuthGate>>,
-    /// Profiles carrying `tls_pin_sha256` (Phase 4).
+    /// Profiles carrying `tls_pin_sha256` (Phase 4). On macOS every session
+    /// window has one (T139): without pins it asks the operator about a
+    /// rejected certificate instead.
     pub tls_pin: Option<Arc<TlsPinGate>>,
+    /// The operator-facing side (T139, macOS): the untrusted-certificate
+    /// question and top-frame load failures.
+    #[cfg(target_os = "macos")]
+    pub ui: Option<Arc<super::connect_web_trust_ui::TrustUi>>,
 }
 
 impl NativeGates {
     pub fn is_empty(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        if self.ui.is_some() {
+            return false;
+        }
         self.http_auth.is_none() && self.tls_pin.is_none()
     }
 
@@ -145,6 +155,14 @@ pub(crate) fn install(win: &tauri::Webview, gates: NativeGates) -> oneshot::Rece
 /// `RejectProtectionSpace`, which is what WebKit does for a delegate that
 /// does not implement the method at all — so adding a pin changes nothing
 /// but the server-trust path.
+///
+/// T139: every web session window now gets the proxy, with a pin gate that
+/// may ask the operator about a rejected certificate when the profile has no
+/// pins (the shim may then hold the challenge open — see
+/// `connect_web_tls_pin::macos`). The proxy also implements the two
+/// navigation-failure methods, which wry does not, to report a top-frame
+/// load that failed; it forwards them to wry's delegate should a later wry
+/// implement them.
 #[cfg(target_os = "macos")]
 mod platform {
     use std::ffi::c_void;
@@ -163,12 +181,15 @@ mod platform {
     use objc2_web_kit::{WKNavigationDelegate, WKWebView};
 
     use super::{InstallError, NativeGates};
+    use crate::commands::connect_web_trust_ui::TrustUi;
     use crate::session::web_http_auth::{AuthMethod, Challenge, GateAnswer, HttpAuthGate};
+    use crate::session::web_load::classify;
     use crate::session::web_tls_pin::TlsPinGate;
 
     pub struct ProxyIvars {
         http_auth: Option<Arc<HttpAuthGate>>,
         tls_pin: Option<Arc<TlsPinGate>>,
+        ui: Option<Arc<TrustUi>>,
         /// wry's own delegate. Weak: the proxy is owned by it.
         inner: Weak<ProtocolObject<dyn WKNavigationDelegate>>,
     }
@@ -220,12 +241,13 @@ mod platform {
                 let ch = read_challenge(challenge);
                 if ch.method == AuthMethod::ServerTrust {
                     match &self.ivars().tls_pin {
-                        Some(pins) => {
-                            let (disposition, credential) =
-                                crate::commands::connect_web_tls_pin::macos::server_trust(challenge, pins);
-                            let ptr = credential.as_ref().map_or(std::ptr::null_mut(), |c| Retained::as_ptr(c).cast_mut());
-                            completion.call((disposition, ptr));
-                        }
+                        // Calls `completion`, now or once the operator answers.
+                        Some(gate) => crate::commands::connect_web_tls_pin::macos::server_trust(
+                            challenge,
+                            gate,
+                            self.ivars().ui.as_ref(),
+                            completion,
+                        ),
                         None => completion
                             .call((NSURLSessionAuthChallengeDisposition::PerformDefaultHandling, std::ptr::null_mut())),
                     }
@@ -264,8 +286,69 @@ mod platform {
                     }
                 }
             }
+
+            /// A top-frame navigation failed before it committed (TLS, DNS,
+            /// connection). WKWebView shows nothing for it.
+            #[unsafe(method(webView:didFailProvisionalNavigation:withError:))]
+            fn did_fail_provisional(&self, web_view: &WKWebView, navigation: *mut AnyObject, error: &AnyObject) {
+                self.forward_failure(
+                    objc2::sel!(webView:didFailProvisionalNavigation:withError:),
+                    web_view,
+                    navigation,
+                    error,
+                );
+                self.report_failure(error);
+            }
+
+            /// A committed top-frame navigation failed while loading.
+            #[unsafe(method(webView:didFailNavigation:withError:))]
+            fn did_fail(&self, web_view: &WKWebView, navigation: *mut AnyObject, error: &AnyObject) {
+                self.forward_failure(objc2::sel!(webView:didFailNavigation:withError:), web_view, navigation, error);
+                self.report_failure(error);
+            }
         }
     );
+
+    impl HttpAuthNavigationDelegate {
+        /// Hand a failure to wry's delegate too, if it implements the method
+        /// (wry 0.55 does not).
+        fn forward_failure(&self, selector: Sel, web_view: &WKWebView, navigation: *mut AnyObject, error: &AnyObject) {
+            let Some(inner) = self.ivars().inner.load() else { return };
+            if !inner.respondsToSelector(selector) {
+                return;
+            }
+            // SAFETY: both selectors take (WKWebView *, WKNavigation *,
+            // NSError *) and return void; `inner` answers the selector (checked
+            // above); every argument is the one WebKit passed in.
+            unsafe {
+                if selector == objc2::sel!(webView:didFailProvisionalNavigation:withError:) {
+                    let _: () = msg_send![&*inner, webView: web_view, didFailProvisionalNavigation: navigation, withError: error];
+                } else {
+                    let _: () = msg_send![&*inner, webView: web_view, didFailNavigation: navigation, withError: error];
+                }
+            }
+        }
+
+        /// Read the `NSError`'s domain, code and failing URL — never its
+        /// description, which can carry the full URL — and report it.
+        fn report_failure(&self, error: &AnyObject) {
+            let Some(ui) = &self.ivars().ui else { return };
+            // SAFETY: `error` is the `NSError` WebKit passed; `domain` returns
+            // a non-null NSString, `code` an NSInteger, `userInfo` a
+            // dictionary (possibly empty).
+            let (domain, code, info): (Retained<NSString>, isize, Option<Retained<AnyObject>>) =
+                unsafe { (msg_send![error, domain], msg_send![error, code], msg_send![error, userInfo]) };
+            let domain = domain.to_string();
+            let failing_url = info.and_then(|info| {
+                let key = NSString::from_str("NSErrorFailingURLStringKey");
+                // SAFETY: `objectForKey:` on the error's userInfo dictionary.
+                let value: Option<Retained<AnyObject>> = unsafe { msg_send![&*info, objectForKey: &*key] };
+                value.and_then(|v| v.downcast::<NSString>().ok()).map(|s| s.to_string())
+            });
+            let code = code as i64;
+            ui.load_failed(failing_url.as_deref(), classify(&domain, code), &format!("{domain}:{code}"));
+        }
+    }
 
     fn method_of(method: &NSString) -> AuthMethod {
         // SAFETY: reading Foundation's immutable `NSString` constants.
@@ -325,6 +408,7 @@ mod platform {
         let proxy = mtm.alloc::<HttpAuthNavigationDelegate>().set_ivars(ProxyIvars {
             http_auth: gates.http_auth,
             tls_pin: gates.tls_pin,
+            ui: gates.ui,
             inner: Weak::from_retained(&inner),
         });
         // SAFETY: `init` on a freshly allocated NSObject subclass.

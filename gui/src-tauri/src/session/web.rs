@@ -31,6 +31,7 @@ use bastion_vault::modules::resource::connect_web::recipe::{recipe_hash, WebLogi
 
 use super::web_engine::PageSnapshot;
 use super::web_launch::WebLaunch;
+use super::web_load::{LoadFailure, PageFailure};
 use super::web_recipe::{session_title, RecipePlan};
 use super::web_tls_pin::{PinSet, TlsPinGate};
 
@@ -684,6 +685,10 @@ impl WebCloseReason {
 struct PageTrack {
     url: Option<Url>,
     loading: bool,
+    /// The last top-frame navigation failed; cleared by the next load.
+    failed: Option<PageFailure>,
+    /// Untrusted-certificate prompts open on this window.
+    prompts: u32,
 }
 
 #[derive(Debug, Default)]
@@ -737,6 +742,11 @@ pub struct WebShared {
     page: Mutex<PageTrack>,
     title: Mutex<TitleParts>,
     abort_hint: Mutex<Option<&'static str>>,
+    /// A server-trust challenge this window refused (pin refusal, or the
+    /// operator declined the certificate), by origin. WebKit reports a
+    /// refused challenge as a *cancelled* navigation, which is not a failure
+    /// by itself; this tells the two apart. Cleared by the next load.
+    tls_refused: Mutex<Option<(WebOrigin, PageFailure)>>,
     /// Set by teardown; the recipe engine and the dry run stop on it.
     closed: std::sync::atomic::AtomicBool,
     /// The sign-in window, for the toolbar's countdown.
@@ -754,9 +764,10 @@ impl WebShared {
         Arc::new(Self {
             resource: resource.to_string(),
             // Loading until the first load finishes.
-            page: Mutex::new(PageTrack { url: None, loading: true }),
+            page: Mutex::new(PageTrack { url: None, loading: true, ..PageTrack::default() }),
             title: Mutex::new(TitleParts { origin: start_origin.to_string(), ..TitleParts::default() }),
             abort_hint: Mutex::new(None),
+            tls_refused: Mutex::new(None),
             closed: std::sync::atomic::AtomicBool::new(false),
             login_window: Mutex::new(LoginWindow::default()),
             relogin: std::sync::atomic::AtomicBool::new(false),
@@ -836,7 +847,9 @@ impl WebShared {
             let mut p = Self::lock(&self.page);
             p.url = Some(url.clone());
             p.loading = !finished;
+            p.failed = None;
         }
+        *Self::lock(&self.tls_refused) = None;
         let mut t = Self::lock(&self.title);
         t.origin = display_origin(url);
         t.notice = None;
@@ -845,7 +858,57 @@ impl WebShared {
 
     pub fn snapshot(&self) -> PageSnapshot {
         let p = Self::lock(&self.page);
-        PageSnapshot { url: p.url.clone(), loading: p.loading }
+        PageSnapshot { url: p.url.clone(), loading: p.loading, failed: p.failed.map(|f| f.check), held: p.prompts > 0 }
+    }
+
+    /// Record that this window refused a server-trust challenge for
+    /// `origin`, so the cancelled navigation that follows is reported with
+    /// this reason (see [`Self::load_failed`]).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn note_tls_refused(&self, origin: &WebOrigin, failure: PageFailure) {
+        *Self::lock(&self.tls_refused) = Some((origin.clone(), failure));
+    }
+
+    /// A top-frame navigation to `origin` failed; `failure` is the platform's
+    /// classification, `None` for a cancelled one. A refusal this window made
+    /// for the same origin ([`Self::note_tls_refused`]) is the more precise
+    /// reason and wins. Returns the failure and the new title, or `None` when
+    /// there is nothing to report (a cancelled navigation with no refusal
+    /// behind it: superseded, or stopped by the operator).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn load_failed(
+        &self,
+        origin: Option<&WebOrigin>,
+        failure: Option<LoadFailure>,
+    ) -> Option<(PageFailure, String)> {
+        let refused = {
+            let mut r = Self::lock(&self.tls_refused);
+            match (&*r, origin) {
+                (Some((o, _)), Some(origin)) if o == origin => r.take().map(|(_, f)| f),
+                _ => None,
+            }
+        };
+        let failure = refused.or_else(|| failure.map(LoadFailure::page_failure))?;
+        {
+            let mut p = Self::lock(&self.page);
+            p.failed = Some(failure);
+            p.loading = false;
+        }
+        self.note_abort(failure.check);
+        Some((failure, self.set_notice(failure.notice.to_string())))
+    }
+
+    /// An untrusted-certificate prompt opened on this window: the recipe
+    /// engine stops its clock until [`Self::end_prompt`].
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn begin_prompt(&self) {
+        Self::lock(&self.page).prompts += 1;
+    }
+
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn end_prompt(&self) {
+        let mut p = Self::lock(&self.page);
+        p.prompts = p.prompts.saturating_sub(1);
     }
 
     /// Show a navigation notice (`blocked: <origin>`). Returns the title.
@@ -1486,6 +1549,61 @@ mod tests {
         shared.note_abort("origin");
         assert_eq!(shared.take_abort_hint(), Some("policy_violation"), "the first reason wins");
         assert_eq!(shared.take_abort_hint(), None);
+    }
+
+    #[test]
+    fn a_failed_load_is_shown_recorded_and_cleared_by_the_next_load() {
+        use crate::session::web_load::LoadFailure;
+        let shared = WebShared::new("km", "https://km.example.com");
+        let o = WebOrigin::parse_config("https://km.example.com", false).unwrap();
+        let (f, title) = shared.load_failed(Some(&o), Some(LoadFailure::Dns)).unwrap();
+        assert_eq!(f.check, "load_dns");
+        assert_eq!(title, "km — https://km.example.com — page not loaded: the host name does not resolve");
+        let snap = shared.snapshot();
+        assert_eq!(snap.failed, Some("load_dns"));
+        assert!(!snap.loading, "a failed load is not still loading");
+        assert_eq!(shared.take_abort_hint(), Some("load_dns"));
+        shared.page_load(&url("https://km.example.com/"), true);
+        assert_eq!(shared.snapshot().failed, None);
+        assert_eq!(shared.title(), "km — https://km.example.com");
+    }
+
+    #[test]
+    fn a_cancelled_load_is_a_failure_only_behind_a_refusal_for_its_origin() {
+        use crate::session::web_load::{LoadFailure, PageFailure};
+        let shared = WebShared::new("km", "https://km.example.com");
+        let o = WebOrigin::parse_config("https://km.example.com", false).unwrap();
+        let other = WebOrigin::parse_config("https://cdn.example.com", false).unwrap();
+        assert_eq!(shared.load_failed(Some(&o), None), None, "superseded or stopped: nothing to report");
+
+        shared.note_tls_refused(&o, LoadFailure::TlsDeclined.page_failure());
+        assert_eq!(shared.load_failed(Some(&other), None), None, "another origin's cancel");
+        let (f, _) = shared.load_failed(Some(&o), None).unwrap();
+        assert_eq!(f.check, "tls_declined");
+
+        // The refusal's reason also wins over the platform's own TLS code.
+        let pin = PageFailure { check: "tls_pin_mismatch", notice: "pinned key mismatch" };
+        shared.note_tls_refused(&o, pin);
+        let (f, _) = shared.load_failed(Some(&o), Some(LoadFailure::TlsUntrusted)).unwrap();
+        assert_eq!(f, pin);
+
+        // A load clears a refusal that never turned into a failure.
+        shared.note_tls_refused(&o, pin);
+        shared.page_load(&url("https://km.example.com/"), true);
+        assert_eq!(shared.load_failed(Some(&o), None), None);
+    }
+
+    #[test]
+    fn an_open_prompt_holds_the_page() {
+        let shared = WebShared::new("km", "https://km.example.com");
+        shared.begin_prompt();
+        shared.begin_prompt();
+        assert!(shared.snapshot().held);
+        shared.end_prompt();
+        assert!(shared.snapshot().held, "one prompt still open");
+        shared.end_prompt();
+        shared.end_prompt();
+        assert!(!shared.snapshot().held);
     }
 
     #[test]

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicerdicer/tauri-docs/refs/heads/v2/tooling/cli/schema.json",
+  "identifier": "sftp-window",
+  "description": "An SFTP session's own window (session.html#/session/sftp). Event subscription for its session's progress and close events and the `sftp-window` command set — nothing else (features/sftp-connect.md).",
+  "windows": ["sftp-*"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "sftp-window"
+  ]
+}

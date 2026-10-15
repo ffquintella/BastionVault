@@ -87,7 +87,7 @@ export function TypeEditorModal({ typeDef, onSave, onClose }: {
 
   function toggleProtocol(p: ConnectProtocol, on: boolean) {
     setProtocols((cur) =>
-      (["ssh", "rdp", "web"] as const).filter((x) => (x === p ? on : cur.includes(x))),
+      (["ssh", "sftp", "rdp", "web"] as const).filter((x) => (x === p ? on : cur.includes(x))),
     );
   }
 
@@ -196,7 +196,7 @@ export function TypeEditorModal({ typeDef, onSave, onClose }: {
             force operators through an existing PAM tool.
           </p>
           <div className="mt-2 pl-6 flex flex-wrap gap-4 text-sm">
-            {(["ssh", "rdp", "web"] as const).map((p) => (
+            {(["ssh", "sftp", "rdp", "web"] as const).map((p) => (
               <label key={p} className="flex items-center gap-2">
                 <input
                   type="checkbox"

@@ -178,8 +178,8 @@ describe("parseTypeConfig / mergeTypeConfig — additive merge with tombstones",
 // ── Protocol gate ─────────────────────────────────────────────────────
 
 describe("connectProtocols — the single Connect gate", () => {
-  it("keeps today's SSH/RDP behaviour exactly", () => {
-    expect(connectProtocols(DEFAULT_RESOURCE_TYPES.server)).toEqual(["ssh", "rdp"]);
+  it("keeps today's SSH/RDP behaviour, plus SFTP on the same transport", () => {
+    expect(connectProtocols(DEFAULT_RESOURCE_TYPES.server)).toEqual(["ssh", "sftp", "rdp"]);
     // firewall / switch carry `connect.enabled: true` but never had a
     // Connect chip (it was gated on `type === "server"`); still none.
     expect(connectProtocols(DEFAULT_RESOURCE_TYPES.firewall)).toEqual([]);
@@ -252,6 +252,7 @@ describe("connectProtocols — the single Connect gate", () => {
     expect(connectProtocols(undefined)).toEqual([]);
     expect(connectProtocols({ id: "server", label: "server", color: "neutral", fields: [] })).toEqual([
       "ssh",
+      "sftp",
       "rdp",
     ]);
   });
@@ -262,11 +263,12 @@ describe("connectProtocols — the single Connect gate", () => {
 describe("strict protocol parsing — unknown never becomes ssh", () => {
   beforeEach(() => mockInvoke.mockReset());
 
-  it("parseSessionProtocol accepts exactly ssh / rdp / web", () => {
+  it("parseSessionProtocol accepts exactly ssh / sftp / rdp / web", () => {
     expect(parseSessionProtocol("ssh")).toBe("ssh");
+    expect(parseSessionProtocol("sftp")).toBe("sftp");
     expect(parseSessionProtocol("rdp")).toBe("rdp");
     expect(parseSessionProtocol("web")).toBe("web");
-    for (const bad of ["telnet", "SSH", "", undefined, null, 22, {}]) {
+    for (const bad of ["telnet", "SSH", "SFTP", "", undefined, null, 22, {}]) {
       expect(parseSessionProtocol(bad)).toBeNull();
     }
   });

@@ -496,7 +496,7 @@ export interface ResourceTypeDef {
 export type ResourceTypeConfig = Record<string, ResourceTypeDef>;
 
 /** Connect protocols a resource type can offer. */
-export type ConnectProtocol = "ssh" | "rdp" | "web";
+export type ConnectProtocol = "ssh" | "rdp" | "web" | "sftp";
 
 /**
  * How far a `web` login mode lets the credential travel, least to most
@@ -517,7 +517,7 @@ export type WebExposure = "none" | "isolated" | "handler" | "proxy" | "dom";
  * anything read from storage must go through `parseSessionProtocol` — an
  * unknown value is refused, never defaulted to `ssh`.
  */
-export type SessionProtocol = "ssh" | "rdp" | "web";
+export type SessionProtocol = "ssh" | "rdp" | "web" | "sftp";
 
 /** Login modes a `web` profile can declare (spec §1). `open`, `form` and
  *  `http-auth` launch; `sso` is refused at save and at connect with "not

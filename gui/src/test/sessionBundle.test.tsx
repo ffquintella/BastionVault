@@ -173,6 +173,7 @@ const ENTRY = "/src/sessionApp/main.tsx";
 const SESSION_ROUTE_MODULES = [
   "/src/routes/SessionRdpWindow.tsx",
   "/src/routes/SessionReplayWindow.tsx",
+  "/src/routes/SessionSftpWindow.tsx",
   "/src/routes/SessionSshWindow.tsx",
   "/src/routes/SessionWorkspaceWindow.tsx",
 ];
@@ -180,9 +181,9 @@ const SESSION_ROUTE_MODULES = [
 // ── Tests ───────────────────────────────────────────────────────────────
 
 describe("session.html route table", () => {
-  it("mounts the four session routes and nothing else", () => {
+  it("mounts the five session routes and nothing else", () => {
     expect(sorted(SESSION_ROUTES.map((r) => r.path))).toEqual(
-      sorted(["/session/ssh", "/session/rdp", "/workspace", "/session-replay"]),
+      sorted(["/session/ssh", "/session/rdp", "/session/sftp", "/workspace", "/session-replay"]),
     );
   });
 
@@ -201,7 +202,7 @@ describe("session.html route table", () => {
   it("is the only place the session routes are mounted", () => {
     const app = SOURCES["/src/App.tsx"];
     expect(app).not.toMatch(/path="\/(session|workspace)/);
-    expect(app).not.toMatch(/Session(Ssh|Rdp|Replay|Workspace)Window/);
+    expect(app).not.toMatch(/Session(Ssh|Rdp|Sftp|Replay|Workspace)Window/);
   });
 });
 
@@ -240,6 +241,7 @@ describe("session.html import graph", () => {
       ...granted("session-window"),
       ...granted("session-workspace"),
       ...granted("session-replay"),
+      ...granted("sftp-window"),
     ]);
     expect(sorted([...graph.commands].filter((c) => !allSets.has(c)))).toEqual([]);
   });
@@ -250,6 +252,11 @@ describe("each session window's command set is exactly what its routes call", ()
     const ssh = walk(["/src/routes/SessionSshWindow.tsx"]).commands;
     const rdp = walk(["/src/routes/SessionRdpWindow.tsx"]).commands;
     expect(sorted(new Set([...ssh, ...rdp]))).toEqual(sorted(granted("session-window")));
+  });
+
+  it("own SFTP window: sftp-window", () => {
+    const used = walk(["/src/routes/SessionSftpWindow.tsx"]).commands;
+    expect(sorted(used)).toEqual(sorted(granted("sftp-window")));
   });
 
   it("the Session Workspace (with its ⌘K palette): session-workspace", () => {

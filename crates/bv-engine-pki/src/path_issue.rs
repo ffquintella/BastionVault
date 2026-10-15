@@ -309,12 +309,10 @@ impl PkiBackendInner {
 /// policy and the managed key store. Used by `pki/issue/:role` and
 /// `pki/sign/:role` for Phase-L2 key reuse.
 ///
-/// Errors:
-/// - `ErrPkiKeyOperationInvalid` — role has `allow_key_reuse = false`
-///   or the key isn't on the role's allow-list.
-/// - `ErrPkiKeyTypeInvalid` — the managed key's algorithm doesn't match
-///   the role's algorithm.
-/// - `ErrString("...")` — the key reference doesn't resolve.
+/// Every refusal is a 400 naming the role knob (or key mismatch) that
+/// caused it. These are operator configuration mistakes, not engine
+/// faults; they used to surface as a bare 500 "PKI key operation is
+/// invalid", which gave the GUI nothing to act on.
 #[maybe_async::maybe_async]
 pub(crate) async fn resolve_pinned_key(
     req: &Request,
@@ -323,13 +321,20 @@ pub(crate) async fn resolve_pinned_key(
     role_alg: KeyAlgorithm,
 ) -> Result<KeyEntry, RvError> {
     if !role.allow_key_reuse {
-        return Err(RvError::ErrPkiKeyOperationInvalid);
+        return Err(RvError::ErrResponseStatus(
+            400,
+            format!(
+                "key_ref `{key_ref}` refused: this role does not allow pinning a managed key \
+                 (set allow_key_reuse = true on the role)"
+            ),
+        ));
     }
-    let entry = keys::load_key(req, key_ref)
-        .await?
-        .ok_or_else(|| RvError::ErrString(format!(
-            "key_ref `{key_ref}` does not resolve to a managed key on this mount"
-        )))?;
+    let entry = keys::load_key(req, key_ref).await?.ok_or_else(|| {
+        RvError::ErrResponseStatus(
+            400,
+            format!("key_ref `{key_ref}` does not resolve to a managed key on this mount"),
+        )
+    })?;
 
     if !role.allowed_key_refs.is_empty() {
         // Match against either the resolved id or the user-supplied
@@ -340,13 +345,26 @@ pub(crate) async fn resolve_pinned_key(
                 || (!entry.name.is_empty() && allowed_ref == &entry.name)
         });
         if !allowed {
-            return Err(RvError::ErrPkiKeyOperationInvalid);
+            return Err(RvError::ErrResponseStatus(
+                400,
+                format!(
+                    "key_ref `{key_ref}` refused: the key is not in this role's allowed_key_refs \
+                     allow-list (add its name or id to the role)"
+                ),
+            ));
         }
     }
 
     let entry_alg = entry.algorithm()?;
     if entry_alg != role_alg {
-        return Err(RvError::ErrPkiKeyTypeInvalid);
+        return Err(RvError::ErrResponseStatus(
+            400,
+            format!(
+                "key_ref `{key_ref}` refused: the key's algorithm {:?} does not match the role's {:?}",
+                entry_alg,
+                role_alg
+            ),
+        ));
     }
     Ok(entry)
 }

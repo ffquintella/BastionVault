@@ -319,6 +319,45 @@ mcp {
 | `tool_timeout_secs` | `0` (30) | Per-call timeout |
 | `require_hybrid_kex` | `false` | Not verifiable in this build: while `true`, `/v2/mcp` refuses to serve (503) rather than ignore it |
 
+### `mcp.brokered_sessions` (optional)
+
+The server switch and limits for agent sessions to resources
+([spec](../features/mcp-brokered-sessions.md)). This build parses and
+validates the block but ships no session tool yet, so it has no effect. Off
+when absent; an old config parses unchanged.
+
+```hcl
+mcp {
+  brokered_sessions {
+    enabled                  = false
+    protocols                = []   # subset of ["ssh", "web", "rdp"]
+    allowed_target_cidrs     = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]
+    max_concurrent           = 4
+    rate_per_binding_per_min = 6
+    call_timeout_secs        = 20
+    rdp_call_timeout_secs    = 45
+    max_output_bytes         = 65536
+    ssh {
+      cert_source_addresses = []
+    }
+  }
+}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Server switch; every session call also needs the runtime `sys/mcp/config.brokered_sessions_enabled` |
+| `protocols` | `[]` | Protocols allowed; any other value refuses to load |
+| `allowed_target_cidrs` | the list shown | Destination allow-list. A configured list **replaces** the default; `[]` allows nothing. Each entry must be `address/prefix` with no host bits set. Loopback, link-local (incl. `169.254.169.254`), multicast, unspecified, broadcast and the vault's own and cluster addresses stay denied whatever is listed: an overlapping entry is accepted with a startup warning on the `security` log. `sys/mcp/config` can replace this list at runtime |
+| `max_concurrent` | `4` | Sessions open at once on this node, 1–32 |
+| `rate_per_binding_per_min` | `6` | Session calls per pairing per minute on this node, 1–60 |
+| `call_timeout_secs` / `rdp_call_timeout_secs` | `20` / `45` | Per-call timeouts, 1–120 |
+| `max_output_bytes` | `65536` | Output returned to the model per call, 1–262144 |
+| `ssh.cert_source_addresses` | `[]` | The vault's egress addresses (address or CIDR) for a brokered certificate's `source-address`; empty omits it |
+
+A value out of range, an unknown protocol or an invalid entry refuses to
+start, naming the key and entry. Limits are in memory and per node.
+
 ## Audit Retention (runtime setting)
 
 How long the replicated audit stores keep records is **not** an HCL option: it

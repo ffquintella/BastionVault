@@ -43,7 +43,7 @@
 //!
 //! Pins are public-key digests, not secrets; they are compared with `==`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -374,6 +374,27 @@ pub struct TrustVerdict {
 
 type RefusalHook = Box<dyn Fn(PinRefusal) + Send + Sync>;
 
+// Only the macOS shim asks the operator (T139).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// What a certificate the platform rejected comes to on a window that may
+/// ask the operator (T139, [`TlsPinGate::with_operator_override`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverrideVerdict {
+    /// Not the operator's to decide: an origin outside the session, or a
+    /// profile with pins. A pin is the standing decision for that resource,
+    /// so a certificate that does not match one is never offered.
+    NotApplicable,
+    /// The leaf certificate could not be read: refuse, nothing to show.
+    Unreadable,
+    /// The operator accepted this exact key for this origin, this session.
+    Accepted,
+    /// The operator declined this key for this origin, this session; not
+    /// asked again.
+    Declined,
+    /// Not decided yet: ask about this key.
+    Ask(SpkiPin),
+}
+
 /// The pins and origin set of one session window, shared with its platform
 /// handler (main thread). The lock is held for bookkeeping only.
 pub struct TlsPinGate {
@@ -382,6 +403,12 @@ pub struct TlsPinGate {
     audit: PinAudit,
     seen: Mutex<HashSet<(WebOrigin, Option<SpkiPin>, PinDecision)>>,
     on_refusal: RefusalHook,
+    /// A window without pins may ask the operator about a rejected
+    /// certificate (macOS only; the other shims never consult it).
+    operator_override: bool,
+    /// The operator's answers, per (origin, leaf key), for this session
+    /// only. Never persisted: the next session asks again.
+    overrides: Mutex<HashMap<(WebOrigin, SpkiPin), bool>>,
 }
 
 impl fmt::Debug for TlsPinGate {
@@ -395,25 +422,129 @@ impl TlsPinGate {
     /// launch). `on_refusal` runs once per refused (origin, key): the command
     /// layer shows the notice in the title and records the abort reason.
     pub fn new(pins: PinSet, origins: OriginSet, audit: PinAudit, on_refusal: RefusalHook) -> Arc<Self> {
-        Arc::new(Self { pins, origins, audit, seen: Mutex::new(HashSet::new()), on_refusal })
+        Self::build(pins, origins, audit, on_refusal, false)
+    }
+
+    /// As [`Self::new`], and a window whose profile has **no** pins may ask
+    /// the operator about a certificate the platform rejected on one of the
+    /// session's https origins ([`Self::operator_override`]). An accepted
+    /// key is accepted for that origin until the session ends, nothing else.
+    pub fn with_operator_override(
+        pins: PinSet,
+        origins: OriginSet,
+        audit: PinAudit,
+        on_refusal: RefusalHook,
+    ) -> Arc<Self> {
+        Self::build(pins, origins, audit, on_refusal, true)
+    }
+
+    fn build(
+        pins: PinSet,
+        origins: OriginSet,
+        audit: PinAudit,
+        on_refusal: RefusalHook,
+        operator_override: bool,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            pins,
+            origins,
+            audit,
+            seen: Mutex::new(HashSet::new()),
+            on_refusal,
+            operator_override,
+            overrides: Mutex::new(HashMap::new()),
+        })
     }
 
     /// Whether a rejection on `origin` is this gate's to decide. The macOS
     /// shim asks before evaluating trust itself, so an origin outside the
     /// session never costs an evaluation.
     pub fn applies_to(&self, origin: Option<&WebOrigin>) -> bool {
-        !self.pins.is_empty() && pinnable(&self.origins, origin).is_some()
+        (!self.pins.is_empty() || self.operator_override) && pinnable(&self.origins, origin).is_some()
+    }
+
+    /// Whether this gate decides with its pins ([`Self::server_trust`]) —
+    /// otherwise, on a window that may ask, with the operator
+    /// ([`Self::operator_override`]).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn has_pins(&self) -> bool {
+        !self.pins.is_empty()
+    }
+
+    /// The operator's standing for a certificate the platform rejected on
+    /// `origin` (`chain` DER, leaf first).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn operator_override(&self, origin: Option<&WebOrigin>, chain: &[Vec<u8>]) -> OverrideVerdict {
+        if !self.operator_override || !self.pins.is_empty() {
+            return OverrideVerdict::NotApplicable;
+        }
+        let Some(origin) = pinnable(&self.origins, origin) else {
+            return OverrideVerdict::NotApplicable;
+        };
+        let Some(leaf) = chain.first().and_then(|d| SpkiPin::of_certificate(d).ok()) else {
+            return OverrideVerdict::Unreadable;
+        };
+        match self.overrides.lock().unwrap_or_else(|p| p.into_inner()).get(&(origin, leaf)) {
+            Some(true) => OverrideVerdict::Accepted,
+            Some(false) => OverrideVerdict::Declined,
+            None => OverrideVerdict::Ask(leaf),
+        }
+    }
+
+    /// Record the operator's answer about `leaf` on `origin`, for this
+    /// session. The first answer stands and is the one audited; a later
+    /// call for the same key changes nothing. Returns the standing answer.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn record_override(&self, origin: &WebOrigin, leaf: SpkiPin, accepted: bool) -> bool {
+        if !self.operator_override || !self.pins.is_empty() || pinnable(&self.origins, Some(origin)).is_none() {
+            return false;
+        }
+        let mut overrides = self.overrides.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(standing) = overrides.get(&(origin.clone(), leaf)) {
+            return *standing;
+        }
+        overrides.insert((origin.clone(), leaf), accepted);
+        drop(overrides);
+        let a = &self.audit;
+        let launch = a.launch_id_hash.as_deref().map(|h| format!(" launch_id_hash={h}")).unwrap_or_default();
+        if accepted {
+            log::warn!(
+                target: "audit",
+                "connect.web.tls_override: resource={} token={}{launch} origin={origin} decision=accepted \
+                 scope=session pin={leaf}",
+                a.resource,
+                a.token,
+            );
+        } else {
+            log::info!(
+                target: "audit",
+                "connect.web.tls_override: resource={} token={}{launch} origin={origin} decision=declined pin={leaf}",
+                a.resource,
+                a.token,
+            );
+        }
+        accepted
     }
 
     /// Whether this session accepted a certificate for `origin` on a pin
     /// (the platform had rejected it). Read-only, for the session toolbar's
     /// lock indicator (Phase 5); decides nothing.
     pub fn accepted_on_pin(&self, origin: &WebOrigin) -> bool {
-        self.seen
+        let on_pin = self
+            .seen
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .iter()
-            .any(|(o, _, d)| o == origin && matches!(d, PinDecision::Accept(_)))
+            .any(|(o, _, d)| o == origin && matches!(d, PinDecision::Accept(_)));
+        // An operator override is shown the same way: the platform rejected
+        // the certificate and this session accepted it anyway.
+        on_pin
+            || self
+                .overrides
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .any(|((o, _), accepted)| o == origin && *accepted)
     }
 
     /// Decide a certificate the platform rejected for `origin`.
@@ -923,6 +1054,76 @@ mod tests {
         assert!(!g.applies_to(Some(&o)));
         assert_eq!(g.server_trust(Some(&o), &[der]).decision, PinDecision::NotApplicable);
         assert!(refusals.lock().unwrap().is_empty());
+    }
+
+    fn prompting_gate(p: PinSet) -> Arc<TlsPinGate> {
+        let set = OriginSet::new(vec![origin("https://appliance.example.com")]);
+        let audit = PinAudit { resource: "km".into(), token: "sess_t".into(), launch_id_hash: Some("h".into()) };
+        TlsPinGate::with_operator_override(p, set, audit, Box::new(|_| {}))
+    }
+
+    #[test]
+    fn the_operator_is_asked_once_per_key_and_the_answer_is_per_key() {
+        let (der, _) = self_signed();
+        let (other, _) = self_signed();
+        let g = prompting_gate(PinSet::default());
+        let o = origin("https://appliance.example.com");
+        assert!(g.applies_to(Some(&o)), "a window without pins may ask");
+        assert!(!g.has_pins());
+        let OverrideVerdict::Ask(leaf) = g.operator_override(Some(&o), &[der.clone()]) else {
+            panic!("expected a question")
+        };
+        assert_eq!(leaf, pin_of(&der));
+        assert!(!g.accepted_on_pin(&o));
+        assert!(g.record_override(&o, leaf, true));
+        assert_eq!(g.operator_override(Some(&o), &[der.clone()]), OverrideVerdict::Accepted);
+        assert!(g.accepted_on_pin(&o), "shown like a pin acceptance");
+        // The first answer stands.
+        assert!(g.record_override(&o, leaf, false));
+        assert_eq!(g.operator_override(Some(&o), &[der]), OverrideVerdict::Accepted);
+        // A different key on the same origin is a new question: accepting
+        // one key never accepts another.
+        let OverrideVerdict::Ask(other_leaf) = g.operator_override(Some(&o), &[other.clone()]) else {
+            panic!("a new key is asked about")
+        };
+        assert!(!g.record_override(&o, other_leaf, false));
+        assert_eq!(g.operator_override(Some(&o), &[other]), OverrideVerdict::Declined);
+    }
+
+    #[test]
+    fn the_operator_is_never_asked_outside_the_session_or_over_a_pin() {
+        let (der, _) = self_signed();
+        let (pinned, _) = self_signed();
+        let g = prompting_gate(PinSet::default());
+        let foreign = origin("https://evil.example");
+        assert_eq!(g.operator_override(Some(&foreign), &[der.clone()]), OverrideVerdict::NotApplicable);
+        assert_eq!(g.operator_override(None, &[der.clone()]), OverrideVerdict::NotApplicable);
+        let leaf = SpkiPin::of_certificate(&der).unwrap();
+        assert!(!g.record_override(&foreign, leaf, true), "nothing recorded off the session");
+        assert!(!g.accepted_on_pin(&foreign));
+        let http = origin("http://appliance.example.com");
+        assert_eq!(g.operator_override(Some(&http), &[der.clone()]), OverrideVerdict::NotApplicable);
+
+        // A profile with pins: a mismatch is refused, never offered.
+        let pinned_gate = prompting_gate(pins(&[pin_of(&pinned)]));
+        let o = origin("https://appliance.example.com");
+        assert!(pinned_gate.has_pins());
+        assert_eq!(pinned_gate.operator_override(Some(&o), &[der.clone()]), OverrideVerdict::NotApplicable);
+        assert!(!pinned_gate.record_override(&o, leaf, true));
+        assert!(!pinned_gate.server_trust(Some(&o), &[der.clone()]).decision.accepts());
+
+        // A gate built without the override never asks.
+        let (plain, _) = gate(PinSet::default());
+        assert!(!plain.applies_to(Some(&o)));
+        assert_eq!(plain.operator_override(Some(&o), &[der]), OverrideVerdict::NotApplicable);
+    }
+
+    #[test]
+    fn an_unreadable_leaf_is_refused_not_asked() {
+        let g = prompting_gate(PinSet::default());
+        let o = origin("https://appliance.example.com");
+        assert_eq!(g.operator_override(Some(&o), &[b"not a certificate".to_vec()]), OverrideVerdict::Unreadable);
+        assert_eq!(g.operator_override(Some(&o), &[]), OverrideVerdict::Unreadable);
     }
 
     #[test]

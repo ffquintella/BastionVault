@@ -200,7 +200,7 @@ fn convert(
             let protocol = match src.protocol {
                 ProfileProtocol::Ssh => PaneProtocol::Ssh,
                 ProfileProtocol::Rdp => PaneProtocol::Rdp,
-                ProfileProtocol::Web => return Ok(None),
+                ProfileProtocol::Web | ProfileProtocol::Sftp => return Ok(None),
             };
             vaults.insert(src.vault_id);
             Ok(Some(SavedNode::Pane(SavedPane {

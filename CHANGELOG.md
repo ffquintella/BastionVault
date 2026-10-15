@@ -56,6 +56,38 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.37] - 2026-10-15
+
+### Added
+
+#### SFTP Connect — dual-pane file transfer (features/sftp-connect.md)
+
+- **Transfer files to and from server resources with an `sftp` connection profile** -- a new `SFTP (file transfer)` protocol in the profile editor opens a two-pane window: this computer on the left, the resource on the right, each with a breadcrumb, sortable Name / Size / Date columns, inline folder expansion, a filter and multi-selection. Copy files and folders either way with the toolbar, F5, a context menu or drag and drop between the panes; progress, cancel and an explicit *Replace* confirmation for existing items are shown in a transfer list. The resource side also supports new folder, rename and delete (files and empty folders); the local side supports new folder. Uses the same credential sources, login-class rule, connect-time MFA and host-key pin as SSH; credential providers are not supported yet. Direct connections only: a resource whose effective transport goes through a Rustion bastion refuses the session rather than dialling it direct. Names a server lists that could escape a folder (`..`, separators, NUL) are hidden and never transferred, symlinked folders are not followed, and partial files are written as `.bvpart` and removed on failure or cancel. Each session open and each transfer is written to the audit log (paths, counts and outcome; never file contents). The built-in `server` type offers SFTP alongside SSH and RDP. (T140, S112)
+
+#### Web Application Connect — failed loads and untrusted certificates (features/web-application-connect.md)
+
+- **Ask before accepting an untrusted TLS certificate in a web session (macOS)** -- when the webview rejects the certificate of one of the session's https origins and the profile has no `tls_pin_sha256`, the session window now shows a native question with the platform's reason, the validity dates, subject, issuer and key fingerprint, and — for `form` and `http-auth` sessions — a warning that continuing sends the stored credential to that server. *Continue* accepts that exact key, for that origin, until the session closes; nothing is saved and the next session asks again. *Don't Continue* refuses it for the session. Both answers are audited as `connect.web.tls_override`. A profile with pins never asks: a certificate that matches no pin is still refused. The recipe's timeout does not run while the question is open. Windows and Linux are unchanged. (T139, S105)
+
+#### MCP Brokered Sessions — groundwork (features/mcp-brokered-sessions.md)
+
+- **Prepare MCP grants for brokered sessions to resources** -- a pairing can now carry `connect_allowed`, always with per-call confirmation (`confirm_connect: false` is refused), and records the operator who approved it for audit and MFA. MCP apps on the network can never be granted a session tool: `sys/mcp/apps` refuses one and the dispatcher refuses an app token that asks. No session tool ships yet, so nothing can open a connection. (T136, S111)
+- **Configure brokered sessions, including where the vault may connect** -- `mcp { brokered_sessions { … } }` in the server config (off by default; an old config parses unchanged) and, without a restart, `brokered_sessions_enabled` and `brokered_sessions_allowed_target_cidrs` on `sys/mcp/config` (sudo). The destination list defaults to `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` and `fc00::/7`; an invalid entry is refused by name; loopback, link-local (including `169.254.169.254`), multicast, unspecified and the vault's own addresses are refused whatever is listed. Every change is logged with the old and new values. (T136, S111)
+- **Opt resource types and connection profiles in to agent sessions** -- a type's `connect.agent_sessions_max` and a profile's `agent_access`, both deny when absent; a profile can be set to `allow` only when its type allows it. (T136, S111)
+
+### Fixed
+
+#### MCP Access — hidden characters in tool results (features/mcp-access.md)
+
+- **Strip invisible characters from every MCP tool result** -- zero-width characters, LRM/RLM/ALM, Unicode tag characters and interlinear annotations passed through to the model and could carry instructions a person reading the result would not see. They are now removed, and U+2028/U+2029 become newlines. (T136, S111)
+
+#### Rustion Bastion Integration
+
+- **Stop the Connection tab claiming a bastion route for a resource that dials direct** -- the *Bastion routing* panel now appears only when the effective transport actually sends Connect through a bastion (`rustion-required`, or `rustion-preferred` with a bastion resolved). Before, with no pinned bastions or group, it showed the whole registry as a random pool ("Will try: …") beside a `direct` transport chip, so a connection error from the operator's own machine looked like a bastion failure. (T75, S51)
+
+#### Web Application Connect
+
+- **Say why a web session page did not load, instead of a blank window and `sign-in timed out` (macOS)** -- a top-frame load that fails (untrusted certificate, host name that does not resolve, refused connection, no network) now shows `page not loaded: …` in the window title, writes `connect.web.load_failed` to the audit log (origin, reason and platform code; never the URL path), and ends a form sign-in or recipe dry run at once with `aborted:<reason>` (`load_tls_untrusted`, `tls_declined`, `load_dns`, `load_connect`, …) rather than waiting out the recipe's timeout. (T139, S105)
+
 ## [0.44.36] - 2026-10-14
 
 ### Fixed
@@ -7863,7 +7895,8 @@ Bulk dependency upgrade across the workspace (`Cargo.toml`, `crates/bv-plugin-pa
 
 - Abandon the SQLx storage backend: `libsqlite3-sys` conflicts at link time with hiqlite's `rusqlite`, so `storage "sqlx"` was removed (T5, M2)
 
-[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.36...HEAD
+[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.37...HEAD
+[0.44.37]: https://github.com/ffquintella/BastionVault/compare/v0.44.36...v0.44.37
 [0.44.36]: https://github.com/ffquintella/BastionVault/compare/v0.44.35...v0.44.36
 [0.44.35]: https://github.com/ffquintella/BastionVault/compare/v0.44.34...v0.44.35
 [0.44.34]: https://github.com/ffquintella/BastionVault/compare/v0.44.33...v0.44.34

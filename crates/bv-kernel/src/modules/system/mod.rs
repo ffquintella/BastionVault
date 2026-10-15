@@ -1154,7 +1154,9 @@ impl SystemBackend {
                         "default_ttl_secs": { field_type: FieldType::Int, required: false, description: "Default MCP token TTL in seconds." },
                         "max_ttl_secs": { field_type: FieldType::Int, required: false, description: "Maximum MCP token TTL in seconds." },
                         "waiver_max_days": { field_type: FieldType::Int, required: false, description: "Maximum machine-waiver duration in days (<= 90)." },
-                        "catalogue_pin": { field_type: FieldType::Str, required: false, description: "Expected tools/list catalogue hash; empty clears the pin." }
+                        "catalogue_pin": { field_type: FieldType::Str, required: false, description: "Expected tools/list catalogue hash; empty clears the pin." },
+                        "brokered_sessions_enabled": { field_type: FieldType::Bool, required: false, description: "Runtime switch for MCP brokered sessions; every session call also needs the server config's mcp.brokered_sessions." },
+                        "brokered_sessions_allowed_target_cidrs": { field_type: FieldType::Array, required: false, description: "Brokered-session destination allow-list (CIDRs). null resets to the server config's list; an empty list allows no destination. Loopback, link-local, multicast and the vault's own addresses stay denied whatever is listed." }
                     },
                     operations: [
                         {op: Operation::Read,  handler: sys_backend_mcp_config_read.handle_mcp_config_read},

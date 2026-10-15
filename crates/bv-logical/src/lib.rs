@@ -43,8 +43,8 @@ pub mod secret;
 pub mod util;
 
 pub use auth::{
-    is_reserved_token_meta_key, split_principal, Auth, McpBinding, McpBindingKind,
-    CHILD_VISIBLE_META, ENTITY_ID_META, NS_ID_META, NS_PATH_META, RESERVED_TOKEN_META_KEYS,
+    is_open_world_mcp_tool, is_reserved_token_meta_key, split_principal, Auth, McpBinding, McpBindingKind,
+    McpOperatorRef, CHILD_VISIBLE_META, MCP_OPEN_WORLD_TOOLS, ENTITY_ID_META, NS_ID_META, NS_PATH_META, RESERVED_TOKEN_META_KEYS,
     RESERVED_TOKEN_META_PREFIXES, SPIFFE_ID_META, USERNAME_META,
 };
 pub use backend::{LogicalBackend, CTX_KEY_BACKEND_PATH};

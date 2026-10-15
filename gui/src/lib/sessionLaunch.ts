@@ -44,6 +44,16 @@ export async function openProfileSession(
     case "rdp":
       await api.sessionOpenRdp(request);
       return;
+    case "sftp":
+      // No placement and no restore: an SFTP session always opens its own
+      // dual-pane window (features/sftp-connect.md).
+      await api.sessionOpenSftp({
+        resource_name: request.resource_name,
+        profile_id: request.profile_id,
+        operator_credential: request.operator_credential,
+        connect_ticket: request.connect_ticket,
+      });
+      return;
     case "web":
       // No placement: a web session is never pooled into the workspace.
       // Never forward an operator credential: `open` releases none, and a

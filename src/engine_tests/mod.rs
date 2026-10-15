@@ -22,6 +22,7 @@ mod notifications;
 mod oidc;
 mod pki_certs_info;
 mod pki_export;
+mod pki_key_ref_policy;
 mod rdp_clipboard;
 mod resource;
 mod resource_connect_web;

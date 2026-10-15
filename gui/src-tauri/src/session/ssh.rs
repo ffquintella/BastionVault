@@ -177,81 +177,15 @@ pub async fn open_ssh_session(
     let stdout_event = stdout_event_name(&token);
     let closed_event = closed_event_name(&token);
 
-    // Connect + auth.
-    let cfg = Arc::new(Config::default());
-    let observed = Arc::new(std::sync::Mutex::new(String::new()));
-    let handler = HostKeyHandler { expected_fp: args.host_key_fingerprint.clone(), observed: observed.clone() };
-    let mut session = client::connect(cfg, (args.host.as_str(), args.port), handler)
-        .await
-        .map_err(|e| format!("connect {}:{}: {e}", args.host, args.port))?;
-
-    // Auth — caller already picked one; we just dispatch.
-    // russh ≥ 0.51 returns `AuthResult` (carrying success +
-    // remaining-method hints) instead of a plain bool, and
-    // `authenticate_publickey` takes a `PrivateKeyWithHashAlg`.
-    //
-    // Recorded before the match consumes `args.credential`, so a
-    // rejection can name the method we actually offered.
-    let attempted = match &args.credential {
-        SshCredential::Password(_) => "password",
-        SshCredential::PrivateKey { .. } => "publickey",
-        SshCredential::Cert { .. } => "publickey (openssh certificate)",
-        SshCredential::SecurityKey { .. } => "publickey (security key)",
-    };
-    let auth_result = match args.credential {
-        SshCredential::Password(pw) => session
-            .authenticate_password(&args.username, pw.as_str())
-            .await
-            .map_err(|e| format!("password auth: {e}"))?,
-        SshCredential::PrivateKey { pem, passphrase } => {
-            let key = decode_secret_key(pem.as_str(), passphrase.as_deref().map(|p| p.as_str()))
-                .map_err(|e| format!("parse private key: {e}"))?;
-            let key_arg = PrivateKeyWithHashAlg::new(Arc::new(key), None);
-            session.authenticate_publickey(&args.username, key_arg).await.map_err(|e| format!("publickey auth: {e}"))?
-        }
-        SshCredential::Cert { pem, cert_openssh } => {
-            let key = decode_secret_key(pem.as_str(), None).map_err(|e| format!("parse ephemeral private key: {e}"))?;
-            let cert = russh::keys::ssh_key::Certificate::from_openssh(cert_openssh.trim())
-                .map_err(|e| format!("parse signed certificate: {e}"))?;
-            session
-                .authenticate_openssh_cert(&args.username, Arc::new(key), cert)
-                .await
-                .map_err(|e| format!("openssh-cert auth: {e}"))?
-        }
-        SshCredential::SecurityKey { public_key_openssh, identity, app, pin_slot } => {
-            let public_key = russh::keys::ssh_key::PublicKey::from_openssh(public_key_openssh.trim())
-                .map_err(|e| format!("parse enrolled security-key public key: {e}"))?;
-            let mut signer = super::sk_signer::SecurityKeySigner::new(identity, app, pin_slot);
-            // russh drives the ceremony and calls back into the signer with
-            // the buffer to sign; the operator touches the key at that point.
-            session
-                .authenticate_publickey_with(&args.username, public_key, None, &mut signer)
-                .await
-                .map_err(|e| format!("security-key auth: {e}"))?
-        }
-    };
-    // Name the method we offered and the ones the server is still
-    // willing to take. Without the `remaining_methods` hint a
-    // credential of the wrong *kind* (a stored password against a
-    // `PasswordAuthentication no` target) is indistinguishable from a
-    // wrong password, and the operator has no way to tell from the
-    // GUI which one they are looking at.
-    if let client::AuthResult::Failure { remaining_methods, partial_success } = &auth_result {
-        let offered: Vec<&'static str> = remaining_methods.iter().map(<&'static str>::from).collect();
-        return Err(auth_failure_message(attempted, &offered, *partial_success));
-    }
-
-    // TOFU log if no pin was supplied.
-    {
-        let fp = observed.lock().map(|g| g.clone()).unwrap_or_default();
-        if args.host_key_fingerprint.is_empty() && !fp.is_empty() {
-            log::warn!(
-                "resource-connect/ssh: accepted unpinned host key for {}:{} — pin {fp} on the profile to lock",
-                args.host,
-                args.port
-            );
-        }
-    }
+    let session = connect_authenticated(
+        &args.host,
+        args.port,
+        &args.username,
+        args.credential,
+        &args.host_key_fingerprint,
+        "resource-connect/ssh",
+    )
+    .await?;
 
     // Open a channel + request a PTY + start an interactive shell.
     let mut channel = session.channel_open_session().await.map_err(|e| format!("channel_open_session: {e}"))?;
@@ -535,13 +469,100 @@ pub async fn open_ssh_session(
     Ok(SshOpenOutcome { token, stdout_event, closed_event })
 }
 
+/// Dial `host:port`, check the host key against `host_key_fingerprint`
+/// (empty = trust on first use, logged under `log_tag`) and authenticate
+/// with `credential`. Shared by the shell session above and the SFTP
+/// session (`session::sftp`), so both present credentials and verify the
+/// host identically; only the channel opened afterwards differs.
+pub(super) async fn connect_authenticated(
+    host: &str,
+    port: u16,
+    username: &str,
+    credential: SshCredential,
+    host_key_fingerprint: &str,
+    log_tag: &str,
+) -> Result<client::Handle<HostKeyHandler>, String> {
+    let cfg = Arc::new(Config::default());
+    let observed = Arc::new(std::sync::Mutex::new(String::new()));
+    let handler = HostKeyHandler { expected_fp: host_key_fingerprint.to_string(), observed: observed.clone() };
+    let mut session = client::connect(cfg, (host, port), handler)
+        .await
+        .map_err(|e| format!("connect {host}:{port}: {e}"))?;
+
+    // Auth — caller already picked one; we just dispatch.
+    // russh ≥ 0.51 returns `AuthResult` (carrying success +
+    // remaining-method hints) instead of a plain bool, and
+    // `authenticate_publickey` takes a `PrivateKeyWithHashAlg`.
+    //
+    // Recorded before the match consumes `credential`, so a
+    // rejection can name the method we actually offered.
+    let attempted = match &credential {
+        SshCredential::Password(_) => "password",
+        SshCredential::PrivateKey { .. } => "publickey",
+        SshCredential::Cert { .. } => "publickey (openssh certificate)",
+        SshCredential::SecurityKey { .. } => "publickey (security key)",
+    };
+    let auth_result = match credential {
+        SshCredential::Password(pw) => session
+            .authenticate_password(username, pw.as_str())
+            .await
+            .map_err(|e| format!("password auth: {e}"))?,
+        SshCredential::PrivateKey { pem, passphrase } => {
+            let key = decode_secret_key(pem.as_str(), passphrase.as_deref().map(|p| p.as_str()))
+                .map_err(|e| format!("parse private key: {e}"))?;
+            let key_arg = PrivateKeyWithHashAlg::new(Arc::new(key), None);
+            session.authenticate_publickey(username, key_arg).await.map_err(|e| format!("publickey auth: {e}"))?
+        }
+        SshCredential::Cert { pem, cert_openssh } => {
+            let key = decode_secret_key(pem.as_str(), None).map_err(|e| format!("parse ephemeral private key: {e}"))?;
+            let cert = russh::keys::ssh_key::Certificate::from_openssh(cert_openssh.trim())
+                .map_err(|e| format!("parse signed certificate: {e}"))?;
+            session
+                .authenticate_openssh_cert(username, Arc::new(key), cert)
+                .await
+                .map_err(|e| format!("openssh-cert auth: {e}"))?
+        }
+        SshCredential::SecurityKey { public_key_openssh, identity, app, pin_slot } => {
+            let public_key = russh::keys::ssh_key::PublicKey::from_openssh(public_key_openssh.trim())
+                .map_err(|e| format!("parse enrolled security-key public key: {e}"))?;
+            let mut signer = super::sk_signer::SecurityKeySigner::new(identity, app, pin_slot);
+            // russh drives the ceremony and calls back into the signer with
+            // the buffer to sign; the operator touches the key at that point.
+            session
+                .authenticate_publickey_with(username, public_key, None, &mut signer)
+                .await
+                .map_err(|e| format!("security-key auth: {e}"))?
+        }
+    };
+    // Name the method we offered and the ones the server is still
+    // willing to take. Without the `remaining_methods` hint a
+    // credential of the wrong *kind* (a stored password against a
+    // `PasswordAuthentication no` target) is indistinguishable from a
+    // wrong password, and the operator has no way to tell from the
+    // GUI which one they are looking at.
+    if let client::AuthResult::Failure { remaining_methods, partial_success } = &auth_result {
+        let offered: Vec<&'static str> = remaining_methods.iter().map(<&'static str>::from).collect();
+        return Err(auth_failure_message(attempted, &offered, *partial_success));
+    }
+
+    // TOFU log if no pin was supplied.
+    {
+        let fp = observed.lock().map(|g| g.clone()).unwrap_or_default();
+        if host_key_fingerprint.is_empty() && !fp.is_empty() {
+            log::warn!("{log_tag}: accepted unpinned host key for {host}:{port} — pin {fp} on the profile to lock");
+        }
+    }
+
+    Ok(session)
+}
+
 #[derive(Serialize, Clone)]
-struct ClosedPayload {
+pub(super) struct ClosedPayload {
     /// Human-readable reason the session ended. Surfaced in the
     /// session window's status bar so the operator can tell apart
     /// "I clicked Disconnect" from "the server killed it during
     /// PAM" without having to dig into logs.
-    reason: String,
+    pub(super) reason: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -570,7 +591,7 @@ pub fn decode_b64(b64: &str) -> Result<Vec<u8>, String> {
     STANDARD.decode(b64.as_bytes()).map_err(|e| format!("base64 decode: {e}"))
 }
 
-struct HostKeyHandler {
+pub(super) struct HostKeyHandler {
     expected_fp: String,
     observed: Arc<std::sync::Mutex<String>>,
 }
@@ -649,6 +670,13 @@ pub async fn drop_session(state: &crate::state::AppState, token: &str) -> Option
         Some(SessionState::Web(w)) => {
             crate::session::web::finish_session(token, w, crate::session::web::WebCloseReason::Dropped).await;
             None
+        }
+        // Cancels any transfer in flight and closes the SSH connection.
+        Some(SessionState::Sftp(s)) => {
+            log::info!("resource-connect/sftp: closed SFTP session token={token}");
+            let on_close = s.on_close.clone();
+            s.shut_down();
+            on_close
         }
         None => None,
     }

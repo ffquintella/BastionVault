@@ -53,8 +53,20 @@ use crate::session::web_tls_pin::{describe_chain, PresentedCertificate, MAX_CHAI
 
 /// The server-trust half of the navigation delegate in
 /// `connect_web_http_auth` (WebKit has one challenge method for both).
+///
+/// A window may hold a challenge open while the operator is asked about an
+/// untrusted certificate (T139). WebKit allows the completion handler to be
+/// called later, and requires that it is called exactly once: a handler
+/// released uncalled raises an Objective-C exception. So every held handler
+/// lives in [`PENDING`] (main thread only) until [`resolve`] answers it or
+/// [`cancel_pending`] — run when the window is destroyed — refuses it.
 #[cfg(target_os = "macos")]
 pub(crate) mod macos {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use block2::{DynBlock, RcBlock};
     use core_foundation::base::TCFType;
     use objc2::encode::{Encoding, RefEncode};
     use objc2::rc::Retained;
@@ -62,8 +74,11 @@ pub(crate) mod macos {
     use objc2_foundation::{NSURLAuthenticationChallenge, NSURLCredential, NSURLSessionAuthChallengeDisposition};
     use security_framework::trust::SecTrust;
 
+    use crate::commands::connect_web_trust_ui::TrustUi;
     use crate::session::web::WebOrigin;
-    use crate::session::web_tls_pin::{TlsPinGate, MAX_CHAIN};
+    use crate::session::web_load::LoadFailure;
+    use crate::session::web_load::PageFailure;
+    use crate::session::web_tls_pin::{describe_chain, OverrideVerdict, SpkiPin, TlsPinGate, MAX_CHAIN};
 
     /// `struct __SecTrust`, only ever behind a `SecTrustRef`.
     #[repr(C)]
@@ -80,6 +95,29 @@ pub(crate) mod macos {
         const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("__SecTrust", &[]));
     }
 
+    pub(crate) type ChallengeCompletion = DynBlock<dyn Fn(NSURLSessionAuthChallengeDisposition, *mut NSURLCredential)>;
+    type HeldCompletion = RcBlock<dyn Fn(NSURLSessionAuthChallengeDisposition, *mut NSURLCredential)>;
+
+    const DEFAULT: NSURLSessionAuthChallengeDisposition = NSURLSessionAuthChallengeDisposition::PerformDefaultHandling;
+    const CANCEL: NSURLSessionAuthChallengeDisposition =
+        NSURLSessionAuthChallengeDisposition::CancelAuthenticationChallenge;
+
+    /// One challenge held for the operator's answer.
+    struct Held {
+        completion: HeldCompletion,
+        trust: SecTrust,
+    }
+
+    /// (window label, origin, leaf key): one question, however many
+    /// connections WebKit opens to the origin while it is open.
+    type PendingKey = (String, WebOrigin, SpkiPin);
+
+    thread_local! {
+        /// Main thread only: WebKit calls the delegate there, and
+        /// [`resolve`] / [`cancel_pending`] are dispatched there.
+        static PENDING: RefCell<HashMap<PendingKey, Vec<Held>>> = RefCell::new(HashMap::new());
+    }
+
     /// The evaluated chain, leaf first, as DER.
     // `SecTrustGetCertificateAtIndex` is deprecated in favour of
     // `SecTrustCopyCertificateChain` (macOS 12), which security-framework only
@@ -93,25 +131,47 @@ pub(crate) mod macos {
         (0..count).filter_map(|i| trust.certificate_at_index(i)).map(|c| c.to_der()).collect()
     }
 
-    /// Decide one server-trust challenge on a pinned window.
+    /// `UseCredential` with a credential for `trust`, or cancel when none
+    /// can be made.
+    fn accept(trust: &SecTrust, completion: &ChallengeCompletion) {
+        // SAFETY: a class method taking a live `SecTrustRef` (owned by
+        // `trust` for this call); it returns an autoreleased credential (or
+        // nil), which objc2 retains.
+        let credential: Option<Retained<NSURLCredential>> = unsafe {
+            msg_send![NSURLCredential::class(), credentialForTrust: trust.as_concrete_TypeRef().cast::<OpaqueSecTrust>()]
+        };
+        match credential {
+            Some(c) => {
+                completion.call((NSURLSessionAuthChallengeDisposition::UseCredential, Retained::as_ptr(&c).cast_mut()))
+            }
+            None => completion.call((CANCEL, std::ptr::null_mut())),
+        }
+    }
+
+    /// Decide one server-trust challenge. Calls `completion` before
+    /// returning, except when the operator is being asked; then the
+    /// challenge is held in [`PENDING`] until the answer.
     ///
     /// 1. Not an https origin of the session → `PerformDefaultHandling` (the
     ///    platform decides; nothing evaluated here).
     /// 2. The platform's own evaluation passes → `PerformDefaultHandling`: a
-    ///    pin overrides rejections only (`session::web_tls_pin`).
-    /// 3. Otherwise the gate decides: accept → `UseCredential` with a
-    ///    credential for this trust; anything else → cancel.
+    ///    pin or an operator override overrides rejections only
+    ///    (`session::web_tls_pin`).
+    /// 3. The profile has pins → the pins decide: accept → `UseCredential`
+    ///    with a credential for this trust; anything else → cancel. A
+    ///    mismatch is never offered to the operator.
+    /// 4. No pins → the operator's answer for this exact key on this origin
+    ///    this session: accepted → `UseCredential`; declined or unreadable →
+    ///    cancel; not asked yet → ask (`ui`), or cancel without one.
     ///
     /// The evaluation in step 2 runs on the main thread, where WebKit calls
     /// its delegate. It is only made for the session's own origins.
     pub(crate) fn server_trust(
         challenge: &NSURLAuthenticationChallenge,
-        gate: &TlsPinGate,
-    ) -> (NSURLSessionAuthChallengeDisposition, Option<Retained<NSURLCredential>>) {
-        const DEFAULT: NSURLSessionAuthChallengeDisposition =
-            NSURLSessionAuthChallengeDisposition::PerformDefaultHandling;
-        const CANCEL: NSURLSessionAuthChallengeDisposition =
-            NSURLSessionAuthChallengeDisposition::CancelAuthenticationChallenge;
+        gate: &Arc<TlsPinGate>,
+        ui: Option<&Arc<TrustUi>>,
+        completion: &ChallengeCompletion,
+    ) {
         let space = challenge.protectionSpace();
         let origin = WebOrigin::from_parts(
             &space.protocol().map(|p| p.to_string()).unwrap_or_default(),
@@ -120,35 +180,126 @@ pub(crate) mod macos {
             u16::try_from(space.port()).unwrap_or(0),
         );
         if !gate.applies_to(origin.as_ref()) {
-            return (DEFAULT, None);
+            completion.call((DEFAULT, std::ptr::null_mut()));
+            return;
         }
+        // `applies_to` holds only for a session origin.
+        let Some(origin) = origin else {
+            completion.call((DEFAULT, std::ptr::null_mut()));
+            return;
+        };
         // SAFETY: `-[NSURLProtectionSpace serverTrust]` returns the space's
         // `SecTrustRef` at +0, or NULL; it stays valid while `space` lives,
-        // which is past every use below.
+        // which is past the wrap below (which takes its own +1).
         let trust_ptr: *mut OpaqueSecTrust = unsafe { msg_send![&*space, serverTrust] };
         if trust_ptr.is_null() {
             // A server-trust challenge without a trust object: nothing to
-            // pin against, and nothing to accept.
-            let _ = gate.server_trust(origin.as_ref(), &[]);
-            return (CANCEL, None);
+            // pin against, and nothing to accept or show.
+            if gate.has_pins() {
+                let _ = gate.server_trust(Some(&origin), &[]);
+            }
+            completion.call((CANCEL, std::ptr::null_mut()));
+            return;
         }
         // SAFETY: a valid `SecTrustRef` (checked non-null above);
         // `wrap_under_get_rule` takes its own +1 and releases it on drop.
         let trust = unsafe { SecTrust::wrap_under_get_rule(trust_ptr.cast()) };
-        if trust.evaluate_with_error().is_ok() {
-            return (DEFAULT, None);
-        }
+        let platform_reason = match trust.evaluate_with_error() {
+            Ok(()) => {
+                completion.call((DEFAULT, std::ptr::null_mut()));
+                return;
+            }
+            // Shown in the question only; it names the host and the
+            // certificate, so it is never logged.
+            Err(e) => e.to_string(),
+        };
         let chain = evaluated_chain(&trust);
-        if !gate.server_trust(origin.as_ref(), &chain).decision.accepts() {
-            return (CANCEL, None);
+
+        if gate.has_pins() {
+            let decision = gate.server_trust(Some(&origin), &chain).decision;
+            match decision {
+                d if d.accepts() => accept(&trust, completion),
+                d => {
+                    if let (Some(ui), crate::session::web_tls_pin::PinDecision::Refuse(r)) = (ui, d) {
+                        ui.refused(&origin, PageFailure { check: r.check(), notice: r.notice() });
+                    }
+                    completion.call((CANCEL, std::ptr::null_mut()));
+                }
+            }
+            return;
         }
-        // SAFETY: a class method taking the live `SecTrustRef`; it returns an
-        // autoreleased credential (or nil), which objc2 retains.
-        let credential: Option<Retained<NSURLCredential>> =
-            unsafe { msg_send![NSURLCredential::class(), credentialForTrust: trust_ptr] };
-        match credential {
-            Some(c) => (NSURLSessionAuthChallengeDisposition::UseCredential, Some(c)),
-            None => (CANCEL, None),
+
+        match gate.operator_override(Some(&origin), &chain) {
+            OverrideVerdict::Accepted => accept(&trust, completion),
+            OverrideVerdict::Declined => {
+                if let Some(ui) = ui {
+                    ui.refused(&origin, LoadFailure::TlsDeclined.page_failure());
+                }
+                completion.call((CANCEL, std::ptr::null_mut()));
+            }
+            OverrideVerdict::NotApplicable | OverrideVerdict::Unreadable => {
+                completion.call((CANCEL, std::ptr::null_mut()))
+            }
+            OverrideVerdict::Ask(leaf) => {
+                let Some(ui) = ui else {
+                    completion.call((CANCEL, std::ptr::null_mut()));
+                    return;
+                };
+                let key: PendingKey = (ui.label().to_string(), origin.clone(), leaf);
+                let held = Held { completion: completion.copy(), trust };
+                let first = PENDING.with(|p| {
+                    let mut p = p.borrow_mut();
+                    let waiting = p.entry(key.clone()).or_default();
+                    waiting.push(held);
+                    waiting.len() == 1
+                });
+                if !first {
+                    // Already being asked about this key.
+                    return;
+                }
+                let leaf_info = describe_chain(&chain).ok().and_then(|c| c.into_iter().next());
+                let answer_ui = Arc::clone(ui);
+                let answer_gate = Arc::clone(gate);
+                ui.ask(&origin, leaf_info, Some(platform_reason), move |accepted| {
+                    let app = answer_ui.app_handle();
+                    let run = move || resolve(&key, accepted, &answer_gate, &answer_ui);
+                    if let Err(e) = app.run_on_main_thread(run) {
+                        // The event loop is gone: the process is exiting and
+                        // the held handlers go with it.
+                        log::warn!("connect.web.tls_override: could not deliver the answer: {e}");
+                    }
+                });
+            }
+        }
+    }
+
+    /// Answer every challenge held for `key`. Main thread.
+    fn resolve(key: &PendingKey, accepted: bool, gate: &TlsPinGate, ui: &TrustUi) {
+        let (_, origin, leaf) = key;
+        let accepted = gate.record_override(origin, *leaf, accepted);
+        if !accepted {
+            ui.refused(origin, LoadFailure::TlsDeclined.page_failure());
+        }
+        let held = PENDING.with(|p| p.borrow_mut().remove(key)).unwrap_or_default();
+        for h in held {
+            if accepted {
+                accept(&h.trust, &h.completion);
+            } else {
+                h.completion.call((CANCEL, std::ptr::null_mut()));
+            }
+        }
+    }
+
+    /// Refuse every challenge still held for the window `label` (it is being
+    /// destroyed). Main thread.
+    pub(crate) fn cancel_pending(label: &str) {
+        let held: Vec<Held> = PENDING.with(|p| {
+            let mut p = p.borrow_mut();
+            let keys: Vec<PendingKey> = p.keys().filter(|(l, _, _)| l == label).cloned().collect();
+            keys.into_iter().filter_map(|k| p.remove(&k)).flatten().collect()
+        });
+        for h in held {
+            h.completion.call((CANCEL, std::ptr::null_mut()));
         }
     }
 }

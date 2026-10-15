@@ -32,6 +32,20 @@ pub enum McpError {
     RateLimited,
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+    /// A session tool on a binding without `connect_allowed` (or, for a
+    /// forged or truncated binding, without `confirm_connect`).
+    /// `features/mcp-brokered-sessions.md` §3 step 2.2.
+    #[error("this principal's binding does not allow brokered sessions (connect_allowed)")]
+    ConnectNotAllowed,
+    /// A session tool on an app (network-mode) binding. Permanent: there is
+    /// no operator to confirm the call. §3 step 2.3.
+    #[error("brokered sessions need a local pairing with an operator to confirm each call; network-mode apps never open them")]
+    ConnectRequiresLocalOperator,
+    /// A shaped session result over its ceiling (`bv_mcp::untrusted`, §8
+    /// step 6). The per-stream caps bound a result, so this means they did
+    /// not hold; refused rather than truncated after the fact.
+    #[error("the result is {bytes} bytes, over this call's {limit}-byte ceiling")]
+    ResultTooLarge { bytes: usize, limit: usize },
     #[error("backend error: {0}")]
     Backend(String),
 }
@@ -50,6 +64,9 @@ impl McpError {
             McpError::ConfirmationInvalid => "mcp_confirmation_required",
             McpError::RateLimited => "mcp_rate_limited",
             McpError::InvalidArgument(_) => "mcp_invalid_argument",
+            McpError::ConnectNotAllowed => "mcp_connect_not_allowed",
+            McpError::ConnectRequiresLocalOperator => "mcp_connect_requires_local_operator",
+            McpError::ResultTooLarge { .. } => "mcp_result_too_large",
             McpError::Backend(_) => "mcp_backend_error",
         }
     }
@@ -57,7 +74,7 @@ impl McpError {
     pub fn jsonrpc_code(&self) -> i64 {
         match self {
             McpError::InvalidArgument(_) => JSONRPC_INVALID_PARAMS,
-            McpError::Backend(_) => JSONRPC_INTERNAL_ERROR,
+            McpError::Backend(_) | McpError::ResultTooLarge { .. } => JSONRPC_INTERNAL_ERROR,
             _ => JSONRPC_INVALID_PARAMS,
         }
     }

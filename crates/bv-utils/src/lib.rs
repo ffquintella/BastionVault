@@ -25,6 +25,7 @@ pub mod cert;
 pub mod cidr;
 pub mod crypto;
 pub mod db;
+pub mod destination_policy;
 pub mod ip_filter;
 pub mod ip_sock_addr;
 pub mod key;

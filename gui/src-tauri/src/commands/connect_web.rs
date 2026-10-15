@@ -333,7 +333,7 @@ pub async fn session_open_web(
         .as_ref()
         .map(|(start, _)| start.launch.launch_id_hash().to_string())
         .or_else(|| http_auth_run.as_ref().map(|start| start.launch.launch_id_hash().to_string()));
-    let tls_pin_gate = (!cfg.tls_pins.is_empty()).then(|| {
+    let tls_pin_gate = (OPERATOR_TLS_OVERRIDE || !cfg.tls_pins.is_empty()).then(|| {
         pin_gate(
             &app,
             &window_label,
@@ -347,7 +347,19 @@ pub async fn session_open_web(
             },
         )
     });
-    let gates = NativeGates { http_auth: http_auth_gate.clone(), tls_pin: tls_pin_gate };
+    let gates = NativeGates {
+        http_auth: http_auth_gate.clone(),
+        tls_pin: tls_pin_gate,
+        #[cfg(target_os = "macos")]
+        ui: Some(super::connect_web_trust_ui::TrustUi::new(
+            &app,
+            &window_label,
+            &token,
+            &request.resource_name,
+            &shared,
+            !matches!(cfg.login, WebLogin::Open),
+        )),
+    };
 
     // A window with native handlers starts on `about:blank` and is sent to
     // the start URL only once they are attached (below).
@@ -833,8 +845,17 @@ pub fn close_web_sessions_on_exit(app: &AppHandle) {
 fn hook_window_destroyed(win: &tauri::Window, app: &AppHandle, token: &str) {
     let token = token.to_string();
     let app = app.clone();
+    #[cfg(target_os = "macos")]
+    let label = win.label().to_string();
     win.on_window_event(move |ev| {
         if let tauri::WindowEvent::Destroyed = ev {
+            // A certificate question still open holds WebKit challenges;
+            // each must be answered exactly once.
+            #[cfg(target_os = "macos")]
+            {
+                let label = label.clone();
+                let _ = app.run_on_main_thread(move || super::connect_web_tls_pin::macos::cancel_pending(&label));
+            }
             let token = token.clone();
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
@@ -1133,9 +1154,17 @@ async fn arm_native_handlers(win: &tauri::Webview, gates: NativeGates, start_url
     win.navigate(start_url.clone()).map_err(|e| failed(&format!("open the start URL: {e}")))
 }
 
+/// Whether a web session window may ask the operator about a certificate
+/// the platform rejected (T139). Only the WKWebView shim can hold a
+/// server-trust challenge open for the answer; WebView2 and WebKitGTK
+/// windows keep refusing it, and a window there still gets a pin gate only
+/// when its profile has pins.
+const OPERATOR_TLS_OVERRIDE: bool = cfg!(target_os = "macos");
+
 /// The TLS pin gate of one window. A refusal is shown in the title (fixed
 /// text) and becomes the session's abort reason if it ends before an
-/// outcome.
+/// outcome. With [`OPERATOR_TLS_OVERRIDE`] a window whose profile has no pins
+/// asks the operator instead (`TlsPinGate::with_operator_override`).
 fn pin_gate(
     app: &AppHandle,
     label: &str,
@@ -1147,15 +1176,15 @@ fn pin_gate(
     let app = app.clone();
     let label = label.to_string();
     let hook_shared = Arc::clone(shared);
-    let gate = TlsPinGate::new(
-        pins.clone(),
-        origins.clone(),
-        audit,
-        Box::new(move |refusal: PinRefusal| {
-            hook_shared.note_abort(refusal.check());
-            set_title_later(&app, &label, hook_shared.set_notice(refusal.notice().to_string()));
-        }),
-    );
+    let on_refusal: Box<dyn Fn(PinRefusal) + Send + Sync> = Box::new(move |refusal: PinRefusal| {
+        hook_shared.note_abort(refusal.check());
+        set_title_later(&app, &label, hook_shared.set_notice(refusal.notice().to_string()));
+    });
+    let gate = if OPERATOR_TLS_OVERRIDE {
+        TlsPinGate::with_operator_override(pins.clone(), origins.clone(), audit, on_refusal)
+    } else {
+        TlsPinGate::new(pins.clone(), origins.clone(), audit, on_refusal)
+    };
     // For the toolbar's lock indicator (held weakly: the hook above holds
     // `shared`).
     shared.attach_pin_gate(&gate);
@@ -1358,7 +1387,7 @@ pub async fn web_recipe_test(
     };
     let gates = NativeGates {
         http_auth: None,
-        tls_pin: (!cfg.tls_pins.is_empty()).then(|| {
+        tls_pin: (OPERATOR_TLS_OVERRIDE || !cfg.tls_pins.is_empty()).then(|| {
             pin_gate(
                 &app,
                 &window_label,
@@ -1368,6 +1397,9 @@ pub async fn web_recipe_test(
                 PinAudit { resource: TEST_TITLE.to_string(), token: token.clone(), launch_id_hash: None },
             )
         }),
+        // A dry run fills nothing.
+        #[cfg(target_os = "macos")]
+        ui: Some(super::connect_web_trust_ui::TrustUi::new(&app, &window_label, &token, TEST_TITLE, &shared, false)),
     };
     let initial_url = if gates.is_empty() {
         scope.start_url.clone()
@@ -1435,7 +1467,7 @@ fn prepare_data_dir(app: &AppHandle, token: &str) -> CmdResult<Option<PathBuf>> 
     web_session::session_data_dir(&root, token).map(Some).map_err(CommandError::from)
 }
 
-fn set_title_later(app: &AppHandle, label: &str, title: String) {
+pub(crate) fn set_title_later(app: &AppHandle, label: &str, title: String) {
     // Window APIs are called from a task rather than from inside the
     // webview callback, so a callback that fires while the window is being
     // built can't re-enter the window registry.

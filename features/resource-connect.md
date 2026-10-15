@@ -48,7 +48,7 @@ This builds on the existing **Resources** layer ([features/resources.md](resourc
 - **Web SSO / SAML / OIDC handoff** for the session windows. Sessions auth with the credentials in the vault, not with the vault user's identity (that would require the target system to trust the vault's identity provider, which is its own product).
 - **Mobile / web Vault.** This is desktop-only — the session windows are Tauri WebviewWindows, no browser deployment.
 - **Multi-hop / jump-host orchestration.** v1 connects directly from the GUI host to the target. A future feature can add `via = <bastion-resource>` chaining.
-- **File transfer (SCP / SFTP).** SSH sessions are interactive-only in v1. SFTP would slot in as a separate feature reusing the same `russh` session.
+- **File transfer (SCP / SFTP).** SSH sessions are interactive-only in v1. SFTP is its own connection-profile protocol, specified in [sftp-connect.md](sftp-connect.md) (T140), reusing the same `russh` connect and credential path.
 
 ## Design
 
@@ -567,7 +567,7 @@ Graphics Pipeline, and cannot be until the flag lands.
 
 - Session recording (keystroke + bitmap capture; storage tier; replay viewer).
 - Tabbed / split session layout — one window per session is the model today; specced out separately in [session-workspace.md](session-workspace.md) (Todo).
-- SFTP file panel attached to an SSH session.
+- SFTP file panel attached to an SSH session. (A standalone dual-pane SFTP window shipped as its own protocol: [sftp-connect.md](sftp-connect.md).)
 - Multi-hop via a designated bastion resource.
 - Smartcard / certificate auth for RDP.
 - RD Gateway / SSH ProxyJump support.

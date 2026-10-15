@@ -2502,6 +2502,13 @@ pub async fn drop_session(state: &crate::state::AppState, token: &str) -> Option
             crate::session::web::finish_session(token, w, crate::session::web::WebCloseReason::Dropped).await;
             None
         }
+        // Cancels any transfer in flight and closes the SSH connection.
+        Some(SessionState::Sftp(s)) => {
+            log::info!("resource-connect/rdp: closed SFTP session token={token}");
+            let on_close = s.on_close.clone();
+            s.shut_down();
+            on_close
+        }
         None => None,
     }
 }

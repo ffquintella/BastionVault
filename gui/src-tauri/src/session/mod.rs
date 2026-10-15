@@ -17,6 +17,7 @@ pub mod output;
 pub mod rdp;
 pub mod rdp_clipboard;
 pub mod routing;
+pub mod sftp;
 pub mod sk_signer;
 pub mod ssh;
 pub mod web;
@@ -24,9 +25,11 @@ pub mod web_chrome;
 pub mod web_engine;
 pub mod web_http_auth;
 pub mod web_launch;
+pub mod web_load;
 pub mod web_recipe;
 pub mod web_script;
 pub mod web_tls_pin;
+pub mod web_tls_prompt;
 pub mod workspace;
 
 use tokio::sync::mpsc;
@@ -44,6 +47,9 @@ pub enum ProfileProtocol {
     Ssh,
     Rdp,
     Web,
+    /// SSH transport with the `sftp` subsystem: the dual-pane file
+    /// transfer window (features/sftp-connect.md).
+    Sftp,
 }
 
 impl ProfileProtocol {
@@ -52,6 +58,7 @@ impl ProfileProtocol {
             Self::Ssh => "ssh",
             Self::Rdp => "rdp",
             Self::Web => "web",
+            Self::Sftp => "sftp",
         }
     }
 
@@ -63,9 +70,10 @@ impl ProfileProtocol {
                 "ssh" => Ok(Self::Ssh),
                 "rdp" => Ok(Self::Rdp),
                 "web" => Ok(Self::Web),
+                "sftp" => Ok(Self::Sftp),
                 other => Err(format!(
                     "connection profile has unknown protocol `{other}`; refusing to guess (this client \
-                     supports ssh, rdp and web)"
+                     supports ssh, sftp, rdp and web)"
                 )),
             },
             Some(_) => Err("connection profile `protocol` is not a string".to_string()),
@@ -109,6 +117,10 @@ pub enum SessionState {
     /// runs through the same registry. A `web_recipe_test` dry-run window is
     /// one too, so it counts for the web/RDP exclusion.
     Web(web::WebSessionState),
+    /// SFTP session (features/sftp-connect.md) — the live `SftpSession`
+    /// the dual-pane window's `sftp_*` commands drive, and the SSH
+    /// connection under it.
+    Sftp(sftp::SftpSessionState),
 }
 
 impl SessionState {
@@ -118,6 +130,7 @@ impl SessionState {
             Self::Ssh(_) => ProfileProtocol::Ssh,
             Self::Rdp(_) => ProfileProtocol::Rdp,
             Self::Web(_) => ProfileProtocol::Web,
+            Self::Sftp(_) => ProfileProtocol::Sftp,
         }
     }
 }
@@ -146,7 +159,7 @@ pub struct WebRdpConflict {
 /// See features/web-application-connect.md, Security Considerations.
 ///
 /// `opening` is the kind of session about to start; `live` are the kinds
-/// already registered. SSH sessions never conflict.
+/// already registered. SSH and SFTP sessions never conflict.
 pub fn web_rdp_conflict(
     opening: ProfileProtocol,
     live: impl IntoIterator<Item = ProfileProtocol>,
@@ -154,7 +167,7 @@ pub fn web_rdp_conflict(
     let other = match opening {
         ProfileProtocol::Web => ProfileProtocol::Rdp,
         ProfileProtocol::Rdp => ProfileProtocol::Web,
-        ProfileProtocol::Ssh => return None,
+        ProfileProtocol::Ssh | ProfileProtocol::Sftp => return None,
     };
     if !live.into_iter().any(|p| p == other) {
         return None;
@@ -257,6 +270,17 @@ mod profile_protocol_tests {
         assert_eq!(ProfileProtocol::of_profile(&json!({ "protocol": "ssh" })), Ok(ProfileProtocol::Ssh));
         assert_eq!(ProfileProtocol::of_profile(&json!({ "protocol": "rdp" })), Ok(ProfileProtocol::Rdp));
         assert_eq!(ProfileProtocol::of_profile(&json!({ "protocol": "web" })), Ok(ProfileProtocol::Web));
+        assert_eq!(ProfileProtocol::of_profile(&json!({ "protocol": "sftp" })), Ok(ProfileProtocol::Sftp));
+    }
+
+    /// An `sftp` profile is never opened as an SSH shell, nor the reverse:
+    /// each `session_open_*` command requires its own protocol.
+    #[test]
+    fn sftp_and_ssh_profiles_are_not_interchangeable() {
+        let sftp = json!({ "protocol": "sftp" });
+        assert!(ProfileProtocol::require(&sftp, ProfileProtocol::Ssh).is_err());
+        assert!(ProfileProtocol::require(&sftp, ProfileProtocol::Sftp).is_ok());
+        assert!(ProfileProtocol::require(&json!({ "protocol": "ssh" }), ProfileProtocol::Sftp).is_err());
     }
 
     /// Pins the fail-closed rule: an unknown, missing or mistyped protocol

@@ -10,8 +10,8 @@ use serde_json::{Map, Value};
 use crate::{
     errors::RvError,
     logical::{
-        field::FieldTrait, Auth, McpBinding, McpBindingKind, Request, Response, ENTITY_ID_META, SPIFFE_ID_META,
-        USERNAME_META,
+        field::FieldTrait, is_open_world_mcp_tool, Auth, McpBinding, McpBindingKind, McpOperatorRef, Request, Response,
+        ENTITY_ID_META, SPIFFE_ID_META, USERNAME_META,
     },
     modules::auth::AuthModule,
     modules::policy::PolicyModule,
@@ -108,6 +108,19 @@ pub struct McpRuntimeConfig {
     pub waiver_max_days: u32,
     #[serde(default)]
     pub catalogue_pin: Option<String>,
+    /// The runtime "big red button" for brokered sessions
+    /// (`features/mcp-brokered-sessions.md` §11): every session call needs
+    /// it on, as well as the server config's `mcp.brokered_sessions`.
+    /// `#[serde(default)]`: a record written before the field existed reads
+    /// as off.
+    #[serde(default)]
+    pub brokered_sessions_enabled: bool,
+    /// The runtime destination allow-list (§12). `None` (`null`) means the
+    /// server config's list applies, or the built-in default when that sets
+    /// none; a list replaces it, and an empty list allows no destination.
+    /// Validated on write: every entry parses as a CIDR.
+    #[serde(default)]
+    pub brokered_sessions_allowed_target_cidrs: Option<Vec<String>>,
 }
 
 impl Default for McpRuntimeConfig {
@@ -118,8 +131,62 @@ impl Default for McpRuntimeConfig {
             max_ttl_secs: default_max_ttl_secs(),
             waiver_max_days: default_waiver_max_days(),
             catalogue_pin: None,
+            brokered_sessions_enabled: false,
+            brokered_sessions_allowed_target_cidrs: None,
         }
     }
+}
+
+/// A request field read without `get_data`'s per-type coercion, which has no
+/// way to say "present and `null`" — the reset value of
+/// `brokered_sessions_allowed_target_cidrs`.
+fn raw_request_field<'a>(req: &'a Request, key: &str) -> Option<&'a Value> {
+    req.data.as_ref().and_then(|d| d.get(key)).or_else(|| req.body.as_ref().and_then(|b| b.get(key)))
+}
+
+/// `brokered_sessions_enabled`: a JSON boolean, or the strings `"true"` /
+/// `"false"` the CLI's `key=value` form sends. Anything else is refused
+/// rather than read as "off" or left unchanged.
+fn parse_runtime_switch(value: &Value) -> Result<bool, RvError> {
+    match value {
+        Value::Bool(b) => Ok(*b),
+        Value::String(s) if s == "true" => Ok(true),
+        Value::String(s) if s == "false" => Ok(false),
+        _ => Err(crate::bv_error_response_status!(400, "brokered_sessions_enabled must be a boolean")),
+    }
+}
+
+/// `brokered_sessions_allowed_target_cidrs`: `null` resets to the server
+/// config's value; a JSON array of strings, or one comma-separated string
+/// (the CLI's form, `""` being the empty list), replaces it. Returns the new
+/// value and the overlap warnings. Every entry must parse, or the write is
+/// refused naming the entry.
+fn parse_runtime_target_cidrs(value: &Value) -> Result<(Option<Vec<String>>, Vec<String>), RvError> {
+    let entries: Vec<String> = match value {
+        Value::Null => return Ok((None, Vec::new())),
+        Value::Array(items) => items
+            .iter()
+            .map(|v| {
+                v.as_str().map(|s| s.trim().to_string()).ok_or_else(|| {
+                    crate::bv_error_response_status!(
+                        400,
+                        "brokered_sessions_allowed_target_cidrs entries must be strings"
+                    )
+                })
+            })
+            .collect::<Result<_, _>>()?,
+        Value::String(s) if s.trim().is_empty() => Vec::new(),
+        Value::String(s) => s.split(',').map(|e| e.trim().to_string()).collect(),
+        _ => {
+            return Err(crate::bv_error_response_status!(
+                400,
+                "brokered_sessions_allowed_target_cidrs must be a list of CIDRs, a comma-separated string, or null"
+            ))
+        }
+    };
+    let parsed = bv_utils::destination_policy::parse_target_cidrs(&entries)
+        .map_err(|e| crate::bv_error_response_status!(400, "brokered_sessions_{}", e))?;
+    Ok((Some(entries), parsed.warnings))
 }
 
 /// The reverse-index entry stored under `mcp/app-tokens/<name>/<accessor>`.
@@ -198,6 +265,95 @@ fn pairing_str(p: &Map<String, Value>, key: &str, required: bool) -> Result<Stri
     }
 }
 
+/// An optional boolean in the pairing grant, read strictly: absent or `null`
+/// is `None`, anything that is not a boolean is refused rather than read as
+/// "off" — a security switch must not have a typo-shaped default.
+fn pairing_opt_bool(p: &Map<String, Value>, key: &str) -> Result<Option<bool>, RvError> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(b)) => Ok(Some(*b)),
+        Some(_) => Err(crate::bv_error_response!("pairing.{} must be a boolean", key)),
+    }
+}
+
+/// The brokered-session half of a pairing grant
+/// (`features/mcp-brokered-sessions.md` §9), re-checked here although the
+/// local gatekeeper's `normalize_grant` enforces the same rules, because the
+/// exchange body is the only thing the vault actually sees:
+///
+/// * `confirm_connect` can never be turned off: an explicit `false` is
+///   refused whether or not `connect_allowed` is set;
+/// * `connect_allowed` requires `confirm_connect = true` in the body — absent
+///   is refused, not defaulted, so a gatekeeper that does not know about
+///   confirmation cannot obtain a session grant;
+/// * a session tool in the allow-list requires `connect_allowed`.
+///
+/// Returns the granted `connect_allowed`.
+fn check_pairing_connect_grant(pairing: &Map<String, Value>, tool_allowlist: &[String]) -> Result<bool, RvError> {
+    let connect_allowed = pairing_opt_bool(pairing, "connect_allowed")?.unwrap_or(false);
+    let confirm_connect = pairing_opt_bool(pairing, "confirm_connect")?;
+    if confirm_connect == Some(false) {
+        return Err(crate::bv_error_response!(
+            "pairing.confirm_connect cannot be false: every brokered session call is confirmed by the operator, and that is not configurable"
+        ));
+    }
+    if connect_allowed && confirm_connect != Some(true) {
+        return Err(crate::bv_error_response!(
+            "pairing.connect_allowed requires pairing.confirm_connect = true: every brokered session call is confirmed by the operator"
+        ));
+    }
+    if let Some(tool) = tool_allowlist.iter().find(|t| is_open_world_mcp_tool(t)) {
+        if !connect_allowed {
+            return Err(crate::bv_error_response!(
+                "pairing.tool_allowlist names the session tool {:?}, which requires pairing.connect_allowed = true",
+                tool
+            ));
+        }
+    }
+    Ok(connect_allowed)
+}
+
+/// The operator record a pairing binding carries (`McpBinding::operator`),
+/// copied from the exchanging session's own auth metadata. The namespace is
+/// normalized exactly as a connect MFA ticket's `namespace` binding is, so a
+/// later ticket redemption compares like with like; a namespace binding that
+/// does not normalize is refused rather than recorded in a form nothing could
+/// match.
+fn operator_ref_from_auth(auth: &Auth) -> Result<McpOperatorRef, RvError> {
+    let meta = |key: &str| auth.metadata.get(key).cloned().unwrap_or_default();
+    let (ns_path, _child_visible) = crate::kernel_api::namespace::binding_from_metadata(&auth.metadata);
+    let namespace = crate::kernel_api::namespace::normalize_path(&ns_path).map_err(|_| {
+        crate::bv_error_response_status!(
+            403,
+            "mcp_pairing_requires_operator_session: the session's namespace binding is malformed"
+        )
+    })?;
+    Ok(McpOperatorRef {
+        entity_id: meta(ENTITY_ID_META),
+        username: meta(USERNAME_META),
+        mount_path: meta("mount_path"),
+        namespace,
+    })
+}
+
+/// The first open-world tool in an app's allow-list, if any. Network-mode
+/// apps never open brokered sessions — a permanent exclusion
+/// (`features/mcp-brokered-sessions.md` §1), not a v1 limit — so a record
+/// carrying one is refused on write and cannot be exchanged.
+fn app_open_world_tool(app: &McpApp) -> Option<&str> {
+    app.tool_allowlist.iter().map(|t| t.trim()).find(|t| is_open_world_mcp_tool(t))
+}
+
+fn app_open_world_refusal(app_name: &str, tool: &str) -> RvError {
+    crate::bv_error_response_status!(
+        400,
+        "mcp_connect_requires_local_operator: MCP app {:?} lists the session tool {:?}; network-mode apps never open brokered sessions, \
+         because there is no operator to confirm each call. Remove it from the app's tool_allowlist; sessions are available to local pairings only",
+        app_name,
+        tool
+    )
+}
+
 async fn get_app(req: &Request, name: &str) -> Result<Option<McpApp>, RvError> {
     match req.storage_get(&format!("{MCP_APP_PREFIX}{name}")).await? {
         Some(entry) => Ok(Some(serde_json::from_slice(&entry.value)?)),
@@ -257,9 +413,56 @@ impl SystemBackend {
         if let Ok(v) = req.get_data("catalogue_pin") {
             cfg.catalogue_pin = v.as_str().filter(|s| !s.is_empty()).map(str::to_string);
         }
+
+        // Brokered sessions (`features/mcp-brokered-sessions.md` §11-12).
+        // Parsed before anything is stored, so an invalid entry leaves the
+        // stored record untouched.
+        let previous_enabled = cfg.brokered_sessions_enabled;
+        let previous_cidrs = cfg.brokered_sessions_allowed_target_cidrs.clone();
+        let mut warnings = Vec::new();
+        let enabled_given = raw_request_field(req, "brokered_sessions_enabled").cloned();
+        let cidrs_given = raw_request_field(req, "brokered_sessions_allowed_target_cidrs").cloned();
+        if let Some(v) = &enabled_given {
+            cfg.brokered_sessions_enabled = parse_runtime_switch(v)?;
+        }
+        if let Some(v) = &cidrs_given {
+            let (cidrs, overlap_warnings) = parse_runtime_target_cidrs(v)?;
+            cfg.brokered_sessions_allowed_target_cidrs = cidrs;
+            warnings = overlap_warnings;
+        }
+
         let entry = StorageEntry::new(MCP_CONFIG_KEY, &cfg)?;
         req.storage_put(&entry).await?;
-        Ok(Some(Response::data_response(serde_json::to_value(cfg)?.as_object().cloned())))
+
+        if enabled_given.is_some() || cidrs_given.is_some() {
+            // `mcp.config.updated`, with both the old and the new values: the
+            // standard audit entry for this request carries the new ones
+            // only, and HMACs them.
+            let by = req
+                .auth
+                .as_ref()
+                .map(|a| a.display_name.clone())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "(unknown)".to_string());
+            log::info!(
+                target: "security",
+                "mcp.config.updated by {}: brokered_sessions_enabled {} -> {}, brokered_sessions_allowed_target_cidrs {:?} -> {:?}",
+                by,
+                previous_enabled,
+                cfg.brokered_sessions_enabled,
+                previous_cidrs,
+                cfg.brokered_sessions_allowed_target_cidrs
+            );
+            for w in &warnings {
+                log::warn!(target: "security", "mcp.config.updated: {w}");
+            }
+        }
+
+        let mut resp = Response::data_response(serde_json::to_value(cfg)?.as_object().cloned());
+        for w in warnings {
+            resp.add_warning(&w);
+        }
+        Ok(Some(resp))
     }
 
     pub async fn handle_mcp_apps_list(
@@ -362,6 +565,13 @@ impl SystemBackend {
 
         if app.approle_role.is_empty() {
             return Err(crate::bv_error_response!("approle_role is required"));
+        }
+        // Checked on the record as it would be stored, not only on the
+        // request's `tool_allowlist`: an update to a record that already
+        // carries a session tool (written before this rule existed) is
+        // refused too, until the tool is removed.
+        if let Some(tool) = app_open_world_tool(&app) {
+            return Err(app_open_world_refusal(&app.name, tool));
         }
 
         put_app(req, &app).await?;
@@ -656,6 +866,11 @@ impl SystemBackend {
         let reveal_allowed = pairing.get("reveal_allowed").and_then(Value::as_bool).unwrap_or(false);
         let destructive_allowed = pairing.get("destructive_allowed").and_then(Value::as_bool).unwrap_or(false);
         let pairing_ttl = pairing.get("ttl_secs").and_then(Value::as_u64);
+        // `features/mcp-brokered-sessions.md` §9. `connect_allowed` may sit
+        // beside `reveal_allowed` (owner decision): such a grant holds the
+        // whole lethal trifecta, and per-call confirmation is what bounds it.
+        let connect_allowed = check_pairing_connect_grant(&pairing, &tool_allowlist)?;
+        let operator = operator_ref_from_auth(auth)?;
 
         let ttl_secs = requested_ttl_secs.or(pairing_ttl).unwrap_or(28_800).clamp(1, 86_400);
         let binding = McpBinding {
@@ -668,6 +883,12 @@ impl SystemBackend {
             client_name: client_name.clone(),
             client_version: client_version.clone(),
             waived_until: None,
+            connect_allowed,
+            // Not configurable (§9): every pairing binding minted from now on
+            // carries it, so no reader can ever find a pairing binding that
+            // skips the operator.
+            confirm_connect: true,
+            operator: Some(operator),
         };
         let auth_module = self.get_module::<AuthModule>("auth")?;
         let Some(token_store) = auth_module.token_store.load_full() else {
@@ -759,6 +980,13 @@ impl SystemBackend {
         if role_name != app.approle_role {
             return Err(RvError::ErrPermissionDenied);
         }
+        // A record written before `sys/mcp/apps` refused session tools may
+        // still carry one. Refuse to mint from it rather than mint a token
+        // whose allow-list names a tool the dispatcher would refuse anyway:
+        // the operator learns at exchange, with the fix named.
+        if let Some(tool) = app_open_world_tool(&app) {
+            return Err(app_open_world_refusal(&app.name, tool));
+        }
         let has_spiffe = auth.metadata.get(SPIFFE_ID_META).is_some_and(|s| !s.is_empty());
         let waived = app.machine_waiver.as_ref().is_some_and(MachineWaiver::is_active);
         if !has_spiffe && !waived {
@@ -781,6 +1009,11 @@ impl SystemBackend {
             client_name: String::new(),
             client_version: String::new(),
             waived_until: app.machine_waiver.as_ref().map(|w| w.expires_at),
+            // Network-mode apps never open sessions (permanent, §1): there is
+            // no human to confirm a call or complete MFA.
+            connect_allowed: false,
+            confirm_connect: false,
+            operator: None,
         };
         let auth_module = self.get_module::<AuthModule>("auth")?;
         let Some(token_store) = auth_module.token_store.load_full() else {
@@ -829,5 +1062,142 @@ impl SystemBackend {
             }),
         );
         Ok(Some(Response::data_response(Some(data))))
+    }
+}
+
+#[cfg(test)]
+mod brokered_session_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn grant(v: Value) -> Map<String, Value> {
+        v.as_object().cloned().unwrap()
+    }
+
+    fn tools(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn connect_grant_rules() {
+        let none = tools(&["bv_kv_read"]);
+        let ssh = tools(&["bv_kv_read", "bv_resource_ssh_exec"]);
+        // Absent: no connect, and that is fine.
+        assert!(!check_pairing_connect_grant(&grant(json!({})), &none).unwrap());
+        // Granted with confirmation, beside reveal.
+        let ok = grant(json!({ "connect_allowed": true, "confirm_connect": true, "reveal_allowed": true }));
+        assert!(check_pairing_connect_grant(&ok, &ssh).unwrap());
+        // confirm_connect absent, false, or mistyped.
+        for (g, needle) in [
+            (json!({ "connect_allowed": true }), "requires pairing.confirm_connect"),
+            (json!({ "connect_allowed": true, "confirm_connect": null }), "requires pairing.confirm_connect"),
+            (json!({ "connect_allowed": true, "confirm_connect": false }), "cannot be false"),
+            (json!({ "confirm_connect": false }), "cannot be false"),
+            (json!({ "connect_allowed": "true", "confirm_connect": true }), "must be a boolean"),
+            (json!({ "connect_allowed": true, "confirm_connect": "true" }), "must be a boolean"),
+        ] {
+            let err = check_pairing_connect_grant(&grant(g.clone()), &none).unwrap_err().to_string();
+            assert!(err.contains(needle), "{g}: {err}");
+        }
+        // A session tool without the grant.
+        let err = check_pairing_connect_grant(&grant(json!({})), &ssh).unwrap_err().to_string();
+        assert!(err.contains("bv_resource_ssh_exec") && err.contains("requires pairing.connect_allowed"), "{err}");
+    }
+
+    #[test]
+    fn operator_ref_is_copied_from_the_session_metadata() {
+        let mut auth = Auth::default();
+        auth.metadata.insert(USERNAME_META.into(), "felipe".into());
+        auth.metadata.insert(ENTITY_ID_META.into(), "e-1".into());
+        auth.metadata.insert("mount_path".into(), "userpass/".into());
+        auth.metadata.insert(crate::logical::NS_PATH_META.into(), "/tenant-a/".into());
+        let op = operator_ref_from_auth(&auth).unwrap();
+        assert_eq!(
+            op,
+            McpOperatorRef {
+                entity_id: "e-1".into(),
+                username: "felipe".into(),
+                mount_path: "userpass/".into(),
+                namespace: "tenant-a".into(),
+            }
+        );
+        // Root namespace normalizes to "".
+        auth.metadata.remove(crate::logical::NS_PATH_META);
+        assert_eq!(operator_ref_from_auth(&auth).unwrap().namespace, "");
+        // A namespace binding that does not normalize is refused.
+        auth.metadata.insert(crate::logical::NS_PATH_META.into(), "a/../b".into());
+        assert!(operator_ref_from_auth(&auth).is_err());
+    }
+
+    #[test]
+    fn app_records_with_a_session_tool_are_found() {
+        let app = |list: &[&str]| McpApp {
+            version: 1,
+            name: "a".into(),
+            approle_role: "r".into(),
+            entity_id: String::new(),
+            description: String::new(),
+            tool_allowlist: tools(list),
+            path_scope: vec![],
+            reveal_allowed: false,
+            destructive_allowed: false,
+            ttl_secs: 3600,
+            machine_waiver: None,
+            created_by: String::new(),
+            created_at: 0,
+            updated_by: String::new(),
+            updated_at: 0,
+        };
+        assert_eq!(app_open_world_tool(&app(&["bv_kv_read"])), None);
+        assert_eq!(
+            app_open_world_tool(&app(&["bv_kv_read", " bv_resource_web_fetch "])),
+            Some("bv_resource_web_fetch")
+        );
+        let err = app_open_world_refusal("a", "bv_resource_rdp_act").to_string();
+        assert!(err.contains("mcp_connect_requires_local_operator") && err.contains("bv_resource_rdp_act"), "{err}");
+    }
+
+    /// A runtime config record written before the brokered-session keys
+    /// existed reads as "switch off, allow-list not overridden".
+    #[test]
+    fn an_old_runtime_config_reads_with_sessions_off() {
+        let old =
+            r#"{"version":1,"default_ttl_secs":3600,"max_ttl_secs":86400,"waiver_max_days":90,"catalogue_pin":null}"#;
+        let cfg: McpRuntimeConfig = serde_json::from_str(old).unwrap();
+        assert!(!cfg.brokered_sessions_enabled);
+        assert_eq!(cfg.brokered_sessions_allowed_target_cidrs, None);
+        let d = McpRuntimeConfig::default();
+        assert!(!d.brokered_sessions_enabled && d.brokered_sessions_allowed_target_cidrs.is_none());
+    }
+
+    #[test]
+    fn runtime_switch_and_list_parsing() {
+        assert!(parse_runtime_switch(&json!(true)).unwrap());
+        assert!(parse_runtime_switch(&json!("true")).unwrap());
+        assert!(!parse_runtime_switch(&json!("false")).unwrap());
+        for bad in [json!("yes"), json!(1), json!(null), json!(["true"])] {
+            assert!(parse_runtime_switch(&bad).is_err(), "{bad}");
+        }
+
+        assert_eq!(parse_runtime_target_cidrs(&json!(null)).unwrap(), (None, vec![]));
+        assert_eq!(parse_runtime_target_cidrs(&json!([])).unwrap(), (Some(vec![]), vec![]));
+        assert_eq!(parse_runtime_target_cidrs(&json!("")).unwrap(), (Some(vec![]), vec![]));
+        assert_eq!(
+            parse_runtime_target_cidrs(&json!(" 10.0.0.0/8 ,fd00::/8")).unwrap().0,
+            Some(vec!["10.0.0.0/8".to_string(), "fd00::/8".to_string()])
+        );
+        let (list, warnings) = parse_runtime_target_cidrs(&json!(["10.0.0.0/8", "::ffff:127.0.0.1/128"])).unwrap();
+        assert_eq!(list.unwrap().len(), 2);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        for (bad, needle) in [
+            (json!(["10.0.0.0/8", "bogus"]), "\"bogus\""),
+            (json!(["10.0.0.1/8"]), "host bits"),
+            (json!("10.0.0.0/8,,"), "empty"),
+            (json!([1]), "must be strings"),
+            (json!({ "a": 1 }), "must be a list"),
+        ] {
+            let err = parse_runtime_target_cidrs(&bad).unwrap_err().to_string();
+            assert!(err.contains(needle), "{bad}: {err}");
+        }
     }
 }

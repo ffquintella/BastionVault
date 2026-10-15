@@ -302,6 +302,73 @@ pub struct McpBinding {
     /// under one. Checked at every `tools/call`, not just at exchange time.
     #[serde(default)]
     pub waived_until: Option<u64>,
+    /// May this binding call the open-world (brokered session) tools listed
+    /// in [`MCP_OPEN_WORLD_TOOLS`]? `features/mcp-brokered-sessions.md` §3.
+    ///
+    /// `#[serde(default)]` is the fail-closed read of every token minted
+    /// before the field existed: it decodes as `false`, so no old token can
+    /// open a session. Only a pairing exchange ever sets it; an app binding
+    /// never does, and the dispatcher refuses an app binding on an
+    /// open-world tool regardless.
+    #[serde(default)]
+    pub connect_allowed: bool,
+    /// Every session call is confirmed by the operator. Forced `true` on
+    /// every pairing binding minted since the field existed and never
+    /// configurable (§9). A binding with `connect_allowed` but without this
+    /// is refused, by the dispatcher and again by the session handler, so a
+    /// forged or truncated record cannot reach a target. Decodes as `false`
+    /// on an old token, which — with `connect_allowed` also `false` — is
+    /// "no sessions".
+    #[serde(default)]
+    pub confirm_connect: bool,
+    /// The operator who approved the pairing, copied from their own login's
+    /// auth metadata at mint (§3 "Operator reference").
+    ///
+    /// Read by exactly two things: audit/transcript attribution, and the MFA
+    /// ticket redemption that names the principal a step-up ticket must have
+    /// been minted for. **Never** by ACL evaluation, share or ownership
+    /// resolution, policy templating or the connect gate: an MCP token stays
+    /// entity-less, so a share to the operator's entity must not become a
+    /// session grant for the agent. `None` on app bindings and on every
+    /// token minted before the field existed.
+    #[serde(default)]
+    pub operator: Option<McpOperatorRef>,
+}
+
+/// The human behind a pairing binding. See [`McpBinding::operator`] for the
+/// two places allowed to read it.
+#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct McpOperatorRef {
+    /// The operator's identity entity id, when their login resolved one.
+    #[serde(default)]
+    pub entity_id: String,
+    /// Login name as the auth backend stamped it.
+    #[serde(default)]
+    pub username: String,
+    /// Auth mount the operator logged in through (`userpass/`, `oidc/` …).
+    #[serde(default)]
+    pub mount_path: String,
+    /// The operator token's namespace path, normalized (`""` = root) — the
+    /// same form a connect MFA ticket's `namespace` binding carries.
+    #[serde(default)]
+    pub namespace: String,
+}
+
+/// The catalogue's open-world tools: each opens a brokered session to a
+/// resource (`features/mcp-brokered-sessions.md` §4). The names are fixed by
+/// that spec and reserved here even before a build carries the tool, because
+/// two crates that cannot see the `bv-mcp` catalogue enforce the permanent
+/// exclusion of network-mode apps on them:
+///
+/// * `sys/mcp/apps` refuses any of these in an app's `tool_allowlist`, and
+///   the app exchange refuses to mint from a record that carries one;
+/// * `bv-mcp`'s catalogue test asserts that every entry flagged
+///   `open_world` is listed here, so the two cannot drift.
+pub const MCP_OPEN_WORLD_TOOLS: &[&str] = &["bv_resource_ssh_exec", "bv_resource_web_fetch", "bv_resource_rdp_act"];
+
+/// Is `tool` one of [`MCP_OPEN_WORLD_TOOLS`]? Exact match.
+pub fn is_open_world_mcp_tool(tool: &str) -> bool {
+    MCP_OPEN_WORLD_TOOLS.contains(&tool)
 }
 
 #[derive(Debug, Clone, Eq, Default, PartialEq, Serialize, Deserialize)]
@@ -353,6 +420,65 @@ mod tests {
             split_principal("ferrogate-spiffe://hml/host/abc", "ferrogate-spiffe://hml/host/abc", "", "");
         assert_eq!(user, "ferrogate-spiffe://hml/host/abc");
         assert_eq!(machine, "ferrogate-spiffe://hml/host/abc");
+    }
+}
+
+#[cfg(test)]
+mod mcp_binding_tests {
+    use super::*;
+
+    /// A binding persisted before brokered sessions existed (no
+    /// `connect_allowed`, `confirm_connect` or `operator` key) decodes with
+    /// sessions off — the read-old half of
+    /// `features/mcp-brokered-sessions.md` §14.
+    #[test]
+    fn a_pre_sessions_binding_decodes_with_sessions_off() {
+        let legacy = r#"{"kind":{"Pairing":"abc-123"},"catalogue_hash":"h","tool_allowlist":["bv_kv_read"],
+            "path_scope":["secret/*"],"reveal_allowed":true,"destructive_allowed":false,
+            "client_name":"c","client_version":"1","waived_until":null}"#;
+        let b: McpBinding = serde_json::from_str(legacy).unwrap();
+        assert!(!b.connect_allowed);
+        assert!(!b.confirm_connect);
+        assert_eq!(b.operator, None);
+        assert!(b.reveal_allowed, "the existing fields are untouched");
+    }
+
+    #[test]
+    fn a_binding_with_an_operator_round_trips() {
+        let b = McpBinding {
+            kind: McpBindingKind::Pairing("p-1".into()),
+            catalogue_hash: "h".into(),
+            tool_allowlist: vec!["bv_resource_ssh_exec".into()],
+            path_scope: vec!["resources/secrets/web-01/".into()],
+            reveal_allowed: true,
+            destructive_allowed: false,
+            client_name: "claude-code".into(),
+            client_version: "2".into(),
+            waived_until: None,
+            connect_allowed: true,
+            confirm_connect: true,
+            operator: Some(McpOperatorRef {
+                entity_id: "e-1".into(),
+                username: "felipe".into(),
+                mount_path: "userpass/".into(),
+                namespace: String::new(),
+            }),
+        };
+        let json = serde_json::to_string(&b).unwrap();
+        assert_eq!(serde_json::from_str::<McpBinding>(&json).unwrap(), b);
+        // An operator record missing some keys decodes with them empty.
+        let partial: McpOperatorRef = serde_json::from_str(r#"{"username":"felipe"}"#).unwrap();
+        assert_eq!(partial, McpOperatorRef { username: "felipe".into(), ..Default::default() });
+    }
+
+    #[test]
+    fn the_reserved_session_tool_names_are_exact() {
+        for tool in ["bv_resource_ssh_exec", "bv_resource_web_fetch", "bv_resource_rdp_act"] {
+            assert!(is_open_world_mcp_tool(tool), "{tool}");
+        }
+        for tool in ["bv_resource_describe", "bv_resource_list", "bv_resource_ssh_exec ", "BV_RESOURCE_SSH_EXEC", ""] {
+            assert!(!is_open_world_mcp_tool(tool), "{tool:?}");
+        }
     }
 }
 

@@ -16,6 +16,14 @@ pub struct ToolMeta {
     /// This tool can return a secret/plaintext value gated by an explicit
     /// `reveal: true` argument (spec §6 "Reveal gate").
     pub is_reveal: bool,
+    /// This tool opens a brokered session to a resource
+    /// (`features/mcp-brokered-sessions.md` §4): reported as
+    /// `openWorldHint`, and gated by the dispatcher on the binding's
+    /// `connect_allowed`, `confirm_connect` and pairing kind. Every name
+    /// flagged here must be in `bv_logical::MCP_OPEN_WORLD_TOOLS`, which is
+    /// what the kernel enforces the network-mode exclusion against (asserted
+    /// by a test below).
+    pub open_world: bool,
     pub input_schema: fn() -> Value,
     pub output_schema: fn() -> Value,
 }
@@ -59,6 +67,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: false,
             idempotent: true,
             is_reveal: false,
+            open_world: false,
             input_schema: || json!({ "type": "object", "properties": {} }),
             output_schema: empty_output_schema,
         },
@@ -69,6 +78,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: false,
             idempotent: true,
             is_reveal: false,
+            open_world: false,
             input_schema: || json!({
                 "type": "object",
                 "properties": { "path": { "type": "string" } },
@@ -83,6 +93,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: false,
             idempotent: true,
             is_reveal: false,
+            open_world: false,
             input_schema: || json!({
                 "type": "object",
                 "properties": {
@@ -100,6 +111,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: false,
             idempotent: true,
             is_reveal: false,
+            open_world: false,
             input_schema: || path_args_schema(json!({})),
             output_schema: empty_output_schema,
         },
@@ -110,6 +122,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: false,
             idempotent: true,
             is_reveal: true,
+            open_world: false,
             input_schema: || path_args_schema(json!({
                 "properties": { "reveal": { "type": "boolean", "default": false } },
             })),
@@ -122,6 +135,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: false,
             idempotent: true,
             is_reveal: false,
+            open_world: false,
             input_schema: || json!({ "type": "object", "properties": {} }),
             output_schema: empty_output_schema,
         },
@@ -132,6 +146,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: false,
             idempotent: true,
             is_reveal: false,
+            open_world: false,
             input_schema: || json!({
                 "type": "object",
                 "properties": { "name": { "type": "string" } },
@@ -146,6 +161,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: false,
             idempotent: true,
             is_reveal: false,
+            open_world: false,
             input_schema: || json!({
                 "type": "object",
                 "properties": {
@@ -164,6 +180,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: false,
             idempotent: true,
             is_reveal: true,
+            open_world: false,
             input_schema: || json!({
                 "type": "object",
                 "properties": {
@@ -182,6 +199,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: false,
             idempotent: true,
             is_reveal: false,
+            open_world: false,
             input_schema: || json!({
                 "type": "object",
                 "properties": {
@@ -199,6 +217,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: false,
             idempotent: true,
             is_reveal: false,
+            open_world: false,
             input_schema: || json!({
                 "type": "object",
                 "properties": {
@@ -217,6 +236,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: false,
             idempotent: false,
             is_reveal: true,
+            open_world: false,
             input_schema: || json!({
                 "type": "object",
                 "properties": {
@@ -234,6 +254,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: false,
             idempotent: true,
             is_reveal: false,
+            open_world: false,
             input_schema: || json!({ "type": "object", "properties": {} }),
             output_schema: empty_output_schema,
         },
@@ -244,6 +265,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: false,
             idempotent: true,
             is_reveal: false,
+            open_world: false,
             input_schema: || json!({
                 "type": "object",
                 "properties": { "serial": { "type": "string" } },
@@ -261,6 +283,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: true,
             idempotent: false,
             is_reveal: false,
+            open_world: false,
             input_schema: || path_args_schema(json!({
                 "properties": { "data": { "type": "object" } },
                 "required": ["data"],
@@ -274,6 +297,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: true,
             idempotent: true,
             is_reveal: false,
+            open_world: false,
             input_schema: || path_args_schema(json!({})),
             output_schema: empty_output_schema,
         },
@@ -284,6 +308,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: true,
             idempotent: false,
             is_reveal: true,
+            open_world: false,
             input_schema: || json!({
                 "type": "object",
                 "properties": {
@@ -304,6 +329,7 @@ pub fn catalogue() -> &'static [ToolMeta] {
             destructive: true,
             idempotent: false,
             is_reveal: false,
+            open_world: false,
             input_schema: || json!({
                 "type": "object",
                 "properties": {
@@ -337,7 +363,7 @@ pub fn tools_list_json() -> Value {
                     "readOnlyHint": t.read_only,
                     "destructiveHint": t.destructive,
                     "idempotentHint": t.idempotent,
-                    "openWorldHint": false,
+                    "openWorldHint": t.open_world,
                 },
             })
         })
@@ -364,12 +390,54 @@ mod tests {
         assert_eq!(catalogue_hash(), catalogue_hash());
     }
 
+    /// The exact set of tools that report `openWorldHint: true`. Empty until
+    /// the first session tool (`bv_resource_ssh_exec`) is appended; each
+    /// phase of `features/mcp-brokered-sessions.md` adds its tool here.
+    const OPEN_WORLD_TOOLS_IN_THIS_BUILD: &[&str] = &[];
+
     #[test]
-    fn no_tool_sets_open_world_hint() {
+    fn only_session_tools_set_open_world_hint() {
         let list = tools_list_json();
+        let flagged: Vec<&str> = list["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["annotations"]["openWorldHint"] == json!(true))
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(flagged, OPEN_WORLD_TOOLS_IN_THIS_BUILD);
         for tool in list["tools"].as_array().unwrap() {
-            assert_eq!(tool["annotations"]["openWorldHint"], json!(false));
+            assert!(tool["annotations"]["openWorldHint"].is_boolean(), "{}", tool["name"]);
         }
+    }
+
+    /// The kernel cannot see this catalogue, so `sys/mcp/apps` and the app
+    /// exchange refuse session tools by name from
+    /// `bv_logical::MCP_OPEN_WORLD_TOOLS`. A tool flagged `open_world` here
+    /// but missing there would slip past the network-mode exclusion; a name
+    /// listed there must not be a non-session tool here.
+    #[test]
+    fn open_world_flags_agree_with_the_reserved_session_tool_names() {
+        for t in catalogue() {
+            assert_eq!(
+                t.open_world,
+                bv_logical::is_open_world_mcp_tool(t.name),
+                "{}: catalogue open_world and bv_logical::MCP_OPEN_WORLD_TOOLS disagree",
+                t.name
+            );
+        }
+    }
+
+    /// Adding the `open_world` field (and extending the sanitizer) must not
+    /// move the catalogue hash: no tool changed, and an operator's
+    /// `catalogue_pin` must keep matching. This is the hash of the 0.44.36
+    /// catalogue (`edb3e437`), checked equal to it when the field was added.
+    /// The CHANGELOG's last quoted value (T80, `6b861ee8…`) predates later
+    /// description changes and is not this one. A phase that appends a
+    /// session tool updates this value, and its CHANGELOG entry quotes it.
+    #[test]
+    fn catalogue_hash_is_pinned() {
+        assert_eq!(catalogue_hash(), "f900f6c593f9cbe6552ef5e5b8ff43e74829cc522aa2dabb770ff01f73dc6209");
     }
 
     #[test]

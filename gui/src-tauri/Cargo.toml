@@ -1,6 +1,6 @@
 [package]
 name = "bastion-vault-gui"
-version = "0.44.36"
+version = "0.44.37"
 edition = "2021"
 description = "BastionVault Desktop GUI"
 # Shipped as a signed installer (see roadmaps/packaging-and-distribution.md),
@@ -127,6 +127,11 @@ uuid = { version = "1", features = ["v4"] }
 # see the russh comment there for why that exact version, and
 # `[patch.crates-io]` in the workspace root for the sspi/picky side.
 russh = { version = "=0.62.7", default-features = true }
+# SFTP connection profiles (features/sftp-connect.md): the `sftp`
+# subsystem client over the russh session above. Already in the lockfile
+# through `bv-engine-files`' `files_ssh_sync` feature (same version, same
+# russh ^0.62.5 requirement), so this adds no new crate to the graph.
+russh-sftp = "2.4"
 async-trait = "0.1"
 log = "0.4"
 env_logger = "0.11"

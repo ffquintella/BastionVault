@@ -1,7 +1,7 @@
 //! `tools/call` → gates → `bv_client::Backend` → result shaping. Spec §6.
 
 use bv_client::{Backend, ClientError, Operation};
-use bv_logical::McpBinding;
+use bv_logical::{McpBinding, McpBindingKind};
 use serde_json::{Map, Value};
 
 use crate::{
@@ -61,7 +61,25 @@ pub async fn call(
     ctx: &DispatchContext<'_>,
 ) -> Result<CallToolResult, McpError> {
     let meta = catalogue::find(tool).ok_or_else(|| McpError::UnknownTool(tool.to_string()))?;
+    dispatch(meta, args, confirmed_state, ctx).await
+}
+
+/// [`call`] once the tool's catalogue entry is known. Separate so the gate
+/// order can be tested against an entry that is not (yet) in the catalogue,
+/// such as an open-world tool before its phase ships.
+pub(crate) async fn dispatch(
+    meta: &ToolMeta,
+    args: Map<String, Value>,
+    confirmed_state: Option<&str>,
+    ctx: &DispatchContext<'_>,
+) -> Result<CallToolResult, McpError> {
+    let tool = meta.name;
     check_tool_allowed(tool, ctx.binding)?;
+    // Before any argument is looked at: a binding that may not open
+    // sessions learns nothing more from a session tool than that.
+    if meta.open_world {
+        check_open_world_gate(ctx.binding)?;
+    }
 
     if tool == "bv_whoami" {
         return Ok(whoami_result(ctx.principal));
@@ -116,7 +134,7 @@ fn require_confirmation(
     confirmed_state: Option<&str>,
     ctx: &DispatchContext<'_>,
 ) -> Result<Option<CallToolResult>, McpError> {
-    let args_hash = hash_args(args);
+    let args_hash = args_hash(args);
     match confirmed_state {
         None => {
             let payload = RequestStatePayload {
@@ -148,7 +166,16 @@ fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-fn hash_args(args: &Map<String, Value>) -> String {
+/// BLAKE3 over the `serde_json` bytes of a call's `arguments`, hex-encoded.
+///
+/// Public because two parties must compute it identically: the dispatcher
+/// binds an MRTR `requestState` to it, and the local gatekeeper binds an
+/// operator's connect MFA ticket to it (`features/mcp-brokered-sessions.md`
+/// §3.1). Key order is stable because no crate in this workspace enables
+/// `serde_json`'s `preserve_order` (see the note on `catalogue_hash`). A map
+/// that cannot serialize hashes the empty input rather than panicking; such a
+/// map cannot have come from a parsed JSON-RPC request.
+pub fn args_hash(args: &Map<String, Value>) -> String {
     let bytes = serde_json::to_vec(args).unwrap_or_default();
     blake3::hash(&bytes).to_hex().to_string()
 }
@@ -239,6 +266,26 @@ fn check_path_scope(path: &str, binding: &McpBinding) -> Result<(), McpError> {
 fn check_reveal_gate(is_reveal_tool: bool, reveal_requested: bool, binding: &McpBinding) -> Result<(), McpError> {
     if is_reveal_tool && reveal_requested && !binding.reveal_allowed {
         return Err(McpError::RevealDenied);
+    }
+    Ok(())
+}
+
+/// The connect gate for open-world (session) tools,
+/// `features/mcp-brokered-sessions.md` §3 step 2, in the spec's order:
+///
+/// 1. `connect_allowed`, and with it `confirm_connect` — a binding claiming
+///    the first without the second is not one the exchange mints, so it is
+///    refused as not allowed rather than trusted;
+/// 2. the binding is a local pairing. An app binding is refused whatever it
+///    claims: network-mode apps never open sessions, permanently.
+///
+/// The session handler re-checks all three as defence in depth.
+pub(crate) fn check_open_world_gate(binding: &McpBinding) -> Result<(), McpError> {
+    if !binding.connect_allowed || !binding.confirm_connect {
+        return Err(McpError::ConnectNotAllowed);
+    }
+    if !matches!(binding.kind, McpBindingKind::Pairing(_)) {
+        return Err(McpError::ConnectRequiresLocalOperator);
     }
     Ok(())
 }

@@ -1879,9 +1879,9 @@ loopback-only listener with `allow_plaintext_loopback`).
 | `POST` | `/v2/mcp` | MCP-bound bearer | The MCP JSON-RPC endpoint (`server/discover`, `tools/list`, `tools/call`) |
 | `GET` | `/.well-known/oauth-protected-resource/v2/mcp` | none | RFC 9728 metadata (minimal) |
 | `POST` | `/v2/mcp/token` | login token | Exchange for an MCP-bound token |
-| `GET`/`POST` | `/v2/sys/mcp/config` | `sudo` | Runtime limits and `catalogue_pin` |
+| `GET`/`POST` | `/v2/sys/mcp/config` | `sudo` | Runtime limits, `catalogue_pin`, and the brokered-session runtime switch and destination allow-list |
 | `LIST` | `/v2/sys/mcp/apps` | ACL | List MCP apps |
-| `GET`/`POST`/`DELETE` | `/v2/sys/mcp/apps/{name}` | ACL | App record; `DELETE` revokes its tokens |
+| `GET`/`POST`/`DELETE` | `/v2/sys/mcp/apps/{name}` | ACL | App record; `DELETE` revokes its tokens. A brokered-session tool in `tool_allowlist` is refused, permanently |
 | `POST`/`DELETE` | `/v2/sys/mcp/apps/{name}/machine-waiver` | `sudo` | Grant (`reason`, `expires_in_days` 1-90) or revoke a machine-identity waiver; revoking also revokes the tokens minted under it |
 | `LIST` | `/v2/sys/mcp/tokens` | ACL | Active MCP-bound tokens (`kind` is `app` or `pairing`) |
 | `DELETE` | `/v2/sys/mcp/tokens/{accessor}` | ACL | Revoke one token |
@@ -1899,14 +1899,35 @@ Send the login token in `X-BastionVault-Token`, `X-Vault-Token` or
 ```json
 { "pairing": { "id": "<[a-z0-9-]{1,64}>", "client_name": "claude-desktop", "client_version": "1.0",
                "tool_allowlist": ["bv_kv_read_metadata"], "path_scope": ["secret/metadata/ai/*"],
-               "reveal_allowed": false, "destructive_allowed": false, "ttl_secs": 28800 } }
+               "reveal_allowed": false, "destructive_allowed": false, "ttl_secs": 28800,
+               "connect_allowed": false, "confirm_connect": true } }
 ```
 
 - **App mode** requires the caller to be the app's AppID login, carrying a
   machine identity or an active waiver (`403 mcp_machine_identity_required`).
+  An app record whose `tool_allowlist` names a brokered-session tool (one
+  written before `sys/mcp/apps` refused them) cannot be exchanged
+  (`400 mcp_connect_requires_local_operator`): network-mode apps never open
+  sessions.
 - **Pairing mode** requires an operator session: an entity- or
   username-bound login, never AppRole, machine, root or MCP-bound
   (`403 mcp_pairing_requires_operator_session`).
+- **Brokered sessions** ([spec](../features/mcp-brokered-sessions.md) §9),
+  pairing mode only. `connect_allowed` and `confirm_connect` are optional
+  booleans, refused when present with any other type.
+  - `confirm_connect` can never be `false`: an explicit `false` is refused,
+    with or without `connect_allowed`. Every pairing token minted carries
+    `confirm_connect = true`.
+  - `connect_allowed: true` requires `confirm_connect: true` in the body;
+    absent is refused, not defaulted.
+  - A session tool (`bv_resource_ssh_exec`, `bv_resource_web_fetch`,
+    `bv_resource_rdp_act`) in `tool_allowlist` requires `connect_allowed`.
+  - `connect_allowed` may be granted together with `reveal_allowed`. Such a
+    token can read secret values **and** open sessions to servers; the
+    per-call operator confirmation is the control for that combination.
+  - The token records the operator (entity id, username, login mount and
+    namespace) from the caller's own login, for audit and for binding an
+    operator's MFA step-up to one call. It is never used for authorization.
 - The token's policies are the caller's, narrowed by `policies`, never wider.
 
 Response: `{ "auth": { "client_token", "accessor", "policies", "lease_duration",
@@ -1921,7 +1942,66 @@ expired, or whose waiver ended, `413` over `max_request_bytes`, `503`
 `mcp_requires_tls` or `mcp_hybrid_kex_unverifiable`. Tool errors are JSON-RPC
 errors whose `data.code` is one of `mcp_tool_not_allowed`,
 `mcp_path_out_of_scope`, `mcp_reveal_denied`, `mcp_destructive_denied`,
-`mcp_invalid_argument`, `mcp_tool_timeout`.
+`mcp_invalid_argument`, `mcp_tool_timeout`, `mcp_connect_not_allowed` (a
+session tool on a token without `connect_allowed` and `confirm_connect`) and
+`mcp_connect_requires_local_operator` (a session tool on an app token,
+always). This build's catalogue carries no session tool yet, so no call
+reaches the last two; every tool reports `openWorldHint: false`.
+
+Every string a tool returns has C0/C1 controls (except newline and tab),
+ANSI CSI/OSC sequences, Unicode bidi controls (including LRM, RLM and ALM),
+zero-width characters, tag characters (U+E0000–U+E007F) and interlinear
+annotation characters removed; U+2028 and U+2029 become newlines.
+
+### `GET`/`POST /v2/sys/mcp/config`
+
+Besides `default_ttl_secs`, `max_ttl_secs`, `waiver_max_days` and
+`catalogue_pin`, two keys govern brokered sessions
+([spec](../features/mcp-brokered-sessions.md) §11-12). Both read as off / not
+set on a record written before they existed.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `brokered_sessions_enabled` | bool (`"true"`/`"false"` accepted) | `false` | The runtime switch. Every session call also needs the server config's `mcp.brokered_sessions.enabled` and its protocol in `protocols` |
+| `brokered_sessions_allowed_target_cidrs` | list of CIDRs, a comma-separated string, or `null` | `null` | The destination allow-list. `null` means the server config's `mcp.brokered_sessions.allowed_target_cidrs` applies, or the built-in `["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]` when that sets none. A list **replaces** it; `[]` (or `""`) allows no destination |
+
+Every entry must be `address/prefix` with no host bits set; otherwise the
+write is refused (`400`) naming the entry, and nothing is stored. Loopback,
+link-local (including `169.254.169.254`), multicast, unspecified, broadcast,
+the vault's own listener addresses and the cluster node addresses are denied
+whatever is listed: an entry overlapping one is accepted, has no effect there,
+and earns a response `warnings` line. A change is logged to the security log
+as `mcp.config.updated` with the old and new values. It applies to the next
+dial on every node.
+
+### Resource opt-ins for brokered sessions
+
+An agent session can reach a connection profile only when both levels opt in;
+absent means deny at both, so existing types and profiles are unaffected.
+
+- **Resource type:** `config/types[<type>].connect.agent_sessions_max`,
+  `"allow"` or `"deny"`. `POST resources/config/types` refuses any other value
+  (`422 agent_policy_invalid`).
+- **Connection profile:** `agent_access`, `"allow"` or `"deny"`, on an entry of
+  the resource record's `connection_profiles`. `POST resources/resources/{name}`
+  vets every new or changed profile that carries the key: any other value is
+  refused (`422 agent_policy_invalid`), and `"allow"` is refused unless the
+  resource's type (in the effective saved type configuration) allows it
+  (`403 mcp_session_profile_not_agent_enabled`) and the profile meets its
+  protocol's static requirements:
+  - **SSH:** an `ssh-engine` source in `ca` mode or a `secret` source
+    (`403 mcp_session_login_class_unsupported` otherwise), and a
+    `host_key_pin` in OpenSSH `SHA256:<base64>` form
+    (`403 mcp_session_host_key_unpinned`);
+  - **web:** `login_mode` `open` or `http-auth`
+    (`403 mcp_web_login_mode_unsupported`), an `https://` `start_url` and no
+    `allow_insecure_http` (`403 mcp_web_origin_refused`), and a `secret`
+    source for `http-auth`;
+  - **RDP:** a `secret` source.
+
+  A profile that did not change is not re-vetted on write, so turning a type
+  back to `deny` does not block unrelated edits to its resources; the
+  session handler re-checks both levels at every call.
 
 ## Response Format
 

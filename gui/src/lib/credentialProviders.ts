@@ -30,6 +30,9 @@ export function providersForProtocol(
   list: CredentialProviderInfo[],
   protocol: SessionProtocol,
 ): CredentialProviderInfo[] {
+  // `connect/authorize` releases provider accounts for ssh / rdp / web only;
+  // an SFTP profile has no provider path (features/sftp-connect.md).
+  if (protocol === "sftp") return [];
   return list.filter((p) => isProviderName(p.name) && p.protocols.includes(protocol));
 }
 
