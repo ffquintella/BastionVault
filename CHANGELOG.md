@@ -56,12 +56,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.41] - 2026-10-15
+
 ### Added
 
 #### MCP Brokered Sessions — web fetch (features/mcp-brokered-sessions.md)
 
 - **Let a paired AI assistant fetch a page from a web-application resource through the vault** -- new MCP tool `bv_resource_web_fetch` (resource, profile, path, optional `GET`/`HEAD`) and route `resources/v2/connect/agent/web/fetch`, built behind the `mcp_sessions_web` feature. The vault makes the request itself, only to the profile's own https origins, follows at most 5 redirects and re-checks each hop's addresses against the destination policy before sending, trusts a certificate the OS roots reject only when it matches the profile's pin (no "accept anyway"), signs in with HTTP Basic from the profile's stored secret without ever returning it, and returns the page as text with allow-listed headers, size caps and every credential and cookie value scrubbed. Each fetch is confirmed by the operator ("Fetch a page from …?"), may need the operator's MFA, and is transcribed and audited. `open` and `http-auth` profiles only; form and SSO logins are refused. (T137, S111)
 - The desktop app's TLS pin decision now lives in `bv-utils` and is shared with the vault; the desktop's behaviour is unchanged. (T137, S105)
+
+### Changed
+
+#### MCP Access — network tools (features/mcp-access.md)
+
+- **The MCP catalogue gained `bv_resource_web_fetch`, so its hash changed** -- the catalogue hash is now `2ef9b8149ea89aa2d509d204988414450bd12658223299e7ee77eb8a48bf5262`; an operator who pinned the previous hash in `sys/mcp/config` must pin this one. (T137, S26, S111)
 
 ### Fixed
 
@@ -7972,7 +7980,8 @@ Bulk dependency upgrade across the workspace (`Cargo.toml`, `crates/bv-plugin-pa
 
 - Abandon the SQLx storage backend: `libsqlite3-sys` conflicts at link time with hiqlite's `rusqlite`, so `storage "sqlx"` was removed (T5, M2)
 
-[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.40...HEAD
+[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.41...HEAD
+[0.44.41]: https://github.com/ffquintella/BastionVault/compare/v0.44.40...v0.44.41
 [0.44.40]: https://github.com/ffquintella/BastionVault/compare/v0.44.39...v0.44.40
 [0.44.39]: https://github.com/ffquintella/BastionVault/compare/v0.44.38...v0.44.39
 [0.44.38]: https://github.com/ffquintella/BastionVault/compare/v0.44.37...v0.44.38

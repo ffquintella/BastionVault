@@ -34,7 +34,7 @@ bv-core = { path = "../bv-core", version = "0.42.0", registry = "uox-bastionvaul
 # `Permissions::check` delegate every verdict to it, so the Kani proofs in
 # that crate are statements about this evaluator (T31 Phase 3.4,
 # docs/verification.md). Dependency-free.
-bv-policy-core = { path = "../bv-policy-core", version = "0.41.0", registry = "uox-bastionvault" }
+bv-policy-core = { path = "../bv-policy-core", version = "0.42.0", registry = "uox-bastionvault" }
 # MCP Access (features/mcp-access.md): the non-secret, hex accessor derived
 # from a token id for `sys/mcp/tokens`. Already vetted and used elsewhere in
 # the workspace (bv-storage, bv-utils, bv-auth-ferrogate).
