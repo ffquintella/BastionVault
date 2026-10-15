@@ -52,9 +52,7 @@ pub(crate) mod model;
 mod proofs;
 
 pub use check::{check, Check, Params, Perm};
-pub use decide::{
-    decide, governing, ungated_grants_list, Candidate, Decision, Effects, Layer, LayerKind, Query, Ungated,
-};
+pub use decide::{decide, governing, Candidate, Decision, Effects, Layer, LayerKind, Query, Ungated};
 pub use gate::{group_gate_passes, scope_passes, share_capability, Caller, Scope, ShareCap};
 pub use merge::{merge_caps, Merge};
 pub use path::{segments_match, Segment};

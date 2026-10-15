@@ -13,6 +13,10 @@
 //! Changed since it was frozen: F6 (T119) — the governing rule's and each
 //! layered rule's own bitmap decides whether it is a deny, and a deny yields
 //! exactly `deny` in both modes (`denied`), marked `T119 (F6)` below.
+//! F7 (T120) — a gated or scoped LIST filter is dropped only when the
+//! governing rule's own check reported LIST, not when any ungated rule the
+//! tries find for the path lists; `matches_ungated_list` is gone, marked
+//! `T120 (F7)` below.
 
 use std::{sync::Arc, time::Duration};
 
@@ -194,6 +198,9 @@ pub fn allow_operation(acl: &ACL, req: &Request, check_only: bool) -> Result<ACL
         Some(perm) => check(perm, req, check_only)?,
         None => ACLResults::default(),
     };
+    // T120 (F7): only the governing rule can lift a LIST filter, and only when
+    // its own check reported LIST (granted it, or carries it in a probe).
+    let governing_lists = base.capabilities_bitmap & Capability::List.to_bits() != 0;
 
     // T119 (F6): whether a rule denies is read from its bitmap, not from its
     // check's output, which on enforcement reports no capability for a deny.
@@ -274,12 +281,9 @@ pub fn allow_operation(acl: &ACL, req: &Request, check_only: bool) -> Result<ACL
         }
     }
 
-    if is_list && (!base.list_filter_groups.is_empty() || !base.list_filter_scopes.is_empty()) {
-        let ungated_list = matches_ungated_list(acl, &path);
-        if ungated_list {
-            base.list_filter_groups.clear();
-            base.list_filter_scopes.clear();
-        }
+    if is_list && governing_lists {
+        base.list_filter_groups.clear();
+        base.list_filter_scopes.clear();
     }
 
     Ok(base)
@@ -502,26 +506,6 @@ pub fn segment_wildcard_matches(rule_path: &str, is_prefix: bool, req_path: &str
         }
     }
     true
-}
-
-fn matches_ungated_list(acl: &ACL, path: &str) -> bool {
-    let list_bit = Capability::List.to_bits();
-    if let Some(p) = acl.exact_rules.get(path) {
-        if p.capabilities_bitmap & list_bit != 0 {
-            return true;
-        }
-    }
-    if let Some(p) = acl.exact_rules.get(path.trim_end_matches('/')) {
-        if p.capabilities_bitmap & list_bit != 0 {
-            return true;
-        }
-    }
-    if let Some(p) = get_none_exact_paths_permissions(acl, path, false) {
-        if p.capabilities_bitmap & list_bit != 0 {
-            return true;
-        }
-    }
-    false
 }
 
 fn scoped_rule_matches(rule: &ScopedRule, path: &str) -> bool {

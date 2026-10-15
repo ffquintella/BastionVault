@@ -1,7 +1,8 @@
 //! Kani harnesses for the ACL theorems of
 //! `roadmaps/formal-verification-and-type-driven-security.md` § Phase 3
-//! (T1–T8), plus one *defect witness* (F7). F6 was a witness until T119
-//! fixed it; it is now `t1_deny_wins_on_enforcement`.
+//! (T1–T8). F6 and F7 were *defect witnesses* until T119 and T120 fixed
+//! them; they are now `t1_deny_wins_on_enforcement` and
+//! `t5b_a_non_governing_list_rule_keeps_the_filter`.
 //!
 //! Run: `cargo kani -p bv-policy-core`. Every harness must report
 //! `VERIFICATION:- SUCCESSFUL` and every `cover` `SATISFIED`; an
@@ -24,11 +25,12 @@
 //! universe) runs at most 4 times, and Kani's unwinding assertions — on by
 //! default — fail the harness if any loop could run longer.
 //!
-//! **Defect witnesses.** `f7_*` states no property: it `cover`s a behaviour
-//! the code's own comments say cannot happen. `SATISFIED` there means the
-//! defect is still present — Kani prints the concrete input. When a fix
-//! lands the cover turns `UNSATISFIABLE`, which fails the gate on purpose:
-//! replace it with the `assert` its doc comment gives, as T119 did for F6.
+//! **Defect witnesses.** A witness (`f<n>_*`, none open today) states no
+//! property: it `cover`s a behaviour the code's own comments say cannot
+//! happen. `SATISFIED` there means the defect is still present — Kani prints
+//! the concrete input. When a fix lands the cover turns `UNSATISFIABLE`,
+//! which fails the gate on purpose: replace it with the `assert` its doc
+//! comment gives, as T119 did for F6 and T120 for F7.
 
 use core::cmp::Ordering;
 
@@ -550,39 +552,38 @@ fn t5b_gated_list_always_carries_a_filter() {
     }
 }
 
-/// T5b (with ungated rules) — a LIST granted with no filter means the
-/// governing ungated rule granted it, or some ungated rule the index finds
-/// for the path (exact, trimmed exact, or most specific non-exact) carries
-/// LIST.
+/// T5b (with ungated rules) — a LIST reported with no filter means the
+/// governing ungated rule's own check reported LIST: on enforcement it
+/// granted the LIST, in a capability probe its bitmap carries LIST. No other
+/// ungated rule the index finds can lift a gated or scoped filter. This is
+/// the strong form F7 refuted until T120.
 #[kani::proof]
 #[kani::unwind(5)]
-fn t5b_an_unfiltered_list_needs_an_ungated_list_grant() {
+fn t5b_an_unfiltered_list_needs_the_governing_rule() {
     let (idx, gated, scoped) = (any_index(), any_rules(), any_rules());
     assume_filters(&gated);
     assume_filters(&scoped);
     let q = Query { acl_is_root: false, op: Op::List, probe: kani::any() };
 
-    let gov_grants = governing(true, &idx).is_some_and(|c| check(&c.perm, Op::List, q.probe, &c).allowed);
-    let lists = |c: &Option<Cand>| c.is_some_and(|c| c.perm.caps & CAP_LIST != 0);
-    let some_ungated_lists = lists(&idx.exact) || lists(&idx.trimmed) || lists(&idx.non_exact);
+    let gov_reports_list =
+        governing(true, &idx).is_some_and(|c| check(&c.perm, Op::List, q.probe, &c).caps & CAP_LIST != 0);
+    let layered_list = applying(&gated, true, |r| r.cand.perm.caps & CAP_LIST != 0);
 
-    let (d, _) = run(&q, &idx, &gated, &scoped);
+    let (d, fx) = run(&q, &idx, &gated, &scoped);
 
-    kani::cover!(d.allowed && !d.filtered && !gov_grants, "an unfiltered LIST the governing rule did not grant");
-    if d.allowed && !d.filtered {
-        assert!(gov_grants || some_ungated_lists);
+    kani::cover!(!d.filtered && gov_reports_list && layered_list, "the governing rule lifts a gated filter");
+    if d.caps & CAP_LIST != 0 && !d.filtered {
+        assert!(gov_reports_list, "a LIST was reported unfiltered without the governing rule");
+        assert!(!fx.filters_live, "a filter was left live on an unfiltered LIST");
     }
 }
 
-/// F7 — DEFECT WITNESS. The filter is dropped when *any* ungated rule the
-/// index finds carries LIST, including the most specific non-exact rule when
-/// an exact rule that withholds LIST governs. A gated LIST is then served
-/// unfiltered on a path where no ungated rule that governs grants LIST. When
-/// fixed, replace the cover with:
-/// `assert!(!(d.allowed && !d.filtered) || gov_lists);`
+/// T5b (F7, closed by T120) — the shape Kani found: an exact rule governs and
+/// withholds LIST, a broader non-exact rule the index also finds carries
+/// LIST, and a gated rule grants the LIST. The LIST stays filtered.
 #[kani::proof]
 #[kani::unwind(5)]
-fn f7_a_non_governing_list_rule_drops_the_filter() {
+fn t5b_a_non_governing_list_rule_keeps_the_filter() {
     let (idx, gated, scoped) = (any_index(), any_rules(), any_rules());
     assume_filters(&gated);
     assume_filters(&scoped);
@@ -592,9 +593,10 @@ fn f7_a_non_governing_list_rule_drops_the_filter() {
     let (d, _) = run(&q, &idx, &gated, &scoped);
 
     kani::cover!(
-        d.allowed && !d.filtered && !gov_lists,
-        "F7: a gated LIST served unfiltered under a governing rule without LIST"
+        d.allowed && d.filtered && !gov_lists && idx.non_exact.is_some_and(|c| c.perm.caps & CAP_LIST != 0),
+        "a gated LIST keeps its filter under a non-governing rule that lists"
     );
+    assert!(!(d.allowed && !d.filtered) || gov_lists);
 }
 
 // ── T7 — root isolation ────────────────────────────────────────────

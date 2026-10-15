@@ -635,27 +635,15 @@ async fn test_resource_group_history() {
     assert_eq!(entries[1]["op"], "create");
 }
 
-#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-async fn test_list_filter_on_groups_gated_list_kv() {
-    let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_list_filter_on_groups_gated_list_kv").await;
+/// Mounts a KV-v1 engine at `kv/` with `alpha`, `beta` and `gamma`, puts
+/// `alpha` and `beta` in asset group `crew`, logs in a userpass user holding
+/// only a policy written from `hcl`, and returns the keys that user's LIST of
+/// `kv/` comes back with.
+async fn list_kv_under_policy(name: &str, hcl: &str) -> Vec<String> {
+    let (_bvault, core, root_token) = new_unseal_test_bastion_vault(name).await;
 
-    // Policy grants read+list on kv/*, gated on membership in "crew".
-    // The list op can't literally "belong to a group" — the
-    // post-route filter narrows the returned keys to group members.
-    let gated_hcl = r#"
-            path "kv/*" {
-                capabilities = ["read", "list"]
-                groups = ["crew"]
-            }
-        "#;
-    let _ = test_write_api(
-        &core,
-        &root_token,
-        "sys/policy/p-list-gated",
-        true,
-        json!({ "policy": gated_hcl }).as_object().cloned(),
-    )
-    .await;
+    let _ = test_write_api(&core, &root_token, "sys/policy/p-list", true, json!({ "policy": hcl }).as_object().cloned())
+        .await;
 
     // KV-v1 mount with three secrets; two join the crew, one stays out.
     let _ =
@@ -673,7 +661,7 @@ async fn test_list_filter_on_groups_gated_list_kv() {
     )
     .await;
 
-    // alice gets the gated policy.
+    // alice gets the policy under test.
     let _ =
         test_write_api(&core, &root_token, "sys/auth/pass", true, json!({ "type": "userpass" }).as_object().cloned())
             .await;
@@ -684,7 +672,7 @@ async fn test_list_filter_on_groups_gated_list_kv() {
         true,
         json!({
             "password": "hunter22XX!",
-            "token_policies": "p-list-gated",
+            "token_policies": "p-list",
             "ttl": 0,
         })
         .as_object()
@@ -698,15 +686,69 @@ async fn test_list_filter_on_groups_gated_list_kv() {
     let resp = core.handle_request(&mut login_req).await.unwrap().unwrap();
     let token = resp.auth.unwrap().client_token;
 
-    // Listing kv/ as alice returns only group members — alpha, beta.
-    // gamma lives in no group, so it is filtered out.
     let resp = test_list_api(&core, &token, "kv/", true).await.unwrap().unwrap();
     let data = resp.data.unwrap();
-    let keys = data["keys"].as_array().unwrap();
-    let names: Vec<&str> = keys.iter().filter_map(|v| v.as_str()).collect();
-    assert!(names.contains(&"alpha"), "expected alpha in {names:?}");
-    assert!(names.contains(&"beta"), "expected beta in {names:?}");
-    assert!(!names.contains(&"gamma"), "gamma should be filtered out of {names:?}");
+    data["keys"].as_array().unwrap().iter().filter_map(|v| v.as_str().map(str::to_string)).collect()
+}
+
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_list_filter_on_groups_gated_list_kv() {
+    // Policy grants read+list on kv/*, gated on membership in "crew".
+    // The list op can't literally "belong to a group" — the
+    // post-route filter narrows the returned keys to group members.
+    let gated_hcl = r#"
+            path "kv/*" {
+                capabilities = ["read", "list"]
+                groups = ["crew"]
+            }
+        "#;
+    // Listing kv/ as alice returns only group members — alpha, beta.
+    // gamma lives in no group, so it is filtered out.
+    let names = list_kv_under_policy("test_list_filter_on_groups_gated_list_kv", gated_hcl).await;
+    assert!(names.iter().any(|n| n == "alpha"), "expected alpha in {names:?}");
+    assert!(names.iter().any(|n| n == "beta"), "expected beta in {names:?}");
+    assert!(!names.iter().any(|n| n == "gamma"), "gamma should be filtered out of {names:?}");
+}
+
+/// F7 (T120): the exact rule for `kv/` governs the LIST and withholds `list`;
+/// the broader `kv*` prefix rule carries `list` but does not govern. Only the
+/// gated rule grants the LIST, so the response stays narrowed to `crew`.
+/// Before T120 the non-governing rule lifted the filter and `gamma` leaked.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_list_filter_survives_a_non_governing_list_rule() {
+    let hcl = r#"
+            path "kv/" {
+                capabilities = ["read"]
+            }
+            path "kv*" {
+                capabilities = ["list"]
+            }
+            path "kv/*" {
+                capabilities = ["read", "list"]
+                groups = ["crew"]
+            }
+        "#;
+    let names = list_kv_under_policy("test_list_filter_survives_a_non_governing_list_rule", hcl).await;
+    assert!(names.iter().any(|n| n == "alpha"), "expected alpha in {names:?}");
+    assert!(names.iter().any(|n| n == "beta"), "expected beta in {names:?}");
+    assert!(!names.iter().any(|n| n == "gamma"), "gamma leaked through a non-governing rule: {names:?}");
+}
+
+/// The governing rule itself granting `list` still lifts the filter: the
+/// caller may list everything without the gated rule.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_list_filter_lifted_by_the_governing_rule() {
+    let hcl = r#"
+            path "kv/" {
+                capabilities = ["list"]
+            }
+            path "kv/*" {
+                capabilities = ["read", "list"]
+                groups = ["crew"]
+            }
+        "#;
+    let names = list_kv_under_policy("test_list_filter_lifted_by_the_governing_rule", hcl).await;
+    assert!(names.iter().any(|n| n == "gamma"), "the governing list grant should return every key: {names:?}");
 }
 
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

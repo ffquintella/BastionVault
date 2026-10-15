@@ -123,19 +123,6 @@ pub fn governing<U: Ungated>(is_list: bool, ungated: &U) -> Option<U::Cand> {
     ungated.non_exact()
 }
 
-/// Some ungated rule the index finds for the path — the exact rule, the
-/// trimmed exact rule, or the most specific non-exact rule — carries LIST.
-/// Used to drop a gated/scoped LIST filter.
-///
-/// Not the same as "the governing rule carries LIST": the non-exact rule is
-/// consulted even when an exact rule governs. That is finding F7 in
-/// `roadmaps/formal-verification-and-type-driven-security.md`; the
-/// `f7_*` harness in `src/proofs.rs` witnesses it.
-pub fn ungated_grants_list<U: Ungated>(ungated: &U) -> bool {
-    let lists = |c: Option<U::Cand>| c.is_some_and(|c| c.perm().caps & CAP_LIST != 0);
-    lists(ungated.exact()) || lists(ungated.exact_trimmed()) || lists(ungated.non_exact())
-}
-
 /// Decide one request.
 ///
 /// 1. A root ACL is allowed everything; `help` is always allowed.
@@ -147,7 +134,9 @@ pub fn ungated_grants_list<U: Ungated>(ungated: &U) -> bool {
 ///    OR'd in, and `allowed` / `root_privs` can only become true. LIST waives
 ///    the gate and instead marks the grant as filtered.
 /// 4. The same for the scope-filtered rules.
-/// 5. A filtered LIST becomes unfiltered when [`ungated_grants_list`].
+/// 5. A filtered LIST becomes unfiltered only when the governing rule's own
+///    check reported LIST: its bitmap carries LIST in a capability probe, or
+///    it granted the LIST on enforcement.
 ///
 /// "Carries `deny`" is read from the permission set's own bitmap, never from
 /// what [`check`] reported: an enforcing check of a deny rule grants nothing
@@ -155,6 +144,13 @@ pub fn ungated_grants_list<U: Ungated>(ungated: &U) -> bool {
 /// grant override a deny on enforcement (finding F6, closed by T119). The
 /// verdict is therefore the same in both modes: a deny that governs or applies
 /// is a deny, for a capability probe and for the request itself.
+///
+/// Only the governing rule can lift the filter. A broader rule the index also
+/// finds — the most specific prefix rule when an exact rule governs, or the
+/// trimmed exact rule when the untrimmed one does — does not decide the
+/// request, so it does not decide whether the response is narrowed either.
+/// Consulting every ungated rule served a gated LIST unfiltered on a path
+/// whose governing rule withholds LIST (finding F7, closed by T120).
 pub fn decide<U, G, S, E>(q: &Query, ungated: &U, gated: &G, scoped: &S, fx: &mut E) -> Decision
 where
     U: Ungated,
@@ -171,6 +167,7 @@ where
 
     let is_list = q.op == Op::List;
     let mut d = Decision::default();
+    let mut governing_lists = false;
 
     if let Some(gov) = governing(is_list, ungated) {
         let perm = gov.perm();
@@ -178,6 +175,7 @@ where
         d.allowed = c.allowed;
         d.caps = c.caps;
         d.root_privs = c.root_privs;
+        governing_lists = is_list && c.caps & CAP_LIST != 0;
         if let Some(cap) = c.granting {
             fx.grant_base(&gov, cap);
         }
@@ -194,7 +192,7 @@ where
         return d;
     }
 
-    if is_list && d.filtered && ungated_grants_list(ungated) {
+    if d.filtered && governing_lists {
         fx.drop_filters();
         d.filtered = false;
     }
@@ -294,6 +292,40 @@ mod tests {
         let idx = Index { non_exact: Some(Cand::caps(CAP_LIST)), ..Index::default() };
         let d = decide(&q(Op::List, false), &idx, &gated, &Rules::default(), &mut Trace::default());
         assert!(d.allowed && !d.filtered);
+    }
+
+    // F7 (T120): only the governing rule lifts the filter.
+
+    #[test]
+    fn a_non_governing_list_rule_keeps_the_filter() {
+        let gated = Rules::of(&[Rule { matches: true, gate: false, has_filter: true, cand: Cand::caps(CAP_LIST) }]);
+        let shadowed = |exact, trimmed| Index { exact, trimmed, non_exact: Some(Cand::caps(CAP_LIST)) };
+        for idx in [
+            shadowed(Some(Cand::caps(CAP_READ)), None),
+            shadowed(None, Some(Cand::caps(CAP_READ))),
+            Index { exact: Some(Cand::caps(CAP_READ)), trimmed: Some(Cand::caps(CAP_LIST)), non_exact: None },
+        ] {
+            for probe in [false, true] {
+                let mut fx = Trace::default();
+                let d = decide(&q(Op::List, probe), &idx, &gated, &Rules::default(), &mut fx);
+                assert!(d.filtered && fx.filters_live && fx.drops == 0, "{idx:?}, probe = {probe}");
+                assert_eq!(d.allowed, !probe);
+            }
+        }
+    }
+
+    #[test]
+    fn a_governing_rule_that_withholds_the_list_keeps_the_filter() {
+        // Carries LIST but grants nothing: inverted wrapping TTLs.
+        let mut inverted = Cand::caps(CAP_LIST);
+        (inverted.perm.min_wrapping_ttl_nanos, inverted.perm.max_wrapping_ttl_nanos) = (2, 1);
+        let gated = Rules::of(&[Rule { matches: true, gate: false, has_filter: true, cand: Cand::caps(CAP_LIST) }]);
+        let idx = Index { exact: Some(inverted), ..Index::default() };
+        let d = decide(&q(Op::List, false), &idx, &gated, &Rules::default(), &mut Trace::default());
+        assert!(d.allowed && d.filtered);
+        // A probe reports the bitmap, so the governing rule lists there.
+        let d = decide(&q(Op::List, true), &idx, &gated, &Rules::default(), &mut Trace::default());
+        assert!(!d.filtered);
     }
 
     #[test]

@@ -56,6 +56,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Security
+
+#### Policy authorization
+
+- **Keep a group- or scope-filtered LIST narrowed when a broader rule that does not govern the path grants `list`** (T120, S65, S108)
+  -- a LIST granted only through a `groups`- or `scopes`-qualified rule was returned unfiltered whenever some broader ungated rule for the path carried `list`, even though the rule that governs the path (for example an exact `path "kv/"` rule without `list`) withheld it. Only the governing rule can lift the filter now. Before upgrading, review policies that combine a qualified LIST grant with an exact rule and a broader prefix or wildcard rule on the same mount: callers who listed every key there now see only the keys in their groups or scopes. `bv_policy_core::ungated_grants_list` is removed.
+
 ## [0.44.40] - 2026-10-15
 
 ### Added

@@ -564,38 +564,54 @@ fn f6_b_an_applying_layered_deny_wipes_on_enforcement() {
     assert!(acl_of(&[ungated_sudo, gated_deny]).allow_operation(&outside, false).unwrap().allowed);
 }
 
+// ── F7, fixed (T120) ───────────────────────────────────────────────
+
+/// F7 (T120): an exact rule withholds LIST on `secret/metadata/`; a broader
+/// `secret/*` rule (out-specified, so not governing) lists; a gated rule
+/// grants a group-filtered LIST. The non-governing rule does not decide the
+/// request, so it does not lift the filter either: the LIST is served
+/// narrowed to `g1`, in both modes. Before T120 the filter was dropped and
+/// every key was returned.
+#[test]
+fn f7_a_non_governing_list_rule_keeps_the_filter() {
+    let exact_and_prefix =
+        [r#"path "secret/metadata/" { capabilities = ["read"] }"#, r#"path "secret/*" { capabilities = ["list"] }"#];
+    let req = Request { operation: Operation::List, path: "secret/metadata/".into(), ..Default::default() };
+    assert!(!acl_of(&exact_and_prefix).allow_operation(&req, false).unwrap().allowed);
+
+    let gated = r#"path "secret/metadata/*" {
+             capabilities = ["list"]
+             groups = ["g1"]
+           }"#;
+    let with_gated = acl_of(&[exact_and_prefix[0], exact_and_prefix[1], gated]);
+    let r = with_gated.allow_operation(&req, false).unwrap();
+    assert!(r.allowed);
+    assert_eq!(r.list_filter_groups, vec!["g1".to_string()]);
+    let probe = with_gated.allow_operation(&req, true).unwrap();
+    assert_eq!(probe.list_filter_groups, vec!["g1".to_string()]);
+
+    // The trimmed exact rule does not lift it either when the untrimmed one
+    // governs.
+    let trimmed = acl_of(&[
+        r#"path "secret/metadata/" { capabilities = ["read"] }"#,
+        r#"path "secret/metadata" { capabilities = ["list"] }"#,
+        gated,
+    ]);
+    assert_eq!(trimmed.allow_operation(&req, false).unwrap().list_filter_groups, vec!["g1".to_string()]);
+
+    // A governing rule that grants LIST still lifts it: the caller may list
+    // everything without the gated rule.
+    let governing = acl_of(&[r#"path "secret/metadata/" { capabilities = ["list"] }"#, gated]);
+    let r = governing.allow_operation(&req, false).unwrap();
+    assert!(r.allowed && r.list_filter_groups.is_empty());
+}
+
 // ── Open defects, pinned ───────────────────────────────────────────
 //
 // Characterizations, not endorsements: each asserts what the evaluator does
 // *today* on a concrete policy, so the defect the Kani witness found is
 // reproducible on real HCL, and a fix has to flip the marked assertion on
 // purpose (and update `legacy`). See the roadmap's Findings table.
-
-/// F7: an exact rule withholds LIST on `secret/metadata/`; a broader
-/// `secret/*` rule (out-specified, so not governing) lists; a gated rule
-/// grants a group-filtered LIST. The filter is dropped because the
-/// non-governing rule lists, so the LIST is served unfiltered — without the
-/// gated rule it is denied.
-#[test]
-fn f7_current_behaviour_a_non_governing_list_rule_drops_the_filter() {
-    let exact_and_prefix =
-        [r#"path "secret/metadata/" { capabilities = ["read"] }"#, r#"path "secret/*" { capabilities = ["list"] }"#];
-    let req = Request { operation: Operation::List, path: "secret/metadata/".into(), ..Default::default() };
-    assert!(!acl_of(&exact_and_prefix).allow_operation(&req, false).unwrap().allowed);
-
-    let with_gated = acl_of(&[
-        exact_and_prefix[0],
-        exact_and_prefix[1],
-        r#"path "secret/metadata/*" {
-             capabilities = ["list"]
-             groups = ["g1"]
-           }"#,
-    ]);
-    let r = with_gated.allow_operation(&req, false).unwrap();
-    assert!(r.allowed);
-    // DEFECT: the LIST should keep the `g1` filter. Flip with the F7 fix.
-    assert!(r.list_filter_groups.is_empty());
-}
 
 /// F8: a gated or scoped segment-wildcard rule with a trailing `*` keeps the
 /// `*` as a literal segment and matches no real path (fail-closed), where

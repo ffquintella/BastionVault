@@ -339,16 +339,17 @@ impl ACL {
     ///   not consulted; the list is granted and the rule's `groups` /
     ///   `scopes` recorded as a filter the post-route pass narrows the
     ///   response keys to;
-    /// - drops that filter when an ungated rule also grants LIST.
+    /// - drops that filter only when the governing ungated rule's own check
+    ///   reported LIST.
     ///
     /// Whether a rule carries `deny` is read from its bitmap, not from what
     /// its check reported, so a deny decides identically on enforcement
     /// (`check_only = false`) and in a capability probe: the result is
     /// exactly `deny`, and on enforcement `root_privs` is cleared too
-    /// (finding F6, closed by T119). The filter is dropped when *any*
-    /// ungated rule found for the path lists, not only the governing one —
-    /// finding F7, preserved unchanged; see
-    /// `roadmaps/formal-verification-and-type-driven-security.md`.
+    /// (finding F6, closed by T119). A broader ungated rule that does not
+    /// govern the path cannot lift the filter, so a gated LIST stays narrowed
+    /// under an exact rule that withholds LIST (finding F7, closed by T120);
+    /// see `roadmaps/formal-verification-and-type-driven-security.md`.
     ///
     /// # Arguments
     ///

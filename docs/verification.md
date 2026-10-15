@@ -34,7 +34,7 @@ queries. The harnesses are in `crates/bv-policy-core/src/proofs.rs`.
 | T3 | **Grant monotonicity.** Merging two same-path rules is a bitwise union unless one denies. Adding a non-deny gated or scoped rule never revokes `allowed`, `root_privs` or a capability bit. | `t3_merge_keeps_deny_and_never_drops_a_capability`, `t3_an_added_layered_grant_never_removes_a_capability` | Capability bits. Parameter constraints are *not* monotone under merge (a merged `required_parameters` / `allowed_parameters` can refuse what one rule alone allowed) — Vault-compatible, not a guarantee. |
 | T4 | **Specificity precedence and determinism.** The exact rule governs whenever one exists; for LIST the trailing-slash-trimmed exact rule is next; otherwise the most specific non-exact rule. "Most specific" is a strict total order (a later first wildcard wins; at the same position a rule without a trailing `*` wins; then fewer `+`; then longer; then the path), and the selected winner is the same in every iteration order of the segment-wildcard map. `+` matches exactly one non-empty segment; a rule without `*` matches only paths of its own length. | `t4_exact_rules_take_precedence`, `t4_specificity_is_a_strict_total_order`, `t4_the_most_specific_candidate_wins_in_any_order`, `t4_segment_wildcards_match_by_shape` | Precedence is *between* rules: a more specific grant beats a less specific deny (Vault-compatible). |
 | T5 | **Group-gate soundness.** A gated rule passes iff the target is in one of its groups; a gated rule whose gate fails contributes nothing to a non-LIST request. | `t5_group_gate_is_sound`, `t5_t6_a_failed_gate_contributes_nothing` | Non-LIST requests (LIST waives the gate by design, see T5b). |
-| T5b | **The LIST carve-out cannot become "return everything".** With only gated/scoped rules, a LIST granted through them always carries a filter. With ungated rules too, an unfiltered LIST means the governing rule granted it or some ungated rule the index finds for the path carries `list`. | `t5b_gated_list_always_carries_a_filter`, `t5b_an_unfiltered_list_needs_an_ungated_list_grant` | **Not** "the governing ungated rule" — see F7 below. |
+| T5b | **The LIST carve-out cannot become "return everything".** With only gated/scoped rules, a LIST granted through them always carries a filter. With ungated rules too, a LIST reported with no filter means the governing ungated rule's own check reported `list` — it granted the LIST on enforcement, or its bitmap carries `list` in a probe. A broader ungated rule that does not govern the path cannot lift the filter. | `t5b_gated_list_always_carries_a_filter`, `t5b_an_unfiltered_list_needs_the_governing_rule`, `t5b_a_non_governing_list_rule_keeps_the_filter` | Enforcement and probes. Until T120 only the weaker form held — any ungated rule the index found carrying `list` lifted the filter (F7, below). |
 | T6 | **Scope-gate soundness.** `owner` passes only for the target's owner (or a write to an unowned target — first write records ownership); `shared` passes only when the caller's shares include the override capability if one is named, else the capability the operation needs; unknown scopes never pass; no caller entity, no pass. A failed scope contributes nothing to a non-LIST request. | `t6_scope_gate_is_sound`, `t5_t6_a_failed_gate_contributes_nothing` | Exact characterisation (sound and complete). |
 | T7 | **Root isolation.** Only the root ACL yields `is_root`, and it is always allowed with `root_privs`. A non-root ACL yields `root_privs` only when an evaluated permission set (the governing rule, or a layered rule that applies) carries `sudo`. | `t7_root_isolation` | `root_privs` comes from `sudo`, by design — it is not exclusive to the root ACL. |
 | T8 | **Parameter constraints.** On `read`/`write`: a missing `required_parameters` key refuses; a parameter matching its `denied_parameters` entry, or any parameter under a `"*"` deny key, refuses; under a restrictive `allowed_parameters` (not empty, not only `"*"`) a value that is not allowed, or an unlisted key without `"*"`, refuses. A grant also needs the capability and wrapping TTLs that are not inverted, and the characterisation is complete. | `t8_parameter_constraints` | `read` and `write` only: on every other operation the parameters are **not consulted** (proved). A request with no parameters at all skips the allow/deny lists. |
@@ -50,17 +50,16 @@ not meant to have. `SATISFIED` means the defect is present (Kani prints the
 input). When the fix lands it turns `UNSATISFIABLE` — failing the gate on
 purpose — and becomes an `assert` (the text is in the harness).
 
-| | Defect | Witness | Reproduced on real HCL |
-|---|---|---|---|
-| F7 | Evaluator finding. Details are withheld from this repository until the fix ships; the maintainer holds the write-up. | `f7_*` | `f7_current_behaviour_*` in `bv-kernel` `policy::differential` |
+No defect witness is open in the core today: F6 and F7 were witnesses and are
+now theorems (below).
 
 F8 (outside the core): an evaluator finding in the host's matcher, pinned by
 `f8_current_behaviour_*`. Details withheld until the fix ships.
 
-Both are preserved unchanged by Phase 3 (no behaviour change) and are
-recorded, with the proposed fixes, in the roadmap's Findings.
+It is preserved unchanged by Phase 3 (no behaviour change) and is recorded
+in the roadmap's Findings.
 
-**F6 — fixed (T119).** It was the third: deny supremacy refuted on
+**F6 — fixed (T119).** It was deny supremacy refuted on
 enforcement. Its witness's covers turned `UNSATISFIABLE` with the fix and the
 harness became the theorem `t1_deny_wins_on_enforcement` (T1, above), keeping
 the two shapes it witnessed as covers. `f6_current_behaviour_*` became
@@ -68,6 +67,18 @@ the two shapes it witnessed as covers. `f6_current_behaviour_*` became
 verdict on HCL, and `src/engine_tests/kernel_policy_deny.rs` asserts it
 through `pre_route`, `readable_targets` and `may_connect_target` with the
 asset groups, owner and shares resolved from storage.
+
+**F7 — fixed (T120).** A gated or scoped LIST filter was dropped when *any*
+ungated rule the index found for the path carried `list` — including the
+most specific prefix rule when an exact rule that withholds `list` governs,
+and the trimmed exact rule when the untrimmed one governs — so a LIST
+granted only through a `groups`/`scopes` rule was served unfiltered. Only the
+governing rule decides now, through its own check. The witness's cover
+turned `UNSATISFIABLE` with the fix and the harness became the theorem
+`t5b_a_non_governing_list_rule_keeps_the_filter`; the weak T5b harness was
+replaced by its strong form, `t5b_an_unfiltered_list_needs_the_governing_rule`.
+`f7_current_behaviour_*` became `f7_a_non_governing_list_rule_keeps_the_filter`
+in `policy::differential`, which asserts the filter on HCL in both modes.
 
 ## Bounds
 
@@ -183,7 +194,7 @@ Everything below fails the gate:
 | a harness missing from, or not listed in, the manifest | A proof cannot report its own disappearance. Also checked statically by `make verify-gates`, with every harness's explicit `#[kani::unwind]`. |
 | a Kani or CBMC version other than the pin | An unpinned verifier makes a claim unreproducible. |
 
-A **defect witness** (`f7_*`) whose covers are all `SATISFIED` is a
+A **defect witness** (`f<n>_*`; none is open today) whose covers are all `SATISFIED` is a
 **known open finding**: the gate passes, and prints and reports it as one.
 If a witness's cover becomes `UNSATISFIABLE`, the defect no longer
 reproduces and the gate fails on purpose — replace the cover with the
@@ -193,7 +204,7 @@ reproduces and the gate fails on purpose — replace the cover with the
 `make verify-gates` runs the gate's self-test, which drives every rule above
 against synthetic logs. The gate was also checked against real output: the
 log of a full run passes; the same log with one theorem cover and the F7
-cover edited to `UNSATISFIABLE` fails with both problems named; and a mutant
+witness cover (before T120) edited to `UNSATISFIABLE` fails with both problems named; and a mutant
 core (`d.caps = CAP_DENY` → `d.caps |= CAP_DENY` in the layer wipe, the
 roadmap's example; since T119 that line is in `decide.rs`'s `denied`) is
 caught by `t1_deny_wins_in_capability_probes` in the fast set.
@@ -201,8 +212,8 @@ caught by `t1_deny_wins_in_capability_probes` in the fast set.
 ### The fast set
 
 Every harness measured at or under 20 s is in the fast set: 14 harnesses,
-72.4 s of verification time, including the remaining witness and at least one
-harness for each of T1–T8. The four slow ones —
+76.8 s of verification time after T120 (its two T5b harnesses measured 10.5 s
+and 6.2 s), including at least one harness for each of T1–T8. The four slow ones —
 `t4_the_most_specific_candidate_wins_in_any_order` (81 s),
 `t3_an_added_layered_grant_never_removes_a_capability` (32 s),
 `t1_deny_wins_on_enforcement` (29.5 s), and

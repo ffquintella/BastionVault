@@ -44,8 +44,10 @@ pin cbmc 6.11.0
 # 219 s wall: the 14 fast harnesses sum to 72.4 s and the 4 slow ones to
 # 169.3 s. The new enforcement theorem measured 29.5 s on an exact run. Nothing
 # lands between 14.1 s and 26.3 s, so any threshold in that gap gives the same
-# split. Every theorem T1-T8 and the remaining witness keep at least one fast
-# harness.
+# split. Every theorem T1-T8 keeps at least one fast harness. T120 (2026-10-15)
+# turned the F7 witness into a theorem and replaced the weak T5b harness with
+# its strong form: 6.2 s and 10.5 s, both fast, so the split is unchanged. No
+# defect witness is open.
 #
 # name                                                kind     set   covers  secs   label
 harness t1_deny_wins_in_capability_probes             theorem  fast  3       11.4   T1
@@ -62,7 +64,7 @@ harness t5_group_gate_is_sound                        theorem  fast  1        5.
 harness t5_t6_a_failed_gate_contributes_nothing       theorem  slow  1       26.3   T5 T6
 harness t6_scope_gate_is_sound                        theorem  fast  4        2.0   T6
 harness t5b_gated_list_always_carries_a_filter        theorem  fast  1        5.2   T5b
-harness t5b_an_unfiltered_list_needs_an_ungated_list_grant theorem fast 1     6.1   T5b
-harness f7_a_non_governing_list_rule_drops_the_filter witness  fast  1        6.2   F7 T120
+harness t5b_an_unfiltered_list_needs_the_governing_rule theorem fast 1      10.5   T5b
+harness t5b_a_non_governing_list_rule_keeps_the_filter theorem fast 1        6.2   T5b F7
 harness t7_root_isolation                             theorem  fast  1       14.1   T7
 harness t8_parameter_constraints                      theorem  fast  4        0.8   T8
