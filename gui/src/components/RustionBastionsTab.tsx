@@ -962,6 +962,8 @@ function bootstrapRoleConfig(
     issuer_ref: issuerRef,
     allow_key_reuse: false,
     allowed_key_refs: [],
+    // The Rustion master takes its key from the issue response.
+    manage_private_key: false,
     allowed_domains: [],
     allow_glob_domains: false,
     acme_enabled: false,
