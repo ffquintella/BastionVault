@@ -3,10 +3,10 @@
 //! and audit line for a top-frame load that failed, and the native question
 //! about a certificate the platform rejected.
 //!
-//! macOS only for now: the platform shim that calls it is the WKWebView
-//! navigation delegate in `connect_web_http_auth`. WebView2 and WebKitGTK
-//! windows keep their Phase 4 behaviour (a rejected certificate without a
-//! matching pin is refused).
+//! Called by the platform shims: the WKWebView navigation delegate, WebView2's
+//! `NavigationCompleted` and WebKitGTK's `load-failed` in
+//! `connect_web_http_auth`, and the certificate handlers in
+//! `connect_web_tls_pin`.
 //!
 //! Every decision stays in the session layer: the failure classification in
 //! `session::web_load`, the per-key override in

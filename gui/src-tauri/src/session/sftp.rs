@@ -186,6 +186,46 @@ pub fn is_safe_entry_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
 }
 
+/// Whether `name` is a valid Windows file name that names a file: none of
+/// `< > : " | ? *` or a control character, no trailing dot or space (Windows
+/// strips them, so `a.` would write `a`), and not a reserved device name
+/// (`CON`, `NUL`, `COM1`, … with or without an extension).
+///
+/// A remote name is checked against this before it becomes a local path on
+/// Windows: `Path::join` with a drive-qualified name (`D:x`) *replaces* the
+/// destination folder instead of extending it, `a:b` writes an NTFS
+/// alternate data stream of `a`, and `NUL` opens a device.
+pub fn is_windows_file_name(name: &str) -> bool {
+    const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+    if name.chars().any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') || (c as u32) < 0x20) {
+        return false;
+    }
+    if name.ends_with(['.', ' ']) {
+        return false;
+    }
+    let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ').to_ascii_uppercase();
+    if RESERVED.contains(&stem.as_str()) {
+        return false;
+    }
+    // COM0–COM9 / LPT0–LPT9, and the superscript-digit forms Windows also
+    // reserves.
+    if let Some(n) = stem.strip_prefix("COM").or_else(|| stem.strip_prefix("LPT")) {
+        let mut chars = n.chars();
+        if let (Some(d), None) = (chars.next(), chars.next()) {
+            if d.is_ascii_digit() || matches!(d, '\u{00B9}' | '\u{00B2}' | '\u{00B3}') {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// A name that may be created on this computer: [`is_safe_entry_name`], and
+/// on Windows also [`is_windows_file_name`].
+pub fn is_safe_local_name(name: &str) -> bool {
+    is_safe_entry_name(name) && (!cfg!(windows) || is_windows_file_name(name))
+}
+
 /// Join a remote (POSIX) folder and an entry name.
 pub fn remote_join(dir: &str, name: &str) -> String {
     if dir.is_empty() {
@@ -424,7 +464,7 @@ pub async fn remote_remove(sftp: &SftpSession, path: &str) -> Result<(), String>
 
 pub async fn local_mkdir(parent: &str, name: &str) -> Result<String, String> {
     let parent = check_local_path(parent)?;
-    if !is_safe_entry_name(name) {
+    if !is_safe_local_name(name) {
         return Err(format!("`{}` is not a valid folder name", name.escape_debug()));
     }
     let path = parent.join(name);
@@ -584,6 +624,9 @@ fn source_name(direction: Direction, src: &str) -> Result<String, String> {
     if !is_safe_entry_name(&name) {
         return Err(format!("`{}` cannot be transferred: unsafe name", src.escape_debug()));
     }
+    if direction == Direction::Download && !is_safe_local_name(&name) {
+        return Err(format!("`{}` cannot be transferred: the name is not valid on this computer", src.escape_debug()));
+    }
     Ok(name)
 }
 
@@ -657,6 +700,11 @@ async fn source_children(sftp: &SftpSession, direction: Direction, dir: &str) ->
                 }
                 if !is_safe_entry_name(&n) {
                     return Err(format!("sftp: {dir} contains an entry with an unsafe name; refusing to copy it"));
+                }
+                if !is_safe_local_name(&n) {
+                    return Err(format!(
+                        "sftp: {dir} contains an entry whose name is not valid on this computer; refusing to copy it"
+                    ));
                 }
                 names.push(n);
             }
@@ -937,6 +985,22 @@ mod tests {
         for ok in ["a", ".hidden", "..x", "x..", "file name.txt", "ação", "a:b"] {
             assert!(is_safe_entry_name(ok), "{ok:?} refused");
         }
+    }
+
+    #[test]
+    fn windows_file_names_exclude_streams_drives_and_devices() {
+        for bad in [
+            "a:b", "D:evil", "C:", "x<y", "x>y", "a\"b", "a|b", "a?", "a*", "tab\tname", "dot.", "space ", "CON",
+            "con", "Nul.txt", "aux.tar.gz", "COM1", "lpt9.log", "COM\u{00B9}", "PRN ",
+        ] {
+            assert!(!is_windows_file_name(bad), "{bad:?} accepted");
+        }
+        for ok in ["a", ".hidden", "report.pdf", "ação", "CONSOLE", "COM10", "LPT", "nul_x", "CONx.txt"] {
+            assert!(is_windows_file_name(ok), "{ok:?} refused");
+        }
+        // Off Windows a `:` is an ordinary character.
+        assert_eq!(is_safe_local_name("a:b"), !cfg!(windows));
+        assert!(!is_safe_local_name(".."));
     }
 
     #[test]

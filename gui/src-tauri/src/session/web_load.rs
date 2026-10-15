@@ -4,17 +4,17 @@
 //! WKWebView renders nothing for a navigation that fails before it commits —
 //! an untrusted certificate, a host that does not resolve, a refused
 //! connection — so without this the window stays blank and a form fill runs
-//! into its deadline as `timeout`. The platform shim reads the failure's
-//! error domain and code and hands them to [`classify`]; the session then
-//! shows the fixed [`LoadFailure::notice`] in the title, audits
-//! [`LoadFailure::check`] and ends the fill with `aborted:<check>`.
+//! into its deadline as `timeout`. WebView2 and WebKitGTK show their own
+//! error page instead, but the fill still ran into its deadline. The platform
+//! shim reads the failure's error domain and code and hands them to its
+//! classifier ([`classify`] for WKWebView, [`classify_webview2`],
+//! [`classify_webkitgtk`]); the session then shows the fixed
+//! [`LoadFailure::notice`] in the title, audits [`LoadFailure::check`] and
+//! ends the fill with `aborted:<check>`.
 //!
 //! Only the domain, the code and the failing origin are read. The platform's
 //! localized description is never shown or logged: it can carry the full
 //! URL, and a path or query can carry a token.
-
-// Only the macOS WKWebView shim calls into this module (T139).
-#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 /// Why the top frame did not load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -89,8 +89,10 @@ pub struct PageFailure {
 }
 
 /// `NSURLErrorDomain`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const NS_URL_ERROR_DOMAIN: &str = "NSURLErrorDomain";
 /// `WebKitErrorDomain`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const WEBKIT_ERROR_DOMAIN: &str = "WebKitErrorDomain";
 
 /// Classify a failed top-frame navigation from its `NSError` domain and code.
@@ -98,6 +100,7 @@ pub const WEBKIT_ERROR_DOMAIN: &str = "WebKitErrorDomain";
 /// or superseded (`NSURLErrorCancelled`, which is also what a refused
 /// server-trust challenge reports — see [`super::web::WebShared`]), and one
 /// the navigation policy stopped (WebKit's "frame load interrupted").
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn classify(domain: &str, code: i64) -> Option<LoadFailure> {
     match domain {
         NS_URL_ERROR_DOMAIN => Some(match code {
@@ -128,9 +131,158 @@ pub fn classify(domain: &str, code: i64) -> Option<LoadFailure> {
     }
 }
 
+/// Classify a failed WebView2 top-level navigation from its
+/// `COREWEBVIEW2_WEB_ERROR_STATUS` (`NavigationCompleted` with
+/// `IsSuccess == FALSE`). `None` for the outcomes that are not the page's:
+///
+/// * `OPERATION_CANCELED` — superseded or stopped, and what a certificate
+///   this window refused (`ServerCertificateErrorDetected` → `CANCEL`) may
+///   report; the window records its own refusal for that case.
+/// * `UNKNOWN` — WebView2 also reports `IsSuccess == FALSE` for a page the
+///   server answered with an HTTP error status, which rendered and is not a
+///   load failure (WKWebView treats it as a success). Ambiguous, so not
+///   reported: the recipe's own timeout still applies.
+/// * the two "credentials required" statuses — an HTTP authentication
+///   challenge the `http-auth` gate refused, which it reports itself.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn classify_webview2(status: i32) -> Option<LoadFailure> {
+    Some(match status {
+        0 | 14 | 17 | 18 => return None,
+        // Common name incorrect, expired, revoked, invalid.
+        1 | 2 | 4 | 5 => LoadFailure::TlsUntrusted,
+        // Client certificate contains errors.
+        3 => LoadFailure::TlsHandshake,
+        // Server unreachable, cannot connect.
+        6 | 12 => LoadFailure::Connect,
+        7 => LoadFailure::Timeout,
+        // The Internet connection has been lost.
+        11 => LoadFailure::Offline,
+        // Invalid server response, connection aborted, connection reset.
+        8..=10 => LoadFailure::Network,
+        13 => LoadFailure::Dns,
+        // Redirect failed, unexpected error, anything newer.
+        _ => LoadFailure::Other,
+    })
+}
+
+/// The `GError` domains a WebKitGTK `load-failed` can carry. The shim maps
+/// the error to one with `glib::Error::is`, so nothing here depends on a
+/// quark's name.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GtkErrorDomain {
+    /// `WEBKIT_NETWORK_ERROR`.
+    WebKitNetwork,
+    /// `WEBKIT_POLICY_ERROR`.
+    WebKitPolicy,
+    /// `WEBKIT_PLUGIN_ERROR`.
+    WebKitPlugin,
+    /// `G_IO_ERROR` (libsoup 3 passes socket errors through).
+    GIo,
+    /// `G_RESOLVER_ERROR`.
+    GResolver,
+    /// `G_TLS_ERROR` (WebKitGTK's `load-failed` after an unhandled
+    /// `load-failed-with-tls-errors` is `G_TLS_ERROR_BAD_CERTIFICATE`).
+    GTls,
+    Other,
+}
+
+/// Classify a failed WebKitGTK main-resource load (`load-failed`). `None`
+/// for a cancelled or superseded load and for one the navigation policy
+/// stopped (as [`classify`]).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn classify_webkitgtk(domain: GtkErrorDomain, code: i32) -> Option<LoadFailure> {
+    Some(match domain {
+        GtkErrorDomain::WebKitNetwork => match code {
+            // WEBKIT_NETWORK_ERROR_CANCELLED.
+            302 => return None,
+            // WEBKIT_NETWORK_ERROR_TRANSPORT.
+            300 => LoadFailure::Network,
+            _ => LoadFailure::Other,
+        },
+        // FRAME_LOAD_INTERRUPTED_BY_POLICY_CHANGE (the allow-list's own
+        // refusals, which have their notice).
+        GtkErrorDomain::WebKitPolicy if code == 102 => return None,
+        // WEBKIT_PLUGIN_ERROR_WILL_HANDLE_LOAD.
+        GtkErrorDomain::WebKitPlugin if code == 204 => return None,
+        GtkErrorDomain::GIo => match code {
+            // G_IO_ERROR_CANCELLED.
+            19 => return None,
+            24 => LoadFailure::Timeout,
+            // HOST_NOT_FOUND.
+            28 => LoadFailure::Dns,
+            // HOST_UNREACHABLE, CONNECTION_REFUSED.
+            37 | 39 => LoadFailure::Connect,
+            // NETWORK_UNREACHABLE.
+            38 => LoadFailure::Offline,
+            // CONNECTION_CLOSED / BROKEN_PIPE, NOT_CONNECTED.
+            44 | 45 => LoadFailure::Network,
+            _ => LoadFailure::Other,
+        },
+        GtkErrorDomain::GResolver => LoadFailure::Dns,
+        GtkErrorDomain::GTls => match code {
+            // G_TLS_ERROR_BAD_CERTIFICATE.
+            2 => LoadFailure::TlsUntrusted,
+            _ => LoadFailure::TlsHandshake,
+        },
+        GtkErrorDomain::WebKitPolicy | GtkErrorDomain::WebKitPlugin | GtkErrorDomain::Other => LoadFailure::Other,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webview2_statuses_are_named() {
+        for s in [1, 2, 4, 5] {
+            assert_eq!(classify_webview2(s), Some(LoadFailure::TlsUntrusted), "{s}");
+        }
+        assert_eq!(classify_webview2(3), Some(LoadFailure::TlsHandshake));
+        assert_eq!(classify_webview2(13), Some(LoadFailure::Dns));
+        assert_eq!(classify_webview2(12), Some(LoadFailure::Connect));
+        assert_eq!(classify_webview2(6), Some(LoadFailure::Connect));
+        assert_eq!(classify_webview2(7), Some(LoadFailure::Timeout));
+        assert_eq!(classify_webview2(11), Some(LoadFailure::Offline));
+        assert_eq!(classify_webview2(10), Some(LoadFailure::Network));
+        assert_eq!(classify_webview2(16), Some(LoadFailure::Other));
+        assert_eq!(classify_webview2(99), Some(LoadFailure::Other));
+    }
+
+    #[test]
+    fn webview2_cancels_http_errors_and_auth_are_not_failures() {
+        for s in [0, 14, 17, 18] {
+            assert_eq!(classify_webview2(s), None, "{s}");
+        }
+    }
+
+    #[test]
+    fn webkitgtk_errors_are_named() {
+        use GtkErrorDomain::*;
+        assert_eq!(classify_webkitgtk(GTls, 2), Some(LoadFailure::TlsUntrusted));
+        assert_eq!(classify_webkitgtk(GTls, 4), Some(LoadFailure::TlsHandshake));
+        assert_eq!(classify_webkitgtk(GResolver, 0), Some(LoadFailure::Dns));
+        assert_eq!(classify_webkitgtk(GIo, 28), Some(LoadFailure::Dns));
+        assert_eq!(classify_webkitgtk(GIo, 39), Some(LoadFailure::Connect));
+        assert_eq!(classify_webkitgtk(GIo, 37), Some(LoadFailure::Connect));
+        assert_eq!(classify_webkitgtk(GIo, 24), Some(LoadFailure::Timeout));
+        assert_eq!(classify_webkitgtk(GIo, 38), Some(LoadFailure::Offline));
+        assert_eq!(classify_webkitgtk(GIo, 44), Some(LoadFailure::Network));
+        assert_eq!(classify_webkitgtk(GIo, 1), Some(LoadFailure::Other));
+        assert_eq!(classify_webkitgtk(WebKitNetwork, 300), Some(LoadFailure::Network));
+        assert_eq!(classify_webkitgtk(WebKitNetwork, 399), Some(LoadFailure::Other));
+        assert_eq!(classify_webkitgtk(WebKitPolicy, 101), Some(LoadFailure::Other));
+        assert_eq!(classify_webkitgtk(Other, 7), Some(LoadFailure::Other));
+    }
+
+    #[test]
+    fn webkitgtk_cancelled_and_policy_interrupted_loads_are_not_failures() {
+        use GtkErrorDomain::*;
+        assert_eq!(classify_webkitgtk(WebKitNetwork, 302), None);
+        assert_eq!(classify_webkitgtk(GIo, 19), None);
+        assert_eq!(classify_webkitgtk(WebKitPolicy, 102), None);
+        assert_eq!(classify_webkitgtk(WebKitPlugin, 204), None);
+    }
 
     #[test]
     fn certificate_errors_are_untrusted() {

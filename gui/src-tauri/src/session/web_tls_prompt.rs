@@ -3,13 +3,14 @@
 //! the dialog is native (the page cannot draw over or answer it), and the
 //! decision is the gate's (`TlsPinGate::operator_override`).
 //!
-//! Only the WKWebView shim asks (T139), so off macOS nothing here is called.
+//! Asked by the WKWebView, WebView2 and WebKitGTK shims
+//! (`commands/connect_web_tls_pin`).
 //!
 //! Server-chosen text (subject, issuer, the platform's reason, which names
 //! the host) appears here and nowhere else: it is never logged or audited.
 
-// Only the macOS WKWebView shim calls into this module (T139).
-#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// The platform shims call into this module; elsewhere only its tests do.
+#![cfg_attr(not(any(target_os = "macos", windows, target_os = "linux")), allow(dead_code))]
 
 use chrono::{DateTime, Utc};
 
@@ -89,9 +90,58 @@ pub fn prompt_message(f: &PromptFacts<'_>) -> String {
     m
 }
 
+/// The platform's reason for a WebView2 `ServerCertificateErrorDetected`,
+/// from its `COREWEBVIEW2_WEB_ERROR_STATUS`. WebView2 gives no text of its
+/// own, so this is the question's "platform reason".
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn webview2_reason(status: i32) -> Option<&'static str> {
+    Some(match status {
+        1 => "The certificate was not issued for this host name.",
+        2 => "The certificate has expired.",
+        3 => "The client certificate contains errors.",
+        4 => "The certificate has been revoked.",
+        5 => "The certificate is not trusted by this computer (unknown issuer or invalid).",
+        _ => return None,
+    })
+}
+
+/// The platform's reason for a WebKitGTK `load-failed-with-tls-errors`, from
+/// its `GTlsCertificateFlags` bits.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn gtls_reason(flags: u32) -> Option<String> {
+    const REASONS: [(u32, &str); 7] = [
+        (1, "the issuer is not trusted by this computer"),
+        (2, "it was not issued for this host name"),
+        (4, "it is not valid yet"),
+        (8, "it has expired"),
+        (16, "it has been revoked"),
+        (32, "it uses an insecure algorithm"),
+        (64, "it could not be verified"),
+    ];
+    let parts: Vec<&str> = REASONS.iter().filter(|(bit, _)| flags & bit != 0).map(|(_, r)| *r).collect();
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!("The certificate is not trusted: {}.", parts.join("; ")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_reasons_are_fixed_text() {
+        assert_eq!(webview2_reason(2), Some("The certificate has expired."));
+        assert!(webview2_reason(5).unwrap().contains("not trusted"));
+        assert_eq!(webview2_reason(0), None);
+        assert_eq!(webview2_reason(13), None);
+        assert_eq!(
+            gtls_reason(1 | 8).as_deref(),
+            Some("The certificate is not trusted: the issuer is not trusted by this computer; it has expired.")
+        );
+        assert_eq!(gtls_reason(0), None);
+        assert_eq!(gtls_reason(128), None, "unknown bits name nothing");
+    }
 
     fn leaf(not_before: i64, not_after: i64) -> PresentedCertificate {
         PresentedCertificate {

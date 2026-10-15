@@ -111,7 +111,6 @@ pub mod connect_web;
 pub mod connect_web_chrome;
 pub mod connect_web_http_auth;
 pub mod connect_web_tls_pin;
-#[cfg(target_os = "macos")]
 pub mod connect_web_trust_ui;
 pub mod connection;
 pub mod dos;
