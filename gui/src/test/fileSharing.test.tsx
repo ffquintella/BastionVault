@@ -237,3 +237,48 @@ describe("FilesPage sharing entry point", () => {
     });
   });
 });
+
+describe("FileSharingCard group grantees", () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_file_owner")
+        return Promise.resolve({ owned: true, entity_id: "entity-1" });
+      if (cmd === "list_shares_for_target") return Promise.resolve([]);
+      if (cmd === "list_entity_aliases") return Promise.resolve([]);
+      if (cmd === "list_groups")
+        return Promise.resolve({ groups: ["engineering"] });
+      if (cmd === "put_share") return Promise.resolve({});
+      return Promise.reject(new Error(`unmocked: ${cmd}`));
+    });
+    useAuthStore.setState({
+      token: "t",
+      isAuthenticated: true,
+      policies: ["default"],
+      entityId: "entity-1",
+    });
+  });
+
+  it("grants to a user identity group on the file id", async () => {
+    const user = userEvent.setup();
+    await renderCard();
+    await user.click(screen.getByRole("button", { name: /grant access/i }));
+    await user.selectOptions(
+      screen.getByLabelText(/grantee kind/i),
+      "group_user",
+    );
+    // Group names are free text — no UUID parsing, unlike EntityPicker.
+    await user.type(screen.getByPlaceholderText("engineering"), "engineering");
+    await user.click(screen.getByRole("button", { name: /^grant$/i }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("put_share", {
+        kind: "file",
+        targetPath: FILE_ID,
+        grantee: "engineering",
+        granteeKind: "group_user",
+        capabilities: ["read"],
+        expiresAt: "",
+      }),
+    );
+  });
+});

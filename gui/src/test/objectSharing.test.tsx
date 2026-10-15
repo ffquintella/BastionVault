@@ -145,8 +145,55 @@ describe("SecretSharingPanel ownership controls", () => {
   });
 });
 
-// Group grantees are only *offered* on asset groups, but a group share
-// can land on any kind through the API or the CLI. Before this, revoke
+describe("SecretSharingPanel group grantees", () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_kv_owner")
+        return Promise.resolve({ owned: true, entity_id: "entity-1" });
+      if (cmd === "list_shares_for_target") return Promise.resolve([]);
+      if (cmd === "list_entity_aliases") return Promise.resolve([]);
+      if (cmd === "list_groups")
+        return Promise.resolve({ groups: ["engineering"] });
+      if (cmd === "put_share") return Promise.resolve({});
+      return Promise.reject(new Error(`unmocked: ${cmd}`));
+    });
+    useAuthStore.setState({
+      token: "t",
+      isAuthenticated: true,
+      policies: ["default"],
+      entityId: "entity-1",
+    });
+  });
+
+  it("lets the owner grant a KV path to a user identity group", async () => {
+    const user = userEvent.setup();
+    await renderPanel();
+    await user.click(screen.getByRole("button", { name: /grant access/i }));
+    await user.selectOptions(
+      screen.getByLabelText(/grantee kind/i),
+      "group_user",
+    );
+    // The opt-in policy tag is the operator's half of the contract;
+    // without it the share is stored but grants nothing.
+    expect(screen.getByText(/group_shared_resources/)).toBeInTheDocument();
+    await user.type(screen.getByPlaceholderText("engineering"), "engineering");
+    await user.click(screen.getByRole("button", { name: /^grant$/i }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("put_share", {
+        kind: "kv-secret",
+        targetPath: KV_PATH,
+        grantee: "engineering",
+        granteeKind: "group_user",
+        capabilities: ["read"],
+        expiresAt: "",
+      }),
+    );
+  });
+});
+
+// A group share can land on any kind — through the grant form or the
+// API/CLI. Before this, revoke
 // sent a hardcoded `entity` kind and silently mis-targeted the record —
 // the row stayed after a "Share revoked" toast.
 describe("ObjectSharingCard revoke honours the record's grantee_kind", () => {

@@ -233,23 +233,30 @@ username receive the same unioned policy set.
 Identity groups now double as share targets. A share's `grantee_kind`
 field selects between an entity grantee (UUID; the legacy default) and
 a group grantee (lowercased group name, kind = `group_user` or
-`group_app`). Group shares are *informational + gated*: a share that
-points at group `engineering` is visible to every member of that group
-in the "Shared with me" tab **only when** the caller carries at least
-one policy whose `metadata.group_shared_resources` is `"true"`. The
-share itself does not grant ACL capability — the caller's regular
-policies still own the access decision; the share row simply surfaces
-the target on the caller's per-user shared list.
+`group_app`). Group shares are *gated*: a share that points at group
+`engineering` applies to a member of that group **only when** the
+caller carries at least one policy whose
+`metadata.group_shared_resources` is `"true"`. For such a caller the
+share surfaces the target in the "Shared with me" tab and, since 0.7.8,
+also feeds `scopes = ["shared"]` ACL rules exactly as an entity share
+does (`resolve_target_shared_caps` in `policy_store.rs`) — on
+resources, KV secrets, files and asset groups. The rule still bounds
+the result: a share cannot grant a capability the caller's own
+`shared`-scoped rule does not list. The GUI's Grant access dialog
+offers both group kinds on every one of those targets.
 
 ### Why intersection, not union
 
 The simplest design ("group share === policy attached to every
 member") risks privilege escalation when group membership churns: an
 admin adds a user to `engineering` and the user instantly gets `update`
-on every secret previously shared with the group. By treating group
-shares as a *visibility filter* over the caller's existing policy
-capabilities, membership changes never expand a user's effective ACL —
-only the discoverable surface of "what is this group working on."
+on every secret previously shared with the group. Two gates bound
+that: the share contributes only to `shared`-scoped rules the member
+already holds (intersection with the rule's capabilities), and only
+for members whose policies carry the opt-in tag. Membership churn
+does extend opted-in group shares to the new member — that is the
+feature — so attach the tag only to policies whose holders should
+inherit their groups' shares.
 Operators who want capability-granting group shares should attach the
 relevant policy to the group itself (`GroupEntry.policies`); the
 login-time `expand_identity_group_policies` flow has unioned those

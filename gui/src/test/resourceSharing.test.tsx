@@ -222,3 +222,50 @@ describe("ResourceSharingCard connect capability", () => {
     expect(screen.getByText(/is not implied by/i)).toBeInTheDocument();
   });
 });
+
+// Identity-group grantees are offered on resources, not only on asset
+// groups: the ACL evaluator resolves a group share against the
+// resource path for members whose policy opts in.
+describe("ResourceSharingCard group grantees", () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_resource_owner")
+        return Promise.resolve({ owned: true, entity_id: "entity-1" });
+      if (cmd === "list_shares_for_target") return Promise.resolve([]);
+      if (cmd === "list_entity_aliases") return Promise.resolve([]);
+      if (cmd === "list_groups") return Promise.resolve({ groups: ["ci-bots"] });
+      if (cmd === "put_share") return Promise.resolve({});
+      return Promise.reject(new Error(`unmocked: ${cmd}`));
+    });
+    useAuthStore.setState({
+      token: "t",
+      isAuthenticated: true,
+      policies: ["default"],
+      entityId: "entity-1",
+    });
+  });
+
+  it("grants to an application group with the group_app kind", async () => {
+    const user = userEvent.setup();
+    await renderCard();
+    await user.click(screen.getByRole("button", { name: /grant access/i }));
+    await user.selectOptions(
+      screen.getByLabelText(/grantee kind/i),
+      "group_app",
+    );
+    await user.type(screen.getByPlaceholderText("ci-bots"), "ci-bots");
+    await user.click(screen.getByRole("button", { name: "connect" }));
+    await user.click(screen.getByRole("button", { name: /^grant$/i }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("put_share", {
+        kind: "resource",
+        targetPath: "segdc1vds0005",
+        grantee: "ci-bots",
+        granteeKind: "group_app",
+        capabilities: ["read", "connect"],
+        expiresAt: "",
+      }),
+    );
+  });
+});
