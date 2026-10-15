@@ -139,6 +139,13 @@ pub struct Config {
     /// request (`enabled` defaults false).
     #[serde(default)]
     pub mcp: McpConfig,
+    /// The file that declared the `mcp` block, set by the loader; `None` when
+    /// no file did. Not part of the config language: it is what lets
+    /// [`Config::merge`] tell "the second file leaves `mcp` out" (keep the
+    /// first file's block) from "both files declare it" (refuse), which the
+    /// block's `#[serde(default)]` alone cannot.
+    #[serde(skip)]
+    pub(crate) mcp_declared_in: Option<String>,
 }
 
 /// `mcp { ... }` — transport settings for the `/v2/mcp` endpoint. These
@@ -571,7 +578,33 @@ impl Config {
         Ok(Some(crate::hsm::resolve_config(label, block)?))
     }
 
-    pub fn merge(&mut self, other: Config) {
+    /// Fold `other` (a later file of a config directory) into `self`.
+    ///
+    /// Scalars follow "a set value in the later file wins"; `listener`,
+    /// `storage` and `hsm` are unioned by label; `dos` is replaced whole.
+    ///
+    /// The `mcp` block is security policy (TLS and origin requirements, the
+    /// brokered-session switch and its destination allow-list), so it is
+    /// declared in **exactly one** file: the file that declares it supplies
+    /// the whole block, and a second file declaring it too is refused with an
+    /// error naming both files. A field-by-field merge was rejected: a later
+    /// file could not switch a boolean back off (an absent key and `false`
+    /// read the same), and an allow-list would have to be either unioned
+    /// (widened) or replaced depending on file order.
+    pub fn merge(&mut self, other: Config) -> Result<(), RvError> {
+        match (&self.mcp_declared_in, other.mcp_declared_in) {
+            (Some(first), Some(second)) => {
+                return Err(RvError::ErrString(format!(
+                    "the `mcp` block is declared in both {first} and {second}; declare it in exactly one file of the config directory"
+                )));
+            }
+            (None, Some(second)) => {
+                self.mcp = other.mcp;
+                self.mcp_declared_in = Some(second);
+            }
+            (_, None) => {}
+        }
+
         self.listener.extend(other.listener);
         self.storage.extend(other.storage);
         self.hsm.extend(other.hsm);
@@ -608,6 +641,7 @@ impl Config {
         }
 
         self.cache.merge(other.cache);
+        Ok(())
     }
 }
 
@@ -642,15 +676,18 @@ fn load_config_dir(dir: &str) -> Result<Config, RvError> {
         }
     }
 
-    let mut result = None;
+    // Merge in file-name order, so "the later file wins" names the same file
+    // on every filesystem: `read_dir` order is unspecified.
+    paths.sort();
+
+    let mut result: Option<Config> = None;
 
     for path in paths {
         log::debug!("load_config_dir path: {path}");
         let config = load_config_file(&path)?;
-        if result.is_none() {
-            result = Some(config.clone());
-        } else {
-            result.as_mut().unwrap().merge(config);
+        match result.as_mut() {
+            None => result = Some(config),
+            Some(merged) => merged.merge(config)?,
         }
     }
 
@@ -659,21 +696,26 @@ fn load_config_dir(dir: &str) -> Result<Config, RvError> {
 
 fn load_config_file(path: &str) -> Result<Config, RvError> {
     log::debug!("load_config_file: {path}");
-    let file = fs::File::open(path)?;
+    let text = fs::read_to_string(path)?;
 
-    if path.ends_with(".hcl") {
-        let mut config: Config = hcl::from_reader(file)?;
-        set_config_type_field(&mut config)?;
-        check_config(&config)?;
-        Ok(config)
+    // Parsed a second time, untyped, only to learn whether the file declares
+    // an `mcp` block at all (see `Config::mcp_declared_in`).
+    let (mut config, declares_mcp): (Config, bool) = if path.ends_with(".hcl") {
+        let body = hcl::parse(&text)?;
+        let declares = body.attributes().any(|a| a.key() == "mcp") || body.blocks().any(|b| b.identifier() == "mcp");
+        (hcl::from_str(&text)?, declares)
     } else if path.ends_with(".json") {
-        let mut config: Config = serde_json::from_reader(file)?;
-        set_config_type_field(&mut config)?;
-        check_config(&config)?;
-        Ok(config)
+        let value: Value = serde_json::from_str(&text)?;
+        (serde_json::from_str(&text)?, value.get("mcp").is_some())
     } else {
-        Err(RvError::ErrConfigPathInvalid)
+        return Err(RvError::ErrConfigPathInvalid);
+    };
+    if declares_mcp {
+        config.mcp_declared_in = Some(path.to_string());
     }
+    set_config_type_field(&mut config)?;
+    check_config(&config)?;
+    Ok(config)
 }
 
 fn set_config_type_field(config: &mut Config) -> Result<(), RvError> {
@@ -1158,6 +1200,104 @@ mod test {
         assert!(warnings[0].contains("169.254.169.254/32") && warnings[0].contains("link-local"), "{warnings:?}");
         assert!(warnings[1].contains("127.0.0.0/8") && warnings[1].contains("loopback"), "{warnings:?}");
         assert!(warnings.iter().all(|w| w.starts_with("mcp.brokered_sessions.allowed_target_cidrs")));
+    }
+
+    /// Writes `files` (name, body) into a fresh directory and loads it as a
+    /// config directory.
+    fn load_dir(dir_name: &str, files: &[(&str, &str)]) -> (Result<Config, RvError>, std::path::PathBuf) {
+        let dir = env::temp_dir().join(TEST_DIR).join(dir_name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for (name, body) in files {
+            write_file(dir.join(name).to_str().unwrap(), body).unwrap();
+        }
+        (load_config(dir.to_str().unwrap()), dir)
+    }
+
+    const NARROW_MCP: &str = r#"
+        mcp {
+          enabled       = true
+          canonical_url = "https://v/v2/mcp"
+          brokered_sessions {
+            enabled              = true
+            protocols            = ["ssh"]
+            allowed_target_cidrs = ["10.20.0.0/16"]
+          }
+        }
+    "#;
+
+    /// Regression: `Config::merge` used to ignore `mcp`, so a directory
+    /// config whose `mcp` block sat in any file but the first loaded one
+    /// dropped it — brokered sessions and a narrower destination list
+    /// included — without a word. The block now comes from whichever file
+    /// declares it, in either position.
+    #[test]
+    fn test_config_dir_keeps_the_mcp_block_from_the_file_that_declares_it() {
+        let with_mcp = format!("{BROKERED_BASE}{NARROW_MCP}");
+        // `b-mcp.hcl` merges after `a-base.hcl` (file-name order).
+        for (dir_name, files) in [
+            ("merge_mcp_second", [("a-base.hcl", BROKERED_BASE), ("b-mcp.hcl", with_mcp.as_str())]),
+            ("merge_mcp_first", [("a-mcp.hcl", with_mcp.as_str()), ("b-base.hcl", BROKERED_BASE)]),
+        ] {
+            let (config, _) = load_dir(dir_name, &files);
+            let config = config.unwrap_or_else(|e| panic!("{dir_name}: {e}"));
+            assert!(config.mcp.enabled, "{dir_name}");
+            let bs = &config.mcp.brokered_sessions;
+            assert!(bs.enabled, "{dir_name}");
+            assert_eq!(bs.protocols, vec!["ssh".to_string()], "{dir_name}");
+            assert_eq!(bs.allowed_target_cidrs, Some(vec!["10.20.0.0/16".to_string()]), "{dir_name}");
+        }
+
+        // JSON files take part the same way.
+        let json_mcp = r#"{"storage":{"file":{"path":"./d"}},"listener":{"tcp":{"address":"127.0.0.1:8200"}},
+            "mcp":{"brokered_sessions":{"allowed_target_cidrs":["192.168.7.0/24"]}}}"#;
+        let (config, _) = load_dir("merge_mcp_json", &[("a-base.hcl", BROKERED_BASE), ("b.json", json_mcp)]);
+        assert_eq!(
+            config.unwrap().mcp.brokered_sessions.allowed_target_cidrs,
+            Some(vec!["192.168.7.0/24".to_string()])
+        );
+    }
+
+    /// Two files declaring `mcp` are refused, naming both, whatever the
+    /// blocks hold — even an empty block, which could otherwise not be told
+    /// from an absent one. The error is the same on every filesystem.
+    #[test]
+    fn test_config_dir_refuses_mcp_declared_twice() {
+        let narrow = format!("{BROKERED_BASE}{NARROW_MCP}");
+        let other = format!("{BROKERED_BASE}\nmcp {{\n  enabled = false\n}}\n");
+        let empty = format!("{BROKERED_BASE}\nmcp {{}}\n");
+        let json_mcp = r#"{"storage":{"file":{"path":"./d"}},"listener":{"tcp":{"address":"127.0.0.1:8200"}},"mcp":{}}"#;
+        for (dir_name, files) in [
+            ("merge_mcp_twice", vec![("a.hcl", narrow.as_str()), ("b.hcl", other.as_str())]),
+            ("merge_mcp_twice_same", vec![("a.hcl", narrow.as_str()), ("b.hcl", narrow.as_str())]),
+            ("merge_mcp_twice_empty", vec![("a.hcl", narrow.as_str()), ("b.hcl", empty.as_str())]),
+            ("merge_mcp_twice_json", vec![("a.hcl", narrow.as_str()), ("b.json", json_mcp)]),
+            ("merge_mcp_twice_mid", vec![("a.hcl", narrow.as_str()), ("b.hcl", BROKERED_BASE), ("c.hcl", other.as_str())]),
+        ] {
+            let (config, dir) = load_dir(dir_name, &files);
+            let err = config.expect_err(dir_name).to_string();
+            let first = dir.join(files[0].0).to_string_lossy().into_owned();
+            let second = dir.join(files[files.len() - 1].0).to_string_lossy().into_owned();
+            assert!(err.contains("`mcp` block is declared in both"), "{dir_name}: {err}");
+            assert!(
+                err.find(&first).is_some_and(|i| err.find(&second).is_some_and(|j| i < j)),
+                "{dir_name}: names both files in order: {err}"
+            );
+        }
+    }
+
+    /// A single-file config records which file declared `mcp` and merges
+    /// nothing; a directory where no file declares it gets the defaults.
+    #[test]
+    fn test_config_mcp_declaration_is_tracked_per_file() {
+        let config = load_str("merge_single", "c.hcl", &format!("{BROKERED_BASE}{NARROW_MCP}")).unwrap();
+        assert!(config.mcp_declared_in.as_deref().is_some_and(|p| p.ends_with("c.hcl")));
+        assert!(load_str("merge_single_none", "c.hcl", BROKERED_BASE).unwrap().mcp_declared_in.is_none());
+
+        let (config, _) = load_dir("merge_none", &[("a.hcl", BROKERED_BASE), ("b.hcl", BROKERED_BASE)]);
+        let config = config.unwrap();
+        assert_eq!(config.mcp, McpConfig::default());
+        assert!(config.mcp_declared_in.is_none());
     }
 
     #[test]

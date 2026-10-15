@@ -100,10 +100,11 @@ pub struct Request {
     /// in charge exactly as before.
     #[default(None)]
     pub share_capability_override: Option<String>,
-    /// Set by the MCP dispatcher before calling `Core::handle_request`, so
-    /// `audit_request_data` can fold it into the entry's `data.mcp` block
-    /// the same way it already folds `env`. `None` for every non-MCP
-    /// request.
+    /// Set by the MCP endpoint's backend before calling
+    /// `Core::handle_request`, so the audit entry carries it as the
+    /// `request.mcp` block — beside `request.data`, not inside it, and not
+    /// HMAC-redacted: every field is non-secret metadata
+    /// (`features/mcp-access.md` §10). `None` for every non-MCP request.
     #[default(None)]
     pub mcp_audit: Option<McpAuditContext>,
     /// Set by the MCP dispatcher's `bv_client::Backend` before calling
@@ -116,22 +117,41 @@ pub struct Request {
     pub mcp_dispatch: bool,
 }
 
-/// The `mcp` sibling block `audit_request_data` attaches to a `tools/call`
-/// request's audit entry. Never carries a secret value, token or
-/// `requestState` — only the metadata spec §10 lists as auditable.
+/// The `mcp` block a `tools/call` request's audit entry carries as
+/// `request.mcp`. Never carries a secret value, token or `requestState` —
+/// only the metadata `features/mcp-access.md` §10 lists as auditable.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct McpAuditContext {
+    /// `"app"` or `"pairing"`.
     pub kind: String,
+    /// The app name or the pairing id.
     pub name: String,
     pub client_name: String,
     pub client_version: String,
     pub transport: String,
     pub tool: String,
     pub catalogue_hash: String,
+    /// `bv_mcp::dispatcher::args_hash` of the call's `arguments`: BLAKE3 hex,
+    /// so the arguments correlate across the gatekeeper, the vault and an
+    /// MFA ticket without being written down
+    /// (`features/mcp-brokered-sessions.md` §10).
+    #[serde(default)]
+    pub args_hash: String,
     pub reveal_requested: bool,
     pub reveal_granted: bool,
     pub destructive: bool,
+    /// The local gatekeeper says an operator confirmed this call. The vault
+    /// cannot see the confirmation happen, so this is the gatekeeper's
+    /// assertion; `operator_confirmation` says so.
     pub confirmed_by_operator: bool,
+    /// How `confirmed_by_operator` is known: `"asserted-by-local-host"` when
+    /// the gatekeeper's `_meta["io.bastionvault/confirmation"]` record
+    /// carried it (`features/mcp-brokered-sessions.md` §9); absent when no
+    /// confirmation was claimed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_confirmation: Option<String>,
+    /// `"allowed"` when the dispatcher's gates passed and the call was
+    /// routed. The ACL decision underneath is the entry's own outcome.
     pub decision: String,
     pub tls_kx_group: Option<String>,
     pub waived: bool,

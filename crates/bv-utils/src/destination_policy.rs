@@ -73,6 +73,18 @@ pub enum AlwaysDenied {
 }
 
 impl AlwaysDenied {
+    /// Every class, in the order an operator-facing listing shows them
+    /// (`sys/mcp/config` reports these as read-only).
+    pub const ALL: [AlwaysDenied; 7] = [
+        Self::Loopback,
+        Self::LinkLocal,
+        Self::Multicast,
+        Self::Unspecified,
+        Self::Broadcast,
+        Self::VaultListener,
+        Self::ClusterNode,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Loopback => "loopback",
@@ -270,7 +282,9 @@ pub fn default_target_cidrs() -> TargetCidrs {
 pub enum TargetCidrSource {
     /// `sys/mcp/config.brokered_sessions_allowed_target_cidrs`.
     Runtime,
-    /// `mcp.brokered_sessions.allowed_target_cidrs` in the server config.
+    /// `mcp.brokered_sessions.allowed_target_cidrs` in the server config
+    /// (reported as `hcl`, the spec's and the operator's name for that layer,
+    /// although a JSON config file sets it the same way).
     ServerConfig,
     /// Neither sets one: [`DEFAULT_ALLOWED_TARGET_CIDRS`].
     Default,
@@ -280,7 +294,7 @@ impl TargetCidrSource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Runtime => "runtime",
-            Self::ServerConfig => "server-config",
+            Self::ServerConfig => "hcl",
             Self::Default => "default",
         }
     }
@@ -702,6 +716,18 @@ mod tests {
         assert_eq!(
             effective_target_cidr_entries(Some(empty.as_slice()), Some(hcl.as_slice())),
             (empty.clone(), TargetCidrSource::Runtime)
+        );
+        // The names `sys/mcp/config` reports for each layer.
+        let names: Vec<&str> =
+            [TargetCidrSource::Runtime, TargetCidrSource::ServerConfig, TargetCidrSource::Default]
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+        assert_eq!(names, ["runtime", "hcl", "default"]);
+        let classes: Vec<&str> = AlwaysDenied::ALL.iter().map(|c| c.as_str()).collect();
+        assert_eq!(
+            classes,
+            ["loopback", "link-local", "multicast", "unspecified", "broadcast", "vault-listener", "cluster-node"]
         );
     }
 

@@ -283,6 +283,11 @@ impl BastionVault {
             core.mount_entry_hmac_level = conf.mount_entry_hmac_level;
             core.mounts_monitor_interval = conf.mounts_monitor_interval;
             core.cache_config = conf.cache.clone();
+            // `mcp.brokered_sessions`: the static server layer of the
+            // brokered-session switches and destination list, which the
+            // kernel's `sys/mcp/config` reports as the effective value's
+            // `hcl` source.
+            core.mcp_brokered_sessions = conf.mcp.brokered_sessions.clone();
             // Seed the DoS guard from the optional `dos { ... }` config block.
             // The barrier-persisted value (if any) overrides this at unseal.
             if let Some(dos) = conf.dos.clone() {
