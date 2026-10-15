@@ -164,6 +164,24 @@ pub fn operator_confirmation(meta: Option<&Value>) -> Option<OperatorConfirmatio
     (confirmation.by == "operator").then_some(confirmation)
 }
 
+/// The `_meta` key under which the local gatekeeper relays the operator's
+/// connect MFA ticket for one session call (`features/mcp-brokered-sessions.md`
+/// §3.1 step 4). Never in `arguments`, which the ticket is bound to by hash;
+/// never shown to the MCP client, which never sees a relayed request.
+pub const CONNECT_TICKET_META_KEY: &str = "io.bastionvault/connect_ticket";
+
+/// Longest ticket the vault reads from `_meta`. A minted ticket is 43
+/// characters (32 random bytes, base64url); anything far longer is not one.
+pub const MAX_CONNECT_TICKET_LEN: usize = 128;
+
+/// The relayed connect MFA ticket in a call's `params._meta`, when it is a
+/// non-empty string of plausible length. The vault, not this parse, decides
+/// whether it is valid: it redeems it single-use against the call.
+pub fn connect_ticket(meta: Option<&Value>) -> Option<&str> {
+    let ticket = meta?.get(CONNECT_TICKET_META_KEY)?.as_str()?.trim();
+    (!ticket.is_empty() && ticket.len() <= MAX_CONNECT_TICKET_LEN).then_some(ticket)
+}
+
 #[cfg(test)]
 mod confirmation_tests {
     use super::*;
@@ -188,5 +206,20 @@ mod confirmation_tests {
             assert_eq!(operator_confirmation(Some(&not_one)), None, "{not_one}");
         }
         assert_eq!(operator_confirmation(None), None);
+    }
+
+    #[test]
+    fn only_a_plausible_string_is_a_relayed_ticket() {
+        let meta = json!({ "io.bastionvault/connect_ticket": " abc " });
+        assert_eq!(connect_ticket(Some(&meta)), Some("abc"));
+        for not_one in [
+            json!({}),
+            json!({ "io.bastionvault/connect_ticket": "" }),
+            json!({ "io.bastionvault/connect_ticket": 7 }),
+            json!({ "io.bastionvault/connect_ticket": "x".repeat(MAX_CONNECT_TICKET_LEN + 1) }),
+        ] {
+            assert_eq!(connect_ticket(Some(&not_one)), None, "{not_one}");
+        }
+        assert_eq!(connect_ticket(None), None);
     }
 }

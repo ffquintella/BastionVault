@@ -110,6 +110,7 @@ mod dispatch_tests {
             confirm_destructive: false,
             request_state_key: b"test-key",
             single_use_guard: guard,
+            connect_ticket: None,
         }
     }
 
@@ -668,6 +669,15 @@ mod dispatch_tests {
         backend: &dyn Backend,
         args: Map<String, Value>,
     ) -> Result<CallToolResult, McpError> {
+        ssh_call_with_ticket(b, backend, args, None).await
+    }
+
+    async fn ssh_call_with_ticket(
+        b: &McpBinding,
+        backend: &dyn Backend,
+        args: Map<String, Value>,
+        connect_ticket: Option<&str>,
+    ) -> Result<CallToolResult, McpError> {
         let p = principal();
         let guard = SingleUseGuard::new();
         let ctx = DispatchContext {
@@ -679,8 +689,66 @@ mod dispatch_tests {
             confirm_destructive: true,
             request_state_key: b"test-key",
             single_use_guard: &guard,
+            connect_ticket,
         };
         dispatcher::call("bv_resource_ssh_exec", args, None, &ctx).await
+    }
+
+    /// The relayed operator ticket reaches the session handler in the
+    /// routed body, and nowhere else; a non-session tool never carries it.
+    #[tokio::test]
+    async fn the_relayed_ticket_is_routed_only_with_a_session_call() {
+        let backend = FakeBackend::default()
+            .with(dispatcher::SSH_EXEC_PATH, json!({ "exit_status": 0, "stdout": "", "stderr": "" }));
+        ssh_call_with_ticket(&ssh_binding(), &backend, ssh_args("uptime"), Some("tkt-1")).await.unwrap();
+        let (_, _, body) = backend.only_call();
+        assert_eq!(body.unwrap()["connect_ticket"], json!("tkt-1"));
+
+        let b = binding(&["bv_resource_describe"], &["resources/*"]);
+        let backend = FakeBackend::default().with("resources/resources/db1", json!({ "hostname": "db1" }));
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        let mut c = ctx(&b, &backend, &p, &guard);
+        c.connect_ticket = Some("tkt-2");
+        let mut args = Map::new();
+        args.insert("name".into(), json!("db1"));
+        dispatcher::call("bv_resource_describe", args, None, &c).await.unwrap();
+        let (_, _, body) = backend.only_call();
+        assert!(body.is_none_or(|b| !b.contains_key("connect_ticket")));
+    }
+
+    /// The gatekeeper validates a session call with the dispatcher's own
+    /// rules before it prompts, and shows the values the vault will route.
+    #[test]
+    fn session_call_validates_exactly_as_dispatch_does() {
+        let mut args = ssh_args("journalctl -u nginx\nuptime");
+        args.insert("timeout_secs".into(), json!(15));
+        let call = dispatcher::session_call("bv_resource_ssh_exec", &args).unwrap();
+        assert_eq!(
+            (call.protocol, call.resource.as_str(), call.profile.as_str(), call.command.as_str()),
+            ("ssh", "web-01", "p_agent", "journalctl -u nginx\nuptime")
+        );
+        assert_eq!(call.timeout_secs, Some(15));
+        assert_eq!(call.args_hash, dispatcher::args_hash(&args));
+        assert_eq!(call.scope_subject, "resources/secrets/web-01/");
+        for bad in ["id\u{0}", "ls\u{202E}x", ""] {
+            let err = dispatcher::session_call("bv_resource_ssh_exec", &ssh_args(bad)).unwrap_err();
+            assert_eq!(err.code(), "mcp_invalid_argument", "{bad:?}");
+        }
+        assert_eq!(dispatcher::session_call("bv_kv_read", &Map::new()).unwrap_err().code(), "mcp_unknown_tool");
+        assert!(dispatcher::path_scope_covers(&["resources/secrets/*".into()], "resources/secrets/web-01/"));
+        assert!(!dispatcher::path_scope_covers(&["resources/secrets/db-01/".into()], "resources/secrets/web-01/"));
+    }
+
+    /// The canonical hash equals the one earlier releases computed for any
+    /// argument map (sorted keys at every depth is how `serde_json` already
+    /// wrote them), so audit correlation across an upgrade is unbroken.
+    #[test]
+    fn args_hash_is_unchanged_for_this_workspaces_maps() {
+        let args = json!({ "z": 1, "a": { "y": [ { "k": 2, "b": 3 } ], "x": "v" }, "m": null });
+        let args = args.as_object().unwrap();
+        let legacy = blake3::hash(&serde_json::to_vec(args).unwrap()).to_hex().to_string();
+        assert_eq!(dispatcher::args_hash(args), legacy);
     }
 
     /// Hidden characters, bad lengths, missing or unknown arguments and

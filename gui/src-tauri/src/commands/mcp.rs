@@ -23,7 +23,7 @@ use tauri::{AppHandle, State, Webview};
 
 use crate::error::CmdResult;
 use crate::mcp_host::{
-    prompter::{reply_for, McpPrompt, McpPromptAnswer},
+    prompter::{reply_for, totp_factor, ConfirmReply, McpPrompt, McpPromptAnswer, MfaReply, PromptReply},
     McpClientSetup, McpServerStatus,
 };
 use crate::state::AppState;
@@ -274,11 +274,14 @@ pub fn mcp_catalogue() -> McpCatalogue {
         .map(|t| McpCatalogueTool {
             name: t.name.to_string(),
             description: t.description.to_string(),
-            kind: match (t.destructive, t.is_reveal) {
-                (true, true) => "write+reveal",
-                (true, false) => "write",
-                (false, true) => "reveal",
-                (false, false) => "read",
+            // A brokered-session tool is granted in the pairing dialog's own
+            // section (connect_allowed), not from the tool list.
+            kind: match (t.open_world, t.destructive, t.is_reveal) {
+                (true, _, _) => "session",
+                (false, true, true) => "write+reveal",
+                (false, true, false) => "write",
+                (false, false, true) => "reveal",
+                (false, false, false) => "read",
             }
             .to_string(),
         })
@@ -401,20 +404,57 @@ pub fn mcp_prompt_pending(webview: Webview, state: State<'_, AppState>) -> CmdRe
     Ok(state.mcp_host.prompts().pending())
 }
 
+/// How long the dialog waits to hear whether the operator's factor was
+/// accepted: the vault round trip of the step-up verify.
+const MFA_VERIFY_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The operator's answer to prompt `id`. Only the main window may answer --
 /// it is the only one the prompt is shown in. An approval whose grant does
 /// not validate is refused here and the prompt stays open for a correction.
+///
+/// A session call's approval on an MFA-gated profile carries the factor
+/// (`features/mcp-brokered-sessions.md` §3.1): a TOTP code, or `fido2`, for
+/// which the host runs the native security-key assertion here over the
+/// challenge it kept. The waiting connection has the gatekeeper verify it
+/// with the vault and keeps the ticket; this command returns only whether
+/// it worked. Unlike `connect_mfa_verify_*`, nothing ticket-shaped is ever
+/// returned to the window. A failed factor denies the call.
 #[tauri::command]
-pub fn mcp_prompt_answer(
+pub async fn mcp_prompt_answer(
     webview: Webview,
+    app: AppHandle,
     state: State<'_, AppState>,
     id: String,
     answer: McpPromptAnswer,
 ) -> CmdResult<()> {
     main_window_only(&webview)?;
-    let reply = reply_for(answer)?;
-    state.mcp_host.prompts().answer(&id, reply)?;
-    Ok(())
+    let broker = state.mcp_host.prompts();
+    let mfa = match answer {
+        McpPromptAnswer::Confirm { allow: true, mfa: Some(mfa) } => mfa,
+        other => {
+            broker.answer(&id, reply_for(other)?)?;
+            return Ok(());
+        }
+    };
+    let factor = match mfa.method.as_str() {
+        "totp" => totp_factor(mfa.code.as_deref())?,
+        "fido2" => {
+            let challenge = broker
+                .pending_fido2_challenge(&id)
+                .ok_or("this request has no security-key challenge waiting (it may have timed out)")?;
+            let credential = crate::commands::fido2_native::assert_webauthn(&state, &app, &challenge).await?;
+            bv_mcp::local::MfaFactor::Fido2(zeroize::Zeroizing::new(credential))
+        }
+        other => return Err(format!("`{other}` is not a factor this app can collect").into()),
+    };
+    let (done, verified) = std::sync::mpsc::channel();
+    broker.answer(&id, PromptReply::Confirm(ConfirmReply { allow: true, mfa: Some(MfaReply { factor, done }) }))?;
+    let outcome = tauri::async_runtime::spawn_blocking(move || verified.recv_timeout(MFA_VERIFY_WAIT)).await;
+    match outcome {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(reason))) => Err(format!("MFA was not accepted, so the call was refused: {reason}").into()),
+        _ => Err("MFA could not be checked in time, so the call was refused".into()),
+    }
 }
 
 /// The AI-assistant server is run, and its requests answered, from the main

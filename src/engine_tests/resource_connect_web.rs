@@ -509,6 +509,7 @@ async fn a_gated_launch_burns_its_mfa_ticket() {
         namespace: String::new(),
         resource: "fw01".into(),
         profile_id: profile_id.into(),
+        mcp_call: None,
     };
 
     // A ticket minted for another profile is refused (and burnt).
@@ -662,6 +663,7 @@ async fn alice_ticket(core: &dyn VaultCtx, profile_id: &str) -> String {
         namespace: String::new(),
         resource: "fw01".into(),
         profile_id: profile_id.into(),
+        mcp_call: None,
     };
     store.mint(&binding, "totp").await.unwrap().0
 }

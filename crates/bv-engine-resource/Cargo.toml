@@ -1,6 +1,6 @@
 [package]
 name = "bv-engine-resource"
-version = "0.42.0"
+version = "0.43.0"
 edition = "2021"
 description = "BastionVault's infrastructure-resource engine: assets, connection profiles and the connect-MFA gate"
 license = "Apache-2.0"
@@ -57,7 +57,7 @@ zeroize = "1.8.2"
 # with timers, so a request the MCP endpoint drops still closes its
 # connection and records its transcript.
 bv-utils = { path = "../bv-utils", version = "0.41.3", registry = "uox-bastionvault" }
-bv-mcp = { path = "../bv-mcp", version = "0.2.0", registry = "uox-bastionvault" }
+bv-mcp = { path = "../bv-mcp", version = "0.3.0", registry = "uox-bastionvault" }
 tokio = { version = "1.52", features = ["rt", "time", "net", "sync", "macros"] }
 # The vault-side SSH client for `bv_resource_ssh_exec`, behind the
 # off-by-default `mcp_sessions_ssh` feature. Same pin and features as

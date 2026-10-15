@@ -86,6 +86,16 @@ pub struct PairingRecord {
     pub destructive_allowed: bool,
     pub confirm_reveal: bool,
     pub confirm_destructive: bool,
+    /// The operator let this client open brokered sessions
+    /// (`features/mcp-brokered-sessions.md` §9). Absent in a record written
+    /// before sessions existed, which reads as "no sessions".
+    #[serde(default)]
+    pub connect_allowed: bool,
+    /// Recorded for the vault's exchange rule and for display. Never an off
+    /// switch: the gatekeeper confirms every session call whatever this
+    /// says, and the exchange always asserts `true`.
+    #[serde(default)]
+    pub confirm_connect: bool,
     pub ttl_secs: u64,
     pub approved_at: u64,
     pub expires_at: Option<u64>,
@@ -348,6 +358,8 @@ mod tests {
             destructive_allowed: false,
             confirm_reveal: true,
             confirm_destructive: true,
+            connect_allowed: false,
+            confirm_connect: false,
             ttl_secs: DEFAULT_TOKEN_TTL_SECS,
             approved_at: 100,
             expires_at: Some(1_000),
@@ -364,6 +376,24 @@ mod tests {
     fn missing_file_loads_as_empty() {
         let (store, _dir) = temp_store("missing");
         assert!(store.load().unwrap().is_empty());
+    }
+
+    /// A record written before brokered sessions existed reads with them
+    /// off, and one that allows them round-trips.
+    #[test]
+    fn a_record_without_the_session_fields_reads_with_sessions_off() {
+        let mut old = serde_json::to_value(record("a", "claude", None, Transport::Stdio)).unwrap();
+        let obj = old.as_object_mut().unwrap();
+        obj.remove("connect_allowed");
+        obj.remove("confirm_connect");
+        let read: PairingRecord = serde_json::from_value(old).unwrap();
+        assert!(!read.connect_allowed && !read.confirm_connect);
+
+        let mut current = record("b", "claude", None, Transport::Stdio);
+        current.connect_allowed = true;
+        current.confirm_connect = true;
+        let back: PairingRecord = serde_json::from_value(serde_json::to_value(&current).unwrap()).unwrap();
+        assert_eq!(back, current);
     }
 
     #[test]

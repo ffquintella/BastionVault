@@ -147,9 +147,38 @@ fn is_invisible_format(c: char) -> bool {
 /// confirms must be exactly the bytes that run, and every one of these can
 /// make a command read differently from what executes.
 pub fn forbidden_command_char(command: &str) -> Option<char> {
-    command
-        .chars()
-        .find(|&c| is_stripped(c) || c == '\u{7f}' || c == '\u{2028}' || c == '\u{2029}' || is_invisible_format(c))
+    command.chars().find(|&c| is_forbidden_in_command(c))
+}
+
+fn is_forbidden_in_command(c: char) -> bool {
+    is_stripped(c) || c == '\u{7f}' || c == '\u{2028}' || c == '\u{2029}' || is_invisible_format(c)
+}
+
+/// A session command (or any argument) as the operator is shown it in a
+/// confirmation (`features/mcp-brokered-sessions.md` §9). Every character
+/// that could hide or disguise text is written as `\u{XXXX}` instead of
+/// being rendered: the classes [`forbidden_command_char`] names, any other
+/// control (the tab included), and every whitespace character but the ASCII
+/// space and the line feed. A line feed stays a line break, so a multi-line
+/// command shows as several lines.
+///
+/// The dispatcher refuses a command carrying most of these before anyone is
+/// asked; this is the second line, so that a renderer — a terminal, a
+/// dialog — is never handed a control character from a model, and an
+/// exotic space never passes for an ordinary one. A command may itself
+/// contain the text `\u{…}`; it is shown as written, so the byte length
+/// shown beside it is what tells the two apart.
+pub fn escape_for_display(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        let disguised = c != '\n' && (c.is_control() || (c.is_whitespace() && c != ' ') || is_forbidden_in_command(c));
+        if disguised {
+            out.push_str(&format!("\\u{{{:04X}}}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -179,6 +208,31 @@ mod tests {
         ] {
             assert_eq!(forbidden_command_char(input), Some(bad), "{input:?}");
         }
+    }
+
+    #[test]
+    fn the_display_form_shows_every_disguised_character_as_an_escape() {
+        let plain = "journalctl -u nginx --since -1h | tail -n 200\nuptime";
+        assert_eq!(escape_for_display(plain), plain, "ordinary text and line breaks are shown as they are");
+        assert_eq!(escape_for_display("grep 'ação' — 日本語"), "grep 'ação' — 日本語");
+        for (input, shown) in [
+            ("a\tb", "a\\u{0009}b"),
+            ("a\rb", "a\\u{000D}b"),
+            ("a\u{1b}[2Jb", "a\\u{001B}[2Jb"),
+            ("a\u{0}b", "a\\u{0000}b"),
+            ("rm -rf\u{00A0}/", "rm -rf\\u{00A0}/"),
+            ("x\u{2003}y", "x\\u{2003}y"),
+            ("ls\u{202E}gpj", "ls\\u{202E}gpj"),
+            ("r\u{200B}m", "r\\u{200B}m"),
+            ("id\u{E0041}", "id\\u{E0041}"),
+            ("one\u{2028}two", "one\\u{2028}two"),
+            ("rm\u{00AD}-rf", "rm\\u{00AD}-rf"),
+        ] {
+            assert_eq!(escape_for_display(input), shown, "{input:?}");
+        }
+        // Nothing a terminal or a dialog would act on survives.
+        let hostile = "a\u{1b}]8;;https://x\u{07}b\u{85}\u{9b}31m";
+        assert!(escape_for_display(hostile).chars().all(|c| !c.is_control()));
     }
 
     #[test]

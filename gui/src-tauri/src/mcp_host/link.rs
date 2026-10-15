@@ -30,12 +30,15 @@ use bastion_vault::{
 use bv_client::{Backend, Operation};
 use bv_mcp::{
     local::{
-        exchange_request_body, minted_token_from_exchange, vault_error_text, ForwardError, MintedToken, VaultLink,
+        exchange_request_body, mfa_begin_body, mfa_begin_error, mfa_preflight_from_begin, mfa_verify_body,
+        minted_token_from_exchange, ticket_from_verify, vault_error_text, ForwardError, McpCallRef, MfaBeginError,
+        MfaFactor, MfaPreflight, MintedToken, VaultLink, CONNECT_MFA_BEGIN_PATH, CONNECT_MFA_VERIFY_PATH,
     },
     pairing::{hash_token, new_pairing_token, now_secs, PairingRecord},
     request_state::SingleUseGuard,
+    sanitize::sanitize_for_model,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tauri::{AppHandle, Manager};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -163,6 +166,40 @@ impl GuiVaultLink {
         }
         result
     }
+
+    /// A logical write as the operator -- the session the server was
+    /// started under, never an MCP token -- in the root namespace, as the
+    /// pairing exchange is. Used for the operator's MFA step-up
+    /// (`features/mcp-brokered-sessions.md` §3.1), whose ticket this
+    /// returns to the gatekeeper only: nothing here reaches the window.
+    fn operator_write(&self, path: &str, body: Map<String, Value>) -> Result<Value, String> {
+        let session = self.session()?;
+        match session.route {
+            VaultRoute::Remote(client) => {
+                let mut client = client.with_token(&session.token);
+                let answer = client.logical().write(path, Some(body));
+                client.token.zeroize();
+                let resp = answer.map_err(|e| format!("could not reach the vault: {e}"))?;
+                if resp.response_status != 200 {
+                    return Err(vault_error_text(&resp.response_data, resp.response_status));
+                }
+                Ok(resp.response_data.unwrap_or(Value::Null))
+            }
+            VaultRoute::Embedded { backend, .. } => {
+                let answer = tauri::async_runtime::block_on(backend.handle_with_namespace(
+                    Operation::Write,
+                    path,
+                    Some(body),
+                    &session.token,
+                    None,
+                ));
+                match answer {
+                    Err(e) => Err(sanitize_for_model(&e.to_string())),
+                    Ok(resp) => Ok(Value::Object(resp.and_then(|r| r.data).unwrap_or_default())),
+                }
+            }
+        }
+    }
 }
 
 impl VaultLink for GuiVaultLink {
@@ -231,6 +268,23 @@ impl VaultLink for GuiVaultLink {
             let _ = self.note::<()>(Err(e.clone()));
         }
         result
+    }
+
+    fn connect_mfa_begin(&self, resource: &str, profile_id: &str) -> Result<MfaPreflight, MfaBeginError> {
+        let answer = self.operator_write(CONNECT_MFA_BEGIN_PATH, mfa_begin_body(resource, profile_id));
+        mfa_preflight_from_begin(&answer.map_err(mfa_begin_error)?)
+    }
+
+    fn connect_mfa_verify(
+        &self,
+        resource: &str,
+        profile_id: &str,
+        factor: &MfaFactor,
+        call: &McpCallRef,
+    ) -> Result<Zeroizing<String>, String> {
+        let answer =
+            self.operator_write(CONNECT_MFA_VERIFY_PATH, mfa_verify_body(resource, profile_id, factor, call))?;
+        ticket_from_verify(&answer)
     }
 }
 

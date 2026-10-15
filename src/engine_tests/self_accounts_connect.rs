@@ -340,6 +340,7 @@ mod self_accounts_connect_tests {
             namespace: String::new(),
             resource: resource.into(),
             profile_id: profile_id.into(),
+            mcp_call: None,
         };
         ConnectMfaTicketStore::new(f.core.as_ref()).unwrap().mint(&binding, "totp").await.unwrap().0
     }

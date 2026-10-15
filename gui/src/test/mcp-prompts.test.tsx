@@ -27,6 +27,7 @@ const CATALOGUE = {
     { name: "bv_kv_list", description: "list", kind: "read" },
     { name: "bv_kv_read", description: "read a value", kind: "reveal" },
     { name: "bv_kv_delete", description: "delete", kind: "write" },
+    { name: "bv_resource_ssh_exec", description: "run one command", kind: "session" },
   ],
 };
 
@@ -55,6 +56,27 @@ const CONFIRM_PROMPT = {
   reveals: true,
   destructive: false,
   deadline_unix_ms: Date.now() + 90_000,
+};
+
+const SESSION_PROMPT = {
+  kind: "confirm",
+  id: "mcp-prompt-7",
+  client_name: "claude-code",
+  tool: "bv_resource_ssh_exec",
+  tool_description: "Run one command on a resource",
+  summary: "",
+  reveals: false,
+  destructive: true,
+  deadline_unix_ms: Date.now() + 90_000,
+  session: {
+    resource: "web-01",
+    profile: "agent-ops",
+    protocol: "ssh",
+    command: "journalctl -u nginx --since -1h\n\\u{0009}tail -n 200",
+    command_bytes: 45,
+    timeout_secs: null,
+  },
+  mfa: null,
 };
 
 function calls(cmd: string) {
@@ -150,6 +172,7 @@ describe("McpPromptHost", () => {
           destructive_allowed: false,
           confirm_reveal: false,
           confirm_destructive: false,
+          connect_allowed: false,
           ttl_secs: 28_800,
         },
       },
@@ -232,6 +255,89 @@ describe("McpPromptHost", () => {
     await user.click(screen.getByRole("button", { name: /allow once/i }));
     await waitFor(() => expect(calls("mcp_prompt_answer")).toHaveLength(1));
     expect(calls("mcp_prompt_answer")[0][1]).toEqual({ id: "mcp-prompt-2", answer: { kind: "confirm", allow: true } });
+  });
+
+  it("offers brokered sessions in their own section, off by default, and warns when reveal is on too", async () => {
+    const user = userEvent.setup();
+    await mount();
+    send(PAIRING_PROMPT);
+    await screen.findByText("Approve an AI assistant?");
+    expect(await screen.findByText(/Brokered sessions — lets this assistant open connections/)).toBeInTheDocument();
+    const ssh = screen.getByLabelText("bv_resource_ssh_exec");
+    expect(ssh).not.toBeChecked();
+    expect(screen.getByText(/Every call is shown to you for approval/)).toBeInTheDocument();
+
+    await user.click(ssh);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await user.click(screen.getByLabelText("Allow revealing secret values"));
+    expect(screen.getByRole("alert")).toHaveTextContent(/read secret values and run commands on servers/);
+
+    await user.type(screen.getByLabelText(/path scope/i), "resources/secrets/web-01/");
+    await user.click(screen.getByRole("button", { name: /^approve$/i }));
+    await waitFor(() => expect(calls("mcp_prompt_answer")).toHaveLength(1));
+    const grant = (calls("mcp_prompt_answer")[0][1] as { answer: { grant: Record<string, unknown> } }).answer.grant;
+    expect(grant.connect_allowed).toBe(true);
+    expect(grant.tool_allowlist).toContain("bv_resource_ssh_exec");
+    expect(grant).not.toHaveProperty("confirm_connect");
+  });
+
+  it("shows a session call field by field, every line of the command, and defaults to deny", async () => {
+    const user = userEvent.setup();
+    await mount();
+    send(SESSION_PROMPT);
+    expect(await screen.findByText("Run a command on web-01?")).toBeInTheDocument();
+    expect(screen.getByText("agent-ops")).toBeInTheDocument();
+    expect(screen.getByText("ssh")).toBeInTheDocument();
+    const box = screen.getByTestId("mcp-session-command");
+    expect(box).toHaveTextContent("journalctl -u nginx --since -1h");
+    expect(box).toHaveTextContent("\\u{0009}tail -n 200");
+    expect(screen.getByText("Command — 45 bytes, 2 lines")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^deny$/i })).toHaveFocus();
+    expect(screen.queryByText(/complete MFA/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /run once/i }));
+    await waitFor(() => expect(calls("mcp_prompt_answer")).toHaveLength(1));
+    expect(calls("mcp_prompt_answer")[0][1]).toEqual({ id: "mcp-prompt-7", answer: { kind: "confirm", allow: true } });
+  });
+
+  it("asks for the operator's own MFA on a gated profile and sends only the factor", async () => {
+    const user = userEvent.setup();
+    await mount();
+    send({ ...SESSION_PROMPT, mfa: { methods: ["fido2", "totp"] } });
+    await screen.findByText("Run a command on web-01?");
+    expect(screen.getByText(/is asking you to complete MFA to access/)).toHaveTextContent(
+      "claude-code is asking you to complete MFA to access web-01 (profile agent-ops).",
+    );
+    expect(screen.queryByRole("button", { name: /^run once$/i })).not.toBeInTheDocument();
+    const verify = screen.getByRole("button", { name: /verify code and run once/i });
+    expect(verify).toBeDisabled();
+    await user.type(screen.getByLabelText("Authenticator code"), "123456");
+    await user.click(verify);
+    await waitFor(() => expect(calls("mcp_prompt_answer")).toHaveLength(1));
+    expect(calls("mcp_prompt_answer")[0][1]).toEqual({
+      id: "mcp-prompt-7",
+      answer: { kind: "confirm", allow: true, mfa: { method: "totp", code: "123456" } },
+    });
+
+    send({ ...SESSION_PROMPT, id: "mcp-prompt-8", mfa: { methods: ["fido2"] } });
+    await user.click(await screen.findByRole("button", { name: /use security key and run/i }));
+    await waitFor(() => expect(calls("mcp_prompt_answer")).toHaveLength(2));
+    expect(calls("mcp_prompt_answer")[1][1]).toEqual({
+      id: "mcp-prompt-8",
+      answer: { kind: "confirm", allow: true, mfa: { method: "fido2" } },
+    });
+  });
+
+  it("reports a refused factor: the call is denied and the dialog closes", async () => {
+    const user = userEvent.setup();
+    answer = () => Promise.reject({ message: "MFA was not accepted, so the call was refused: invalid TOTP code" });
+    await mount();
+    send({ ...SESSION_PROMPT, mfa: { methods: ["totp"] } });
+    await screen.findByText("Run a command on web-01?");
+    await user.type(screen.getByLabelText("Authenticator code"), "000000");
+    await user.click(screen.getByRole("button", { name: /verify code and run once/i }));
+    expect(await screen.findByText(/invalid TOTP code/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Run a command on web-01?")).not.toBeInTheDocument());
   });
 
   it("closes a request the host withdrew (timed out or the server stopped)", async () => {

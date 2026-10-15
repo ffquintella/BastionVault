@@ -115,6 +115,12 @@ async fn handle_tools_call(
     let tool = params.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
     let args = params.get("arguments").and_then(Value::as_object).cloned().unwrap_or_default();
     let confirmed_state = params.get("_meta").and_then(|m| m.get("requestState")).and_then(Value::as_str);
+    // The operator's MFA ticket the local gatekeeper relayed for a session
+    // call (`features/mcp-brokered-sessions.md` §3.1 step 5). Read from
+    // `_meta` like `requestState`; the session handler redeems it against
+    // this call's arguments hash, and no other tool is handed it.
+    let connect_ticket =
+        is_open_world_mcp_tool(&tool).then(|| bv_mcp::jsonrpc::connect_ticket(params.get("_meta"))).flatten();
 
     let mcp_audit = mcp_audit_context(ep, &tool, &args, binding, params.get("_meta"));
     // The dispatcher consumes the arguments; a session tool's refusal event
@@ -137,6 +143,7 @@ async fn handle_tools_call(
         confirm_destructive: false,
         request_state_key: ep.request_state_key,
         single_use_guard: ep.single_use_guard,
+        connect_ticket,
     };
 
     let timeout = if session_args.is_some() { session_call_timeout(ep.core) } else { ep.tool_timeout };

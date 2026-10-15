@@ -19,9 +19,10 @@
 //! 5. the type's `agent_sessions_max` and the profile's `agent_access`, with
 //!    the profile's static requirements (a supported credential source, a
 //!    host-key pin);
-//! 6. MFA: a gated profile is refused until the gatekeeper can run the
-//!    operator's step-up (`mcp_session_mfa_required`, or
-//!    `mcp_session_mfa_unavailable` for a non-userpass operator);
+//! 6. MFA: a gated profile needs the operator's ticket for this exact call,
+//!    relayed by the gatekeeper and redeemed once (`mcp_session_mfa_required`
+//!    without one, `mcp_session_mfa_ticket_refused` for one bound to anything
+//!    else, `mcp_session_mfa_unavailable` for a non-userpass operator);
 //! 7. no bastion route is bypassed: a `rustion` profile, a
 //!    `rustion-required` policy, or `rustion-preferred` with a bastion;
 //! 8. the rate and concurrency limits;

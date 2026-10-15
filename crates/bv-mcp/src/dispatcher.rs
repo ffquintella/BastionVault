@@ -60,6 +60,59 @@ pub struct DispatchContext<'a> {
     pub confirm_destructive: bool,
     pub request_state_key: &'a [u8],
     pub single_use_guard: &'a SingleUseGuard,
+    /// The operator's connect MFA ticket the local gatekeeper relayed in
+    /// `_meta` (`features/mcp-brokered-sessions.md` §3.1 step 5). Put in the
+    /// routed body's `connect_ticket` for a session tool only, where the
+    /// handler redeems it against this exact call; ignored for every other
+    /// tool. Never taken from `arguments`.
+    pub connect_ticket: Option<&'a str>,
+}
+
+/// A session tool call as the operator confirms it
+/// (`features/mcp-brokered-sessions.md` §9): validated exactly as
+/// [`call`] validates it, so the local gatekeeper refuses a malformed call
+/// before it prompts anyone, and shows the operator the very values the
+/// vault will route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionCall {
+    pub tool: &'static str,
+    /// `ssh`, `web` or `rdp`.
+    pub protocol: &'static str,
+    /// The resource as it will be routed (one normalized segment).
+    pub resource: String,
+    pub profile: String,
+    /// SSH: the command, byte for byte what runs.
+    pub command: String,
+    pub timeout_secs: Option<u64>,
+    /// [`args_hash`] of the call's `arguments`: what an operator MFA ticket
+    /// for this call is bound to.
+    pub args_hash: String,
+    /// The path the binding's `path_scope` must cover.
+    pub scope_subject: String,
+}
+
+/// Validates a session tool call without routing it. `Err` is the refusal
+/// the dispatcher would answer with; an unknown or non-session tool is
+/// [`McpError::UnknownTool`].
+pub fn session_call(tool: &str, args: &Map<String, Value>) -> Result<SessionCall, McpError> {
+    let meta = catalogue::find(tool).filter(|m| m.open_world).ok_or_else(|| McpError::UnknownTool(tool.to_string()))?;
+    let req = build_tool_request(meta.name, args)?;
+    let scope_subject = req.scope_subject().to_string();
+    let body = req.body.unwrap_or_default();
+    let text = |key: &str| body.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+    match meta.name {
+        "bv_resource_ssh_exec" => Ok(SessionCall {
+            tool: meta.name,
+            protocol: "ssh",
+            resource: text("resource"),
+            profile: text("profile_id"),
+            command: text("command"),
+            timeout_secs: body.get("timeout_secs").and_then(Value::as_u64),
+            args_hash: args_hash(args),
+            scope_subject,
+        }),
+        other => Err(McpError::UnknownTool(other.to_string())),
+    }
 }
 
 struct ToolRequest {
@@ -145,11 +198,14 @@ pub(crate) async fn dispatch(
         }
     }
 
-    let response = ctx
-        .backend
-        .handle(req.operation, &req.path, req.body, ctx.token)
-        .await
-        .map_err(|e| map_backend_error(meta, e))?;
+    let mut body = req.body;
+    if meta.open_world {
+        if let Some(ticket) = ctx.connect_ticket {
+            body.get_or_insert_with(Map::new).insert("connect_ticket".into(), Value::String(ticket.to_string()));
+        }
+    }
+    let response =
+        ctx.backend.handle(req.operation, &req.path, body, ctx.token).await.map_err(|e| map_backend_error(meta, e))?;
 
     if meta.open_world {
         return shape_session_result(meta, &args, response);
@@ -205,13 +261,39 @@ fn now_secs() -> u64 {
 /// Public because two parties must compute it identically: the dispatcher
 /// binds an MRTR `requestState` to it, and the local gatekeeper binds an
 /// operator's connect MFA ticket to it (`features/mcp-brokered-sessions.md`
-/// §3.1). Key order is stable because no crate in this workspace enables
-/// `serde_json`'s `preserve_order` (see the note on `catalogue_hash`). A map
-/// that cannot serialize hashes the empty input rather than panicking; such a
-/// map cannot have come from a parsed JSON-RPC request.
+/// §3.1), possibly in another process built with other features.
+///
+/// So the bytes are canonical: every object's keys in byte order, at every
+/// depth, whatever the build's `serde_json` map type. Without
+/// `preserve_order` (the case in this workspace's vault builds) that is the
+/// order `serde_json` already writes, so this hash is unchanged from the one
+/// earlier releases computed; with it (a host whose dependency graph turns
+/// it on) the client's key order would otherwise leak into the hash and an
+/// operator's ticket would never match. A map that cannot serialize hashes
+/// the empty input rather than panicking; such a map cannot have come from a
+/// parsed JSON-RPC request.
 pub fn args_hash(args: &Map<String, Value>) -> String {
-    let bytes = serde_json::to_vec(args).unwrap_or_default();
+    let canonical = canonical_json(&Value::Object(args.clone()));
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
     blake3::hash(&bytes).to_hex().to_string()
+}
+
+/// `value` with every object rebuilt in sorted key order, which a map that
+/// keeps insertion order then also serializes in.
+fn canonical_json(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let mut out = Map::new();
+            for key in keys {
+                out.insert(key.clone(), canonical_json(&map[key]));
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonical_json).collect()),
+        other => other.clone(),
+    }
 }
 
 /// A routed call's failure. A session handler leads its refusals with a
@@ -349,18 +431,24 @@ fn check_tool_allowed(tool: &str, binding: &McpBinding) -> Result<(), McpError> 
 /// decision: intentionally minimal, defence in depth only. Real ACL under
 /// `Core::handle_request` remains authoritative.
 fn check_path_scope(path: &str, binding: &McpBinding) -> Result<(), McpError> {
-    let in_scope = binding.path_scope.iter().any(|pattern| {
+    if path_scope_covers(&binding.path_scope, path) {
+        Ok(())
+    } else {
+        Err(McpError::PathOutOfScope(path.to_string()))
+    }
+}
+
+/// Whether a grant's `path_scope` covers `path`, by the dispatcher's own
+/// rule. Public so the local gatekeeper can tell, before it prompts, that
+/// the vault will refuse a call as out of scope.
+pub fn path_scope_covers(path_scope: &[String], path: &str) -> bool {
+    path_scope.iter().any(|pattern| {
         if let Some(prefix) = pattern.strip_suffix('*') {
             path.starts_with(prefix)
         } else {
             path == pattern
         }
-    });
-    if in_scope {
-        Ok(())
-    } else {
-        Err(McpError::PathOutOfScope(path.to_string()))
-    }
+    })
 }
 
 fn check_reveal_gate(is_reveal_tool: bool, reveal_requested: bool, binding: &McpBinding) -> Result<(), McpError> {

@@ -656,6 +656,8 @@ mod tests {
             destructive_allowed: false,
             confirm_reveal: true,
             confirm_destructive: true,
+            connect_allowed: false,
+            confirm_connect: false,
             ttl_secs: 3600,
         };
         let operator_present = Arc::new(std::sync::atomic::AtomicBool::new(true));

@@ -13,21 +13,24 @@
 //! - the loopback-HTTP transport, which only the CLI offers.
 //!
 //! Fail-closed everywhere: no controlling terminal means no pairing and no
-//! per-call confirmation, never a silent approval.
+//! per-call confirmation, never a silent approval. A per-call confirmation
+//! nobody answers within [`CONFIRM_TIMEOUT`] is refused.
 
 use std::{
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{atomic::AtomicUsize, Arc, Mutex, MutexGuard},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bv_mcp::{
     catalogue,
     local::{
-        exchange_request_body, minted_token_from_exchange, ConfirmRequest, ConnInfo, ConnectionSlot, ForwardError,
-        LocalServer, MintedToken, PairingDecision, PairingGrant, PairingRequest, Prompter, VaultLink,
+        exchange_request_body, mfa_begin_body, mfa_begin_error, mfa_preflight_from_begin, mfa_verify_body,
+        minted_token_from_exchange, normalize_grant, ticket_from_verify, ConfirmRequest, ConnInfo, ConnectionSlot,
+        ForwardError, LocalServer, McpCallRef, MfaBeginError, MfaFactor, MfaPreflight, MintedToken, PairingDecision,
+        PairingGrant, PairingRequest, Prompter, VaultLink, CONNECT_MFA_BEGIN_PATH, CONNECT_MFA_VERIFY_PATH,
         MAX_MESSAGE_BYTES,
     },
     pairing::{
@@ -37,7 +40,7 @@ use bv_mcp::{
     sanitize::sanitize_for_model,
 };
 use serde_json::Value;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{api::Client, bv_error_string, errors::RvError};
 
@@ -106,9 +109,50 @@ impl VaultLink for HttpVaultLink {
             (s, data) => Err(ForwardError::Other(vault_error_text(&data, s))),
         }
     }
+
+    /// Asked with the operator's own login -- the client this server mints
+    /// pairing tokens from -- never with an MCP token.
+    fn connect_mfa_begin(&self, resource: &str, profile_id: &str) -> Result<MfaPreflight, MfaBeginError> {
+        let resp = self
+            .client
+            .logical()
+            .write(CONNECT_MFA_BEGIN_PATH, Some(mfa_begin_body(resource, profile_id)))
+            .map_err(|e| MfaBeginError::Other(format!("could not reach the vault: {e}")))?;
+        if resp.response_status != 200 {
+            return Err(mfa_begin_error(vault_error_text(&resp.response_data, resp.response_status)));
+        }
+        mfa_preflight_from_begin(&resp.response_data.unwrap_or(Value::Null))
+    }
+
+    fn connect_mfa_verify(
+        &self,
+        resource: &str,
+        profile_id: &str,
+        factor: &MfaFactor,
+        call: &McpCallRef,
+    ) -> Result<Zeroizing<String>, String> {
+        let resp = self
+            .client
+            .logical()
+            .write(CONNECT_MFA_VERIFY_PATH, Some(mfa_verify_body(resource, profile_id, factor, call)))
+            .map_err(|e| format!("could not reach the vault: {e}"))?;
+        if resp.response_status != 200 {
+            return Err(vault_error_text(&resp.response_data, resp.response_status));
+        }
+        ticket_from_verify(&resp.response_data.unwrap_or(Value::Null))
+    }
 }
 
 // ── operator side ────────────────────────────────────────────────────────
+
+/// How long a per-call confirmation waits at the terminal before the call
+/// is refused: the desktop app's dialog waits as long.
+pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// The warning a pairing that may both reveal secrets and open sessions is
+/// given (`features/mcp-brokered-sessions.md` §9).
+pub const TRIFECTA_WARNING: &str = "This assistant can read secret values AND run commands on servers. A hijacked \
+                                    assistant could send a secret to a server. You will approve each command; read them.";
 
 /// Prompts on the controlling terminal (`/dev/tty`), *not* stdin/stdout: in
 /// stdio transport those two are the MCP channel itself, and a prompt written
@@ -119,30 +163,117 @@ pub struct TtyPrompter {
     one_prompt_at_a_time: Mutex<()>,
 }
 
-struct Tty {
-    reader: BufReader<File>,
-    writer: File,
+/// One conversation with the operator. Generic so the prompts are testable
+/// with an in-memory "terminal".
+pub(crate) struct Tty<R: BufRead, W: Write> {
+    reader: R,
+    writer: W,
+    /// When unanswered questions are refused. `None`: wait for ever (the
+    /// pairing questions, asked of an operator who ran `bvault mcp pair`).
+    deadline: Option<Instant>,
+    /// Whether a line can be read before `timeout` runs out.
+    ready: fn(&R, Duration) -> bool,
 }
 
-impl Tty {
-    fn open() -> Option<Tty> {
+type RealTty = Tty<BufReader<File>, File>;
+
+impl RealTty {
+    fn open() -> Option<RealTty> {
         #[cfg(unix)]
         let (input, output) = ("/dev/tty", "/dev/tty");
         #[cfg(not(unix))]
         let (input, output) = ("CONIN$", "CONOUT$");
         let reader = File::open(input).ok()?;
         let writer = OpenOptions::new().write(true).open(output).ok()?;
-        Some(Tty { reader: BufReader::new(reader), writer })
+        discard_typed_ahead(&reader);
+        Some(Tty { reader: BufReader::new(reader), writer, deadline: None, ready: tty_ready })
     }
+}
 
+/// Keys typed before a question is asked are not an answer to it: drop
+/// them, so a stray `y` (or one typed after an earlier prompt timed out)
+/// cannot approve the next call.
+#[cfg(unix)]
+fn discard_typed_ahead(tty: &File) {
+    use std::os::fd::AsRawFd;
+    // SAFETY: `tty` is an open file for the whole call; `tcflush` only
+    // discards the kernel's pending input queue for that descriptor and
+    // touches no memory of ours. A failure (not a terminal) is harmless.
+    unsafe {
+        libc::tcflush(tty.as_raw_fd(), libc::TCIFLUSH);
+    }
+}
+
+#[cfg(not(unix))]
+fn discard_typed_ahead(_tty: &File) {}
+
+/// Waits until the terminal has a line to read, for at most `timeout`.
+#[cfg(unix)]
+fn tty_ready(reader: &BufReader<File>, timeout: Duration) -> bool {
+    use std::os::fd::AsRawFd;
+    if !reader.buffer().is_empty() {
+        return true;
+    }
+    let fd = reader.get_ref().as_raw_fd();
+    // `FD_SET` on a descriptor at or past `FD_SETSIZE` is undefined; such a
+    // terminal is waited on without a timeout rather than risked.
+    if fd < 0 || fd as usize >= libc::FD_SETSIZE {
+        return true;
+    }
+    let deadline = Instant::now() + timeout;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        // SAFETY: `set` is a zeroed `fd_set` on this stack frame, initialised
+        // by FD_ZERO/FD_SET for one descriptor below FD_SETSIZE (checked
+        // above); `tv` is a valid timeval; `select` reads and writes only
+        // those two for the call's duration. `fd` stays open throughout.
+        let ready = unsafe {
+            let mut set: libc::fd_set = std::mem::zeroed();
+            libc::FD_ZERO(&mut set);
+            libc::FD_SET(fd, &mut set);
+            let mut tv = libc::timeval {
+                tv_sec: left.as_secs() as libc::time_t,
+                tv_usec: left.subsec_micros() as libc::suseconds_t,
+            };
+            libc::select(fd + 1, &mut set, std::ptr::null_mut(), std::ptr::null_mut(), &mut tv)
+        };
+        match ready {
+            n if n > 0 => return true,
+            0 => return false,
+            // Interrupted by a signal: wait out the rest.
+            _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => continue,
+            _ => return false,
+        }
+    }
+}
+
+/// No `select` on this platform's console: no timeout.
+#[cfg(not(unix))]
+fn tty_ready(_reader: &BufReader<File>, _timeout: Duration) -> bool {
+    true
+}
+
+impl<R: BufRead, W: Write> Tty<R, W> {
     fn say(&mut self, text: &str) {
         let _ = writeln!(self.writer, "{text}");
     }
 
-    /// `None` on EOF or a read error -- the operator went away.
+    /// `None` on EOF, a read error, or the deadline passing -- the operator
+    /// went away, or did not answer in time.
     fn ask(&mut self, prompt: &str) -> Option<String> {
         let _ = write!(self.writer, "{prompt}");
         let _ = self.writer.flush();
+        if let Some(deadline) = self.deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() || !(self.ready)(&self.reader, left) {
+                self.say("");
+                self.say("  No answer in time: refused.");
+                return None;
+            }
+        }
         let mut line = String::new();
         match self.reader.read_line(&mut line) {
             Ok(0) | Err(_) => None,
@@ -158,6 +289,165 @@ impl Tty {
             _ => default_yes,
         })
     }
+
+    /// The pairing questions (`bvault mcp pair`, or a first contact on
+    /// `bvault mcp serve`).
+    pub(crate) fn approve(&mut self, request: &PairingRequest<'_>) -> Option<PairingDecision> {
+        self.say("");
+        self.say("A local MCP client is asking for access to your vault.");
+        self.say(&format!(
+            "  Client:     {} {}",
+            sanitize_for_model(request.client_name),
+            sanitize_for_model(request.client_version)
+        ));
+        self.say(&format!("  Transport:  {}", request.transport.as_str()));
+        if let Some(uid) = request.peer_uid {
+            self.say(&format!("  Peer uid:   {uid}"));
+        }
+        self.say("  It will act with YOUR permissions, narrowed to the scope you choose below.");
+        self.say("");
+        if !self.yes_no("Approve this client?", false)? {
+            return Some(PairingDecision::Denied);
+        }
+
+        let path_scope = split_list(
+            &self.ask("Path scope, comma-separated (e.g. secret/metadata/ai/*; empty denies every path): ")?,
+        );
+        if path_scope.is_empty() {
+            self.say("  No path scope: every tool call will be refused until you re-pair with one.");
+        }
+
+        let defaults = pairing::default_tool_allowlist();
+        self.say(&format!("Default tools (read-only, never reveal a value): {}", defaults.join(", ")));
+        let tools_in = self.ask("Tools, comma-separated (Enter for the default list): ")?;
+        let mut tool_allowlist = if tools_in.is_empty() { defaults } else { split_list(&tools_in) };
+        if let Some(unknown) = tool_allowlist.iter().find(|t| catalogue::find(t).is_none()) {
+            self.say(&format!(
+                "  `{}` is not a tool in this build's catalogue; denying the pairing.",
+                sanitize_for_model(unknown)
+            ));
+            return Some(PairingDecision::Denied);
+        }
+
+        let reveal_allowed = self.yes_no("Allow revealing secret values?", false)?;
+        let confirm_reveal = reveal_allowed && self.yes_no("  Ask you to confirm each reveal?", true)?;
+        let destructive_allowed = self.yes_no("Allow destructive tools (write, delete, issue, sign)?", false)?;
+        let confirm_destructive = destructive_allowed && self.yes_no("  Ask you to confirm each one?", true)?;
+
+        // Brokered sessions: their own question, off by default, with every
+        // call confirmed and no way to say otherwise.
+        let session_tools: Vec<&str> = catalogue::catalogue().iter().filter(|t| t.open_world).map(|t| t.name).collect();
+        self.say("");
+        self.say("Brokered sessions let this assistant open connections to your servers through the vault");
+        self.say(&format!(
+            "({}). The vault holds the credential; every call is shown to you for approval,",
+            session_tools.join(", ")
+        ));
+        self.say("with the exact command, and runs only if you say yes.");
+        let connect_allowed = self.yes_no("Allow brokered sessions?", false)?;
+        if connect_allowed {
+            for tool in &session_tools {
+                if !tool_allowlist.iter().any(|t| t == tool) {
+                    tool_allowlist.push(tool.to_string());
+                }
+            }
+            if reveal_allowed {
+                self.say("");
+                self.say(&format!("  WARNING: {TRIFECTA_WARNING}"));
+                if !self.yes_no("  Pair it with both anyway?", false)? {
+                    return Some(PairingDecision::Denied);
+                }
+            }
+        } else if tool_allowlist.iter().any(|t| session_tools.contains(&t.as_str())) {
+            tool_allowlist.retain(|t| !session_tools.contains(&t.as_str()));
+            self.say("  Brokered sessions not allowed: the session tools were left out.");
+        }
+
+        let hours = self.ask(&format!("Token lifetime in hours [{}]: ", DEFAULT_TOKEN_TTL_SECS / 3600))?;
+        let ttl_secs = if hours.is_empty() {
+            DEFAULT_TOKEN_TTL_SECS
+        } else {
+            match hours.parse::<u64>() {
+                Ok(h) if h >= 1 => (h * 3600).min(MAX_TOKEN_TTL_SECS),
+                _ => {
+                    self.say("  Not a whole number of hours; denying the pairing.");
+                    return Some(PairingDecision::Denied);
+                }
+            }
+        };
+
+        let grant = PairingGrant {
+            tool_allowlist,
+            path_scope,
+            reveal_allowed,
+            destructive_allowed,
+            confirm_reveal,
+            confirm_destructive,
+            connect_allowed,
+            confirm_connect: connect_allowed,
+            ttl_secs,
+        };
+        match normalize_grant(grant) {
+            Ok(grant) => Some(PairingDecision::Approved(grant)),
+            Err(reason) => {
+                self.say(&format!("  {}; denying the pairing.", sanitize_for_model(&reason)));
+                Some(PairingDecision::Denied)
+            }
+        }
+    }
+
+    /// A per-call confirmation. Default deny; for a session call, the
+    /// operator sees every field and every line of the command, and on a
+    /// gated profile types a TOTP code, which is verified before the answer
+    /// is given. A failed factor denies.
+    pub(crate) fn confirm(&mut self, request: &ConfirmRequest<'_>) -> Option<bool> {
+        let client = sanitize_for_model(request.client_name);
+        self.say("");
+        if let (true, Some(detail)) = (request.open_world, request.detail) {
+            let resource = request.session.map(|c| sanitize_for_model(&c.resource)).unwrap_or_default();
+            self.say(&format!("MCP client `{client}` wants to run a command on `{resource}` ({}):", request.tool));
+            for line in detail.split('\n') {
+                self.say(&format!("    {line}"));
+            }
+            if let Some(step) = &request.mfa {
+                let profile = request.session.map(|c| sanitize_for_model(&c.profile)).unwrap_or_default();
+                self.say("");
+                self.say(&format!(
+                    "`{client}` is asking you to complete MFA to access `{resource}` (profile `{profile}`)."
+                ));
+                if !step.challenge.methods.iter().any(|m| m == "totp") {
+                    self.say("  Your only enrolled factor is a security key, which this terminal cannot use;");
+                    self.say("  approve this from the BastionVault desktop app. Refused.");
+                    return Some(false);
+                }
+            }
+            if !self.yes_no("Run this command once?", false)? {
+                return Some(false);
+            }
+            if let Some(step) = &request.mfa {
+                let code = Zeroizing::new(self.ask("Authenticator (TOTP) code: ")?);
+                if code.trim().is_empty() {
+                    self.say("  No code: refused.");
+                    return Some(false);
+                }
+                if let Err(reason) = (step.verify)(MfaFactor::Totp(code)) {
+                    self.say(&format!("  MFA failed ({}): refused.", sanitize_for_model(&reason)));
+                    return Some(false);
+                }
+                self.say("  MFA verified.");
+            }
+            return Some(true);
+        }
+        let what = match (request.reveals, request.destructive) {
+            (true, true) => "reveal a secret value AND make a change",
+            (true, false) => "reveal a secret value",
+            _ => "make a change",
+        };
+        self.say(&format!("MCP client `{client}` wants to {what}:"));
+        self.say(&format!("  {}  {}", sanitize_for_model(request.tool), sanitize_for_model(request.summary)));
+        // Default deny: anything but an explicit yes refuses the call.
+        self.yes_no("Allow this one call?", false)
+    }
 }
 
 fn split_list(input: &str) -> Vec<String> {
@@ -167,84 +457,29 @@ fn split_list(input: &str) -> Vec<String> {
 impl Prompter for TtyPrompter {
     fn approve(&self, request: &PairingRequest<'_>) -> Option<PairingDecision> {
         let _one = lock(&self.one_prompt_at_a_time);
-        let mut tty = Tty::open()?;
-        tty.say("");
-        tty.say("A local MCP client is asking for access to your vault.");
-        tty.say(&format!(
-            "  Client:     {} {}",
-            sanitize_for_model(request.client_name),
-            sanitize_for_model(request.client_version)
-        ));
-        tty.say(&format!("  Transport:  {}", request.transport.as_str()));
-        if let Some(uid) = request.peer_uid {
-            tty.say(&format!("  Peer uid:   {uid}"));
-        }
-        tty.say("  It will act with YOUR permissions, narrowed to the scope you choose below.");
-        tty.say("");
-        if !tty.yes_no("Approve this client?", false)? {
-            return Some(PairingDecision::Denied);
-        }
-
-        let path_scope =
-            split_list(&tty.ask("Path scope, comma-separated (e.g. secret/metadata/ai/*; empty denies every path): ")?);
-        if path_scope.is_empty() {
-            tty.say("  No path scope: every tool call will be refused until you re-pair with one.");
-        }
-
-        let defaults = pairing::default_tool_allowlist();
-        tty.say(&format!("Default tools (read-only, never reveal a value): {}", defaults.join(", ")));
-        let tools_in = tty.ask("Tools, comma-separated (Enter for the default list): ")?;
-        let tool_allowlist = if tools_in.is_empty() { defaults } else { split_list(&tools_in) };
-        if let Some(unknown) = tool_allowlist.iter().find(|t| catalogue::find(t).is_none()) {
-            tty.say(&format!(
-                "  `{}` is not a tool in this build's catalogue; denying the pairing.",
-                sanitize_for_model(unknown)
-            ));
-            return Some(PairingDecision::Denied);
-        }
-
-        let reveal_allowed = tty.yes_no("Allow revealing secret values?", false)?;
-        let confirm_reveal = reveal_allowed && tty.yes_no("  Ask you to confirm each reveal?", true)?;
-        let destructive_allowed = tty.yes_no("Allow destructive tools (write, delete, issue, sign)?", false)?;
-        let confirm_destructive = destructive_allowed && tty.yes_no("  Ask you to confirm each one?", true)?;
-
-        let hours = tty.ask(&format!("Token lifetime in hours [{}]: ", DEFAULT_TOKEN_TTL_SECS / 3600))?;
-        let ttl_secs = if hours.is_empty() {
-            DEFAULT_TOKEN_TTL_SECS
-        } else {
-            match hours.parse::<u64>() {
-                Ok(h) if h >= 1 => (h * 3600).min(MAX_TOKEN_TTL_SECS),
-                _ => {
-                    tty.say("  Not a whole number of hours; denying the pairing.");
-                    return Some(PairingDecision::Denied);
-                }
-            }
-        };
-
-        Some(PairingDecision::Approved(PairingGrant {
-            tool_allowlist,
-            path_scope,
-            reveal_allowed,
-            destructive_allowed,
-            confirm_reveal,
-            confirm_destructive,
-            ttl_secs,
-        }))
+        RealTty::open()?.approve(request)
     }
 
     fn confirm(&self, request: &ConfirmRequest<'_>) -> Option<bool> {
         let _one = lock(&self.one_prompt_at_a_time);
-        let mut tty = Tty::open()?;
-        tty.say("");
-        let what = match (request.reveals, request.destructive) {
-            (true, true) => "reveal a secret value AND make a change",
-            (true, false) => "reveal a secret value",
-            _ => "make a change",
-        };
-        tty.say(&format!("MCP client `{}` wants to {what}:", sanitize_for_model(request.client_name)));
-        tty.say(&format!("  {}  {}", sanitize_for_model(request.tool), sanitize_for_model(request.summary)));
-        // Default deny: anything but an explicit yes refuses the call.
-        tty.yes_no("Allow this one call?", false)
+        let mut tty = RealTty::open()?;
+        tty.deadline = Some(Instant::now() + CONFIRM_TIMEOUT);
+        tty.confirm(request)
+    }
+
+    fn confirmation_unavailable_message(&self) -> &str {
+        "this call needs operator confirmation at the terminal running `bvault mcp serve`, and none was given \
+         (no terminal, or no answer within 90 seconds)"
+    }
+
+    fn mfa_methods(&self) -> &[&'static str] {
+        &["totp"]
+    }
+
+    fn mfa_unavailable_message(&self) -> &str {
+        "this connection profile requires your MFA, and a terminal can take only a TOTP code, which your account \
+         does not have; approve this assistant's session calls from the BastionVault desktop app, which can use \
+         your security key"
     }
 }
 
@@ -579,8 +814,159 @@ mod tests {
             destructive_allowed: false,
             confirm_reveal: true,
             confirm_destructive: true,
+            connect_allowed: false,
+            confirm_connect: false,
             ttl_secs: 3600,
         }
+    }
+
+    // ── the terminal prompt ─────────────────────────────────────────────
+
+    /// A terminal whose keyboard is `typed` and whose screen is returned.
+    fn tty(typed: &str) -> Tty<std::io::Cursor<Vec<u8>>, Vec<u8>> {
+        Tty {
+            reader: std::io::Cursor::new(typed.as_bytes().to_vec()),
+            writer: Vec::new(),
+            deadline: None,
+            ready: |_, _| true,
+        }
+    }
+
+    fn screen(t: &Tty<std::io::Cursor<Vec<u8>>, Vec<u8>>) -> String {
+        String::from_utf8(t.writer.clone()).unwrap()
+    }
+
+    fn session_call(command: &str) -> bv_mcp::dispatcher::SessionCall {
+        let args = serde_json::json!({ "resource": "web-01", "profile": "p_agent", "command": command });
+        bv_mcp::dispatcher::session_call("bv_resource_ssh_exec", args.as_object().unwrap()).unwrap()
+    }
+
+    fn session_request<'a>(
+        call: &'a bv_mcp::dispatcher::SessionCall,
+        detail: &'a str,
+        mfa: Option<bv_mcp::local::MfaStep<'a>>,
+    ) -> ConfirmRequest<'a> {
+        ConfirmRequest {
+            client_name: "claude-code",
+            tool: "bv_resource_ssh_exec",
+            summary: "",
+            reveals: false,
+            destructive: true,
+            detail: Some(detail),
+            session: Some(call),
+            open_world: true,
+            mfa,
+        }
+    }
+
+    /// The operator sees every field and every line of the command; Enter
+    /// alone, or anything but yes, refuses.
+    #[test]
+    fn the_session_prompt_shows_the_whole_call_and_defaults_to_deny() {
+        let call = session_call("journalctl -u nginx | tail -n 20\nuptime");
+        let detail = bv_mcp::local::render_session_detail(&call);
+        for (typed, expected) in [("y\n", Some(true)), ("\n", Some(false)), ("n\n", Some(false)), ("", None)] {
+            let mut t = tty(typed);
+            assert_eq!(t.confirm(&session_request(&call, &detail, None)), expected, "{typed:?}");
+            let shown = screen(&t);
+            assert!(shown.contains("`claude-code` wants to run a command on `web-01`"), "{shown}");
+            assert!(shown.contains("Profile:   p_agent") && shown.contains("Protocol:  ssh"), "{shown}");
+            assert!(shown.contains("  | journalctl -u nginx | tail -n 20") && shown.contains("  | uptime"), "{shown}");
+            assert!(shown.contains("Run this command once? [y/N]"), "{shown}");
+        }
+    }
+
+    /// On a gated profile the operator is told who asks for MFA, types a
+    /// TOTP code, and the call is allowed only once it verifies.
+    #[test]
+    fn the_session_prompt_collects_totp_and_a_failed_factor_denies() {
+        let call = session_call("uptime");
+        let detail = bv_mcp::local::render_session_detail(&call);
+        let challenge = bv_mcp::local::MfaChallenge { methods: vec!["fido2".into(), "totp".into()], fido2: None };
+        let typed_codes = std::cell::RefCell::new(Vec::new());
+        let verify = |factor: MfaFactor| -> Result<(), String> {
+            let MfaFactor::Totp(code) = factor else { return Err("not totp".into()) };
+            typed_codes.borrow_mut().push(code.to_string());
+            if code.as_str() == "123456" {
+                Ok(())
+            } else {
+                Err("invalid TOTP code".into())
+            }
+        };
+        let step = || bv_mcp::local::MfaStep { challenge: &challenge, verify: &verify };
+
+        let mut t = tty("y\n123456\n");
+        assert_eq!(t.confirm(&session_request(&call, &detail, Some(step()))), Some(true));
+        let shown = screen(&t);
+        assert!(
+            shown.contains("`claude-code` is asking you to complete MFA to access `web-01` (profile `p_agent`)"),
+            "{shown}"
+        );
+        assert!(shown.contains("Authenticator (TOTP) code:") && shown.contains("MFA verified."), "{shown}");
+
+        let mut t = tty("y\n000000\n");
+        assert_eq!(t.confirm(&session_request(&call, &detail, Some(step()))), Some(false));
+        assert!(screen(&t).contains("MFA failed (invalid TOTP code): refused."));
+
+        // A denial asks for no factor at all.
+        let mut t = tty("n\n");
+        assert_eq!(t.confirm(&session_request(&call, &detail, Some(step()))), Some(false));
+        assert!(!screen(&t).contains("Authenticator"));
+        assert_eq!(*typed_codes.borrow(), vec!["123456".to_string(), "000000".to_string()]);
+
+        // A security key only: the terminal cannot take it, and says where to go.
+        let keys_only = bv_mcp::local::MfaChallenge { methods: vec!["fido2".into()], fido2: None };
+        let mut t = tty("y\n");
+        let request =
+            session_request(&call, &detail, Some(bv_mcp::local::MfaStep { challenge: &keys_only, verify: &verify }));
+        assert_eq!(t.confirm(&request), Some(false));
+        assert!(screen(&t).contains("desktop app"));
+        assert_eq!(TtyPrompter::default().mfa_methods(), &["totp"]);
+    }
+
+    /// A question nobody answers in time is refused, and says so.
+    #[test]
+    fn an_unanswered_confirmation_is_refused_at_the_deadline() {
+        let call = session_call("uptime");
+        let detail = bv_mcp::local::render_session_detail(&call);
+        let mut t = tty("y\n");
+        t.deadline = Some(Instant::now());
+        t.ready = |_, _| false;
+        assert_eq!(t.confirm(&session_request(&call, &detail, None)), None);
+        assert!(screen(&t).contains("No answer in time: refused."));
+    }
+
+    /// `bvault mcp pair` can grant brokered sessions; the session tool comes
+    /// with the grant, confirmation is forced on, and reveal plus sessions
+    /// shows the warning before it is allowed.
+    #[test]
+    fn pairing_at_the_terminal_can_grant_brokered_sessions() {
+        let request = PairingRequest {
+            client_name: "claude-code",
+            client_version: "2.1",
+            transport: Transport::Stdio,
+            peer_uid: None,
+        };
+        // approve, scope, default tools, no reveal, no writes, sessions yes, default TTL.
+        let mut t = tty("y\nresources/secrets/web-01/\n\nn\nn\ny\n\n");
+        let Some(PairingDecision::Approved(g)) = t.approve(&request) else { panic!("{}", screen(&t)) };
+        assert!(g.connect_allowed && g.confirm_connect);
+        assert!(g.tool_allowlist.iter().any(|t| t == "bv_resource_ssh_exec"));
+        assert!(screen(&t).contains("every call is shown to you for approval"));
+
+        // Sessions declined: a session tool typed into the list is dropped.
+        let mut t = tty("y\nsecret/*\nbv_whoami,bv_resource_ssh_exec\nn\nn\nn\n\n");
+        let Some(PairingDecision::Approved(g)) = t.approve(&request) else { panic!("{}", screen(&t)) };
+        assert!(!g.connect_allowed && !g.confirm_connect);
+        assert_eq!(g.tool_allowlist, vec!["bv_whoami".to_string()]);
+
+        // Reveal and sessions: the warning, and a second yes.
+        let mut t = tty("y\nsecret/*\n\ny\ny\nn\ny\ny\n\n");
+        let Some(PairingDecision::Approved(g)) = t.approve(&request) else { panic!("{}", screen(&t)) };
+        assert!(g.reveal_allowed && g.connect_allowed);
+        assert!(screen(&t).contains(TRIFECTA_WARNING));
+        let mut t = tty("y\nsecret/*\n\ny\ny\nn\ny\nn\n");
+        assert_eq!(t.approve(&request), Some(PairingDecision::Denied), "declining the warning denies");
     }
 
     struct HttpRig {

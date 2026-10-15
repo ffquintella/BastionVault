@@ -21,7 +21,7 @@ publish = ["uox-bastionvault"]
 # framework.
 
 [dependencies]
-bastion_vault = { path = "../..", version = "0.44.39", registry = "uox-bastionvault", default-features = false }
+bastion_vault = { path = "../..", version = "0.44.40", registry = "uox-bastionvault", default-features = false }
 # The Prometheus families, named directly rather than through
 # `bastion_vault::metrics`: this crate owns the module name `metrics` (the
 # `/metrics` scrape endpoint), so the alias would collide. Same collision
@@ -34,7 +34,7 @@ bv_plugin_surface = { path = "../bv_plugin_surface", version = "0.42.0", registr
 # `/v2/mcp` keeps process-wide. The JSON-RPC handling itself -- and with it
 # the `bv-client` `Backend` adapter that used to be here -- is
 # `bastion_vault::mcp_endpoint`, shared with the desktop app's embedded vault.
-bv-mcp = { path = "../bv-mcp", version = "0.2.0", registry = "uox-bastionvault" }
+bv-mcp = { path = "../bv-mcp", version = "0.3.0", registry = "uox-bastionvault" }
 
 actix-web = { version = "4.13", features = ["rustls-0_23"] }
 actix-tls = "3.5"

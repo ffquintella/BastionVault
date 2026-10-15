@@ -1,13 +1,17 @@
 //! The operator side of the local gatekeeper: what a human is asked, what
 //! they can answer, and the pairing record an approval becomes.
 
+use serde_json::Value;
+use zeroize::Zeroizing;
+
 use crate::{
     catalogue,
+    dispatcher::SessionCall,
     pairing::{
         hash_token, new_pairing_id, new_pairing_token, PairingRecord, Transport, DEFAULT_PAIRING_LIFETIME_SECS,
         MAX_TOKEN_TTL_SECS,
     },
-    sanitize::sanitize_for_model,
+    sanitize::{escape_for_display, sanitize_for_model},
 };
 
 pub struct PairingRequest<'a> {
@@ -25,6 +29,13 @@ pub struct PairingGrant {
     pub destructive_allowed: bool,
     pub confirm_reveal: bool,
     pub confirm_destructive: bool,
+    /// May open brokered sessions (`features/mcp-brokered-sessions.md` §9):
+    /// required for any session tool in `tool_allowlist`.
+    pub connect_allowed: bool,
+    /// Forced to `connect_allowed` by [`normalize_grant`]: there is no grant
+    /// that allows sessions without confirming each one, and no channel can
+    /// turn it off.
+    pub confirm_connect: bool,
     pub ttl_secs: u64,
 }
 
@@ -34,12 +45,73 @@ pub enum PairingDecision {
     Denied,
 }
 
+/// What `resources/v2/connect/mfa/begin` reported for a gated profile: the
+/// factors the operator holds, server-ordered, and the WebAuthn request
+/// options when a security key is among them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MfaChallenge {
+    pub methods: Vec<String>,
+    /// Opaque; handed to the platform authenticator by a host that can run
+    /// the assertion. Never shown to the MCP client.
+    pub fido2: Option<Value>,
+}
+
+/// One second factor the operator presented.
+pub enum MfaFactor {
+    /// The current code from the operator's authenticator app.
+    Totp(Zeroizing<String>),
+    /// A JSON-encoded WebAuthn assertion over [`MfaChallenge::fido2`].
+    Fido2(Zeroizing<String>),
+}
+
+impl MfaFactor {
+    /// The `method` the vault's verify expects.
+    pub fn method(&self) -> &'static str {
+        match self {
+            MfaFactor::Totp(_) => "totp",
+            MfaFactor::Fido2(_) => "fido2",
+        }
+    }
+}
+
+impl std::fmt::Debug for MfaFactor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MfaFactor::{}(<redacted>)", self.method())
+    }
+}
+
+/// The MFA step of a session call's confirmation
+/// (`features/mcp-brokered-sessions.md` §3.1 steps 2-3). The prompter
+/// collects one factor and hands it to `verify`, which proves it to the vault
+/// as the operator, bound to this one call. On `Ok` the gatekeeper holds the
+/// resulting ticket; the prompter never sees it. On `Err` the call must be
+/// denied: a failed factor denies, it is not retried into an approval.
+pub struct MfaStep<'a> {
+    pub challenge: &'a MfaChallenge,
+    pub verify: &'a dyn Fn(MfaFactor) -> Result<(), String>,
+}
+
 pub struct ConfirmRequest<'a> {
     pub client_name: &'a str,
     pub tool: &'a str,
+    /// Reveal and write tools: what the call touches (mount, path, key),
+    /// never a value. Empty for a session tool, which uses `detail`.
     pub summary: &'a str,
     pub reveals: bool,
     pub destructive: bool,
+    /// Session tools (§9): the whole call as the operator must read it --
+    /// resource, profile, protocol and the exact command, escaped for
+    /// display ([`render_session_detail`]). `None` for every other tool.
+    pub detail: Option<&'a str>,
+    /// The same call, field by field, for a host that lays it out itself.
+    /// Its `command` is the raw bytes that will run; display it only through
+    /// [`escape_for_display`].
+    pub session: Option<&'a SessionCall>,
+    /// The tool opens a network session to a resource (`openWorldHint`).
+    /// Confirmation of these is mandatory and has no off switch.
+    pub open_world: bool,
+    /// Present when the profile requires the operator's MFA.
+    pub mfa: Option<MfaStep<'a>>,
 }
 
 /// A human. `None` from either method means *no operator is reachable*, which
@@ -58,6 +130,46 @@ pub trait Prompter: Send + Sync {
     fn confirmation_unavailable_message(&self) -> &str {
         "this call needs operator confirmation and no terminal is available to give it"
     }
+
+    /// The second factors this operator channel can collect for a session
+    /// call's MFA step: `"totp"`, `"fido2"`. None by default, so a host that
+    /// has not built the step refuses MFA-gated profiles before prompting
+    /// rather than prompting without it.
+    fn mfa_methods(&self) -> &[&'static str] {
+        &[]
+    }
+
+    /// What a client is told when a gated profile needs a factor this
+    /// channel cannot collect.
+    fn mfa_unavailable_message(&self) -> &str {
+        "this connection profile requires your MFA, and none of the factors enrolled on your account can be completed here"
+    }
+}
+
+/// The text a confirmation shows for a session call (§9): every field the
+/// call carries, and the command in a gutter so each of its lines -- and so
+/// each line break -- is visible, never truncated, with its byte length.
+/// Everything is escaped for display; nothing here is a secret.
+pub fn render_session_detail(call: &SessionCall) -> String {
+    let command = escape_for_display(&call.command);
+    let lines = command.split('\n').count();
+    let mut out = format!(
+        "Resource:  {}\nProfile:   {}\nProtocol:  {}\nCommand:   {} bytes, {} line{}",
+        escape_for_display(&call.resource),
+        escape_for_display(&call.profile),
+        call.protocol,
+        call.command.len(),
+        lines,
+        if lines == 1 { "" } else { "s" },
+    );
+    if let Some(timeout) = call.timeout_secs {
+        out.push_str(&format!("\nTimeout:   {timeout} s"));
+    }
+    for line in command.split('\n') {
+        out.push_str("\n  | ");
+        out.push_str(line);
+    }
+    out
 }
 
 /// Most entries a grant's path scope may carry. Far beyond any real scope;
@@ -85,6 +197,14 @@ pub fn normalize_grant(grant: PairingGrant) -> Result<PairingGrant, String> {
     if tool_allowlist.is_empty() {
         return Err("a pairing needs at least one tool".to_string());
     }
+    if let Some(session_tool) = tool_allowlist.iter().find(|t| catalogue::find(t).is_some_and(|m| m.open_world)) {
+        if !grant.connect_allowed {
+            return Err(format!(
+                "`{session_tool}` opens brokered sessions to your servers; allow brokered sessions (connect_allowed) \
+                 to grant it, or leave it out"
+            ));
+        }
+    }
 
     let mut path_scope: Vec<String> = Vec::new();
     for glob in grant.path_scope.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
@@ -110,6 +230,9 @@ pub fn normalize_grant(grant: PairingGrant) -> Result<PairingGrant, String> {
         destructive_allowed: grant.destructive_allowed,
         confirm_reveal: grant.reveal_allowed && grant.confirm_reveal,
         confirm_destructive: grant.destructive_allowed && grant.confirm_destructive,
+        connect_allowed: grant.connect_allowed,
+        // Never what the channel asked for: on whenever sessions are.
+        confirm_connect: grant.connect_allowed,
         ttl_secs: grant.ttl_secs.min(MAX_TOKEN_TTL_SECS),
     })
 }
@@ -132,6 +255,8 @@ pub fn build_record(request: &PairingRequest<'_>, grant: &PairingGrant, now: u64
         destructive_allowed: grant.destructive_allowed,
         confirm_reveal: grant.confirm_reveal,
         confirm_destructive: grant.confirm_destructive,
+        connect_allowed: grant.connect_allowed,
+        confirm_connect: grant.connect_allowed,
         ttl_secs: grant.ttl_secs,
         approved_at: now,
         expires_at: Some(now + DEFAULT_PAIRING_LIFETIME_SECS),
@@ -153,8 +278,61 @@ mod tests {
             destructive_allowed: false,
             confirm_reveal: true,
             confirm_destructive: true,
+            connect_allowed: false,
+            confirm_connect: false,
             ttl_secs: 8 * 3600,
         }
+    }
+
+    #[test]
+    fn a_session_tool_needs_connect_allowed_and_connect_is_always_confirmed() {
+        let mut g = grant();
+        g.tool_allowlist.push("bv_resource_ssh_exec".into());
+        let err = normalize_grant(g.clone()).unwrap_err();
+        assert!(err.contains("bv_resource_ssh_exec") && err.contains("connect_allowed"), "{err}");
+
+        // A channel asking for sessions without confirmation gets them confirmed.
+        g.connect_allowed = true;
+        g.confirm_connect = false;
+        let normalized = normalize_grant(g).unwrap();
+        assert!(normalized.connect_allowed && normalized.confirm_connect);
+
+        // Reveal and sessions together are allowed (the owner's decision).
+        let mut both = grant();
+        both.tool_allowlist.push("bv_resource_ssh_exec".into());
+        both.reveal_allowed = true;
+        both.connect_allowed = true;
+        let both = normalize_grant(both).unwrap();
+        assert!(both.reveal_allowed && both.connect_allowed && both.confirm_connect);
+
+        // No sessions, nothing to confirm; and the record follows the grant.
+        let none = normalize_grant(grant()).unwrap();
+        assert!(!none.connect_allowed && !none.confirm_connect);
+        let request =
+            PairingRequest { client_name: "c", client_version: "1", transport: Transport::Stdio, peer_uid: None };
+        let (record, _) = build_record(&request, &both, 1);
+        assert!(record.connect_allowed && record.confirm_connect);
+    }
+
+    #[test]
+    fn the_session_detail_shows_every_field_and_every_line_escaped() {
+        let call = SessionCall {
+            tool: "bv_resource_ssh_exec",
+            protocol: "ssh",
+            resource: "web-01".into(),
+            profile: "agent-ops".into(),
+            command: "journalctl -u nginx\n\tuptime\u{00A0}x".into(),
+            timeout_secs: Some(15),
+            args_hash: "h".into(),
+            scope_subject: "resources/secrets/web-01/".into(),
+        };
+        let detail = render_session_detail(&call);
+        assert_eq!(
+            detail,
+            "Resource:  web-01\nProfile:   agent-ops\nProtocol:  ssh\nCommand:   30 bytes, 2 lines\n\
+             Timeout:   15 s\n  | journalctl -u nginx\n  | \\u{0009}uptime\\u{00A0}x"
+        );
+        assert!(detail.chars().all(|c| c == '\n' || !c.is_control()));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Feature: MCP Brokered Sessions — vault-brokered SSH, web and RDP access to resources for MCP clients
 
-**Status: In progress.** Phase 1 (T136) slices 1–3 shipped in 0.44.37–0.44.39: the substrate, transcripts and audit, and `bv_resource_ssh_exec`; operator confirmation and MFA (slice 4) are next, and until then every session call is refused. The owner's decisions
+**Status: In progress.** Phase 1 (T136) slices 1–3 shipped in 0.44.37–0.44.39: the substrate, transcripts and audit, and `bv_resource_ssh_exec`. Slice 4 (unreleased): operator confirmation in both gatekeepers and the operator's MFA bound to one call (`mcp_call` tickets). The owner's decisions
 are recorded inline as "Decided 2026-10-14 by the owner". Tracked as ROADMAP
 T136 (SSH, with the shared substrate), T137 (web) and T138 (RDP) under M8, next
 to MCP Access (T80, T94). Written against the tree at 0.44.36 (`edb3e437`).

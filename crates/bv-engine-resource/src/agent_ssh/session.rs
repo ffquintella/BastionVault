@@ -42,7 +42,7 @@ use super::{
 use crate::{
     agent_access,
     agent_limits::{binding_limit_key, SessionLimiter, SessionLimits, SessionPermit},
-    connect_mfa::{caller_namespace, find_profile},
+    connect_mfa::{caller_namespace, find_profile, ConnectMfaTicketStore, McpCallBinding, TicketBinding},
     errors::RvError,
     logical::{McpBinding, McpBindingKind, Request},
     type_config, ResourceBackendInner,
@@ -171,27 +171,106 @@ fn session_target(profile: &Value, meta: &Map<String, Value>) -> Result<(String,
     Ok((host, port))
 }
 
-/// MFA-gated profiles: refused until the gatekeeper can run the operator's
-/// step-up in the confirmation dialog (`features/mcp-brokered-sessions.md`
-/// §3.1). Which refusal depends on whether the operator could ever do it.
-fn mfa_refusal(binding: &McpBinding) -> SessionRefusal {
-    let userpass =
-        binding.operator.as_ref().is_some_and(|o| !o.username.is_empty() && o.mount_path.starts_with("userpass"));
-    if userpass {
-        SessionRefusal::new(
-            "mcp_session_mfa_required",
-            403,
-            "this connection profile requires MFA, which the operator completes in the confirmation dialog for \
-             one call; this server's gatekeeper cannot run that step yet, so the gated profile is refused",
-        )
-    } else {
-        SessionRefusal::new(
+/// Whether the binding's operator is a userpass principal: the only kind
+/// with a second factor on file to step up with (§3.1 "Userpass-only").
+fn userpass_operator(binding: &McpBinding) -> Option<&crate::logical::McpOperatorRef> {
+    binding.operator.as_ref().filter(|o| !o.username.is_empty() && o.mount_path.starts_with("userpass"))
+}
+
+/// Step 6 for an MFA-gated profile (`features/mcp-brokered-sessions.md`
+/// §3.1 step 5): redeem the operator's ticket the gatekeeper relayed, single
+/// use and delete-before-validate, against the ticket this exact call must
+/// carry --
+///
+/// * mount, principal and namespace from `McpBinding.operator` (the MCP
+///   token's own metadata is empty), and the namespace must also be the one
+///   this call runs in, so a ticket for a same-named resource in another
+///   tenant cannot be spent here;
+/// * resource and profile from the call;
+/// * `mcp_call` = the binding's pairing id, this tool and the hash of the
+///   call's arguments the endpoint recorded -- so another command, tool,
+///   resource, profile, pairing or operator burns the ticket and is refused.
+///
+/// Runs before any credential is resolved. Returns the factor proved.
+async fn redeem_agent_ticket(
+    backend: &ResourceBackendInner,
+    req: &Request,
+    binding: &McpBinding,
+    resource: &str,
+    profile_id: &str,
+) -> Result<String, CallError> {
+    let Some(operator) = userpass_operator(binding) else {
+        return Err(refused(
             "mcp_session_mfa_unavailable",
             403,
             "this connection profile requires MFA, and only a userpass operator holds the enrolled factors to \
              complete it; the operator who paired this assistant is not a userpass user",
-        )
+        ));
+    };
+    let ticket = req
+        .get_data("connect_ticket")
+        .ok()
+        .and_then(|v| v.as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string))
+        .ok_or_else(|| {
+            refused(
+                "mcp_session_mfa_required",
+                403,
+                "this connection profile requires MFA, which the operator completes in the gatekeeper's \
+                 confirmation for this one call; this call carries no operator ticket",
+            )
+        })?;
+    let pairing_id = match &binding.kind {
+        McpBindingKind::Pairing(id) => id.clone(),
+        McpBindingKind::App(_) => {
+            return Err(refused("mcp_connect_requires_local_operator", 403, "network-mode apps never open sessions"))
+        }
+    };
+    let call =
+        req.mcp_audit.as_ref().filter(|a| a.tool == SSH_EXEC_TOOL && !a.args_hash.is_empty()).ok_or_else(|| {
+            refused(
+                "mcp_session_mfa_ticket_refused",
+                403,
+                "this call carries no record of its arguments to bind the operator's ticket to",
+            )
+        })?;
+    let namespace = caller_namespace(&backend.core, req)
+        .await
+        .map_err(|error| CallError::Vault { reason: "namespace_unresolvable", error })?;
+    if namespace != operator.namespace {
+        return Err(refused(
+            "mcp_session_mfa_unavailable",
+            403,
+            "the operator signed in to another namespace than the one this call runs in, so their MFA ticket \
+             cannot be bound to this resource",
+        ));
     }
+    let expect = TicketBinding {
+        mount: operator.mount_path.clone(),
+        principal: operator.username.to_lowercase(),
+        namespace,
+        resource: resource.to_string(),
+        profile_id: profile_id.to_string(),
+        mcp_call: Some(McpCallBinding {
+            pairing_id: pairing_id.clone(),
+            tool: SSH_EXEC_TOOL.to_string(),
+            args_hash: call.args_hash.clone(),
+        }),
+    };
+    let store = ConnectMfaTicketStore::new(backend.core.as_ref())
+        .map_err(|error| CallError::Vault { reason: "mfa_ticket_store_unavailable", error })?;
+    let record = store.consume(&ticket, &expect).await.map_err(|e| match e {
+        crate::connect_mfa::TicketError::Storage(error) => {
+            CallError::Vault { reason: "mfa_ticket_store_unavailable", error }
+        }
+        other => refused("mcp_session_mfa_ticket_refused", 403, other.to_string()),
+    })?;
+    log::info!(
+        "connect.mfa.authorized resource={resource} profile={profile_id} principal={} method={} mcp_call=true \
+         pairing_id={pairing_id} tool={SSH_EXEC_TOOL}",
+        record.principal,
+        record.method
+    );
+    Ok(record.method)
 }
 
 /// Step 7: a session must not bypass a bastion. A `rustion` profile, a
@@ -435,10 +514,12 @@ pub(crate) async fn prepare_and_run(
     agent_access::check_agent_enabled(types.type_def(type_id), &profile)
         .map_err(|r| refused(r.code(), r.status(), r.to_string()))?;
 
-    // 6. MFA. Fails closed until the gatekeeper runs the operator's step-up.
-    if profile_gate_flag(&profile) {
-        return Err(CallError::Refused(mfa_refusal(&gated.binding)));
-    }
+    // 6. MFA: the operator's ticket for this exact call, redeemed once.
+    let mfa_method = if profile_gate_flag(&profile) {
+        Some(redeem_agent_ticket(backend, req, &gated.binding, &resource, &profile_id).await?)
+    } else {
+        None
+    };
 
     // 7. No bastion route is bypassed.
     check_transport(backend, req, &resource, &meta, &profile).await?;
@@ -489,6 +570,7 @@ pub(crate) async fn prepare_and_run(
         who,
         binding: gated.binding,
         operator_confirmation: req.mcp_audit.as_ref().and_then(|a| a.operator_confirmation.clone()),
+        mfa_method,
         resource,
         profile_id,
         command: gated.command,
@@ -524,6 +606,8 @@ struct SessionTask {
     who: Request,
     binding: McpBinding,
     operator_confirmation: Option<String>,
+    /// The factor the operator proved for a gated profile.
+    mfa_method: Option<String>,
     resource: String,
     profile_id: String,
     command: String,
@@ -725,7 +809,7 @@ impl SessionTask {
                 client_name: self.binding.client_name.clone(),
                 binding_reveal_allowed: self.binding.reveal_allowed,
                 operator_confirmation: self.operator_confirmation.clone(),
-                mfa_method: None,
+                mfa_method: self.mfa_method.clone(),
                 started_at_ms: self.started_at_ms,
                 finished_at_ms,
                 credential_echo_redacted: out.credential_redacted || err.credential_redacted,
@@ -783,7 +867,7 @@ impl SessionTask {
             host_key_fingerprint: report.host_key_fingerprint.clone(),
             login: self.login_kind.to_string(),
             cert_serial: self.cert_serial.clone(),
-            mfa_method: None,
+            mfa_method: self.mfa_method.clone(),
             command_hmac: mcp_events::audit_hmac(self.ctx.as_ref(), self.command.as_bytes()),
             command_bytes: self.command.len() as u64,
             exit_status: report.exit_status,
@@ -952,7 +1036,7 @@ mod tests {
     }
 
     #[test]
-    fn mfa_refusal_depends_on_whether_the_operator_could_step_up() {
+    fn only_a_userpass_operator_can_step_up_for_an_agent() {
         let mut binding = McpBinding {
             kind: McpBindingKind::Pairing("p".into()),
             catalogue_hash: String::new(),
@@ -971,11 +1055,14 @@ mod tests {
                 ..Default::default()
             }),
         };
-        assert_eq!(mfa_refusal(&binding).code, "mcp_session_mfa_required");
+        assert!(userpass_operator(&binding).is_some());
         binding.operator.as_mut().unwrap().mount_path = "oidc/".into();
-        assert_eq!(mfa_refusal(&binding).code, "mcp_session_mfa_unavailable");
+        assert!(userpass_operator(&binding).is_none());
+        binding.operator.as_mut().unwrap().mount_path = "userpass/".into();
+        binding.operator.as_mut().unwrap().username = String::new();
+        assert!(userpass_operator(&binding).is_none());
         binding.operator = None;
-        assert_eq!(mfa_refusal(&binding).code, "mcp_session_mfa_unavailable");
+        assert!(userpass_operator(&binding).is_none());
     }
 
     #[test]

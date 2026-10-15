@@ -568,6 +568,12 @@ impl ResourceBackend {
                             field_type: FieldType::Str,
                             required: false,
                             description: "JSON-encoded FIDO2 assertion. Required when method = fido2."
+                        },
+                        "mcp_call": {
+                            field_type: FieldType::Map,
+                            required: false,
+                            description: "MCP gatekeeper only: {pairing_id, tool, args_hash} of the one \
+                                          agent call this ticket is for (60 s, agent route only)."
                         }
                     },
                     operations: [
@@ -819,6 +825,12 @@ impl ResourceBackend {
                             field_type: FieldType::Int,
                             required: false,
                             description: "Call budget in seconds, at most mcp.brokered_sessions.call_timeout_secs."
+                        },
+                        "connect_ticket": {
+                            field_type: FieldType::SecretStr,
+                            required: false,
+                            description: "The operator's connect MFA ticket for this one call, relayed by the \
+                                          gatekeeper. Required for an MFA-gated profile."
                         }
                     },
                     operations: [

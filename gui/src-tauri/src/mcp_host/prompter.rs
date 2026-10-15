@@ -7,6 +7,13 @@
 //! that is stopping, a window that never answers -- each is `None` to the
 //! gatekeeper, which refuses the pairing or the call. One prompt is shown at
 //! a time; a second waits its turn.
+//!
+//! A brokered-session call (`features/mcp-brokered-sessions.md` §3.1, §9) is
+//! shown field by field, and on an MFA-gated profile the operator proves a
+//! factor in the same dialog. The factor goes from `mcp_prompt_answer` to
+//! the waiting connection, which has the gatekeeper verify it with the vault;
+//! the resulting ticket stays in the gatekeeper's memory, and the dialog is
+//! told only whether it worked.
 
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -16,11 +23,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bv_mcp::{
     catalogue,
-    local::{normalize_grant, ConfirmRequest, PairingDecision, PairingGrant, PairingRequest, Prompter},
+    local::{normalize_grant, ConfirmRequest, MfaFactor, PairingDecision, PairingGrant, PairingRequest, Prompter},
     pairing::{default_tool_allowlist, DEFAULT_TOKEN_TTL_SECS, MAX_TOKEN_TTL_SECS},
-    sanitize::sanitize_for_model,
+    sanitize::{escape_for_display, sanitize_for_model},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use zeroize::Zeroizing;
 
 /// How long a pairing-consent dialog stays open. Long enough to read the
 /// request and choose a scope; an assistant that gave up waiting reconnects
@@ -28,6 +37,9 @@ use serde::{Deserialize, Serialize};
 pub const PAIRING_TIMEOUT: Duration = Duration::from_secs(180);
 /// How long a per-call confirmation stays open before the call is refused.
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(90);
+/// The second factors this host can collect for a session call: a TOTP code
+/// typed in the dialog, and the native security-key assertion.
+pub const MFA_METHODS: &[&str] = &["totp", "fido2"];
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -71,6 +83,37 @@ pub struct ConfirmPrompt {
     pub reveals: bool,
     pub destructive: bool,
     pub deadline_unix_ms: u64,
+    /// A brokered-session call: what it will do, field by field. Its
+    /// confirmation is mandatory.
+    pub session: Option<SessionPrompt>,
+    /// The profile requires the operator's MFA, completed in this dialog.
+    pub mfa: Option<MfaPrompt>,
+    /// The WebAuthn request options for the security-key path. Kept here,
+    /// never sent to the window: the host runs the assertion itself.
+    #[serde(skip)]
+    pub fido2_challenge: Option<Value>,
+}
+
+/// A session call as the dialog lays it out. Every string is escaped for
+/// display: a character that could hide or disguise text is shown as
+/// `\u{XXXX}`, never rendered.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct SessionPrompt {
+    pub resource: String,
+    pub profile: String,
+    pub protocol: String,
+    /// The exact command, escaped for display; line breaks kept.
+    pub command: String,
+    /// Bytes of the command as it will run.
+    pub command_bytes: usize,
+    pub timeout_secs: Option<u64>,
+}
+
+/// The factors the dialog may offer: the operator's enrolled ones this host
+/// can collect, in the vault's order.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct MfaPrompt {
+    pub methods: Vec<String>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -90,7 +133,8 @@ impl McpPrompt {
 }
 
 /// The grant the consent dialog sends back. Validated with
-/// [`normalize_grant`] before it can resolve a prompt.
+/// [`normalize_grant`] before it can resolve a prompt. There is no
+/// `confirm_connect`: session calls are always confirmed.
 #[derive(Deserialize, Clone, Debug)]
 pub struct McpGrantInput {
     pub tool_allowlist: Vec<String>,
@@ -99,7 +143,25 @@ pub struct McpGrantInput {
     pub destructive_allowed: bool,
     pub confirm_reveal: bool,
     pub confirm_destructive: bool,
+    #[serde(default)]
+    pub connect_allowed: bool,
     pub ttl_secs: u64,
+}
+
+/// The factor the operator chose in a session confirmation.
+#[derive(Deserialize, Clone)]
+pub struct McpMfaInput {
+    /// `totp` or `fido2`.
+    pub method: String,
+    /// The TOTP code; absent for `fido2`, whose assertion the host runs.
+    #[serde(default)]
+    pub code: Option<String>,
+}
+
+impl std::fmt::Debug for McpMfaInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpMfaInput").field("method", &self.method).field("code", &"<redacted>").finish()
+    }
 }
 
 /// The operator's answer, from the frontend.
@@ -113,18 +175,36 @@ pub enum McpPromptAnswer {
     },
     Confirm {
         allow: bool,
+        #[serde(default)]
+        mfa: Option<McpMfaInput>,
     },
 }
 
-#[derive(Debug, PartialEq)]
+/// A factor for the waiting connection to verify, and where to say whether
+/// it was accepted.
+#[derive(Debug)]
+pub struct MfaReply {
+    pub factor: MfaFactor,
+    pub done: mpsc::Sender<Result<(), String>>,
+}
+
+#[derive(Debug)]
+pub struct ConfirmReply {
+    pub allow: bool,
+    pub mfa: Option<MfaReply>,
+}
+
+#[derive(Debug)]
 pub enum PromptReply {
     Pairing(PairingDecision),
-    Confirm(bool),
+    Confirm(ConfirmReply),
 }
 
 /// Turns the frontend's answer into the reply the waiting connection gets,
 /// refusing (without resolving the prompt) an approval whose grant does not
-/// validate, so the operator can correct it.
+/// validate, so the operator can correct it. An answer carrying a factor is
+/// not handled here: `mcp_prompt_answer` builds that reply itself, because
+/// it waits for the verification.
 pub fn reply_for(answer: McpPromptAnswer) -> Result<PromptReply, String> {
     match answer {
         McpPromptAnswer::Pairing { approved: false, .. } => Ok(PromptReply::Pairing(PairingDecision::Denied)),
@@ -139,12 +219,27 @@ pub fn reply_for(answer: McpPromptAnswer) -> Result<PromptReply, String> {
                 destructive_allowed: g.destructive_allowed,
                 confirm_reveal: g.confirm_reveal,
                 confirm_destructive: g.confirm_destructive,
+                connect_allowed: g.connect_allowed,
+                // Forced on with `connect_allowed` by `normalize_grant`.
+                confirm_connect: g.connect_allowed,
                 ttl_secs: g.ttl_secs,
             })?;
             Ok(PromptReply::Pairing(PairingDecision::Approved(grant)))
         }
-        McpPromptAnswer::Confirm { allow } => Ok(PromptReply::Confirm(allow)),
+        McpPromptAnswer::Confirm { allow: true, mfa: Some(_) } => {
+            Err("an answer with a second factor is completed by the host".to_string())
+        }
+        McpPromptAnswer::Confirm { allow, .. } => Ok(PromptReply::Confirm(ConfirmReply { allow, mfa: None })),
     }
+}
+
+/// A typed TOTP code, checked for shape before it is sent anywhere.
+pub fn totp_factor(code: Option<&str>) -> Result<MfaFactor, String> {
+    let code = code.map(str::trim).unwrap_or_default();
+    if !(6..=10).contains(&code.len()) || !code.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("enter the current 6-digit code from your authenticator app".to_string());
+    }
+    Ok(MfaFactor::Totp(Zeroizing::new(code.to_string())))
 }
 
 /// Where a prompt is shown. The Tauri implementation emits to the main
@@ -196,6 +291,14 @@ impl PromptBroker {
     /// after it was emitted.
     pub fn pending(&self) -> Option<McpPrompt> {
         lock(&self.pending).as_ref().map(|p| p.prompt.clone())
+    }
+
+    /// The security-key challenge of confirmation `id`, while it waits.
+    pub fn pending_fido2_challenge(&self, id: &str) -> Option<Value> {
+        match lock(&self.pending).as_ref().map(|p| &p.prompt) {
+            Some(McpPrompt::Confirm(c)) if c.id == id => c.fido2_challenge.clone(),
+            _ => None,
+        }
     }
 
     /// Resolves the waiting prompt `id`. An answer for any other prompt, or
@@ -300,6 +403,18 @@ impl Prompter for GuiPrompter {
     }
 
     fn confirm(&self, request: &ConfirmRequest<'_>) -> Option<bool> {
+        let session = request.session.map(|call| SessionPrompt {
+            resource: escape_for_display(&call.resource),
+            profile: escape_for_display(&call.profile),
+            protocol: call.protocol.to_string(),
+            command: escape_for_display(&call.command),
+            command_bytes: call.command.len(),
+            timeout_secs: call.timeout_secs,
+        });
+        let mfa = request.mfa.as_ref().map(|step| MfaPrompt {
+            methods: step.challenge.methods.iter().filter(|m| MFA_METHODS.contains(&m.as_str())).cloned().collect(),
+        });
+        let fido2_challenge = request.mfa.as_ref().and_then(|step| step.challenge.fido2.clone());
         let build = |id| {
             McpPrompt::Confirm(ConfirmPrompt {
                 id,
@@ -310,12 +425,47 @@ impl Prompter for GuiPrompter {
                 reveals: request.reveals,
                 destructive: request.destructive,
                 deadline_unix_ms: now_ms() + CONFIRM_TIMEOUT.as_millis() as u64,
+                session,
+                mfa,
+                fido2_challenge,
             })
         };
-        match self.broker.ask(self.sink.as_ref(), build, CONFIRM_TIMEOUT)? {
-            PromptReply::Confirm(allow) => Some(allow),
-            PromptReply::Pairing(_) => Some(false),
+        let reply = match self.broker.ask(self.sink.as_ref(), build, CONFIRM_TIMEOUT)? {
+            PromptReply::Confirm(reply) => reply,
+            PromptReply::Pairing(_) => return Some(false),
+        };
+        match (reply.allow, reply.mfa, &request.mfa) {
+            (false, mfa, _) => {
+                if let Some(mfa) = mfa {
+                    let _ = mfa.done.send(Err("the call was denied".to_string()));
+                }
+                Some(false)
+            }
+            // Gated, and no factor: not an approval.
+            (true, None, Some(_)) => Some(false),
+            (true, None, None) => Some(true),
+            (true, Some(mfa), None) => {
+                let _ = mfa.done.send(Err("this call did not ask for MFA".to_string()));
+                Some(false)
+            }
+            (true, Some(mfa), Some(step)) => {
+                // Verified here, on the asking connection, by the gatekeeper:
+                // the ticket goes to its memory, the window learns only this.
+                let verified = (step.verify)(mfa.factor);
+                let ok = verified.is_ok();
+                let _ = mfa.done.send(verified);
+                Some(ok)
+            }
         }
+    }
+
+    fn mfa_methods(&self) -> &[&'static str] {
+        MFA_METHODS
+    }
+
+    fn mfa_unavailable_message(&self) -> &str {
+        "this connection profile requires your MFA, and your account has no TOTP key or security key this app can \
+         use; enrol one, or ask an administrator to clear require_mfa on the profile"
     }
 
     fn pairing_unavailable_message(&self) -> &str {
@@ -397,8 +547,27 @@ mod tests {
             destructive_allowed: false,
             confirm_reveal: true,
             confirm_destructive: true,
+            connect_allowed: false,
             ttl_secs: 3600,
         }
+    }
+
+    /// A grant with sessions gets them confirmed; a session tool without
+    /// `connect_allowed` is refused with the reason.
+    #[test]
+    fn a_grant_with_sessions_is_always_confirmed() {
+        let mut g = grant_input();
+        g.tool_allowlist.push("bv_resource_ssh_exec".into());
+        assert!(reply_for(McpPromptAnswer::Pairing { approved: true, grant: Some(g.clone()) })
+            .unwrap_err()
+            .contains("connect_allowed"));
+        g.connect_allowed = true;
+        let Ok(PromptReply::Pairing(PairingDecision::Approved(grant))) =
+            reply_for(McpPromptAnswer::Pairing { approved: true, grant: Some(g) })
+        else {
+            panic!("a grant with sessions allowed is accepted")
+        };
+        assert!(grant.connect_allowed && grant.confirm_connect);
     }
 
     #[test]
@@ -460,6 +629,10 @@ mod tests {
             summary: "mount=secret",
             reveals: false,
             destructive: true,
+            detail: None,
+            session: None,
+            open_world: false,
+            mfa: None,
         };
         assert_eq!(p.confirm(&call), None);
         assert!(lock(&sink.shown).is_empty());
@@ -498,11 +671,15 @@ mod tests {
             summary: "mount=secret path=ai/x",
             reveals: true,
             destructive: false,
+            detail: None,
+            session: None,
+            open_world: false,
+            mfa: None,
         };
-        let answering = answer_when_shown(broker.clone(), McpPromptAnswer::Confirm { allow: false });
+        let answering = answer_when_shown(broker.clone(), McpPromptAnswer::Confirm { allow: false, mfa: None });
         assert_eq!(p.confirm(&call), Some(false));
         answering.join().unwrap();
-        let answering = answer_when_shown(broker, McpPromptAnswer::Confirm { allow: true });
+        let answering = answer_when_shown(broker, McpPromptAnswer::Confirm { allow: true, mfa: None });
         assert_eq!(p.confirm(&call), Some(true));
         answering.join().unwrap();
 
@@ -517,7 +694,8 @@ mod tests {
     fn answers_must_name_the_waiting_prompt_and_match_its_kind() {
         let sink = Arc::new(FakeSink::default());
         let (broker, p) = prompter(&sink);
-        assert!(broker.answer("mcp-prompt-0", PromptReply::Confirm(true)).is_err(), "nothing is waiting");
+        let yes = || PromptReply::Confirm(ConfirmReply { allow: true, mfa: None });
+        assert!(broker.answer("mcp-prompt-0", yes()).is_err(), "nothing is waiting");
 
         let waiting = {
             let p = p.clone();
@@ -530,7 +708,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         };
         assert!(broker.answer("mcp-prompt-999", PromptReply::Pairing(PairingDecision::Denied)).is_err());
-        assert!(broker.answer(&id, PromptReply::Confirm(true)).is_err(), "a yes to a call cannot approve a pairing");
+        assert!(broker.answer(&id, yes()).is_err(), "a yes to a call cannot approve a pairing");
         assert!(broker.pending().is_some(), "a rejected answer leaves the prompt waiting");
         broker.answer(&id, PromptReply::Pairing(PairingDecision::Denied)).unwrap();
         assert_eq!(waiting.join().unwrap(), Some(PairingDecision::Denied));
@@ -567,7 +745,7 @@ mod tests {
         assert!(matches!(reply_for(answer), Ok(PromptReply::Pairing(PairingDecision::Approved(_)))));
         let answer: McpPromptAnswer =
             serde_json::from_value(serde_json::json!({ "kind": "confirm", "allow": true })).unwrap();
-        assert!(matches!(reply_for(answer), Ok(PromptReply::Confirm(true))));
+        assert!(matches!(reply_for(answer), Ok(PromptReply::Confirm(ConfirmReply { allow: true, mfa: None }))));
         let prompt = McpPrompt::Confirm(ConfirmPrompt {
             id: "x".into(),
             client_name: "c".into(),
@@ -577,7 +755,140 @@ mod tests {
             reveals: true,
             destructive: false,
             deadline_unix_ms: 1,
+            session: None,
+            mfa: None,
+            fido2_challenge: Some(serde_json::json!({ "publicKey": { "challenge": "c2VjcmV0" } })),
         });
-        assert_eq!(serde_json::to_value(&prompt).unwrap()["kind"], serde_json::json!("confirm"));
+        let wire = serde_json::to_value(&prompt).unwrap();
+        assert_eq!(wire["kind"], serde_json::json!("confirm"));
+        assert!(wire.get("fido2_challenge").is_none(), "the security-key challenge stays in the host");
+        let answer: McpPromptAnswer = serde_json::from_value(serde_json::json!({
+            "kind": "confirm", "allow": true, "mfa": { "method": "totp", "code": "123456" }
+        }))
+        .unwrap();
+        assert!(!format!("{answer:?}").contains("123456"), "a typed code never prints");
+        assert!(reply_for(answer).is_err(), "a factor is completed by the host, not here");
+    }
+
+    // ── brokered sessions ───────────────────────────────────────────────
+
+    fn session_call(command: &str) -> bv_mcp::dispatcher::SessionCall {
+        let args = serde_json::json!({ "resource": "web-01", "profile": "p_agent", "command": command });
+        bv_mcp::dispatcher::session_call("bv_resource_ssh_exec", args.as_object().unwrap()).unwrap()
+    }
+
+    fn session_request<'a>(
+        call: &'a bv_mcp::dispatcher::SessionCall,
+        detail: &'a str,
+        mfa: Option<bv_mcp::local::MfaStep<'a>>,
+    ) -> ConfirmRequest<'a> {
+        ConfirmRequest {
+            client_name: "claude-code",
+            tool: "bv_resource_ssh_exec",
+            summary: "",
+            reveals: false,
+            destructive: true,
+            detail: Some(detail),
+            session: Some(call),
+            open_world: true,
+            mfa,
+        }
+    }
+
+    /// Answers the waiting confirmation with a factor, as `mcp_prompt_answer`
+    /// does, and returns what the dialog would be told.
+    fn answer_with_factor(
+        broker: Arc<PromptBroker>,
+        code: &'static str,
+    ) -> std::thread::JoinHandle<Result<(), String>> {
+        std::thread::spawn(move || {
+            for _ in 0..500 {
+                if let Some(p) = broker.pending() {
+                    let (done, result) = mpsc::channel();
+                    let factor = totp_factor(Some(code)).unwrap();
+                    let reply =
+                        PromptReply::Confirm(ConfirmReply { allow: true, mfa: Some(MfaReply { factor, done }) });
+                    broker.answer(p.id(), reply).unwrap();
+                    return result.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            panic!("the prompt was never shown");
+        })
+    }
+
+    /// The dialog gets the call field by field, escaped; the factors it may
+    /// offer; and never the security-key challenge.
+    #[test]
+    fn a_session_confirmation_shows_the_call_and_the_mfa_step() {
+        let sink = Arc::new(FakeSink::default());
+        let (broker, p) = prompter(&sink);
+        let call = session_call("journalctl -u nginx\n\ttail -n 5");
+        let detail = bv_mcp::local::render_session_detail(&call);
+        let challenge = bv_mcp::local::MfaChallenge {
+            methods: vec!["fido2".into(), "totp".into(), "sms".into()],
+            fido2: Some(serde_json::json!({ "publicKey": { "challenge": "abc" } })),
+        };
+        let verify = |_: MfaFactor| -> Result<(), String> { Ok(()) };
+        let step = bv_mcp::local::MfaStep { challenge: &challenge, verify: &verify };
+        let answering = answer_with_factor(broker.clone(), "123456");
+        assert_eq!(p.confirm(&session_request(&call, &detail, Some(step))), Some(true));
+        assert_eq!(answering.join().unwrap(), Ok(()));
+
+        let shown = lock(&sink.shown);
+        let McpPrompt::Confirm(prompt) = &shown[0] else { panic!("expected a confirmation") };
+        let session = prompt.session.as_ref().expect("a session call");
+        assert_eq!(
+            (session.resource.as_str(), session.profile.as_str(), session.protocol.as_str()),
+            ("web-01", "p_agent", "ssh")
+        );
+        assert_eq!(
+            session.command, "journalctl -u nginx\n\\u{0009}tail -n 5",
+            "tabs and the like are shown as escapes"
+        );
+        assert_eq!(session.command_bytes, call.command.len());
+        assert_eq!(prompt.mfa.as_ref().unwrap().methods, vec!["fido2".to_string(), "totp".to_string()]);
+        let wire = serde_json::to_value(prompt).unwrap();
+        assert!(!wire.to_string().contains("abc"), "the challenge is not sent to the window: {wire}");
+    }
+
+    /// A factor the vault refuses denies the call, and the dialog is told
+    /// why; a yes without a factor on a gated profile is not an approval.
+    #[test]
+    fn a_failed_or_missing_factor_denies_the_session_call() {
+        let sink = Arc::new(FakeSink::default());
+        let (broker, p) = prompter(&sink);
+        let call = session_call("uptime");
+        let detail = bv_mcp::local::render_session_detail(&call);
+        let challenge = bv_mcp::local::MfaChallenge { methods: vec!["totp".into()], fido2: None };
+        let verify = |factor: MfaFactor| -> Result<(), String> {
+            match factor {
+                MfaFactor::Totp(code) if code.as_str() == "123456" => Ok(()),
+                _ => Err("invalid TOTP code".to_string()),
+            }
+        };
+        let step = || bv_mcp::local::MfaStep { challenge: &challenge, verify: &verify };
+
+        let answering = answer_with_factor(broker.clone(), "000000");
+        assert_eq!(p.confirm(&session_request(&call, &detail, Some(step()))), Some(false));
+        assert_eq!(answering.join().unwrap(), Err("invalid TOTP code".to_string()));
+
+        let answering = answer_when_shown(broker.clone(), McpPromptAnswer::Confirm { allow: true, mfa: None });
+        assert_eq!(p.confirm(&session_request(&call, &detail, Some(step()))), Some(false));
+        answering.join().unwrap();
+
+        // Ungated: a plain yes is a yes.
+        let answering = answer_when_shown(broker, McpPromptAnswer::Confirm { allow: true, mfa: None });
+        assert_eq!(p.confirm(&session_request(&call, &detail, None)), Some(true));
+        answering.join().unwrap();
+        assert_eq!(p.mfa_methods(), &["totp", "fido2"]);
+    }
+
+    #[test]
+    fn a_totp_code_is_checked_for_shape_before_it_goes_anywhere() {
+        assert!(totp_factor(Some(" 123456 ")).is_ok());
+        for bad in [None, Some(""), Some("12345"), Some("12345a"), Some("12345678901")] {
+            assert!(totp_factor(bad).is_err(), "{bad:?}");
+        }
     }
 }

@@ -72,6 +72,9 @@ pub const SESSION_ERROR_CODES: &[&str] = &[
     "agent_policy_invalid",
     "mcp_session_mfa_required",
     "mcp_session_mfa_unavailable",
+    // The relayed operator ticket was unknown, spent, expired or bound to
+    // another call, operator, pairing, resource or profile (§3.1 step 5).
+    "mcp_session_mfa_ticket_refused",
     "mcp_session_requires_bastion",
     "mcp_session_login_class_unsupported",
     "mcp_session_destination_refused",

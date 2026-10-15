@@ -2386,6 +2386,27 @@ export interface McpPairingPrompt {
   max_ttl_secs: number;
 }
 
+/**
+ * A brokered-session call, field by field (features/mcp-brokered-sessions.md
+ * §9). The host escapes every string: a character that could hide or
+ * disguise text arrives as `\u{XXXX}`, never as itself.
+ */
+export interface McpSessionPrompt {
+  resource: string;
+  profile: string;
+  protocol: string;
+  /** The exact command; line breaks kept. */
+  command: string;
+  /** Bytes of the command as it will run. */
+  command_bytes: number;
+  timeout_secs: number | null;
+}
+
+/** The profile requires the operator's MFA: the factors the dialog may offer. */
+export interface McpMfaPrompt {
+  methods: string[];
+}
+
 /** A paired client's call that needs the operator's yes. */
 export interface McpConfirmPrompt {
   kind: "confirm";
@@ -2398,6 +2419,10 @@ export interface McpConfirmPrompt {
   reveals: boolean;
   destructive: boolean;
   deadline_unix_ms: number;
+  /** Present for a brokered-session call; its confirmation is mandatory. */
+  session?: McpSessionPrompt | null;
+  /** Present when the profile requires the operator's MFA. */
+  mfa?: McpMfaPrompt | null;
 }
 
 export type McpPrompt = McpPairingPrompt | McpConfirmPrompt;
@@ -2410,12 +2435,18 @@ export interface McpGrantInput {
   destructive_allowed: boolean;
   confirm_reveal: boolean;
   confirm_destructive: boolean;
+  /** May open brokered sessions; every such call is confirmed, always. */
+  connect_allowed: boolean;
   ttl_secs: number;
 }
 
+/** The factor proved in a session confirmation. The host verifies it and
+ *  keeps the resulting ticket; the window is told only whether it worked. */
+export type McpMfaAnswer = { method: "totp"; code: string } | { method: "fido2" };
+
 export type McpPromptAnswer =
   | { kind: "pairing"; approved: boolean; grant?: McpGrantInput }
-  | { kind: "confirm"; allow: boolean };
+  | { kind: "confirm"; allow: boolean; mfa?: McpMfaAnswer };
 
 /** A client the operator approved on this workstation. Carries no secret. */
 export interface McpPairing {

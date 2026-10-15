@@ -56,6 +56,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.40] - 2026-10-15
+
+### Added
+
+#### MCP Brokered Sessions — operator confirmation and MFA (features/mcp-brokered-sessions.md)
+
+- **Confirm every brokered session call before it runs** -- `bvault mcp serve` (on its terminal) and the desktop app (a dialog in the main window) now show each `bv_resource_ssh_exec` call with its resource, profile and exact command, and relay it only after you choose *Run once*. Denying, or not answering within 90 seconds, refuses it. Calls the vault would refuse anyway are passed through without a prompt so the vault refuses and audits them. With this, agent SSH sessions work end to end against a remote vault built with `mcp_sessions_ssh`. (T136, S111, S104)
+- **Complete MFA for an agent's session yourself** -- for a profile with `require_mfa`, the prompt says the assistant is asking you to complete MFA for that resource and takes your TOTP code or, in the desktop app, your FIDO2 key. The resulting ticket is bound to that one call (pairing, tool and argument hash), expires in 60 seconds, is single-use, stays inside the app or CLI process, and cannot be spent on a human Connect (nor a human ticket on the agent route). Only userpass operators can do this; others get `mcp_session_mfa_unavailable`. The CLI offers TOTP only. (T136, S111)
+- **Grant brokered sessions when pairing an assistant** -- the desktop pairing dialog and `bvault mcp pair` can allow `connect_allowed`, with a warning when it is combined with revealing secrets. Confirmation of session calls cannot be turned off. (T136, S111)
+
 ## [0.44.39] - 2026-10-15
 
 ### Added
@@ -7942,7 +7952,8 @@ Bulk dependency upgrade across the workspace (`Cargo.toml`, `crates/bv-plugin-pa
 
 - Abandon the SQLx storage backend: `libsqlite3-sys` conflicts at link time with hiqlite's `rusqlite`, so `storage "sqlx"` was removed (T5, M2)
 
-[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.39...HEAD
+[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.40...HEAD
+[0.44.40]: https://github.com/ffquintella/BastionVault/compare/v0.44.39...v0.44.40
 [0.44.39]: https://github.com/ffquintella/BastionVault/compare/v0.44.38...v0.44.39
 [0.44.38]: https://github.com/ffquintella/BastionVault/compare/v0.44.37...v0.44.38
 [0.44.37]: https://github.com/ffquintella/BastionVault/compare/v0.44.36...v0.44.37

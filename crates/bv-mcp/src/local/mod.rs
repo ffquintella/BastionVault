@@ -46,15 +46,17 @@ mod server;
 pub mod uds;
 
 pub use link::{
-    exchange_request_body, minted_token_from_exchange, vault_error_text, ForwardError, MintedToken, VaultLink,
+    exchange_request_body, mfa_begin_body, mfa_begin_error, mfa_preflight_from_begin, mfa_verify_body,
+    minted_token_from_exchange, ticket_from_verify, vault_error_text, ForwardError, McpCallRef, MfaBeginError,
+    MfaPreflight, MintedToken, VaultLink, CONNECT_MFA_BEGIN_PATH, CONNECT_MFA_VERIFY_PATH,
 };
 pub use operator::{
-    build_record, normalize_grant, ConfirmRequest, PairingDecision, PairingGrant, PairingRequest, Prompter,
-    MAX_PATH_SCOPE_ENTRIES, MAX_PATH_SCOPE_LEN,
+    build_record, normalize_grant, render_session_detail, ConfirmRequest, MfaChallenge, MfaFactor, MfaStep,
+    PairingDecision, PairingGrant, PairingRequest, Prompter, MAX_PATH_SCOPE_ENTRIES, MAX_PATH_SCOPE_LEN,
 };
 pub use server::{
-    exchange_ttl, run_line_session, ConnInfo, ConnectionSlot, LocalServer, SessionState, HANDSHAKE_PROTOCOL_VERSIONS,
-    MAX_CONCURRENT_CONNECTIONS, MAX_MESSAGE_BYTES,
+    exchange_ttl, run_line_session, ConnInfo, ConnectionSlot, LocalServer, SessionState, GATEKEEPER_META_PREFIX,
+    HANDSHAKE_PROTOCOL_VERSIONS, MAX_CONCURRENT_CONNECTIONS, MAX_MESSAGE_BYTES,
 };
 
 use crate::pairing::PairingStore;

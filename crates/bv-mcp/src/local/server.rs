@@ -12,16 +12,20 @@ use std::{
 };
 
 use serde_json::{json, Map, Value};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{
-    link::{ForwardError, MintedToken, VaultLink},
+    link::{ForwardError, McpCallRef, MfaBeginError, MfaPreflight, MintedToken, VaultLink},
     lock,
-    operator::{build_record, ConfirmRequest, PairingDecision, PairingRequest, Prompter},
+    operator::{
+        build_record, render_session_detail, ConfirmRequest, MfaFactor, MfaStep, PairingDecision, PairingRequest,
+        Prompter,
+    },
 };
 use crate::{
-    catalogue,
-    jsonrpc::{JsonRpcError, JsonRpcResponse},
+    catalogue::{self, ToolMeta},
+    dispatcher,
+    jsonrpc::{JsonRpcError, JsonRpcResponse, CONNECT_TICKET_META_KEY, OPERATOR_CONFIRMATION_META_KEY},
     pairing::{find_matching, hash_token, now_secs, PairingRecord, PairingStore, Transport, MAX_TOKEN_TTL_SECS},
     sanitize::sanitize_for_model,
 };
@@ -187,19 +191,63 @@ fn with_client_info(message: &Map<String, Value>, handshake: &Handshake) -> Valu
 }
 
 /// The `_meta` namespace that belongs to this gatekeeper: the operator's
-/// confirmation record and, later, a connect MFA ticket
-/// (`features/mcp-brokered-sessions.md` §3 step 3, §9). The vault trusts
-/// what arrives under it as the gatekeeper's assertion.
+/// confirmation record and the operator's connect MFA ticket
+/// (`features/mcp-brokered-sessions.md` §3 step 3, §9). The vault audits the
+/// first as this host's assertion and redeems the second itself.
 pub const GATEKEEPER_META_PREFIX: &str = "io.bastionvault/";
 
 /// Remove every `io.bastionvault/*` key a client put in `params._meta`, so
-/// a client cannot assert an operator confirmation (or carry a ticket) on
-/// its own. This gatekeeper asserts none yet, so a brokered-session call it
-/// relays reaches the vault unconfirmed and is refused there
-/// (`mcp_confirmation_required`): fail closed until it confirms them.
+/// a client cannot assert an operator confirmation or carry a ticket on its
+/// own. Runs on every relayed message, before [`assert_gatekeeper_meta`]
+/// adds this gatekeeper's own.
 fn strip_gatekeeper_meta(message: &mut Value) {
     if let Some(meta) = message.get_mut("params").and_then(|p| p.get_mut("_meta")).and_then(Value::as_object_mut) {
         meta.retain(|key, _| !key.starts_with(GATEKEEPER_META_PREFIX));
+    }
+}
+
+/// What this gatekeeper adds to a call once the operator said yes.
+struct Assertion {
+    /// Unix seconds of the operator's answer.
+    at: u64,
+    /// The operator completed the profile's MFA in the same dialog.
+    mfa: bool,
+    /// The connect MFA ticket bound to this call. Held only here, and in the
+    /// relayed message for as long as the relay takes.
+    ticket: Option<Zeroizing<String>>,
+}
+
+/// The `_meta` the vault reads: `io.bastionvault/confirmation`
+/// (`{"by": "operator", "at", "mfa"}`) and, for a gated profile,
+/// `io.bastionvault/connect_ticket`. Never in `arguments`: the ticket is
+/// bound to their hash.
+fn assert_gatekeeper_meta(message: &mut Value, assertion: &Assertion) {
+    let Some(object) = message.as_object_mut() else { return };
+    let params = object.entry("params").or_insert(Value::Null);
+    if params.is_null() {
+        *params = Value::Object(Map::new());
+    }
+    let Some(params) = params.as_object_mut() else { return };
+    let meta = params.entry("_meta").or_insert(Value::Null);
+    if !meta.is_object() {
+        *meta = Value::Object(Map::new());
+    }
+    let Some(meta) = meta.as_object_mut() else { return };
+    meta.insert(
+        OPERATOR_CONFIRMATION_META_KEY.to_string(),
+        json!({ "by": "operator", "at": assertion.at, "mfa": assertion.mfa }),
+    );
+    if let Some(ticket) = &assertion.ticket {
+        meta.insert(CONNECT_TICKET_META_KEY.to_string(), Value::String(ticket.to_string()));
+    }
+}
+
+/// Wipes the relayed copy of a ticket once the relay is done with it.
+fn wipe_relayed_ticket(message: &mut Value) {
+    let ticket =
+        message.get_mut("params").and_then(|p| p.get_mut("_meta")).and_then(|m| m.get_mut(CONNECT_TICKET_META_KEY));
+    if let Some(Value::String(ticket)) = ticket {
+        ticket.zeroize();
     }
 }
 
@@ -359,9 +407,10 @@ impl LocalServer {
             Ok(r) => r,
             Err(refusal) => return Some(refusal.into_response(id)),
         };
-        if let Err(refusal) = self.confirm_if_needed(&record, object) {
-            return Some(refusal.into_response(id));
-        }
+        let assertion = match self.confirm_if_needed(&record, object) {
+            Ok(assertion) => assertion,
+            Err(refusal) => return Some(refusal.into_response(id)),
+        };
         let token = match self.token_for(&record) {
             Ok(t) => t,
             Err(refusal) => return Some(refusal.into_response(id)),
@@ -372,12 +421,18 @@ impl LocalServer {
             None => message.clone(),
         };
         strip_gatekeeper_meta(&mut forwarded);
+        if let Some(assertion) = &assertion {
+            assert_gatekeeper_meta(&mut forwarded, assertion);
+        }
         // Last look before the vault: a stop that landed while this call was
         // being resolved refuses it here rather than after it has run.
         if self.is_shut_down() {
+            wipe_relayed_ticket(&mut forwarded);
             return Some(Refusal::stopped().into_response(id));
         }
-        match self.link.forward(&token, &forwarded) {
+        let relayed = self.link.forward(&token, &forwarded);
+        wipe_relayed_ticket(&mut forwarded);
+        match relayed {
             Ok(response) => Some(response),
             Err(ForwardError::Refused(status)) => {
                 lock(&self.tokens).remove(&record.id);
@@ -488,38 +543,62 @@ impl LocalServer {
         }
     }
 
-    /// Per-call operator confirmation for reveal/destructive calls the grant
-    /// allows and asked to confirm. A call the grant would refuse anyway is
-    /// forwarded without a prompt (the vault will deny it); a call needing a
-    /// confirmation nobody can give is refused.
-    fn confirm_if_needed(&self, record: &PairingRecord, message: &Map<String, Value>) -> Result<(), Refusal> {
+    /// Per-call operator confirmation: for a session tool, every call
+    /// ([`Self::confirm_session`]); for a reveal or a write, when the grant
+    /// allows it and asked to confirm it. A call the grant would refuse
+    /// anyway is forwarded without a prompt (the vault will deny it); a call
+    /// needing a confirmation nobody can give is refused. `Some` is what the
+    /// operator approved, for the relayed `_meta`.
+    fn confirm_if_needed(
+        &self,
+        record: &PairingRecord,
+        message: &Map<String, Value>,
+    ) -> Result<Option<Assertion>, Refusal> {
         if message.get("method").and_then(Value::as_str) != Some("tools/call") {
-            return Ok(());
+            return Ok(None);
         }
         let params = message.get("params").cloned().unwrap_or(Value::Null);
         let Some(tool) = params.get("name").and_then(Value::as_str) else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(meta) = catalogue::find(tool) else {
-            return Ok(());
+            return Ok(None);
         };
         let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+        if meta.open_world {
+            return self.confirm_session(record, meta, &arguments);
+        }
         let reveal_requested = arguments.get("reveal").and_then(Value::as_bool).unwrap_or(false);
 
         let reveals = meta.is_reveal && reveal_requested;
         let destructive = meta.destructive;
         if (reveals && !record.reveal_allowed) || (destructive && !record.destructive_allowed) {
-            return Ok(());
+            return Ok(None);
         }
         let needs = (reveals && record.confirm_reveal) || (destructive && record.confirm_destructive);
         if !needs {
-            return Ok(());
+            return Ok(None);
         }
 
         let summary = call_summary(&arguments);
-        let request =
-            ConfirmRequest { client_name: &record.client_name, tool, summary: &summary, reveals, destructive };
+        let request = ConfirmRequest {
+            client_name: &record.client_name,
+            tool,
+            summary: &summary,
+            reveals,
+            destructive,
+            detail: None,
+            session: None,
+            open_world: false,
+            mfa: None,
+        };
         let answer = self.prompter.confirm(&request);
+        self.judge_answer(answer)?;
+        Ok(Some(Assertion { at: (self.clock)(), mfa: false, ticket: None }))
+    }
+
+    /// The operator's answer, or the refusal it amounts to.
+    fn judge_answer(&self, answer: Option<bool>) -> Result<(), Refusal> {
         if self.is_shut_down() {
             return Err(Refusal::stopped());
         }
@@ -530,6 +609,104 @@ impl LocalServer {
                 Err(Refusal::new(-32001, "mcp_confirmation_denied", self.prompter.confirmation_unavailable_message()))
             }
         }
+    }
+
+    /// A brokered-session call (`features/mcp-brokered-sessions.md` §3 step
+    /// 3, §3.1, §9). Every one the vault could run is shown to the operator
+    /// -- there is no grant, flag or record field that skips this -- with
+    /// the exact command, and, when the profile is gated, completes the
+    /// operator's MFA in the same prompt, bound to this one call.
+    ///
+    /// A call the vault refuses before it runs anything (not in the
+    /// allow-list, no `connect_allowed`, malformed, outside the path scope)
+    /// is relayed unprompted and unconfirmed, so the vault answers it with
+    /// its own code and audit event and nobody is asked about it.
+    fn confirm_session(
+        &self,
+        record: &PairingRecord,
+        meta: &ToolMeta,
+        arguments: &Value,
+    ) -> Result<Option<Assertion>, Refusal> {
+        if !record.tool_allowlist.iter().any(|t| t == meta.name) || !record.connect_allowed {
+            return Ok(None);
+        }
+        let empty = Map::new();
+        let args = match arguments {
+            Value::Object(args) => args,
+            Value::Null => &empty,
+            _ => return Ok(None),
+        };
+        let Ok(call) = dispatcher::session_call(meta.name, args) else {
+            return Ok(None);
+        };
+        if !dispatcher::path_scope_covers(&record.path_scope, &call.scope_subject) {
+            return Ok(None);
+        }
+
+        // Is the profile gated? The vault decides, asked as the operator.
+        let challenge = match self.link.connect_mfa_begin(&call.resource, &call.profile) {
+            Ok(MfaPreflight::NotRequired) => None,
+            Ok(MfaPreflight::Required(challenge)) => Some(challenge),
+            Err(MfaBeginError::Unavailable(reason)) => {
+                return Err(Refusal::new(-32001, "mcp_session_mfa_unavailable", sanitize_for_model(&reason)))
+            }
+            Err(MfaBeginError::Other(reason)) => {
+                return Err(Refusal::new(
+                    -32603,
+                    "mcp_session_mfa_check_failed",
+                    format!(
+                        "could not ask the vault, as the operator, whether this profile requires MFA: {}",
+                        sanitize_for_model(&reason)
+                    ),
+                ))
+            }
+        };
+        if let Some(challenge) = &challenge {
+            let collectable = self.prompter.mfa_methods();
+            if !challenge.methods.iter().any(|m| collectable.contains(&m.as_str())) {
+                return Err(Refusal::new(
+                    -32001,
+                    "mcp_session_mfa_unavailable",
+                    self.prompter.mfa_unavailable_message(),
+                ));
+            }
+        }
+
+        let bound_to = McpCallRef {
+            pairing_id: record.id.clone(),
+            tool: meta.name.to_string(),
+            args_hash: call.args_hash.clone(),
+        };
+        let ticket: Mutex<Option<Zeroizing<String>>> = Mutex::new(None);
+        let verify = |factor: MfaFactor| -> Result<(), String> {
+            let minted = self.link.connect_mfa_verify(&call.resource, &call.profile, &factor, &bound_to)?;
+            *lock(&ticket) = Some(minted);
+            Ok(())
+        };
+        let detail = render_session_detail(&call);
+        let request = ConfirmRequest {
+            client_name: &record.client_name,
+            tool: meta.name,
+            summary: "",
+            reveals: false,
+            destructive: meta.destructive,
+            detail: Some(&detail),
+            session: Some(&call),
+            open_world: true,
+            mfa: challenge.as_ref().map(|challenge| MfaStep { challenge, verify: &verify }),
+        };
+        let answer = self.prompter.confirm(&request);
+        self.judge_answer(answer)?;
+
+        let ticket = lock(&ticket).take();
+        if challenge.is_some() && ticket.is_none() {
+            return Err(Refusal::new(
+                -32001,
+                "mcp_confirmation_denied",
+                "this profile requires the operator's MFA, which was not completed; the call was not run",
+            ));
+        }
+        Ok(Some(Assertion { at: (self.clock)(), mfa: ticket.is_some(), ticket }))
     }
 
     fn token_for(&self, record: &PairingRecord) -> Result<Zeroizing<String>, Refusal> {
@@ -641,10 +818,15 @@ pub(super) mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
-    use crate::local::operator::PairingGrant;
+    use crate::local::operator::{MfaChallenge, PairingGrant};
     use crate::pairing::new_pairing_id;
 
     pub(crate) const MINTED: &str = "SECRET-MCP-TOKEN-0123456789";
+    pub(crate) const TICKET: &str = "SECRET-CONNECT-TICKET-abcdef";
+
+    /// One `connect/mfa/verify` the fake vault saw:
+    /// `(resource, profile, method, factor, call)`.
+    pub(crate) type VerifyCall = (String, String, String, String, McpCallRef);
 
     #[derive(Default)]
     pub(crate) struct FakeLink {
@@ -652,6 +834,13 @@ pub(super) mod tests {
         pub(crate) forwards: Mutex<Vec<(String, Value)>>,
         pub(crate) refuse_next_forward: Mutex<Option<u16>>,
         pub(crate) minted_ttls: Mutex<Vec<u64>>,
+        /// What `connect/mfa/begin` answers; `None` is "not required".
+        pub(crate) begin: Mutex<Option<Result<MfaPreflight, MfaBeginError>>>,
+        pub(crate) begins: Mutex<Vec<(String, String)>>,
+        /// What `connect/mfa/verify` answers; `None` mints [`TICKET`].
+        pub(crate) verify: Mutex<Option<Result<String, String>>>,
+        /// `(resource, profile, method, factor, call)` per verify.
+        pub(crate) verifies: Mutex<Vec<VerifyCall>>,
     }
 
     impl VaultLink for Arc<FakeLink> {
@@ -668,14 +857,54 @@ pub(super) mod tests {
             lock(&self.forwards).push((token.to_string(), message.clone()));
             Ok(json!({ "jsonrpc": "2.0", "id": message["id"], "result": { "relayed": true } }))
         }
+
+        fn connect_mfa_begin(&self, resource: &str, profile_id: &str) -> Result<MfaPreflight, MfaBeginError> {
+            lock(&self.begins).push((resource.to_string(), profile_id.to_string()));
+            lock(&self.begin).clone().unwrap_or(Ok(MfaPreflight::NotRequired))
+        }
+
+        fn connect_mfa_verify(
+            &self,
+            resource: &str,
+            profile_id: &str,
+            factor: &MfaFactor,
+            call: &McpCallRef,
+        ) -> Result<Zeroizing<String>, String> {
+            let shown = match factor {
+                MfaFactor::Totp(code) => code.to_string(),
+                MfaFactor::Fido2(credential) => credential.to_string(),
+            };
+            lock(&self.verifies).push((
+                resource.to_string(),
+                profile_id.to_string(),
+                factor.method().to_string(),
+                shown,
+                call.clone(),
+            ));
+            lock(&self.verify).clone().unwrap_or(Ok(TICKET.to_string())).map(Zeroizing::new)
+        }
+    }
+
+    /// What a confirmation showed the operator.
+    #[derive(Clone, Debug, Default)]
+    pub(crate) struct Shown {
+        pub(crate) tool: String,
+        pub(crate) detail: Option<String>,
+        pub(crate) command: Option<String>,
+        pub(crate) open_world: bool,
+        pub(crate) mfa_methods: Option<Vec<String>>,
+        pub(crate) verified: Option<Result<(), String>>,
     }
 
     #[derive(Default)]
     pub(crate) struct Scripted {
         pub(crate) approve: Mutex<Option<Option<PairingDecision>>>,
         pub(crate) confirm: Mutex<Option<Option<bool>>>,
+        /// The TOTP code the operator types when a call asks for MFA.
+        pub(crate) totp: Mutex<Option<String>>,
         pub(crate) approvals_asked: AtomicUsize,
         pub(crate) confirms_asked: AtomicUsize,
+        pub(crate) shown: Mutex<Vec<Shown>>,
     }
 
     impl Prompter for Arc<Scripted> {
@@ -684,9 +913,31 @@ pub(super) mod tests {
             lock(&self.approve).clone().unwrap_or(None)
         }
 
-        fn confirm(&self, _request: &ConfirmRequest<'_>) -> Option<bool> {
+        fn confirm(&self, request: &ConfirmRequest<'_>) -> Option<bool> {
             self.confirms_asked.fetch_add(1, Ordering::SeqCst);
-            (*lock(&self.confirm)).unwrap_or(None)
+            let mut shown = Shown {
+                tool: request.tool.to_string(),
+                detail: request.detail.map(str::to_string),
+                command: request.session.map(|c| c.command.clone()),
+                open_world: request.open_world,
+                mfa_methods: request.mfa.as_ref().map(|m| m.challenge.methods.clone()),
+                verified: None,
+            };
+            let answer = (*lock(&self.confirm)).unwrap_or(None);
+            if let (Some(step), Some(true), Some(code)) = (&request.mfa, answer, lock(&self.totp).clone()) {
+                let verified = (step.verify)(MfaFactor::Totp(Zeroizing::new(code)));
+                let failed = verified.is_err();
+                shown.verified = Some(verified);
+                lock(&self.shown).push(shown);
+                // A failed factor denies.
+                return Some(!failed);
+            }
+            lock(&self.shown).push(shown);
+            answer
+        }
+
+        fn mfa_methods(&self) -> &[&'static str] {
+            &["totp"]
         }
     }
 
@@ -698,6 +949,8 @@ pub(super) mod tests {
             destructive_allowed: false,
             confirm_reveal: true,
             confirm_destructive: true,
+            connect_allowed: false,
+            confirm_connect: false,
             ttl_secs: 3600,
         }
     }
@@ -1251,6 +1504,295 @@ pub(super) mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    // ── brokered sessions (features/mcp-brokered-sessions.md §3.1, §9) ────
+
+    const SSH: &str = "bv_resource_ssh_exec";
+
+    fn ssh_args(command: &str) -> Value {
+        json!({ "resource": "web-01", "profile": "p_agent", "command": command })
+    }
+
+    fn ssh_call(id: u64, arguments: Value) -> Vec<u8> {
+        request(id, "tools/call", json!({ "name": SSH, "arguments": arguments }))
+    }
+
+    /// A client paired for `bv_resource_ssh_exec` on `web-01`, with
+    /// brokered sessions allowed.
+    fn session_rig(name: &str) -> Rig {
+        let rig = rig(name);
+        let mut g = grant();
+        g.tool_allowlist.push(SSH.into());
+        g.path_scope = vec!["resources/secrets/web-01/".into()];
+        g.connect_allowed = true;
+        g.confirm_connect = true;
+        *lock(&rig.prompt.approve) = Some(Some(PairingDecision::Approved(g)));
+        rig.server.handle_message(&stdio(), &request(1, "tools/list", json!({}))).unwrap();
+        rig
+    }
+
+    fn last_meta(rig: &Rig) -> Value {
+        lock(&rig.link.forwards).last().unwrap().1["params"]["_meta"].clone()
+    }
+
+    fn session_forwards(rig: &Rig) -> usize {
+        lock(&rig.link.forwards).iter().filter(|(_, m)| m["method"] == json!("tools/call")).count()
+    }
+
+    /// Every session call is shown with its exact command; an approval
+    /// relays the call with this gatekeeper's confirmation and nothing else.
+    #[test]
+    fn a_session_call_is_always_confirmed_and_the_approval_is_asserted() {
+        let rig = session_rig("session-confirm");
+        *lock(&rig.prompt.confirm) = Some(Some(true));
+        let command = "journalctl -u nginx --since -1h | tail -n 200\nuptime";
+        for id in [2, 3] {
+            let resp = rig.server.handle_message(&stdio(), &ssh_call(id, ssh_args(command))).unwrap();
+            assert_eq!(resp["result"]["relayed"], json!(true), "{resp}");
+        }
+        assert_eq!(rig.prompt.confirms_asked.load(Ordering::SeqCst), 2, "no call skips the operator");
+        let shown = lock(&rig.prompt.shown).clone();
+        assert_eq!(shown[0].tool, SSH);
+        assert!(shown[0].open_world);
+        assert_eq!(shown[0].command.as_deref(), Some(command), "the dialog's command is the bytes relayed");
+        let detail = shown[0].detail.clone().unwrap();
+        assert!(detail.contains("Resource:  web-01") && detail.contains("Profile:   p_agent"), "{detail}");
+        assert!(detail.contains("Protocol:  ssh") && detail.contains("  | uptime"), "{detail}");
+        assert!(shown[0].mfa_methods.is_none(), "an ungated profile asks for no factor");
+
+        let meta = last_meta(&rig);
+        assert_eq!(meta[OPERATOR_CONFIRMATION_META_KEY]["by"], json!("operator"));
+        assert_eq!(meta[OPERATOR_CONFIRMATION_META_KEY]["mfa"], json!(false));
+        assert!(meta.get(CONNECT_TICKET_META_KEY).is_none());
+        let relayed = lock(&rig.link.forwards).last().unwrap().1.clone();
+        assert_eq!(relayed["params"]["arguments"], ssh_args(command), "arguments are relayed untouched");
+        assert_eq!(*lock(&rig.link.begins), vec![("web-01".to_string(), "p_agent".to_string()); 2]);
+    }
+
+    #[test]
+    fn a_denied_or_unanswered_session_call_never_reaches_the_vault() {
+        let rig = session_rig("session-deny");
+        *lock(&rig.prompt.confirm) = Some(Some(false));
+        let denied = rig.server.handle_message(&stdio(), &ssh_call(2, ssh_args("uptime"))).unwrap();
+        assert_eq!(data_code(&denied), "mcp_confirmation_denied");
+        assert!(denied["error"]["message"].as_str().unwrap().contains("declined"));
+        // No answer at all -- a timeout, or nobody at the terminal.
+        *lock(&rig.prompt.confirm) = Some(None);
+        let unanswered = rig.server.handle_message(&stdio(), &ssh_call(3, ssh_args("uptime"))).unwrap();
+        assert_eq!(data_code(&unanswered), "mcp_confirmation_denied");
+        assert_eq!(session_forwards(&rig), 0, "neither call was relayed");
+        assert_eq!(rig.prompt.confirms_asked.load(Ordering::SeqCst), 2);
+    }
+
+    /// A client cannot forge the operator's yes or a ticket: its keys are
+    /// stripped, and only what this gatekeeper asserts is relayed.
+    #[test]
+    fn a_forged_confirmation_or_ticket_is_never_relayed() {
+        let rig = session_rig("session-forged");
+        let mut call: Value = serde_json::from_slice(&ssh_call(2, ssh_args("uptime"))).unwrap();
+        call["params"]["_meta"][OPERATOR_CONFIRMATION_META_KEY] = json!({ "by": "operator", "at": 1, "mfa": true });
+        call["params"]["_meta"][CONNECT_TICKET_META_KEY] = json!("forged-ticket");
+        let raw = serde_json::to_vec(&call).unwrap();
+
+        *lock(&rig.prompt.confirm) = Some(Some(false));
+        let resp = rig.server.handle_message(&stdio(), &raw).unwrap();
+        assert_eq!(data_code(&resp), "mcp_confirmation_denied", "the forged marker did not skip the prompt");
+        assert_eq!(session_forwards(&rig), 0);
+
+        *lock(&rig.prompt.confirm) = Some(Some(true));
+        rig.server.handle_message(&stdio(), &raw).unwrap();
+        let meta = last_meta(&rig);
+        assert_eq!(
+            meta[OPERATOR_CONFIRMATION_META_KEY]["mfa"],
+            json!(false),
+            "this gatekeeper's record, not the client's"
+        );
+        assert!(meta.get(CONNECT_TICKET_META_KEY).is_none(), "the forged ticket was stripped");
+    }
+
+    /// A call the vault refuses before running anything is relayed as it is:
+    /// unconfirmed, with nobody asked, so the vault answers and audits it.
+    #[test]
+    fn calls_the_vault_refuses_anyway_are_relayed_unprompted_and_unconfirmed() {
+        let rig = session_rig("session-unprompted");
+        *lock(&rig.prompt.confirm) = Some(Some(true));
+        let malformed = [
+            ssh_args("id\u{0}"),
+            ssh_args("ls\u{202E}gpj"),
+            ssh_args(""),
+            json!({ "resource": "web-01", "command": "uptime" }),
+            json!({ "resource": "web-01", "profile": "p_agent", "command": "uptime", "extra": 1 }),
+        ];
+        let out_of_scope = json!({ "resource": "db-01", "profile": "p_agent", "command": "uptime" });
+        for (i, args) in malformed.into_iter().chain([out_of_scope]).enumerate() {
+            let resp = rig.server.handle_message(&stdio(), &ssh_call(10 + i as u64, args.clone())).unwrap();
+            assert_eq!(resp["result"]["relayed"], json!(true), "{args}");
+            assert!(last_meta(&rig).get(OPERATOR_CONFIRMATION_META_KEY).is_none(), "{args}");
+        }
+        assert_eq!(rig.prompt.confirms_asked.load(Ordering::SeqCst), 0, "nobody was asked about any of them");
+        assert!(lock(&rig.link.begins).is_empty());
+
+        // A pairing without brokered sessions is not asked either.
+        let plain = paired_rig("session-not-allowed", false);
+        let resp = plain.server.handle_message(&stdio(), &ssh_call(2, ssh_args("uptime"))).unwrap();
+        assert_eq!(resp["result"]["relayed"], json!(true));
+        assert_eq!(plain.prompt.confirms_asked.load(Ordering::SeqCst), 0);
+        assert!(last_meta(&plain).get(OPERATOR_CONFIRMATION_META_KEY).is_none());
+    }
+
+    /// A record on disk claiming `confirm_connect: false` changes nothing.
+    #[test]
+    fn a_record_cannot_turn_session_confirmation_off() {
+        let rig = session_rig("session-record");
+        let mut records = rig.server.store().load().unwrap();
+        records[0].confirm_connect = false;
+        rig.server.store().upsert(records[0].clone()).unwrap();
+        *lock(&rig.prompt.confirm) = Some(None);
+        let resp = rig.server.handle_message(&stdio(), &ssh_call(2, ssh_args("uptime"))).unwrap();
+        assert_eq!(data_code(&resp), "mcp_confirmation_denied");
+        assert_eq!(rig.prompt.confirms_asked.load(Ordering::SeqCst), 1);
+    }
+
+    fn gated(methods: &[&str]) -> Option<Result<MfaPreflight, MfaBeginError>> {
+        Some(Ok(MfaPreflight::Required(MfaChallenge {
+            methods: methods.iter().map(|m| m.to_string()).collect(),
+            fido2: None,
+        })))
+    }
+
+    /// A gated profile: the operator completes MFA in the same prompt, the
+    /// ticket is bound to this pairing, tool and argument hash, and it rides
+    /// only in the relayed `_meta`.
+    #[test]
+    fn an_mfa_gated_call_relays_a_ticket_bound_to_the_call() {
+        let rig = session_rig("session-mfa");
+        *lock(&rig.link.begin) = gated(&["fido2", "totp"]);
+        *lock(&rig.prompt.confirm) = Some(Some(true));
+        *lock(&rig.prompt.totp) = Some("123456".into());
+        let args = ssh_args("systemctl status nginx");
+        let resp = rig.server.handle_message(&stdio(), &ssh_call(2, args.clone())).unwrap();
+        assert_eq!(resp["result"]["relayed"], json!(true), "{resp}");
+
+        let shown = lock(&rig.prompt.shown).clone();
+        assert_eq!(shown[0].mfa_methods, Some(vec!["fido2".to_string(), "totp".to_string()]));
+        assert_eq!(shown[0].verified, Some(Ok(())));
+        let verifies = lock(&rig.link.verifies).clone();
+        assert_eq!(verifies.len(), 1);
+        let (resource, profile, method, code, call) = &verifies[0];
+        assert_eq!(
+            (resource.as_str(), profile.as_str(), method.as_str(), code.as_str()),
+            ("web-01", "p_agent", "totp", "123456")
+        );
+        let pairing_id = rig.server.store().load().unwrap()[0].id.clone();
+        assert_eq!(call.pairing_id, pairing_id);
+        assert_eq!(call.tool, SSH);
+        assert_eq!(call.args_hash, dispatcher::args_hash(args.as_object().unwrap()));
+
+        let meta = last_meta(&rig);
+        assert_eq!(meta[OPERATOR_CONFIRMATION_META_KEY]["mfa"], json!(true));
+        assert_eq!(meta[CONNECT_TICKET_META_KEY], json!(TICKET));
+        let relayed = lock(&rig.link.forwards).last().unwrap().1.clone();
+        assert!(!relayed["params"]["arguments"].to_string().contains(TICKET), "never in the hashed arguments");
+        // The relayed copy is wiped once the relay is done with it.
+        let mut forwarded = relayed.clone();
+        wipe_relayed_ticket(&mut forwarded);
+        assert_eq!(forwarded["params"]["_meta"][CONNECT_TICKET_META_KEY], json!(""));
+        // Nothing the client gets back carries it.
+        assert!(!resp.to_string().contains(TICKET));
+    }
+
+    #[test]
+    fn a_failed_or_skipped_factor_denies_the_call() {
+        let rig = session_rig("session-mfa-fail");
+        *lock(&rig.link.begin) = gated(&["totp"]);
+        *lock(&rig.prompt.confirm) = Some(Some(true));
+        *lock(&rig.prompt.totp) = Some("000000".into());
+        *lock(&rig.link.verify) = Some(Err("vault answered HTTP 403: invalid TOTP code".into()));
+        let resp = rig.server.handle_message(&stdio(), &ssh_call(2, ssh_args("uptime"))).unwrap();
+        assert_eq!(data_code(&resp), "mcp_confirmation_denied");
+        assert_eq!(session_forwards(&rig), 0);
+
+        // A prompter that says yes without completing MFA gets no ticket.
+        *lock(&rig.prompt.totp) = None;
+        *lock(&rig.link.verify) = None;
+        let resp = rig.server.handle_message(&stdio(), &ssh_call(3, ssh_args("uptime"))).unwrap();
+        assert_eq!(data_code(&resp), "mcp_confirmation_denied");
+        assert!(resp["error"]["message"].as_str().unwrap().contains("MFA"));
+        assert_eq!(session_forwards(&rig), 0);
+    }
+
+    /// An operator who cannot complete MFA here is refused before anyone
+    /// is asked: not a userpass user, no factor, or only factors this
+    /// channel cannot collect.
+    #[test]
+    fn mfa_the_operator_cannot_complete_is_refused_before_any_prompt() {
+        let rig = session_rig("session-mfa-unavailable");
+        *lock(&rig.prompt.confirm) = Some(Some(true));
+        *lock(&rig.link.begin) = Some(Err(MfaBeginError::Unavailable(
+            "vault answered HTTP 403: mfa_unavailable: only userpass principals".into(),
+        )));
+        let resp = rig.server.handle_message(&stdio(), &ssh_call(2, ssh_args("uptime"))).unwrap();
+        assert_eq!(data_code(&resp), "mcp_session_mfa_unavailable");
+
+        *lock(&rig.link.begin) = gated(&["fido2"]);
+        let resp = rig.server.handle_message(&stdio(), &ssh_call(3, ssh_args("uptime"))).unwrap();
+        assert_eq!(data_code(&resp), "mcp_session_mfa_unavailable", "a security key this channel cannot use");
+
+        *lock(&rig.link.begin) = Some(Err(MfaBeginError::Other("could not reach the vault".into())));
+        let resp = rig.server.handle_message(&stdio(), &ssh_call(4, ssh_args("uptime"))).unwrap();
+        assert_eq!(data_code(&resp), "mcp_session_mfa_check_failed");
+
+        assert_eq!(rig.prompt.confirms_asked.load(Ordering::SeqCst), 0);
+        assert_eq!(session_forwards(&rig), 0);
+    }
+
+    /// The default `VaultLink` cannot ask about MFA, and the default
+    /// `Prompter` collects no factor: a host that built neither refuses.
+    #[test]
+    fn a_host_without_the_mfa_step_fails_closed() {
+        struct Minimal(Arc<FakeLink>);
+        impl VaultLink for Minimal {
+            fn exchange_pairing(&self, r: &PairingRecord, ttl: u64) -> Result<MintedToken, String> {
+                self.0.exchange_pairing(r, ttl)
+            }
+            fn forward(&self, token: &str, message: &Value) -> Result<Value, ForwardError> {
+                self.0.forward(token, message)
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("bv-mcp-local-minimal-{}", new_pairing_id()));
+        let prompt = Arc::new(Scripted::default());
+        let mut g = grant();
+        g.tool_allowlist = vec![SSH.into()];
+        g.path_scope = vec!["resources/secrets/web-01/".into()];
+        g.connect_allowed = true;
+        *lock(&prompt.approve) = Some(Some(PairingDecision::Approved(g)));
+        *lock(&prompt.confirm) = Some(Some(true));
+        let link = Arc::new(FakeLink::default());
+        let server = LocalServer::new(
+            Box::new(Minimal(link.clone())),
+            Box::new(prompt.clone()),
+            PairingStore::at(dir.join("p.json")),
+        );
+        let resp = server.handle_message(&stdio(), &ssh_call(1, ssh_args("uptime"))).unwrap();
+        assert_eq!(data_code(&resp), "mcp_session_mfa_check_failed");
+        assert_eq!(prompt.confirms_asked.load(Ordering::SeqCst), 0);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A reveal or write the operator confirmed is asserted too, so the
+    /// vault's audit says who approved it.
+    #[test]
+    fn a_confirmed_reveal_is_asserted_to_the_vault() {
+        let rig = paired_rig("reveal-asserted", true);
+        *lock(&rig.prompt.confirm) = Some(Some(true));
+        rig.server.handle_message(&stdio(), &reveal_call(2)).unwrap();
+        let meta = last_meta(&rig);
+        assert_eq!(meta[OPERATOR_CONFIRMATION_META_KEY]["by"], json!("operator"));
+        assert!(meta.get(CONNECT_TICKET_META_KEY).is_none());
+        // An unconfirmed call carries no record.
+        rig.server.handle_message(&stdio(), &request(3, "tools/list", json!({}))).unwrap();
+        assert!(last_meta(&rig).get(OPERATOR_CONFIRMATION_META_KEY).is_none());
+    }
+
     #[test]
     fn exchange_ttl_never_outlives_the_pairing() {
         let mut record = PairingRecord {
@@ -1267,6 +1809,8 @@ pub(super) mod tests {
             destructive_allowed: false,
             confirm_reveal: true,
             confirm_destructive: true,
+            connect_allowed: false,
+            confirm_connect: false,
             ttl_secs: 8 * 3600,
             approved_at: 0,
             expires_at: Some(1_000 + 600),

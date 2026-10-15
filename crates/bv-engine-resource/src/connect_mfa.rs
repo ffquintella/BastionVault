@@ -58,6 +58,51 @@ pub const TICKET_PREFIX: &str = "connect/mfa-tickets/";
 /// not to grant a window of privileged access.
 pub const TICKET_TTL_SECS: i64 = 120;
 
+/// How long a ticket bound to one MCP agent call stays redeemable
+/// (`features/mcp-brokered-sessions.md` §3.1): the gatekeeper relays it the
+/// moment the operator approves, so half the human window is ample.
+pub const MCP_CALL_TICKET_TTL_SECS: i64 = 60;
+
+/// The one MCP agent call a ticket was minted for (§3.1 step 3): the
+/// operator's step-up spent on exactly this pairing, tool and argument
+/// hash. A ticket carrying one is redeemable only on the agent route; a
+/// ticket without one only on a human Connect path.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpCallBinding {
+    pub pairing_id: String,
+    pub tool: String,
+    /// `bv_mcp::dispatcher::args_hash` of the call's `arguments`.
+    pub args_hash: String,
+}
+
+impl McpCallBinding {
+    /// Reads the `mcp_call` block of a verify body, strictly: exactly these
+    /// three strings, a pairing id by the exchange's own rule, a session
+    /// tool, and a BLAKE3 hex hash. Anything else is refused, never ignored.
+    pub fn from_request_block(block: &Value) -> Result<Self, String> {
+        let obj = block.as_object().ok_or("`mcp_call` must be an object")?;
+        if let Some(extra) = obj.keys().find(|k| !matches!(k.as_str(), "pairing_id" | "tool" | "args_hash")) {
+            return Err(format!("`mcp_call` has an unknown key `{extra}`"));
+        }
+        let field = |key: &str| -> Result<String, String> {
+            obj.get(key).and_then(Value::as_str).map(str::to_string).ok_or(format!("`mcp_call.{key}` is required"))
+        };
+        let (pairing_id, tool, args_hash) = (field("pairing_id")?, field("tool")?, field("args_hash")?);
+        let pairing_ok = (1..=64).contains(&pairing_id.len())
+            && pairing_id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        if !pairing_ok {
+            return Err("`mcp_call.pairing_id` must match [a-z0-9-]{1,64}".into());
+        }
+        if !crate::logical::is_open_world_mcp_tool(&tool) {
+            return Err("`mcp_call.tool` must be a brokered-session tool".into());
+        }
+        if args_hash.len() != 64 || !args_hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+            return Err("`mcp_call.args_hash` must be 64 lowercase hex characters".into());
+        }
+        Ok(Self { pairing_id, tool, args_hash })
+    }
+}
+
 /// A redeemed-once authorization to open a specific gated profile.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConnectMfaTicket {
@@ -78,17 +123,28 @@ pub struct ConnectMfaTicket {
     pub method: String,
     pub issued_at: String,
     pub expires_at: String,
+    /// Present on a ticket minted for one MCP agent call. Absent on a human
+    /// ticket, and on every record written before agent tickets existed --
+    /// which therefore stay human-only. Not written when absent, so a human
+    /// ticket's record is byte-for-byte what earlier releases wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_call: Option<McpCallBinding>,
 }
 
 /// The tuple a ticket must match to be redeemable. Every field is compared;
 /// a mismatch on any one of them is a hard failure, not a warning.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `mcp_call` is compared like the rest, which makes the human/agent split
+/// structural: a human Connect path expects `None` and so refuses an agent
+/// ticket, and the agent route expects `Some` and so refuses a human one.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TicketBinding {
     pub mount: String,
     pub principal: String,
     pub namespace: String,
     pub resource: String,
     pub profile_id: String,
+    pub mcp_call: Option<McpCallBinding>,
 }
 
 /// Why a ticket could not be redeemed. Every variant is a refusal — there is
@@ -179,6 +235,7 @@ impl ConnectMfaTicketStore {
         };
 
         let now = Utc::now();
+        let ttl = if binding.mcp_call.is_some() { MCP_CALL_TICKET_TTL_SECS } else { TICKET_TTL_SECS };
         let record = ConnectMfaTicket {
             mount: binding.mount.clone(),
             principal: binding.principal.clone(),
@@ -187,7 +244,8 @@ impl ConnectMfaTicketStore {
             profile_id: binding.profile_id.clone(),
             method: method.to_string(),
             issued_at: now.to_rfc3339(),
-            expires_at: (now + ChronoDuration::seconds(TICKET_TTL_SECS)).to_rfc3339(),
+            expires_at: (now + ChronoDuration::seconds(ttl)).to_rfc3339(),
+            mcp_call: binding.mcp_call.clone(),
         };
 
         let value = serde_json::to_vec(&record)?;
@@ -234,6 +292,19 @@ impl ConnectMfaTicketStore {
         }
         if record.profile_id != expect.profile_id {
             return Err(TicketError::Mismatch("profile"));
+        }
+        match (&record.mcp_call, &expect.mcp_call) {
+            (None, None) => {}
+            (Some(_), None) => {
+                return Err(TicketError::Mismatch("connect (it was issued for one MCP agent call)"))
+            }
+            (None, Some(_)) => {
+                return Err(TicketError::Mismatch("MCP agent call (it was issued for a human connect)"))
+            }
+            (Some(minted), Some(expected)) if minted != expected => {
+                return Err(TicketError::Mismatch("MCP agent call"))
+            }
+            (Some(_), Some(_)) => {}
         }
 
         let expires: DateTime<Utc> = DateTime::parse_from_rfc3339(&record.expires_at)
@@ -292,9 +363,12 @@ pub fn caller_principal(req: &Request) -> Result<(String, String), RvError> {
     let username = auth.metadata.get("username").map(|s| s.as_str()).unwrap_or_default();
 
     if username.is_empty() || !mount.starts_with("userpass") {
+        // `mfa_unavailable:` is a stable reason, like `mfa_required:`: the
+        // MCP gatekeeper reads it from `connect/mfa/begin` to refuse an agent
+        // call before prompting (features/mcp-brokered-sessions.md §3.1).
         return Err(bv_error_response_status!(
             403,
-            "this connection profile requires MFA re-validation, which is only \
+            "mfa_unavailable: this connection profile requires MFA re-validation, which is only \
              available to userpass principals (they are the only ones with a TOTP \
              key or security key on file). Connect with a userpass token, or clear \
              `require_mfa` on the profile."
@@ -437,6 +511,8 @@ pub async fn enforce(
         namespace: caller_namespace(core, req).await?,
         resource: resource.to_string(),
         profile_id: profile_id.to_string(),
+        // A human connect path: an agent ticket is refused here.
+        mcp_call: None,
     };
 
     let store = ConnectMfaTicketStore::new(core)?;
@@ -615,6 +691,9 @@ impl super::ResourceBackendInner {
             namespace: caller_namespace(&self.core, req).await?,
             resource: resource.to_string(),
             profile_id: profile_id.to_string(),
+            // Every caller of this is a human connect path: an agent ticket
+            // is refused (and burnt) here.
+            mcp_call: None,
         };
         let store = ConnectMfaTicketStore::new(&self.core)?;
         Ok(store.consume(ticket.as_str(), &binding).await?)
@@ -666,7 +745,7 @@ impl super::ResourceBackendInner {
         if !has_factor {
             return Err(bv_error_response_status!(
                 403,
-                "this connection profile requires MFA re-validation, but you have no \
+                "mfa_unavailable: this connection profile requires MFA re-validation, but you have no \
                  second factor enrolled. Enrol a TOTP key or a security key on your \
                  account, or ask an administrator to clear `require_mfa` on the profile."
             ));
@@ -685,6 +764,12 @@ impl super::ResourceBackendInner {
     /// ticket is bound here — to the profile the caller named on *this* call
     /// — so a verification for a low-value profile cannot be spent on a
     /// high-value one.
+    ///
+    /// With an `mcp_call` block (`features/mcp-brokered-sessions.md` §3.1)
+    /// the ticket is minted for that one agent call: 60 s, redeemable only on
+    /// the agent route, by the pairing, tool and argument hash it names. Only
+    /// the operator's own session may ask for one; an MCP-bound token never
+    /// reaches this handler (the MCP-origin gate), and is refused here too.
     pub async fn handle_connect_mfa_verify(
         &self,
         _backend: &dyn crate::logical::Backend,
@@ -710,6 +795,25 @@ impl super::ResourceBackendInner {
         let method = method
             .filter(|m| !m.is_empty())
             .ok_or_else(|| bv_error_response_status!(400, "`method` is required"))?;
+
+        // Read before the ceremony: a malformed block must not cost the
+        // operator a factor.
+        // Absent (or null) is a human ticket; present but not an object is
+        // refused -- never read as absent, which would mint a human ticket
+        // for a caller that asked for an agent one.
+        let mcp_call = match req.get_data("mcp_call") {
+            Err(RvError::ErrRequestFieldNotFound | RvError::ErrRequestNoData) | Ok(Value::Null) => None,
+            Err(_) => return Err(bv_error_response_status!(400, "`mcp_call` must be an object")),
+            Ok(block) => {
+                if req.auth.as_ref().is_some_and(|a| a.mcp_binding.is_some()) {
+                    return Err(bv_error_response_status!(
+                        403,
+                        "an MCP-bound token cannot mint an MCP agent-call ticket; the operator's own session must"
+                    ));
+                }
+                Some(McpCallBinding::from_request_block(&block).map_err(|m| bv_error_response_status!(400, &m))?)
+            }
+        };
 
         let (mount, principal) = caller_principal(req)?;
         let ns_prefix = step_up_ns_prefix(&self.core, req).await?;
@@ -745,6 +849,7 @@ impl super::ResourceBackendInner {
             namespace: caller_namespace(&self.core, req).await?,
             resource: resource.clone(),
             profile_id: profile_id.clone(),
+            mcp_call,
         };
         let store = ConnectMfaTicketStore::new(&self.core)?;
         let (ticket, record) = store.mint(&binding, &method).await?;
@@ -911,7 +1016,8 @@ mod tests {
         let mut auth = Auth::default();
         auth.metadata.insert("mount_path".into(), "approle/".into());
         req.auth = Some(auth);
-        assert!(caller_principal(&req).is_err());
+        let err = caller_principal(&req).unwrap_err().to_string();
+        assert!(err.contains("mfa_unavailable: "), "the reason the MCP gatekeeper reads: {err}");
 
         let mut auth = Auth::default();
         auth.metadata.insert("mount_path".into(), "userpass/".into());
@@ -921,6 +1027,36 @@ mod tests {
             caller_principal(&req).unwrap(),
             ("userpass/".to_string(), "alice".to_string())
         );
+    }
+
+    #[test]
+    fn the_mcp_call_block_is_read_strictly() {
+        let hash = "ab".repeat(32);
+        let ok = serde_json::json!({ "pairing_id": "0a1b-2c", "tool": "bv_resource_ssh_exec", "args_hash": hash });
+        let call = McpCallBinding::from_request_block(&ok).unwrap();
+        assert_eq!((call.pairing_id.as_str(), call.tool.as_str()), ("0a1b-2c", "bv_resource_ssh_exec"));
+        for bad in [
+            serde_json::json!("x"),
+            serde_json::json!({ "pairing_id": "p", "tool": "bv_resource_ssh_exec" }),
+            serde_json::json!({ "pairing_id": "P!", "tool": "bv_resource_ssh_exec", "args_hash": hash }),
+            serde_json::json!({ "pairing_id": "p", "tool": "bv_kv_read", "args_hash": hash }),
+            serde_json::json!({ "pairing_id": "p", "tool": "bv_resource_ssh_exec", "args_hash": "AB".repeat(32) }),
+            serde_json::json!({ "pairing_id": "p", "tool": "bv_resource_ssh_exec", "args_hash": "ab" }),
+            serde_json::json!({ "pairing_id": "p", "tool": "bv_resource_ssh_exec", "args_hash": hash, "x": 1 }),
+        ] {
+            assert!(McpCallBinding::from_request_block(&bad).is_err(), "{bad}");
+        }
+    }
+
+    /// An old ticket record reads as human-only, and a human ticket is
+    /// written exactly as earlier releases wrote it.
+    #[test]
+    fn a_ticket_without_mcp_call_is_a_human_ticket_on_disk_and_off() {
+        let old = r#"{"mount":"userpass/","principal":"felipe","namespace":"","resource":"web-01",
+                      "profile_id":"p","method":"totp","issued_at":"x","expires_at":"y"}"#;
+        let record: ConnectMfaTicket = serde_json::from_str(old).unwrap();
+        assert!(record.mcp_call.is_none());
+        assert!(!serde_json::to_string(&record).unwrap().contains("mcp_call"));
     }
 
     /// Regression: a root-issued userpass token operating in a child namespace

@@ -1,10 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 
-import { Badge, Button, Input, Modal, Textarea } from "./ui";
+import { Badge, Button, Input, Modal, Textarea, useToast } from "./ui";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
-import type { McpCatalogueTool, McpConfirmPrompt, McpPairingPrompt, McpPrompt } from "../lib/types";
+import type {
+  McpCatalogueTool,
+  McpConfirmPrompt,
+  McpMfaAnswer,
+  McpPairingPrompt,
+  McpPrompt,
+  McpSessionPrompt,
+} from "../lib/types";
 import { useAuthStore } from "../stores/authStore";
 
 /** Events the Rust host (`gui/src-tauri/src/mcp_host`) sends the main window. */
@@ -31,6 +38,12 @@ function isPrompt(p: unknown): p is McpPrompt {
   const { kind, id } = p as { kind?: unknown; id?: unknown };
   return (kind === "pairing" || kind === "confirm") && typeof id === "string" && id.length > 0;
 }
+
+/** The pairing-dialog warning when one assistant may both reveal secrets and
+ *  open sessions (features/mcp-brokered-sessions.md §9). */
+export const TRIFECTA_WARNING =
+  "This assistant can read secret values and run commands on servers. A hijacked assistant could send a " +
+  "secret to a server. You will approve each command; read them.";
 
 /** Seconds left before the host refuses on the operator's behalf. */
 function useSecondsLeft(deadlineMs: number): number {
@@ -70,6 +83,8 @@ export function McpPairingModal({ prompt, onDone }: { prompt: McpPairingPrompt; 
   const [confirmReveal, setConfirmReveal] = useState(true);
   const [destructive, setDestructive] = useState(false);
   const [confirmDestructive, setConfirmDestructive] = useState(true);
+  // Brokered sessions: off by default, one checkbox per session tool.
+  const [sessions, setSessions] = useState<string[]>([]);
   const maxHours = Math.max(1, Math.floor(prompt.max_ttl_secs / 3600));
   const [hours, setHours] = useState(String(Math.max(1, Math.round(prompt.default_ttl_secs / 3600))));
   const [error, setError] = useState<string | null>(null);
@@ -97,6 +112,10 @@ export function McpPairingModal({ prompt, onDone }: { prompt: McpPairingPrompt; 
     setSelected((cur) => (cur.includes(name) ? cur.filter((t) => t !== name) : [...cur, name]));
   }
 
+  function toggleSession(name: string) {
+    setSessions((cur) => (cur.includes(name) ? cur.filter((t) => t !== name) : [...cur, name]));
+  }
+
   async function answer(approved: boolean) {
     setBusy(true);
     setError(null);
@@ -108,12 +127,13 @@ export function McpPairingModal({ prompt, onDone }: { prompt: McpPairingPrompt; 
               kind: "pairing",
               approved: true,
               grant: {
-                tool_allowlist: selected,
+                tool_allowlist: [...selected, ...sessions],
                 path_scope: paths,
                 reveal_allowed: reveal,
                 destructive_allowed: destructive,
                 confirm_reveal: reveal && confirmReveal,
                 confirm_destructive: destructive && confirmDestructive,
+                connect_allowed: sessions.length > 0,
                 ttl_secs: hoursNum * 3600,
               },
             }
@@ -130,7 +150,10 @@ export function McpPairingModal({ prompt, onDone }: { prompt: McpPairingPrompt; 
     }
   }
 
-  const listed = tools.length > 0 ? tools : prompt.default_tools.map((name) => ({ name, description: "", kind: "read" }));
+  const known = tools.length > 0 ? tools : prompt.default_tools.map((name) => ({ name, description: "", kind: "read" }));
+  // Session tools are granted in their own section, never from the list.
+  const listed = known.filter((t) => t.kind !== "session");
+  const sessionTools = tools.filter((t) => t.kind === "session");
 
   return (
     <Modal
@@ -246,6 +269,37 @@ export function McpPairingModal({ prompt, onDone }: { prompt: McpPairingPrompt; 
             value={hours}
             onChange={(e) => setHours(e.target.value)}
           />
+          {sessionTools.length > 0 && (
+            <div className="col-span-2 space-y-2 rounded border border-[var(--color-border)] p-3">
+              <p className="font-medium">Brokered sessions — lets this assistant open connections to your servers</p>
+              <p className="text-xs text-[var(--color-text-muted)]">
+                The vault opens the connection and holds the credential; the assistant gets only the output. Every
+                call is shown to you for approval, with the exact command, and runs only if you allow it. This
+                cannot be turned off.
+              </p>
+              <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
+                {sessionTools.map((t) => (
+                  <label key={t.name} className="flex min-w-0 items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={sessions.includes(t.name)}
+                      onChange={() => toggleSession(t.name)}
+                      aria-label={t.name}
+                    />
+                    <span className="min-w-0 truncate font-mono text-xs" title={t.description}>
+                      {t.name}
+                    </span>
+                    <Badge variant="error" label="session" />
+                  </label>
+                ))}
+              </div>
+              {sessions.length > 0 && reveal && (
+                <p role="alert" className="text-sm text-[var(--color-danger)]">
+                  {TRIFECTA_WARNING}
+                </p>
+              )}
+            </div>
+          )}
         </div>
         {paths.length === 0 && (
           <p className="text-xs text-[var(--color-text-muted)]">Add at least one path the assistant may touch.</p>
@@ -267,6 +321,11 @@ function confirmVerb(prompt: McpConfirmPrompt): string {
  * grant allows but asked to confirm. Deny is the default; closing denies.
  */
 export function McpConfirmModal({ prompt, onDone }: { prompt: McpConfirmPrompt; onDone: () => void }) {
+  if (prompt.session) return <McpSessionConfirmModal prompt={prompt} session={prompt.session} onDone={onDone} />;
+  return <McpCallConfirmModal prompt={prompt} onDone={onDone} />;
+}
+
+function McpCallConfirmModal({ prompt, onDone }: { prompt: McpConfirmPrompt; onDone: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -322,6 +381,245 @@ export function McpConfirmModal({ prompt, onDone }: { prompt: McpConfirmPrompt; 
         </div>
         <Countdown deadlineMs={prompt.deadline_unix_ms} />
         {error && <p className="text-sm text-[var(--color-danger)]">{error}</p>}
+      </div>
+    </Modal>
+  );
+}
+
+
+/** The command as the operator reads it: every line numbered, so each line
+ *  break is visible; never truncated (the box scrolls). The host has already
+ *  escaped anything that could hide or disguise text. */
+function CommandBox({ session }: { session: McpSessionPrompt }) {
+  const lines = session.command.split("\n");
+  return (
+    <div className="space-y-1">
+      <p className="text-xs text-[var(--color-text-muted)]">
+        {`Command — ${session.command_bytes} bytes, ${lines.length} line${lines.length === 1 ? "" : "s"}`}
+      </p>
+      <div
+        data-testid="mcp-session-command"
+        className="max-h-60 overflow-auto rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] p-2 font-mono text-xs"
+      >
+        {lines.map((line, i) => (
+          <div key={i} className="flex min-w-0 gap-2">
+            <span className="select-none text-[var(--color-text-muted)]">{i + 1}</span>
+            <span className="min-w-0 whitespace-pre-wrap break-all">{line}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The per-call confirmation of a brokered session (features/mcp-brokered-sessions.md
+ * §9): mandatory for every call. It shows the resource, profile, protocol and
+ * the exact command, and — on an MFA-gated profile — collects the operator's
+ * own factor: "<client> is asking you to complete MFA to access <resource>".
+ * Deny is the default; closing, Escape and the timeout deny; a factor the vault
+ * refuses denies. The host verifies the factor and keeps the ticket; this
+ * dialog never sees it.
+ */
+function McpSessionConfirmModal({
+  prompt,
+  session,
+  onDone,
+}: {
+  prompt: McpConfirmPrompt;
+  session: McpSessionPrompt;
+  onDone: () => void;
+}) {
+  const { toast } = useToast();
+  const methods = prompt.mfa?.methods ?? [];
+  const needsMfa = !!prompt.mfa;
+  const hasTotp = methods.includes("totp");
+  const hasKey = methods.includes("fido2");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState<null | "deny" | "allow" | "key">(null);
+  const [error, setError] = useState<string | null>(null);
+  const [keyStatus, setKeyStatus] = useState<string | null>(null);
+  const [pinOpen, setPinOpen] = useState(false);
+  const [pin, setPin] = useState("");
+
+  // The security-key ceremony runs in the host while this dialog is open:
+  // mirror its progress, and relay the key's PIN when it asks for one.
+  useEffect(() => {
+    if (!hasKey) return;
+    const status = listen<string>("fido2-status", (e) => {
+      if (e.payload === "tap-key") setKeyStatus("Tap your security key now…");
+      else if (e.payload === "insert-key") setKeyStatus("Insert your security key…");
+      else if (e.payload === "processing") setKeyStatus("Checking with the vault…");
+    });
+    const pinAsk = listen<string>("fido2-pin-request", () => {
+      setPin("");
+      setPinOpen(true);
+    });
+    return () => {
+      void status.then((u) => u());
+      void pinAsk.then((u) => u());
+    };
+  }, [hasKey]);
+
+  async function send(allow: boolean, mfa?: McpMfaAnswer) {
+    setBusy(!allow ? "deny" : mfa?.method === "fido2" ? "key" : "allow");
+    setError(null);
+    try {
+      await api.mcpPromptAnswer(prompt.id, mfa ? { kind: "confirm", allow, mfa } : { kind: "confirm", allow });
+      onDone();
+    } catch (e) {
+      const message = extractError(e);
+      if (!allow) {
+        onDone();
+      } else if (mfa) {
+        // The host has already refused the call; say why, wherever this
+        // dialog has gone.
+        toast("error", message);
+        setError(message);
+        onDone();
+      } else {
+        setError(message);
+      }
+    } finally {
+      setBusy(null);
+      setKeyStatus(null);
+    }
+  }
+
+  const submitPin = async () => {
+    const value = pin;
+    setPin("");
+    setPinOpen(false);
+    try {
+      await api.fido2SubmitPin(value);
+    } catch (e) {
+      setError(extractError(e));
+    }
+  };
+
+  const canRunWithCode = hasTotp && /^\d{6,10}$/.test(code.trim());
+  return (
+    <Modal
+      open
+      onClose={() => void send(false)}
+      title={`Run a command on ${session.resource}?`}
+      size="lg"
+      actions={
+        <>
+          <Button variant="ghost" onClick={() => void send(false)} disabled={busy !== null} autoFocus>
+            Deny
+          </Button>
+          {!needsMfa && (
+            <Button variant="danger" onClick={() => void send(true)} loading={busy === "allow"}>
+              Run once
+            </Button>
+          )}
+          {needsMfa && hasKey && (
+            <Button
+              variant={hasTotp ? "ghost" : "danger"}
+              onClick={() => void send(true, { method: "fido2" })}
+              loading={busy === "key"}
+              disabled={busy !== null}
+            >
+              Use security key and run
+            </Button>
+          )}
+          {needsMfa && hasTotp && (
+            <Button
+              variant="danger"
+              onClick={() => void send(true, { method: "totp", code: code.trim() })}
+              disabled={!canRunWithCode || busy !== null}
+              loading={busy === "allow"}
+            >
+              Verify code and run once
+            </Button>
+          )}
+        </>
+      }
+    >
+      <div className="space-y-3 text-sm">
+        <p>
+          <span className="font-medium">{prompt.client_name}</span> wants to run a command on{" "}
+          <span className="font-medium break-all">{session.resource}</span> over {session.protocol.toUpperCase()},
+          through a session the vault opens and closes for this one call.
+        </p>
+        <div className="grid grid-cols-2 gap-3 rounded border border-[var(--color-border)] p-3">
+          <div className="min-w-0">
+            <p className="text-xs text-[var(--color-text-muted)]">Resource</p>
+            <p className="truncate font-mono text-xs" title={session.resource}>
+              {session.resource}
+            </p>
+          </div>
+          <div className="min-w-0">
+            <p className="text-xs text-[var(--color-text-muted)]">Profile</p>
+            <p className="truncate font-mono text-xs" title={session.profile}>
+              {session.profile}
+            </p>
+          </div>
+          <div className="min-w-0">
+            <p className="text-xs text-[var(--color-text-muted)]">Protocol</p>
+            <p className="font-mono text-xs">{session.protocol}</p>
+          </div>
+          <div className="min-w-0">
+            <p className="text-xs text-[var(--color-text-muted)]">Tool</p>
+            <p className="truncate font-mono text-xs">{prompt.tool}</p>
+          </div>
+          <div className="col-span-2">
+            <CommandBox session={session} />
+          </div>
+        </div>
+        <p className="text-xs text-[var(--color-text-muted)]">
+          Read the command: it runs exactly as shown, with the profile&apos;s credential, which the assistant never
+          sees. Its output goes back to the assistant.
+        </p>
+        {needsMfa && (
+          <div className="space-y-2 rounded border border-[var(--color-border)] p-3">
+            <p>
+              <span className="font-medium">{prompt.client_name}</span> is asking you to complete MFA to access{" "}
+              <span className="font-medium break-all">{session.resource}</span> (profile{" "}
+              <span className="font-mono text-xs">{session.profile}</span>).
+            </p>
+            {methods.length === 0 && (
+              <p className="text-[var(--color-danger)]">None of your enrolled factors can be used here.</p>
+            )}
+            {hasTotp && (
+              <Input
+                label="Authenticator code"
+                value={code}
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                placeholder="123456"
+                disabled={busy !== null}
+                onChange={(e) => setCode(e.target.value)}
+                hint="The current code from the authenticator app bound to your account."
+              />
+            )}
+            {hasKey && keyStatus && <p className="text-xs text-[var(--color-text-muted)]">{keyStatus}</p>}
+            {pinOpen && (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="col-span-2">
+                  <Input
+                    label="Security key PIN"
+                    type="password"
+                    autoComplete="off"
+                    value={pin}
+                    onChange={(e) => setPin(e.target.value)}
+                    hint="The PIN of the security key itself. It goes to the key only."
+                  />
+                </div>
+                <Button onClick={() => void submitPin()} disabled={pin.length === 0}>
+                  Unlock key
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+        <Countdown deadlineMs={prompt.deadline_unix_ms} />
+        {error && (
+          <p role="alert" className="text-sm text-[var(--color-danger)]">
+            {error}
+          </p>
+        )}
       </div>
     </Modal>
   );

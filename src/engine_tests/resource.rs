@@ -474,6 +474,7 @@ mod ticket_store_tests {
             namespace: String::new(),
             resource: "web01".into(),
             profile_id: "p_abc".into(),
+            mcp_call: None,
         }
     }
 

@@ -1964,6 +1964,12 @@ session tool on a token without `connect_allowed` and `confirm_connect`) and
 always), plus the session handler's codes listed under
 [`resources/v2/connect/agent/ssh/exec`](#post-resourcesv2connectagentsshexec-mcp-only).
 
+`params._meta` may carry, besides `io.modelcontextprotocol/*`, the local
+gatekeeper's `io.bastionvault/confirmation` (the operator approved this call)
+and `io.bastionvault/connect_ticket` (the operator's MFA ticket for this
+session call, handed only to the session handler). The gatekeeper removes
+both from whatever the client sent before adding its own.
+
 The catalogue has one session tool, `bv_resource_ssh_exec`, which reports
 `openWorldHint: true`; every other tool reports `false`. **This retracts the
 earlier statement that no tool opens a network connection.** A session tool
@@ -2163,7 +2169,10 @@ authorize an agent.
 
 Body (the dispatcher builds it from the tool's arguments): `resource`,
 `profile_id`, `command`, optional `timeout_secs` (1 to
-`mcp.brokered_sessions.call_timeout_secs`).
+`mcp.brokered_sessions.call_timeout_secs`), and `connect_ticket` — the
+operator's MFA ticket the local gatekeeper relayed in
+`_meta["io.bastionvault/connect_ticket"]`, never taken from the tool's
+arguments.
 
 Checks, in order, each refusal a stable code and a `connect.agent.refused`
 event; nothing is dialed and no credential is touched before the last one
@@ -2179,17 +2188,25 @@ passes:
 | `ssh` in `mcp.brokered_sessions.protocols`; the build has the executor (cargo feature `mcp_sessions_ssh`) | `mcp_session_protocol_disabled` |
 | The connect gate on `resources/secrets/<resource>/` | `403 permission denied` (`reason: permission_denied`) |
 | Type `agent_sessions_max` and profile `agent_access` both `"allow"`; an SSH profile with a supported source and a host-key pin | `mcp_session_profile_not_agent_enabled`, `mcp_session_login_class_unsupported`, `mcp_session_host_key_unpinned` |
-| The profile is not MFA-gated (`require_mfa`) | `mcp_session_mfa_required`; `mcp_session_mfa_unavailable` when the pairing's operator is not a userpass user |
+| An MFA-gated profile (`require_mfa`) carries the operator's ticket for this exact call, redeemed once | `mcp_session_mfa_required` (no ticket); `mcp_session_mfa_ticket_refused` (unknown, spent, expired, a human ticket, or bound to another operator, resource, profile, pairing, tool or arguments hash — the ticket is burnt); `mcp_session_mfa_unavailable` (the pairing's operator is not a userpass user, or signed in to another namespace than the call runs in) |
 | No bastion route: a `rustion` profile, a `rustion-required` policy, or `rustion-preferred` with a bastion | `mcp_session_requires_bastion` |
 | Rate (per pairing per minute) and concurrency (one per pairing, `max_concurrent` per node) | `mcp_rate_limited`, `mcp_session_busy` |
 | Destination policy on every resolved address of the target | `mcp_session_destination_refused` |
 
-MFA-gated profiles are refused in this build: the operator's step-up in the
-confirmation dialog is not built yet. The local gatekeepers (`bvault mcp
-serve`, the desktop app) do not yet send the confirmation record either; they
-strip any `io.bastionvault/*` key a client puts in `_meta`, so a session call
-relayed through them is refused with `mcp_confirmation_required` until they
-confirm session calls.
+The confirmation record and the ticket come from the local gatekeeper
+(`bvault mcp serve`, the desktop app), which strips any `io.bastionvault/*`
+key the MCP client sent and adds its own only after the operator approved the
+call ([spec](../features/mcp-brokered-sessions.md) §3.1, §9). The vault audits
+the confirmation as `operator_confirmation: "asserted-by-local-host"`. The
+ticket it verifies itself: it must have been minted by
+[`connect/mfa/verify` with `mcp_call`](#post-resourcesv2connectmfaverify-with-mcp_call)
+for the binding's operator (`mount`, `principal` and `namespace` from the
+token's operator record), this resource and profile, and
+`{pairing_id, tool, args_hash}` of this pairing, this tool and the hash of
+this call's `arguments` (`args_hash` in the `mcp` audit block). It is
+redeemed before any credential is touched, and a successful redemption is
+logged as `connect.mfa.authorized … mcp_call=true pairing_id=… tool=…`; the
+`connect.agent.ssh.exec` event and the transcript carry `mfa_method`.
 
 The target is the profile's `target_host`, else the resource's `ip_address`,
 else its `hostname`, on the profile's `target_port` (default 22) — never a
@@ -2247,6 +2264,40 @@ Every session that ran is recorded in a transcript
 ([`v2/sys/mcp/transcripts`](#get-v2sysmcptranscripts)): the command, both
 streams as captured (up to 1 MiB each, credential-scrubbed, not sanitized),
 the exit status and the host key.
+
+### `POST resources/v2/connect/mfa/verify` with `mcp_call`
+
+The connect-time MFA verify (`resources/v2/connect/mfa/begin` reports whether
+a profile is gated and which factors the caller holds; `verify` takes
+`resource`, `profile_id`, `method` = `totp` | `fido2`, and `totp_code` or
+`credential`) accepts one more, optional body field for the MCP gatekeeper
+([spec](../features/mcp-brokered-sessions.md) §3.1):
+
+```json
+{ "resource": "web-01", "profile_id": "p_agent", "method": "totp", "totp_code": "123456",
+  "mcp_call": { "pairing_id": "0f3c…", "tool": "bv_resource_ssh_exec", "args_hash": "<64 hex>" } }
+```
+
+- With `mcp_call`, the ticket is bound to that one agent call, expires after
+  **60 s** (a human ticket: 120 s), and is redeemable **only** on the agent
+  route above. Without it, the ticket is a human one, redeemable only on the
+  human Connect paths (`connect/authorize`, `connect/web/launch`, the
+  Rustion open). Each side refuses — and burns — the other's ticket.
+- `mcp_call` is read strictly, before the factor is checked: exactly
+  `pairing_id` (`[a-z0-9-]{1,64}`), `tool` (a brokered-session tool) and
+  `args_hash` (64 lowercase hex, `bv_mcp::dispatcher::args_hash` of the
+  call's `arguments`); anything else is `400`. A non-object `mcp_call` is
+  refused, never read as absent.
+- Only the operator's own session can ask for one: an MCP-bound token never
+  reaches this path (the MCP-origin gate) and is refused here too (`403`).
+- The step-up is userpass-only. `begin` and `verify` refuse any other caller
+  on a gated profile with a reason that starts `mfa_unavailable:` (as they do
+  a userpass caller with no factor enrolled); the gatekeeper turns that into
+  `mcp_session_mfa_unavailable` before it prompts anyone.
+- The response is the same as without `mcp_call`: `connect_ticket`,
+  `expires_at`, `method`, `resource`, `profile_id`. The gatekeeper keeps the
+  ticket in memory and relays it with the call; it is never shown to the MCP
+  client or the desktop window.
 
 ## Response Format
 

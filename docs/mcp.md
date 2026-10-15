@@ -72,11 +72,11 @@ receives a password, key or certificate. The design, and what it does not
 protect against, is in
 [`features/mcp-brokered-sessions.md`](../features/mcp-brokered-sessions.md).
 
-> **This build:** the vault side is complete, but the local gatekeepers do not
-> yet ask you to confirm a session call, so every call is refused
-> (`mcp_confirmation_required`) until they do. MFA-gated profiles are refused
-> too (`mcp_session_mfa_required`) until the confirmation dialog can run your
-> step-up.
+**You approve every call.** The desktop app or `bvault mcp serve` shows each
+session call before anything is dialed — resource, profile, protocol and the
+exact command — and it runs only if you allow it. There is no setting, grant
+or "allow for a while" that skips this. See
+[Approving session calls](#approving-session-calls).
 
 **What turns it on.** All of these, and a binary built with the
 `mcp_sessions_ssh` cargo feature:
@@ -125,6 +125,65 @@ never loopback, link-local (including `169.254.169.254`), multicast, this
 host's own addresses or the cluster's nodes, whatever the list says. The name
 is resolved once and only the checked addresses are dialed. The host key must
 match the pin before any credential is sent.
+
+### Approving session calls
+
+When a paired assistant calls `bv_resource_ssh_exec`, the gatekeeper first
+checks what the vault would refuse anyway — a pairing without brokered
+sessions, a malformed command, a resource outside the path scope — and relays
+those unprompted, so the vault answers them with its own code and audit event
+and nobody is asked. Every other call is shown to you:
+
+- **Desktop app:** **Run a command on *web-01*?**, with the resource, profile,
+  protocol and the command in a box with numbered lines and its byte length.
+  It is never truncated (the box scrolls). A character that could hide or
+  disguise text — a control, a bidi or zero-width character, an unusual space
+  — is shown as `\u{XXXX}`; most of them are refused before you are asked.
+  **Deny** has the focus; Escape, closing the dialog and 90 seconds without an
+  answer deny.
+- **`bvault mcp serve`:** the same lines on the terminal it runs in, then
+  `Run this command once? [y/N]`. Anything but `y` denies, and so does no
+  answer within 90 seconds. Keys typed before the question are discarded, so
+  a stray `y` cannot approve the next call.
+
+**MFA-gated profiles.** When the profile has `require_mfa`, the same prompt
+says "*claude-code* is asking you to complete MFA to access *web-01*" and asks
+for **your** second factor — the assistant never completes MFA:
+
+- the desktop app takes a TOTP code, or runs your security key (with its PIN
+  if it has one);
+- `bvault mcp serve` takes a TOTP code only. An operator whose only factor is
+  a security key is refused there, with a message naming the desktop app.
+
+The gatekeeper asks the vault, as you (your login, not the assistant's token),
+whether the profile is gated (`resources/v2/connect/mfa/begin`), then verifies
+your factor (`…/mfa/verify`) for that **one call**: the vault mints a ticket
+bound to your login, the resource, the profile, this pairing, the tool and the
+hash of the call's arguments, valid for 60 seconds and usable once. The
+gatekeeper keeps it in memory and relays it to the vault with the call; the
+assistant never sees it, the desktop window never sees it, and no result
+echoes it. A wrong code denies the call. A different command, another
+assistant, a second use, a human Connect window or a late use all find the
+ticket refused (`mcp_session_mfa_ticket_refused`).
+
+Only a **userpass** operator can do this: TOTP keys and security keys are
+enrolled on userpass users. An operator who signed in another way can use
+ungated profiles only; a gated one is refused before you are asked
+(`mcp_session_mfa_unavailable`).
+
+**What reaches the vault.** On approval the gatekeeper adds
+`_meta["io.bastionvault/confirmation"] = {"by": "operator", "at": …, "mfa": …}`
+(and, for a gated profile, the ticket) after removing any `io.bastionvault/*`
+key the assistant sent. The vault cannot see your click, so it records the
+confirmation as `operator_confirmation: "asserted-by-local-host"`; the MFA leg
+is verified by the vault itself.
+
+**Pairing.** Brokered sessions are a separate, off-by-default choice when you
+approve an assistant: the desktop dialog's **Brokered sessions** section (one
+checkbox per session tool), or the `Allow brokered sessions?` question of
+`bvault mcp pair`. If the same assistant may also reveal secret values, you
+are warned: it can read a secret **and** run a command that sends it
+somewhere — you will approve each command, so read them.
 
 **What is recorded.** Every refusal and every session is audited
 (`connect.agent.refused`, `connect.agent.ssh.exec`, `connect.agent.aborted`;
@@ -266,7 +325,8 @@ the assistant reaches it by launching the app's own binary.
    to, and whether the kernel confirmed it runs as your user. Choose the tools (preselected: the read-only
    ones that never reveal a value), the path scope (required), whether it may
    reveal values or make changes, whether to confirm each such call (on by
-   default), and the token lifetime. **Deny**, closing the dialog, or no answer
+   default), the token lifetime, and — in its own section, off by default —
+   whether it may open **brokered sessions**. **Deny**, closing the dialog, or no answer
    within 3 minutes refuses it. An assistant that gave up waiting reconnects and
    finds the approval recorded. An approval belongs to the assistant on this
    computer, not to the vault: signed in to another vault later, the app serves
@@ -275,7 +335,9 @@ the assistant reaches it by launching the app's own binary.
 5. A paired assistant's reveal or write, when you asked to confirm it, shows
    **Allow this AI-assistant call?** naming the tool and what it touches (mount,
    path, key — never a value). Deny is the default; no answer within 90 seconds
-   refuses the call.
+   refuses the call. A brokered-session call always shows **Run a command on
+   …?** ([Approving session calls](#approving-session-calls)), with the MFA
+   step when the profile requires it.
 
 How it fits together: `--mcp-stdio` starts no window. It connects to the app's
 socket — `mcp-gui.sock` beside the pairing store (`$XDG_CONFIG_HOME/bvault/`,
@@ -319,7 +381,9 @@ domain sockets in this build); use `bvault mcp serve`.
    `clientInfo`. Claude Code reports `claude-code`; Claude Desktop reports
    `claude-desktop`. You are shown who is asking and choose the path scope, the tools
    (default: read-only, never reveals a value), whether it may reveal values or
-   make changes, and whether you want to confirm each such call.
+   make changes, whether you want to confirm each such call, and whether it may
+   open brokered sessions (every one of which you confirm, at the terminal
+   `bvault mcp serve` runs in).
 3. Point the assistant at the server.
 
    Claude Desktop (`claude_desktop_config.json`):
@@ -397,7 +461,9 @@ With none, a client that is not yet paired is **refused**
 (`mcp_pairing_requires_operator`) and a call that needs confirmation is refused
 (`mcp_confirmation_denied`). This is intentional: nothing is approved silently.
 Run `bvault mcp pair` first, and choose "no" to per-call confirmation only if you
-accept an unattended reveal or write.
+accept an unattended reveal or write. A brokered-session call has no such
+choice: it always needs you at a terminal (or in the desktop app), so a headless
+`bvault mcp serve` refuses every one.
 
 ## The limits, stated plainly
 
@@ -441,6 +507,13 @@ process-local, so MRTR confirmations are not shared across an HA cluster or a
 restart), a log of recent local calls in the desktop app, and
 external/enterprise authorization (blocked on the Identity Provider feature).
 
+Brokered sessions (T136): the embedded vault in the desktop app has no
+brokered-sessions switch yet, so sessions work against a remote vault only;
+`bvault mcp serve` cannot use a security key for the MFA step; an operator
+who did not sign in with userpass cannot reach MFA-gated profiles; and an
+operator signed in to a child namespace cannot either, because agent calls
+run in the root namespace.
+
 ## Troubleshooting
 
 | Symptom | Cause |
@@ -458,10 +531,12 @@ external/enterprise authorization (blocked on the Identity Provider feature).
 | `mcp_tool_not_allowed` / `mcp_path_out_of_scope` | Outside the grant |
 | `mcp_reveal_denied` / `mcp_destructive_denied` | The grant does not allow it |
 | `mcp_connect_not_allowed` | The pairing was not granted brokered sessions (`connect_allowed`) |
-| `mcp_confirmation_required` | A session call without your confirmation; this build's gatekeepers do not send one yet |
+| `mcp_confirmation_required` | A session call reached the vault without a gatekeeper's confirmation: the assistant called `/v2/mcp` directly, or through a gatekeeper older than this release |
 | `mcp_brokered_sessions_disabled` / `mcp_session_protocol_disabled` | A switch is off: `mcp.brokered_sessions`, its `protocols`, the runtime switch, or a build without `mcp_sessions_ssh` |
 | `mcp_session_profile_not_agent_enabled` | The type's `agent_sessions_max` or the profile's `agent_access` is not `allow` |
-| `mcp_session_mfa_required` / `mcp_session_mfa_unavailable` | The profile requires MFA; not supported for sessions yet / the operator is not a userpass user |
+| `mcp_session_mfa_required` / `mcp_session_mfa_unavailable` | The profile requires MFA and the call carried no ticket (a gatekeeper older than this release) / you cannot complete it here: not a userpass user, no factor enrolled, only a security key at `bvault mcp serve`, or signed in to a child namespace |
+| `mcp_session_mfa_ticket_refused` | Your MFA ticket was for another call, expired (60 s) or already used; it is burnt, and the assistant's retry asks you again |
+| `mcp_session_mfa_check_failed` | The gatekeeper could not ask the vault whether the profile is gated (unreachable, or your session may not read the resource or profile) |
 | `mcp_session_requires_bastion` | The resource must be reached through Rustion, which cannot run an agent's command |
 | `mcp_session_destination_refused` | The target address is outside `allowed_target_cidrs`, or always denied |
 | `mcp_session_host_key_unpinned` / `mcp_session_host_key_mismatch` | No pin on the profile / the server's key is not the pinned one |
