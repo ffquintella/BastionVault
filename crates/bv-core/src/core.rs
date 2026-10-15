@@ -172,6 +172,13 @@ pub struct Core {
     /// `bv_kernel_api::change_epochs` for why persisting the counters would be
     /// the wrong trade, and what that costs in an HA cluster.
     pub change_epochs: Arc<bv_kernel_api::ChangeEpochs>,
+    /// The server config's `mcp.brokered_sessions` block
+    /// (`features/mcp-brokered-sessions.md` §12), as loaded at startup. Static:
+    /// the runtime layer (`sys/mcp/config`) is read per request and overrides
+    /// the destination list without touching this. The defaults — sessions off,
+    /// no destination list of its own — when the vault was built without a
+    /// config (tests, an embedded vault that has not set one).
+    pub mcp_brokered_sessions: crate::config::BrokeredSessionsConfig,
 }
 
 /// The mount a request path belongs to, as a change-epoch topic component.
@@ -249,6 +256,7 @@ impl Default for Core {
             seal_provider_swap: std::sync::RwLock::new(None),
             dos_guard: Arc::new(crate::dos::DosGuard::new(crate::dos::DosConfig::default())),
             change_epochs: Arc::new(bv_kernel_api::ChangeEpochs::new()),
+            mcp_brokered_sessions: crate::config::BrokeredSessionsConfig::default(),
         }
     }
 }

@@ -18,7 +18,7 @@ publish = ["uox-bastionvault"]
 [dependencies]
 bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
 bv-context = { path = "../bv-context", version = "0.41.0", registry = "uox-bastionvault" }
-bv-logical = { path = "../bv-logical", version = "0.41.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.42.0", registry = "uox-bastionvault" }
 bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-bastionvault" }
 bv-utils = { path = "../bv-utils", version = "0.41.0", registry = "uox-bastionvault" }
 bv-kernel-api = { path = "../bv-kernel-api", version = "0.41.0", registry = "uox-bastionvault" }

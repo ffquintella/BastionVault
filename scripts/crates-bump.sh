@@ -203,18 +203,27 @@ for crate in targets:
         continue
 
     # Breaking: every dependent's requirement has to move, or the workspace
-    # stops resolving on the very next build.
+    # stops resolving on the very next build. Match ANY requirement the new
+    # version no longer satisfies, not just one equal to `old`: patch bumps
+    # leave dependents on an older patch (`0.41.0` while the crate is at
+    # 0.41.5), and an exact-`old` match silently rewrote none of them.
     dep_pat = re.compile(
         r'(^' + re.escape(crate) + r'\s*=\s*\{[^}]*?version\s*=\s*")'
-        + re.escape(old) + r'(")',
+        r'(\d+\.\d+\.\d+)(")',
         re.M | re.S,
     )
+
+    def rewrite(m):
+        if caret_matches(m[2], new):
+            return m[0]
+        return m[1] + new + m[3]
+
     for path in manifests:
         text = edits.get(path, read(path))
-        new_text, n = dep_pat.subn(r"\g<1>" + new + r"\g<2>", text)
-        if n:
+        new_text = dep_pat.sub(rewrite, text)
+        if new_text != text:
             edits[path] = new_text
-            cascaded.add((crate, path, n))
+            cascaded.add((crate, path, 1))
 
 print(f"==> bumping {len(summary)} crate(s)")
 for crate, old, new, kind in summary:
