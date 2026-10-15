@@ -1,6 +1,6 @@
 # Feature: MCP Brokered Sessions — vault-brokered SSH, web and RDP access to resources for MCP clients
 
-**Status: In progress.** Phase 1 (T136) slices 1–3 shipped in 0.44.37–0.44.39: the substrate, transcripts and audit, and `bv_resource_ssh_exec`. Slice 4 (unreleased): operator confirmation in both gatekeepers and the operator's MFA bound to one call (`mcp_call` tickets). The owner's decisions
+**Status: In progress.** Phase 1 (T136, SSH) shipped in four releases: the substrate (0.44.37), transcripts and audit (0.44.38), `bv_resource_ssh_exec` (0.44.39), and operator confirmation and MFA bound to one call (0.44.40). Agent SSH sessions work end to end against a remote vault built with `mcp_sessions_ssh`. `make test-release` passed on 2026-10-15 (default features; the `mcp_sessions_ssh` tests ran in the per-crate suites), and T136 is done. Web (T137) and RDP (T138) are not started. The owner's decisions
 are recorded inline as "Decided 2026-10-14 by the owner". Tracked as ROADMAP
 T136 (SSH, with the shared substrate), T137 (web) and T138 (RDP) under M8, next
 to MCP Access (T80, T94). Written against the tree at 0.44.36 (`edb3e437`).
@@ -1614,27 +1614,24 @@ remain:
 
 ## What Is Not Yet Implemented
 
-All of it. None of these exist:
+Phase 1 (SSH) is implemented. Still missing:
 
-- the three tools;
-- the binding fields (`connect_allowed`, `confirm_connect`, `operator`);
-- `mcp_call` on MFA tickets and the gatekeeper's MFA orchestration;
-- `agent_sessions_max` and `agent_access`;
-- the `resources/v2/connect/agent/*` routes;
-- the server-side SSH exec, and the stored-key resolver;
-- the server-side web fetch;
-- the RDP worker;
-- the destination policy;
-- the transcript store, its routes and its fixed retention rule;
-- the session rate and concurrency limits;
-- the extended sanitizer;
-- the confirmation `detail`;
-- the HCL `brokered_sessions` block, the runtime and embedded-vault switches,
-  and the pairing-UI section.
+- **Web and RDP:** `bv_resource_web_fetch` (T137) and `bv_resource_rdp_act`
+  (T138, waits for T124), with their routes and executors.
+- **Embedded vault:** no brokered-sessions switch, so sessions work only
+  against a remote vault.
+- **Builds:** `mcp_sessions_ssh` is off by default in every build, the desktop
+  app's included; a deployment must be built with it.
+- **Operator MFA:** userpass operators only, in the operator's own namespace;
+  the CLI offers TOTP only, and its confirmation prompt has no timeout on
+  Windows.
+- **Tests not yet written:** the OpenSSH-container `sshd` enforcement test and
+  the share-to-operator regression test.
+- **Operator views** (Phase 4): recent agent sessions and transcripts in the
+  GUI.
 
 Prerequisites not yet built:
 
-- the `mcp` audit block (T94);
 - the plugin ABI 1.4 process substrate (T124), for RDP;
 - Rustion `exec`, for any bastion-routed agent session (cross-repo,
   unplanned).
