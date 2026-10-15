@@ -186,6 +186,18 @@ pub async fn create_managed_key_from_signer_with_exportable(
     persist_new_key(req, signer, name, false, exportable, source).await
 }
 
+/// Keep the leaf key `pki/issue/:role` just generated (role
+/// `manage_private_key`). `exported = true`: the PKCS#8 already left the
+/// vault in the issue response. `exportable = true`: the cert export route
+/// may hand it back later. The name must be free; a clash fails the call.
+#[maybe_async::maybe_async]
+pub async fn persist_issued_leaf_key(req: &Request, signer: &Signer, name: &str) -> Result<KeyEntry, RvError> {
+    if !name.is_empty() {
+        ensure_name_free(req, name).await?;
+    }
+    persist_new_key(req, signer, name, true, true, KeySource::Generated).await
+}
+
 /// Generate a fresh managed key under `alg`, persist it, and return the
 /// stored [`KeyEntry`] alongside the [`Signer`] handle the caller can
 /// use immediately (so `generate/exported` doesn't have to reload from
@@ -293,9 +305,9 @@ pub async fn load_refs(req: &Request, id: &str) -> Result<KeyRefs, RvError> {
 }
 
 /// Append a cert-serial reference to the refs file for `key_id`. Used by
-/// `pki/issue/:role` and `pki/sign/:role` (Phase L2) when a managed key
-/// was pinned via `key_ref`, so `delete_key` can refuse while bindings
-/// remain. Idempotent — re-recording the same serial is a no-op.
+/// `pki/issue/:role` and `pki/sign/:role` when a managed key was pinned via
+/// `key_ref` or kept by a `manage_private_key` role, so `delete_key` can
+/// refuse while bindings remain. Idempotent.
 #[maybe_async::maybe_async]
 pub async fn add_cert_ref(req: &Request, key_id: &str, serial_hex: &str) -> Result<(), RvError> {
     let mut refs = load_refs(req, key_id).await?;

@@ -1605,6 +1605,9 @@ export interface PkiRoleConfig {
   /** Phase L2: allow-list of managed keys this role may pin to. Empty +
    *  `allow_key_reuse=true` means any key on this mount is acceptable. */
   allowed_key_refs: string[];
+  /** Keep every key `issue` generates in the managed key store (exportable,
+   *  named `<role>-<serial>`) and bind it to the cert. Not with `no_store`. */
+  manage_private_key: boolean;
   /** Phase L4: parent domains for CN / DNS SAN matching. Combined with
    *  `allow_subdomains` / `allow_bare_domains` / `allow_glob_domains`. */
   allowed_domains: string[];
@@ -1661,7 +1664,8 @@ export interface PkiIssueResult {
   issuer_id: string;
   /** Phase L3: leaf-issuer → root chain. */
   ca_chain: string[];
-  /** Phase L2: when `key_ref` was used, the resolved managed key UUID. */
+  /** Bound managed key UUID: the `key_ref` pin, or the key a
+   *  `manage_private_key` role kept. Empty when the key was not stored. */
   key_id: string;
 }
 

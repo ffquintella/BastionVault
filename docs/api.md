@@ -1710,6 +1710,33 @@ Or with `GET` and a query parameter:
 GET /v1/{mount}/{path}?list=true
 ~~~
 
+### PKI role: managed private keys
+
+A PKI role can keep the private key of every certificate `issue` generates.
+The role path is served on both `/v1` and `/v2`; use `/v2` for new
+integrations.
+
+~~~
+POST /v2/{mount}/roles/{name}      {"manage_private_key": true, ...}
+POST /v2/{mount}/issue/{name}      {"common_name": "..."}
+POST /v2/{mount}/cert/{serial}/export  {"format": "pem", "include_private_key": true}
+~~~
+
+- `manage_private_key` (bool, default `false`): every key `issue/{name}`
+  generates is stored in the mount's managed key store (`LIST
+  {mount}/keys`), barrier-sealed, `exportable = true`, named
+  `<role>-<serial>`, and bound to the certificate (`key_id` on the
+  certificate record). The issue response carries `key_id` and still
+  returns `private_key` as before.
+- Refused with `400` when combined with `no_store = true`: the key is bound
+  to the stored certificate record, which `no_store` never writes.
+- A `key_ref`-pinned issuance is unaffected (that key is already managed).
+  `sign/{name}`, `sign-verbatim` and ACME are CSR-based — the caller holds
+  the key — so the option does not apply there.
+- The kept key can be exported with the certificate (PEM or PKCS#12, POST
+  only) and cannot be deleted while the certificate is bound; revoking the
+  certificate drops the binding.
+
 ## Authentication Endpoints
 
 ### Token Login

@@ -93,6 +93,9 @@ impl PkiBackendInner {
             .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let role = self.get_role(req, &role_name).await?
             .ok_or(RvError::ErrPkiRoleNotFound)?;
+        // Fail closed before anything is signed if the stored role is
+        // contradictory (write_role refuses it; this covers other routes in).
+        role.check_key_management()?;
 
         let common_name = req.get_data("common_name")?.as_str()
             .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
@@ -200,12 +203,23 @@ impl PkiBackendInner {
             // make the compiler happy without falling through silently.
             _ => return Err(RvError::ErrPkiKeyTypeInvalid),
         };
-        // Return PKCS#8 to the caller (Phase 5.3). The leaf's private key
-        // is *not* stored anywhere on the engine side — it lives only in
-        // this response — so there's no storage-vs-API split here.
+        // Return PKCS#8 to the caller (Phase 5.3). Unless the role sets
+        // `manage_private_key` (or a key was pinned), the leaf's private key
+        // is not stored on the engine side — it lives only in this response.
         let leaf_key_pem = leaf_signer.to_pkcs8_pem()?;
 
         let serial_hex = storage::serial_to_hex(&serial_bytes);
+
+        // `manage_private_key`: keep the fresh key as a managed key. Written
+        // before the cert record so the record can carry its `key_id`; the
+        // key→cert ref is still written only after the record exists.
+        let managed_key: Option<KeyEntry> = if pinned_key.is_none() && role.manage_private_key {
+            let name = managed_leaf_key_name(&role_name, &serial_hex);
+            Some(keys::persist_issued_leaf_key(req, &leaf_signer, &name).await?)
+        } else {
+            None
+        };
+        let bound_key: Option<&KeyEntry> = pinned_key.as_ref().or(managed_key.as_ref());
 
         // Persist the cert (unless the role opts out) so revoke can find it
         // and the CRL builder can include it.
@@ -230,9 +244,16 @@ impl PkiBackendInner {
                 issuer_id: issuer_id.clone(),
                 is_orphaned: false,
                 source: String::new(),
-                key_id: pinned_key.as_ref().map(|e| e.id.clone()).unwrap_or_default(),
+                key_id: bound_key.map(|e| e.id.clone()).unwrap_or_default(),
             };
-            storage::put_json(req, &storage::cert_storage_key(&serial_hex), &record).await?;
+            if let Err(e) = storage::put_json(req, &storage::cert_storage_key(&serial_hex), &record).await {
+                // The cert is never returned, so its just-kept key is dead
+                // weight; remove it and surface the original error.
+                if let Some(entry) = &managed_key {
+                    discard_unbound_leaf_key(req, entry).await;
+                }
+                return Err(e);
+            }
         }
 
         // Phase L2: if the leaf was bound to a managed key, record the
@@ -240,7 +261,7 @@ impl PkiBackendInner {
         // refuse while bindings remain. Done after the cert record is
         // persisted so the engine never carries a "key references cert
         // X" link without a corresponding cert record.
-        if let Some(entry) = &pinned_key {
+        if let Some(entry) = bound_key {
             keys::add_cert_ref(req, &entry.id, &serial_hex).await?;
         }
 
@@ -252,7 +273,7 @@ impl PkiBackendInner {
         data.insert("private_key_type".into(), json!(role.algorithm()?.as_str()));
         data.insert("serial_number".into(), json!(serial_hex));
         data.insert("issuer_id".into(), json!(issuer_id));
-        if let Some(entry) = &pinned_key {
+        if let Some(entry) = bound_key {
             data.insert("key_id".into(), json!(entry.id));
         }
         Ok(Some(Response::data_response(Some(data))))
@@ -367,6 +388,27 @@ pub(crate) async fn resolve_pinned_key(
         ));
     }
     Ok(entry)
+}
+
+/// Managed-key name for the leaf a `manage_private_key` role keeps:
+/// `<role>-<serial>`. Serials are random per issuance; a name that is
+/// somehow taken fails the issuance rather than being renamed.
+fn managed_leaf_key_name(role_name: &str, serial_hex: &str) -> String {
+    format!("{role_name}-{serial_hex}")
+}
+
+/// Best-effort removal of a leaf key kept by `manage_private_key` whose
+/// cert record could not be written. The key has no refs yet, so a plain
+/// delete suffices; a failure is logged (id only) and the caller still
+/// returns the original error.
+#[maybe_async::maybe_async]
+async fn discard_unbound_leaf_key(req: &Request, entry: &KeyEntry) {
+    if let Err(e) = keys::delete_key(req, &entry.id).await {
+        log::warn!(
+            "pki/issue: cert record write failed and managed key {} could not be removed: {e}",
+            entry.id
+        );
+    }
 }
 
 /// Load the mount's `config/urls` and project it into the subset the

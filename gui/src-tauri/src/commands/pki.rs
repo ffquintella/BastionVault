@@ -1024,6 +1024,9 @@ pub struct PkiRoleConfig {
     pub allow_key_reuse: bool,
     #[serde(default)]
     pub allowed_key_refs: Vec<String>,
+    // Keep issue-generated leaf keys in the managed key store
+    #[serde(default)]
+    pub manage_private_key: bool,
     // Phase L4 — emission controls
     #[serde(default)]
     pub allowed_domains: Vec<String>,
@@ -1094,6 +1097,7 @@ impl Default for PkiRoleConfig {
             issuer_ref: String::new(),
             allow_key_reuse: false,
             allowed_key_refs: Vec::new(),
+            manage_private_key: false,
             allowed_domains: Vec::new(),
             allow_glob_domains: false,
             acme_enabled: true,
@@ -1152,6 +1156,8 @@ fn role_config_from_map(map: &Map<String, Value>) -> PkiRoleConfig {
         issuer_ref: val_str(map, "issuer_ref"),
         allow_key_reuse: val_bool(map, "allow_key_reuse"),
         allowed_key_refs: val_str_array(map, "allowed_key_refs"),
+        // Absent on servers that predate the option — reads as false.
+        manage_private_key: val_bool(map, "manage_private_key"),
         allowed_domains: val_str_array(map, "allowed_domains"),
         allow_glob_domains: val_bool(map, "allow_glob_domains"),
         // pre-L4 roles deserialise without `acme_enabled` — default true
@@ -1219,6 +1225,7 @@ fn role_write_body(config: &PkiRoleConfig) -> Map<String, Value> {
     }
     body.insert("allow_key_reuse".into(), json!(config.allow_key_reuse));
     body.insert("allowed_key_refs".into(), json!(config.allowed_key_refs.join(",")));
+    body.insert("manage_private_key".into(), json!(config.manage_private_key));
     body.insert("allowed_domains".into(), json!(config.allowed_domains.join(",")));
     body.insert("allow_glob_domains".into(), json!(config.allow_glob_domains));
     body.insert("acme_enabled".into(), json!(config.acme_enabled));
@@ -1269,7 +1276,8 @@ pub struct PkiIssueResult {
     /// Phase L3: leaf-issuer → root chain.
     #[serde(default)]
     pub ca_chain: Vec<String>,
-    /// Phase L2: when `key_ref` was used, the resolved managed key UUID.
+    /// The bound managed key UUID: the `key_ref` pin, or the key a
+    /// `manage_private_key` role kept. Empty when the key was not stored.
     #[serde(default)]
     pub key_id: String,
 }

@@ -48,6 +48,7 @@ const SMARTCARD_ROLE: PkiRoleConfig = {
   issuer_ref: "",
   allow_key_reuse: false,
   allowed_key_refs: [],
+  manage_private_key: false,
   allowed_domains: [],
   allow_glob_domains: false,
   acme_enabled: false,
