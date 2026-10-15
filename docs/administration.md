@@ -261,11 +261,14 @@ grantee kinds are supported:
   with me* feed and the rule with `scopes = ["shared"]` resolves to
   the granted capabilities.
 - **`group_user` / `group_app`** — the grantee is an identity group.
-  Group shares are *visibility-only*: they surface the target on
-  each member's *Shared with me* feed **only when** the member has a
-  policy whose `metadata.group_shared_resources` is `"true"`. The
-  actual ACL is still owned by the member's regular policies, so
-  membership churn cannot escalate access on its own.
+  A group share takes effect for a member **only when** the member
+  has a policy whose `metadata.group_shared_resources` is `"true"`.
+  For such a member it behaves like an entity share: the target
+  appears on their *Shared with me* feed and a rule with
+  `scopes = ["shared"]` grants the capabilities the share carries
+  (never more than the rule itself lists). Adding a user to the group
+  therefore extends every opted-in group share to them — gate the
+  opt-in tag on the policies you attach accordingly.
 
 ### Granting a share
 

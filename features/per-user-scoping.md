@@ -217,12 +217,16 @@ probe it with `Request::share_capability_override` (see
 granted sessions as it, and the reverse pairing (`connect` without `read`) is
 the one this makes possible.
 
-Group grantees are *visibility-only*: the share row surfaces the
-target on each group member's "Shared with me" feed when (and only
-when) the caller carries at least one policy whose
-`metadata.group_shared_resources` is `"true"`. ACL capability comes
-from regular policies — see `features/identity-groups.md` §Phase 7
-for the full design and a sample HCL setup.
+Group grantees (`group_user` / `group_app`) take effect only for a
+caller who is a member of the group **and** carries at least one
+policy whose `metadata.group_shared_resources` is `"true"`. For such a
+caller the share both surfaces the target on their "Shared with me"
+feed and contributes its capabilities to the ACL check, on every
+target kind — resource, KV secret, file and asset group
+(`resolve_target_shared_caps` in `policy_store.rs`). Without the tag
+the share is stored but grants nothing. See
+`features/identity-groups.md` §Phase 7 for the full design and a
+sample HCL setup.
 
 Caller-introspection endpoint: `identity/sharing/for-me`. Returns the
 union of direct entity shares + group shares the caller is entitled
@@ -334,6 +338,7 @@ owner/share stores the same way.
 | 11 | Self-service `kv-owner/claim` endpoint + Claim button + owner-badge in secrets list | Done |
 | 12 | File-resource sharing GUI: Sharing tab + Share action on the Files page, `file` kind on `/sharing`, share-pointer fallback for grantees | Done |
 | 13 | One GUI sharing surface (`ObjectSharingCard`) behind all four kinds; group grantees revocable everywhere | Done |
+| 14 | GUI grant form offers identity-group grantees (user group / app group) on every kind, not only asset groups | Done |
 
 Phases 1–6 deliver the two baseline roles the operator asked for
 (`standard-user-readonly` and `secret-author`).

@@ -56,6 +56,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### Sharing — identity-group grantees in the GUI (features/per-user-scoping.md)
+
+- **Share resources, KV secrets and files with an identity group from the GUI** -- the Grant access dialog on every Sharing tab now offers *User identity group* and *Application group (AppID)* alongside a direct user, as asset groups already did. A group share grants access only to members whose policies carry `metadata.group_shared_resources = "true"`; the dialog says so. (T27, S33, S18)
+
 ## [0.44.38] - 2026-10-15
 
 ### Added

@@ -8,7 +8,7 @@ import type { AssetGroupInfo } from "../lib/types";
 // `AssetGroupSharingCard` is the fourth wrapper over
 // `ObjectSharingCard`, and the one that stretches it: its owner is a
 // field on the record the parent already loaded rather than an owner
-// endpoint, and it is the only surface that offers group grantees.
+// endpoint.
 const mockInvoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),

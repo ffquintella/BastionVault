@@ -625,7 +625,6 @@ export function AssetGroupSharingCard({
       owner={{ transfer: api.transferAssetGroupOwner }}
       capabilities={["read", "list", "update", "delete", "create"]}
       capabilityHint="These capabilities apply to every current and future member of the group — both resources and KV secrets."
-      granteeKinds={["entity", "group_user", "group_app"]}
       // Unlike the other kinds, a later write never captures ownership:
       // the group takes its owner on create and keeps it.
       unownedDescription="This group was created by a root token or by a caller without an entity_id. An admin can claim it or assign an owner."

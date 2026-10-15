@@ -46,6 +46,18 @@ export interface OwnerAdapter {
   claim?: (target: string) => Promise<void>;
 }
 
+/**
+ * Every grantee kind, in the order the grant form lists them. The
+ * server resolves identity-group grantees for every `ShareTargetKind`
+ * (resource, KV secret, file, asset group — see
+ * `policy_store::resolve_target_shared_caps`), so this is the default.
+ */
+export const ALL_SHARE_GRANTEE_KINDS: readonly ShareGranteeKind[] = [
+  "entity",
+  "group_user",
+  "group_app",
+];
+
 const GRANTEE_KIND_LABELS: Record<ShareGranteeKind, string> = {
   entity: "User (entity)",
   group_user: "User identity group",
@@ -87,8 +99,9 @@ export interface ObjectSharingCardProps {
   /** Explanatory copy under the capability chips, when a kind needs it. */
   capabilityHint?: ReactNode;
   /**
-   * Grantee kinds offered on grant, in the order they are listed. A
-   * single-entry list (the default) hides the selector entirely.
+   * Grantee kinds offered on grant, in the order they are listed. The
+   * default offers a direct entity and both identity-group kinds; a
+   * single-entry list hides the selector entirely.
    *
    * This gates only what the *grant* form can create. Revoke and the
    * grantee column always honour the `grantee_kind` on the record, so a
@@ -186,7 +199,7 @@ export function ObjectSharingCard({
   onOwnerChange,
   capabilities,
   capabilityHint,
-  granteeKinds = ["entity"],
+  granteeKinds = ALL_SHARE_GRANTEE_KINDS,
   unownedDescription: unownedDescriptionOverride,
   toast,
   isAdminPolicy = isAdminUser,
