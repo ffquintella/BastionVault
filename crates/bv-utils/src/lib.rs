@@ -38,6 +38,7 @@ pub mod salt;
 pub mod seal;
 pub mod sock_addr;
 pub mod string;
+pub mod tls_pin;
 pub mod token_util;
 pub mod unix_sock_addr;
 

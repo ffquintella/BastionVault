@@ -335,6 +335,8 @@ ssh_pqc = ["bastion_vault/ssh_pqc"]
 # has no `mcp.brokered_sessions` switch of its own yet, so with it on every
 # embedded session call is still refused (`mcp_brokered_sessions_disabled`).
 mcp_sessions_ssh = ["bastion_vault/mcp_sessions_ssh"]
+# The same, for the HTTPS executor behind `bv_resource_web_fetch` (§6).
+mcp_sessions_web = ["bastion_vault/mcp_sessions_web"]
 mcp_local_dev = ["dep:tauri-plugin-mcp-bridge"]
 # Development-only HTTP interception proxy. Routes every outbound
 # vault request — legacy `Client`, `RemoteBackend` and the discovery

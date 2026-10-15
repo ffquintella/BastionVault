@@ -64,6 +64,30 @@ tokio = { version = "1.52", features = ["rt", "time", "net", "sync", "macros"] }
 # bv-engine-files' `files_ssh_sync` (see the reasoning there), so enabling
 # it adds no crate and no feature variant to the graph.
 russh = { version = "=0.62.7", optional = true, default-features = true }
+# The vault-side HTTPS client for `bv_resource_web_fetch`, behind the
+# off-by-default `mcp_sessions_web` feature (features/mcp-brokered-sessions.md
+# §6). Every crate here is already in the server graph, at these versions:
+# * reqwest: the root crate's own (rustls only, no native-tls, so no
+#   openssl-sys). The executor gives it a preconfigured rustls config, no
+#   proxy, no redirects of its own, and a resolver that answers only the
+#   addresses the destination policy checked.
+# * rustls: the verifier that runs the platform roots first and the
+#   profile's pins (bv-utils' `tls_pin`, shared with the desktop app) only for
+#   a certificate they reject. aws-lc-rs provider, as bv-utils and the root.
+# * rustls-native-certs: the platform roots ("platform roots" in §6.3), the
+#   crate the LDAP engine already reads them with.
+# * html5ever: the HTML-to-text reduction (§6.3 names it). Its tokenizer
+#   only; no DOM, no scripting.
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls"] }
+rustls = { version = "0.23.37", optional = true, features = ["aws_lc_rs"] }
+rustls-native-certs = { version = "0.8", optional = true }
+html5ever = { version = "0.38", optional = true }
+# `agent_web::test_server`, an in-process HTTPS server the facade's
+# end-to-end tests dial through the destination policy's test seam: rcgen
+# mints its certificates, tokio-rustls terminates TLS. Only the
+# `test-support` feature (a dev-dependency's) turns them on.
+rcgen = { version = "0.14", optional = true }
+tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["aws_lc_rs"] }
 
 [dev-dependencies]
 # The launch-store state machine is tested in-crate over an in-memory
@@ -73,6 +97,9 @@ tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
 # The SSH executor's tests dial an in-process server on loopback, which the
 # destination policy refuses unless the test seam is compiled in.
 bv-utils = { path = "../bv-utils", features = ["test-support"] }
+# The web executor's tests run their own HTTPS server (see `test-support`).
+rcgen = "0.14"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
 
 [features]
 default = []
@@ -88,10 +115,16 @@ sync_handler = [
 # tool is still listed and every call is refused with
 # `mcp_session_protocol_disabled`.
 mcp_sessions_ssh = ["dep:russh"]
-# Exposes `agent_ssh::test_server`, an in-process SSH server that records
-# every request a client makes, to the facade's end-to-end tests. Only
-# dev-dependencies enable it.
-test-support = []
+# Compiles the vault-side HTTPS executor behind `bv_resource_web_fetch`
+# (features/mcp-brokered-sessions.md §6). Off by default: without it the
+# tool is still listed and every call is refused with
+# `mcp_session_protocol_disabled`.
+mcp_sessions_web = ["dep:reqwest", "dep:rustls", "dep:rustls-native-certs", "dep:html5ever"]
+# Exposes `agent_ssh::test_server` (an in-process SSH server that records
+# every request a client makes) and `agent_web::test_server` (its HTTPS
+# counterpart) to the facade's end-to-end tests. Only dev-dependencies
+# enable it.
+test-support = ["dep:rcgen", "dep:tokio-rustls"]
 
 # Lints this crate's code trips, all of which the root crate already allows.
 [lints.clippy]
@@ -103,4 +136,8 @@ ignored = [
     # Pulled in by the `#[maybe_async::maybe_async]` attribute's async
     # expansion, which is a token stream to a static `use` scan.
     "async-trait",
+    # Used only by `agent_web::test_server`, which also needs
+    # `mcp_sessions_web`; `test-support` alone enables them unused.
+    "rcgen",
+    "tokio-rustls",
 ]

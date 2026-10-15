@@ -144,6 +144,9 @@ files_ssh_sync = ["bastion_vault/files_ssh_sync"]
 # The vault-side SSH executor for the MCP tool `bv_resource_ssh_exec`
 # (features/mcp-brokered-sessions.md §5.3). Off by default.
 mcp_sessions_ssh = ["bastion_vault/mcp_sessions_ssh"]
+# The vault-side HTTPS executor for `bv_resource_web_fetch`
+# (features/mcp-brokered-sessions.md §6). Off by default.
+mcp_sessions_web = ["bastion_vault/mcp_sessions_web"]
 # The seal backends. `bvault` is the binary an operator builds, so these have
 # to be reachable from here or `--features hsm_yubihsm2` would silently do
 # nothing -- exactly the trap Phase 3 found four flags already in.

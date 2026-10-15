@@ -149,8 +149,23 @@ pub trait Prompter: Send + Sync {
 /// The text a confirmation shows for a session call (§9): every field the
 /// call carries, and the command in a gutter so each of its lines -- and so
 /// each line break -- is visible, never truncated, with its byte length.
-/// Everything is escaped for display; nothing here is a secret.
+/// For a web fetch, the method and the path with its query, whole. Everything
+/// is escaped for display; nothing here is a secret.
 pub fn render_session_detail(call: &SessionCall) -> String {
+    if call.protocol == "web" {
+        let mut out = format!(
+            "Resource:  {}\nProfile:   {}\nProtocol:  web\nRequest:   {} {}\nPath:      {} bytes, with its query",
+            escape_for_display(&call.resource),
+            escape_for_display(&call.profile),
+            escape_for_display(&call.method),
+            escape_for_display(&call.path),
+            call.path.len(),
+        );
+        if let Some(timeout) = call.timeout_secs {
+            out.push_str(&format!("\nTimeout:   {timeout} s"));
+        }
+        return out;
+    }
     let command = escape_for_display(&call.command);
     let lines = command.split('\n').count();
     let mut out = format!(
@@ -322,6 +337,8 @@ mod tests {
             resource: "web-01".into(),
             profile: "agent-ops".into(),
             command: "journalctl -u nginx\n\tuptime\u{00A0}x".into(),
+            method: String::new(),
+            path: String::new(),
             timeout_secs: Some(15),
             args_hash: "h".into(),
             scope_subject: "resources/secrets/web-01/".into(),
@@ -333,6 +350,32 @@ mod tests {
              Timeout:   15 s\n  | journalctl -u nginx\n  | \\u{0009}uptime\\u{00A0}x"
         );
         assert!(detail.chars().all(|c| c == '\n' || !c.is_control()));
+    }
+
+    /// A web fetch shows the method and the whole path with its query.
+    #[test]
+    fn the_web_detail_shows_the_method_and_the_whole_path() {
+        let path = format!("/api/search?q={}&verbose=1", "a".repeat(300));
+        let call = SessionCall {
+            tool: "bv_resource_web_fetch",
+            protocol: "web",
+            resource: "grafana".into(),
+            profile: "agent-api".into(),
+            command: String::new(),
+            method: "HEAD".into(),
+            path: path.clone(),
+            timeout_secs: None,
+            args_hash: "h".into(),
+            scope_subject: "resources/secrets/grafana/".into(),
+        };
+        let detail = render_session_detail(&call);
+        assert_eq!(
+            detail,
+            format!(
+                "Resource:  grafana\nProfile:   agent-api\nProtocol:  web\nRequest:   HEAD {path}\nPath:      {} bytes, with its query",
+                path.len()
+            )
+        );
     }
 
     #[test]

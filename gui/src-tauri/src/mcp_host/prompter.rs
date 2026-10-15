@@ -102,10 +102,18 @@ pub struct SessionPrompt {
     pub resource: String,
     pub profile: String,
     pub protocol: String,
-    /// The exact command, escaped for display; line breaks kept.
+    /// The exact command, escaped for display; line breaks kept. Empty for
+    /// a web fetch.
     pub command: String,
     /// Bytes of the command as it will run.
     pub command_bytes: usize,
+    /// Web fetch only: `GET` or `HEAD`.
+    pub method: Option<String>,
+    /// Web fetch only: the origin-relative path with its query, escaped for
+    /// display, never truncated.
+    pub path: Option<String>,
+    /// Bytes of the path as it will be requested.
+    pub path_bytes: Option<usize>,
     pub timeout_secs: Option<u64>,
 }
 
@@ -409,6 +417,9 @@ impl Prompter for GuiPrompter {
             protocol: call.protocol.to_string(),
             command: escape_for_display(&call.command),
             command_bytes: call.command.len(),
+            method: (call.protocol == "web").then(|| escape_for_display(&call.method)),
+            path: (call.protocol == "web").then(|| escape_for_display(&call.path)),
+            path_bytes: (call.protocol == "web").then_some(call.path.len()),
             timeout_secs: call.timeout_secs,
         });
         let mfa = request.mfa.as_ref().map(|step| MfaPrompt {
@@ -850,6 +861,41 @@ mod tests {
         assert_eq!(prompt.mfa.as_ref().unwrap().methods, vec!["fido2".to_string(), "totp".to_string()]);
         let wire = serde_json::to_value(prompt).unwrap();
         assert!(!wire.to_string().contains("abc"), "the challenge is not sent to the window: {wire}");
+    }
+
+    /// A web fetch reaches the dialog as one: method, path and resource,
+    /// with no command.
+    #[test]
+    fn a_web_fetch_confirmation_shows_the_method_and_path() {
+        let sink = Arc::new(FakeSink::default());
+        let (broker, p) = prompter(&sink);
+        let args =
+            serde_json::json!({ "resource": "grafana", "profile": "agent-api", "method": "HEAD", "path": "/api?x=1" });
+        let call = bv_mcp::dispatcher::session_call("bv_resource_web_fetch", args.as_object().unwrap()).unwrap();
+        let detail = bv_mcp::local::render_session_detail(&call);
+        let mut request = session_request(&call, &detail, None);
+        request.tool = "bv_resource_web_fetch";
+        request.destructive = false;
+        let answering = std::thread::spawn(move || {
+            for _ in 0..500 {
+                if let Some(pending) = broker.pending() {
+                    broker.answer(pending.id(), PromptReply::Confirm(ConfirmReply { allow: true, mfa: None })).unwrap();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            panic!("the prompt was never shown");
+        });
+        assert_eq!(p.confirm(&request), Some(true));
+        answering.join().unwrap();
+        let shown = lock(&sink.shown);
+        let McpPrompt::Confirm(prompt) = &shown[0] else { panic!("expected a confirmation") };
+        let session = prompt.session.as_ref().expect("a session call");
+        assert_eq!(
+            (session.protocol.as_str(), session.resource.as_str(), session.method.as_deref(), session.path.as_deref()),
+            ("web", "grafana", Some("HEAD"), Some("/api?x=1"))
+        );
+        assert_eq!((session.command.as_str(), session.path_bytes), ("", Some(8)));
     }
 
     /// A factor the vault refuses denies the call, and the dialog is told

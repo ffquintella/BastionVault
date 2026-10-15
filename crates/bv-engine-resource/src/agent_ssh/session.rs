@@ -6,12 +6,7 @@
 //! credential is resolved or minted, and the destination is resolved and
 //! checked before that too, so a refused call never touches a secret.
 
-use std::{
-    collections::BTreeMap,
-    num::NonZeroU32,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use base64::Engine as _;
 use bv_kernel_api::{
@@ -19,81 +14,48 @@ use bv_kernel_api::{
     mcp_events::{self, AbortCause, AgentAborted, AgentRefused, SshExecEvent},
     mcp_sessions::BrokeredSessionEnv,
     mcp_transcripts::{
-        McpSessionTranscript, SshTranscript, TranscriptBody, TranscriptScrubber, TranscriptStore, TranscriptStream,
-        TranscriptSummary, MAX_TRANSCRIPT_STREAM_BYTES,
+        McpSessionTranscript, SshTranscript, TranscriptBody, TranscriptStore, TranscriptStream, TranscriptSummary,
+        MAX_TRANSCRIPT_STREAM_BYTES,
     },
     ssh_credentials::{self, BrokeredCertRequest, SecretResolution, SshCertificateFacts},
     VaultCtx,
 };
 use bv_mcp::untrusted::{decode_output, shape_stream, CredentialScrubber, DecodedOutput};
-use bv_utils::destination_policy::{parse_target_cidrs, CheckedTarget, SystemResolver, DESTINATION_REFUSED_CODE};
+use bv_utils::destination_policy::{CheckedTarget, DESTINATION_REFUSED_CODE};
 use rand::RngExt;
 use serde_json::{Map, Value};
-use tokio::{
-    sync::watch,
-    time::{Instant, MissedTickBehavior},
-};
+use tokio::{sync::watch, time::Instant};
 
 use super::{
     exec::{self, ExecError, ExecReport, ExecSpec, SshLogin, TranscriptCapture, STDERR, STDOUT},
-    CallError, Gated, SessionRefusal, CERT_VALIDITY_SECS, CONNECT_BUDGET, DRAIN_LIMIT_BYTES, REVALIDATE_EVERY,
-    SSH_EXEC_TOOL,
+    CallError, Gated, SessionRefusal, CERT_VALIDITY_SECS, CONNECT_BUDGET, DRAIN_LIMIT_BYTES, SSH_EXEC_TOOL,
 };
 use crate::{
     agent_access,
-    agent_limits::{binding_limit_key, SessionLimiter, SessionLimits, SessionPermit},
-    connect_mfa::{caller_namespace, find_profile, ConnectMfaTicketStore, McpCallBinding, TicketBinding},
+    agent_limits::{binding_limit_key, SessionPermit},
+    agent_session::{
+        aborted_refusal, cause_str, check_transport, destination_policy, now_ms, redeem_agent_ticket, refused,
+        resource_type, str_field, watch_revocation, without_code, ScrubberAdapter,
+    },
+    connect_mfa::{caller_namespace, find_profile},
     errors::RvError,
     logical::{McpBinding, McpBindingKind, Request},
     type_config, ResourceBackendInner,
 };
 
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
 /// Clock skew allowed between the SSH engine's `valid_before` and this
 /// check, both on this host's clock.
 const CERT_SKEW_SECS: u64 = 5;
-
-fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
-}
-
-/// A limiter's or a policy's own message already leads with the code.
-fn without_code(message: &str, code: &str) -> String {
-    message.strip_prefix(code).and_then(|m| m.strip_prefix(": ")).unwrap_or(message).to_string()
-}
-
-fn refused(code: &'static str, status: u16, message: impl Into<String>) -> CallError {
-    CallError::Refused(SessionRefusal::new(code, status, message))
-}
-
-impl ResourceBackendInner {
-    /// This node's session limiter, built from the server config on first
-    /// use (the config is static for the life of the process).
-    pub(crate) fn agent_limiter(&self, env: &dyn BrokeredSessionEnv) -> &SessionLimiter {
-        self.agent_limiter.get_or_init(|| {
-            let settings = env.settings();
-            let defaults = SessionLimits::default();
-            SessionLimiter::new(SessionLimits {
-                rate_per_binding_per_min: NonZeroU32::new(settings.rate_per_binding_per_min)
-                    .unwrap_or(defaults.rate_per_binding_per_min),
-                max_concurrent: NonZeroU32::new(settings.max_concurrent).unwrap_or(defaults.max_concurrent),
-            })
-        })
-    }
-}
 
 /// How the session will log in, decided from the stored profile before any
 /// secret is touched.
 enum LoginPlan {
     Secret { secret_id: String, profile_username: Option<String> },
     Certificate { ssh_mount: String, ssh_role: String, username: String },
-}
-
-fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
-    v.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
 }
 
 impl LoginPlan {
@@ -171,188 +133,11 @@ fn session_target(profile: &Value, meta: &Map<String, Value>) -> Result<(String,
     Ok((host, port))
 }
 
-/// Whether the binding's operator is a userpass principal: the only kind
-/// with a second factor on file to step up with (§3.1 "Userpass-only").
-fn userpass_operator(binding: &McpBinding) -> Option<&crate::logical::McpOperatorRef> {
-    binding.operator.as_ref().filter(|o| !o.username.is_empty() && o.mount_path.starts_with("userpass"))
-}
-
-/// Step 6 for an MFA-gated profile (`features/mcp-brokered-sessions.md`
-/// §3.1 step 5): redeem the operator's ticket the gatekeeper relayed, single
-/// use and delete-before-validate, against the ticket this exact call must
-/// carry --
-///
-/// * mount, principal and namespace from `McpBinding.operator` (the MCP
-///   token's own metadata is empty), and the namespace must also be the one
-///   this call runs in, so a ticket for a same-named resource in another
-///   tenant cannot be spent here;
-/// * resource and profile from the call;
-/// * `mcp_call` = the binding's pairing id, this tool and the hash of the
-///   call's arguments the endpoint recorded -- so another command, tool,
-///   resource, profile, pairing or operator burns the ticket and is refused.
-///
-/// Runs before any credential is resolved. Returns the factor proved.
-async fn redeem_agent_ticket(
-    backend: &ResourceBackendInner,
-    req: &Request,
-    binding: &McpBinding,
-    resource: &str,
-    profile_id: &str,
-) -> Result<String, CallError> {
-    let Some(operator) = userpass_operator(binding) else {
-        return Err(refused(
-            "mcp_session_mfa_unavailable",
-            403,
-            "this connection profile requires MFA, and only a userpass operator holds the enrolled factors to \
-             complete it; the operator who paired this assistant is not a userpass user",
-        ));
-    };
-    let ticket = req
-        .get_data("connect_ticket")
-        .ok()
-        .and_then(|v| v.as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string))
-        .ok_or_else(|| {
-            refused(
-                "mcp_session_mfa_required",
-                403,
-                "this connection profile requires MFA, which the operator completes in the gatekeeper's \
-                 confirmation for this one call; this call carries no operator ticket",
-            )
-        })?;
-    let pairing_id = match &binding.kind {
-        McpBindingKind::Pairing(id) => id.clone(),
-        McpBindingKind::App(_) => {
-            return Err(refused("mcp_connect_requires_local_operator", 403, "network-mode apps never open sessions"))
-        }
-    };
-    let call =
-        req.mcp_audit.as_ref().filter(|a| a.tool == SSH_EXEC_TOOL && !a.args_hash.is_empty()).ok_or_else(|| {
-            refused(
-                "mcp_session_mfa_ticket_refused",
-                403,
-                "this call carries no record of its arguments to bind the operator's ticket to",
-            )
-        })?;
-    let namespace = caller_namespace(&backend.core, req)
-        .await
-        .map_err(|error| CallError::Vault { reason: "namespace_unresolvable", error })?;
-    if namespace != operator.namespace {
-        return Err(refused(
-            "mcp_session_mfa_unavailable",
-            403,
-            "the operator signed in to another namespace than the one this call runs in, so their MFA ticket \
-             cannot be bound to this resource",
-        ));
-    }
-    let expect = TicketBinding {
-        mount: operator.mount_path.clone(),
-        principal: operator.username.to_lowercase(),
-        namespace,
-        resource: resource.to_string(),
-        profile_id: profile_id.to_string(),
-        mcp_call: Some(McpCallBinding {
-            pairing_id: pairing_id.clone(),
-            tool: SSH_EXEC_TOOL.to_string(),
-            args_hash: call.args_hash.clone(),
-        }),
-    };
-    let store = ConnectMfaTicketStore::new(backend.core.as_ref())
-        .map_err(|error| CallError::Vault { reason: "mfa_ticket_store_unavailable", error })?;
-    let record = store.consume(&ticket, &expect).await.map_err(|e| match e {
-        crate::connect_mfa::TicketError::Storage(error) => {
-            CallError::Vault { reason: "mfa_ticket_store_unavailable", error }
-        }
-        other => refused("mcp_session_mfa_ticket_refused", 403, other.to_string()),
-    })?;
-    log::info!(
-        "connect.mfa.authorized resource={resource} profile={profile_id} principal={} method={} mcp_call=true \
-         pairing_id={pairing_id} tool={SSH_EXEC_TOOL}",
-        record.principal,
-        record.method
-    );
-    Ok(record.method)
-}
-
-/// Step 7: a session must not bypass a bastion. A `rustion` profile, a
-/// `rustion-required` transport policy, and `rustion-preferred` with a
-/// bastion available all route through Rustion, whose `exec` is a no-op, so
-/// they are refused rather than dialed direct. An unresolvable policy is
-/// refused too: guessing "direct" is how a lock gets bypassed.
-async fn check_transport(
-    backend: &ResourceBackendInner,
-    req: &Request,
-    resource: &str,
-    meta: &Map<String, Value>,
-    profile: &Value,
-) -> Result<(), CallError> {
-    let bastion = |m: String| refused("mcp_session_requires_bastion", 403, m);
-    if str_field(profile, "kind") == Some("rustion") {
-        return Err(bastion(
-            "this profile routes through a Rustion bastion, which cannot run an agent's command".into(),
-        ));
-    }
-    let path = "rustion/policy/effective";
-    let router = backend.core.router();
-    if router.matching_mount(path).map_err(|e| bastion(format!("the transport policy could not be resolved: {e}")))?
-        != "rustion/"
-    {
-        // No Rustion engine mounted: direct is the only transport there is.
-        return Ok(());
-    }
-    let groups = match backend.core.resource_groups() {
-        Some(index) => index
-            .groups_for_resource(resource)
-            .await
-            .map_err(|e| bastion(format!("the resource's asset groups could not be read: {e}")))?,
-        None => Vec::new(),
-    };
-    let mut body = Map::new();
-    body.insert("resource_id".into(), Value::String(resource.to_string()));
-    if let Some(t) = meta.get("type").and_then(Value::as_str).filter(|t| !t.is_empty()) {
-        body.insert("resource_type".into(), Value::String(t.to_string()));
-    }
-    if !groups.is_empty() {
-        body.insert("asset_group_ids".into(), Value::Array(groups.into_iter().map(Value::String).collect()));
-    }
-    let mut sub = Request::new_write_request(path, Some(body));
-    sub.operation = crate::logical::Operation::Write;
-    sub.auth = req.auth.clone();
-    sub.namespace_path = req.namespace_path.clone();
-    let data = router
-        .handle_request(&mut sub)
-        .await
-        .map_err(|e| {
-            bastion(format!("the Rustion transport policy could not be resolved ({e}); refusing rather than guessing"))
-        })?
-        .and_then(|r| r.data)
-        .unwrap_or_default();
-    let transport = data.get("transport").and_then(Value::as_str).unwrap_or_default();
-    let has_bastion = data.get("bastions").and_then(Value::as_array).is_some_and(|b| !b.is_empty());
-    match transport {
-        "rustion-required" => Err(bastion(
-            "the resource's transport policy is rustion-required; agent sessions are never dialed direct".into(),
-        )),
-        "rustion-preferred" if has_bastion => Err(bastion(
-            "the resource's transport policy prefers a Rustion bastion and one is configured; agent sessions are \
-             not downgraded to direct"
-                .into(),
-        )),
-        _ => Ok(()),
-    }
-}
-
 /// Step 9: resolve the host once, check every address, and hand back the
 /// only thing the executor may dial.
 async fn check_destination(gated: &Gated, host: String, port: u16) -> Result<CheckedTarget, CallError> {
-    let parsed = parse_target_cidrs(&gated.runtime.allowed_target_cidrs).map_err(|e| {
-        refused(DESTINATION_REFUSED_CODE, 403, format!("the destination allow-list in force does not parse ({e})"))
-    })?;
-    let policy = gated.env.destination_policy(parsed.cidrs);
-    // The platform resolver blocks.
-    let checked = tokio::task::spawn_blocking(move || policy.resolve_and_check(&SystemResolver, &host, port))
-        .await
-        .map_err(|e| refused(DESTINATION_REFUSED_CODE, 500, format!("the destination check did not finish: {e}")))?;
-    checked.map_err(|r| refused(r.code(), 403, without_code(&r.to_string(), r.code())))
+    let policy = destination_policy(gated.env.as_ref(), &gated.runtime)?;
+    crate::agent_session::check_destination(&gated.env, &policy, host, port).await.map_err(CallError::Refused)
 }
 
 /// What a signed certificate must say before it is used (§5.2): the
@@ -502,7 +287,7 @@ pub(crate) async fn prepare_and_run(
     }
 
     // 5. The type and profile opt-ins, and the profile's static requirements.
-    let type_id = meta.get("type").and_then(Value::as_str).unwrap_or_default();
+    let type_id = resource_type(&meta);
     let types = type_config::effective_type_config(backend.core.as_ref(), req).await.map_err(|e| match e {
         type_config::TypeConfigError::Storage(error) => CallError::Vault { reason: "type_config_unreadable", error },
         type_config::TypeConfigError::Malformed(source) => refused(
@@ -516,7 +301,7 @@ pub(crate) async fn prepare_and_run(
 
     // 6. MFA: the operator's ticket for this exact call, redeemed once.
     let mfa_method = if profile_gate_flag(&profile) {
-        Some(redeem_agent_ticket(backend, req, &gated.binding, &resource, &profile_id).await?)
+        Some(redeem_agent_ticket(backend, req, &gated.binding, &resource, &profile_id, SSH_EXEC_TOOL).await?)
     } else {
         None
     };
@@ -619,59 +404,6 @@ struct SessionTask {
     started_at_ms: u64,
     /// Held for the life of the session; dropping it frees the slot.
     _permit: SessionPermit,
-}
-
-/// The transcript writer's view of the session's credential scrubber.
-struct ScrubberAdapter<'a>(&'a CredentialScrubber);
-
-impl TranscriptScrubber for ScrubberAdapter<'_> {
-    fn scrub(&self, text: &str) -> (String, bool) {
-        self.0.scrub(text)
-    }
-}
-
-/// Watch the session's token and the runtime switch until one says stop.
-async fn watch_revocation(
-    ctx: Arc<dyn VaultCtx>,
-    env: Arc<dyn BrokeredSessionEnv>,
-    token: String,
-    tx: watch::Sender<Option<AbortCause>>,
-) {
-    let mut tick = tokio::time::interval(REVALIDATE_EVERY);
-    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    tick.tick().await;
-    loop {
-        tick.tick().await;
-        if let Some(cause) = revalidate(ctx.as_ref(), env.as_ref(), &token).await {
-            let _ = tx.send(Some(cause));
-            return;
-        }
-    }
-}
-
-/// `None` while the session may go on. A check that cannot be made ends the
-/// session too: fail closed.
-async fn revalidate(ctx: &dyn VaultCtx, env: &dyn BrokeredSessionEnv, token: &str) -> Option<AbortCause> {
-    let Some(tokens) = ctx.tokens() else { return Some(AbortCause::ExecutorError) };
-    match tokens.lookup(token).await {
-        Ok(Some(_)) => {}
-        Ok(None) => return Some(AbortCause::TokenRevoked),
-        Err(_) => return Some(AbortCause::ExecutorError),
-    }
-    match env.runtime().await {
-        Ok(r) if r.enabled => None,
-        Ok(_) => Some(AbortCause::KillSwitch),
-        Err(_) => Some(AbortCause::ExecutorError),
-    }
-}
-
-fn cause_str(cause: AbortCause) -> &'static str {
-    match cause {
-        AbortCause::TokenRevoked => "token_revoked",
-        AbortCause::KillSwitch => "kill_switch",
-        AbortCause::Timeout => "timeout",
-        AbortCause::ExecutorError => "executor_error",
-    }
 }
 
 /// One stream for the transcript: what was kept for it (up to 1 MiB, not
@@ -913,17 +645,6 @@ impl SessionTask {
     }
 }
 
-/// What a session cut short by revocation or the kill switch answers.
-fn aborted_refusal(cause: AbortCause) -> SessionRefusal {
-    let why = match cause {
-        AbortCause::TokenRevoked => "the pairing or its token was revoked",
-        AbortCause::KillSwitch => "brokered sessions were switched off",
-        AbortCause::Timeout => "the call timed out",
-        AbortCause::ExecutorError => "the session could not be re-validated",
-    };
-    SessionRefusal::new("mcp_session_aborted", 409, format!("{why}; the session was ended"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1033,36 +754,6 @@ mod tests {
         assert!(refused(&f, "", 1_000).message.contains("60 s"));
         // Another login.
         assert!(verify_certificate(&facts("uptime"), "uptime", "", "root", "agent", 1_000).is_err());
-    }
-
-    #[test]
-    fn only_a_userpass_operator_can_step_up_for_an_agent() {
-        let mut binding = McpBinding {
-            kind: McpBindingKind::Pairing("p".into()),
-            catalogue_hash: String::new(),
-            tool_allowlist: vec![],
-            path_scope: vec![],
-            reveal_allowed: false,
-            destructive_allowed: false,
-            client_name: String::new(),
-            client_version: String::new(),
-            waived_until: None,
-            connect_allowed: true,
-            confirm_connect: true,
-            operator: Some(crate::logical::McpOperatorRef {
-                username: "felipe".into(),
-                mount_path: "userpass/".into(),
-                ..Default::default()
-            }),
-        };
-        assert!(userpass_operator(&binding).is_some());
-        binding.operator.as_mut().unwrap().mount_path = "oidc/".into();
-        assert!(userpass_operator(&binding).is_none());
-        binding.operator.as_mut().unwrap().mount_path = "userpass/".into();
-        binding.operator.as_mut().unwrap().username = String::new();
-        assert!(userpass_operator(&binding).is_none());
-        binding.operator = None;
-        assert!(userpass_operator(&binding).is_none());
     }
 
     #[test]

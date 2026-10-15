@@ -524,6 +524,12 @@ files_ssh_sync = ["bv-engine-files/files_ssh_sync"]
 # `connect_allowed`, and the type and profile opt-ins. Same russh as
 # `files_ssh_sync`, so it adds no crate to the graph.
 mcp_sessions_ssh = ["bv-engine-resource/mcp_sessions_ssh"]
+# MCP brokered sessions — the vault-side HTTPS executor behind the MCP tool
+# `bv_resource_web_fetch` (features/mcp-brokered-sessions.md §6). Off by
+# default, gated exactly like `mcp_sessions_ssh`. Its crates (reqwest,
+# rustls, rustls-native-certs, html5ever) are already in the lockfile; with
+# it on, html5ever joins the server graph.
+mcp_sessions_web = ["bv-engine-resource/mcp_sessions_web"]
 
 # Transit Secret Engine — Phase 4 follow-ups, both off by default.
 #

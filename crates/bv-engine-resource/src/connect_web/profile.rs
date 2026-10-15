@@ -212,7 +212,7 @@ fn secret_fields(v: Option<&Value>) -> Result<SecretFieldMap, WebRefusal> {
     Ok(map)
 }
 
-fn credential_source(profile: &Map<String, Value>, mode: &str) -> Result<WebCredentialSource, WebRefusal> {
+pub(crate) fn credential_source(profile: &Map<String, Value>, mode: &str) -> Result<WebCredentialSource, WebRefusal> {
     let cs = profile
         .get("credential_source")
         .and_then(Value::as_object)
@@ -277,14 +277,14 @@ fn credential_source(profile: &Map<String, Value>, mode: &str) -> Result<WebCred
 }
 
 /// The origin key of a full URL (the profile's `start_url`).
-fn url_origin(raw: &str, allow_insecure_http: bool) -> Result<String, String> {
+pub(crate) fn url_origin(raw: &str, allow_insecure_http: bool) -> Result<String, String> {
     let (scheme, authority, _) = recipe::split_url(raw)?;
     recipe::origin_key(scheme, authority, allow_insecure_http)
 }
 
 /// The origin key of a configured `allowed_origins` entry: a bare
 /// `scheme://host[:port]`, at most one trailing `/`.
-fn bare_origin(raw: &str, allow_insecure_http: bool) -> Result<String, String> {
+pub(crate) fn bare_origin(raw: &str, allow_insecure_http: bool) -> Result<String, String> {
     let (scheme, authority, rest) = recipe::split_url(raw.trim())?;
     if !(rest.is_empty() || rest == "/") {
         return Err("is not a bare origin (no path, query or fragment)".into());

@@ -19,6 +19,7 @@ mod files;
 mod kv_version_read;
 mod mcp_access;
 mod mcp_sessions_ssh;
+mod mcp_sessions_web;
 mod mcp_transcripts;
 mod notifications;
 mod oidc;

@@ -334,9 +334,10 @@ mcp {
 ### `mcp.brokered_sessions` (optional)
 
 The server switch and limits for agent sessions to resources
-([spec](../features/mcp-brokered-sessions.md)). This build parses and
-validates the block but ships no session tool yet, so it opens nothing. Off
-when absent; an old config parses unchanged. `GET v2/sys/mcp/config` reports
+([spec](../features/mcp-brokered-sessions.md)). `ssh` opens sessions in a
+build with the `mcp_sessions_ssh` feature (`bv_resource_ssh_exec`), `web` in
+one with `mcp_sessions_web` (`bv_resource_web_fetch`); `rdp` is accepted and
+has no tool yet. Off when absent; an old config parses unchanged. `GET v2/sys/mcp/config` reports
 the block's `enabled` and `protocols`, and the destination list in force with
 its source — `runtime`, `hcl` (this block, from an HCL or JSON file) or
 `default` ([API](api.md#getpost-v2sysmcpconfig)). In a config directory the
@@ -367,8 +368,8 @@ mcp {
 | `allowed_target_cidrs` | the list shown | Destination allow-list. A configured list **replaces** the default; `[]` allows nothing. Each entry must be `address/prefix` with no host bits set. Loopback, link-local (incl. `169.254.169.254`), multicast, unspecified, broadcast and the vault's own and cluster addresses stay denied whatever is listed: an overlapping entry is accepted with a startup warning on the `security` log. `sys/mcp/config` can replace this list at runtime |
 | `max_concurrent` | `4` | Sessions open at once on this node, 1–32 |
 | `rate_per_binding_per_min` | `6` | Session calls per pairing per minute on this node, 1–60 |
-| `call_timeout_secs` / `rdp_call_timeout_secs` | `20` / `45` | Per-call timeouts, 1–120 |
-| `max_output_bytes` | `65536` | Output returned to the model per call, 1–262144 |
+| `call_timeout_secs` / `rdp_call_timeout_secs` | `20` / `45` | Per-call timeouts (SSH and web / RDP), 1–120 |
+| `max_output_bytes` | `65536` | Output returned to the model per call (SSH stdout and stderr together; a web fetch's page text), 1–262144 |
 | `ssh.cert_source_addresses` | `[]` | The vault's egress addresses (address or CIDR) for a brokered certificate's `source-address`; empty omits it |
 
 A value out of range, an unknown protocol or an invalid entry refuses to
