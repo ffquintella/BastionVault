@@ -217,6 +217,7 @@ function defaultRoleConfig(): PkiRoleConfig {
     issuer_ref: "",
     allow_key_reuse: false,
     allowed_key_refs: [],
+    manage_private_key: false,
     allowed_domains: [],
     allow_glob_domains: false,
     acme_enabled: true,
@@ -1781,7 +1782,7 @@ function RoleEditor({
             label="no_store"
             checked={config.no_store}
             onChange={(b) => set({ no_store: b })}
-            disabled={!editing}
+            disabled={!editing || (config.manage_private_key && !config.no_store)}
           />
           <Toggle
             label="allow_glob_domains"
@@ -1801,6 +1802,7 @@ function RoleEditor({
             onChange={(b) => set({ allow_key_reuse: b })}
             disabled={!editing}
           />
+          <ManagePrivateKeyToggle config={config} editing={editing} set={set} />
           <Toggle
             label="allow_email_sans (rfc822Name / S/MIME)"
             checked={config.allow_email_sans}
@@ -1808,6 +1810,17 @@ function RoleEditor({
             disabled={!editing}
           />
         </div>
+      )}
+
+      {compact && <ManagePrivateKeyToggle config={config} editing={editing} set={set} />}
+
+      {config.manage_private_key && (
+        <p className="text-xs text-[var(--color-text-muted)]">
+          Every certificate issued under this role keeps its private key in{" "}
+          <strong>Keys</strong>, bound to the certificate. Export it from{" "}
+          <strong>Certificates → Export</strong> with “Include private key”.
+          Does not apply to CSR signing. Requires <code>no_store</code> off.
+        </p>
       )}
 
       {!compact && (
@@ -1879,6 +1892,28 @@ function RoleEditor({
         </div>
       )}
     </div>
+  );
+}
+
+/** Role option `manage_private_key`. Cannot be turned on while `no_store`
+ *  is set: the engine refuses that pair, since the key binds to the stored
+ *  cert record. Shown in both the full editor and the compact create form. */
+function ManagePrivateKeyToggle({
+  config,
+  editing,
+  set,
+}: {
+  config: PkiRoleConfig;
+  editing: boolean;
+  set: (patch: Partial<PkiRoleConfig>) => void;
+}) {
+  return (
+    <Toggle
+      label="manage_private_key (store key in Keys, exportable)"
+      checked={config.manage_private_key}
+      onChange={(b) => set({ manage_private_key: b })}
+      disabled={!editing || (config.no_store && !config.manage_private_key)}
+    />
   );
 }
 

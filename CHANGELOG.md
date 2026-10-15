@@ -63,6 +63,10 @@ EXAMPLE ENTRY:
 - **Let a paired AI assistant fetch a page from a web-application resource through the vault** -- new MCP tool `bv_resource_web_fetch` (resource, profile, path, optional `GET`/`HEAD`) and route `resources/v2/connect/agent/web/fetch`, built behind the `mcp_sessions_web` feature. The vault makes the request itself, only to the profile's own https origins, follows at most 5 redirects and re-checks each hop's addresses against the destination policy before sending, trusts a certificate the OS roots reject only when it matches the profile's pin (no "accept anyway"), signs in with HTTP Basic from the profile's stored secret without ever returning it, and returns the page as text with allow-listed headers, size caps and every credential and cookie value scrubbed. Each fetch is confirmed by the operator ("Fetch a page from …?"), may need the operator's MFA, and is transcribed and audited. `open` and `http-auth` profiles only; form and SSO logins are refused. (T137, S111)
 - The desktop app's TLS pin decision now lives in `bv-utils` and is shared with the vault; the desktop's behaviour is unchanged. (T137, S105)
 
+#### PKI Key Management — managed private keys per role (features/pki-key-management-and-lifecycle.md)
+
+- **Keep the private key of every certificate a role issues, and export it later with the certificate** -- new role option `manage_private_key` (default `false`; roles already stored read as `false` and behave as before). When set, `pki/issue/:role` stores the generated key in the mount's managed key store (barrier-sealed, `exportable`, named `<role>-<serial>`), binds it to the certificate, and adds `key_id` to the issue response, which still returns `private_key`. Export it through `pki/cert/<serial>/export` with `include_private_key=true` (PEM or PKCS#12); the key cannot be deleted while the certificate is bound. Combining it with `no_store` is refused with a 400. CSR-based signing (`sign/:role`, `sign-verbatim`, ACME) and `key_ref`-pinned issuance are unchanged. The GUI's role form has a `manage_private_key` toggle. (T142, S37)
+
 ### Fixed
 
 #### MCP Access — default pairing grant

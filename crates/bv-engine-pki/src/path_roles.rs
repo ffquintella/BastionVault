@@ -83,6 +83,12 @@ pub struct RoleEntry {
     /// acceptable". `#[serde(default)]` keeps pre-L2 roles readable.
     #[serde(default)]
     pub allowed_key_refs: Vec<String>,
+    /// Persist every leaf key `pki/issue/:role` generates as an exportable
+    /// managed key (`<role>-<serial>`) bound to the cert. CSR-based paths
+    /// never hold the key and are unaffected. Incompatible with `no_store`.
+    /// `#[serde(default)]`: roles stored before this field read as `false`.
+    #[serde(default)]
+    pub manage_private_key: bool,
     /// Phase L4: list of parent domains this role may issue under. Used
     /// in conjunction with `allow_subdomains`, `allow_bare_domains`,
     /// and `allow_glob_domains` to constrain CN + DNS SANs. Ignored
@@ -174,6 +180,21 @@ impl RoleEntry {
         };
         std::cmp::min(base, self.max_ttl)
     }
+
+    /// `manage_private_key` binds the key to the stored cert record, which
+    /// `no_store` never writes — refuse the pair instead of letting one
+    /// flag silently win. Checked at role write and again at issuance.
+    pub fn check_key_management(&self) -> Result<(), RvError> {
+        if self.manage_private_key && self.no_store {
+            return Err(RvError::ErrResponseStatus(
+                400,
+                "manage_private_key requires no_store = false: a managed key is bound to the \
+                 stored certificate record, which no_store never writes"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl PkiBackend {
@@ -213,6 +234,7 @@ impl PkiBackend {
                 "issuer_ref": { field_type: FieldType::Str, default: "", description: "Pin issuance to a specific issuer (ID or name). Empty = mount default." },
                 "allow_key_reuse": { field_type: FieldType::Bool, default: false, description: "Allow callers to pin a managed key via key_ref on issue/sign (Phase L2). Default false (closed)." },
                 "allowed_key_refs": { field_type: FieldType::CommaStringSlice, default: "", description: "Allow-list of managed key IDs/names this role may pin to. Empty + allow_key_reuse=true means any." },
+                "manage_private_key": { field_type: FieldType::Bool, default: false, description: "Store the private key of every cert issue/:role generates in the managed key store (pki/keys, exportable=true, named <role>-<serial>) and bind it to the cert, so it can be exported later via cert/<serial>/export include_private_key=true. Does not apply to sign/sign-verbatim/ACME (CSR-based). Incompatible with no_store. Default false." },
                 "allowed_domains": { field_type: FieldType::CommaStringSlice, default: "", description: "Phase L4: allowed parent domains for CN / DNS SANs (used with allow_subdomains / allow_bare_domains / allow_glob_domains). Ignored when allow_any_name=true." },
                 "allow_glob_domains": { field_type: FieldType::Bool, default: false, description: "Phase L4: entries in allowed_domains may contain `*` glob patterns within a label." },
                 "acme_enabled": { field_type: FieldType::Bool, default: true, description: "Phase L4: per-role ACME kill-switch. Default true." },
@@ -356,6 +378,7 @@ impl PkiBackendInner {
                 .get_data_or_default("allowed_key_refs")?
                 .as_comma_string_slice()
                 .unwrap_or_default(),
+            manage_private_key: bool_or(req, "manage_private_key", false)?,
             allowed_domains: req
                 .get_data_or_default("allowed_domains")?
                 .as_comma_string_slice()
@@ -376,6 +399,7 @@ impl PkiBackendInner {
             allow_ad_sid,
             ad_sid,
         };
+        role.check_key_management()?;
 
         let entry = StorageEntry::new(format!("role/{name}").as_str(), &role)?;
         req.storage_put(&entry).await?;
@@ -416,4 +440,60 @@ fn parse_opt_duration(req: &Request, key: &str, default: Duration) -> Result<Dur
             "{key}: '{s}' is not a valid duration ({e}); use a unit suffix like '720h' or '5m'"
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RoleEntry;
+
+    /// A role exactly as stored before `manage_private_key` existed: the
+    /// field is absent and must read as `false` (keys stay unmanaged).
+    const ROLE_JSON_BEFORE_MANAGE_PRIVATE_KEY: &str = r#"{
+        "ttl": 2592000, "max_ttl": 7776000, "not_before_duration": 30,
+        "key_type": "ec", "key_bits": 0, "signature_bits": 0,
+        "allow_localhost": true, "allow_bare_domains": false, "allow_subdomains": false,
+        "allow_any_name": true, "allow_ip_sans": true, "server_flag": true, "client_flag": true,
+        "use_csr_sans": true, "use_csr_common_name": true,
+        "key_usage": ["DigitalSignature", "KeyEncipherment"], "ext_key_usage": [],
+        "country": "", "province": "", "locality": "", "organization": "", "ou": "",
+        "no_store": false, "generate_lease": false, "issuer_ref": "",
+        "allow_key_reuse": true, "allowed_key_refs": ["k1"]
+    }"#;
+
+    #[test]
+    fn role_stored_before_the_field_reads_as_unmanaged() {
+        let role: RoleEntry =
+            serde_json::from_str(ROLE_JSON_BEFORE_MANAGE_PRIVATE_KEY).expect("old role JSON must still parse");
+        assert!(!role.manage_private_key, "absent field must default to false (closed)");
+        assert!(role.allow_key_reuse, "the rest of the old record must survive");
+        assert_eq!(role.allowed_key_refs, vec!["k1".to_string()]);
+        role.check_key_management().expect("an old role is always valid");
+    }
+
+    #[test]
+    fn manage_private_key_round_trips_through_storage_json() {
+        let role = RoleEntry { manage_private_key: true, ..Default::default() };
+        let json = serde_json::to_value(&role).expect("serialise");
+        assert_eq!(json["manage_private_key"], serde_json::json!(true), "read response must carry the field");
+        let back: RoleEntry = serde_json::from_value(json).expect("deserialise");
+        assert!(back.manage_private_key);
+        assert!(!RoleEntry::default().manage_private_key, "default is closed");
+    }
+
+    #[test]
+    fn manage_private_key_with_no_store_is_refused() {
+        let role = RoleEntry { manage_private_key: true, no_store: true, ..Default::default() };
+        let err = role.check_key_management().expect_err("contradictory role must be refused");
+        // The HTTP layer maps `ErrResponseStatus` to its own status code:
+        // an operator config mistake, not an engine fault.
+        assert!(
+            matches!(&err, crate::errors::RvError::ErrResponseStatus(400, msg) if msg.contains("no_store")),
+            "expected a 400 naming no_store, got {err:?}"
+        );
+
+        for (manage, no_store) in [(false, false), (true, false), (false, true)] {
+            let ok = RoleEntry { manage_private_key: manage, no_store, ..Default::default() };
+            ok.check_key_management().unwrap_or_else(|e| panic!("({manage}, {no_store}) must be accepted: {e:?}"));
+        }
+    }
 }
