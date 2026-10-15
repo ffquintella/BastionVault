@@ -1,0 +1,14 @@
+# graphify scan exclusions (gitignore syntax). graphify already honours
+# .gitignore and skips target/, node_modules/, dist/ and .git/ on its own;
+# this adds the rest of AGENTS.md §6.
+
+# Separate Cargo workspaces / submodules — not part of this workspace.
+third_party/
+IronRDP/
+plugins-ext/
+
+# Generated cargo --timings reports.
+docs/build-timings/*.html
+
+# Machine-local Claude Code state (agents/ is shared config, not code).
+.claude/
