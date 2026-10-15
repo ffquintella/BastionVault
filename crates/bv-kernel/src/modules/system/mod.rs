@@ -243,6 +243,8 @@ impl SystemBackend {
         let sys_backend_mcp_token_delete = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_mcp_token_exchange = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_mcp_pairing_delete = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_mcp_transcripts_list = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_mcp_transcript_read = self.self_ptr.upgrade().unwrap().clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -1237,6 +1239,27 @@ impl SystemBackend {
                     help: "Revoke every MCP-bound token minted for one local pairing."
                 },
                 {
+                    // MCP brokered-session transcripts
+                    // (features/mcp-brokered-sessions.md §10). Sudo-gated via
+                    // `root_paths` below; every read is audited as
+                    // `mcp.transcript.accessed`. HTTP shim under /v2/sys only.
+                    pattern: "mcp/transcripts/?$",
+                    operations: [
+                        {op: Operation::List, handler: sys_backend_mcp_transcripts_list.handle_mcp_transcripts_list}
+                    ],
+                    help: "List MCP brokered-session transcripts, newest first."
+                },
+                {
+                    pattern: r"mcp/transcripts/(?P<id>[^/]+)$",
+                    fields: {
+                        "id": { field_type: FieldType::Str, required: true, description: "Transcript id: <20-digit nanoseconds>-<session id>." }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_mcp_transcript_read.handle_mcp_transcript_read}
+                    ],
+                    help: "Read one MCP brokered-session transcript."
+                },
+                {
                     // The public HTTP path is `/v2/mcp/token` (not under
                     // `/v2/sys/`); Phase 3's server route maps that to this
                     // logical path. See mcp.rs's handler doc for why this
@@ -1505,7 +1528,7 @@ impl SystemBackend {
             // Admin reads/writes are gated by policy on the explicit
             // mount/name paths instead. `identity/profile/*` is caller-scoped
             // for the same reason and is likewise never root-scoped.
-            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "audit-retention", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*", "identity/ns-assignment", "identity/ns-assignment/*", "dos/config", "dos/stats", "dos/bans/*", "mcp/config"],
+            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "audit-retention", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*", "identity/ns-assignment", "identity/ns-assignment/*", "dos/config", "dos/stats", "dos/bans/*", "mcp/config", "mcp/transcripts", "mcp/transcripts/*"],
             // NB: `mcp/apps/<name>/machine-waiver` is NOT listed here even
             // though it is sudo-gated: `root_paths` only supports an exact
             // path or a trailing-`*` prefix (`new_radix_from_paths` in
@@ -2364,6 +2387,17 @@ impl SystemBackend {
             "last_run": last_run,
             "status_error": status_error,
             "stores": audit_retention::RETENTION_STORES.iter().map(|s| s.name).collect::<Vec<_>>(),
+            // Per store: whether it follows `retention_days` or a fixed rule
+            // (the MCP session transcripts), and the retention in force for
+            // it now (`null`: not pruned while retention is disabled).
+            "store_rules": audit_retention::RETENTION_STORES
+                .iter()
+                .map(|s| json!({
+                    "store": s.name,
+                    "rule": s.rule.as_str(),
+                    "retention_days": s.rule.days(cfg.enabled.then_some(cfg.retention_days)),
+                }))
+                .collect::<Vec<_>>(),
         })
         .as_object()
         .cloned()

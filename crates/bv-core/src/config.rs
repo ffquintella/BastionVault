@@ -143,9 +143,11 @@ pub struct Config {
     /// no file did. Not part of the config language: it is what lets
     /// [`Config::merge`] tell "the second file leaves `mcp` out" (keep the
     /// first file's block) from "both files declare it" (refuse), which the
-    /// block's `#[serde(default)]` alone cannot.
+    /// block's `#[serde(default)]` alone cannot. Public only so that
+    /// `Config { .., ..Default::default() }` keeps working outside this
+    /// crate; nothing but the loader should set it.
     #[serde(skip)]
-    pub(crate) mcp_declared_in: Option<String>,
+    pub mcp_declared_in: Option<String>,
 }
 
 /// `mcp { ... }` — transport settings for the `/v2/mcp` endpoint. These

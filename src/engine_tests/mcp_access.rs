@@ -1050,4 +1050,225 @@ mod mod_test {
         assert_eq!(data["brokered_sessions_allowed_target_cidrs"], Value::Null);
         assert_eq!(data["brokered_sessions_enabled"], json!(false));
     }
+
+    // ── MCP brokered sessions, slice 2: the `mcp` audit block (T94 slice),
+    // `connect.agent.refused`, and the effective destination list ──
+
+    /// A file audit device in a fresh directory; returns the directory and the
+    /// log path.
+    async fn audit_file(core: &crate::core::Core, name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "bv-mcp-audit-{name}-{}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("audit.log");
+        let broker = core.audit_broker.load().as_ref().cloned().expect("broker installed at unseal");
+        let mut options = std::collections::HashMap::new();
+        options.insert("file_path".to_string(), log.display().to_string());
+        broker
+            .enable_device(crate::audit::AuditDeviceConfig {
+                path: format!("mcp-{name}"),
+                device_type: "file".into(),
+                description: String::new(),
+                options,
+                namespace: String::new(),
+                mirror: false,
+            })
+            .await
+            .unwrap();
+        (dir, log)
+    }
+
+    fn audit_lines(log: &std::path::Path) -> Vec<Value> {
+        std::fs::read_to_string(log).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+    }
+
+    /// Every request a `tools/call` routes carries the `request.mcp` block:
+    /// pairing, client, tool, catalogue and argument hashes, `allowed`, and
+    /// the gatekeeper's asserted confirmation when it sent one. A session
+    /// tool the dispatcher refuses yields `connect.agent.refused`, naming the
+    /// operator and pairing; nothing in either holds the MCP token.
+    #[tokio::test]
+    async fn test_mcp_tools_call_audit_block_and_session_refusal_event() {
+        use crate::mcp_endpoint::{handle_jsonrpc, McpEndpoint, McpEndpointOutcome};
+        use bv_mcp::request_state::SingleUseGuard;
+
+        let (_bvault, core_arc, root_token) = new_unseal_test_bastion_vault("test_mcp_audit_block").await;
+        let core: &crate::core::Core = &core_arc;
+        let (audit_dir, audit_log) = audit_file(core, "block").await;
+        let op = operator_token(core, &root_token, "felipe").await;
+        let mount = json!({ "type": "kv-v2" }).as_object().cloned();
+        let _ = test_write_api(core, &root_token, "sys/mounts/mcpkv/", true, mount).await;
+        let secret = json!({ "data": { "k": "v" } }).as_object().cloned();
+        let _ = test_write_api(core, &root_token, "mcpkv/data/ai/x", true, secret).await;
+        let policy_hcl = r#"
+            path "sys/mcp/token"    { capabilities = ["update"] }
+            path "mcpkv/metadata/*" { capabilities = ["read", "list"] }
+        "#;
+        let policy = json!({ "policy": policy_hcl }).as_object().cloned();
+        let _ = test_write_api(core, &root_token, "sys/policy/mcp-pairer", true, policy).await;
+        let pairing = json!({
+            "pairing": {
+                "id": "audited",
+                "client_name": "claude-code",
+                "client_version": "2.1",
+                "tool_allowlist": ["bv_kv_list"],
+                "path_scope": ["mcpkv/*"],
+            },
+        })
+        .as_object()
+        .cloned();
+        let resp = test_write_api(core, &op, "sys/mcp/token", true, pairing).await;
+        let mcp_token = resp.unwrap().unwrap().data.unwrap()["auth"]["client_token"].as_str().unwrap().to_string();
+
+        let guard = SingleUseGuard::new();
+        let ep = McpEndpoint {
+            core: &core_arc,
+            client_ip: "",
+            tool_timeout: std::time::Duration::from_secs(30),
+            server_version: "9.9",
+            request_state_key: b"in-process-test-key",
+            single_use_guard: &guard,
+        };
+        let call = |id: u64, tool: &str, arguments: Value, meta: Value| {
+            serde_json::to_vec(&json!({
+                "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": { "name": tool, "arguments": arguments, "_meta": meta },
+            }))
+            .unwrap()
+        };
+        let answer = |outcome: McpEndpointOutcome| match outcome {
+            McpEndpointOutcome::Answer(r) => serde_json::to_value(r).unwrap(),
+            other => panic!("expected a JSON-RPC answer, got {other:?}"),
+        };
+
+        // Confirmed by the operator (as the gatekeeper asserts it), then not.
+        let confirmed_args = json!({ "mount": "mcpkv", "path": "ai" });
+        let confirmed = json!({ "io.bastionvault/confirmation": { "by": "operator", "at": 1_760_000_000u64, "mfa": false } });
+        let ok = answer(handle_jsonrpc(&ep, &mcp_token, &call(1, "bv_kv_list", confirmed_args.clone(), confirmed)).await.unwrap());
+        assert!(ok["error"].is_null(), "{ok}");
+        let plain_args = json!({ "mount": "mcpkv" });
+        let ok = answer(handle_jsonrpc(&ep, &mcp_token, &call(2, "bv_kv_list", plain_args.clone(), json!({}))).await.unwrap());
+        assert!(ok["error"].is_null(), "{ok}");
+
+        // A session tool: refused by the dispatcher (no session tool ships yet).
+        let session_args = json!({ "resource": "web-01", "profile": "p_agent", "command": "id" });
+        let refused =
+            answer(handle_jsonrpc(&ep, &mcp_token, &call(3, "bv_resource_ssh_exec", session_args, json!({}))).await.unwrap());
+        let code = refused["error"]["data"]["code"].as_str().unwrap().to_string();
+
+        let entries = audit_lines(&audit_log);
+        let blocks: Vec<&Value> = entries.iter().filter(|e| e["request"]["mcp"].is_object()).collect();
+        let first = blocks
+            .iter()
+            .find(|e| e["request"]["mcp"]["args_hash"] == json!(bv_mcp::dispatcher::args_hash(confirmed_args.as_object().unwrap())))
+            .unwrap_or_else(|| panic!("the confirmed call's block is in the audit log: {blocks:#?}"));
+        let mcp = &first["request"]["mcp"];
+        assert_eq!(mcp["kind"], json!("pairing"));
+        assert_eq!(mcp["name"], json!("audited"));
+        assert_eq!(mcp["client_name"], json!("claude-code"));
+        assert_eq!(mcp["client_version"], json!("2.1"));
+        assert_eq!(mcp["tool"], json!("bv_kv_list"));
+        assert_eq!(mcp["catalogue_hash"], json!(bv_mcp::catalogue::catalogue_hash()));
+        assert_eq!(mcp["decision"], json!("allowed"));
+        assert_eq!(mcp["transport"], json!("in-process"));
+        assert_eq!(mcp["confirmed_by_operator"], json!(true));
+        assert_eq!(mcp["operator_confirmation"], json!("asserted-by-local-host"));
+        assert_eq!(first["request"]["path"], json!("mcpkv/metadata/ai/"));
+
+        let second = blocks
+            .iter()
+            .find(|e| e["request"]["mcp"]["args_hash"] == json!(bv_mcp::dispatcher::args_hash(plain_args.as_object().unwrap())))
+            .expect("the unconfirmed call's block");
+        assert_eq!(second["request"]["mcp"]["confirmed_by_operator"], json!(false));
+        assert!(second["request"]["mcp"].get("operator_confirmation").is_none());
+
+        let refusal = entries
+            .iter()
+            .find(|e| e["type"] == "event" && e["request"]["path"] == "connect.agent.refused")
+            .unwrap_or_else(|| panic!("connect.agent.refused is in the audit log: {entries:#?}"));
+        let data = &refusal["request"]["data"];
+        assert_eq!(data["reason"], json!(code));
+        assert_eq!(data["tool"], json!("bv_resource_ssh_exec"));
+        assert_eq!(data["protocol"], json!("ssh"));
+        assert_eq!(data["resource"], json!("web-01"));
+        assert_eq!(data["profile_id"], json!("p_agent"));
+        assert_eq!(data["pairing_id"], json!("audited"));
+        assert_eq!(data["operator"]["username"], json!("felipe"));
+        assert!(data.get("command").is_none(), "no command text in audit");
+        // No block was written for the refused call: nothing was routed.
+        assert!(blocks.iter().all(|e| e["request"]["mcp"]["tool"] != "bv_resource_ssh_exec"));
+
+        let raw = std::fs::read_to_string(&audit_log).unwrap();
+        assert!(!raw.contains(&mcp_token), "the MCP token is never in the audit log");
+        let _ = std::fs::remove_dir_all(audit_dir);
+    }
+
+    /// `sys/mcp/config` reports the destination list in force and where it
+    /// comes from: the built-in default, the server config's
+    /// `mcp.brokered_sessions` (`hcl`), or the runtime value — and the
+    /// server's static switch, its protocols and the always-denied classes.
+    #[tokio::test]
+    async fn test_mcp_config_reports_the_effective_destination_list_and_its_source() {
+        use crate::test_utils::{init_test_bastion_vault, new_test_backend, unseal_test_bastion_vault};
+
+        // No server config: the default.
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_mcp_config_effective_default").await;
+        let data = read_mcp_config(&core, &root).await;
+        assert_eq!(data["brokered_sessions_target_cidrs_source"], json!("default"));
+        assert_eq!(
+            data["brokered_sessions_effective_target_cidrs"],
+            json!(bv_utils::destination_policy::DEFAULT_ALLOWED_TARGET_CIDRS)
+        );
+        assert_eq!(data["brokered_sessions_server_enabled"], json!(false));
+        assert_eq!(data["brokered_sessions_server_protocols"], json!([]));
+        let denied = data["brokered_sessions_always_denied"].as_array().unwrap();
+        assert!(denied.contains(&json!("loopback")) && denied.contains(&json!("vault-listener")), "{denied:?}");
+
+        // A server config with its own list.
+        let mut config = crate::config::Config::default();
+        config.mcp.brokered_sessions.enabled = true;
+        config.mcp.brokered_sessions.protocols = vec!["ssh".into()];
+        config.mcp.brokered_sessions.allowed_target_cidrs = Some(vec!["10.9.0.0/16".into()]);
+        let bvault = crate::BastionVault::new(new_test_backend("test_mcp_config_effective_hcl"), Some(&config)).unwrap();
+        let seal = crate::core::SealConfig { secret_shares: 1, secret_threshold: 1 };
+        let init = init_test_bastion_vault(&bvault, &seal).await;
+        assert!(unseal_test_bastion_vault(&bvault, &[init.secret_shares[0].as_slice()]).await);
+        let core = bvault.core.load().clone();
+        let root = init.root_token.clone();
+        let core: &crate::core::Core = &core;
+
+        let data = read_mcp_config(core, &root).await;
+        assert_eq!(data["brokered_sessions_target_cidrs_source"], json!("hcl"));
+        assert_eq!(data["brokered_sessions_effective_target_cidrs"], json!(["10.9.0.0/16"]));
+        assert_eq!(data["brokered_sessions_server_enabled"], json!(true));
+        assert_eq!(data["brokered_sessions_server_protocols"], json!(["ssh"]));
+        assert_eq!(data["brokered_sessions_allowed_target_cidrs"], Value::Null, "the runtime layer is unset");
+
+        // The runtime layer replaces it, an empty list included; `null` hands
+        // back to the server config. The write's own response says so too.
+        let resp = write_mcp_config(core, &root, json!({ "brokered_sessions_allowed_target_cidrs": ["10.20.0.0/16"] }), true)
+            .await
+            .unwrap()
+            .unwrap();
+        let written = resp.data.unwrap();
+        assert_eq!(written["brokered_sessions_target_cidrs_source"], json!("runtime"));
+        assert_eq!(written["brokered_sessions_effective_target_cidrs"], json!(["10.20.0.0/16"]));
+        write_mcp_config(core, &root, json!({ "brokered_sessions_allowed_target_cidrs": [] }), true).await.unwrap();
+        let data = read_mcp_config(core, &root).await;
+        assert_eq!(data["brokered_sessions_target_cidrs_source"], json!("runtime"));
+        assert_eq!(data["brokered_sessions_effective_target_cidrs"], json!([]));
+        write_mcp_config(core, &root, json!({ "brokered_sessions_allowed_target_cidrs": null }), true).await.unwrap();
+        let data = read_mcp_config(core, &root).await;
+        assert_eq!(data["brokered_sessions_target_cidrs_source"], json!("hcl"));
+        assert_eq!(data["brokered_sessions_effective_target_cidrs"], json!(["10.9.0.0/16"]));
+
+        // The derived keys are read-only: writing one changes nothing stored.
+        write_mcp_config(core, &root, json!({ "brokered_sessions_target_cidrs_source": "runtime" }), true).await.unwrap();
+        let view = sys_mount_view(core);
+        let stored: Value = serde_json::from_slice(&view.get("mcp/config").await.unwrap().unwrap().value).unwrap();
+        assert!(stored.get("brokered_sessions_target_cidrs_source").is_none(), "{stored}");
+        assert!(stored.get("brokered_sessions_effective_target_cidrs").is_none(), "{stored}");
+    }
 }

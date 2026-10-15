@@ -19,6 +19,29 @@ use crate::{
 };
 
 use super::SystemBackend;
+use crate::kernel_api::{
+    mcp_events::TranscriptAccessed,
+    mcp_transcripts::{parse_transcript_id, TranscriptError, TranscriptStore},
+};
+
+/// A transcript store failure as an operator-facing error: a malformed id is
+/// the caller's (400), an unreadable record or a storage failure the
+/// vault's (500), each naming why.
+fn transcript_error(e: TranscriptError) -> RvError {
+    match e {
+        TranscriptError::InvalidId(_) | TranscriptError::Invalid(_) => {
+            crate::bv_error_response_status!(400, "{}", e)
+        }
+        TranscriptError::Unreadable { .. } | TranscriptError::Storage(_) => {
+            crate::bv_error_response_status!(500, "{}", e)
+        }
+    }
+}
+
+/// RFC3339 of a transcript id's nanosecond half.
+fn nanos_rfc3339(nanos: u128) -> String {
+    i64::try_from(nanos).map(|n| chrono::DateTime::from_timestamp_nanos(n).to_rfc3339()).unwrap_or_default()
+}
 
 pub const MCP_CONFIG_KEY: &str = "mcp/config";
 pub const MCP_APP_PREFIX: &str = "mcp/apps/";
@@ -383,7 +406,36 @@ impl SystemBackend {
             Some(entry) => serde_json::from_slice(&entry.value)?,
             None => McpRuntimeConfig::default(),
         };
-        Ok(Some(Response::data_response(serde_json::to_value(cfg)?.as_object().cloned())))
+        Ok(Some(Response::data_response(Some(self.mcp_config_response(&cfg)?))))
+    }
+
+    /// The stored runtime record plus what is actually in force for brokered
+    /// sessions once the server config is folded in: the effective
+    /// destination list and the layer it came from (`runtime`, `hcl` or
+    /// `default`), the server config's static switch and protocols, and the
+    /// always-denied classes no list can re-allow. The derived keys are
+    /// read-only; a write ignores them.
+    fn mcp_config_response(&self, cfg: &McpRuntimeConfig) -> Result<Map<String, Value>, RvError> {
+        let mut data = serde_json::to_value(cfg)?.as_object().cloned().unwrap_or_default();
+        let server = &self.core.mcp_brokered_sessions;
+        let (effective, source) = bv_utils::destination_policy::effective_target_cidr_entries(
+            cfg.brokered_sessions_allowed_target_cidrs.as_deref(),
+            server.allowed_target_cidrs.as_deref(),
+        );
+        data.insert("brokered_sessions_effective_target_cidrs".into(), serde_json::to_value(effective)?);
+        data.insert("brokered_sessions_target_cidrs_source".into(), Value::String(source.as_str().to_string()));
+        data.insert("brokered_sessions_server_enabled".into(), Value::Bool(server.enabled));
+        data.insert("brokered_sessions_server_protocols".into(), serde_json::to_value(&server.protocols)?);
+        data.insert(
+            "brokered_sessions_always_denied".into(),
+            Value::Array(
+                bv_utils::destination_policy::AlwaysDenied::ALL
+                    .iter()
+                    .map(|c| Value::String(c.as_str().to_string()))
+                    .collect(),
+            ),
+        );
+        Ok(data)
     }
 
     pub async fn handle_mcp_config_write(
@@ -458,7 +510,7 @@ impl SystemBackend {
             }
         }
 
-        let mut resp = Response::data_response(serde_json::to_value(cfg)?.as_object().cloned());
+        let mut resp = Response::data_response(Some(self.mcp_config_response(&cfg)?));
         for w in warnings {
             resp.add_warning(&w);
         }
@@ -1061,6 +1113,89 @@ impl SystemBackend {
                 "metadata": { "mcp_kind": "app", "mcp_name": app.name },
             }),
         );
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// `LIST v2/sys/mcp/transcripts` — every MCP session transcript id,
+    /// newest first, with the instant and session id each id encodes. Keys
+    /// only: no transcript is decrypted. Needs `list` and `sudo`
+    /// (`root_paths`), and emits `mcp.transcript.accessed`; if that event
+    /// cannot be written to an enabled audit device the listing is refused.
+    pub async fn handle_mcp_transcripts_list(
+        &self,
+        _backend: &dyn crate::logical::Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = TranscriptStore::from_ctx(self.core.as_ref())?;
+        let ids = store.list().await.map_err(transcript_error)?;
+        let event = TranscriptAccessed {
+            operation: "list".into(),
+            transcript_id: None,
+            listed: Some(ids.len() as u64),
+            found: true,
+        };
+        crate::kernel_api::mcp_events::emit(self.core.as_ref(), &event, Some(req)).await?;
+
+        let mut key_info = Map::new();
+        for id in &ids {
+            if let Some(parsed) = parse_transcript_id(id) {
+                key_info.insert(
+                    id.clone(),
+                    serde_json::json!({
+                        "recorded_at": nanos_rfc3339(parsed.nanos),
+                        "session_id": parsed.session_id,
+                    }),
+                );
+            }
+        }
+        let mut data = Map::new();
+        data.insert("keys".into(), serde_json::to_value(&ids)?);
+        data.insert("key_info".into(), Value::Object(key_info));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// `GET v2/sys/mcp/transcripts/{id}` — one transcript: who and what (the
+    /// summary) and the session record (command and credential-scrubbed
+    /// output). Needs `read` and `sudo` (`root_paths`). Every attempt emits
+    /// `mcp.transcript.accessed`, found or not, before anything is returned;
+    /// if that event cannot be written to an enabled audit device the read is
+    /// refused. A record that does not decode is a 500 naming why — never
+    /// skipped or returned in part.
+    pub async fn handle_mcp_transcript_read(
+        &self,
+        _backend: &dyn crate::logical::Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let id = req.get_data_as_str("id")?;
+        let parsed = parse_transcript_id(&id);
+        let read = match parsed {
+            None => Err(TranscriptError::InvalidId(crate::kernel_api::mcp_events::bounded_arg(&id))),
+            Some(_) => match TranscriptStore::from_ctx(self.core.as_ref()) {
+                Ok(store) => store.read(&id).await,
+                Err(e) => Err(TranscriptError::from(e)),
+            },
+        };
+        let event = TranscriptAccessed {
+            operation: "read".into(),
+            transcript_id: Some(crate::kernel_api::mcp_events::bounded_arg(&id)),
+            listed: None,
+            found: matches!(read, Ok(Some(_))),
+        };
+        crate::kernel_api::mcp_events::emit(self.core.as_ref(), &event, Some(req)).await?;
+
+        let transcript = match read {
+            Ok(Some(t)) => t,
+            Ok(None) => return Err(crate::bv_error_response_status!(404, "no MCP session transcript {:?}", id)),
+            Err(e) => return Err(transcript_error(e)),
+        };
+        let recorded_at = parsed.map(|p| nanos_rfc3339(p.nanos)).unwrap_or_default();
+        let mut data = Map::new();
+        data.insert("id".into(), Value::String(id));
+        data.insert("recorded_at".into(), Value::String(recorded_at));
+        data.insert("version".into(), Value::from(crate::kernel_api::mcp_transcripts::TRANSCRIPT_RECORD_VERSION));
+        data.insert("protocol".into(), Value::String(transcript.body.protocol().to_string()));
+        data.insert("summary".into(), serde_json::to_value(&transcript.summary)?);
+        data.insert("body".into(), serde_json::to_value(&transcript.body)?);
         Ok(Some(Response::data_response(Some(data))))
     }
 }

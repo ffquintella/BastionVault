@@ -1,6 +1,6 @@
 [package]
 name = "bv-core"
-version = "0.41.6"
+version = "0.42.0"
 edition = "2021"
 description = "BastionVault's kernel: Core, the mount table, the module registry, the seal path and the server config model"
 license = "Apache-2.0"
@@ -26,7 +26,7 @@ bv-shamir = { path = "../bv-shamir", version = "0.41.0", registry = "uox-bastion
 bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-bastionvault" }
 bv-logical = { path = "../bv-logical", version = "0.42.0", registry = "uox-bastionvault" }
 bv-utils = { path = "../bv-utils", version = "0.41.0", registry = "uox-bastionvault" }
-bv-audit = { path = "../bv-audit", version = "0.41.0", registry = "uox-bastionvault" }
+bv-audit = { path = "../bv-audit", version = "0.42.0", registry = "uox-bastionvault" }
 bv-kernel-api = { path = "../bv-kernel-api", version = "0.41.0", registry = "uox-bastionvault" }
 bv_crypto = { path = "../bv_crypto", version = "0.41.0", registry = "uox-bastionvault" }
 

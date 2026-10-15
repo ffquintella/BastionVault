@@ -136,3 +136,57 @@ pub struct ClientInfo {
     pub name: String,
     pub version: String,
 }
+
+/// The `_meta` key under which the local gatekeeper asserts that the operator
+/// confirmed a call (`features/mcp-brokered-sessions.md` §9). Every
+/// `io.bastionvault/*` key is the gatekeeper's: it strips any a client sent
+/// before adding its own.
+pub const OPERATOR_CONFIRMATION_META_KEY: &str = "io.bastionvault/confirmation";
+
+/// The gatekeeper's confirmation record:
+/// `{"by": "operator", "at": <unix seconds>, "mfa": <bool>}`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct OperatorConfirmation {
+    pub by: String,
+    pub at: u64,
+    #[serde(default)]
+    pub mfa: bool,
+}
+
+/// The confirmation record in a call's `params._meta`, when it is well
+/// formed and says `by: "operator"`. Anything else — absent, another `by`,
+/// a mistyped field — is no confirmation, and does not disturb the rest of
+/// `_meta`'s parsing. The vault cannot see the confirmation happen: this is
+/// the local host's assertion, and is audited as such.
+pub fn operator_confirmation(meta: Option<&Value>) -> Option<OperatorConfirmation> {
+    let record = meta?.get(OPERATOR_CONFIRMATION_META_KEY)?;
+    let confirmation: OperatorConfirmation = serde_json::from_value(record.clone()).ok()?;
+    (confirmation.by == "operator").then_some(confirmation)
+}
+
+#[cfg(test)]
+mod confirmation_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_a_well_formed_operator_record_is_a_confirmation() {
+        let meta = json!({ "io.bastionvault/confirmation": { "by": "operator", "at": 1_760_000_000u64, "mfa": true } });
+        assert_eq!(
+            operator_confirmation(Some(&meta)),
+            Some(OperatorConfirmation { by: "operator".into(), at: 1_760_000_000, mfa: true })
+        );
+        let no_mfa = json!({ "io.bastionvault/confirmation": { "by": "operator", "at": 5 } });
+        assert!(operator_confirmation(Some(&no_mfa)).is_some_and(|c| !c.mfa));
+        for not_one in [
+            json!({}),
+            json!({ "io.bastionvault/confirmation": { "by": "agent", "at": 5 } }),
+            json!({ "io.bastionvault/confirmation": { "by": "operator", "at": "yesterday" } }),
+            json!({ "io.bastionvault/confirmation": { "by": "operator" } }),
+            json!({ "io.bastionvault/confirmation": true }),
+        ] {
+            assert_eq!(operator_confirmation(Some(&not_one)), None, "{not_one}");
+        }
+        assert_eq!(operator_confirmation(None), None);
+    }
+}

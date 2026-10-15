@@ -1,6 +1,6 @@
 [package]
 name = "bv-engine-transit"
-version = "0.41.0"
+version = "0.41.1"
 edition = "2021"
 description = "BastionVault's Transit engine: encryption as a service, key derivation and BYOK"
 license = "Apache-2.0"

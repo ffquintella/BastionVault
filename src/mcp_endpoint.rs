@@ -10,7 +10,7 @@
 //! forward to. Keeping it here means an embedded vault answers an assistant
 //! exactly as a remote one does, gate for gate.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bv_client::{Backend, ClientError, JsonResponse, Operation as ClientOp};
@@ -25,7 +25,8 @@ use serde_json::{json, Map, Value};
 use crate::{
     core::Core,
     errors::RvError,
-    logical::{Auth, McpBinding, Operation, Request},
+    kernel_api::mcp_events::{self, AgentRefused},
+    logical::{is_open_world_mcp_tool, Auth, McpAuditContext, McpBinding, McpBindingKind, Operation, Request},
     modules::auth::AuthModule,
 };
 
@@ -115,7 +116,11 @@ async fn handle_tools_call(
     let args = params.get("arguments").and_then(Value::as_object).cloned().unwrap_or_default();
     let confirmed_state = params.get("_meta").and_then(|m| m.get("requestState")).and_then(Value::as_str);
 
-    let backend = InProcessMcpBackend { core: ep.core.clone() };
+    let mcp_audit = mcp_audit_context(ep, &tool, &args, binding, params.get("_meta"));
+    // The dispatcher consumes the arguments; a session tool's refusal event
+    // names the resource and profile they gave.
+    let session_args = is_open_world_mcp_tool(&tool).then(|| args.clone());
+    let backend = InProcessMcpBackend { core: ep.core.clone(), mcp_audit };
     let principal = PrincipalInfo {
         accessor: mcp_accessor(token),
         display_name: meta.client_info.as_ref().map(|c| c.name.clone()).unwrap_or_default(),
@@ -151,8 +156,106 @@ async fn handle_tools_call(
     match outcome {
         Ok(result) => JsonRpcResponse::success(id, serde_json::to_value(result).unwrap_or(Value::Null)),
         Err(err) => {
+            if let Some(args) = session_args.as_ref().filter(|_| refused_before_routing(&err)) {
+                audit_session_refusal(ep.core, token, auth, binding, &tool, args, err.code()).await;
+            }
             JsonRpcResponse::failure(id, JsonRpcError::with_data_code(err.jsonrpc_code(), err.to_string(), err.code()))
         }
+    }
+}
+
+/// The `request.mcp` audit block for one `tools/call`
+/// (`features/mcp-access.md` §10; the slice `features/mcp-brokered-sessions.md`
+/// §10 assigns to Phase 1). Set on every request the call routes, so the
+/// standard audit entry says which binding, client and tool it was for.
+///
+/// `decision` is `allowed`: the block only reaches the audit log on a routed
+/// request, which the dispatcher's gates have passed. `transport` is what the
+/// vault can see — `http` from `bv-server`'s route, `in-process` from an
+/// embedded vault (the transport with no network peer, `client_ip` empty);
+/// how the local gatekeeper was reached is not visible here.
+fn mcp_audit_context(
+    ep: &McpEndpoint<'_>,
+    tool: &str,
+    args: &Map<String, Value>,
+    binding: &McpBinding,
+    meta: Option<&Value>,
+) -> McpAuditContext {
+    static CATALOGUE_HASH: OnceLock<String> = OnceLock::new();
+    let (kind, name) = match &binding.kind {
+        McpBindingKind::App(name) => ("app", name.clone()),
+        McpBindingKind::Pairing(id) => ("pairing", id.clone()),
+    };
+    let meta_tool = catalogue::find(tool);
+    let reveal_requested =
+        meta_tool.is_some_and(|m| m.is_reveal) && args.get("reveal").and_then(Value::as_bool).unwrap_or(false);
+    let confirmation = bv_mcp::jsonrpc::operator_confirmation(meta);
+    McpAuditContext {
+        kind: kind.to_string(),
+        name,
+        client_name: binding.client_name.clone(),
+        client_version: binding.client_version.clone(),
+        transport: if ep.client_ip.is_empty() { "in-process" } else { "http" }.to_string(),
+        tool: tool.to_string(),
+        catalogue_hash: CATALOGUE_HASH.get_or_init(catalogue::catalogue_hash).clone(),
+        args_hash: dispatcher::args_hash(args),
+        reveal_requested,
+        reveal_granted: reveal_requested && binding.reveal_allowed,
+        destructive: meta_tool.is_some_and(|m| m.destructive),
+        confirmed_by_operator: confirmation.is_some(),
+        operator_confirmation: confirmation.map(|_| "asserted-by-local-host".to_string()),
+        decision: "allowed".to_string(),
+        waived: binding.waived_until.is_some(),
+        ..Default::default()
+    }
+}
+
+/// Whether the dispatcher refused the call itself, before anything was
+/// routed. A refusal from the session handler underneath arrives as a
+/// backend error and is audited there, with its own code.
+fn refused_before_routing(err: &bv_mcp::McpError) -> bool {
+    !matches!(err, bv_mcp::McpError::Backend(_) | bv_mcp::McpError::ResultTooLarge { .. })
+}
+
+/// `connect.agent.refused` for a session tool the dispatcher refused
+/// (`features/mcp-brokered-sessions.md` §10): no connect grant, an app
+/// binding, a path out of scope, an invalid argument. The resource and
+/// profile are the call's own arguments, bounded; the event is best effort,
+/// since the call is refused whatever happens to it.
+async fn audit_session_refusal(
+    core: &Arc<Core>,
+    token: &str,
+    auth: &Auth,
+    binding: &McpBinding,
+    tool: &str,
+    args: &Map<String, Value>,
+    code: &str,
+) {
+    let protocol = match tool {
+        "bv_resource_ssh_exec" => "ssh",
+        "bv_resource_web_fetch" => "web",
+        "bv_resource_rdp_act" => "rdp",
+        _ => "unknown",
+    };
+    let arg = |key: &str| args.get(key).and_then(Value::as_str).map(mcp_events::bounded_arg);
+    let event = AgentRefused {
+        reason: code.to_string(),
+        tool: tool.to_string(),
+        protocol: protocol.to_string(),
+        resource: arg("resource"),
+        profile_id: arg("profile"),
+        operator: binding.operator.clone(),
+        pairing_id: match &binding.kind {
+            McpBindingKind::Pairing(id) => Some(id.clone()),
+            McpBindingKind::App(_) => None,
+        },
+        client_name: binding.client_name.clone(),
+    };
+    let mut who = Request::new("mcp/dispatch");
+    who.client_token = token.to_string();
+    who.auth = Some(auth.clone());
+    if let Err(e) = mcp_events::emit(core.as_ref(), &event, Some(&who)).await {
+        log::warn!(target: "security", "connect.agent.refused could not be written to the audit log: {e}");
     }
 }
 
@@ -172,6 +275,8 @@ fn mcp_accessor(token: &str) -> String {
 /// HTTP hop.
 struct InProcessMcpBackend {
     core: Arc<Core>,
+    /// Stamped on every request this call routes (`Request::mcp_audit`).
+    mcp_audit: McpAuditContext,
 }
 
 #[async_trait::async_trait]
@@ -197,6 +302,7 @@ impl Backend for InProcessMcpBackend {
         // MCP-origin gate refuses the very token this whole path exists to
         // dispatch. See that field's doc.
         req.mcp_dispatch = true;
+        req.mcp_audit = Some(self.mcp_audit.clone());
         let resp = self.core.handle_request(&mut req).await.map_err(|e| ClientError::backend(e.to_string()))?;
         Ok(resp.map(|r| JsonResponse { data: r.data, ..Default::default() }))
     }

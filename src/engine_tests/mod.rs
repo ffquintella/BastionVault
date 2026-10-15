@@ -18,6 +18,7 @@ mod ferrogate;
 mod files;
 mod kv_version_read;
 mod mcp_access;
+mod mcp_transcripts;
 mod notifications;
 mod oidc;
 mod pki_certs_info;

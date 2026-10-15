@@ -155,7 +155,11 @@ pub fn retention_announcement(
     if !cfg.enabled {
         return (
             log::Level::Info,
-            "audit-retention: retention is disabled; audit records are kept forever".to_string(),
+            format!(
+                "audit-retention: retention is disabled; audit records are kept forever (MCP session transcripts are \
+                 still deleted after {} days)",
+                crate::kernel_api::mcp_transcripts::TRANSCRIPT_RETENTION_DAYS
+            ),
         );
     }
     match source {

@@ -16,6 +16,13 @@
 //! [`super::housekeeping`]; this module holds the record formats, the schedule
 //! arithmetic and the pruning itself.
 //!
+//! Each store has its own rule ([`RetentionRule`]). The audit stores follow the
+//! operator's configuration; the MCP session transcripts have a fixed 30-day
+//! rule (`features/mcp-brokered-sessions.md` §10) that the configuration can
+//! neither shorten nor lengthen, and that still applies when retention is
+//! disabled or its configuration is unreadable. The clock check covers every
+//! store either way.
+//!
 //! Not pruned, on purpose: the policy / identity-group / asset-group change
 //! histories (`{name}/{nanos}` keys) — they are the provenance of objects that
 //! still exist and grow with administrative changes, not with requests — and
@@ -67,30 +74,98 @@ const STATUS_KEY: &str = "status";
 /// Width of the nanosecond prefix every pruned store's keys start with.
 const NANOS_KEY_WIDTH: usize = 20;
 
-/// One prunable store: its operator-facing name and its system-view sub-path.
+/// How long one store keeps its records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetentionRule {
+    /// The operator's `retention_days`; nothing is deleted while retention is
+    /// disabled or its configuration cannot be read.
+    Configured,
+    /// A fixed number of days, set in code. Applied whatever the operator's
+    /// configuration says, including `enabled = false` and an unreadable
+    /// record.
+    FixedDays(u32),
+}
+
+impl RetentionRule {
+    /// The retention this rule gives, in days, when the operator's
+    /// configuration gives `configured` (`None`: disabled or unreadable).
+    /// `None` means the store is not pruned by this run.
+    pub fn days(self, configured: Option<u32>) -> Option<u32> {
+        match self {
+            RetentionRule::Configured => configured,
+            RetentionRule::FixedDays(days) => Some(days),
+        }
+    }
+
+    /// `configured` or `fixed`, as reported per store.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RetentionRule::Configured => "configured",
+            RetentionRule::FixedDays(_) => "fixed",
+        }
+    }
+}
+
+/// One prunable store: its operator-facing name, its system-view sub-path and
+/// its retention rule.
 #[derive(Debug, Clone, Copy)]
 pub struct RetentionStore {
     pub name: &'static str,
     pub sub_path: &'static str,
+    pub rule: RetentionRule,
 }
 
 /// Every store the housekeeping job prunes. All are flat logs under the
 /// system view whose keys start with 20-digit nanoseconds.
 pub const RETENTION_STORES: &[RetentionStore] = &[
-    RetentionStore { name: "access-audit", sub_path: super::access_audit_store::ACCESS_AUDIT_SUB_PATH },
-    RetentionStore { name: "denial-audit", sub_path: super::denial_audit_store::DENIAL_AUDIT_SUB_PATH },
+    RetentionStore {
+        name: "access-audit",
+        sub_path: super::access_audit_store::ACCESS_AUDIT_SUB_PATH,
+        rule: RetentionRule::Configured,
+    },
+    RetentionStore {
+        name: "denial-audit",
+        sub_path: super::denial_audit_store::DENIAL_AUDIT_SUB_PATH,
+        rule: RetentionRule::Configured,
+    },
     RetentionStore {
         name: "login-audit",
         sub_path: crate::modules::credential::login_audit_store::LOGIN_AUDIT_SUB_PATH,
+        rule: RetentionRule::Configured,
     },
-    RetentionStore { name: "user-audit", sub_path: crate::modules::identity::user_audit_store::USER_AUDIT_SUB_PATH },
-    RetentionStore { name: "share-history", sub_path: crate::modules::identity::share_store::SHARE_HISTORY_SUB_PATH },
-    RetentionStore { name: "files-audit", sub_path: crate::modules::files::files_audit_store::FILES_AUDIT_SUB_PATH },
+    RetentionStore {
+        name: "user-audit",
+        sub_path: crate::modules::identity::user_audit_store::USER_AUDIT_SUB_PATH,
+        rule: RetentionRule::Configured,
+    },
+    RetentionStore {
+        name: "share-history",
+        sub_path: crate::modules::identity::share_store::SHARE_HISTORY_SUB_PATH,
+        rule: RetentionRule::Configured,
+    },
+    RetentionStore {
+        name: "files-audit",
+        sub_path: crate::modules::files::files_audit_store::FILES_AUDIT_SUB_PATH,
+        rule: RetentionRule::Configured,
+    },
     RetentionStore {
         name: "ssh-sign-audit",
         sub_path: crate::modules::ssh::ssh_sign_audit_store::SSH_SIGN_AUDIT_SUB_PATH,
+        rule: RetentionRule::Configured,
     },
-    RetentionStore { name: "ssh-ca-audit", sub_path: crate::modules::ssh::ssh_ca_audit_store::SSH_CA_AUDIT_SUB_PATH },
+    RetentionStore {
+        name: "ssh-ca-audit",
+        sub_path: crate::modules::ssh::ssh_ca_audit_store::SSH_CA_AUDIT_SUB_PATH,
+        rule: RetentionRule::Configured,
+    },
+    // MCP brokered-session transcripts: commands and their output, which may
+    // hold any secret a command printed. Head and chunk keys share the
+    // nanosecond prefix, so a record expires whole.
+    RetentionStore {
+        name: "mcp-session-transcripts",
+        sub_path: crate::kernel_api::mcp_transcripts::MCP_TRANSCRIPTS_SUB_PATH,
+        rule: RetentionRule::FixedDays(crate::kernel_api::mcp_transcripts::TRANSCRIPT_RETENTION_DAYS),
+    },
 ];
 
 /// Operator configuration. Persisted at `sys/audit-retention/config`.
@@ -152,6 +227,17 @@ pub struct StoreRunReport {
     pub unrecognised: u64,
     /// Delete batches issued.
     pub batches: u64,
+    /// The store's rule: `configured` or `fixed` ([`RetentionRule::as_str`]).
+    /// Empty in reports written before per-store rules existed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rule: String,
+    /// The retention this store was pruned under, in days. `0` in reports
+    /// written before per-store rules existed.
+    #[serde(default)]
+    pub retention_days: u32,
+    /// RFC3339 cutoff for this store; records strictly older were deleted.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cutoff: String,
     /// Why the store could not be pruned completely, if it could not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -165,9 +251,13 @@ pub enum RunOutcome {
     Completed,
     /// At least one store failed; the others were pruned.
     Partial,
-    /// Retention is disabled; nothing was deleted.
+    /// Retention is disabled: no audit record was deleted. Stores with a
+    /// fixed rule (the MCP session transcripts) were still pruned, and are
+    /// the only entries in `stores`.
     Disabled,
-    /// The run could not start (e.g. the configuration is unreadable).
+    /// The run could not prune the configured stores (e.g. the configuration
+    /// is unreadable, or the vault is sealed). Stores with a fixed rule were
+    /// still pruned when the vault was unsealed, and are listed in `stores`.
     Failed,
     /// The vault was sealed mid-run; the next run continues.
     Interrupted,
@@ -180,10 +270,12 @@ pub enum RunOutcome {
 pub struct RetentionRunReport {
     pub started_at: String,
     pub finished_at: String,
-    /// RFC3339 cutoff; records strictly older were deleted. Empty when the
-    /// run did not get as far as computing one.
+    /// RFC3339 cutoff of the configured stores; records strictly older were
+    /// deleted. Empty when the run did not prune them. A store with a fixed
+    /// rule reports its own cutoff.
     #[serde(default)]
     pub cutoff: String,
+    /// The operator's configured retention (`0` when it could not be read).
     pub retention_days: u32,
     pub outcome: RunOutcome,
     #[serde(default)]
@@ -501,59 +593,57 @@ pub async fn prune_keys(
 
 /// One retention run over every store in [`RETENTION_STORES`], at `now`.
 ///
-/// Reads the configuration first; an unreadable configuration fails the run
-/// without deleting anything. Logs one `security` line per store and one
-/// summary line, never record contents.
+/// Reads the configuration first. It decides the [`RetentionRule::Configured`]
+/// stores only: disabled or unreadable, those stores are not touched, and an
+/// unreadable configuration fails the run (never a fallback to the default).
+/// Stores with a fixed rule are pruned either way. The clock check covers
+/// every store, using the newest record of all of them, so the stores are
+/// listed (keys only) even when only the fixed ones will be pruned. Logs one
+/// `security` line per pruned store and one summary line, never record
+/// contents.
 pub async fn run_retention(core: &Core, now: DateTime<Utc>, params: PruneParams) -> RetentionRunReport {
     let node_id = crate::storage::cluster::node_id(core.physical.as_ref());
     let started_at = now.to_rfc3339();
-    let failed = |error: String, retention_days: u32| RetentionRunReport {
-        started_at: started_at.clone(),
-        finished_at: Utc::now().to_rfc3339(),
-        cutoff: String::new(),
-        retention_days,
-        outcome: RunOutcome::Failed,
-        stores: Vec::new(),
-        error: Some(error),
-        node_id,
-    };
 
-    let cfg = match load_config(core).await {
-        Ok((cfg, _)) => cfg,
+    let (configured_days, reported_days, config_error, disabled) = match load_config(core).await {
+        Ok((cfg, _)) if cfg.enabled => (Some(cfg.retention_days), cfg.retention_days, None, false),
+        Ok((cfg, _)) => {
+            log::info!(
+                target: "security",
+                "audit-retention: retention is disabled; no audit records deleted (stores with a fixed rule are still pruned)"
+            );
+            (None, cfg.retention_days, None, true)
+        }
         Err(e) => {
             log::error!(
                 target: "security",
-                "audit-retention: run refused, nothing deleted: the retention configuration could not be read ({e})"
+                "audit-retention: the retention configuration could not be read ({e}); no audit records deleted (stores with a fixed rule are still pruned)"
             );
-            return failed(format!("the retention configuration could not be read: {e}"), 0);
+            (None, 0, Some(format!("the retention configuration could not be read: {e}")), false)
         }
     };
 
-    if !cfg.enabled {
-        log::info!(target: "security", "audit-retention: retention is disabled; no audit records deleted");
+    let Some(system_view) = core.system_view() else {
         return RetentionRunReport {
-            started_at: started_at.clone(),
+            started_at,
             finished_at: Utc::now().to_rfc3339(),
             cutoff: String::new(),
-            retention_days: cfg.retention_days,
-            outcome: RunOutcome::Disabled,
+            retention_days: reported_days,
+            outcome: RunOutcome::Failed,
             stores: Vec::new(),
-            error: None,
+            error: Some(config_error.unwrap_or_else(|| "the vault is sealed".to_string())),
             node_id,
         };
-    }
-
-    let Some(system_view) = core.system_view() else {
-        return failed("the vault is sealed".to_string(), cfg.retention_days);
     };
 
-    let cutoff = now - chrono::Duration::days(cfg.retention_days as i64);
-    let cutoff_key = nanos_key(cutoff);
-    let cutoff_rfc = cutoff.to_rfc3339();
+    let configured_cutoff = configured_days.map(|days| now - chrono::Duration::days(days as i64));
+    let configured_cutoff_rfc = configured_cutoff.map(|c| c.to_rfc3339()).unwrap_or_default();
     let sealed = || core.sealed();
 
     // List every store first (keys only): the clock check needs the newest
-    // record across all of them before anything is deleted.
+    // record across all of them before anything is deleted — including the
+    // configured stores a disabled run will not prune, which are the ones a
+    // live deployment writes continuously.
     let mut listings: Vec<(&RetentionStore, Result<Vec<String>, String>)> = Vec::with_capacity(RETENTION_STORES.len());
     for store in RETENTION_STORES {
         let view = system_view.new_sub_view(store.sub_path);
@@ -562,72 +652,108 @@ pub async fn run_retention(core: &Core, now: DateTime<Utc>, params: PruneParams)
     }
     let newest = listings.iter().filter_map(|(_, l)| l.as_ref().ok()).filter_map(|keys| newest_key_time(keys)).max();
 
+    // The stores this run prunes, each with its retention.
+    let planned: Vec<(&RetentionStore, u32, Result<Vec<String>, String>)> = listings
+        .into_iter()
+        .filter_map(|(store, listed)| store.rule.days(configured_days).map(|days| (store, days, listed)))
+        .collect();
+    let base_report = |store: &RetentionStore, days: u32| StoreRunReport {
+        store: store.name.to_string(),
+        rule: store.rule.as_str().to_string(),
+        retention_days: days,
+        cutoff: (now - chrono::Duration::days(days as i64)).to_rfc3339(),
+        ..Default::default()
+    };
+
     if let Err(reason) = clock_check(now, newest) {
         log::error!(target: "security", "audit-retention: run refused, nothing deleted: {reason}");
-        let stores = listings
+        let stores = planned
             .into_iter()
-            .map(|(store, listed)| StoreRunReport {
-                store: store.name.to_string(),
+            .map(|(store, days, listed)| StoreRunReport {
                 remaining: listed.as_ref().map(|k| k.len() as u64).unwrap_or(0),
                 error: Some(match listed {
                     Ok(_) => "not pruned: clock check failed".to_string(),
                     Err(e) => e,
                 }),
-                ..Default::default()
+                ..base_report(store, days)
             })
             .collect();
         return RetentionRunReport {
             started_at,
             finished_at: Utc::now().to_rfc3339(),
-            cutoff: cutoff_rfc,
-            retention_days: cfg.retention_days,
+            cutoff: configured_cutoff_rfc,
+            retention_days: reported_days,
             outcome: RunOutcome::Refused,
             stores,
-            error: Some(reason),
+            error: Some(match &config_error {
+                Some(config) => format!("{reason}; {config}"),
+                None => reason,
+            }),
             node_id,
         };
     }
 
-    let mut stores = Vec::with_capacity(RETENTION_STORES.len());
-    let mut outcome = RunOutcome::Completed;
-    for (store, listed) in listings {
+    let mut stores = Vec::with_capacity(planned.len());
+    let mut store_failed = false;
+    let mut interrupted = false;
+    for (store, days, listed) in planned {
         let view = system_view.new_sub_view(store.sub_path);
-        let (report, interrupted) = match listed {
+        let cutoff = now - chrono::Duration::days(days as i64);
+        let cutoff_key = nanos_key(cutoff);
+        let (pruned, was_interrupted) = match listed {
             Ok(keys) => prune_keys(&view, store.name, keys, &cutoff_key, params, &sealed).await,
             Err(e) => (StoreRunReport { store: store.name.to_string(), error: Some(e), ..Default::default() }, false),
+        };
+        let report = StoreRunReport {
+            deleted: pruned.deleted,
+            remaining: pruned.remaining,
+            unrecognised: pruned.unrecognised,
+            batches: pruned.batches,
+            error: pruned.error,
+            ..base_report(store, days)
         };
         match &report.error {
             None => log::info!(
                 target: "security",
-                "audit-retention: store={} deleted={} remaining={} unrecognised={} cutoff={} retention_days={}",
-                report.store, report.deleted, report.remaining, report.unrecognised, cutoff_rfc, cfg.retention_days
+                "audit-retention: store={} deleted={} remaining={} unrecognised={} cutoff={} retention_days={} rule={}",
+                report.store, report.deleted, report.remaining, report.unrecognised, report.cutoff, days, report.rule
             ),
             Some(err) => log::warn!(
                 target: "security",
-                "audit-retention: store={} deleted={} before stopping: {err} (cutoff={})",
-                report.store, report.deleted, cutoff_rfc
+                "audit-retention: store={} deleted={} before stopping: {err} (cutoff={}, rule={})",
+                report.store, report.deleted, report.cutoff, report.rule
             ),
         }
-        if report.error.is_some() && outcome == RunOutcome::Completed {
-            outcome = RunOutcome::Partial;
-        }
+        store_failed |= report.error.is_some();
         stores.push(report);
-        if interrupted {
-            outcome = RunOutcome::Interrupted;
+        if was_interrupted {
+            interrupted = true;
             break;
         }
     }
 
+    let outcome = if interrupted {
+        RunOutcome::Interrupted
+    } else if config_error.is_some() {
+        RunOutcome::Failed
+    } else if store_failed {
+        RunOutcome::Partial
+    } else if disabled {
+        RunOutcome::Disabled
+    } else {
+        RunOutcome::Completed
+    };
+
     let deleted: u64 = stores.iter().map(|s| s.deleted).sum();
     log::info!(
         target: "security",
-        "audit-retention: run {} — {deleted} audit records older than {cutoff_rfc} deleted across {} stores",
+        "audit-retention: run {} — {deleted} expired records deleted across {} stores",
         match outcome {
             RunOutcome::Completed => "completed",
             RunOutcome::Partial => "partially completed",
             RunOutcome::Interrupted => "interrupted",
-            RunOutcome::Disabled => "disabled",
-            RunOutcome::Failed => "failed",
+            RunOutcome::Disabled => "completed with audit retention disabled",
+            RunOutcome::Failed => "failed for the configured stores",
             RunOutcome::Refused => "refused",
         },
         stores.len()
@@ -636,11 +762,11 @@ pub async fn run_retention(core: &Core, now: DateTime<Utc>, params: PruneParams)
     RetentionRunReport {
         started_at,
         finished_at: Utc::now().to_rfc3339(),
-        cutoff: cutoff_rfc,
-        retention_days: cfg.retention_days,
+        cutoff: configured_cutoff_rfc,
+        retention_days: reported_days,
         outcome,
         stores,
-        error: None,
+        error: config_error,
         node_id,
     }
 }
@@ -652,6 +778,30 @@ mod tests {
 
     fn at(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    /// Every audit store follows the operator; the transcripts keep 30 days
+    /// whatever the operator configured, including nothing at all.
+    #[test]
+    fn each_store_has_its_own_rule() {
+        let transcripts = RETENTION_STORES.iter().find(|s| s.name == "mcp-session-transcripts").unwrap();
+        assert_eq!(transcripts.sub_path, "mcp-session-transcripts/");
+        assert_eq!(transcripts.rule, RetentionRule::FixedDays(30));
+        assert_eq!(transcripts.rule.days(None), Some(30), "pruned while retention is disabled");
+        assert_eq!(transcripts.rule.days(Some(3650)), Some(30), "not lengthened by the operator");
+        assert_eq!(transcripts.rule.days(Some(1)), Some(30), "not shortened either");
+        assert_eq!(transcripts.rule.as_str(), "fixed");
+        for store in RETENTION_STORES.iter().filter(|s| s.name != "mcp-session-transcripts") {
+            assert_eq!(store.rule, RetentionRule::Configured, "{}", store.name);
+            assert_eq!(store.rule.days(None), None);
+            assert_eq!(store.rule.days(Some(90)), Some(90));
+        }
+        // A transcript head and its chunks classify like any other record.
+        let cutoff = nanos_key(at("2026-01-01T00:00:00Z"));
+        let old = nanos_key(at("2025-12-01T00:00:00Z"));
+        for key in [format!("{old}-0b1c-42"), format!("{old}-0b1c-42.1"), format!("{old}-0b1c-42.12")] {
+            assert_eq!(classify_key(&key, &cutoff), KeyClass::Expired, "{key}");
+        }
     }
 
     #[test]

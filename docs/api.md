@@ -1410,19 +1410,33 @@ Response:
   "last_run": {
     "started_at": "...", "finished_at": "...", "cutoff": "...", "retention_days": 365,
     "outcome": "completed", "node_id": 1,
-    "stores": [ { "store": "access-audit", "deleted": 1200, "remaining": 183132, "unrecognised": 0, "batches": 3 } ]
+    "stores": [ { "store": "access-audit", "deleted": 1200, "remaining": 183132, "unrecognised": 0, "batches": 3,
+                  "rule": "configured", "retention_days": 365, "cutoff": "..." } ]
   },
   "status_error": null,
-  "stores": ["access-audit", "denial-audit", "login-audit", "user-audit", "share-history", "files-audit", "ssh-sign-audit", "ssh-ca-audit"]
+  "stores": ["access-audit", "denial-audit", "login-audit", "user-audit", "share-history", "files-audit", "ssh-sign-audit", "ssh-ca-audit", "mcp-session-transcripts"],
+  "store_rules": [ { "store": "access-audit", "rule": "configured", "retention_days": 365 },
+                   { "store": "mcp-session-transcripts", "rule": "fixed", "retention_days": 30 } ]
 }
 ~~~
 
+Each store has its own rule (`store_rules`). Every audit store is
+`configured`: it follows `retention_days` and is not pruned while `enabled` is
+`false` (`retention_days` is then `null` in `store_rules`). The MCP session
+transcripts (`mcp-session-transcripts`, see
+[MCP Endpoints](#get-v2sysmcptranscripts)) are `fixed` at 30 days: pruned at
+the first permitted daily run after 30 days whatever `retention_days` says —
+including `enabled: false` and an unreadable setting — and never kept longer.
+
 `source` is `default` until a value has been written. `outcome` is one of
-`completed`, `partial` (a store failed; its `error` says why), `disabled`,
-`failed` (nothing deleted — e.g. the setting could not be read), `refused`
-(nothing deleted — this node's clock is more than 2 days past the newest audit
+`completed`, `partial` (a store failed; its `error` says why), `disabled` (no
+audit record deleted; the `fixed` stores were still pruned and are the only
+entries in `stores`), `failed` (no audit record deleted — e.g. the setting
+could not be read; the `fixed` stores were still pruned), `refused` (nothing
+deleted in any store — this node's clock is more than 2 days past the newest
 record in the deployment, see below) or `interrupted` (the vault sealed
-mid-run). The run happens once a day at 00:00 UTC on the cluster's Raft leader
+mid-run). Each `stores` entry carries its `rule`, `retention_days` and
+`cutoff`; reports written by an older build lack them. The run happens once a day at 00:00 UTC on the cluster's Raft leader
 (or the single node); a node that was down at midnight runs once when it comes
 back. After an install or upgrade the first run is the first 00:00 UTC at least
 24 hours after the leader first starts the new version (`next_run_at` shows
@@ -1886,6 +1900,8 @@ loopback-only listener with `allow_plaintext_loopback`).
 | `LIST` | `/v2/sys/mcp/tokens` | ACL | Active MCP-bound tokens (`kind` is `app` or `pairing`) |
 | `DELETE` | `/v2/sys/mcp/tokens/{accessor}` | ACL | Revoke one token |
 | `DELETE` | `/v2/sys/mcp/pairings/{id}` | ACL | Revoke every token minted for one local pairing |
+| `LIST` (or `GET`) | `/v2/sys/mcp/transcripts` | `list` + `sudo` | Brokered-session transcript ids, newest first |
+| `GET` | `/v2/sys/mcp/transcripts/{id}` | `read` + `sudo` | One brokered-session transcript |
 
 ### `POST /v2/mcp/token`
 
@@ -1948,6 +1964,47 @@ session tool on a token without `connect_allowed` and `confirm_connect`) and
 always). This build's catalogue carries no session tool yet, so no call
 reaches the last two; every tool reports `openWorldHint: false`.
 
+**Audit.** Every request a `tools/call` routes is recorded with an `mcp`
+block beside `request.data` (`request.mcp`), in the clear:
+
+```json
+"mcp": { "kind": "pairing", "name": "<pairing id or app name>", "client_name": "claude-code",
+         "client_version": "2.1", "transport": "http", "tool": "bv_kv_list",
+         "catalogue_hash": "<hash>", "args_hash": "<BLAKE3 hex of the call's arguments>",
+         "reveal_requested": false, "reveal_granted": false, "destructive": false,
+         "confirmed_by_operator": true, "operator_confirmation": "asserted-by-local-host",
+         "decision": "allowed", "tls_kx_group": null, "waived": false, "peer_uid": null,
+         "peer_pid": null, "otel_traceparent": null, "otel_tracestate": null }
+```
+
+`transport` is what the vault sees: `http` (`bv-server`'s route) or
+`in-process` (an embedded vault). `decision` is `allowed` because the block is
+written only on a routed request; the ACL outcome underneath is the entry's
+own. `confirmed_by_operator` is the local gatekeeper's assertion, sent as
+`_meta["io.bastionvault/confirmation"] = {"by": "operator", "at": <unix>,
+"mfa": <bool>}`; the vault cannot observe the confirmation, so it records
+`operator_confirmation: "asserted-by-local-host"` beside it. The arguments
+appear only as `args_hash` (and HMAC'd in the body). A session tool the
+dispatcher refuses is recorded as a `connect.agent.refused` event (below).
+
+**Brokered-session events** ([spec](../features/mcp-brokered-sessions.md)
+§10). Written as audit entries with `"type": "event"`, the event name in
+`request.path`, `request.operation` `"event"` and the fields in the clear in
+`request.data` (and as one line on the security log, with or without an audit
+device). No event carries credential material, certificates, tickets, command
+text, URL paths, page text or images; a command appears only as
+`command_hmac` (`hmac:<hex>` under the audit HMAC key).
+
+| Event | Fields |
+|---|---|
+| `connect.agent.refused` | `reason` (the `data.code`), `tool`, `protocol`, `resource`, `profile_id` (the call's arguments, cut at 128 characters), `operator`, `pairing_id`, `client_name` |
+| `connect.agent.ssh.exec` | `session_id`, `operator`, `pairing_id`, `client_name`, `binding_reveal_allowed`, `resource`, `profile_id`, `target`, `host_key_fingerprint`, `login`, `cert_serial`, `mfa_method`, `command_hmac`, `command_bytes`, `exit_status`, `exit_signal`, `timed_out`, `stdout_bytes`, `stderr_bytes`, `truncated`, `credential_echo_redacted`, `duration_ms`, `transcript_id`, `operator_confirmation` |
+| `connect.agent.aborted` | `session_id`, `cause` (`token_revoked`, `kill_switch`, `timeout`, `executor_error`), `protocol`, `resource`, `profile_id`, `operator`, `pairing_id` |
+| `mcp.transcript.accessed` | `operation` (`read` or `list`), `transcript_id`, `listed`, `found` |
+
+This build emits `connect.agent.refused` (for the dispatcher's refusals) and
+`mcp.transcript.accessed`; the session events arrive with the session tool.
+
 Every string a tool returns has C0/C1 controls (except newline and tab),
 ANSI CSI/OSC sequences, Unicode bidi controls (including LRM, RLM and ALM),
 zero-width characters, tag characters (U+E0000–U+E007F) and interlinear
@@ -1973,6 +2030,64 @@ whatever is listed: an entry overlapping one is accepted, has no effect there,
 and earns a response `warnings` line. A change is logged to the security log
 as `mcp.config.updated` with the old and new values. It applies to the next
 dial on every node.
+
+Reads (and the response to a write) also report what is in force, read-only —
+a write ignores these keys:
+
+| Key | Meaning |
+|---|---|
+| `brokered_sessions_effective_target_cidrs` | The destination allow-list in force |
+| `brokered_sessions_target_cidrs_source` | Where it comes from: `runtime` (`brokered_sessions_allowed_target_cidrs` is set), `hcl` (the server config's `mcp.brokered_sessions.allowed_target_cidrs`, whether the file is HCL or JSON) or `default` |
+| `brokered_sessions_server_enabled` | The server config's `mcp.brokered_sessions.enabled` |
+| `brokered_sessions_server_protocols` | The server config's `mcp.brokered_sessions.protocols` |
+| `brokered_sessions_always_denied` | The classes no list can re-allow: `loopback`, `link-local`, `multicast`, `unspecified`, `broadcast`, `vault-listener`, `cluster-node` |
+
+### `GET /v2/sys/mcp/transcripts`
+
+`LIST` (or `GET`) needs `list` **and** `sudo` on `sys/mcp/transcripts`; `GET
+/v2/sys/mcp/transcripts/{id}` needs `read` **and** `sudo` on
+`sys/mcp/transcripts/*` ([spec](../features/mcp-brokered-sessions.md) §10). No
+baseline policy grants them, and no MCP tool can reach them. There is no `v1`
+form.
+
+A transcript is what one brokered session ran and what came back: the command
+verbatim and its output after the session's own credential was scrubbed (the
+writer scrubs every text field again) and before model sanitization, so ANSI
+bytes are kept. It may hold **other** secrets a command printed (`cat .env`):
+treat it as sensitive as any secret on the hosts agents reach. Transcripts
+are stored under the system view, barrier-encrypted, and deleted after a fixed
+30 days by the audit-retention run (see
+[Retention](#audit-trail-retention-and-dashboard-statistics)).
+
+Every list and every read — found or not — emits `mcp.transcript.accessed`
+before anything is returned; when an audit device is enabled and that entry
+cannot be written, the request is refused.
+
+~~~json
+// LIST /v2/sys/mcp/transcripts — keys only, newest first; no record is decrypted
+{ "keys": ["01760531123456789000-as_6f0c01"],
+  "key_info": { "01760531123456789000-as_6f0c01": { "recorded_at": "2026-10-15T12:25:23.456789+00:00", "session_id": "as_6f0c01" } } }
+
+// GET /v2/sys/mcp/transcripts/01760531123456789000-as_6f0c01
+{ "id": "01760531123456789000-as_6f0c01", "recorded_at": "...", "version": 1, "protocol": "ssh",
+  "summary": { "session_id": "as_6f0c01", "tool": "bv_resource_ssh_exec", "resource": "web-01",
+               "profile_id": "p_agent", "operator": { "entity_id": "", "username": "felipe", "mount_path": "userpass/", "namespace": "" },
+               "pairing_id": "pair-1", "client_name": "claude-code", "binding_reveal_allowed": false,
+               "operator_confirmation": "asserted-by-local-host", "mfa_method": null,
+               "started_at_ms": 1760531123000, "finished_at_ms": 1760531123812, "credential_echo_redacted": true },
+  "body": { "protocol": "ssh", "command": "…", "target": "10.0.0.9:22", "host_key_fingerprint": "SHA256:…",
+            "login": "password", "cert_serial": null, "exit_status": 0, "exit_signal": null,
+            "timed_out": false, "aborted": null,
+            "stdout": { "text": "…", "seen_bytes": 18234, "stored_truncated": false, "model_truncated_at": 65536, "binary": false },
+            "stderr": { "text": "", "seen_bytes": 0, "stored_truncated": false, "model_truncated_at": null, "binary": false } } }
+~~~
+
+An id is `<20-digit nanoseconds>-<session id>` (`[a-z0-9_-]`, at most 64
+characters); anything else is a `400`. An unknown id is a `404`. A stored
+record that does not decode — an unknown `version`, a missing body chunk, a
+length mismatch, malformed JSON — is a `500` naming why, never a partial
+answer. This build records no transcript yet: the SSH session tool that
+writes them arrives with the session executor.
 
 ### Resource opt-ins for brokered sessions
 

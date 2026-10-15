@@ -335,6 +335,16 @@ pub(crate) const V2_ONLY: &[ResourceSpec] = &[
     resource!("/mcp/pairings/{id}" => [
         route!(routed Delete => sys_mcp_pairing_delete_request_handler, "sys/mcp/pairings/{id}"),
     ]),
+    // MCP brokered-session transcripts (features/mcp-brokered-sessions.md
+    // §10). `list`/`read` and `sudo` (the sys backend's `root_paths`); every
+    // read is audited as `mcp.transcript.accessed`.
+    resource!("/mcp/transcripts" => [
+        route!(routed List => sys_mcp_transcripts_list_request_handler, "sys/mcp/transcripts"),
+        route!(routed Get => sys_mcp_transcripts_list_request_handler, "sys/mcp/transcripts"),
+    ]),
+    resource!("/mcp/transcripts/{id}" => [
+        route!(routed Get => sys_mcp_transcript_read_request_handler, "sys/mcp/transcripts/{id}"),
+    ]),
     // Credential-provider grant and entity-data purge
     // (features/self-accounts.md §4.5, §4.7).
     resource!("/plugins/{name}/grants/credential-provider" => [

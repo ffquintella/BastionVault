@@ -1,6 +1,6 @@
 [package]
 name = "bv-engine-totp"
-version = "0.41.0"
+version = "0.41.1"
 edition = "2021"
 description = "BastionVault's TOTP engine: RFC 6238 second factors, enrolment barcodes and MFA verification"
 license = "Apache-2.0"

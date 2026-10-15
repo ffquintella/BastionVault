@@ -4327,6 +4327,31 @@ async fn sys_mcp_token_delete_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// LIST (or GET) `/v2/sys/mcp/transcripts` — the MCP session transcript ids,
+/// newest first. Shim over the sudo-gated logical route.
+async fn sys_mcp_transcripts_list_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/mcp/transcripts".to_string();
+    r.operation = Operation::List;
+    handle_request(core, &mut r).await
+}
+
+/// GET `/v2/sys/mcp/transcripts/{id}` — one MCP session transcript. Shim over
+/// the sudo-gated logical route, which validates the id.
+async fn sys_mcp_transcript_read_request_handler(
+    req: HttpRequest,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = format!("sys/mcp/transcripts/{}", path.into_inner());
+    r.operation = Operation::Read;
+    handle_request(core, &mut r).await
+}
+
 async fn sys_mcp_pairing_delete_request_handler(
     req: HttpRequest,
     path: web::Path<String>,

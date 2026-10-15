@@ -89,6 +89,14 @@ pub struct AuditRequest {
     /// was sent or when the device is configured to omit data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
+    /// The MCP block of a `tools/call` (`Request::mcp_audit`,
+    /// `features/mcp-access.md` §10): app or pairing, client, tool, catalogue
+    /// and argument hashes, decision, operator confirmation. A sibling of
+    /// `data` rather than a key inside it, so it can never collide with a
+    /// request body field, and written verbatim — it holds no secret. Absent
+    /// on every non-MCP entry, which keeps their serialized form unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<Value>,
     /// Derived client address — see `AuditAuth.remote_address`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub remote_address: String,
@@ -176,9 +184,50 @@ impl AuditEntry {
                 operation: operation_str(req.operation).to_string(),
                 path: req.path.clone(),
                 data: audit_request_data(req, hmac_key, log_raw),
+                mcp: req.mcp_audit.as_ref().and_then(|m| serde_json::to_value(m).ok()),
                 remote_address: derived_addr.clone(),
                 remote_address_socket: socket_addr,
                 remote_address_derived: derived_addr,
+            },
+            response: None,
+            error: String::new(),
+            prev_hash: String::new(),
+        }
+    }
+
+    /// Build an `event` entry: something the vault did or refused outside a
+    /// request's own response, such as `connect.agent.refused` or
+    /// `mcp.transcript.accessed`. `request.path` is the event name,
+    /// `request.operation` is `"event"`, and `data` is written **verbatim**,
+    /// not HMAC-redacted — the caller passes only fields that are safe in the
+    /// clear and HMACs anything that is not (`hmac_redact`). `req`, when
+    /// given, supplies who and from where, with the usual redaction (the
+    /// token is HMAC'd); its body is not recorded.
+    pub fn event(name: &str, data: Map<String, Value>, req: Option<&Request>, hmac_key: &[u8]) -> Self {
+        let base = match req {
+            Some(r) => {
+                let mut who = r.clone();
+                who.body = None;
+                who.data = None;
+                who.mcp_audit = None;
+                Self::from_request(&who, hmac_key, false)
+            }
+            None => Self::default(),
+        };
+        Self {
+            time: Utc::now().to_rfc3339(),
+            r#type: "event".to_string(),
+            auth: base.auth,
+            namespace: base.namespace,
+            request: AuditRequest {
+                id: base.request.id,
+                operation: "event".to_string(),
+                path: name.to_string(),
+                data: Some(Value::Object(data)),
+                mcp: None,
+                remote_address: base.request.remote_address,
+                remote_address_socket: base.request.remote_address_socket,
+                remote_address_derived: base.request.remote_address_derived,
             },
             response: None,
             error: String::new(),
@@ -392,5 +441,72 @@ mod tests {
         assert!(entry.request.remote_address.is_empty());
         assert!(entry.auth.remote_address_socket.is_empty());
         assert!(entry.auth.remote_address_derived.is_empty());
+    }
+
+    /// A `tools/call` entry carries the MCP block as `request.mcp`, in the
+    /// clear and beside the HMAC'd body; every other entry has none, so its
+    /// serialized form is unchanged.
+    #[test]
+    fn the_mcp_block_is_a_plain_sibling_of_the_redacted_body() {
+        use bv_logical::{McpAuditContext, Operation, Request};
+        let mut req = Request::new("secret/data/x");
+        req.operation = Operation::Write;
+        let mut body = Map::new();
+        body.insert("mcp".into(), Value::String("a body field named mcp".into()));
+        req.body = Some(body);
+        req.mcp_audit = Some(McpAuditContext {
+            kind: "pairing".into(),
+            name: "p-1".into(),
+            client_name: "claude-code".into(),
+            tool: "bv_kv_write".into(),
+            catalogue_hash: "c0ffee".into(),
+            args_hash: "a1b2".into(),
+            confirmed_by_operator: true,
+            operator_confirmation: Some("asserted-by-local-host".into()),
+            decision: "allowed".into(),
+            ..Default::default()
+        });
+        let entry = AuditEntry::from_response(&req, &None, None, b"k", false);
+        let mcp = entry.request.mcp.as_ref().expect("the block is recorded");
+        assert_eq!(mcp["kind"], "pairing");
+        assert_eq!(mcp["tool"], "bv_kv_write");
+        assert_eq!(mcp["args_hash"], "a1b2");
+        assert_eq!(mcp["decision"], "allowed");
+        assert_eq!(mcp["confirmed_by_operator"], true);
+        assert_eq!(mcp["operator_confirmation"], "asserted-by-local-host");
+        // The body's own `mcp` key is still the HMAC'd body value.
+        assert!(entry.request.data.as_ref().unwrap()["mcp"].as_str().unwrap().starts_with("hmac:"));
+
+        let plain = AuditEntry::from_response(&Request::new("secret/data/x"), &None, None, b"k", false);
+        assert!(plain.request.mcp.is_none());
+        assert!(!serialize_line(&plain).unwrap().contains("\"mcp\""));
+    }
+
+    /// An event entry names the event in `request.path`, keeps its fields in
+    /// the clear, takes who and from where from the request (token HMAC'd)
+    /// and never records that request's body.
+    #[test]
+    fn an_event_entry_records_its_fields_verbatim_and_no_request_body() {
+        use bv_logical::{Auth, Request};
+        let mut req = Request::new("sys/mcp/transcripts/x");
+        req.client_token = "s.secret-token".into();
+        req.auth = Some(Auth { display_name: "felipe".into(), ..Default::default() });
+        let mut body = Map::new();
+        body.insert("password".into(), Value::String("hunter2".into()));
+        req.body = Some(body);
+        let mut fields = Map::new();
+        fields.insert("transcript_id".into(), Value::String("0001-abc".into()));
+        let entry = AuditEntry::event("mcp.transcript.accessed", fields, Some(&req), b"k");
+        assert_eq!(entry.r#type, "event");
+        assert_eq!(entry.request.operation, "event");
+        assert_eq!(entry.request.path, "mcp.transcript.accessed");
+        assert_eq!(entry.request.data.as_ref().unwrap()["transcript_id"], "0001-abc");
+        assert_eq!(entry.auth.display_name, "felipe");
+        assert!(entry.auth.client_token.starts_with("hmac:"));
+        let line = serialize_line(&entry).unwrap();
+        assert!(!line.contains("hunter2") && !line.contains("s.secret-token"), "{line}");
+
+        let anonymous = AuditEntry::event("connect.agent.refused", Map::new(), None, b"k");
+        assert!(anonymous.auth.client_token.is_empty());
     }
 }

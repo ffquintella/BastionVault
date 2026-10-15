@@ -1,6 +1,6 @@
 [package]
 name = "bv-engine-kv"
-version = "0.41.0"
+version = "0.41.1"
 edition = "2021"
 description = "BastionVault's key/value secret engines, v1 (flat) and v2 (versioned)"
 license = "Apache-2.0"

@@ -1,6 +1,6 @@
 [package]
 name = "bv-audit"
-version = "0.41.0"
+version = "0.42.0"
 edition = "2021"
 description = "BastionVault's audit entries, hash chain, file device and broker fan-out"
 license = "Apache-2.0"

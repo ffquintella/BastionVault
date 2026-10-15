@@ -6,7 +6,19 @@ BastionVault is configured using HCL or JSON files. Pass the config file path to
 bvault server --config /etc/bvault/config.hcl
 ~~~
 
-You can also pass a directory; all `.hcl` and `.json` files in it will be merged.
+You can also pass a directory; all `.hcl` and `.json` files in it are merged,
+in file-name order. Each file must still declare exactly one `storage` and one
+`listener` block. When merging:
+
+- a scalar set in a later file (`log_level`, `api_addr`, `pid_file`, …)
+  replaces the earlier value; `listener`, `storage` and `hsm` blocks are
+  combined by label; a later `dos` block replaces an earlier one whole;
+- the `mcp` block (including `brokered_sessions`) must be declared in **exactly
+  one** file, which supplies the whole block. A second file declaring `mcp` —
+  even an empty `mcp {}` — refuses to start, naming both files. It is never
+  merged field by field: a later file could not switch a boolean back off,
+  and a destination allow-list would be widened or replaced depending on file
+  order.
 
 ## Minimal Example
 
@@ -323,8 +335,12 @@ mcp {
 
 The server switch and limits for agent sessions to resources
 ([spec](../features/mcp-brokered-sessions.md)). This build parses and
-validates the block but ships no session tool yet, so it has no effect. Off
-when absent; an old config parses unchanged.
+validates the block but ships no session tool yet, so it opens nothing. Off
+when absent; an old config parses unchanged. `GET v2/sys/mcp/config` reports
+the block's `enabled` and `protocols`, and the destination list in force with
+its source — `runtime`, `hcl` (this block, from an HCL or JSON file) or
+`default` ([API](api.md#getpost-v2sysmcpconfig)). In a config directory the
+block lives in the one file that declares `mcp` (see above).
 
 ```hcl
 mcp {
@@ -406,14 +422,22 @@ curl -H "X-Vault-Token: $ROOT" -X POST -d '{"enabled": false}'     https://vault
   early. A deployment idle for that long just waits for new audit records.
 - **Stores pruned:** `access-audit`, `denial-audit`, `login-audit`,
   `identity/user-audit`, `sharing/history`, `files-audit`, `ssh-sign-audit`,
-  `ssh-ca-audit`. Policy, identity-group and asset-group change histories are
-  kept, and the hash-chained `audit.log` file is governed by
-  `log_rotate_size_mb` / `log_rotate_keep` instead.
+  `ssh-ca-audit` follow `retention_days`. Policy, identity-group and
+  asset-group change histories are kept, and the hash-chained `audit.log` file
+  is governed by `log_rotate_size_mb` / `log_rotate_keep` instead.
+- **MCP session transcripts** (`mcp-session-transcripts`, the commands an
+  agent ran through brokered sessions and their output) have a **fixed
+  30-day** rule that this setting can neither shorten nor lengthen: they are
+  deleted at the first permitted daily run after 30 days even with
+  `enabled: false`, `retention_days = 3650`, or an unreadable setting. The
+  clock check still applies to them. `GET v2/sys/audit-retention` lists each
+  store's rule under `store_rules`.
 - **Load:** deletes go out in batches of 500 with a 50 ms pause, oldest first.
 - **Observability:** one line per store on the `security` log (counts and the
   cutoff, never record contents) and the `last_run` report on the endpoint.
-- If the stored setting cannot be read, the run deletes nothing and reports
-  `outcome: "failed"`; write the setting again (both fields) to repair it.
+- If the stored setting cannot be read, the run deletes no audit record and
+  reports `outcome: "failed"` (the transcripts' fixed rule still applies);
+  write the setting again (both fields) to repair it.
 
 The Dashboard's audit statistics are recomputed by the same background job
 every 10 minutes; there is nothing to configure.

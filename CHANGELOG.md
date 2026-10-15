@@ -56,6 +56,23 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.38] - 2026-10-15
+
+### Added
+
+#### MCP Brokered Sessions — transcripts and audit (features/mcp-brokered-sessions.md)
+
+- **Keep a transcript of every brokered agent session for 30 days** -- commands and responses are stored encrypted in the vault, with the session's credential scrubbed out by the store itself, under `mcp-session-transcripts/`. Records over the size bounds are refused, never truncated. They are deleted after 30 days by the daily audit housekeeping even when audit retention is disabled; `sys/audit-retention` reports each store's rule. No session tool ships yet, so nothing is recorded until one does. (T136, S111)
+- **Read transcripts at `v2/sys/mcp/transcripts`** -- list and read need `read` plus `sudo`, and every list or read is itself audited (`mcp.transcript.accessed`); when an audit device is enabled and that event cannot be written, the read is refused. Transcripts can contain secrets a command printed. (T136, S111)
+- **Record MCP context on every tool call in the audit log** -- each routed `tools/call` carries an `mcp` block (principal, client, tool, argument hash, transport, and whether the local host asserted an operator confirmation). Refused session-tool calls also emit `connect.agent.refused`. (T136, S3, S111)
+- **Show where the brokered-session destination list comes from** -- `sys/mcp/config` reads report the effective list, its source (`runtime`, `hcl` or `default`), the server-level switches and the always-denied ranges. (T136, S111)
+
+### Changed
+
+#### Configuration — `mcp` block in a config directory (docs/configuration.md)
+
+- **Refuse to start when two config files both declare `mcp`** -- with a directory of config files, a second file's `mcp` block was silently dropped, including a narrower `brokered_sessions` destination list. The server now names both files and stops. Files in a directory are merged in sorted name order. `metrics`, `log_dir`, `work_dir`, `daemon*` and `batch_*` in later files are still ignored as before. (T136, S111)
+
 ## [0.44.37] - 2026-10-15
 
 ### Added
@@ -7895,7 +7912,8 @@ Bulk dependency upgrade across the workspace (`Cargo.toml`, `crates/bv-plugin-pa
 
 - Abandon the SQLx storage backend: `libsqlite3-sys` conflicts at link time with hiqlite's `rusqlite`, so `storage "sqlx"` was removed (T5, M2)
 
-[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.37...HEAD
+[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.38...HEAD
+[0.44.38]: https://github.com/ffquintella/BastionVault/compare/v0.44.37...v0.44.38
 [0.44.37]: https://github.com/ffquintella/BastionVault/compare/v0.44.36...v0.44.37
 [0.44.36]: https://github.com/ffquintella/BastionVault/compare/v0.44.35...v0.44.36
 [0.44.35]: https://github.com/ffquintella/BastionVault/compare/v0.44.34...v0.44.35

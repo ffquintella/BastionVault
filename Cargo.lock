@@ -1005,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "bastion-vault-gui"
-version = "0.44.37"
+version = "0.44.38"
 dependencies = [
  "arboard",
  "argon2 0.5.3",
@@ -1078,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "bastion_vault"
-version = "0.44.37"
+version = "0.44.38"
 dependencies = [
  "actix-rt",
  "anyhow",
@@ -1523,7 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "bv-audit"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1543,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-approle"
-version = "0.41.3"
+version = "0.41.4"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1596,7 +1596,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-ferrogate"
-version = "0.41.0"
+version = "0.41.1"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-fido2"
-version = "0.41.1"
+version = "0.41.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1663,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-oidc"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "async-trait",
  "bv-auth-audit",
@@ -1683,7 +1683,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-saml"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1709,7 +1709,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-userpass"
-version = "0.41.3"
+version = "0.41.4"
 dependencies = [
  "async-trait",
  "bcrypt",
@@ -1761,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "bv-core"
-version = "0.41.6"
+version = "0.42.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
@@ -1814,7 +1814,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-cert-lifecycle"
-version = "0.41.1"
+version = "0.41.2"
 dependencies = [
  "async-trait",
  "bv-context",
@@ -1861,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-kv"
-version = "0.41.0"
+version = "0.41.1"
 dependencies = [
  "async-trait",
  "bv-context",
@@ -1880,7 +1880,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-ldap"
-version = "0.41.0"
+version = "0.41.1"
 dependencies = [
  "async-trait",
  "bv-context",
@@ -1905,7 +1905,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-notifications"
-version = "0.41.0"
+version = "0.41.1"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1999,7 +1999,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-rustion"
-version = "0.41.7"
+version = "0.41.8"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2061,7 +2061,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-ssh-broker"
-version = "0.41.0"
+version = "0.41.1"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2080,7 +2080,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-totp"
-version = "0.41.0"
+version = "0.41.1"
 dependencies = [
  "async-trait",
  "base32",
@@ -2107,7 +2107,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-transit"
-version = "0.41.0"
+version = "0.41.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2159,7 +2159,7 @@ dependencies = [
 
 [[package]]
 name = "bv-kernel"
-version = "0.41.15"
+version = "0.42.0"
 dependencies = [
  "actix-rt",
  "arc-swap",
@@ -2210,7 +2210,7 @@ dependencies = [
 
 [[package]]
 name = "bv-kernel-api"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2465,7 +2465,7 @@ dependencies = [
 
 [[package]]
 name = "bvault-cli"
-version = "0.44.37"
+version = "0.44.38"
 dependencies = [
  "actix-rt",
  "actix-web",

@@ -41,6 +41,8 @@
 //! | [`namespace`] | namespace resolution, login binding, per-namespace routers |
 //! | [`resource_group`] | the asset-group reverse index |
 //! | [`engines`] | Tier 3 ↔ Tier 3 contracts (**not** kernel contracts — see the file) |
+//! | [`mcp_transcripts`] | the MCP session transcript store: resource engine writes, kernel reads and prunes |
+//! | [`mcp_events`] | the `connect.agent.*` / `mcp.transcript.accessed` audit events |
 //!
 //! ## Why the routing and mount tables are in here
 //!
@@ -67,6 +69,8 @@ pub mod dos;
 pub mod engines;
 pub mod provider;
 pub mod identity;
+pub mod mcp_events;
+pub mod mcp_transcripts;
 pub mod module;
 pub mod mount;
 pub mod namespace;

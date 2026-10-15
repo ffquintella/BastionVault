@@ -1,6 +1,6 @@
 [package]
 name = "bv-engine-notifications"
-version = "0.41.0"
+version = "0.41.1"
 edition = "2021"
 description = "BastionVault's notifications engine: in-app inbox, targeting and plugin delivery channels"
 license = "Apache-2.0"
