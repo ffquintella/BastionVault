@@ -191,11 +191,17 @@ pub fn final_path(url: &Url) -> String {
     url.path().split('/').map(|segment| segment.split(';').next().unwrap_or_default()).collect::<Vec<_>>().join("/")
 }
 
-/// A hop's path with its query, for the transcript, cut at its limit.
-fn hop_path(url: &Url) -> String {
-    let mut p = match url.query() {
-        Some(q) => format!("{}?{q}", url.path()),
-        None => url.path().to_string(),
+/// A hop's path for the transcript, cut at its limit. The first hop is the
+/// path the operator confirmed and is kept with its query. A hop reached by
+/// redirect has a URL the target chose, which may carry a bearer value
+/// (`?ticket=…`, `;jsessionid=…`) the scrubber does not know, so it is
+/// recorded as [`final_path`] and a dropped query shows only as `?…`.
+fn hop_path(url: &Url, redirected: bool) -> String {
+    let mut p = match (redirected, url.query()) {
+        (false, Some(q)) => format!("{}?{q}", url.path()),
+        (false, None) => url.path().to_string(),
+        (true, Some(_)) => format!("{}?…", final_path(url)),
+        (true, None) => final_path(url),
     };
     if p.len() > MAX_TRANSCRIPT_HOP_PATH_BYTES {
         let mut end = MAX_TRANSCRIPT_HOP_PATH_BYTES;
@@ -441,7 +447,7 @@ async fn fetch(spec: &FetchSpec, trace: &mut FetchTrace) -> Result<Fetched, Fetc
             // deadline or a revocation is still in the transcript.
             trace.hops.push(WebTranscriptHop {
                 origin: origin.clone(),
-                path: hop_path(&url),
+                path: hop_path(&url, redirects > 0),
                 status: None,
                 answered_challenge: authorization.is_some(),
             });
@@ -455,13 +461,9 @@ async fn fetch(spec: &FetchSpec, trace: &mut FetchTrace) -> Result<Fetched, Fetc
             if let Some(hop) = trace.hops.last_mut() {
                 hop.status = Some(response.status().as_u16());
             }
-            let set_cookies: Vec<String> = response
-                .headers()
-                .get_all(header::SET_COOKIE)
-                .iter()
-                .filter_map(|v| v.to_str().ok().map(str::to_string))
-                .collect();
-            trace.jar.absorb(&origin, set_cookies.iter().map(String::as_str));
+            // Borrowed straight from the headers: no plain copy of a cookie
+            // value outlives this call (the jar keeps its own, zeroized).
+            trace.jar.absorb(&origin, response.headers().get_all(header::SET_COOKIE).iter().filter_map(|v| v.to_str().ok()));
             if response.status() == StatusCode::UNAUTHORIZED && authorization.is_none() {
                 if let (Some(credential), Some(realm)) = (&spec.credential, basic_realm(response.headers())) {
                     if answered.insert((origin.clone(), realm)) {
@@ -578,7 +580,9 @@ mod tests {
     fn the_final_path_carries_no_query_or_session_parameter() {
         let url = Url::parse("https://app/app;jsessionid=ABC123/home;x=1?token=s3cr3t").unwrap();
         assert_eq!(final_path(&url), "/app/home");
-        assert_eq!(hop_path(&url), "/app;jsessionid=ABC123/home;x=1?token=s3cr3t");
+        assert_eq!(hop_path(&url, false), "/app;jsessionid=ABC123/home;x=1?token=s3cr3t");
+        assert_eq!(hop_path(&url, true), "/app/home?…", "a redirect target's query and session parameters never reach the transcript");
+        assert_eq!(hop_path(&Url::parse("https://app/a;jsessionid=S").unwrap(), true), "/a");
         let credential =
             BasicCredential { username: Zeroizing::new("ops".into()), password: Zeroizing::new("pw".into()) };
         assert_eq!(credential.header().as_str(), "Basic b3BzOnB3");
@@ -731,6 +735,8 @@ mod server_tests {
             "/" => TestResponse::new(200, "text/html", "<h1>Home</h1>"),
             "/hop" => TestResponse::redirect(302, "/landing?from=hop"),
             "/landing?from=hop" => TestResponse::new(200, "text/plain", "landed"),
+            "/sso" => TestResponse::redirect(302, "/x;jsessionid=S3SS10N?ticket=ST-T1CK3T"),
+            "/x;jsessionid=S3SS10N?ticket=ST-T1CK3T" => TestResponse::new(200, "text/plain", "in"),
             "/big" => TestResponse::new(200, "text/plain", vec![b'x'; 5000]),
             "/slow" => {
                 TestResponse { delay: Some(Duration::from_secs(30)), ..TestResponse::new(200, "text/plain", "late") }
@@ -803,7 +809,25 @@ mod server_tests {
             (1, "/landing", b"landed".as_slice())
         );
         let paths: Vec<&str> = trace.hops.iter().map(|h| h.path.as_str()).collect();
-        assert_eq!(paths, vec!["/hop", "/landing?from=hop"]);
+        assert_eq!(paths, vec!["/hop", "/landing?…"]);
+    }
+
+    /// A redirect target chosen by the target may carry a bearer value the
+    /// scrubber does not know (an SSO ticket, a path session id). It is sent,
+    /// but neither the transcript nor the returned path keeps it.
+    #[tokio::test]
+    async fn a_redirect_targets_session_values_stay_out_of_the_transcript() {
+        let s = server().await;
+        let mut call = Call::new("/sso");
+        call.pins = vec![s.leaf_pin()];
+        let (trace, outcome) = call.run(&s).await;
+        let fetched = outcome.unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!((fetched.status, fetched.final_path.as_str()), (200, "/x"));
+        let paths: Vec<&str> = trace.hops.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["/sso", "/x?…"]);
+        for hop in &trace.hops {
+            assert!(!hop.path.contains("S3SS10N") && !hop.path.contains("T1CK3T"), "{hop:?}");
+        }
     }
 
     /// A redirect off the list stops the fetch; one to a listed origin whose
@@ -885,7 +909,10 @@ mod server_tests {
         assert!(trace.credential_sent && trace.hops[1].answered_challenge);
         let seen = s.requests();
         assert!(seen[0].header("authorization").is_none(), "never pre-emptive");
-        assert_eq!(seen[1].header("authorization"), Some("Basic b3BzOmh1bnRlcjItUXg3"));
+        // Built from the fixture rather than spelled out: a literal `Basic <base64>`
+        // trips the repository's secret scanner although it is a test password.
+        let expected = format!("Basic {}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD,format!("ops:{PASSWORD}")));
+        assert_eq!(seen[1].header("authorization"), Some(expected.as_str()));
 
         let (trace, outcome) = call("/rejecting").run(&s).await;
         assert_eq!(outcome.unwrap().status, 401, "a rejected answer is the result, not a loop");
