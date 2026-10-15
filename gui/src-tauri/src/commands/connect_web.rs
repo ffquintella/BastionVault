@@ -350,7 +350,6 @@ pub async fn session_open_web(
     let gates = NativeGates {
         http_auth: http_auth_gate.clone(),
         tls_pin: tls_pin_gate,
-        #[cfg(target_os = "macos")]
         ui: Some(super::connect_web_trust_ui::TrustUi::new(
             &app,
             &window_label,
@@ -845,16 +844,15 @@ pub fn close_web_sessions_on_exit(app: &AppHandle) {
 fn hook_window_destroyed(win: &tauri::Window, app: &AppHandle, token: &str) {
     let token = token.to_string();
     let app = app.clone();
-    #[cfg(target_os = "macos")]
     let label = win.label().to_string();
     win.on_window_event(move |ev| {
         if let tauri::WindowEvent::Destroyed = ev {
-            // A certificate question still open holds WebKit challenges;
-            // each must be answered exactly once.
-            #[cfg(target_os = "macos")]
+            // A certificate question still open holds platform loads (WebKit
+            // challenges, WebView2 deferrals); each must be answered exactly
+            // once.
             {
                 let label = label.clone();
-                let _ = app.run_on_main_thread(move || super::connect_web_tls_pin::macos::cancel_pending(&label));
+                let _ = app.run_on_main_thread(move || super::connect_web_tls_pin::cancel_pending(&label));
             }
             let token = token.clone();
             let app = app.clone();
@@ -1155,11 +1153,10 @@ async fn arm_native_handlers(win: &tauri::Webview, gates: NativeGates, start_url
 }
 
 /// Whether a web session window may ask the operator about a certificate
-/// the platform rejected (T139). Only the WKWebView shim can hold a
-/// server-trust challenge open for the answer; WebView2 and WebKitGTK
-/// windows keep refusing it, and a window there still gets a pin gate only
-/// when its profile has pins.
-const OPERATOR_TLS_OVERRIDE: bool = cfg!(target_os = "macos");
+/// the platform rejected (T139): on every platform with a shim that can hold
+/// or retry the load for the answer (`connect_web_tls_pin`). Elsewhere a
+/// window gets a pin gate only when its profile has pins.
+const OPERATOR_TLS_OVERRIDE: bool = cfg!(any(target_os = "macos", windows, target_os = "linux"));
 
 /// The TLS pin gate of one window. A refusal is shown in the title (fixed
 /// text) and becomes the session's abort reason if it ends before an
@@ -1398,7 +1395,6 @@ pub async fn web_recipe_test(
             )
         }),
         // A dry run fills nothing.
-        #[cfg(target_os = "macos")]
         ui: Some(super::connect_web_trust_ui::TrustUi::new(&app, &window_label, &token, TEST_TITLE, &shared, false)),
     };
     let initial_url = if gates.is_empty() {

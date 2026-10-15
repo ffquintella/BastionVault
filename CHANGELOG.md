@@ -58,9 +58,20 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Web Application Connect — failed loads and untrusted certificates on Windows and Linux (features/web-application-connect.md)
+
+- **Say why a web session page did not load on Windows and Linux too** -- a top-level load that fails (untrusted certificate, host name that does not resolve, refused connection, timeout, no network) now shows `page not loaded: …` in the window title, writes `connect.web.load_failed` to the audit log (origin, reason and platform code, never the URL path) and ends a form sign-in or recipe dry run at once with `aborted:<reason>`, as on macOS. WebView2 and WebKitGTK still show their own error page. (T139, S105)
+- **Ask before accepting an untrusted TLS certificate on Windows and Linux** -- a session window whose profile has no `tls_pin_sha256` now asks, as on macOS, when the certificate of one of the session's https origins is rejected: *Continue* accepts that exact key for that origin until the session closes, *Don't Continue* refuses it for the session; both are audited as `connect.web.tls_override`, and profiles with pins never ask. On Windows the load waits for the answer; on Linux it ends without an error page and is loaded again after *Continue*. A Windows WebView2 runtime too old to hold the question (no `ICoreWebView2_14`) keeps its own handling for windows without pins. (T139, S105)
+
 #### Sharing — identity-group grantees in the GUI (features/per-user-scoping.md)
 
 - **Share resources, KV secrets and files with an identity group from the GUI** -- the Grant access dialog on every Sharing tab now offers *User identity group* and *Application group (AppID)* alongside a direct user, as asset groups already did. A group share grants access only to members whose policies carry `metadata.group_shared_resources = "true"`; the dialog says so. (T27, S33, S18)
+
+### Security
+
+#### SFTP Connect — Windows file names (features/sftp-connect.md)
+
+- **Refuse to download a remote file whose name is not a valid Windows file name** -- on Windows, a name such as `D:x` made the destination path leave the folder the operator picked, `a:b` wrote an NTFS alternate data stream and `CON` or `NUL` opened a device. Such names (`< > : " | ? *`, control characters, a trailing dot or space, reserved device names) are now refused, top-level and inside folders, before anything is written, and the local pane's *New folder* applies the same rule. Other platforms are unchanged. (T140, S112)
 
 ## [0.44.38] - 2026-10-15
 

@@ -1,7 +1,8 @@
 # Feature: SFTP Connect — dual-pane file transfer to server resources
 
-**Status: In progress (2026-10-14).** Tracked as ROADMAP T140 (spec S112),
-next to Resource Connect (T36, [resource-connect.md](resource-connect.md)),
+**Status: Done for direct connections (2026-10-15).** Tracked as ROADMAP T140
+(spec S112); Rustion-brokered SFTP (Phase 4) is T141. Next to Resource Connect (T36,
+[resource-connect.md](resource-connect.md)),
 which listed SFTP as a separate feature reusing the same `russh` session.
 
 ## Summary
@@ -71,6 +72,14 @@ offers `ssh`, `rdp` and `sftp`.
   can contain `..`, `/`, `\` or NUL in a name. Such entries are dropped from
   listings and refused as transfer sources or destinations, so a download can
   never write outside the destination folder the operator picked.
+- **On Windows, a downloaded name must also be a valid Windows file name.**
+  `Path::join` with a drive-qualified name (`D:x`) replaces the destination
+  folder rather than extending it, `a:b` writes an NTFS alternate data stream
+  and `CON` / `NUL` / `COM1` open devices. A remote name with `< > : " | ? *`,
+  a control character, a trailing dot or space, or a reserved device stem is
+  refused as a download source (top level or inside a folder, before anything
+  is written) and as a local *New folder* name (`is_windows_file_name`). It
+  still shows in the remote listing, where it is a valid name.
 - **Recursion does not follow symlinked folders** on either side, so a link
   loop cannot make a transfer unbounded. A symlink to a file is transferred as
   the file's content.
@@ -97,15 +106,21 @@ offers `ssh`, `rdp` and `sftp`.
 | 1 | `sftp` protocol in the profile model, editor, resource types and launch matrix | Done |
 | 2 | Host session, operations, transfer engine, commands, ACL | Done |
 | 3 | Dual-pane session window | Done |
-| 4 | SFTP through a Rustion bastion | Not started |
+| 4 | SFTP through a Rustion bastion | Not started (T141) |
 
 ## Current State
 
-Phases 1–3 implemented (Unreleased). Unit-tested (name sanitisation, path
-joining, protocol parsing, window ACL); not yet exercised by hand against a
-live SFTP server in a desktop build.
+Phases 1–3 done (0.44.37; the Windows file-name rule is Unreleased) on macOS,
+Windows and Linux: the local pane takes Windows drive paths (`C:\…`, the
+verbatim `\\?\` prefix stripped) and names are checked against the local
+platform's rules. Unit-tested (name sanitisation including the Windows rule,
+path joining, protocol parsing, window ACL); not yet exercised by hand against
+a live SFTP server in a desktop build, and the Windows build is not compiled
+on the development hosts — per-platform manual checks.
 
 ## What Is Not Yet Implemented
 
-- Rustion-brokered SFTP (Phase 4).
+- Rustion-brokered SFTP (Phase 4, T141).
+- UNC paths (`\\server\share`) in the local pane: the backend lists them, but the
+  pane's breadcrumb and parent navigation understand drive paths only.
 - Resume, permissions editing, OS drag-and-drop.

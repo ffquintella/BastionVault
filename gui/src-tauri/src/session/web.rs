@@ -864,7 +864,7 @@ impl WebShared {
     /// Record that this window refused a server-trust challenge for
     /// `origin`, so the cancelled navigation that follows is reported with
     /// this reason (see [`Self::load_failed`]).
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", windows, target_os = "linux")), allow(dead_code))]
     pub fn note_tls_refused(&self, origin: &WebOrigin, failure: PageFailure) {
         *Self::lock(&self.tls_refused) = Some((origin.clone(), failure));
     }
@@ -875,7 +875,7 @@ impl WebShared {
     /// reason and wins. Returns the failure and the new title, or `None` when
     /// there is nothing to report (a cancelled navigation with no refusal
     /// behind it: superseded, or stopped by the operator).
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", windows, target_os = "linux")), allow(dead_code))]
     pub fn load_failed(
         &self,
         origin: Option<&WebOrigin>,
@@ -900,12 +900,12 @@ impl WebShared {
 
     /// An untrusted-certificate prompt opened on this window: the recipe
     /// engine stops its clock until [`Self::end_prompt`].
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", windows, target_os = "linux")), allow(dead_code))]
     pub fn begin_prompt(&self) {
         Self::lock(&self.page).prompts += 1;
     }
 
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", windows, target_os = "linux")), allow(dead_code))]
     pub fn end_prompt(&self) {
         let mut p = Self::lock(&self.page);
         p.prompts = p.prompts.saturating_sub(1);

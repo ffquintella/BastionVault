@@ -1,22 +1,25 @@
-//! TLS SPKI pinning for web sessions — the platform shims and the
-//! fingerprint helper (features/web-application-connect.md §8; T96 Phase 4).
+//! TLS SPKI pinning and the untrusted-certificate question for web sessions
+//! — the platform shims and the fingerprint helper
+//! (features/web-application-connect.md §8, §8.2; T96 Phase 4, T139).
 //!
-//! Every decision is `session::web_tls_pin`'s; the shims here read the chain
-//! a platform rejected, ask `TlsPinGate::server_trust`, and apply the
-//! verdict. They are attached only to windows whose profile carries
-//! `tls_pin_sha256` (through `connect_web_http_auth::install`, the single
-//! native attach point), so an unpinned window keeps the platform's TLS
-//! behaviour exactly.
+//! Every decision is `session::web_tls_pin`'s
+//! ([`TlsPinGate::decide_rejected`]); the shims here read the chain a
+//! platform rejected, ask the gate, and apply the verdict — or hold the load
+//! while the operator is asked. Every session window gets one (through
+//! `connect_web_http_auth::install`, the single native attach point): a
+//! window whose profile carries `tls_pin_sha256` lets the pins decide, one
+//! without pins asks the operator about a certificate the platform rejected
+//! on one of the session's https origins.
 //!
-//! | Platform | Hook | Accept | Refuse |
-//! |---|---|---|---|
-//! | macOS   | server-trust challenge on the navigation delegate | `UseCredential` with `credentialForTrust:` | `CancelAuthenticationChallenge` |
-//! | Windows | WebView2 `ServerCertificateErrorDetected` (`ICoreWebView2_14`) | `ALWAYS_ALLOW` (cached for this window's browser process) | `CANCEL` (no interstitial) |
-//! | Linux   | WebKitGTK `load-failed-with-tls-errors` | per-context certificate exception for the host, then reload, once | `false` (WebKitGTK's error page) |
+//! | Platform | Hook | Accept | Refuse | Ask |
+//! |---|---|---|---|---|
+//! | macOS   | server-trust challenge on the navigation delegate | `UseCredential` with `credentialForTrust:` | `CancelAuthenticationChallenge` | the completion handler is held until the answer |
+//! | Windows | WebView2 `ServerCertificateErrorDetected` (`ICoreWebView2_14`) | `ALWAYS_ALLOW` (cached for this window's browser process) | `CANCEL` (no interstitial) | a deferral is held until the answer |
+//! | Linux   | WebKitGTK `load-failed-with-tls-errors` | per-context certificate exception for the host, then reload, once | `false` (WebKitGTK's error page) | the load ends without an error page; an accept adds the exception and reloads |
 //!
-//! None of them has an "accept any certificate" branch: the only accept is a
-//! [`PinDecision::Accept`](crate::session::web_tls_pin::PinDecision) from the
-//! gate, and any failure to read the chain is a refusal.
+//! None of them has an "accept any certificate" branch: the only accepts are
+//! a pin match and the operator's answer for one key, and any failure to
+//! read the chain is a refusal.
 //!
 //! The per-session scope of an accept: macOS answers one challenge on a
 //! window whose `WKWebsiteDataStore` is non-persistent; WebView2's
@@ -49,6 +52,50 @@ use crate::error::{CmdResult, CommandError};
 use crate::session::web::WebOrigin;
 use crate::session::web_tls_pin::{describe_chain, PresentedCertificate, MAX_CHAIN};
 
+// ── Shared by the shims (T139) ─────────────────────────────────────
+
+/// Ask the operator about the certificate `key` names and, once they
+/// answer, record the answer for the session and run `settle` with it on
+/// the main thread, where the shim keeps its held loads.
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+fn ask_operator(
+    ui: &Arc<crate::commands::connect_web_trust_ui::TrustUi>,
+    gate: &Arc<crate::session::web_tls_pin::TlsPinGate>,
+    key: crate::session::web_tls_pin::PendingKey,
+    leaf: Option<PresentedCertificate>,
+    platform_reason: Option<String>,
+    settle: fn(&crate::session::web_tls_pin::PendingKey, bool, &crate::commands::connect_web_trust_ui::TrustUi),
+) {
+    let answer_ui = Arc::clone(ui);
+    let answer_gate = Arc::clone(gate);
+    let origin = key.1.clone();
+    ui.ask(&origin, leaf, platform_reason, move |accepted| {
+        let app = answer_ui.app_handle();
+        let run = move || {
+            let (_, origin, leaf) = &key;
+            let accepted = answer_gate.record_override(origin, *leaf, accepted);
+            if !accepted {
+                answer_ui.refused(origin, crate::session::web_load::LoadFailure::TlsDeclined.page_failure());
+            }
+            settle(&key, accepted, &answer_ui);
+        };
+        if let Err(e) = app.run_on_main_thread(run) {
+            // The event loop is gone: the process is exiting and the held
+            // loads go with it.
+            log::warn!("connect.web.tls_override: could not deliver the answer: {e}");
+        }
+    });
+}
+
+/// Refuse every certificate question still open for the window `label`,
+/// which is being destroyed. Main thread.
+pub(crate) fn cancel_pending(label: &str) {
+    #[cfg(target_os = "macos")]
+    macos::cancel_pending(label);
+    #[cfg(not(target_os = "macos"))]
+    platform::cancel_pending(label);
+}
+
 // ── macOS ──────────────────────────────────────────────────────────
 
 /// The server-trust half of the navigation delegate in
@@ -63,7 +110,6 @@ use crate::session::web_tls_pin::{describe_chain, PresentedCertificate, MAX_CHAI
 #[cfg(target_os = "macos")]
 pub(crate) mod macos {
     use std::cell::RefCell;
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use block2::{DynBlock, RcBlock};
@@ -76,9 +122,9 @@ pub(crate) mod macos {
 
     use crate::commands::connect_web_trust_ui::TrustUi;
     use crate::session::web::WebOrigin;
-    use crate::session::web_load::LoadFailure;
-    use crate::session::web_load::PageFailure;
-    use crate::session::web_tls_pin::{describe_chain, OverrideVerdict, SpkiPin, TlsPinGate, MAX_CHAIN};
+    use crate::session::web_tls_pin::{
+        describe_chain, PendingKey, PendingQuestions, RejectedAction, TlsPinGate, MAX_CHAIN,
+    };
 
     /// `struct __SecTrust`, only ever behind a `SecTrustRef`.
     #[repr(C)]
@@ -108,14 +154,10 @@ pub(crate) mod macos {
         trust: SecTrust,
     }
 
-    /// (window label, origin, leaf key): one question, however many
-    /// connections WebKit opens to the origin while it is open.
-    type PendingKey = (String, WebOrigin, SpkiPin);
-
     thread_local! {
         /// Main thread only: WebKit calls the delegate there, and
         /// [`resolve`] / [`cancel_pending`] are dispatched there.
-        static PENDING: RefCell<HashMap<PendingKey, Vec<Held>>> = RefCell::new(HashMap::new());
+        static PENDING: RefCell<PendingQuestions<Held>> = RefCell::new(PendingQuestions::default());
     }
 
     /// The evaluated chain, leaf first, as DER.
@@ -215,72 +257,34 @@ pub(crate) mod macos {
         };
         let chain = evaluated_chain(&trust);
 
-        if gate.has_pins() {
-            let decision = gate.server_trust(Some(&origin), &chain).decision;
-            match decision {
-                d if d.accepts() => accept(&trust, completion),
-                d => {
-                    if let (Some(ui), crate::session::web_tls_pin::PinDecision::Refuse(r)) = (ui, d) {
-                        ui.refused(&origin, PageFailure { check: r.check(), notice: r.notice() });
-                    }
-                    completion.call((CANCEL, std::ptr::null_mut()));
-                }
+        let refused = |o: &WebOrigin, f| {
+            if let Some(ui) = ui {
+                ui.refused(o, f);
             }
-            return;
-        }
-
-        match gate.operator_override(Some(&origin), &chain) {
-            OverrideVerdict::Accepted => accept(&trust, completion),
-            OverrideVerdict::Declined => {
-                if let Some(ui) = ui {
-                    ui.refused(&origin, LoadFailure::TlsDeclined.page_failure());
-                }
-                completion.call((CANCEL, std::ptr::null_mut()));
-            }
-            OverrideVerdict::NotApplicable | OverrideVerdict::Unreadable => {
-                completion.call((CANCEL, std::ptr::null_mut()))
-            }
-            OverrideVerdict::Ask(leaf) => {
+        };
+        match gate.decide_rejected(Some(&origin), &chain, ui.is_some(), refused) {
+            RejectedAction::Accept { .. } => accept(&trust, completion),
+            RejectedAction::Refuse => completion.call((CANCEL, std::ptr::null_mut())),
+            RejectedAction::Ask { origin, leaf } => {
                 let Some(ui) = ui else {
                     completion.call((CANCEL, std::ptr::null_mut()));
                     return;
                 };
-                let key: PendingKey = (ui.label().to_string(), origin.clone(), leaf);
+                let key: PendingKey = (ui.label().to_string(), origin, leaf);
                 let held = Held { completion: completion.copy(), trust };
-                let first = PENDING.with(|p| {
-                    let mut p = p.borrow_mut();
-                    let waiting = p.entry(key.clone()).or_default();
-                    waiting.push(held);
-                    waiting.len() == 1
-                });
-                if !first {
+                if !PENDING.with(|p| p.borrow_mut().hold(key.clone(), held)) {
                     // Already being asked about this key.
                     return;
                 }
                 let leaf_info = describe_chain(&chain).ok().and_then(|c| c.into_iter().next());
-                let answer_ui = Arc::clone(ui);
-                let answer_gate = Arc::clone(gate);
-                ui.ask(&origin, leaf_info, Some(platform_reason), move |accepted| {
-                    let app = answer_ui.app_handle();
-                    let run = move || resolve(&key, accepted, &answer_gate, &answer_ui);
-                    if let Err(e) = app.run_on_main_thread(run) {
-                        // The event loop is gone: the process is exiting and
-                        // the held handlers go with it.
-                        log::warn!("connect.web.tls_override: could not deliver the answer: {e}");
-                    }
-                });
+                super::ask_operator(ui, gate, key, leaf_info, Some(platform_reason), resolve);
             }
         }
     }
 
     /// Answer every challenge held for `key`. Main thread.
-    fn resolve(key: &PendingKey, accepted: bool, gate: &TlsPinGate, ui: &TrustUi) {
-        let (_, origin, leaf) = key;
-        let accepted = gate.record_override(origin, *leaf, accepted);
-        if !accepted {
-            ui.refused(origin, LoadFailure::TlsDeclined.page_failure());
-        }
-        let held = PENDING.with(|p| p.borrow_mut().remove(key)).unwrap_or_default();
+    fn resolve(key: &PendingKey, accepted: bool, _ui: &TrustUi) {
+        let held = PENDING.with(|p| p.borrow_mut().take(key));
         for h in held {
             if accepted {
                 accept(&h.trust, &h.completion);
@@ -293,11 +297,7 @@ pub(crate) mod macos {
     /// Refuse every challenge still held for the window `label` (it is being
     /// destroyed). Main thread.
     pub(crate) fn cancel_pending(label: &str) {
-        let held: Vec<Held> = PENDING.with(|p| {
-            let mut p = p.borrow_mut();
-            let keys: Vec<PendingKey> = p.keys().filter(|(l, _, _)| l == label).cloned().collect();
-            keys.into_iter().filter_map(|k| p.remove(&k)).flatten().collect()
-        });
+        let held = PENDING.with(|p| p.borrow_mut().take_window(label));
         for h in held {
             h.completion.call((CANCEL, std::ptr::null_mut()));
         }
@@ -312,37 +312,93 @@ pub(crate) mod macos {
 /// chain. Every path that is not an accept sets `CANCEL`, which also keeps
 /// WebView2's interstitial (and any "continue anyway" it offers) away.
 ///
+/// A question (T139) takes the event's deferral: WebView2 waits for the
+/// action until the deferral completes, so the load is held exactly as
+/// macOS holds its challenge. Each held deferral lives in [`PENDING`] (UI
+/// thread) until [`resolve`] or [`cancel_pending`] completes it.
+///
 /// Not compiled on the hosts this was written on.
 #[cfg(windows)]
 pub(crate) mod platform {
+    use std::cell::RefCell;
     use std::sync::Arc;
 
     use webview2_com::Microsoft::Web::WebView2::Win32::{
-        ICoreWebView2_14, COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW,
-        COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL,
+        ICoreWebView2Deferral, ICoreWebView2ServerCertificateErrorDetectedEventArgs, ICoreWebView2_14,
+        COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION, COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW,
+        COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL, COREWEBVIEW2_WEB_ERROR_STATUS,
     };
     use webview2_com::{take_pwstr, ServerCertificateErrorDetectedEventHandler};
     use windows::core::{Interface, PWSTR};
 
+    use crate::commands::connect_web_trust_ui::TrustUi;
     use crate::session::web::WebOrigin;
-    use crate::session::web_tls_pin::{chain_from_pem, TlsPinGate, MAX_CHAIN};
+    use crate::session::web_tls_pin::{
+        chain_from_pem, describe_chain, PendingKey, PendingQuestions, RejectedAction, TlsPinGate, MAX_CHAIN,
+    };
+    use crate::session::web_tls_prompt::webview2_reason;
     use tauri::Url;
 
-    pub fn install(webview: &tauri::webview::PlatformWebview, gate: Arc<TlsPinGate>) -> Result<(), String> {
+    /// One certificate error held for the operator's answer.
+    struct Held {
+        args: ICoreWebView2ServerCertificateErrorDetectedEventArgs,
+        deferral: ICoreWebView2Deferral,
+    }
+
+    thread_local! {
+        /// UI thread only: WebView2 raises its events there, and
+        /// [`resolve`] / [`cancel_pending`] are dispatched there.
+        static PENDING: RefCell<PendingQuestions<Held>> = RefCell::new(PendingQuestions::default());
+    }
+
+    /// Set the action on a held event and complete its deferral.
+    fn complete(h: Held, action: COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION) {
+        // SAFETY: COM calls on objects WebView2 handed the event handler,
+        // made on the UI thread that owns them.
+        let done = unsafe { h.args.SetAction(action).and_then(|()| h.deferral.Complete()) };
+        if let Err(e) = done {
+            log::warn!(
+                "connect.web.tls_override: could not complete a held certificate error (WebView2 {:?})",
+                e.code()
+            );
+        }
+    }
+
+    pub fn install(
+        webview: &tauri::webview::PlatformWebview,
+        gate: Arc<TlsPinGate>,
+        ui: Option<Arc<TrustUi>>,
+    ) -> Result<(), String> {
         // SAFETY: COM calls on the WebView2 objects tauri hands the
         // `with_webview` closure, on the UI thread that owns them; every
         // out-pointer is a local.
         unsafe {
             let core = webview.controller().CoreWebView2().map_err(|e| format!("CoreWebView2: {e}"))?;
-            let core14 = core
-                .cast::<ICoreWebView2_14>()
-                .map_err(|e| format!("this WebView2 runtime cannot honour a TLS pin (no ICoreWebView2_14): {e}"))?;
+            let core14 = match core.cast::<ICoreWebView2_14>() {
+                Ok(core14) => core14,
+                Err(e) if gate.has_pins() => {
+                    return Err(format!("this WebView2 runtime cannot honour a TLS pin (no ICoreWebView2_14): {e}"))
+                }
+                // Without pins nothing would be overridden, only asked: an
+                // older runtime keeps its own handling of a rejected
+                // certificate, as before T139.
+                Err(e) => {
+                    log::warn!(
+                        "connect.web: this WebView2 runtime cannot ask about untrusted certificates \
+                         (no ICoreWebView2_14): {e}"
+                    );
+                    return Ok(());
+                }
+            };
             let handler = ServerCertificateErrorDetectedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
-                let decide = || -> windows::core::Result<bool> {
+                // `Some(accept)` to act now, `None` when held for a question.
+                let decide = || -> windows::core::Result<Option<bool>> {
                     let mut uri = PWSTR::null();
                     args.RequestUri(&mut uri)?;
                     let uri = take_pwstr(uri);
+                    let mut status = COREWEBVIEW2_WEB_ERROR_STATUS::default();
+                    args.ErrorStatus(&mut status)?;
                     let cert = args.ServerCertificate()?;
                     let mut leaf = PWSTR::null();
                     cert.ToPemEncoding(&mut leaf)?;
@@ -358,13 +414,34 @@ pub(crate) mod platform {
                     }
                     let origin = Url::parse(&uri).ok().as_ref().and_then(WebOrigin::of_url);
                     // An unreadable chain is decided as an empty one: refused
-                    // on a session origin, never accepted.
+                    // on a session origin, never accepted or asked about.
                     let chain = chain_from_pem(&leaf, &pems).unwrap_or_default();
-                    Ok(gate.server_trust(origin.as_ref(), &chain).decision.accepts())
+                    let refused = |o: &WebOrigin, f| {
+                        if let Some(ui) = &ui {
+                            ui.refused(o, f);
+                        }
+                    };
+                    match gate.decide_rejected(origin.as_ref(), &chain, ui.is_some(), refused) {
+                        RejectedAction::Accept { .. } => Ok(Some(true)),
+                        RejectedAction::Refuse => Ok(Some(false)),
+                        RejectedAction::Ask { origin, leaf } => {
+                            let Some(ui) = &ui else { return Ok(Some(false)) };
+                            let deferral = args.GetDeferral()?;
+                            let key: PendingKey = (ui.label().to_string(), origin, leaf);
+                            let held = Held { args: args.clone(), deferral };
+                            if PENDING.with(|p| p.borrow_mut().hold(key.clone(), held)) {
+                                let leaf_info = describe_chain(&chain).ok().and_then(|c| c.into_iter().next());
+                                let reason = webview2_reason(status.0).map(str::to_string);
+                                super::ask_operator(ui, &gate, key, leaf_info, reason, resolve);
+                            }
+                            Ok(None)
+                        }
+                    }
                 };
                 let action = match decide() {
-                    Ok(true) => COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW,
-                    Ok(false) => COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL,
+                    Ok(None) => return Ok(()),
+                    Ok(Some(true)) => COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW,
+                    Ok(Some(false)) => COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL,
                     Err(e) => {
                         log::warn!(
                             target: "audit",
@@ -384,6 +461,25 @@ pub(crate) mod platform {
         }
         Ok(())
     }
+
+    /// Complete every event held for `key` with the answer. UI thread.
+    fn resolve(key: &PendingKey, accepted: bool, _ui: &TrustUi) {
+        let action = if accepted {
+            COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW
+        } else {
+            COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL
+        };
+        for h in PENDING.with(|p| p.borrow_mut().take(key)) {
+            complete(h, action);
+        }
+    }
+
+    /// Refuse every event still held for the window `label`. UI thread.
+    pub fn cancel_pending(label: &str) {
+        for h in PENDING.with(|p| p.borrow_mut().take_window(label)) {
+            complete(h, COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL);
+        }
+    }
 }
 
 // ── Linux ──────────────────────────────────────────────────────────
@@ -393,7 +489,13 @@ pub(crate) mod platform {
 /// allowed for the host in this window's own `WebContext` and the load is
 /// retried — once per (origin, key): a second failure with the same accepted
 /// key means the exception did not take, and the error page stays. Returning
-/// `false` leaves WebKitGTK's own error page, which offers no way past it.
+/// `false` leaves WebKitGTK's own error page, which offers no way past it
+/// (and is followed by `load-failed`, which reports the failure).
+///
+/// A question (T139) cannot hold the load open: the signal is synchronous.
+/// The handler returns `true` instead — no error page, no `load-failed` —
+/// and keeps the view, certificate and URI in [`PENDING`]; an accept adds
+/// the exception and reloads, a decline reports the load as `tls_declined`.
 ///
 /// Sub-resource loads do not raise the signal; they pass once the main
 /// document of their host has been accepted (the exception is per host).
@@ -401,17 +503,55 @@ pub(crate) mod platform {
 /// Not compiled on the hosts this was written on.
 #[cfg(target_os = "linux")]
 pub(crate) mod platform {
+    use std::cell::RefCell;
     use std::sync::Arc;
 
     use webkit2gtk::gio::prelude::TlsCertificateExt;
     use webkit2gtk::{WebContextExt, WebViewExt};
 
+    use crate::commands::connect_web_trust_ui::TrustUi;
     use crate::session::web::WebOrigin;
-    use crate::session::web_tls_pin::{TlsPinGate, MAX_CHAIN};
+    use crate::session::web_load::LoadFailure;
+    use crate::session::web_tls_pin::{
+        describe_chain, PendingKey, PendingQuestions, RejectedAction, TlsPinGate, MAX_CHAIN,
+    };
+    use crate::session::web_tls_prompt::gtls_reason;
     use tauri::Url;
 
-    pub fn install(webview: &tauri::webview::PlatformWebview, gate: Arc<TlsPinGate>) -> Result<(), String> {
-        webview.inner().connect_load_failed_with_tls_errors(move |view, failing_uri, certificate, _errors| {
+    /// One main-resource load waiting for the operator's answer.
+    struct Held {
+        view: webkit2gtk::WebView,
+        certificate: webkit2gtk::gio::TlsCertificate,
+        uri: String,
+    }
+
+    thread_local! {
+        /// GTK main thread only: WebKitGTK emits there, and [`resolve`] /
+        /// [`cancel_pending`] are dispatched there.
+        static PENDING: RefCell<PendingQuestions<Held>> = RefCell::new(PendingQuestions::default());
+    }
+
+    /// Allow `certificate` for `origin`'s host in the view's own context and
+    /// load `uri` again. False when the view has no context.
+    fn allow_and_reload(
+        view: &webkit2gtk::WebView,
+        certificate: &webkit2gtk::gio::TlsCertificate,
+        origin: &WebOrigin,
+        uri: &str,
+    ) -> bool {
+        let Some(context) = view.context() else { return false };
+        let host = origin.host().trim_start_matches('[').trim_end_matches(']').to_string();
+        context.allow_tls_certificate_for_host(certificate, &host);
+        view.load_uri(uri);
+        true
+    }
+
+    pub fn install(
+        webview: &tauri::webview::PlatformWebview,
+        gate: Arc<TlsPinGate>,
+        ui: Option<Arc<TrustUi>>,
+    ) -> Result<(), String> {
+        webview.inner().connect_load_failed_with_tls_errors(move |view, failing_uri, certificate, errors| {
             let mut chain: Vec<Vec<u8>> = Vec::new();
             let mut next = Some(certificate.clone());
             while let Some(cert) = next.take() {
@@ -424,17 +564,53 @@ pub(crate) mod platform {
             }
             let url = Url::parse(failing_uri).ok();
             let origin = url.as_ref().and_then(WebOrigin::of_url);
-            let verdict = gate.server_trust(origin.as_ref(), &chain);
-            if !verdict.decision.accepts() || !verdict.first {
-                return false;
+            let refused = |o: &WebOrigin, f| {
+                if let Some(ui) = &ui {
+                    ui.refused(o, f);
+                }
+            };
+            match gate.decide_rejected(origin.as_ref(), &chain, ui.is_some(), refused) {
+                RejectedAction::Accept { retry: true } => match &origin {
+                    Some(origin) => allow_and_reload(view, certificate, origin, failing_uri),
+                    None => false,
+                },
+                RejectedAction::Accept { retry: false } | RejectedAction::Refuse => false,
+                RejectedAction::Ask { origin, leaf } => {
+                    let Some(ui) = &ui else { return false };
+                    let key: PendingKey = (ui.label().to_string(), origin, leaf);
+                    let held =
+                        Held { view: view.clone(), certificate: certificate.clone(), uri: failing_uri.to_string() };
+                    if PENDING.with(|p| p.borrow_mut().hold(key.clone(), held)) {
+                        let leaf_info = describe_chain(&chain).ok().and_then(|c| c.into_iter().next());
+                        super::ask_operator(ui, &gate, key, leaf_info, gtls_reason(errors.bits()), resolve);
+                    }
+                    // Handled: no error page while the question is open.
+                    true
+                }
             }
-            let (Some(context), Some(origin)) = (view.context(), origin) else { return false };
-            let host = origin.host().trim_start_matches('[').trim_end_matches(']').to_string();
-            context.allow_tls_certificate_for_host(certificate, &host);
-            view.load_uri(failing_uri);
-            true
         });
         Ok(())
+    }
+
+    /// Apply the answer to every load held for `key`. Main thread.
+    fn resolve(key: &PendingKey, accepted: bool, ui: &TrustUi) {
+        let (_, origin, _) = key;
+        for h in PENDING.with(|p| p.borrow_mut().take(key)) {
+            // `load-failed` was suppressed while the question was open, so a
+            // load that stays failed is reported here (a declined key, noted
+            // by `ask_operator`, names itself).
+            if !accepted {
+                ui.load_failed(Some(&h.uri), Some(LoadFailure::TlsDeclined), "tls:declined");
+            } else if !allow_and_reload(&h.view, &h.certificate, origin, &h.uri) {
+                ui.load_failed(Some(&h.uri), Some(LoadFailure::TlsUntrusted), "tls:no_context");
+            }
+        }
+    }
+
+    /// Forget the loads held for the window `label`: each already ended (the
+    /// handler returned), so nothing waits on an answer.
+    pub fn cancel_pending(label: &str) {
+        drop(PENDING.with(|p| p.borrow_mut().take_window(label)));
     }
 }
 
@@ -442,11 +618,18 @@ pub(crate) mod platform {
 pub(crate) mod platform {
     use std::sync::Arc;
 
+    use crate::commands::connect_web_trust_ui::TrustUi;
     use crate::session::web_tls_pin::TlsPinGate;
 
-    pub fn install(_webview: &tauri::webview::PlatformWebview, _gate: Arc<TlsPinGate>) -> Result<(), String> {
+    pub fn install(
+        _webview: &tauri::webview::PlatformWebview,
+        _gate: Arc<TlsPinGate>,
+        _ui: Option<Arc<TrustUi>>,
+    ) -> Result<(), String> {
         Err("TLS pins cannot be honoured on this platform".into())
     }
+
+    pub fn cancel_pending(_label: &str) {}
 }
 
 // ── Fingerprint helper (trust on first use) ────────────────────────

@@ -32,6 +32,11 @@
 //! attached independently. A window with neither keeps the platform defaults
 //! exactly.
 //!
+//! **Top-frame load failures (T139)** are reported from here too: the macOS
+//! delegate's `didFail…Navigation` methods, WebView2's `NavigationCompleted`
+//! and WebKitGTK's `load-failed`, each classified by `session::web_load` and
+//! handed to the window's `TrustUi`.
+//!
 //! **The Windows and Linux blocks are not compiled on the development hosts
 //! this was written on** (the Windows cross-check stops in C build scripts
 //! before reaching this crate); both are kept minimal and are per-platform
@@ -50,28 +55,23 @@ use crate::session::web_tls_pin::TlsPinGate;
 pub(crate) struct NativeGates {
     /// `http-auth` sessions (Phase 3).
     pub http_auth: Option<Arc<HttpAuthGate>>,
-    /// Profiles carrying `tls_pin_sha256` (Phase 4). On macOS every session
-    /// window has one (T139): without pins it asks the operator about a
-    /// rejected certificate instead.
+    /// Profiles carrying `tls_pin_sha256` (Phase 4). On macOS, Windows and
+    /// Linux every session window has one (T139): without pins it asks the
+    /// operator about a rejected certificate instead.
     pub tls_pin: Option<Arc<TlsPinGate>>,
-    /// The operator-facing side (T139, macOS): the untrusted-certificate
-    /// question and top-frame load failures.
-    #[cfg(target_os = "macos")]
+    /// The operator-facing side (T139): the untrusted-certificate question
+    /// and top-frame load failures.
     pub ui: Option<Arc<super::connect_web_trust_ui::TrustUi>>,
 }
 
 impl NativeGates {
     pub fn is_empty(&self) -> bool {
-        #[cfg(target_os = "macos")]
-        if self.ui.is_some() {
-            return false;
-        }
-        self.http_auth.is_none() && self.tls_pin.is_none()
+        self.ui.is_none() && self.http_auth.is_none() && self.tls_pin.is_none()
     }
 
     /// The abort check for a failure that cannot be told apart (the shared
     /// macOS delegate): the HTTP-auth handler's when there is one.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(any(windows, target_os = "linux"), allow(dead_code))]
     fn shared_check(&self) -> &'static str {
         if self.http_auth.is_some() {
             HTTP_AUTH_HANDLER_CHECK
@@ -446,13 +446,26 @@ mod platform {
 mod platform {
     use std::sync::Arc;
 
-    use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2_10, ICoreWebView2_5};
-    use webview2_com::{take_pwstr, BasicAuthenticationRequestedEventHandler, ClientCertificateRequestedEventHandler};
-    use windows::core::{Interface, PCWSTR, PWSTR};
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_10, ICoreWebView2_5, COREWEBVIEW2_WEB_ERROR_STATUS,
+    };
+    use webview2_com::{
+        take_pwstr, BasicAuthenticationRequestedEventHandler, ClientCertificateRequestedEventHandler,
+        NavigationCompletedEventHandler, NavigationStartingEventHandler,
+    };
+    use windows::core::{Interface, BOOL, PCWSTR, PWSTR};
     use zeroize::Zeroizing;
 
     use super::{InstallError, NativeGates};
+    use crate::commands::connect_web_trust_ui::TrustUi;
     use crate::session::web_http_auth::{Challenge, GateAnswer, HttpAuthGate};
+    use crate::session::web_load::classify_webview2;
+
+    /// Navigations whose start is remembered to name a failure's origin.
+    const STARTED_KEPT: usize = 16;
 
     /// A NUL-terminated UTF-16 copy that is zeroized when dropped.
     fn wide(s: &str) -> Zeroizing<Vec<u16>> {
@@ -464,7 +477,62 @@ mod platform {
             install_http_auth(&webview, gate).map_err(InstallError::http_auth)?;
         }
         if let Some(pins) = gates.tls_pin {
-            crate::commands::connect_web_tls_pin::platform::install(&webview, pins).map_err(InstallError::tls_pin)?;
+            crate::commands::connect_web_tls_pin::platform::install(&webview, pins, gates.ui.clone())
+                .map_err(InstallError::tls_pin)?;
+        }
+        if let Some(ui) = gates.ui {
+            install_load_failures(&webview, ui).map_err(InstallError::tls_pin)?;
+        }
+        Ok(())
+    }
+
+    /// Report a failed top-level navigation (T139). `NavigationCompleted`
+    /// carries no URI, so the URI of each navigation's start is kept by id.
+    fn install_load_failures(webview: &tauri::webview::PlatformWebview, ui: Arc<TrustUi>) -> Result<(), String> {
+        let started: Arc<Mutex<VecDeque<(u64, String)>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let on_start = Arc::clone(&started);
+        // SAFETY: COM calls on the WebView2 objects tauri hands this closure,
+        // on the UI thread that owns them; every out-pointer is a local.
+        unsafe {
+            let core = webview.controller().CoreWebView2().map_err(|e| format!("CoreWebView2: {e}"))?;
+            let starting = NavigationStartingEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut id = 0u64;
+                let mut uri = PWSTR::null();
+                args.NavigationId(&mut id)?;
+                args.Uri(&mut uri)?;
+                let mut kept = on_start.lock().unwrap_or_else(|p| p.into_inner());
+                if kept.len() >= STARTED_KEPT {
+                    kept.pop_front();
+                }
+                kept.push_back((id, take_pwstr(uri)));
+                Ok(())
+            }));
+            let mut start_token = 0i64;
+            core.add_NavigationStarting(&starting, &mut start_token)
+                .map_err(|e| format!("add_NavigationStarting: {e}"))?;
+            let completed = NavigationCompletedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut id = 0u64;
+                let mut success = BOOL::default();
+                args.NavigationId(&mut id)?;
+                args.IsSuccess(&mut success)?;
+                let uri = {
+                    let mut kept = started.lock().unwrap_or_else(|p| p.into_inner());
+                    let at = kept.iter().position(|(i, _)| *i == id);
+                    at.and_then(|at| kept.remove(at)).map(|(_, uri)| uri)
+                };
+                if success.as_bool() {
+                    return Ok(());
+                }
+                let mut status = COREWEBVIEW2_WEB_ERROR_STATUS::default();
+                args.WebErrorStatus(&mut status)?;
+                ui.load_failed(uri.as_deref(), classify_webview2(status.0), &format!("webview2:{}", status.0));
+                Ok(())
+            }));
+            let mut done_token = 0i64;
+            core.add_NavigationCompleted(&completed, &mut done_token)
+                .map_err(|e| format!("add_NavigationCompleted: {e}"))?;
         }
         Ok(())
     }
@@ -552,11 +620,17 @@ mod platform {
 mod platform {
     use std::sync::Arc;
 
+    use webkit2gtk::gio::{IOErrorEnum, ResolverError, TlsError};
     use webkit2gtk::glib::translate::ToGlibPtr;
-    use webkit2gtk::{AuthenticationRequestExt, AuthenticationScheme, Credential, CredentialPersistence, WebViewExt};
+    use webkit2gtk::{
+        AuthenticationRequestExt, AuthenticationScheme, Credential, CredentialPersistence, NetworkError, PluginError,
+        PolicyError, WebViewExt,
+    };
 
     use super::{InstallError, NativeGates};
+    use crate::commands::connect_web_trust_ui::TrustUi;
     use crate::session::web_http_auth::{AuthMethod, Challenge, GateAnswer, HttpAuthGate};
+    use crate::session::web_load::{classify_webkitgtk, GtkErrorDomain};
 
     fn method_of(s: AuthenticationScheme) -> AuthMethod {
         match s {
@@ -577,9 +651,51 @@ mod platform {
             install_http_auth(&webview, gate).map_err(InstallError::http_auth)?;
         }
         if let Some(pins) = gates.tls_pin {
-            crate::commands::connect_web_tls_pin::platform::install(&webview, pins).map_err(InstallError::tls_pin)?;
+            crate::commands::connect_web_tls_pin::platform::install(&webview, pins, gates.ui.clone())
+                .map_err(InstallError::tls_pin)?;
+        }
+        if let Some(ui) = gates.ui {
+            install_load_failures(&webview, ui);
         }
         Ok(())
+    }
+
+    /// The domain of a `load-failed` error, matched by type rather than by
+    /// quark name.
+    fn domain_of(error: &webkit2gtk::glib::Error) -> GtkErrorDomain {
+        if error.is::<NetworkError>() {
+            GtkErrorDomain::WebKitNetwork
+        } else if error.is::<PolicyError>() {
+            GtkErrorDomain::WebKitPolicy
+        } else if error.is::<PluginError>() {
+            GtkErrorDomain::WebKitPlugin
+        } else if error.is::<IOErrorEnum>() {
+            GtkErrorDomain::GIo
+        } else if error.is::<ResolverError>() {
+            GtkErrorDomain::GResolver
+        } else if error.is::<TlsError>() {
+            GtkErrorDomain::GTls
+        } else {
+            GtkErrorDomain::Other
+        }
+    }
+
+    /// Report a failed main-resource load (T139). `load-failed` is emitted
+    /// for the main resource only; returning `false` keeps WebKitGTK's own
+    /// error page.
+    fn install_load_failures(webview: &tauri::webview::PlatformWebview, ui: Arc<TrustUi>) {
+        webview.inner().connect_load_failed(move |_, _event, failing_uri, error| {
+            // SAFETY: reading the `code` field of the live `GError` behind
+            // `error` (glib exposes the domain, not the code).
+            let code = unsafe { (*ToGlibPtr::<*const webkit2gtk::glib::ffi::GError>::to_glib_none(error).0).code };
+            let domain = domain_of(error);
+            ui.load_failed(
+                Some(failing_uri),
+                classify_webkitgtk(domain, code),
+                &format!("{}:{code}", error.domain().as_str()),
+            );
+            false
+        });
     }
 
     fn install_http_auth(webview: &tauri::webview::PlatformWebview, gate: Arc<HttpAuthGate>) -> Result<(), String> {
@@ -627,7 +743,9 @@ mod platform {
     use super::{InstallError, NativeGates};
 
     pub fn install(_webview: tauri::webview::PlatformWebview, gates: NativeGates) -> Result<(), InstallError> {
-        if gates.is_empty() {
+        // The operator-facing side needs a platform shim; without one the
+        // window keeps the platform's behaviour.
+        if gates.http_auth.is_none() && gates.tls_pin.is_none() {
             return Ok(());
         }
         Err(InstallError {

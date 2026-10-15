@@ -57,6 +57,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::web::{OriginSet, WebOrigin};
+use super::web_load::{LoadFailure, PageFailure};
 
 /// Most pins one profile may carry. A profile needs one or two (the current
 /// key and the next); the bound keeps a pasted list from growing unnoticed.
@@ -374,8 +375,7 @@ pub struct TrustVerdict {
 
 type RefusalHook = Box<dyn Fn(PinRefusal) + Send + Sync>;
 
-// Only the macOS shim asks the operator (T139).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", windows, target_os = "linux")), allow(dead_code))]
 /// What a certificate the platform rejected comes to on a window that may
 /// ask the operator (T139, [`TlsPinGate::with_operator_override`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -404,7 +404,7 @@ pub struct TlsPinGate {
     seen: Mutex<HashSet<(WebOrigin, Option<SpkiPin>, PinDecision)>>,
     on_refusal: RefusalHook,
     /// A window without pins may ask the operator about a rejected
-    /// certificate (macOS only; the other shims never consult it).
+    /// certificate (T139; every platform shim consults it).
     operator_override: bool,
     /// The operator's answers, per (origin, leaf key), for this session
     /// only. Never persisted: the next session asks again.
@@ -459,6 +459,7 @@ impl TlsPinGate {
     /// Whether a rejection on `origin` is this gate's to decide. The macOS
     /// shim asks before evaluating trust itself, so an origin outside the
     /// session never costs an evaluation.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn applies_to(&self, origin: Option<&WebOrigin>) -> bool {
         (!self.pins.is_empty() || self.operator_override) && pinnable(&self.origins, origin).is_some()
     }
@@ -466,14 +467,14 @@ impl TlsPinGate {
     /// Whether this gate decides with its pins ([`Self::server_trust`]) —
     /// otherwise, on a window that may ask, with the operator
     /// ([`Self::operator_override`]).
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", windows, target_os = "linux")), allow(dead_code))]
     pub fn has_pins(&self) -> bool {
         !self.pins.is_empty()
     }
 
     /// The operator's standing for a certificate the platform rejected on
     /// `origin` (`chain` DER, leaf first).
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", windows, target_os = "linux")), allow(dead_code))]
     pub fn operator_override(&self, origin: Option<&WebOrigin>, chain: &[Vec<u8>]) -> OverrideVerdict {
         if !self.operator_override || !self.pins.is_empty() {
             return OverrideVerdict::NotApplicable;
@@ -494,7 +495,7 @@ impl TlsPinGate {
     /// Record the operator's answer about `leaf` on `origin`, for this
     /// session. The first answer stands and is the one audited; a later
     /// call for the same key changes nothing. Returns the standing answer.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", windows, target_os = "linux")), allow(dead_code))]
     pub fn record_override(&self, origin: &WebOrigin, leaf: SpkiPin, accepted: bool) -> bool {
         if !self.operator_override || !self.pins.is_empty() || pinnable(&self.origins, Some(origin)).is_none() {
             return false;
@@ -603,6 +604,116 @@ impl TlsPinGate {
             ),
             PinDecision::NotApplicable => {}
         }
+    }
+}
+
+/// What a platform shim does with one certificate the platform rejected on
+/// a session window ([`TlsPinGate::decide_rejected`], T139).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RejectedAction {
+    /// Override the rejection. `retry` is true only the first time this
+    /// session accepts this (origin, key) on a pin: WebKitGTK, which accepts
+    /// by adding an exception and reloading, reloads only then, so an
+    /// exception that does not take cannot loop.
+    Accept { retry: bool },
+    /// Keep the rejection.
+    Refuse,
+    /// Ask the operator about this key on this origin (a window without
+    /// pins, not asked yet). The shim holds or suspends the load until the
+    /// answer ([`TlsPinGate::record_override`]).
+    Ask { origin: WebOrigin, leaf: SpkiPin },
+}
+
+impl TlsPinGate {
+    /// Decide a certificate the platform rejected on `origin` (`chain` DER,
+    /// leaf first) — the one decision every platform shim makes:
+    ///
+    /// * a profile **with** pins: the pins decide ([`Self::server_trust`]);
+    ///   a mismatch is never offered to the operator;
+    /// * **no** pins: the operator's answer for this exact key on this
+    ///   origin this session ([`Self::operator_override`]) — accepted,
+    ///   declined, or not asked yet ([`RejectedAction::Ask`] when the shim
+    ///   `can_ask`, a refusal otherwise).
+    ///
+    /// `refused` runs when this refuses a session origin with a reason the
+    /// window should report (a pin refusal, a declined key), so the cancelled
+    /// or failed load that follows names it ([`super::web::WebShared::note_tls_refused`]).
+    pub fn decide_rejected(
+        &self,
+        origin: Option<&WebOrigin>,
+        chain: &[Vec<u8>],
+        can_ask: bool,
+        refused: impl FnOnce(&WebOrigin, PageFailure),
+    ) -> RejectedAction {
+        if self.has_pins() {
+            let verdict = self.server_trust(origin, chain);
+            return match (verdict.decision, origin) {
+                (d, _) if d.accepts() => RejectedAction::Accept { retry: verdict.first },
+                (PinDecision::Refuse(r), Some(o)) => {
+                    refused(o, PageFailure { check: r.check(), notice: r.notice() });
+                    RejectedAction::Refuse
+                }
+                _ => RejectedAction::Refuse,
+            };
+        }
+        match self.operator_override(origin, chain) {
+            // Accepted earlier in this session (the reload, or another
+            // connection): already applied once, so no reload.
+            OverrideVerdict::Accepted => RejectedAction::Accept { retry: false },
+            OverrideVerdict::Declined => {
+                if let Some(o) = origin {
+                    refused(o, LoadFailure::TlsDeclined.page_failure());
+                }
+                RejectedAction::Refuse
+            }
+            OverrideVerdict::NotApplicable | OverrideVerdict::Unreadable => RejectedAction::Refuse,
+            OverrideVerdict::Ask(leaf) => match origin {
+                Some(o) if can_ask => RejectedAction::Ask { origin: o.clone(), leaf },
+                _ => RejectedAction::Refuse,
+            },
+        }
+    }
+}
+
+/// (window label, origin, leaf key): one question, however many
+/// connections or loads ask about the same key while it is open.
+pub type PendingKey = (String, WebOrigin, SpkiPin);
+
+/// The platform loads held while the operator is asked about a certificate
+/// (T139). Every held item must be answered exactly once — WebKit raises an
+/// exception for a completion handler released uncalled, and WebView2 waits
+/// on an uncompleted deferral — so items leave only through [`Self::take`]
+/// (the answer) or [`Self::take_window`] (the window is being destroyed).
+/// Each shim keeps one in a main-thread `thread_local!`: the platform
+/// objects it holds are not `Send`.
+pub struct PendingQuestions<H> {
+    held: HashMap<PendingKey, Vec<H>>,
+}
+
+impl<H> Default for PendingQuestions<H> {
+    fn default() -> Self {
+        Self { held: HashMap::new() }
+    }
+}
+
+impl<H> PendingQuestions<H> {
+    /// Hold `item` until `key` is answered. True for the first item of a
+    /// key: the caller asks the question; later ones wait for that answer.
+    pub fn hold(&mut self, key: PendingKey, item: H) -> bool {
+        let waiting = self.held.entry(key).or_default();
+        waiting.push(item);
+        waiting.len() == 1
+    }
+
+    /// Everything held for `key`, now answered.
+    pub fn take(&mut self, key: &PendingKey) -> Vec<H> {
+        self.held.remove(key).unwrap_or_default()
+    }
+
+    /// Everything held for the window `label`, which is going away.
+    pub fn take_window(&mut self, label: &str) -> Vec<H> {
+        let keys: Vec<PendingKey> = self.held.keys().filter(|(l, _, _)| l == label).cloned().collect();
+        keys.into_iter().filter_map(|k| self.held.remove(&k)).flatten().collect()
     }
 }
 
@@ -1116,6 +1227,76 @@ mod tests {
         let (plain, _) = gate(PinSet::default());
         assert!(!plain.applies_to(Some(&o)));
         assert_eq!(plain.operator_override(Some(&o), &[der]), OverrideVerdict::NotApplicable);
+    }
+
+    #[test]
+    fn decide_rejected_asks_once_then_follows_the_answer() {
+        let (der, _) = self_signed();
+        let g = prompting_gate(PinSet::default());
+        let o = origin("https://appliance.example.com");
+        let noted = std::cell::RefCell::new(Vec::new());
+        let note = |o: &WebOrigin, f: PageFailure| noted.borrow_mut().push((o.clone(), f.check));
+
+        let RejectedAction::Ask { origin: asked, leaf } = g.decide_rejected(Some(&o), &[der.clone()], true, note)
+        else {
+            panic!("expected a question")
+        };
+        assert_eq!(asked, o);
+        assert_eq!(g.decide_rejected(Some(&o), &[der.clone()], false, note), RejectedAction::Refuse, "cannot ask");
+        assert!(noted.borrow().is_empty(), "not asking is not a declined key");
+
+        g.record_override(&o, leaf, true);
+        assert_eq!(g.decide_rejected(Some(&o), &[der.clone()], true, note), RejectedAction::Accept { retry: false });
+
+        let (other, _) = self_signed();
+        let RejectedAction::Ask { leaf: other_leaf, .. } = g.decide_rejected(Some(&o), &[other.clone()], true, note)
+        else {
+            panic!("a new key is asked about")
+        };
+        g.record_override(&o, other_leaf, false);
+        assert_eq!(g.decide_rejected(Some(&o), &[other], true, note), RejectedAction::Refuse);
+        assert_eq!(*noted.borrow(), vec![(o.clone(), "tls_declined")]);
+
+        // Outside the session: refused, nothing noted, never asked.
+        let foreign = origin("https://evil.example");
+        assert_eq!(g.decide_rejected(Some(&foreign), &[der.clone()], true, note), RejectedAction::Refuse);
+        assert_eq!(g.decide_rejected(None, &[der], true, note), RejectedAction::Refuse);
+        assert_eq!(noted.borrow().len(), 1);
+    }
+
+    #[test]
+    fn decide_rejected_lets_pins_decide_and_retries_once() {
+        let (pinned, _) = self_signed();
+        let (other, _) = self_signed();
+        let g = prompting_gate(pins(&[pin_of(&pinned)]));
+        let o = origin("https://appliance.example.com");
+        let noted = std::cell::RefCell::new(Vec::new());
+        let note = |o: &WebOrigin, f: PageFailure| noted.borrow_mut().push((o.clone(), f.check));
+        assert_eq!(g.decide_rejected(Some(&o), &[pinned.clone()], true, note), RejectedAction::Accept { retry: true });
+        assert_eq!(g.decide_rejected(Some(&o), &[pinned], true, note), RejectedAction::Accept { retry: false });
+        assert_eq!(g.decide_rejected(Some(&o), &[other], true, note), RejectedAction::Refuse, "never asked");
+        assert_eq!(*noted.borrow(), vec![(o, "tls_pin_mismatch")]);
+    }
+
+    #[test]
+    fn pending_questions_are_answered_once_per_key_and_per_window() {
+        let (a, _) = self_signed();
+        let (b, _) = self_signed();
+        let o = origin("https://appliance.example.com");
+        let key_a = ("web-1".to_string(), o.clone(), pin_of(&a));
+        let key_b = ("web-1".to_string(), o.clone(), pin_of(&b));
+        let key_other = ("web-2".to_string(), o, pin_of(&a));
+        let mut p = PendingQuestions::default();
+        assert!(p.hold(key_a.clone(), 1), "first item asks");
+        assert!(!p.hold(key_a.clone(), 2), "second waits for the same answer");
+        assert!(p.hold(key_b.clone(), 3));
+        assert!(p.hold(key_other.clone(), 4), "another window asks for itself");
+        assert_eq!(p.take(&key_a), vec![1, 2]);
+        assert!(p.take(&key_a).is_empty(), "answered once");
+        let mut gone = p.take_window("web-1");
+        gone.sort();
+        assert_eq!(gone, vec![3]);
+        assert_eq!(p.take(&key_other), vec![4]);
     }
 
     #[test]
