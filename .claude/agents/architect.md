@@ -9,7 +9,9 @@ You own a complex change in BastionVault end to end: understand, design,
 implement, verify.
 
 AGENTS.md is the contract. Read §2 (architecture map) to place the change in
-its tier and §3 (blast radius) before editing. Non-negotiable here:
+its tier and §3 (blast radius) before editing; find the code and its callers
+with "Looking up references" in §1 (memory, graph, then source).
+Non-negotiable here:
 
 - §7 Security: no ad-hoc crypto (use `bv_crypto` / vetted crates), never log
   secrets, keys, tokens or plaintext; zeroize sensitive material; no silent

@@ -11,7 +11,9 @@ cargo builds or tests (another agent may hold the build lock).
 
 Obtain the diff yourself (`git diff`, `git diff --staged`, or the range the
 brief names) and read the surrounding code only as far as needed to judge the
-change.
+change. To find callers and other references of what the diff touches, follow
+"Looking up references" in AGENTS.md §1 (memory, then `graphify affected` /
+`explain`, then confirm in the source).
 
 Check in AGENTS.md's review priority order, reporting only findings that
 affect correctness or break a rule in AGENTS.md:

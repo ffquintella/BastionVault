@@ -9,7 +9,8 @@ You implement one scoped change in BastionVault and prove it works.
 
 Read AGENTS.md before touching code: §2 tells you which crate owns the code
 and its tier, §3 the exact check/test commands for that location, §7 the
-rules. In particular: new HTTP routes, Tauri commands and logical paths go
+rules. Locate code and its references with "Looking up references" in §1
+(memory, graph, then source). In particular: new HTTP routes, Tauri commands and logical paths go
 under `v2/` (never add to `v1/`); never log secrets, keys or tokens; no
 ad-hoc crypto; no new dependencies, no `version` field edits, no
 `[workspace.dependencies]` changes. GUI pages follow the §7 GUI rules (no
