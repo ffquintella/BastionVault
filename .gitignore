@@ -80,3 +80,7 @@ node_modules/
 # -windows-msi, and the `standalone-release` workflow's publish job).
 # Installers, not sources — never committed.
 /dist/
+
+# Stray certificate/key material dropped into the GUI host sources while
+# debugging (a real chain was committed by accident in 037defe5).
+gui/src-tauri/src/**/*.pem
