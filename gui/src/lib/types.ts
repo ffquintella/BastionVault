@@ -1622,6 +1622,23 @@ export interface PkiRoleConfig {
   /** Allow-list of mail domains (the part after `@`), matched exactly and
    *  case-insensitively. Empty + `allow_email_sans=true` means any domain. */
   allowed_email_domains: string[];
+  /** AD smart-card logon: permit UPN `otherName` SANs. Closed by default —
+   *  the UPN is what the KDC maps to an AD account. */
+  allow_upn_sans: boolean;
+  /** Allow-list of UPN realms (the part after `@`). Empty +
+   *  `allow_upn_sans=true` means any realm. */
+  allowed_upn_domains: string[];
+  /** Extra EKU OIDs in dotted-decimal form (e.g. `1.3.6.1.4.1.311.20.2.2`
+   *  for Smart Card Logon). Validated by the engine on write. */
+  ext_key_usage_oids: string[];
+  /** Permit the AD SID extension (KB5014754 strong mapping). Closed by default. */
+  allow_ad_sid: boolean;
+  /** Default SID emitted when a request omits `ad_sid`. Requires `allow_ad_sid`. */
+  ad_sid: string;
+  /** Signature hash size. Not edited in the GUI; round-tripped so a save keeps it. */
+  signature_bits: number;
+  /** NotBefore backdate in seconds. Not edited in the GUI; round-tripped. */
+  not_before_duration: number;
 }
 
 export interface PkiIssueRequest {

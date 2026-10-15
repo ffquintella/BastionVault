@@ -63,6 +63,13 @@ const STORED_ROLE = {
   acme_enabled: true,
   allow_email_sans: false,
   allowed_email_domains: [],
+  allow_upn_sans: false,
+  allowed_upn_domains: [],
+  ext_key_usage_oids: [],
+  allow_ad_sid: false,
+  ad_sid: "",
+  signature_bits: 0,
+  not_before_duration: 30,
 };
 
 function installMocks(roles: string[]) {

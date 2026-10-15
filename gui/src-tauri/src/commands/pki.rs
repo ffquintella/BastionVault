@@ -1039,10 +1039,34 @@ pub struct PkiRoleConfig {
     pub allow_email_sans: bool,
     #[serde(default)]
     pub allowed_email_domains: Vec<String>,
+    // AD smart-card logon. The engine's role write replaces the whole
+    // entry, so every field it stores has to travel through here — one
+    // left out is reset to its default on any GUI save.
+    #[serde(default)]
+    pub allow_upn_sans: bool,
+    #[serde(default)]
+    pub allowed_upn_domains: Vec<String>,
+    #[serde(default)]
+    pub ext_key_usage_oids: Vec<String>,
+    #[serde(default)]
+    pub allow_ad_sid: bool,
+    #[serde(default)]
+    pub ad_sid: String,
+    // Not edited in the GUI; carried so a save keeps what the API set.
+    #[serde(default)]
+    pub signature_bits: u64,
+    /// NotBefore backdate in seconds.
+    #[serde(default = "default_not_before_duration")]
+    pub not_before_duration: u64,
 }
 
 fn default_acme_enabled() -> bool {
     true
+}
+
+/// Matches the engine's `RoleEntry::not_before_duration` default.
+fn default_not_before_duration() -> u64 {
+    30
 }
 
 impl Default for PkiRoleConfig {
@@ -1079,6 +1103,13 @@ impl Default for PkiRoleConfig {
             acme_enabled: true,
             allow_email_sans: false,
             allowed_email_domains: Vec::new(),
+            allow_upn_sans: false,
+            allowed_upn_domains: Vec::new(),
+            ext_key_usage_oids: Vec::new(),
+            allow_ad_sid: false,
+            ad_sid: String::new(),
+            signature_bits: 0,
+            not_before_duration: default_not_before_duration(),
         }
     }
 }
@@ -1094,43 +1125,59 @@ pub async fn pki_list_roles(state: State<'_, AppState>, mount: String) -> CmdRes
 pub async fn pki_read_role(state: State<'_, AppState>, mount: String, name: String) -> CmdResult<PkiRoleConfig> {
     let mount = mount_prefix(&mount);
     let resp = make_request(&state, Operation::Read, format!("{mount}/roles/{name}"), None).await?;
-    let map = data_to_map(resp);
-    Ok(PkiRoleConfig {
-        ttl: val_duration_str(&map, "ttl"),
-        max_ttl: val_duration_str(&map, "max_ttl"),
-        key_type: val_str(&map, "key_type"),
-        key_bits: val_u64(&map, "key_bits"),
-        allow_localhost: val_bool(&map, "allow_localhost"),
-        allow_any_name: val_bool(&map, "allow_any_name"),
-        allow_subdomains: val_bool(&map, "allow_subdomains"),
-        allow_bare_domains: val_bool(&map, "allow_bare_domains"),
-        allow_ip_sans: val_bool(&map, "allow_ip_sans"),
-        server_flag: val_bool(&map, "server_flag"),
-        client_flag: val_bool(&map, "client_flag"),
-        use_csr_sans: val_bool(&map, "use_csr_sans"),
-        use_csr_common_name: val_bool(&map, "use_csr_common_name"),
-        key_usage: val_str_array(&map, "key_usage"),
-        ext_key_usage: val_str_array(&map, "ext_key_usage"),
-        country: val_str(&map, "country"),
-        province: val_str(&map, "province"),
-        locality: val_str(&map, "locality"),
-        organization: val_str(&map, "organization"),
-        ou: val_str(&map, "ou"),
-        no_store: val_bool(&map, "no_store"),
-        generate_lease: val_bool(&map, "generate_lease"),
-        issuer_ref: val_str(&map, "issuer_ref"),
-        allow_key_reuse: val_bool(&map, "allow_key_reuse"),
-        allowed_key_refs: val_str_array(&map, "allowed_key_refs"),
+    Ok(role_config_from_map(&data_to_map(resp)))
+}
+
+/// Map a `pki/roles/:name` read response onto the form model.
+fn role_config_from_map(map: &Map<String, Value>) -> PkiRoleConfig {
+    PkiRoleConfig {
+        ttl: val_duration_str(map, "ttl"),
+        max_ttl: val_duration_str(map, "max_ttl"),
+        key_type: val_str(map, "key_type"),
+        key_bits: val_u64(map, "key_bits"),
+        allow_localhost: val_bool(map, "allow_localhost"),
+        allow_any_name: val_bool(map, "allow_any_name"),
+        allow_subdomains: val_bool(map, "allow_subdomains"),
+        allow_bare_domains: val_bool(map, "allow_bare_domains"),
+        allow_ip_sans: val_bool(map, "allow_ip_sans"),
+        server_flag: val_bool(map, "server_flag"),
+        client_flag: val_bool(map, "client_flag"),
+        use_csr_sans: val_bool(map, "use_csr_sans"),
+        use_csr_common_name: val_bool(map, "use_csr_common_name"),
+        key_usage: val_str_array(map, "key_usage"),
+        ext_key_usage: val_str_array(map, "ext_key_usage"),
+        country: val_str(map, "country"),
+        province: val_str(map, "province"),
+        locality: val_str(map, "locality"),
+        organization: val_str(map, "organization"),
+        ou: val_str(map, "ou"),
+        no_store: val_bool(map, "no_store"),
+        generate_lease: val_bool(map, "generate_lease"),
+        issuer_ref: val_str(map, "issuer_ref"),
+        allow_key_reuse: val_bool(map, "allow_key_reuse"),
+        allowed_key_refs: val_str_array(map, "allowed_key_refs"),
         // Absent on servers that predate the option — reads as false.
-        manage_private_key: val_bool(&map, "manage_private_key"),
-        allowed_domains: val_str_array(&map, "allowed_domains"),
-        allow_glob_domains: val_bool(&map, "allow_glob_domains"),
+        manage_private_key: val_bool(map, "manage_private_key"),
+        allowed_domains: val_str_array(map, "allowed_domains"),
+        allow_glob_domains: val_bool(map, "allow_glob_domains"),
         // pre-L4 roles deserialise without `acme_enabled` — default true
         // matches the engine's serde default.
         acme_enabled: map.get("acme_enabled").and_then(|v| v.as_bool()).unwrap_or(true),
-        allow_email_sans: val_bool(&map, "allow_email_sans"),
-        allowed_email_domains: val_str_array(&map, "allowed_email_domains"),
-    })
+        allow_email_sans: val_bool(map, "allow_email_sans"),
+        allowed_email_domains: val_str_array(map, "allowed_email_domains"),
+        allow_upn_sans: val_bool(map, "allow_upn_sans"),
+        allowed_upn_domains: val_str_array(map, "allowed_upn_domains"),
+        ext_key_usage_oids: val_str_array(map, "ext_key_usage_oids"),
+        allow_ad_sid: val_bool(map, "allow_ad_sid"),
+        ad_sid: val_str(map, "ad_sid"),
+        signature_bits: val_u64(map, "signature_bits"),
+        // Serialised as integer seconds; absent only on a malformed
+        // response, where the engine default is the safe round-trip.
+        not_before_duration: map
+            .get("not_before_duration")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_else(default_not_before_duration),
+    }
 }
 
 #[tauri::command]
@@ -1141,6 +1188,15 @@ pub async fn pki_write_role(
     config: PkiRoleConfig,
 ) -> CmdResult<()> {
     let mount = mount_prefix(&mount);
+    let body = role_write_body(&config);
+    make_request(&state, Operation::Write, format!("{mount}/roles/{name}"), Some(body)).await?;
+    Ok(())
+}
+
+/// Build the `pki/roles/:name` write body. The engine's role write
+/// replaces the stored entry wholesale, so this must carry every field
+/// the engine stores — anything omitted is silently reset to its default.
+fn role_write_body(config: &PkiRoleConfig) -> Map<String, Value> {
     let mut body = Map::new();
     body.insert("ttl".into(), json!(config.ttl));
     body.insert("max_ttl".into(), json!(config.max_ttl));
@@ -1175,8 +1231,14 @@ pub async fn pki_write_role(
     body.insert("acme_enabled".into(), json!(config.acme_enabled));
     body.insert("allow_email_sans".into(), json!(config.allow_email_sans));
     body.insert("allowed_email_domains".into(), json!(config.allowed_email_domains.join(",")));
-    make_request(&state, Operation::Write, format!("{mount}/roles/{name}"), Some(body)).await?;
-    Ok(())
+    body.insert("allow_upn_sans".into(), json!(config.allow_upn_sans));
+    body.insert("allowed_upn_domains".into(), json!(config.allowed_upn_domains.join(",")));
+    body.insert("ext_key_usage_oids".into(), json!(config.ext_key_usage_oids.join(",")));
+    body.insert("allow_ad_sid".into(), json!(config.allow_ad_sid));
+    body.insert("ad_sid".into(), json!(config.ad_sid));
+    body.insert("signature_bits".into(), json!(config.signature_bits));
+    body.insert("not_before_duration".into(), json!(config.not_before_duration));
+    body
 }
 
 #[tauri::command]
@@ -3287,4 +3349,63 @@ pub async fn pki_sign_request_reject(
     )
     .await?;
     Ok(sign_request_from_map(&data_to_map(resp)))
+}
+
+#[cfg(test)]
+mod role_tests {
+    //! The engine's role write replaces the stored entry wholesale, so a
+    //! field the GUI does not carry is reset on every save. These tests
+    //! take the field set from the engine's own `RoleEntry`, so a field
+    //! added there without GUI plumbing fails here instead of in an
+    //! operator's role.
+
+    use std::time::Duration;
+
+    use bastion_vault::modules::pki::path_roles::RoleEntry;
+
+    use super::*;
+
+    fn engine_read(role: &RoleEntry) -> Map<String, Value> {
+        serde_json::to_value(role).unwrap().as_object().cloned().unwrap()
+    }
+
+    #[test]
+    fn write_body_carries_every_stored_role_field() {
+        let stored = engine_read(&RoleEntry::default());
+        // `issuer_ref` is left out of the body when empty, which the engine
+        // reads as empty too; give it a value so the key check sees it.
+        let config = PkiRoleConfig { issuer_ref: "root".into(), ..Default::default() };
+        let body = role_write_body(&config);
+        let missing: Vec<&String> = stored.keys().filter(|k| !body.contains_key(*k)).collect();
+        assert!(missing.is_empty(), "pki_write_role drops role fields: {missing:?}");
+    }
+
+    #[test]
+    fn read_then_write_preserves_ad_smartcard_and_untouched_fields() {
+        let role = RoleEntry {
+            ttl: Duration::from_secs(3600),
+            max_ttl: Duration::from_secs(7200),
+            not_before_duration: Duration::from_secs(120),
+            key_type: "rsa".into(),
+            key_bits: 2048,
+            signature_bits: 384,
+            allow_upn_sans: true,
+            allowed_upn_domains: vec!["corp.example.com".into(), "ad.example.com".into()],
+            ext_key_usage_oids: vec!["1.3.6.1.4.1.311.20.2.2".into()],
+            allow_ad_sid: true,
+            ad_sid: "S-1-5-21-1004336348-1177238915-682003330-512".into(),
+            ..Default::default()
+        };
+        let body = role_write_body(&role_config_from_map(&engine_read(&role)));
+
+        assert_eq!(body["allow_upn_sans"], json!(true));
+        assert_eq!(body["allowed_upn_domains"], json!("corp.example.com,ad.example.com"));
+        assert_eq!(body["ext_key_usage_oids"], json!("1.3.6.1.4.1.311.20.2.2"));
+        assert_eq!(body["allow_ad_sid"], json!(true));
+        assert_eq!(body["ad_sid"], json!("S-1-5-21-1004336348-1177238915-682003330-512"));
+        assert_eq!(body["signature_bits"], json!(384));
+        assert_eq!(body["not_before_duration"], json!(120));
+        assert_eq!(body["ttl"], json!("1h"));
+        assert_eq!(body["max_ttl"], json!("2h"));
+    }
 }

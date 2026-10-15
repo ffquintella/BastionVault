@@ -970,6 +970,14 @@ function bootstrapRoleConfig(
     // A bastion host certificate has no mailbox to assert.
     allow_email_sans: false,
     allowed_email_domains: [],
+    // Nor a Windows logon identity.
+    allow_upn_sans: false,
+    allowed_upn_domains: [],
+    ext_key_usage_oids: [],
+    allow_ad_sid: false,
+    ad_sid: "",
+    signature_bits: 0,
+    not_before_duration: 30,
   };
 }
 

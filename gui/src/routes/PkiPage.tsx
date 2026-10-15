@@ -186,6 +186,13 @@ const ALL_USAGES = ["issuing-certificates", "crl-signing", "ocsp-signing"] as co
 // instead of a server round-trip with a generic error.
 const DURATION_UNIT_RE = /^\s*(\d+\s*(ns|us|µs|ms|s|m|h|d|w|y))(\s*\d+\s*(ns|us|µs|ms|s|m|h|d|w|y))*\s*$/;
 
+function splitCommaList(value: string): string[] {
+  return value
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
 function defaultRoleConfig(): PkiRoleConfig {
   return {
     // Pre-fill with sensible defaults that are valid duration strings.
@@ -223,6 +230,13 @@ function defaultRoleConfig(): PkiRoleConfig {
     acme_enabled: true,
     allow_email_sans: false,
     allowed_email_domains: [],
+    allow_upn_sans: false,
+    allowed_upn_domains: [],
+    ext_key_usage_oids: [],
+    allow_ad_sid: false,
+    ad_sid: "",
+    signature_bits: 0,
+    not_before_duration: 30,
   };
 }
 
@@ -1809,6 +1823,18 @@ function RoleEditor({
             onChange={(b) => set({ allow_email_sans: b })}
             disabled={!editing}
           />
+          <Toggle
+            label="allow_upn_sans (AD smart-card UPN)"
+            checked={config.allow_upn_sans}
+            onChange={(b) => set({ allow_upn_sans: b })}
+            disabled={!editing}
+          />
+          <Toggle
+            label="allow_ad_sid (KB5014754 SID extension)"
+            checked={config.allow_ad_sid}
+            onChange={(b) => set({ allow_ad_sid: b })}
+            disabled={!editing}
+          />
         </div>
       )}
 
@@ -1866,6 +1892,29 @@ function RoleEditor({
             }
             disabled={!editing || !config.allow_key_reuse}
             placeholder="key-name | uuid"
+          />
+          <Input
+            label="allowed_upn_domains (comma-separated; needs allow_upn_sans)"
+            value={config.allowed_upn_domains.join(",")}
+            onChange={(e) => set({ allowed_upn_domains: splitCommaList(e.target.value) })}
+            disabled={!editing || !config.allow_upn_sans}
+            placeholder="corp.example.com — exact match, subdomains not implied"
+          />
+          <Input
+            label="ext_key_usage_oids (comma-separated dotted OIDs)"
+            value={config.ext_key_usage_oids.join(",")}
+            onChange={(e) => set({ ext_key_usage_oids: splitCommaList(e.target.value) })}
+            disabled={!editing}
+            placeholder="1.3.6.1.4.1.311.20.2.2 (Smart Card Logon)"
+          />
+          {/* Left editable while allow_ad_sid is off so a stale SID can be
+              cleared; the engine rejects a SID without allow_ad_sid. */}
+          <Input
+            label="ad_sid (default SID; needs allow_ad_sid)"
+            value={config.ad_sid}
+            onChange={(e) => set({ ad_sid: e.target.value })}
+            disabled={!editing}
+            placeholder="S-1-5-21-…"
           />
         </div>
       )}
