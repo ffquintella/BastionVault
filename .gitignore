@@ -33,8 +33,20 @@ target/
 # `npx vitest run`; gui/.gitignore only covers gui/node_modules).
 node_modules/
 
-# Claude Code local settings (machine-local)
-.claude/
+# Claude Code local settings (machine-local). Shared project config is
+# tracked: the tier agents, the session-recall skill + recall.py and the
+# hooks that run it (AGENTS.md §1). The memory store itself lives in
+# ~/.claude/memory/recall.db, outside the repo.
+.claude/*
+!.claude/agents/
+!.claude/skills/
+!.claude/memory/
+!.claude/settings.json
+.claude/memory/__pycache__/
+
+# graphify knowledge graph (AGENTS.md §1). Derived from the tree and rebuilt
+# locally; never shared, since it summarises security-sensitive code.
+graphify-out/
 .DS_Store
 
 # Local container-image push config (operator-specific; written by
