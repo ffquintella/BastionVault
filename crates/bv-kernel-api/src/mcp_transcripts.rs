@@ -239,8 +239,11 @@ pub struct SshTranscript {
 pub struct WebTranscriptHop {
     /// `https://host[:port]`.
     pub origin: String,
-    /// The path with its query, as sent (credential- and session-scrubbed by
-    /// the writer). At most [`MAX_TRANSCRIPT_HOP_PATH_BYTES`].
+    /// The path as sent (credential- and session-scrubbed by the writer).
+    /// The first hop keeps its query, which the operator confirmed; a hop
+    /// reached by redirect has no query (shown as `?…`) and no `;` path
+    /// parameters, since the target chose them. At most
+    /// [`MAX_TRANSCRIPT_HOP_PATH_BYTES`].
     pub path: String,
     /// The response status; `None` when no response arrived.
     #[serde(default)]

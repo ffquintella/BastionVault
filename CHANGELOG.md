@@ -56,6 +56,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.41] - 2026-10-15
+
 ### Added
 
 #### MCP Brokered Sessions — web fetch (features/mcp-brokered-sessions.md)
@@ -66,6 +68,12 @@ EXAMPLE ENTRY:
 #### PKI Key Management — managed private keys per role (features/pki-key-management-and-lifecycle.md)
 
 - **Keep the private key of every certificate a role issues, and export it later with the certificate** -- new role option `manage_private_key` (default `false`; roles already stored read as `false` and behave as before). When set, `pki/issue/:role` stores the generated key in the mount's managed key store (barrier-sealed, `exportable`, named `<role>-<serial>`), binds it to the certificate, and adds `key_id` to the issue response, which still returns `private_key`. Export it through `pki/cert/<serial>/export` with `include_private_key=true` (PEM or PKCS#12); the key cannot be deleted while the certificate is bound. Combining it with `no_store` is refused with a 400. CSR-based signing (`sign/:role`, `sign-verbatim`, ACME) and `key_ref`-pinned issuance are unchanged. The GUI's role form has a `manage_private_key` toggle. (T142, S37)
+
+### Changed
+
+#### MCP Access — network tools (features/mcp-access.md)
+
+- **The MCP catalogue gained `bv_resource_web_fetch`, so its hash changed** -- the catalogue hash is now `2ef9b8149ea89aa2d509d204988414450bd12658223299e7ee77eb8a48bf5262`; an operator who pinned the previous hash in `sys/mcp/config` must pin this one. (T137, S26, S111)
 
 ### Fixed
 
@@ -7976,7 +7984,8 @@ Bulk dependency upgrade across the workspace (`Cargo.toml`, `crates/bv-plugin-pa
 
 - Abandon the SQLx storage backend: `libsqlite3-sys` conflicts at link time with hiqlite's `rusqlite`, so `storage "sqlx"` was removed (T5, M2)
 
-[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.40...HEAD
+[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.41...HEAD
+[0.44.41]: https://github.com/ffquintella/BastionVault/compare/v0.44.40...v0.44.41
 [0.44.40]: https://github.com/ffquintella/BastionVault/compare/v0.44.39...v0.44.40
 [0.44.39]: https://github.com/ffquintella/BastionVault/compare/v0.44.38...v0.44.39
 [0.44.38]: https://github.com/ffquintella/BastionVault/compare/v0.44.37...v0.44.38

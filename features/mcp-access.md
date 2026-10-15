@@ -259,12 +259,11 @@ Deviations from the design below, all deliberate and disclosed:
 - **Pairing revocation is by pairing id** (`DELETE /v2/sys/mcp/pairings/{id}`),
   since the serving process holds the token only in memory and a separate
   `pairings revoke` process has nothing to revoke by accessor.
-- **Not built** (T94): DPoP sender-constraint, the audit `mcp: {...}` block
-  (`Request::mcp_audit` is defined but never set or read; every call still gets
-  a normal audit entry), `bvault_mcp_*` metrics, per-principal/per-tool rate
+- **Not built** (T94): DPoP sender-constraint, `bvault_mcp_*` metrics, per-principal/per-tool rate
   limits, `GET /v2/sys/mcp/calls`, `server/discover`, endpoint enforcement of
   `catalogue_pin`, a barrier-derived `requestState` key, lifecycle audit events
-  (`mcp.local.*`, `mcp.app.*`), the cucumber feature file.
+  (`mcp.local.*`, `mcp.app.*`), the cucumber feature file. The audit
+  `mcp: {...}` block shipped in 0.44.38 with T136.
 - **Fail-closed where a setting cannot be honoured**: `require_hybrid_kex`
   cannot be verified (the negotiated group is not carried out of the TLS layer)
   so `/v2/mcp` refuses to serve while it is set.
