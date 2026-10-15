@@ -327,6 +327,8 @@ Next-up list recorded before the migration, in its order:
 - [x] T57 Issue S/MIME certificates with rfc822Name SANs (S35)
   - source: roadmap.md feature row "PKI: `rfc822Name` email SANs (S/MIME person certs)", status `[x]` Done
   - old-notes: [spec](features/pki-email-sans.md) — the engine could not emit an `rfc822Name` at all, and silently dropped one present in a caller's CSR, so no BastionVault-issued certificate could be used for S/MIME. Adds `allow_email_sans` + `allowed_email_domains` (closed by default) on the role, an `email_sans` field on `issue` / `sign` / `csr/generate` / sign-request `preflight` + `approve`, emission across all four builders (classical, ML-DSA, composite, generated CSR), and CSR `rfc822Name` preservation — refuse-don't-drop, matching the existing `allow_ip_sans` gate.
+- [x] T143 Keep every PKI role field when a role is saved from the desktop app (S38)
+  - note: the GUI role form carried a subset of the role, and the engine's role write replaces the whole entry, so saving from the Roles tab reset the AD smart-card fields (`allow_upn_sans`, `allowed_upn_domains`, `ext_key_usage_oids`, `allow_ad_sid`, `ad_sid`) plus `signature_bits` and `not_before_duration`. The form now carries and shows them; a test derives the field set from the engine's `RoleEntry` so a new role field cannot be dropped silently again.
 - [x] T58 Encrypt as a service with the transit engine (S60)
   - source: roadmap.md feature row "Transit", status `[x]` Done
   - initiative: [Transit Secret Engine](features/transit-secret-engine.md) — Phases 1–4: AEAD + HMAC + sign/verify + ML-KEM datakey + ML-DSA + derived/convergent + BYOK + hybrid composite.

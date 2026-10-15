@@ -65,6 +65,11 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### PKI — desktop role editor
+
+- **Keep a role's AD smart-card settings when saving it from the desktop app** (T143, S38)
+  -- saving a PKI role from the Roles tab sent only part of the role, and the engine replaces a role wholesale on write, so any role saved from the GUI silently lost UPN SANs (`allow_upn_sans`, `allowed_upn_domains`), extra EKU OIDs (`ext_key_usage_oids`), the AD SID extension settings (`allow_ad_sid`, `ad_sid`), `signature_bits` and `not_before_duration` set through the API or CLI. A smart-card logon role edited in the GUI stopped producing certificates Windows accepts. Every stored role field now round-trips, and the role editor shows and edits the AD smart-card fields.
+
 #### MCP Access — default pairing grant
 
 - **Keep session tools out of the default pairing grant** -- the read-only `bv_resource_web_fetch` would otherwise have been preselected for every newly paired assistant; session tools must now be chosen explicitly. (T137, S111)
