@@ -1,6 +1,6 @@
 # Feature: MCP Brokered Sessions — vault-brokered SSH, web and RDP access to resources for MCP clients
 
-**Status: In progress.** Phase 1 (T136, SSH) shipped in four releases: the substrate (0.44.37), transcripts and audit (0.44.38), `bv_resource_ssh_exec` (0.44.39), and operator confirmation and MFA bound to one call (0.44.40). Agent SSH sessions work end to end against a remote vault built with `mcp_sessions_ssh`. `make test-release` passed on 2026-10-15 (default features; the `mcp_sessions_ssh` tests ran in the per-crate suites), and T136 is done. Web (T137) and RDP (T138) are not started. The owner's decisions
+**Status: In progress.** Phase 1 (T136, SSH) shipped in four releases: the substrate (0.44.37), transcripts and audit (0.44.38), `bv_resource_ssh_exec` (0.44.39), and operator confirmation and MFA bound to one call (0.44.40). Agent SSH sessions work end to end against a remote vault built with `mcp_sessions_ssh`. `make test-release` passed on 2026-10-15 (default features; the `mcp_sessions_ssh` tests ran in the per-crate suites), and T136 is done. Phase 2 (T137, web) is implemented — `bv_resource_web_fetch` behind `mcp_sessions_web`, end to end through the gatekeeper and operator MFA (see §6.4 "As built") — but not yet released: `make test-release`, the CHANGELOG entry with the new catalogue hash and the ROADMAP move are still to do. RDP (T138) is not started. The owner's decisions
 are recorded inline as "Decided 2026-10-14 by the owner". Tracked as ROADMAP
 T136 (SSH, with the shared substrate), T137 (web) and T138 (RDP) under M8, next
 to MCP Access (T80, T94). Written against the tree at 0.44.36 (`edb3e437`).
@@ -688,6 +688,10 @@ New `data.code` strings (`crates/bv-mcp/src/error.rs` gains the variants):
 - `mcp_session_timeout`
 - `mcp_web_login_mode_unsupported`
 - `mcp_web_origin_refused`
+- `mcp_web_tls_unpinned` (added in Phase 2: a certificate the platform
+  rejects, on a profile with no pin)
+- `mcp_web_tls_pin_mismatch` (added in Phase 2: pins present, none admits the
+  certificate)
 
 Error messages may name the resource and profile. They never echo output,
 credential material or tickets.
@@ -926,6 +930,56 @@ changing on 2026-10-14) moves into a crate both use, rather than being copied.
 
 **Note on hidden text.** Text extraction is not CSS-aware, so `display:none`
 text is returned. This is one more reason for the untrusted envelope.
+
+#### 6.4 As built (Phase 2)
+
+Where the text above left a choice, Phase 2 made these, and the code says so
+in `crates/bv-engine-resource/src/agent_web/`:
+
+- **Module layout.** The protocol-neutral half of Phase 1's `agent_ssh/` —
+  the refusal type, the dispatch, binding, switch and timeout checks, the
+  operator ticket, the bastion and destination checks, revocation — moved to
+  `agent_session.rs`; `agent_ssh/` and `agent_web/` both call it.
+- **Method.** `method` is optional and defaults to `GET`; the dispatcher
+  writes the default into the routed body, so the operator, the vault and the
+  ticket's arguments hash all see the same call.
+- **Path normal form.** Besides the path rules above, the dispatcher refuses
+  what a URL parser would rewrite — a `.` segment (also `%2e`), a `'` in the
+  query — and a `..;` segment (a servlet container's `..`). The handler
+  builds the URL and refuses it if the path did not come out byte for byte.
+- **TLS.** "Platform roots" are the operating system's store
+  (`rustls-native-certs`, read once per process). A certificate it trusts is
+  used, pin or not; one it rejects is admitted only by `tls_pin::decide`, the
+  desktop's decision moved to `bv-utils` (the desktop crate re-exports it
+  and wraps it in its session-origin check). Refusals get two new codes,
+  `mcp_web_tls_unpinned` and `mcp_web_tls_pin_mismatch`.
+- **`http-auth`.** Basic only (reqwest has no Digest). "At most once per
+  (origin, realm)" holds for the whole call, and the credential is never
+  sent pre-emptively, so a redirect into the same protected space that
+  challenges again gets that `401` as the result — as does an answer the
+  target rejects. Never retried.
+- **Cookies.** The per-call jar is host-only (exact origin key), ignores
+  `Domain` and `Path`, keeps at most 32 cookies of 4 KiB per origin, and is
+  dropped with the call. Every cookie value of 8 or more bytes is added to
+  the call's scrubber, so a page echoing a session id returns it redacted.
+- **Result.** Beyond the fields in §6.3: `method`, `final_origin` and
+  `login`. `final_path` drops the query and `;` path parameters (a session
+  URL never returns). `body_text` is absent when the body is binary — by
+  type, by its bytes, or because there is no `Content-Type` at all — and
+  ends with `[… truncated by the vault]` when it was cut.
+- **Outcomes.** A fetch that answered emits `connect.agent.web.fetch`; one
+  stopped by a rule after it dialed (an off-list redirect, a refused hop, a
+  refused certificate, more than five redirects) emits
+  `connect.agent.refused`; a timeout, revocation or failure emits
+  `connect.agent.aborted`. Every fetch that sent a request — answered or not
+  — is transcribed, with each hop recorded before it is sent.
+- **Resolver.** `BrokeredSessionEnv` gained `resolver()` (default: the
+  platform resolver), so a test can answer a name with a fixed, refused or
+  mixed set. It cannot admit an address: every answer is still checked
+  address by address. SSH resolves through it too.
+- **HTML.** html5ever's tokenizer only (no tree builder, no DOM), behind
+  `mcp_sessions_web`; it was not in the server graph before, and is now only
+  in builds with that feature.
 
 ### 7. RDP — `bv_resource_rdp_act` (Phase 3, T138)
 
@@ -1454,7 +1508,7 @@ before Phase 1 merges.
 |---|---|---|---|
 | 0 | **Spec + owner decisions** | T136 | This document. Owner decisions recorded 2026-10-14. The CIDR default (§11) still needs the owner's confirmation. |
 | 1 | **Substrate + SSH exec** | T136 | **Shared pieces:** `McpBinding.connect_allowed/confirm_connect/operator`; exchange rules; `sys/mcp/apps` refusal; `ToolMeta.open_world`; `bv_mcp::untrusted`; extended sanitizer; `ConfirmRequest.detail/mfa`; gatekeeper confirmation and operator MFA (desktop TOTP + FIDO2, CLI TOTP); `mcp_call` on connect MFA tickets; HCL and runtime switches; `agent_sessions_max` and `agent_access`; destination policy with its default; rate and concurrency limits; `mcp` audit block (T94 slice); `connect.agent.*` events; transcript store, `v2/sys/mcp/transcripts`, and the fixed 30-day retention rule. **SSH:** `bv_resource_ssh_exec`; `resources/v2/connect/agent/ssh/exec`; server-side russh exec behind `mcp_sessions_ssh`; shared certificate minting with critical options; server-side `secret` resolver generalized to stored keys; single-channel exec wrapper; host-key pin. **Docs:** edits `features/mcp-access.md` and `docs/mcp.md` to retract "never will be". Requires `make test-release`. |
-| 2 | **Web fetch** | T137 | `bv_resource_web_fetch`; `resources/v2/connect/agent/web/fetch`; server-side HTTP client behind `mcp_sessions_web`; `open` and `http-auth` only; origin and redirect rules; TLS pin decision extracted from the desktop crate; HTML to text; header allow-list; credential scrub in every encoding. |
+| 2 | **Web fetch** | T137 | `bv_resource_web_fetch`; `resources/v2/connect/agent/web/fetch`; server-side HTTP client behind `mcp_sessions_web`; `open` and `http-auth` only; origin and redirect rules; TLS pin decision extracted from the desktop crate; HTML to text; header allow-list; credential scrub in every encoding. **Implemented, not yet released** (§6.4): reqwest with a checked-address-only resolver and no proxy; redirects re-checked per hop; `bv_utils::tls_pin` shared with the desktop; html5ever tokenizer; transcripts and `connect.agent.web.fetch`; confirmation and operator MFA through the existing gatekeeper, with the method, path and resource in the desktop dialog and the CLI prompt. |
 | 3 | **RDP act** | T138 | Waits for T124; no fallback. RDP worker in `plugins-ext/` with IronRDP extracted from the desktop crate; RDP credential-release host call generalized from T124; `bv_resource_rdp_act`; `resources/v2/connect/agent/rdp/act`; Unicode typing; PNG from raw pixels; full screenshots in transcripts. |
 | 4 | **Operator views** | — (unscheduled) | Recent agent sessions in Settings → AI Assistants (with T94's recent-calls view); transcripts on the Recordings page. |
 | 5 | **Beyond v1** | — (unscheduled) | Each would get its own task when scheduled: step-up for non-userpass operators (an authentication feature in its own right, §3.1); Rustion-routed agent exec once Rustion supports `exec` (cross-repo); web `form` mode through T106 or T97; FIDO2 step-up in the CLI. Network-mode apps and confirmation-skipping are **not** future work: both are excluded permanently. |
@@ -1614,14 +1668,24 @@ remain:
 
 ## What Is Not Yet Implemented
 
-Phase 1 (SSH) is implemented. Still missing:
+Phase 1 (SSH) is implemented and released; Phase 2 (web) is implemented and
+not yet released. Still missing:
 
-- **Web and RDP:** `bv_resource_web_fetch` (T137) and `bv_resource_rdp_act`
-  (T138, waits for T124), with their routes and executors.
+- **Releasing Phase 2:** `make test-release` with `mcp_sessions_web`, the
+  CHANGELOG entry quoting the new catalogue hash
+  (`2ef9b8149ea89aa2d509d204988414450bd12658223299e7ee77eb8a48bf5262`), and
+  the ROADMAP move for T137.
+- **RDP:** `bv_resource_rdp_act` (T138, waits for T124), with its route and
+  worker.
+- **Web, by design for now:** `form` and `sso` login modes (T106, T97); HTTP
+  Digest; methods other than `GET` and `HEAD`. The platform roots are read
+  once per process. The cookie jar ignores `Domain` and `Path`. The HTML
+  reduction is not CSS-aware.
 - **Embedded vault:** no brokered-sessions switch, so sessions work only
   against a remote vault.
-- **Builds:** `mcp_sessions_ssh` is off by default in every build, the desktop
-  app's included; a deployment must be built with it.
+- **Builds:** `mcp_sessions_ssh` and `mcp_sessions_web` are off by default in
+  every build, the desktop app's included; a deployment must be built with
+  them.
 - **Operator MFA:** userpass operators only, in the operator's own namespace;
   the CLI offers TOTP only, and its confirmation prompt has no timeout on
   Windows.
@@ -1656,7 +1720,10 @@ Prerequisites not yet built:
   (S110): the housekeeping job that prunes transcripts.
 - New runtime dependencies:
   - none for Phase 1;
-  - Phase 2 may need `html5ever` in the server graph (verify first);
+  - Phase 2 adds `html5ever` (tokenizer only) to the server graph, behind
+    `mcp_sessions_web`; verified before: it was in `Cargo.lock` through the
+    desktop crate only. reqwest, rustls and `rustls-native-certs` were already
+    in the server graph;
   - Phase 3 brings IronRDP into a `plugins-ext/` worker only.
 
 ## Tracking

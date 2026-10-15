@@ -1988,15 +1988,21 @@ dependencies = [
  "derive_more 2.1.1",
  "hex",
  "hmac 0.13.0",
+ "html5ever",
  "log",
  "maybe-async",
  "rand 0.10.2",
+ "rcgen",
+ "reqwest 0.12.28",
  "russh",
+ "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "sha1 0.11.0",
  "sha2 0.11.0",
  "tokio",
+ "tokio-rustls",
  "zeroize",
 ]
 
@@ -2404,6 +2410,7 @@ name = "bv-utils"
 version = "0.41.4"
 dependencies = [
  "as-any",
+ "base64 0.22.1",
  "better_default",
  "blake2b_simd",
  "blake3",
@@ -2419,6 +2426,7 @@ dependencies = [
  "ipnetwork",
  "maybe-async",
  "rand 0.10.2",
+ "rcgen",
  "rustls",
  "serde",
  "serde_json",
@@ -2427,6 +2435,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "url",
+ "x509-parser",
  "zeroize",
 ]
 

@@ -18,8 +18,19 @@ use crate::{
 /// requests this dispatcher routes (`Request::mcp_dispatch`).
 pub const SSH_EXEC_PATH: &str = "resources/v2/connect/agent/ssh/exec";
 
+/// The route `bv_resource_web_fetch` dispatches to (§13), answering only
+/// requests this dispatcher routes, like [`SSH_EXEC_PATH`].
+pub const WEB_FETCH_PATH: &str = "resources/v2/connect/agent/web/fetch";
+
 /// Longest session command, in bytes (§11 "Limits": default and ceiling).
 pub const MAX_SESSION_COMMAND_BYTES: usize = 4096;
+
+/// Longest web fetch path, query included, in bytes (§6.3 "Path rules").
+pub const MAX_WEB_PATH_BYTES: usize = 2048;
+
+/// The methods `bv_resource_web_fetch` may send (§6.3). Read-only by HTTP
+/// semantics; there is no body to send.
+pub const WEB_FETCH_METHODS: &[&str] = &["GET", "HEAD"];
 
 /// Largest `timeout_secs` a session call may ask for: the server's ceiling
 /// for `call_timeout_secs`. The handler further refuses anything above the
@@ -36,6 +47,13 @@ pub const MAX_SESSION_NAME_BYTES: usize = 128;
 /// `\n` and `\t`; 64 KiB covers the rest. A result over it means a cap did
 /// not hold, and is refused rather than cut.
 pub const SSH_EXEC_RESULT_CEILING_BYTES: usize = 4 * 262_144 + 65_536;
+
+/// The final cap on a shaped `bv_resource_web_fetch` result, by the same
+/// reckoning as [`SSH_EXEC_RESULT_CEILING_BYTES`]: at most
+/// `max_output_bytes` of page text (ceiling 256 KiB) plus the truncation
+/// marker, carried twice and at most doubled by escaping, and the small
+/// fixed fields.
+pub const WEB_FETCH_RESULT_CEILING_BYTES: usize = 4 * 262_144 + 65_536;
 
 /// Non-secret facts about the calling principal, needed only to answer
 /// `bv_whoami` without a routed request (spec §7: "answered from the token
@@ -81,8 +99,14 @@ pub struct SessionCall {
     /// The resource as it will be routed (one normalized segment).
     pub resource: String,
     pub profile: String,
-    /// SSH: the command, byte for byte what runs.
+    /// SSH: the command, byte for byte what runs. Empty for other protocols.
     pub command: String,
+    /// Web: the HTTP method, `GET` or `HEAD` (the default `GET` filled in).
+    /// Empty for other protocols.
+    pub method: String,
+    /// Web: the origin-relative path with its query, byte for byte what is
+    /// requested. Empty for other protocols.
+    pub path: String,
     pub timeout_secs: Option<u64>,
     /// [`args_hash`] of the call's `arguments`: what an operator MFA ticket
     /// for this call is bound to.
@@ -107,6 +131,20 @@ pub fn session_call(tool: &str, args: &Map<String, Value>) -> Result<SessionCall
             resource: text("resource"),
             profile: text("profile_id"),
             command: text("command"),
+            method: String::new(),
+            path: String::new(),
+            timeout_secs: body.get("timeout_secs").and_then(Value::as_u64),
+            args_hash: args_hash(args),
+            scope_subject,
+        }),
+        "bv_resource_web_fetch" => Ok(SessionCall {
+            tool: meta.name,
+            protocol: "web",
+            resource: text("resource"),
+            profile: text("profile_id"),
+            command: String::new(),
+            method: text("method"),
+            path: text("path"),
             timeout_secs: body.get("timeout_secs").and_then(Value::as_u64),
             args_hash: args_hash(args),
             scope_subject,
@@ -320,8 +358,9 @@ fn shape_session_result(
     response: Option<bv_client::JsonResponse>,
 ) -> Result<CallToolResult, McpError> {
     let data = response.and_then(|r| r.data).unwrap_or_default();
-    let (protocol, ceiling) = match meta.name {
-        "bv_resource_ssh_exec" => (SessionProtocol::Ssh, SSH_EXEC_RESULT_CEILING_BYTES),
+    let (protocol, ceiling, body) = match meta.name {
+        "bv_resource_ssh_exec" => (SessionProtocol::Ssh, SSH_EXEC_RESULT_CEILING_BYTES, render_ssh_text(&data)),
+        "bv_resource_web_fetch" => (SessionProtocol::Web, WEB_FETCH_RESULT_CEILING_BYTES, render_web_text(&data)),
         other => return Err(McpError::UnknownTool(other.to_string())),
     };
     let source = UntrustedSource {
@@ -329,7 +368,6 @@ fn shape_session_result(
         resource: args.get("resource").and_then(Value::as_str).unwrap_or_default(),
         profile: args.get("profile").and_then(Value::as_str).unwrap_or_default(),
     };
-    let body = render_ssh_text(&data);
     let result = untrusted::envelope(&source, &body, data);
     untrusted::check_result_size(&result, ceiling)?;
     Ok(result)
@@ -362,6 +400,34 @@ fn render_ssh_text(data: &Map<String, Value>) -> String {
         } else {
             out.push_str(&format!("\n\n--- {stream} ({bytes} bytes{cut}) ---\n{text}"));
         }
+    }
+    out
+}
+
+/// The text a client without `structuredContent` support shows for a web
+/// fetch: the status line, where the answer came from, and the page text
+/// with its byte count. Follows the constant preamble; the envelope
+/// sanitizes it again. Never a header other than the content type.
+fn render_web_text(data: &Map<String, Value>) -> String {
+    let status = data.get("status").and_then(Value::as_u64).map(|s| s.to_string()).unwrap_or_else(|| "?".into());
+    let content_type = data.get("content_type").and_then(Value::as_str).unwrap_or("no content type");
+    let mut out = format!("HTTP {status} ({content_type})");
+    if data.get("redirected").and_then(Value::as_bool).unwrap_or(false) {
+        let origin = data.get("final_origin").and_then(Value::as_str).unwrap_or_default();
+        let path = data.get("final_path").and_then(Value::as_str).unwrap_or_default();
+        out.push_str(&format!("\nafter redirects, from {origin}{path}"));
+    }
+    let bytes = data.get("body_bytes").and_then(Value::as_u64).unwrap_or(0);
+    let cut = if data.get("truncated").and_then(Value::as_bool).unwrap_or(false) { ", truncated" } else { "" };
+    if data.get("binary_output").and_then(Value::as_bool).unwrap_or(false) {
+        out.push_str(&format!("\n\nbody: binary ({bytes} bytes{cut}), not shown"));
+        return out;
+    }
+    let text = data.get("body_text").and_then(Value::as_str).unwrap_or_default();
+    if text.is_empty() {
+        out.push_str(&format!("\n\nbody: (empty, {bytes} bytes)"));
+    } else {
+        out.push_str(&format!("\n\n--- body ({bytes} bytes{cut}) ---\n{text}"));
     }
     out
 }
@@ -579,6 +645,108 @@ fn session_command(args: &Map<String, Value>) -> Result<&str, McpError> {
         )));
     }
     Ok(command)
+}
+
+/// `bv_resource_web_fetch`'s `method`: exactly `GET` or `HEAD` (§6.3).
+/// Public so the session handler re-checks with this very rule.
+pub fn check_web_method(method: &str) -> Result<(), String> {
+    if WEB_FETCH_METHODS.contains(&method) {
+        Ok(())
+    } else {
+        Err(format!("`method` must be one of {WEB_FETCH_METHODS:?}"))
+    }
+}
+
+/// Characters a web fetch path may carry, besides alphanumerics and a valid
+/// `%XX` escape: RFC 3986's unreserved, sub-delims, and the gen-delims a path
+/// or query may hold (`:`, `@`, `/`, `?`). A `#` (a fragment), square
+/// brackets (authority only), space, quotes, angle brackets, backslash,
+/// caret, backtick, braces, pipe and every non-ASCII or control byte are
+/// refused.
+fn web_path_char_ok(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/?".contains(&c)
+}
+
+/// One round of percent-decoding, bytewise; an invalid escape is left as is
+/// (the character check has already refused one).
+fn percent_decode_once(raw: &[u8]) -> Vec<u8> {
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'%' && i + 2 < raw.len() {
+            if let (Some(h), Some(l)) = (hex(raw[i + 1]), hex(raw[i + 2])) {
+                out.push(h << 4 | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(raw[i]);
+        i += 1;
+    }
+    out
+}
+
+/// `bv_resource_web_fetch`'s `path` (§6.3 "Path rules"): origin-relative,
+/// starting with `/` but not `//`; at most [`MAX_WEB_PATH_BYTES`]; no
+/// fragment; only RFC 3986 characters, with every `%` starting a valid
+/// escape; and no `..` segment in the path part after percent-decoding --
+/// decoded repeatedly (a double-encoded `%252e%252e` included), split on
+/// both `/` and `\` as some servers do, and with a `;` path parameter cut off
+/// (`..;` is `..` to a servlet container). Refused, never cleaned: the operator
+/// confirms exactly what is requested. Public so the session handler
+/// re-checks with this very rule.
+pub fn check_web_path(path: &str) -> Result<(), String> {
+    if path.is_empty() || path.len() > MAX_WEB_PATH_BYTES {
+        return Err(format!("`path` is {} bytes; it must be 1-{MAX_WEB_PATH_BYTES}", path.len()));
+    }
+    if !path.starts_with('/') || path.starts_with("//") {
+        return Err("`path` must be origin-relative: start with `/`, not `//`, and carry no scheme or host".into());
+    }
+    let bytes = path.as_bytes();
+    if let Some(at) = bytes.iter().position(|b| *b == b'#') {
+        return Err(format!("`path` has a fragment at byte {at}; fragments are never sent"));
+    }
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'%' {
+            let valid = bytes.get(i + 1).is_some_and(u8::is_ascii_hexdigit)
+                && bytes.get(i + 2).is_some_and(u8::is_ascii_hexdigit);
+            if !valid {
+                return Err(format!("`path` has a `%` at byte {i} that does not start a %XX escape"));
+            }
+            i += 3;
+            continue;
+        }
+        if !web_path_char_ok(c) {
+            return Err(format!("`path` has a byte outside RFC 3986 at offset {i} (0x{c:02X}); percent-encode it"));
+        }
+        i += 1;
+    }
+    let path_part = path.split('?').next().unwrap_or_default();
+    let mut decoded = path_part.as_bytes().to_vec();
+    for _ in 0..3 {
+        let next = percent_decode_once(&decoded);
+        if next == decoded {
+            break;
+        }
+        decoded = next;
+    }
+    let dot_dot = |segment: &[u8]| segment.split(|b| *b == b';').next() == Some(b"..".as_slice());
+    if decoded.split(|b| *b == b'/' || *b == b'\\').any(dot_dot) {
+        return Err("`path` has a `..` segment (after percent-decoding); it is refused, not normalized".into());
+    }
+    // What an HTTP client's URL parser would rewrite is refused too, so the
+    // bytes the operator confirms are the bytes sent: a `.` segment (also
+    // `%2e`) is dropped by it, and a `'` in the query is escaped to `%27`.
+    if path_part.split('/').any(|segment| segment == "." || segment.eq_ignore_ascii_case("%2e")) {
+        return Err("`path` has a `.` segment, which would be normalized away; send the path without it".into());
+    }
+    if path.split_once('?').is_some_and(|(_, query)| query.contains('\'')) {
+        return Err("`path` has a `'` in its query; percent-encode it as %27".into());
+    }
+    Ok(())
 }
 
 /// The optional `timeout_secs`: an integer in 1..=[`MAX_SESSION_TIMEOUT_SECS`].
@@ -814,6 +982,35 @@ fn build_tool_request(tool: &str, args: &Map<String, Value>) -> Result<ToolReque
             Ok(ToolRequest {
                 operation: Operation::Write,
                 path: SSH_EXEC_PATH.to_string(),
+                body: Some(body),
+                scope_subject: Some(format!("resources/secrets/{resource}/")),
+            })
+        }
+        "bv_resource_web_fetch" => {
+            check_known_args(args, &["resource", "profile", "method", "path", "timeout_secs"])?;
+            let resource = normalize_component(session_name(args, "resource")?)?;
+            let profile = session_name(args, "profile")?;
+            let method = match args.get("method") {
+                None | Some(Value::Null) => "GET",
+                Some(Value::String(m)) => m.as_str(),
+                Some(_) => return Err(McpError::InvalidArgument("non-string `method`".into())),
+            };
+            check_web_method(method).map_err(McpError::InvalidArgument)?;
+            let path = arg_str(args, "path")?;
+            check_web_path(path).map_err(McpError::InvalidArgument)?;
+            let mut body = Map::new();
+            body.insert("resource".into(), Value::String(resource.clone()));
+            body.insert("profile_id".into(), Value::String(profile.to_string()));
+            body.insert("method".into(), Value::String(method.to_string()));
+            body.insert("path".into(), Value::String(path.to_string()));
+            if let Some(timeout) = session_timeout(args)? {
+                body.insert("timeout_secs".into(), Value::from(timeout));
+            }
+            // As for SSH: the connect path, not the describe path, is the
+            // scope subject.
+            Ok(ToolRequest {
+                operation: Operation::Write,
+                path: WEB_FETCH_PATH.to_string(),
                 body: Some(body),
                 scope_subject: Some(format!("resources/secrets/{resource}/")),
             })

@@ -406,7 +406,7 @@ mod mod_test {
         assert_eq!(t.summary.pairing_id, "agent-1");
         assert_eq!(t.summary.operator.as_ref().unwrap().username, "felipe");
         assert_eq!(t.summary.operator_confirmation.as_deref(), Some("asserted-by-local-host"));
-        let TranscriptBody::Ssh(ssh) = &t.body;
+        let TranscriptBody::Ssh(ssh) = &t.body else { panic!("an ssh transcript") };
         assert_eq!(ssh.command, "uptime");
         assert_eq!(ssh.stdout.text, " 10:00 up 3 days\n");
         assert_eq!(ssh.login, "password");
@@ -446,7 +446,7 @@ mod mod_test {
         assert!(!sc["stderr"].as_str().unwrap().contains(PASSWORD));
         assert_eq!(sc["credential_echo_redacted"], json!(true));
         let t = rig.transcripts().await;
-        let TranscriptBody::Ssh(ssh) = &t[0].body;
+        let TranscriptBody::Ssh(ssh) = &t[0].body else { panic!("an ssh transcript") };
         assert!(!ssh.stdout.text.contains(PASSWORD) && !ssh.stderr.text.contains(PASSWORD));
         assert!(t[0].summary.credential_echo_redacted);
         assert!(!std::fs::read_to_string(&rig.audit_log).unwrap().contains(PASSWORD));
@@ -458,7 +458,7 @@ mod mod_test {
         // The transcript keeps the ANSI bytes for forensics.
         let t = rig.transcripts().await;
         let newest = t.iter().find(|t| t.summary.session_id == sc["session_id"].as_str().unwrap()).unwrap();
-        let TranscriptBody::Ssh(ssh) = &newest.body;
+        let TranscriptBody::Ssh(ssh) = &newest.body else { panic!("an ssh transcript") };
         assert!(ssh.stdout.text.contains("\u{1b}[31m"));
     }
 
@@ -474,7 +474,7 @@ mod mod_test {
         assert_eq!(sc["stdout_truncated"], json!(true));
         assert_eq!(sc["stdout_bytes"], json!(100_000));
         let t = rig.transcripts().await;
-        let TranscriptBody::Ssh(ssh) = &t[0].body;
+        let TranscriptBody::Ssh(ssh) = &t[0].body else { panic!("an ssh transcript") };
         assert_eq!(ssh.stdout.text.len(), 100_000);
         assert_eq!(ssh.stdout.model_truncated_at, Some(1024));
         let exec = events(&rig.audit_log, "connect.agent.ssh.exec");
@@ -625,7 +625,7 @@ mod mod_test {
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(count(&rig.server.events(), "signal:KILL"), 1, "{:?}", rig.server.events());
         let t = rig.transcripts().await;
-        let TranscriptBody::Ssh(ssh) = &t[0].body;
+        let TranscriptBody::Ssh(ssh) = &t[0].body else { panic!("an ssh transcript") };
         assert!(ssh.timed_out);
         let aborted = events(&rig.audit_log, "connect.agent.aborted");
         assert!(aborted.iter().any(|e| e["cause"] == "timeout"), "{aborted:?}");
@@ -691,6 +691,7 @@ mod mod_test {
             .into_iter()
             .map(|t| match t.body {
                 TranscriptBody::Ssh(ssh) => ssh.aborted,
+                other => panic!("an ssh transcript, got {}", other.protocol()),
             })
             .collect();
         assert!(
@@ -726,7 +727,7 @@ mod mod_test {
         assert!(stdout.contains("-----BEGIN OPENSSH PRIVATE KEY-----"), "armor is not secret");
         assert!(rig.server.events().iter().any(|e| e == "auth_publickey:deploy"), "{:?}", rig.server.events());
         let t = rig.transcripts().await;
-        let TranscriptBody::Ssh(ssh) = &t[0].body;
+        let TranscriptBody::Ssh(ssh) = &t[0].body else { panic!("an ssh transcript") };
         assert!(!ssh.stdout.text.contains(&body_line));
     }
 

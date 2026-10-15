@@ -136,6 +136,53 @@ impl McpAuditEvent for SshExecEvent {
     const NAME: &'static str = CONNECT_AGENT_SSH_EXEC;
 }
 
+/// `connect.agent.web.fetch` (Phase 2), with the spec's fields. The path is
+/// present only as `path_hmac` and its length; the page text never.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct WebFetchEvent {
+    pub session_id: String,
+    pub operator: Option<McpOperatorRef>,
+    pub pairing_id: Option<String>,
+    pub client_name: String,
+    pub binding_reveal_allowed: bool,
+    pub resource: String,
+    pub profile_id: String,
+    /// `GET` or `HEAD`.
+    pub method: String,
+    /// [`audit_hmac`] of the requested path (with its query); `None` without
+    /// an audit device.
+    pub path_hmac: Option<String>,
+    pub path_bytes: u64,
+    /// The profile's start origin, `https://host[:port]` (configuration, not
+    /// model input).
+    pub origin: String,
+    /// The `ip:port` the first request dialed.
+    pub target: String,
+    /// `open` or `http-auth`.
+    pub login: String,
+    /// How the last certificate was trusted: `platform`, `pinned-leaf`,
+    /// `pinned-issuer`.
+    pub tls: Option<String>,
+    pub mfa_method: Option<String>,
+    /// The final response's status.
+    pub status: Option<u16>,
+    /// Redirects followed.
+    pub redirects: u32,
+    /// Whether the profile's credential answered a challenge.
+    pub credential_sent: bool,
+    pub body_bytes: u64,
+    pub truncated: bool,
+    pub binary_output: bool,
+    pub credential_echo_redacted: bool,
+    pub duration_ms: u64,
+    pub transcript_id: Option<String>,
+    pub operator_confirmation: Option<String>,
+}
+
+impl McpAuditEvent for WebFetchEvent {
+    const NAME: &'static str = CONNECT_AGENT_WEB_FETCH;
+}
+
 /// `mcp.transcript.accessed`.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TranscriptAccessed {
@@ -239,6 +286,12 @@ mod tests {
             pairing_id: None,
         };
         assert_eq!(event_fields(&aborted)["cause"], "token_revoked");
+
+        let fetch = WebFetchEvent { path_hmac: Some("hmac:cd".into()), path_bytes: 11, ..Default::default() };
+        let fields = event_fields(&fetch);
+        assert_eq!(WebFetchEvent::NAME, "connect.agent.web.fetch");
+        assert!(!fields.contains_key("path") && !fields.contains_key("body_text"), "never the path or the page");
+        assert_eq!(fields["path_hmac"], "hmac:cd");
         assert_eq!(TranscriptAccessed::NAME, "mcp.transcript.accessed");
     }
 

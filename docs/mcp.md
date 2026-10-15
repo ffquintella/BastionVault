@@ -26,9 +26,11 @@ normal vault token presented to `/v2/mcp` is refused too. There is no way to
 `bv_resource_list`, `bv_resource_describe`, `bv_transit_encrypt|decrypt|sign|verify`,
 `bv_totp_code`, `bv_pki_list_certs`, `bv_pki_read_cert`. The write tools:
 `bv_kv_write`, `bv_kv_delete` (soft-delete only), `bv_pki_issue`, `bv_ssh_sign`.
-The session tool: `bv_resource_ssh_exec`, which runs one command on a server
+The session tools: `bv_resource_ssh_exec`, which runs one command on a server
 over an SSH session the vault opens (see
-[Brokered SSH sessions](#brokered-ssh-sessions)).
+[Brokered SSH sessions](#brokered-ssh-sessions)), and `bv_resource_web_fetch`,
+which fetches one page of a web application over an HTTPS session the vault
+opens (see [Brokered web fetches](#brokered-web-fetches)).
 
 A grant's **path scope** is matched against the path the tool sends to the
 vault, not the argument the assistant typed. Each line is an exact path or a
@@ -42,6 +44,7 @@ prefix ending in `*`:
 | `bv_resource_describe` (`name`) | `resources/resources/<name>` |
 | `bv_capabilities` (`path`) | the `path` asked about, not `sys/capabilities-self` |
 | `bv_resource_ssh_exec` (`resource`, `profile`, `command`) | `resources/secrets/<resource>/`, the path the `connect` capability is checked on |
+| `bv_resource_web_fetch` (`resource`, `profile`, `path`, optional `method`) | `resources/secrets/<resource>/`, likewise |
 
 So `secret/*` covers every KV tool on the `secret` mount, and `resources/*`
 covers both resource tools.
@@ -55,8 +58,9 @@ returns plaintext or a private key (`bv_transit_decrypt`, `bv_totp_code`,
 **Earlier versions of this guide said no tool would ever open a network
 connection. That is no longer true, and the statement is withdrawn.**
 `bv_resource_ssh_exec` connects from the vault to a server and runs a command
-there. It is off unless you turn it on in five places (below), and every call
-must be confirmed by a person.
+there; `bv_resource_web_fetch` connects from the vault to a web application
+and fetches a page. Each is off unless you turn it on in five places (below),
+and every call must be confirmed by a person.
 
 Tool descriptions are constants in the software. `sys/mcp/config` accepts a
 `catalogue_pin`, and the Admin → MCP Apps → Catalogue tab pins the hash with one
@@ -135,14 +139,17 @@ those unprompted, so the vault answers them with its own code and audit event
 and nobody is asked. Every other call is shown to you:
 
 - **Desktop app:** **Run a command on *web-01*?**, with the resource, profile,
-  protocol and the command in a box with numbered lines and its byte length.
+  protocol and the command in a box with numbered lines and its byte length;
+  for a web fetch, **Fetch a page from *grafana*?**, with the method and the
+  whole path with its query.
   It is never truncated (the box scrolls). A character that could hide or
   disguise text — a control, a bidi or zero-width character, an unusual space
   — is shown as `\u{XXXX}`; most of them are refused before you are asked.
   **Deny** has the focus; Escape, closing the dialog and 90 seconds without an
   answer deny.
 - **`bvault mcp serve`:** the same lines on the terminal it runs in, then
-  `Run this command once? [y/N]`. Anything but `y` denies, and so does no
+  `Run this command once? [y/N]` (for a web fetch, `Request:   GET <path>`
+  and `Fetch this page once? [y/N]`). Anything but `y` denies, and so does no
   answer within 90 seconds. Keys typed before the question are discarded, so
   a stray `y` cannot approve the next call.
 
@@ -192,6 +199,72 @@ an encrypted transcript — the command and its output, with the session's own
 credential removed — readable with `read`/`list` **and** `sudo` on
 `v2/sys/mcp/transcripts`. Transcripts can contain other secrets a command
 printed.
+
+## Brokered web fetches
+
+`bv_resource_web_fetch` lets a paired assistant read **one page** of a
+web-application resource — a status page, an API's JSON, an appliance's
+console — with `GET` or `HEAD`. The vault makes the request from its own
+process, logs in when the profile is `http-auth`, and returns the status, the
+content type and the page reduced to text. The assistant never receives the
+password, a cookie, a session URL or any response header but the content
+type. Everything in [Brokered SSH sessions](#brokered-ssh-sessions) about
+approval, MFA, pairing, limits, audit and transcripts applies unchanged.
+
+**What turns it on.** The same five places, with `web` instead of `ssh`, and a
+binary built with the `mcp_sessions_web` cargo feature:
+
+1. `protocols = ["web"]` (or `["ssh", "web"]`) in `mcp.brokered_sessions`;
+2. the runtime switch;
+3. the resource type's `connect.agent_sessions_max = "allow"`;
+4. the connection profile: `agent_access = "allow"` on a **web** profile whose
+   `login_mode` is `open` or `http-auth` (with a `secret` credential source),
+   whose `start_url` and `allowed_origins` are `https://`, and without
+   `allow_insecure_http`. `form` and `sso` profiles are refused
+   (`mcp_web_login_mode_unsupported`): filling a login form needs a browser,
+   which waits on proxy mode or Rustion browser isolation;
+5. the pairing's brokered sessions, with `bv_resource_web_fetch` ticked.
+
+The operator needs `update` on `resources/v2/connect/agent/web/fetch` and
+`connect` on `resources/secrets/<resource>/*`.
+
+**What is fetched.** The assistant sends only a path, such as
+`/api/health?verbose=1`. The vault fetches it from the origin of the profile's
+`start_url` — never a host the assistant names. Absolute URLs, `//host`,
+fragments, `..` segments (also percent-encoded), and anything a URL parser
+would rewrite are refused before you are asked.
+
+**Redirects** are followed by the vault, at most five, and only to the
+profile's own https origins (`start_url` and `allowed_origins`); each hop's
+address is checked against the destination allow-list before anything is
+sent there. A redirect anywhere else stops the fetch, and where it pointed is
+not returned.
+
+**Certificates.** The vault trusts the operating system's certificate store,
+read when it first fetches (restart the vault after adding a CA). An appliance
+with a self-signed or private-CA certificate needs `tls_pin_sha256` on its
+profile — the same pins the desktop app uses, decided by the same code: a
+pin of the server's key, or of a CA in the chain it presents. There is no
+"trust on first use" and no "accept anyway" for an assistant: an untrusted
+certificate with no matching pin is refused (`mcp_web_tls_unpinned`,
+`mcp_web_tls_pin_mismatch`), and the request is never sent.
+
+**Logins.** An `http-auth` profile's stored username and password are sent
+(HTTP Basic) only when the site asks for them with a Basic challenge, at most
+once per site and realm in a call; Digest, NTLM and Negotiate are not
+answered. A second challenge after the answer means the site refused the
+credential, and the assistant gets that `401`. Cookies the site sets during the call are sent
+back to it within the call and then dropped.
+
+**What comes back.** At most 2 MiB of the page is read. HTML is reduced to
+text — scripts, styles, comments, hidden templates, SVG and frames dropped,
+links kept as `text <href>` — and JSON, XML and plain text are returned as
+they are; anything else is reported as binary and not returned. The text is
+capped at `max_output_bytes` and ends with `[… truncated by the vault]` when
+cut. The profile's password, and every session cookie value the site set, are
+replaced with `<redacted:credential>` wherever the page echoes them, in every
+encoding the vault knows. Text a page hides with CSS is still returned: the
+reduction does not run the page's styles.
 
 ## Enabling the network endpoint
 
@@ -467,7 +540,8 @@ choice: it always needs you at a terminal (or in the desktop app), so a headless
 
 ## The limits, stated plainly
 
-**Changed by brokered sessions.** Before `bv_resource_ssh_exec`, an
+**Changed by brokered sessions.** Before `bv_resource_ssh_exec` and
+`bv_resource_web_fetch`, an
 assistant needed a second MCP server to combine private data, untrusted
 content and a way to send data out. With sessions enabled, BastionVault alone
 can provide all three, even within one pairing. The control is procedural —
@@ -514,6 +588,13 @@ who did not sign in with userpass cannot reach MFA-gated profiles; and an
 operator signed in to a child namespace cannot either, because agent calls
 run in the root namespace.
 
+Web fetches (T137): `GET` and `HEAD` only; `form` and `sso` login modes are
+refused (they wait on proxy mode, T106, or Rustion browser isolation, T97);
+HTTP Digest is not answered; the operating system's certificate store is read
+once per vault process; the per-call cookie jar keeps cookies per exact
+origin and ignores `Domain` and `Path`; and the HTML reduction does not apply
+CSS, so text a page hides is returned.
+
 ## Troubleshooting
 
 | Symptom | Cause |
@@ -532,7 +613,7 @@ run in the root namespace.
 | `mcp_reveal_denied` / `mcp_destructive_denied` | The grant does not allow it |
 | `mcp_connect_not_allowed` | The pairing was not granted brokered sessions (`connect_allowed`) |
 | `mcp_confirmation_required` | A session call reached the vault without a gatekeeper's confirmation: the assistant called `/v2/mcp` directly, or through a gatekeeper older than this release |
-| `mcp_brokered_sessions_disabled` / `mcp_session_protocol_disabled` | A switch is off: `mcp.brokered_sessions`, its `protocols`, the runtime switch, or a build without `mcp_sessions_ssh` |
+| `mcp_brokered_sessions_disabled` / `mcp_session_protocol_disabled` | A switch is off: `mcp.brokered_sessions`, its `protocols`, the runtime switch, or a build without `mcp_sessions_ssh` / `mcp_sessions_web` |
 | `mcp_session_profile_not_agent_enabled` | The type's `agent_sessions_max` or the profile's `agent_access` is not `allow` |
 | `mcp_session_mfa_required` / `mcp_session_mfa_unavailable` | The profile requires MFA and the call carried no ticket (a gatekeeper older than this release) / you cannot complete it here: not a userpass user, no factor enrolled, only a security key at `bvault mcp serve`, or signed in to a child namespace |
 | `mcp_session_mfa_ticket_refused` | Your MFA ticket was for another call, expired (60 s) or already used; it is burnt, and the assistant's retry asks you again |
@@ -542,6 +623,9 @@ run in the root namespace.
 | `mcp_session_host_key_unpinned` / `mcp_session_host_key_mismatch` | No pin on the profile / the server's key is not the pinned one |
 | `mcp_session_login_class_unsupported` | The credential source cannot be used for sessions, or the SSH role cannot bind the command (named in the message) |
 | `mcp_rate_limited` / `mcp_session_busy` | Too many calls this minute / a session is already open |
-| `mcp_session_timeout` / `mcp_session_failed` / `mcp_session_aborted` | Connecting took over 10 s / the connection or login failed / revoked or switched off mid-session |
+| `mcp_session_timeout` / `mcp_session_failed` / `mcp_session_aborted` | Connecting took over 10 s, or a fetch outlived the call timeout / the connection or login failed, or a fetch redirected more than five times / revoked or switched off mid-session |
+| `mcp_web_login_mode_unsupported` | A `form` or `sso` web profile: an assistant can use `open` and `http-auth` only |
+| `mcp_web_origin_refused` | The profile is not https only, or the site redirected outside the profile's origins |
+| `mcp_web_tls_unpinned` / `mcp_web_tls_pin_mismatch` | The site's certificate is not trusted by the operating system and the profile pins no key / pins keys, none of which matches |
 | `is too long for a Unix socket path` | Choose a shorter `--socket` (about 100 bytes) |
 | `is accessible to other users` | `chmod 600` the pairing store |

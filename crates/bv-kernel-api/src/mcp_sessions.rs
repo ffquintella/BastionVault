@@ -13,8 +13,10 @@
 //! handler refuses with `mcp_brokered_sessions_disabled`, exactly as with the
 //! switch off.
 
+use std::sync::Arc;
+
 use bv_errors::RvError;
-use bv_utils::destination_policy::{DestinationPolicy, TargetCidrSource, TargetCidrs};
+use bv_utils::destination_policy::{DestinationPolicy, Resolver, SystemResolver, TargetCidrSource, TargetCidrs};
 
 /// The static half: the server config's `mcp.brokered_sessions`, already
 /// validated at load (`bv-core`'s `BrokeredSessionsConfig::validate`), so
@@ -89,4 +91,14 @@ pub trait BrokeredSessionEnv: Send + Sync {
     /// The only constructor of a session's policy, so a test that needs a
     /// loopback target replaces this service rather than any setting.
     fn destination_policy(&self, allowed: TargetCidrs) -> DestinationPolicy;
+
+    /// The DNS lookup every session dial (and every web redirect hop) is
+    /// resolved through, once, before the policy checks each address. The
+    /// platform resolver unless an environment says otherwise; only a test
+    /// environment does, to answer a name with a fixed (for example a mixed
+    /// allowed/refused) set. It cannot admit an address: whatever it answers
+    /// is still checked, address by address, by [`Self::destination_policy`].
+    fn resolver(&self) -> Arc<dyn Resolver> {
+        Arc::new(SystemResolver)
+    }
 }

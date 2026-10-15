@@ -412,6 +412,23 @@ function CommandBox({ session }: { session: McpSessionPrompt }) {
   );
 }
 
+/** A web fetch's request as the operator reads it: the method and the whole
+ *  path with its query, never truncated (the box wraps). The host has already
+ *  escaped anything that could hide or disguise text. */
+function PathBox({ session }: { session: McpSessionPrompt }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-xs text-[var(--color-text-muted)]">{`Request — ${session.path_bytes ?? 0} bytes of path`}</p>
+      <div
+        data-testid="mcp-session-path"
+        className="max-h-60 overflow-auto rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] p-2 font-mono text-xs"
+      >
+        <span className="min-w-0 whitespace-pre-wrap break-all">{`${session.method ?? "GET"} ${session.path ?? ""}`}</span>
+      </div>
+    </div>
+  );
+}
+
 /**
  * The per-call confirmation of a brokered session (features/mcp-brokered-sessions.md
  * §9): mandatory for every call. It shows the resource, profile, protocol and
@@ -498,11 +515,13 @@ function McpSessionConfirmModal({
   };
 
   const canRunWithCode = hasTotp && /^\d{6,10}$/.test(code.trim());
+  const web = session.protocol === "web";
+  const act = web ? "fetch" : "run";
   return (
     <Modal
       open
       onClose={() => void send(false)}
-      title={`Run a command on ${session.resource}?`}
+      title={web ? `Fetch a page from ${session.resource}?` : `Run a command on ${session.resource}?`}
       size="lg"
       actions={
         <>
@@ -511,7 +530,7 @@ function McpSessionConfirmModal({
           </Button>
           {!needsMfa && (
             <Button variant="danger" onClick={() => void send(true)} loading={busy === "allow"}>
-              Run once
+              {web ? "Fetch once" : "Run once"}
             </Button>
           )}
           {needsMfa && hasKey && (
@@ -521,7 +540,7 @@ function McpSessionConfirmModal({
               loading={busy === "key"}
               disabled={busy !== null}
             >
-              Use security key and run
+              {`Use security key and ${act}`}
             </Button>
           )}
           {needsMfa && hasTotp && (
@@ -531,7 +550,7 @@ function McpSessionConfirmModal({
               disabled={!canRunWithCode || busy !== null}
               loading={busy === "allow"}
             >
-              Verify code and run once
+              {`Verify code and ${act} once`}
             </Button>
           )}
         </>
@@ -539,9 +558,11 @@ function McpSessionConfirmModal({
     >
       <div className="space-y-3 text-sm">
         <p>
-          <span className="font-medium">{prompt.client_name}</span> wants to run a command on{" "}
-          <span className="font-medium break-all">{session.resource}</span> over {session.protocol.toUpperCase()},
-          through a session the vault opens and closes for this one call.
+          <span className="font-medium">{prompt.client_name}</span> wants to{" "}
+          {web ? "fetch a page from" : "run a command on"}{" "}
+          <span className="font-medium break-all">{session.resource}</span> over{" "}
+          {web ? "HTTPS" : session.protocol.toUpperCase()}, through a session the vault opens and closes for this one
+          call.
         </p>
         <div className="grid grid-cols-2 gap-3 rounded border border-[var(--color-border)] p-3">
           <div className="min-w-0">
@@ -564,13 +585,18 @@ function McpSessionConfirmModal({
             <p className="text-xs text-[var(--color-text-muted)]">Tool</p>
             <p className="truncate font-mono text-xs">{prompt.tool}</p>
           </div>
-          <div className="col-span-2">
-            <CommandBox session={session} />
-          </div>
+          {web && (
+            <div className="min-w-0">
+              <p className="text-xs text-[var(--color-text-muted)]">Method</p>
+              <p className="font-mono text-xs">{session.method ?? "GET"}</p>
+            </div>
+          )}
+          <div className="col-span-2">{web ? <PathBox session={session} /> : <CommandBox session={session} />}</div>
         </div>
         <p className="text-xs text-[var(--color-text-muted)]">
-          Read the command: it runs exactly as shown, with the profile&apos;s credential, which the assistant never
-          sees. Its output goes back to the assistant.
+          {web
+            ? "Read the request: it is sent exactly as shown to the profile's own address. When the site asks for a login, the vault answers with the profile's credential, which the assistant never sees. The page text goes back to the assistant."
+            : "Read the command: it runs exactly as shown, with the profile's credential, which the assistant never sees. Its output goes back to the assistant."}
         </p>
         {needsMfa && (
           <div className="space-y-2 rounded border border-[var(--color-border)] p-3">

@@ -230,13 +230,13 @@ fn rfc3339_ms(ms: i64) -> String {
 
 /// A non-empty string field of a secret / sub-response, copied into a
 /// `Zeroizing` buffer.
-fn take_field(data: &Map<String, Value>, key: &str) -> Option<Zeroizing<String>> {
+pub(crate) fn take_field(data: &Map<String, Value>, key: &str) -> Option<Zeroizing<String>> {
     data.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(|s| Zeroizing::new(s.to_string()))
 }
 
 /// Scrub every string in a credential-bearing map — nested objects and
 /// arrays included — before it is dropped.
-fn zeroize_map(data: &mut Map<String, Value>) {
+pub(crate) fn zeroize_map(data: &mut Map<String, Value>) {
     for (_, v) in data.iter_mut() {
         zeroize_value(v);
     }
@@ -607,7 +607,7 @@ fn parse_checkout(data: &Map<String, Value>) -> Result<Checkout, Option<Zeroizin
 
 #[maybe_async::maybe_async]
 impl super::ResourceBackendInner {
-    async fn read_resource_secret(
+    pub(crate) async fn read_resource_secret(
         &self,
         req: &mut Request,
         resource: &str,

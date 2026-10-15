@@ -75,6 +75,18 @@ pub const MAX_TRANSCRIPT_STREAM_BYTES: usize = 1 << 20;
 /// (§11 "Limits"), which the dispatcher enforces before anything runs.
 pub const MAX_TRANSCRIPT_COMMAND_BYTES: usize = 4096;
 
+/// Longest web request path (with its query) a transcript accepts: the
+/// web fetch tool's own ceiling, which the dispatcher enforces.
+pub const MAX_TRANSCRIPT_WEB_PATH_BYTES: usize = 2048;
+
+/// Longest redirect-hop path a transcript keeps. A server chooses these, so
+/// the executor cuts a longer one (and says so) before it is recorded.
+pub const MAX_TRANSCRIPT_HOP_PATH_BYTES: usize = 8192;
+
+/// Most requests one web fetch makes (the first, five redirects, and a
+/// challenge answer on each), and so most hops a transcript lists.
+pub const MAX_TRANSCRIPT_WEB_HOPS: usize = 12;
+
 /// Longest session id. Ids are `[a-z0-9_-]` (the spec's ids look like
 /// `as_6f0c…`), so a transcript id is a single, dot-free storage key segment
 /// and a chunk key cannot be named as an id.
@@ -221,18 +233,88 @@ pub struct SshTranscript {
     pub stderr: TranscriptStream,
 }
 
-/// The protocol-specific half of a transcript. Web (Phase 2) and RDP
-/// (Phase 3) add variants; a reader refuses a variant it does not know.
+/// One request a web fetch sent (`features/mcp-brokered-sessions.md` §10:
+/// "each redirect hop's path").
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebTranscriptHop {
+    /// `https://host[:port]`.
+    pub origin: String,
+    /// The path with its query, as sent (credential- and session-scrubbed by
+    /// the writer). At most [`MAX_TRANSCRIPT_HOP_PATH_BYTES`].
+    pub path: String,
+    /// The response status; `None` when no response arrived.
+    #[serde(default)]
+    pub status: Option<u16>,
+    /// This request answered an HTTP authentication challenge with the
+    /// profile's credential.
+    #[serde(default)]
+    pub answered_challenge: bool,
+}
+
+/// A web `GET`/`HEAD` fetch (§6).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebTranscript {
+    /// `GET` or `HEAD`.
+    pub method: String,
+    /// The origin-relative path with its query, as the operator confirmed it.
+    pub path: String,
+    /// The profile's start origin the path was fetched from.
+    pub origin: String,
+    /// The `ip:port` the first request dialed.
+    #[serde(default)]
+    pub target: String,
+    /// `open` or `http-auth`.
+    pub login: String,
+    /// How the server's certificate was trusted on the last request:
+    /// `platform`, `pinned-leaf` or `pinned-issuer`.
+    #[serde(default)]
+    pub tls: Option<String>,
+    /// Every request sent, in order.
+    #[serde(default)]
+    pub hops: Vec<WebTranscriptHop>,
+    /// The final response's status; `None` when the fetch stopped before one.
+    #[serde(default)]
+    pub status: Option<u16>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    /// Raw body bytes read (at most the raw-read cap).
+    #[serde(default)]
+    pub body_bytes: u64,
+    /// The raw body was longer than the raw-read cap.
+    #[serde(default)]
+    pub body_truncated: bool,
+    /// The extracted response text (HTML reduced to text), credential-
+    /// scrubbed, not sanitized; up to 1 MiB, with where the model's copy
+    /// stopped.
+    #[serde(default)]
+    pub text: TranscriptStream,
+    #[serde(default)]
+    pub timed_out: bool,
+    /// Why the session was cut short (`token_revoked`, `kill_switch`,
+    /// `timeout`, `executor_error`), when it was.
+    #[serde(default)]
+    pub aborted: Option<String>,
+    /// The refusal code that stopped the fetch after it had dialed (an
+    /// off-origin redirect, a refused hop destination, a refused
+    /// certificate), when one did.
+    #[serde(default)]
+    pub stopped: Option<String>,
+}
+
+/// The protocol-specific half of a transcript. RDP (Phase 3) adds a
+/// variant; a reader refuses a variant it does not know.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "protocol", rename_all = "lowercase")]
 pub enum TranscriptBody {
     Ssh(SshTranscript),
+    Web(WebTranscript),
 }
 
 impl TranscriptBody {
     pub fn protocol(&self) -> &'static str {
         match self {
             Self::Ssh(_) => "ssh",
+            Self::Web(_) => "web",
         }
     }
 }
@@ -343,6 +425,40 @@ fn prepare(
             scrub(&mut ssh.command);
             scrub(&mut ssh.stdout.text);
             scrub(&mut ssh.stderr.text);
+        }
+        TranscriptBody::Web(web) => {
+            if web.method != "GET" && web.method != "HEAD" {
+                return Err(TranscriptError::Invalid(format!("web method {:?} is not GET or HEAD", web.method)));
+            }
+            if web.path.len() > MAX_TRANSCRIPT_WEB_PATH_BYTES {
+                return Err(TranscriptError::Invalid(format!(
+                    "the path is {} bytes; at most {MAX_TRANSCRIPT_WEB_PATH_BYTES}",
+                    web.path.len()
+                )));
+            }
+            if web.hops.len() > MAX_TRANSCRIPT_WEB_HOPS {
+                return Err(TranscriptError::Invalid(format!(
+                    "{} requests; a web transcript keeps at most {MAX_TRANSCRIPT_WEB_HOPS}",
+                    web.hops.len()
+                )));
+            }
+            if let Some(hop) = web.hops.iter().find(|h| h.path.len() > MAX_TRANSCRIPT_HOP_PATH_BYTES) {
+                return Err(TranscriptError::Invalid(format!(
+                    "a hop path is {} bytes; at most {MAX_TRANSCRIPT_HOP_PATH_BYTES}",
+                    hop.path.len()
+                )));
+            }
+            if web.text.text.len() > MAX_TRANSCRIPT_STREAM_BYTES {
+                return Err(TranscriptError::Invalid(format!(
+                    "the response text is {} bytes; a transcript keeps at most {MAX_TRANSCRIPT_STREAM_BYTES}",
+                    web.text.text.len()
+                )));
+            }
+            scrub(&mut web.path);
+            for hop in &mut web.hops {
+                scrub(&mut hop.path);
+            }
+            scrub(&mut web.text.text);
         }
     }
     transcript.summary.credential_echo_redacted |= redacted;
@@ -595,7 +711,7 @@ mod tests {
         assert!(entries.iter().all(|e| !String::from_utf8_lossy(&e.value).contains("hunter2")));
         let back = round_trip(&entries, &id).unwrap();
         assert!(back.summary.credential_echo_redacted);
-        let TranscriptBody::Ssh(body) = &back.body;
+        let TranscriptBody::Ssh(body) = &back.body else { panic!("an ssh transcript") };
         assert_eq!(body.command, "echo <redacted:credential> | sudo -S id");
         assert!(body.stdout.text.contains("uid=0(root)") && !body.stdout.text.contains("hunter2"));
 
@@ -640,7 +756,7 @@ mod tests {
         let t = assemble(id, head, vec![Some(body.to_vec())]).unwrap();
         assert_eq!(t.summary.operator, None);
         assert!(!t.summary.credential_echo_redacted);
-        let TranscriptBody::Ssh(ssh) = t.body;
+        let TranscriptBody::Ssh(ssh) = t.body else { panic!("an ssh transcript") };
         assert_eq!(ssh.command, "uptime");
         assert_eq!(ssh.exit_status, None);
         assert_eq!(ssh.stdout.model_truncated_at, None);
@@ -686,5 +802,68 @@ mod tests {
         let mut h = head();
         h.body_bytes = unknown_variant.len() as u64;
         assert!(reason(assemble(&id, h, vec![Some(unknown_variant)])).contains("malformed"));
+    }
+
+    fn web(path: &str, text: &str) -> McpSessionTranscript {
+        let mut t = ssh("unused", "");
+        t.summary.tool = "bv_resource_web_fetch".into();
+        t.body = TranscriptBody::Web(WebTranscript {
+            method: "GET".into(),
+            path: path.into(),
+            origin: "https://grafana.internal".into(),
+            target: "10.0.0.9:443".into(),
+            login: "http-auth".into(),
+            tls: Some("platform".into()),
+            hops: vec![
+                WebTranscriptHop {
+                    origin: "https://grafana.internal".into(),
+                    path: path.into(),
+                    status: Some(302),
+                    answered_challenge: false,
+                },
+                WebTranscriptHop {
+                    origin: "https://grafana.internal".into(),
+                    path: "/login?next=hunter2".into(),
+                    status: Some(200),
+                    answered_challenge: true,
+                },
+            ],
+            status: Some(200),
+            content_type: Some("text/html".into()),
+            body_bytes: text.len() as u64,
+            text: TranscriptStream { text: text.into(), seen_bytes: text.len() as u64, ..Default::default() },
+            ..Default::default()
+        });
+        t
+    }
+
+    /// A web record scrubs its path, every hop path and the page text, and
+    /// reads back; out-of-bounds records are refused.
+    #[test]
+    fn a_web_record_is_scrubbed_bounded_and_reads_back() {
+        let (id, entries) =
+            encode(web("/api/health?token=hunter2", "Welcome hunter2\nDashboards"), 11, &Replace("hunter2")).unwrap();
+        assert!(entries.iter().all(|e| !String::from_utf8_lossy(&e.value).contains("hunter2")));
+        let back = round_trip(&entries, &id).unwrap();
+        assert!(back.summary.credential_echo_redacted);
+        let TranscriptBody::Web(body) = &back.body else { panic!("a web transcript") };
+        assert_eq!(body.path, "/api/health?token=<redacted:credential>");
+        assert_eq!(body.hops[1].path, "/login?next=<redacted:credential>");
+        assert!(body.hops[1].answered_challenge);
+        assert!(body.text.text.starts_with("Welcome <redacted:credential>"));
+        assert_eq!(back.body.protocol(), "web");
+
+        let long = format!("/{}", "a".repeat(MAX_TRANSCRIPT_WEB_PATH_BYTES));
+        assert!(matches!(encode(web(&long, ""), 1, &NoCredential), Err(TranscriptError::Invalid(_))));
+        let mut post = web("/", "");
+        if let TranscriptBody::Web(w) = &mut post.body {
+            w.method = "POST".into();
+        }
+        assert!(matches!(encode(post, 1, &NoCredential), Err(TranscriptError::Invalid(_))));
+        let mut many = web("/", "");
+        if let TranscriptBody::Web(w) = &mut many.body {
+            w.hops = vec![WebTranscriptHop::default(); MAX_TRANSCRIPT_WEB_HOPS + 1];
+        }
+        assert!(matches!(encode(many, 1, &NoCredential), Err(TranscriptError::Invalid(_))));
     }
 }

@@ -405,7 +405,9 @@ impl<R: BufRead, W: Write> Tty<R, W> {
         self.say("");
         if let (true, Some(detail)) = (request.open_world, request.detail) {
             let resource = request.session.map(|c| sanitize_for_model(&c.resource)).unwrap_or_default();
-            self.say(&format!("MCP client `{client}` wants to run a command on `{resource}` ({}):", request.tool));
+            let web = request.session.is_some_and(|c| c.protocol == "web");
+            let what = if web { "fetch a page from" } else { "run a command on" };
+            self.say(&format!("MCP client `{client}` wants to {what} `{resource}` ({}):", request.tool));
             for line in detail.split('\n') {
                 self.say(&format!("    {line}"));
             }
@@ -421,7 +423,8 @@ impl<R: BufRead, W: Write> Tty<R, W> {
                     return Some(false);
                 }
             }
-            if !self.yes_no("Run this command once?", false)? {
+            let question = if web { "Fetch this page once?" } else { "Run this command once?" };
+            if !self.yes_no(question, false)? {
                 return Some(false);
             }
             if let Some(step) = &request.mfa {
@@ -874,6 +877,25 @@ mod tests {
             assert!(shown.contains("  | journalctl -u nginx | tail -n 20") && shown.contains("  | uptime"), "{shown}");
             assert!(shown.contains("Run this command once? [y/N]"), "{shown}");
         }
+    }
+
+    /// A web fetch is shown as one: the method, the whole path and the
+    /// resource, and its own question.
+    #[test]
+    fn the_web_fetch_prompt_shows_the_method_and_path() {
+        let args =
+            serde_json::json!({ "resource": "grafana", "profile": "agent-api", "path": "/api/health?verbose=1" });
+        let call = bv_mcp::dispatcher::session_call("bv_resource_web_fetch", args.as_object().unwrap()).unwrap();
+        let detail = bv_mcp::local::render_session_detail(&call);
+        let mut request = session_request(&call, &detail, None);
+        request.tool = "bv_resource_web_fetch";
+        request.destructive = false;
+        let mut t = tty("y\n");
+        assert_eq!(t.confirm(&request), Some(true));
+        let shown = screen(&t);
+        assert!(shown.contains("`claude-code` wants to fetch a page from `grafana`"), "{shown}");
+        assert!(shown.contains("Request:   GET /api/health?verbose=1"), "{shown}");
+        assert!(shown.contains("Fetch this page once? [y/N]"), "{shown}");
     }
 
     /// On a gated profile the operator is told who asks for MFA, types a

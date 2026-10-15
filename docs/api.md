@@ -1961,8 +1961,9 @@ errors whose `data.code` is one of `mcp_tool_not_allowed`,
 `mcp_invalid_argument`, `mcp_tool_timeout`, `mcp_connect_not_allowed` (a
 session tool on a token without `connect_allowed` and `confirm_connect`) and
 `mcp_connect_requires_local_operator` (a session tool on an app token,
-always), plus the session handler's codes listed under
-[`resources/v2/connect/agent/ssh/exec`](#post-resourcesv2connectagentsshexec-mcp-only).
+always), plus the session handlers' codes listed under
+[`resources/v2/connect/agent/ssh/exec`](#post-resourcesv2connectagentsshexec-mcp-only)
+and [`resources/v2/connect/agent/web/fetch`](#post-resourcesv2connectagentwebfetch-mcp-only).
 
 `params._meta` may carry, besides `io.modelcontextprotocol/*`, the local
 gatekeeper's `io.bastionvault/confirmation` (the operator approved this call)
@@ -1970,25 +1971,38 @@ and `io.bastionvault/connect_ticket` (the operator's MFA ticket for this
 session call, handed only to the session handler). The gatekeeper removes
 both from whatever the client sent before adding its own.
 
-The catalogue has one session tool, `bv_resource_ssh_exec`, which reports
-`openWorldHint: true`; every other tool reports `false`. **This retracts the
-earlier statement that no tool opens a network connection.** A session tool
-needs the token's `connect_allowed`, is never gated on `destructive_allowed`
-(its `destructiveHint` is advice to the client), and its call timeout is
+The catalogue has two session tools, `bv_resource_ssh_exec` and
+`bv_resource_web_fetch`, which report `openWorldHint: true`; every other tool
+reports `false`. **This retracts the earlier statement that no tool opens a
+network connection.** A session tool needs the token's `connect_allowed`, is
+never gated on `destructive_allowed` (its `destructiveHint` is advice to the
+client), is never in a pairing's default tool list (the web fetch, read-only
+by HTTP semantics, included), and its call timeout is
 `mcp.brokered_sessions.call_timeout_secs` (plus 10 s for the handler to
-answer) instead of `mcp.tool_timeout_secs`. Its arguments are exactly
-`resource`, `profile` (required), `command` and an optional `timeout_secs`;
-any other argument is refused (`mcp_invalid_argument`), as is a command with a
-control, bidi, zero-width, tag, line-separator or other invisible character —
-refused, never cleaned. Its result is wrapped: `structuredContent.untrusted`
-names the source (`{"source": "resource", "protocol": "ssh", "resource",
-"profile"}`) and `content[0].text` starts with a constant preamble saying the
-output is data from a remote system. A shaped result over 1 MiB + 64 KiB is
-refused (`mcp_result_too_large`).
+answer) instead of `mcp.tool_timeout_secs`. Arguments other than a tool's own
+are refused (`mcp_invalid_argument`):
+
+- `bv_resource_ssh_exec`: `resource`, `profile` (required), `command` and an
+  optional `timeout_secs`. A command with a control, bidi, zero-width, tag,
+  line-separator or other invisible character is refused, never cleaned.
+- `bv_resource_web_fetch`: `resource`, `profile`, `path` (required), `method`
+  (`GET`, the default, or `HEAD`) and an optional `timeout_secs`. The path is
+  origin-relative: it starts with `/` but not `//`, is at most 2048 bytes of
+  RFC 3986 characters (every `%` a valid escape), has no fragment, no `..`
+  segment after percent-decoding (repeatedly, and split on `/` and `\`; `..;`
+  counts), and nothing a URL parser would rewrite (a `.` segment, a `'` in the
+  query). Refused, never cleaned or normalized.
+
+A session result is wrapped: `structuredContent.untrusted` names the source
+(`{"source": "resource", "protocol": "ssh" | "web", "resource", "profile"}`)
+and `content[0].text` starts with a constant preamble saying the output is data
+from a remote system. A shaped result over 1 MiB + 64 KiB is refused
+(`mcp_result_too_large`).
 
 The catalogue hash is
-`3f24b819102aa4d50d194b3a1959232faed5a06777c654a7de20a2ae6fcbd173`; a
-`catalogue_pin` set to an earlier value must be updated.
+`2ef9b8149ea89aa2d509d204988414450bd12658223299e7ee77eb8a48bf5262`
+(`bv_resource_web_fetch` appended to the 0.44.40 catalogue,
+`3f24b819…bd173`); a `catalogue_pin` set to an earlier value must be updated.
 
 **Audit.** Every request a `tools/call` routes is recorded with an `mcp`
 block beside `request.data` (`request.mcp`), in the clear:
@@ -2117,8 +2131,16 @@ An id is `<20-digit nanoseconds>-<session id>` (`[a-z0-9_-]`, at most 64
 characters); anything else is a `400`. An unknown id is a `404`. A stored
 record that does not decode — an unknown `version`, a missing body chunk, a
 length mismatch, malformed JSON — is a `500` naming why, never a partial
-answer. This build records no transcript yet: the SSH session tool that
-writes them arrives with the session executor.
+answer. The session handlers write them: `bv_resource_ssh_exec` (`protocol:
+"ssh"`, above) and `bv_resource_web_fetch` (`protocol: "web"`): `method`,
+`path` (with its query), `origin`, `target` (the first `ip:port` dialed),
+`login`, `tls` (`platform`, `pinned-leaf`, `pinned-issuer`), `hops` (every
+request: `origin`, `path` with its query, `status`, `answered_challenge`),
+`status`, `content_type`, `body_bytes`, `body_truncated`, `text` (the
+extracted page text, credential- and cookie-scrubbed, up to 1 MiB, with
+`model_truncated_at`), `timed_out`, `aborted`, and `stopped` (the refusal
+code that ended a fetch after it had dialed). A web transcript is written
+for every fetch that sent a request.
 
 ### Resource opt-ins for brokered sessions
 
@@ -2265,6 +2287,117 @@ Every session that ran is recorded in a transcript
 streams as captured (up to 1 MiB each, credential-scrubbed, not sanitized),
 the exit status and the host key.
 
+### `POST resources/v2/connect/agent/web/fetch` (MCP only)
+
+The route behind `bv_resource_web_fetch`
+([spec](../features/mcp-brokered-sessions.md) §6, §13): one `GET` or `HEAD` of
+a web-application resource, fetched by the vault process with the profile's
+credential, which never leaves it. Like the SSH route it is **internal to
+MCP** (`403 mcp_connect_not_allowed` for any request the dispatcher did not
+route) and not in the `default` policy:
+
+```hcl
+path "resources/v2/connect/agent/web/fetch" { capabilities = ["update"] }
+path "resources/secrets/<resource>/*"       { capabilities = ["connect"] }
+```
+
+It is compiled only with the cargo feature `mcp_sessions_web` (off by
+default); `web` must be in `mcp.brokered_sessions.protocols`.
+
+Body (built by the dispatcher): `resource`, `profile_id`, `method` (`GET` |
+`HEAD`), `path`, optional `timeout_secs`, and the relayed `connect_ticket`.
+The checks are the SSH route's, in the same order and with the same codes,
+with these differences:
+
+| Step | Refusal |
+|---|---|
+| `method` and `path`, re-checked with the dispatcher's rules | `mcp_invalid_argument` |
+| `web` listed; the build has the executor (`mcp_sessions_web`) | `mcp_session_protocol_disabled` |
+| A web profile, opted in, `login_mode` `open` or `http-auth` (`form` and `sso` need a browser, which waits on proxy mode or Rustion browser isolation) | `mcp_session_profile_not_agent_enabled`, `mcp_web_login_mode_unsupported` |
+| https only: an `https://` `start_url` and `allowed_origins`, no `allow_insecure_http` | `mcp_web_origin_refused` |
+| `http-auth` uses a stored `secret` (username and password, through `credential_source.fields`) | `mcp_session_login_class_unsupported` |
+| No bastion route: a `rustion` profile, `web.transport: rustion-isolated`, a Rustion policy | `mcp_session_requires_bastion` |
+| Destination policy on every address of the start origin's host | `mcp_session_destination_refused` |
+
+**What is fetched.** The URL is the origin of the profile's `web.start_url`
+plus the confirmed path, byte for byte. Its host is resolved once, every
+address is checked against the destination policy, and only checked addresses
+are dialed (a name gets them as its only DNS answer; no proxy, the
+environment's included).
+
+**Redirects** (`301`, `302`, `303`, `307`, `308`) are followed by the vault,
+at most 5, only to https origins the profile lists (`web.start_url`'s and
+`web.allowed_origins`), each hop resolved once and checked against the
+destination policy before anything is sent to it. A redirect elsewhere stops
+the fetch with `mcp_web_origin_refused` (and a refused hop address with
+`mcp_session_destination_refused`); the redirect target is never returned or
+logged. More than 5 redirects stop with `mcp_session_failed`.
+
+**TLS.** The platform's trust anchors (the operating system's store, read once
+at the first fetch), then the profile's `web.tls_pin_sha256` with the desktop
+app's Phase 4 rules — the same code, `bv_utils::tls_pin`: a pin only admits a
+certificate the platform rejected; a leaf pin is accepted as is; an issuer pin
+only for a presented CA the leaf verifies under for the host. There is no
+trust on first use and no "accept anyway": a certificate the platform rejects
+is refused with `mcp_web_tls_unpinned` when the profile pins nothing, and with
+`mcp_web_tls_pin_mismatch` when no pin admits it. No request is sent over a
+refused connection.
+
+**The credential** (`http-auth`) is HTTP Basic, sent only in answer to a `401`
+`Basic` challenge from the origin being fetched, at most once per (origin,
+realm) in a call — never pre-emptively, never to Digest, NTLM or Negotiate.
+A second `401` after an answer is the result (the target refused the
+credential, or challenged again after a redirect); the vault does not
+retry.
+
+**Request headers** are fixed: `User-Agent: BastionVault-Agent/<major.minor>`,
+`Accept`, `Accept-Encoding: identity`, and the call's own cookies — a cookie
+the target sets during the call goes back to that same origin on the call's
+next request, and the jar is dropped with the call. The agent supplies no
+header.
+
+Response `data` (wrapped by the dispatcher in the untrusted envelope):
+
+```json
+{ "session_id": "aw_6f0c…", "method": "GET", "status": 200, "content_type": "text/html; charset=utf-8",
+  "final_origin": "https://grafana.internal", "final_path": "/api/health", "redirected": false,
+  "body_text": "…", "body_bytes": 312, "truncated": false, "binary_output": false,
+  "credential_echo_redacted": false, "duration_ms": 140, "login": "http-auth" }
+```
+
+- At most 2 MiB of the final response's body is read; past it the
+  connection is dropped and `truncated` is set. `HEAD` reads none.
+- `text/html` and `application/xhtml+xml` are reduced to text (html5ever's
+  tokenizer): `script`, `style`, `noscript`, `template`, `svg`, `iframe` and
+  comments are dropped, links kept as `text <href>`. JSON, XML and every
+  `text/*` are returned as text. Anything else, no `Content-Type`, or a body
+  that is mostly NUL or not UTF-8 is `binary_output: true` with no
+  `body_text`.
+- `body_text` is cut at `mcp.brokered_sessions.max_output_bytes` (default
+  64 KiB, ceiling 256 KiB) and then ends with `[… truncated by the vault]`;
+  `truncated` says so.
+- The profile's password is replaced with `<redacted:credential>` in every
+  encoding the vault produces (raw, percent- and form-encoded, JSON-escaped,
+  HTML-escaped, and the Basic `user:password` base64), and so is every cookie
+  value of 8 or more characters the target set during the call.
+- Only `content_type` is returned of the response headers: never a cookie,
+  `Set-Cookie`, `Authorization` or `Location`. `final_path` carries neither
+  the query nor `;` path parameters.
+- A fetch past the call timeout ends with `504 mcp_session_timeout`; one
+  that cannot connect, or fails mid-response, with `502 mcp_session_failed`.
+  Revocation and the runtime switch end a running fetch within two seconds
+  (`409 mcp_session_aborted`), as for SSH.
+
+Events: `connect.agent.web.fetch` for a fetch that answered (`method`,
+`path_hmac` and `path_bytes` — never the path —, `origin`, `target`, `login`,
+`tls`, `status`, `redirects`, `credential_sent`, `body_bytes`, `truncated`,
+`binary_output`, `credential_echo_redacted`, `mfa_method`, `transcript_id`,
+and the pairing, operator and confirmation fields the SSH event carries);
+`connect.agent.refused` (protocol `web`) for every refusal, including the ones
+after dialing (an off-list redirect, a refused hop, a refused certificate);
+`connect.agent.aborted` for a timeout, a revocation or a failure. Every fetch
+that sent a request is recorded in a transcript.
+
 ### `POST resources/v2/connect/mfa/verify` with `mcp_call`
 
 The connect-time MFA verify (`resources/v2/connect/mfa/begin` reports whether
@@ -2277,6 +2410,8 @@ a profile is gated and which factors the caller holds; `verify` takes
 { "resource": "web-01", "profile_id": "p_agent", "method": "totp", "totp_code": "123456",
   "mcp_call": { "pairing_id": "0f3c…", "tool": "bv_resource_ssh_exec", "args_hash": "<64 hex>" } }
 ```
+
+(`tool` is `bv_resource_ssh_exec` or `bv_resource_web_fetch`.)
 
 - With `mcp_call`, the ticket is bound to that one agent call, expires after
   **60 s** (a human ticket: 120 s), and is redeemable **only** on the agent

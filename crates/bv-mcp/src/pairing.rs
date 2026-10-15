@@ -121,9 +121,17 @@ struct StoreFile {
 }
 
 /// Non-secret tools an operator can approve without a second thought: the
-/// read-only ones that cannot return a secret value.
+/// read-only ones that cannot return a secret value and open no session.
+/// `bv_resource_web_fetch` is read-only by HTTP semantics but open-world: it
+/// is granted only in the separate brokered-sessions step, with
+/// `connect_allowed`, never by default
+/// (`features/mcp-brokered-sessions.md` §9).
 pub fn default_tool_allowlist() -> Vec<String> {
-    crate::catalogue::catalogue().iter().filter(|t| t.read_only && !t.is_reveal).map(|t| t.name.to_string()).collect()
+    crate::catalogue::catalogue()
+        .iter()
+        .filter(|t| t.read_only && !t.is_reveal && !t.open_world)
+        .map(|t| t.name.to_string())
+        .collect()
 }
 
 fn random_hex(bytes: usize) -> String {
@@ -519,6 +527,10 @@ mod tests {
         assert!(tools.contains(&"bv_kv_read_metadata".to_string()));
         for forbidden in ["bv_kv_read", "bv_transit_decrypt", "bv_totp_code", "bv_kv_write", "bv_pki_issue"] {
             assert!(!tools.contains(&forbidden.to_string()), "{forbidden} must not be in the default grant");
+        }
+        // Session tools are never in it, the read-only web fetch included.
+        for session_tool in ["bv_resource_ssh_exec", "bv_resource_web_fetch"] {
+            assert!(!tools.contains(&session_tool.to_string()), "{session_tool} must not be in the default grant");
         }
     }
 }

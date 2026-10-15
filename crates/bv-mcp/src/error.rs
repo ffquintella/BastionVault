@@ -87,6 +87,12 @@ pub const SESSION_ERROR_CODES: &[&str] = &[
     "mcp_session_failed",
     "mcp_web_login_mode_unsupported",
     "mcp_web_origin_refused",
+    // Web (§6.3 "TLS"): the target's certificate is not trusted by the
+    // platform roots and the profile pins nothing (no trust-on-first-use, no
+    // "accept anyway" for an agent), or the profile pins keys and none
+    // admits it.
+    "mcp_web_tls_unpinned",
+    "mcp_web_tls_pin_mismatch",
 ];
 
 /// A session handler's error, as it reaches the dispatcher through the

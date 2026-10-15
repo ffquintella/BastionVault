@@ -8,7 +8,9 @@
 //! WebView2's `ServerCertificateErrorDetected`, WebKitGTK's
 //! `load-failed-with-tls-errors`) only read the presented chain and apply the
 //! verdict; every decision is made here, without Tauri or a webview, so it is
-//! unit-tested.
+//! unit-tested. The pin decision itself ([`decide`] below the session-origin
+//! scope check) is `bastion_vault::utils::tls_pin`, shared with the vault's
+//! agent web fetch so the two cannot disagree about what a pin admits.
 //!
 //! The rules:
 //!
@@ -47,245 +49,20 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use base64::Engine as _;
-use rustls::client::danger::ServerCertVerifier as _;
-use rustls::client::WebPkiServerVerifier;
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::RootCertStore;
+use rustls::pki_types::UnixTime;
 use serde::Serialize;
-use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use super::web::{OriginSet, WebOrigin};
 use super::web_load::{LoadFailure, PageFailure};
 
-/// Most pins one profile may carry. A profile needs one or two (the current
-/// key and the next); the bound keeps a pasted list from growing unnoticed.
-pub const MAX_PINS: usize = 16;
-
-/// Longest chain read off a platform or a probe; anything longer is cut.
-pub const MAX_CHAIN: usize = 8;
+// The pin decision is shared with the vault's agent web fetch
+// (features/mcp-brokered-sessions.md §6.3): it lives in `bv-utils` and is
+// re-exported here under the names this crate has always used.
+pub use bastion_vault::utils::tls_pin::{PinDecision, PinMatch, PinRefusal, PinSet, SpkiPin, MAX_CHAIN};
 
 /// Longest subject / issuer text the fingerprint helper returns. The text is
 /// server-chosen, so it is cut rather than trusted to be short.
 const MAX_NAME_CHARS: usize = 256;
-
-/// One pin: the SHA-256 of a DER `SubjectPublicKeyInfo`.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SpkiPin([u8; 32]);
-
-impl SpkiPin {
-    /// Parse an operator-written pin. Accepted forms (surrounding whitespace
-    /// ignored):
-    ///
-    /// * `sha256:<64 hex digits>` — the canonical form this crate and the GUI
-    ///   write. The prefix is optional and case-insensitive, the hex any case,
-    ///   and `:` between byte pairs is tolerated (`AB:CD:…`).
-    /// * `sha256/<base64>` or curl's `sha256//<base64>` — the RFC 7469 /
-    ///   `curl --pinnedpubkey` form: standard, padded base64 of the 32 bytes
-    ///   (44 characters). Also accepted bare.
-    pub fn parse(raw: &str) -> Result<Self, String> {
-        let s = raw.trim();
-        if s.is_empty() {
-            return Err("is empty".to_string());
-        }
-        // ASCII lower-casing keeps byte offsets, so `rest` maps back onto `s`.
-        let lower = s.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("sha256//").or_else(|| lower.strip_prefix("sha256/")) {
-            // Base64 is case-sensitive: decode the original text.
-            return Self::from_base64(&s[s.len() - rest.len()..]);
-        }
-        let prefixed = lower.starts_with("sha256:");
-        let hex_part = lower.strip_prefix("sha256:").unwrap_or(&lower);
-        if let Some(pin) = Self::from_hex(hex_part) {
-            return Ok(pin);
-        }
-        if !prefixed && s.len() == 44 {
-            return Self::from_base64(s);
-        }
-        Err("is not a SHA-256 public-key pin: give sha256:<64 hex digits> or sha256/<base64>".to_string())
-    }
-
-    fn from_hex(h: &str) -> Option<Self> {
-        let compact = if h.contains(':') {
-            let parts: Vec<&str> = h.split(':').collect();
-            if parts.len() != 32 || parts.iter().any(|p| p.len() != 2) {
-                return None;
-            }
-            parts.concat()
-        } else {
-            h.to_string()
-        };
-        if compact.len() != 64 {
-            return None;
-        }
-        let bytes = hex::decode(&compact).ok()?;
-        <[u8; 32]>::try_from(bytes.as_slice()).ok().map(Self)
-    }
-
-    fn from_base64(b: &str) -> Result<Self, String> {
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(b)
-            .map_err(|_| "is not valid base64 (standard alphabet, padded)".to_string())?;
-        <[u8; 32]>::try_from(bytes.as_slice())
-            .map(Self)
-            .map_err(|_| format!("decodes to {} bytes; a SHA-256 pin is 32", bytes.len()))
-    }
-
-    /// The pin of a DER `SubjectPublicKeyInfo`.
-    pub fn of_spki_der(spki: &[u8]) -> Self {
-        Self(Sha256::digest(spki).into())
-    }
-
-    /// The pin of a DER certificate's public key, hashed over the
-    /// `SubjectPublicKeyInfo` bytes exactly as they appear in the certificate.
-    pub fn of_certificate(der: &[u8]) -> Result<Self, String> {
-        let (_, cert) = x509_parser::parse_x509_certificate(der).map_err(|e| format!("unreadable certificate: {e}"))?;
-        Ok(Self::of_spki_der(cert.public_key().raw))
-    }
-
-    /// RFC 7469 / curl form, without the `sha256/` prefix.
-    pub fn to_base64(self) -> String {
-        base64::engine::general_purpose::STANDARD.encode(self.0)
-    }
-}
-
-/// `sha256:<hex>`, the canonical form.
-impl fmt::Display for SpkiPin {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "sha256:{}", hex::encode(self.0))
-    }
-}
-
-impl fmt::Debug for SpkiPin {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
-    }
-}
-
-/// A profile's pins, deduplicated. Empty means "no pinning".
-#[derive(Clone, Debug, Default)]
-pub struct PinSet {
-    pins: Vec<SpkiPin>,
-}
-
-impl PinSet {
-    /// `web.tls_pin_sha256` as stored on the profile. Every entry must be a
-    /// readable pin: one that is not refuses the whole list, because dropping
-    /// it would hide a typo behind a session that then fails closed for no
-    /// visible reason.
-    pub fn from_json(values: &[Value]) -> Result<Self, String> {
-        let mut strs = Vec::with_capacity(values.len());
-        for (i, v) in values.iter().enumerate() {
-            strs.push(v.as_str().ok_or_else(|| format!("web.tls_pin_sha256[{i}] must be a string"))?);
-        }
-        Self::from_strs(&strs)
-    }
-
-    pub fn from_strs<S: AsRef<str>>(values: &[S]) -> Result<Self, String> {
-        if values.len() > MAX_PINS {
-            return Err(format!("web.tls_pin_sha256 has {} pins; at most {MAX_PINS} are allowed", values.len()));
-        }
-        let mut pins: Vec<SpkiPin> = Vec::with_capacity(values.len());
-        for (i, v) in values.iter().enumerate() {
-            let pin = SpkiPin::parse(v.as_ref()).map_err(|e| format!("web.tls_pin_sha256[{i}] {e}"))?;
-            if !pins.contains(&pin) {
-                pins.push(pin);
-            }
-        }
-        Ok(Self { pins })
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.pins.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.pins.len()
-    }
-
-    pub fn contains(&self, pin: &SpkiPin) -> bool {
-        self.pins.contains(pin)
-    }
-}
-
-/// Comma-separated pins, for the `session.open` audit line.
-impl fmt::Display for PinSet {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, p) in self.pins.iter().enumerate() {
-            if i > 0 {
-                f.write_str(",")?;
-            }
-            write!(f, "{p}")?;
-        }
-        Ok(())
-    }
-}
-
-/// Which pin let a rejected certificate through.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PinMatch {
-    /// The leaf's own key.
-    Leaf,
-    /// A presented issuer's key (`depth` in the chain, 1 = the leaf's
-    /// issuer), after WebPKI verification against it alone.
-    Issuer { depth: usize },
-}
-
-/// Why a rejected certificate on a session origin stays rejected.
-/// [`check`](Self::check) is the `aborted:<check>` name (server rule:
-/// `[a-z0-9_]{1,32}`) and the audit reason; [`notice`](Self::notice) the
-/// operator-facing title text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PinRefusal {
-    /// The platform reported no certificate.
-    NoCertificate,
-    /// The leaf certificate could not be parsed.
-    Malformed,
-    /// No presented key is pinned.
-    Mismatch,
-    /// An issuer's key is pinned, but the leaf does not verify under it for
-    /// this host (wrong host, expired, not signed by it, …).
-    IssuerUnverified,
-}
-
-impl PinRefusal {
-    pub fn check(self) -> &'static str {
-        match self {
-            Self::NoCertificate => "tls_pin_no_certificate",
-            Self::Malformed => "tls_pin_malformed",
-            Self::Mismatch => "tls_pin_mismatch",
-            Self::IssuerUnverified => "tls_pin_issuer",
-        }
-    }
-
-    /// Fixed text only: never a name from the certificate.
-    pub fn notice(self) -> &'static str {
-        match self {
-            Self::NoCertificate | Self::Malformed => "unreadable TLS certificate \u{2014} refused",
-            Self::Mismatch => "TLS certificate does not match the pinned key \u{2014} refused",
-            Self::IssuerUnverified => "TLS certificate is not valid for this host under the pinned CA \u{2014} refused",
-        }
-    }
-}
-
-/// The verdict on one certificate the platform rejected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PinDecision {
-    /// Not an https origin of this session, or no pins: the platform's
-    /// rejection stands, unaudited here.
-    NotApplicable,
-    /// Override the platform's rejection for this certificate.
-    Accept(PinMatch),
-    /// Keep the rejection; audited and shown.
-    Refuse(PinRefusal),
-}
-
-impl PinDecision {
-    pub fn accepts(self) -> bool {
-        matches!(self, Self::Accept(_))
-    }
-}
 
 /// Whether `origin` is one a pin may override a rejection for.
 fn pinnable(origins: &OriginSet, origin: Option<&WebOrigin>) -> Option<WebOrigin> {
@@ -294,7 +71,9 @@ fn pinnable(origins: &OriginSet, origin: Option<&WebOrigin>) -> Option<WebOrigin
 
 /// Decide one rejected certificate. `chain` is DER, leaf first, as the
 /// platform presented it; `now` is the time issuer verification checks
-/// validity periods against.
+/// validity periods against. Only an https origin of this session's set is
+/// the pins' business ([`pinnable`]); the decision itself is the shared one
+/// (`bastion_vault::utils::tls_pin::decide`).
 pub fn decide(
     pins: &PinSet,
     origins: &OriginSet,
@@ -302,56 +81,8 @@ pub fn decide(
     chain: &[Vec<u8>],
     now: UnixTime,
 ) -> PinDecision {
-    if pins.is_empty() {
-        return PinDecision::NotApplicable;
-    }
-    let Some(origin) = pinnable(origins, origin) else {
-        return PinDecision::NotApplicable;
-    };
-    let Some(leaf) = chain.first() else {
-        return PinDecision::Refuse(PinRefusal::NoCertificate);
-    };
-    let Ok(leaf_pin) = SpkiPin::of_certificate(leaf) else {
-        return PinDecision::Refuse(PinRefusal::Malformed);
-    };
-    if pins.contains(&leaf_pin) {
-        return PinDecision::Accept(PinMatch::Leaf);
-    }
-    let presented = &chain[1..chain.len().min(MAX_CHAIN)];
-    let mut issuer_pinned = false;
-    for (i, der) in presented.iter().enumerate() {
-        let Ok(pin) = SpkiPin::of_certificate(der) else { continue };
-        if !pins.contains(&pin) {
-            continue;
-        }
-        issuer_pinned = true;
-        if issuer_vouches_for(der, leaf, presented, origin.host(), now) {
-            return PinDecision::Accept(PinMatch::Issuer { depth: i + 1 });
-        }
-    }
-    PinDecision::Refuse(if issuer_pinned { PinRefusal::IssuerUnverified } else { PinRefusal::Mismatch })
-}
-
-/// rustls' standard WebPKI server-certificate verification of `leaf` for
-/// `host`, with `anchor` as the only trust anchor: chain signatures,
-/// validity, `serverAuth` usage and the host name. No revocation check (no
-/// CRLs are configured), as for the webviews' own default.
-fn issuer_vouches_for(anchor: &[u8], leaf: &[u8], intermediates: &[Vec<u8>], host: &str, now: UnixTime) -> bool {
-    let mut roots = RootCertStore::empty();
-    if roots.add(CertificateDer::from(anchor.to_vec())).is_err() {
-        return false;
-    }
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let Ok(verifier) = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider).build() else {
-        return false;
-    };
-    let bare = host.trim_start_matches('[').trim_end_matches(']');
-    let Ok(name) = ServerName::try_from(bare) else {
-        return false;
-    };
-    let intermediates: Vec<CertificateDer<'static>> =
-        intermediates.iter().map(|d| CertificateDer::from(d.clone())).collect();
-    verifier.verify_server_cert(&CertificateDer::from(leaf.to_vec()), &intermediates, &name, &[], now).is_ok()
+    let scoped = pinnable(origins, origin);
+    bastion_vault::utils::tls_pin::decide(pins, scoped.as_ref().map(|o| o.host()), chain, now)
 }
 
 /// Names for the gate's audit lines.
@@ -807,6 +538,8 @@ pub fn describe_chain(chain: &[Vec<u8>]) -> Result<Vec<PresentedCertificate>, St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+    use bastion_vault::utils::tls_pin::MAX_PINS;
     use rcgen::{
         BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose,
         PublicKeyData,

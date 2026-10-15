@@ -15,7 +15,9 @@
 
 pub mod agent_access;
 pub mod agent_limits;
+mod agent_session;
 pub mod agent_ssh;
+pub mod agent_web;
 pub mod connect_clipboard;
 pub mod connect_mfa;
 pub mod connect_provider;
@@ -294,9 +296,13 @@ pub struct ResourceModule {
 pub struct ResourceBackendInner {
     pub core: Arc<dyn VaultCtx>,
     /// This node's MCP brokered-session limiter (`agent_limits`), shared by
-    /// every resource mount, built from the server config on first use.
-    /// Read only by the SSH executor, so unread in a build without it.
-    #[cfg_attr(not(all(feature = "mcp_sessions_ssh", not(feature = "sync_handler"))), allow(dead_code))]
+    /// every resource mount and every protocol, built from the server config
+    /// on first use. Read only by the session executors, so unread in a
+    /// build without one.
+    #[cfg_attr(
+        not(all(any(feature = "mcp_sessions_ssh", feature = "mcp_sessions_web"), not(feature = "sync_handler"))),
+        allow(dead_code)
+    )]
     agent_limiter: std::sync::OnceLock<agent_limits::SessionLimiter>,
 }
 
@@ -341,6 +347,7 @@ impl ResourceBackend {
         let h_clipboard_audit = self.inner.clone();
         let h_cfg_effective = self.inner.clone();
         let h_agent_ssh_exec = self.inner.clone();
+        let h_agent_web_fetch = self.inner.clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -838,6 +845,52 @@ impl ResourceBackend {
                     ],
                     help: "Run one confirmed command on a resource over a vault-brokered SSH session \
                            (MCP bv_resource_ssh_exec only). Returns capped, credential-scrubbed, sanitized output."
+                },
+                {
+                    // MCP brokered sessions, web (features/mcp-brokered-sessions.md
+                    // §6, §13). Like the SSH route: answers only the MCP
+                    // dispatcher, not in the `default` policy. See
+                    // agent_web/mod.rs.
+                    pattern: r"v2/connect/agent/web/fetch$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name the web profile lives on."
+                        },
+                        "profile_id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Connection-profile id of a web profile with agent_access = allow."
+                        },
+                        "method": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "GET or HEAD."
+                        },
+                        "path": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "The operator-confirmed origin-relative path with its query."
+                        },
+                        "timeout_secs": {
+                            field_type: FieldType::Int,
+                            required: false,
+                            description: "Call budget in seconds, at most mcp.brokered_sessions.call_timeout_secs."
+                        },
+                        "connect_ticket": {
+                            field_type: FieldType::SecretStr,
+                            required: false,
+                            description: "The operator's connect MFA ticket for this one call, relayed by the \
+                                          gatekeeper. Required for an MFA-gated profile."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_agent_web_fetch.handle_agent_web_fetch}
+                    ],
+                    help: "Fetch one page of a web resource with GET or HEAD over a vault-brokered HTTPS session \
+                           (MCP bv_resource_web_fetch only). Returns status, content type and capped, \
+                           credential-scrubbed, sanitized page text; never a cookie, header or session URL."
                 }
             ],
             secrets: [{

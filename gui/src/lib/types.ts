@@ -2395,10 +2395,16 @@ export interface McpSessionPrompt {
   resource: string;
   profile: string;
   protocol: string;
-  /** The exact command; line breaks kept. */
+  /** The exact command; line breaks kept. Empty for a web fetch. */
   command: string;
   /** Bytes of the command as it will run. */
   command_bytes: number;
+  /** Web fetch only: `GET` or `HEAD`. */
+  method?: string | null;
+  /** Web fetch only: the origin-relative path with its query, whole. */
+  path?: string | null;
+  /** Web fetch only: bytes of the path as it will be requested. */
+  path_bytes?: number | null;
   timeout_secs: number | null;
 }
 

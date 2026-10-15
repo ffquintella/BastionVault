@@ -79,6 +79,25 @@ const SESSION_PROMPT = {
   mfa: null,
 };
 
+const WEB_PROMPT = {
+  ...SESSION_PROMPT,
+  id: "mcp-prompt-9",
+  tool: "bv_resource_web_fetch",
+  tool_description: "Fetch one page of a web-application resource",
+  destructive: false,
+  session: {
+    resource: "grafana",
+    profile: "agent-api",
+    protocol: "web",
+    command: "",
+    command_bytes: 0,
+    method: "GET",
+    path: "/api/health?verbose=1",
+    path_bytes: 21,
+    timeout_secs: null,
+  },
+};
+
 function calls(cmd: string) {
   return mockInvoke.mock.calls.filter((c) => c[0] === cmd);
 }
@@ -298,6 +317,28 @@ describe("McpPromptHost", () => {
     await user.click(screen.getByRole("button", { name: /run once/i }));
     await waitFor(() => expect(calls("mcp_prompt_answer")).toHaveLength(1));
     expect(calls("mcp_prompt_answer")[0][1]).toEqual({ id: "mcp-prompt-7", answer: { kind: "confirm", allow: true } });
+  });
+
+  it("shows a web fetch as one: the method, the whole path and the resource, deny first", async () => {
+    const user = userEvent.setup();
+    await mount();
+    send(WEB_PROMPT);
+    expect(await screen.findByText("Fetch a page from grafana?")).toBeInTheDocument();
+    expect(screen.getByText("agent-api")).toBeInTheDocument();
+    expect(screen.getByText("web")).toBeInTheDocument();
+    expect(screen.getByTestId("mcp-session-path")).toHaveTextContent("GET /api/health?verbose=1");
+    expect(screen.getByText("Request — 21 bytes of path")).toBeInTheDocument();
+    expect(screen.queryByTestId("mcp-session-command")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^deny$/i })).toHaveFocus();
+    await user.click(screen.getByRole("button", { name: /^fetch once$/i }));
+    await waitFor(() => expect(calls("mcp_prompt_answer")).toHaveLength(1));
+    expect(calls("mcp_prompt_answer")[0][1]).toEqual({ id: "mcp-prompt-9", answer: { kind: "confirm", allow: true } });
+
+    send({ ...WEB_PROMPT, id: "mcp-prompt-10", mfa: { methods: ["totp"] } });
+    expect(await screen.findByRole("button", { name: /verify code and fetch once/i })).toBeDisabled();
+    expect(screen.getByText(/is asking you to complete MFA to access/)).toHaveTextContent(
+      "claude-code is asking you to complete MFA to access grafana (profile agent-api).",
+    );
   });
 
   it("asks for the operator's own MFA on a gated profile and sends only the factor", async () => {
