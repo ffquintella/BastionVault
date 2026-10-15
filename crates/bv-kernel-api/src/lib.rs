@@ -43,6 +43,8 @@
 //! | [`engines`] | Tier 3 ↔ Tier 3 contracts (**not** kernel contracts — see the file) |
 //! | [`mcp_transcripts`] | the MCP session transcript store: resource engine writes, kernel reads and prunes |
 //! | [`mcp_events`] | the `connect.agent.*` / `mcp.transcript.accessed` audit events |
+//! | [`mcp_sessions`] | the brokered-session switches, limits and destination policy an executor reads |
+//! | [`ssh_credentials`] | the server-side `secret` resolver and brokered certificate minting (Rustion + agents) |
 //!
 //! ## Why the routing and mount tables are in here
 //!
@@ -70,6 +72,7 @@ pub mod engines;
 pub mod provider;
 pub mod identity;
 pub mod mcp_events;
+pub mod mcp_sessions;
 pub mod mcp_transcripts;
 pub mod module;
 pub mod mount;
@@ -79,6 +82,7 @@ pub mod policy;
 pub mod resource_group;
 pub mod router;
 pub mod services;
+pub mod ssh_credentials;
 pub mod stats;
 
 pub use change_epochs::{ChangeEpochs, EpochSnapshot};

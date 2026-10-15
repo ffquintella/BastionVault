@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.44.38"
+version = "0.44.39"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -395,6 +395,11 @@ bv-storage = { path = "crates/bv-storage", features = ["test-support"] }
 bv-server = { path = "crates/bv-server", features = ["test-support"] }
 serial_test = "3.4"
 cucumber = "0.23"
+# MCP brokered sessions' end-to-end tests (src/engine_tests/mcp_sessions_ssh.rs):
+# the destination policy's loopback seam, and the resource engine's recording
+# in-process SSH server. Dev-only, so a release build compiles neither.
+bv-utils = { path = "crates/bv-utils", features = ["test-support"] }
+bv-engine-resource = { path = "crates/bv-engine-resource", features = ["test-support"] }
 # `ferro-crypto` is a normal dependency (PQ-TLS transport for cmis_grpc); the
 # ferrogate tests additionally use its composite primitive to mint fixtures.
 # Pulled in for the Phase-3 composite-signature test so we can verify the
@@ -511,6 +516,14 @@ files_smb = ["bv-engine-files/files_smb"]
 # the planned Resource Connect SSH window will use.
 # See `features/file-resources.md` § "Phase 6 — SFTP / SCP sync".
 files_ssh_sync = ["bv-engine-files/files_ssh_sync"]
+# MCP brokered sessions — the vault-side SSH executor behind the MCP tool
+# `bv_resource_ssh_exec` (features/mcp-brokered-sessions.md §5.3). Off by
+# default: without it the tool is listed and every call is refused with
+# `mcp_session_protocol_disabled`. With it, sessions still need the server
+# config's `mcp.brokered_sessions`, the runtime switch, a pairing's
+# `connect_allowed`, and the type and profile opt-ins. Same russh as
+# `files_ssh_sync`, so it adds no crate to the graph.
+mcp_sessions_ssh = ["bv-engine-resource/mcp_sessions_ssh"]
 
 # Transit Secret Engine — Phase 4 follow-ups, both off by default.
 #

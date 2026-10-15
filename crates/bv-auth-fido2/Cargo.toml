@@ -1,6 +1,6 @@
 [package]
 name = "bv-auth-fido2"
-version = "0.41.2"
+version = "0.41.3"
 edition = "2021"
 description = "BastionVault's FIDO2 / WebAuthn auth backend: passkey registration and login"
 license = "Apache-2.0"
@@ -17,7 +17,7 @@ bv-context = { path = "../bv-context", version = "0.41.0", registry = "uox-basti
 bv-logical = { path = "../bv-logical", version = "0.42.0", registry = "uox-bastionvault" }
 bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-bastionvault" }
 bv-utils = { path = "../bv-utils", version = "0.41.0", registry = "uox-bastionvault" }
-bv-kernel-api = { path = "../bv-kernel-api", version = "0.41.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.42.0", registry = "uox-bastionvault" }
 bv-auth-audit = { path = "../bv-auth-audit", version = "0.41.0", registry = "uox-bastionvault" }
 
 async-trait = "0.1"

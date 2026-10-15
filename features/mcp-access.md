@@ -115,8 +115,21 @@ ordered, and hashed; a change to a tool's description is a release event.
 - **Prompt injection carried in secret content.** Values are returned only on
   explicit reveal; results are wrapped in `structuredContent`, control
   characters and ANSI escapes are stripped from every string the model or the
-  user will see; the catalogue contains **no open-world tool** (no HTTP fetch,
-  no shell), so the "lethal trifecta" needs a *second* server to complete.
+  user will see.
+
+  **Retracted.** This section used to add that the catalogue contains no
+  open-world tool, so the "lethal trifecta" needs a *second* server to
+  complete. Since MCP Brokered Sessions Phase 1 (T136,
+  [mcp-brokered-sessions.md](mcp-brokered-sessions.md)) that is false:
+  `bv_resource_ssh_exec` runs a command on a resource over a session the vault
+  opens, and one pairing may hold reveal and sessions together, so
+  BastionVault alone can supply private data, untrusted content and an
+  outbound channel. The bound is no longer structural but procedural:
+  default-off server and runtime switches, `connect_allowed` on the pairing,
+  opt-ins on the resource type and profile, the destination allow-list,
+  caps, audit and transcripts, and the operator's confirmation of every
+  session call, which cannot be turned off. Session output is wrapped as
+  untrusted data, and network-mode apps never open sessions.
 - **Exfiltration through write tools.** `kv_write`/`kv_delete`/`pki_issue`/
   `ssh_sign` are `destructiveHint` tools, disabled per principal by default,
   MRTR-confirmed in local mode, and audited with argument HMACs.
@@ -677,12 +690,21 @@ BLAKE3 over the canonical JSON of the full `tools/list` result.
 | `bv_kv_delete` | `DELETE <mount>/data/<path>` (soft-delete only; no `destroy`, no `metadata` delete) | | ✓ | ✓ | Phase 6; requires `destructive_allowed` |
 | `bv_pki_issue` | `pki/issue/<role>` | | ✓ | | Phase 6; requires `destructive_allowed` **and** `reveal_allowed` (returns a private key) |
 | `bv_ssh_sign` | `ssh/sign/<role>` | | ✓ | | Phase 6; requires `destructive_allowed` |
+| `bv_resource_ssh_exec` | `resources/v2/connect/agent/ssh/exec` (scope subject `resources/secrets/<name>/`) | | ✓ | | Brokered sessions Phase 1 ([spec](mcp-brokered-sessions.md) §5); `openWorldHint: true`; requires `connect_allowed` on a local pairing and the operator's confirmation of every call, never `destructive_allowed` |
 
 Deliberately **absent**, permanently: anything under `sys/` or `auth/`
 (mounts, policies, tokens, seal, plugins, backup), `kv metadata destroy`,
-`pki/root/*`, `transit/keys/*` writes, file-resource downloads, anything that
-opens a network connection (`openWorldHint` is `false` on every tool and no
-tool will ever set it `true`). An agent that needs those needs an operator.
+`pki/root/*`, `transit/keys/*` writes, file-resource downloads. An agent that
+needs those needs an operator.
+
+**Retracted:** this list used to include "anything that opens a network
+connection (`openWorldHint` is `false` on every tool and no tool will ever set
+it `true`)". The repository owner reversed that rule on 2026-10-14
+([mcp-brokered-sessions.md](mcp-brokered-sessions.md), "This reverses a stated
+rule"): `bv_resource_ssh_exec` sets `openWorldHint: true` and opens an SSH
+connection from the vault, under the gates that spec lists. Every other tool
+still reports `false`, and network-mode apps can never be granted a session
+tool.
 
 ### 8. Configuration
 
@@ -795,7 +817,8 @@ Prometheus (`crates/bv-metrics/src/mcp_metrics.rs`):
 | Browser-tab DNS rebinding against the local server | Loopback bind + `Origin`/`Host` 403 + pairing bearer token (Inspector CVE lesson) |
 | Same-user process impersonating a paired client | Peer creds + `exe_path` recorded; change → re-pair prompt; honest limit documented |
 | Poisoned tool description | Constants in code; catalogue hash in `server/discover`; `catalogue_pin` refuses to serve a changed catalogue until the operator updates the pin |
-| Prompt injection inside a secret value | Values only on explicit reveal; control-character stripping; no open-world tools in the catalogue |
+| Prompt injection inside a secret value | Values only on explicit reveal; control-character stripping. (No longer: "no open-world tools in the catalogue" — see the session-output row below.) |
+| Prompt injection in brokered-session output, and a single server holding the lethal trifecta | Session tools are off by default four times over (server and runtime switches, `connect_allowed`, type and profile opt-ins); output is wrapped as untrusted, capped, credential-scrubbed and sanitized; every session call is confirmed by the operator, permanently; see [mcp-brokered-sessions.md](mcp-brokered-sessions.md) |
 | Secret written out through `bv_kv_write` | Destructive off by default, MRTR-confirmed locally, argument HMACs in audit |
 | Confirmation handle replay | `requestState` HMAC-bound to accessor+args+expiry, single-use, never authentication |
 | Legacy client sends `Mcp-Session-Id` expecting state | Ignored; nothing keyed on it |

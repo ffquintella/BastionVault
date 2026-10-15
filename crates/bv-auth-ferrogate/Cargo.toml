@@ -1,6 +1,6 @@
 [package]
 name = "bv-auth-ferrogate"
-version = "0.41.1"
+version = "0.41.2"
 edition = "2021"
 description = "BastionVault's FerroGate machine-identity auth backend (CMIS, SVID, DPoP)"
 license = "Apache-2.0"
@@ -20,7 +20,7 @@ bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastion
 bv-context = { path = "../bv-context", version = "0.41.0", registry = "uox-bastionvault" }
 bv-logical = { path = "../bv-logical", version = "0.42.0", registry = "uox-bastionvault" }
 bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-bastionvault" }
-bv-kernel-api = { path = "../bv-kernel-api", version = "0.41.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.42.0", registry = "uox-bastionvault" }
 # The FerroGate deny-reason counters live in the metrics substrate, next to
 # every other metric family, so this backend takes `bv-metrics` directly
 # rather than reaching through the root crate's re-export.

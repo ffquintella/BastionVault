@@ -55,6 +55,10 @@ pub mod exchange;
 /// `POST /v2/mcp`'s JSON-RPC handling with no HTTP in it: shared by
 /// `bv-server`'s route and the desktop app's embedded-vault MCP host.
 pub mod mcp_endpoint;
+/// The server-side environment of MCP brokered sessions — switches, limits,
+/// the vault's own addresses — registered for the resource engine's session
+/// handler.
+pub mod mcp_sessions_env;
 pub mod plugins;
 pub mod scheduled_exports;
 /// Moved to the Tier 0 `bv-context` crate. Not in the roadmap's Tier 0 list,
@@ -306,6 +310,13 @@ impl BastionVault {
         // naming `crate::plugins`. Not a `Module::register`, because the
         // runtime is not a module. See src/plugins/kernel_service.rs.
         core.kernel_services.set_plugin_host(crate::plugins::PluginRuntimeHost::new(core.clone()));
+
+        // MCP brokered sessions (features/mcp-brokered-sessions.md §11-12):
+        // the resource engine's session handler reads the server config's
+        // switches and limits, the runtime switch and the vault's own
+        // addresses through this, and refuses every session without it.
+        core.kernel_services
+            .set_brokered_sessions(Arc::new(crate::mcp_sessions_env::VaultBrokeredSessionEnv::new(&core, config)));
 
         // The namespace re-root migration runs at the very top of
         // `post_unseal` — before `ModuleManager::setup`, so before any module

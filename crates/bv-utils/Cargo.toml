@@ -1,6 +1,6 @@
 [package]
 name = "bv-utils"
-version = "0.41.3"
+version = "0.41.4"
 edition = "2021"
 description = "BastionVault's shared helpers: salts, seal boxes, socket addresses, TLS and cert utilities"
 license = "Apache-2.0"
@@ -48,6 +48,11 @@ bv-storage = { path = "../bv-storage", features = ["test-support"] }
 [features]
 default = []
 sync_handler = ["maybe-async/is_sync", "bv-storage/sync_handler", "bv-logical/sync_handler"]
+# Compiles `destination_policy::DestinationPolicy::permit_for_tests`, the
+# seam that lets an in-process test target on loopback past the brokered-
+# session destination policy (features/mcp-brokered-sessions.md §11). Only
+# dev-dependencies enable it; a release build never compiles the seam.
+test-support = []
 
 # Exactly the three lints this crate's code trips, each already allowed by
 # the root crate's `[lints.clippy]`. Stated per-crate rather than inherited

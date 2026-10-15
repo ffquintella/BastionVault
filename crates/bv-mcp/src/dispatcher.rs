@@ -6,11 +6,36 @@ use serde_json::{Map, Value};
 
 use crate::{
     catalogue::{self, ToolMeta},
-    error::McpError,
+    error::{session_error_from_backend, McpError},
     jsonrpc::CallToolResult,
     request_state::{self, RequestStatePayload, SingleUseGuard},
-    sanitize::sanitize_for_model,
+    sanitize::{forbidden_command_char, sanitize_for_model},
+    untrusted::{self, SessionProtocol, UntrustedSource},
 };
+
+/// The route `bv_resource_ssh_exec` dispatches to
+/// (`features/mcp-brokered-sessions.md` §13). The handler accepts only
+/// requests this dispatcher routes (`Request::mcp_dispatch`).
+pub const SSH_EXEC_PATH: &str = "resources/v2/connect/agent/ssh/exec";
+
+/// Longest session command, in bytes (§11 "Limits": default and ceiling).
+pub const MAX_SESSION_COMMAND_BYTES: usize = 4096;
+
+/// Largest `timeout_secs` a session call may ask for: the server's ceiling
+/// for `call_timeout_secs`. The handler further refuses anything above the
+/// configured value.
+pub const MAX_SESSION_TIMEOUT_SECS: u64 = 120;
+
+/// Longest resource name or profile id a session tool accepts.
+pub const MAX_SESSION_NAME_BYTES: usize = 128;
+
+/// The final cap on a shaped `bv_resource_ssh_exec` result (§8 step 6). The
+/// handler returns at most `max_output_bytes` of output (ceiling 256 KiB),
+/// carried twice — in `structuredContent` and in the text — and at most
+/// doubled by JSON escaping once the sanitizer has removed every control but
+/// `\n` and `\t`; 64 KiB covers the rest. A result over it means a cap did
+/// not hold, and is refused rather than cut.
+pub const SSH_EXEC_RESULT_CEILING_BYTES: usize = 4 * 262_144 + 65_536;
 
 /// Non-secret facts about the calling principal, needed only to answer
 /// `bv_whoami` without a routed request (spec §7: "answered from the token
@@ -90,8 +115,11 @@ pub(crate) async fn dispatch(
 
     // Destructiveness is a property of the tool itself (write/delete/issue),
     // not an opt-in request argument the way `reveal` is — a destructive
-    // tool is refused outright unless the binding allows it.
-    if meta.destructive {
+    // tool is refused outright unless the binding allows it. A session tool
+    // is the exception: its grant is `connect_allowed` (checked above) and
+    // its confirmation is the operator's, on every call; its
+    // `destructiveHint` is advice to the client, not a second grant.
+    if meta.destructive && !meta.open_world {
         check_destructive_gate(meta.destructive, ctx.binding)?;
     }
 
@@ -104,7 +132,7 @@ pub(crate) async fn dispatch(
     // destructive and a reveal) — combine into a single MRTR round trip
     // rather than asking twice.
     let needs_reveal_confirm = meta.is_reveal && reveal_requested && ctx.confirm_reveal;
-    let needs_destructive_confirm = meta.destructive && ctx.confirm_destructive;
+    let needs_destructive_confirm = meta.destructive && !meta.open_world && ctx.confirm_destructive;
     if needs_reveal_confirm || needs_destructive_confirm {
         let decision = match (needs_reveal_confirm, needs_destructive_confirm) {
             (true, true) => "reveal+destructive",
@@ -117,9 +145,15 @@ pub(crate) async fn dispatch(
         }
     }
 
-    let response =
-        ctx.backend.handle(req.operation, &req.path, req.body, ctx.token).await.map_err(map_backend_error)?;
+    let response = ctx
+        .backend
+        .handle(req.operation, &req.path, req.body, ctx.token)
+        .await
+        .map_err(|e| map_backend_error(meta, e))?;
 
+    if meta.open_world {
+        return shape_session_result(meta, &args, response);
+    }
     Ok(shape_result(meta, reveal_requested, response))
 }
 
@@ -180,8 +214,74 @@ pub fn args_hash(args: &Map<String, Value>) -> String {
     blake3::hash(&bytes).to_hex().to_string()
 }
 
-fn map_backend_error(err: ClientError) -> McpError {
-    McpError::Backend(err.to_string())
+/// A routed call's failure. A session handler leads its refusals with a
+/// stable code ([`crate::error::SESSION_ERROR_CODES`]), which is carried
+/// through as `data.code`; anything else is a plain backend error.
+fn map_backend_error(meta: &ToolMeta, err: ClientError) -> McpError {
+    let message = err.to_string();
+    if meta.open_world {
+        if let Some(session) = session_error_from_backend(&message) {
+            return session;
+        }
+    }
+    McpError::Backend(message)
+}
+
+/// Steps 5 and 6 of §8 for a session result: the handler has already capped,
+/// decoded, credential-scrubbed and sanitized the output (it holds the
+/// credential; this side never does). Here it is wrapped in the untrusted
+/// envelope — the constant preamble, `structuredContent.untrusted` — and the
+/// whole result is checked against its ceiling.
+fn shape_session_result(
+    meta: &ToolMeta,
+    args: &Map<String, Value>,
+    response: Option<bv_client::JsonResponse>,
+) -> Result<CallToolResult, McpError> {
+    let data = response.and_then(|r| r.data).unwrap_or_default();
+    let (protocol, ceiling) = match meta.name {
+        "bv_resource_ssh_exec" => (SessionProtocol::Ssh, SSH_EXEC_RESULT_CEILING_BYTES),
+        other => return Err(McpError::UnknownTool(other.to_string())),
+    };
+    let source = UntrustedSource {
+        protocol,
+        resource: args.get("resource").and_then(Value::as_str).unwrap_or_default(),
+        profile: args.get("profile").and_then(Value::as_str).unwrap_or_default(),
+    };
+    let body = render_ssh_text(&data);
+    let result = untrusted::envelope(&source, &body, data);
+    untrusted::check_result_size(&result, ceiling)?;
+    Ok(result)
+}
+
+/// The text a client without `structuredContent` support shows: the exit
+/// status and both streams, with their byte counts. Follows the constant
+/// preamble; the envelope sanitizes it again.
+fn render_ssh_text(data: &Map<String, Value>) -> String {
+    let mut out = String::new();
+    let timed_out = data.get("timed_out").and_then(Value::as_bool).unwrap_or(false);
+    match (data.get("exit_status").and_then(Value::as_u64), data.get("exit_signal").and_then(Value::as_str)) {
+        _ if timed_out => out.push_str("timed out; the command was sent KILL"),
+        (Some(status), _) => out.push_str(&format!("exit status: {status}")),
+        (None, Some(signal)) => out.push_str(&format!("killed by signal: {signal}")),
+        (None, None) => out.push_str("exit status: unknown"),
+    }
+    let binary = data.get("binary_output").and_then(Value::as_bool).unwrap_or(false);
+    for stream in ["stdout", "stderr"] {
+        let bytes = data.get(&format!("{stream}_bytes")).and_then(Value::as_u64).unwrap_or(0);
+        let truncated = data.get(&format!("{stream}_truncated")).and_then(Value::as_bool).unwrap_or(false);
+        let cut = if truncated { ", truncated" } else { "" };
+        if binary {
+            out.push_str(&format!("\n\n{stream}: binary output ({bytes} bytes{cut}), not shown"));
+            continue;
+        }
+        let text = data.get(stream).and_then(Value::as_str).unwrap_or_default();
+        if bytes == 0 && text.is_empty() {
+            out.push_str(&format!("\n\n{stream}: (empty)"));
+        } else {
+            out.push_str(&format!("\n\n--- {stream} ({bytes} bytes{cut}) ---\n{text}"));
+        }
+    }
+    out
 }
 
 fn whoami_result(principal: &PrincipalInfo) -> CallToolResult {
@@ -341,6 +441,69 @@ fn resource_name(args: &Map<String, Value>) -> Result<String, McpError> {
         return Err(McpError::InvalidArgument("a resource name may not contain `/`".into()));
     }
     Ok(name)
+}
+
+/// Session tools take exactly their declared arguments: what the operator
+/// confirms is the whole call, so nothing may ride along unshown.
+fn check_known_args(args: &Map<String, Value>, known: &[&str]) -> Result<(), McpError> {
+    match args.keys().find(|k| !known.contains(&k.as_str())) {
+        Some(extra) => Err(McpError::InvalidArgument(format!("unknown argument `{}`", sanitize_for_model(extra)))),
+        None => Ok(()),
+    }
+}
+
+/// A name a session tool folds into a path or a record lookup: a resource
+/// or a profile id. One segment, bounded, and nothing a reader of the
+/// confirmation could not see.
+fn session_name<'a>(args: &'a Map<String, Value>, key: &str) -> Result<&'a str, McpError> {
+    let raw = arg_str(args, key)?;
+    if raw.is_empty() || raw.len() > MAX_SESSION_NAME_BYTES {
+        return Err(McpError::InvalidArgument(format!("`{key}` must be 1-{MAX_SESSION_NAME_BYTES} bytes")));
+    }
+    if raw.trim() != raw || raw.contains('/') || raw.contains("..") {
+        return Err(McpError::InvalidArgument(format!(
+            "`{key}` must be one path segment, with no `/`, `..` or surrounding whitespace"
+        )));
+    }
+    if let Some(c) = forbidden_command_char(raw) {
+        return Err(McpError::InvalidArgument(format!("`{key}` contains U+{:04X}, which is not allowed", c as u32)));
+    }
+    Ok(raw)
+}
+
+/// `bv_resource_ssh_exec`'s `command` (§5.1): UTF-8 (a JSON string already
+/// is), 1-4096 bytes, and no character [`forbidden_command_char`] names.
+/// Refused, never cleaned: the operator confirms exactly what runs. The
+/// handler repeats this check.
+fn session_command(args: &Map<String, Value>) -> Result<&str, McpError> {
+    let command = arg_str(args, "command")?;
+    if command.is_empty() || command.len() > MAX_SESSION_COMMAND_BYTES {
+        return Err(McpError::InvalidArgument(format!(
+            "`command` is {} bytes; it must be 1-{MAX_SESSION_COMMAND_BYTES}",
+            command.len()
+        )));
+    }
+    if let Some(c) = forbidden_command_char(command) {
+        return Err(McpError::InvalidArgument(format!(
+            "`command` contains U+{:04X}, a control, bidi, zero-width, tag or other invisible character; \
+             a session command is refused rather than cleaned, so the operator confirms exactly what runs",
+            c as u32
+        )));
+    }
+    Ok(command)
+}
+
+/// The optional `timeout_secs`: an integer in 1..=[`MAX_SESSION_TIMEOUT_SECS`].
+fn session_timeout(args: &Map<String, Value>) -> Result<Option<u64>, McpError> {
+    match args.get("timeout_secs") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => match v.as_u64() {
+            Some(n) if (1..=MAX_SESSION_TIMEOUT_SECS).contains(&n) => Ok(Some(n)),
+            _ => Err(McpError::InvalidArgument(format!(
+                "`timeout_secs` must be an integer in 1..={MAX_SESSION_TIMEOUT_SECS}"
+            ))),
+        },
+    }
 }
 
 fn arg_str<'a>(args: &'a Map<String, Value>, key: &str) -> Result<&'a str, McpError> {
@@ -542,6 +705,29 @@ fn build_tool_request(tool: &str, args: &Map<String, Value>) -> Result<ToolReque
                 path: format!("ssh/sign/{role}"),
                 body: Some(body),
                 scope_subject: None,
+            })
+        }
+        "bv_resource_ssh_exec" => {
+            check_known_args(args, &["resource", "profile", "command", "timeout_secs"])?;
+            let resource = normalize_component(session_name(args, "resource")?)?;
+            let profile = session_name(args, "profile")?;
+            let command = session_command(args)?;
+            let mut body = Map::new();
+            body.insert("resource".into(), Value::String(resource.clone()));
+            body.insert("profile_id".into(), Value::String(profile.to_string()));
+            body.insert("command".into(), Value::String(command.to_string()));
+            if let Some(timeout) = session_timeout(args)? {
+                body.insert("timeout_secs".into(), Value::from(timeout));
+            }
+            // The scope subject is the path the `connect` capability is
+            // checked on (§1): a scope for describing a resource
+            // (`resources/resources/<name>`) must not become one for
+            // connecting to it.
+            Ok(ToolRequest {
+                operation: Operation::Write,
+                path: SSH_EXEC_PATH.to_string(),
+                body: Some(body),
+                scope_subject: Some(format!("resources/secrets/{resource}/")),
             })
         }
         other => Err(McpError::UnknownTool(other.to_string())),

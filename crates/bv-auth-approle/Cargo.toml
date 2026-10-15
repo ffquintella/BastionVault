@@ -1,6 +1,6 @@
 [package]
 name = "bv-auth-approle"
-version = "0.41.4"
+version = "0.41.5"
 edition = "2021"
 description = "BastionVault's AppRole auth backend: role IDs, secret IDs and machine binding"
 license = "Apache-2.0"
@@ -21,7 +21,7 @@ bv-context = { path = "../bv-context", version = "0.41.0", registry = "uox-basti
 bv-logical = { path = "../bv-logical", version = "0.42.0", registry = "uox-bastionvault" }
 bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-bastionvault" }
 bv-utils = { path = "../bv-utils", version = "0.41.0", registry = "uox-bastionvault" }
-bv-kernel-api = { path = "../bv-kernel-api", version = "0.41.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.42.0", registry = "uox-bastionvault" }
 bv-auth-audit = { path = "../bv-auth-audit", version = "0.41.0", registry = "uox-bastionvault" }
 bv-auth-ferrogate = { path = "../bv-auth-ferrogate", version = "0.41.0", registry = "uox-bastionvault" }
 

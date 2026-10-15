@@ -15,6 +15,7 @@
 
 pub mod agent_access;
 pub mod agent_limits;
+pub mod agent_ssh;
 pub mod connect_clipboard;
 pub mod connect_mfa;
 pub mod connect_provider;
@@ -292,6 +293,11 @@ pub struct ResourceModule {
 
 pub struct ResourceBackendInner {
     pub core: Arc<dyn VaultCtx>,
+    /// This node's MCP brokered-session limiter (`agent_limits`), shared by
+    /// every resource mount, built from the server config on first use.
+    /// Read only by the SSH executor, so unread in a build without it.
+    #[cfg_attr(not(all(feature = "mcp_sessions_ssh", not(feature = "sync_handler"))), allow(dead_code))]
+    agent_limiter: std::sync::OnceLock<agent_limits::SessionLimiter>,
 }
 
 #[derive(Deref)]
@@ -302,9 +308,7 @@ pub struct ResourceBackend {
 
 impl ResourceBackend {
     pub fn new(core: Arc<dyn VaultCtx>) -> Self {
-        Self {
-            inner: Arc::new(ResourceBackendInner { core }),
-        }
+        Self { inner: Arc::new(ResourceBackendInner { core, agent_limiter: std::sync::OnceLock::new() }) }
     }
 
     pub fn new_backend(&self) -> LogicalBackend {
@@ -336,6 +340,7 @@ impl ResourceBackend {
         let h_web_close = self.inner.clone();
         let h_clipboard_audit = self.inner.clone();
         let h_cfg_effective = self.inner.clone();
+        let h_agent_ssh_exec = self.inner.clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -785,6 +790,42 @@ impl ResourceBackend {
                     ],
                     help: "Record a batch of RDP clipboard transfers (direction, kind, outcome, byte \
                            counts) for the audit trail. Never content or file names."
+                },
+                {
+                    // MCP brokered sessions, SSH (features/mcp-brokered-sessions.md
+                    // §5, §13). Answers only the MCP dispatcher: a request
+                    // without `Request::mcp_dispatch` and an MCP binding is
+                    // refused, so this is not a general remote-exec API. Not
+                    // in the `default` policy: an administrator grants
+                    // `update` on it. See agent_ssh/mod.rs.
+                    pattern: r"v2/connect/agent/ssh/exec$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name the SSH profile lives on."
+                        },
+                        "profile_id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Connection-profile id of an SSH profile with agent_access = allow."
+                        },
+                        "command": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "The operator-confirmed command, run verbatim on one exec channel."
+                        },
+                        "timeout_secs": {
+                            field_type: FieldType::Int,
+                            required: false,
+                            description: "Call budget in seconds, at most mcp.brokered_sessions.call_timeout_secs."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_agent_ssh_exec.handle_agent_ssh_exec}
+                    ],
+                    help: "Run one confirmed command on a resource over a vault-brokered SSH session \
+                           (MCP bv_resource_ssh_exec only). Returns capped, credential-scrubbed, sanitized output."
                 }
             ],
             secrets: [{

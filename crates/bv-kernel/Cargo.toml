@@ -1,6 +1,6 @@
 [package]
 name = "bv-kernel"
-version = "0.42.0"
+version = "0.42.1"
 edition = "2021"
 description = "BastionVault's kernel tier: tokens and leases, identity, policy, namespaces, resource groups and the sys/ backend"
 license = "Apache-2.0"
@@ -28,7 +28,7 @@ bv-logical = { path = "../bv-logical", version = "0.42.0", registry = "uox-basti
 bv-utils = { path = "../bv-utils", version = "0.41.0", registry = "uox-bastionvault" }
 bv-audit = { path = "../bv-audit", version = "0.42.0", registry = "uox-bastionvault" }
 bv-metrics = { path = "../bv-metrics", version = "0.41.0", registry = "uox-bastionvault" }
-bv-kernel-api = { path = "../bv-kernel-api", version = "0.41.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.42.0", registry = "uox-bastionvault" }
 bv-core = { path = "../bv-core", version = "0.42.0", registry = "uox-bastionvault" }
 # The model-checked decision core: `ACL::allow_operation` and
 # `Permissions::check` delegate every verdict to it, so the Kani proofs in

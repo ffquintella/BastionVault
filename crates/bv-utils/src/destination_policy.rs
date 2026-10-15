@@ -32,16 +32,25 @@
 //! can all reach, so the three agree on what a valid entry is and on what
 //! "overlaps an always-denied class" means.
 //!
+//! **The vault's own host.** A listener bound to an unspecified address
+//! answers on every address of the host, and Docker bridges, VPN tunnels and
+//! secondary interfaces add more. Rather than enumerate them once at start,
+//! [`DestinationPolicy::deny_host_addresses`] asks the kernel at dial time
+//! whether an address is one of this host's own ([`is_host_local_address`]),
+//! so an interface that came up after start is denied too. Every brokered
+//! session executor turns it on.
+//!
 //! **Tests.** In-process test targets listen on loopback, which nothing may
 //! re-allow, so a test needs a way past rule 3. That seam
 //! ([`DestinationPolicy::permit_for_tests`]) is compiled only under
-//! `cfg(test)`; no production constructor and no configuration key can reach
-//! it.
+//! `cfg(test)` or this crate's `test-support` feature, which only
+//! dev-dependencies enable; no production constructor and no configuration
+//! key can reach it, and a release build compiles neither.
 
 use std::{
     collections::HashSet,
     fmt,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket},
     str::FromStr,
 };
 
@@ -412,7 +421,9 @@ pub struct DestinationPolicy {
     allowed: TargetCidrs,
     vault_listeners: HashSet<IpAddr>,
     cluster_nodes: HashSet<IpAddr>,
-    #[cfg(test)]
+    /// Refuse every address this host owns ([`Self::deny_host_addresses`]).
+    deny_host_addresses: bool,
+    #[cfg(any(test, feature = "test-support"))]
     test_permits: Vec<IpNetwork>,
 }
 
@@ -430,27 +441,48 @@ impl DestinationPolicy {
             allowed,
             vault_listeners: vault_listeners.into_iter().map(normalize_ip).collect(),
             cluster_nodes: cluster_nodes.into_iter().map(normalize_ip).collect(),
-            #[cfg(test)]
+            deny_host_addresses: false,
+            #[cfg(any(test, feature = "test-support"))]
             test_permits: Vec::new(),
         }
     }
 
+    /// Also refuse every address of this host's own interfaces, checked at
+    /// dial time with [`is_host_local_address`] and reported as
+    /// [`AlwaysDenied::VaultListener`]. This is what covers a listener bound
+    /// to an unspecified address, and an interface added after start.
+    /// Every session executor builds its policy with this on.
+    pub fn deny_host_addresses(mut self) -> Self {
+        self.deny_host_addresses = true;
+        self
+    }
+
     /// **Test-only.** Lets addresses inside `net` past the always-denied
     /// classes (an in-process target listens on loopback). Compiled only
-    /// under `cfg(test)`; a release build has neither this method nor the
-    /// field it sets.
-    #[cfg(test)]
+    /// under `cfg(test)` or the `test-support` feature, which only
+    /// dev-dependencies turn on; a release build has neither this method nor
+    /// the field it sets.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn permit_for_tests(mut self, net: IpNetwork) -> Self {
         self.test_permits.push(normalize_net(net));
         self
     }
 
-    #[cfg(test)]
+    /// **Test-only.** [`Self::permit_for_tests`] for `127.0.0.0/8` and
+    /// `::1`, where an in-process test target listens; spares a caller the
+    /// `ipnetwork` dependency.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn permit_loopback_for_tests(self) -> Self {
+        self.permit_for_tests(IpNetwork::from_str("127.0.0.0/8").expect("valid literal"))
+            .permit_for_tests(IpNetwork::from_str("::1/128").expect("valid literal"))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     fn test_permitted(&self, addr: IpAddr) -> bool {
         self.test_permits.iter().any(|n| n.contains(addr))
     }
 
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     fn test_permitted(&self, _addr: IpAddr) -> bool {
         false
     }
@@ -469,6 +501,9 @@ impl DestinationPolicy {
         }
         if self.cluster_nodes.contains(&addr) {
             return Err(DestinationRefusal::AlwaysDenied { addr, class: AlwaysDenied::ClusterNode });
+        }
+        if self.deny_host_addresses && is_host_local_address(addr) {
+            return Err(DestinationRefusal::AlwaysDenied { addr, class: AlwaysDenied::VaultListener });
         }
         if !self.allowed.contains(addr) {
             return Err(DestinationRefusal::NotAllowed { addr });
@@ -505,6 +540,17 @@ impl DestinationPolicy {
         }
         Ok(CheckedTarget { addrs })
     }
+}
+
+/// Whether `addr` is one of this host's own interface addresses: the kernel
+/// lets a socket bind only to an address the host owns, so a throwaway UDP
+/// bind to `addr:0` answers the question without enumerating interfaces and
+/// without `unsafe`. Nothing is sent. A host configured to bind non-local
+/// addresses (Linux `net.ipv4.ip_nonlocal_bind = 1`, or `IP_FREEBIND` set
+/// system-wide) reports every address as its own, which refuses every
+/// destination: the failure is closed, and loud.
+pub fn is_host_local_address(addr: IpAddr) -> bool {
+    UdpSocket::bind(SocketAddr::new(normalize_ip(addr), 0)).is_ok()
 }
 
 /// A single address or a CIDR block, the form an OpenSSH certificate's
@@ -803,5 +849,27 @@ mod tests {
             DestinationPolicy::new(wide(), [], []).permit_for_tests(IpNetwork::from_str("127.0.0.0/8").unwrap());
         assert_eq!(seamed.check(ip("127.0.0.1")), Ok(ip("127.0.0.1")));
         assert!(seamed.check(ip("169.254.169.254")).is_err(), "the seam admits only what it names");
+    }
+
+    /// The kernel knows which addresses are this host's: loopback always,
+    /// TEST-NET-1 (RFC 5737) never.
+    #[test]
+    fn host_local_addresses_are_asked_of_the_kernel() {
+        assert!(is_host_local_address(ip("127.0.0.1")));
+        assert!(is_host_local_address(ip("::ffff:127.0.0.1")), "mapped form is normalized first");
+        assert!(!is_host_local_address(ip("192.0.2.1")));
+    }
+
+    /// With the host check on, an allowed address that is not the host's
+    /// passes, and the check runs after the fixed classes so loopback still
+    /// reports as loopback.
+    #[test]
+    fn the_host_check_only_adds_refusals() {
+        let policy = policy(&["192.0.2.0/24"]).deny_host_addresses();
+        assert_eq!(policy.check(ip("192.0.2.1")), Ok(ip("192.0.2.1")));
+        assert_eq!(
+            policy.check(ip("127.0.0.1")),
+            Err(DestinationRefusal::AlwaysDenied { addr: ip("127.0.0.1"), class: AlwaysDenied::Loopback })
+        );
     }
 }

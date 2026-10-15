@@ -186,6 +186,23 @@ fn with_client_info(message: &Map<String, Value>, handshake: &Handshake) -> Valu
     Value::Object(message)
 }
 
+/// The `_meta` namespace that belongs to this gatekeeper: the operator's
+/// confirmation record and, later, a connect MFA ticket
+/// (`features/mcp-brokered-sessions.md` §3 step 3, §9). The vault trusts
+/// what arrives under it as the gatekeeper's assertion.
+pub const GATEKEEPER_META_PREFIX: &str = "io.bastionvault/";
+
+/// Remove every `io.bastionvault/*` key a client put in `params._meta`, so
+/// a client cannot assert an operator confirmation (or carry a ticket) on
+/// its own. This gatekeeper asserts none yet, so a brokered-session call it
+/// relays reaches the vault unconfirmed and is refused there
+/// (`mcp_confirmation_required`): fail closed until it confirms them.
+fn strip_gatekeeper_meta(message: &mut Value) {
+    if let Some(meta) = message.get_mut("params").and_then(|p| p.get_mut("_meta")).and_then(Value::as_object_mut) {
+        meta.retain(|key, _| !key.starts_with(GATEKEEPER_META_PREFIX));
+    }
+}
+
 fn major_minor(version: &str) -> String {
     version.splitn(3, '.').take(2).collect::<Vec<_>>().join(".")
 }
@@ -350,10 +367,11 @@ impl LocalServer {
             Err(refusal) => return Some(refusal.into_response(id)),
         };
 
-        let forwarded = match handshake {
+        let mut forwarded = match handshake {
             Some(handshake) => with_client_info(object, handshake),
             None => message.clone(),
         };
+        strip_gatekeeper_meta(&mut forwarded);
         // Last look before the vault: a stop that landed while this call was
         // being resolved refuses it here rather than after it has run.
         if self.is_shut_down() {
@@ -1077,6 +1095,31 @@ pub(super) mod tests {
         let allowed = rig.server.handle_message(&stdio(), &reveal_call(3)).unwrap();
         assert_eq!(allowed["result"]["relayed"], json!(true));
         assert_eq!(rig.prompt.confirms_asked.load(Ordering::SeqCst), 2);
+    }
+
+    /// A client cannot assert the operator's confirmation (or carry any
+    /// other gatekeeper record): every `io.bastionvault/*` key it sends is
+    /// removed before the call is relayed; its other `_meta` keys are not.
+    #[test]
+    fn client_supplied_gatekeeper_meta_is_stripped_before_relaying() {
+        let rig = paired_rig("strip-meta", false);
+        let mut call: Value = serde_json::from_slice(&request(
+            2,
+            "tools/call",
+            json!({ "name": "bv_kv_read_metadata", "arguments": { "mount": "secret", "path": "x" } }),
+        ))
+        .unwrap();
+        call["params"]["_meta"]["io.bastionvault/confirmation"] = json!({ "by": "operator", "at": 1, "mfa": true });
+        call["params"]["_meta"]["io.bastionvault/connect_ticket"] = json!("forged");
+        call["params"]["_meta"]["progressToken"] = json!("kept");
+        let resp = rig.server.handle_message(&stdio(), &serde_json::to_vec(&call).unwrap()).unwrap();
+        assert_eq!(resp["result"]["relayed"], json!(true));
+        let forwards = lock(&rig.link.forwards);
+        let meta = &forwards.last().unwrap().1["params"]["_meta"];
+        assert!(meta.get("io.bastionvault/confirmation").is_none(), "{meta}");
+        assert!(meta.get("io.bastionvault/connect_ticket").is_none(), "{meta}");
+        assert_eq!(meta["progressToken"], json!("kept"));
+        assert_eq!(meta["io.modelcontextprotocol/clientInfo"]["name"], json!("claude-desktop"));
     }
 
     #[test]

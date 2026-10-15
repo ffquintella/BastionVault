@@ -1,6 +1,6 @@
 [package]
 name = "bv-engine-resource"
-version = "0.41.5"
+version = "0.42.0"
 edition = "2021"
 description = "BastionVault's infrastructure-resource engine: assets, connection profiles and the connect-MFA gate"
 license = "Apache-2.0"
@@ -20,7 +20,7 @@ bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastion
 bv-context = { path = "../bv-context", version = "0.41.0", registry = "uox-bastionvault" }
 bv-logical = { path = "../bv-logical", version = "0.42.0", registry = "uox-bastionvault" }
 bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-bastionvault" }
-bv-kernel-api = { path = "../bv-kernel-api", version = "0.41.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.42.0", registry = "uox-bastionvault" }
 
 async-trait = "0.1"
 hex = "0.4"
@@ -47,11 +47,32 @@ base32 = "0.5"
 # this process's heap once the launch bundle is built.
 zeroize = "1.8.2"
 
+# MCP brokered sessions (features/mcp-brokered-sessions.md, `agent_ssh/`).
+# `bv-utils`: the destination policy every session dial is checked against
+# (Tier 0, already under every engine through bv-kernel-api). `bv-mcp`: the
+# untrusted-output shaping (`bv_mcp::untrusted`: joint caps, binary
+# detection, the session-credential scrubber) and the command validator,
+# which must be the dispatcher's own code so the two cannot disagree about
+# what a confirmed command is. `tokio`: the session runs in its own task,
+# with timers, so a request the MCP endpoint drops still closes its
+# connection and records its transcript.
+bv-utils = { path = "../bv-utils", version = "0.41.3", registry = "uox-bastionvault" }
+bv-mcp = { path = "../bv-mcp", version = "0.2.0", registry = "uox-bastionvault" }
+tokio = { version = "1.52", features = ["rt", "time", "net", "sync", "macros"] }
+# The vault-side SSH client for `bv_resource_ssh_exec`, behind the
+# off-by-default `mcp_sessions_ssh` feature. Same pin and features as
+# bv-engine-files' `files_ssh_sync` (see the reasoning there), so enabling
+# it adds no crate and no feature variant to the graph.
+russh = { version = "=0.62.7", optional = true, default-features = true }
+
 [dev-dependencies]
 # The launch-store state machine is tested in-crate over an in-memory
 # `Storage`; its methods are `maybe_async`, so the async build needs a runtime.
 # Same pin as bv-engine-rustion's dev-dependency.
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
+# The SSH executor's tests dial an in-process server on loopback, which the
+# destination policy refuses unless the test seam is compiled in.
+bv-utils = { path = "../bv-utils", features = ["test-support"] }
 
 [features]
 default = []
@@ -60,7 +81,17 @@ sync_handler = [
     "bv-storage/sync_handler",
     "bv-logical/sync_handler",
     "bv-kernel-api/sync_handler",
+    "bv-utils/sync_handler",
 ]
+# Compiles the vault-side SSH executor behind `bv_resource_ssh_exec`
+# (features/mcp-brokered-sessions.md §5.3). Off by default: without it the
+# tool is still listed and every call is refused with
+# `mcp_session_protocol_disabled`.
+mcp_sessions_ssh = ["dep:russh"]
+# Exposes `agent_ssh::test_server`, an in-process SSH server that records
+# every request a client makes, to the facade's end-to-end tests. Only
+# dev-dependencies enable it.
+test-support = []
 
 # Lints this crate's code trips, all of which the root crate already allows.
 [lints.clippy]

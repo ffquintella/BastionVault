@@ -52,6 +52,7 @@ use super::{
     auth::{AuthMountRegistry, TokenService},
     engines::{ConnectMfaGate, LoginClassPolicy, NotificationSink, PluginHost, TotpMfa},
     identity::IdentityService,
+    mcp_sessions::BrokeredSessionEnv,
     namespace::NamespaceRegistry,
     pipeline::{DenialAudit, NsScopeDatafix, RequestPipeline, RerootActivation, UnsealHook},
     policy::PolicyGate,
@@ -77,6 +78,7 @@ pub struct KernelServices {
     connect_mfa: ArcSwap<Option<Arc<dyn ConnectMfaGate>>>,
     totp_mfa: ArcSwap<Option<Arc<dyn TotpMfa>>>,
     plugin_host: ArcSwap<Option<Arc<dyn PluginHost>>>,
+    brokered_sessions: ArcSwap<Option<Arc<dyn BrokeredSessionEnv>>>,
     // The Tier 2 slots: what `Core::handle_request` and `Core::post_unseal`
     // delegate to the kernel tier instead of calling by name. See
     // `crate::pipeline`.
@@ -159,6 +161,16 @@ impl KernelServices {
     // Registered by the assembly layer, not by a `Module`: the plugin runtime
     // is not one.
     service_slot!(set_plugin_host, plugin_host, plugin_host, PluginHost, "plugin runtime");
+    // Registered by the assembly layer, which holds the server config the
+    // brokered-session switches and the vault's own addresses come from.
+    // Empty means no brokered session can open (see `crate::mcp_sessions`).
+    service_slot!(
+        set_brokered_sessions,
+        brokered_sessions,
+        brokered_sessions,
+        BrokeredSessionEnv,
+        "MCP brokered-session environment"
+    );
 
     // ── Tier 2: the request pipeline and the unseal path ──────────────
     service_slot!(

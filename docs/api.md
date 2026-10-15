@@ -1961,8 +1961,28 @@ errors whose `data.code` is one of `mcp_tool_not_allowed`,
 `mcp_invalid_argument`, `mcp_tool_timeout`, `mcp_connect_not_allowed` (a
 session tool on a token without `connect_allowed` and `confirm_connect`) and
 `mcp_connect_requires_local_operator` (a session tool on an app token,
-always). This build's catalogue carries no session tool yet, so no call
-reaches the last two; every tool reports `openWorldHint: false`.
+always), plus the session handler's codes listed under
+[`resources/v2/connect/agent/ssh/exec`](#post-resourcesv2connectagentsshexec-mcp-only).
+
+The catalogue has one session tool, `bv_resource_ssh_exec`, which reports
+`openWorldHint: true`; every other tool reports `false`. **This retracts the
+earlier statement that no tool opens a network connection.** A session tool
+needs the token's `connect_allowed`, is never gated on `destructive_allowed`
+(its `destructiveHint` is advice to the client), and its call timeout is
+`mcp.brokered_sessions.call_timeout_secs` (plus 10 s for the handler to
+answer) instead of `mcp.tool_timeout_secs`. Its arguments are exactly
+`resource`, `profile` (required), `command` and an optional `timeout_secs`;
+any other argument is refused (`mcp_invalid_argument`), as is a command with a
+control, bidi, zero-width, tag, line-separator or other invisible character —
+refused, never cleaned. Its result is wrapped: `structuredContent.untrusted`
+names the source (`{"source": "resource", "protocol": "ssh", "resource",
+"profile"}`) and `content[0].text` starts with a constant preamble saying the
+output is data from a remote system. A shaped result over 1 MiB + 64 KiB is
+refused (`mcp_result_too_large`).
+
+The catalogue hash is
+`3f24b819102aa4d50d194b3a1959232faed5a06777c654a7de20a2ae6fcbd173`; a
+`catalogue_pin` set to an earlier value must be updated.
 
 **Audit.** Every request a `tools/call` routes is recorded with an `mcp`
 block beside `request.data` (`request.mcp`), in the clear:
@@ -2002,8 +2022,13 @@ text, URL paths, page text or images; a command appears only as
 | `connect.agent.aborted` | `session_id`, `cause` (`token_revoked`, `kill_switch`, `timeout`, `executor_error`), `protocol`, `resource`, `profile_id`, `operator`, `pairing_id` |
 | `mcp.transcript.accessed` | `operation` (`read` or `list`), `transcript_id`, `listed`, `found` |
 
-This build emits `connect.agent.refused` (for the dispatcher's refusals) and
-`mcp.transcript.accessed`; the session events arrive with the session tool.
+`connect.agent.refused` comes from the dispatcher (refused before routing)
+or from the session handler (refused after routing, before anything is
+dialed, and on a host-key mismatch); the handler's `reason` is its error code,
+or `permission_denied` when the `connect` gate refused. A session that dialed
+writes one `connect.agent.ssh.exec`, and also `connect.agent.aborted` when it
+was cut short (`timeout`, `token_revoked`, `kill_switch`) or failed after
+dialing (`executor_error`: connection refused, login rejected).
 
 Every string a tool returns has C0/C1 controls (except newline and tab),
 ANSI CSI/OSC sequences, Unicode bidi controls (including LRM, RLM and ALM),
@@ -2117,6 +2142,111 @@ absent means deny at both, so existing types and profiles are unaffected.
   A profile that did not change is not re-vetted on write, so turning a type
   back to `deny` does not block unrelated edits to its resources; the
   session handler re-checks both levels at every call.
+
+### `POST resources/v2/connect/agent/ssh/exec` (MCP only)
+
+The route behind `bv_resource_ssh_exec`
+([spec](../features/mcp-brokered-sessions.md) §5, §13). It is **internal to
+MCP**: a request that the MCP dispatcher did not route for an MCP-bound token
+is refused (`403 mcp_connect_not_allowed`), so it is not a general remote-exec
+API. It is not in the `default` policy; the operator who pairs the assistant
+must hold:
+
+```hcl
+path "resources/v2/connect/agent/ssh/exec" { capabilities = ["update"] }
+path "resources/secrets/<resource>/*"      { capabilities = ["connect"] }
+```
+
+The second line is the connect gate on the resource. An MCP token carries no
+entity, so only a policy grant passes it: ownership and shares never
+authorize an agent.
+
+Body (the dispatcher builds it from the tool's arguments): `resource`,
+`profile_id`, `command`, optional `timeout_secs` (1 to
+`mcp.brokered_sessions.call_timeout_secs`).
+
+Checks, in order, each refusal a stable code and a `connect.agent.refused`
+event; nothing is dialed and no credential is touched before the last one
+passes:
+
+| Step | Refusal |
+|---|---|
+| MCP-dispatched, binding with `connect_allowed` + `confirm_connect` | `mcp_connect_not_allowed` |
+| The binding is a local pairing | `mcp_connect_requires_local_operator` |
+| The gatekeeper's confirmation record (`_meta["io.bastionvault/confirmation"]`, `by: "operator"`) | `mcp_confirmation_required` |
+| The command is valid (as the dispatcher checks it) | `mcp_invalid_argument` |
+| Server config `mcp.brokered_sessions.enabled`, the runtime `brokered_sessions_enabled` | `mcp_brokered_sessions_disabled` |
+| `ssh` in `mcp.brokered_sessions.protocols`; the build has the executor (cargo feature `mcp_sessions_ssh`) | `mcp_session_protocol_disabled` |
+| The connect gate on `resources/secrets/<resource>/` | `403 permission denied` (`reason: permission_denied`) |
+| Type `agent_sessions_max` and profile `agent_access` both `"allow"`; an SSH profile with a supported source and a host-key pin | `mcp_session_profile_not_agent_enabled`, `mcp_session_login_class_unsupported`, `mcp_session_host_key_unpinned` |
+| The profile is not MFA-gated (`require_mfa`) | `mcp_session_mfa_required`; `mcp_session_mfa_unavailable` when the pairing's operator is not a userpass user |
+| No bastion route: a `rustion` profile, a `rustion-required` policy, or `rustion-preferred` with a bastion | `mcp_session_requires_bastion` |
+| Rate (per pairing per minute) and concurrency (one per pairing, `max_concurrent` per node) | `mcp_rate_limited`, `mcp_session_busy` |
+| Destination policy on every resolved address of the target | `mcp_session_destination_refused` |
+
+MFA-gated profiles are refused in this build: the operator's step-up in the
+confirmation dialog is not built yet. The local gatekeepers (`bvault mcp
+serve`, the desktop app) do not yet send the confirmation record either; they
+strip any `io.bastionvault/*` key a client puts in `_meta`, so a session call
+relayed through them is refused with `mcp_confirmation_required` until they
+confirm session calls.
+
+The target is the profile's `target_host`, else the resource's `ip_address`,
+else its `hostname`, on the profile's `target_port` (default 22) — never a
+value from the call. The name is resolved once; every address must pass the
+policy and only checked addresses are dialed. The host key is checked against
+`host_key_pin` before any authentication (`mcp_session_host_key_mismatch`,
+audited as a refusal).
+
+The credential is resolved or minted under the server's authority and used
+only in the vault process:
+
+- **`ssh-engine` (`ca` mode)**, preferred: an ephemeral Ed25519 key is
+  signed per call by `<ssh_mount>/sign/<ssh_role>` for the profile's
+  `username`, requesting `force-command=<the command>`, `source-address`
+  when `mcp.brokered_sessions.ssh.cert_source_addresses` is set, and a 60 s
+  validity. The signed certificate is checked before use; a role that drops
+  `force-command` or `source-address`, adds any extension (its
+  `default_extensions` must be empty), or signs for longer than 60 s is
+  refused naming the role (`422 mcp_session_login_class_unsupported`).
+- **`secret`**: the resource secret's `private_key` (with `passphrase`) or,
+  failing that, its `password`; the login is the secret's `username`, else
+  the profile's.
+
+The vault's client opens one `session` channel, sends one `exec` with the
+command and `EOF`, and never a PTY, shell, environment, X11, agent, subsystem
+or forwarding request; it refuses every channel the target opens towards it.
+
+Response `data` (wrapped by the dispatcher in the untrusted envelope):
+
+```json
+{ "session_id": "as_6f0c…", "exit_status": 0, "exit_signal": null, "timed_out": false,
+  "stdout": "…", "stdout_bytes": 18234, "stdout_truncated": false,
+  "stderr": "", "stderr_bytes": 0, "stderr_truncated": false,
+  "binary_output": false, "credential_echo_redacted": false, "duration_ms": 812,
+  "host_key_fingerprint": "SHA256:…", "login": "password" }
+```
+
+- stdout and stderr share `mcp.brokered_sessions.max_output_bytes`; past it up
+  to 1 MiB more is read and discarded, then the channel is closed. The byte
+  counts are what the target sent.
+- `binary_output: true` omits both strings.
+- The session's own password, passphrase and private-key body lines are
+  replaced with `<redacted:credential>` in every encoding the vault produces;
+  `credential_echo_redacted` says so.
+- At the call timeout the command is sent `KILL` and `timed_out: true` is
+  returned. A connection that cannot be set up within 10 s fails with
+  `mcp_session_timeout`; a refused connection or login with
+  `mcp_session_failed`.
+- The session's token and the runtime switch are re-checked every second:
+  revoking the pairing or its token, signing out, or turning
+  `brokered_sessions_enabled` off ends a running session within two seconds
+  (`409 mcp_session_aborted`).
+
+Every session that ran is recorded in a transcript
+([`v2/sys/mcp/transcripts`](#get-v2sysmcptranscripts)): the command, both
+streams as captured (up to 1 MiB each, credential-scrubbed, not sanitized),
+the exit status and the host key.
 
 ## Response Format
 

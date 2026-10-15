@@ -26,6 +26,9 @@ normal vault token presented to `/v2/mcp` is refused too. There is no way to
 `bv_resource_list`, `bv_resource_describe`, `bv_transit_encrypt|decrypt|sign|verify`,
 `bv_totp_code`, `bv_pki_list_certs`, `bv_pki_read_cert`. The write tools:
 `bv_kv_write`, `bv_kv_delete` (soft-delete only), `bv_pki_issue`, `bv_ssh_sign`.
+The session tool: `bv_resource_ssh_exec`, which runs one command on a server
+over an SSH session the vault opens (see
+[Brokered SSH sessions](#brokered-ssh-sessions)).
 
 A grant's **path scope** is matched against the path the tool sends to the
 vault, not the argument the assistant typed. Each line is an exact path or a
@@ -38,6 +41,7 @@ prefix ending in `*`:
 | `bv_resource_list` (no arguments) | `resources/resources/` |
 | `bv_resource_describe` (`name`) | `resources/resources/<name>` |
 | `bv_capabilities` (`path`) | the `path` asked about, not `sys/capabilities-self` |
+| `bv_resource_ssh_exec` (`resource`, `profile`, `command`) | `resources/secrets/<resource>/`, the path the `connect` capability is checked on |
 
 So `secret/*` covers every KV tool on the `secret` mount, and `resources/*`
 covers both resource tools.
@@ -46,13 +50,89 @@ Secret **values** come back only when the grant allows `reveal` *and* the call
 asks for it; by default "read a secret" returns its metadata. A tool that
 returns plaintext or a private key (`bv_transit_decrypt`, `bv_totp_code`,
 `bv_pki_issue`) counts as a reveal. There is no tool for `sys/`, `auth/`,
-`kv metadata destroy`, `pki/root/*`, file downloads, or anything that opens a
-network connection, and there never will be.
+`kv metadata destroy`, `pki/root/*` or file downloads.
+
+**Earlier versions of this guide said no tool would ever open a network
+connection. That is no longer true, and the statement is withdrawn.**
+`bv_resource_ssh_exec` connects from the vault to a server and runs a command
+there. It is off unless you turn it on in five places (below), and every call
+must be confirmed by a person.
 
 Tool descriptions are constants in the software. `sys/mcp/config` accepts a
 `catalogue_pin`, and the Admin → MCP Apps → Catalogue tab pins the hash with one
 click. **Note:** endpoint enforcement of the pin is not built yet (T94); the pin
 is recorded and shown as matching or not, nothing more.
+
+## Brokered SSH sessions
+
+`bv_resource_ssh_exec` lets a paired assistant run **one command** on a
+resource's server. The vault opens the SSH session, runs the command, closes
+the session and returns capped, sanitized output. The assistant never
+receives a password, key or certificate. The design, and what it does not
+protect against, is in
+[`features/mcp-brokered-sessions.md`](../features/mcp-brokered-sessions.md).
+
+> **This build:** the vault side is complete, but the local gatekeepers do not
+> yet ask you to confirm a session call, so every call is refused
+> (`mcp_confirmation_required`) until they do. MFA-gated profiles are refused
+> too (`mcp_session_mfa_required`) until the confirmation dialog can run your
+> step-up.
+
+**What turns it on.** All of these, and a binary built with the
+`mcp_sessions_ssh` cargo feature:
+
+1. The server config:
+
+   ```hcl
+   mcp {
+     brokered_sessions {
+       enabled   = true
+       protocols = ["ssh"]
+       # allowed_target_cidrs = ["10.20.0.0/16"]   # default: RFC 1918 + fc00::/7
+       # call_timeout_secs = 20, max_output_bytes = 65536, rate_per_binding_per_min = 6, max_concurrent = 4
+       # ssh { cert_source_addresses = ["203.0.113.7"] }
+     }
+   }
+   ```
+
+2. The runtime switch: `bvault write sys/mcp/config brokered_sessions_enabled=true`
+   (sudo). Turning it off ends running sessions within two seconds.
+3. The resource type: `connect.agent_sessions_max = "allow"` in the saved type
+   configuration.
+4. The connection profile: `agent_access = "allow"`, an SSH profile with a
+   `host_key_pin` (`SHA256:…`) and an `ssh-engine` (CA mode) or `secret`
+   credential source.
+5. The pairing: `connect_allowed`, chosen when you approve the assistant. A
+   pairing that may also reveal secrets can carry a revealed secret into a
+   command; the only check on that is you, reading the command before you
+   allow it.
+
+The operator also needs `update` on `resources/v2/connect/agent/ssh/exec` and
+`connect` on `resources/secrets/<resource>/*`, granted by policy — ownership
+and shares never authorize an assistant. Network-mode apps can never open
+sessions.
+
+**Logins.** A certificate minted per call is preferred: the SSH engine role
+must allow `force-command` (and `source-address` when
+`cert_source_addresses` is set), add no `default_extensions`, and sign for at
+most 60 s; the server then runs only the confirmed command. A stored password
+or key also works, used inside the vault only; for a key, put `restrict` on
+its `authorized_keys` line, since only the vault's own client keeps it to one
+command.
+
+**What the vault refuses to dial.** Only addresses inside the allow-list, and
+never loopback, link-local (including `169.254.169.254`), multicast, this
+host's own addresses or the cluster's nodes, whatever the list says. The name
+is resolved once and only the checked addresses are dialed. The host key must
+match the pin before any credential is sent.
+
+**What is recorded.** Every refusal and every session is audited
+(`connect.agent.refused`, `connect.agent.ssh.exec`, `connect.agent.aborted`;
+the command only as an HMAC). Every session that ran is kept for 30 days as
+an encrypted transcript — the command and its output, with the session's own
+credential removed — readable with `read`/`list` **and** `sudo` on
+`v2/sys/mcp/transcripts`. Transcripts can contain other secrets a command
+printed.
 
 ## Enabling the network endpoint
 
@@ -321,6 +401,14 @@ accept an unattended reveal or write.
 
 ## The limits, stated plainly
 
+**Changed by brokered sessions.** Before `bv_resource_ssh_exec`, an
+assistant needed a second MCP server to combine private data, untrusted
+content and a way to send data out. With sessions enabled, BastionVault alone
+can provide all three, even within one pairing. The control is procedural —
+default-off switches, opt-ins on both sides, the destination allow-list, caps,
+audit and transcripts, and above all **your confirmation of every call** — not
+structural. Read each command before you allow it.
+
 **Protects against:** an assistant given a broad token (it does not work),
 reuse of an MCP token against the REST API, over-broad agents (tool list and
 path scope on top of ACL), unattested hosts (machine identity or an expiring,
@@ -369,5 +457,16 @@ external/enterprise authorization (blocked on the Identity Provider feature).
 | `mcp_token_refused` | Token revoked, expired, or its waiver ended; retry mints a fresh one |
 | `mcp_tool_not_allowed` / `mcp_path_out_of_scope` | Outside the grant |
 | `mcp_reveal_denied` / `mcp_destructive_denied` | The grant does not allow it |
+| `mcp_connect_not_allowed` | The pairing was not granted brokered sessions (`connect_allowed`) |
+| `mcp_confirmation_required` | A session call without your confirmation; this build's gatekeepers do not send one yet |
+| `mcp_brokered_sessions_disabled` / `mcp_session_protocol_disabled` | A switch is off: `mcp.brokered_sessions`, its `protocols`, the runtime switch, or a build without `mcp_sessions_ssh` |
+| `mcp_session_profile_not_agent_enabled` | The type's `agent_sessions_max` or the profile's `agent_access` is not `allow` |
+| `mcp_session_mfa_required` / `mcp_session_mfa_unavailable` | The profile requires MFA; not supported for sessions yet / the operator is not a userpass user |
+| `mcp_session_requires_bastion` | The resource must be reached through Rustion, which cannot run an agent's command |
+| `mcp_session_destination_refused` | The target address is outside `allowed_target_cidrs`, or always denied |
+| `mcp_session_host_key_unpinned` / `mcp_session_host_key_mismatch` | No pin on the profile / the server's key is not the pinned one |
+| `mcp_session_login_class_unsupported` | The credential source cannot be used for sessions, or the SSH role cannot bind the command (named in the message) |
+| `mcp_rate_limited` / `mcp_session_busy` | Too many calls this minute / a session is already open |
+| `mcp_session_timeout` / `mcp_session_failed` / `mcp_session_aborted` | Connecting took over 10 s / the connection or login failed / revoked or switched off mid-session |
 | `is too long for a Unix socket path` | Choose a shorter `--socket` (about 100 bytes) |
 | `is accessible to other users` | `chmod 600` the pairing store |

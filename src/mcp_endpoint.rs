@@ -139,20 +139,18 @@ async fn handle_tools_call(
         single_use_guard: ep.single_use_guard,
     };
 
-    let outcome =
-        match tokio::time::timeout(ep.tool_timeout, dispatcher::call(&tool, args, confirmed_state, &ctx)).await {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                return JsonRpcResponse::failure(
-                    id,
-                    JsonRpcError::with_data_code(
-                        -32603,
-                        "the tool call exceeded mcp.tool_timeout_secs",
-                        "mcp_tool_timeout",
-                    ),
-                )
-            }
-        };
+    let timeout = if session_args.is_some() { session_call_timeout(ep.core) } else { ep.tool_timeout };
+    let outcome = match tokio::time::timeout(timeout, dispatcher::call(&tool, args, confirmed_state, &ctx)).await {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            let message = if session_args.is_some() {
+                "the session call exceeded mcp.brokered_sessions.call_timeout_secs"
+            } else {
+                "the tool call exceeded mcp.tool_timeout_secs"
+            };
+            return JsonRpcResponse::failure(id, JsonRpcError::with_data_code(-32603, message, "mcp_tool_timeout"));
+        }
+    };
     match outcome {
         Ok(result) => JsonRpcResponse::success(id, serde_json::to_value(result).unwrap_or(Value::Null)),
         Err(err) => {
@@ -210,11 +208,33 @@ fn mcp_audit_context(
     }
 }
 
+/// Margin past a session's own call timeout before the endpoint gives up on
+/// it. The session handler bounds the session itself (connect included) and
+/// then records its transcript and events; this lets it answer `timed_out`
+/// rather than be cut off (`features/mcp-brokered-sessions.md` §11). A
+/// session the endpoint does drop still finishes in its own task.
+const SESSION_RESPONSE_MARGIN_SECS: u64 = 10;
+
+/// A session tool's endpoint timeout: `mcp.brokered_sessions.call_timeout_secs`
+/// (as the registered session environment reports it) plus the margin, in
+/// place of `mcp.tool_timeout_secs`.
+fn session_call_timeout(core: &Arc<Core>) -> Duration {
+    let call_timeout = core
+        .kernel_services
+        .brokered_sessions()
+        .map(|env| env.settings().call_timeout_secs)
+        .unwrap_or(core.mcp_brokered_sessions.call_timeout_secs);
+    Duration::from_secs(call_timeout.saturating_add(SESSION_RESPONSE_MARGIN_SECS))
+}
+
 /// Whether the dispatcher refused the call itself, before anything was
 /// routed. A refusal from the session handler underneath arrives as a
-/// backend error and is audited there, with its own code.
+/// backend or session error and is audited there, with its own code.
 fn refused_before_routing(err: &bv_mcp::McpError) -> bool {
-    !matches!(err, bv_mcp::McpError::Backend(_) | bv_mcp::McpError::ResultTooLarge { .. })
+    !matches!(
+        err,
+        bv_mcp::McpError::Backend(_) | bv_mcp::McpError::ResultTooLarge { .. } | bv_mcp::McpError::Session { .. }
+    )
 }
 
 /// `connect.agent.refused` for a session tool the dispatcher refused

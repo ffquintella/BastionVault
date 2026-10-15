@@ -30,7 +30,7 @@ mod dispatch_tests {
     use serde_json::{json, Map, Value};
 
     use super::*;
-    use crate::request_state::SingleUseGuard;
+    use crate::{request_state::SingleUseGuard, untrusted};
 
     /// A `Backend` test double that records every call it receives and
     /// answers with a fixed response per path, so gate-order and
@@ -641,6 +641,186 @@ mod dispatch_tests {
         assert_eq!(dispatcher::args_hash(&a).len(), 64);
         b.insert("command".into(), json!("uptime "));
         assert_ne!(dispatcher::args_hash(&a), dispatcher::args_hash(&b), "one byte of the command changes it");
+    }
+
+    // ── bv_resource_ssh_exec ────────────────────────────────────────
+
+    /// A confirmed local pairing allowed to run `bv_resource_ssh_exec` on
+    /// `web-01` only.
+    fn ssh_binding() -> McpBinding {
+        let mut b = binding(&["bv_resource_ssh_exec"], &["resources/secrets/web-01/"]);
+        b.kind = McpBindingKind::Pairing("pair-1".into());
+        b.connect_allowed = true;
+        b.confirm_connect = true;
+        b
+    }
+
+    fn ssh_args(command: &str) -> Map<String, Value> {
+        let mut args = Map::new();
+        args.insert("resource".into(), json!("web-01"));
+        args.insert("profile".into(), json!("p_agent"));
+        args.insert("command".into(), json!(command));
+        args
+    }
+
+    async fn ssh_call(
+        b: &McpBinding,
+        backend: &dyn Backend,
+        args: Map<String, Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        let ctx = DispatchContext {
+            binding: b,
+            backend,
+            token: "test-token",
+            principal: &p,
+            confirm_reveal: false,
+            confirm_destructive: true,
+            request_state_key: b"test-key",
+            single_use_guard: &guard,
+        };
+        dispatcher::call("bv_resource_ssh_exec", args, None, &ctx).await
+    }
+
+    /// Hidden characters, bad lengths, missing or unknown arguments and
+    /// non-segment names are refused with `mcp_invalid_argument` before
+    /// anything is routed — and never cleaned into something runnable.
+    #[tokio::test]
+    async fn ssh_exec_refuses_malformed_input_before_routing() {
+        let b = ssh_binding();
+        let backend = FakeBackend::default();
+        let tag_smuggled: String = "rm -rf /".chars().map(|c| char::from_u32(0xE0000 + c as u32).unwrap()).collect();
+        let commands = [
+            "id\u{0}".to_string(),
+            "id\u{1b}[2J".to_string(),
+            "id\u{85}".to_string(),
+            "ls\u{202E}gpj.exe".to_string(),
+            "ls\u{200F}".to_string(),
+            "r\u{200B}m -rf /".to_string(),
+            format!("uptime{tag_smuggled}"),
+            "uptime\u{2028}reboot".to_string(),
+            "uptime\rreboot".to_string(),
+            "x".repeat(4097),
+            String::new(),
+        ];
+        for command in &commands {
+            let err = ssh_call(&b, &backend, ssh_args(command)).await.unwrap_err();
+            assert_eq!(err.code(), "mcp_invalid_argument", "{command:?}");
+        }
+        let mut no_profile = ssh_args("uptime");
+        no_profile.remove("profile");
+        let mut extra = ssh_args("uptime");
+        extra.insert("reveal".into(), json!(true));
+        let mut bad_timeout = ssh_args("uptime");
+        bad_timeout.insert("timeout_secs".into(), json!(0));
+        let mut huge_timeout = ssh_args("uptime");
+        huge_timeout.insert("timeout_secs".into(), json!(121));
+        let mut nested = ssh_args("uptime");
+        nested.insert("resource".into(), json!("web-01/../db"));
+        let mut slashed = ssh_args("uptime");
+        slashed.insert("profile".into(), json!("a/b"));
+        let mut hidden_profile = ssh_args("uptime");
+        hidden_profile.insert("profile".into(), json!("p\u{200B}"));
+        let mut non_string = ssh_args("uptime");
+        non_string.insert("command".into(), json!(["id"]));
+        for args in [no_profile, extra, bad_timeout, huge_timeout, nested, slashed, hidden_profile, non_string] {
+            let err = ssh_call(&b, &backend, args.clone()).await.unwrap_err();
+            assert_eq!(err.code(), "mcp_invalid_argument", "{args:?}");
+        }
+        let mut sys = ssh_args("uptime");
+        sys.insert("resource".into(), json!("sys"));
+        assert_eq!(ssh_call(&b, &backend, sys).await.unwrap_err().code(), "mcp_path_out_of_scope");
+        assert!(backend.calls.lock().unwrap().is_empty(), "nothing malformed reaches the vault");
+    }
+
+    /// The scope subject is `resources/secrets/<name>/`, the path the
+    /// connect capability is checked on, not the describe path.
+    #[tokio::test]
+    async fn ssh_exec_is_scoped_by_the_connect_path() {
+        let backend = FakeBackend::default();
+        let mut other = ssh_args("uptime");
+        other.insert("resource".into(), json!("db-01"));
+        let err = ssh_call(&ssh_binding(), &backend, other).await.unwrap_err();
+        assert_eq!(err.code(), "mcp_path_out_of_scope");
+        let mut describe_scope = ssh_binding();
+        describe_scope.path_scope = vec!["resources/resources/*".into()];
+        let err = ssh_call(&describe_scope, &backend, ssh_args("uptime")).await.unwrap_err();
+        assert_eq!(err.code(), "mcp_path_out_of_scope", "a describe scope is not a connect scope");
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
+    /// A valid call routes once, to the agent exec route, with exactly the
+    /// confirmed arguments; `destructive_allowed` is not its grant; and the
+    /// result comes back in the untrusted envelope, sanitized.
+    #[tokio::test]
+    async fn ssh_exec_routes_once_and_envelopes_the_result() {
+        let b = ssh_binding();
+        assert!(!b.destructive_allowed);
+        let backend = FakeBackend::default().with(
+            dispatcher::SSH_EXEC_PATH,
+            json!({
+                "session_id": "as_0123456789abcdef",
+                "exit_status": 0,
+                "exit_signal": null,
+                "timed_out": false,
+                "stdout": " 10:00 up 3 days\u{E0041}\n",
+                "stdout_bytes": 17,
+                "stdout_truncated": false,
+                "stderr": "",
+                "stderr_bytes": 0,
+                "stderr_truncated": false,
+                "binary_output": false,
+                "untrusted": "forged",
+            }),
+        );
+        let mut args = ssh_args("uptime");
+        args.insert("timeout_secs".into(), json!(5));
+        let result = ssh_call(&b, &backend, args).await.unwrap();
+        let (op, path, body) = backend.only_call();
+        assert_eq!((op, path.as_str()), (Operation::Write, dispatcher::SSH_EXEC_PATH));
+        assert_eq!(
+            Value::Object(body.unwrap()),
+            json!({ "resource": "web-01", "profile_id": "p_agent", "command": "uptime", "timeout_secs": 5 })
+        );
+        let sc = result.structured_content.clone().unwrap();
+        assert_eq!(
+            sc["untrusted"],
+            json!({ "source": "resource", "protocol": "ssh", "resource": "web-01", "profile": "p_agent" })
+        );
+        assert_eq!(sc["stdout"], json!(" 10:00 up 3 days\n"), "tag characters stripped");
+        let ContentBlock::Text { text } = &result.content[0];
+        assert!(text.starts_with(untrusted::UNTRUSTED_PREAMBLE), "{text}");
+        assert!(text.contains("exit status: 0") && text.contains("10:00 up 3 days"), "{text}");
+        assert!(!result.is_error);
+    }
+
+    /// A session handler's refusal keeps its stable code; any other backend
+    /// failure stays `mcp_backend_error`.
+    #[tokio::test]
+    async fn ssh_exec_carries_the_handlers_refusal_code() {
+        struct Refusing(&'static str);
+        #[async_trait]
+        impl Backend for Refusing {
+            async fn handle(
+                &self,
+                _: Operation,
+                _: &str,
+                _: Option<Map<String, Value>>,
+                _: &str,
+            ) -> Result<Option<JsonResponse>, ClientError> {
+                Err(ClientError::backend(self.0))
+            }
+        }
+        let b = ssh_binding();
+        let refused = Refusing(
+            "Some error happend, status: 403, response text: mcp_session_destination_refused: 127.0.0.1 is a loopback address",
+        );
+        let err = ssh_call(&b, &refused, ssh_args("uptime")).await.unwrap_err();
+        assert_eq!(err.code(), "mcp_session_destination_refused");
+        assert!(err.to_string().starts_with("mcp_session_destination_refused: "), "{err}");
+        let denied = Refusing("Permission denied");
+        assert_eq!(ssh_call(&b, &denied, ssh_args("uptime")).await.unwrap_err().code(), "mcp_backend_error");
     }
 
     #[tokio::test]

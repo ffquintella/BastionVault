@@ -117,9 +117,69 @@ pub fn sanitize_for_model(input: &str) -> String {
         .collect()
 }
 
+/// Characters with no visible glyph of their own that the sanitizer keeps
+/// in output (they are harmless there) but that a session command may not
+/// carry, because the operator confirming it could not see them: the soft
+/// hyphen, the combining grapheme joiner, the Mongolian vowel separator,
+/// the variation selectors and the Hangul fillers that render as blanks.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{034F}'
+            | '\u{180E}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{E0100}'..='\u{E01EF}'
+            | '\u{115F}'
+            | '\u{1160}'
+            | '\u{3164}'
+            | '\u{FFA0}'
+    )
+}
+
+/// The first character a brokered-session command may not contain, if any
+/// (`features/mcp-brokered-sessions.md` §5.1): a C0 control other than
+/// `\t` and `\n` (NUL and `\r` included), DEL, a C1 control, a bidi
+/// control, a zero-width, tag or interlinear-annotation character, U+2028 /
+/// U+2029, or an invisible format character ([`is_invisible_format`]).
+///
+/// A command carrying one is **refused, not cleaned**: what the operator
+/// confirms must be exactly the bytes that run, and every one of these can
+/// make a command read differently from what executes.
+pub fn forbidden_command_char(command: &str) -> Option<char> {
+    command
+        .chars()
+        .find(|&c| is_stripped(c) || c == '\u{7f}' || c == '\u{2028}' || c == '\u{2029}' || is_invisible_format(c))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commands_with_hidden_characters_are_named() {
+        assert_eq!(forbidden_command_char("journalctl -u nginx | tail -n 20\n\tuptime"), None);
+        assert_eq!(forbidden_command_char("grep 'ação' /var/log/app.log"), None, "plain non-ASCII is fine");
+        for (input, bad) in [
+            ("echo\u{0}x", '\u{0}'),
+            ("safe\rrm -rf /", '\r'),
+            ("a\u{1b}[2Jb", '\u{1b}'),
+            ("a\u{7f}", '\u{7f}'),
+            ("a\u{85}", '\u{85}'),
+            ("ls\u{202E}fdp.exe", '\u{202E}'),
+            ("ls\u{200E}", '\u{200E}'),
+            ("r\u{200B}m", '\u{200B}'),
+            ("id\u{E0041}", '\u{E0041}'),
+            ("one\u{2028}two", '\u{2028}'),
+            ("one\u{2029}two", '\u{2029}'),
+            ("x\u{FFF9}", '\u{FFF9}'),
+            ("rm\u{00AD}-rf", '\u{00AD}'),
+            ("a\u{FE0F}", '\u{FE0F}'),
+            ("a\u{3164}b", '\u{3164}'),
+        ] {
+            assert_eq!(forbidden_command_char(input), Some(bad), "{input:?}");
+        }
+    }
 
     #[test]
     fn preserves_plain_text() {

@@ -122,7 +122,11 @@ impl From<RvError> for TranscriptError {
 /// replaced anything. The resource engine adapts `bv_mcp::untrusted`'s
 /// `CredentialScrubber` to it; a certificate login, which has no reusable
 /// secret, passes [`NoCredential`].
-pub trait TranscriptScrubber {
+///
+/// `Sync`, so a `&dyn TranscriptScrubber` held across [`TranscriptStore::record`]'s
+/// storage writes keeps the future `Send`: a session records its transcript
+/// from its own spawned task.
+pub trait TranscriptScrubber: Sync {
     fn scrub(&self, text: &str) -> (String, bool);
 }
 

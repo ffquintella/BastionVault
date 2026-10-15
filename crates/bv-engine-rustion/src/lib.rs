@@ -2414,6 +2414,11 @@ impl RustionBackendInner {
     /// NOT the caller's `read` capability. The caller's `connect` grant must
     /// already have been verified. `ns_prefix` is the caller's namespace
     /// prefix ([`Self::namespace_sub_request_prefix`]).
+    ///
+    /// The read itself is the shared server-side resolver
+    /// ([`kernel_api::ssh_credentials::resolve_secret_credential`]), which MCP
+    /// agent sessions use too; this path seals a password for the bastion and
+    /// still refuses a stored key, which the bastion envelope cannot carry.
     async fn resolve_secret_credential(
         &self,
         ns_prefix: &str,
@@ -2423,56 +2428,40 @@ impl RustionBackendInner {
     ) -> Result<(String, Option<String>), RvError> {
         use base64::{engine::general_purpose::STANDARD, Engine as _};
 
-        // Route directly through the router so the read runs under the
-        // server's authority, skipping the per-caller ACL gate. The
-        // connect-capability check in `handle_session_open_v2` is the
-        // authorization for this read.
-        let path = format!("{ns_prefix}resources/secrets/{resource_name}/{secret_id}");
-        let mut sub = Request::new(&path);
-        sub.operation = Operation::Read;
-        let resp = self.core.router().handle_request(&mut sub).await?.ok_or_else(|| {
-            bv_error_response_status!(404, &format!("resource secret `{secret_id}` not found for `{resource_name}`"))
-        })?;
-        let data = resp.data.unwrap_or_default();
-        let password = data.get("password").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        if password.is_empty() {
-            return Err(bv_error_response_status!(
+        // The resolver writes the security-log line, attributed to the
+        // connecting operator, so "who pulled a credential to broker a
+        // connect-only session" lands in security.log (the router-direct read
+        // has no caller identity of its own).
+        let actor = auth.metadata.get("username").map(String::as_str).unwrap_or("");
+        let resolved = kernel_api::ssh_credentials::resolve_secret_credential(
+            self.core.as_ref(),
+            ns_prefix,
+            resource_name,
+            secret_id,
+            &kernel_api::ssh_credentials::SecretResolution { audit_label: "rustion-connect-resolve", actor },
+        )
+        .await?;
+        let password = resolved.password.as_ref().ok_or_else(|| {
+            bv_error_response_status!(
                 422,
                 &format!(
                     "secret `{secret_id}` carries no `password` field — only password-shaped \
                      credentials (ssh-password / rdp-password) can be brokered server-side today"
                 )
-            ));
-        }
-        let username = data.get("username").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
-
-        // Mirror the resource module's security-log line so "who pulled a
-        // credential to broker a connect-only session" lands in security.log
-        // attributed to the connecting operator (the router-direct read above
-        // has no caller identity of its own).
-        log::info!(
-            target: "security",
-            "rustion-connect-resolve: user={} resource={} key={}",
-            auth.metadata.get("username").map(String::as_str).unwrap_or(""),
-            resource_name,
-            secret_id
-        );
-
-        Ok((STANDARD.encode(password.as_bytes()), username))
+            )
+        })?;
+        Ok((STANDARD.encode(password.as_bytes()), resolved.username.clone()))
     }
 
-    /// Mint a brokered SSH certificate for the Rustion path: generate an
-    /// ephemeral Ed25519 keypair in-process, sign it via the bound SSH
-    /// engine role (`<mount>/sign/<role>`), and return the base64 private
-    /// key (for the envelope's `credential.material`) plus the signed
-    /// OpenSSH certificate text (for `credential.extra["cert"]`) and its
-    /// serial. The ephemeral private key never leaves this process
-    /// un-sealed and its plaintext copy is zeroized before return.
-    ///
-    /// The sign call runs router-direct under the server's own authority
-    /// (the connect-capability gate in `handle_session_open_v2` is the
-    /// authorization), so a connect-only operator never needs `read` /
-    /// `update` on the SSH engine mount.
+    /// Mint a brokered SSH certificate for the Rustion path through the
+    /// shared minter ([`kernel_api::ssh_credentials::mint_brokered_ssh_cert`]):
+    /// an ephemeral Ed25519 keypair generated in-process, signed via the bound
+    /// SSH engine role (`<mount>/sign/<role>`) router-direct, so a
+    /// connect-only operator never needs `read` / `update` on the SSH engine
+    /// mount. Returns the base64 private key (for the envelope's
+    /// `credential.material`) plus the signed OpenSSH certificate text (for
+    /// `credential.extra["cert"]`) and its serial. The plaintext key is
+    /// zeroized when the minter's buffer drops, right after it is encoded.
     ///
     /// `ns_prefix` is the caller's namespace prefix from
     /// [`Self::namespace_sub_request_prefix`]. The SSH engine that signs the
@@ -2491,55 +2480,20 @@ impl RustionBackendInner {
         principal: Option<&str>,
     ) -> Result<MintedSshCert, RvError> {
         use base64::{engine::general_purpose::STANDARD, Engine as _};
-        use ssh_key::{rand_core::OsRng, Algorithm, LineEnding, PrivateKey};
-        use zeroize::Zeroizing;
 
-        // Ephemeral client keypair — in-memory only, never persisted.
-        let private_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519)
-            .map_err(|e| bv_error_string!(&format!("generate ephemeral ssh keypair: {e}")))?;
-        let public_openssh = private_key
-            .public_key()
-            .to_openssh()
-            .map_err(|e| bv_error_string!(&format!("serialize ephemeral pubkey: {e}")))?;
-        let private_openssh: Zeroizing<String> = Zeroizing::new(
-            private_key
-                .to_openssh(LineEnding::LF)
-                .map_err(|e| bv_error_string!(&format!("serialize ephemeral private key: {e}")))?
-                .to_string(),
-        );
-
-        // Sign the public half via the SSH engine, router-direct.
-        let mut body = Map::new();
-        body.insert("public_key".into(), Value::String(public_openssh));
-        if let Some(p) = principal.filter(|s| !s.is_empty()) {
-            body.insert("valid_principals".into(), Value::String(p.to_string()));
-        }
-        let path = format!("{ns_prefix}{ssh_mount}/sign/{ssh_role}");
-        let mut sub = Request::new_write_request(&path, Some(body));
-        sub.operation = Operation::Write;
-        let resp = self.core.router().handle_request(&mut sub).await?.ok_or_else(|| {
-            bv_error_response_status!(
-                502,
-                &format!("ssh engine `{path}` returned no response while minting brokered cert")
-            )
-        })?;
-        let data = resp.data.unwrap_or_default();
-        let certificate = data
-            .get("signed_key")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                bv_error_response_status!(502, &format!("ssh engine `{path}` sign response missing `signed_key`"))
-            })?
-            .to_string();
-        let serial = data.get("serial_number").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-
-        // Base64 the private key, then drop the plaintext copy. From here
-        // the key lives only inside the sealed envelope ciphertext.
-        let private_key_b64 = STANDARD.encode(private_openssh.as_bytes());
-        drop(private_openssh);
-
-        Ok(MintedSshCert { private_key_b64, certificate, serial })
+        let minted = kernel_api::ssh_credentials::mint_brokered_ssh_cert(
+            self.core.as_ref(),
+            ns_prefix,
+            ssh_mount,
+            ssh_role,
+            &kernel_api::ssh_credentials::BrokeredCertRequest { principal, ..Default::default() },
+        )
+        .await?;
+        // Base64 the private key; the minter's zeroizing buffer drops with
+        // `minted`. From here the key lives only inside the sealed envelope
+        // ciphertext.
+        let private_key_b64 = STANDARD.encode(minted.private_key_openssh.as_bytes());
+        Ok(MintedSshCert { private_key_b64, certificate: minted.certificate.clone(), serial: minted.serial.clone() })
     }
 
     // ─── Phase 5: renew + kill ──────────────────────────────────────

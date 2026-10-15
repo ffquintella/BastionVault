@@ -56,6 +56,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.39] - 2026-10-15
+
 ### Added
 
 #### Web Application Connect — failed loads and untrusted certificates on Windows and Linux (features/web-application-connect.md)
@@ -66,6 +68,17 @@ EXAMPLE ENTRY:
 #### Sharing — identity-group grantees in the GUI (features/per-user-scoping.md)
 
 - **Share resources, KV secrets and files with an identity group from the GUI** -- the Grant access dialog on every Sharing tab now offers *User identity group* and *Application group (AppID)* alongside a direct user, as asset groups already did. A group share grants access only to members whose policies carry `metadata.group_shared_resources = "true"`; the dialog says so. (T27, S33, S18)
+
+#### MCP Brokered Sessions — one-shot SSH commands (features/mcp-brokered-sessions.md)
+
+- **Let a paired AI assistant run one command on an SSH resource through the vault** -- new MCP tool `bv_resource_ssh_exec` (resource, profile, command) and route `resources/v2/connect/agent/ssh/exec`, built behind the `mcp_sessions_ssh` feature. The vault opens the connection itself: it signs a certificate bound to that exact command and valid for 60 seconds, or uses the profile's stored password or key without ever returning it, requires a pinned host key, dials only addresses the destination policy allows, opens one exec channel with no PTY, environment or forwarding, scrubs the credential from the output, caps it and marks it as untrusted, writes a transcript and emits `connect.agent.*` events. Revoking the pairing or token, signing out or turning the switch off ends a running command within 2 seconds. Every call still needs the operator's confirmation, which the desktop app and `bvault mcp serve` do not send yet, so calls are refused with `mcp_confirmation_required` until that lands; MFA-protected profiles and Rustion-routed profiles are refused. (T136, S111)
+- **Stop a client from forging local-host markers** -- `bvault mcp serve` and the desktop app's local server now drop any `io.bastionvault/*` key a client puts in `_meta` before relaying the call. (T136, S111)
+
+### Changed
+
+#### MCP Access — network tools (features/mcp-access.md)
+
+- **The MCP catalogue now contains a tool that opens network connections** -- `bv_resource_ssh_exec` reverses the former "no tool opens a network connection" rule by the owner's decision; `docs/mcp.md` and the MCP Access spec say so. The catalogue hash changed again. (T136, S26, S111)
 
 ### Security
 
@@ -7929,7 +7942,8 @@ Bulk dependency upgrade across the workspace (`Cargo.toml`, `crates/bv-plugin-pa
 
 - Abandon the SQLx storage backend: `libsqlite3-sys` conflicts at link time with hiqlite's `rusqlite`, so `storage "sqlx"` was removed (T5, M2)
 
-[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.38...HEAD
+[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.39...HEAD
+[0.44.39]: https://github.com/ffquintella/BastionVault/compare/v0.44.38...v0.44.39
 [0.44.38]: https://github.com/ffquintella/BastionVault/compare/v0.44.37...v0.44.38
 [0.44.37]: https://github.com/ffquintella/BastionVault/compare/v0.44.36...v0.44.37
 [0.44.36]: https://github.com/ffquintella/BastionVault/compare/v0.44.35...v0.44.36
