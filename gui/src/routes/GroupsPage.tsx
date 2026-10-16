@@ -16,7 +16,8 @@ import {
 } from "../components/ui";
 import type { GroupKind, GroupInfo, GroupHistoryEntry } from "../lib/types";
 import * as api from "../lib/api";
-import { extractError } from "../lib/error";
+import { extractError, isMountNotFound } from "../lib/error";
+import { useNamespaceStore } from "../stores/namespaceStore";
 
 export function GroupsPage() {
   const { toast } = useToast();
@@ -43,27 +44,33 @@ export function GroupsPage() {
   const [formPolicies, setFormPolicies] = useState<string[]>([]);
   const [freeformMembers, setFreeformMembers] = useState("");
 
+  const activeNamespace = useNamespaceStore((s) => s.active);
+
   useEffect(() => {
     loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kind]);
+  }, [kind, activeNamespace]);
 
   async function loadAll() {
     setLoading(true);
     setSelected(null);
     setSelectedInfo(null);
+    // Probe the group listing itself rather than `sys/mounts`: `identity/` is
+    // a header-scoped mount that exists only in the root mount table, so a
+    // child namespace's mount list never contains it even though the backend
+    // serves that namespace's own group keyspace.
     try {
-      const mounts = await api.listMounts().catch(() => []);
-      const enabled = mounts.some((m) => m.path === "identity/");
-      setMountEnabled(enabled);
-      if (!enabled) {
-        setGroups([]);
-        return;
-      }
       const result = await api.listGroups(kind);
+      setMountEnabled(true);
       setGroups(result.groups);
-    } catch {
+    } catch (e: unknown) {
       setGroups([]);
+      if (isMountNotFound(e) || extractError(e).includes("Router mount not found")) {
+        setMountEnabled(false);
+      } else {
+        setMountEnabled(true);
+        toast("error", extractError(e));
+      }
     } finally {
       setLoading(false);
     }
