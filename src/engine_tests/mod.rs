@@ -27,6 +27,7 @@ mod pki_certs_info;
 mod pki_export;
 mod pki_key_ref_policy;
 mod pki_managed_role_key;
+mod pki_tidy_key_refs;
 mod rdp_clipboard;
 mod resource;
 mod resource_connect_web;

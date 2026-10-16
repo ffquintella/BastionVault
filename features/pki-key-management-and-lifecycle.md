@@ -89,6 +89,7 @@ The split is deliberate:
 - `pki/root/generate/{internal|exported}` and `pki/intermediate/generate/{internal|exported}` accept `key_ref` to promote a managed key to issuer instead of generating fresh material. Algorithm-mismatch is rejected. Bindings recorded in `KeyRefs.issuer_ids`. When `key_ref` is supplied on `exported` mode, the route does *not* re-echo the private key (the operator owns it through the key store).
 - `CertRecord.key_id` is populated when a leaf was issued via `key_ref`. `PendingIntermediate.key_id` carries the binding through the two-stage intermediate flow until `set-signed` lands.
 - `pki/revoke` clears the cert-serial binding from the managed key's `KeyRefs` so deletion can succeed once all certs the key bound are revoked. Best-effort: revoke proceeds even if refs cleanup fails.
+- `pki/tidy` clears the binding of every expired cert record it sweeps, before deleting the record, so a key whose bound certs have all been tidied away deletes without `force`. Unlike revoke this is not best-effort: a failed refs update aborts the sweep with an error and keeps the record, so the next run retries. Tidy never deletes the key itself (T144).
 - `build_issuer_chain` walks the local issuer registry by Subject/Issuer DN matching to assemble a `[leaf-issuer, …, root]` PEM array, stopping when it hits a self-signed root or an off-mount parent.
 - New route `READ /v1/pki/issuer/<ref>/chain` returns `{ca_chain, certificate_bundle}`.
 - `pki/issue`, `pki/sign/:role`, and `pki/sign-verbatim` responses now include a `ca_chain` array consistently.

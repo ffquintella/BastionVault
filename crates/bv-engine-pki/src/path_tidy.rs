@@ -184,6 +184,21 @@ pub async fn run_tidy_inner(
                 continue;
             }
             if record.not_after_unix < cutoff {
+                // Release the cert→managed-key binding *before* the record
+                // goes, so a failure can never leave a ref naming a serial
+                // that no longer exists (the next run would not find the
+                // record to retry). The key itself is never deleted here.
+                // A failed ref update aborts the sweep: continuing would
+                // keep the key undeletable without force and hide why.
+                if !record.key_id.is_empty() {
+                    super::keys::remove_cert_ref(req, &record.key_id, &key).await.map_err(|e| {
+                        RvError::ErrString(format!(
+                            "pki/tidy: failed to release managed-key binding for serial {key} on key {}; \
+                             cert record kept, re-run tidy to retry: {e}",
+                            record.key_id,
+                        ))
+                    })?;
+                }
                 req.storage_delete(&storage_key).await?;
                 certs_deleted += 1;
             }

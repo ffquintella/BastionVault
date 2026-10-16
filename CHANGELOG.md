@@ -88,6 +88,10 @@ EXAMPLE ENTRY:
 
 - **Keep session tools out of the default pairing grant** -- the read-only `bv_resource_web_fetch` would otherwise have been preselected for every newly paired assistant; session tools must now be chosen explicitly. (T137, S111)
 
+#### PKI Key Management — tidy (features/pki-key-management-and-lifecycle.md)
+
+- **Let a managed key be deleted once tidy has swept its expired certificates** -- `pki/tidy` removed expired certificate records but left their serials in the bound key's references, so `DELETE pki/key/<ref>` kept refusing the key as "bound" until you passed `force=true`. Tidy now clears each swept certificate's binding first; the key itself is never deleted by tidy. If a binding cannot be cleared, tidy stops with an error naming the serial and key and keeps that certificate record, so running it again retries. Keys already left bound by an earlier tidy still need `force=true` once. (T144, S37)
+
 ### Security
 
 #### Policy authorization
