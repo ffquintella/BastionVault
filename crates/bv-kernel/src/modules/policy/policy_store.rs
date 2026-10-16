@@ -3064,6 +3064,13 @@ async fn resolve_target_shared_caps(
     // because the share is not keyed on the caller's entity_id.
     let group_shared = caller_policies_opt_in_group_shared(&core, req).await;
     if group_shared {
+        // Groups are namespace-scoped and resolved from the token's binding
+        // namespace, exactly as login expands them and as the feed lists them.
+        let binding_ns = req
+            .auth
+            .as_ref()
+            .map(|a| crate::modules::namespace::token_binding::binding_from_metadata(&a.metadata).0)
+            .unwrap_or_default();
         let username = req
             .auth
             .as_ref()
@@ -3086,11 +3093,11 @@ async fn resolve_target_shared_caps(
                     continue;
                 }
                 let m_lc = member.trim().to_lowercase();
-                let Ok(names) = gs.list_groups(kind).await else {
+                let Ok(names) = gs.list_groups_ns(kind, &binding_ns).await else {
                     continue;
                 };
                 for g_name in names {
-                    let Ok(Some(g)) = gs.get_group(kind, &g_name).await else {
+                    let Ok(Some(g)) = gs.get_group_ns(kind, &g_name, &binding_ns).await else {
                         continue;
                     };
                     let is_member =
@@ -3197,10 +3204,14 @@ async fn caller_policies_opt_in_group_shared(core: &crate::core::Core, req: &Req
     else {
         return false;
     };
+    // Policies resolve from the token's binding namespace, the same keyspace
+    // the ACL itself was built from (`new_acl_inner`).
+    let (binding_ns, _) =
+        crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata);
     let pstore = pmodule.policy_store.load();
     for name in &auth.policies {
         if let Ok(Some(p)) = pstore
-            .get_policy(name, crate::modules::policy::policy::PolicyType::Acl)
+            .get_policy_ns(name, crate::modules::policy::policy::PolicyType::Acl, &binding_ns)
             .await
         {
             if p.metadata

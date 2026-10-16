@@ -8389,6 +8389,127 @@ mod mod_system_tests {
         );
     }
 
+    /// A namespace-bound principal whose `group_shared_resources` policy and
+    /// identity group both live in its namespace must see — and open — a
+    /// resource shared with that group. Regression: the opt-in tag and the
+    /// group membership were both read from root's keyspace, so the feed
+    /// showed only direct shares and the ACL refused the group-shared target,
+    /// while the same setup authored at root worked.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_tenant_sees_group_share_inside_its_namespace() {
+        let mut server = TestHttpServer::new("test_tenant_group_share", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        let ns_header = [("X-BastionVault-Namespace", "dti/esi")];
+        for path in ["v1/sys/namespaces/dti", "v1/sys/namespaces/dti/esi"] {
+            let (s, r) = server.write(path, serde_json::json!({}).as_object().cloned(), Some(&root)).unwrap();
+            assert!((200..300).contains(&s), "ns create {path}: {s} {r:?}");
+        }
+
+        // The opt-in policy, authored in the namespace.
+        let (s, r) = server
+            .request_with_headers(
+                "POST",
+                "v1/sys/policies/acl/grp-share",
+                serde_json::json!({
+                    "policy": "path \"dti/esi/secret/data/unused\" { capabilities = [\"read\"] }\nmetadata {\n  group_shared_resources = \"true\"\n}\n"
+                })
+                .as_object()
+                .cloned(),
+                Some(&root),
+                None,
+                &ns_header,
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "tenant policy write: {s} {r:?}");
+
+        let (s, r) = server
+            .request_with_headers(
+                "POST",
+                "v1/resources/resources/team-db",
+                serde_json::json!({ "type": "server" }).as_object().cloned(),
+                Some(&root),
+                None,
+                &ns_header,
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "tenant resource create: {s} {r:?}");
+
+        // The identity group, also in the namespace.
+        let (s, r) = server
+            .request_with_headers(
+                "POST",
+                "v1/identity/group/user/team",
+                serde_json::json!({ "members": ["tina"] }).as_object().cloned(),
+                Some(&root),
+                None,
+                &ns_header,
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "tenant group create: {s} {r:?}");
+
+        server
+            .write("v1/sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
+            .unwrap();
+        server
+            .write(
+                "v1/auth/pass/users/tina",
+                serde_json::json!({ "password": "hunter22XX!", "token_policies": "grp-share", "ttl": 0 })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        let (s, r) = server
+            .request_with_headers(
+                "POST",
+                "v1/auth/pass/login/tina",
+                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                None,
+                None,
+                &ns_header,
+            )
+            .unwrap();
+        assert_eq!(s, 200, "tenant login: {r:?}");
+        let tenant = r["auth"]["client_token"].as_str().unwrap().to_string();
+
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let target_b64 = URL_SAFE_NO_PAD.encode(b"team-db");
+        let (s, r) = server
+            .request_with_headers(
+                "POST",
+                &format!("v2/identity/sharing/by-target/resource/{target_b64}/team"),
+                serde_json::json!({ "capabilities": ["read"], "grantee_kind": "group_user" }).as_object().cloned(),
+                Some(&root),
+                None,
+                &ns_header,
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "group share grant: {s} {r:?}");
+
+        let (s, r) = server
+            .request_with_headers("LIST", "v2/identity/sharing/for-me", None, Some(&tenant), None, &ns_header)
+            .unwrap();
+        assert_eq!(s, 200, "for-me feed: {s} {r:?}");
+        assert_eq!(
+            r["data"]["group_shared_resources"],
+            serde_json::json!(true),
+            "the namespace policy's opt-in tag must be honoured: {r:?}"
+        );
+        let entries = r["data"]["entries"].as_array().cloned().unwrap_or_default();
+        assert!(
+            entries.iter().any(|e| e["target_path"] == "team-db"),
+            "the group share must appear in the feed: {r:?}"
+        );
+
+        let (s, r) = server
+            .request_with_headers("GET", "v1/resources/resources/team-db", None, Some(&tenant), None, &ns_header)
+            .unwrap();
+        assert_eq!(s, 200, "tenant must read the resource shared with its group: {s} {r:?}");
+    }
+
     /// Mounting/unmounting/listing via `sys/mounts` must target the *active
     /// namespace*, never root. Regression for the header-forwarding gap in the
     /// mount shims: engines enabled from a child namespace landed on root
