@@ -56,6 +56,15 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.43] - 2026-10-16
+
+### Fixed
+
+#### Identity groups — desktop app
+
+- **Show identity groups when a child namespace is active in the desktop app** (T26, S18)
+  -- the Identity Groups page decided the identity backend was missing by looking for `identity/` in the active namespace's mount table, which namespaces created before v0.28.3 lack even though identity paths are always served. Under such a namespace the page reported "Identity backend not mounted" for groups that exist. The page now probes the groups list directly and reloads when the active namespace changes.
+
 ## [0.44.42] - 2026-10-16
 
 ### Fixed
@@ -8004,7 +8013,8 @@ Bulk dependency upgrade across the workspace (`Cargo.toml`, `crates/bv-plugin-pa
 
 - Abandon the SQLx storage backend: `libsqlite3-sys` conflicts at link time with hiqlite's `rusqlite`, so `storage "sqlx"` was removed (T5, M2)
 
-[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.42...HEAD
+[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.43...HEAD
+[0.44.43]: https://github.com/ffquintella/BastionVault/compare/v0.44.42...v0.44.43
 [0.44.42]: https://github.com/ffquintella/BastionVault/compare/v0.44.41...v0.44.42
 [0.44.41]: https://github.com/ffquintella/BastionVault/compare/v0.44.40...v0.44.41
 [0.44.40]: https://github.com/ffquintella/BastionVault/compare/v0.44.39...v0.44.40
