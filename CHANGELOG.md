@@ -56,6 +56,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### SFTP Connect — through a Rustion bastion (features/sftp-connect.md)
+
+- Transfer files through a Rustion bastion when the resource's transport policy routes it there (T141, S112)
+  -- an `sftp` profile on a `rustion-required` resource, or a `rustion-preferred` one with bastions configured, used to refuse the session; it now opens through the bastion the same way an SSH session does. The desktop app authenticates to the bastion with a one-shot SSH ticket, pins the bastion's host key, and asks for the `sftp` subsystem, which the bastion relays to the target; the target credential never reaches this machine for stored-secret, SSH-engine and default-account sources. A credential the bastion cannot use (a passphrase-protected key, a FIDO2 security key) is refused under `rustion-required` and dialled direct under `rustion-preferred`, as for SSH. The SFTP window shows the bastion chip (bastion name, time left, renew, terminate), and the session-open audit line names the bastion and its session id. Needs Rustion 0.17.0 or later; an older bastion accepts the subsystem without relaying it, and the open then fails with an error naming the required version.
+
 ### Fixed
 
 #### RDP sessions — desktop app
