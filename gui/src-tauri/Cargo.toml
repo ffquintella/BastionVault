@@ -214,7 +214,7 @@ arboard = { version = "3", default-features = false, features = ["image-data"] }
 # would compile without the `network_client` feature here, so we
 # pin it explicitly. Resolves to the ffquintella/sspi-rs fork via the
 # workspace root `[patch.crates-io]`.
-sspi = { version = "0.21", default-features = false, features = ["network_client", "aws-lc-rs"] }
+sspi = { version = "0.23", default-features = false, features = ["network_client", "aws-lc-rs"] }
 # Used by `commands/pki.rs::pki_import_ca_pkcs12` for PKCS#12 container
 # parsing. Pure-Rust PFX/PKCS#12 reader; `pbes1` feature covers the
 # legacy Windows-friendly cipher modes (RC2 / 3DES) that openssl had to
