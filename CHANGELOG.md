@@ -56,6 +56,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.42] - 2026-10-16
+
 ### Fixed
 
 #### PKI — desktop role editor
@@ -8002,7 +8004,8 @@ Bulk dependency upgrade across the workspace (`Cargo.toml`, `crates/bv-plugin-pa
 
 - Abandon the SQLx storage backend: `libsqlite3-sys` conflicts at link time with hiqlite's `rusqlite`, so `storage "sqlx"` was removed (T5, M2)
 
-[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.41...HEAD
+[Unreleased]: https://github.com/ffquintella/BastionVault/compare/v0.44.42...HEAD
+[0.44.42]: https://github.com/ffquintella/BastionVault/compare/v0.44.41...v0.44.42
 [0.44.41]: https://github.com/ffquintella/BastionVault/compare/v0.44.40...v0.44.41
 [0.44.40]: https://github.com/ffquintella/BastionVault/compare/v0.44.39...v0.44.40
 [0.44.39]: https://github.com/ffquintella/BastionVault/compare/v0.44.38...v0.44.39
