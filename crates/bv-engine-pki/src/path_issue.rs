@@ -189,8 +189,7 @@ impl PkiBackendInner {
             SubjectInput { common_name, alt_names: alt_dns, ip_sans: alt_ips, upn_sans, email_sans, ad_sid };
         let (cert_pem, serial_bytes) = match (role_alg.class(), &ca_signer, &leaf_signer) {
             (AlgorithmClass::Classical, Signer::Classical(ca), Signer::Classical(leaf)) => {
-                let (cert, serial) = x509::build_leaf(&role, &subject, ttl, leaf, ca, &ca_cert_pem, &urls)?;
-                (cert.pem(), serial)
+                x509::build_leaf(&role, &subject, ttl, leaf, ca, &ca_cert_pem, &urls)?
             }
             (AlgorithmClass::Pqc, Signer::MlDsa(ca), Signer::MlDsa(leaf)) => {
                 x509_pqc::build_leaf(&role, &subject, ttl, leaf, ca, &ca_cert_pem, &urls)?

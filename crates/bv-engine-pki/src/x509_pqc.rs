@@ -6,7 +6,7 @@
 //! directly with `x509-cert` + `der`, sign the DER-encoded TBS bytes with
 //! [`MlDsaSigner`], and stuff the signature into the BIT STRING.
 //!
-//! The extension set mirrors what the classical (rcgen-driven) Phase 1 path
+//! The extension set mirrors what the classical Phase 1 path
 //! already emits, so a chain switching between PQC and classical issuers
 //! still presents the same ext profile to verifiers (BasicConstraints, KU,
 //! EKU, SAN, SubjectKeyIdentifier, AuthorityKeyIdentifier). What's deferred
@@ -324,8 +324,28 @@ pub(super) fn sign_certificate(
     signer: &MlDsaSigner,
     alg_id: AlgorithmIdentifierOwned,
 ) -> Result<Certificate, RvError> {
+    assemble_certificate(tbs, alg_id, |tbs_der| signer.sign(tbs_der))
+}
+
+/// Sign `tbs` and wrap it into a certificate; the certificate counterpart
+/// of [`build_crl_with_alg`], shared with classical issuance in
+/// [`super::x509`]. `sign` gets exactly the DER embedded as
+/// `tbsCertificate`; `alg_id` must equal `tbs.signature` (RFC 5280
+/// §4.1.1.2), and a mismatch is a builder bug that fails closed.
+pub(super) fn assemble_certificate<F>(
+    tbs: TbsCertificateInner,
+    alg_id: AlgorithmIdentifierOwned,
+    sign: F,
+) -> Result<Certificate, RvError>
+where
+    F: FnOnce(&[u8]) -> Result<Vec<u8>, RvError>,
+{
+    if tbs.signature != alg_id {
+        log::error!("pki/x509: TBS signature algorithm does not match the outer signatureAlgorithm");
+        return Err(RvError::ErrPkiInternal);
+    }
     let tbs_der = tbs.to_der().map_err(der_err)?;
-    let signature = signer.sign(&tbs_der)?;
+    let signature = sign(&tbs_der)?;
     Ok(CertificateInner {
         tbs_certificate: tbs,
         signature_algorithm: alg_id,
@@ -482,15 +502,10 @@ pub(super) fn build_subject_alt_name(subject: &SubjectInput) -> Result<Option<Ex
     }
     let mut names: GeneralNames = Vec::new();
     for d in &subject.alt_names {
-        let ia5 = Ia5String::new(d.as_str()).map_err(der_err)?;
-        names.push(GeneralName::DnsName(ia5));
+        names.push(dns_general_name(d)?);
     }
     for ip in &subject.ip_sans {
-        let bytes = match ip {
-            IpAddr::V4(v4) => v4.octets().to_vec(),
-            IpAddr::V6(v6) => v6.octets().to_vec(),
-        };
-        names.push(GeneralName::IpAddress(OctetString::new(bytes).map_err(der_err)?));
+        names.push(ip_general_name(ip)?);
     }
     // S/MIME rfc822Names and AD smart-card UPN otherNames share this one
     // SAN extension with the DNS / IP names — a second subjectAltName
@@ -504,6 +519,23 @@ pub(super) fn build_subject_alt_name(subject: &SubjectInput) -> Result<Option<Ex
     Ok(Some(encode_ext(false, &SubjectAltName(names))?))
 }
 
+/// A `dNSName` SAN entry. Non-ASCII names cannot be an IA5String and are
+/// refused with the offending name, rather than as an opaque DER error.
+pub(super) fn dns_general_name(name: &str) -> Result<GeneralName, RvError> {
+    let ia5 = Ia5String::new(name)
+        .map_err(|e| RvError::ErrString(format!("alt_names: cannot encode `{name}` as an IA5String dNSName ({e})")))?;
+    Ok(GeneralName::DnsName(ia5))
+}
+
+/// An `iPAddress` SAN entry: 4 octets for IPv4, 16 for IPv6.
+pub(super) fn ip_general_name(ip: &IpAddr) -> Result<GeneralName, RvError> {
+    let bytes = match ip {
+        IpAddr::V4(v4) => v4.octets().to_vec(),
+        IpAddr::V6(v6) => v6.octets().to_vec(),
+    };
+    Ok(GeneralName::IpAddress(OctetString::new(bytes).map_err(der_err)?))
+}
+
 /// The AD SID extension for a subject, when one was requested. Returns
 /// `None` for every subject that did not ask for it, so the PQC / composite
 /// certificate profile is unchanged unless the role opted in.
@@ -515,8 +547,8 @@ pub(super) fn build_ad_sid_extension(subject: &SubjectInput) -> Result<Option<Ex
 }
 
 /// CRL distribution points from `pki/config/urls`, as a single
-/// `DistributionPoint` holding every configured URI. Mirrors what the
-/// classical path hands `rcgen::CrlDistributionPoint`, so a chain that
+/// `DistributionPoint` holding every configured URI. Shared with the
+/// classical path (byte-identical to rcgen's encoding), so a chain that
 /// mixes issuer classes presents the same CDP shape to verifiers.
 pub(super) fn build_crl_distribution_points(
     urls: &super::x509::IssuanceUrls,

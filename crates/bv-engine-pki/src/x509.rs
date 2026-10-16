@@ -1,23 +1,45 @@
-//! X.509 / CRL builders for the PKI engine.
+//! X.509 / CRL builders for the PKI engine: role-config knobs in, DER out.
 //!
-//! Phase 1 leans on `rcgen::CertificateParams` for DER assembly. The wrappers
-//! here translate between the role-config view (string knobs from JSON) and
-//! the `rcgen` builder, so the `path_*` handlers stay focused on storage and
-//! request/response shape.
+//! Certificates a classical CA issues are built with `x509-cert` and signed
+//! with the CA's `rcgen::KeyPair`, as CRLs are; see [`sign_issued_certificate`]
+//! for why rcgen's `signed_by` is no longer used for them. rcgen still builds
+//! the self-signed root and CSRs and owns classical key handling.
 
 use std::{net::IpAddr, str::FromStr, time::Duration};
 
+use const_oid::{AssociatedOid, ObjectIdentifier};
 use rand::Rng;
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
-    ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, OtherNameValue, SanType,
-    SerialNumber,
+    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    KeyUsagePurpose, OtherNameValue, PublicKeyData as _, SanType, SerialNumber, SigningKey as _,
 };
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
+use x509_cert::{
+    attr::AttributeTypeAndValue,
+    certificate::{TbsCertificateInner, Version},
+    der::{
+        asn1::{Any, OctetString, SetOfVec},
+        flagset::FlagSet,
+        Decode, Encode, Tag,
+    },
+    ext::{
+        pkix::{
+            name::GeneralNames, BasicConstraints as PkixBasicConstraints, ExtendedKeyUsage, KeyUsage, KeyUsages,
+            SubjectAltName, SubjectKeyIdentifier,
+        },
+        Extension,
+    },
+    name::{Name, RdnSequence, RelativeDistinguishedName},
+    serial_number::SerialNumber as PkixSerialNumber,
+    spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned},
+    time::Validity,
+};
 
 use super::{
     crypto::{rcgen_err, CertSigner},
     path_roles::RoleEntry,
+    x509_pqc,
 };
 use crate::errors::RvError;
 
@@ -67,6 +89,11 @@ impl IssuanceUrls {
     }
 }
 
+/// rcgen parameters for a role-driven leaf. Since issuance moved to
+/// [`issue_leaf`], this only feeds [`build_leaf_csr`]; the
+/// `leaf_extensions_match_rcgen_profile` test pins the two to the same
+/// subject DN and extension profile, so a change to one must be mirrored in
+/// the other.
 fn params_for_subject(
     role: &RoleEntry,
     subject: &SubjectInput,
@@ -295,8 +322,8 @@ pub fn build_root_ca(
     Ok((cert, serial))
 }
 
-/// Build a leaf cert signed by the provided CA. Returns the cert plus the
-/// serial bytes embedded in it (for storage indexing and CRL inclusion).
+/// Build a leaf cert signed by the provided CA. Returns the cert PEM plus
+/// the serial bytes embedded in it (for storage indexing and CRL inclusion).
 pub fn build_leaf(
     role: &RoleEntry,
     subject: &SubjectInput,
@@ -305,12 +332,9 @@ pub fn build_leaf(
     ca_signer: &CertSigner,
     ca_cert_pem: &str,
     urls: &IssuanceUrls,
-) -> Result<(Certificate, Vec<u8>), RvError> {
-    let serial = random_serial_bytes();
-    let params = params_for_subject(role, subject, ttl, &serial, urls)?;
-    let issuer = reload_issuer(ca_signer, ca_cert_pem)?;
-    let cert = params.signed_by(leaf_signer.key_pair(), &issuer).map_err(rcgen_err)?;
-    Ok((cert, serial))
+) -> Result<(String, Vec<u8>), RvError> {
+    let spki_der = leaf_signer.key_pair().subject_public_key_info();
+    issue_leaf(role, subject, ttl, &spki_der, ca_signer, ca_cert_pem, urls)
 }
 
 /// Build a leaf cert from a CSR-supplied public key, signed by the
@@ -325,13 +349,9 @@ pub fn build_leaf_from_spki(
     ca_signer: &CertSigner,
     ca_cert_pem: &str,
     urls: &IssuanceUrls,
-) -> Result<(Certificate, Vec<u8>), RvError> {
-    let serial = random_serial_bytes();
-    let params = params_for_subject(role, subject, ttl, &serial, urls)?;
-    let issuer = reload_issuer(ca_signer, ca_cert_pem)?;
-    let public_key = rcgen::SubjectPublicKeyInfo::from_der(spki_der).map_err(rcgen_err)?;
-    let cert = params.signed_by(&public_key, &issuer).map_err(rcgen_err)?;
-    Ok((cert, serial))
+) -> Result<(String, Vec<u8>), RvError> {
+    let spki_der = accepted_spki_der(spki_der)?;
+    issue_leaf(role, subject, ttl, &spki_der, ca_signer, ca_cert_pem, urls)
 }
 
 /// Build an intermediate-CA cert signed by this mount's root. The result is
@@ -346,33 +366,35 @@ pub fn build_intermediate_ca(
     ca_signer: &CertSigner,
     ca_cert_pem: &str,
     path_len: Option<u8>,
-) -> Result<(Certificate, Vec<u8>), RvError> {
-    use rcgen::{BasicConstraints, IsCa, KeyUsagePurpose};
-    use time::OffsetDateTime;
-
-    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).map_err(rcgen_err)?;
-    let mut dn = rcgen::DistinguishedName::new();
-    dn.push(rcgen::DnType::CommonName, common_name.to_string());
-    if !organization.is_empty() {
-        dn.push(rcgen::DnType::OrganizationName, organization.to_string());
-    }
-    params.distinguished_name = dn;
-    params.is_ca = match path_len {
-        Some(n) => IsCa::Ca(BasicConstraints::Constrained(n)),
-        None => IsCa::Ca(BasicConstraints::Unconstrained),
-    };
-    params.key_usages =
-        vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature];
-    let now = OffsetDateTime::now_utc();
-    params.not_before = now - time::Duration::seconds(30);
-    params.not_after = now + time::Duration::seconds(ttl.as_secs() as i64);
+) -> Result<(String, Vec<u8>), RvError> {
+    let spki_der = accepted_spki_der(spki_der)?;
     let serial = random_serial_bytes();
-    params.serial_number = Some(rcgen::SerialNumber::from_slice(&serial));
 
-    let issuer = reload_issuer(ca_signer, ca_cert_pem)?;
-    let public_key = rcgen::SubjectPublicKeyInfo::from_der(spki_der).map_err(rcgen_err)?;
-    let cert = params.signed_by(&public_key, &issuer).map_err(rcgen_err)?;
-    Ok((cert, serial))
+    // CN is always written, O only when set — the DN rcgen used to build.
+    let mut attrs = vec![(ATTR_COMMON_NAME, common_name)];
+    if !organization.is_empty() {
+        attrs.push((ATTR_ORGANIZATION, organization));
+    }
+    let key_usage = KeyUsage(KeyUsages::KeyCertSign | KeyUsages::CRLSign | KeyUsages::DigitalSignature);
+    // Order and criticality as rcgen emitted them for a CA: KU, SKI, BC.
+    let extensions = vec![
+        x509_pqc::encode_ext(true, &key_usage)?,
+        x509_pqc::encode_ext_octets(SubjectKeyIdentifier::OID, false, spki_key_identifier(&spki_der)?)?,
+        x509_pqc::encode_ext(true, &PkixBasicConstraints { ca: true, path_len_constraint: path_len })?,
+    ];
+
+    let pem = sign_issued_certificate(
+        IssuedTbs {
+            serial: &serial,
+            subject: utf8_name(&attrs)?,
+            spki: decode_spki(&spki_der)?,
+            validity: x509_pqc::build_validity(Duration::from_secs(30), ttl)?,
+            extensions,
+        },
+        ca_signer,
+        ca_cert_pem,
+    )?;
+    Ok((pem, serial))
 }
 
 /// Build a CSR for an intermediate keypair. The intermediate mount uses
@@ -433,12 +455,314 @@ pub fn build_leaf_csr(
     params.serialize_request(signer.key_pair()).map_err(rcgen_err)
 }
 
-/// `rcgen::Issuer` consumes its signing key, so we reconstruct one from the
-/// CertSigner's PKCS#8 PEM each time we need an issuer handle. The CertSigner
-/// itself remains live and reusable.
-fn reload_issuer<'a>(ca_signer: &CertSigner, ca_cert_pem: &str) -> Result<Issuer<'a, KeyPair>, RvError> {
-    let kp = KeyPair::from_pem(ca_signer.pem_pkcs8()).map_err(rcgen_err)?;
-    Issuer::from_ca_cert_pem(ca_cert_pem, kp).map_err(rcgen_err)
+// ── classical issuance ─────────────────────────────────────────────────
+
+const ATTR_COMMON_NAME: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.4.3");
+const ATTR_ORGANIZATION: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.4.10");
+const ATTR_ORGANIZATIONAL_UNIT: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.4.11");
+const ATTR_COUNTRY: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.4.6");
+const ATTR_LOCALITY: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.4.7");
+const ATTR_PROVINCE: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.4.8");
+
+/// Everything about an issued certificate except who issues it.
+struct IssuedTbs<'a> {
+    serial: &'a [u8],
+    subject: Name,
+    spki: SubjectPublicKeyInfoOwned,
+    validity: Validity,
+    /// In emission order; the AuthorityKeyIdentifier is prepended later.
+    extensions: Vec<Extension>,
+}
+
+/// The issuing CA, read from its certificate.
+struct IssuingCa {
+    /// The CA's subject, proven to re-encode to its exact bytes.
+    name: Name,
+    /// The CA's SubjectKeyIdentifier, when its certificate has one.
+    key_id: Option<OctetString>,
+}
+
+/// Leaf profile, in the order rcgen emitted it: SAN, KU, EKU, CRL DP, then
+/// the AD SID custom extension. Leaves carry no SKI or BasicConstraints,
+/// as before.
+fn issue_leaf(
+    role: &RoleEntry,
+    subject: &SubjectInput,
+    ttl: Duration,
+    spki_der: &[u8],
+    ca_signer: &CertSigner,
+    ca_cert_pem: &str,
+    urls: &IssuanceUrls,
+) -> Result<(String, Vec<u8>), RvError> {
+    let serial = random_serial_bytes();
+    let subject_dn = leaf_subject_name(role, subject)?;
+
+    let mut extensions = Vec::new();
+    extensions.extend(leaf_subject_alt_name(subject, subject_dn.0.is_empty())?);
+    extensions.extend(key_usage_extension(&parse_key_usages(&role.key_usage))?);
+    extensions.extend(ext_key_usage_extension(&parse_ext_key_usages(role, &role.ext_key_usage)?)?);
+    extensions.extend(x509_pqc::build_crl_distribution_points(urls)?);
+    extensions.extend(x509_pqc::build_ad_sid_extension(subject)?);
+
+    let pem = sign_issued_certificate(
+        IssuedTbs {
+            serial: &serial,
+            subject: subject_dn,
+            spki: decode_spki(spki_der)?,
+            validity: x509_pqc::build_validity(role.not_before_duration, ttl)?,
+            extensions,
+        },
+        ca_signer,
+        ca_cert_pem,
+    )?;
+    Ok((pem, serial))
+}
+
+/// Sign `parts` with a classical CA and return the certificate PEM.
+///
+/// rcgen's `Issuer` rebuilt the CA subject as a map keyed by attribute type,
+/// so `DC=br, DC=fgv` came out as `DC=fgv` and multi-valued RDNs were
+/// refused; it also wrote no AuthorityKeyIdentifier. Leaves under AD CS CAs
+/// then did not chain. Here the issuer is the CA subject verbatim and the
+/// AKI (first, non-critical, keyIdentifier only) is the CA's SKI.
+fn sign_issued_certificate(parts: IssuedTbs<'_>, ca_signer: &CertSigner, ca_cert_pem: &str) -> Result<String, RvError> {
+    let ca = load_issuing_ca(ca_cert_pem)?;
+    let alg_id = certificate_signature_alg_id(ca_signer)?;
+
+    let mut extensions = Vec::with_capacity(parts.extensions.len() + 1);
+    match &ca.key_id {
+        Some(key_id) => extensions.push(x509_pqc::encode_aki(key_id)?),
+        // No SKI to point at. A derived key id would match nothing the CA
+        // advertises, and path builders that look issuers up by key id
+        // would then miss the CA; without an AKI they match on the issuer
+        // name, which is now exact. Logged so the CA can be fixed.
+        None => log::warn!(
+            "pki: issuing CA `{}` has no SubjectKeyIdentifier; issuing without an AuthorityKeyIdentifier",
+            ca.name
+        ),
+    }
+    extensions.extend(parts.extensions);
+
+    let tbs = TbsCertificateInner {
+        version: Version::V3,
+        serial_number: PkixSerialNumber::new(parts.serial).map_err(encode_err("the serial number"))?,
+        signature: alg_id.clone(),
+        issuer: ca.name,
+        validity: parts.validity,
+        subject: parts.subject,
+        subject_public_key_info: parts.spki,
+        issuer_unique_id: None,
+        subject_unique_id: None,
+        // RFC 5280: Extensions is SIZE (1..MAX); rcgen omitted it when empty.
+        extensions: if extensions.is_empty() { None } else { Some(extensions) },
+    };
+    let cert =
+        x509_pqc::assemble_certificate(tbs, alg_id, |tbs_der| ca_signer.key_pair().sign(tbs_der).map_err(rcgen_err))?;
+    let der = cert.to_der().map_err(encode_err("the certificate"))?;
+    Ok(x509_pqc::pem_encode("CERTIFICATE", &der))
+}
+
+/// Read the issuer Name and SKI from the CA certificate. Parsed with
+/// x509-parser (as rcgen did); only the subject is decoded with x509-cert,
+/// which re-sorts SET OF members. A subject that does not re-encode to its
+/// own bytes, or an SKI that does not parse, is refused: emitting an issuer
+/// or AKI that does not match the CA would recreate the chaining failure.
+fn load_issuing_ca(ca_cert_pem: &str) -> Result<IssuingCa, RvError> {
+    use x509_parser::{extensions::ParsedExtension, oid_registry::OID_X509_EXT_SUBJECT_KEY_IDENTIFIER};
+
+    let ca_der = x509_pqc::pem_decode_first(ca_cert_pem)?;
+    let (_, ca) = x509_parser::parse_x509_certificate(&ca_der)
+        .map_err(|e| RvError::ErrString(format!("pki: cannot parse the issuing CA certificate ({e})")))?;
+    let ca_subject = &ca.tbs_certificate.subject;
+
+    let raw_subject = ca_subject.as_raw();
+    let name = Name::from_der(raw_subject)
+        .map_err(|e| RvError::ErrString(format!("pki: cannot decode the issuing CA's subject `{ca_subject}` ({e})")))?;
+    if name.to_der().map_err(encode_err("the issuing CA's subject"))? != raw_subject {
+        return Err(RvError::ErrString(format!(
+            "pki: the issuing CA's subject `{ca_subject}` is not DER-canonical (for example an unsorted \
+             multi-valued RDN) and cannot be copied byte-for-byte into the issuer field; re-issue the CA \
+             certificate with a DER-encoded subject"
+        )));
+    }
+
+    let malformed_ski = || {
+        RvError::ErrString(format!(
+            "pki: the issuing CA certificate `{ca_subject}` has a malformed SubjectKeyIdentifier extension"
+        ))
+    };
+    let key_id = match ca.get_extension_unique(&OID_X509_EXT_SUBJECT_KEY_IDENTIFIER) {
+        Ok(None) => None,
+        Ok(Some(ext)) => match ext.parsed_extension() {
+            ParsedExtension::SubjectKeyIdentifier(kid) if !kid.0.is_empty() => {
+                Some(OctetString::new(kid.0.to_vec()).map_err(|_| malformed_ski())?)
+            }
+            _ => return Err(malformed_ski()),
+        },
+        Err(e) => {
+            return Err(RvError::ErrString(format!(
+                "pki: the issuing CA certificate `{ca_subject}` has more than one SubjectKeyIdentifier ({e})"
+            )))
+        }
+    };
+    Ok(IssuingCa { name, key_id })
+}
+
+/// The `AlgorithmIdentifier` for certificates `signer` signs. The identifier
+/// follows the key type (RSA hash by modulus size, as `CertSigner` pins it)
+/// while `KeyPair::sign` uses the algorithm the key pair was loaded with;
+/// if those ever disagreed the certificate would not verify, so fail closed.
+fn certificate_signature_alg_id(signer: &CertSigner) -> Result<AlgorithmIdentifierOwned, RvError> {
+    use super::crypto::KeyAlgorithm;
+
+    let expected: &'static rcgen::SignatureAlgorithm = match signer.algorithm() {
+        KeyAlgorithm::Rsa2048 => &rcgen::PKCS_RSA_SHA256,
+        KeyAlgorithm::Rsa3072 => &rcgen::PKCS_RSA_SHA384,
+        KeyAlgorithm::Rsa4096 => &rcgen::PKCS_RSA_SHA512,
+        KeyAlgorithm::EcdsaP256 => &rcgen::PKCS_ECDSA_P256_SHA256,
+        KeyAlgorithm::EcdsaP384 => &rcgen::PKCS_ECDSA_P384_SHA384,
+        KeyAlgorithm::Ed25519 => &rcgen::PKCS_ED25519,
+        // ML-DSA and composite CAs have their own builders.
+        _ => return Err(RvError::ErrPkiKeyTypeInvalid),
+    };
+    if signer.key_pair().algorithm() != expected {
+        return Err(RvError::ErrString(format!(
+            "pki: the {} CA key is loaded with a signature algorithm that does not match its key type; \
+             refusing to sign",
+            signer.algorithm().as_str()
+        )));
+    }
+    classical_signature_alg_id(signer.algorithm())
+}
+
+/// Check a CSR-supplied SubjectPublicKeyInfo against the key types rcgen
+/// can represent (RSA, P-256, P-384, Ed25519) — the set accepted before —
+/// and return the DER rcgen would have embedded for it.
+fn accepted_spki_der(spki_der: &[u8]) -> Result<Vec<u8>, RvError> {
+    let public_key = rcgen::SubjectPublicKeyInfo::from_der(spki_der).map_err(rcgen_err)?;
+    Ok(public_key.subject_public_key_info())
+}
+
+fn decode_spki(spki_der: &[u8]) -> Result<SubjectPublicKeyInfoOwned, RvError> {
+    SubjectPublicKeyInfoOwned::from_der(spki_der)
+        .map_err(|e| RvError::ErrString(format!("pki: cannot decode the subject public key ({e})")))
+}
+
+/// SKI for an issued CA certificate: SHA-256 over the DER SPKI, truncated
+/// to 160 bits. That is rcgen's `KeyIdMethod::Sha256`, so an intermediate
+/// re-signed after the move keeps the key identifier it had before.
+fn spki_key_identifier(spki_der: &[u8]) -> Result<OctetString, RvError> {
+    let digest = Sha256::digest(spki_der);
+    OctetString::new(digest[..20].to_vec()).map_err(encode_err("the SubjectKeyIdentifier"))
+}
+
+/// A Name of single-valued RDNs, in the given order, with UTF8String values.
+fn utf8_name(attrs: &[(ObjectIdentifier, &str)]) -> Result<Name, RvError> {
+    let mut rdns = Vec::with_capacity(attrs.len());
+    for (oid, value) in attrs {
+        let value = Any::new(Tag::Utf8String, value.as_bytes()).map_err(encode_err("a subject attribute"))?;
+        let atv = AttributeTypeAndValue { oid: *oid, value };
+        let set = SetOfVec::try_from(vec![atv]).map_err(encode_err("a subject RDN"))?;
+        rdns.push(RelativeDistinguishedName(set));
+    }
+    Ok(RdnSequence(rdns))
+}
+
+/// Leaf subject as rcgen encoded it: CN, O, OU, C, L, ST, each its own RDN,
+/// UTF8String, skipped when empty. Built field by field, so a role value
+/// containing `,` or `+` stays one attribute.
+fn leaf_subject_name(role: &RoleEntry, subject: &SubjectInput) -> Result<Name, RvError> {
+    let attrs: Vec<(ObjectIdentifier, &str)> = [
+        (ATTR_COMMON_NAME, subject.common_name.as_str()),
+        (ATTR_ORGANIZATION, role.organization.as_str()),
+        (ATTR_ORGANIZATIONAL_UNIT, role.ou.as_str()),
+        (ATTR_COUNTRY, role.country.as_str()),
+        (ATTR_LOCALITY, role.locality.as_str()),
+        (ATTR_PROVINCE, role.province.as_str()),
+    ]
+    .into_iter()
+    .filter(|(_, value)| !value.is_empty())
+    .collect();
+    utf8_name(&attrs)
+}
+
+/// SAN as [`params_for_subject`] builds it: CN and `alt_names` (IP-shaped
+/// entries become iPAddress), then `ip_sans`, rfc822Names and UPNs.
+/// Critical iff the subject DN is empty (RFC 5280 §4.2.1.6).
+fn leaf_subject_alt_name(subject: &SubjectInput, subject_dn_is_empty: bool) -> Result<Option<Extension>, RvError> {
+    let mut names: GeneralNames = Vec::new();
+    let cn = Some(&subject.common_name).filter(|cn| !cn.is_empty());
+    for name in cn.into_iter().chain(subject.alt_names.iter()) {
+        names.push(match IpAddr::from_str(name) {
+            Ok(ip) => x509_pqc::ip_general_name(&ip)?,
+            Err(_) => x509_pqc::dns_general_name(name)?,
+        });
+    }
+    for ip in &subject.ip_sans {
+        names.push(x509_pqc::ip_general_name(ip)?);
+    }
+    for addr in &subject.email_sans {
+        names.push(super::email_san::rfc822_general_name(addr)?);
+    }
+    for upn in &subject.upn_sans {
+        names.push(super::ad_ext::upn_general_name(upn)?);
+    }
+    if names.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(x509_pqc::encode_ext(subject_dn_is_empty, &SubjectAltName(names))?))
+}
+
+/// KeyUsage from the role's names (via [`parse_key_usages`]); critical, and
+/// omitted when no name resolved.
+fn key_usage_extension(purposes: &[KeyUsagePurpose]) -> Result<Option<Extension>, RvError> {
+    if purposes.is_empty() {
+        return Ok(None);
+    }
+    let flags = purposes.iter().fold(FlagSet::<KeyUsages>::default(), |acc, purpose| {
+        acc | match purpose {
+            KeyUsagePurpose::DigitalSignature => KeyUsages::DigitalSignature,
+            KeyUsagePurpose::ContentCommitment => KeyUsages::NonRepudiation,
+            KeyUsagePurpose::KeyEncipherment => KeyUsages::KeyEncipherment,
+            KeyUsagePurpose::DataEncipherment => KeyUsages::DataEncipherment,
+            KeyUsagePurpose::KeyAgreement => KeyUsages::KeyAgreement,
+            KeyUsagePurpose::KeyCertSign => KeyUsages::KeyCertSign,
+            KeyUsagePurpose::CrlSign => KeyUsages::CRLSign,
+            KeyUsagePurpose::EncipherOnly => KeyUsages::EncipherOnly,
+            KeyUsagePurpose::DecipherOnly => KeyUsages::DecipherOnly,
+        }
+    });
+    Ok(Some(x509_pqc::encode_ext(true, &KeyUsage(flags))?))
+}
+
+/// ExtendedKeyUsage from [`parse_ext_key_usages`], in its order; non-critical.
+fn ext_key_usage_extension(purposes: &[ExtendedKeyUsagePurpose]) -> Result<Option<Extension>, RvError> {
+    if purposes.is_empty() {
+        return Ok(None);
+    }
+    let oids = purposes.iter().map(ext_key_usage_oid).collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(x509_pqc::encode_ext(false, &ExtendedKeyUsage(oids))?))
+}
+
+fn ext_key_usage_oid(purpose: &ExtendedKeyUsagePurpose) -> Result<ObjectIdentifier, RvError> {
+    let dotted = match purpose {
+        ExtendedKeyUsagePurpose::Any => "2.5.29.37.0",
+        ExtendedKeyUsagePurpose::ServerAuth => "1.3.6.1.5.5.7.3.1",
+        ExtendedKeyUsagePurpose::ClientAuth => "1.3.6.1.5.5.7.3.2",
+        ExtendedKeyUsagePurpose::CodeSigning => "1.3.6.1.5.5.7.3.3",
+        ExtendedKeyUsagePurpose::EmailProtection => "1.3.6.1.5.5.7.3.4",
+        ExtendedKeyUsagePurpose::TimeStamping => "1.3.6.1.5.5.7.3.8",
+        ExtendedKeyUsagePurpose::OcspSigning => "1.3.6.1.5.5.7.3.9",
+        ExtendedKeyUsagePurpose::Other(arcs) => {
+            let dotted = arcs.iter().map(u64::to_string).collect::<Vec<_>>().join(".");
+            return super::ad_ext::parse_oid(&dotted);
+        }
+    };
+    super::ad_ext::parse_oid(dotted)
+}
+
+fn encode_err(what: &'static str) -> impl Fn(x509_cert::der::Error) -> RvError {
+    move |e| RvError::ErrString(format!("pki: failed to encode {what} ({e})"))
 }
 
 /// Build a CRL signed by a *classical* CA (RSA / ECDSA / Ed25519).
@@ -685,4 +1009,599 @@ pub fn split_alt_names(input: &str) -> (Vec<String>, Vec<IpAddr>) {
         }
     }
     (dns, ips)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Classical issuance must chain to its CA. Field report: under an AD CS
+    //! CA `DC=br, DC=fgv, CN=FGV-SSL-CA-V1` (SKI `86:79:B4:…`) leaves carried
+    //! issuer `DC=fgv, CN=FGV-SSL-CA-V1` and no AKI. Test CAs are built with
+    //! `x509-cert` (rcgen cannot express them) from keys generated per test.
+
+    use super::*;
+    use crate::crypto::KeyAlgorithm;
+    use rcgen::{Issuer, KeyPair};
+    use x509_cert::{
+        attr::AttributeTypeAndValue,
+        certificate::{CertificateInner, TbsCertificateInner, Version},
+        der::{
+            asn1::{Any, BitString, OctetString, SetOfVec},
+            Decode, Encode, Tag, Tagged,
+        },
+        ext::{
+            pkix::{BasicConstraints as PkixBasicConstraints, KeyUsage, KeyUsages, SubjectKeyIdentifier},
+            Extension,
+        },
+        name::{Name, RdnSequence, RelativeDistinguishedName},
+        serial_number::SerialNumber as PkixSerialNumber,
+        spki::SubjectPublicKeyInfoOwned,
+    };
+    use x509_parser::{
+        extensions::ParsedExtension,
+        oid_registry::{OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER, OID_X509_EXT_BASIC_CONSTRAINTS},
+    };
+
+    use crate::x509_pqc;
+
+    const OID_DC: &str = "0.9.2342.19200300.100.1.25";
+    const OID_CN: &str = "2.5.4.3";
+    const OID_O: &str = "2.5.4.10";
+    const OID_C: &str = "2.5.4.6";
+    const OID_AKI: &str = "2.5.29.35";
+
+    /// The CA SKI from the field report, padded to 160 bits. Deliberately
+    /// *not* derived from the CA key: the AKI must copy the CA's SKI, not
+    /// recompute one.
+    const FIELD_SKI: [u8; 20] = [
+        0x86, 0x79, 0xB4, 0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87, 0x98, 0xA9, 0xBA, 0xCB, 0xDC, 0xED, 0xFE,
+        0x0F, 0x1E,
+    ];
+
+    // ── test CA construction ───────────────────────────────────────────
+
+    fn atv(oid: &str, tag: Tag, value: &str) -> AttributeTypeAndValue {
+        AttributeTypeAndValue {
+            oid: ObjectIdentifier::new_unwrap(oid),
+            value: Any::new(tag, value.as_bytes()).unwrap(),
+        }
+    }
+
+    fn rdn(atvs: Vec<AttributeTypeAndValue>) -> RelativeDistinguishedName {
+        RelativeDistinguishedName(SetOfVec::try_from(atvs).unwrap())
+    }
+
+    /// `DC=br, DC=fgv, CN=FGV-SSL-CA-V1` in encoding order, as AD CS
+    /// writes it: domainComponent as IA5String, CN as PrintableString.
+    fn ad_cs_subject() -> Name {
+        RdnSequence(vec![
+            rdn(vec![atv(OID_DC, Tag::Ia5String, "br")]),
+            rdn(vec![atv(OID_DC, Tag::Ia5String, "fgv")]),
+            rdn(vec![atv(OID_CN, Tag::PrintableString, "FGV-SSL-CA-V1")]),
+        ])
+    }
+
+    /// `C=BR` followed by the multi-valued RDN `CN=x+O=y`.
+    fn multi_valued_subject() -> Name {
+        RdnSequence(vec![
+            rdn(vec![atv(OID_C, Tag::PrintableString, "BR")]),
+            rdn(vec![atv(OID_CN, Tag::Utf8String, "x"), atv(OID_O, Tag::Utf8String, "y")]),
+        ])
+    }
+
+    struct TestCa {
+        signer: CertSigner,
+        pem: String,
+    }
+
+    /// Self-signed CA over `subject`, carrying `ski` as its
+    /// SubjectKeyIdentifier when given. `patch` rewrites the TBS DER
+    /// before it is signed, for building deliberately non-canonical CAs.
+    fn make_ca_with(
+        alg: KeyAlgorithm,
+        subject: Name,
+        ski: Option<&[u8]>,
+        patch: impl Fn(Vec<u8>) -> Vec<u8>,
+    ) -> TestCa {
+        let signer = CertSigner::generate(alg).expect("CA keygen");
+        let spki = SubjectPublicKeyInfoOwned::from_der(&signer.key_pair().subject_public_key_info()).unwrap();
+        let alg_id = classical_signature_alg_id(alg).unwrap();
+        let mut exts: Vec<Extension> = vec![
+            x509_pqc::encode_ext(true, &PkixBasicConstraints { ca: true, path_len_constraint: None }).unwrap(),
+            x509_pqc::encode_ext(true, &KeyUsage(KeyUsages::KeyCertSign | KeyUsages::CRLSign)).unwrap(),
+        ];
+        if let Some(ski) = ski {
+            exts.push(
+                x509_pqc::encode_ext_octets(SubjectKeyIdentifier::OID, false, OctetString::new(ski.to_vec()).unwrap())
+                    .unwrap(),
+            );
+        }
+        let tbs: TbsCertificateInner = TbsCertificateInner {
+            version: Version::V3,
+            serial_number: PkixSerialNumber::new(&random_serial_bytes()).unwrap(),
+            signature: alg_id.clone(),
+            issuer: subject.clone(),
+            validity: x509_pqc::build_validity(Duration::from_secs(60), Duration::from_secs(86_400)).unwrap(),
+            subject,
+            subject_public_key_info: spki,
+            issuer_unique_id: None,
+            subject_unique_id: None,
+            extensions: Some(exts),
+        };
+        let tbs_der = patch(tbs.to_der().unwrap());
+        let sig = signer.key_pair().sign(&tbs_der).unwrap();
+        // Assemble the outer SEQUENCE by hand so a patched TBS is
+        // embedded exactly as signed.
+        let mut body = tbs_der;
+        body.extend(alg_id.to_der().unwrap());
+        body.extend(BitString::from_bytes(&sig).unwrap().to_der().unwrap());
+        let mut der = Vec::new();
+        x509_cert::der::Header::new(Tag::Sequence, x509_cert::der::Length::try_from(body.len()).unwrap())
+            .unwrap()
+            .encode_to_vec(&mut der)
+            .unwrap();
+        der.extend(body);
+        TestCa { signer, pem: x509_pqc::pem_encode("CERTIFICATE", &der) }
+    }
+
+    fn make_ca(alg: KeyAlgorithm, subject: Name, ski: Option<&[u8]>) -> TestCa {
+        make_ca_with(alg, subject, ski, |der| der)
+    }
+
+    fn der_of(pem: &str) -> Vec<u8> {
+        x509_pqc::pem_decode_first(pem).unwrap()
+    }
+
+    fn leaf_role() -> RoleEntry {
+        RoleEntry {
+            key_usage: vec!["DigitalSignature".into(), "KeyEncipherment".into()],
+            organization: "FGV".into(),
+            ..Default::default()
+        }
+    }
+
+    fn leaf_subject(cn: &str) -> SubjectInput {
+        SubjectInput { common_name: cn.into(), alt_names: vec![cn.into()], ..Default::default() }
+    }
+
+    /// The checks a strict path builder makes: the issuer Name is the CA
+    /// subject byte-for-byte, the AKI keyIdentifier is the CA's SKI (or
+    /// absent), and the signature verifies under the CA key with matching
+    /// inner/outer algorithm identifiers.
+    fn assert_chains(cert_pem: &str, ca_pem: &str, expected_aki: Option<&[u8]>) {
+        let cert_der = der_of(cert_pem);
+        let ca_der = der_of(ca_pem);
+        let (_, cert) = x509_parser::parse_x509_certificate(&cert_der).expect("issued cert parses");
+        let (_, ca) = x509_parser::parse_x509_certificate(&ca_der).expect("CA parses");
+
+        assert_eq!(
+            cert.tbs_certificate.issuer.as_raw(),
+            ca.tbs_certificate.subject.as_raw(),
+            "issuer must be the CA subject byte-for-byte (issuer `{}`, CA subject `{}`)",
+            cert.tbs_certificate.issuer,
+            ca.tbs_certificate.subject,
+        );
+
+        let aki = cert.get_extension_unique(&OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER).expect("at most one AKI");
+        match expected_aki {
+            Some(kid) => {
+                let ext = aki.expect("AuthorityKeyIdentifier must be present");
+                assert!(!ext.critical, "AKI must be non-critical (RFC 5280 §4.2.1.1)");
+                match ext.parsed_extension() {
+                    ParsedExtension::AuthorityKeyIdentifier(a) => {
+                        assert_eq!(a.key_identifier.as_ref().map(|k| k.0), Some(kid), "AKI keyId == CA SKI");
+                        assert!(a.authority_cert_issuer.is_none());
+                        assert!(a.authority_cert_serial.is_none());
+                    }
+                    other => panic!("AKI did not parse: {other:?}"),
+                }
+            }
+            None => assert!(aki.is_none(), "no AKI expected"),
+        }
+
+        assert_eq!(cert.signature_algorithm, cert.tbs_certificate.signature, "inner/outer signature alg");
+        cert.verify_signature(Some(ca.public_key())).expect("signature verifies under the CA key");
+    }
+
+    // ── 1. build_leaf ──────────────────────────────────────────────────
+
+    #[test]
+    fn leaf_issuer_is_ca_subject_verbatim_and_aki_is_ca_ski() {
+        let ca = make_ca(KeyAlgorithm::EcdsaP256, ad_cs_subject(), Some(&FIELD_SKI));
+        let leaf_key = CertSigner::generate(KeyAlgorithm::EcdsaP256).unwrap();
+        let (pem, _) = build_leaf(
+            &leaf_role(),
+            &leaf_subject("app.fgv.br"),
+            Duration::from_secs(3600),
+            &leaf_key,
+            &ca.signer,
+            &ca.pem,
+            &IssuanceUrls::default(),
+        )
+        .expect("issue leaf");
+        assert_chains(&pem, &ca.pem, Some(&FIELD_SKI));
+    }
+
+    // ── 2. build_leaf_from_spki / build_intermediate_ca ────────────────
+
+    #[test]
+    fn sign_path_leaf_issuer_is_ca_subject_verbatim_and_aki_is_ca_ski() {
+        let ca = make_ca(KeyAlgorithm::EcdsaP256, ad_cs_subject(), Some(&FIELD_SKI));
+        let requester = CertSigner::generate(KeyAlgorithm::EcdsaP384).unwrap();
+        let spki_der = requester.key_pair().subject_public_key_info();
+        let (pem, _) = build_leaf_from_spki(
+            &leaf_role(),
+            &leaf_subject("csr.fgv.br"),
+            Duration::from_secs(3600),
+            &spki_der,
+            &ca.signer,
+            &ca.pem,
+            &IssuanceUrls::default(),
+        )
+        .expect("sign CSR leaf");
+        assert_chains(&pem, &ca.pem, Some(&FIELD_SKI));
+        let cert = x509_cert::Certificate::from_der(&der_of(&pem)).unwrap();
+        assert_eq!(cert.tbs_certificate.subject_public_key_info.to_der().unwrap(), spki_der, "CSR key embedded");
+    }
+
+    #[test]
+    fn intermediate_issuer_is_ca_subject_verbatim_and_aki_is_ca_ski() {
+        let ca = make_ca(KeyAlgorithm::EcdsaP256, ad_cs_subject(), Some(&FIELD_SKI));
+        let child = CertSigner::generate(KeyAlgorithm::EcdsaP256).unwrap();
+        let spki_der = child.key_pair().subject_public_key_info();
+        let (pem, _) = build_intermediate_ca(
+            "FGV Issuing CA 2",
+            "FGV",
+            Duration::from_secs(86_400),
+            &spki_der,
+            &ca.signer,
+            &ca.pem,
+            Some(0),
+        )
+        .expect("sign intermediate");
+        assert_chains(&pem, &ca.pem, Some(&FIELD_SKI));
+
+        let der = der_of(&pem);
+        let (_, cert) = x509_parser::parse_x509_certificate(&der).unwrap();
+        let bc = cert.get_extension_unique(&OID_X509_EXT_BASIC_CONSTRAINTS).unwrap().expect("BC present");
+        assert!(bc.critical);
+        match bc.parsed_extension() {
+            ParsedExtension::BasicConstraints(b) => {
+                assert!(b.ca);
+                assert_eq!(b.path_len_constraint, Some(0));
+            }
+            other => panic!("BC did not parse: {other:?}"),
+        }
+    }
+
+    // ── 3. multi-valued RDN in the CA subject ──────────────────────────
+
+    #[test]
+    fn multi_valued_rdn_ca_subject_is_copied_verbatim() {
+        let ca = make_ca(KeyAlgorithm::EcdsaP256, multi_valued_subject(), Some(&FIELD_SKI));
+        let leaf_key = CertSigner::generate(KeyAlgorithm::EcdsaP256).unwrap();
+        let (leaf, _) = build_leaf(
+            &leaf_role(),
+            &leaf_subject("mv.example"),
+            Duration::from_secs(3600),
+            &leaf_key,
+            &ca.signer,
+            &ca.pem,
+            &IssuanceUrls::default(),
+        )
+        .expect("a multi-valued RDN in the CA subject must not block issuance");
+        assert_chains(&leaf, &ca.pem, Some(&FIELD_SKI));
+
+        let (from_csr, _) = build_leaf_from_spki(
+            &leaf_role(),
+            &leaf_subject("mv-csr.example"),
+            Duration::from_secs(3600),
+            &leaf_key.key_pair().subject_public_key_info(),
+            &ca.signer,
+            &ca.pem,
+            &IssuanceUrls::default(),
+        )
+        .expect("sign path");
+        assert_chains(&from_csr, &ca.pem, Some(&FIELD_SKI));
+
+        let (inter, _) = build_intermediate_ca(
+            "MV Sub CA",
+            "",
+            Duration::from_secs(86_400),
+            &leaf_key.key_pair().subject_public_key_info(),
+            &ca.signer,
+            &ca.pem,
+            None,
+        )
+        .expect("sign-intermediate path");
+        assert_chains(&inter, &ca.pem, Some(&FIELD_SKI));
+    }
+
+    // ── 4. CA without a SubjectKeyIdentifier ───────────────────────────
+
+    #[test]
+    fn ca_without_ski_issues_without_aki() {
+        let ca = make_ca(KeyAlgorithm::EcdsaP256, ad_cs_subject(), None);
+        let leaf_key = CertSigner::generate(KeyAlgorithm::EcdsaP256).unwrap();
+        let (leaf, _) = build_leaf(
+            &leaf_role(),
+            &leaf_subject("noski.example"),
+            Duration::from_secs(3600),
+            &leaf_key,
+            &ca.signer,
+            &ca.pem,
+            &IssuanceUrls::default(),
+        )
+        .expect("issue under a CA without SKI");
+        assert_chains(&leaf, &ca.pem, None);
+
+        let (inter, _) = build_intermediate_ca(
+            "No SKI Sub CA",
+            "",
+            Duration::from_secs(86_400),
+            &leaf_key.key_pair().subject_public_key_info(),
+            &ca.signer,
+            &ca.pem,
+            None,
+        )
+        .expect("sign intermediate under a CA without SKI");
+        assert_chains(&inter, &ca.pem, None);
+    }
+
+    // ── 5. signature per classical CA key type ─────────────────────────
+
+    #[test]
+    fn issued_signature_verifies_for_each_classical_ca_key_type() {
+        // (CA key type, expected outer signatureAlgorithm OID)
+        let cases = [
+            (KeyAlgorithm::EcdsaP256, "1.2.840.10045.4.3.2"),
+            (KeyAlgorithm::EcdsaP384, "1.2.840.10045.4.3.3"),
+            (KeyAlgorithm::Ed25519, "1.3.101.112"),
+            (KeyAlgorithm::Rsa2048, "1.2.840.113549.1.1.11"),
+        ];
+        for (alg, sig_oid) in cases {
+            assert_ca_signs_leaf_with(alg, sig_oid);
+        }
+    }
+
+    /// rcgen's reloaded issuer signed RSA-3072 leaves with SHA-256; they now
+    /// follow the key's pinned hash, as CRLs already did. Separate test: the
+    /// debug-build RSA-3072 keygen is slow and should run in parallel.
+    #[test]
+    fn rsa3072_ca_signs_with_sha384() {
+        assert_ca_signs_leaf_with(KeyAlgorithm::Rsa3072, "1.2.840.113549.1.1.12");
+    }
+
+    fn assert_ca_signs_leaf_with(alg: KeyAlgorithm, sig_oid: &str) {
+        let ca = make_ca(alg, ad_cs_subject(), Some(&FIELD_SKI));
+        let leaf_key = CertSigner::generate(KeyAlgorithm::EcdsaP256).unwrap();
+        let (leaf, _) = build_leaf(
+            &leaf_role(),
+            &leaf_subject("sig.example"),
+            Duration::from_secs(3600),
+            &leaf_key,
+            &ca.signer,
+            &ca.pem,
+            &IssuanceUrls::default(),
+        )
+        .unwrap_or_else(|e| panic!("issue under {alg:?} CA: {e:?}"));
+        assert_chains(&leaf, &ca.pem, Some(&FIELD_SKI));
+        let cert = x509_cert::Certificate::from_der(&der_of(&leaf)).unwrap();
+        assert_eq!(cert.signature_algorithm.oid.to_string(), sig_oid, "{alg:?} signature algorithm");
+        if matches!(alg, KeyAlgorithm::Rsa2048 | KeyAlgorithm::Rsa3072) {
+            // RFC 4055: PKCS#1 v1.5 identifiers carry an explicit NULL.
+            assert_eq!(cert.signature_algorithm.parameters.as_ref().map(|p| p.tag()), Some(Tag::Null));
+        } else {
+            assert!(cert.signature_algorithm.parameters.is_none(), "{alg:?} parameters must be absent");
+        }
+    }
+
+    // ── 6. extension parity with the rcgen profile ─────────────────────
+
+    /// The rcgen-built reference for `role` + `subject`, signed by a CA
+    /// rcgen can parse. Only the subject, key and extensions are compared,
+    /// so the reference issuer does not matter.
+    fn rcgen_reference_leaf(
+        role: &RoleEntry,
+        subject: &SubjectInput,
+        serial: &[u8],
+        leaf_key: &CertSigner,
+        urls: &IssuanceUrls,
+    ) -> String {
+        let ca = make_ca(
+            KeyAlgorithm::EcdsaP256,
+            RdnSequence(vec![rdn(vec![atv(OID_CN, Tag::Utf8String, "Reference CA")])]),
+            Some(&FIELD_SKI),
+        );
+        let params = params_for_subject(role, subject, Duration::from_secs(3600), serial, urls).unwrap();
+        let kp = KeyPair::from_pem(ca.signer.pem_pkcs8()).unwrap();
+        let issuer = Issuer::from_ca_cert_pem(&ca.pem, kp).unwrap();
+        params.signed_by(leaf_key.key_pair(), &issuer).unwrap().pem()
+    }
+
+    fn assert_leaf_profile_matches_rcgen(
+        role: &RoleEntry,
+        subject: &SubjectInput,
+        urls: &IssuanceUrls,
+    ) -> Vec<Extension> {
+        let ca = make_ca(KeyAlgorithm::EcdsaP256, ad_cs_subject(), Some(&FIELD_SKI));
+        let leaf_key = CertSigner::generate(KeyAlgorithm::EcdsaP256).unwrap();
+        let (pem, serial) = build_leaf(role, subject, Duration::from_secs(3600), &leaf_key, &ca.signer, &ca.pem, urls)
+            .expect("issue leaf");
+        let reference = rcgen_reference_leaf(role, subject, &serial, &leaf_key, urls);
+
+        let new = x509_cert::Certificate::from_der(&der_of(&pem)).unwrap().tbs_certificate;
+        let old = x509_cert::Certificate::from_der(&der_of(&reference)).unwrap().tbs_certificate;
+        assert_eq!(new.subject.to_der().unwrap(), old.subject.to_der().unwrap(), "subject DN encoding");
+        assert_eq!(new.serial_number, old.serial_number, "serial");
+        assert_eq!(new.subject_public_key_info, old.subject_public_key_info, "SPKI");
+        assert_eq!(new.version, old.version);
+
+        let aki = ObjectIdentifier::new_unwrap(OID_AKI);
+        let new_exts: Vec<Extension> =
+            new.extensions.clone().unwrap_or_default().into_iter().filter(|e| e.extn_id != aki).collect();
+        let old_exts: Vec<Extension> = old.extensions.unwrap_or_default();
+        assert_eq!(new_exts, old_exts, "every extension other than AKI matches the rcgen profile, in order");
+        new.extensions.unwrap_or_default()
+    }
+
+    #[test]
+    fn leaf_extensions_match_rcgen_profile() {
+        let role = RoleEntry {
+            key_usage: vec!["DigitalSignature".into(), "KeyEncipherment".into(), "bogus".into()],
+            ext_key_usage: vec!["codesigning".into(), "smartcardlogon".into(), "1.3.6.1.5.5.7.3.4".into()],
+            ext_key_usage_oids: vec!["1.2.3.4.5".into()],
+            organization: "FGV".into(),
+            ou: "TI".into(),
+            country: "BR".into(),
+            locality: "Rio de Janeiro".into(),
+            province: "RJ".into(),
+            ..Default::default()
+        };
+        let subject = SubjectInput {
+            common_name: "app.fgv.br".into(),
+            alt_names: vec!["www.fgv.br".into(), "192.0.2.10".into()],
+            ip_sans: vec!["10.0.0.5".parse().unwrap(), "2001:db8::1".parse().unwrap()],
+            upn_sans: vec!["alice@fgv.br".into()],
+            email_sans: vec!["alice@fgv.br".into()],
+            ad_sid: Some("S-1-5-21-1004336348-1177238915-682003330-512".into()),
+        };
+        let urls = IssuanceUrls { crl_distribution_points: vec!["http://crl.fgv.br/ca.crl".into()] };
+        let exts = assert_leaf_profile_matches_rcgen(&role, &subject, &urls);
+
+        // The comparison above is only meaningful if the profile is rich.
+        let oids: Vec<String> = exts.iter().map(|e| e.extn_id.to_string()).collect();
+        for want in ["2.5.29.17", "2.5.29.15", "2.5.29.37", "2.5.29.31", crate::ad_ext::SID_EXT_OID] {
+            assert!(oids.iter().any(|o| o == want), "extension {want} missing from {oids:?}");
+        }
+        let san = exts.iter().find(|e| e.extn_id.to_string() == "2.5.29.17").unwrap();
+        assert!(!san.critical, "SAN is non-critical when the subject DN is non-empty");
+    }
+
+    #[test]
+    fn leaf_with_empty_subject_dn_matches_rcgen_profile() {
+        // No CN and no role DN fields: rcgen marks the SAN critical
+        // (RFC 5280 §4.2.1.6). EKU comes from the role's server/client flags.
+        let role = RoleEntry::default();
+        let subject = SubjectInput { alt_names: vec!["only-san.example".into()], ..Default::default() };
+        let exts = assert_leaf_profile_matches_rcgen(&role, &subject, &IssuanceUrls::default());
+        let san = exts.iter().find(|e| e.extn_id.to_string() == "2.5.29.17").expect("SAN");
+        assert!(san.critical, "SAN must be critical when the subject DN is empty");
+    }
+
+    #[test]
+    fn intermediate_extensions_match_rcgen_profile() {
+        // The rcgen parameters the old `build_intermediate_ca` used.
+        let (cn, org, path_len) = ("FGV Issuing CA 2", "FGV", Some(1));
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, cn.to_string());
+        dn.push(DnType::OrganizationName, org.to_string());
+        params.distinguished_name = dn;
+        params.is_ca = IsCa::Ca(BasicConstraints::Constrained(1));
+        params.key_usages =
+            vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature];
+
+        let ca = make_ca(KeyAlgorithm::EcdsaP384, ad_cs_subject(), Some(&FIELD_SKI));
+        let child = CertSigner::generate(KeyAlgorithm::EcdsaP256).unwrap();
+        let spki_der = child.key_pair().subject_public_key_info();
+        let (pem, serial) =
+            build_intermediate_ca(cn, org, Duration::from_secs(86_400), &spki_der, &ca.signer, &ca.pem, path_len)
+                .expect("sign intermediate");
+        params.serial_number = Some(SerialNumber::from_slice(&serial));
+        let reference = {
+            let rcgen_ca = make_ca(
+                KeyAlgorithm::EcdsaP256,
+                RdnSequence(vec![rdn(vec![atv(OID_CN, Tag::Utf8String, "Reference CA")])]),
+                Some(&FIELD_SKI),
+            );
+            let kp = KeyPair::from_pem(rcgen_ca.signer.pem_pkcs8()).unwrap();
+            let issuer = Issuer::from_ca_cert_pem(&rcgen_ca.pem, kp).unwrap();
+            let public_key = rcgen::SubjectPublicKeyInfo::from_der(&spki_der).unwrap();
+            params.signed_by(&public_key, &issuer).unwrap().pem()
+        };
+
+        let new = x509_cert::Certificate::from_der(&der_of(&pem)).unwrap().tbs_certificate;
+        let old = x509_cert::Certificate::from_der(&der_of(&reference)).unwrap().tbs_certificate;
+        assert_eq!(new.subject.to_der().unwrap(), old.subject.to_der().unwrap(), "subject DN encoding");
+        assert_eq!(new.serial_number, old.serial_number, "serial");
+        assert_eq!(new.subject_public_key_info, old.subject_public_key_info, "SPKI");
+        let aki = ObjectIdentifier::new_unwrap(OID_AKI);
+        let new_exts: Vec<Extension> =
+            new.extensions.unwrap_or_default().into_iter().filter(|e| e.extn_id != aki).collect();
+        // KU, SKI (same key-id method), BC with pathLen — byte-identical.
+        assert_eq!(new_exts, old.extensions.unwrap_or_default(), "intermediate profile matches rcgen");
+    }
+
+    // ── fail-closed cases ──────────────────────────────────────────────
+
+    #[test]
+    fn non_canonical_ca_subject_is_refused() {
+        // Swap the two members of the multi-valued RDN after DER sorting,
+        // so the CA subject is BER-ordered. Re-encoding it would silently
+        // re-sort, producing an issuer that does not byte-match.
+        let cn = atv(OID_CN, Tag::Utf8String, "x").to_der().unwrap();
+        let o = atv(OID_O, Tag::Utf8String, "y").to_der().unwrap();
+        let sorted: Vec<u8> = [cn.clone(), o.clone()].concat();
+        let swapped: Vec<u8> = [o, cn].concat();
+        let ca = make_ca_with(KeyAlgorithm::EcdsaP256, multi_valued_subject(), Some(&FIELD_SKI), |mut der| {
+            let mut i = 0;
+            let mut patched = 0;
+            while i + sorted.len() <= der.len() {
+                if der[i..i + sorted.len()] == sorted[..] {
+                    der[i..i + sorted.len()].copy_from_slice(&swapped);
+                    patched += 1;
+                    i += sorted.len();
+                } else {
+                    i += 1;
+                }
+            }
+            assert_eq!(patched, 2, "issuer and subject both patched");
+            der
+        });
+        let leaf_key = CertSigner::generate(KeyAlgorithm::EcdsaP256).unwrap();
+        let err = build_leaf(
+            &leaf_role(),
+            &leaf_subject("ber.example"),
+            Duration::from_secs(3600),
+            &leaf_key,
+            &ca.signer,
+            &ca.pem,
+            &IssuanceUrls::default(),
+        )
+        .expect_err("a CA subject that cannot be copied verbatim must be refused");
+        assert!(format!("{err:?}").contains("byte-for-byte"), "operator-facing reason: {err:?}");
+    }
+
+    #[test]
+    fn malformed_ca_ski_is_refused() {
+        // An SKI extension whose value is a NULL rather than an OCTET
+        // STRING, in an otherwise well-formed CA.
+        let base = make_ca(KeyAlgorithm::EcdsaP256, ad_cs_subject(), None);
+        let cert = x509_cert::Certificate::from_der(&der_of(&base.pem)).unwrap();
+        let mut tbs = cert.tbs_certificate.clone();
+        tbs.extensions.as_mut().unwrap().push(Extension {
+            extn_id: SubjectKeyIdentifier::OID,
+            critical: false,
+            extn_value: OctetString::new(vec![0x05, 0x00]).unwrap(),
+        });
+        let sig = base.signer.key_pair().sign(&tbs.to_der().unwrap()).unwrap();
+        let rebuilt = CertificateInner {
+            tbs_certificate: tbs,
+            signature_algorithm: cert.signature_algorithm.clone(),
+            signature: BitString::from_bytes(&sig).unwrap(),
+        };
+        let ca = TestCa { signer: base.signer, pem: x509_pqc::pem_encode("CERTIFICATE", &rebuilt.to_der().unwrap()) };
+        let leaf_key = CertSigner::generate(KeyAlgorithm::EcdsaP256).unwrap();
+        let err = build_leaf(
+            &leaf_role(),
+            &leaf_subject("badski.example"),
+            Duration::from_secs(3600),
+            &leaf_key,
+            &ca.signer,
+            &ca.pem,
+            &IssuanceUrls::default(),
+        )
+        .expect_err("a malformed CA SubjectKeyIdentifier must be refused, not ignored");
+        assert!(format!("{err:?}").contains("SubjectKeyIdentifier"), "operator-facing reason: {err:?}");
+    }
 }

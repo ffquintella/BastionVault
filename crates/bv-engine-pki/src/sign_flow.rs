@@ -519,18 +519,15 @@ impl PkiBackendInner {
         let urls = load_issuance_urls(req).await?;
 
         let (cert_pem, serial_bytes) = match (&plan.parsed.algorithm_class, &ca_signer) {
-            (CsrAlgClass::Classical, Signer::Classical(ca_classical)) => {
-                let (cert, serial) = x509::build_leaf_from_spki(
-                    &plan.role,
-                    &subject,
-                    plan.ttl,
-                    &plan.parsed.spki_der,
-                    ca_classical,
-                    &ca_cert_pem,
-                    &urls,
-                )?;
-                (cert.pem(), serial)
-            }
+            (CsrAlgClass::Classical, Signer::Classical(ca_classical)) => x509::build_leaf_from_spki(
+                &plan.role,
+                &subject,
+                plan.ttl,
+                &plan.parsed.spki_der,
+                ca_classical,
+                &ca_cert_pem,
+                &urls,
+            )?,
             (CsrAlgClass::MlDsa(level), Signer::MlDsa(ca_ml)) => x509_pqc::build_leaf_from_pqc_spki(
                 &plan.role,
                 &subject,
