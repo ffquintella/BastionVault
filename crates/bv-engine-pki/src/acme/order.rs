@@ -422,12 +422,9 @@ impl PkiBackendInner {
 
         // Same dispatch as `sign_csr_role`. Mixed-class chains rejected.
         let (cert_pem, serial_bytes) = match (&parsed.algorithm_class, &ca_signer) {
-            (CsrAlgClass::Classical, Signer::Classical(ca)) => {
-                let (cert, serial) = x509::build_leaf_from_spki(
-                    &role, &subject, ttl, &parsed.spki_der, ca, &ca_cert_pem, &urls,
-                )?;
-                (cert.pem(), serial)
-            }
+            (CsrAlgClass::Classical, Signer::Classical(ca)) => x509::build_leaf_from_spki(
+                &role, &subject, ttl, &parsed.spki_der, ca, &ca_cert_pem, &urls,
+            )?,
             (CsrAlgClass::MlDsa(level), Signer::MlDsa(ca_ml)) => x509_pqc::build_leaf_from_pqc_spki(
                 &role,
                 &subject,

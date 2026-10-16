@@ -73,7 +73,21 @@ EXAMPLE ENTRY:
 - Resume an RDP session automatically after the network drops it, without logging on again (T146, S46)
   -- when the connection breaks under a live session (a failed write with no disconnect reason from the server, or the socket closing or resetting), the desktop app redials the same host up to twice, 1 s and then 4 s later, and presents the auto-reconnect cookie Windows issued for that session, so the server reattaches the same desktop with its open windows. The pane says *reconnecting… (attempt n of 2)* with the cause, then carries on in the same pane, at the same size, without re-attaching; if the link stays down, or the server refuses the cookie, the pane closes with that reason. A session the server ended, a protocol error and a Disconnect are never retried. Only direct password sessions resume: a Rustion-brokered session (its ticket is single-use) and a smart-card session close as before, saying why. The redial runs the same DNS, TCP, TLS and pin checks as the first connect and carries no password, so a rejected cookie ends the session instead of logging on again; the cookie stays in the app's memory, is never logged or shown, is wiped when replaced or rejected, and is dropped on Disconnect. Each attempt and its outcome is written to the host's audit log (`session.reconnect`).
 
+### Changed
+
+#### PKI — classical issuers
+
+- Sign certificates issued by an RSA-3072 or RSA-4096 CA with sha384WithRSA or sha512WithRSA (T147, S38)
+  -- leaves and intermediates signed by these CAs used SHA-256 whatever the key size; they now use the hash the engine already pins for that key size, the same one their CRLs were signed with. RSA-2048 CAs and imported RSA keys of other sizes stay on SHA-256. A verifier that pins the signature algorithm of issued certificates must accept the new one.
+
 ### Fixed
+
+#### PKI — certificates issued by an imported CA
+
+- Chain certificates issued by a classical CA whose subject repeats an attribute, such as an AD CS CA named `DC=br, DC=fgv, CN=…` (T147, S38)
+  -- leaves and intermediates signed by an RSA, ECDSA or Ed25519 issuer carried an issuer name rebuilt from the CA subject, which kept only the last value of each attribute type (`DC=fgv, CN=FGV-SSL-CA-V1` instead of `DC=br, DC=fgv, CN=FGV-SSL-CA-V1`), and no Authority Key Identifier, so clients could not build the chain. The issuer name is now the CA subject copied byte for byte, and the Authority Key Identifier is the CA's Subject Key Identifier; a CA without one gets no Authority Key Identifier and a warning in the server log. A CA whose subject has a multi-valued RDN, which was refused, can now issue. `pki/issue`, `pki/sign`, `pki/sign-verbatim`, approved sign requests, ACME and `pki/root/sign-intermediate` are all covered; PQC and composite issuers already behaved this way. Certificates issued before the upgrade are not changed — re-issue them.
+- Refuse to issue, with an error naming the cause, when the CA certificate's subject is not DER-canonical or its Subject Key Identifier is malformed, empty or repeated, and when a requested DNS name is not ASCII (T147, S38)
+  -- these used to produce a certificate that did not chain, or an unclear signing error.
 
 #### Sharing — identity groups inside a namespace
 

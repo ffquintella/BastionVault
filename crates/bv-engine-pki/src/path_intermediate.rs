@@ -384,7 +384,7 @@ impl PkiBackendInner {
             return Err(RvError::ErrPkiKeyTypeInvalid);
         };
 
-        let (cert, _serial) = x509::build_intermediate_ca(
+        let (cert_pem, _serial) = x509::build_intermediate_ca(
             &common_name,
             &organization,
             ttl,
@@ -393,7 +393,6 @@ impl PkiBackendInner {
             &ca_cert_pem,
             path_len,
         )?;
-        let cert_pem = cert.pem();
 
         let mut data: Map<String, Value> = Map::new();
         data.insert("certificate".into(), json!(cert_pem));
