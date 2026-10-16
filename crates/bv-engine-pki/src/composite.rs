@@ -207,6 +207,17 @@ impl CompositeSigner {
         &self.pqc
     }
 
+    /// Test-only: the same keys with a different cached ML-DSA public key,
+    /// the shape of a tampered or corrupted storage envelope.
+    #[cfg(test)]
+    pub(crate) fn with_pqc_cached_public_key(&self, public_key: Vec<u8>) -> Result<Self, RvError> {
+        Ok(Self {
+            variant: self.variant,
+            classical: CertSigner::from_pem(self.classical.pem_pkcs8())?,
+            pqc: self.pqc.with_cached_public_key(public_key),
+        })
+    }
+
     /// Build the BIT STRING contents for a composite `subjectPublicKey`.
     ///
     /// Per draft-ietf-lamps-pq-composite-sigs, this is a DER-encoded
