@@ -77,6 +77,23 @@ services:
       # linuxserver/openssh-server listens on 2222 inside the container.
       - "2222"
 
+  brokered-target:
+    # OpenSSH that trusts only BastionVault's `ssh/` engine CA
+    # (TrustedUserCAKeys) and has password login off: the brokered
+    # ssh-cert phase of run.sh. run.sh writes the CA public key and the
+    # host key into ./var/brokered-target/ before starting it, and pins
+    # that host key in the envelope.
+    build:
+      context: ./brokered-target
+    image: bv-brokered-target:e2e
+    container_name: brokered-target
+    networks:
+      - rustion-e2e
+    volumes:
+      - ./var/brokered-target:/bv:ro
+    expose:
+      - "2222"
+
 networks:
   rustion-e2e:
     driver: bridge

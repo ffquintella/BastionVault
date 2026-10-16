@@ -79,6 +79,40 @@ subsequent runs reuse the cached layers.
 To reuse an already-initialised `var/bv`, pass `BV_ROOT_TOKEN=…`. To
 start fresh, `docker compose down -v && rm -rf var/bv/* var/rustion/*`.
 
+### Brokered SSH (Steps B1-B5)
+
+Every run then proves a **brokered** login (`login_class = brokered`,
+[the spec](../../../features/ssh-resource-login-brokering.md) Phase 4,
+Rustion T444): no credential lives on the resource or reaches the
+operator. Unlike Steps 7-8, each check here fails the run.
+
+- **B1** mounts the `ssh/` engine, generates its CA and a `brokered` role,
+  and starts `brokered-target` (`brokered-target/`): an OpenSSH server
+  that trusts only that CA through `TrustedUserCAKeys` and has password
+  login off. run.sh generates the target's host key into
+  `var/brokered-target/` and computes its `SHA256:` pin.
+- **B2** calls `rustion/v2/session/open` with
+  `credential_source = {kind: ssh-engine, mode: ca}` and the pin. The vault
+  mints an ephemeral Ed25519 key and certificate and seals both into the
+  envelope; the operator dials Rustion with the ticket and must get a shell
+  as `tester`. The same `cert_serial` must appear in BV's open response, in
+  Rustion's `brokered_login` audit row (`outcome: success`,
+  `hostkey_pinned: true`) and in the recording sidecar.
+- **B3** opens with a wrong host-key pin: Rustion must refuse at key
+  exchange, before any authentication, with `brokered_login` failure and
+  no `session_started`.
+- **B4** mints from a second engine (`ssh-untrusted/`) whose CA the target
+  does not trust: the target must refuse, and Rustion must try nothing
+  else.
+- **B5** pins BV's current `501 ssh_otp_rustion_unsupported` for
+  `mode = otp`. Rustion already accepts `ssh-otp`; the run fails as soon as
+  BV stops refusing, so the OTP leg gets added here then.
+
+The brokered probe hands the ticket to `ssh` through `SSH_ASKPASS_REQUIRE=force`
+(OpenSSH 8.4 or later), so it does not need `sshpass`. It also keeps stdin
+open until the target shell exits, because Rustion ends a session on the
+operator's EOF.
+
 ### Multi-instance failover (`E2E_FAILOVER=1`)
 
 `E2E_FAILOVER=1 ./run.sh` loads the `docker-compose.failover.yaml`
@@ -98,9 +132,10 @@ inside Rustion:
 ```
 tests/e2e/rustion-ssh/
   README.md                 — this file
-  docker-compose.yaml       — three-service stack
+  docker-compose.yaml       — the stack (BV, Rustion, two OpenSSH targets)
   docker-compose.failover.yaml — overlay adding rustion-2 (E2E_FAILOVER)
   run.sh                    — driver script
+  brokered-target/          — OpenSSH image trusting only BV's ssh/ CA
   config/
     bv-policy.hcl           — minimal admin policy for the test operator
     rustion.toml            — Rustion config with control-plane listener
@@ -116,5 +151,9 @@ tests/e2e/rustion-ssh/
 - The Rustion authority record's deployment_id binding (Phase 9) is
   not enforced yet — the e2e accepts any envelope signed by the
   pinned pubkey.
-- ssh-key / ssh-cert credential kinds aren't wired in the proxy loop
-  yet (only ssh-password), so the demo uses a password credential.
+- Brokered `ssh-otp` through Rustion is not exercised: BV's v2
+  session/open still refuses `mode = otp` on the Rustion transport
+  (T105). Step B5 pins that refusal.
+- Brokered certificates carry the literal key id
+  `vault-brokered-{{token_display_name}}`: the `key_id_format` template is
+  not rendered when the vault mints server-side.

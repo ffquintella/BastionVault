@@ -363,6 +363,201 @@ CO_TICKET=$(echo "$V2" | jq -r '.data.ticket // empty')
 bold "Done — connect-only operator proxied an SSH session without ever reading the credential."
 
 #───────────────────────────────────────────────────────────────────
+# Brokered SSH (Rustion T444, BastionVault T105, features/ssh-resource-login-brokering.md
+# Phase 4). Every login is a certificate the vault's `ssh/` engine minted for
+# this one connect: v2 session/open with credential_source.kind=ssh-engine
+# mints an ephemeral Ed25519 key + cert inside the vault, seals both into the
+# envelope, and Rustion presents them to a target that trusts only that CA.
+#
+# Unlike Steps 7-8 these checks fail the run: each proof is read back from
+# the target shell and from Rustion's audit chain, not from a log line.
+#───────────────────────────────────────────────────────────────────
+BROKERED_RESOURCE="${BROKERED_RESOURCE:-brokered-target}"
+BROKERED_HOST=brokered-target
+BROKERED_PORT=2222
+BROKERED_USER=tester
+BT_DIR=var/brokered-target
+require ssh-keygen
+
+# The Rustion audit chain as JSON rows (one file per day, bind-mounted).
+rustion_audit() { cat var/rustion/audit/*.jsonl 2>/dev/null || true; }
+# The brokered_login row Rustion wrote for one BV session id.
+brokered_row() {
+    rustion_audit | jq -c --arg sid "$1" \
+        'select(.event.type == "brokered_login" and .event.session_id == $sid) | .event' | tail -n 1
+}
+# How many session_started rows name the brokered target (the row carries
+# the bare host). A refused or failed brokered login must not write one.
+started_count() {
+    rustion_audit | jq -s --arg t "$BROKERED_HOST" \
+        '[.[] | select(.event.type == "session_started" and .event.target == $t)] | length'
+}
+# Poll for the brokered_login row: Rustion writes it after the dial, which
+# the ssh client only waits on up to its own timeouts.
+wait_brokered_row() {
+    local row="" i
+    for i in $(seq 1 20); do
+        row=$(brokered_row "$1"); [ -n "$row" ] && break
+        sleep 0.5
+    done
+    printf '%s' "$row"
+}
+# Dial Rustion with a ticket and print the target shell's output. Returns 0
+# only when the shell answered as $BROKERED_USER on $BROKERED_HOST.
+# The ticket goes in through OpenSSH's own askpass hook (OpenSSH >= 8.4), so
+# this phase needs no sshpass, and perl's alarm caps the dial where no
+# timeout(1) is installed.
+ASKPASS=var/ticket-askpass.sh
+printf '#!/bin/sh\nprintf "%%s\\n" "$E2E_TICKET"\n' > "$ASKPASS"; chmod 700 "$ASKPASS"
+ssh_brokered() {
+    local ticket=$1 out
+    # stdin stays open until the target shell exits on its own: Rustion ends
+    # the session on the operator's EOF, which would drop the shell's reply.
+    out=$( { printf 'echo "whoami=$(id -un)"; exit\n'; sleep 8; } | perl -e 'alarm shift; exec @ARGV' 40 \
+        env E2E_TICKET="$ticket" SSH_ASKPASS="$PWD/$ASKPASS" SSH_ASKPASS_REQUIRE=force \
+        ssh -tt \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+            -o NumberOfPasswordPrompts=1 -o ConnectTimeout=10 \
+            -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
+            -p "$RUSTION_SSH_PORT" "operator@$RUSTION_SSH_HOST" 2>&1) || true
+    echo "$out" | sed 's/^/[ssh] /' >&2
+    echo "$out" | grep -q "whoami=$BROKERED_USER"
+}
+# v2 session/open with a brokered ssh-engine credential source.
+brokered_open() {
+    local mount=$1 pin=$2
+    curl -sk "$BV_ADDR/v1/rustion/v2/session/open" "${RT[@]}" -H 'Content-Type: application/json' \
+        -d "$(jq -n --arg res "$BROKERED_RESOURCE" --arg mount "$mount" \
+                    --arg host "$BROKERED_HOST" --argjson port "$BROKERED_PORT" \
+                    --arg user "$BROKERED_USER" --arg pin "$pin" \
+            '{resource_name:$res,
+              credential_source:{kind:"ssh-engine", ssh_mount:$mount, ssh_role:"brokered", mode:"ca"},
+              target_host:$host, target_port:$port, target_protocol:"ssh",
+              target_hostkey_pin:$pin, credential_username:$user,
+              ttl_secs:600, max_renewals:0}')"
+}
+# Mount an ssh engine at $1, generate its CA, and write the `brokered` role.
+# Prints the CA public key.
+ssh_engine_with_ca() {
+    local mount=$1 code body
+    IFS=$'\n' read -r -d '' code body < <(
+        api POST "/v1/sys/mounts/$mount" "${RT[@]}" -H 'Content-Type: application/json' \
+            -d '{"type":"ssh"}'; printf '\0')
+    case "$code" in 200|204) ;; *) echo "$body" | grep -qi 'existing\|already' \
+        || die "mount $mount failed (HTTP $code): $body" ;; esac
+    # An existing CA (re-run on a kept var/bv) is read back, not replaced.
+    body=$(curl -sk "$BV_ADDR/v1/$mount/public_key" "${RT[@]}" | jq -r '.data.public_key // empty')
+    if [ -z "$body" ]; then
+        body=$(curl -sk -X POST "$BV_ADDR/v1/$mount/config/ca" "${RT[@]}" \
+            -H 'Content-Type: application/json' -d '{}' | jq -r '.data.public_key // empty')
+    fi
+    [ -n "$body" ] || die "$mount: no CA public key"
+    IFS=$'\n' read -r -d '' code _ < <(
+        api POST "/v1/$mount/roles/brokered" "${RT[@]}" -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg u "$BROKERED_USER" \
+                '{key_type:"ca", allowed_users:$u, default_user:$u,
+                  default_extensions:{"permit-pty":""}, ttl:"5m", max_ttl:"10m"}')"; printf '\0')
+    case "$code" in 200|204) ;; *) die "$mount: role write failed (HTTP $code)" ;; esac
+    printf '%s' "$body"
+}
+
+bold "Step B1 — brokered: ssh engine CA, a target that trusts only it, and its host-key pin"
+CA_PUB=$(ssh_engine_with_ca ssh)
+log "ssh/ CA: ${CA_PUB:0:40}…"
+mkdir -p "$BT_DIR"
+printf '%s\n' "$CA_PUB" > "$BT_DIR/bv_user_ca.pub"
+[ -s "$BT_DIR/ssh_host_ed25519_key" ] \
+    || ssh-keygen -q -t ed25519 -N '' -C brokered-target -f "$BT_DIR/ssh_host_ed25519_key"
+HOSTKEY_PIN=$(ssh-keygen -l -E sha256 -f "$BT_DIR/ssh_host_ed25519_key.pub" | awk '{print $2}')
+case "$HOSTKEY_PIN" in SHA256:*) ;; *) die "could not fingerprint the target host key" ;; esac
+log "target host-key pin: $HOSTKEY_PIN"
+"${DC[@]}" up -d --build --force-recreate brokered-target
+api POST "/v1/resources/$BROKERED_RESOURCE" "${RT[@]}" -H 'Content-Type: application/json' \
+    -d "{\"name\":\"$BROKERED_RESOURCE\",\"type\":\"server\",\"hostname\":\"$BROKERED_HOST\",
+         \"description\":\"e2e brokered ssh-cert target\"}" >/dev/null
+sleep 2
+
+bold "Step B2 — brokered ssh-cert: BV mints, Rustion presents, the target accepts"
+BEFORE=$(started_count)
+OPEN=$(brokered_open ssh "$HOSTKEY_PIN")
+echo "$OPEN" | jq -c '.data | {session_id, login_class, ssh_engine_mode, cert_serial}' 2>/dev/null || echo "$OPEN"
+SID=$(echo "$OPEN" | jq -r '.data.session_id // empty')
+TICKET=$(echo "$OPEN" | jq -r '.data.ticket // empty')
+BV_SERIAL=$(echo "$OPEN" | jq -r '.data.cert_serial // empty')
+[ -n "$TICKET" ] || die "brokered open returned no ticket: $OPEN"
+[ "$(echo "$OPEN" | jq -r '.data.login_class')" = brokered ] || die "BV open is not login_class=brokered"
+[ "$(echo "$OPEN" | jq -r '.data.ssh_engine_mode')" = ca ]    || die "BV open is not ssh_engine_mode=ca"
+[ -n "$BV_SERIAL" ] || die "BV open carries no cert_serial"
+ssh_brokered "$TICKET" || die "brokered ssh-cert: the target shell did not answer as $BROKERED_USER"
+log "  → shell on $BROKERED_HOST as $BROKERED_USER, with no credential on the resource or the operator"
+ROW=$(wait_brokered_row "$SID")
+echo "[rustion] $ROW"
+[ -n "$ROW" ] || die "Rustion wrote no brokered_login row for $SID"
+[ "$(echo "$ROW" | jq -r .outcome)" = success ]          || die "brokered_login outcome is not success"
+[ "$(echo "$ROW" | jq -r .credential_kind)" = ssh-cert ] || die "brokered_login kind is not ssh-cert"
+[ "$(echo "$ROW" | jq -r .principal)" = "$BROKERED_USER" ] || die "brokered_login principal mismatch"
+[ "$(echo "$ROW" | jq -r .hostkey_pinned)" = true ]       || die "brokered_login says the host key was not pinned"
+RU_SERIAL=$(echo "$ROW" | jq -r .cert_serial)
+[ "$RU_SERIAL" = "$BV_SERIAL" ] || die "cert_serial differs: BV=$BV_SERIAL Rustion=$RU_SERIAL"
+log "  → cert_serial $BV_SERIAL joins BV's session/open and Rustion's brokered_login"
+[ "$(started_count)" -gt "$BEFORE" ] || die "Rustion wrote no session_started for the brokered target"
+# The third witness: the recording's sidecar (written when the session ends).
+find var/rustion/recordings -name '*.json' -exec cat {} + 2>/dev/null \
+    | jq -se --arg s "$BV_SERIAL" 'any(.[]; .cert_serial == $s and .login_class == "brokered")' >/dev/null \
+    || die "no recording sidecar carries cert_serial $BV_SERIAL"
+log "  → the recording sidecar carries the same cert_serial"
+
+bold "Step B3 — a wrong host-key pin stops the dial before any credential is sent"
+# A well-formed pin for a key the target does not hold: 32 zero bytes.
+WRONG_PIN="SHA256:$(head -c 32 /dev/zero | base64 | tr -d '=')"
+BEFORE=$(started_count)
+OPEN=$(brokered_open ssh "$WRONG_PIN")
+SID=$(echo "$OPEN" | jq -r '.data.session_id // empty')
+TICKET=$(echo "$OPEN" | jq -r '.data.ticket // empty')
+[ -n "$TICKET" ] || die "open with a wrong pin returned no ticket (the pin is enforced at dial): $OPEN"
+ssh_brokered "$TICKET" && die "a wrong host-key pin still reached a shell"
+ROW=$(wait_brokered_row "$SID")
+echo "[rustion] $ROW"
+[ "$(echo "$ROW" | jq -r .outcome)" = failure ] || die "wrong pin: brokered_login outcome is not failure"
+[ "$(started_count)" = "$BEFORE" ] || die "wrong pin: Rustion wrote session_started anyway"
+log "  → refused at key exchange: brokered_login failure, no session_started"
+
+bold "Step B4 — a certificate from a CA the target does not trust is refused, never downgraded"
+ssh_engine_with_ca ssh-untrusted >/dev/null
+BEFORE=$(started_count)
+OPEN=$(brokered_open ssh-untrusted "$HOSTKEY_PIN")
+SID=$(echo "$OPEN" | jq -r '.data.session_id // empty')
+TICKET=$(echo "$OPEN" | jq -r '.data.ticket // empty')
+[ -n "$TICKET" ] || die "untrusted-CA open returned no ticket: $OPEN"
+ssh_brokered "$TICKET" && die "a certificate from an untrusted CA reached a shell"
+ROW=$(wait_brokered_row "$SID")
+echo "[rustion] $ROW"
+[ "$(echo "$ROW" | jq -r .outcome)" = failure ] || die "untrusted CA: brokered_login outcome is not failure"
+[ "$(started_count)" = "$BEFORE" ] || die "untrusted CA: Rustion wrote session_started anyway"
+log "  → the target refused the certificate; Rustion tried no other credential"
+
+bold "Step B5 — brokered ssh-otp through Rustion (BastionVault side not wired yet)"
+# Rustion accepts and materialises ssh-otp (M38, T436-T437); BastionVault's
+# v2 session/open still refuses mode=otp on the Rustion transport. This step
+# pins that refusal so the day BV forwards OTP, the run says to extend it.
+IFS=$'\n' read -r -d '' code body < <(
+    api POST /v1/rustion/v2/session/open "${RT[@]}" -H 'Content-Type: application/json' \
+        -d "$(jq -n --arg res "$BROKERED_RESOURCE" --arg host "$BROKERED_HOST" \
+                    --argjson port "$BROKERED_PORT" --arg user "$BROKERED_USER" \
+            '{resource_name:$res,
+              credential_source:{kind:"ssh-engine", ssh_mount:"ssh", ssh_role:"brokered", mode:"otp"},
+              target_host:$host, target_port:$port, target_protocol:"ssh",
+              credential_username:$user, ttl_secs:600}')"; printf '\0')
+if [ "$code" = 501 ] && echo "$body" | grep -q ssh_otp_rustion_unsupported; then
+    warn "ssh-otp: BV still answers 501 ssh_otp_rustion_unsupported — OTP leg not run (BV T105)"
+else
+    die "ssh-otp: BV no longer refuses OTP over Rustion (HTTP $code) — add the OTP leg here: $body"
+fi
+
+bold "Done — brokered ssh-cert proven end to end; cert_serial joins both witnesses."
+
+#───────────────────────────────────────────────────────────────────
 # Step 9 — multi-instance failover (opt-in: E2E_FAILOVER=1)
 #
 # Brings up a SECOND Rustion (rustion-2), enrols it, then proves that an
