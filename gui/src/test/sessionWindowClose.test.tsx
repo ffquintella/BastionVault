@@ -152,8 +152,13 @@ afterEach(() => {
 });
 
 describe("isLiveStatus", () => {
-  it("counts an open, connecting or not-yet-reported session as live", () => {
-    expect([undefined, "connecting", "open"].map((s) => isLiveStatus(s as never))).toEqual([true, true, true]);
+  it("counts an open, connecting, reconnecting or not-yet-reported session as live", () => {
+    expect([undefined, "connecting", "open", "reconnecting"].map((s) => isLiveStatus(s as never))).toEqual([
+      true,
+      true,
+      true,
+      true,
+    ]);
     expect(isLiveStatus("closed")).toBe(false);
     expect(isLiveStatus("error")).toBe(false);
   });

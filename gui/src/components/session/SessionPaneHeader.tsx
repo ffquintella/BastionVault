@@ -12,7 +12,7 @@ import type { ReactNode } from "react";
 
 import { RustionSessionChip } from "../RustionSessionChip";
 
-export type SessionPaneStatus = "connecting" | "open" | "closed" | "error";
+export type SessionPaneStatus = "connecting" | "open" | "reconnecting" | "closed" | "error";
 
 function statusBackground(status: SessionPaneStatus): string {
   switch (status) {
@@ -24,6 +24,8 @@ function statusBackground(status: SessionPaneStatus): string {
       return "#5e1f1f";
     case "connecting":
       return "#2a2f5e";
+    case "reconnecting":
+      return "#5e4a1f";
   }
 }
 

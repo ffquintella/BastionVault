@@ -35,10 +35,11 @@ import { extractError } from "./error";
 /** Tauri's `TauriEvent.WINDOW_CLOSE_REQUESTED`. */
 export const WINDOW_CLOSE_REQUESTED_EVENT = "tauri://close-requested";
 
-/** A session that is, or may still be, live: closing its window ends it.
+/** A session that is, or may still be, live (a reconnecting one too):
+ *  closing its window ends it.
  *  A pane that has not reported a status yet counts as connecting. */
 export function isLiveStatus(status: SessionPaneStatus | undefined): boolean {
-  return status === undefined || status === "open" || status === "connecting";
+  return status === undefined || status === "open" || status === "connecting" || status === "reconnecting";
 }
 
 export interface WindowCloseGuard {

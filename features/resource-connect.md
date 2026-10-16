@@ -563,6 +563,49 @@ does not. The connector change is written but unpushed — four remaining steps
 are listed in the roadmap. It is also untested against a live Windows
 Graphics Pipeline, and cannot be until the flag lands.
 
+### Phase 7.7 — RDP auto-reconnect — **Done**
+
+A transport drop under a live RDP session no longer ends it. The session
+task in `gui/src-tauri/src/session/rdp.rs` (`run_session`) keeps the most
+recent Server Auto-Reconnect Cookie (MS-RDPBCGR 2.2.4.2; the server
+regenerates it hourly) and, when a connection ends on a lost transport,
+redials and resumes the same Windows session (MS-RDPBCGR 1.3.1.5) over the
+same session token, control channel and frame channel.
+
+| Exit | Retried? |
+|---|---|
+| Failed write with no server disconnect reason behind it | yes |
+| Read EOF, reset, abort, broken pipe | yes |
+| Server Terminate / disconnect reason (incl. one read after a failed write) | no |
+| Operator Disconnect, window close, control channel dropped | no |
+| Protocol error, failed DisplayControl reactivation | no |
+| `AutoReconnectFailed` (server rejected the cookie) | no — ends with that reason |
+
+- **Budget:** at most two attempts per drop, after 1 s and 4 s, each bounded
+  at 20 s end to end. A resumed connection that stays up 60 s earns a fresh
+  budget; one that drops sooner shares it, so a flapping link ends.
+- **Same checks:** the redial goes through the open path's `dial()` — DNS,
+  TCP, TLS, the bastion pin (fail-closed), the connector, and a fresh
+  clipboard bridge and audit task with the session's resolved clipboard
+  settings. A failed pin or a refused connect ends the session with its
+  reason; only network-layer failures use up another attempt.
+- **Eligibility:** direct password sessions only. A Rustion-brokered session
+  is not retried (the bastion ticket is single-use; a fresh one needs
+  `rustion/v2/session/open` and the operator's MFA again), nor a smart-card
+  session (CredSSP would need the private key kept for the session's life).
+  Both close with the reason appended.
+- **Pane:** the per-session `session-reconnect-<token>` event carries
+  `{phase: "reconnecting", attempt, max_attempts, reason}` and then
+  `{phase: "resumed", width, height}`; the pane shows a `reconnecting`
+  status and re-sends its size if it changed meanwhile. A final failure
+  arrives as the usual closed event.
+- **Audit:** the host logs `session.reconnect` (target `audit`) for every
+  attempt with `outcome=attempting|resumed|failed`, the token and the reason.
+
+Not verified by hand yet against a Windows host with the drop reproduced
+(the Trend Micro network filter on the reporting Mac); the retry decision,
+the cookie handling and the pane states are covered by unit tests.
+
 ### Phase 8 — Future / deferred
 
 - Session recording (keystroke + bitmap capture; storage tier; replay viewer).
@@ -598,6 +641,7 @@ No new C-linked deps. No OpenSSL. No `aws-lc-sys`. (rustls is already in tree; i
 - **Window isolation.** Each session window is a separate Tauri WebviewWindow with its own isolated WebView context. A compromise of the resources list page can't reach into a running session window's memory.
 - **Session credential lifetime.** Pulled into RAM on connect, cleared on disconnect. The host wraps it in `Zeroizing<Vec<u8>>` so a panic / crash dump doesn't preserve plaintext.
 - **Refuse insecure-by-default.** SSH refuses `none` auth and the obsolete `ssh-rsa` host key. RDP refuses standard RDP encryption (no NLA) by default; operators can opt in per-resource for legacy hosts via an explicit `allow_legacy_rdp_auth = true` resource flag, logged at WARN every connect.
+- **The RDP auto-reconnect cookie is a credential.** It lets its holder reattach the Windows session without a logon, so it lives only in the session task's memory: never logged (its `Debug` prints nothing), never in an event or a frame, never persisted. It is wiped when the server replaces or rejects it and dropped with the session on Disconnect. The copy handed to ironrdp's connector for a redial is freed unwiped (`ServerAutoReconnect` has no `Zeroize`). A redial carries no password and sets no autologon, so a rejected cookie ends the session rather than logging on again from a stored secret. A regression test asserts the cookie appears in no log line and no event.
 - **Bitmap data does NOT cross the audit boundary.** A real PAM product records video; we do not (Phase 5). This is documented so a SOC doesn't expect to find session video in audit logs and discover the gap during an incident.
 - **Network egress allow-listing.** The Connect path opens an outbound TCP connection from the operator's workstation to the target. In environments that gate workstation egress, the operator's existing firewall rules apply unchanged — there's no proxy / tunnel built into v1.
 - **Process isolation between sessions.** Each session lives on its own Tokio task; a panic in one doesn't take down the GUI host (we already use `catch_unwind` around the long-running task spawn pattern).

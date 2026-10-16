@@ -56,6 +56,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### RDP sessions — desktop app
+
+- Resume an RDP session automatically after the network drops it, without logging on again (T145, S46)
+  -- when the connection breaks under a live session (a failed write with no disconnect reason from the server, or the socket closing or resetting), the desktop app redials the same host up to twice, 1 s and then 4 s later, and presents the auto-reconnect cookie Windows issued for that session, so the server reattaches the same desktop with its open windows. The pane says *reconnecting… (attempt n of 2)* with the cause, then carries on in the same pane, at the same size, without re-attaching; if the link stays down, or the server refuses the cookie, the pane closes with that reason. A session the server ended, a protocol error and a Disconnect are never retried. Only direct password sessions resume: a Rustion-brokered session (its ticket is single-use) and a smart-card session close as before, saying why. The redial runs the same DNS, TCP, TLS and pin checks as the first connect and carries no password, so a rejected cookie ends the session instead of logging on again; the cookie stays in the app's memory, is never logged or shown, is wiped when replaced or rejected, and is dropped on Disconnect. Each attempt and its outcome is written to the host's audit log (`session.reconnect`).
+
 ### Fixed
 
 #### RDP sessions — desktop app

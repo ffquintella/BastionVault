@@ -614,6 +614,44 @@ describe("RdpPane", () => {
     expect(invokedWith("session_input_rdp_key")).toHaveLength(2);
   });
 
+  it("shows a transport drop as reconnecting, then resumes on the same token", async () => {
+    renderRdp();
+    const RECONNECT = `session-reconnect-${TOKEN}`;
+    expect(h.listeners.has(RECONNECT)).toBe(true);
+    act(() =>
+      h.listeners.get(RECONNECT)!({
+        payload: { phase: "reconnecting", attempt: 1, max_attempts: 2, reason: "connection lost (write input: Broken pipe)" },
+      }),
+    );
+    expect(screen.getByText("reconnecting")).toBeInTheDocument();
+    expect(screen.getByText(/attempt 1 of 2\): connection lost/)).toBeInTheDocument();
+    act(() => h.listeners.get(RECONNECT)!({ payload: { phase: "resumed", width: 1280, height: 720 } }));
+    expect(screen.getByText("open")).toBeInTheDocument();
+    expect(screen.queryByText(/attempt 1 of 2/)).not.toBeInTheDocument();
+    // The frame channel is never re-attached: the host kept it.
+    expect(invokedWith("session_attach_rdp_frames")).toHaveLength(1);
+  });
+
+  it("ends a failed reconnect with the host's final reason", async () => {
+    renderRdp();
+    const RECONNECT = `session-reconnect-${TOKEN}`;
+    act(() =>
+      h.listeners.get(RECONNECT)!({
+        payload: { phase: "reconnecting", attempt: 2, max_attempts: 2, reason: "reset (RST)" },
+      }),
+    );
+    act(() =>
+      h.listeners.get(CLOSED)!({
+        payload: { reason: "the server refused to resume the session (auto-reconnect rejected)" },
+      }),
+    );
+    expect(screen.getByText("closed")).toBeInTheDocument();
+    expect(screen.getByText(/refused to resume the session/)).toBeInTheDocument();
+    // A late progress event cannot reopen a closed pane.
+    act(() => h.listeners.get(RECONNECT)?.({ payload: { phase: "resumed", width: 1, height: 1 } }));
+    expect(screen.getByText("closed")).toBeInTheDocument();
+  });
+
   it("reflects the closed event", async () => {
     renderRdp();
     act(() => h.listeners.get(CLOSED)!({ payload: null }));
