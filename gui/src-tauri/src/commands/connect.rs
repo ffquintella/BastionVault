@@ -1418,10 +1418,12 @@ pub struct SessionRustionInfoRequest {
 #[tauri::command]
 pub async fn session_rustion_info(
     state: State<'_, AppState>,
+    webview: Webview,
     request: SessionRustionInfoRequest,
 ) -> CmdResult<Option<SessionRustionInfo>> {
-    let bundles = state.rustion_session_bundles.lock().await;
-    Ok(bundles.get(&request.token).map(|b| SessionRustionInfo {
+    // Only the window holding the session reads its bundle (T145).
+    let bundle = super::rustion::caller_bundle(&state, &webview, &request.token).await?;
+    Ok(bundle.as_ref().map(|b| SessionRustionInfo {
         session_id: b.session_id.clone(),
         bastion_id: b.bastion_id.clone(),
         bastion_name: b.bastion_name.clone(),

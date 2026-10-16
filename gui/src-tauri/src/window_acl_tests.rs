@@ -36,8 +36,6 @@ const TOKEN: &str = "sess_0123456789abcdef0123456789abcdef";
 /// that needs it, the set in `permissions/window-sets.json`, and the spec.
 const SESSION_WINDOW: &[&str] = &[
     "get_session_workspace_prefs",
-    "rustion_session_kill",
-    "rustion_session_renew",
     "session_attach_rdp_frames",
     "session_close",
     "session_heartbeat",
@@ -48,7 +46,10 @@ const SESSION_WINDOW: &[&str] = &[
     "session_input_rdp_wheel",
     "session_move",
     "session_resize",
+    // The Rustion chip (T145): token-bound, ids from the host's bundle.
     "session_rustion_info",
+    "session_rustion_kill",
+    "session_rustion_renew",
     // T108: answer the window's own close request, and close itself.
     "session_window_close",
     "session_window_closing",
@@ -80,13 +81,14 @@ const WORKSPACE_EXTRA: &[&str] = &[
 /// An SFTP session's own window (features/sftp-connect.md): its session's
 /// lifecycle and the file operations — no keystroke or RDP input, no move.
 /// The three Rustion commands drive the lifecycle chip of a brokered
-/// session (T141), the same three an SSH window has.
+/// session (T141), the same three an SSH window has, bound to its token
+/// (T145).
 const SFTP_WINDOW: &[&str] = &[
-    "rustion_session_kill",
-    "rustion_session_renew",
     "session_close",
     "session_heartbeat",
     "session_rustion_info",
+    "session_rustion_kill",
+    "session_rustion_renew",
     "session_window_close",
     "session_window_closing",
     "sftp_cancel_transfer",
@@ -149,6 +151,11 @@ const NEVER_IN_A_SESSION_WINDOW: &[&str] = &[
     "session_attach",
     "session_detach",
     "rustion_open_replay_window",
+    // T145: the raw-id lifecycle commands act on any bastion session the
+    // vault policy allows; a session window uses the token-bound
+    // `session_rustion_renew` / `_kill` instead.
+    "rustion_session_renew",
+    "rustion_session_kill",
     "fido2_submit_pin",
     // The AI-assistant server (T131): starting it, and answering its pairing
     // and per-call prompts, are the operator's alone. These commands also

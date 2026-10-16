@@ -10,13 +10,15 @@
 //! Settings → Rustion Bastions section (target table, enrolment
 //! wizard, per-row health dot, Test Connection button).
 
+use std::collections::HashMap;
+
 use bv_client::Operation;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use tauri::State;
+use tauri::{State, Webview};
 
-use crate::error::CmdResult;
-use crate::state::AppState;
+use crate::error::{CmdResult, CommandError};
+use crate::state::{AppState, RustionSessionBundle};
 
 use super::make_request;
 
@@ -484,17 +486,31 @@ pub struct RustionSessionRenewResult {
     pub bastion_id: String,
 }
 
+/// Renew by raw ids. The main window's admin surface only (its
+/// `app-all-commands` set); a session window renews its own session
+/// through [`session_rustion_renew`], which takes the ids from the host.
 #[tauri::command]
 pub async fn rustion_session_renew(
     state: State<'_, AppState>,
     request: RustionSessionRenewRequest,
 ) -> CmdResult<RustionSessionRenewResult> {
-    let mut body = Map::new();
-    body.insert("bastion_id".into(), Value::String(request.bastion_id));
-    body.insert("session_id".into(), Value::String(request.session_id));
-    body.insert("correlation_id".into(), Value::String(request.correlation_id));
-    body.insert("extend_secs".into(), Value::Number(request.extend_secs.into()));
-    let resp = make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}session/renew"), Some(body)).await?;
+    renew_at(&state, request.bastion_id, request.session_id, request.correlation_id, request.extend_secs).await
+}
+
+async fn renew_at(
+    state: &State<'_, AppState>,
+    bastion_id: String,
+    session_id: String,
+    correlation_id: String,
+    extend_secs: u32,
+) -> CmdResult<RustionSessionRenewResult> {
+    let resp = make_request(
+        state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}session/renew"),
+        Some(renew_body(bastion_id, session_id, correlation_id, extend_secs)),
+    )
+    .await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(RustionSessionRenewResult {
         session_id: s(&data, "session_id"),
@@ -503,6 +519,15 @@ pub async fn rustion_session_renew(
         max_renewals: data.get("max_renewals").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(0),
         bastion_id: s(&data, "bastion_id"),
     })
+}
+
+fn renew_body(bastion_id: String, session_id: String, correlation_id: String, extend_secs: u32) -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("bastion_id".into(), Value::String(bastion_id));
+    body.insert("session_id".into(), Value::String(session_id));
+    body.insert("correlation_id".into(), Value::String(correlation_id));
+    body.insert("extend_secs".into(), Value::Number(extend_secs.into()));
+    body
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -521,22 +546,207 @@ pub struct RustionSessionKillResult {
     pub bastion_id: String,
 }
 
+/// Kill by raw ids. The main window's admin surface only (the live
+/// sessions page); a session window ends its own session through
+/// [`session_rustion_kill`].
 #[tauri::command]
 pub async fn rustion_session_kill(
     state: State<'_, AppState>,
     request: RustionSessionKillRequest,
 ) -> CmdResult<RustionSessionKillResult> {
-    let mut body = Map::new();
-    body.insert("bastion_id".into(), Value::String(request.bastion_id));
-    body.insert("session_id".into(), Value::String(request.session_id));
-    body.insert("correlation_id".into(), Value::String(request.correlation_id));
-    let resp = make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}session/kill"), Some(body)).await?;
+    kill_at(&state, request.bastion_id, request.session_id, request.correlation_id).await
+}
+
+async fn kill_at(
+    state: &State<'_, AppState>,
+    bastion_id: String,
+    session_id: String,
+    correlation_id: String,
+) -> CmdResult<RustionSessionKillResult> {
+    let resp = make_request(
+        state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}session/kill"),
+        Some(kill_body(bastion_id, session_id, correlation_id)),
+    )
+    .await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(RustionSessionKillResult {
         session_id: s(&data, "session_id"),
         terminated_at: s(&data, "terminated_at"),
         bastion_id: s(&data, "bastion_id"),
     })
+}
+
+fn kill_body(bastion_id: String, session_id: String, correlation_id: String) -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("bastion_id".into(), Value::String(bastion_id));
+    body.insert("session_id".into(), Value::String(session_id));
+    body.insert("correlation_id".into(), Value::String(correlation_id));
+    body
+}
+
+// ─── A session window's own bastion session ────────────────────────
+//
+// `session_rustion_info` / `_renew` / `_kill` are what a session window
+// (ssh-*, rdp-*, sftp-*, the Session Workspace) holds. Each takes the local
+// session token, is refused unless the calling window holds that session
+// (`attachments::authorize_input`, the check `require_session_window`
+// makes), and reads the bastion, session and correlation ids from the
+// bundle the host stashed at open. The webview never names a bastion
+// session, so a compromised one can renew or end only the session it
+// renders.
+
+/// The Rustion bundle `caller` may act on for `token`: `None` for a
+/// session dialled direct. Refused when `caller` does not hold the session.
+pub(crate) fn bound_bundle(
+    route: &crate::session::attachments::Route,
+    caller: &str,
+    token: &str,
+    bundles: &HashMap<String, RustionSessionBundle>,
+) -> CmdResult<Option<RustionSessionBundle>> {
+    crate::session::attachments::authorize_input(route, caller, token).map_err(CommandError::from)?;
+    Ok(bundles.get(token).cloned())
+}
+
+/// [`bound_bundle`] read from the live state. The two locks are taken one
+/// after the other, never together (`AppState::session_attachments`).
+pub(crate) async fn caller_bundle(
+    state: &State<'_, AppState>,
+    webview: &Webview,
+    token: &str,
+) -> CmdResult<Option<RustionSessionBundle>> {
+    let route = state.session_attachments.lock().await.route(token);
+    let bundles = state.rustion_session_bundles.lock().await;
+    bound_bundle(&route, webview.label(), token, &bundles)
+}
+
+fn require_brokered(bundle: Option<RustionSessionBundle>, token: &str) -> CmdResult<RustionSessionBundle> {
+    bundle.ok_or_else(|| CommandError::from(format!("session `{token}` was not opened through a Rustion bastion")))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionRustionRenewRequest {
+    pub token: String,
+    pub extend_secs: u32,
+}
+
+#[tauri::command]
+pub async fn session_rustion_renew(
+    state: State<'_, AppState>,
+    webview: Webview,
+    request: SessionRustionRenewRequest,
+) -> CmdResult<RustionSessionRenewResult> {
+    let bundle = require_brokered(caller_bundle(&state, &webview, &request.token).await?, &request.token)?;
+    let session_id = bundle.session_id.clone();
+    let result =
+        renew_at(&state, bundle.bastion_id, bundle.session_id, bundle.correlation_id, request.extend_secs).await?;
+    // Keep the stash current so a pane that re-mounts shows the renewed
+    // expiry rather than the one from open.
+    if let Some(b) = state.rustion_session_bundles.lock().await.get_mut(&request.token) {
+        if b.session_id == session_id && !result.expires_at.is_empty() {
+            b.expires_at = result.expires_at.clone();
+        }
+    }
+    Ok(result)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRustionKillRequest {
+    pub token: String,
+}
+
+#[tauri::command]
+pub async fn session_rustion_kill(
+    state: State<'_, AppState>,
+    webview: Webview,
+    request: SessionRustionKillRequest,
+) -> CmdResult<RustionSessionKillResult> {
+    let bundle = require_brokered(caller_bundle(&state, &webview, &request.token).await?, &request.token)?;
+    kill_at(&state, bundle.bastion_id, bundle.session_id, bundle.correlation_id).await
+}
+
+#[cfg(test)]
+mod session_lifecycle_tests {
+    use super::*;
+    use crate::session::attachments::Route;
+
+    const TOKEN: &str = "sess_0123456789abcdef0123456789abcdef";
+    const OTHER: &str = "sess_fedcba9876543210fedcba9876543210";
+
+    fn bundle(n: &str) -> RustionSessionBundle {
+        RustionSessionBundle {
+            session_id: format!("rs_{n}"),
+            bastion_id: format!("bastion_{n}"),
+            bastion_name: format!("bastion {n}"),
+            correlation_id: format!("corr_{n}"),
+            expires_at: "2026-10-16T12:00:00Z".into(),
+            max_renewals: 3,
+            protocol: "ssh".into(),
+        }
+    }
+
+    fn bundles() -> HashMap<String, RustionSessionBundle> {
+        HashMap::from([(TOKEN.to_string(), bundle("mine")), (OTHER.to_string(), bundle("theirs"))])
+    }
+
+    #[test]
+    fn the_holding_window_gets_its_own_bundle() {
+        let own = format!("ssh-{TOKEN}");
+        let got = bound_bundle(&Route::Attached(own.clone()), &own, TOKEN, &bundles()).unwrap().unwrap();
+        assert_eq!(got.session_id, "rs_mine");
+        assert_eq!(got.bastion_id, "bastion_mine");
+        assert_eq!(got.correlation_id, "corr_mine");
+    }
+
+    #[test]
+    fn a_window_not_holding_the_token_is_refused() {
+        let holder = format!("ssh-{TOKEN}");
+        for caller in [format!("ssh-{OTHER}"), format!("sftp-{OTHER}"), "session-workspace".into(), "main".into()] {
+            let err = bound_bundle(&Route::Attached(holder.clone()), &caller, TOKEN, &bundles());
+            assert!(err.is_err(), "{caller} read another window's bundle");
+        }
+        // Detached (in transit) and unknown sessions fail closed too.
+        assert!(bound_bundle(&Route::Detached, &holder, TOKEN, &bundles()).is_err());
+        assert!(bound_bundle(&Route::Unknown, &holder, TOKEN, &bundles()).is_err());
+    }
+
+    #[test]
+    fn a_direct_session_has_no_bundle_and_cannot_renew_or_kill() {
+        let own = format!("rdp-{TOKEN}");
+        let none = bound_bundle(&Route::Attached(own.clone()), &own, TOKEN, &HashMap::new()).unwrap();
+        assert!(none.is_none());
+        assert!(require_brokered(none, TOKEN).is_err());
+    }
+
+    /// The envelope carries the bundle's ids. The request types have no
+    /// field that could name another bastion session.
+    #[test]
+    fn the_envelope_ids_come_from_the_bundle_and_the_webview_cannot_name_them() {
+        let b = bundle("mine");
+        let renew = renew_body(b.bastion_id.clone(), b.session_id.clone(), b.correlation_id.clone(), 600);
+        assert_eq!(renew["bastion_id"], "bastion_mine");
+        assert_eq!(renew["session_id"], "rs_mine");
+        assert_eq!(renew["correlation_id"], "corr_mine");
+        assert_eq!(renew["extend_secs"], 600);
+        let kill = kill_body(b.bastion_id, b.session_id, b.correlation_id);
+        assert_eq!(kill["session_id"], "rs_mine");
+        assert_eq!(kill["bastion_id"], "bastion_mine");
+
+        let r: SessionRustionRenewRequest =
+            serde_json::from_value(serde_json::json!({ "token": TOKEN, "extendSecs": 600 })).unwrap();
+        assert_eq!((r.token.as_str(), r.extend_secs), (TOKEN, 600));
+        for smuggled in ["bastionId", "sessionId", "correlationId"] {
+            let mut v = serde_json::json!({ "token": TOKEN, "extendSecs": 600 });
+            v[smuggled] = "rs_theirs".into();
+            assert!(serde_json::from_value::<SessionRustionRenewRequest>(v).is_err(), "renew took {smuggled}");
+            let mut v = serde_json::json!({ "token": TOKEN });
+            v[smuggled] = "rs_theirs".into();
+            assert!(serde_json::from_value::<SessionRustionKillRequest>(v).is_err(), "kill took {smuggled}");
+        }
+    }
 }
 
 // ─── Phase 6.2/6.3: recordings ──────────────────────────────────────
