@@ -10,11 +10,13 @@ only the conclusion. You do not edit files and you do not run builds or tests
 (no cargo, no make).
 
 Start from AGENTS.md §2 (architecture map): it says which crate under
-`crates/` or which directory under `src/` owns each subsystem. If
-`graphify-out/graph.json` exists, run `graphify query "<question>"` next and
-use its `source_location`s as leads — then confirm each one in the source,
-since the graph can be stale (AGENTS.md §1). Never build or update the graph
-yourself. Work from the
+`crates/` or which directory under `src/` owns each subsystem. Then follow
+"Looking up references" in AGENTS.md §1: memories in the brief (or
+`python3 .claude/memory/recall.py list --scope .`) for known traps, then the
+graph if `graphify-out/graph.json` exists (`graphify explain` / `query` /
+`affected` / `path`), using its `src=… loc=L…` hits as leads — then confirm
+each one in the source, since the graph can be stale. Never build or update
+the graph, and never write a memory. Work from the
 paths and terms named in the brief. Prefer Grep and Glob over reading whole
 files; read only the line ranges that answer the question.
 

@@ -55,8 +55,9 @@ crates into context; it complements the §2 map, it does not replace it.
 
 - **Query first when the graph exists.** If `graphify-out/graph.json` is
   present, run `graphify query "<question>"` (or `graphify path "A" "B"`,
-  `graphify explain "X"`) before grepping. Cite `source_location` and open
-  only those line ranges.
+  `graphify explain "X"`) before grepping. Each hit carries
+  `src=<path> loc=L<line>`; open only those line ranges. The full procedure,
+  together with memory, is "Looking up references" below.
 - **The graph is a hint, not evidence.** It can be stale. Confirm every fact
   you act on in the source before editing, reviewing or reporting it.
 - **Build or refresh:** `/graphify .` once, then `/graphify . --update` after
@@ -101,6 +102,50 @@ can contain tokens and unseal keys.
   `recall.py use <id>`. Verify any file, flag or command a memory names
   before acting on it.
 - Tests: `python3 -B .claude/memory/test_recall.py`.
+
+### Looking up references (memory + graph + source)
+
+Any "where is X / who uses X / how does X reach Y / what does editing X
+break" question goes through three sources in this order. Each one narrows
+the next; only the last one is evidence.
+
+1. **Memory — what has bitten us before.** Read the recalled-context block
+   injected at session start for anything about the area (a trap, a
+   convention, a file that must move with another). A subagent does not get
+   that block: the coordinator copies the relevant lines into its brief, or
+   the agent runs `python3 .claude/memory/recall.py list --scope .`
+   (read-only). Memory points at *where to look and what to watch for*; it
+   never answers the question by itself.
+2. **Graph — where to look.** If `graphify-out/graph.json` exists, ask it
+   before grepping, with the command that fits the question:
+
+   | Question | Command |
+   |---|---|
+   | Where is symbol X, what is around it | `graphify explain "X"` |
+   | Where does this concept live | `graphify query "<question>" --budget 1500` |
+   | Who calls / imports / implements X | `graphify affected "X" --depth 1` |
+   | How does A reach B | `graphify path "A" "B"` |
+   | Start from a known file or symbol | `graphify query "<question>" --seed <path-or-id>` |
+
+   Prefer an exact symbol or file path to a prose question — a free-text
+   `query` matches keywords and fans out to hundreds of nodes. When a name is
+   ambiguous the command lists candidate node ids (e.g. `RvError` matches 7
+   files); re-run with the id. Raise `--budget` only when the output says it
+   truncated something you need. "No node matching …" (exit 4) means the
+   graph does not know the name — go straight to grep.
+3. **Source — what is true.** Open only the `src=… loc=L…` ranges the graph
+   returned, then confirm with a targeted `rg` (excluding §6 paths). The
+   graph is built from a past tree and misses macro-generated code, dynamic
+   dispatch through `TypeId` / registries, and anything edited since the
+   last `--update` (`ls -l graphify-out/graph.json` against
+   `git log -1 --format=%cd`). For "what breaks if I edit this crate", the
+   cargo graph (`make test-plan`) is authoritative, not `affected`.
+
+Cite what you report as `path:line` from the source, never from graph or
+memory output. If the source contradicts a memory, retire the memory (see
+above) and say so; if it contradicts the graph, mention that the graph is
+stale and suggest `/graphify . --update` instead of running it yourself
+mid-task.
 
 ---
 
