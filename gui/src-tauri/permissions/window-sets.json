@@ -24,7 +24,7 @@
     },
     {
       "identifier": "sftp-window",
-      "description": "An SFTP session's own window (sftp-<token>, session.html). Drives the one SFTP session it renders: remote listing, folder creation, rename, delete, transfers and their cancel; the local pane's listing, home and folder creation; close, liveness, asking before its native close and closing itself. Every command takes the session token and is refused by the host unless the calling window holds that live SFTP session (require_session_window), so the local-filesystem commands are unusable without one. No keystroke or RDP input, no vault reads, no session opens, no token. Derived from what session.html's /session/sftp route calls; gui/src/test/sessionBundle.test.ts keeps the two equal. Features/sftp-connect.md.",
+      "description": "An SFTP session's own window (sftp-<token>, session.html). Drives the one SFTP session it renders: remote listing, folder creation, rename, delete, transfers and their cancel; the local pane's listing, home and folder creation; close, liveness, asking before its native close and closing itself; for a session brokered through a Rustion bastion (T141), reading its bastion lifecycle bundle and renewing or terminating that bastion session, as an SSH window does. Every sftp_* command takes the session token and is refused by the host unless the calling window holds that live SFTP session (require_session_window); the three Rustion lifecycle commands do not, as in the SSH window, and are bounded by the operator's vault policy on rustion/session/*, so the local-filesystem commands are unusable without one. No keystroke or RDP input, no vault reads, no session opens, no token. Derived from what session.html's /session/sftp route calls; gui/src/test/sessionBundle.test.ts keeps the two equal. Features/sftp-connect.md.",
       "permissions": [
         "allow-session-close",
         "allow-session-heartbeat",
@@ -39,7 +39,10 @@
         "allow-sftp-cancel-transfer",
         "allow-sftp-local-home",
         "allow-sftp-local-list",
-        "allow-sftp-local-mkdir"
+        "allow-sftp-local-mkdir",
+        "allow-session-rustion-info",
+        "allow-rustion-session-renew",
+        "allow-rustion-session-kill"
       ]
     },
     {

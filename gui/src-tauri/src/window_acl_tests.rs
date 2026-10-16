@@ -79,9 +79,14 @@ const WORKSPACE_EXTRA: &[&str] = &[
 
 /// An SFTP session's own window (features/sftp-connect.md): its session's
 /// lifecycle and the file operations — no keystroke or RDP input, no move.
+/// The three Rustion commands drive the lifecycle chip of a brokered
+/// session (T141), the same three an SSH window has.
 const SFTP_WINDOW: &[&str] = &[
+    "rustion_session_kill",
+    "rustion_session_renew",
     "session_close",
     "session_heartbeat",
+    "session_rustion_info",
     "session_window_close",
     "session_window_closing",
     "sftp_cancel_transfer",

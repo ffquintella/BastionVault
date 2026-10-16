@@ -1,7 +1,7 @@
 # Feature: SFTP Connect — dual-pane file transfer to server resources
 
-**Status: Done for direct connections (2026-10-15).** Tracked as ROADMAP T140
-(spec S112); Rustion-brokered SFTP (Phase 4) is T141. Next to Resource Connect (T36,
+**Status: Done (direct 2026-10-15, through a Rustion bastion 2026-10-16).**
+Tracked as ROADMAP T140 (spec S112); Rustion-brokered SFTP (Phase 4) is T141. Next to Resource Connect (T36,
 [resource-connect.md](resource-connect.md)),
 which listed SFTP as a separate feature reusing the same `russh` session.
 
@@ -23,15 +23,14 @@ instead of a PTY + shell). The credential never reaches the webview.
 |---|---|
 | Credential sources | `secret`, `ldap`, `pki`, `ssh-engine`, `default-account`, `fido2` — resolved by the same `resolve_ssh_credential` path as SSH, so the SSH login-class rule applies unchanged |
 | `provider` source | Not launchable for `sftp` (fails closed in the editor and the host) |
-| Transport | **Direct only.** When the effective Rustion policy would route the session through a bastion (`rustion-required`, or `rustion-preferred` with bastions configured) the open is refused — it is never silently dialled direct. A lock violation is refused as for SSH. |
+| Transport | Direct, or **through a Rustion bastion** when the effective policy routes there (`rustion-required`, or `rustion-preferred` with bastions configured) — the same route choice as SSH (Phase 4, below). Never silently dialled direct under `rustion-required`. A lock violation is refused as for SSH. |
 | Connect-time MFA | Same as SSH: `connect/authorize` redeems the ticket before any credential is resolved |
 | Placement | Always its own window (`sftp-<token>`). An SFTP session is not a Session Workspace pane kind; an explicit workspace placement is refused. |
 | Remote operations | list, home, create folder, rename, delete (file / empty folder) |
 | Local operations | list, home, create folder |
 | Transfers | upload and download of files and folders (recursive), progress events, cancel, explicit overwrite confirmation |
 
-Out of scope for v1: SFTP through a Rustion bastion (needs the bastion to
-relay the `sftp` subsystem on its SSH listener — see Phase 4), resume of partial transfers,
+Out of scope for v1: resume of partial transfers,
 remote `chmod`/`chown`, drag-and-drop from the OS file manager, an SFTP pane
 attached to an existing SSH terminal session.
 
@@ -65,6 +64,52 @@ offers `ssh`, `rdp` and `sftp`.
   one.
 - Window ACL: capability `session-window` covers `sftp-*`; the commands are in
   that window set only.
+
+## Through a Rustion bastion (Phase 4)
+
+`session_open_sftp` chooses the route the way `session_open_ssh` does:
+
+1. `secret`, `ssh-engine` and `default-account` sources go to
+   `rustion/v2/session/open` first. When the policy picks a bastion the
+   server evaluates the profile's MFA gate, burns the connect ticket and
+   seals the credential into the bastion envelope — nothing is resolved on
+   the operator's machine. Otherwise it answers *direct* and step 2 runs.
+2. Every other source (and those three when direct): connect-time MFA, then
+   `resolve_ssh_credential` (login-class rule included), then
+   `resolve_ssh_connect_route`, which hands a brokerable credential
+   (password, unencrypted key, SSH certificate) to `rustion/session/open`.
+   A passphrase-protected key or a FIDO2 security key cannot be brokered:
+   refused under `rustion-required`, dialled direct under
+   `rustion-preferred` — exactly as for SSH.
+
+On a bastion route the dial is the bastion only (`dial_inputs`): user
+`operator`, the one-shot ticket as the password, and the **bastion's**
+host-key pin from its listener record (empty = TOFU with a warning, never the
+target's pin, which names a different key). The client then asks for the
+`sftp` subsystem; the bastion relays it byte for byte to the target, which it
+dials with the sealed credential and checks against the target's pin.
+
+- **Ticket protocol.** An ordinary `ssh` ticket on the SSH listener; Rustion
+  has no SFTP ticket protocol. A used ticket cannot open a second channel.
+- **Minimum bastion.** Rustion 0.17.0 (its M39, T450–T453). An older bastion
+  acknowledges `sftp` without relaying it; the open then fails (the SFTP
+  handshake does not complete within the connect timeout) with an error that
+  names the required version, rather than hanging.
+- **Lifecycle.** The bastion session's bundle (`protocol: "sftp"`) is kept
+  under the local token like SSH and RDP; the SFTP window shows the Rustion
+  chip (bastion, time left, renew, terminate), and the bundle is dropped with
+  the session. Disconnect closes the bastion connection, which ends the
+  bastion-side session.
+- **Window ACL.** The `sftp-window` set gains `session_rustion_info`,
+  `rustion_session_renew` and `rustion_session_kill` — the three an SSH
+  window already has for the same chip.
+- **Audit.** The host's `session.open` line for a bastion route has
+  `transport=rustion`, the bastion name, the Rustion session id and the
+  correlation id; login class, mint and cert serial are stamped server-side
+  on the control plane's own row. Rustion audits the relay with
+  `sftp_session_started` / `sftp_session_ended` (byte counts, no file names).
+  The per-transfer `sftp.transfer` lines are written by the desktop app on
+  both routes.
 
 ## Security considerations
 
@@ -106,31 +151,23 @@ offers `ssh`, `rdp` and `sftp`.
 | 1 | `sftp` protocol in the profile model, editor, resource types and launch matrix | Done |
 | 2 | Host session, operations, transfer engine, commands, ACL | Done |
 | 3 | Dual-pane session window | Done |
-| 4 | SFTP through a Rustion bastion | Blocked on Rustion (T141) |
+| 4 | SFTP through a Rustion bastion | Done (T141) |
 
 ## Current State
 
-Phases 1–3 done (0.44.37; the Windows file-name rule is Unreleased) on macOS,
-Windows and Linux: the local pane takes Windows drive paths (`C:\…`, the
-verbatim `\\?\` prefix stripped) and names are checked against the local
-platform's rules. Unit-tested (name sanitisation including the Windows rule,
-path joining, protocol parsing, window ACL); not yet exercised by hand against
-a live SFTP server in a desktop build, and the Windows build is not compiled
-on the development hosts — per-platform manual checks.
+Phases 1–4 done. Phases 1–3 (0.44.37; the Windows file-name rule in 0.44.39)
+on macOS, Windows and Linux: the local pane takes Windows drive paths (`C:\…`,
+the verbatim `\\?\` prefix stripped) and names are checked against the local
+platform's rules. Phase 4 (Unreleased) routes a brokered resource through a
+Rustion ≥ 0.17.0 bastion. Unit-tested (name sanitisation including the
+Windows rule, path joining, protocol parsing, window ACL, the brokered dial
+decision); not yet exercised by hand against a live SFTP server or a live
+bastion in a desktop build, and the Windows build is not compiled on the
+development hosts — per-platform manual checks.
 
 ## What Is Not Yet Implemented
 
-- Rustion-brokered SFTP (Phase 4, T141) — **blocked on Rustion.** The
-  bastion's SSH listener acknowledges an `sftp` subsystem request but does not
-  dial the target or relay any data (rustion-ssh `subsystem_request`); only
-  `shell_request` consumes a BastionVault ticket session, and it always asks
-  the target for a shell. A client routed there would get a successful
-  subsystem reply and then hang in the SFTP handshake. Once the bastion relays
-  it, the BastionVault side is: route `session_open_sftp` through
-  `open_rustion_session_v2_ssh` (ticket, bastion host-key pin, lifecycle
-  bundle), open the `sftp` subsystem on the bastion connection, and settle the
-  ticket's protocol (`ssh` or a new `sftp`), since Rustion rejects a ticket
-  minted for another protocol's listener.
+- `provider` credential sources (direct or brokered).
 - UNC paths (`\\server\share`) in the local pane: the backend lists them, but the
   pane's breadcrumb and parent navigation understand drive paths only.
 - Resume, permissions editing, OS drag-and-drop.
