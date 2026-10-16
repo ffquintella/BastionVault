@@ -50,18 +50,20 @@ export function isTearOff(
 const STATUS_COLOR: Record<SessionPaneStatus, string> = {
   open: "#3fb27f",
   connecting: "#7aa2f7",
+  reconnecting: "#e0af68",
   closed: "#6b6b6b",
   error: "#ff6e6e",
 };
 
-/** One status for a tab: an error anywhere wins, then connecting, then
- *  open; closed only when every pane is closed. */
+/** One status for a tab: an error anywhere wins, then reconnecting, then
+ *  connecting, then open; closed only when every pane is closed. */
 export function tabStatus(
   tab: WorkspaceTab,
   status: Readonly<Record<string, SessionPaneStatus>>,
 ): SessionPaneStatus {
   const all = leaves(tab.root).map((l) => status[l.token] ?? "connecting");
   if (all.includes("error")) return "error";
+  if (all.includes("reconnecting")) return "reconnecting";
   if (all.includes("connecting")) return "connecting";
   if (all.includes("open")) return "open";
   return "closed";

@@ -62,6 +62,7 @@ use ironrdp::pdu::input::mouse::{MousePdu, PointerFlags};
 use ironrdp::pdu::nego::NegoRequestData;
 use ironrdp::pdu::rdp::capability_sets::{MajorPlatformType, RailSupportLevel};
 use ironrdp::pdu::rdp::client_info::{CompressionType, PerformanceFlags, TimezoneInfo};
+use ironrdp::pdu::rdp::session_info::ServerAutoReconnect;
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{ActiveStage, ActiveStageBuilder, ActiveStageOutput};
 use ironrdp_async::{single_sequence_step_read, FramedWrite, NetworkClient};
@@ -72,7 +73,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{RdpSessionState, SessionCleanup, SessionState};
 
@@ -711,8 +712,9 @@ impl PumpStats {
 
 /// Resolve the Phase 4 transport. Connects via TCP, runs the
 /// ironrdp connector handshake (no CredSSP — standard RDP
-/// security; NLA support is a follow-up), starts the active-stage
-/// pump task, and registers the session on `AppState`.
+/// security; NLA support is a follow-up), starts the session task
+/// (which resumes the session after a transport drop, see
+/// [`run_session`]), and registers the session on `AppState`.
 pub async fn open_rdp_session(
     app: AppHandle,
     state: &crate::state::AppState,
@@ -722,6 +724,104 @@ pub async fn open_rdp_session(
     let closed_event = closed_event_name(&token);
     let resize_event = resize_event_name(&token);
 
+    let clipboard_stats: SharedClipboardStats = Arc::new(Mutex::new(ClipboardStats::default()));
+    let dialed = dial(&app, &args, &token, None, &clipboard_stats, None).await.map_err(|e| e.message)?;
+    let (width, height) = (dialed.width, dialed.height);
+
+    // Stage 5: spawn the session task. Events go to the window that
+    // holds the session (T38; see `session::routing`); frames travel
+    // over a `Channel` bound to the webview that attached it.
+    let (tx, rx) = mpsc::channel::<RdpControl>(64);
+    let frames = Arc::new(Mutex::new(FrameSink::new()));
+    let task = SessionTask {
+        app: app.clone(),
+        token: token.clone(),
+        events: super::routing::SessionEvents::new(app.clone(), token.clone()),
+        rx,
+        frames: Arc::clone(&frames),
+        closed_event: closed_event.clone(),
+        resize_event: resize_event.clone(),
+        cursor_event: cursor_event_name(&token),
+        reconnect_event: reconnect_event_name(&token),
+        label: args.label.clone(),
+        clipboard_stats,
+        clipboard_settings: args.clipboard,
+        redial: redial_args(&args),
+    };
+    tokio::spawn(run_session(task, dialed));
+
+    {
+        // The web/RDP exclusion is decided under the lock that inserts the
+        // entry, so a web session registering concurrently either sees this
+        // RDP session or is seen here. On a conflict the already-spawned
+        // pump is told to stop and the dialled session is abandoned.
+        let mut sessions = state.connect_sessions.lock().await;
+        if let Some(conflict) = super::registry_web_rdp_conflict(super::ProfileProtocol::Rdp, &sessions) {
+            drop(sessions);
+            let _ = tx.try_send(RdpControl::Close);
+            return Err(refuse_rdp_open(&format!("{}:{}", args.host, args.port), conflict));
+        }
+        sessions.insert(
+            token.clone(),
+            SessionState::Rdp(RdpSessionState {
+                input_tx: tx,
+                frames,
+                label: args.label.clone(),
+                on_close: args.on_close.clone(),
+            }),
+        );
+    }
+    log::info!("resource-connect/rdp: opened session token={token} label={} ({}:{})", args.label, args.host, args.port);
+
+    Ok(RdpOpenOutcome { token, closed_event, resize_event, width, height })
+}
+
+/// A connected, activated RDP transport, ready for the pump.
+struct Dialed {
+    framed: TokioFramed<ironrdp_tls::TlsStream<TcpStream>>,
+    connection_result: ConnectionResult,
+    width: u16,
+    height: u16,
+    egfx_rx: Option<mpsc::UnboundedReceiver<EgfxEvent>>,
+    clipboard_rx: mpsc::UnboundedReceiver<ClipboardMessage>,
+}
+
+/// Why [`dial`] failed. `message` is the text the open path has always
+/// returned (`commands::connect` reads it to pick the next host
+/// candidate); `transient` says whether a reconnect may try again.
+struct DialError {
+    message: String,
+    transient: bool,
+}
+
+impl DialError {
+    /// The network did not carry the connection: DNS, TCP, a TLS
+    /// handshake cut short, the peer hanging up mid-handshake.
+    fn transient(message: String) -> Self {
+        Self { message, transient: true }
+    }
+
+    /// A check or the server refused: retrying cannot change the answer.
+    fn fatal(message: String) -> Self {
+        Self { message, transient: false }
+    }
+}
+
+/// Stages 1–4 of a connect, shared by the first open and every
+/// reconnect, so a reconnect runs exactly the checks the open did.
+///
+/// `desktop` overrides the initial desktop size (a reconnect asks for
+/// the size the session last had). `cookie` makes the connector send
+/// the Client Auto-Reconnect Packet so the server reattaches the
+/// existing Windows session instead of starting a new logon.
+async fn dial(
+    app: &AppHandle,
+    args: &RdpOpenArgs,
+    token: &str,
+    desktop: Option<DesktopSize>,
+    clipboard_stats: &SharedClipboardStats,
+    cookie: Option<&ReconnectCookie>,
+) -> Result<Dialed, DialError> {
     // Stage 1: resolve + TCP connect. We need a concrete `SocketAddr`
     // for the ironrdp connector (it stamps the local addr into the
     // PDU stream), so resolve here rather than letting `TcpStream`
@@ -735,24 +835,28 @@ pub async fn open_rdp_session(
         // as a spurious "dns lookup returned no addresses".
         let resolved = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::lookup_host(host_port.clone()))
             .await
-            .map_err(|_| format!("rdp: DNS lookup for {} timed out", args.host))?
-            .map_err(|e| format!("rdp: parse/resolve {}: {e}", host_port))?;
-        resolved.into_iter().next().ok_or_else(|| format!("rdp: DNS lookup for {} returned no addresses", args.host))?
+            .map_err(|_| DialError::transient(format!("rdp: DNS lookup for {} timed out", args.host)))?
+            .map_err(|e| DialError::transient(format!("rdp: parse/resolve {}: {e}", host_port)))?;
+        resolved
+            .into_iter()
+            .next()
+            .ok_or_else(|| DialError::transient(format!("rdp: DNS lookup for {} returned no addresses", args.host)))?
     };
     let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(target))
         .await
-        .map_err(|_| format!("rdp: TCP connect to {target} timed out"))?
-        .map_err(|e| format!("rdp: TCP connect {target}: {e}"))?;
-    let local = tcp.local_addr().map_err(|e| format!("rdp: local_addr: {e}"))?;
+        .map_err(|_| DialError::transient(format!("rdp: TCP connect to {target} timed out")))?
+        .map_err(|e| DialError::transient(format!("rdp: TCP connect {target}: {e}")))?;
+    let local = tcp.local_addr().map_err(|e| DialError::transient(format!("rdp: local_addr: {e}")))?;
 
     // Stage 2: ironrdp connector — phase one (pre-TLS).
     //
-    // `mut` only so the EGFX branch below can turn
-    // `support_dyn_vc_gfx_protocol` on once it knows the graphics
-    // channel was really registered; nothing mutates it in a build
-    // without the `rdp_egfx` feature.
-    #[cfg_attr(not(feature = "rdp_egfx"), allow(unused_mut))]
-    let mut cfg = build_connector_config(&args);
+    // `mut` so a reconnect can ask for the session's last size, and so
+    // the EGFX branch below can turn `support_dyn_vc_gfx_protocol` on
+    // once it knows the graphics channel was really registered.
+    let mut cfg = build_connector_config(args);
+    if let Some(size) = desktop {
+        cfg.desktop_size = size;
+    }
     let (width, height) = (cfg.desktop_size.width, cfg.desktop_size.height);
     let mut framed = TokioFramed::new(tcp);
     // Register the DisplayControl dynamic virtual channel so the
@@ -807,8 +911,9 @@ pub async fn open_rdp_session(
     // nothing, so that a server sees a client without clipboard
     // redirection rather than one that offers the capability and then
     // refuses every transfer.
+    // A reconnect builds a fresh bridge and audit task with the same
+    // settings: the old backend went down with the old active stage.
     let (clipboard_proxy, clipboard_rx) = rdp_clipboard::channel();
-    let clipboard_stats: SharedClipboardStats = Arc::new(Mutex::new(ClipboardStats::default()));
     let clipboard_backend = if args.clipboard.direction.enabled() {
         if args.ticket_cookie.is_some() {
             // A brokered session dials the bastion's RDP listener, and
@@ -834,11 +939,11 @@ pub async fn open_rdp_session(
         // Fail closed on audit: the audit task sets this when the vault
         // cannot record a batch, and the backend then refuses every
         // further transfer. See `rdp_clipboard::audit`.
-        let withdraw = rdp_clipboard::audit::Withdraw::new(Arc::clone(&clipboard_stats));
+        let withdraw = rdp_clipboard::audit::Withdraw::new(Arc::clone(clipboard_stats));
         let withdrawn = withdraw.flag();
         let audit = rdp_clipboard::audit::spawn(
             args.clipboard_audit.clone(),
-            token.clone(),
+            token.to_string(),
             args.label.clone(),
             withdraw,
             Arc::new(VaultAuditDelivery { app: app.clone() }),
@@ -861,12 +966,12 @@ pub async fn open_rdp_session(
         Some(rdp_clipboard::spawn(rdp_clipboard::SpawnConfig {
             settings: args.clipboard,
             proxy: clipboard_proxy,
-            stats: Arc::clone(&clipboard_stats),
+            stats: Arc::clone(clipboard_stats),
             label: args.label.clone(),
             audit,
             withdrawn,
             staging_base,
-            token: token.clone(),
+            token: token.to_string(),
         }))
     } else {
         None
@@ -876,16 +981,22 @@ pub async fn open_rdp_session(
     if let Some(backend) = clipboard_backend {
         connector = connector.with_static_channel(Cliprdr::new(Box::new(backend)));
     }
+    if let Some(cookie) = cookie {
+        // `ServerAutoReconnect` has no `Zeroize`: this copy is freed
+        // unwiped when `connect_finalize` drops the connector.
+        connector = connector.with_auto_reconnect_cookie(cookie.for_connector());
+    }
     let should_upgrade = ironrdp_async::connect_begin(&mut framed, &mut connector)
         .await
-        .map_err(|e| format!("rdp: connect_begin: {}", e.report()))?;
+        .map_err(|e| DialError::fatal(format!("rdp: connect_begin: {}", e.report())))?;
 
     // Stage 3: TLS upgrade. ironrdp-tls returns the server cert
     // as `x509_cert::Certificate`; extract the SubjectPublicKeyInfo
     // bytes for the connector's CredSSP / TLS-binding requirements.
     let initial = framed.into_inner_no_leftover();
-    let (upgraded, server_cert) =
-        ironrdp_tls::upgrade(initial, args.host.as_str()).await.map_err(|e| format!("rdp: TLS upgrade: {e}"))?;
+    let (upgraded, server_cert) = ironrdp_tls::upgrade(initial, args.host.as_str())
+        .await
+        .map_err(|e| DialError::transient(format!("rdp: TLS upgrade: {e}")))?;
 
     // Bastion TLS pinning. The RDP TLS handshake above trusts any cert
     // (self-signed leaf, no chain to a CA), so when a pin is supplied it
@@ -895,12 +1006,12 @@ pub async fn open_rdp_session(
     // session bytes flow. Non-bastion (direct) dials pass `None` and
     // keep the prior behaviour.
     if let Some(pin) = args.tls_pin_sha256.as_deref() {
-        verify_tls_pin(&server_cert, pin)?;
+        verify_tls_pin(&server_cert, pin).map_err(DialError::fatal)?;
         log::info!("resource-connect/rdp: bastion TLS leaf cert matched pin {pin}");
     }
 
     let server_pubkey = ironrdp_tls::extract_tls_server_public_key(&server_cert)
-        .ok_or_else(|| "rdp: server cert missing SubjectPublicKeyInfo".to_string())?
+        .ok_or_else(|| DialError::fatal("rdp: server cert missing SubjectPublicKeyInfo".to_string()))?
         .to_vec();
     let upgraded_marker = ironrdp_async::mark_as_upgraded(should_upgrade, &mut connector);
     let mut framed = TokioFramed::new(upgraded);
@@ -919,7 +1030,14 @@ pub async fn open_rdp_session(
         None,
     )
     .await
-    .map_err(|e| describe_finalize_error(&args, &e))?;
+    .map_err(|e| {
+        let message = describe_finalize_error(args, &e);
+        if peer_hung_up(&e) {
+            DialError::transient(message)
+        } else {
+            DialError::fatal(message)
+        }
+    })?;
 
     // What the server actually agreed to. The bitmap codec is not
     // in `ConnectionResult` — ironrdp keeps the server's capability
@@ -945,62 +1063,360 @@ pub async fn open_rdp_session(
         );
     }
 
-    // Stage 5: spawn the active-stage pump.
-    let (tx, rx) = mpsc::channel::<RdpControl>(64);
-    let frames = Arc::new(Mutex::new(FrameSink::new()));
-    // Events go to the window that holds the session (T38; see
-    // `session::routing`). Frames already travel over a `Channel` bound
-    // to the webview that attached it.
-    let events_for_task = super::routing::SessionEvents::new(app.clone(), token.clone());
-    let closed_event_for_task = closed_event.clone();
-    let resize_event_for_task = resize_event.clone();
-    let cursor_event_for_task = cursor_event_name(&token);
-    let frames_for_task = Arc::clone(&frames);
-    let label_for_task = args.label.clone();
     #[cfg(not(feature = "rdp_egfx"))]
     let egfx_rx: Option<mpsc::UnboundedReceiver<EgfxEvent>> = None;
-    tokio::spawn(active_stage_loop(
-        events_for_task,
-        framed,
-        connection_result,
-        rx,
-        frames_for_task,
-        closed_event_for_task,
-        resize_event_for_task,
-        cursor_event_for_task,
-        width,
-        height,
-        label_for_task,
-        egfx_rx,
-        clipboard_rx,
-        Arc::clone(&clipboard_stats),
-        args.clipboard,
-    ));
+    Ok(Dialed { framed, connection_result, width, height, egfx_rx, clipboard_rx })
+}
 
-    {
-        // The web/RDP exclusion is decided under the lock that inserts the
-        // entry, so a web session registering concurrently either sees this
-        // RDP session or is seen here. On a conflict the already-spawned
-        // pump is told to stop and the dialled session is abandoned.
-        let mut sessions = state.connect_sessions.lock().await;
-        if let Some(conflict) = super::registry_web_rdp_conflict(super::ProfileProtocol::Rdp, &sessions) {
-            drop(sessions);
-            let _ = tx.try_send(RdpControl::Close);
-            return Err(refuse_rdp_open(&format!("{}:{}", args.host, args.port), conflict));
-        }
-        sessions.insert(
-            token.clone(),
-            SessionState::Rdp(RdpSessionState {
-                input_tx: tx,
-                frames,
-                label: args.label.clone(),
-                on_close: args.on_close.clone(),
-            }),
-        );
+// ============================================================================
+// Auto-reconnect (MS-RDPBCGR 1.3.1.5)
+// ============================================================================
+
+/// Reconnect attempts per transport drop, and the wait before each.
+/// Enough for a filter or VPN that cuts one flow and passes the next;
+/// a link that stays down is reported rather than retried for minutes.
+const RECONNECT_BACKOFF: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(4)];
+
+/// Upper bound on one reconnect dial, end to end: the per-stage
+/// timeouts only cover DNS and TCP.
+const RECONNECT_DIAL_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// A resumed connection that stays up this long gets a fresh attempt
+/// budget for its next drop. Below it, drops share one budget, so a
+/// link that dies right after every resume ends instead of flapping.
+const RECONNECT_STABLE_AFTER: Duration = Duration::from_secs(60);
+
+/// Per-session event the pane listens on for reconnect progress.
+pub fn reconnect_event_name(token: &str) -> String {
+    format!("session-reconnect-{token}")
+}
+
+/// The live session's Server Auto-Reconnect Cookie (MS-RDPBCGR
+/// 2.2.4.2): a credential that reattaches the Windows session without
+/// a logon. Kept only in the session task's memory — never logged
+/// (`Debug` prints nothing of it), never in an event, never persisted
+/// — and wiped when replaced, rejected, or dropped with the session.
+struct ReconnectCookie(ServerAutoReconnect);
+
+impl ReconnectCookie {
+    fn new(cookie: ServerAutoReconnect) -> Self {
+        Self(cookie)
     }
-    log::info!("resource-connect/rdp: opened session token={token} label={} ({}:{})", args.label, args.host, args.port);
 
-    Ok(RdpOpenOutcome { token, closed_event, resize_event, width, height })
+    /// The copy handed to [`ClientConnector::with_auto_reconnect_cookie`].
+    fn for_connector(&self) -> ServerAutoReconnect {
+        self.0.clone()
+    }
+}
+
+impl ReconnectCookie {
+    fn wipe(&mut self) {
+        self.0.random_bits.zeroize();
+        self.0.logon_id.zeroize();
+    }
+}
+
+impl Drop for ReconnectCookie {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+impl std::fmt::Debug for ReconnectCookie {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReconnectCookie(<redacted>)")
+    }
+}
+
+/// The arguments a reconnect dials with, or why the session cannot
+/// resume. The redial carries no credential: an empty password with
+/// autologon off, so only the cookie can reattach the session, and a
+/// rejected cookie ends it rather than logging on again.
+fn redial_args(args: &RdpOpenArgs) -> Result<RdpOpenArgs, &'static str> {
+    if args.ticket_cookie.is_some() {
+        return Err("bastion-brokered sessions cannot resume (the bastion ticket is single-use)");
+    }
+    if let RdpCredential::SmartCard(_) = args.credential {
+        return Err("smart-card sessions cannot resume without re-running CredSSP");
+    }
+    Ok(RdpOpenArgs {
+        host: args.host.clone(),
+        port: args.port,
+        username: args.username.clone(),
+        credential: RdpCredential::Password(Zeroizing::new(String::new())),
+        domain: args.domain.clone(),
+        label: args.label.clone(),
+        // The registry entry keeps the session's cleanup.
+        on_close: None,
+        aggressive_performance: args.aggressive_performance,
+        enable_egfx: args.enable_egfx,
+        bulk_compression: args.bulk_compression,
+        clipboard: args.clipboard,
+        clipboard_audit: args.clipboard_audit.clone(),
+        ticket_cookie: None,
+        tls_pin_sha256: args.tls_pin_sha256.clone(),
+    })
+}
+
+/// Why a connection ended, as far as reconnecting is concerned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EndCause {
+    /// The transport broke under a session nobody ended.
+    TransportLost,
+    /// The operator, the server, or a protocol error ended it; a new
+    /// connection would not change that.
+    Final,
+}
+
+/// Which failed reads are a lost transport. Anything else (a framing
+/// error, a malformed PDU) is the protocol, not the network.
+fn read_error_cause(kind: std::io::ErrorKind) -> EndCause {
+    use std::io::ErrorKind;
+    match kind {
+        ErrorKind::UnexpectedEof
+        | ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::BrokenPipe => EndCause::TransportLost,
+        _ => EndCause::Final,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReconnectDecision {
+    /// Dial again after `delay`; this is attempt number `attempt`.
+    Retry { attempt: u32, delay: Duration },
+    /// Close. `Some` says why a lost transport was not retried.
+    Stop(Option<String>),
+}
+
+/// The retry policy, free of I/O. `eligible` is [`redial_args`]'s
+/// verdict; `attempts_made` counts attempts already spent on this drop.
+fn decide_reconnect(
+    cause: EndCause,
+    eligible: Result<(), &'static str>,
+    have_cookie: bool,
+    attempts_made: u32,
+) -> ReconnectDecision {
+    if cause == EndCause::Final {
+        return ReconnectDecision::Stop(None);
+    }
+    if let Err(why) = eligible {
+        return ReconnectDecision::Stop(Some(why.to_string()));
+    }
+    if !have_cookie {
+        return ReconnectDecision::Stop(Some("the server issued no auto-reconnect cookie".to_string()));
+    }
+    match RECONNECT_BACKOFF.get(attempts_made as usize) {
+        Some(&delay) => ReconnectDecision::Retry { attempt: attempts_made + 1, delay },
+        None => {
+            ReconnectDecision::Stop(Some(format!("gave up after {} reconnect attempt(s)", RECONNECT_BACKOFF.len())))
+        }
+    }
+}
+
+/// Keep the session's cookie current from a pump output. A new cookie
+/// replaces (and so wipes) the old one — the server regenerates it
+/// hourly. A rejected reconnect drops it and returns the close reason.
+/// Other outputs are left alone. Never logs the cookie.
+fn track_reconnect_cookie(out: ActiveStageOutput, slot: &mut Option<ReconnectCookie>, label: &str) -> Option<String> {
+    match out {
+        ActiveStageOutput::AutoReconnectCookie(fresh) => {
+            *slot = Some(ReconnectCookie::new(fresh));
+            log::debug!("rdp: {label}: server issued an auto-reconnect cookie");
+            None
+        }
+        ActiveStageOutput::AutoReconnectFailed => {
+            *slot = None;
+            log::warn!("rdp: {label}: the server rejected the auto-reconnect cookie");
+            Some(
+                "the server refused to resume the session (auto-reconnect rejected); \
+                 connect again to start a new logon"
+                    .to_string(),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// Payload of [`reconnect_event_name`]: progress and reasons only, with
+/// no field a cookie could reach.
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+enum ReconnectEvent {
+    Reconnecting { attempt: u32, max_attempts: u32, reason: String },
+    Resumed { width: u16, height: u16 },
+}
+
+/// What the session task owns across reconnects. The control channel,
+/// frame sink and event names outlive any one connection, so the pane
+/// keeps its token and frame channel through a resume.
+struct SessionTask {
+    app: AppHandle,
+    token: String,
+    events: super::routing::SessionEvents,
+    rx: mpsc::Receiver<RdpControl>,
+    frames: Arc<Mutex<FrameSink>>,
+    closed_event: String,
+    resize_event: String,
+    cursor_event: String,
+    reconnect_event: String,
+    label: String,
+    clipboard_stats: SharedClipboardStats,
+    clipboard_settings: ClipboardSettings,
+    redial: Result<RdpOpenArgs, &'static str>,
+}
+
+/// How a reconnect wait ended.
+enum RedialOutcome {
+    Dialed(Result<Box<Dialed>, DialError>),
+    /// The operator closed the session, or its control channel went away.
+    Closed(String),
+}
+
+/// One session, start to finish: run the pump; when it ends on a lost
+/// transport, resume the same Windows session with the auto-reconnect
+/// cookie ([`decide_reconnect`]); otherwise tell the pane why it closed.
+async fn run_session(task: SessionTask, first: Dialed) {
+    let SessionTask {
+        app,
+        token,
+        events,
+        mut rx,
+        frames,
+        closed_event,
+        resize_event,
+        cursor_event,
+        reconnect_event,
+        label,
+        clipboard_stats,
+        clipboard_settings,
+        redial,
+    } = task;
+    let eligible = redial.as_ref().map(|_| ()).map_err(|why| *why);
+    let max_attempts = RECONNECT_BACKOFF.len() as u32;
+    let mut cookie: Option<ReconnectCookie> = None;
+    let mut attempts: u32 = 0;
+    let mut dialed = first;
+    let mut resumed = false;
+
+    let close_reason: String = 'session: loop {
+        let started = tokio::time::Instant::now();
+        let PumpEnd { reason, cause, width, height } = active_stage_loop(
+            &events,
+            dialed,
+            &mut rx,
+            &frames,
+            &resize_event,
+            &cursor_event,
+            &label,
+            &clipboard_stats,
+            clipboard_settings,
+            &mut cookie,
+            resumed,
+        )
+        .await;
+        if started.elapsed() >= RECONNECT_STABLE_AFTER {
+            attempts = 0;
+        }
+        let mut reason = reason;
+        loop {
+            let (attempt, delay) = match decide_reconnect(cause, eligible, cookie.is_some(), attempts) {
+                ReconnectDecision::Stop(None) => break 'session reason,
+                ReconnectDecision::Stop(Some(why)) => break 'session format!("{reason}; not reconnecting: {why}"),
+                ReconnectDecision::Retry { attempt, delay } => (attempt, delay),
+            };
+            // `decide_reconnect` retries only an eligible session holding a cookie.
+            let (Ok(redial_args), Some(current)) = (redial.as_ref(), cookie.as_ref()) else {
+                break 'session reason;
+            };
+            attempts = attempt;
+            log::warn!(
+                target: "audit",
+                "session.reconnect: protocol=rdp token={token} attempt={attempt}/{max_attempts} \
+                 outcome=attempting reason={reason:?}"
+            );
+            events
+                .emit(&reconnect_event, ReconnectEvent::Reconnecting { attempt, max_attempts, reason: reason.clone() })
+                .await;
+
+            let desktop = desktop_for_redial(width, height);
+            let redial_fut = async {
+                tokio::time::sleep(delay).await;
+                let dial_fut = dial(&app, redial_args, &token, Some(desktop), &clipboard_stats, Some(current));
+                match tokio::time::timeout(RECONNECT_DIAL_TIMEOUT, dial_fut).await {
+                    Ok(result) => result,
+                    Err(_) => Err(DialError::transient(format!(
+                        "rdp: reconnect did not complete within {}s",
+                        RECONNECT_DIAL_TIMEOUT.as_secs()
+                    ))),
+                }
+            };
+            tokio::pin!(redial_fut);
+            let outcome = loop {
+                tokio::select! {
+                    biased;
+                    ctl = rx.recv() => match ctl {
+                        Some(RdpControl::Close) => break RedialOutcome::Closed(
+                            "operator closed the session while it was reconnecting".to_string(),
+                        ),
+                        None => break RedialOutcome::Closed("session control channel dropped".to_string()),
+                        // No connection to send input to. A pane resized
+                        // meanwhile re-sends its size on resume.
+                        Some(_) => {}
+                    },
+                    result = &mut redial_fut => break RedialOutcome::Dialed(result.map(Box::new)),
+                }
+            };
+            match outcome {
+                RedialOutcome::Closed(why) => break 'session why,
+                RedialOutcome::Dialed(Ok(next)) => {
+                    log::info!(
+                        target: "audit",
+                        "session.reconnect: protocol=rdp token={token} attempt={attempt}/{max_attempts} outcome=resumed"
+                    );
+                    events
+                        .emit(&reconnect_event, ReconnectEvent::Resumed { width: next.width, height: next.height })
+                        .await;
+                    dialed = *next;
+                    resumed = true;
+                    continue 'session;
+                }
+                RedialOutcome::Dialed(Err(e)) => {
+                    log::warn!(
+                        target: "audit",
+                        "session.reconnect: protocol=rdp token={token} attempt={attempt}/{max_attempts} \
+                         outcome=failed reason={:?}",
+                        e.message
+                    );
+                    reason = format!("reconnect attempt {attempt} failed: {}", e.message);
+                    if !e.transient {
+                        break 'session reason;
+                    }
+                }
+            }
+        }
+    };
+    // Wiped here at the latest; an operator Disconnect lands here too.
+    drop(cookie.take());
+
+    log::info!("resource-connect/rdp: {label} closed — {close_reason}");
+    // Replayed like the SSH worker's: the pump can end before a
+    // freshly (re)attached pane has subscribed.
+    let payload = super::ssh::ClosedPayload { reason: close_reason };
+    events.emit(&closed_event, payload.clone()).await;
+    tokio::spawn(async move {
+        for delay in [200u64, 800, 2500] {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            events.emit(&closed_event, payload.clone()).await;
+        }
+    });
+}
+
+/// The desktop size a reconnect asks for: the session's last one,
+/// clamped as a DisplayControl resize would be.
+fn desktop_for_redial(width: u16, height: u16) -> DesktopSize {
+    let (w, h) = MonitorLayoutEntry::adjust_display_size(u32::from(width), u32::from(height));
+    DesktopSize { width: u16::try_from(w).unwrap_or(u16::MAX), height: u16::try_from(h).unwrap_or(u16::MAX) }
 }
 
 fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
@@ -1276,34 +1692,28 @@ impl ClipboardInbox {
 /// which is what makes the flush timer legal here: dropping the
 /// read future leaves any partial data in the `Framed` buffer.
 #[allow(clippy::too_many_arguments)]
-async fn active_stage_loop<S>(
-    events: super::routing::SessionEvents,
-    mut framed: TokioFramed<S>,
-    connection_result: ConnectionResult,
-    mut rx: mpsc::Receiver<RdpControl>,
-    frames: Arc<Mutex<FrameSink>>,
-    closed_event: String,
-    resize_event: String,
-    cursor_event: String,
-    mut width: u16,
-    mut height: u16,
-    label: String,
-    mut egfx_rx: Option<mpsc::UnboundedReceiver<EgfxEvent>>,
-    // Always present, even with clipboard redirection off, so the
-    // `select!` branch below stays free of an `Option` borrow.
-    //
-    // With redirection off nothing ever holds a sender — `channel()`
-    // hands the `PumpProxy` to `rdp_clipboard::spawn` only on the
-    // enabled path, so the proxy dies with `open_rdp_session`'s frame.
-    // The branch is therefore *permanently ready* with `None` from the
-    // first poll, which is why it is gated on `clipboard_open` below.
-    // See [`ClipboardInbox`].
-    clipboard_rx: mpsc::UnboundedReceiver<ClipboardMessage>,
-    clipboard_stats: SharedClipboardStats,
+async fn active_stage_loop(
+    events: &super::routing::SessionEvents,
+    dialed: Dialed,
+    rx: &mut mpsc::Receiver<RdpControl>,
+    frames: &Mutex<FrameSink>,
+    resize_event: &str,
+    cursor_event: &str,
+    label: &str,
+    clipboard_stats: &SharedClipboardStats,
     clipboard_settings: ClipboardSettings,
-) where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
-{
+    // The session's auto-reconnect cookie, kept current here and read
+    // by [`run_session`] once the connection ends.
+    cookie: &mut Option<ReconnectCookie>,
+    // This connection resumed a dropped one: repaint the pane in full.
+    resumed: bool,
+) -> PumpEnd {
+    let Dialed { mut framed, connection_result, mut width, mut height, mut egfx_rx, clipboard_rx } = dialed;
+    // `clipboard_rx` is always present, even with clipboard redirection
+    // off, so the `select!` branch below stays free of an `Option`
+    // borrow. With redirection off nothing holds a sender, so the
+    // branch is *permanently ready* with `None` from the first poll —
+    // which is why it is gated on `clipboard_open`. See [`ClipboardInbox`].
     let mut clipboard_rx = ClipboardInbox::new(clipboard_rx);
     let mut image = DecodedImage::new(ironrdp::graphics::image_processing::PixelFormat::RgbA32, width, height);
     // Captured before the builder consumes the rest of the result:
@@ -1360,6 +1770,11 @@ async fn active_stage_loop<S>(
     // channel is up, so the session takes the window's size from the
     // start instead of on the operator's first manual resize.
     let mut pending_resize: Option<(u32, u32)> = None;
+    if resumed {
+        dirty.mark_full();
+        flush_at = Some(tokio::time::Instant::now());
+        events.emit(resize_event, ResizePayload { width, height }).await;
+    }
 
     // Every way out of the pump names why. The pane shows this in its
     // header, so an operator can tell "the server logged me off" from
@@ -1448,14 +1863,14 @@ async fn active_stage_loop<S>(
                     None => std::future::pending().await,
                 }
             }, if deadline.is_some() => {
-                flush_frame(&frames, current_surface(&image, &egfx_fb), &mut dirty, width, height, &mut stats);
+                flush_frame(frames, current_surface(&image, &egfx_fb), &mut dirty, width, height, &mut stats);
                 flush_at = None;
             }
             _ = tokio::time::sleep_until(stats_at) => {
                 let now = tokio::time::Instant::now();
-                stats.log_delta(&mut stats_baseline, &label, (now - stats_since).as_secs_f64());
+                stats.log_delta(&mut stats_baseline, label, (now - stats_since).as_secs_f64());
                 if clipboard_settings.direction.enabled() {
-                    log_clipboard_stats(&clipboard_stats, &label, clipboard_settings);
+                    log_clipboard_stats(clipboard_stats, label, clipboard_settings);
                     // Piggybacks on this tick rather than arming a
                     // timer of its own: `drive_timeouts` expires the
                     // clipboard locks and stale file-contents requests
@@ -1512,7 +1927,7 @@ async fn active_stage_loop<S>(
             pdu = framed.read_pdu() => {
                 let (action, payload) = match pdu {
                     Ok(v) => v,
-                    Err(e) => break 'pump PumpExit::Ended(describe_read_error(&e)),
+                    Err(e) => break 'pump PumpExit::ReadFailed(e),
                 };
                 stats.pdus += 1;
                 last_pdu_at = tokio::time::Instant::now();
@@ -1541,13 +1956,13 @@ async fn active_stage_loop<S>(
                         // right shape either way.
                         ActiveStageOutput::PointerBitmap(pointer) => {
                             let update = cursor_update_from(&pointer).unwrap_or(CursorUpdate::Default);
-                            events.emit(&cursor_event, update).await;
+                            events.emit(cursor_event, update).await;
                         }
                         ActiveStageOutput::PointerHidden => {
-                            events.emit(&cursor_event, CursorUpdate::Hidden).await;
+                            events.emit(cursor_event, CursorUpdate::Hidden).await;
                         }
                         ActiveStageOutput::PointerDefault => {
-                            events.emit(&cursor_event, CursorUpdate::Default).await;
+                            events.emit(cursor_event, CursorUpdate::Default).await;
                         }
                         // Server-initiated pointer warp (snap-to-
                         // default-button and friends). A webview
@@ -1571,6 +1986,11 @@ async fn active_stage_loop<S>(
                                 let _ = framed.write_all(&frame).await;
                             }
                             break 'pump PumpExit::Ended(format!("server ended the session: {}", reason.description()));
+                        }
+                        out @ (ActiveStageOutput::AutoReconnectCookie(_) | ActiveStageOutput::AutoReconnectFailed) => {
+                            if let Some(reason) = track_reconnect_cookie(out, cookie, label) {
+                                break 'pump PumpExit::Ended(reason);
+                            }
                         }
                         // Logged by name only: an auto-reconnect cookie is a
                         // credential and must never reach the log.
@@ -1604,7 +2024,7 @@ async fn active_stage_loop<S>(
                                 height,
                             );
                             egfx_fb.resize(width, height);
-                            events.emit(&resize_event, ResizePayload { width, height }).await;
+                            events.emit(resize_event, ResizePayload { width, height }).await;
                             // The frame header carries the desktop size
                             // too, so the canvas can resize itself off
                             // the next frame even if this event loses
@@ -1644,7 +2064,7 @@ async fn active_stage_loop<S>(
                 if let Some(rx) = egfx_rx.as_mut() {
                     while let Ok(event) = rx.try_recv() {
                         if let Some(size) = apply_egfx_event(event, &mut egfx_fb, &mut dirty, &mut width, &mut height) {
-                            events.emit(&resize_event, size).await;
+                            events.emit(resize_event, size).await;
                         }
                     }
                 }
@@ -1654,40 +2074,43 @@ async fn active_stage_loop<S>(
             }
         }
     };
-    let close_reason = match exit {
-        PumpExit::Ended(reason) => reason,
+    let (reason, cause) = match exit {
+        PumpExit::Ended(reason) => (reason, EndCause::Final),
+        PumpExit::ReadFailed(e) => (describe_read_error(&e), read_error_cause(e.kind())),
         // A write is often what notices first that the server hung up,
         // and Windows usually says why just before it does (Set Error
         // Info, MCS disconnect). Read what is left on the socket before
         // settling for "broken pipe".
         PumpExit::WriteFailed(write_error) => {
             match trailing_disconnect_reason(&mut framed, &mut active_stage, &mut image).await {
-                Ok(server) => format!("server ended the session: {server} (then {write_error})"),
-                Err(socket) => format!("{write_error}; socket then: {socket}"),
+                Ok(server) => (format!("server ended the session: {server} (then {write_error})"), EndCause::Final),
+                Err(socket) => (format!("{write_error}; socket then: {socket}"), EndCause::TransportLost),
             }
         }
     };
     log::info!(
-        "resource-connect/rdp: {label} closed — {close_reason} (last server PDU {:.1}s before)",
+        "resource-connect/rdp: {label} connection ended — {reason} (last server PDU {:.1}s before)",
         last_pdu_at.elapsed().as_secs_f64()
     );
-    stats.log_session_total(&label, session_start);
-    // Replayed like the SSH worker's: the pump can end before a
-    // freshly (re)attached pane has subscribed.
-    let payload = super::ssh::ClosedPayload { reason: close_reason };
-    events.emit(&closed_event, payload.clone()).await;
-    tokio::spawn(async move {
-        for delay in [200u64, 800, 2500] {
-            tokio::time::sleep(Duration::from_millis(delay)).await;
-            events.emit(&closed_event, payload.clone()).await;
-        }
-    });
+    stats.log_session_total(label, session_start);
+    PumpEnd { reason, cause, width, height }
+}
+
+/// How one connection's pump ended, for [`run_session`].
+struct PumpEnd {
+    reason: String,
+    cause: EndCause,
+    /// The desktop size at the end, which a reconnect asks for again.
+    width: u16,
+    height: u16,
 }
 
 /// How the active-stage pump ended. A failed write is kept apart
-/// because the server's own reason may still be readable.
+/// because the server's own reason may still be readable; a failed
+/// read keeps its error so [`read_error_cause`] can classify it.
 enum PumpExit {
     Ended(String),
+    ReadFailed(std::io::Error),
     WriteFailed(String),
 }
 
@@ -3437,5 +3860,239 @@ mod close_reason_tests {
         assert!(reset.starts_with("connection reset by peer"), "{reset}");
         let other = describe_read_error(&Error::other("boom"));
         assert_eq!(other, "connection lost (boom)");
+    }
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use super::{
+        active_output_name, build_connector_config, decide_reconnect, read_error_cause, redial_args,
+        track_reconnect_cookie, ClipboardSettings, EndCause, RdpCredential, RdpOpenArgs, ReconnectCookie,
+        ReconnectDecision, ReconnectEvent, SmartCardCredential, DEFAULT_BULK_COMPRESSION, RECONNECT_BACKOFF,
+    };
+    use ironrdp::pdu::rdp::session_info::ServerAutoReconnect;
+    use ironrdp::session::ActiveStageOutput;
+    use std::io::ErrorKind;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
+    use zeroize::Zeroizing;
+
+    const LOGON_ID: u32 = 6_210_279;
+    const RANDOM: [u8; 16] =
+        [0xC0, 0xFF, 0xEE, 0x5A, 0x11, 0xD0, 0x0D, 0xF0, 0x0B, 0xA4, 0xBE, 0xEF, 0x77, 0x31, 0x9C, 0xE2];
+
+    fn server_cookie() -> ServerAutoReconnect {
+        ServerAutoReconnect { logon_id: LOGON_ID, random_bits: RANDOM }
+    }
+
+    /// Every way the cookie could be rendered into text.
+    fn leaks_cookie(text: &str) -> bool {
+        let hex: String = RANDOM.iter().map(|b| format!("{b:02x}")).collect();
+        let decimal = format!("{:?}", RANDOM);
+        let decimal_inner = decimal.trim_start_matches('[').trim_end_matches(']');
+        let lower = text.to_lowercase();
+        lower.contains(&hex)
+            || lower.contains(&hex[..8])
+            || text.contains(decimal_inner)
+            || text.contains("192, 255, 238")
+            || text.contains(&LOGON_ID.to_string())
+            || lower.contains(&format!("{LOGON_ID:x}"))
+    }
+
+    fn args(credential: RdpCredential, ticket_cookie: Option<String>) -> RdpOpenArgs {
+        RdpOpenArgs {
+            host: "rdp.example.test".to_owned(),
+            port: 3389,
+            username: "alice".to_owned(),
+            credential,
+            domain: Some("CORP".to_owned()),
+            label: "rdp alice@rdp.example.test:3389".to_owned(),
+            on_close: None,
+            aggressive_performance: false,
+            enable_egfx: false,
+            bulk_compression: DEFAULT_BULK_COMPRESSION,
+            clipboard: ClipboardSettings::off(),
+            clipboard_audit: crate::session::rdp_clipboard::audit::AuditContext {
+                resource: "r".into(),
+                profile_id: "p".into(),
+                vault_audit: false,
+            },
+            ticket_cookie,
+            tls_pin_sha256: Some("sha256:00".to_owned()),
+        }
+    }
+
+    fn password(pw: &str) -> RdpCredential {
+        RdpCredential::Password(Zeroizing::new(pw.to_owned()))
+    }
+
+    // --- which exits are retried -------------------------------------------
+
+    #[test]
+    fn a_deliberate_end_is_never_retried() {
+        // Operator close, server Terminate, a rejected cookie, a protocol
+        // error: all `Final`, whatever else holds.
+        assert_eq!(decide_reconnect(EndCause::Final, Ok(()), true, 0), ReconnectDecision::Stop(None));
+        assert_eq!(decide_reconnect(EndCause::Final, Err("x"), false, 5), ReconnectDecision::Stop(None));
+    }
+
+    #[test]
+    fn a_lost_transport_is_retried_with_bounded_backoff() {
+        assert_eq!(
+            decide_reconnect(EndCause::TransportLost, Ok(()), true, 0),
+            ReconnectDecision::Retry { attempt: 1, delay: RECONNECT_BACKOFF[0] }
+        );
+        assert_eq!(
+            decide_reconnect(EndCause::TransportLost, Ok(()), true, 1),
+            ReconnectDecision::Retry { attempt: 2, delay: RECONNECT_BACKOFF[1] }
+        );
+        let ReconnectDecision::Stop(Some(why)) =
+            decide_reconnect(EndCause::TransportLost, Ok(()), true, RECONNECT_BACKOFF.len() as u32)
+        else {
+            panic!("the budget must run out");
+        };
+        assert!(why.contains("gave up"), "{why}");
+        assert!(RECONNECT_BACKOFF.len() <= 2, "at most two attempts per drop");
+        assert!(RECONNECT_BACKOFF.iter().all(|d| *d <= Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn a_lost_transport_without_a_cookie_or_eligibility_is_not_retried() {
+        let ReconnectDecision::Stop(Some(why)) = decide_reconnect(EndCause::TransportLost, Ok(()), false, 0) else {
+            panic!("no cookie, no reconnect");
+        };
+        assert!(why.contains("no auto-reconnect cookie"), "{why}");
+        assert_eq!(
+            decide_reconnect(EndCause::TransportLost, Err("brokered"), true, 0),
+            ReconnectDecision::Stop(Some("brokered".to_string()))
+        );
+    }
+
+    #[test]
+    fn only_eof_and_reset_style_reads_count_as_a_lost_transport() {
+        for kind in
+            [ErrorKind::UnexpectedEof, ErrorKind::ConnectionReset, ErrorKind::ConnectionAborted, ErrorKind::BrokenPipe]
+        {
+            assert_eq!(read_error_cause(kind), EndCause::TransportLost, "{kind:?}");
+        }
+        for kind in [ErrorKind::InvalidData, ErrorKind::Other, ErrorKind::PermissionDenied] {
+            assert_eq!(read_error_cause(kind), EndCause::Final, "{kind:?}");
+        }
+    }
+
+    // --- what a reconnect dials with ---------------------------------------
+
+    #[test]
+    fn a_redial_carries_no_credential_and_keeps_the_pin() {
+        let redial = redial_args(&args(password("hunter2"), None)).expect("a direct password session can resume");
+        match &redial.credential {
+            RdpCredential::Password(pw) => assert!(pw.is_empty(), "the password must not be kept for a redial"),
+            RdpCredential::SmartCard(_) => panic!("credential kind changed"),
+        }
+        assert!(redial.ticket_cookie.is_none());
+        assert!(redial.on_close.is_none());
+        assert_eq!(redial.tls_pin_sha256.as_deref(), Some("sha256:00"));
+        assert_eq!((redial.host.as_str(), redial.port, redial.username.as_str()), ("rdp.example.test", 3389, "alice"));
+        // Without a password the server is never asked to log on again.
+        assert!(!build_connector_config(&redial).autologon);
+    }
+
+    #[test]
+    fn brokered_and_smart_card_sessions_do_not_resume() {
+        let brokered = redial_args(&args(password(""), Some("tkt_0123".into()))).err().expect("ticket is single-use");
+        assert!(brokered.contains("single-use"), "{brokered}");
+        let sc = RdpCredential::SmartCard(SmartCardCredential {
+            certificate_der: vec![1],
+            private_key_der: vec![2],
+            pin: "0000".into(),
+        });
+        assert!(redial_args(&args(sc, None)).is_err());
+    }
+
+    // --- the cookie never leaves host memory -------------------------------
+
+    struct Capture;
+    static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    impl log::Log for Capture {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            CAPTURED.lock().unwrap().push(format!("{} {}", record.target(), record.args()));
+        }
+        fn flush(&self) {}
+    }
+
+    fn capture_logs() {
+        static INIT: OnceLock<()> = OnceLock::new();
+        INIT.get_or_init(|| {
+            log::set_logger(&Capture).expect("no other logger in this test binary");
+            log::set_max_level(log::LevelFilter::Trace);
+        });
+    }
+
+    #[test]
+    fn the_cookie_never_reaches_a_log_line_or_an_event() {
+        capture_logs();
+        let label = "rdp reconnect-leak-test";
+        let mut slot = None;
+
+        assert!(
+            track_reconnect_cookie(ActiveStageOutput::AutoReconnectCookie(server_cookie()), &mut slot, label).is_none()
+        );
+        assert!(slot.is_some(), "the cookie is kept");
+        // A regenerated cookie replaces the old one.
+        let newer = ServerAutoReconnect { logon_id: LOGON_ID, random_bits: [7; 16] };
+        track_reconnect_cookie(ActiveStageOutput::AutoReconnectCookie(newer), &mut slot, label);
+        assert_eq!(slot.as_ref().map(|c| c.for_connector().random_bits), Some([7; 16]));
+        track_reconnect_cookie(ActiveStageOutput::AutoReconnectCookie(server_cookie()), &mut slot, label);
+
+        let reason = track_reconnect_cookie(ActiveStageOutput::AutoReconnectFailed, &mut slot, label)
+            .expect("a rejected cookie ends the session");
+        assert!(slot.is_none(), "a rejected cookie is dropped");
+        assert!(reason.contains("refused to resume"), "{reason}");
+
+        let mine: Vec<String> = CAPTURED.lock().unwrap().iter().filter(|l| l.contains(label)).cloned().collect();
+        assert!(mine.iter().any(|l| l.contains("issued an auto-reconnect cookie")), "logger saw nothing: {mine:?}");
+        for line in &mine {
+            assert!(!leaks_cookie(line), "cookie in log line: {line}");
+        }
+        assert!(!leaks_cookie(&reason));
+
+        let cookie = ReconnectCookie::new(server_cookie());
+        assert!(!leaks_cookie(&format!("{cookie:?}")));
+        assert!(!leaks_cookie(active_output_name(&ActiveStageOutput::AutoReconnectCookie(server_cookie()))));
+
+        for event in [
+            ReconnectEvent::Reconnecting { attempt: 1, max_attempts: 2, reason: reason.clone() },
+            ReconnectEvent::Resumed { width: 1280, height: 800 },
+        ] {
+            let json = serde_json::to_string(&event).unwrap();
+            assert!(!leaks_cookie(&json), "cookie in event: {json}");
+        }
+    }
+
+    #[test]
+    fn the_cookie_wipe_used_by_drop_clears_it() {
+        let mut cookie = ReconnectCookie::new(server_cookie());
+        cookie.wipe();
+        assert_eq!(cookie.0.random_bits, [0; 16]);
+        assert_eq!(cookie.0.logon_id, 0);
+    }
+
+    #[test]
+    fn the_reconnect_event_shape_is_what_the_pane_reads() {
+        let json = serde_json::to_value(ReconnectEvent::Reconnecting {
+            attempt: 1,
+            max_attempts: 2,
+            reason: "connection lost".into(),
+        })
+        .unwrap();
+        assert_eq!(json["phase"], "reconnecting");
+        assert_eq!(json["attempt"], 1);
+        assert_eq!(json["max_attempts"], 2);
+        let json = serde_json::to_value(ReconnectEvent::Resumed { width: 10, height: 20 }).unwrap();
+        assert_eq!(json["phase"], "resumed");
     }
 }

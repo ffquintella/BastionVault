@@ -42,6 +42,17 @@ interface ResizePayload {
   height: number;
 }
 
+/** Host-side auto-reconnect progress (`ReconnectEvent` in
+ *  `gui/src-tauri/src/session/rdp.rs`). Never carries the cookie. */
+type ReconnectPayload =
+  | { phase: "reconnecting"; attempt: number; max_attempts: number; reason: string }
+  | { phase: "resumed"; width: number; height: number };
+
+/** Mirrors `reconnect_event_name` in `session/rdp.rs`. */
+export function rdpReconnectEventName(token: string): string {
+  return `session-reconnect-${token}`;
+}
+
 /// Debounce window-resize → server-resize so we don't fire a
 /// DisplayControl PDU for every pixel of drag. 250 ms feels
 /// responsive without flooding the deactivation-reactivation
@@ -188,6 +199,29 @@ export function RdpPane({
       closedHandled = true;
       setStatus("closed");
       setErrorMessage(ev.payload?.reason ?? "");
+    });
+
+    // The transport dropped and the host is resuming the same Windows
+    // session over the same token and frame channel. A final failure
+    // arrives as the closed event above, with its reason.
+    const unlistenReconnect = listen<ReconnectPayload>(rdpReconnectEventName(token), (ev) => {
+      if (closedHandled) return;
+      const p = ev.payload;
+      if (p.phase === "reconnecting") {
+        setStatus("reconnecting");
+        setErrorMessage(`reconnecting… (attempt ${p.attempt} of ${p.max_attempts}): ${p.reason}`);
+        return;
+      }
+      setStatus("open");
+      setErrorMessage("");
+      // The host redialled at the session's last size; a pane resized
+      // while the link was down asks for its current one.
+      const box = containerRef.current;
+      if (!box) return;
+      const width = Math.min(8192, Math.max(200, Math.floor(box.clientWidth)));
+      const height = Math.min(8192, Math.max(200, Math.floor(box.clientHeight)));
+      if (width === p.width && height === p.height) return;
+      void invoke("session_input_rdp_resize", { request: { token, width, height } }).catch(() => undefined);
     });
 
     // Server-confirmed DisplayControl resize. The backend has already
@@ -377,6 +411,7 @@ export function RdpPane({
       // re-arms a full repaint, which is exactly what a reattaching
       // pane needs.
       void unlistenClosed.then((u) => u());
+      void unlistenReconnect.then((u) => u());
       void unlistenResize.then((u) => u());
       void unlistenCursor.then((u) => u());
       observer.disconnect();
