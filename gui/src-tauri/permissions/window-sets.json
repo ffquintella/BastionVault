@@ -2,7 +2,7 @@
   "set": [
     {
       "identifier": "session-window",
-      "description": "A session's own window (ssh-<token> / rdp-<token>, session.html). Drives the one session it renders: SSH/RDP input and resize, the RDP frame channel, close, liveness, Move to workspace, asking before its native close and closing itself (session_window_closing / session_window_close, T108 — the calling window only, never another by label), the session-input preferences it reads, and the Rustion chip's renew / end. Every input command is further narrowed by the host to the window holding the session (attachments::authorize_input). No vault reads, no session opens, no token. Derived from what session.html's own-window routes call; gui/src/test/sessionBundle.test.ts keeps the two equal. Features/session-workspace.md, T110.",
+      "description": "A session's own window (ssh-<token> / rdp-<token>, session.html). Drives the one session it renders: SSH/RDP input and resize, the RDP frame channel, close, liveness, Move to workspace, asking before its native close and closing itself (session_window_closing / session_window_close, T108 — the calling window only, never another by label), the session-input preferences it reads, and the Rustion chip's read / renew / end (session_rustion_info / _renew / _kill, T145: each takes the session token, and the host takes the bastion, session and correlation ids from the bundle it stashed at open, never from the webview). Every input command and the three Rustion commands are further narrowed by the host to the window holding the session (attachments::authorize_input); the raw-id rustion_session_renew / _kill stay in the main window's set only. No vault reads, no session opens, no token. Derived from what session.html's own-window routes call; gui/src/test/sessionBundle.test.ts keeps the two equal. Features/session-workspace.md, T110.",
       "permissions": [
         "allow-session-input",
         "allow-session-resize",
@@ -18,13 +18,13 @@
         "allow-session-window-close",
         "allow-session-rustion-info",
         "allow-get-session-workspace-prefs",
-        "allow-rustion-session-renew",
-        "allow-rustion-session-kill"
+        "allow-session-rustion-renew",
+        "allow-session-rustion-kill"
       ]
     },
     {
       "identifier": "sftp-window",
-      "description": "An SFTP session's own window (sftp-<token>, session.html). Drives the one SFTP session it renders: remote listing, folder creation, rename, delete, transfers and their cancel; the local pane's listing, home and folder creation; close, liveness, asking before its native close and closing itself. Every command takes the session token and is refused by the host unless the calling window holds that live SFTP session (require_session_window), so the local-filesystem commands are unusable without one. No keystroke or RDP input, no vault reads, no session opens, no token. Derived from what session.html's /session/sftp route calls; gui/src/test/sessionBundle.test.ts keeps the two equal. Features/sftp-connect.md.",
+      "description": "An SFTP session's own window (sftp-<token>, session.html). Drives the one SFTP session it renders: remote listing, folder creation, rename, delete, transfers and their cancel; the local pane's listing, home and folder creation; close, liveness, asking before its native close and closing itself; for a session brokered through a Rustion bastion (T141), reading its bastion lifecycle bundle and renewing or terminating that bastion session (session_rustion_info / _renew / _kill), as an SSH window does. Every sftp_* command and the three Rustion lifecycle commands take the session token and are refused by the host unless the calling window holds that live session (require_session_window); the Rustion commands act only on the bastion session stashed for that token (T145), so the local-filesystem commands are unusable without one. No keystroke or RDP input, no vault reads, no session opens, no token. Derived from what session.html's /session/sftp route calls; gui/src/test/sessionBundle.test.ts keeps the two equal. Features/sftp-connect.md.",
       "permissions": [
         "allow-session-close",
         "allow-session-heartbeat",
@@ -39,7 +39,10 @@
         "allow-sftp-cancel-transfer",
         "allow-sftp-local-home",
         "allow-sftp-local-list",
-        "allow-sftp-local-mkdir"
+        "allow-sftp-local-mkdir",
+        "allow-session-rustion-info",
+        "allow-session-rustion-renew",
+        "allow-session-rustion-kill"
       ]
     },
     {

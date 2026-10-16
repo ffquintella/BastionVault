@@ -58,17 +58,35 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### SFTP Connect — through a Rustion bastion (features/sftp-connect.md)
+
+- Transfer files through a Rustion bastion when the resource's transport policy routes it there (T141, S112)
+  -- an `sftp` profile on a `rustion-required` resource, or a `rustion-preferred` one with bastions configured, used to refuse the session; it now opens through the bastion the same way an SSH session does. The desktop app authenticates to the bastion with a one-shot SSH ticket, pins the bastion's host key, and asks for the `sftp` subsystem, which the bastion relays to the target; the target credential never reaches this machine for stored-secret, SSH-engine and default-account sources. A credential the bastion cannot use (a passphrase-protected key, a FIDO2 security key) is refused under `rustion-required` and dialled direct under `rustion-preferred`, as for SSH. The SFTP window shows the bastion chip (bastion name, time left, renew, terminate), and the session-open audit line names the bastion and its session id. Needs Rustion 0.17.0 or later; an older bastion accepts the subsystem without relaying it, and the open then fails with an error naming the required version.
+
 #### RDP sessions — desktop app
 
-- Resume an RDP session automatically after the network drops it, without logging on again (T145, S46)
+- Resume an RDP session automatically after the network drops it, without logging on again (T146, S46)
   -- when the connection breaks under a live session (a failed write with no disconnect reason from the server, or the socket closing or resetting), the desktop app redials the same host up to twice, 1 s and then 4 s later, and presents the auto-reconnect cookie Windows issued for that session, so the server reattaches the same desktop with its open windows. The pane says *reconnecting… (attempt n of 2)* with the cause, then carries on in the same pane, at the same size, without re-attaching; if the link stays down, or the server refuses the cookie, the pane closes with that reason. A session the server ended, a protocol error and a Disconnect are never retried. Only direct password sessions resume: a Rustion-brokered session (its ticket is single-use) and a smart-card session close as before, saying why. The redial runs the same DNS, TCP, TLS and pin checks as the first connect and carries no password, so a rejected cookie ends the session instead of logging on again; the cookie stays in the app's memory, is never logged or shown, is wiped when replaced or rejected, and is dropped on Disconnect. Each attempt and its outcome is written to the host's audit log (`session.reconnect`).
 
 ### Fixed
+
+#### Sharing — identity groups inside a namespace
+
+- Show and honour shares granted to an identity group for users logged into a namespace (T27, S33, S18)
+  -- "Shared with me" listed only direct shares for a namespace-bound user, and opening a group-shared resource was refused, even when the user had a policy carrying `metadata { group_shared_resources = "true" }` and belonged to the grantee group. Both the feed and the ACL check looked the opt-in policy and the group membership up in the root namespace, while a namespace user's policies and groups live in that namespace. They are now resolved from the namespace the token is bound to — the same place login expands group policies and the ACL loads its policies from. Root-bound users are unaffected.
 
 #### RDP sessions — desktop app
 
 - Say why an RDP session ended instead of showing a bare "closed" (T36, S46)
   -- the session pump knew the cause (the server's disconnect reason, a dropped or reset socket, a protocol error) but logged it only to the app's stderr, which a Finder- or Start-menu-launched app does not keep, and sent the pane an empty close event. The pane header now shows the reason, the host logs it on one line with the session label, and a failed write of a response frame now ends the session at once instead of carrying on over a dead socket until the next read. When a write is what notices the drop ("broken pipe"), the host first reads for up to a second for the disconnect reason Windows sends before hanging up, and reports that if it is there. The server's DisplayControl limits and every resize sent are now logged at `info`, so a drop that follows a resize can be told apart.
+
+### Security
+
+#### Rustion sessions — desktop app
+
+- **Let a session window renew, end or read only its own bastion session** (T145, S51, S112)
+  -- an SSH, RDP or SFTP window and the Session Workspace could renew or terminate any Rustion bastion session the operator's vault policy allowed, because the renew and kill commands took the bastion, session and correlation ids from the window, and the bundle read checked no window at all. All three now take only the window's local session token, are refused unless the calling window renders that session, and use the ids the app stashed when it opened it. The Rustion chip behaves as before. The raw-id commands remain for the main window's live-sessions page only.
+
 
 ## [0.44.44] - 2026-10-16
 

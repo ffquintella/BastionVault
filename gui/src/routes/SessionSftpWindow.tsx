@@ -6,7 +6,12 @@
  * the resource on the right — and a transfer list underneath. URL params:
  *   token  — the session id every `sftp_*` command names
  *   closed — the event the host emits when the connection drops
- *   label  — operator-visible title (`sftp felipe@host:22`)
+ *   label  — operator-visible title (`sftp felipe@host:22`, with
+ *            ` via rustion[<bastion>]` when brokered)
+ *
+ * A session brokered through a Rustion bastion (T141) shows the same
+ * lifecycle chip as an SSH window: bastion name, time left, renew and
+ * terminate. A direct session's chip renders nothing.
  *
  * Every file operation goes through the host, which refuses it unless this
  * window holds the session. Remote names are untrusted and filtered by the
@@ -47,6 +52,7 @@ import { useSessionHeartbeat } from "../lib/sessionHeartbeat";
 import { useWindowCloseGuard } from "../lib/sessionWindowClose";
 import { existsConflict, formatSize, isValidEntryName, newTransferId } from "../lib/sftpPanes";
 import type { PaneSide } from "../lib/sftpPanes";
+import { RustionSessionChip } from "../components/RustionSessionChip";
 import { WindowCloseConfirm } from "../components/session/CloseConfirm";
 import { SftpFilePane } from "../components/session/SftpFilePane";
 import type { PaneRow, SftpDragPayload } from "../components/session/SftpFilePane";
@@ -331,6 +337,7 @@ export function SessionSftpWindow() {
         </span>
         {!live && <span className="shrink-0 text-xs text-[var(--color-danger)]">Disconnected — {closedReason}</span>}
         <div className="ml-auto flex items-center gap-1">
+          <RustionSessionChip token={token} />
           <ToolButton
             onClick={() => copySelected(active)}
             disabled={!live || activeSel.size === 0}

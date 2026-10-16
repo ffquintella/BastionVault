@@ -727,6 +727,8 @@ pub fn run() {
             commands::rustion::rustion_session_open,
             commands::rustion::rustion_session_renew,
             commands::rustion::rustion_session_kill,
+            commands::rustion::session_rustion_renew,
+            commands::rustion::session_rustion_kill,
             commands::rustion::rustion_authority_attest,
             commands::rustion::rustion_target_deenrol,
             commands::rustion::rustion_recordings_list,

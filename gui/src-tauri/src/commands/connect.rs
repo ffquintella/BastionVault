@@ -1418,10 +1418,12 @@ pub struct SessionRustionInfoRequest {
 #[tauri::command]
 pub async fn session_rustion_info(
     state: State<'_, AppState>,
+    webview: Webview,
     request: SessionRustionInfoRequest,
 ) -> CmdResult<Option<SessionRustionInfo>> {
-    let bundles = state.rustion_session_bundles.lock().await;
-    Ok(bundles.get(&request.token).map(|b| SessionRustionInfo {
+    // Only the window holding the session reads its bundle (T145).
+    let bundle = super::rustion::caller_bundle(&state, &webview, &request.token).await?;
+    Ok(bundle.as_ref().map(|b| SessionRustionInfo {
         session_id: b.session_id.clone(),
         bastion_id: b.bastion_id.clone(),
         bastion_name: b.bastion_name.clone(),
@@ -1992,7 +1994,7 @@ enum BastionProtocol {
 
 /// Outcome of consulting the Rustion policy resolver before a Connect.
 /// Returned by [`resolve_connect_route`].
-enum ConnectRoute {
+pub(super) enum ConnectRoute {
     /// Effective policy is `transport=direct` (or empty) — keep the
     /// existing in-app dial against the resource's host candidates.
     Direct,
@@ -2269,7 +2271,7 @@ async fn read_effective_login_class(
 ///     anything is dialed (matches the server's own 403 behaviour on
 ///     session/open).
 #[allow(clippy::too_many_arguments)]
-async fn resolve_ssh_connect_route(
+pub(super) async fn resolve_ssh_connect_route(
     state: &State<'_, AppState>,
     resource_name: &str,
     meta: &Map<String, Value>,
@@ -2457,7 +2459,7 @@ async fn parse_rustion_ticket_bundle(
 /// when the policy does not route through a bastion — the caller then falls
 /// back to the client-side resolution path.
 #[allow(clippy::too_many_arguments)]
-async fn open_rustion_session_v2_ssh(
+pub(super) async fn open_rustion_session_v2_ssh(
     state: &State<'_, AppState>,
     resource_name: &str,
     profile_id: &str,

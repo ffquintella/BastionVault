@@ -3,7 +3,8 @@
 //
 //   const { renewing, renew, killing, kill, lastError, lastRenewed } =
 //     useRustionSessionLifecycle({
-//       session,             // RustionSessionOpenResult from rustionSessionOpen
+//       token,               // the local session token this window holds
+//       session,             // RustionSessionOpenResult-shaped expiry source
 //       isIdle,              // true when the operator's terminal hasn't
 //                            // received input recently — skip auto-renew
 //       autoRenewEnabled,    // user toggle
@@ -18,18 +19,24 @@
 // Termination is one-shot — calling `kill` POSTs the kill envelope at
 // the bastion and marks the session terminated locally so the timer
 // stops firing.
+//
+// Renew and kill go by `token` only (T145): the host checks the calling
+// window holds that session and takes the bastion, session and
+// correlation ids from the bundle it stashed at open. `session` here
+// drives only the local expiry mirror and the reset on a new session.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { sessionRustionKill, sessionRustionRenew } from "../lib/api";
 import {
-  rustionSessionKill,
-  rustionSessionRenew,
   type RustionSessionKillResult,
   type RustionSessionOpenResult,
   type RustionSessionRenewResult,
 } from "../lib/rustion";
 
 export interface UseRustionSessionLifecycleArgs {
+  /** The local session token the calling window holds. */
+  token: string;
   session: RustionSessionOpenResult | null;
   /** Whether the operator's terminal has been idle for the renew-skip
    *  window. Caller's choice of threshold (e.g. 5 minutes). */
@@ -62,6 +69,7 @@ export function useRustionSessionLifecycle(
   args: UseRustionSessionLifecycleArgs,
 ): UseRustionSessionLifecycleResult {
   const {
+    token,
     session,
     isIdle,
     autoRenewEnabled,
@@ -100,12 +108,7 @@ export function useRustionSessionLifecycle(
     setRenewing(true);
     setLastError(null);
     try {
-      const res = await rustionSessionRenew({
-        bastionId: session.bastion_id,
-        sessionId: session.session_id,
-        correlationId: session.correlation_id,
-        extendSecs,
-      });
+      const res = await sessionRustionRenew(token, extendSecs);
       setExpiresAt(res.expiresAt);
       setRenewalsUsed(res.renewalsUsed);
       setMaxRenewals(res.maxRenewals);
@@ -116,18 +119,14 @@ export function useRustionSessionLifecycle(
     } finally {
       setRenewing(false);
     }
-  }, [session, terminated, extendSecs]);
+  }, [token, session, terminated, extendSecs]);
 
   const kill = useCallback(async () => {
     if (!session || terminated) return null;
     setKilling(true);
     setLastError(null);
     try {
-      const res = await rustionSessionKill({
-        bastionId: session.bastion_id,
-        sessionId: session.session_id,
-        correlationId: session.correlation_id,
-      });
+      const res = await sessionRustionKill(token);
       setTerminated(true);
       return res;
     } catch (e) {
@@ -136,7 +135,7 @@ export function useRustionSessionLifecycle(
     } finally {
       setKilling(false);
     }
-  }, [session, terminated]);
+  }, [token, session, terminated]);
 
   // Auto-renew timer. Fires at (expires_at - renewLeadSecs). Skips
   // when idle, when auto-renew is off, or when the budget is gone.

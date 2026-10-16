@@ -246,7 +246,8 @@ pub struct RustionSessionBundle {
     pub correlation_id: String,
     pub expires_at: String,
     pub max_renewals: u32,
-    /// `ssh` | `rdp` — surfaced in audit + the lifecycle UI.
+    /// `ssh` | `rdp` | `sftp` — surfaced in audit + the lifecycle UI. An
+    /// `sftp` session rides an ordinary `ssh` ticket on the bastion.
     pub protocol: String,
 }
 
