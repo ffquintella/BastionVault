@@ -56,6 +56,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.44] - 2026-10-16
+
 ### Fixed
 
 #### RDP sessions — desktop app
