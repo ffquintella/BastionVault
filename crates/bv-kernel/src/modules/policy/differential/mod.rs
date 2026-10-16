@@ -328,18 +328,10 @@ fn same_index(new: &ACL, old: &ACL) -> Result<(), TestCaseError> {
     let wildcards = |acl: &ACL| {
         acl.segment_wildcard_paths.iter().map(|e| (e.key().clone(), perm_key(e.value()))).collect::<BTreeMap<_, _>>()
     };
-    let gated = |acl: &ACL| {
-        acl.grouped_rules
-            .iter()
-            .map(|r| (r.path.clone(), r.is_prefix, r.has_segment_wildcards, perm_key(&r.permissions)))
-            .collect::<Vec<_>>()
-    };
-    let scoped = |acl: &ACL| {
-        acl.scoped_rules
-            .iter()
-            .map(|r| (r.path.clone(), r.is_prefix, r.has_segment_wildcards, perm_key(&r.permissions)))
-            .collect::<Vec<_>>()
-    };
+    let gated =
+        |acl: &ACL| acl.grouped_rules.iter().map(|r| (r.shape.clone(), perm_key(&r.permissions))).collect::<Vec<_>>();
+    let scoped =
+        |acl: &ACL| acl.scoped_rules.iter().map(|r| (r.shape.clone(), perm_key(&r.permissions))).collect::<Vec<_>>();
     prop_assert_eq!(new.root, old.root);
     prop_assert_eq!(trie(new, false), trie(old, false));
     prop_assert_eq!(trie(new, true), trie(old, true));
@@ -606,26 +598,150 @@ fn f7_a_non_governing_list_rule_keeps_the_filter() {
     assert!(r.allowed && r.list_filter_groups.is_empty());
 }
 
-// ── Open defects, pinned ───────────────────────────────────────────
+// ── F8, fixed (T121) ───────────────────────────────────────────────
 //
-// Characterizations, not endorsements: each asserts what the evaluator does
-// *today* on a concrete policy, so the defect the Kani witness found is
-// reproducible on real HCL, and a fix has to flip the marked assertion on
-// purpose (and update `legacy`). See the roadmap's Findings table.
+// A `groups`- or `scopes`-qualified segment-wildcard rule with a trailing `*`
+// kept the `*` as a literal segment and matched no real path; the same rule
+// ungated is a prefix rule on its last segment. Each case below shows the
+// qualified rule now matches exactly what the ungated one does.
 
-/// F8: a gated or scoped segment-wildcard rule with a trailing `*` keeps the
-/// `*` as a literal segment and matches no real path (fail-closed), where
-/// the same rule ungated is a prefix rule.
+const GATED_GLOB_READ: &str = r#"path "secret/+/data/*" {
+     capabilities = ["read", "list"]
+     groups = ["g1"]
+   }"#;
+const SCOPED_GLOB_READ: &str = r#"path "secret/+/data/*" {
+     capabilities = ["read", "list"]
+     scopes = ["shared"]
+   }"#;
+const UNGATED_GLOB_READ: &str = r#"path "secret/+/data/*" { capabilities = ["read", "list"] }"#;
+
+fn allowed_in_both_modes(acl: &ACL, req: &Request) -> bool {
+    let enforced = acl.allow_operation(req, false).unwrap().allowed;
+    let probed = acl.allow_operation(req, true).unwrap().capabilities_bitmap & Capability::Read.to_bits() != 0;
+    assert_eq!(enforced, probed, "enforcement and probe disagree on {}", req.path);
+    enforced
+}
+
+/// F8 (T121): a gated `secret/+/data/*` grants what the same rule grants
+/// ungated, in both modes. Before T121 the gated rule matched nothing.
 #[test]
-fn f8_current_behaviour_a_gated_segment_wildcard_glob_matches_nothing() {
-    let rule = r#"path "secret/+/data/*" {
-             capabilities = ["read"]
-             groups = ["g1"]
-           }"#;
-    let mut req = Request { operation: Operation::Read, path: "secret/x/data/y".into(), ..Default::default() };
-    req.asset_groups = vec!["g1".into()];
-    // DEFECT (fail-closed): should be allowed. Flip with the F8 fix.
-    assert!(!acl_of(&[rule]).allow_operation(&req, false).unwrap().allowed);
-    let ungated = r#"path "secret/+/data/*" { capabilities = ["read"] }"#;
+fn f8_a_gated_segment_wildcard_glob_is_a_prefix_rule() {
+    let req = in_group(read_as("secret/x/data/y"), "g1");
+    assert!(allowed_in_both_modes(&acl_of(&[UNGATED_GLOB_READ]), &req));
+    assert!(allowed_in_both_modes(&acl_of(&[GATED_GLOB_READ]), &req));
+    // A longer path under the prefix, and a last segment the glob extends.
+    assert!(allowed_in_both_modes(&acl_of(&[GATED_GLOB_READ]), &in_group(read_as("secret/x/data/y/z"), "g1")));
+    let partial = r#"path "secret/+/da*" {
+         capabilities = ["read"]
+         groups = ["g1"]
+       }"#;
+    assert!(allowed_in_both_modes(&acl_of(&[partial]), &in_group(read_as("secret/x/data"), "g1")));
+    // The gate still decides: outside `g1` the rule contributes nothing.
+    assert!(!allowed_in_both_modes(&acl_of(&[GATED_GLOB_READ]), &read_as("secret/x/data/y")));
+}
+
+/// F8 (T121): the same for a `scopes = ["shared"]` rule backed by a share.
+#[test]
+fn f8_a_scoped_segment_wildcard_glob_is_a_prefix_rule() {
+    let req = with_share(read_as("secret/x/data/y"), "read");
+    assert!(allowed_in_both_modes(&acl_of(&[SCOPED_GLOB_READ]), &req));
+    assert!(!allowed_in_both_modes(&acl_of(&[SCOPED_GLOB_READ]), &read_as("secret/x/data/y")));
+}
+
+/// F8 (T121): the shape decides for a `deny` too. A gated or scoped
+/// `secret/+/data/*` deny that applies now revokes an ungated grant; before
+/// T121 it matched nothing and the grant stood.
+#[test]
+fn f8_a_qualified_segment_wildcard_glob_deny_revokes() {
+    let ungated = r#"path "secret/*" { capabilities = ["read", "list", "sudo"] }"#;
+    let gated_deny = r#"path "secret/+/data/*" {
+         capabilities = ["deny"]
+         groups = ["g1"]
+       }"#;
+    let shared_deny = r#"path "secret/+/data/*" {
+         capabilities = ["deny"]
+         scopes = ["shared"]
+       }"#;
+
+    let req = in_group(read_as("secret/x/data/y"), "g1");
     assert!(acl_of(&[ungated]).allow_operation(&req, false).unwrap().allowed);
+    assert_denied(&acl_of(&[ungated, gated_deny]), &req);
+    assert_denied(&acl_of(&[ungated, shared_deny]), &with_share(read_as("secret/x/data/y"), "read"));
+
+    // Outside its gate, or off its shape, the deny contributes nothing.
+    assert!(acl_of(&[ungated, gated_deny]).allow_operation(&read_as("secret/x/data/y"), false).unwrap().allowed);
+    assert!(
+        acl_of(&[ungated, gated_deny])
+            .allow_operation(&in_group(read_as("secret/x/other/y"), "g1"), false)
+            .unwrap()
+            .allowed
+    );
+
+    // LIST waives the gate, so the deny applies to the collection as well.
+    let list = Request { operation: Operation::List, path: "secret/x/data/".into(), ..Default::default() };
+    assert_denied(&acl_of(&[ungated, gated_deny]), &list);
+}
+
+/// F8 (T121): a gated `+…*` rule's LIST of a collection under it is granted
+/// and narrowed to its groups, in both modes. Before T121 it was refused.
+#[test]
+fn f8_a_gated_segment_wildcard_glob_list_carries_the_filter() {
+    let list = Request { operation: Operation::List, path: "secret/x/data/".into(), ..Default::default() };
+    let acl = acl_of(&[GATED_GLOB_READ]);
+    for check_only in [false, true] {
+        let r = acl.allow_operation(&list, check_only).unwrap();
+        assert!(check_only || r.allowed, "the gated LIST was refused");
+        assert_eq!(r.list_filter_groups, vec!["g1".to_string()], "check_only = {check_only}");
+    }
+    let scoped = acl_of(&[SCOPED_GLOB_READ]).allow_operation(&list, false).unwrap();
+    assert!(scoped.allowed);
+    assert_eq!(scoped.list_filter_scopes, vec!["shared".to_string()]);
+    // The ungated rule lists the same collection, unfiltered.
+    let ungated = acl_of(&[UNGATED_GLOB_READ]).allow_operation(&list, false).unwrap();
+    assert!(ungated.allowed && ungated.list_filter_groups.is_empty());
+}
+
+/// F8 (T121): what the ungated rule does not match stays unmatched gated:
+/// too few segments, an empty `+` segment, a literal segment that differs.
+#[test]
+fn f8_a_gated_segment_wildcard_glob_refuses_other_shapes() {
+    for path in ["secret/x/data", "secret//data/y", "secret/x/other/y", "secret/x/y/data/z", "secret/data/y"] {
+        let req = in_group(read_as(path), "g1");
+        assert!(!allowed_in_both_modes(&acl_of(&[UNGATED_GLOB_READ]), &req), "ungated matched {path}");
+        assert!(!allowed_in_both_modes(&acl_of(&[GATED_GLOB_READ]), &req), "gated matched {path}");
+        assert!(
+            !allowed_in_both_modes(&acl_of(&[SCOPED_GLOB_READ]), &with_share(read_as(path), "read")),
+            "scoped matched {path}"
+        );
+    }
+    let list = Request { operation: Operation::List, path: "secret/x/".into(), ..Default::default() };
+    assert!(!acl_of(&[GATED_GLOB_READ]).allow_operation(&list, false).unwrap().allowed);
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// F8 (T121), on every generated rule shape: one rule grants a read of
+    /// a path ungated exactly when it grants it `groups`-gated (gate
+    /// passing) and `scopes`-filtered (scope passing). A read, not a LIST:
+    /// for LIST the ungated index also consults the trailing-`/`-trimmed
+    /// exact rule, a precedence step the layers do not take.
+    #[test]
+    fn a_qualified_rule_matches_what_the_same_rule_matches_ungated(rule in arb_rule_path(), req in arb_request()) {
+        let with_qualifier = |qualifier: &str| format!("path \"{rule}\" {{\n capabilities = [\"read\"]\n {qualifier}\n}}");
+        let ungated = acl_of(&[with_qualifier("").as_str()]);
+        let gated = acl_of(&[with_qualifier("groups = [\"g1\"]").as_str()]);
+        let scoped = acl_of(&[with_qualifier("scopes = [\"owner\"]").as_str()]);
+
+        let mut read = Request { operation: Operation::Read, path: req.path.clone(), ..Default::default() };
+        read.asset_groups = vec!["g1".into()];
+        read.asset_owner = "u1".into();
+        let mut auth = Auth::default();
+        auth.metadata.insert("entity_id".into(), "u1".into());
+        read.auth = Some(auth);
+
+        let expected = ungated.allow_operation(&read, false).unwrap().allowed;
+        prop_assert_eq!(gated.allow_operation(&read, false).unwrap().allowed, expected, "gated, rule {}", rule);
+        prop_assert_eq!(scoped.allow_operation(&read, false).unwrap().allowed, expected, "scoped, rule {}", rule);
+    }
 }

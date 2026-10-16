@@ -203,6 +203,9 @@ Semantics:
   read-always + update-only-in-g, which merging could not represent.
 - An explicit `capabilities = ["deny"]` inside a gated rule still
   wipes the grant for matching targets, mirroring ungated deny.
+- A gated rule's path matches exactly what the same rule matches
+  ungated, including a `+` rule ending in `*` (`kv/+/*`, a prefix rule on
+  its last segment). Until T121 such a gated rule matched nothing.
 
 Authorize flow:
 

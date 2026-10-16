@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 1ed23592514d87a53a883fb72a347b1c5dcebbb319fc93f81bf5287742c0bc40 # shrinks to set = [[RuleModel { path: "+/a*", caps: [], old_style: None, groups: [], scopes: ["OWNER"], required: [], allowed: None, denied: None, ttl: None }]], requests = [RequestModel { op: List, path: "a", data: None, body: None, entity: None, asset_groups: [], asset_owner: "", shared: [], share_override: None }]
+cc 22cc1b841f16b6c6b04a32cdbdd925ed10a8a6932dde1fc2e853ac0300c50e35 # shrinks to rule = "+/*", req = RequestModel { op: List, path: "a/a", data: None, body: None, entity: None, asset_groups: [], asset_owner: "", shared: [], share_override: None }

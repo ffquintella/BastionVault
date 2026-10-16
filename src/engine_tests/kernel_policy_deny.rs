@@ -29,7 +29,7 @@ use crate::{
 
 const PASSWORD: &str = "hunter22XX!";
 
-async fn write_policy(core: &Arc<Core>, root: &str, name: &str, hcl: &str) {
+pub(super) async fn write_policy(core: &Arc<Core>, root: &str, name: &str, hcl: &str) {
     test_write_api(
         core.as_ref(),
         root,
@@ -41,12 +41,12 @@ async fn write_policy(core: &Arc<Core>, root: &str, name: &str, hcl: &str) {
     .unwrap();
 }
 
-async fn write(core: &Arc<Core>, root: &str, path: &str, body: serde_json::Value) {
+pub(super) async fn write(core: &Arc<Core>, root: &str, path: &str, body: serde_json::Value) {
     test_write_api(core.as_ref(), root, path, true, body.as_object().cloned()).await.unwrap();
 }
 
 /// A userpass user carrying exactly `policies`; returns its token.
-async fn user(core: &Arc<Core>, root: &str, name: &str, policies: &str) -> String {
+pub(super) async fn user(core: &Arc<Core>, root: &str, name: &str, policies: &str) -> String {
     write(
         core,
         root,
@@ -62,7 +62,7 @@ async fn user(core: &Arc<Core>, root: &str, name: &str, policies: &str) -> Strin
 
 /// A read through the full request path: `post_auth` resolves the asset
 /// groups, owner and shares from storage and runs the enforcing check.
-async fn can_read(core: &Arc<Core>, token: &str, path: &str) -> bool {
+pub(super) async fn can_read(core: &Arc<Core>, token: &str, path: &str) -> bool {
     let mut req = Request::new(path);
     req.operation = Operation::Read;
     req.client_token = token.to_string();
@@ -71,7 +71,12 @@ async fn can_read(core: &Arc<Core>, token: &str, path: &str) -> bool {
 
 /// `readable_targets` as a set-returning endpoint calls it, for a caller
 /// carrying `policies` and (optionally) an identity entity.
-async fn readable(core: &Arc<Core>, policies: &[&str], entity_id: Option<&str>, targets: &[&str]) -> Vec<bool> {
+pub(super) async fn readable(
+    core: &Arc<Core>,
+    policies: &[&str],
+    entity_id: Option<&str>,
+    targets: &[&str],
+) -> Vec<bool> {
     let mut auth = Auth { policies: policies.iter().map(|p| p.to_string()).collect(), ..Default::default() };
     if let Some(id) = entity_id {
         auth.metadata.insert("entity_id".into(), id.into());
@@ -85,7 +90,7 @@ async fn readable(core: &Arc<Core>, policies: &[&str], entity_id: Option<&str>, 
 
 /// `may_connect_target` as the three session-connect gates call it, with the
 /// target qualifiers resolved from the identity and resource-group stores.
-async fn may_connect(core: &Arc<Core>, policies: &[&str], entity_id: Option<&str>, target: &str) -> bool {
+pub(super) async fn may_connect(core: &Arc<Core>, policies: &[&str], entity_id: Option<&str>, target: &str) -> bool {
     let mut auth = Auth { policies: policies.iter().map(|p| p.to_string()).collect(), ..Default::default() };
     if let Some(id) = entity_id {
         auth.metadata.insert("entity_id".into(), id.into());
