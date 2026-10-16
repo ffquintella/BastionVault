@@ -56,6 +56,36 @@ mod test_utils {
     #[allow(unused_imports)]
     pub use bastion_vault::test_utils::*;
     pub use bv_server::test_support::TestHttpServer;
+
+    /// Policy names a fresh vault lists, plus `extra`: every seeded baseline,
+    /// sorted, `root` last. Mirrors the server's seed list
+    /// (`policy_store::load_default_acl_policy` + `module_policies`).
+    pub fn seeded_policy_names<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+        let mut names: Vec<&str> = vec![
+            "administrator", "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user",
+            "secret-author", "shared-access", "standard-user", "standard-user-readonly",
+            "totp-admin", "totp-user", "transit-admin", "transit-user",
+            // Per-module baselines (features/module-policies.md).
+            "secrets-full", "secrets-read", "secrets-shared",
+            "resource-full", "resource-read", "resource-connect", "resource-shared",
+            "files-full", "files-read", "files-shared",
+            "ssh-full", "ssh-read", "ssh-connect",
+            "pki-full", "pki-read", "pki-connect",
+            "ad-full", "ad-read", "ad-connect",
+            "totp-full", "totp-read", "totp-connect",
+            "transit-full", "transit-read", "transit-connect",
+        ];
+        names.extend_from_slice(extra);
+        names.sort_unstable();
+        names.push("root");
+        names
+    }
+
+    /// `bvault policy list` (table format) output for [`seeded_policy_names`].
+    pub fn seeded_policy_list_output(extra: &[&str]) -> String {
+        let eol = if cfg!(windows) { "\r\n" } else { "\n" };
+        seeded_policy_names(extra).iter().map(|n| format!("{n}    {eol}")).collect()
+    }
 }
 
 #[derive(Parser)]

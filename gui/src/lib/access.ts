@@ -25,6 +25,16 @@ export const ADMIN_POLICIES = new Set<string>([
   "plugin-admin",
 ]);
 
+/**
+ * The seeded per-module baselines for `module` that make its workspace page
+ * useful: `<module>-full`, `-read` and `-connect` (server side:
+ * `module_policies::MODULE_POLICIES`). `-shared` is left out on purpose, since
+ * shares surface through the Sharing page and not the engine page.
+ */
+export function modulePolicies(module: string): string[] {
+  return [`${module}-full`, `${module}-read`, `${module}-connect`];
+}
+
 /** True when the token carries any policy that grants the admin GUI. */
 export function isAdminUser(policies: readonly string[]): boolean {
   return policies.some((p) => ADMIN_POLICIES.has(p));
