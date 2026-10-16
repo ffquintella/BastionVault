@@ -101,8 +101,11 @@ dials with the sealed credential and checks against the target's pin.
   the session. Disconnect closes the bastion connection, which ends the
   bastion-side session.
 - **Window ACL.** The `sftp-window` set gains `session_rustion_info`,
-  `rustion_session_renew` and `rustion_session_kill` — the three an SSH
-  window already has for the same chip.
+  `session_rustion_renew` and `session_rustion_kill` — the three an SSH
+  window has for the same chip. Each takes only the local session token: the
+  host refuses a window that does not hold that session and reads the
+  bastion, session and correlation ids from the bundle it stashed at open
+  (T145), so the window can renew or end only its own bastion session.
 - **Audit.** The host's `session.open` line for a bastion route has
   `transport=rustion`, the bastion name, the Rustion session id and the
   correlation id; login class, mint and cert serial are stamped server-side

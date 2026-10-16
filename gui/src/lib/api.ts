@@ -2,6 +2,7 @@
 // than Tauri's `invoke` directly, so no page can fan out fast enough to
 // trip the server's IP abuse guard. See lib/invoke.ts.
 import { invoke } from "./invoke";
+import type { RustionSessionKillResult, RustionSessionRenewResult } from "./rustion";
 import type {
   ConnectProfileHint,
   VaultMode,
@@ -3618,6 +3619,16 @@ export type SessionRustionInfo = {
 
 export const sessionRustionInfo = (token: string) =>
   invoke<SessionRustionInfo | null>("session_rustion_info", { request: { token } });
+
+/// T145: renew / end the bastion session behind a session window's own
+/// token. The host refuses a window that does not hold `token` and takes
+/// the bastion, session and correlation ids from its own bundle; the raw-id
+/// `rustionSessionRenew` / `rustionSessionKill` are main-window only.
+export const sessionRustionRenew = (token: string, extendSecs: number) =>
+  invoke<RustionSessionRenewResult>("session_rustion_renew", { request: { token, extendSecs } });
+
+export const sessionRustionKill = (token: string) =>
+  invoke<RustionSessionKillResult>("session_rustion_kill", { request: { token } });
 
 /// Effective capabilities of the current token on a set of paths. Used to
 /// filter UI affordances — e.g. hide a resource's credential values when the

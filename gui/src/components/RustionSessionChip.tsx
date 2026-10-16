@@ -9,6 +9,10 @@
  *     Terminate manually. The chip surfaces the bastion name, the
  *     time remaining, and the renewal-budget counter.
  *
+ * Renew and Terminate send only the token (T145); the host refuses a
+ * window that does not hold it and acts on the bastion session it
+ * stashed for that token, never on ids from this page.
+ *
  * The hook expects a [[RustionSessionOpenResult]]-shaped object; we
  * synthesise one from the smaller bundle the host returns. Only the
  * fields the hook actually reads are filled — the rest stay empty so
@@ -91,6 +95,7 @@ export function RustionSessionChip({ token, background }: RustionSessionChipProp
   }, [info]);
 
   const lifecycle = useRustionSessionLifecycle({
+    token,
     session: sessionShim,
     // Auto-renew while the chip is mounted — there is no idle
     // detection at this layer; renewals are cheap and the
