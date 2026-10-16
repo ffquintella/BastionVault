@@ -180,8 +180,14 @@ export function RdpPane({
       },
     );
 
-    const unlistenClosed = listen(closedEvent, () => {
+    // The host replays this a few times (see `active_stage_loop`), so
+    // the first payload wins.
+    let closedHandled = false;
+    const unlistenClosed = listen<{ reason?: string } | null>(closedEvent, (ev) => {
+      if (closedHandled) return;
+      closedHandled = true;
       setStatus("closed");
+      setErrorMessage(ev.payload?.reason ?? "");
     });
 
     // Server-confirmed DisplayControl resize. The backend has already

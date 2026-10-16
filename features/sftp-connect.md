@@ -31,7 +31,7 @@ instead of a PTY + shell). The credential never reaches the webview.
 | Transfers | upload and download of files and folders (recursive), progress events, cancel, explicit overwrite confirmation |
 
 Out of scope for v1: SFTP through a Rustion bastion (needs the bastion to
-accept the `sftp` subsystem on its SSH listener), resume of partial transfers,
+relay the `sftp` subsystem on its SSH listener — see Phase 4), resume of partial transfers,
 remote `chmod`/`chown`, drag-and-drop from the OS file manager, an SFTP pane
 attached to an existing SSH terminal session.
 
@@ -106,7 +106,7 @@ offers `ssh`, `rdp` and `sftp`.
 | 1 | `sftp` protocol in the profile model, editor, resource types and launch matrix | Done |
 | 2 | Host session, operations, transfer engine, commands, ACL | Done |
 | 3 | Dual-pane session window | Done |
-| 4 | SFTP through a Rustion bastion | Not started (T141) |
+| 4 | SFTP through a Rustion bastion | Blocked on Rustion (T141) |
 
 ## Current State
 
@@ -120,7 +120,17 @@ on the development hosts — per-platform manual checks.
 
 ## What Is Not Yet Implemented
 
-- Rustion-brokered SFTP (Phase 4, T141).
+- Rustion-brokered SFTP (Phase 4, T141) — **blocked on Rustion.** The
+  bastion's SSH listener acknowledges an `sftp` subsystem request but does not
+  dial the target or relay any data (rustion-ssh `subsystem_request`); only
+  `shell_request` consumes a BastionVault ticket session, and it always asks
+  the target for a shell. A client routed there would get a successful
+  subsystem reply and then hang in the SFTP handshake. Once the bastion relays
+  it, the BastionVault side is: route `session_open_sftp` through
+  `open_rustion_session_v2_ssh` (ticket, bastion host-key pin, lifecycle
+  bundle), open the `sftp` subsystem on the bastion connection, and settle the
+  ticket's protocol (`ssh` or a new `sftp`), since Rustion rejects a ticket
+  minted for another protocol's listener.
 - UNC paths (`\\server\share`) in the local pane: the backend lists them, but the
   pane's breadcrumb and parent navigation understand drive paths only.
 - Resume, permissions editing, OS drag-and-drop.

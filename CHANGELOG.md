@@ -56,6 +56,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+#### RDP sessions — desktop app
+
+- Say why an RDP session ended instead of showing a bare "closed" (T36, S46)
+  -- the session pump knew the cause (the server's disconnect reason, a dropped or reset socket, a protocol error) but logged it only to the app's stderr, which a Finder- or Start-menu-launched app does not keep, and sent the pane an empty close event. The pane header now shows the reason, the host logs it on one line with the session label, and a failed write of a response frame now ends the session at once instead of carrying on over a dead socket until the next read. When a write is what notices the drop ("broken pipe"), the host first reads for up to a second for the disconnect reason Windows sends before hanging up, and reports that if it is there. The server's DisplayControl limits and every resize sent are now logged at `info`, so a drop that follows a resize can be told apart.
+
 ## [0.44.44] - 2026-10-16
 
 ### Fixed
