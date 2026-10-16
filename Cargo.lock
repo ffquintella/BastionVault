@@ -6012,7 +6012,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -6329,7 +6329,7 @@ dependencies = [
 [[package]]
 name = "ironrdp"
 version = "0.17.0"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 dependencies = [
  "ironrdp-cliprdr",
  "ironrdp-connector",
@@ -6345,7 +6345,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-async"
 version = "0.10.0"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 dependencies = [
  "bytes",
  "ironrdp-connector",
@@ -6358,12 +6358,12 @@ dependencies = [
 [[package]]
 name = "ironrdp-bulk"
 version = "0.1.1"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 
 [[package]]
 name = "ironrdp-cliprdr"
 version = "0.7.0"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 dependencies = [
  "bitflags 2.13.1",
  "ironrdp-core",
@@ -6375,7 +6375,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-connector"
 version = "0.10.0"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 dependencies = [
  "ironrdp-core",
  "ironrdp-error",
@@ -6393,7 +6393,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-core"
 version = "0.2.1"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 dependencies = [
  "ironrdp-error",
 ]
@@ -6401,7 +6401,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-displaycontrol"
 version = "0.8.0"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 dependencies = [
  "ironrdp-core",
  "ironrdp-dvc",
@@ -6413,7 +6413,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-dvc"
 version = "0.8.0"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 dependencies = [
  "ironrdp-core",
  "ironrdp-pdu",
@@ -6424,7 +6424,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-egfx"
 version = "0.3.0"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 dependencies = [
  "bit_field",
  "bitflags 2.13.1",
@@ -6440,12 +6440,12 @@ dependencies = [
 [[package]]
 name = "ironrdp-error"
 version = "0.2.0"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 
 [[package]]
 name = "ironrdp-graphics"
 version = "0.9.0"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 dependencies = [
  "bit_field",
  "bitflags 2.13.1",
@@ -6462,7 +6462,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-input"
 version = "0.7.0"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 dependencies = [
  "bitvec",
  "ironrdp-pdu",
@@ -6472,7 +6472,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-pdu"
 version = "0.9.0"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 dependencies = [
  "bit_field",
  "bitflags 2.13.1",
@@ -6495,7 +6495,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-rdpei"
 version = "0.1.0"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 dependencies = [
  "bitflags 2.13.1",
  "ironrdp-core",
@@ -6508,7 +6508,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-session"
 version = "0.11.0"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 dependencies = [
  "ironrdp-bulk",
  "ironrdp-core",
@@ -6526,7 +6526,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-svc"
 version = "0.8.0"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 dependencies = [
  "bitflags 2.13.1",
  "ironrdp-core",
@@ -6536,7 +6536,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-tls"
 version = "0.2.2"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 dependencies = [
  "rustls-native-certs",
  "tokio",
@@ -6547,7 +6547,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-tokio"
 version = "0.10.0"
-source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#4f1d84705f40195dcf4bbfb6c562baa5dafe945d"
+source = "git+https://github.com/ffquintella/IronRDP?branch=fix-deps#f98841f74d5ab35c4d58d8ad6de5bc108f305162"
 dependencies = [
  "ironrdp-async",
  "tokio",
@@ -7625,7 +7625,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 3.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -7637,7 +7637,7 @@ version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
 dependencies = [
- "base64 0.21.7",
+ "base64 0.22.1",
  "chrono",
  "getrandom 0.2.17",
  "http 1.4.2",
@@ -8266,7 +8266,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.45.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11399,8 +11399,8 @@ dependencies = [
 
 [[package]]
 name = "sspi"
-version = "0.21.4"
-source = "git+https://github.com/ffquintella/sspi-rs?branch=fix-deps-next#8150b25253398fc4a9294e0ca08ca8d8935d500d"
+version = "0.23.0"
+source = "git+https://github.com/ffquintella/sspi-rs?branch=fix-deps-0.23#756e7fc15d8a8948b0fb621a525243ec9f7b4578"
 dependencies = [
  "async-dnssd",
  "async-recursion",
@@ -12073,7 +12073,7 @@ dependencies = [
  "serde_with",
  "swift-rs",
  "thiserror 2.0.20",
- "toml 0.9.12+spec-1.1.0",
+ "toml 1.1.3+spec-1.1.0",
  "url",
  "urlpattern",
  "uuid",
@@ -12205,7 +12205,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows 0.61.3",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -14155,8 +14155,8 @@ dependencies = [
 
 [[package]]
 name = "winscard"
-version = "0.3.3"
-source = "git+https://github.com/ffquintella/sspi-rs?branch=fix-deps-next#8150b25253398fc4a9294e0ca08ca8d8935d500d"
+version = "0.4.0"
+source = "git+https://github.com/ffquintella/sspi-rs?branch=fix-deps-0.23#756e7fc15d8a8948b0fb621a525243ec9f7b4578"
 dependencies = [
  "bitflags 2.13.1",
  "crypto-bigint 0.7.5",

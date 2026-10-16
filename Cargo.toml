@@ -724,9 +724,10 @@ debug = false
 # (RUSTSEC-2026-0118 NSEC3 proof unbounded loop, RUSTSEC-2026-0119
 # O(n^2) name compression CPU exhaustion). Every published sspi still
 # requires `hickory ^0.25`, so the advisories cannot be cleared by
-# version choice alone. The fork is upstream master (sspi 0.21.4) plus
-# exactly one commit porting `src/dns.rs` to the 0.26 resolver API --
-# no pin deltas, no other code. Drop this patch once Devolutions
+# version choice alone (re-checked against sspi 0.23.0, 2026-10-16: no
+# hickory 0.25.x carries either fix). The fork is the `sspi-v0.23.0` tag
+# plus exactly one commit porting `src/dns.rs` to the 0.26 resolver API
+# -- no pin deltas, no other code. Drop this patch once Devolutions
 # releases an sspi on hickory 0.26.
 #
 # hickory reaches us only through sspi's `dns_resolver` feature, which
@@ -743,7 +744,7 @@ debug = false
 # *stable* ed25519-dalek 3.0.0 with no fork at all. See the russh
 # comment in `crates/bv-engine-files/Cargo.toml` for why 0.62.7 in
 # particular.
-sspi = { git = "https://github.com/ffquintella/sspi-rs", branch = "fix-deps-next" }
+sspi = { git = "https://github.com/ffquintella/sspi-rs", branch = "fix-deps-0.23" }
 
 # hiqlite fork. It was created for the raft-client socket-leak fix: stock
 # hiqlite <= 0.15.0 leaks one ESTABLISHED TCP socket per openraft client
