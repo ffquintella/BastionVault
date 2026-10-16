@@ -758,9 +758,14 @@ pub async fn open_rdp_session(
     // Register the DisplayControl dynamic virtual channel so the
     // server advertises support during capability exchange. The
     // capability-set callback is invoked when the server announces
-    // its supported monitor count / scaling — we don't need anything
-    // from it today, so reply with an empty SVC message vector.
-    let drdynvc = DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(|_caps| Ok(Vec::new())));
+    // its supported monitor count / scaling. Nothing is sent back, but
+    // the limits are logged: ironrdp does not yet check a monitor
+    // layout against them, and a layout the server refuses can end
+    // the session.
+    let drdynvc = DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(|caps| {
+        log::info!("resource-connect/rdp: DisplayControl open, server limits {caps:?}");
+        Ok(Vec::new())
+    }));
 
     // Graphics Pipeline (MS-RDPEGFX). Registered only when the
     // `rdp_egfx` feature is compiled in AND an OpenH264 library was
@@ -1356,7 +1361,7 @@ async fn active_stage_loop<S>(
     // header, so an operator can tell "the server logged me off" from
     // "the socket died" without the GUI's stderr — which a Finder- or
     // Start-menu-launched app does not have.
-    let close_reason: String = 'pump: loop {
+    let exit: PumpExit = 'pump: loop {
         // Copied out so the `select!` branches below can reassign
         // `flush_at` without holding a borrow across the await.
         let deadline = flush_at;
@@ -1368,8 +1373,8 @@ async fn active_stage_loop<S>(
             biased;
             ctl = rx.recv() => {
                 match ctl {
-                    Some(RdpControl::Close) => break 'pump "operator closed the session".to_string(),
-                    None => break 'pump "session control channel dropped".to_string(),
+                    Some(RdpControl::Close) => break 'pump PumpExit::Ended("operator closed the session".to_string()),
+                    None => break 'pump PumpExit::Ended("session control channel dropped".to_string()),
                     Some(RdpControl::Repaint) => {
                         // Window attached or reloaded. Paint everything,
                         // now rather than on the next server update —
@@ -1393,8 +1398,9 @@ async fn active_stage_loop<S>(
                             Some(Ok(frame)) => {
                                 pending_resize = None;
                                 if let Err(e) = framed.write_all(&frame).await {
-                                    break 'pump format!("connection lost (write resize: {e})");
+                                    break 'pump PumpExit::WriteFailed(format!("connection lost (write resize: {e})"));
                                 }
+                                log::info!("rdp: sent resize {cw}x{ch}");
                             }
                             Some(Err(e)) => {
                                 pending_resize = None;
@@ -1423,7 +1429,7 @@ async fn active_stage_loop<S>(
                                 continue;
                             }
                             if let Err(e) = framed.write_all(buf.filled()).await {
-                                break 'pump format!("connection lost (write input: {e})");
+                                break 'pump PumpExit::WriteFailed(format!("connection lost (write input: {e})"));
                             }
                         }
                     }
@@ -1457,7 +1463,7 @@ async fn active_stage_loop<S>(
                                 match active_stage.process_svc_processor_messages(messages) {
                                     Ok(frame) if !frame.is_empty() => {
                                         if let Err(e) = framed.write_all(&frame).await {
-                                            break 'pump format!("connection lost (write clipboard: {e})");
+                                            break 'pump PumpExit::WriteFailed(format!("connection lost (write clipboard: {e})"));
                                         }
                                     }
                                     Ok(_) => {}
@@ -1485,7 +1491,7 @@ async fn active_stage_loop<S>(
                 match encode_clipboard_message(&mut active_stage, msg) {
                     Ok(Some(frame)) => {
                         if let Err(e) = framed.write_all(&frame).await {
-                            break 'pump format!("connection lost (write clipboard: {e})");
+                            break 'pump PumpExit::WriteFailed(format!("connection lost (write clipboard: {e})"));
                         }
                     }
                     Ok(None) => {}
@@ -1502,13 +1508,13 @@ async fn active_stage_loop<S>(
             pdu = framed.read_pdu() => {
                 let (action, payload) = match pdu {
                     Ok(v) => v,
-                    Err(e) => break 'pump describe_read_error(&e),
+                    Err(e) => break 'pump PumpExit::Ended(describe_read_error(&e)),
                 };
                 stats.pdus += 1;
                 stats.wire_bytes_in += payload.len() as u64;
                 let outputs = match active_stage.process(&mut image, action, &payload) {
                     Ok(v) => v,
-                    Err(e) => break 'pump format!("RDP protocol error: {}", e.report()),
+                    Err(e) => break 'pump PumpExit::Ended(format!("RDP protocol error: {}", e.report())),
                 };
                 let mut response_frames: Vec<Vec<u8>> = Vec::new();
                 let mut reactivation: Option<
@@ -1559,7 +1565,7 @@ async fn active_stage_loop<S>(
                             for frame in response_frames {
                                 let _ = framed.write_all(&frame).await;
                             }
-                            break 'pump format!("server ended the session: {}", reason.description());
+                            break 'pump PumpExit::Ended(format!("server ended the session: {}", reason.description()));
                         }
                         _ => {}
                     }
@@ -1568,7 +1574,7 @@ async fn active_stage_loop<S>(
                     // Labelled: a bare `break` here would leave only this
                     // `for`, and the pump would carry on over a dead socket.
                     if let Err(e) = framed.write_all(&frame).await {
-                        break 'pump format!("connection lost (write response: {e})");
+                        break 'pump PumpExit::WriteFailed(format!("connection lost (write response: {e})"));
                     }
                 }
                 // Drive the deactivation-reactivation sequence to
@@ -1603,7 +1609,7 @@ async fn active_stage_loop<S>(
                                 "rdp: reactivated at {width}x{height} after DisplayControl resize"
                             );
                         }
-                        Err(e) => break 'pump format!("display reactivation failed: {e}"),
+                        Err(e) => break 'pump PumpExit::Ended(format!("display reactivation failed: {e}")),
                     }
                     continue;
                 }
@@ -1615,9 +1621,9 @@ async fn active_stage_loop<S>(
                         Some(Ok(frame)) => {
                             pending_resize = None;
                             if let Err(e) = framed.write_all(&frame).await {
-                                break 'pump format!("connection lost (write resize: {e})");
+                                break 'pump PumpExit::WriteFailed(format!("connection lost (write resize: {e})"));
                             }
-                            log::debug!("rdp: sent deferred resize {cw}x{ch}");
+                            log::info!("rdp: sent deferred resize {cw}x{ch}");
                         }
                         Some(Err(e)) => {
                             pending_resize = None;
@@ -1641,6 +1647,19 @@ async fn active_stage_loop<S>(
             }
         }
     };
+    let close_reason = match exit {
+        PumpExit::Ended(reason) => reason,
+        // A write is often what notices first that the server hung up,
+        // and Windows usually says why just before it does (Set Error
+        // Info, MCS disconnect). Read what is left on the socket before
+        // settling for "broken pipe".
+        PumpExit::WriteFailed(write_error) => {
+            match trailing_disconnect_reason(&mut framed, &mut active_stage, &mut image).await {
+                Some(server) => format!("server ended the session: {server} (then {write_error})"),
+                None => write_error,
+            }
+        }
+    };
     log::info!("resource-connect/rdp: {label} closed — {close_reason}");
     stats.log_session_total(&label, session_start);
     // Replayed like the SSH worker's: the pump can end before a
@@ -1653,6 +1672,41 @@ async fn active_stage_loop<S>(
             events.emit(&closed_event, payload.clone()).await;
         }
     });
+}
+
+/// How the active-stage pump ended. A failed write is kept apart
+/// because the server's own reason may still be readable.
+enum PumpExit {
+    Ended(String),
+    WriteFailed(String),
+}
+
+/// How long to keep reading for a disconnect reason after a write
+/// failed. Long enough for PDUs already in flight, short enough that a
+/// silent drop still closes the pane promptly.
+const TRAILING_REASON_WINDOW: Duration = Duration::from_secs(1);
+
+/// Reads whatever the server sent before the connection broke and
+/// returns its disconnect reason, if one is there. Best effort: `None`
+/// on EOF, a read or decode error, or when the window runs out.
+async fn trailing_disconnect_reason<S>(
+    framed: &mut TokioFramed<S>,
+    active_stage: &mut ActiveStage,
+    image: &mut DecodedImage,
+) -> Option<String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
+{
+    let deadline = tokio::time::Instant::now() + TRAILING_REASON_WINDOW;
+    loop {
+        let (action, payload) = tokio::time::timeout_at(deadline, framed.read_pdu()).await.ok()?.ok()?;
+        let outputs = active_stage.process(image, action, &payload).ok()?;
+        for out in outputs {
+            if let ActiveStageOutput::Terminate(reason) = out {
+                return Some(reason.description());
+            }
+        }
+    }
 }
 
 /// Operator-facing text for a failed server read. A clean EOF is the
