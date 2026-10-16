@@ -63,6 +63,13 @@ EXAMPLE ENTRY:
 - **Keep a role's AD smart-card settings when saving it from the desktop app** (T143, S38)
   -- saving a PKI role from the Roles tab sent only part of the role, and the engine replaces a role wholesale on write, so any role saved from the GUI silently lost UPN SANs (`allow_upn_sans`, `allowed_upn_domains`), extra EKU OIDs (`ext_key_usage_oids`), the AD SID extension settings (`allow_ad_sid`, `ad_sid`), `signature_bits` and `not_before_duration` set through the API or CLI. A smart-card logon role edited in the GUI stopped producing certificates Windows accepts. Every stored role field now round-trips, and the role editor shows and edits the AD smart-card fields.
 
+### Security
+
+#### Policy authorization
+
+- **Apply a `groups`- or `scopes`-qualified `+` rule that ends in `*` to the paths the same rule matches without a qualifier** (T121, S65, S108)
+  -- a qualified segment-wildcard rule with a trailing glob, such as `path "secret/+/data/*" { groups = ["g1"] ... }`, compared the `*` as a literal path segment and matched no real path, while the same rule without `groups`/`scopes` is a prefix rule on its last segment and matches `secret/x/data/y`. Such rules now match exactly what their unqualified form matches, for every operation: on requests, LIST filtering, per-object filtering (`resources/search`), session-connect checks and capability probes. This changes access in both directions: a qualified grant of that shape now grants, with a LIST through it narrowed to its groups or scopes, and a qualified `deny` of that shape now applies and revokes every other grant for the targets in its groups or scopes, where before it was silently ignored. Before upgrading, review policies whose `groups`/`scopes` rules have a `+` segment and end in `*`: callers gain what those grants say and lose what those denies say. Rules without `+`, `+` rules without a trailing `*`, and unqualified rules are unchanged. In `bv-kernel`, `GroupGatedRule` and `ScopedRule` carry their path as `shape: RuleShape`.
+
 ## [0.44.41] - 2026-10-15
 
 ### Added

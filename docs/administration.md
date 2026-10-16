@@ -179,6 +179,12 @@ means legacy unscoped semantics.
 `groups` and `scopes` are additive per rule: when both are present
 the rule applies if the group filter *or* the scope filter passes.
 
+A qualified rule's path matches exactly what the same rule matches
+without the qualifier: exact, prefix (`*`), segment wildcard (`+`), and
+a `+` rule ending in `*` (`secret/+/data/*` is a prefix rule on its last
+segment). Until T121 a qualified `+` rule ending in `*` matched nothing,
+so neither its grant nor its `deny` applied.
+
 ### Policy metadata (opt-in feature flags)
 
 A top-level `metadata { key = "value" }` block on a policy carries

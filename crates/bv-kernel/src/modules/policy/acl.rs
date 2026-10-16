@@ -108,9 +108,8 @@ pub struct ACL {
 /// carries the asset-group filter.
 #[derive(Debug, Clone, Default)]
 pub struct GroupGatedRule {
-    pub path: String,
-    pub is_prefix: bool,
-    pub has_segment_wildcards: bool,
+    /// Built by [`RuleShape::of`], like every layered rule's.
+    pub shape: RuleShape,
     pub permissions: Permissions,
 }
 
@@ -120,10 +119,75 @@ pub struct GroupGatedRule {
 /// `permissions.scopes` carries the filter.
 #[derive(Debug, Clone, Default)]
 pub struct ScopedRule {
+    /// Built by [`RuleShape::of`], like every layered rule's.
+    pub shape: RuleShape,
+    pub permissions: Permissions,
+}
+
+/// The path shape a layered (`groups`- or `scopes`-qualified) rule is matched
+/// with: the path without its trailing glob, whether it had one (its last
+/// segment is then a string prefix), and whether it has `+` segments.
+///
+/// Build it with [`RuleShape::of`], which reads `Policy::init`'s two encodings
+/// of a trailing `*` exactly as the ungated index does, so one rule matches
+/// the same paths ungated, gated or scoped (finding F8, closed by T121).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuleShape {
     pub path: String,
     pub is_prefix: bool,
     pub has_segment_wildcards: bool,
-    pub permissions: Permissions,
+}
+
+impl RuleShape {
+    /// The shape `pr` is matched with. A rule without `+` arrives with its
+    /// glob already stripped and `is_prefix` set. A segment-wildcard rule
+    /// keeps its `*` in `path` with `is_prefix` false, as in Vault: the
+    /// ungated map is keyed by that string, so `a/+/b` and `a/+/b*` stay two
+    /// rules, and its lookup reads the glob back with `segment_wildcard_glob`.
+    pub fn of(pr: &PolicyPathRules) -> Self {
+        if !pr.has_segment_wildcards {
+            return RuleShape { path: pr.path.clone(), is_prefix: pr.is_prefix, has_segment_wildcards: false };
+        }
+        // Copying `path` / `is_prefix` verbatim compared the `*` as a literal
+        // segment, so a qualified `secret/+/data/*` matched no real path and
+        // neither its grant nor its `deny` ever applied (F8).
+        let (path, is_prefix) = segment_wildcard_glob(&pr.path);
+        RuleShape { path: path.to_string(), is_prefix, has_segment_wildcards: true }
+    }
+
+    /// Does `path` match this shape? Exact for a literal rule, string prefix
+    /// for a globbed one (as the prefix trie's ancestor lookup), and
+    /// `segment_wildcard_matches` — `bv_policy_core::segments_match`, the
+    /// ungated matcher's own decision — for `+` rules.
+    pub fn matches(&self, path: &str) -> bool {
+        if self.has_segment_wildcards {
+            segment_wildcard_matches(&self.path, self.is_prefix, path)
+        } else if self.is_prefix {
+            path.starts_with(&self.path)
+        } else {
+            self.path == path
+        }
+    }
+
+    /// The rule as written: the path with its trailing `*` when it had one.
+    pub fn written(&self) -> String {
+        if self.is_prefix {
+            format!("{}*", self.path)
+        } else {
+            self.path.clone()
+        }
+    }
+}
+
+/// A segment-wildcard rule's stored path (its `ACL::segment_wildcard_paths`
+/// key, i.e. `PolicyPathRules::path`) split into the path it matches and
+/// whether its last segment is a prefix (it ended in `*`). The one reading of
+/// that glob: the ungated lookup, `locate_match` and [`RuleShape::of`].
+pub(super) fn segment_wildcard_glob(stored: &str) -> (&str, bool) {
+    match stored.strip_suffix('*') {
+        Some(path) => (path, true),
+        None => (stored, false),
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -218,12 +282,7 @@ impl ACL {
                 if !pr.groups.is_empty() {
                     let mut cloned_perms = pr.permissions.clone();
                     cloned_perms.add_granting_policy_to_map(policy, pr.permissions.capabilities_bitmap)?;
-                    acl.grouped_rules.push(GroupGatedRule {
-                        path: pr.path.clone(),
-                        is_prefix: pr.is_prefix,
-                        has_segment_wildcards: pr.has_segment_wildcards,
-                        permissions: cloned_perms,
-                    });
+                    acl.grouped_rules.push(GroupGatedRule { shape: RuleShape::of(pr), permissions: cloned_perms });
                     continue;
                 }
 
@@ -234,12 +293,7 @@ impl ACL {
                 if !pr.scopes.is_empty() {
                     let mut cloned_perms = pr.permissions.clone();
                     cloned_perms.add_granting_policy_to_map(policy, pr.permissions.capabilities_bitmap)?;
-                    acl.scoped_rules.push(ScopedRule {
-                        path: pr.path.clone(),
-                        is_prefix: pr.is_prefix,
-                        has_segment_wildcards: pr.has_segment_wildcards,
-                        permissions: cloned_perms,
-                    });
+                    acl.scoped_rules.push(ScopedRule { shape: RuleShape::of(pr), permissions: cloned_perms });
                     continue;
                 }
 
@@ -324,7 +378,8 @@ impl ACL {
     /// (`cargo kani -p bv-policy-core`, theorems T1–T8 in
     /// `docs/verification.md`). This ACL only answers its questions: which
     /// exact, prefix and segment-wildcard rule the tries find for the path,
-    /// which group-gated and scope-filtered rules match, whether their gates
+    /// which group-gated and scope-filtered rules match (by the shape the
+    /// same rule has ungated, [`RuleShape`]), whether their gates
     /// pass, and how the request's parameters compare with each rule's lists
     /// (see `core_bridge`). In order, the core:
     ///
@@ -426,11 +481,8 @@ impl ACL {
                 ..Default::default()
             };
 
-            let mut curr_wc_path = full_wc_path.as_str();
-            if curr_wc_path.ends_with('*') {
-                pd.is_prefix = true;
-                curr_wc_path = &curr_wc_path[..curr_wc_path.len() - 1];
-            }
+            let (curr_wc_path, is_prefix) = segment_wildcard_glob(full_wc_path);
+            pd.is_prefix = is_prefix;
             pd.wc_path = curr_wc_path.to_string();
 
             let split_curr_wc_path: Vec<&str> = curr_wc_path.split('/').collect();
@@ -560,10 +612,7 @@ impl ACL {
         self.scoped_rules
             .iter()
             .filter(|rule| scoped_rule_matches(rule, &path) && !scope_passes(rule, req))
-            .map(|rule| {
-                let shape = if rule.is_prefix { "*" } else { "" };
-                format!("{}{} (scopes = [{}])", rule.path, shape, rule.permissions.scopes.join(", "))
-            })
+            .map(|rule| format!("{} (scopes = [{}])", rule.shape.written(), rule.permissions.scopes.join(", ")))
             .collect()
     }
 
@@ -780,8 +829,7 @@ impl ACL {
             if key.is_empty() {
                 continue;
             }
-            let is_prefix = key.ends_with('*');
-            let rule_path = if is_prefix { &key[..key.len() - 1] } else { key.as_str() };
+            let (rule_path, is_prefix) = segment_wildcard_glob(key);
             if segment_wildcard_matches(rule_path, is_prefix, path) {
                 let literal_len = rule_path.chars().filter(|c| *c != '+').count();
                 if seg_best.as_ref().map(|(_, l, _)| literal_len > *l).unwrap_or(true) {
@@ -900,23 +948,13 @@ impl MatchKind {
     }
 }
 
-/// Does `path` match this group-gated rule's path shape?
-/// Mirrors the match logic used for the ungated tries: exact for literal
-/// rules, prefix for globbed rules, segment-aware for `+` wildcards.
-///
-/// A segment-wildcard rule keeps its trailing `*` in `path` with
-/// `is_prefix = false` (`Policy::init` only strips the glob from rules
-/// without `+`), so here that `*` is compared as a literal segment and such a
-/// gated rule matches no real path — fail-closed, recorded as finding F8 in
-/// `roadmaps/formal-verification-and-type-driven-security.md`. Unchanged.
+/// Does `path` match this group-gated rule's path shape? The same shape the
+/// ungated index reads for the same rule ([`RuleShape`]): a qualified
+/// `secret/+/data/*` is a prefix rule on its last segment, as it is ungated
+/// (finding F8, closed by T121; see
+/// `roadmaps/formal-verification-and-type-driven-security.md`).
 pub(super) fn grouped_rule_matches(rule: &GroupGatedRule, path: &str) -> bool {
-    if rule.has_segment_wildcards {
-        segment_wildcard_matches(&rule.path, rule.is_prefix, path)
-    } else if rule.is_prefix {
-        path.starts_with(&rule.path)
-    } else {
-        rule.path == path
-    }
+    rule.shape.matches(path)
 }
 
 /// Segment-wildcard matcher for group-gated and share-scoped rules: `+`
@@ -934,16 +972,10 @@ pub(super) fn segment_wildcard_matches(rule_path: &str, is_prefix: bool, req_pat
     bv_policy_core::segments_match(&rule_parts, is_prefix, &req_parts).is_some()
 }
 
-/// Does `path` match this scoped rule's path shape? Same matching
-/// logic as `grouped_rule_matches`, F8 included.
+/// Does `path` match this scoped rule's path shape? The same
+/// [`RuleShape::matches`] as `grouped_rule_matches`.
 pub(super) fn scoped_rule_matches(rule: &ScopedRule, path: &str) -> bool {
-    if rule.has_segment_wildcards {
-        segment_wildcard_matches(&rule.path, rule.is_prefix, path)
-    } else if rule.is_prefix {
-        path.starts_with(&rule.path)
-    } else {
-        rule.path == path
-    }
+    rule.shape.matches(path)
 }
 
 /// Does the caller pass any of the rule's listed scopes? Decided by

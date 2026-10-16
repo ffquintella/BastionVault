@@ -17,13 +17,17 @@
 //! governing rule's own check reported LIST, not when any ungated rule the
 //! tries find for the path lists; `matches_ungated_list` is gone, marked
 //! `T120 (F7)` below.
+//! F8 (T121) — a gated or scoped segment-wildcard rule ending in `*` is a
+//! prefix rule over the path without it, as the ungated lookup below reads
+//! the same rule, instead of comparing `*` as a literal segment (`layer_shape`,
+//! marked `T121 (F8)` below).
 
 use std::{sync::Arc, time::Duration};
 
 use radix_trie::{Trie, TrieCommon};
 
 use super::super::{
-    acl::{ACLResults, GroupGatedRule, ScopedRule, ACL},
+    acl::{ACLResults, GroupGatedRule, RuleShape, ScopedRule, ACL},
     policy::{to_granting_capabilities, Capability},
     Permissions, Policy, PolicyPathRules, PolicyType,
 };
@@ -92,24 +96,14 @@ pub fn new_acl(policies: &[Arc<Policy>]) -> Result<ACL, RvError> {
             if !pr.groups.is_empty() {
                 let mut cloned_perms = pr.permissions.clone();
                 cloned_perms.add_granting_policy_to_map(policy, pr.permissions.capabilities_bitmap)?;
-                acl.grouped_rules.push(GroupGatedRule {
-                    path: pr.path.clone(),
-                    is_prefix: pr.is_prefix,
-                    has_segment_wildcards: pr.has_segment_wildcards,
-                    permissions: cloned_perms,
-                });
+                acl.grouped_rules.push(GroupGatedRule { shape: layer_shape(pr), permissions: cloned_perms });
                 continue;
             }
 
             if !pr.scopes.is_empty() {
                 let mut cloned_perms = pr.permissions.clone();
                 cloned_perms.add_granting_policy_to_map(policy, pr.permissions.capabilities_bitmap)?;
-                acl.scoped_rules.push(ScopedRule {
-                    path: pr.path.clone(),
-                    is_prefix: pr.is_prefix,
-                    has_segment_wildcards: pr.has_segment_wildcards,
-                    permissions: cloned_perms,
-                });
+                acl.scoped_rules.push(ScopedRule { shape: layer_shape(pr), permissions: cloned_perms });
                 continue;
             }
 
@@ -131,6 +125,19 @@ pub fn new_acl(policies: &[Arc<Policy>]) -> Result<ACL, RvError> {
     }
 
     Ok(acl)
+}
+
+/// T121 (F8): a segment-wildcard rule keeps its trailing `*` in `pr.path`
+/// (`Policy::init` strips it only from rules without `+`). Read it as
+/// `get_none_exact_paths_permissions` reads the same rule's map key: a prefix
+/// rule over the path without the `*`.
+fn layer_shape(pr: &PolicyPathRules) -> RuleShape {
+    if pr.has_segment_wildcards {
+        let is_prefix = pr.path.ends_with('*');
+        let path = if is_prefix { &pr.path[..pr.path.len() - 1] } else { pr.path.as_str() };
+        return RuleShape { path: path.to_string(), is_prefix, has_segment_wildcards: true };
+    }
+    RuleShape { path: pr.path.clone(), is_prefix: pr.is_prefix, has_segment_wildcards: false }
 }
 
 fn get_permissions(acl: &ACL, pr: &PolicyPathRules) -> Result<Option<Permissions>, RvError> {
@@ -463,19 +470,20 @@ pub fn scope_gated_non_contributors(acl: &ACL, req: &Request) -> Vec<String> {
         .iter()
         .filter(|rule| scoped_rule_matches(rule, &path) && !scope_passes(rule, req))
         .map(|rule| {
-            let shape = if rule.is_prefix { "*" } else { "" };
-            format!("{}{} (scopes = [{}])", rule.path, shape, rule.permissions.scopes.join(", "))
+            let shape = if rule.shape.is_prefix { "*" } else { "" };
+            format!("{}{} (scopes = [{}])", rule.shape.path, shape, rule.permissions.scopes.join(", "))
         })
         .collect()
 }
 
 fn grouped_rule_matches(rule: &GroupGatedRule, path: &str) -> bool {
-    if rule.has_segment_wildcards {
-        segment_wildcard_matches(&rule.path, rule.is_prefix, path)
-    } else if rule.is_prefix {
-        path.starts_with(&rule.path)
+    let shape = &rule.shape;
+    if shape.has_segment_wildcards {
+        segment_wildcard_matches(&shape.path, shape.is_prefix, path)
+    } else if shape.is_prefix {
+        path.starts_with(&shape.path)
     } else {
-        rule.path == path
+        shape.path == path
     }
 }
 
@@ -509,12 +517,13 @@ pub fn segment_wildcard_matches(rule_path: &str, is_prefix: bool, req_path: &str
 }
 
 fn scoped_rule_matches(rule: &ScopedRule, path: &str) -> bool {
-    if rule.has_segment_wildcards {
-        segment_wildcard_matches(&rule.path, rule.is_prefix, path)
-    } else if rule.is_prefix {
-        path.starts_with(&rule.path)
+    let shape = &rule.shape;
+    if shape.has_segment_wildcards {
+        segment_wildcard_matches(&shape.path, shape.is_prefix, path)
+    } else if shape.is_prefix {
+        path.starts_with(&shape.path)
     } else {
-        rule.path == path
+        shape.path == path
     }
 }
 

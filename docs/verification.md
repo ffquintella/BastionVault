@@ -51,13 +51,8 @@ input). When the fix lands it turns `UNSATISFIABLE` — failing the gate on
 purpose — and becomes an `assert` (the text is in the harness).
 
 No defect witness is open in the core today: F6 and F7 were witnesses and are
-now theorems (below).
-
-F8 (outside the core): an evaluator finding in the host's matcher, pinned by
-`f8_current_behaviour_*`. Details withheld until the fix ships.
-
-It is preserved unchanged by Phase 3 (no behaviour change) and is recorded
-in the roadmap's Findings.
+now theorems (below). F8 was outside the core, in the host's matcher, and was
+pinned by an HCL test instead; it is fixed too (below).
 
 **F6 — fixed (T119).** It was deny supremacy refuted on
 enforcement. Its witness's covers turned `UNSATISFIABLE` with the fix and the
@@ -80,6 +75,30 @@ replaced by its strong form, `t5b_an_unfiltered_list_needs_the_governing_rule`.
 `f7_current_behaviour_*` became `f7_a_non_governing_list_rule_keeps_the_filter`
 in `policy::differential`, which asserts the filter on HCL in both modes.
 
+**F8 — fixed (T121).** A `groups`- or `scopes`-qualified segment-wildcard
+rule ending in `*` (`secret/+/data/*`) matched no real path: `Policy::init`
+keeps such a rule's `*` in its path, the ungated index reads it back as a
+prefix glob, and the layers compared it as a literal segment. Its grant never
+applied and its `deny` was ignored. Layered rules now take their shape from
+`RuleShape::of` in `acl.rs`, which reads the glob through the same function
+as the ungated lookup (`segment_wildcard_glob`), and both layers match
+through `RuleShape::matches`. `f8_current_behaviour_*` became five
+`f8_*` tests in `policy::differential` asserting the fixed behaviour on HCL in
+both modes, and `src/engine_tests/kernel_policy_segment_glob.rs` asserts it
+through `pre_route`, the LIST filter, `readable_targets` and
+`may_connect_target`.
+
+There is no Kani harness for F8, on purpose. The core never sees a rule's
+path: it asks the host whether layer rule *i* matches (`Layer::matches`) and
+quantifies over every answer, and `segments_match` takes `is_prefix` already
+decided. The defect was in the host computing those inputs from strings
+(`strip_suffix('*')` over `PolicyPathRules`), which is the unproved "real
+string matching in the index" below. A harness over the core could only
+restate `segments_match` (T4 already proves it) or prove a model of the host;
+neither says production's layers and index agree. That statement is made on
+real strings by the differential property
+`a_qualified_rule_matches_what_the_same_rule_matches_ungated` (below).
+
 ## Bounds
 
 | Bound | Value | Why it is enough / what it means |
@@ -99,9 +118,10 @@ in `policy::differential`, which asserts the filter on HCL in both modes.
 - **Real string matching in the index.** Which exact / prefix rule the radix
   tries return, string normalisation (leading `/`, trailing `/` trimming),
   `str::starts_with` / `==` on real segments, the specificity *inputs*
-  (`find('+')`, byte lengths), case-insensitive group names, case-folded
-  parameter keys and glob-matched JSON values. Mitigated, not proved, by the
-  differential suite below.
+  (`find('+')`, byte lengths), the reading of a rule's trailing `*` into a
+  prefix shape (F8), case-insensitive group names, case-folded parameter keys
+  and glob-matched JSON values. Mitigated, not proved, by the differential
+  suite below.
 - **The asynchronous inputs.** `asset_groups`, `asset_owner` and
   `target_shared_caps` are resolved in `PolicyStore::post_auth` against
   storage. The core decides correctly *given* them.
@@ -128,6 +148,13 @@ entity, owner, shares, override), in enforcement and probe mode. They must
 agree on the verdict, capabilities, `root_privs`, granting-policy names, LIST
 filter entries and their order, `capabilities()`, `has_mount_access`, the
 scope diagnostics and the built index.
+
+`a_qualified_rule_matches_what_the_same_rule_matches_ungated` (T121) checks
+the host against itself rather than against `legacy`: for every generated
+rule path, the rule grants a read of a path ungated exactly when it grants
+it `groups`-gated and `scopes`-filtered with the qualifier passing. It uses
+reads because for LIST the ungated index also consults the trimmed exact
+rule, a precedence step the layers do not take.
 
 ```bash
 cargo nextest run -p bv-kernel --lib differential                         # 1024 cases, fixed seed
