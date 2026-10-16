@@ -1345,6 +1345,12 @@ async fn active_stage_loop<S>(
     // frame rate.
     let mut stats_since = session_start;
     let mut stats_at = session_start + STATS_INTERVAL;
+    // The canvas asks for the window's size as soon as it mounts, which
+    // is before the server has opened the DisplayControl channel. Keep
+    // the latest such request (already clamped) and send it once the
+    // channel is up, so the session takes the window's size from the
+    // start instead of on the operator's first manual resize.
+    let mut pending_resize: Option<(u32, u32)> = None;
 
     loop {
         // Copied out so the `select!` branches below can reassign
@@ -1380,23 +1386,28 @@ async fn active_stage_loop<S>(
                         );
                         match active_stage.encode_resize(cw, ch, None, None) {
                             Some(Ok(frame)) => {
+                                pending_resize = None;
                                 if let Err(e) = framed.write_all(&frame).await {
                                     log::warn!("rdp: write resize pdu: {e:?}");
                                     break;
                                 }
                             }
                             Some(Err(e)) => {
+                                pending_resize = None;
                                 log::warn!("rdp: encode_resize: {e:?}");
                             }
                             None => {
-                                // Server didn't advertise DisplayControl
-                                // support, or the DVC isn't open yet.
-                                // Drop silently — the canvas stays at
-                                // the negotiated resolution and the
-                                // frontend continues to letterbox it.
+                                // The DVC isn't open yet, or the server
+                                // never advertises DisplayControl. Keep
+                                // the request: it is sent after the next
+                                // PDU that opens the channel. If the
+                                // channel never opens the canvas stays
+                                // at the negotiated resolution and the
+                                // frontend letterboxes it.
                                 log::debug!(
-                                    "rdp: resize {rw}x{rh} ignored (DisplayControl unavailable)"
+                                    "rdp: resize {rw}x{rh} deferred (DisplayControl not open yet)"
                                 );
+                                pending_resize = Some((cw, ch));
                             }
                         }
                     }
@@ -1605,6 +1616,26 @@ async fn active_stage_loop<S>(
                         }
                     }
                     continue;
+                }
+                // A resize asked for before DisplayControl opened. Each
+                // server PDU may be the one that opens it; once
+                // `encode_resize` returns a frame, send it and stop.
+                if let Some((cw, ch)) = pending_resize {
+                    match active_stage.encode_resize(cw, ch, None, None) {
+                        Some(Ok(frame)) => {
+                            pending_resize = None;
+                            if let Err(e) = framed.write_all(&frame).await {
+                                log::warn!("rdp: write deferred resize pdu: {e:?}");
+                                break;
+                            }
+                            log::debug!("rdp: sent deferred resize {cw}x{ch}");
+                        }
+                        Some(Err(e)) => {
+                            pending_resize = None;
+                            log::warn!("rdp: encode deferred resize: {e:?}");
+                        }
+                        None => {}
+                    }
                 }
                 // Drain whatever the EGFX handler produced while
                 // `process` was routing this PDU through the DVC.
