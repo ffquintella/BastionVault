@@ -56,6 +56,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+#### RDP sessions — desktop app
+
+- Open RDP sessions at the size of their window instead of 1024×600 until the first manual resize (T36, S46)
+  -- the canvas asks for its window's size as soon as it mounts, which is before the server has opened the DisplayControl channel, and the host dropped that request. The session pump now keeps the latest early request and sends it as soon as the channel opens, so the remote desktop takes the window's resolution right after login. A server that never offers DisplayControl still stays at the negotiated size, letterboxed as before.
+
 ## [0.44.43] - 2026-10-16
 
 ### Fixed
