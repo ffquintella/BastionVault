@@ -105,16 +105,7 @@ mod test {
         // list policy with table format — all seeded baselines ship.
         let ret = test_http_server.cli(&["policy", "list"], &["--format=table"]);
         assert!(ret.is_ok());
-        #[cfg(windows)]
-        assert_eq!(
-            ret.unwrap(),
-            "administrator    \r\ndefault    \r\nldap-admin    \r\nldap-user    \r\nmy-policy    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nshared-access    \r\nstandard-user    \r\nstandard-user-readonly    \r\ntotp-admin    \r\ntotp-user    \r\ntransit-admin    \r\ntransit-user    \r\nroot    \r\n",
-        );
-        #[cfg(not(windows))]
-        assert_eq!(
-            ret.unwrap(),
-            "administrator    \ndefault    \nldap-admin    \nldap-user    \nmy-policy    \npki-admin    \npki-user    \nsecret-author    \nshared-access    \nstandard-user    \nstandard-user-readonly    \ntotp-admin    \ntotp-user    \ntransit-admin    \ntransit-user    \nroot    \n",
-        );
+        assert_eq!(ret.unwrap(), crate::test_utils::seeded_policy_list_output(&["my-policy"]));
 
         // read my-policy with table format
         let ret = test_http_server.cli(&["policy", "read"], &["my-policy", "--format=table"]);
@@ -129,16 +120,7 @@ mod test {
         // list policy with table format again
         let ret = test_http_server.cli(&["policy", "list"], &["--format=table"]);
         assert!(ret.is_ok());
-        #[cfg(windows)]
-        assert_eq!(
-            ret.unwrap(),
-            "administrator    \r\ndefault    \r\nldap-admin    \r\nldap-user    \r\nmy-policy    \r\nmy-policy1    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nshared-access    \r\nstandard-user    \r\nstandard-user-readonly    \r\ntotp-admin    \r\ntotp-user    \r\ntransit-admin    \r\ntransit-user    \r\nroot    \r\n",
-        );
-        #[cfg(not(windows))]
-        assert_eq!(
-            ret.unwrap(),
-            "administrator    \ndefault    \nldap-admin    \nldap-user    \nmy-policy    \nmy-policy1    \npki-admin    \npki-user    \nsecret-author    \nshared-access    \nstandard-user    \nstandard-user-readonly    \ntotp-admin    \ntotp-user    \ntransit-admin    \ntransit-user    \nroot    \n",
-        );
+        assert_eq!(ret.unwrap(), crate::test_utils::seeded_policy_list_output(&["my-policy", "my-policy1"]));
 
         // read my-policy1 with table format
         let ret = test_http_server.cli(&["policy", "read"], &["my-policy1", "--format=table"]);

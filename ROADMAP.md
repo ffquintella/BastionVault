@@ -165,6 +165,8 @@ Next-up list recorded before the migration, in its order:
 - [x] T134 Bound `sys/audit/events` to the last 24 hours when no `from` is given (S110)
 - [x] T135 Upgrade the embedded hiqlite to 0.15.3 and bound hiqlite list/scan responses (S16)
   - note: production incident follow-up — a follower's client-API WebSocket to the leader died whenever one consistent query returned >= 64 MiB (fastwebsockets `FrameTooLarge`), failing every in-flight request with 503. Fork `ffquintella/hiqlite` `main-local` now carries upstream 0.15.3 plus error-level logging of every WebSocket reader exit and a 0.15.x restart fix; `list`/`scan` page by key range (8 MiB / 10k rows per page). Requires a full cluster stop to upgrade (see CHANGELOG 0.44.35).
+- [x] T146 Assign a module's access as full, read, connect or shared through seeded per-module policies (S113, S33)
+  - note: [Module Policies](features/module-policies.md) — 25 policies seeded on unseal for secrets, resource, files, ssh, pki, ad (openldap), totp and transit, each templated on `{{request.namespace}}` so one root policy grants the module in the namespace a request addresses. `-shared` only for modules with a share target kind. Older baselines (`pki-user`, `standard-user`, …) are kept. GUI nav gates name the new policies. Unit-tested on the ACL (`module_policies.rs`); not exercised end-to-end against live mounts.
 
 ## [M5] Resources
 > outcome: Done when operators can inventory resources and files, connect to them in-app over SSH/RDP and web without seeing credentials, query and change data on database resources under SQL grants that BastionVault enforces, and work in a tabbed session workspace.
@@ -638,3 +640,4 @@ Next-up list recorded before the migration, in its order:
 | S110 | Feature: Audit Retention and Precomputed Dashboard Statistics | features/audit-retention-and-dashboard-stats.md |
 | S111 | Feature: MCP Brokered Sessions — vault-brokered SSH, web and RDP access to resources for MCP clients | features/mcp-brokered-sessions.md |
 | S112 | Feature: SFTP Connect — dual-pane file transfer to server resources | features/sftp-connect.md |
+| S113 | Feature: Module Policies — per-module full / read / connect / shared baselines | features/module-policies.md |

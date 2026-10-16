@@ -58,6 +58,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Module policies (features/module-policies.md)
+
+- Assign a module's access by name with seeded `<module>-full`, `-read`, `-connect` and `-shared` policies (T146, S113)
+  -- every vault now seeds, on unseal, 25 policies for `secret/` (`secrets-*`), `resources/` + asset groups (`resource-*`), `files/` (`files-*`), `ssh/`, `pki/`, `openldap/` (`ad-*`), `totp/` and `transit/`. `-full` grants every operation on the mount; `-read` lists and reads, never writes, and never returns key or credential material (PKI private keys, AD passwords, resource credentials, TOTP codes); `-connect` uses the module without reading what is behind it (open a resource session without seeing its credential, sign an SSH certificate, issue a certificate against a role, check out an AD account, fetch a TOTP code, run a Transit operation); `-shared` grants only what was shared with the user or one of their identity groups, and exists for secrets, resource and files. Each policy applies in the namespace the request addresses, so assigning `ssh-full` at root gives full SSH in whichever namespace the user is working in and in no other at the same time; the user still needs to be allowed into the namespace. Holding several policies of one module never removes access any of them grants. Existing `pki-user`, `pki-admin`, `ldap-*`, `totp-*`, `transit-*`, `standard-user`, `secret-author` and `shared-access` are unchanged, and a policy an operator already created under one of the new names is kept. The desktop app shows the PKI, SSH, TOTP, OpenLDAP and Cert Lifecycle pages to holders of the matching `-full`, `-read` or `-connect` policy.
+
 #### SFTP Connect — through a Rustion bastion (features/sftp-connect.md)
 
 - Transfer files through a Rustion bastion when the resource's transport policy routes it there (T141, S112)

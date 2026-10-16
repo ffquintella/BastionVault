@@ -20,6 +20,8 @@ pub mod policy;
 pub use policy::{Permissions, Policy, PolicyPathRules, PolicyType};
 
 pub mod policy_store;
+// `<module>-full|read|connect|shared` baselines (features/module-policies.md).
+pub(crate) mod module_policies;
 pub mod kernel_service;
 pub use policy_store::{PolicyHistoryEntry, PolicyStore};
 
@@ -890,6 +892,33 @@ mod mod_policy_tests {
         },
     };
 
+    /// Every policy a fresh vault seeds — the older baselines, the per-module
+    /// `<module>-full|read|connect|shared` set, and `extra` — sorted as
+    /// `sys/policy` lists them, `root` last.
+    fn seeded_policy_names(extra: Option<&str>) -> serde_json::Value {
+        let mut names: Vec<&str> = vec![
+            "administrator",
+            "default",
+            "ldap-admin",
+            "ldap-user",
+            "pki-admin",
+            "pki-user",
+            "secret-author",
+            "shared-access",
+            "standard-user",
+            "standard-user-readonly",
+            "totp-admin",
+            "totp-user",
+            "transit-admin",
+            "transit-user",
+        ];
+        names.extend(module_policies::MODULE_POLICIES.iter().map(|(n, _)| *n));
+        names.extend(extra);
+        names.sort_unstable();
+        names.push("root");
+        json!(names)
+    }
+
     #[maybe_async::maybe_async]
     async fn test_write_policy(core: &dyn VaultCtx, token: &str, name: &str, policy: &str) {
         let data = json!({
@@ -998,31 +1027,8 @@ mod mod_policy_tests {
         let policies = policies.unwrap();
         assert!(policies.data.is_some());
         let policies = policies.data.unwrap();
-        // Seeded policies — `standard-user`, `standard-user-readonly`,
-        // `secret-author`, and the per-engine `*-admin` / `*-user`
-        // pairs all ship in the default install (see
-        // `policy_store.rs`) alongside `default` and `root`. This
-        // list grows whenever a new secret-engine ships its own
-        // bundled policies, so update it in lock-step with the
-        // additions to `policy_store.rs::seed_default_policies`.
-        let expected = json!([
-            "administrator",
-            "default",
-            "ldap-admin",
-            "ldap-user",
-            "pki-admin",
-            "pki-user",
-            policy1_name,
-            "secret-author",
-            "shared-access",
-            "standard-user",
-            "standard-user-readonly",
-            "totp-admin",
-            "totp-user",
-            "transit-admin",
-            "transit-user",
-            "root"
-        ]);
+        // Every seeded baseline plus the policy just written.
+        let expected = seeded_policy_names(Some(policy1_name));
         assert_eq!(policies["keys"], expected);
         assert_eq!(policies["policies"], expected);
 
@@ -1037,16 +1043,10 @@ mod mod_policy_tests {
         assert!(policy1.to_string().contains(policy1_name));
 
         // List again — same seeded set as before the policy1 round
-        // trip, just without policy1 itself. Update in lock-step with
-        // `policy_store.rs::seed_default_policies` whenever a new
-        // engine adds its bundled policies.
+        // trip, just without policy1 itself.
         let policies = test_list_api(&core, &root_token, "sys/policy", true).await;
         let policies = policies.unwrap().unwrap().data.unwrap();
-        let seeded_after_delete = json!([
-            "administrator", "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user",
-            "secret-author", "shared-access", "standard-user", "standard-user-readonly",
-            "totp-admin", "totp-user", "transit-admin", "transit-user", "root"
-        ]);
+        let seeded_after_delete = seeded_policy_names(None);
         assert_eq!(policies["keys"], seeded_after_delete);
         assert_eq!(policies["policies"], seeded_after_delete);
     }
@@ -1058,19 +1058,11 @@ mod mod_policy_tests {
         // set token
         test_http_server.token = test_http_server.root_token.clone();
 
-        // List policies — `standard-user`, `standard-user-readonly`,
-        // `secret-author`, and the per-engine `*-admin` / `*-user`
-        // pairs are all seeded alongside the built-ins. This list
-        // grows whenever a new secret-engine ships its own bundled
-        // policies, so update it in lock-step with
-        // `policy_store.rs::seed_default_policies`.
+        // List policies — every seeded baseline plus `root`
+        // (`seeded_policy_names`).
         let ret = test_http_server.read("sys/policy", None);
         assert!(ret.is_ok());
-        let seeded = json!([
-            "administrator", "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user",
-            "secret-author", "shared-access", "standard-user", "standard-user-readonly",
-            "totp-admin", "totp-user", "transit-admin", "transit-user", "root"
-        ]);
+        let seeded = seeded_policy_names(None);
         assert_eq!(
             ret.unwrap().1,
             json!({ "keys": seeded.clone(), "policies": seeded })
@@ -1103,11 +1095,7 @@ mod mod_policy_tests {
         // List policies again — seeded set plus policy1.
         let ret = test_http_server.read("sys/policy", None);
         assert!(ret.is_ok());
-        let with_policy1 = json!([
-            "administrator", "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user", "policy1",
-            "secret-author", "shared-access", "standard-user", "standard-user-readonly",
-            "totp-admin", "totp-user", "transit-admin", "transit-user", "root"
-        ]);
+        let with_policy1 = seeded_policy_names(Some("policy1"));
         assert_eq!(
             ret.unwrap().1,
             json!({ "keys": with_policy1.clone(), "policies": with_policy1 })
@@ -1120,11 +1108,7 @@ mod mod_policy_tests {
         // List policies again — back to the seeded baseline.
         let ret = test_http_server.read("sys/policy", None);
         assert!(ret.is_ok());
-        let baseline = json!([
-            "administrator", "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user",
-            "secret-author", "shared-access", "standard-user", "standard-user-readonly",
-            "totp-admin", "totp-user", "transit-admin", "transit-user", "root"
-        ]);
+        let baseline = seeded_policy_names(None);
         assert_eq!(
             ret.unwrap().1,
             json!({ "keys": baseline.clone(), "policies": baseline })

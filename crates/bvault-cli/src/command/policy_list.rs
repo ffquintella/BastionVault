@@ -62,16 +62,7 @@ mod test {
         // legacy `standard-user` all ship by default.
         let ret = test_http_server.cli(&["policy", "list"], &[]);
         assert!(ret.is_ok());
-        #[cfg(windows)]
-        assert_eq!(
-            ret.unwrap(),
-            "administrator    \r\ndefault    \r\nldap-admin    \r\nldap-user    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nshared-access    \r\nstandard-user    \r\nstandard-user-readonly    \r\ntotp-admin    \r\ntotp-user    \r\ntransit-admin    \r\ntransit-user    \r\nroot    \r\n",
-        );
-        #[cfg(not(windows))]
-        assert_eq!(
-            ret.unwrap(),
-            "administrator    \ndefault    \nldap-admin    \nldap-user    \npki-admin    \npki-user    \nsecret-author    \nshared-access    \nstandard-user    \nstandard-user-readonly    \ntotp-admin    \ntotp-user    \ntransit-admin    \ntransit-user    \nroot    \n",
-        );
+        assert_eq!(ret.unwrap(), crate::test_utils::seeded_policy_list_output(&[]));
 
         // write a test policy
         let test_policy = r#"path "secret/" {}"#;
@@ -82,45 +73,23 @@ mod test {
         // list policy again
         let ret = test_http_server.cli(&["policy", "list"], &[]);
         assert!(ret.is_ok());
-        #[cfg(windows)]
-        assert_eq!(
-            ret.unwrap(),
-            "administrator    \r\ndefault    \r\nldap-admin    \r\nldap-user    \r\nmy-policy    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nshared-access    \r\nstandard-user    \r\nstandard-user-readonly    \r\ntotp-admin    \r\ntotp-user    \r\ntransit-admin    \r\ntransit-user    \r\nroot    \r\n",
-        );
-        #[cfg(not(windows))]
-        assert_eq!(
-            ret.unwrap(),
-            "administrator    \ndefault    \nldap-admin    \nldap-user    \nmy-policy    \npki-admin    \npki-user    \nsecret-author    \nshared-access    \nstandard-user    \nstandard-user-readonly    \ntotp-admin    \ntotp-user    \ntransit-admin    \ntransit-user    \nroot    \n",
-        );
+        assert_eq!(ret.unwrap(), crate::test_utils::seeded_policy_list_output(&["my-policy"]));
 
         // list policy with table format
         let ret = test_http_server.cli(&["policy", "list"], &["--format=table"]);
         assert!(ret.is_ok());
-        #[cfg(windows)]
-        assert_eq!(
-            ret.unwrap(),
-            "administrator    \r\ndefault    \r\nldap-admin    \r\nldap-user    \r\nmy-policy    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nshared-access    \r\nstandard-user    \r\nstandard-user-readonly    \r\ntotp-admin    \r\ntotp-user    \r\ntransit-admin    \r\ntransit-user    \r\nroot    \r\n",
-        );
-        #[cfg(not(windows))]
-        assert_eq!(
-            ret.unwrap(),
-            "administrator    \ndefault    \nldap-admin    \nldap-user    \nmy-policy    \npki-admin    \npki-user    \nsecret-author    \nshared-access    \nstandard-user    \nstandard-user-readonly    \ntotp-admin    \ntotp-user    \ntransit-admin    \ntransit-user    \nroot    \n",
-        );
+        assert_eq!(ret.unwrap(), crate::test_utils::seeded_policy_list_output(&["my-policy"]));
 
         // list policy with json format
         let ret = test_http_server.cli(&["policy", "list"], &["--format=json"]);
         assert!(ret.is_ok());
-        assert_eq!(
-            ret.unwrap(),
-            "[\n  \"administrator\",\n  \"default\",\n  \"ldap-admin\",\n  \"ldap-user\",\n  \"my-policy\",\n  \"pki-admin\",\n  \"pki-user\",\n  \"secret-author\",\n  \"shared-access\",\n  \"standard-user\",\n  \"standard-user-readonly\",\n  \"totp-admin\",\n  \"totp-user\",\n  \"transit-admin\",\n  \"transit-user\",\n  \"root\"\n]\n",
-        );
+        let names = crate::test_utils::seeded_policy_names(&["my-policy"]);
+        assert_eq!(ret.unwrap(), format!("{}\n", serde_json::to_string_pretty(&names).unwrap()));
 
         // list policy with yaml format
         let ret = test_http_server.cli(&["policy", "list"], &["--format=yaml"]);
         assert!(ret.is_ok());
-        assert_eq!(
-            ret.unwrap(),
-            "- administrator\n- default\n- ldap-admin\n- ldap-user\n- my-policy\n- pki-admin\n- pki-user\n- secret-author\n- shared-access\n- standard-user\n- standard-user-readonly\n- totp-admin\n- totp-user\n- transit-admin\n- transit-user\n- root\n",
-        );
+        let names = crate::test_utils::seeded_policy_names(&["my-policy"]);
+        assert_eq!(ret.unwrap(), names.iter().map(|n| format!("- {n}\n")).collect::<String>());
     }
 }

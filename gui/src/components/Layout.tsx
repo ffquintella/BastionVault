@@ -16,7 +16,7 @@ import { NotificationBell } from "./NotificationBell";
 import { useNotificationsStore } from "../stores/notificationsStore";
 import { listen } from "@tauri-apps/api/event";
 import { useToast } from "./ui/Toast";
-import { SUPER_ADMIN, isAdminUser } from "../lib/access";
+import { SUPER_ADMIN, isAdminUser, modulePolicies } from "../lib/access";
 import { revalidateConnectAccess } from "../lib/connectValidation";
 import {
   WEB_SESSION_OUTCOME_EVENT,
@@ -82,19 +82,15 @@ const userNav: NavItem[] = [
   {
     path: "/pki",
     label: "PKI",
-    requires: [...SUPER_ADMIN, "pki-admin", "pki-user"],
+    requires: [...SUPER_ADMIN, "pki-admin", "pki-user", ...modulePolicies("pki")],
     requiresMountType: "pki",
   },
   // SSH engine. Same gating shape as PKI: hidden when no `ssh/` mount
-  // exists or when the token has no SSH-relevant policy. We don't ship
-  // dedicated `ssh-admin` / `ssh-user` baseline policies yet — until
-  // those land, the super-admin keywords gate the entry; operators who
-  // already delegate via custom policies can override `requires` per
-  // install.
+  // exists or when the token has no SSH-relevant policy.
   {
     path: "/ssh",
     label: "SSH",
-    requires: [...SUPER_ADMIN],
+    requires: [...SUPER_ADMIN, ...modulePolicies("ssh")],
     requiresMountType: "ssh",
   },
   // TOTP engine. Gated by the dedicated `totp-admin` / `totp-user`
@@ -106,7 +102,7 @@ const userNav: NavItem[] = [
   {
     path: "/totp",
     label: "TOTP",
-    requires: [...SUPER_ADMIN, "totp-admin", "totp-user"],
+    requires: [...SUPER_ADMIN, "totp-admin", "totp-user", ...modulePolicies("totp")],
     requiresMountType: "totp",
   },
   // OpenLDAP / AD password-rotation engine. Same gating shape as
@@ -115,7 +111,7 @@ const userNav: NavItem[] = [
   {
     path: "/ldap",
     label: "OpenLDAP / AD",
-    requires: [...SUPER_ADMIN, "ldap-admin", "ldap-user"],
+    requires: [...SUPER_ADMIN, "ldap-admin", "ldap-user", ...modulePolicies("ad")],
     requiresMountType: "openldap",
   },
   // Cert-Lifecycle module (Phases L5–L7). Surface alongside PKI when
@@ -124,7 +120,7 @@ const userNav: NavItem[] = [
   {
     path: "/cert-lifecycle",
     label: "Cert Lifecycle",
-    requires: [...SUPER_ADMIN, "pki-admin", "pki-user"],
+    requires: [...SUPER_ADMIN, "pki-admin", "pki-user", ...modulePolicies("pki")],
     requiresMountType: "cert-lifecycle",
   },
 ];

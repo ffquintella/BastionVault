@@ -2111,6 +2111,13 @@ impl PolicyStore {
         // OpenLDAP / AD delegated baselines.
         self.load_acl_policy(LDAP_USER_POLICY_NAME, LDAP_USER_POLICY).await?;
         self.load_acl_policy(LDAP_ADMIN_POLICY_NAME, LDAP_ADMIN_POLICY).await?;
+        // Per-module `-full` / `-read` / `-connect` / `-shared` baselines.
+        // Seeded once and then operator-owned, like the engine pairs above; an
+        // operator policy that already holds one of these names is kept.
+        // See `features/module-policies.md`.
+        for (name, hcl) in super::module_policies::MODULE_POLICIES {
+            self.load_acl_policy(name, hcl).await?;
+        }
         Ok(())
     }
 
