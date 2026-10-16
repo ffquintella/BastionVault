@@ -35,12 +35,26 @@ mod ha_tests {
     /// therefore fails with "Address already in use" even under
     /// `--test-threads=1`. Within a block: node N uses raft = base + N - 1 and
     /// api = base + 10 + N - 1.
-    const PORT_BLOCK_BASE: u16 = 38210;
+    ///
+    /// Every block must stay below the OS ephemeral port range (Linux default
+    /// 32768–60999, macOS 49152–65535). The lingering nodes of earlier tests
+    /// keep opening outbound Raft/API connections, and the kernel hands those
+    /// sockets ephemeral local ports; a listen port inside that range can be
+    /// taken by one of them and the next cluster fails with EADDRINUSE. This
+    /// is what broke `test_graceful_leave` on 127.0.0.1:38260 in CI.
+    const PORT_BLOCK_BASE: u16 = 29210;
     const PORT_BLOCK_SIZE: u16 = 20;
+    const EPHEMERAL_PORT_FLOOR: u16 = 32768;
     static NEXT_PORT_BLOCK: AtomicU16 = AtomicU16::new(0);
 
     fn alloc_port_base() -> u16 {
-        PORT_BLOCK_BASE + NEXT_PORT_BLOCK.fetch_add(1, Ordering::Relaxed) * PORT_BLOCK_SIZE
+        let base = PORT_BLOCK_BASE + NEXT_PORT_BLOCK.fetch_add(1, Ordering::Relaxed) * PORT_BLOCK_SIZE;
+        assert!(
+            base + PORT_BLOCK_SIZE <= EPHEMERAL_PORT_FLOOR,
+            "port block {base}..{} reaches the ephemeral range; lower PORT_BLOCK_BASE",
+            base + PORT_BLOCK_SIZE
+        );
+        base
     }
 
     fn raft_port(port_base: u16, node_id: u64) -> u16 {
