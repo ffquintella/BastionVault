@@ -1344,6 +1344,10 @@ async fn active_stage_loop<S>(
     let mut stats = PumpStats::default();
     let mut stats_baseline = PumpStats::default();
     let session_start = tokio::time::Instant::now();
+    // When the server last sent anything. Logged on close: a server
+    // that went quiet seconds before the drop reads differently from
+    // one cut off mid-stream.
+    let mut last_pdu_at = session_start;
     // Actual wall time covered by the pending window, not the
     // nominal interval: the timer branch can be late when the pump
     // is busy, and a late tick would otherwise inflate the reported
@@ -1511,6 +1515,7 @@ async fn active_stage_loop<S>(
                     Err(e) => break 'pump PumpExit::Ended(describe_read_error(&e)),
                 };
                 stats.pdus += 1;
+                last_pdu_at = tokio::time::Instant::now();
                 stats.wire_bytes_in += payload.len() as u64;
                 let outputs = match active_stage.process(&mut image, action, &payload) {
                     Ok(v) => v,
@@ -1567,7 +1572,9 @@ async fn active_stage_loop<S>(
                             }
                             break 'pump PumpExit::Ended(format!("server ended the session: {}", reason.description()));
                         }
-                        _ => {}
+                        // Logged by name only: an auto-reconnect cookie is a
+                        // credential and must never reach the log.
+                        other => log::info!("rdp: ignored server output {}", active_output_name(&other)),
                     }
                 }
                 for frame in response_frames {
@@ -1655,12 +1662,15 @@ async fn active_stage_loop<S>(
         // settling for "broken pipe".
         PumpExit::WriteFailed(write_error) => {
             match trailing_disconnect_reason(&mut framed, &mut active_stage, &mut image).await {
-                Some(server) => format!("server ended the session: {server} (then {write_error})"),
-                None => write_error,
+                Ok(server) => format!("server ended the session: {server} (then {write_error})"),
+                Err(socket) => format!("{write_error}; socket then: {socket}"),
             }
         }
     };
-    log::info!("resource-connect/rdp: {label} closed — {close_reason}");
+    log::info!(
+        "resource-connect/rdp: {label} closed — {close_reason} (last server PDU {:.1}s before)",
+        last_pdu_at.elapsed().as_secs_f64()
+    );
     stats.log_session_total(&label, session_start);
     // Replayed like the SSH worker's: the pump can end before a
     // freshly (re)attached pane has subscribed.
@@ -1687,25 +1697,58 @@ enum PumpExit {
 const TRAILING_REASON_WINDOW: Duration = Duration::from_secs(1);
 
 /// Reads whatever the server sent before the connection broke and
-/// returns its disconnect reason, if one is there. Best effort: `None`
-/// on EOF, a read or decode error, or when the window runs out.
+/// returns its disconnect reason. Without one, `Err` says how the
+/// socket ended: a clean EOF means the server's TCP stack closed it, a
+/// reset points at an abortive close — the server killing the
+/// connection, or a firewall/VPN in between.
 async fn trailing_disconnect_reason<S>(
     framed: &mut TokioFramed<S>,
     active_stage: &mut ActiveStage,
     image: &mut DecodedImage,
-) -> Option<String>
+) -> Result<String, String>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
 {
     let deadline = tokio::time::Instant::now() + TRAILING_REASON_WINDOW;
+    let mut drained = 0u32;
     loop {
-        let (action, payload) = tokio::time::timeout_at(deadline, framed.read_pdu()).await.ok()?.ok()?;
-        let outputs = active_stage.process(image, action, &payload).ok()?;
+        let (action, payload) = match tokio::time::timeout_at(deadline, framed.read_pdu()).await {
+            Err(_) => return Err(format!("nothing more within 1s after {drained} pdu(s)")),
+            Ok(Err(e)) => return Err(format!("{} after {drained} pdu(s)", describe_socket_end(&e))),
+            Ok(Ok(v)) => v,
+        };
+        drained += 1;
+        let outputs =
+            active_stage.process(image, action, &payload).map_err(|e| format!("undecodable pdu: {}", e.report()))?;
         for out in outputs {
             if let ActiveStageOutput::Terminate(reason) = out {
-                return Some(reason.description());
+                return Ok(reason.description());
             }
         }
+    }
+}
+
+/// Short form of how a read ended, for the trailing-reason report.
+fn describe_socket_end(e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::UnexpectedEof => "clean EOF (server closed TCP)".to_string(),
+        std::io::ErrorKind::ConnectionReset => "reset (RST)".to_string(),
+        _ => format!("read error ({e})"),
+    }
+}
+
+/// Variant name of a server output the pump does not act on. Never
+/// formats the payload: some variants carry credentials.
+fn active_output_name(out: &ActiveStageOutput) -> &'static str {
+    match out {
+        ActiveStageOutput::MonitorLayout(_) => "MonitorLayout",
+        ActiveStageOutput::WindowingOrders(_) => "WindowingOrders",
+        ActiveStageOutput::SaveSessionInfo { .. } => "SaveSessionInfo",
+        ActiveStageOutput::MultitransportRequest(_) => "MultitransportRequest",
+        ActiveStageOutput::AutoDetect(_) => "AutoDetect",
+        ActiveStageOutput::AutoReconnectCookie(_) => "AutoReconnectCookie",
+        ActiveStageOutput::AutoReconnectFailed => "AutoReconnectFailed",
+        _ => "other",
     }
 }
 
@@ -3375,7 +3418,15 @@ mod wheel_tests {
 
 #[cfg(test)]
 mod close_reason_tests {
-    use super::describe_read_error;
+    use super::{describe_read_error, describe_socket_end};
+
+    #[test]
+    fn a_socket_end_tells_a_clean_close_from_a_reset() {
+        use std::io::{Error, ErrorKind};
+        assert!(describe_socket_end(&Error::new(ErrorKind::UnexpectedEof, "x")).starts_with("clean EOF"));
+        assert_eq!(describe_socket_end(&Error::new(ErrorKind::ConnectionReset, "x")), "reset (RST)");
+        assert_eq!(describe_socket_end(&Error::other("boom")), "read error (boom)");
+    }
 
     #[test]
     fn a_read_failure_is_described_for_the_operator() {
