@@ -1278,6 +1278,13 @@ impl IdentityBackendInner {
             .cloned()
             .unwrap_or_default();
         let policies: Vec<String> = auth.policies.clone();
+        // The token's policies and the identity groups it belongs to both
+        // live in the namespace it is bound to (login resolves them there),
+        // not in root. Reading root here made a namespace principal's
+        // `group_shared_resources` policy and its groups invisible, so group
+        // shares silently dropped out of the feed.
+        let (binding_ns, _) =
+            crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata);
 
         // Lazy entity-id resolution — matches the alias-fallback in
         // handle_entity_self so callers with pre-existing tokens still
@@ -1312,7 +1319,7 @@ impl IdentityBackendInner {
             let pstore = pmodule.policy_store.load();
             for name in &policies {
                 if let Ok(Some(p)) = pstore
-                    .get_policy(name, crate::modules::policy::policy::PolicyType::Acl)
+                    .get_policy_ns(name, crate::modules::policy::policy::PolicyType::Acl, &binding_ns)
                     .await
                 {
                     if p.metadata
@@ -1354,10 +1361,10 @@ impl IdentityBackendInner {
                         if member.is_empty() {
                             continue;
                         }
-                        let names = gs.list_groups(kind).await?;
+                        let names = gs.list_groups_ns(kind, &binding_ns).await?;
                         let m_lc = member.trim().to_lowercase();
                         for g_name in names {
-                            let Some(g) = gs.get_group(kind, &g_name).await? else {
+                            let Some(g) = gs.get_group_ns(kind, &g_name, &binding_ns).await? else {
                                 continue;
                             };
                             let is_member =

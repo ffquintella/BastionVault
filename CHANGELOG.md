@@ -65,6 +65,11 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Sharing — identity groups inside a namespace
+
+- Show and honour shares granted to an identity group for users logged into a namespace (T27, S33, S18)
+  -- "Shared with me" listed only direct shares for a namespace-bound user, and opening a group-shared resource was refused, even when the user had a policy carrying `metadata { group_shared_resources = "true" }` and belonged to the grantee group. Both the feed and the ACL check looked the opt-in policy and the group membership up in the root namespace, while a namespace user's policies and groups live in that namespace. They are now resolved from the namespace the token is bound to — the same place login expands group policies and the ACL loads its policies from. Root-bound users are unaffected.
+
 #### RDP sessions — desktop app
 
 - Say why an RDP session ended instead of showing a bare "closed" (T36, S46)
