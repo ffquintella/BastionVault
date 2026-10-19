@@ -14,9 +14,8 @@
 //!     caller-supplied overrides win on key collision so a per-call
 //!     `force-command` can tighten beyond a default.
 //!   * `ttl` — `humantime` parsed; clamped to `max_ttl`.
-//!   * `key_id` — literal `{{role}}` substitution today; full
-//!     identity templating arrives in Phase 3 next to the PKI engine's
-//!     templater. The default `vault-{{role}}-…` keeps cert audit logs
+//!   * `key_id` — `{{role}}` and `{{token_display_name}}` are
+//!     substituted (see `render_key_id`). The default `vault-{{role}}-…` keeps cert audit logs
 //!     traceable to the issuing role.
 //!   * Serial number — fresh `u64` from the OS RNG per cert. Audit
 //!     logs surface this so revocation / forensics has a stable
@@ -325,11 +324,7 @@ impl SshBackendInner {
         let key_id = if !req_key_id.is_empty() {
             req_key_id
         } else {
-            // Phase 1 templating: literal `{{role}}` substitution.
-            // Phase 3 reaches into the identity templater the PKI
-            // engine already uses so `{{token_display_name}}` and the
-            // rest start working.
-            role.key_id_format.replace("{{role}}", &role_name)
+            render_key_id(&role.key_id_format, &role_name, req)
         };
 
         // ── Serial: random u64 from OS RNG ─────────────────────────
@@ -551,7 +546,7 @@ impl SshBackendInner {
         let key_id = if !req_key_id.is_empty() {
             req_key_id
         } else {
-            role.key_id_format.replace("{{role}}", &role_name_for_key_id)
+            render_key_id(&role.key_id_format, &role_name_for_key_id, req)
         };
 
         // ── Random serial + nonce ──────────────────────────────────
@@ -597,6 +592,25 @@ impl SshBackendInner {
     }
 }
 
+/// Expand a role's `key_id_format`. `{{role}}` is the role name and
+/// `{{token_display_name}}` is the calling token's display name, so the
+/// host's sshd log attributes a login to a principal. An empty display
+/// name renders as `unknown` rather than leaving a literal placeholder,
+/// and control characters are dropped because the key id lands in sshd's
+/// log. Other `{{...}}` text is left untouched.
+fn render_key_id(format: &str, role: &str, req: &Request) -> String {
+    let display_name = req
+        .auth
+        .as_ref()
+        .map(|a| a.display_name.as_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or("unknown");
+    let clean = |s: &str| s.chars().filter(|c| !c.is_control()).collect::<String>();
+    format
+        .replace("{{role}}", &clean(role))
+        .replace("{{token_display_name}}", &clean(display_name))
+}
+
 /// Pull a `Map`-typed field as `BTreeMap<String, String>`. Anything
 /// not a string-valued JSON object entry is dropped — we don't want
 /// to surface obscure type errors to operators when the OpenSSH cert
@@ -623,6 +637,36 @@ fn collect_string_map(req: &Request, key: &str) -> BTreeMap<String, String> {
 #[cfg(test)]
 mod tests {
     use ssh_key::PublicKey;
+
+    use super::render_key_id;
+    use bv_logical::{Auth, Request};
+
+    fn req_with_display_name(name: &str) -> Request {
+        let mut req = Request::default();
+        req.auth = Some(Auth { display_name: name.to_string(), ..Default::default() });
+        req
+    }
+
+    #[test]
+    fn key_id_renders_role_and_token_display_name() {
+        let req = req_with_display_name("userpass-felipe");
+        assert_eq!(
+            render_key_id("vault-{{role}}-{{token_display_name}}", "admins", &req),
+            "vault-admins-userpass-felipe"
+        );
+    }
+
+    #[test]
+    fn key_id_without_auth_or_name_renders_unknown_not_placeholder() {
+        assert_eq!(render_key_id("{{token_display_name}}", "r", &Request::default()), "unknown");
+        assert_eq!(render_key_id("{{token_display_name}}", "r", &req_with_display_name("")), "unknown");
+    }
+
+    #[test]
+    fn key_id_strips_control_characters() {
+        let req = req_with_display_name("a\nb\x1b[31m");
+        assert_eq!(render_key_id("{{token_display_name}}", "r", &req), "ab[31m");
+    }
 
     /// Regression: a NIST P-256 client key must parse so the CA can
     /// sign it. Before the `ecdsa` feature was enabled on `ssh-key`,

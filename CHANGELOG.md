@@ -68,6 +68,14 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Resource Connect SSH
+
+- Send an SSH keepalive every 30 seconds (three misses end the session) so a connection dropped silently by a firewall or NAT is detected, and report "ssh connection lost" instead of "disconnect before shell was ready" when the connection closes after the shell has already produced output
+
+#### SSH secret engine
+
+- Expand `{{token_display_name}}` in a role's `key_id_format` on `ssh/sign` and the PQC sign path, so signed certificates carry the caller's display name (or `unknown`) instead of the literal placeholder in the host's sshd log
+
 #### HSM seal
 
 - Refuse `recovery = "shamir-ceremony"` at `operator init` with the per-node HSM seal, which generated no recovery key and returned no shares while only logging a warning; an already-initialized cluster with that setting keeps starting, logs an error on every start, and reports `recovery_configured: false` (T454, S114)

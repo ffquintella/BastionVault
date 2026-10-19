@@ -315,6 +315,7 @@ pub async fn open_ssh_session(
         // for the new window instead of reaching one that is not
         // listening yet. See `session::output`.
         let mut output = super::output::SessionOutput::new(super::output::OUTPUT_BUFFER_CAPACITY, retain_output);
+        let mut received_output = !pre_shell_buf.is_empty();
         output.record(&pre_shell_buf, false);
         {
             use zeroize::Zeroize;
@@ -332,6 +333,7 @@ pub async fn open_ssh_session(
                     match msg {
                         // stdout and stderr surface on the same event.
                         Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                            received_output = true;
                             let delivered = match output.live_epoch() {
                                 Some(epoch) => {
                                     events
@@ -355,7 +357,12 @@ pub async fn open_ssh_session(
                             break;
                         }
                         None => {
-                            close_reason = "ssh transport closed (TCP EOF / disconnect before shell was ready)".into();
+                            close_reason = if received_output {
+                                "ssh connection lost (TCP closed or keepalive timed out with no EOF from the remote shell)"
+                            } else {
+                                "ssh transport closed before the shell produced any output"
+                            }
+                            .into();
                             break;
                         }
                         Some(ChannelMsg::ExitStatus { exit_status }) => {
@@ -482,7 +489,14 @@ pub(super) async fn connect_authenticated(
     host_key_fingerprint: &str,
     log_tag: &str,
 ) -> Result<client::Handle<HostKeyHandler>, String> {
-    let cfg = Arc::new(Config::default());
+    // Without keepalives a silent drop on the path (firewall/NAT idle
+    // timeout) is only noticed on the next write, and an idle server-side
+    // session is never reaped. Probe every 30 s; give up after 3 misses.
+    let cfg = Arc::new(Config {
+        keepalive_interval: Some(std::time::Duration::from_secs(30)),
+        keepalive_max: 3,
+        ..Config::default()
+    });
     let observed = Arc::new(std::sync::Mutex::new(String::new()));
     let handler = HostKeyHandler { expected_fp: host_key_fingerprint.to_string(), observed: observed.clone() };
     let mut session = client::connect(cfg, (host, port), handler)
