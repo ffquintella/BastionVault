@@ -56,6 +56,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### HSM seal
+
+- Close the HSM seal task: auto-unseal, hybrid PQC key custody, cluster enrollment and replication (mock-validated), `v2/sys/hsm/status` and the GUI HSM / Seal page are all shipped (T17)
+
+### Postponed
+
+- Postpone the networked HSM enroll / rotate-epoch handshake and Yubico attestation root-CA pinning to the backlog: both need real hardware or a live cluster to validate, and the pool topology (T454) removes the need for the per-node HSM-to-HSM channel (T456)
+
 ## [0.44.46] - 2026-10-19
 
 ### Added

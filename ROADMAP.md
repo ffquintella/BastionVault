@@ -103,9 +103,9 @@ Next-up list recorded before the migration, in its order:
   - note: `MlDsa{44,65,87}Keypair` in `crates/bv_crypto` held the 32-byte seed — the whole private key — in a plain array that was dropped without being cleared, and `Debug` printed it; every `keypair_from_seed` / `sign` / `verify` call also left an uncleared stack copy. The keypairs now derive `Zeroize` + `ZeroizeOnDrop` (as `KemKeypair` already did), redact the seed in `Debug`, and the provider methods copy the seed into a `Zeroizing` buffer. Public API unchanged (patch bump for `bv_crypto`).
 - [x] T151 Wipe the post-quantum private keys that the PKI, SSH and transit engines copy out of `bv_crypto`, and keep KEM secrets out of debug output (S86)
   - note: Caller-side follow-up to T149. `bv_crypto`'s `KemKeypair` and `SharedSecret` get a hand-written `Debug` that prints `<redacted>` for the secret. PKI's `MlDsaSigner::from_pkcs8_pem` / `from_storage_pem` copy the seed straight into a `Zeroizing` buffer, and the decoded DER / base64 that held it is wiped too. SSH's `pqc::CaKeypair` derives `Zeroize` + `ZeroizeOnDrop` and is filled in place instead of through a by-value seed local. Transit's `policy::KeyVersion` derives `Zeroize` + `ZeroizeOnDrop` and redacts `material` in `Debug` (serialized form unchanged), and the hybrid keygen wipes its intermediate seed copies. `bv-engine-ssh` (under `ssh_pqc`) and `bv-engine-transit` gain a direct `zeroize` dependency, already in the lockfile. No public item removed or changed in type; patch bumps for `bv_crypto`, `bv-engine-pki`, `bv-engine-ssh`, `bv-engine-transit`.
-- [/] T17 Seal the vault with a hardware security module (S17, S91)
+- [x] T17 Seal the vault with a hardware security module (S17, S91)
   - source: roadmap.md feature row "HSM Support", status `[/]` In progress
-  - old-notes: [spec](features/hsm-support.md) — YubiHSM 2 + mock backends, HSM auto-unseal, hybrid PQC custody, and cluster enrollment/replication implemented and tested with the mock; `v2/sys/hsm/status` + `bvault operator hsm status` + GUI HSM / Seal status page shipped. Remaining: the networked enroll / rotate-epoch HTTP handshake (validated against real hardware / a live cluster).
+  - old-notes: [spec](features/hsm-support.md) — YubiHSM 2 + mock backends, HSM auto-unseal, hybrid PQC custody, and cluster enrollment/replication implemented and tested with the mock; `v2/sys/hsm/status` + `bvault operator hsm status` + GUI HSM / Seal status page shipped. The networked enroll / rotate-epoch handshake and Yubico root-CA pinning are postponed as T456; the pool topology (T454) replaces the per-node handshake.
 - [ ] T454 Serve an N-node cluster from a pool of two YubiHSM 2 devices (S114, S17)
   - note: [spec](features/hsm-pool-ha.md) — up to 12 nodes share two devices through an mTLS HSM gateway; every node keeps its own SCP03 session per device. Dual-wrap: independent non-exportable wrap keys, one blob per device, under-replicated sets repaired automatically; opt-in ML-KEM-768 recovery copy with Shamir-split shares. Seven phases (formats, pool backend, link crate, ceremonies and repair, recovery, audit, hardware validation); changes the seal record, blob AAD and authz counter formats (read-old/write-new).
 
@@ -541,6 +541,9 @@ Next-up list recorded before the migration, in its order:
   - from: M5
   - why: needs bastion-side `CLIPRDR` forwarding in Rustion, which is cross-repo; BastionVault already warns on a brokered profile and reports `ready=false` when the channel never negotiates
   - note: Phase 5 of [RDP clipboard redirection](features/rdp-clipboard-redirection.md); the direction switches, policy ceiling and audit from T35 apply unchanged once the channel survives the hop
+- [>] T456 Ship the networked HSM enroll / rotate-epoch handshake and pin the Yubico attestation root CA (S17, S114)
+  - from: M3
+  - why: the handshake cannot be validated without real hardware or a live cluster, and the pool topology (T454) makes the per-node HSM-to-HSM channel unnecessary; root-CA pinning needs a real device attestation chain
 
 ## Specs
 

@@ -36,9 +36,9 @@ Because the YubiHSM 2 has no native ML-KEM / ML-DSA support, post-quantum keys u
   (`src/hsm/enroll.rs`, `src/hsm/replicate.rs`). `GET v2/sys/hsm/status` +
   `bvault operator hsm status` + a read-only **HSM / Seal** page in the desktop GUI
   (`gui/src/routes/HsmStatusPage.tsx`, backed by the `hsm_status` Tauri command) are wired.
-  **Remaining:** the *networked* enroll / rotate-epoch
-  HTTP handshake endpoints (a live multi-node exchange) — deferred until they can be validated
-  against real hardware or a running cluster rather than shipped as untested stubs.
+  **Postponed (T456):** the *networked* enroll / rotate-epoch HTTP handshake (a live multi-node
+  exchange) — it cannot be validated without real hardware or a running cluster, and the pool
+  topology ([hsm-pool-ha.md](hsm-pool-ha.md), T454) replaces the per-node channel.
 
 All behavior is covered by unit/integration tests using the mock backend (30+ tests across the
 `hsm` and `seal` modules). The `hsm_yubihsm2` backend compiles against the real crate but requires
