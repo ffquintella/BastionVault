@@ -2146,7 +2146,7 @@ dependencies = [
 
 [[package]]
 name = "bv-errors"
-version = "0.41.1"
+version = "0.41.2"
 dependencies = [
  "anyhow",
  "bcrypt",
@@ -2292,7 +2292,7 @@ dependencies = [
 
 [[package]]
 name = "bv-metrics"
-version = "0.41.0"
+version = "0.41.1"
 dependencies = [
  "prometheus-client",
  "sysinfo",
@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "bv-storage"
-version = "0.41.3"
+version = "0.41.4"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
