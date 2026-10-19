@@ -95,27 +95,15 @@ impl MlDsaSigner {
         match level {
             MlDsaLevel::L44 => {
                 let kp = MlDsa44Provider.generate_keypair().map_err(pqc_err)?;
-                Ok(Self {
-                    level,
-                    seed: Zeroizing::new(*kp.secret_seed()),
-                    public_key: kp.public_key().to_vec(),
-                })
+                Ok(Self { level, seed: zeroizing_seed(kp.secret_seed()), public_key: kp.public_key().to_vec() })
             }
             MlDsaLevel::L65 => {
                 let kp = MlDsa65Provider.generate_keypair().map_err(pqc_err)?;
-                Ok(Self {
-                    level,
-                    seed: Zeroizing::new(*kp.secret_seed()),
-                    public_key: kp.public_key().to_vec(),
-                })
+                Ok(Self { level, seed: zeroizing_seed(kp.secret_seed()), public_key: kp.public_key().to_vec() })
             }
             MlDsaLevel::L87 => {
                 let kp = MlDsa87Provider.generate_keypair().map_err(pqc_err)?;
-                Ok(Self {
-                    level,
-                    seed: Zeroizing::new(*kp.secret_seed()),
-                    public_key: kp.public_key().to_vec(),
-                })
+                Ok(Self { level, seed: zeroizing_seed(kp.secret_seed()), public_key: kp.public_key().to_vec() })
             }
         }
     }
@@ -251,7 +239,8 @@ impl MlDsaSigner {
         // the DER source, and `DecodePem` doesn't compose cleanly through
         // the type-system's higher-rank lifetimes here. Doing the
         // base64-decode ourselves keeps the borrow chain simple.
-        let der_bytes = decode_pem_block(pem, "PRIVATE KEY")?;
+        // The DER holds the seed, so it is wiped along with every other copy.
+        let der_bytes = Zeroizing::new(decode_pem_block(pem, "PRIVATE KEY")?);
         let info = PrivateKeyInfo::from_der(&der_bytes).map_err(pkcs8_err)?;
         let level = match info.algorithm.oid {
             o if o == OID_ML_DSA_44 => MlDsaLevel::L44,
@@ -265,17 +254,23 @@ impl MlDsaSigner {
         if bytes.len() != 32 {
             return Err(RvError::ErrPkiPemBundleInvalid);
         }
-        let mut seed = [0u8; 32];
+        let mut seed = Zeroizing::new([0u8; 32]);
         seed.copy_from_slice(bytes);
 
         // Reconstruct the public key from the seed so the rest of the
         // engine has it cached without a second user-facing field.
         let pk = match level {
-            MlDsaLevel::L44 => MlDsa44Provider.keypair_from_seed(&seed).map_err(pqc_err)?.public_key().to_vec(),
-            MlDsaLevel::L65 => MlDsa65Provider.keypair_from_seed(&seed).map_err(pqc_err)?.public_key().to_vec(),
-            MlDsaLevel::L87 => MlDsa87Provider.keypair_from_seed(&seed).map_err(pqc_err)?.public_key().to_vec(),
+            MlDsaLevel::L44 => {
+                MlDsa44Provider.keypair_from_seed(seed.as_slice()).map_err(pqc_err)?.public_key().to_vec()
+            }
+            MlDsaLevel::L65 => {
+                MlDsa65Provider.keypair_from_seed(seed.as_slice()).map_err(pqc_err)?.public_key().to_vec()
+            }
+            MlDsaLevel::L87 => {
+                MlDsa87Provider.keypair_from_seed(seed.as_slice()).map_err(pqc_err)?.public_key().to_vec()
+            }
         };
-        Ok(Self { level, seed: Zeroizing::new(seed), public_key: pk })
+        Ok(Self { level, seed, public_key: pk })
     }
 
     /// Heuristic used by the unified [`Signer`](super::crypto::Signer) loader
@@ -292,10 +287,15 @@ impl MlDsaSigner {
         let json_bytes = STANDARD.decode(body.as_bytes()).map_err(|_| RvError::ErrPkiPemBundleInvalid)?;
         let env: StorageEnvelope = serde_json::from_slice(&json_bytes).map_err(|_| RvError::ErrPkiPemBundleInvalid)?;
         let level = MlDsaLevel::from_role(&env.alg).ok_or(RvError::ErrPkiKeyTypeInvalid)?;
-        let seed_vec = STANDARD.decode(env.seed_b64.as_bytes()).map_err(|_| RvError::ErrPkiPemBundleInvalid)?;
-        let seed: [u8; 32] = seed_vec.try_into().map_err(|_| RvError::ErrPkiPemBundleInvalid)?;
+        let seed_vec =
+            Zeroizing::new(STANDARD.decode(env.seed_b64.as_bytes()).map_err(|_| RvError::ErrPkiPemBundleInvalid)?);
+        if seed_vec.len() != 32 {
+            return Err(RvError::ErrPkiPemBundleInvalid);
+        }
+        let mut seed = Zeroizing::new([0u8; 32]);
+        seed.copy_from_slice(&seed_vec);
         let public_key = STANDARD.decode(env.public_key_b64.as_bytes()).map_err(|_| RvError::ErrPkiPemBundleInvalid)?;
-        Ok(Self { level, seed: Zeroizing::new(seed), public_key })
+        Ok(Self { level, seed, public_key })
     }
 }
 
@@ -317,6 +317,14 @@ fn pkcs8_err(e: impl std::fmt::Debug) -> RvError {
 /// Strip the PEM armor of a single block with the given label and
 /// base64-decode the body. Used by [`MlDsaSigner::from_pkcs8_pem`] so the
 /// caller-side `PrivateKeyInfo<'a>` parse owns its source bytes.
+/// Copy a seed into a buffer that is wiped on drop, without an
+/// intermediate by-value copy on the stack.
+fn zeroizing_seed(seed: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    let mut out = Zeroizing::new([0u8; 32]);
+    out.copy_from_slice(seed);
+    out
+}
+
 fn decode_pem_block(pem: &str, label: &str) -> Result<Vec<u8>, RvError> {
     let begin = format!("-----BEGIN {label}-----");
     let end = format!("-----END {label}-----");
@@ -326,4 +334,51 @@ fn decode_pem_block(pem: &str, label: &str) -> Result<Vec<u8>, RvError> {
     let body_end = begin_idx + end_idx;
     let body: String = pem[body_start..body_end].chars().filter(|c| !c.is_whitespace()).collect();
     STANDARD.decode(body.as_bytes()).map_err(|_| RvError::ErrPkiPemBundleInvalid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LEVELS: [MlDsaLevel; 3] = [MlDsaLevel::L44, MlDsaLevel::L65, MlDsaLevel::L87];
+
+    #[test]
+    fn test_pkcs8_pem_round_trip_keeps_seed_and_public_key() {
+        for level in LEVELS {
+            let signer = MlDsaSigner::generate(level).unwrap();
+            let pem = signer.to_pkcs8_pem().unwrap();
+            let back = MlDsaSigner::from_pkcs8_pem(&pem).unwrap();
+            assert_eq!(back.level(), level);
+            assert_eq!(back.seed.as_slice(), signer.seed.as_slice());
+            assert_eq!(back.public_key(), signer.public_key());
+        }
+    }
+
+    #[test]
+    fn test_storage_pem_round_trip_keeps_seed_and_public_key() {
+        for level in LEVELS {
+            let signer = MlDsaSigner::generate(level).unwrap();
+            let back = MlDsaSigner::from_storage_pem(&signer.to_storage_pem()).unwrap();
+            assert_eq!(back.level(), level);
+            assert_eq!(back.seed.as_slice(), signer.seed.as_slice());
+            assert_eq!(back.public_key(), signer.public_key());
+        }
+    }
+
+    #[test]
+    fn test_storage_pem_rejects_wrong_seed_length() {
+        for len in [0usize, 31, 33, 64] {
+            let env = StorageEnvelope {
+                alg: MlDsaLevel::L65.as_str().to_string(),
+                seed_b64: STANDARD.encode(vec![0x5a; len]),
+                public_key_b64: String::new(),
+            };
+            let body = STANDARD.encode(serde_json::to_string(&env).unwrap());
+            let pem = format!("-----BEGIN BV PQC SIGNER-----\n{body}\n-----END BV PQC SIGNER-----\n");
+            assert!(
+                matches!(MlDsaSigner::from_storage_pem(&pem), Err(RvError::ErrPkiPemBundleInvalid)),
+                "seed of {len} bytes was accepted"
+            );
+        }
+    }
 }

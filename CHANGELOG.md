@@ -58,6 +58,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### CI: composite PKI issuance is tested
+
+- Run the PKI engine's unit tests with composite (classical + ML-DSA) issuance compiled in, on every pull request that can reach `bv-engine-pki` and in `make test-release` (T150, S38)
+  -- `pki_pqc_composite` is off by default and no job enabled it, so the composite regression tests for issuer chaining, Authority Key Identifiers, the CA-key check and literal subjects never ran. New `make test-pki-composite` target and `pki-composite` job in `.github/workflows/tests.yml`, planned by `scripts/ci-plan.sh` (output `run_pki_composite`).
+
 #### Module policies (features/module-policies.md)
 
 - Assign a module's access by name with seeded `<module>-full`, `-read`, `-connect` and `-shared` policies (T146, S113)
@@ -91,6 +96,11 @@ EXAMPLE ENTRY:
 - Chain certificates issued by an ML-DSA or composite CA the same way as classical ones, and refuse a CA certificate that does not belong to the issuer's key (T148, S38)
   -- ML-DSA and composite issuers rebuilt the issuer name from the CA subject, so a CA subject that was not DER-canonical (an unsorted multi-valued RDN) came out re-sorted and no longer matched the CA, and a CA without a Subject Key Identifier got an Authority Key Identifier the engine made up from its key, which matched nothing the CA advertises. They now refuse such a CA subject with an error, leave the Authority Key Identifier out (with a warning in the server log) when the CA has no Subject Key Identifier, and refuse a malformed, empty or repeated one — the same rules as classical issuers. Every issuer, classical, ML-DSA and composite, now also checks before signing that the CA certificate holds the public key of the issuer's private key (for composite keys, both halves; for ML-DSA, the key its seed derives) and refuses with an error naming the CA otherwise, where it used to issue certificates that could never verify against that CA. An issuer whose stored key and certificate disagree stops issuing until the CA certificate is re-imported with its own key. Covers `pki/issue`, `pki/sign`, `pki/sign-verbatim`, approved sign requests, ACME and `pki/root/sign-intermediate`; CRLs are unchanged.
 
+#### PKI — ML-DSA and composite root CAs
+
+- Take the common name and organisation literally when generating an ML-DSA or composite root CA (T150, S38)
+  -- the root subject was assembled as an `RFC 4514` string and parsed back, so an organisation such as `Acme, Inc.` made the request fail, a value such as `Acme,OU=Ops` added an attribute, and a leading `#` or a `\` was decoded as DN syntax. The subject is now built attribute by attribute; roots whose values contain none of these characters keep byte-identical subjects (O, then CN).
+
 #### Sharing — identity groups inside a namespace
 
 - Show and honour shares granted to an identity group for users logged into a namespace (T27, S33, S18)
@@ -112,6 +122,8 @@ EXAMPLE ENTRY:
 
 - **Wipe ML-DSA private-key seeds from memory after use** (T149, S86)
   -- the ML-DSA-44/65/87 keypair type kept its 32-byte seed, which is the whole private key, in a buffer that was freed without being cleared, and printed it in debug output. PKI issuance, transit and SSH signing derive a keypair from the seed on every operation, so each one left another copy in process memory. The seed is now overwritten when the keypair is dropped, debug output shows `<redacted>` in its place, and signing, verification and key derivation clear their temporary copy of the seed before returning.
+- **Wipe the post-quantum private keys that the PKI, SSH and transit engines hold, and hide ML-KEM secrets in debug output** (T151, S86)
+  -- importing an ML-DSA key into PKI, loading the ML-DSA-65 SSH CA, and generating or holding a transit key each kept a copy of the private key in memory that was freed without being cleared. These copies are now overwritten when they are dropped: the PKI signer's decoded seed, the SSH CA keypair, and every transit key version (the stored key format is unchanged). Debug output of an ML-KEM keypair, an ML-KEM shared secret and a transit key version now shows `<redacted>` in place of the secret bytes.
 
 #### Rustion sessions — desktop app
 
