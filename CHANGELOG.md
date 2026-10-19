@@ -118,6 +118,11 @@ EXAMPLE ENTRY:
 - Take the requested common name and the role's subject fields literally in ML-DSA and composite certificates (T148, S38)
   -- these subjects were assembled as an `RFC 4514` string and parsed back, so a `,` or `+` in a common name or role field split it into extra attributes, and a `\` or a leading `#` was decoded as an escape. A requester could add subject attributes the role does not set (`O`, `OU`, …), and a role allowing subdomains of `example.com` accepted the common name `evil.example.net,CN=app.example.com` and issued a certificate whose last CN was `evil.example.net`. Each field is now one attribute holding exactly the value given. Subjects without those characters are byte-for-byte unchanged, CN still last; a role country that is not a valid PrintableString is now refused instead of being written as an invalid one.
 
+#### Post-quantum signing keys
+
+- **Wipe ML-DSA private-key seeds from memory after use** (T149, S86)
+  -- the ML-DSA-44/65/87 keypair type kept its 32-byte seed, which is the whole private key, in a buffer that was freed without being cleared, and printed it in debug output. PKI issuance, transit and SSH signing derive a keypair from the seed on every operation, so each one left another copy in process memory. The seed is now overwritten when the keypair is dropped, debug output shows `<redacted>` in its place, and signing, verification and key derivation clear their temporary copy of the seed before returning.
+
 #### Rustion sessions — desktop app
 
 - **Let a session window renew, end or read only its own bastion session** (T145, S51, S112)
