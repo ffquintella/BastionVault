@@ -6,12 +6,18 @@
 //! - `DELETE /v1/pki/issuer/:ref` → remove (with default-pointer guard)
 //! - `READ   /v1/pki/config/issuers` → `{"default": "<id>", "default_name": "<name>"}`
 //! - `WRITE  /v1/pki/config/issuers` → set default (`{"default": "<id-or-name>"}`)
+//! - `WRITE  /v2/pki/issuer/:ref/renew` → re-issue the CA certificate, same key + subject (T455)
+//! - `READ   /v2/pki/issuer/:ref/history` → certificates replaced by renewal
 
 use std::{collections::HashMap, sync::Arc};
 
+use humantime::parse_duration;
 use serde_json::{json, Map, Value};
 
-use super::{issuers, PkiBackend, PkiBackendInner};
+use super::{
+    issuer_renew::{self, RenewLifetime, RenewedBy},
+    issuers, PkiBackend, PkiBackendInner,
+};
 use crate::{
     context::Context,
     errors::RvError,
@@ -59,6 +65,32 @@ impl PkiBackend {
             },
             operations: [{op: Operation::Read, handler: r.read_issuer_chain}],
             help: "Read the issuer chain (leaf-issuer → root) for the named issuer."
+        })
+    }
+
+    pub fn issuer_renew_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"issuer/(?P<ref>[\w\-]+)/renew$",
+            fields: {
+                "ref": { field_type: FieldType::Str, required: true, description: "Issuer ID (UUID) or name." },
+                "ttl": { field_type: FieldType::Str, default: "",
+                    description: "Validity of the renewed certificate from now (e.g. 87600h). Empty = the current certificate's notAfter - notBefore." }
+            },
+            operations: [{op: Operation::Write, handler: r.renew_issuer}],
+            help: "Re-issue an issuer's CA certificate for the same key and subject with a fresh validity. Self-signed issuers are re-signed by their own key, others by their parent issuer on this mount."
+        })
+    }
+
+    pub fn issuer_history_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"issuer/(?P<ref>[\w\-]+)/history$",
+            fields: {
+                "ref": { field_type: FieldType::Str, required: true, description: "Issuer ID (UUID) or name." }
+            },
+            operations: [{op: Operation::Read, handler: r.read_issuer_history}],
+            help: "List the certificates an issuer held before each renewal, oldest first."
         })
     }
 
@@ -174,6 +206,65 @@ impl PkiBackendInner {
         let reference = req.get_data("ref")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         issuers::delete_issuer(req, &reference).await?;
         Ok(None)
+    }
+
+    pub async fn renew_issuer(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let reference = req.get_data("ref")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let ttl = req.get_data_or_default("ttl")?.as_str().unwrap_or("").trim().to_string();
+        let lifetime = if ttl.is_empty() {
+            RenewLifetime::SameSpan
+        } else {
+            RenewLifetime::Ttl(parse_duration(&ttl).map_err(|e| {
+                RvError::ErrResponseStatus(400, format!("renew: `ttl` is not a duration ({e})"))
+            })?)
+        };
+        let outcome = issuer_renew::renew_issuer(req, &reference, lifetime).await?;
+
+        let (signed_by, signed_by_id) = match &outcome.renewed_by {
+            RenewedBy::SelfSigned => ("self".to_string(), outcome.issuer_id.clone()),
+            RenewedBy::Parent { id, name } => (name.clone(), id.clone()),
+        };
+        let mut data: Map<String, Value> = Map::new();
+        data.insert("issuer_id".into(), json!(outcome.issuer_id));
+        data.insert("issuer_name".into(), json!(outcome.issuer_name));
+        data.insert("certificate".into(), json!(outcome.certificate_pem));
+        data.insert("serial_number".into(), json!(outcome.serial_hex));
+        data.insert("not_before".into(), json!(outcome.not_before_unix));
+        data.insert("not_after".into(), json!(outcome.not_after_unix));
+        data.insert("previous_serial_number".into(), json!(outcome.previous_serial_hex));
+        data.insert("previous_not_after".into(), json!(outcome.previous_not_after_unix));
+        data.insert("signed_by".into(), json!(signed_by));
+        data.insert("signed_by_issuer_id".into(), json!(signed_by_id));
+        data.insert("ttl_clamped".into(), json!(outcome.ttl_clamped));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn read_issuer_history(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let reference = req.get_data("ref")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let issuer = issuers::load_issuer(req, &reference).await?;
+        let history = issuer_renew::load_history(req, &issuer.id).await?;
+        let certificates: Vec<Value> = history
+            .entries
+            .iter()
+            .map(|e| {
+                json!({
+                    "serial_number": e.serial_hex,
+                    "not_after": e.not_after_unix,
+                    "replaced_at": e.replaced_at_unix,
+                    "replaced_by_serial_number": e.replaced_by_serial_hex,
+                    "certificate": e.certificate_pem,
+                })
+            })
+            .collect();
+        let mut data: Map<String, Value> = Map::new();
+        data.insert("issuer_id".into(), json!(issuer.id));
+        data.insert("issuer_name".into(), json!(issuer.name));
+        data.insert("certificates".into(), json!(certificates));
+        Ok(Some(Response::data_response(Some(data))))
     }
 
     pub async fn read_config_issuers(

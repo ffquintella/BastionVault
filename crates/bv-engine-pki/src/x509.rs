@@ -669,7 +669,7 @@ fn ensure_signing_key_is_certified(
 /// follows the key type (RSA hash by modulus size, as `CertSigner` pins it)
 /// while `KeyPair::sign` uses the algorithm the key pair was loaded with;
 /// if those ever disagreed the certificate would not verify, so fail closed.
-fn certificate_signature_alg_id(signer: &CertSigner) -> Result<AlgorithmIdentifierOwned, RvError> {
+pub(super) fn certificate_signature_alg_id(signer: &CertSigner) -> Result<AlgorithmIdentifierOwned, RvError> {
     use super::crypto::KeyAlgorithm;
 
     let expected: &'static rcgen::SignatureAlgorithm = match signer.algorithm() {
@@ -700,7 +700,7 @@ fn accepted_spki_der(spki_der: &[u8]) -> Result<Vec<u8>, RvError> {
     Ok(public_key.subject_public_key_info())
 }
 
-fn decode_spki(spki_der: &[u8]) -> Result<SubjectPublicKeyInfoOwned, RvError> {
+pub(super) fn decode_spki(spki_der: &[u8]) -> Result<SubjectPublicKeyInfoOwned, RvError> {
     SubjectPublicKeyInfoOwned::from_der(spki_der)
         .map_err(|e| RvError::ErrString(format!("pki: cannot decode the subject public key ({e})")))
 }

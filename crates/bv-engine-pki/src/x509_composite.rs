@@ -43,11 +43,11 @@ const CRL_NUMBER_OID: const_oid::ObjectIdentifier = const_oid::ObjectIdentifier:
 /// AlgorithmIdentifier for the cert / CRL signature. Reads the OID off
 /// the signer so multi-variant deployments (P256+L44, P256+L65,
 /// P384+L87) emit the right `signatureAlgorithm` for each pairing.
-fn composite_alg_id(signer: &CompositeSigner) -> AlgorithmIdentifierOwned {
+pub(super) fn composite_alg_id(signer: &CompositeSigner) -> AlgorithmIdentifierOwned {
     AlgorithmIdentifierOwned { oid: signer.oid(), parameters: None }
 }
 
-fn composite_spki(signer: &CompositeSigner) -> Result<SubjectPublicKeyInfoOwned, RvError> {
+pub(super) fn composite_spki(signer: &CompositeSigner) -> Result<SubjectPublicKeyInfoOwned, RvError> {
     let pk_der = signer.composite_public_key_der()?;
     Ok(SubjectPublicKeyInfoOwned {
         algorithm: composite_alg_id(signer),

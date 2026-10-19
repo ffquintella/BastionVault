@@ -1737,6 +1737,44 @@ POST /v2/{mount}/cert/{serial}/export  {"format": "pem", "include_private_key": 
   only) and cannot be deleted while the certificate is bound; revoking the
   certificate drops the binding.
 
+### PKI issuer renewal
+
+Re-issue an issuer's CA certificate for the **same key and subject** with a
+fresh validity, e.g. a root that is about to expire or already has. `v2` only.
+
+~~~
+POST /v2/{mount}/issuer/{ref}/renew     {"ttl": "87600h"}
+GET  /v2/{mount}/issuer/{ref}/history
+~~~
+
+- `ttl` (optional): validity from now. Empty keeps the current certificate's
+  `notAfter - notBefore`. `notBefore` is backdated 30 s, as on generation.
+- Kept byte for byte: subject, public key and every extension (BasicConstraints,
+  KeyUsage, SKI, name constraints, policies, ...). New: serial, validity,
+  signature. Certificates the issuer already signed chain to the new one.
+- Unchanged: issuer id, name, default pointer, usages, managed key
+  (`key_id`), `ca_kind`. The key never leaves the managed-key store.
+- A **self-signed** issuer is re-signed with its own key. Any other issuer is
+  re-signed by its parent when that parent is a key-holding issuer on the same
+  mount: issuer and AKI follow the parent, the validity is clamped to the
+  parent's `notAfter` (`ttl_clamped: true`), and the parent needs the
+  `issuing-certificates` usage and a `pathLenConstraint` other than 0.
+- Refused, with the reason: a key-less (trust/chain-only) issuer (`400`); a
+  parent that is not on this mount or is key-less here (`409`, renew at that
+  CA); an expired parent (`400`).
+- Response: `issuer_id`, `issuer_name`, `certificate`, `serial_number`,
+  `not_before`, `not_after`, `previous_serial_number`, `previous_not_after`,
+  `signed_by` (`"self"` or the parent issuer's name), `signed_by_issuer_id`,
+  `ttl_clamped`.
+- `history` lists the replaced certificates, oldest first:
+  `{"certificates": [{"serial_number", "not_after", "replaced_at",
+  "replaced_by_serial_number", "certificate"}]}`. Re-importing a replaced
+  certificate through `config/ca` matches the existing issuer instead of
+  adding a second one.
+- ACL: renewal is its own path, so `update` on `{mount}/issuer/+` (rename,
+  usages) does not grant it. The built-in `pki-full` template covers it
+  through `pki/*`; `pki-read` grants neither path.
+
 ## Authentication Endpoints
 
 ### Token Login

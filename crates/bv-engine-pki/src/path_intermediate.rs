@@ -47,7 +47,7 @@ const DEFAULT_INTERMEDIATE_TTL: Duration = Duration::from_secs(5 * 365 * 24 * 36
 /// constraint is unspecified (unconstrained CA), `Ok(Some(n))` when
 /// BasicConstraints carries `pathLenConstraint = n`. Used by L4's
 /// path-length clamp on `sign-intermediate`.
-fn issuer_path_len(cert_pem: &str) -> Result<Option<u8>, RvError> {
+pub(super) fn issuer_path_len(cert_pem: &str) -> Result<Option<u8>, RvError> {
     use x509_parser::extensions::ParsedExtension;
     use x509_parser::prelude::FromDer;
 

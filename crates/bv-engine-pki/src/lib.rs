@@ -51,6 +51,7 @@ pub mod crypto;
 pub mod csr;
 pub mod email_san;
 pub mod export;
+pub mod issuer_renew;
 pub mod issuers;
 pub mod keys;
 pub mod path_config;
@@ -150,6 +151,8 @@ impl PkiBackend {
             self.issuers_list_path(),
             self.issuer_path(),
             self.issuer_chain_path(),
+            self.issuer_renew_path(),
+            self.issuer_history_path(),
             self.config_issuers_path(),
             self.config_ca_path(),
             self.config_urls_path(),

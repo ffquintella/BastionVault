@@ -58,6 +58,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### PKI: issuer renewal
+
+- Renew a PKI issuer's CA certificate for the same key and subject with `POST /v2/<mount>/issuer/<ref>/renew`, and from the desktop app's Issuers tab (T455, S37)
+  -- only the serial, validity (`ttl`, default: the current certificate's span) and signature change, so certificates already issued keep chaining and the issuer keeps its id, name, default pointer, usages and managed key. Self-signed issuers, generated or imported with their key, re-sign themselves; other issuers are re-signed by their parent issuer on the same mount, within the parent's lifetime. Key-less trust anchors and issuers whose parent is not on the mount are refused with the reason. The replaced certificates stay readable at `GET /v2/<mount>/issuer/<ref>/history`, and re-importing one through `config/ca` no longer adds a second issuer. The Issuers tab also marks an expired *Not After*.
+
 #### Self-accounts
 
 - Add a per-account "Require MFA at Connect" flag (default on); the `require_connect_mfa` setting now forces it on for every account and defaults to off. Existing accounts stay MFA-gated.

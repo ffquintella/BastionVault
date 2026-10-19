@@ -6,6 +6,7 @@
 //! ca/cert        # PEM of the active CA certificate
 //! ca/key         # PEM of the active CA private key (PKCS#8)
 //! ca/meta        # JSON metadata (algorithm, common name, etc.)
+//! issuers/<id>/history  # JSON IssuerCertHistory: certificates replaced by renewal
 //! certs/<hex>    # JSON cert record indexed by serial (lowercase hex, no `:`)
 //! crl/state      # JSON CRL state (crl_number + revoked serial set)
 //! crl/cached     # Last-built CRL PEM bytes
@@ -45,6 +46,61 @@ pub fn issuer_key_key(id: &str) -> String { format!("issuers/{id}/key") }
 pub fn issuer_meta_key(id: &str) -> String { format!("issuers/{id}/meta") }
 pub fn issuer_crl_state_key(id: &str) -> String { format!("crl/issuer/{id}/state") }
 pub fn issuer_crl_cached_key(id: &str) -> String { format!("crl/issuer/{id}/cached") }
+/// Certificates an issuer held before `issuer/<ref>/renew` replaced them.
+/// Absent until the first renewal.
+pub fn issuer_history_key(id: &str) -> String { format!("issuers/{id}/history") }
+
+/// Persisted-format version for [`IssuerCertHistory`]. Bump alongside a
+/// read-old/write-new migration; a record carrying a *newer* version is
+/// refused rather than rewritten, so an older binary cannot drop fields it
+/// does not know about.
+pub const ISSUER_CERT_HISTORY_FORMAT_VERSION: u32 = 1;
+
+/// The certificates an issuer has been renewed away from, oldest first.
+/// The issuer's current certificate stays at `issuers/<id>/cert`; this
+/// record only ever grows on renewal and is removed with the issuer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IssuerCertHistory {
+    /// See [`ISSUER_CERT_HISTORY_FORMAT_VERSION`]. `#[serde(default)]` so
+    /// a hand-written record without it still loads (as version 0, which
+    /// reads like version 1).
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub entries: Vec<IssuerCertHistoryEntry>,
+}
+
+/// One replaced issuer certificate. Public material only.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IssuerCertHistoryEntry {
+    pub serial_hex: String,
+    pub certificate_pem: String,
+    pub not_after_unix: i64,
+    /// When the renewal that replaced this certificate ran.
+    pub replaced_at_unix: u64,
+    /// Serial of the certificate that replaced it.
+    #[serde(default)]
+    pub replaced_by_serial_hex: String,
+}
+
+impl IssuerCertHistory {
+    /// Decode a stored history record, refusing one written by a newer
+    /// format than this binary understands.
+    pub fn decode(bytes: &[u8]) -> Result<Self, RvError> {
+        let history: Self = serde_json::from_slice(bytes)?;
+        if history.version > ISSUER_CERT_HISTORY_FORMAT_VERSION {
+            return Err(RvError::ErrResponseStatus(
+                500,
+                format!(
+                    "issuer certificate history is format version {}, newer than the {} this server reads; \
+                     upgrade the server before renewing this issuer",
+                    history.version, ISSUER_CERT_HISTORY_FORMAT_VERSION
+                ),
+            ));
+        }
+        Ok(history)
+    }
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IssuersIndex {
