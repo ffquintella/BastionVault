@@ -35,12 +35,15 @@ rand = "^0.10"
 sha2 = "0.11"
 ssh-encoding = "0.2"
 ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "ecdsa", "encryption"] }
+# Wipes the ML-DSA-65 CA seed held by `pqc::CaKeypair` on drop. Same crate
+# and version `bv_crypto` already uses; only the `ssh_pqc` build needs it.
+zeroize = { version = "1.8", features = ["zeroize_derive"], optional = true }
 
 [features]
 default = []
 # ML-DSA-65 SSH CA generation. On in the root crate's default build so the
 # GUI's "Generate CA -> ML-DSA-65" path works out of the box.
-ssh_pqc = []
+ssh_pqc = ["dep:zeroize"]
 sync_handler = [
     "maybe-async/is_sync",
     "bv-storage/sync_handler",

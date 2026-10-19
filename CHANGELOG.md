@@ -124,6 +124,8 @@ EXAMPLE ENTRY:
 
 - **Wipe ML-DSA private-key seeds from memory after use** (T149, S86)
   -- the ML-DSA-44/65/87 keypair type kept its 32-byte seed, which is the whole private key, in a buffer that was freed without being cleared, and printed it in debug output. PKI issuance, transit and SSH signing derive a keypair from the seed on every operation, so each one left another copy in process memory. The seed is now overwritten when the keypair is dropped, debug output shows `<redacted>` in its place, and signing, verification and key derivation clear their temporary copy of the seed before returning.
+- **Wipe the post-quantum private keys that the PKI, SSH and transit engines hold, and hide ML-KEM secrets in debug output** (T151, S86)
+  -- importing an ML-DSA key into PKI, loading the ML-DSA-65 SSH CA, and generating or holding a transit key each kept a copy of the private key in memory that was freed without being cleared. These copies are now overwritten when they are dropped: the PKI signer's decoded seed, the SSH CA keypair, and every transit key version (the stored key format is unchanged). Debug output of an ML-KEM keypair, an ML-KEM shared secret and a transit key version now shows `<redacted>` in place of the secret bytes.
 
 #### Rustion sessions — desktop app
 

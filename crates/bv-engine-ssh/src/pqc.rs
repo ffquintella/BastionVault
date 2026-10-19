@@ -58,6 +58,7 @@ use std::collections::BTreeMap;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use bv_crypto::{MlDsa65Provider, ML_DSA_65_PUBLIC_KEY_LEN, ML_DSA_65_SEED_LEN};
 use ssh_encoding::{Decode, Encode};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::errors::RvError;
 
@@ -78,6 +79,10 @@ pub const MLDSA65_CERT_ALGO: &str = "ssh-mldsa65-cert-v01@openssh.com";
 /// we persist; FIPS 204 keygen rederives the expanded private key
 /// from it deterministically each time we sign. Smaller storage
 /// surface, identical security to keeping the expanded form.
+///
+/// The seed is the whole private key, so it is wiped when the keypair
+/// is dropped.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct CaKeypair {
     pub secret_seed: [u8; ML_DSA_65_SEED_LEN],
     pub public_key: Vec<u8>,
@@ -89,7 +94,6 @@ impl CaKeypair {
         let kp = MlDsa65Provider
             .generate_keypair()
             .map_err(|e| RvError::ErrString(format!("ML-DSA-65 keygen failed: {e:?}")))?;
-        let seed = *kp.secret_seed();
         let public_key = kp.public_key().to_vec();
         if public_key.len() != ML_DSA_65_PUBLIC_KEY_LEN {
             return Err(RvError::ErrString(format!(
@@ -98,13 +102,18 @@ impl CaKeypair {
                 ML_DSA_65_PUBLIC_KEY_LEN
             )));
         }
-        Ok(Self { secret_seed: seed, public_key })
+        // Copy the seed straight into the wiped-on-drop struct rather
+        // than through a by-value local.
+        let mut ca = Self { secret_seed: [0u8; ML_DSA_65_SEED_LEN], public_key };
+        ca.secret_seed.copy_from_slice(kp.secret_seed());
+        Ok(ca)
     }
 
     /// Load from on-disk seed + pubkey hex (the `CaConfig` shape).
     pub fn from_hex(seed_hex: &str, pubkey_hex: &str) -> Result<Self, RvError> {
-        let seed_bytes = hex::decode(seed_hex)
-            .map_err(|e| RvError::ErrString(format!("CA seed hex decode: {e}")))?;
+        let seed_bytes = Zeroizing::new(
+            hex::decode(seed_hex).map_err(|e| RvError::ErrString(format!("CA seed hex decode: {e}")))?,
+        );
         if seed_bytes.len() != ML_DSA_65_SEED_LEN {
             return Err(RvError::ErrString(format!(
                 "CA seed length: got {}, want {}",
@@ -112,9 +121,6 @@ impl CaKeypair {
                 ML_DSA_65_SEED_LEN
             )));
         }
-        let mut secret_seed = [0u8; ML_DSA_65_SEED_LEN];
-        secret_seed.copy_from_slice(&seed_bytes);
-
         let public_key = hex::decode(pubkey_hex)
             .map_err(|e| RvError::ErrString(format!("CA public-key hex decode: {e}")))?;
         if public_key.len() != ML_DSA_65_PUBLIC_KEY_LEN {
@@ -124,7 +130,9 @@ impl CaKeypair {
                 ML_DSA_65_PUBLIC_KEY_LEN
             )));
         }
-        Ok(Self { secret_seed, public_key })
+        let mut ca = Self { secret_seed: [0u8; ML_DSA_65_SEED_LEN], public_key };
+        ca.secret_seed.copy_from_slice(&seed_bytes);
+        Ok(ca)
     }
 
     /// OpenSSH-format single-line public key: `<algo> <base64> <comment>`.
@@ -346,11 +354,32 @@ mod tests {
     #[test]
     fn ca_keypair_round_trips_through_hex() {
         let ca = CaKeypair::generate().unwrap();
-        let seed_hex = hex::encode(ca.secret_seed);
+        let seed_hex = hex::encode(&ca.secret_seed);
         let pk_hex = hex::encode(&ca.public_key);
         let back = CaKeypair::from_hex(&seed_hex, &pk_hex).unwrap();
         assert_eq!(ca.secret_seed, back.secret_seed);
         assert_eq!(ca.public_key, back.public_key);
+    }
+
+    fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+    #[test]
+    fn ca_keypair_wipes_seed() {
+        assert_zeroize_on_drop::<CaKeypair>();
+        let mut ca = CaKeypair::generate().unwrap();
+        assert_ne!(ca.secret_seed, [0u8; ML_DSA_65_SEED_LEN]);
+        ca.zeroize();
+        assert_eq!(ca.secret_seed, [0u8; ML_DSA_65_SEED_LEN]);
+    }
+
+    #[test]
+    fn ca_keypair_from_hex_rejects_wrong_seed_length() {
+        let ca = CaKeypair::generate().unwrap();
+        let pk_hex = hex::encode(&ca.public_key);
+        for len in [0usize, 31, 33, 64] {
+            let seed_hex = hex::encode(vec![0x5a; len]);
+            assert!(CaKeypair::from_hex(&seed_hex, &pk_hex).is_err(), "seed of {len} bytes was accepted");
+        }
     }
 
     #[test]
