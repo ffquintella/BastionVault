@@ -56,6 +56,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.47] - 2026-10-19
+
 ### Added
 
 #### HSM seal
@@ -67,6 +69,10 @@ EXAMPLE ENTRY:
 - Store HSM-wrapped keys in the pool-ready formats: blobs bound to the HSM device (`hsm_id`) instead of the node, so any node can open a copy through the same device; per-device blob sets; a v2 seal record that still unseals v1 records and converts them on the first write; per-node unwrap counters started above the old cluster-wide one; and a barrier-protected custody store that hands engines opaque key handles. `v2/sys/hsm/status` adds `hsm_id`, `topology`, `recovery_requested`, `recovery_configured` and `seal_record_version`. A vault initialized by this build cannot be unsealed by an older one (T454, S114)
 
 ### Fixed
+
+#### Resource Connect RDP
+
+- Fix "mixed username format" when connecting over RDP with a `DOMAIN\user` or `user@domain` account: the qualified name is split into user and domain (or kept as a UPN with the separate domain dropped) before CredSSP sees it
 
 #### Resource Connect SSH
 

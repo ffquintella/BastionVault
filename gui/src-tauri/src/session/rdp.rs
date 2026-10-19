@@ -1419,15 +1419,32 @@ fn desktop_for_redial(width: u16, height: u16) -> DesktopSize {
     DesktopSize { width: u16::try_from(w).unwrap_or(u16::MAX), height: u16::try_from(h).unwrap_or(u16::MAX) }
 }
 
+/// Reconcile a qualified username with the separate domain field.
+///
+/// With CredSSP on, sspi builds the identity from `(username, domain)` and
+/// rejects a username that already carries a domain (`DOM\\user`, `user@dom`)
+/// next to a non-empty domain with "mixed username format". `DOM\\user` wins
+/// over the field (the qualifier is what the operator typed); a UPN is kept
+/// as-is and the field dropped, since the UPN suffix is the domain.
+fn normalize_logon(username: &str, domain: Option<&str>) -> (String, Option<String>) {
+    if let Some((dom, user)) = username.split_once('\\') {
+        return (user.to_owned(), Some(dom.to_owned()).filter(|d| !d.is_empty()));
+    }
+    if username.contains('@') {
+        return (username.to_owned(), None);
+    }
+    (username.to_owned(), domain.filter(|d| !d.is_empty()).map(str::to_owned))
+}
+
 fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
+    let (norm_user, norm_domain) = normalize_logon(&args.username, args.domain.as_deref());
     // Smartcard auth requires CredSSP. A password session offers it next to
     // plain TLS so NLA-enforcing hosts connect; an empty password (Rustion
     // ticket, cookie redial) keeps it off — the bastion drives upstream auth.
     let (credentials, enable_credssp) = match &args.credential {
-        RdpCredential::Password(pw) => (
-            Credentials::UsernamePassword { username: args.username.clone(), password: pw.as_str().to_owned() },
-            !pw.is_empty(),
-        ),
+        RdpCredential::Password(pw) => {
+            (Credentials::UsernamePassword { username: norm_user, password: pw.as_str().to_owned() }, !pw.is_empty())
+        }
         RdpCredential::SmartCard(sc) => (
             Credentials::SmartCard {
                 pin: sc.pin.clone(),
@@ -1449,7 +1466,7 @@ fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
     };
     ConnectorConfig {
         credentials,
-        domain: args.domain.clone(),
+        domain: norm_domain,
         enable_tls: true,
         enable_credssp,
         keyboard_type: KeyboardType::IBM_ENHANCED,
@@ -3323,6 +3340,18 @@ mod nego_cookie_tests {
         assert!(build_connector_config(&a).enable_credssp);
         assert!(!build_connector_config(&args(Some(TICKET.to_owned()))).enable_credssp);
         assert!(!build_connector_config(&super::redial_args(&a).unwrap()).enable_credssp);
+    }
+
+    /// Regression: `DOM\\user` or `user@dom` plus a domain field made sspi
+    /// fail CredSSP with "mixed username format".
+    #[test]
+    fn qualified_usernames_do_not_mix_with_the_domain_field() {
+        use super::normalize_logon;
+        assert_eq!(normalize_logon("CORP\\alice", Some("CORP")), ("alice".into(), Some("CORP".into())));
+        assert_eq!(normalize_logon("CORP\\alice", None), ("alice".into(), Some("CORP".into())));
+        assert_eq!(normalize_logon("alice@corp.example", Some("CORP")), ("alice@corp.example".into(), None));
+        assert_eq!(normalize_logon("alice", Some("CORP")), ("alice".into(), Some("CORP".into())));
+        assert_eq!(normalize_logon("alice", Some("")), ("alice".into(), None));
     }
 
     #[test]
