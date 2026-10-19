@@ -56,6 +56,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.46] - 2026-10-19
+
 ### Added
 
 #### PKI: issuer renewal
