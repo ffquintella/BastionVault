@@ -30,7 +30,7 @@ use zeroize::Zeroizing;
 use crate::{
     errors::RvError,
     hsm::{
-        blob::{open_blob, seal_blob, BlobAad, Context},
+        blob::{open_blob, seal_blob, Context},
         domain_separated, AttestedKey, HsmBackend, HsmObjectId, HsmObjectIds, ResolvedHsmConfig,
     },
 };
@@ -84,7 +84,9 @@ impl YubiHsm2Backend {
         let identity_raw = client.get_public_key(config.objects.identity).map_err(map_yubi)?.as_ref().to_vec();
         let identity_pub = to_sec1_uncompressed(&identity_raw);
 
-        let serial = client.device_info().map(|i| i.serial_number.to_string()).unwrap_or_default();
+        // The serial is part of the device's `hsm_id`, which every v2 blob
+        // binds, so an unreadable serial is an error rather than "".
+        let serial = client.device_info().map(|i| i.serial_number.to_string()).map_err(map_yubi)?;
 
         Ok(Self { client: Mutex::new(client), objects: config.objects, serial, authz_pub, identity_pub })
     }
@@ -113,18 +115,18 @@ impl HsmBackend for YubiHsm2Backend {
     }
 
     async fn wrap_data(&self, key: HsmObjectId, ctx: &Context, plaintext: &[u8]) -> Result<Vec<u8>, RvError> {
-        let aad = BlobAad::from_context(ctx, self.authz_fingerprint()?);
+        let device = self.device_binding()?;
         let client = self.client()?;
-        seal_blob("yubihsm2", key, aad, plaintext, |inner| {
+        seal_blob("yubihsm2", key, ctx, &device, plaintext, |inner| {
             let msg = client.wrap_data(key, inner.to_vec()).map_err(map_yubi)?;
             Ok(msg.into_vec())
         })
     }
 
     async fn unwrap_data(&self, key: HsmObjectId, ctx: &Context, wrapped: &[u8]) -> Result<Zeroizing<Vec<u8>>, RvError> {
-        let expected = BlobAad::from_context(ctx, self.authz_fingerprint()?);
+        let device = self.device_binding()?;
         let client = self.client()?;
-        open_blob(wrapped, &expected, |w| {
+        open_blob(wrapped, ctx, &device, |w| {
             let msg = wrap::Message::from_vec(w.to_vec()).map_err(|_| RvError::ErrHsmBlobInvalid)?;
             let pt = client.unwrap_data(key, msg).map_err(map_yubi)?;
             Ok(Zeroizing::new(pt))

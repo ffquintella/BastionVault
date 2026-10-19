@@ -22,8 +22,10 @@ use crate::errors::RvError;
 
 pub mod authz;
 pub mod blob;
+pub mod blobset;
 pub mod context;
 pub mod custody;
+pub mod custody_store;
 pub mod derive;
 pub mod enroll;
 pub mod replicate;
@@ -33,7 +35,11 @@ pub mod mock;
 #[cfg(feature = "hsm_yubihsm2")]
 pub mod yubihsm2;
 
-pub use blob::{BlobAad, BvHsmBlob, Context, Purpose, BV_HSM_BLOB_VERSION};
+pub use blob::{
+    AuthzAlg, BlobAad, BvHsmBlob, Context, DeviceBinding, HsmId, Purpose, BV_HSM_BLOB_VERSION, BV_HSM_BLOB_VERSION_V1,
+};
+pub use blobset::BvHsmBlobSet;
+pub use custody_store::{BvHsmHandle, CustodyStore};
 
 /// A YubiHSM 2 object identifier (the device uses 16-bit ids).
 pub type HsmObjectId = u16;
@@ -78,12 +84,28 @@ pub trait HsmBackend: Send + Sync {
         Ok(authz_fingerprint_of(&self.authz_public_key()?))
     }
 
+    /// `<backend_type>:<serial>`, the device identity bound into v2 blobs.
+    /// Fails, rather than inventing an id, when the serial is unknown.
+    fn hsm_id(&self) -> Result<HsmId, RvError> {
+        HsmId::from_parts(self.backend_type(), &self.device_serial())
+    }
+
+    /// Algorithm of the `bv-authz` key. Both backends sign with Ed25519.
+    fn authz_alg(&self) -> AuthzAlg {
+        AuthzAlg::Ed25519
+    }
+
+    /// Everything a v2 blob AAD binds about this device.
+    fn device_binding(&self) -> Result<DeviceBinding, RvError> {
+        Ok(DeviceBinding { hsm_id: self.hsm_id()?, authz_alg: self.authz_alg(), authz_fp: self.authz_fingerprint()? })
+    }
+
     /// AES-CCM wrap of `plaintext` under the HSM-resident wrap key `key`,
-    /// producing a serialized [`BvHsmBlob`] bound to `ctx`.
+    /// producing a serialized v2 [`BvHsmBlob`] bound to `ctx` and this device.
     async fn wrap_data(&self, key: HsmObjectId, ctx: &Context, plaintext: &[u8]) -> Result<Vec<u8>, RvError>;
 
-    /// AES-CCM unwrap of a serialized [`BvHsmBlob`], enforcing that its AAD
-    /// matches `ctx` (and the local `bv-authz` fingerprint).
+    /// AES-CCM unwrap of a serialized [`BvHsmBlob`] (v1 or v2), enforcing that
+    /// its AAD matches `ctx` and this device ([`blob::open_blob`]).
     async fn unwrap_data(&self, key: HsmObjectId, ctx: &Context, wrapped: &[u8]) -> Result<Zeroizing<Vec<u8>>, RvError>;
 
     /// Signature with an HSM-resident key. The object type selects the
@@ -101,8 +123,9 @@ pub trait HsmBackend: Send + Sync {
     /// attested key. The mock simulates this with a test CA.
     async fn verify_attestation(&self, cert_chain: &[u8]) -> Result<AttestedKey, RvError>;
 
-    /// ECDH between the HSM-resident `bv-identity` private key and a peer
-    /// P-256 public key (SEC1-uncompressed). Result is the raw shared X coord.
+    /// ECDH between the HSM-resident P-256 key `key` (`bv-identity` in the
+    /// per-node topology) and a peer SEC1-uncompressed public key. Result is
+    /// the raw shared X coordinate.
     async fn derive_ecdh(&self, key: HsmObjectId, peer_pub: &[u8]) -> Result<Zeroizing<Vec<u8>>, RvError>;
 
     /// Hardware randomness. Augments, never replaces, the host CSPRNG (rule 3).
@@ -295,6 +318,7 @@ pub fn resolve_config(label: &str, raw: &HsmConfigBlock) -> Result<ResolvedHsmCo
     } else {
         raw.node_id.clone()
     };
+    validate_node_id(&node_id)?;
 
     Ok(ResolvedHsmConfig {
         backend_type,
@@ -307,6 +331,21 @@ pub fn resolve_config(label: &str, raw: &HsmConfigBlock) -> Result<ResolvedHsmCo
         state_path: raw.state_path.clone(),
         node_id,
     })
+}
+
+/// Longest node id accepted; generous for FQDN-style ids.
+const MAX_NODE_ID_LEN: usize = 128;
+
+/// A node id names the per-node authz counter key
+/// (`core/hsm-authz-counter/<node_id>`), so it must be one safe path segment.
+pub fn validate_node_id(node_id: &str) -> Result<(), RvError> {
+    let ok_chars = node_id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+    if node_id.is_empty() || node_id.len() > MAX_NODE_ID_LEN || !ok_chars || node_id == "." || node_id == ".." {
+        return Err(RvError::ErrHsmConfigInvalid(format!(
+            "HSM node_id {node_id:?} must be 1-{MAX_NODE_ID_LEN} characters of [A-Za-z0-9._-] and not \".\" or \"..\""
+        )));
+    }
+    Ok(())
 }
 
 fn hostname_or(fallback: &str) -> String {
@@ -391,6 +430,18 @@ mod tests {
     fn resolve_yubihsm_requires_password() {
         let raw = HsmConfigBlock::default();
         assert!(resolve_config("yubihsm2", &raw).is_err());
+    }
+
+    #[test]
+    fn resolve_rejects_node_ids_that_are_not_one_path_segment() {
+        for bad in ["a/b", "..", ".", "n 1", "x\\y", "\u{0}", "a:b"] {
+            let raw = HsmConfigBlock { node_id: bad.into(), ..Default::default() };
+            assert!(resolve_config("mock", &raw).is_err(), "{bad:?} must be rejected");
+        }
+        for good in ["vault-3", "node.example.com", "n_1"] {
+            let raw = HsmConfigBlock { node_id: good.into(), ..Default::default() };
+            assert!(resolve_config("mock", &raw).is_ok(), "{good:?} must be accepted");
+        }
     }
 
     #[test]

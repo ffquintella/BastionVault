@@ -27,6 +27,13 @@ pub trait SealProvider: Send + Sync {
     /// Whether unseal needs operator-supplied shares. `false` ⇒ auto-unseal.
     fn requires_shares(&self) -> bool;
 
+    /// Refuse an init this provider cannot honour. Called by `Core::init`
+    /// before anything is written, because a failure in [`Self::init_kek`]
+    /// comes after the barrier is initialized.
+    async fn check_init(&self, _seal_config: &SealConfig) -> Result<(), RvError> {
+        Ok(())
+    }
+
     /// Persist whatever recovery material this provider needs for the freshly
     /// generated `kek`, and return the shares to hand back to the operator
     /// (empty for auto-unseal providers).

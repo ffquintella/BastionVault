@@ -1,6 +1,7 @@
 # Feature: HSM Pool HA — an N-node cluster served by two YubiHSM 2 devices
 
-> Status: **planned** (T454). Spec written 2026-10-19. Extends
+> Status: **in progress** (T454) — phase 1 of 7 (formats and custody core) done
+> 2026-10-19; see [Current state](#current-state). Spec written 2026-10-19. Extends
 > [HSM Support (YubiHSM 2)](hsm-support.md) (S17), whose non-negotiable security
 > rules apply here unchanged unless a section below says otherwise and why.
 
@@ -861,17 +862,75 @@ Metrics:
 
 ---
 
+## Current state
+
+Phase 1 (formats and custody core) is implemented in `bv-core` and tested with the
+mock backend. Nothing is pool-capable yet: there is no `topology = "pool"` config,
+and a seal record with `topology = pool` is refused at unseal with an explicit error.
+
+- **Blob v2** (`crates/bv-core/src/hsm/blob.rs`). The AAD binds `hsm_id` and
+  `authz_alg`; `HsmBackend::hsm_id()` / `device_binding()` supply them from the
+  device. Every new wrap is v2; v1 still opens. A v2 blob for another `hsm_id` is
+  refused before the device is called. The YubiHSM 2 backend now fails to open if
+  it cannot read the device serial, because the serial is part of `hsm_id`.
+- **Blob set v1** (`hsm/blobset.rs`). Copies are keyed by `hsm_id` and must be v2,
+  bound to their key, with the set's purpose and epoch. Duplicate map keys are
+  rejected, not shadowed. The `recovery` envelope is structurally validated and
+  never written yet.
+- **Seal record v2** (`crates/bv-core/src/seal/hsm/record.rs`). v1 loads as
+  `per-node` with `legacy_node_blobs` (byte-for-byte), and the first write produces
+  v2. Unsealing does not write. A fresh per-node init stores the KEK as a one-copy
+  v2 set. Fixture: `crates/bv-core/src/seal/testdata/hsm-seal-v1/`, captured from
+  the pre-T454 code.
+- **Per-node authz counters** at `core/hsm-authz-counter/<node_id>`, seeded above
+  the legacy global key, which is left in place. A non-decimal counter is an error
+  (the old code silently reset it to 0). `node_id` must be 1–128 characters of
+  `[A-Za-z0-9._-]`, because it names this key.
+- **Recovery.** Per-node + `recovery = "shamir-ceremony"` is refused at init, through
+  a new `SealProvider::check_init` that `Core::init` calls before anything is
+  written. An already-initialized cluster with that config keeps starting, logs at
+  `error` on every unseal, and status reports `recovery_requested` /
+  `recovery_configured: false`.
+- **Custody store** (`hsm/custody_store.rs`). `BvHsmHandle { version: 1, key_id }`;
+  `create`, `with_private`, `delete` and `replication_report` over
+  `core/hsm/custody/<key_id>` in the barrier. Writes take the `hsm-custody` lock;
+  use goes through the session cache that `custody.rs` used to own. The
+  `custody.rs` providers take handles, and `derive.rs` takes the ECDH key id.
+
+Decisions made in phase 1 where this spec left room:
+
+- `kek` is optional in the v2 record: a record converted from v1 has no v2 copy,
+  only `legacy_node_blobs`, and a set with no copies is invalid.
+- The custody API is `create(kind: PqcKeyKind)`, not `create(purpose, alg)`: the
+  pair admits invalid combinations such as `BarrierKek` + ML-KEM-768.
+- A custody record also stores its `key_id` (a record copied to another key is
+  refused) and the public key (every use checks that the unwrapped seed derives it).
+- Per-node unseal picks exactly one copy: the v2 copy for this device, else this
+  node's legacy v1 blob. A failure on that copy is not retried on the other.
+- PQC custody unwraps keep the process-local authorization counter they had
+  before; only the barrier unwrap uses the persisted per-node counter.
+
+Not done in phase 1, deliberately:
+
+- No writer of the seal record takes `hsm-custody` yet: the only writer is init,
+  which writes a fresh record. Phase 4's read-modify-write writers must.
+- The startup gate "pool topology only on hiqlite or single-node `file`" is left to
+  phase 2, which introduces the pool topology it gates.
+- `Storage::lock` returns a non-`Send` guard, so custody `create` / `delete`
+  futures are not `Send` and cannot be called from an HTTP handler until
+  `bv-storage` makes the guard `Send`.
+
 ## Implementation phases
 
-| Phase | Scope | Main files |
-|---|---|---|
-| 1. Formats and custody core | `BvHsmBlob` v2, `BvHsmBlobSet`, seal record v2 + v1 reader, per-node authz counters, custody store and handles. Mock only. | `crates/bv-core/src/hsm/{blob,blobset,custody_store}.rs`, `crates/bv-core/src/seal/hsm.rs` |
-| 2. Pool backend | `HsmPool`: members, preference, failover, health probe, circuit breaker, parallel wrap, `min_wrap_copies`. Mock enforces the 16-session limit and `SESSIONS_FULL`. | `crates/bv-core/src/hsm/{pool,mock,yubihsm2,mod}.rs` |
-| 3. HSM link | `bv-hsm-link` crate (gateway + relay), `bvault hsm-gateway` | `crates/bv-hsm-link/`, `crates/bvault-cli` |
-| 4. Ceremonies and repair | `provision`, attestation chain pinning, node enroll/revoke with credential delivery, member add/retire, repair job, epoch rotation, `migrate-to-pool`, v2 routes, CLI | `crates/bv-core/src/hsm/{enroll,ceremony,repair,attest}.rs`, `crates/bv-kernel/src/modules/system/`, `crates/bvault-cli` |
-| 5. Recovery | Recovery keypair, Shamir split, recovery copies, `recover` route | `crates/bv-core/src/hsm/recovery.rs` |
-| 6. Audit and observability | Device-log drain, events, metrics, status, GUI page, `docs/hsm.md`, `docs/api.md` | `crates/bv-core/src/hsm/device_audit.rs`, `gui/src/routes/HsmStatusPage.tsx` |
-| 7. Hardware validation | Two physical devices plus three nodes; measure latencies; confirm the FIPS Ed25519 question | `tests/` behind `BVAULT_TEST_YUBIHSM_POOL=1` |
+| Phase | Scope | Main files | Status |
+|---|---|---|---|
+| 1. Formats and custody core | `BvHsmBlob` v2, `BvHsmBlobSet`, seal record v2 + v1 reader, per-node authz counters, custody store and handles. Mock only. | `crates/bv-core/src/hsm/{blob,blobset,custody_store}.rs`, `crates/bv-core/src/seal/hsm.rs`, `crates/bv-core/src/seal/hsm/record.rs` | Done |
+| 2. Pool backend | `HsmPool`: members, preference, failover, health probe, circuit breaker, parallel wrap, `min_wrap_copies`. Mock enforces the 16-session limit and `SESSIONS_FULL`. | `crates/bv-core/src/hsm/{pool,mock,yubihsm2,mod}.rs` | Planned |
+| 3. HSM link | `bv-hsm-link` crate (gateway + relay), `bvault hsm-gateway` | `crates/bv-hsm-link/`, `crates/bvault-cli` | Planned |
+| 4. Ceremonies and repair | `provision`, attestation chain pinning, node enroll/revoke with credential delivery, member add/retire, repair job, epoch rotation, `migrate-to-pool`, v2 routes, CLI | `crates/bv-core/src/hsm/{enroll,ceremony,repair,attest}.rs`, `crates/bv-kernel/src/modules/system/`, `crates/bvault-cli` | Planned |
+| 5. Recovery | Recovery keypair, Shamir split, recovery copies, `recover` route | `crates/bv-core/src/hsm/recovery.rs` | Planned |
+| 6. Audit and observability | Device-log drain, events, metrics, status, GUI page, `docs/hsm.md`, `docs/api.md` | `crates/bv-core/src/hsm/device_audit.rs`, `gui/src/routes/HsmStatusPage.tsx` | Planned |
+| 7. Hardware validation | Two physical devices plus three nodes; measure latencies; confirm the FIPS Ed25519 question | `tests/` behind `BVAULT_TEST_YUBIHSM_POOL=1` | Planned |
 
 **What happens to the existing modules:**
 

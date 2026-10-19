@@ -120,17 +120,30 @@ HSM seal response:
   "auto_unseal": true,
   "backend": "yubihsm2",
   "device_serial": "0012345678",
+  "hsm_id": "yubihsm2:0012345678",
   "node_id": "node-a",
   "cluster_uuid": "…",
   "epoch": 0,
+  "topology": "per-node",
   "enrolled_nodes": 3,
   "this_node_enrolled": true,
   "recovery": "none",
+  "recovery_requested": "none",
+  "recovery_configured": false,
+  "seal_record_version": 2,
   "pqc_key_cache_ttl_secs": 60,
   "sealed": false,
   "initialized": true
 }
 ~~~
+
+- `topology` — `per-node` (one device per node) or `pool` (two shared devices,
+  [HSM pool HA](../features/hsm-pool-ha.md); not yet unsealable by this build).
+- `recovery_requested` — the `recovery` value in config (`recovery` is the same
+  value, kept for older clients). `recovery_configured` is `true` only when the
+  seal record holds a recovery key; it is never inferred from config.
+- `seal_record_version` — `1` for a record written before T454 and not yet
+  rewritten, `2` otherwise; `null` before init.
 
 CLI equivalent: `bvault operator hsm status`.
 

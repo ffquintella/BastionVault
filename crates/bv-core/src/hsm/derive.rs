@@ -8,7 +8,7 @@
 //! 1. **Fresh host entropy** — `OsRng(64)` (rule 3, mandatory, never optional).
 //! 2. **HSM randomness** — `get_random(32)` from the local device (augments,
 //!    never replaces, the host CSPRNG).
-//! 3. **Classical HSM contribution** — `derive_ecdh(bv-identity, binding_pub)`,
+//! 3. **Classical HSM contribution** — `derive_ecdh(<ecdh key>, binding_pub)`,
 //!    a secret computable only inside an enrolled HSM. It is an *additional*
 //!    input, never the sole one (rule 1): a quantum adversary who breaks the
 //!    ECDH still cannot reconstruct the seed without the host entropy.
@@ -26,7 +26,7 @@ use crate::{
     errors::RvError,
     hsm::{
         blob::{Context, Purpose},
-        context, HsmBackend, ResolvedHsmConfig,
+        context, HsmBackend, HsmObjectId, ResolvedHsmConfig,
     },
 };
 
@@ -38,21 +38,30 @@ pub enum PqcKeyKind {
 }
 
 impl PqcKeyKind {
-    fn seed_len(&self) -> usize {
+    pub fn seed_len(&self) -> usize {
         match self {
             PqcKeyKind::MlKem768 => ML_KEM_768_SEED_LEN,
             PqcKeyKind::MlDsa65 => ML_DSA_65_SEED_LEN,
         }
     }
 
-    fn purpose(&self) -> Purpose {
+    pub fn purpose(&self) -> Purpose {
         match self {
             PqcKeyKind::MlKem768 => Purpose::PqcKemSeed,
             PqcKeyKind::MlDsa65 => Purpose::PqcSigSeed,
         }
     }
 
-    fn seed_context(&self, cluster_uuid: &str, epoch: u64) -> String {
+    /// The key family a seed purpose belongs to; `None` for non-seed purposes.
+    pub fn from_purpose(purpose: Purpose) -> Option<Self> {
+        match purpose {
+            Purpose::PqcKemSeed => Some(PqcKeyKind::MlKem768),
+            Purpose::PqcSigSeed => Some(PqcKeyKind::MlDsa65),
+            Purpose::BarrierKek | Purpose::ReplicationChannel => None,
+        }
+    }
+
+    pub fn seed_context(&self, cluster_uuid: &str, epoch: u64) -> String {
         match self {
             PqcKeyKind::MlKem768 => context::pqc_kem_seed(cluster_uuid, epoch),
             PqcKeyKind::MlDsa65 => context::pqc_sig_seed(cluster_uuid, epoch),
@@ -87,15 +96,15 @@ pub fn derive_pqc_seed(
 pub struct GeneratedPqcKey {
     pub kind: PqcKeyKind,
     pub public_key: Vec<u8>,
-    /// Serialized `BvHsmBlob` wrapping the seed under `bv-wrap-pqc`.
+    /// Serialized v2 `BvHsmBlob` wrapping the seed under `bv-wrap-pqc`.
     pub wrapped_seed: Vec<u8>,
 }
 
 /// Generate a PQC key under hybrid custody: gather the three entropy inputs,
 /// derive the seed, publish the public key, wrap the seed, and zeroize all
 /// intermediate material. `binding_pub` is the cluster ECDH binding point
-/// (SEC1-uncompressed P-256), typically the bootstrap node's `bv-identity`
-/// public key from the custody root.
+/// (SEC1-uncompressed P-256). `ecdh_key` is the device key that contributes
+/// the ECDH input: `bv-identity` per node, `bv-seed-ecdh` in a pool (T454).
 #[maybe_async::maybe_async]
 pub async fn generate_pqc_key(
     backend: &dyn HsmBackend,
@@ -104,6 +113,7 @@ pub async fn generate_pqc_key(
     epoch: u64,
     kind: PqcKeyKind,
     binding_pub: &[u8],
+    ecdh_key: HsmObjectId,
 ) -> Result<GeneratedPqcKey, RvError> {
     // 1. Fresh host entropy (mandatory).
     let mut e_host = Zeroizing::new(vec![0u8; 64]);
@@ -111,7 +121,7 @@ pub async fn generate_pqc_key(
     // 2. HSM randomness.
     let e_hsm = backend.get_random(32).await?;
     // 3. Classical HSM ECDH contribution (only computable inside the device).
-    let s_ecdh = backend.derive_ecdh(config.objects.identity, binding_pub).await?;
+    let s_ecdh = backend.derive_ecdh(ecdh_key, binding_pub).await?;
 
     let seed_context = kind.seed_context(cluster_uuid, epoch);
     let seed = derive_pqc_seed(&e_host, &e_hsm, &s_ecdh, cluster_uuid, &seed_context, kind.seed_len())?;

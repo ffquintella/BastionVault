@@ -86,6 +86,11 @@ sha2 = "0.11"
 # `bv-storage`'s. Same crate as the normal dependency; the extra feature is
 # dev-only so a release build never compiles the fixtures.
 bv-storage = { path = "../bv-storage", features = ["test-support"] }
+# The HSM seal and custody tests (`--features hsm_mock`) are async and run on
+# `#[tokio::test]` through `maybe_async::test`. Without this they did not
+# compile at all, so nothing ran them. Already in the graph through bv-errors
+# with these features, so it adds no compile cost.
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
 
 [features]
 default = []

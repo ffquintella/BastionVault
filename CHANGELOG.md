@@ -62,6 +62,22 @@ EXAMPLE ENTRY:
 
 - Close the HSM seal task: auto-unseal, hybrid PQC key custody, cluster enrollment and replication (mock-validated), `v2/sys/hsm/status` and the GUI HSM / Seal page are all shipped (T17)
 
+#### HSM pool HA (phase 1 of 7)
+
+- Store HSM-wrapped keys in the pool-ready formats: blobs bound to the HSM device (`hsm_id`) instead of the node, so any node can open a copy through the same device; per-device blob sets; a v2 seal record that still unseals v1 records and converts them on the first write; per-node unwrap counters started above the old cluster-wide one; and a barrier-protected custody store that hands engines opaque key handles. `v2/sys/hsm/status` adds `hsm_id`, `topology`, `recovery_requested`, `recovery_configured` and `seal_record_version`. A vault initialized by this build cannot be unsealed by an older one (T454, S114)
+
+### Fixed
+
+#### HSM seal
+
+- Refuse `recovery = "shamir-ceremony"` at `operator init` with the per-node HSM seal, which generated no recovery key and returned no shares while only logging a warning; an already-initialized cluster with that setting keeps starting, logs an error on every start, and reports `recovery_configured: false` (T454, S114)
+
+### Security
+
+#### HSM seal
+
+- Fail closed on a corrupt HSM unwrap counter instead of silently restarting it at 0, refuse to open a YubiHSM 2 whose serial cannot be read, and require the HSM `node_id` to be 1–128 characters of `[A-Za-z0-9._-]`, since it now names a storage key (T454, S114)
+
 ### Postponed
 
 - Postpone the networked HSM enroll / rotate-epoch handshake and Yubico attestation root-CA pinning to the backlog: both need real hardware or a live cluster to validate, and the pool topology (T454) removes the need for the per-node HSM-to-HSM channel (T456)

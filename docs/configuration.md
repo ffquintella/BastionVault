@@ -242,9 +242,9 @@ hsm "yubihsm2" {
 | `password` | | (yubihsm2) Auth credential; `env:VAR` supported, plaintext rejected. |
 | `domains` | `[1]` | (yubihsm2) YubiHSM domains for BastionVault objects. |
 | `state_path` | *(ephemeral)* | (mock) File backing the mock object store. |
-| `node_id` | `$HOSTNAME` | Node identity for context strings / per-node keys. |
+| `node_id` | `$HOSTNAME` | Node identity for context strings / per-node keys. 1–128 characters of `[A-Za-z0-9._-]`. |
 | `pqc_key_cache_ttl` | `60s` | Unwrapped-seed cache TTL; `0` disables caching. |
-| `recovery` | `none` | `none` or `shamir-ceremony` (init-time only). |
+| `recovery` | `none` | `none` or `shamir-ceremony` (init-time only). `shamir-ceremony` is refused at `init` in the per-node topology; see [docs/hsm.md](hsm.md#recovery-modes). |
 
 > The mock backend has no hardware protection and refuses to start when
 > `BVAULT_ENV=production`. See the [HSM guide](hsm.md) for the full workflow.

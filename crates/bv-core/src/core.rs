@@ -386,6 +386,9 @@ impl Core {
         }
 
         seal_config.validate()?;
+        // Before the first write: a provider refusal after `barrier.init`
+        // would leave an initialized barrier whose KEK nobody holds.
+        self.seal_provider().check_init(seal_config).await?;
 
         // Encode the seal configuration
         let serialized_seal_config = serde_json::to_string(seal_config)?;

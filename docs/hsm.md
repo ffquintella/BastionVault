@@ -136,17 +136,22 @@ operator-unseal.
 | `password` | yubihsm2 | Yes | — | Auth credential. Supports `env:VAR`; plaintext is rejected. |
 | `domains` | yubihsm2 | No | `[1]` | YubiHSM domains for BastionVault objects. |
 | `state_path` | mock | No | *(ephemeral)* | File backing the mock object store. Empty ⇒ in-memory only. |
-| `node_id` | both | No | `$HOSTNAME` | Stable node identity used in context strings and per-node key routing. Set explicitly in clusters. |
+| `node_id` | both | No | `$HOSTNAME` | Stable node identity used in context strings and per-node key routing. Set explicitly in clusters. 1–128 characters of `[A-Za-z0-9._-]` (it names the node's unwrap-counter key). |
 | `pqc_key_cache_ttl` | both | No | `60s` | TTL for the unwrapped-seed session cache. `0` disables caching (strict per-operation unwrap). |
-| `recovery` | both | No | `none` | `none` or `shamir-ceremony`. **Honored only at `init`; cannot be enabled later.** |
+| `recovery` | both | No | `none` | `none` or `shamir-ceremony`. **Honored only at `init`; cannot be enabled later.** `shamir-ceremony` is refused at `init` in the per-node topology (see below). |
 
 ### Recovery modes
 
 - `recovery = "none"` (default) — no software escrow. If every cluster HSM is
   lost, the vault is unrecoverable. This is the documented, intended guarantee.
-- `recovery = "shamir-ceremony"` — at `init` only, a recovery wrapping key is
-  generated and Shamir-split; store the shares offline. Opt in only if you
-  accept a software recovery path.
+- `recovery = "shamir-ceremony"` — **not available in the per-node topology.**
+  Earlier builds accepted it, logged a warning, and generated no recovery key
+  and no shares. `operator init` now refuses it with an error naming
+  [HSM pool HA](../features/hsm-pool-ha.md#recovery-shamir-ceremony), where the
+  recovery copy is defined (T454). A per-node cluster that was initialized
+  with it keeps starting, logs an `error` on every start, and reports
+  `recovery_requested: "shamir-ceremony"`, `recovery_configured: false` in
+  `v2/sys/hsm/status`. No recovery exists for it; treat it as `none`.
 
 ### Per-node HSM objects
 
@@ -179,9 +184,24 @@ or over HTTP:
 GET /v2/sys/hsm/status
 ```
 
-Returns the active seal type and, for an HSM seal, the backend, device serial,
-cluster epoch, enrolled-node count, recovery posture, and cache TTL. Read-only;
-never returns secret material. See the [API reference](api.md#hsm-seal-status).
+Returns the active seal type and, for an HSM seal, the backend, device serial
+and `hsm_id`, cluster epoch, topology, enrolled-node count, the recovery mode
+requested in config and whether a recovery key actually exists, the stored
+seal-record version, and the cache TTL. Read-only; never returns secret
+material. See the [API reference](api.md#hsm-seal-status).
+
+### Upgrading to the T454 formats
+
+- **Seal record.** A record written before T454 (`seal_record_version: 1`)
+  keeps unsealing; it is read as `topology = per-node` and converted to v2 by
+  the first write. Unsealing does not write it. A vault initialized by this
+  build has a v2 record, and an older build cannot unseal it.
+- **Blobs.** New blobs bind the device (`hsm_id`) instead of the node, so any
+  node can open a copy through the same device. Old node-bound blobs still open.
+- **Unwrap counters.** Each node now keeps its own counter at
+  `core/hsm-authz-counter/<node_id>`, started above the old cluster-wide
+  `core/hsm-authz-counter`, which is left in place and no longer written. A
+  counter that is not a decimal integer is an error, not a reset to 0.
 
 ### Clustering
 

@@ -22,7 +22,7 @@ use zeroize::Zeroizing;
 use crate::{
     errors::RvError,
     hsm::{
-        blob::{open_blob, seal_blob, BlobAad, Context},
+        blob::{open_blob, seal_blob, Context},
         domain_separated, AttestedKey, HsmBackend, HsmObjectId, HsmObjectIds, ResolvedHsmConfig,
     },
 };
@@ -137,14 +137,14 @@ impl HsmBackend for MockHsmBackend {
 
     async fn wrap_data(&self, key: HsmObjectId, ctx: &Context, plaintext: &[u8]) -> Result<Vec<u8>, RvError> {
         let material = self.wrap_material(key)?;
-        let aad = BlobAad::from_context(ctx, self.authz_fingerprint()?);
-        seal_blob("mock", key, aad, plaintext, |inner| aes256_gcm_seal(&material, inner))
+        let device = self.device_binding()?;
+        seal_blob("mock", key, ctx, &device, plaintext, |inner| aes256_gcm_seal(&material, inner))
     }
 
     async fn unwrap_data(&self, key: HsmObjectId, ctx: &Context, wrapped: &[u8]) -> Result<Zeroizing<Vec<u8>>, RvError> {
         let material = self.wrap_material(key)?;
-        let expected = BlobAad::from_context(ctx, self.authz_fingerprint()?);
-        open_blob(wrapped, &expected, |w| aes256_gcm_open(&material, w))
+        let device = self.device_binding()?;
+        open_blob(wrapped, ctx, &device, |w| aes256_gcm_open(&material, w))
     }
 
     async fn sign(&self, key: HsmObjectId, ctx: &str, msg: &[u8]) -> Result<Vec<u8>, RvError> {
@@ -418,6 +418,32 @@ mod tests {
         let wrong_ctx = Context::new(context::barrier_kek("other-cluster"), Purpose::BarrierKek, 0, "n1");
         assert_eq!(
             hsm.unwrap_data(hsm.objects.wrap_barrier, &wrong_ctx, &blob).await.unwrap_err(),
+            RvError::ErrHsmContextMismatch
+        );
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn new_blobs_are_v2_and_open_for_any_node_on_the_same_device() {
+        let hsm = MockHsmBackend::open(&test_config("n1")).await.unwrap();
+        let ctx = Context::new(context::barrier_kek("clu"), Purpose::BarrierKek, 0, "n1");
+        let blob = hsm.wrap_data(hsm.objects.wrap_barrier, &ctx, b"kek").await.unwrap();
+        let parsed = crate::hsm::BvHsmBlob::from_bytes(&blob).unwrap();
+        assert_eq!(parsed.version(), crate::hsm::BV_HSM_BLOB_VERSION);
+        assert_eq!(parsed.aad.hsm_id(), Some(&hsm.hsm_id().unwrap()));
+        // Node n2 opens n1's copy through the same device: v2 binds the device.
+        let as_n2 = Context::new(context::barrier_kek("clu"), Purpose::BarrierKek, 0, "n2");
+        assert_eq!(hsm.unwrap_data(hsm.objects.wrap_barrier, &as_n2, &blob).await.unwrap().as_slice(), b"kek");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn v2_blob_is_refused_by_another_device() {
+        let a = MockHsmBackend::open(&test_config("n1")).await.unwrap();
+        let b = MockHsmBackend::open(&test_config("n1")).await.unwrap();
+        assert_ne!(a.hsm_id().unwrap(), b.hsm_id().unwrap());
+        let ctx = Context::new(context::barrier_kek("clu"), Purpose::BarrierKek, 0, "n1");
+        let blob = a.wrap_data(a.objects.wrap_barrier, &ctx, b"kek").await.unwrap();
+        assert_eq!(
+            b.unwrap_data(b.objects.wrap_barrier, &ctx, &blob).await.unwrap_err(),
             RvError::ErrHsmContextMismatch
         );
     }

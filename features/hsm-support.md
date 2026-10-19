@@ -9,7 +9,10 @@ Because the YubiHSM 2 has no native ML-KEM / ML-DSA support, post-quantum keys u
 > **Second topology (planned):** [HSM Pool HA](hsm-pool-ha.md) (S114, T454) lets a
 > cluster of up to 12 nodes run on exactly two YubiHSM 2 devices reached over an
 > mTLS gateway, instead of one device per node. The per-node topology below is
-> unchanged.
+> unchanged, except for these T454 phase 1 changes: new blobs are v2 (bound to
+> the device's `hsm_id`, not the node), the seal record is v2 (v1 still loads),
+> unwrap counters are per node, and `recovery = "shamir-ceremony"` is refused at
+> `init` because the per-node topology never generated a recovery key.
 
 ## Implementation Status
 
@@ -168,7 +171,7 @@ The HSM holds `bv-wrap-barrier-<node>`, which protects the KEK at rest. On start
 1. Operator configures the `hsm "yubihsm2"` (or `"mock"`) seal in the config file.
 2. `Core::init()` generates the KEK as before.
 3. The KEK is wrapped via `wrap_data(bv-wrap-barrier, ctx_barrier, kek)` and the blob stored at `core/seal-config`. The plaintext KEK is zeroized.
-4. **No software recovery copy is created by default** (rule 6). If the operator explicitly sets `recovery = "shamir-ceremony"` at init, a recovery wrapping key is generated, Shamir-split M-of-N, and the shares must be stored offline; the spec default is `recovery = "none"`, meaning loss of all cluster HSMs makes the vault unrecoverable — this is the intended guarantee, and init prints an explicit warning either way.
+4. **No software recovery copy is created by default** (rule 6). If the operator explicitly sets `recovery = "shamir-ceremony"` at init, a recovery wrapping key is generated, Shamir-split M-of-N, and the shares must be stored offline (*not implemented for the per-node topology: init refuses it since T454 phase 1; the recovery copy is specified in [HSM Pool HA](hsm-pool-ha.md#recovery-shamir-ceremony)*); the spec default is `recovery = "none"`, meaning loss of all cluster HSMs makes the vault unrecoverable — this is the intended guarantee, and init prints an explicit warning either way.
 
 **Auto-unseal (every startup):**
 1. Read the wrapped KEK blob for **this node** from storage (each node has its own blob, wrapped by its own HSM — see cluster section).
