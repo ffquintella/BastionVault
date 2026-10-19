@@ -1322,6 +1322,15 @@ that must still happen before the first release that ships `form` mode:
   use channels and are unaffected. The exclusion stays until upstream removes
   the exemption; any new `Channel` user must be added to the predicate, or
   the mitigation no longer holds.
+  **Decision (2026-10-19): wait for Tauri v3.** Checked tauri 2.12.0: the
+  exemption is still in `webview/mod.rs` with the same "Remove this special
+  check in v3" TODO, so a point upgrade does not help. The alternatives
+  (RDP frames over `emit_to` a single webview, or a per-session-token custom
+  URI scheme) were judged not worth the hot-path and isolation risk for now.
+  Tracked as T458 (blocked on the Tauri v3 release); a monthly scheduled task
+  watches for it. Operator-visible effect: closing the RDP session is needed
+  before opening a web one, and the reverse. When v3 ships, confirm the
+  exemption is gone, then remove `web_rdp_conflict` and its call sites.
 - **Per-platform `invoke`-rejected check: still pending (manual).** The
   rejection above is established from the 2.11.5 source and its upstream
   test, not by running `window.__TAURI_INTERNALS__.invoke(...)` from a web
