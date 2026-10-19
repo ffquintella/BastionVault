@@ -26,6 +26,8 @@ impl MetricsManager {
         cache_metrics().register(&mut registry.lock().unwrap());
         // FerroGate machine-auth counters (same singleton pattern).
         crate::ferrogate_metrics::ferrogate_metrics().register(&mut registry.lock().unwrap());
+        // HSM pool families (same singleton pattern; recorded by bv-core).
+        crate::hsm_metrics::hsm_metrics().register(&mut registry.lock().unwrap());
         MetricsManager { registry, system_metrics, http_metrics }
     }
 

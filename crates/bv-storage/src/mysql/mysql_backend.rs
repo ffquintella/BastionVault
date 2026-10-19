@@ -195,7 +195,7 @@ impl Backend for MysqlBackend {
         }
     }
 
-    async fn lock(&self, lock_name: &str) -> Result<Box<dyn Any>, RvError> {
+    async fn lock(&self, lock_name: &str) -> Result<Box<dyn Any + Send>, RvError> {
         Ok(Box::new(MysqlBackendLock::new(&self.pool, lock_name, 1)?))
     }
 }

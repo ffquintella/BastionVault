@@ -139,6 +139,7 @@ operator-unseal.
 | `node_id` | both | No | `$HOSTNAME` | Stable node identity used in context strings and per-node key routing. Set explicitly in clusters. 1–128 characters of `[A-Za-z0-9._-]` (it names the node's unwrap-counter key). |
 | `pqc_key_cache_ttl` | both | No | `60s` | TTL for the unwrapped-seed session cache. `0` disables caching (strict per-operation unwrap). |
 | `recovery` | both | No | `none` | `none` or `shamir-ceremony`. **Honored only at `init`; cannot be enabled later.** `shamir-ceremony` is refused at `init` in the per-node topology (see below). |
+| `topology` | both | No | `per-node` | `per-node` or `pool`. The pool keys (`member`, `min_wrap_copies`, `link`, `credential_dir`) are in [configuration.md](configuration.md#hsm-pool-topology-topology--pool); see [Pool topology](#pool-topology-two-devices-for-the-cluster). |
 
 ### Recovery modes
 
@@ -187,7 +188,9 @@ GET /v2/sys/hsm/status
 Returns the active seal type and, for an HSM seal, the backend, device serial
 and `hsm_id`, cluster epoch, topology, enrolled-node count, the recovery mode
 requested in config and whether a recovery key actually exists, the stored
-seal-record version, and the cache TTL. Read-only; never returns secret
+seal-record version, and the cache TTL. In the pool topology it lists each
+member (`state`, `up`, `serial`, `last_error`) with `min_wrap_copies` and
+`under_replicated_sets` instead of one device. Read-only; never returns secret
 material. See the [API reference](api.md#hsm-seal-status).
 
 ### Upgrading to the T454 formats
@@ -223,11 +226,55 @@ seeds) is stored **once per node**, each copy wrapped by that node's own HSM.
   nothing on its disk was decryptable without the old device. Recovery comes
   from its peers, not from any software escrow.
 
+### Pool topology (two devices for the cluster)
+
+`topology = "pool"` lets every node use the same two devices
+([HSM pool HA](../features/hsm-pool-ha.md), T454). This build implements the
+pool itself on the **mock** backend (phase 2 of 7); the network link to remote
+devices, node enrollment, repair and recovery come in later phases.
+
+- **Init** needs both members reachable and an explicit `recovery`. The KEK is
+  wrapped on each member at once and stored as a two-copy set in a v2 seal
+  record with `topology = pool` and both members `active`. `recovery =
+  "shamir-ceremony"` is refused until the recovery copy exists (phase 5).
+- **Unseal** tries the members in this node's preference order
+  (`SHA-256(node_id ‖ hsm_id)`, or `prefer = true`). On a member it takes a
+  fresh per-node counter, gets a signed unwrap authorization, checks it was
+  made by the `bv-authz` key the seal record pins for that member, and
+  unwraps. A transport, session or device failure moves on to the other
+  member. If no member answers, the node stays sealed with an error naming
+  each member; it never uses a recovery copy, a cache or a software path.
+- **Tampering is not an outage.** An AAD, authorization or MAC mismatch stops
+  the operation on that member and is **not** retried on the other one. It
+  raises `hsm.crypto_failure` on the `security` log target (the audit broker
+  is not up before unseal; audit delivery is phase 6) and counts in
+  `bv_hsm_session_errors_total{kind="crypto"}`.
+- **Circuit breaker.** Three consecutive transport failures mark a member down
+  (`hsm.member_down`, `bv_hsm_member_up{member}=0`). Operations skip it; it is
+  retried after 1 s, then 2, 4, … up to 60 s. A health probe (`device-info`)
+  runs every 10 s and brings it back (`hsm.member_up`). A member whose device
+  reports another serial than the record is `faulted` and stays down.
+- **`SESSIONS_FULL`.** A device holds 16 sessions. When it is full the node
+  backs off from that member for 100 ms → 5 s, with jitter, and uses the other
+  one. It is counted as `kind="sessions_full"`; it does not open the breaker.
+- **Key creation with one member down** stores one copy and reports the set
+  as under-replicated (`hsm.set_under_replicated`,
+  `bv_hsm_under_replicated_sets`), unless `min_wrap_copies = 2`, which refuses
+  it. Repairing those sets is phase 4.
+- **Storage.** Every blob-set and membership write takes the `hsm-custody`
+  lock, so the pool is accepted only on hiqlite or a single-node local `file`
+  backend.
+
+The mock pool is for dev and homolog. Its session limit is per process: two
+processes that open the same `state_path` are two devices as far as sessions go.
+
 ### Failure behavior (fail-closed)
 
 An unreachable or unenrolled HSM keeps the node **sealed** — it never opens the
 vault on a degraded device. Cluster HA covers single-node HSM failures; monitor
-HSM session errors so you can react before quorum is threatened.
+HSM session errors so you can react before quorum is threatened. In the pool
+topology, one member down is not an outage; both down keeps restarted nodes
+sealed while already-unsealed nodes keep serving barrier data.
 
 ---
 

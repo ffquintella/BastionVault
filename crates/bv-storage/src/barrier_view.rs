@@ -56,7 +56,7 @@ impl Storage for BarrierView {
             .collect())
     }
 
-    async fn lock(&self, lock_name: &str) -> Result<Box<dyn Any>, RvError> {
+    async fn lock(&self, lock_name: &str) -> Result<Box<dyn Any + Send>, RvError> {
         self.barrier.lock(lock_name).await
     }
 }

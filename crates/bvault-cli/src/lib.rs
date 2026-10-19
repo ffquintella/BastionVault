@@ -24,8 +24,8 @@ use sysexits::ExitCode;
 // resolves the `crate::<name>::` paths the moved files still use. Same alias
 // preamble the Phase 3 engine crates carry, two tiers up.
 use bastion_vault::{
-    api, backup, config, errors, exchange, hsm, kernel_api, logging, logical, metrics, modules,
-    plugins, seal, server_info, storage, utils,
+    api, backup, config, errors, exchange, kernel_api, logging, logical, metrics, modules, plugins,
+    seal, server_info, storage, utils,
 };
 
 // Re-exported rather than aliased: the call sites spell these `crate::VERSION`

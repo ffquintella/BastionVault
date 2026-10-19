@@ -1,13 +1,12 @@
-//! Central, barrier-protected HSM custody store (T454 phase 1).
+//! Central, barrier-protected HSM custody store (T454 phases 1–2).
 //!
 //! PQC seeds live as [`BvHsmBlobSet`]s at `core/hsm/custody/<key_id>` in the
 //! barrier keyspace; engines hold an opaque [`BvHsmHandle`], never a blob. All
-//! writes take the `hsm-custody` storage lock. Private-key use goes through the
-//! bounded session cache: unwrap, use, zeroize. Spec: `features/hsm-pool-ha.md`
-//! § PQC seeds and the custody store.
+//! writes take the `hsm-custody` storage lock. Seeds are wrapped on every pool
+//! member and unwrapped through failover; use goes through the bounded session
+//! cache. Spec: `features/hsm-pool-ha.md` § PQC seeds and the custody store.
 
 use std::{
-    collections::BTreeSet,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -16,6 +15,7 @@ use std::{
 };
 
 use bv_crypto::{KemKeypair, MlDsa65Keypair, MlDsa65Provider, MlKem768Provider};
+use bv_metrics::hsm_metrics::{hsm_metrics, UnderReplicatedScope};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -25,9 +25,11 @@ use crate::{
     errors::RvError,
     hsm::{
         authz::{self, UnwrapRequest},
-        blob::{BvHsmBlob, Context, HsmId},
+        blob::{Context, HsmId},
         blobset::{unix_now_secs, BvHsmBlobSet},
-        derive::{self, PqcKeyKind},
+        clock,
+        derive::{self, PqcKeyKind, PqcKeyMaterial},
+        pool::{HsmPool, LogEventSink, PoolMember, PoolMemberSpec},
         HsmBackend, HsmObjectId, ResolvedHsmConfig,
     },
     storage::{Storage, StorageEntry},
@@ -197,11 +199,11 @@ struct SeedCacheSlot {
     expires_at: Instant,
 }
 
-/// Custody store over one device. Phase 2 replaces the single backend with
-/// the HSM pool; the API and the persisted record stay as they are.
+/// Custody store over an [`HsmPool`]: the pool topology's two members, or a
+/// one-member pool for a per-node device. The persisted record is unchanged.
 pub struct CustodyStore {
     storage: Arc<dyn Storage>,
-    backend: Arc<dyn HsmBackend>,
+    pool: Arc<HsmPool>,
     config: ResolvedHsmConfig,
     scope: CustodyScope,
     ttl: Duration,
@@ -213,51 +215,83 @@ pub struct CustodyStore {
     counter: AtomicU64,
 }
 
-// TODO(T454 phase 2): `Storage::lock` returns a non-`Send` `Box<dyn Any>`, so
-// the futures of `create` and `delete`, which hold it across `.await`, are not
-// `Send` and cannot yet run from an HTTP handler. Make the guard `Send` in
-// `bv-storage` before wiring these into routes. The phase-2 startup gate (pool
-// topology only on hiqlite or single-node file storage) is not implemented
-// either: phase 1 has no pool topology to gate.
 #[maybe_async::maybe_async]
 impl CustodyStore {
+    /// A store over one per-node device (a one-member pool).
     /// `storage` must be the barrier (keys are `core/hsm/custody/...`).
     pub fn new(
         storage: Arc<dyn Storage>,
         backend: Arc<dyn HsmBackend>,
         config: ResolvedHsmConfig,
         scope: CustodyScope,
+    ) -> Result<Self, RvError> {
+        let hsm_id = backend.hsm_id()?;
+        let member = PoolMemberSpec { name: hsm_id.to_string(), hsm_id, prefer: false, device: Ok(backend) };
+        let pool = HsmPool::new(&config.node_id, vec![member], 1, clock::monotonic(), Arc::new(LogEventSink))?;
+        Ok(Self::with_pool(storage, Arc::new(pool), config, scope))
+    }
+
+    /// A store over `pool`, whose `min_wrap_copies` every new key must meet.
+    pub fn with_pool(
+        storage: Arc<dyn Storage>,
+        pool: Arc<HsmPool>,
+        config: ResolvedHsmConfig,
+        scope: CustodyScope,
     ) -> Self {
         let ttl = config.pqc_key_cache_ttl;
-        Self { storage, backend, config, scope, ttl, cache: Mutex::new(None), counter: AtomicU64::new(0) }
+        Self { storage, pool, config, scope, ttl, cache: Mutex::new(None), counter: AtomicU64::new(0) }
     }
 
-    /// Members a set must have a copy for. One device until the pool exists.
-    fn active_members(&self) -> Result<BTreeSet<HsmId>, RvError> {
-        Ok(BTreeSet::from([self.backend.hsm_id()?]))
+    /// Seed inputs (device randomness and ECDH) from the preferred reachable
+    /// member, failing over like a read. The ECDH result is consumed here once.
+    async fn derive_material(&self, kind: PqcKeyKind) -> Result<PqcKeyMaterial, RvError> {
+        let mut attempt = self.pool.read(|_| true);
+        while let Some(member) = attempt.next_member() {
+            let backend = member.backend()?;
+            let derived = derive::derive_pqc_key_material(
+                backend.as_ref(),
+                &self.scope.cluster_uuid,
+                self.scope.epoch,
+                kind,
+                &self.scope.binding_pub,
+                self.scope.ecdh_key,
+            )
+            .await;
+            match derived {
+                Ok(material) => {
+                    attempt.succeeded(member);
+                    return Ok(material);
+                }
+                Err(e) => attempt.failed(member, "derive seed", e)?,
+            }
+        }
+        Err(attempt.into_error("creating an HSM custody key"))
     }
 
-    /// Create a PQC key under custody. Returns its handle and public key.
+    /// Create a PQC key under custody. Returns its handle and public key. The
+    /// seed is wrapped on every reachable member; fewer than `min_wrap_copies`
+    /// copies is `ErrHsmInsufficientCopies` and nothing is stored.
     pub async fn create(&self, kind: PqcKeyKind) -> Result<(BvHsmHandle, Vec<u8>), RvError> {
-        let generated = derive::generate_pqc_key(
-            self.backend.as_ref(),
-            &self.config,
-            &self.scope.cluster_uuid,
-            self.scope.epoch,
-            kind,
-            &self.scope.binding_pub,
-            self.scope.ecdh_key,
-        )
-        .await?;
-        let copy = BvHsmBlob::from_bytes(&generated.wrapped_seed)?;
-        let set = BvHsmBlobSet::new(kind.purpose(), self.scope.epoch, copy, &self.config.node_id, unix_now_secs()?)?;
+        let material = self.derive_material(kind).await?;
+        let epoch = self.scope.epoch;
+        let seed_context = kind.seed_context(&self.scope.cluster_uuid, epoch);
+        let wrap_ctx = Context::new(seed_context, kind.purpose(), epoch, &self.config.node_id);
+        let outcome = self.pool.wrap_all(self.config.objects.wrap_pqc, &wrap_ctx, &material.seed).await?;
+        let public_key = material.public_key.clone();
+        drop(material); // zeroizes the seed
+
+        let mut copies = outcome.copies.into_values();
+        let first = copies.next().ok_or_else(|| RvError::ErrHsmInsufficientCopies {
+            have: 0,
+            need: self.pool.min_wrap_copies(),
+            unreachable: Vec::new(),
+        })?;
+        let mut set = BvHsmBlobSet::new(kind.purpose(), epoch, first, &self.config.node_id, unix_now_secs()?)?;
+        for copy in copies {
+            set.insert_copy(copy)?;
+        }
         let handle = BvHsmHandle::generate();
-        let record = CustodyRecord {
-            version: CUSTODY_RECORD_VERSION,
-            key_id: handle.key_id.clone(),
-            public_key: generated.public_key.clone(),
-            set,
-        };
+        let record = CustodyRecord { version: CUSTODY_RECORD_VERSION, key_id: handle.key_id.clone(), public_key, set };
         let key = handle.storage_key()?;
         let value = record.encode()?;
         {
@@ -268,13 +302,15 @@ impl CustodyStore {
             self.storage.put(&StorageEntry { key, value }).await?;
         }
         let copies: Vec<&str> = record.set.copies.keys().map(HsmId::as_str).collect();
-        let under_replicated = record.set.is_under_replicated(&self.active_members()?);
+        let missing = record.set.missing_copies(&self.pool.active_ids());
         log::info!(
             target: "security",
-            "hsm custody key created: key_id={} kind={kind:?} copies={copies:?} under_replicated={under_replicated}",
-            handle.key_id
+            "hsm custody key created: key_id={} kind={kind:?} copies={copies:?} under_replicated={}",
+            handle.key_id,
+            !missing.is_empty()
         );
-        Ok((handle, generated.public_key))
+        self.pool.report_under_replicated(&format!("custody key {}", handle.key_id), &missing);
+        Ok((handle, record.public_key))
     }
 
     /// Lend the private keypair behind `handle` to `f`, then zeroize it.
@@ -308,20 +344,17 @@ impl CustodyStore {
     where
         F: FnOnce(&PqcKeypair) -> R,
     {
-        let record = self.load(handle).await?;
+        let (record, record_bytes) = self.load(handle).await?;
         let kind = record.kind()?;
         if expect.is_some_and(|expected| expected != kind) {
             return Err(RvError::ErrHsmContextMismatch);
         }
-        let hsm_id = self.backend.hsm_id()?;
-        let copy = record.set.copy_for(&hsm_id).ok_or_else(|| {
-            RvError::ErrHsm(format!("HSM custody key {} has no copy for HSM {hsm_id}", record.key_id))
-        })?;
-        let copy_bytes = copy.to_bytes()?;
-        let cache_key = cache_key_of(&record.key_id, &copy_bytes);
+        // Bound to the exact stored record, so any change to it (a repaired
+        // copy, a swapped public key) misses the cache.
+        let cache_key = cache_key_of(&record.key_id, &record_bytes);
         let (seed, from_device) = match self.cache_get(&cache_key) {
             Some(seed) => (seed, false),
-            None => (self.unwrap_seed(&record, kind, &copy_bytes).await?, true),
+            None => (self.unwrap_with_failover(&record, kind).await?, true),
         };
         let keypair = PqcKeypair::from_seed(kind, &seed)?;
         if keypair.public_key() != record.public_key.as_slice() {
@@ -339,14 +372,38 @@ impl CustodyStore {
         Ok(f(&keypair))
     }
 
-    /// Unwrap the seed of `record`'s local copy through a signed, audited
-    /// authorization. Never consults or fills the session cache.
+    /// Unwrap through the preferred member holding a copy, failing over on
+    /// outages and never on a cryptographic failure. Never touches the cache.
+    async fn unwrap_with_failover(
+        &self,
+        record: &CustodyRecord,
+        kind: PqcKeyKind,
+    ) -> Result<Zeroizing<Vec<u8>>, RvError> {
+        let mut attempt = self.pool.read(|id| record.set.copy_for(id).is_some());
+        while let Some(member) = attempt.next_member() {
+            let Some(copy) = record.set.copy_for(member.hsm_id()) else { continue };
+            let copy_bytes = copy.to_bytes()?;
+            match self.unwrap_seed(record, kind, member, &copy_bytes).await {
+                Ok(seed) => {
+                    attempt.succeeded(member);
+                    return Ok(seed);
+                }
+                Err(e) => attempt.failed(member, "unwrap custody seed", e)?,
+            }
+        }
+        Err(attempt.into_error(&format!("HSM custody key {}", record.key_id)))
+    }
+
+    /// Unwrap `copy_bytes` (the copy for `member`) through a signed, audited
+    /// authorization on that member.
     async fn unwrap_seed(
         &self,
         record: &CustodyRecord,
         kind: PqcKeyKind,
+        member: &PoolMember,
         copy_bytes: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, RvError> {
+        let backend = member.backend()?;
         // The expected context comes from this store's cluster, never from the
         // blob header, so a set from another cluster cannot be opened here.
         let epoch = record.set.epoch;
@@ -359,15 +416,15 @@ impl CustodyStore {
         let counter = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
         let request =
             UnwrapRequest::new(ctx.context.clone(), copy_bytes, &self.config.node_id, epoch, counter, kind.purpose());
-        let authorization =
-            authz::sign_authorization(self.backend.as_ref(), self.config.objects.authz, request).await?;
+        let authorization = authz::sign_authorization(backend.as_ref(), self.config.objects.authz, request).await?;
         log::info!(
             target: "security",
-            "hsm custody unwrap authorized (key_id={}): {}",
+            "hsm custody unwrap authorized (key_id={}, hsm_id={}): {}",
             record.key_id,
+            member.hsm_id(),
             authz::audit_record(&authorization)
         );
-        self.backend.unwrap_data(self.config.objects.wrap_pqc, &ctx, copy_bytes).await
+        backend.unwrap_data(self.config.objects.wrap_pqc, &ctx, copy_bytes).await
     }
 
     /// Delete the key behind `handle`. Unknown handles are an error.
@@ -385,9 +442,10 @@ impl CustodyStore {
         Ok(())
     }
 
-    /// Every custody set's replication state against the active members.
+    /// Every custody set's replication state against the active members. Also
+    /// the source of the custody half of `bv_hsm_under_replicated_sets`.
     pub async fn replication_report(&self) -> Result<ReplicationReport, RvError> {
-        let active = self.active_members()?;
+        let active = self.pool.active_ids();
         let mut report = ReplicationReport::default();
         for name in self.storage.list(CUSTODY_STORE_PREFIX).await? {
             if !is_key_id(&name) {
@@ -412,17 +470,20 @@ impl CustodyStore {
                 }
             }
         }
+        hsm_metrics().set_under_replicated(UnderReplicatedScope::Custody, report.under_replicated.len());
         Ok(report)
     }
 
-    async fn load(&self, handle: &BvHsmHandle) -> Result<CustodyRecord, RvError> {
+    /// The decoded record and the exact bytes it was decoded from.
+    async fn load(&self, handle: &BvHsmHandle) -> Result<(CustodyRecord, Vec<u8>), RvError> {
         let key = handle.storage_key()?;
         let entry = self
             .storage
             .get(&key)
             .await?
             .ok_or_else(|| RvError::ErrHsm(format!("unknown HSM custody handle {}", handle.key_id)))?;
-        CustodyRecord::decode(&handle.key_id, &entry.value)
+        let record = CustodyRecord::decode(&handle.key_id, &entry.value)?;
+        Ok((record, entry.value))
     }
 
     fn cache_get(&self, key: &str) -> Option<Zeroizing<Vec<u8>>> {
@@ -467,11 +528,11 @@ impl CustodyStore {
     }
 }
 
-/// Cache key: the key id plus the exact copy bytes it was unwrapped from.
-fn cache_key_of(key_id: &str, copy_bytes: &[u8]) -> String {
+/// Cache key: the key id plus the exact stored record bytes.
+fn cache_key_of(key_id: &str, record_bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(key_id.as_bytes());
-    h.update(copy_bytes);
+    h.update(record_bytes);
     hex::encode(h.finalize())
 }
 
@@ -498,6 +559,8 @@ mod tests {
             recovery: RecoveryMode::None,
             state_path: String::new(),
             node_id: "n1".into(),
+            pool: None,
+            recovery_explicit: false,
         }
     }
 
@@ -522,7 +585,7 @@ mod tests {
             ecdh_key: HsmObjectIds::default().identity,
             binding_pub: backend.identity_public_key().unwrap(),
         };
-        Arc::new(CustodyStore::new(storage, backend, cfg(ttl), scope))
+        Arc::new(CustodyStore::new(storage, backend, cfg(ttl), scope).unwrap())
     }
 
     async fn fresh_store(name: &str, ttl: u64) -> (Arc<CustodyStore>, Arc<dyn Storage>, Arc<MockHsmBackend>) {
@@ -689,23 +752,31 @@ mod tests {
         assert_eq!(store.authorizations_issued(), 2);
     }
 
-    #[tokio::test]
+    /// Regression (T454 phase 2): the `hsm-custody` guard used to be `!Send`,
+    /// so these futures could not run from an HTTP handler. Compile-time check.
+    #[allow(dead_code)]
+    fn custody_futures_are_send(store: &CustodyStore, handle: &BvHsmHandle) {
+        fn assert_send<T: Send>(_: T) {}
+        assert_send(store.create(PqcKeyKind::MlKem768));
+        assert_send(store.delete(handle));
+        assert_send(store.with_private(handle, |_| ()));
+        assert_send(store.replication_report());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn writes_wait_for_the_hsm_custody_lock() {
         let (store, storage, _) = fresh_store("custody_lock", 60).await;
         let held = storage.lock(HSM_CUSTODY_LOCK).await.unwrap();
 
-        // `create` holds a non-Send lock guard, so drive it on its own thread.
+        // A plain task on the runtime: possible now that the guard is `Send`.
         let writer = store.clone();
-        let task = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
-            rt.block_on(writer.create(PqcKeyKind::MlKem768))
-        });
-        std::thread::sleep(Duration::from_millis(400));
+        let task = tokio::spawn(async move { writer.create(PqcKeyKind::MlKem768).await });
+        tokio::time::sleep(Duration::from_millis(400)).await;
         assert!(!task.is_finished(), "create must not write while another holder has hsm-custody");
         assert_eq!(store.replication_report().await.unwrap().total_sets, 0);
 
         drop(held);
-        let (h, _) = task.join().unwrap().unwrap();
+        let (h, _) = task.await.unwrap().unwrap();
         store.with_private(&h, |_| ()).await.unwrap();
     }
 }

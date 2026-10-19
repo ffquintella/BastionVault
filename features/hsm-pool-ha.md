@@ -1,7 +1,8 @@
 # Feature: HSM Pool HA — an N-node cluster served by two YubiHSM 2 devices
 
-> Status: **in progress** (T454) — phase 1 of 7 (formats and custody core) done
-> 2026-10-19; see [Current state](#current-state). Spec written 2026-10-19. Extends
+> Status: **in progress** (T454) — phases 1–2 of 7 (formats and custody core;
+> pool backend) done 2026-10-19; see [Current state](#current-state). Spec
+> written 2026-10-19. Extends
 > [HSM Support (YubiHSM 2)](hsm-support.md) (S17), whose non-negotiable security
 > rules apply here unchanged unless a section below says otherwise and why.
 
@@ -864,9 +865,59 @@ Metrics:
 
 ## Current state
 
-Phase 1 (formats and custody core) is implemented in `bv-core` and tested with the
-mock backend. Nothing is pool-capable yet: there is no `topology = "pool"` config,
-and a seal record with `topology = pool` is refused at unseal with an explicit error.
+Phases 1 (formats and custody core) and 2 (pool backend) are implemented in
+`bv-core` and tested with the mock backend. A cluster can run `topology = "pool"`
+on two **mock** devices: init dual-wraps the KEK, every node unseals through the
+preferred reachable member, and custody keys are created and used through the
+pool. There is no network link, enrollment, repair or recovery yet (phases 3–5),
+and a `yubihsm2` pool is validated but refused at startup.
+
+Phase 2:
+
+- **`HsmPool`** (`crates/bv-core/src/hsm/pool.rs`). Members are ordered per node
+  by `SHA-256(node_id ‖ hsm_id)`, or `prefer = true`. Reads go through a
+  `ReadAttempt` the caller drives, so the per-member steps (counter,
+  authorization, unwrap) stay at the call site. One function, `classify`,
+  decides failover: AAD, authorization and MAC failures (`ErrHsmContextMismatch`,
+  `ErrHsmAuthzInvalid`, `ErrHsmBlobInvalid`) stop the read and raise
+  `hsm.crypto_failure`; transport (`ErrHsmTransport`), `SESSIONS_FULL` and other
+  device errors fail over. Writes wrap on every usable member concurrently and
+  need `min_wrap_copies` copies, else `ErrHsmInsufficientCopies { have, need,
+  unreachable }`. A device that is not the member it is opened as is `faulted`.
+- **Health.** Breaker: down after 3 consecutive transport failures, retried
+  after 1 s doubling to 60 s; `probe_all` (`device-info`, no session) every
+  10 s from a background task, honouring the backoff. `SESSIONS_FULL`: that
+  member is skipped for 100 ms → 5 s with jitter, the other one is tried, and it
+  does not open the breaker. Time is an injected `Clock` (`hsm/clock.rs`), so
+  the tests use a manual clock and never sleep.
+- **Mock** (`hsm/mock.rs`). Split into `MockHsmDevice` (object store, session
+  table, link state) and `MockHsmBackend` (one client, one session owner). The
+  device holds 16 sessions, expires one after 30 s idle, answers
+  `SESSIONS_FULL`, and can be set offline. A new device takes the configured
+  serial; an existing one keeps its own.
+- **Config** (`hsm/mod.rs`, `config.rs`). `topology = "pool"` with exactly two
+  `member` blocks, the rules in [Configuration](#configuration), and the storage
+  gate (hiqlite, or a single-node local `file` backend), checked both at config
+  resolution and on the physical backend the provider is given.
+- **Seal path** (`seal/hsm.rs`). Pool init requires both members reachable and an
+  explicit `recovery`; `shamir-ceremony` is refused as phase 5. It writes a v2
+  record with `topology = pool` under the `hsm-custody` lock and refuses to
+  overwrite an existing record. Pool unseal is the [Unseal flow](#unseal-flow-pool-topology),
+  with the authorization checked against the `bv-authz` key the record pins for
+  the member. A per-node node refuses a pool record and a pool node refuses a
+  per-node record, each with an explicit error.
+- **Custody store** runs over an `HsmPool`: a one-member pool for a per-node
+  device, the two-member pool otherwise. Seed inputs come from the preferred
+  reachable member; the seed is wrapped on every member.
+- **`Storage::lock` / `Backend::lock` return a `Send` guard**, so custody
+  `create` / `delete` futures are `Send` (a compile-time test asserts it).
+- **Status and metrics.** `v2/sys/hsm/status` reports `topology`, per-member
+  `{state, up, faulted, serial, last_error, holds_kek_copy}`,
+  `under_replicated_sets` (the KEK set) and `min_wrap_copies`.
+  `bv_hsm_member_up{member}`, `bv_hsm_session_errors_total{member,kind}` and
+  `bv_hsm_under_replicated_sets` are in `bv-metrics`.
+
+Phase 1:
 
 - **Blob v2** (`crates/bv-core/src/hsm/blob.rs`). The AAD binds `hsm_id` and
   `authz_alg`; `HsmBackend::hsm_id()` / `device_binding()` supply them from the
@@ -910,22 +961,56 @@ Decisions made in phase 1 where this spec left room:
 - PQC custody unwraps keep the process-local authorization counter they had
   before; only the barrier unwrap uses the persisted per-node counter.
 
-Not done in phase 1, deliberately:
+Phase 1 left three items to phase 2, all now closed: the storage gate, the `Send`
+lock guard, and `hsm-custody` around the seal-record write (pool init takes it).
 
-- No writer of the seal record takes `hsm-custody` yet: the only writer is init,
-  which writes a fresh record. Phase 4's read-modify-write writers must.
-- The startup gate "pool topology only on hiqlite or single-node `file`" is left to
-  phase 2, which introduces the pool topology it gates.
-- `Storage::lock` returns a non-`Send` guard, so custody `create` / `delete`
-  futures are not `Send` and cannot be called from an HTTP handler until
-  `bv-storage` makes the guard `Send`.
+Decisions made in phase 2 where this spec left room:
+
+- `SESSIONS_FULL` never sleeps on the request path: the member gets a jittered
+  "not before" window and the other member is tried at once. If both are
+  unusable the operation fails, naming each member. Rejected: sleeping and
+  retrying inside unseal, which hides saturation and stalls the caller.
+- Only `ErrHsmTransport` counts towards the breaker. Other device errors fail
+  over but do not open it, and `SESSIONS_FULL` has its own backoff.
+- Unseal takes a fresh per-node counter for each member it tries, so every
+  authorization is distinct. A counter storage failure is returned as is, not
+  booked against a member.
+- The authorization is checked against the `bv-authz` key the seal record pins
+  for the member, before the unwrap rather than after (stricter than step 3.5).
+- Unavailability is a new `ErrHsmPoolUnavailable(String)` naming each member,
+  not a payload on `ErrHsmUnavailable`, which mock and per-node code use as a
+  unit variant. New `ErrHsmTransport` and `ErrHsmSessionsFull` let backends say
+  what failed; the YubiHSM 2 backend maps connector and session errors, device
+  `SESSIONS_FULL`, and an `unwrap-data` `INVALID_DATA` (a CCM tag failure; to be
+  confirmed on hardware in phase 7) to them.
+- Mock members are reached by `state_path` and take no `gateway` / `connector`;
+  `serial` is required for both backends because it forms the member's `hsm_id`
+  even while the device is unreachable.
+- `device_audit` and `repair_rate` are refused, not ignored, until phases 6 and 4.
+- The record's `seed_ecdh_pub` holds the member's `bv-identity` key, which is what
+  the mock and today's layout use for the seed ECDH; `bv-seed-ecdh` is phase 4.
+- Pool init uses the session the node's member client already has; per-node
+  credential delivery is phase 4. Event delivery is the `security` log through a
+  `PoolEventSink`; an audit-broker sink is phase 6.
+
+Not done in phase 2, deliberately:
+
+- Custody sets are not counted in `v2/sys/hsm/status` (the provider has no
+  barrier); `CustodyStore::replication_report` counts them and feeds the metric.
+  No engine uses the custody store yet, so the only live set is the KEK.
+- Membership is re-read from the record on every unseal and status call, not on
+  a 30 s timer: nothing writes membership until phase 4.
+- `close_sessions` exists but is not yet called on seal or shutdown.
+- "Parallel" wrap runs the member futures concurrently on one task. The
+  YubiHSM 2 client is blocking, so its pool wraps will need `spawn_blocking`
+  when the link lands (phase 3).
 
 ## Implementation phases
 
 | Phase | Scope | Main files | Status |
 |---|---|---|---|
 | 1. Formats and custody core | `BvHsmBlob` v2, `BvHsmBlobSet`, seal record v2 + v1 reader, per-node authz counters, custody store and handles. Mock only. | `crates/bv-core/src/hsm/{blob,blobset,custody_store}.rs`, `crates/bv-core/src/seal/hsm.rs`, `crates/bv-core/src/seal/hsm/record.rs` | Done |
-| 2. Pool backend | `HsmPool`: members, preference, failover, health probe, circuit breaker, parallel wrap, `min_wrap_copies`. Mock enforces the 16-session limit and `SESSIONS_FULL`. | `crates/bv-core/src/hsm/{pool,mock,yubihsm2,mod}.rs` | Planned |
+| 2. Pool backend | `HsmPool`: members, preference, failover, health probe, circuit breaker, parallel wrap, `min_wrap_copies`. Mock enforces the 16-session limit and `SESSIONS_FULL`. Pool init and unseal, storage gate, status, metrics. | `crates/bv-core/src/hsm/{pool,clock,mock,yubihsm2,mod}.rs`, `crates/bv-core/src/seal/hsm.rs`, `crates/bv-metrics/src/hsm_metrics.rs` | Done |
 | 3. HSM link | `bv-hsm-link` crate (gateway + relay), `bvault hsm-gateway` | `crates/bv-hsm-link/`, `crates/bvault-cli` | Planned |
 | 4. Ceremonies and repair | `provision`, attestation chain pinning, node enroll/revoke with credential delivery, member add/retire, repair job, epoch rotation, `migrate-to-pool`, v2 routes, CLI | `crates/bv-core/src/hsm/{enroll,ceremony,repair,attest}.rs`, `crates/bv-kernel/src/modules/system/`, `crates/bvault-cli` | Planned |
 | 5. Recovery | Recovery keypair, Shamir split, recovery copies, `recover` route | `crates/bv-core/src/hsm/recovery.rs` | Planned |

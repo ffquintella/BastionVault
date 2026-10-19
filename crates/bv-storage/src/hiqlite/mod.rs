@@ -231,7 +231,7 @@ impl Backend for HiqliteBackend {
         Ok(())
     }
 
-    async fn lock(&self, lock_name: &str) -> Result<Box<dyn Any>, RvError> {
+    async fn lock(&self, lock_name: &str) -> Result<Box<dyn Any + Send>, RvError> {
         let lock = self
             .client
             .lock(Cow::Owned(lock_name.to_string()))

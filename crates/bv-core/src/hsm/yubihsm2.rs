@@ -35,10 +35,31 @@ use crate::{
     },
 };
 
-/// Map any `yubihsm` error to an opaque HSM error (never leak device internals
-/// or key material through the message).
-fn map_yubi(e: impl std::fmt::Display) -> RvError {
-    RvError::ErrHsm(format!("yubihsm: {e}"))
+/// Map a `yubihsm` client error to an opaque HSM error (never leak device
+/// internals or key material through the message). The class matters to the
+/// pool: transport and session failures and `SESSIONS_FULL` fail over; a
+/// device error does too; nothing here is reported as a cryptographic failure.
+fn map_yubi(e: yubihsm::client::Error) -> RvError {
+    use yubihsm::client::ErrorKind;
+    if e.device_error() == Some(yubihsm::device::ErrorKind::SessionsFull) {
+        return RvError::ErrHsmSessionsFull;
+    }
+    match e.kind() {
+        ErrorKind::ConnectorError | ErrorKind::ClosedSessionError | ErrorKind::CreateFailed => {
+            RvError::ErrHsmTransport(format!("yubihsm: {e}"))
+        }
+        _ => RvError::ErrHsm(format!("yubihsm: {e}")),
+    }
+}
+
+/// `unwrap-data` on a blob whose AES-CCM tag does not verify. The device
+/// reports it as `INVALID_DATA`; to be confirmed on hardware (T454 phase 7).
+/// It is a cryptographic failure, so a pool never fails over on it.
+fn map_unwrap(e: yubihsm::client::Error) -> RvError {
+    if e.device_error() == Some(yubihsm::device::ErrorKind::InvalidData) {
+        return RvError::ErrHsmContextMismatch;
+    }
+    map_yubi(e)
 }
 
 pub struct YubiHsm2Backend {
@@ -128,7 +149,7 @@ impl HsmBackend for YubiHsm2Backend {
         let client = self.client()?;
         open_blob(wrapped, ctx, &device, |w| {
             let msg = wrap::Message::from_vec(w.to_vec()).map_err(|_| RvError::ErrHsmBlobInvalid)?;
-            let pt = client.unwrap_data(key, msg).map_err(map_yubi)?;
+            let pt = client.unwrap_data(key, msg).map_err(map_unwrap)?;
             Ok(Zeroizing::new(pt))
         })
     }
@@ -200,6 +221,13 @@ impl HsmBackend for YubiHsm2Backend {
     async fn get_random(&self, len: usize) -> Result<Zeroizing<Vec<u8>>, RvError> {
         let client = self.client()?;
         Ok(Zeroizing::new(client.get_pseudo_random(len).map_err(map_yubi)?))
+    }
+
+    /// `yubihsm` 0.42 sends `device-info` inside the client's session; the
+    /// session-free probe through the HSM link arrives with T454 phase 3.
+    async fn probe(&self) -> Result<String, RvError> {
+        let client = self.client()?;
+        client.device_info().map(|i| i.serial_number.to_string()).map_err(map_yubi)
     }
 }
 

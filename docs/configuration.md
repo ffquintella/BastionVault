@@ -245,9 +245,63 @@ hsm "yubihsm2" {
 | `node_id` | `$HOSTNAME` | Node identity for context strings / per-node keys. 1–128 characters of `[A-Za-z0-9._-]`. |
 | `pqc_key_cache_ttl` | `60s` | Unwrapped-seed cache TTL; `0` disables caching. |
 | `recovery` | `none` | `none` or `shamir-ceremony` (init-time only). `shamir-ceremony` is refused at `init` in the per-node topology; see [docs/hsm.md](hsm.md#recovery-modes). |
+| `topology` | `per-node` | `per-node` (one device per node) or `pool` (two devices shared by the cluster; see below). |
 
 > The mock backend has no hardware protection and refuses to start when
 > `BVAULT_ENV=production`. See the [HSM guide](hsm.md) for the full workflow.
+
+### HSM pool topology (`topology = "pool"`)
+
+Two devices serve the whole cluster ([HSM pool HA](../features/hsm-pool-ha.md),
+T454). This build runs the pool on the **mock** backend only; a `yubihsm2` pool
+block is validated and then refused at startup, because pool nodes authenticate
+with per-node credentials that node enrollment (T454 phase 4) delivers.
+
+```hcl
+hsm "mock" {
+  topology        = "pool"
+  node_id         = "vault-3"
+  recovery        = "none"          # required, explicitly, for pool init
+  min_wrap_copies = 1               # 1 (default) | 2
+
+  member "hsm-a" {
+    serial     = "MOCK-A"
+    state_path = "/var/lib/bastionvault/hsm-a.json"
+  }
+  member "hsm-b" {
+    serial     = "MOCK-B"
+    state_path = "/var/lib/bastionvault/hsm-b.json"
+    # prefer   = true               # try this member first on every node
+  }
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `member "<name>"` | | Exactly two. `<name>` is 1–64 characters of `[A-Za-z0-9._-]`. |
+| `member.serial` | | Required. The device serial; with the backend it forms the member's `hsm_id`. A new mock device is created with it. |
+| `member.gateway` | | (yubihsm2) `https://` mTLS HSM gateway. Exactly one of `gateway` / `connector`. |
+| `member.connector` | | (yubihsm2) Local `yubihsm-connector` URL or `usb`, on the node that hosts the device. |
+| `member.state_path` | | (mock, required) File backing that mock device; the two must differ. |
+| `member.prefer` | `false` | At most one member. Otherwise each node orders members by `SHA-256(node_id ‖ hsm_id)`. |
+| `min_wrap_copies` | `1` | Copies a new key needs before it is stored. `2` refuses key creation while a member is down. |
+| `link { ca_file, cert_file, key_file }` | | (yubihsm2) This node's mTLS identity for the gateways; required when any member uses `gateway`. |
+| `credential_dir` | | (yubihsm2, required) Where this node's per-member credentials live. |
+
+Validation, all at startup:
+
+- `password` and `auth_key_id` are refused (credentials come from
+  `credential_dir`), and so are a top-level `connector` / `state_path`.
+- The storage must have a real cluster lock: `hiqlite`, or a single-node `file`
+  backend on a local path (dev and homolog). Any other storage, including a
+  `file` backend with a cloud `target`, is a startup error naming it.
+- After `init`, the **seal record** owns membership. A `member` block that
+  disagrees with it (for example a different `serial`) is ignored with a `warn`
+  naming the field; only where this node reaches the device (`connector`,
+  `state_path`) is taken from config.
+- `device_audit` and `repair_rate` are refused until the jobs they configure
+  exist (T454 phases 6 and 4). Pool-only settings in a per-node block are
+  refused rather than ignored.
 
 ## Metrics Access (optional)
 

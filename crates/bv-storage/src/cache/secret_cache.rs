@@ -187,7 +187,7 @@ impl Backend for CachingBackend {
         Ok(())
     }
 
-    async fn lock(&self, lock_name: &str) -> Result<Box<dyn Any>, RvError> {
+    async fn lock(&self, lock_name: &str) -> Result<Box<dyn Any + Send>, RvError> {
         self.inner.lock(lock_name).await
     }
 }

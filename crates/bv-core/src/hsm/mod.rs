@@ -13,7 +13,11 @@
 //! See `features/hsm-support.md` for the full design and the non-negotiable
 //! security rules this code enforces.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -23,11 +27,13 @@ use crate::errors::RvError;
 pub mod authz;
 pub mod blob;
 pub mod blobset;
+pub mod clock;
 pub mod context;
 pub mod custody;
 pub mod custody_store;
 pub mod derive;
 pub mod enroll;
+pub mod pool;
 pub mod replicate;
 
 #[cfg(feature = "hsm_mock")]
@@ -130,6 +136,16 @@ pub trait HsmBackend: Send + Sync {
 
     /// Hardware randomness. Augments, never replaces, the host CSPRNG (rule 3).
     async fn get_random(&self, len: usize) -> Result<Zeroizing<Vec<u8>>, RvError>;
+
+    /// Health probe: the serial the device reports now, through `device-info`
+    /// where the backend can send it without a session. An unreachable device
+    /// or link is [`RvError::ErrHsmTransport`].
+    async fn probe(&self) -> Result<String, RvError>;
+
+    /// Release this client's session slot, if it holds one.
+    async fn close_session(&self) -> Result<(), RvError> {
+        Ok(())
+    }
 }
 
 /// Length-prefixed domain separation for HSM signatures. `bv-authz` (Ed25519)
@@ -219,12 +235,114 @@ pub struct ResolvedHsmConfig {
     pub state_path: String,
     /// Stable node identity used in context strings and per-node blob routing.
     pub node_id: String,
+    /// `Some` for `topology = "pool"` (T454); `None` is the per-node topology.
+    pub pool: Option<ResolvedPoolConfig>,
+    /// Whether `recovery` was written in the config. Pool init refuses an
+    /// implicit recovery posture (spec § Barrier KEK, bootstrap at init).
+    pub recovery_explicit: bool,
+}
+
+impl ResolvedHsmConfig {
+    pub fn is_pool(&self) -> bool {
+        self.pool.is_some()
+    }
+}
+
+/// Members a pool has, exactly (spec § Configuration, validation rules).
+pub const POOL_MEMBER_COUNT: usize = 2;
+/// `min_wrap_copies` when the config leaves it out.
+pub const DEFAULT_MIN_WRAP_COPIES: usize = 1;
+const MAX_MEMBER_NAME_LEN: usize = 64;
+
+/// One `member "<name>" { ... }` block of a pool, validated. A *bootstrap*
+/// entry: after init the seal record's member entry is authoritative, and
+/// only `connector` / `state_path` (where this node reaches the device) apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPoolMember {
+    pub name: String,
+    /// `https://` mTLS gateway (yubihsm2; used from T454 phase 3).
+    pub gateway: String,
+    /// Local `yubihsm-connector` URL or `usb` (yubihsm2).
+    pub connector: String,
+    pub serial: String,
+    /// File backing the mock device (mock only).
+    pub state_path: String,
+    pub prefer: bool,
+}
+
+impl ResolvedPoolMember {
+    pub fn hsm_id(&self, backend_type: &str) -> Result<HsmId, RvError> {
+        HsmId::from_parts(backend_type, &self.serial)
+    }
+}
+
+/// The node's mTLS client identity for the HSM link (consumed by T454 phase 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLink {
+    pub ca_file: String,
+    pub cert_file: String,
+    pub key_file: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPoolConfig {
+    /// 1 (default) or 2: copies a new blob set needs before it is stored.
+    pub min_wrap_copies: usize,
+    pub credential_dir: String,
+    pub link: Option<ResolvedLink>,
+    /// Exactly [`POOL_MEMBER_COUNT`], sorted by name.
+    pub members: Vec<ResolvedPoolMember>,
+}
+
+/// Raw `member "<name>" { ... }` block inside a pool `hsm` block.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct HsmMemberBlock {
+    #[serde(default)]
+    pub gateway: String,
+    #[serde(default)]
+    pub connector: String,
+    #[serde(default)]
+    pub serial: String,
+    #[serde(default)]
+    pub state_path: String,
+    #[serde(default)]
+    pub prefer: bool,
+}
+
+/// Raw `link { ... }` block inside a pool `hsm` block.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct HsmLinkBlock {
+    #[serde(default)]
+    pub ca_file: String,
+    #[serde(default)]
+    pub cert_file: String,
+    #[serde(default)]
+    pub key_file: String,
 }
 
 /// Raw, serde-parsed HCL `hsm "<label>" { ... }` block. Kept string-typed and
 /// permissive; validation and env-expansion happen in [`resolve_config`].
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct HsmConfigBlock {
+    /// `""` / `"per-node"` (default) or `"pool"`.
+    #[serde(default)]
+    pub topology: String,
+    /// Pool only. `0` means unset (the default, 1).
+    #[serde(default)]
+    pub min_wrap_copies: u32,
+    /// Pool only: where per-node credentials live (T454 phase 4).
+    #[serde(default)]
+    pub credential_dir: String,
+    #[serde(default)]
+    pub link: Option<HsmLinkBlock>,
+    #[serde(default)]
+    pub member: BTreeMap<String, HsmMemberBlock>,
+    /// Device-log drain mode (T454 phase 6). Refused until it is implemented.
+    #[serde(default)]
+    pub device_audit: String,
+    /// Repair job rate (T454 phase 4). Refused until it is implemented.
+    #[serde(default)]
+    pub repair_rate: Option<u64>,
     #[serde(default)]
     pub connector: String,
     #[serde(default)]
@@ -290,6 +408,20 @@ pub fn resolve_config(label: &str, raw: &HsmConfigBlock) -> Result<ResolvedHsmCo
         other => return Err(RvError::ErrHsmConfigInvalid(format!("unknown HSM backend {other:?}"))),
     };
 
+    refuse_unimplemented_settings(raw)?;
+    let pool = match raw.topology.trim() {
+        "" | "per-node" => {
+            refuse_pool_only_settings(raw)?;
+            None
+        }
+        "pool" => Some(resolve_pool(&backend_type, raw)?),
+        other => {
+            return Err(RvError::ErrHsmConfigInvalid(format!(
+                "unknown HSM topology {other:?}; expected \"per-node\" or \"pool\""
+            )))
+        }
+    };
+
     let defaults = HsmObjectIds::default();
     let objects = HsmObjectIds {
         auth_key: if raw.auth_key_id != 0 { raw.auth_key_id } else { defaults.auth_key },
@@ -299,7 +431,9 @@ pub fn resolve_config(label: &str, raw: &HsmConfigBlock) -> Result<ResolvedHsmCo
         authz: if raw.authz_key_id != 0 { raw.authz_key_id } else { defaults.authz },
     };
 
-    let password = if backend_type == "yubihsm2" {
+    // A pool node authenticates with per-node credentials (resolve_pool
+    // refuses `password`), so only the per-node yubihsm2 seal needs one.
+    let password = if backend_type == "yubihsm2" && pool.is_none() {
         if raw.password.is_empty() {
             return Err(RvError::ErrHsmConfigInvalid("yubihsm2 seal requires a password".into()));
         }
@@ -330,7 +464,172 @@ pub fn resolve_config(label: &str, raw: &HsmConfigBlock) -> Result<ResolvedHsmCo
         recovery,
         state_path: raw.state_path.clone(),
         node_id,
+        pool,
+        recovery_explicit: !raw.recovery.trim().is_empty(),
     })
+}
+
+fn config_err(msg: impl Into<String>) -> RvError {
+    RvError::ErrHsmConfigInvalid(msg.into())
+}
+
+/// `device_audit` and `repair_rate` configure jobs that do not exist yet. An
+/// accepted-but-ignored audit setting would be a silent gap, so they fail.
+fn refuse_unimplemented_settings(raw: &HsmConfigBlock) -> Result<(), RvError> {
+    if !raw.device_audit.trim().is_empty() {
+        return Err(config_err("`device_audit` is not implemented yet (device-log drain, T454 phase 6); remove it"));
+    }
+    if raw.repair_rate.is_some() {
+        return Err(config_err("`repair_rate` is not implemented yet (repair job, T454 phase 4); remove it"));
+    }
+    Ok(())
+}
+
+/// Pool settings in a per-node block are almost certainly a missing
+/// `topology = "pool"`; refusing them beats silently running per-node.
+fn refuse_pool_only_settings(raw: &HsmConfigBlock) -> Result<(), RvError> {
+    let mut stray = Vec::new();
+    if !raw.member.is_empty() {
+        stray.push("member");
+    }
+    if raw.link.is_some() {
+        stray.push("link");
+    }
+    if raw.min_wrap_copies != 0 {
+        stray.push("min_wrap_copies");
+    }
+    if !raw.credential_dir.is_empty() {
+        stray.push("credential_dir");
+    }
+    if stray.is_empty() {
+        Ok(())
+    } else {
+        Err(config_err(format!("{} require topology = \"pool\"", stray.join(", "))))
+    }
+}
+
+fn validate_member_name(name: &str) -> Result<(), RvError> {
+    let ok_chars = name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+    if name.is_empty() || name.len() > MAX_MEMBER_NAME_LEN || !ok_chars {
+        return Err(config_err(format!(
+            "HSM pool member name {name:?} must be 1-{MAX_MEMBER_NAME_LEN} characters of [A-Za-z0-9._-]"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a `topology = "pool"` block (spec § Configuration).
+fn resolve_pool(backend_type: &str, raw: &HsmConfigBlock) -> Result<ResolvedPoolConfig, RvError> {
+    if !raw.password.is_empty() || raw.auth_key_id != 0 {
+        return Err(config_err(
+            "`password` and `auth_key_id` are not used with topology = \"pool\": each node authenticates to each \
+             member with its own credentials from `credential_dir`",
+        ));
+    }
+    if !raw.connector.is_empty() || !raw.state_path.is_empty() {
+        return Err(config_err(
+            "with topology = \"pool\", set `connector` / `state_path` inside each `member` block, not at the top level",
+        ));
+    }
+    if raw.member.len() != POOL_MEMBER_COUNT {
+        return Err(config_err(format!(
+            "topology = \"pool\" requires exactly {POOL_MEMBER_COUNT} `member` blocks, found {}",
+            raw.member.len()
+        )));
+    }
+
+    let mut members = Vec::with_capacity(raw.member.len());
+    let mut ids = BTreeSet::new();
+    let mut paths = BTreeSet::new();
+    for (name, block) in &raw.member {
+        validate_member_name(name)?;
+        if block.serial.trim().is_empty() {
+            return Err(config_err(format!("HSM pool member {name:?} has no `serial`")));
+        }
+        let member = ResolvedPoolMember {
+            name: name.clone(),
+            gateway: block.gateway.trim().to_string(),
+            connector: block.connector.trim().to_string(),
+            serial: block.serial.trim().to_string(),
+            state_path: block.state_path.trim().to_string(),
+            prefer: block.prefer,
+        };
+        let hsm_id = member
+            .hsm_id(backend_type)
+            .map_err(|e| config_err(format!("HSM pool member {name:?} has an invalid `serial`: {e}")))?;
+        if !ids.insert(hsm_id.clone()) {
+            return Err(config_err(format!("two HSM pool members name the same device {hsm_id}")));
+        }
+        match backend_type {
+            "mock" => {
+                if !member.gateway.is_empty() || !member.connector.is_empty() {
+                    return Err(config_err(format!(
+                        "mock HSM pool member {name:?}: the mock has no link; set `state_path` instead of \
+                         `gateway` / `connector`"
+                    )));
+                }
+                if member.state_path.is_empty() {
+                    return Err(config_err(format!("mock HSM pool member {name:?} needs a `state_path`")));
+                }
+                if !paths.insert(member.state_path.clone()) {
+                    return Err(config_err(format!(
+                        "mock HSM pool members share the state_path {:?}, which would be one device twice",
+                        member.state_path
+                    )));
+                }
+            }
+            _ => {
+                if member.gateway.is_empty() == member.connector.is_empty() {
+                    return Err(config_err(format!(
+                        "HSM pool member {name:?} needs exactly one of `gateway` and `connector`"
+                    )));
+                }
+                if !member.gateway.is_empty() && !member.gateway.starts_with("https://") {
+                    return Err(config_err(format!(
+                        "HSM pool member {name:?}: `gateway` must be an https:// (mTLS) URL"
+                    )));
+                }
+                if !member.state_path.is_empty() {
+                    return Err(config_err(format!("`state_path` is mock-only (member {name:?})")));
+                }
+            }
+        }
+        members.push(member);
+    }
+    if members.iter().filter(|m| m.prefer).count() > 1 {
+        return Err(config_err("at most one HSM pool member may set `prefer = true`"));
+    }
+
+    let link = match &raw.link {
+        Some(l) => {
+            let link = ResolvedLink {
+                ca_file: l.ca_file.trim().to_string(),
+                cert_file: l.cert_file.trim().to_string(),
+                key_file: l.key_file.trim().to_string(),
+            };
+            if link.ca_file.is_empty() || link.cert_file.is_empty() || link.key_file.is_empty() {
+                return Err(config_err("the HSM `link` block needs `ca_file`, `cert_file` and `key_file`"));
+            }
+            Some(link)
+        }
+        None => None,
+    };
+    if link.is_none() && members.iter().any(|m| !m.gateway.is_empty()) {
+        return Err(config_err("a `link` block is required when any HSM pool member uses `gateway`"));
+    }
+
+    let credential_dir = raw.credential_dir.trim().to_string();
+    if backend_type == "yubihsm2" && credential_dir.is_empty() {
+        return Err(config_err("a yubihsm2 HSM pool needs `credential_dir` for the node's per-member credentials"));
+    }
+
+    let min_wrap_copies = match raw.min_wrap_copies {
+        0 => DEFAULT_MIN_WRAP_COPIES,
+        n @ (1 | 2) => n as usize,
+        other => return Err(config_err(format!("`min_wrap_copies` must be 1 or 2, got {other}"))),
+    };
+
+    Ok(ResolvedPoolConfig { min_wrap_copies, credential_dir, link, members })
 }
 
 /// Longest node id accepted; generous for FQDN-style ids.
@@ -358,16 +657,60 @@ pub fn is_production_env() -> bool {
     std::env::var("BVAULT_ENV").map(|v| v.eq_ignore_ascii_case("production")).unwrap_or(false)
 }
 
+/// The mock backend's guard: no hardware protection, so never in production.
+pub fn refuse_mock_in_production() -> Result<(), RvError> {
+    if is_production_env() {
+        log::error!(target: "security", "refusing to start: mock HSM backend is not permitted in production");
+        return Err(RvError::ErrHsmMockRefusedInProduction);
+    }
+    Ok(())
+}
+
+/// Open this node's client for one pool member, through the path the config
+/// gives this node (mock: `state_path`). Pool mode with yubihsm2 needs the
+/// per-node credentials node enrollment delivers (T454 phase 4), so it fails.
+#[maybe_async::maybe_async]
+pub async fn open_pool_member(
+    config: &ResolvedHsmConfig,
+    member: &ResolvedPoolMember,
+    clock: Arc<dyn clock::Clock>,
+) -> Result<Arc<dyn HsmBackend>, RvError> {
+    match config.backend_type.as_str() {
+        "mock" => {
+            refuse_mock_in_production()?;
+            #[cfg(feature = "hsm_mock")]
+            {
+                let device = mock::MockHsmDevice::open(&member.state_path, Some(&member.serial), clock)?;
+                let client = mock::MockHsmBackend::connect(device, &config.node_id, config.objects)?;
+                Ok(Arc::new(client))
+            }
+            #[cfg(not(feature = "hsm_mock"))]
+            {
+                let _ = (member, clock);
+                Err(RvError::ErrHsmConfigInvalid(
+                    "mock HSM backend requested but this build lacks the `hsm_mock` feature".into(),
+                ))
+            }
+        }
+        "yubihsm2" => {
+            let _ = (member, clock);
+            Err(RvError::ErrHsmConfigInvalid(
+                "topology = \"pool\" with the yubihsm2 backend needs per-node credentials in `credential_dir`, \
+                 which node enrollment delivers (T454 phase 4); this build only validates the configuration"
+                    .into(),
+            ))
+        }
+        other => Err(RvError::ErrHsmConfigInvalid(format!("unknown HSM backend {other:?}"))),
+    }
+}
+
 /// Construct the configured backend. Only compiled backends are available;
 /// requesting a backend whose feature is off is a config error, not a panic.
 #[maybe_async::maybe_async]
 pub async fn new_backend(config: &ResolvedHsmConfig) -> Result<Arc<dyn HsmBackend>, RvError> {
     match config.backend_type.as_str() {
         "mock" => {
-            if is_production_env() {
-                log::error!(target: "security", "refusing to start: mock HSM backend is not permitted in production");
-                return Err(RvError::ErrHsmMockRefusedInProduction);
-            }
+            refuse_mock_in_production()?;
             #[cfg(feature = "hsm_mock")]
             {
                 log::warn!(target: "security", "using the MOCK HSM backend — NO hardware protection; dev/homolog only");
@@ -451,5 +794,156 @@ mod tests {
         assert_eq!(cfg.objects, HsmObjectIds::default());
         assert_eq!(cfg.domains, vec![1]);
         assert_eq!(cfg.pqc_key_cache_ttl, Duration::from_secs(60));
+        assert!(cfg.pool.is_none(), "per-node stays the default");
+        assert!(!cfg.recovery_explicit);
+    }
+
+    fn mock_member(serial: &str, path: &str) -> HsmMemberBlock {
+        HsmMemberBlock { serial: serial.into(), state_path: path.into(), ..Default::default() }
+    }
+
+    fn mock_pool() -> HsmConfigBlock {
+        let mut raw = HsmConfigBlock { topology: "pool".into(), node_id: "n1".into(), ..Default::default() };
+        raw.member.insert("hsm-a".into(), mock_member("MOCK-A", "/tmp/a.json"));
+        raw.member.insert("hsm-b".into(), mock_member("MOCK-B", "/tmp/b.json"));
+        raw
+    }
+
+    fn yubi_pool() -> HsmConfigBlock {
+        let mut raw = HsmConfigBlock {
+            topology: "pool".into(),
+            node_id: "vault-3".into(),
+            credential_dir: "/var/lib/bastionvault/hsm".into(),
+            link: Some(HsmLinkBlock { ca_file: "ca.pem".into(), cert_file: "n.pem".into(), key_file: "n.key".into() }),
+            ..Default::default()
+        };
+        let gw = |url: &str, serial: &str| HsmMemberBlock {
+            gateway: url.into(),
+            serial: serial.into(),
+            ..Default::default()
+        };
+        raw.member.insert("hsm-a".into(), gw("https://hsm-a.internal:8250", "0012345678"));
+        raw.member.insert("hsm-b".into(), gw("https://hsm-b.internal:8250", "0087654321"));
+        raw
+    }
+
+    fn rejects(label: &str, raw: &HsmConfigBlock, needle: &str) {
+        match resolve_config(label, raw) {
+            Err(RvError::ErrHsmConfigInvalid(msg)) => assert!(msg.contains(needle), "{msg:?} lacks {needle:?}"),
+            Err(other) => panic!("unexpected error {other}"),
+            Ok(_) => panic!("config must be rejected ({needle})"),
+        }
+    }
+
+    #[test]
+    fn pool_config_resolves_with_defaults() {
+        let cfg = resolve_config("mock", &mock_pool()).unwrap();
+        let pool = cfg.pool.as_ref().unwrap();
+        assert_eq!(pool.min_wrap_copies, DEFAULT_MIN_WRAP_COPIES);
+        assert_eq!(pool.members.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), vec!["hsm-a", "hsm-b"]);
+        assert_eq!(pool.members[0].hsm_id("mock").unwrap().as_str(), "mock:MOCK-A");
+
+        let cfg = resolve_config("yubihsm2", &yubi_pool()).unwrap();
+        assert!(cfg.password.is_empty(), "pool nodes do not use a password");
+        assert!(cfg.pool.unwrap().link.is_some());
+
+        let mut two = mock_pool();
+        two.min_wrap_copies = 2;
+        two.recovery = "none".into();
+        let cfg = resolve_config("mock", &two).unwrap();
+        assert_eq!(cfg.pool.unwrap().min_wrap_copies, 2);
+        assert!(cfg.recovery_explicit);
+    }
+
+    #[test]
+    fn pool_config_validation_rules() {
+        let mut one = mock_pool();
+        one.member.remove("hsm-b");
+        rejects("mock", &one, "exactly 2");
+
+        let mut no_serial = mock_pool();
+        no_serial.member.get_mut("hsm-a").unwrap().serial.clear();
+        rejects("mock", &no_serial, "no `serial`");
+
+        let mut bad_serial = mock_pool();
+        bad_serial.member.get_mut("hsm-a").unwrap().serial = "a/b".into();
+        rejects("mock", &bad_serial, "invalid `serial`");
+
+        let mut same_device = mock_pool();
+        same_device.member.get_mut("hsm-b").unwrap().serial = "MOCK-A".into();
+        rejects("mock", &same_device, "same device");
+
+        let mut same_path = mock_pool();
+        same_path.member.get_mut("hsm-b").unwrap().state_path = "/tmp/a.json".into();
+        rejects("mock", &same_path, "state_path");
+
+        let mut mock_gateway = mock_pool();
+        mock_gateway.member.get_mut("hsm-a").unwrap().gateway = "https://x:8250".into();
+        rejects("mock", &mock_gateway, "no link");
+
+        let mut both = yubi_pool();
+        both.member.get_mut("hsm-a").unwrap().connector = "http://127.0.0.1:12345".into();
+        rejects("yubihsm2", &both, "exactly one of `gateway` and `connector`");
+
+        let mut neither = yubi_pool();
+        neither.member.get_mut("hsm-a").unwrap().gateway.clear();
+        rejects("yubihsm2", &neither, "exactly one of `gateway` and `connector`");
+
+        let mut plain_http = yubi_pool();
+        plain_http.member.get_mut("hsm-a").unwrap().gateway = "http://hsm-a:8250".into();
+        rejects("yubihsm2", &plain_http, "https://");
+
+        let mut no_link = yubi_pool();
+        no_link.link = None;
+        rejects("yubihsm2", &no_link, "`link` block is required");
+
+        // A node that reaches both devices through local connectors needs no link.
+        let mut local = yubi_pool();
+        local.link = None;
+        for m in local.member.values_mut() {
+            m.gateway.clear();
+            m.connector = "usb".into();
+        }
+        resolve_config("yubihsm2", &local).unwrap();
+
+        let mut password = yubi_pool();
+        password.password = "env:BVAULT_HSM_PASSWORD".into();
+        rejects("yubihsm2", &password, "`password` and `auth_key_id`");
+        let mut auth_key = mock_pool();
+        auth_key.auth_key_id = 3;
+        rejects("mock", &auth_key, "`password` and `auth_key_id`");
+
+        let mut no_creds = yubi_pool();
+        no_creds.credential_dir.clear();
+        rejects("yubihsm2", &no_creds, "credential_dir");
+
+        let mut copies = mock_pool();
+        copies.min_wrap_copies = 3;
+        rejects("mock", &copies, "1 or 2");
+
+        let mut prefer = mock_pool();
+        prefer.member.values_mut().for_each(|m| m.prefer = true);
+        rejects("mock", &prefer, "prefer");
+
+        let mut top_level_path = mock_pool();
+        top_level_path.state_path = "/tmp/x.json".into();
+        rejects("mock", &top_level_path, "inside each `member` block");
+
+        let mut topology = mock_pool();
+        topology.topology = "mesh".into();
+        rejects("mock", &topology, "unknown HSM topology");
+    }
+
+    #[test]
+    fn per_node_refuses_pool_settings_and_unbuilt_jobs() {
+        let mut stray = mock_pool();
+        stray.topology.clear();
+        rejects("mock", &stray, "require topology = \"pool\"");
+
+        let audit = HsmConfigBlock { device_audit: "forced".into(), ..Default::default() };
+        rejects("mock", &audit, "device_audit");
+        let mut rate = mock_pool();
+        rate.repair_rate = Some(2);
+        rejects("mock", &rate, "repair_rate");
     }
 }

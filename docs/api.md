@@ -138,12 +138,71 @@ HSM seal response:
 ~~~
 
 - `topology` — `per-node` (one device per node) or `pool` (two shared devices,
-  [HSM pool HA](../features/hsm-pool-ha.md); not yet unsealable by this build).
+  [HSM pool HA](../features/hsm-pool-ha.md)).
 - `recovery_requested` — the `recovery` value in config (`recovery` is the same
   value, kept for older clients). `recovery_configured` is `true` only when the
   seal record holds a recovery key; it is never inferred from config.
 - `seal_record_version` — `1` for a record written before T454 and not yet
   rewritten, `2` otherwise; `null` before init.
+
+HSM pool response (`topology = "pool"`; T454 phase 2). There is no single
+`device_serial` / `hsm_id`; each member reports its own:
+
+~~~json
+{
+  "type": "hsm",
+  "auto_unseal": true,
+  "backend": "mock",
+  "node_id": "vault-3",
+  "topology": "pool",
+  "min_wrap_copies": 1,
+  "members": [
+    {
+      "name": "hsm-a",
+      "hsm_id": "mock:MOCK-A",
+      "serial": "MOCK-A",
+      "state": "active",
+      "up": true,
+      "faulted": false,
+      "prefer": false,
+      "holds_kek_copy": true,
+      "last_error": null
+    },
+    {
+      "name": "hsm-b",
+      "hsm_id": "mock:MOCK-B",
+      "serial": "MOCK-B",
+      "state": "active",
+      "up": false,
+      "faulted": false,
+      "prefer": false,
+      "holds_kek_copy": true,
+      "last_error": "probe: HSM transport or session failure: mock HSM MOCK-B is unreachable"
+    }
+  ],
+  "under_replicated_sets": 0,
+  "kek_under_replicated": false,
+  "cluster_uuid": "…",
+  "epoch": 0,
+  "seal_record_version": 2,
+  "seal_record_topology": "pool",
+  "recovery": "none",
+  "recovery_requested": "none",
+  "recovery_configured": false,
+  "pqc_key_cache_ttl_secs": 60,
+  "sealed": false,
+  "initialized": true
+}
+~~~
+
+- Members come from the seal record once one exists (`state` is its member
+  state); before init they are the config's bootstrap list (`state:
+  "bootstrap"`). `up` is `false` while the member's circuit breaker is open or
+  it is `faulted` (the device behind its path is not the recorded one).
+- `under_replicated_sets` counts the KEK set only; custody sets are counted by
+  the custody store and exported as `bv_hsm_under_replicated_sets`.
+- `last_error` is the member's last failure (operation and error class); it
+  never carries key material.
 
 CLI equivalent: `bvault operator hsm status`.
 

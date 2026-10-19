@@ -115,6 +115,31 @@ pub async fn generate_pqc_key(
     binding_pub: &[u8],
     ecdh_key: HsmObjectId,
 ) -> Result<GeneratedPqcKey, RvError> {
+    let material = derive_pqc_key_material(backend, cluster_uuid, epoch, kind, binding_pub, ecdh_key).await?;
+    let wrap_ctx = Context::new(kind.seed_context(cluster_uuid, epoch), kind.purpose(), epoch, &config.node_id);
+    let wrapped_seed = backend.wrap_data(config.objects.wrap_pqc, &wrap_ctx, &material.seed).await?;
+    // The seed zeroizes when `material` drops here.
+    Ok(GeneratedPqcKey { kind, public_key: material.public_key, wrapped_seed })
+}
+
+/// A freshly derived seed and its public key, before any wrap. In a pool the
+/// device inputs come from one member and the seed is wrapped on every member.
+pub struct PqcKeyMaterial {
+    pub seed: Zeroizing<Vec<u8>>,
+    pub public_key: Vec<u8>,
+}
+
+/// Steps 1–5 of seed creation on `backend`: host entropy, device randomness,
+/// device ECDH, HKDF, public key. Every intermediate is zeroized.
+#[maybe_async::maybe_async]
+pub async fn derive_pqc_key_material(
+    backend: &dyn HsmBackend,
+    cluster_uuid: &str,
+    epoch: u64,
+    kind: PqcKeyKind,
+    binding_pub: &[u8],
+    ecdh_key: HsmObjectId,
+) -> Result<PqcKeyMaterial, RvError> {
     // 1. Fresh host entropy (mandatory).
     let mut e_host = Zeroizing::new(vec![0u8; 64]);
     rand::rng().fill_bytes(e_host.as_mut_slice());
@@ -138,12 +163,8 @@ pub async fn generate_pqc_key(
             .public_key()
             .to_vec(),
     };
-
-    let wrap_ctx = Context::new(seed_context, kind.purpose(), epoch, &config.node_id);
-    let wrapped_seed = backend.wrap_data(config.objects.wrap_pqc, &wrap_ctx, &seed).await?;
-
-    // e_host, e_hsm, s_ecdh, seed all zeroize on drop here.
-    Ok(GeneratedPqcKey { kind, public_key, wrapped_seed })
+    // e_host, e_hsm and s_ecdh zeroize on drop here.
+    Ok(PqcKeyMaterial { seed, public_key })
 }
 
 #[cfg(test)]

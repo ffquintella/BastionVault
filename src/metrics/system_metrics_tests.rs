@@ -25,6 +25,9 @@ static SYS_METRICS_MAP: &[(&str, &str)] = &[
     (LOAD_AVERAGE, LOAD_AVERAGE_HELP),
 ];
 
+/// The system gauges in a scrape. Other families share the registry (the HSM
+/// pool's `bv_hsm_under_replicated_sets` is a gauge whose healthy value is 0),
+/// so only the names in `SYS_METRICS_MAP` are collected.
 fn parse_gauge(raw: &str) -> HashMap<String, f64> {
     let mut gauge_map = HashMap::new();
     let lines: Vec<&str> = raw.split('\n').collect();
@@ -36,8 +39,10 @@ fn parse_gauge(raw: &str) -> HashMap<String, f64> {
             let parts: Vec<&str> = lines[i + 1].split(" ").collect();
             // println!("in parse_gauge {}:{}", parts[0], parts[1]);
             let metric_name = parts[0].to_string();
-            let value: f64 = parts[1].parse().unwrap();
-            gauge_map.insert(metric_name, value);
+            if SYS_METRICS_MAP.iter().any(|(name, _)| *name == metric_name) {
+                let value: f64 = parts[1].parse().unwrap();
+                gauge_map.insert(metric_name, value);
+            }
         }
         i += 1;
     }

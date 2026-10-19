@@ -11,7 +11,18 @@
 //! cannot sign; identity/authz keys cannot unwrap), context strings, and blob
 //! wire format as the real device.
 
-use std::{collections::BTreeMap, sync::RwLock};
+// A `MockHsmDevice` is the device and a `MockHsmBackend` one client of it (one
+// session owner). Like the YubiHSM 2 it holds 16 sessions, expires one after
+// 30 s idle, answers SESSIONS_FULL past that, and can be set offline.
+
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, RwLock,
+    },
+    time::Duration,
+};
 
 use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
 use ed25519_dalek::{Signer as _, SigningKey};
@@ -23,11 +34,16 @@ use crate::{
     errors::RvError,
     hsm::{
         blob::{open_blob, seal_blob, Context},
+        clock::{self, Clock},
         domain_separated, AttestedKey, HsmBackend, HsmObjectId, HsmObjectIds, ResolvedHsmConfig,
     },
 };
 
 const AES_NONCE_LEN: usize = 12;
+/// Concurrent sessions per device (YubiHSM 2 limit).
+pub const MOCK_MAX_SESSIONS: usize = 16;
+/// A session idle this long is expired by the device (YubiHSM 2 behaviour).
+pub const MOCK_SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The kind of a provisioned mock object, mirroring the real device's object
 /// types and their capability masks.
@@ -57,57 +73,138 @@ struct MockState {
     objects: BTreeMap<u16, StoredObject>,
 }
 
-pub struct MockHsmBackend {
-    // Path backing the object store; empty ⇒ ephemeral (tests). Read back by
-    // the enrollment re-wrap path (`import_wrapped`), which persists mutated
-    // objects; `allow(dead_code)` until that call site lands in the same crate.
-    #[allow(dead_code)]
+/// One simulated device: its object store, session table and link state.
+pub struct MockHsmDevice {
+    /// Path backing the object store; empty ⇒ ephemeral (tests).
     state_path: String,
-    objects: HsmObjectIds,
     /// In-memory object store. Persisted to `state_path` on provisioning so dev
-    /// clusters survive restarts. `RwLock` guards enrollment-time mutation.
+    /// clusters survive restarts. `RwLock` guards provisioning-time mutation.
     state: RwLock<MockState>,
+    /// Session owner → last use. Per process: two processes opening the same
+    /// `state_path` are two devices as far as the session limit goes.
+    sessions: Mutex<BTreeMap<String, Duration>>,
+    offline: AtomicBool,
+    clock: Arc<dyn Clock>,
+}
+
+impl MockHsmDevice {
+    /// Open the device at `state_path`. A new device takes `serial_if_new`
+    /// (a random `MOCK-…` serial when `None`); an existing one keeps its own,
+    /// so a wrong file is caught by the caller's serial check, not hidden.
+    pub fn open(state_path: &str, serial_if_new: Option<&str>, clock: Arc<dyn Clock>) -> Result<Arc<Self>, RvError> {
+        let mut state = load_state(state_path)?;
+        if state.serial.is_empty() {
+            state.serial = match serial_if_new {
+                Some(serial) => serial.to_string(),
+                None => format!("MOCK-{}", hex::encode(random_bytes(6))),
+            };
+            persist_state(state_path, &state)?;
+        }
+        Ok(Arc::new(Self {
+            state_path: state_path.to_string(),
+            state: RwLock::new(state),
+            sessions: Mutex::new(BTreeMap::new()),
+            offline: AtomicBool::new(false),
+            clock,
+        }))
+    }
+
+    pub fn serial(&self) -> String {
+        self.state.read().map(|s| s.serial.clone()).unwrap_or_default()
+    }
+
+    /// Simulate the device, its host or its link going down (or coming back).
+    pub fn set_offline(&self, offline: bool) {
+        self.offline.store(offline, Ordering::SeqCst);
+    }
+
+    /// Sessions currently held (idle ones past the timeout are not counted).
+    pub fn open_sessions(&self) -> usize {
+        let now = self.clock.now();
+        self.sessions
+            .lock()
+            .map(|s| s.values().filter(|last| now.saturating_sub(**last) < MOCK_SESSION_IDLE_TIMEOUT).count())
+            .unwrap_or(0)
+    }
+
+    fn reachable(&self) -> Result<(), RvError> {
+        if self.offline.load(Ordering::SeqCst) {
+            return Err(RvError::ErrHsmTransport(format!("mock HSM {} is unreachable", self.serial())));
+        }
+        Ok(())
+    }
+
+    /// Use (or open) `owner`'s session, as every authenticated command does.
+    fn session(&self, owner: &str) -> Result<(), RvError> {
+        self.reachable()?;
+        let now = self.clock.now();
+        let mut sessions = self.sessions.lock().map_err(|_| RvError::ErrRwLockWritePoison)?;
+        sessions.retain(|_, last| now.saturating_sub(*last) < MOCK_SESSION_IDLE_TIMEOUT);
+        if !sessions.contains_key(owner) && sessions.len() >= MOCK_MAX_SESSIONS {
+            return Err(RvError::ErrHsmSessionsFull);
+        }
+        sessions.insert(owner.to_string(), now);
+        Ok(())
+    }
+
+    fn close_session(&self, owner: &str) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.remove(owner);
+        }
+    }
+
+    /// Provision any missing object `objects` names. Keys come from host
+    /// CSPRNG bytes (the codebase's idiom, avoiding the rand_core version
+    /// split) and are persisted so restarts reuse them.
+    fn ensure_objects(&self, objects: &HsmObjectIds) -> Result<(), RvError> {
+        let mut state = self.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
+        let mut changed = ensure_object(&mut state, objects.wrap_barrier, MockKind::Wrap);
+        changed |= ensure_object(&mut state, objects.wrap_pqc, MockKind::Wrap);
+        changed |= ensure_object(&mut state, objects.identity, MockKind::Identity);
+        changed |= ensure_object(&mut state, objects.authz, MockKind::Authz);
+        if changed {
+            persist_state(&self.state_path, &state)?;
+        }
+        Ok(())
+    }
+}
+
+/// One client of a [`MockHsmDevice`]: what a node's session to it looks like.
+pub struct MockHsmBackend {
+    device: Arc<MockHsmDevice>,
+    /// Session owner on the device (the node id).
+    owner: String,
+    objects: HsmObjectIds,
     /// Cached public keys (derived at open; keys are immutable in steady state).
     authz_pub: Vec<u8>,
     identity_pub: Vec<u8>,
 }
 
 impl MockHsmBackend {
-    /// Open (and, on first use, provision) the mock device for `config`.
+    /// Open (and, on first use, provision) the mock device for `config`, as a
+    /// client owned by `config.node_id`.
     #[maybe_async::maybe_async]
     pub async fn open(config: &ResolvedHsmConfig) -> Result<Self, RvError> {
-        let mut state = load_state(&config.state_path)?;
+        let device = MockHsmDevice::open(&config.state_path, None, clock::monotonic())?;
+        Self::connect(device, &config.node_id, config.objects)
+    }
 
-        // Provision any missing required object. Keys are generated from host
-        // CSPRNG bytes (the codebase's idiom, avoiding the rand_core version
-        // split) and persisted so restarts reuse them.
-        let mut changed = false;
-        if state.serial.is_empty() {
-            state.serial = format!("MOCK-{}", hex::encode(random_bytes(6)));
-            changed = true;
-        }
-        changed |= ensure_object(&mut state, config.objects.wrap_barrier, MockKind::Wrap);
-        changed |= ensure_object(&mut state, config.objects.wrap_pqc, MockKind::Wrap);
-        changed |= ensure_object(&mut state, config.objects.identity, MockKind::Identity);
-        changed |= ensure_object(&mut state, config.objects.authz, MockKind::Authz);
-        if changed {
-            persist_state(&config.state_path, &state)?;
-        }
+    /// A further client of an already-open device.
+    pub fn connect(device: Arc<MockHsmDevice>, owner: &str, objects: HsmObjectIds) -> Result<Self, RvError> {
+        device.ensure_objects(&objects)?;
+        let (authz_pub, identity_pub) = {
+            let state = device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+            (authz_public(&state, objects.authz)?, identity_public(&state, objects.identity)?)
+        };
+        Ok(Self { device, owner: owner.to_string(), objects, authz_pub, identity_pub })
+    }
 
-        let authz_pub = authz_public(&state, config.objects.authz)?;
-        let identity_pub = identity_public(&state, config.objects.identity)?;
-
-        Ok(Self {
-            state_path: config.state_path.clone(),
-            objects: config.objects,
-            state: RwLock::new(state),
-            authz_pub,
-            identity_pub,
-        })
+    pub fn device(&self) -> Arc<MockHsmDevice> {
+        self.device.clone()
     }
 
     fn wrap_material(&self, key: HsmObjectId) -> Result<Zeroizing<Vec<u8>>, RvError> {
-        let state = self.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+        let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
         let obj = state.objects.get(&key).ok_or(RvError::ErrHsmUnavailable)?;
         if obj.kind != MockKind::Wrap {
             // Capability minimization: only wrap keys wrap/unwrap.
@@ -124,7 +221,7 @@ impl HsmBackend for MockHsmBackend {
     }
 
     fn device_serial(&self) -> String {
-        self.state.read().map(|s| s.serial.clone()).unwrap_or_default()
+        self.device.serial()
     }
 
     fn authz_public_key(&self) -> Result<Vec<u8>, RvError> {
@@ -136,19 +233,22 @@ impl HsmBackend for MockHsmBackend {
     }
 
     async fn wrap_data(&self, key: HsmObjectId, ctx: &Context, plaintext: &[u8]) -> Result<Vec<u8>, RvError> {
+        self.device.session(&self.owner)?;
         let material = self.wrap_material(key)?;
         let device = self.device_binding()?;
         seal_blob("mock", key, ctx, &device, plaintext, |inner| aes256_gcm_seal(&material, inner))
     }
 
     async fn unwrap_data(&self, key: HsmObjectId, ctx: &Context, wrapped: &[u8]) -> Result<Zeroizing<Vec<u8>>, RvError> {
+        self.device.session(&self.owner)?;
         let material = self.wrap_material(key)?;
         let device = self.device_binding()?;
         open_blob(wrapped, ctx, &device, |w| aes256_gcm_open(&material, w))
     }
 
     async fn sign(&self, key: HsmObjectId, ctx: &str, msg: &[u8]) -> Result<Vec<u8>, RvError> {
-        let state = self.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+        self.device.session(&self.owner)?;
+        let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
         let obj = state.objects.get(&key).ok_or(RvError::ErrHsmUnavailable)?;
         let signed = domain_separated(ctx, msg);
         match obj.kind {
@@ -168,7 +268,8 @@ impl HsmBackend for MockHsmBackend {
     }
 
     async fn attest(&self, key: HsmObjectId) -> Result<Vec<u8>, RvError> {
-        let state = self.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+        self.device.session(&self.owner)?;
+        let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
         let obj = state.objects.get(&key).ok_or(RvError::ErrHsmUnavailable)?;
         let public_key = match obj.kind {
             MockKind::Identity => identity_public(&state, key)?,
@@ -237,7 +338,8 @@ impl HsmBackend for MockHsmBackend {
     }
 
     async fn derive_ecdh(&self, key: HsmObjectId, peer_pub: &[u8]) -> Result<Zeroizing<Vec<u8>>, RvError> {
-        let state = self.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+        self.device.session(&self.owner)?;
+        let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
         let obj = state.objects.get(&key).ok_or(RvError::ErrHsmUnavailable)?;
         if obj.kind != MockKind::Identity {
             return Err(RvError::ErrHsm("object cannot derive ECDH".into()));
@@ -249,7 +351,19 @@ impl HsmBackend for MockHsmBackend {
     }
 
     async fn get_random(&self, len: usize) -> Result<Zeroizing<Vec<u8>>, RvError> {
+        self.device.session(&self.owner)?;
         Ok(Zeroizing::new(random_bytes(len)))
+    }
+
+    /// `device-info` holds no session, so it answers even at `SESSIONS_FULL`.
+    async fn probe(&self) -> Result<String, RvError> {
+        self.device.reachable()?;
+        Ok(self.device.serial())
+    }
+
+    async fn close_session(&self) -> Result<(), RvError> {
+        self.device.close_session(&self.owner);
+        Ok(())
     }
 }
 
@@ -384,7 +498,79 @@ mod tests {
             recovery: RecoveryMode::None,
             state_path: String::new(), // ephemeral
             node_id: node_id.into(),
+            pool: None,
+            recovery_explicit: false,
         }
+    }
+
+    fn device_with_clock() -> (Arc<MockHsmDevice>, Arc<crate::hsm::clock::ManualClock>) {
+        let clock = crate::hsm::clock::ManualClock::new();
+        (MockHsmDevice::open("", Some("MOCK-S"), clock.clone()).unwrap(), clock)
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn sixteen_sessions_then_sessions_full_until_one_expires() {
+        let (device, clock) = device_with_clock();
+        assert_eq!(device.serial(), "MOCK-S", "a new device takes the configured serial");
+        let clients: Vec<MockHsmBackend> = (0..MOCK_MAX_SESSIONS)
+            .map(|i| MockHsmBackend::connect(device.clone(), &format!("node-{i}"), HsmObjectIds::default()).unwrap())
+            .collect();
+        for c in &clients {
+            c.get_random(1).await.unwrap();
+        }
+        assert_eq!(device.open_sessions(), MOCK_MAX_SESSIONS);
+        // An existing owner keeps its slot; a 17th owner is refused.
+        clients[0].get_random(1).await.unwrap();
+        let late = MockHsmBackend::connect(device.clone(), "node-late", HsmObjectIds::default()).unwrap();
+        assert_eq!(late.get_random(1).await.unwrap_err(), RvError::ErrHsmSessionsFull);
+        // device-info holds no session and still answers.
+        assert_eq!(late.probe().await.unwrap(), "MOCK-S");
+
+        // Idle sessions expire after 30 s; client 0 was used last, at t=0 too.
+        clock.advance(MOCK_SESSION_IDLE_TIMEOUT - Duration::from_millis(1));
+        assert_eq!(late.get_random(1).await.unwrap_err(), RvError::ErrHsmSessionsFull);
+        clock.advance(Duration::from_millis(1));
+        late.get_random(1).await.unwrap();
+        assert_eq!(device.open_sessions(), 1);
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn close_session_frees_the_slot() {
+        let (device, _) = device_with_clock();
+        let a = MockHsmBackend::connect(device.clone(), "a", HsmObjectIds::default()).unwrap();
+        a.get_random(1).await.unwrap();
+        assert_eq!(device.open_sessions(), 1);
+        a.close_session().await.unwrap();
+        assert_eq!(device.open_sessions(), 0);
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn an_offline_device_fails_every_command_as_a_transport_error() {
+        let (device, _) = device_with_clock();
+        let a = MockHsmBackend::connect(device.clone(), "a", HsmObjectIds::default()).unwrap();
+        let ctx = Context::new(context::barrier_kek("clu"), Purpose::BarrierKek, 0, "a");
+        let blob = a.wrap_data(a.objects.wrap_barrier, &ctx, b"kek").await.unwrap();
+
+        device.set_offline(true);
+        assert!(matches!(a.probe().await.unwrap_err(), RvError::ErrHsmTransport(_)));
+        assert!(matches!(a.unwrap_data(a.objects.wrap_barrier, &ctx, &blob).await, Err(RvError::ErrHsmTransport(_))));
+        assert!(matches!(a.sign(a.objects.authz, "c", b"m").await, Err(RvError::ErrHsmTransport(_))));
+        // Metadata cached at open stays readable, as on the real device.
+        assert_eq!(a.device_serial(), "MOCK-S");
+
+        device.set_offline(false);
+        assert_eq!(a.unwrap_data(a.objects.wrap_barrier, &ctx, &blob).await.unwrap().as_slice(), b"kek");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn an_existing_device_keeps_its_serial() {
+        let path = std::env::temp_dir().join(format!("bv-mock-hsm-serial-{}.json", hex::encode(random_bytes(6))));
+        let path = path.to_string_lossy().to_string();
+        let first = MockHsmDevice::open(&path, Some("MOCK-FIRST"), crate::hsm::clock::monotonic()).unwrap();
+        MockHsmBackend::connect(first, "n", HsmObjectIds::default()).unwrap();
+        let again = MockHsmDevice::open(&path, Some("MOCK-OTHER"), crate::hsm::clock::monotonic()).unwrap();
+        assert_eq!(again.serial(), "MOCK-FIRST", "the configured serial never rewrites a device");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

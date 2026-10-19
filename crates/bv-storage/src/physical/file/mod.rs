@@ -297,14 +297,10 @@ impl Backend for FileBackend {
         self.target.delete(key).await
     }
 
-    async fn lock(&self, lock_name: &str) -> Result<Box<dyn Any>, RvError> {
-        // The trait-object re-box is necessary because `Backend::lock`
-        // returns `Box<dyn Any>` (no `Send` bound) while `FileTarget::
-        // lock` returns `Box<dyn Any + Send>` — we need `Send` so a
-        // target implementation can return a tokio-friendly guard,
-        // but the outer `Backend` trait does not require it.
-        let guard = self.target.lock(lock_name).await?;
-        Ok(Box::new(guard))
+    async fn lock(&self, lock_name: &str) -> Result<Box<dyn Any + Send>, RvError> {
+        // `Backend::lock` and `FileTarget::lock` both return a `Send`
+        // guard, so the target's guard is handed back as it is.
+        self.target.lock(lock_name).await
     }
 }
 

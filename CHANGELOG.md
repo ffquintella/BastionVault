@@ -64,9 +64,19 @@ EXAMPLE ENTRY:
 
 - Close the HSM seal task: auto-unseal, hybrid PQC key custody, cluster enrollment and replication (mock-validated), `v2/sys/hsm/status` and the GUI HSM / Seal page are all shipped (T17)
 
+#### HSM pool HA (phase 2 of 7)
+
+- Run the HSM seal on a pool of two devices with `hsm "mock" { topology = "pool" … }` and two `member` blocks: init wraps the KEK on both members, every node unseals through its preferred reachable member and fails over on transport, session or device errors but never on an AAD, authorization or MAC mismatch (raised as `hsm.crypto_failure`); a member is marked down after three consecutive failures and probed back every 10 s; `SESSIONS_FULL` backs off and uses the other member; new keys need `min_wrap_copies` copies (1 by default, 2 refuses creation with a member down); both members down keeps the node sealed with an error naming each one. `v2/sys/hsm/status` lists the members with `state`, `up`, `serial` and `last_error`, plus `min_wrap_copies` and `under_replicated_sets`, and `bv_hsm_member_up`, `bv_hsm_session_errors_total` and `bv_hsm_under_replicated_sets` are exported. Pool mode needs hiqlite or a single-node local `file` storage and an explicit `recovery`; `recovery = "shamir-ceremony"` and the `yubihsm2` backend are refused in pool mode until later phases (T454, S114)
+
 #### HSM pool HA (phase 1 of 7)
 
 - Store HSM-wrapped keys in the pool-ready formats: blobs bound to the HSM device (`hsm_id`) instead of the node, so any node can open a copy through the same device; per-device blob sets; a v2 seal record that still unseals v1 records and converts them on the first write; per-node unwrap counters started above the old cluster-wide one; and a barrier-protected custody store that hands engines opaque key handles. `v2/sys/hsm/status` adds `hsm_id`, `topology`, `recovery_requested`, `recovery_configured` and `seal_record_version`. A vault initialized by this build cannot be unsealed by an older one (T454, S114)
+
+### Changed
+
+#### HSM seal
+
+- Refuse at startup an `hsm` block that sets `member`, `link`, `min_wrap_copies` or `credential_dir` without `topology = "pool"`, or sets `device_audit` / `repair_rate` (not implemented yet), instead of silently ignoring them (T454, S114)
 
 ### Fixed
 

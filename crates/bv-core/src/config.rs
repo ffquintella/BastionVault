@@ -577,7 +577,35 @@ impl Config {
             ));
         }
         let (label, block) = self.hsm.iter().next().expect("len checked above");
-        Ok(Some(crate::hsm::resolve_config(label, block)?))
+        let resolved = crate::hsm::resolve_config(label, block)?;
+        if resolved.is_pool() {
+            self.check_pool_storage()?;
+        }
+        Ok(Some(resolved))
+    }
+
+    /// The pool topology serializes every blob-set write under the
+    /// `hsm-custody` lock, so it needs storage whose lock is real: hiqlite, or
+    /// a single-node `file` backend on a local path (a cloud target's is not).
+    fn check_pool_storage(&self) -> Result<(), RvError> {
+        let refuse = |what: String| {
+            RvError::ErrHsmConfigInvalid(format!(
+                "the HSM pool topology needs hiqlite storage (or a single-node `file` backend on a local path, for \
+                 dev and homolog); this config's storage is {what}"
+            ))
+        };
+        if self.storage.len() != 1 {
+            return Err(refuse(format!("{} storage blocks", self.storage.len())));
+        }
+        let (kind, storage) = self.storage.iter().next().expect("len checked above");
+        match kind.as_str() {
+            "hiqlite" => Ok(()),
+            "file" => match storage.config.get("target").and_then(|t| t.as_str()).unwrap_or("local") {
+                "local" => Ok(()),
+                target => Err(refuse(format!("`file` with target {target:?}"))),
+            },
+            other => Err(refuse(format!("{other:?}"))),
+        }
     }
 
     /// Fold `other` (a later file of a config directory) into `self`.
@@ -761,6 +789,71 @@ mod test {
         file.flush()?;
 
         Ok(())
+    }
+
+    fn parse_hcl(text: &str) -> Result<Config, RvError> {
+        let text = format!("listener \"tcp\" {{\n address = \"127.0.0.1:8200\"\n tls_disable = true\n}}\n{text}");
+        let mut config: Config = hcl::from_str(&text)?;
+        set_config_type_field(&mut config)?;
+        Ok(config)
+    }
+
+    const POOL_HSM_BLOCK: &str = r#"
+        hsm "mock" {
+          topology        = "pool"
+          node_id         = "vault-3"
+          recovery        = "none"
+          min_wrap_copies = 2
+          member "hsm-a" {
+            serial     = "MOCK-A"
+            state_path = "/var/lib/bvault/hsm-a.json"
+            prefer     = true
+          }
+          member "hsm-b" {
+            serial     = "MOCK-B"
+            state_path = "/var/lib/bvault/hsm-b.json"
+          }
+        }
+    "#;
+
+    #[test]
+    fn test_hsm_pool_block_parses_from_hcl() {
+        let config = parse_hcl(&format!("storage \"hiqlite\" {{ data_dir = \"/d\" }}\n{POOL_HSM_BLOCK}")).unwrap();
+        let hsm = config.resolve_hsm().unwrap().unwrap();
+        let pool = hsm.pool.expect("topology = pool");
+        assert_eq!(pool.min_wrap_copies, 2);
+        assert_eq!(pool.members.len(), 2);
+        assert_eq!(pool.members[0].name, "hsm-a");
+        assert!(pool.members[0].prefer && !pool.members[1].prefer);
+        assert_eq!(pool.members[1].state_path, "/var/lib/bvault/hsm-b.json");
+        assert!(hsm.recovery_explicit);
+
+        // A duplicated member label never yields a silently shadowed member.
+        let dup = POOL_HSM_BLOCK.replace("member \"hsm-b\"", "member \"hsm-a\"");
+        let refused = parse_hcl(&format!("storage \"hiqlite\" {{ data_dir = \"/d\" }}\n{dup}"))
+            .and_then(|c| c.resolve_hsm().map(|_| ()));
+        assert!(refused.is_err(), "two `member \"hsm-a\"` blocks must not resolve");
+    }
+
+    #[test]
+    fn test_hsm_pool_needs_storage_with_a_cluster_lock() {
+        let with_storage = |storage: &str| parse_hcl(&format!("{storage}\n{POOL_HSM_BLOCK}")).unwrap().resolve_hsm();
+        assert!(with_storage("storage \"hiqlite\" { data_dir = \"/d\" }").is_ok());
+        assert!(with_storage("storage \"file\" { path = \"/d\" }").is_ok());
+        assert!(with_storage("storage \"file\" {\n path = \"/d\"\n target = \"local\"\n}").is_ok());
+
+        for (storage, named) in [
+            ("storage \"mysql\" { address = \"db:3306\" }", "\"mysql\""),
+            ("storage \"file\" {\n target = \"s3\"\n bucket = \"b\"\n}", "target \"s3\""),
+        ] {
+            match with_storage(storage) {
+                Err(RvError::ErrHsmConfigInvalid(msg)) => assert!(msg.contains(named), "{msg}"),
+                other => panic!("{storage}: expected a refusal naming {named}, got {:?}", other.map(|_| ())),
+            }
+        }
+        // The per-node topology is not gated: any storage, as before.
+        let per_node = "storage \"mysql\" { address = \"db:3306\" }\nhsm \"mock\" { node_id = \"n1\" }";
+        assert!(parse_hcl(per_node).unwrap().resolve_hsm().unwrap().unwrap().pool.is_none());
     }
 
     #[test]

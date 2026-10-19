@@ -126,7 +126,7 @@ impl Storage for AESGCMBarrier {
         Ok(out)
     }
 
-    async fn lock(&self, lock_name: &str) -> Result<Box<dyn Any>, RvError> {
+    async fn lock(&self, lock_name: &str) -> Result<Box<dyn Any + Send>, RvError> {
         self.backend.lock(lock_name).await
     }
 }

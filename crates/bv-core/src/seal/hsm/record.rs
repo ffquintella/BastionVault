@@ -146,6 +146,25 @@ impl HsmSealRecord {
         }
     }
 
+    /// A fresh pool record: `members` are authoritative from here on.
+    pub fn new_pool(cluster_uuid: String, epoch: u64, members: BTreeMap<HsmId, HsmMember>, kek: BvHsmBlobSet) -> Self {
+        Self {
+            version: HSM_SEAL_RECORD_VERSION,
+            cluster_uuid,
+            epoch,
+            topology: Topology::Pool,
+            members,
+            kek: Some(kek),
+            recovery_pub: None,
+            legacy_node_blobs: BTreeMap::new(),
+        }
+    }
+
+    /// Active members, the ones a set must have a copy for.
+    pub fn active_members(&self) -> impl Iterator<Item = (&HsmId, &HsmMember)> {
+        self.members.iter().filter(|(_, m)| m.state == MemberState::Active)
+    }
+
     /// Decode a stored record of either version. Unknown versions (a record
     /// written by a newer build) are refused, never guessed at.
     pub fn decode(bytes: &[u8]) -> Result<StoredSealRecord, RvError> {

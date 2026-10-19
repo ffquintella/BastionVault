@@ -185,6 +185,8 @@ mod tests {
             recovery: RecoveryMode::None,
             state_path: String::new(),
             node_id: node.into(),
+            pool: None,
+            recovery_explicit: false,
         }
     }
 

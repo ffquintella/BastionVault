@@ -1771,6 +1771,7 @@ dependencies = [
  "bv-errors",
  "bv-kernel-api",
  "bv-logical",
+ "bv-metrics",
  "bv-shamir",
  "bv-storage",
  "bv-utils",

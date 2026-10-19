@@ -417,18 +417,10 @@ impl Server {
             // diagnosable via `/sys/seal-status`.
             if let Some((hsm_cfg, physical, hsm_core)) = hsm_bootstrap {
                 let result = async {
-                    let backend = crate::hsm::new_backend(&hsm_cfg).await?;
-                    log::info!(
-                        target: "security",
-                        "HSM seal backend `{}` (serial {}) online",
-                        backend.backend_type(),
-                        backend.device_serial()
-                    );
-                    let provider = std::sync::Arc::new(crate::seal::hsm::HsmSealProvider::new(
-                        backend,
-                        physical,
-                        hsm_cfg.clone(),
-                    ));
+                    // Per node: this node's device. Pool (T454): this node's
+                    // client for each member, plus the 10 s health probe.
+                    let provider = crate::seal::hsm::HsmSealProvider::open(&hsm_cfg, physical).await?;
+                    log::info!(target: "security", "HSM seal online: {}", provider.describe());
                     hsm_core.set_seal_provider(provider);
                     if hsm_core.inited().await? {
                         hsm_core.auto_unseal().await

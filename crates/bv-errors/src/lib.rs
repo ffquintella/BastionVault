@@ -211,6 +211,20 @@ pub enum RvError {
     ErrHsmMockRefusedInProduction,
     #[error("HSM migration transcript verification failed: {0}")]
     ErrHsmTranscriptInvalid(String),
+    /// The device could not be reached or its session failed. A pool fails
+    /// over on this; it is never a cryptographic failure.
+    #[error("HSM transport or session failure: {0}")]
+    ErrHsmTransport(String),
+    #[error("HSM has no free session slot (SESSIONS_FULL).")]
+    ErrHsmSessionsFull,
+    #[error(
+        "HSM pool produced {have} wrapped copies but min_wrap_copies is {need}; unreachable members: {}",
+        .unreachable.join(", ")
+    )]
+    ErrHsmInsufficientCopies { have: usize, need: usize, unreachable: Vec<String> },
+    /// Every pool member failed or was skipped; the message names each one.
+    #[error("No HSM pool member could serve the request: {0}")]
+    ErrHsmPoolUnavailable(String),
     #[error("PKI pem bundle is invalid.")]
     ErrPkiPemBundleInvalid,
     #[error("PKI ca public key of certificate does not match private key.")]
@@ -453,7 +467,11 @@ impl RvError {
             | RvError::ErrClusterNoLeader
             | RvError::ErrClusterQuorumLost
             | RvError::ErrClusterUnhealthy
-            | RvError::ErrHsmUnavailable => 503,
+            | RvError::ErrHsmUnavailable
+            | RvError::ErrHsmTransport(_)
+            | RvError::ErrHsmSessionsFull
+            | RvError::ErrHsmInsufficientCopies { .. }
+            | RvError::ErrHsmPoolUnavailable(_) => 503,
             RvError::ErrHsmAuthzInvalid => 403,
             RvError::ErrHsmContextMismatch | RvError::ErrHsmBlobInvalid => 400,
             RvError::ErrPermissionDenied => 403,
@@ -555,6 +573,7 @@ impl PartialEq for RvError {
             | (RvError::ErrHsmContextMismatch, RvError::ErrHsmContextMismatch)
             | (RvError::ErrHsmAuthzInvalid, RvError::ErrHsmAuthzInvalid)
             | (RvError::ErrHsmMockRefusedInProduction, RvError::ErrHsmMockRefusedInProduction)
+            | (RvError::ErrHsmSessionsFull, RvError::ErrHsmSessionsFull)
             | (RvError::ErrPkiPemBundleInvalid, RvError::ErrPkiPemBundleInvalid)
             | (RvError::ErrPkiCertKeyMismatch, RvError::ErrPkiCertKeyMismatch)
             | (RvError::ErrPkiCertChainIncorrect, RvError::ErrPkiCertChainIncorrect)
@@ -580,6 +599,12 @@ impl PartialEq for RvError {
             (RvError::ErrHsmAttestationInvalid(a), RvError::ErrHsmAttestationInvalid(b)) => a == b,
             (RvError::ErrHsmConfigInvalid(a), RvError::ErrHsmConfigInvalid(b)) => a == b,
             (RvError::ErrHsmTranscriptInvalid(a), RvError::ErrHsmTranscriptInvalid(b)) => a == b,
+            (RvError::ErrHsmTransport(a), RvError::ErrHsmTransport(b)) => a == b,
+            (RvError::ErrHsmPoolUnavailable(a), RvError::ErrHsmPoolUnavailable(b)) => a == b,
+            (
+                RvError::ErrHsmInsufficientCopies { have: ha, need: na, unreachable: ua },
+                RvError::ErrHsmInsufficientCopies { have: hb, need: nb, unreachable: ub },
+            ) => ha == hb && na == nb && ua == ub,
             _ => false,
         }
     }

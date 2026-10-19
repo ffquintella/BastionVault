@@ -118,6 +118,8 @@ mod tests {
             recovery: RecoveryMode::None,
             state_path: String::new(),
             node_id: "n1".into(),
+            pool: None,
+            recovery_explicit: false,
         }
     }
 
@@ -134,7 +136,7 @@ mod tests {
             ecdh_key: HsmObjectIds::default().identity,
             binding_pub: backend.identity_public_key().unwrap(),
         };
-        Arc::new(CustodyStore::new(storage, backend, cfg(ttl), scope))
+        Arc::new(CustodyStore::new(storage, backend, cfg(ttl), scope).unwrap())
     }
 
     #[tokio::test]

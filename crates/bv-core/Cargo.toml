@@ -29,6 +29,10 @@ bv-utils = { path = "../bv-utils", version = "0.41.0", registry = "uox-bastionva
 bv-audit = { path = "../bv-audit", version = "0.42.0", registry = "uox-bastionvault" }
 bv-kernel-api = { path = "../bv-kernel-api", version = "0.42.0", registry = "uox-bastionvault" }
 bv_crypto = { path = "../bv_crypto", version = "0.41.0", registry = "uox-bastionvault" }
+# The HSM pool's families (bv_hsm_member_up, bv_hsm_session_errors_total,
+# bv_hsm_under_replicated_sets) live in the metrics substrate's singleton, like
+# the FerroGate counters. Tier 0 and already under bv-storage: no new code.
+bv-metrics = { path = "../bv-metrics", version = "0.41.0", registry = "uox-bastionvault" }
 
 arc-swap = "1.7"
 # Pulled in by the `#[maybe_async::maybe_async]` attribute's async expansion,
@@ -80,6 +84,10 @@ rusb = { version = "0.9", optional = true, features = ["vendored"] }
 x509-cert = { version = "0.2", default-features = false, features = ["std"], optional = true }
 serde_bytes = "0.11"
 sha2 = "0.11"
+# The HSM pool's 10 s health probe runs as a background task (`rt`, `time`).
+# Already in the graph with these features through bv-errors and
+# bv-kernel-api, so this adds no compile cost.
+tokio = { version = "1.52", features = ["rt", "time"] }
 
 [dev-dependencies]
 # The config loader's tests write fixture files under `TEST_DIR`, which is

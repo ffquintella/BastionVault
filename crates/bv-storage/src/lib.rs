@@ -78,7 +78,9 @@ pub trait Storage: Send + Sync {
     async fn get(&self, key: &str) -> Result<Option<StorageEntry>, RvError>;
     async fn put(&self, entry: &StorageEntry) -> Result<(), RvError>;
     async fn delete(&self, key: &str) -> Result<(), RvError>;
-    async fn lock(&self, _lock_name: &str) -> Result<Box<dyn Any>, RvError> {
+    /// The guard is `Send` so a caller can hold it across `.await` in a
+    /// future that runs on a multi-threaded runtime (an HTTP handler).
+    async fn lock(&self, _lock_name: &str) -> Result<Box<dyn Any + Send>, RvError> {
         Ok(Box::new(true))
     }
 
@@ -134,7 +136,8 @@ pub trait Backend: Send + Sync + std::any::Any {
     async fn get(&self, key: &str) -> Result<Option<BackendEntry>, RvError>;
     async fn put(&self, entry: &BackendEntry) -> Result<(), RvError>;
     async fn delete(&self, key: &str) -> Result<(), RvError>;
-    async fn lock(&self, _lock_name: &str) -> Result<Box<dyn Any>, RvError> {
+    /// `Send` guard, for the same reason as [`Storage::lock`].
+    async fn lock(&self, _lock_name: &str) -> Result<Box<dyn Any + Send>, RvError> {
         Ok(Box::new(true))
     }
 
