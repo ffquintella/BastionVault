@@ -1552,7 +1552,10 @@ pub(crate) struct OpenContext {
 /// saved in another namespace is refused before its resource is read, so a
 /// same-named resource in the active namespace is never resolved in its
 /// place.
-pub(super) async fn open_context(state: &State<'_, AppState>, restore: Option<&SessionRestoreRef>) -> CmdResult<OpenContext> {
+pub(super) async fn open_context(
+    state: &State<'_, AppState>,
+    restore: Option<&SessionRestoreRef>,
+) -> CmdResult<OpenContext> {
     let namespace =
         session::layouts::normalize_namespace(&state.active_namespace.lock().await.clone().unwrap_or_default());
     let pane_ref = match restore {
@@ -1588,7 +1591,11 @@ fn require_restore_in_workspace(ctx: &OpenContext, placement: Placement) -> CmdR
 /// The calling webview must hold `token` (`attachments::authorize_input`).
 /// Every command that drives a session — keystrokes, paste, resize,
 /// pointer, the RDP frame channel — goes through here.
-pub(super) async fn require_session_window(state: &State<'_, AppState>, webview: &Webview, token: &str) -> CmdResult<()> {
+pub(super) async fn require_session_window(
+    state: &State<'_, AppState>,
+    webview: &Webview,
+    token: &str,
+) -> CmdResult<()> {
     let route = state.session_attachments.lock().await.route(token);
     session::attachments::authorize_input(&route, webview.label(), token).map_err(CommandError::from)
 }

@@ -109,10 +109,7 @@ pub async fn plugin_surfaces_refresh<R: Runtime>(
     let token = current_token(&state).await;
     let (namespace, namespace_generation) = {
         let namespace = state.active_namespace.lock().await;
-        (
-            namespace.clone(),
-            state.active_namespace_generation.load(std::sync::atomic::Ordering::Acquire),
-        )
+        (namespace.clone(), state.active_namespace_generation.load(std::sync::atomic::Ordering::Acquire))
     };
     let bundle = bv_client::fetch_with_namespace(&*backend, &cache, &token, namespace.as_deref())
         .await
@@ -126,16 +123,8 @@ pub async fn plugin_surfaces_refresh<R: Runtime>(
     let _ = cache.write_bundle(&bundle);
     // Extensibility v2: (re)instantiate app modules to match the fresh
     // bundle and emit their dynamic menus.
-    crate::plugin_apps::sync_from_bundle(
-        &app,
-        &state,
-        &bundle,
-        backend.clone(),
-        &cache,
-        &token,
-        namespace.clone(),
-    )
-    .await;
+    crate::plugin_apps::sync_from_bundle(&app, &state, &bundle, backend.clone(), &cache, &token, namespace.clone())
+        .await;
     drop(namespace_guard);
     Ok(PluginSurfacesResult { bundle })
 }
@@ -202,17 +191,9 @@ pub async fn plugin_surface_watch_tick<R: Runtime>(
     let token = current_token(&state).await;
     let (namespace, namespace_generation) = {
         let namespace = state.active_namespace.lock().await;
-        (
-            namespace.clone(),
-            state.active_namespace_generation.load(std::sync::atomic::Ordering::Acquire),
-        )
+        (namespace.clone(), state.active_namespace_generation.load(std::sync::atomic::Ordering::Acquire))
     };
-    let new_bundle = bv_client::watch_once_with_namespace_uncommitted(
-        &*backend,
-        &cache,
-        &token,
-        namespace.as_deref(),
-    )
+    let new_bundle = bv_client::watch_once_with_namespace_uncommitted(&*backend, &cache, &token, namespace.as_deref())
         .await
         .map_err(CommandError::from)?;
     let namespace_guard = state.active_namespace.lock().await;
@@ -225,16 +206,8 @@ pub async fn plugin_surface_watch_tick<R: Runtime>(
     // tick, give live modules a chance to run `bvx_tick` (30 s floor).
     if let Some(ref bundle) = new_bundle {
         let _ = cache.write_bundle(bundle);
-        crate::plugin_apps::sync_from_bundle(
-            &app,
-            &state,
-            bundle,
-            backend.clone(),
-            &cache,
-            &token,
-            namespace.clone(),
-        )
-        .await;
+        crate::plugin_apps::sync_from_bundle(&app, &state, bundle, backend.clone(), &cache, &token, namespace.clone())
+            .await;
     } else {
         crate::plugin_apps::tick_all(&app, &state).await;
     }

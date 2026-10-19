@@ -145,7 +145,12 @@ pub async fn open_sftp_session(
         );
     }
     spawn_disconnect_watch(app, token.clone(), closed_event.clone(), handle);
-    log::info!("resource-connect/sftp: opened session token={token} label={} ({}:{})", args.label, args.host, args.port);
+    log::info!(
+        "resource-connect/sftp: opened session token={token} label={} ({}:{})",
+        args.label,
+        args.host,
+        args.port
+    );
     Ok(SftpOpenOutcome { token, closed_event, remote_home })
 }
 
@@ -411,7 +416,8 @@ pub async fn local_list(path: &str) -> Result<Listing, String> {
         } else {
             kind
         };
-        let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs());
+        let mtime =
+            meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs());
         entries.push(Entry { name, kind, target_kind, size: meta.len(), mtime, permissions: unix_mode(&meta) });
     }
     Ok(Listing { path: display_local(&canonical), entries, skipped_unsafe })
@@ -454,7 +460,9 @@ pub async fn remote_remove(sftp: &SftpSession, path: &str) -> Result<(), String>
     check_remote_path(path)?;
     let meta = sftp.symlink_metadata(path).await.map_err(|e| format!("sftp: {path}: {e}"))?;
     if meta.is_dir() {
-        sftp.remove_dir(path).await.map_err(|e| format!("sftp: remove folder {path}: {e} (only empty folders can be removed)"))
+        sftp.remove_dir(path)
+            .await
+            .map_err(|e| format!("sftp: remove folder {path}: {e} (only empty folders can be removed)"))
     } else {
         sftp.remove_file(path).await.map_err(|e| format!("sftp: remove {path}: {e}"))
     }
@@ -570,8 +578,18 @@ pub async fn run_transfer(
             }
             Step::File { src, dst, .. } => {
                 progress.current = src.clone();
-                copy_file(&sftp, req.direction, src, dst, &cancel, &mut progress, &events, &progress_event, &mut last_emit)
-                    .await
+                copy_file(
+                    &sftp,
+                    req.direction,
+                    src,
+                    dst,
+                    &cancel,
+                    &mut progress,
+                    &events,
+                    &progress_event,
+                    &mut last_emit,
+                )
+                .await
             }
         };
         match result {
@@ -660,7 +678,11 @@ async fn source_kind(sftp: &SftpSession, direction: Direction, path: &str) -> Re
                 lmeta.clone()
             };
             Ok(if meta.is_dir() {
-                if lmeta.is_symlink() { SourceKind::Skip("symlinked folder") } else { SourceKind::Dir }
+                if lmeta.is_symlink() {
+                    SourceKind::Skip("symlinked folder")
+                } else {
+                    SourceKind::Dir
+                }
             } else if meta.is_regular() {
                 SourceKind::File(meta.size.unwrap_or(0))
             } else {
@@ -675,7 +697,11 @@ async fn source_kind(sftp: &SftpSession, direction: Direction, path: &str) -> Re
                 lmeta.clone()
             };
             Ok(if meta.is_dir() {
-                if lmeta.file_type().is_symlink() { SourceKind::Skip("symlinked folder") } else { SourceKind::Dir }
+                if lmeta.file_type().is_symlink() {
+                    SourceKind::Skip("symlinked folder")
+                } else {
+                    SourceKind::Dir
+                }
             } else if meta.is_file() {
                 SourceKind::File(meta.len())
             } else {
@@ -804,9 +830,10 @@ async fn make_dir(sftp: &SftpSession, direction: Direction, dst: &str) -> Result
         Direction::Upload => match sftp.symlink_metadata(dst.to_string()).await {
             Ok(m) if m.is_dir() => Ok(()),
             Ok(_) => Err(CopyError::Failed(format!("sftp: {dst} exists and is not a folder"))),
-            Err(_) => {
-                sftp.create_dir(dst.to_string()).await.map_err(|e| CopyError::Failed(format!("sftp: create {dst}: {e}")))
-            }
+            Err(_) => sftp
+                .create_dir(dst.to_string())
+                .await
+                .map_err(|e| CopyError::Failed(format!("sftp: create {dst}: {e}"))),
         },
         Direction::Download => match tokio::fs::symlink_metadata(dst).await {
             Ok(m) if m.is_dir() => Ok(()),
@@ -833,7 +860,9 @@ async fn copy_file(
         Direction::Download => {
             download_file(sftp, src, &partial, cancel, progress, events, progress_event, last_emit).await
         }
-        Direction::Upload => upload_file(sftp, src, &partial, cancel, progress, events, progress_event, last_emit).await,
+        Direction::Upload => {
+            upload_file(sftp, src, &partial, cancel, progress, events, progress_event, last_emit).await
+        }
     };
     if let Err(e) = result {
         // Never leave the partial file behind.
@@ -899,7 +928,8 @@ async fn download_file(
     progress_event: &str,
     last_emit: &mut Instant,
 ) -> Result<(), CopyError> {
-    let mut remote = sftp.open(src.to_string()).await.map_err(|e| CopyError::Failed(format!("sftp: open {src}: {e}")))?;
+    let mut remote =
+        sftp.open(src.to_string()).await.map_err(|e| CopyError::Failed(format!("sftp: open {src}: {e}")))?;
     // `create_new`: a stale partial from a crashed run is not silently reused.
     let mut local = tokio::fs::OpenOptions::new()
         .write(true)
@@ -938,8 +968,10 @@ async fn upload_file(
     last_emit: &mut Instant,
 ) -> Result<(), CopyError> {
     let mut local = tokio::fs::File::open(src).await.map_err(|e| CopyError::Failed(format!("open {src}: {e}")))?;
-    let mut remote =
-        sftp.create(partial.to_string()).await.map_err(|e| CopyError::Failed(format!("sftp: create {partial}: {e}")))?;
+    let mut remote = sftp
+        .create(partial.to_string())
+        .await
+        .map_err(|e| CopyError::Failed(format!("sftp: create {partial}: {e}")))?;
     let mut buf = vec![0u8; COPY_CHUNK];
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -988,8 +1020,26 @@ mod tests {
     #[test]
     fn windows_file_names_exclude_streams_drives_and_devices() {
         for bad in [
-            "a:b", "D:evil", "C:", "x<y", "x>y", "a\"b", "a|b", "a?", "a*", "tab\tname", "dot.", "space ", "CON",
-            "con", "Nul.txt", "aux.tar.gz", "COM1", "lpt9.log", "COM\u{00B9}", "PRN ",
+            "a:b",
+            "D:evil",
+            "C:",
+            "x<y",
+            "x>y",
+            "a\"b",
+            "a|b",
+            "a?",
+            "a*",
+            "tab\tname",
+            "dot.",
+            "space ",
+            "CON",
+            "con",
+            "Nul.txt",
+            "aux.tar.gz",
+            "COM1",
+            "lpt9.log",
+            "COM\u{00B9}",
+            "PRN ",
         ] {
             assert!(!is_windows_file_name(bad), "{bad:?} accepted");
         }

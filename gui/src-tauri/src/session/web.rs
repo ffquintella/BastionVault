@@ -459,9 +459,8 @@ pub fn parse_web_profile(profile: &Value) -> Result<WebSessionConfig, String> {
     let mode = match opt_str(web.get("login_mode"), "web.login_mode")? {
         Some(mode @ ("open" | "form" | "http-auth")) => mode,
         Some("sso") => {
-            return Err(
-                "login mode `sso` is not available yet; this release supports `open`, `form` and `http-auth`".to_string()
-            )
+            return Err("login mode `sso` is not available yet; this release supports `open`, `form` and `http-auth`"
+                .to_string())
         }
         Some(other) => return Err(format!("unknown login mode `{other}`")),
         None => return Err("web profile has no login_mode".to_string()),

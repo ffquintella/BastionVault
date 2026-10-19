@@ -695,10 +695,7 @@ pub struct ProviderGrantResult {
 }
 
 #[tauri::command]
-pub async fn plugins_get_provider_grant(
-    state: State<'_, AppState>,
-    name: String,
-) -> CmdResult<ProviderGrantResult> {
+pub async fn plugins_get_provider_grant(state: State<'_, AppState>, name: String) -> CmdResult<ProviderGrantResult> {
     if is_remote(&state).await {
         let json =
             remote_call_v2(&state, "GET", &format!("sys/plugins/{name}/grants/credential-provider"), None).await?;

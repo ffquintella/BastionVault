@@ -140,13 +140,10 @@ impl TrustUi {
         // called from, so the window lookup cannot re-enter the registry
         // (as `set_title_later`).
         tauri::async_runtime::spawn(async move {
-            let mut dialog = ui
-                .app
-                .dialog()
-                .message(message)
-                .title(PROMPT_TITLE)
-                .kind(MessageDialogKind::Warning)
-                .buttons(MessageDialogButtons::OkCancelCustom(CONTINUE_LABEL.to_string(), CANCEL_LABEL.to_string()));
+            let mut dialog =
+                ui.app.dialog().message(message).title(PROMPT_TITLE).kind(MessageDialogKind::Warning).buttons(
+                    MessageDialogButtons::OkCancelCustom(CONTINUE_LABEL.to_string(), CANCEL_LABEL.to_string()),
+                );
             // A sheet on the session window, so the question names its window.
             if let Some(window) = session_window(&ui.app, &ui.label) {
                 dialog = dialog.parent(&window);

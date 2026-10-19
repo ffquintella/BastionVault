@@ -618,7 +618,10 @@ pub struct BundleExpectation<'a> {
 /// The login the host is about to run.
 #[derive(Clone, Copy)]
 pub enum ExpectedLogin<'a> {
-    Form { recipe_hash: &'a str, plan: &'a RecipePlan },
+    Form {
+        recipe_hash: &'a str,
+        plan: &'a RecipePlan,
+    },
     /// Answers HTTP authentication challenges natively; no recipe, no TOTP.
     HttpAuth,
 }
@@ -632,7 +635,9 @@ pub fn check_bundle(bundle: &LaunchBundle, expect: &BundleExpectation<'_>) -> Re
     let c = &bundle.credential;
     match expect.login {
         ExpectedLogin::Form { recipe_hash, plan } => {
-            if bundle.login_mode != "form" || bundle.exposure != "dom" || bundle.recipe_hash.as_deref() != Some(recipe_hash)
+            if bundle.login_mode != "form"
+                || bundle.exposure != "dom"
+                || bundle.recipe_hash.as_deref() != Some(recipe_hash)
             {
                 return Err("bundle_mismatch");
             }
@@ -1114,10 +1119,8 @@ mod tests {
             login: ExpectedLogin::Form { recipe_hash: &hash, plan: &plan },
         };
         assert_eq!(check_bundle(&b, &expect), Ok(()));
-        let other = BundleExpectation {
-            login: ExpectedLogin::Form { recipe_hash: "sha256:other", plan: &plan },
-            ..expect
-        };
+        let other =
+            BundleExpectation { login: ExpectedLogin::Form { recipe_hash: "sha256:other", plan: &plan }, ..expect };
         assert_eq!(check_bundle(&b, &other), Err("bundle_mismatch"));
         // A form launch is never accepted as an http-auth one, or the reverse.
         let other = BundleExpectation { login: ExpectedLogin::HttpAuth, ..expect };

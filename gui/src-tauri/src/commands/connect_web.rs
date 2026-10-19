@@ -1396,7 +1396,15 @@ pub async fn web_recipe_test(
             )
         }),
         // A dry run fills nothing.
-        ui: Some(super::connect_web_trust_ui::TrustUi::new(&app, &window_label, &token, TEST_TITLE, &shared, &scope.start_url, false)),
+        ui: Some(super::connect_web_trust_ui::TrustUi::new(
+            &app,
+            &window_label,
+            &token,
+            TEST_TITLE,
+            &shared,
+            &scope.start_url,
+            false,
+        )),
     };
     let initial_url = if gates.is_empty() {
         scope.start_url.clone()

@@ -37,10 +37,10 @@ use tauri::{AppHandle, State, Webview};
 use zeroize::Zeroizing;
 
 use super::connect::{
-    collect_policy_hints, find_profile, is_connect_layer_error, open_context, open_rustion_session_v2_ssh, profile_host_candidates,
-    profile_port, profile_username, read_effective_policy, read_resource_meta, record_recent_session, require_session_window,
-    resolve_session_layout, resolve_ssh_connect_route, resolve_ssh_credential, spawn_own_session_window,
-    now_rfc3339, ConnectRoute, OperatorCredential, SessionProtocolTag,
+    collect_policy_hints, find_profile, is_connect_layer_error, now_rfc3339, open_context, open_rustion_session_v2_ssh,
+    profile_host_candidates, profile_port, profile_username, read_effective_policy, read_resource_meta,
+    record_recent_session, require_session_window, resolve_session_layout, resolve_ssh_connect_route,
+    resolve_ssh_credential, spawn_own_session_window, ConnectRoute, OperatorCredential, SessionProtocolTag,
 };
 use super::connect_provider::{dial_in_order, DialFailure};
 use crate::error::{CmdResult, CommandError};
@@ -153,7 +153,10 @@ pub async fn session_open_sftp(
     let opened_in = open_context(&state, None).await?;
     let meta = read_resource_meta(&state, &request.resource_name).await?;
     let profile = find_profile(&meta, &request.profile_id).ok_or_else(|| {
-        CommandError::from(format!("profile `{}` not found on resource `{}`", request.profile_id, request.resource_name))
+        CommandError::from(format!(
+            "profile `{}` not found on resource `{}`",
+            request.profile_id, request.resource_name
+        ))
     })?;
     session::ProfileProtocol::require(&profile, session::ProfileProtocol::Sftp).map_err(CommandError::from)?;
     // Own window, always; the preferences are read for the window builder
@@ -384,8 +387,15 @@ pub async fn session_open_sftp(
     // The bastion-side lifecycle (renew, kill), keyed by the local token as
     // for SSH and RDP; the window's Rustion chip reads it, and the drop path
     // removes it.
-    if let ConnectRoute::Rustion { bastion_id, bastion_name, session_id, correlation_id, expires_at, max_renewals, .. } =
-        &route
+    if let ConnectRoute::Rustion {
+        bastion_id,
+        bastion_name,
+        session_id,
+        correlation_id,
+        expires_at,
+        max_renewals,
+        ..
+    } = &route
     {
         state.rustion_session_bundles.lock().await.insert(
             outcome.token.clone(),
@@ -545,7 +555,8 @@ pub async fn sftp_transfer(
     };
     let cancel = Arc::new(AtomicBool::new(false));
     {
-        let mut map = transfers.lock().map_err(|_| CommandError::from("sftp: transfer registry poisoned".to_string()))?;
+        let mut map =
+            transfers.lock().map_err(|_| CommandError::from("sftp: transfer registry poisoned".to_string()))?;
         if map.contains_key(&request.transfer_id) {
             return Err(CommandError::from("sftp: a transfer with this id is already running".to_string()));
         }

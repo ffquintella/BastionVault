@@ -894,10 +894,7 @@ pub async fn list_audit_events(
 /// Parse an array of audit-trail rows in the `sys/audit/events` shape. Shared
 /// with the dashboard summary's `audit_stats.recent`, which uses the same row.
 fn audit_events_from(value: Option<&Value>) -> Vec<AuditEvent> {
-    value
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(audit_event_from).collect())
-        .unwrap_or_default()
+    value.and_then(|v| v.as_array()).map(|arr| arr.iter().filter_map(audit_event_from).collect()).unwrap_or_default()
 }
 
 fn audit_event_from(v: &Value) -> Option<AuditEvent> {

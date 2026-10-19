@@ -499,9 +499,8 @@ pub(super) async fn connect_authenticated(
     });
     let observed = Arc::new(std::sync::Mutex::new(String::new()));
     let handler = HostKeyHandler { expected_fp: host_key_fingerprint.to_string(), observed: observed.clone() };
-    let mut session = client::connect(cfg, (host, port), handler)
-        .await
-        .map_err(|e| format!("connect {host}:{port}: {e}"))?;
+    let mut session =
+        client::connect(cfg, (host, port), handler).await.map_err(|e| format!("connect {host}:{port}: {e}"))?;
 
     // Auth — caller already picked one; we just dispatch.
     // russh ≥ 0.51 returns `AuthResult` (carrying success +
@@ -517,10 +516,9 @@ pub(super) async fn connect_authenticated(
         SshCredential::SecurityKey { .. } => "publickey (security key)",
     };
     let auth_result = match credential {
-        SshCredential::Password(pw) => session
-            .authenticate_password(username, pw.as_str())
-            .await
-            .map_err(|e| format!("password auth: {e}"))?,
+        SshCredential::Password(pw) => {
+            session.authenticate_password(username, pw.as_str()).await.map_err(|e| format!("password auth: {e}"))?
+        }
         SshCredential::PrivateKey { pem, passphrase } => {
             let key = decode_secret_key(pem.as_str(), passphrase.as_deref().map(|p| p.as_str()))
                 .map_err(|e| format!("parse private key: {e}"))?;
