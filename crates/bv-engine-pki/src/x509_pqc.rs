@@ -14,7 +14,6 @@
 
 use std::{
     net::IpAddr,
-    str::FromStr,
     time::{Duration, SystemTime},
 };
 
@@ -361,13 +360,34 @@ where
     })
 }
 
+/// Root CA subject for ML-DSA and composite certificates: O (when set), then
+/// CN, each a single-valued UTF8String RDN — the bytes the RFC 4514 parse
+/// used here before produced for plain values. Values are taken literally:
+/// that parse split an organisation such as `Acme, Inc.` into extra
+/// attributes. CN is always written, as the classical root builder does.
 pub(super) fn build_dn_cn_o(common_name: &str, organization: &str) -> Result<Name, RvError> {
-    let s = if organization.is_empty() {
-        format!("CN={}", common_name)
+    use super::x509::{ATTR_COMMON_NAME, ATTR_ORGANIZATION};
+    let mut rdns = Vec::with_capacity(2);
+    if !organization.is_empty() {
+        rdns.push(literal_rdn(ATTR_ORGANIZATION, organization)?);
+    }
+    rdns.push(literal_rdn(ATTR_COMMON_NAME, common_name)?);
+    Ok(RdnSequence(rdns))
+}
+
+/// One single-valued RDN holding `value` verbatim. C is a PrintableString
+/// (refused if `value` is not one), every other attribute a UTF8String.
+fn literal_rdn(oid: ObjectIdentifier, value: &str) -> Result<RelativeDistinguishedName, RvError> {
+    let tag = if oid == super::x509::ATTR_COUNTRY {
+        PrintableStringRef::new(value).map_err(|e| {
+            RvError::ErrString(format!("pki: role country `{value}` is not a valid PrintableString ({e})"))
+        })?;
+        Tag::PrintableString
     } else {
-        format!("CN={},O={}", common_name, organization)
+        Tag::Utf8String
     };
-    Name::from_str(&s).map_err(der_err)
+    let atv = AttributeTypeAndValue { oid, value: Any::new(tag, value.as_bytes()).map_err(der_err)? };
+    Ok(RelativeDistinguishedName(SetOfVec::try_from(vec![atv]).map_err(der_err)?))
 }
 
 /// Leaf subject for ML-DSA and composite certificates: one single-valued RDN
@@ -390,16 +410,7 @@ pub(super) fn build_leaf_dn(role: &RoleEntry, cn: &str) -> Result<Name, RvError>
     ];
     let mut rdns = Vec::with_capacity(fields.len());
     for (oid, value) in fields.into_iter().filter(|(_, value)| !value.is_empty()) {
-        let tag = if oid == ATTR_COUNTRY {
-            PrintableStringRef::new(value).map_err(|e| {
-                RvError::ErrString(format!("pki: role country `{value}` is not a valid PrintableString ({e})"))
-            })?;
-            Tag::PrintableString
-        } else {
-            Tag::Utf8String
-        };
-        let atv = AttributeTypeAndValue { oid, value: Any::new(tag, value.as_bytes()).map_err(der_err)? };
-        rdns.push(RelativeDistinguishedName(SetOfVec::try_from(vec![atv]).map_err(der_err)?));
+        rdns.push(literal_rdn(oid, value)?);
     }
     if rdns.is_empty() {
         return Err(RvError::ErrString(
@@ -646,6 +657,10 @@ mod tests {
     //! CA certificate must certify the key that signs. Fixtures are shared
     //! with `x509::tests`.
 
+    use std::str::FromStr;
+
+    use x509_cert::der::Tagged;
+
     use bv_crypto::{ML_DSA_65_PUBLIC_KEY_LEN, ML_DSA_65_SIGNATURE_LEN};
     use fips204::{
         ml_dsa_65,
@@ -781,6 +796,54 @@ mod tests {
             let err = issued.expect_err("a signer inconsistent with its seed must be refused");
             assert!(format!("{err:?}").contains("not the one its private seed derives"), "reason: {err:?}");
         }
+    }
+
+    // ── build_dn_cn_o ──────────────────────────────────────────────────
+
+    fn single_valued_attrs(dn: &Name) -> Vec<(String, Tag, Vec<u8>)> {
+        dn.0.iter()
+            .map(|rdn| {
+                assert_eq!(rdn.0.len(), 1, "every RDN is single-valued");
+                let atv = rdn.0.get(0).unwrap();
+                (atv.oid.to_string(), atv.value.tag(), atv.value.value().to_vec())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn root_dn_bytes_are_unchanged_for_plain_values() {
+        // The RFC 4514 parse this replaced, for values with no DN syntax in
+        // them: root subjects must keep their bytes (O first, CN last, both
+        // UTF8String).
+        let before = Name::from_str("CN=Root CA,O=FGV").unwrap();
+        let after = build_dn_cn_o("Root CA", "FGV").unwrap();
+        assert_eq!(after.to_der().unwrap(), before.to_der().unwrap());
+        assert_eq!(
+            single_valued_attrs(&after),
+            vec![
+                ("2.5.4.10".to_string(), Tag::Utf8String, b"FGV".to_vec()),
+                ("2.5.4.3".to_string(), Tag::Utf8String, b"Root CA".to_vec()),
+            ],
+        );
+
+        let cn_only = build_dn_cn_o("Root CA", "").unwrap();
+        assert_eq!(cn_only.to_der().unwrap(), Name::from_str("CN=Root CA").unwrap().to_der().unwrap());
+    }
+
+    #[test]
+    fn root_dn_takes_dn_syntax_in_values_literally() {
+        // An organisation the old string parse split into an extra
+        // attribute, and a CN carrying separators, an escape and a leading
+        // `#` that it read as DN syntax.
+        let cn = r"#0c0141 RootC CA+O=Evil";
+        let dn = build_dn_cn_o(cn, "Acme, Inc.").unwrap();
+        assert_eq!(
+            single_valued_attrs(&dn),
+            vec![
+                ("2.5.4.10".to_string(), Tag::Utf8String, b"Acme, Inc.".to_vec()),
+                ("2.5.4.3".to_string(), Tag::Utf8String, cn.as_bytes().to_vec()),
+            ],
+        );
     }
 
     // ── build_leaf_dn ──────────────────────────────────────────────────

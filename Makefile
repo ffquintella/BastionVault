@@ -120,7 +120,7 @@ endif
 # affect cargo's own internal parallelism, which is where the cores actually go.
 .NOTPARALLEL:
 
-.PHONY: help build run-dev run-dev-gui run-dev-gui-proxy gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-integration test-doc test-cucumber test-hiqlite test-all test-release verify-gates verify-routes verify-fast verify-kani verify-differential verify verify-full verification-report docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test downloads-image downloads-image-run downloads-image-test container-deps-key container-deps-ref container-deps-image container-deps-push container-cache-clean container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all install uninstall gui-linux-packages gui-windows-msi gui-windows-nsis windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings release release-version-check release-dispatch release-linux-appimage release-macos-pkg release-windows-msi release-local release-checksums
+.PHONY: help build run-dev run-dev-gui run-dev-gui-proxy gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-pki-composite test-integration test-doc test-cucumber test-hiqlite test-all test-release verify-gates verify-routes verify-fast verify-kani verify-differential verify verify-full verification-report docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test downloads-image downloads-image-run downloads-image-test container-deps-key container-deps-ref container-deps-image container-deps-push container-cache-clean container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all install uninstall gui-linux-packages gui-windows-msi gui-windows-nsis windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings release release-version-check release-dispatch release-linux-appimage release-macos-pkg release-windows-msi release-local release-checksums
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -475,6 +475,21 @@ check-isolated: prune-stale ## cargo check every workspace member on its own (ca
 check-hsm: prune-stale ## cargo check the HSM seal backends (nothing else compiles them; DEEP=1 for the image's graph)
 	@scripts/check-hsm.sh $(if $(DEEP),--deep)
 
+# ── Composite PKI issuance (feature-gated) ────────────────────────
+#
+# `pki_pqc_composite` is off by default and `--all-features` is banned
+# (AGENTS.md §5), so bv-engine-pki's composite arms — and the composite
+# regression tests for the issuance hardening (T147, T148, T150) — compile in
+# no other target. Scoped to the one crate on purpose: the feature adds code
+# only there and changes nothing beneath it, so a warm tree rebuilds just
+# bv-engine-pki. NEXTEST_PROFILE=ci selects the profile CI writes JUnit with.
+#
+# tests/test_pki_composite.rs is gated on the same feature through the root
+# crate and is not run here: it needs a second feature variant of the whole
+# root crate, which is a different cost from this one.
+test-pki-composite: require-nextest prune-stale ## Run bv-engine-pki unit tests with the composite (pki_pqc_composite) feature on
+	cargo nextest run $(if $(NEXTEST_PROFILE),--profile $(NEXTEST_PROFILE)) -p bv-engine-pki --lib --features pki_pqc_composite
+
 test-integration: require-nextest prune-stale ## Run the tests/ integration suite with nextest (links ~30 binaries; slow)
 	cargo nextest run $(TEST_SCOPE) --tests
 
@@ -523,19 +538,22 @@ test-all: test test-integration test-doc ## Run unit + integration + doctests (e
 # queue on the shared target/ lock (AGENTS.md §5).
 #
 # Deliberately NOT here: `make build` (a release *build* is its own step) and
-# `tests/e2e/rustion-ssh` (needs real remote hosts, cannot be hermetic).
+# `tests/e2e/rustion-ssh` (needs real remote hosts, cannot be hermetic). Also
+# not run, though not by choice: `tests/test_pki_composite.rs`, which compiles
+# to nothing without the root crate's `pki_pqc_composite` (see test-pki-composite).
 test-release: require-nextest ## Every suite, for a release or a high-risk merge (slow: tens of minutes)
-	@echo "==> [1/8] unit tests (lib + bins)"      && $(MAKE) --no-print-directory test
-	@echo "==> [2/8] integration tests (tests/)"   && $(MAKE) --no-print-directory test-integration
-	@echo "==> [3/8] doctests"                     && $(MAKE) --no-print-directory test-doc
-	@echo "==> [4/8] hiqlite storage + HA"         && $(MAKE) --no-print-directory test-hiqlite
-	@echo "==> [5/8] cucumber features"            && $(MAKE) --no-print-directory test-cucumber
-	@echo "==> [6/8] plugin ABI + substrate"       && $(MAKE) --no-print-directory plugins-test
-	@echo "==> [7/8] GUI typecheck + vitest"       && $(MAKE) --no-print-directory gui-check gui-test
+	@echo "==> [1/9] unit tests (lib + bins)"      && $(MAKE) --no-print-directory test
+	@echo "==> [2/9] integration tests (tests/)"   && $(MAKE) --no-print-directory test-integration
+	@echo "==> [3/9] doctests"                     && $(MAKE) --no-print-directory test-doc
+	@echo "==> [4/9] hiqlite storage + HA"         && $(MAKE) --no-print-directory test-hiqlite
+	@echo "==> [5/9] cucumber features"            && $(MAKE) --no-print-directory test-cucumber
+	@echo "==> [6/9] plugin ABI + substrate"       && $(MAKE) --no-print-directory plugins-test
+	@echo "==> [7/9] GUI typecheck + vitest"       && $(MAKE) --no-print-directory gui-check gui-test
+	@echo "==> [8/9] composite PKI issuance"       && $(MAKE) --no-print-directory test-pki-composite
 	@# DEEP=1, not the cheap per-change variant: a release cuts the container
 	@# image, and the image builds `-p bvault-cli` with both HSM backends. This
 	@# is the one place that is worth paying for the image's real graph.
-	@echo "==> [8/8] HSM seal backends (image graph)" && $(MAKE) --no-print-directory check-hsm DEEP=1
+	@echo "==> [9/9] HSM seal backends (image graph)" && $(MAKE) --no-print-directory check-hsm DEEP=1
 	@echo ""
 	@echo "==> test-release complete: every suite in this repo passed."
 	@echo "    Not covered (needs real hosts, run by hand): tests/e2e/rustion-ssh"

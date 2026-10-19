@@ -39,6 +39,8 @@
 #   isolation      `cargo check -p X` over every member, when any manifest moved
 #   hsm            `make check-hsm`, when bv-core, a manifest or the image recipe
 #                  moved — the seal backends are off in every other job
+#   pki-composite  `make test-pki-composite`, when bv-engine-pki is affected —
+#                  the `pki_pqc_composite` arms are off in every other job
 #   gui            tsc + vitest, when gui/ (not gui/src-tauri) moved
 #   kani           verify.yml's tier-1 Kani job, when bv-policy-core or the
 #                  verification tooling moved (output `run_kani`)
@@ -91,7 +93,7 @@ while [[ $# -gt 0 ]]; do
     --base)  BASE="${2:?--base needs a git ref}"; shift 2 ;;
     --full)  FORCE_FULL=1; shift ;;
     --pkg)   SEED_PKGS+=("${2:?--pkg needs a package name}"); shift 2 ;;
-    -h|--help) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "ci-plan: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
@@ -194,6 +196,12 @@ run_hsm = (
     or bool(plan["manifest_files"])
     or bool(plan["hsm_files"])
 )
+# bv-engine-pki's composite (classical + ML-DSA) arms are behind
+# `pki_pqc_composite`, which no other job enables, so their regression tests
+# ran nowhere. The feature adds code only to bv-engine-pki, so that crate in
+# the affected set is the trigger; it is there whenever anything beneath it
+# moved, too, because lib_pkgs is the reverse-dependency closure.
+run_pki_composite = full or "bv-engine-pki" in lib_pkgs
 # verify.yml (T31 Phase 4). The Kani proofs are statements about
 # bv-policy-core's source and nothing else — the crate has no dependencies — so
 # a change that cannot reach it cannot change a Kani result. The differential
@@ -216,6 +224,7 @@ out = {
     "run_cucumber": "true" if run_cucumber else "false",
     "run_isolation": "true" if run_isolation else "false",
     "run_hsm": "true" if run_hsm else "false",
+    "run_pki_composite": "true" if run_pki_composite else "false",
     "run_kani": "true" if run_kani else "false",
     "run_differential": "true" if run_differential else "false",
 }
@@ -253,6 +262,7 @@ lines = [
     f"| cucumber | {'run' if run_cucumber else 'skipped (root crate not affected)'} |",
     f"| isolation | {'run' if run_isolation else 'skipped (no manifest changed)'} |",
     f"| hsm | {'run' if run_hsm else 'skipped (bv-core, manifests and the image recipe all untouched)'} |",
+    f"| pki-composite | {'run' if run_pki_composite else 'skipped (bv-engine-pki not affected)'} |",
     f"| gui | {'run' if run_gui else 'skipped (gui/ not touched)'} |",
     f"| verify: kani (fast set on a PR) | {'run' if run_kani else 'skipped (bv-policy-core and the verification tooling untouched)'} |",
     f"| verify: differential | {'run' if run_differential else 'skipped (bv-kernel not affected)'} |",
