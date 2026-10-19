@@ -256,6 +256,57 @@ pub async fn pki_set_issuer_usages(
     Ok(())
 }
 
+/// Outcome of `pki/issuer/<ref>/renew` (T455). Public material only: the
+/// issuer's key never leaves the engine's managed-key store.
+#[derive(Serialize)]
+pub struct PkiIssuerRenewResult {
+    pub issuer_id: String,
+    pub issuer_name: String,
+    pub certificate: String,
+    pub serial_number: String,
+    pub not_before: i64,
+    pub not_after: i64,
+    pub previous_serial_number: String,
+    pub previous_not_after: i64,
+    /// `"self"` for a self-signed issuer, else the parent issuer's name.
+    pub signed_by: String,
+    pub signed_by_issuer_id: String,
+    /// The parent's own expiry shortened the requested validity.
+    pub ttl_clamped: bool,
+}
+
+/// `POST /v2/<mount>/issuer/<ref>/renew`: re-issue the issuer's CA
+/// certificate for the same key and subject. An empty `ttl` keeps the
+/// current certificate's validity span.
+#[tauri::command]
+pub async fn pki_renew_issuer(
+    state: State<'_, AppState>,
+    mount: String,
+    reference: String,
+    ttl: Option<String>,
+) -> CmdResult<PkiIssuerRenewResult> {
+    let mount = mount_prefix(&mount);
+    let mut body = Map::new();
+    if let Some(ttl) = ttl.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+        body.insert("ttl".into(), json!(ttl));
+    }
+    let resp = make_request(&state, Operation::Write, format!("{mount}/issuer/{reference}/renew"), Some(body)).await?;
+    let map = data_to_map(resp);
+    Ok(PkiIssuerRenewResult {
+        issuer_id: val_str(&map, "issuer_id"),
+        issuer_name: val_str(&map, "issuer_name"),
+        certificate: val_str(&map, "certificate"),
+        serial_number: val_str(&map, "serial_number"),
+        not_before: val_i64(&map, "not_before"),
+        not_after: val_i64(&map, "not_after"),
+        previous_serial_number: val_str(&map, "previous_serial_number"),
+        previous_not_after: val_i64(&map, "previous_not_after"),
+        signed_by: val_str(&map, "signed_by"),
+        signed_by_issuer_id: val_str(&map, "signed_by_issuer_id"),
+        ttl_clamped: val_bool(&map, "ttl_clamped"),
+    })
+}
+
 #[tauri::command]
 pub async fn pki_delete_issuer(state: State<'_, AppState>, mount: String, reference: String) -> CmdResult<()> {
     let mount = mount_prefix(&mount);

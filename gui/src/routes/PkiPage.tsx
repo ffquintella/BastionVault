@@ -555,6 +555,7 @@ function IssuersTab({ mount }: { mount: string }) {
   const [exportTarget, setExportTarget] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [usageValues, setUsageValues] = useState<string[]>([]);
+  const [showRenew, setShowRenew] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -724,7 +725,13 @@ function IssuersTab({ mount }: { mount: string }) {
                 <Field label="Kind" value={detail.ca_kind} />
                 <Field label="Common Name" value={detail.common_name} />
                 <Field label="Key Type" value={detail.key_type} />
-                <Field label="Not After" value={fmtUnix(detail.not_after)} />
+                <Field
+                  label="Not After"
+                  value={
+                    fmtUnix(detail.not_after) +
+                    (detail.not_after > 0 && detail.not_after * 1000 < Date.now() ? " (expired)" : "")
+                  }
+                />
                 <Field label="Default" value={detail.is_default ? "yes" : "no"} />
                 <Field label="Issuer ID" value={detail.id} mono />
                 <Field label="Usages" value={detail.usage.join(", ") || "(none)"} />
@@ -762,6 +769,13 @@ function IssuersTab({ mount }: { mount: string }) {
                     }}
                   >
                     Edit usages
+                  </Button>
+                )}
+                {/* Key-less (trust/chain-only) issuers have no backing key
+                    to certify; the engine refuses them, so don't offer it. */}
+                {isAdmin && !!detail.key_id && (
+                  <Button variant="ghost" onClick={() => setShowRenew(true)}>
+                    Renew
                   </Button>
                 )}
                 <Button
@@ -874,6 +888,14 @@ function IssuersTab({ mount }: { mount: string }) {
         </div>
       </Modal>
 
+      <RenewIssuerModal
+        open={showRenew}
+        onClose={() => setShowRenew(false)}
+        mount={mount}
+        issuer={detail}
+        onRenewed={selectIssuer}
+      />
+
       <ConfirmModal
         open={!!deleteTarget}
         onClose={() => setDeleteTarget(null)}
@@ -898,6 +920,95 @@ function IssuersTab({ mount }: { mount: string }) {
         onClose={() => setExportTarget(null)}
       />
     </Card>
+  );
+}
+
+// ── Renew Issuer Modal ───────────────────────────────────────────
+
+/** Re-issue an issuer CA certificate for the same key and subject (T455).
+ *  Id, name, default pointer and usages survive, so the caller only needs
+ *  to re-read the issuer detail afterwards (`onRenewed`). */
+function RenewIssuerModal({
+  open,
+  onClose,
+  mount,
+  issuer,
+  onRenewed,
+}: {
+  open: boolean;
+  onClose: () => void;
+  mount: string;
+  issuer: PkiIssuerDetail | null;
+  onRenewed: (issuerId: string) => Promise<void> | void;
+}) {
+  const { toast } = useToast();
+  const [ttl, setTtl] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (open) setTtl("");
+  }, [open]);
+
+  async function submit() {
+    if (!issuer || busy) return;
+    setBusy(true);
+    try {
+      const r = await api.pkiRenewIssuer(mount, issuer.id, ttl.trim() || undefined);
+      const by = r.signed_by === "self" ? "re-signed with its own key" : "re-signed by " + r.signed_by;
+      const clamped = r.ttl_clamped ? "; validity capped at the parent issuer expiry" : "";
+      toast("success", "Issuer " + r.issuer_name + " renewed until " + fmtUnix(r.not_after) + " (" + by + clamped + ")");
+      onClose();
+      await onRenewed(r.issuer_id);
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={() => {
+        if (!busy) onClose();
+      }}
+      title="Renew issuer certificate"
+      size="md"
+      actions={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button onClick={submit} disabled={busy || !issuer}>
+            {busy ? "Renewing…" : "Renew"}
+          </Button>
+        </>
+      }
+    >
+      {issuer && (
+        <div className="space-y-3 min-w-0">
+          <p className="text-sm">
+            Issue a new CA certificate for <strong className="break-all">{issuer.name}</strong> with the
+            same key and subject (<span className="break-all">{issuer.common_name || "no CN"}</span>).
+            Certificates it already issued keep chaining to it. The current certificate (Not After{" "}
+            {fmtUnix(issuer.not_after)}) is kept in the issuer history.
+          </p>
+          <p className="text-xs text-[var(--color-text-muted)]">
+            A self-signed issuer is re-signed with its own key. An intermediate is re-signed by its
+            parent issuer on this mount and cannot outlive it; one whose parent is not on this mount
+            must be renewed at that CA.
+          </p>
+          <Input
+            label="Validity (TTL)"
+            value={ttl}
+            onChange={(e) => setTtl(e.target.value)}
+            placeholder="e.g. 87600h"
+            hint="Leave empty to keep the validity span of the current certificate."
+            autoFocus
+          />
+        </div>
+      )}
+    </Modal>
   );
 }
 

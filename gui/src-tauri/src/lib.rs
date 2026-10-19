@@ -529,6 +529,7 @@ pub fn run() {
             commands::pki::pki_read_issuer,
             commands::pki::pki_rename_issuer,
             commands::pki::pki_set_issuer_usages,
+            commands::pki::pki_renew_issuer,
             commands::pki::pki_delete_issuer,
             commands::pki::pki_read_default_issuer,
             commands::pki::pki_set_default_issuer,

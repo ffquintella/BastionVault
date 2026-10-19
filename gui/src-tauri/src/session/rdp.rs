@@ -27,10 +27,10 @@
 //! string literal for every full-desktop repaint.
 //!
 //! Phase 4 limitations (each deferred to a follow-up phase):
-//!   - **No CredSSP / NLA**: connects in standard RDP-Security
-//!     mode. Modern Windows servers refuse this by default;
-//!     operators with NLA-enforcing servers see an explicit error
-//!     pointing at the sspi/picky integration follow-up.
+//!   - **CredSSP / NLA** is offered for password sessions with a
+//!     non-empty password (and always for smart-card); the
+//!     bastion-ticket and cookie-redial paths stay TLS-only. A redial
+//!     to an NLA-only host therefore ends rather than reattaching.
 //!   - **No EGFX / Graphics Pipeline**: server-side H.264 and
 //!     RFX Progressive are not negotiated, so the server falls back
 //!     to RemoteFX (advertised by default) or interleaved bitmap
@@ -1016,9 +1016,9 @@ async fn dial(
     let upgraded_marker = ironrdp_async::mark_as_upgraded(should_upgrade, &mut connector);
     let mut framed = TokioFramed::new(upgraded);
 
-    // Stage 4: ironrdp connector — phase two. CredSSP is OFF in
-    // build_connector_config so the network client is never invoked
-    // (we still pass a stub to satisfy the trait bound).
+    // Stage 4: ironrdp connector — phase two. CredSSP runs here when
+    // build_connector_config enabled it (password or smart-card); the
+    // network client serves Kerberos KDC lookups, NTLM needs none.
     let mut net = CredSspNetworkClient::new();
     let connection_result = ironrdp_async::connect_finalize(
         upgraded_marker,
@@ -1420,14 +1420,14 @@ fn desktop_for_redial(width: u16, height: u16) -> DesktopSize {
 }
 
 fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
-    // Smartcard auth requires CredSSP — there's no Standard
-    // Security analogue. Password auth still uses Standard
-    // Security so the Phase-4 flow against NLA-disabled hosts
-    // keeps working unchanged.
+    // Smartcard auth requires CredSSP. A password session offers it next to
+    // plain TLS so NLA-enforcing hosts connect; an empty password (Rustion
+    // ticket, cookie redial) keeps it off — the bastion drives upstream auth.
     let (credentials, enable_credssp) = match &args.credential {
-        RdpCredential::Password(pw) => {
-            (Credentials::UsernamePassword { username: args.username.clone(), password: pw.as_str().to_owned() }, false)
-        }
+        RdpCredential::Password(pw) => (
+            Credentials::UsernamePassword { username: args.username.clone(), password: pw.as_str().to_owned() },
+            !pw.is_empty(),
+        ),
         RdpCredential::SmartCard(sc) => (
             Credentials::SmartCard {
                 pin: sc.pin.clone(),
@@ -3311,6 +3311,18 @@ mod nego_cookie_tests {
         a.username = "alice".to_owned();
         a.credential = RdpCredential::Password(Zeroizing::new("s3cret".to_owned()));
         assert!(build_connector_config(&a).autologon);
+    }
+
+    /// Regression: a server that enforces NLA answered the TLS-only
+    /// request with "requires Enhanced RDP Security with CredSSP".
+    #[test]
+    fn password_sessions_offer_credssp_and_empty_password_sessions_do_not() {
+        let mut a = args(None);
+        a.username = "alice".to_owned();
+        a.credential = RdpCredential::Password(Zeroizing::new("s3cret".to_owned()));
+        assert!(build_connector_config(&a).enable_credssp);
+        assert!(!build_connector_config(&args(Some(TICKET.to_owned()))).enable_credssp);
+        assert!(!build_connector_config(&super::redial_args(&a).unwrap()).enable_credssp);
     }
 
     #[test]

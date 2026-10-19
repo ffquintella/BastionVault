@@ -76,7 +76,6 @@ pub struct SftpOpenOutcome {
 pub struct SftpSessionState {
     pub sftp: Arc<SftpSession>,
     handle: Arc<client::Handle<HostKeyHandler>>,
-    pub label: String,
     pub on_close: Option<SessionCleanup>,
     /// Cancel flags of the transfers in flight, by transfer id.
     pub transfers: Arc<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>>,
@@ -140,7 +139,6 @@ pub async fn open_sftp_session(
             SessionState::Sftp(SftpSessionState {
                 sftp: Arc::new(sftp),
                 handle: Arc::clone(&handle),
-                label: args.label.clone(),
                 on_close: args.on_close.clone(),
                 transfers: Arc::default(),
             }),

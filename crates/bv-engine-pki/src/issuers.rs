@@ -622,6 +622,13 @@ pub async fn find_issuer_by_serial(
                 return Ok(Some((id.clone(), name.clone())));
             }
         }
+        // A certificate this issuer was renewed away from (T455) is the
+        // same issuer, not a new one: re-importing the original bundle
+        // must not register its expired certificate a second time.
+        let history = super::issuer_renew::load_history(req, id).await?;
+        if history.entries.iter().any(|e| e.serial_hex == serial_hex) {
+            return Ok(Some((id.clone(), name.clone())));
+        }
     }
     Ok(None)
 }
@@ -747,7 +754,7 @@ pub async fn rename_issuer(req: &Request, reference: &str, new_name: &str) -> Re
 /// `pki/config/issuers`). Allows deleting the only issuer — the mount
 /// becomes "no CA configured" again, which is the same as a fresh mount.
 ///
-/// Storage: removes `issuers/<id>/{cert,key,meta}` and
+/// Storage: removes `issuers/<id>/{cert,key,meta,history}` and
 /// `crl/issuer/<id>/{state,cached}`. Cert records issued by this issuer
 /// (those with `CertRecord.issuer_id == id`) are intentionally left in
 /// `certs/<serial>` — `pki/tidy` will sweep them once they expire. The
@@ -793,6 +800,7 @@ pub async fn delete_issuer(req: &Request, reference: &str) -> Result<(), RvError
     let _ = req.storage_delete(&storage::issuer_meta_key(&id)).await;
     let _ = req.storage_delete(&storage::issuer_crl_state_key(&id)).await;
     let _ = req.storage_delete(&storage::issuer_crl_cached_key(&id)).await;
+    let _ = req.storage_delete(&storage::issuer_history_key(&id)).await;
 
     index.by_id.remove(&id);
     if index.by_id.is_empty() {

@@ -31,6 +31,8 @@ pub(crate) struct TrustUi {
     token: String,
     resource: String,
     shared: Arc<WebShared>,
+    /// Where the window is reloaded after the operator accepts a certificate.
+    start_url: Url,
     /// A form or http-auth session: accepting a certificate sends the
     /// stored credential, and the question says so.
     fills_credential: bool,
@@ -43,6 +45,7 @@ impl TrustUi {
         token: &str,
         resource: &str,
         shared: &Arc<WebShared>,
+        start_url: &Url,
         fills_credential: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -51,12 +54,30 @@ impl TrustUi {
             token: token.to_string(),
             resource: resource.to_string(),
             shared: Arc::clone(shared),
+            start_url: start_url.clone(),
             fills_credential,
         })
     }
 
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    /// Reload the window's start URL after an accepted certificate, for a
+    /// platform whose challenge cannot be held open for the question
+    /// (macOS). The page being left never loaded, so the recipe engine waits
+    /// for this load.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn reload_start(&self) {
+        self.shared.expect_navigation();
+        match super::connect_web::remote_webview(&self.app, &self.label) {
+            Some(remote) => {
+                if let Err(e) = remote.navigate(self.start_url.clone()) {
+                    log::warn!("connect.web.tls_override: could not reload the start URL: {e}");
+                }
+            }
+            None => log::warn!("connect.web.tls_override: the session window is gone"),
+        }
     }
 
     pub fn app_handle(&self) -> AppHandle {

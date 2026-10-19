@@ -1447,6 +1447,24 @@ export interface PkiIssuerDetail {
   key_id?: string;
 }
 
+/** `pki/issuer/<ref>/renew` (T455): the issuer's CA certificate re-issued
+ *  for the same key and subject. Times are unix seconds. */
+export interface PkiIssuerRenewResult {
+  issuer_id: string;
+  issuer_name: string;
+  certificate: string;
+  serial_number: string;
+  not_before: number;
+  not_after: number;
+  previous_serial_number: string;
+  previous_not_after: number;
+  /** `"self"` for a self-signed issuer, else the parent issuer's name. */
+  signed_by: string;
+  signed_by_issuer_id: string;
+  /** The parent's own expiry shortened the requested validity. */
+  ttl_clamped: boolean;
+}
+
 export interface PkiDefaultIssuer {
   default: string;
   default_name: string;

@@ -115,11 +115,74 @@ The split is deliberate:
 
 End-to-end coverage in [tests/test_pki_managed_keys.rs](../tests/test_pki_managed_keys.rs) (L1, 9 cases), [tests/test_pki_key_reuse.rs](../tests/test_pki_key_reuse.rs) (L2, 7 cases), [tests/test_pki_issuer_keys.rs](../tests/test_pki_issuer_keys.rs) (L3, 6 cases), [tests/test_pki_emission_control.rs](../tests/test_pki_emission_control.rs) (L4, 6 cases), [tests/test_cert_lifecycle_basic.rs](../tests/test_cert_lifecycle_basic.rs) (L5, 6 cases), [tests/test_cert_lifecycle_scheduler.rs](../tests/test_cert_lifecycle_scheduler.rs) (L6, 5 cases), and [tests/test_cert_lifecycle_plugin.rs](../tests/test_cert_lifecycle_plugin.rs) (L7, 4 cases including a real `http-push` round-trip against a localhost capture server).
 
+**Issuer renewal (T455)** re-issues an issuer's CA certificate for the same managed key and subject: `POST /v2/<mount>/issuer/<ref>/renew` (`ttl` optional), `GET /v2/<mount>/issuer/<ref>/history`. GUI: PKI → Issuers → **Renew** (admin-only, hidden for key-less issuers; the detail panel now marks an expired *Not After*). Details in [Issuer renewal](#issuer-renewal) below. Covered by `crates/bv-engine-pki/src/issuer_renew.rs` unit tests (RSA / ECDSA / Ed25519 / ML-DSA self-renewal, parent re-signing, AKI handling, history format), `src/engine_tests/pki_issuer_renew.rs` (HTTP `/v2`: expired root, imported RSA root, key-less refusal, same-mount and off-mount intermediates) and `gui/src/test/pkiIssuerRenew.test.tsx`.
+
 **Implementation notes / deviations:**
 - `key_ref` is honoured on `pki/issue/:role`, `pki/sign/:role`, `pki/root/generate/*`, and `pki/intermediate/generate/*`. `pki/sign-verbatim` is intentionally excluded from leaf reuse — it has no role to gate `allow_key_reuse` against.
 - The chain walk uses textual DN comparison via `x509-parser`'s `to_string()`. Distinct issuers with identical Subject DNs (a pre-existing data hazard at the mount) cause first-match-wins behaviour. Real deployments use unique CA names, so this is acceptable for L3.
 
 All seven phases are landed. The only open follow-up is the **`plugin-ext` bridge** that would let third-party Rust binaries register additional `CertDeliveryPlugin` implementations at runtime. The trait + registry surface is stable; the bridge is scoped as a separate effort that touches the existing `plugin-ext` IPC contract rather than this module. Roadmap entry tracks the active phase under "PKI: Key Management + Cert Lifecycle" in [ROADMAP.md](../ROADMAP.md).
+
+## Issuer renewal
+
+A CA certificate expires; its key does not have to. Renewal (T455) issues a
+new certificate for the issuer's existing key so everything already signed
+keeps chaining, instead of forcing a new root and re-issuing every leaf.
+
+**What changes.** The current certificate's TBS is copied and only the serial
+(fresh, never equal to the old one), the validity and the signature change.
+Subject, SubjectPublicKeyInfo and every extension are kept byte for byte —
+including ones no engine builder emits (name constraints, policies), which is
+why this is a copy rather than a call into `build_root_ca`. Issuer id, name,
+default pointer, usages, `key_id` and `ca_kind` are untouched.
+
+**Who signs.**
+
+- *Self-signed* (subject and issuer are the same bytes, and no AKI names a key
+  other than the SKI): re-signed with the issuer's own key. Generated roots and
+  roots imported with their key (`ca_kind = imported`) both qualify.
+- *Signed by a parent on this mount*: the unique key-holding issuer whose
+  subject equals the issuer's `Issuer` bytes (and whose SKI equals the AKI,
+  when both exist) re-signs it. Issuer and AKI follow the parent; validity is
+  clamped to the parent's `notAfter` and reported as `ttl_clamped`; the parent
+  must not be expired, must have `issuing-certificates`, and must not have
+  `pathLenConstraint = 0` — the same gates as `root/sign-intermediate`.
+- *Parent elsewhere or key-less here*: refused with a 409 naming the parent.
+  Rejected alternative: re-signing with the issuer's own key, which would
+  silently turn an intermediate into a root. The message points at
+  `intermediate/generate/internal` with `key_ref=<key_id>` for a CSR over the
+  same key; landing the upstream-signed result *in place* (rather than as a
+  new issuer via `set-signed`) is not implemented.
+- *Key-less issuer*: refused with a 400; there is no key here to certify.
+
+**Validity.** `ttl` counts from now; empty keeps the current
+`notAfter - notBefore`. `notBefore` is backdated 30 s. A `notAfter` past
+9999-12-31 is a 400 rather than a panic or an encoding error.
+
+**Checks.** Before signing, the certificate must certify the issuer's stored
+key and its subject must re-encode to the same bytes (`x509::load_issuing_ca`,
+the loader every issuing path uses). After signing, the result is re-parsed and
+refused (500, logged) unless subject, public key, SKI and issuer bytes are the
+expected ones. Self-signed detection is by name and key identifier, not by
+verifying the old signature, because x509-parser cannot verify ML-DSA or
+composite signatures; a self-issued certificate whose AKI names another key is
+treated as parent-signed.
+
+**Storage.** New record `issuers/<id>/history` (`IssuerCertHistory`, format
+version 1): the replaced certificates, oldest first, each with serial,
+`notAfter`, replacement time and successor serial. Absent until the first
+renewal, deleted with the issuer, and a record with a newer version is refused
+rather than rewritten. Write order is history → `issuers/<id>/cert` →
+`issuers/<id>/meta`: a failure after the certificate write leaves the old
+(earlier) `notAfter` in the metadata, so issuance clamps to it or refuses
+instead of trusting an unrecorded expiry; re-running the renewal repairs it,
+and a retried renewal does not duplicate the history entry. `config/ca`
+re-import matches a replaced certificate's serial against the history, so
+importing the original bundle again does not register a second issuer.
+
+**Not covered.** Re-keying (a new key is a new issuer: generate or import
+one, then move the default pointer); renewing through an off-mount parent in
+place; a `pki-read` grant for `history` (the built-in template predates it).
 
 ## Phases
 
@@ -143,6 +206,7 @@ PKI engine:
 pki/<mount>/keys/<key_id>          -- KeyEntry { algorithm, public_key_der, private_key_pem (sealed), created_at, exported_mode }
 pki/<mount>/keys/by-name/<name>    -- pointer to key_id (optional human-friendly alias)
 pki/<mount>/keys/refs/<key_id>     -- reference set: issuers + cert serials currently bound to this key
+pki/<mount>/issuers/<id>/history   -- IssuerCertHistory { version, entries[] }: certificates replaced by renewal (T455)
 ```
 
 Lifecycle module (new top-level mount):

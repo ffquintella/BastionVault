@@ -92,6 +92,7 @@ import type {
   PkiMountInfo,
   PkiIssuerListResult,
   PkiIssuerDetail,
+  PkiIssuerRenewResult,
   PkiDefaultIssuer,
   PkiGenerateRootRequest,
   PkiRootResult,
@@ -2472,6 +2473,10 @@ export const pkiRenameIssuer = (mount: string, reference: string, newName: strin
   invoke<void>("pki_rename_issuer", { mount, reference, newName });
 export const pkiSetIssuerUsages = (mount: string, reference: string, usages: string[]) =>
   invoke<void>("pki_set_issuer_usages", { mount, reference, usages });
+/** `POST v2/<mount>/issuer/<ref>/renew`: re-issue the issuer's CA certificate
+ *  for the same key and subject. Omit `ttl` to keep the current validity span. */
+export const pkiRenewIssuer = (mount: string, reference: string, ttl?: string) =>
+  invoke<PkiIssuerRenewResult>("pki_renew_issuer", { mount, reference, ttl: ttl || null });
 export const pkiDeleteIssuer = (mount: string, reference: string) =>
   invoke<void>("pki_delete_issuer", { mount, reference });
 export const pkiReadDefaultIssuer = (mount: string) =>
