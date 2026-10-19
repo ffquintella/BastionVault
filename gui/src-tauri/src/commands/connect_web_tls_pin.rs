@@ -101,18 +101,21 @@ pub(crate) fn cancel_pending(label: &str) {
 /// The server-trust half of the navigation delegate in
 /// `connect_web_http_auth` (WebKit has one challenge method for both).
 ///
-/// A window may hold a challenge open while the operator is asked about an
-/// untrusted certificate (T139). WebKit allows the completion handler to be
-/// called later, and requires that it is called exactly once: a handler
-/// released uncalled raises an Objective-C exception. So every held handler
-/// lives in [`PENDING`] (main thread only) until [`resolve`] answers it or
-/// [`cancel_pending`] — run when the window is destroyed — refuses it.
+/// A challenge is **not** held open while the operator is asked about an
+/// untrusted certificate (T139): the TLS handshake stalls behind the dialog
+/// and the connection is torn down long before a person answers, so the
+/// accept would reach a dead connection and the load would fail with
+/// `NSURLErrorSecureConnectionFailed`. The challenge is cancelled at once
+/// instead, the question is asked, and an accept records the override and
+/// reloads the session's start URL; that load's challenge is answered
+/// immediately from the recorded override. [`PENDING`] (main thread only)
+/// only de-duplicates the question per key.
 #[cfg(target_os = "macos")]
 pub(crate) mod macos {
     use std::cell::RefCell;
     use std::sync::Arc;
 
-    use block2::{DynBlock, RcBlock};
+    use block2::DynBlock;
     use core_foundation::base::TCFType;
     use objc2::encode::{Encoding, RefEncode};
     use objc2::rc::Retained;
@@ -142,22 +145,16 @@ pub(crate) mod macos {
     }
 
     pub(crate) type ChallengeCompletion = DynBlock<dyn Fn(NSURLSessionAuthChallengeDisposition, *mut NSURLCredential)>;
-    type HeldCompletion = RcBlock<dyn Fn(NSURLSessionAuthChallengeDisposition, *mut NSURLCredential)>;
 
     const DEFAULT: NSURLSessionAuthChallengeDisposition = NSURLSessionAuthChallengeDisposition::PerformDefaultHandling;
     const CANCEL: NSURLSessionAuthChallengeDisposition =
         NSURLSessionAuthChallengeDisposition::CancelAuthenticationChallenge;
 
-    /// One challenge held for the operator's answer.
-    struct Held {
-        completion: HeldCompletion,
-        trust: SecTrust,
-    }
-
     thread_local! {
         /// Main thread only: WebKit calls the delegate there, and
-        /// [`resolve`] / [`cancel_pending`] are dispatched there.
-        static PENDING: RefCell<PendingQuestions<Held>> = RefCell::new(PendingQuestions::default());
+        /// [`resolve`] / [`cancel_pending`] are dispatched there. One entry
+        /// per challenge cancelled while its question is open.
+        static PENDING: RefCell<PendingQuestions<()>> = RefCell::new(PendingQuestions::default());
     }
 
     /// The evaluated chain, leaf first, as DER.
@@ -190,9 +187,9 @@ pub(crate) mod macos {
         }
     }
 
-    /// Decide one server-trust challenge. Calls `completion` before
-    /// returning, except when the operator is being asked; then the
-    /// challenge is held in [`PENDING`] until the answer.
+    /// Decide one server-trust challenge. Always calls `completion` before
+    /// returning; when the operator has to be asked, the challenge is
+    /// cancelled and the answer decides the reload (see the module note).
     ///
     /// 1. Not an https origin of the session → `PerformDefaultHandling` (the
     ///    platform decides; nothing evaluated here).
@@ -204,7 +201,8 @@ pub(crate) mod macos {
     ///    mismatch is never offered to the operator.
     /// 4. No pins → the operator's answer for this exact key on this origin
     ///    this session: accepted → `UseCredential`; declined or unreadable →
-    ///    cancel; not asked yet → ask (`ui`), or cancel without one.
+    ///    cancel; not asked yet → cancel and ask (`ui`), reloading on an
+    ///    accept, or just cancel without one.
     ///
     /// The evaluation in step 2 runs on the main thread, where WebKit calls
     /// its delegate. It is only made for the session's own origins.
@@ -270,9 +268,11 @@ pub(crate) mod macos {
                     completion.call((CANCEL, std::ptr::null_mut()));
                     return;
                 };
+                // Cancel now: a handshake held behind the dialog does not
+                // survive until the operator answers.
+                completion.call((CANCEL, std::ptr::null_mut()));
                 let key: PendingKey = (ui.label().to_string(), origin, leaf);
-                let held = Held { completion: completion.copy(), trust };
-                if !PENDING.with(|p| p.borrow_mut().hold(key.clone(), held)) {
+                if !PENDING.with(|p| p.borrow_mut().hold(key.clone(), ())) {
                     // Already being asked about this key.
                     return;
                 }
@@ -282,25 +282,19 @@ pub(crate) mod macos {
         }
     }
 
-    /// Answer every challenge held for `key`. Main thread.
-    fn resolve(key: &PendingKey, accepted: bool, _ui: &TrustUi) {
-        let held = PENDING.with(|p| p.borrow_mut().take(key));
-        for h in held {
-            if accepted {
-                accept(&h.trust, &h.completion);
-            } else {
-                h.completion.call((CANCEL, std::ptr::null_mut()));
-            }
+    /// Settle the question for `key`: an accept reloads the start URL, whose
+    /// challenge the recorded override answers. Main thread.
+    fn resolve(key: &PendingKey, accepted: bool, ui: &TrustUi) {
+        let asked = PENDING.with(|p| p.borrow_mut().take(key));
+        if accepted && !asked.is_empty() {
+            ui.reload_start();
         }
     }
 
-    /// Refuse every challenge still held for the window `label` (it is being
+    /// Forget the questions still open for the window `label` (it is being
     /// destroyed). Main thread.
     pub(crate) fn cancel_pending(label: &str) {
-        let held = PENDING.with(|p| p.borrow_mut().take_window(label));
-        for h in held {
-            h.completion.call((CANCEL, std::ptr::null_mut()));
-        }
+        PENDING.with(|p| p.borrow_mut().take_window(label));
     }
 }
 

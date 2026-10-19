@@ -56,6 +56,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### Self-accounts
+
+- Add a per-account "Require MFA at Connect" flag (default on); the `require_connect_mfa` setting now forces it on for every account and defaults to off. Existing accounts stay MFA-gated.
+
+### Fixed
+
+#### RDP
+
+- Offer CredSSP/NLA for direct password sessions so hosts that refuse TLS-only ("requires Enhanced RDP Security with CredSSP") connect; Rustion-ticket and cookie-redial sessions stay TLS-only.
+
 ## [0.44.45] - 2026-10-19
 
 ### Added

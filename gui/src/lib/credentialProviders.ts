@@ -162,7 +162,7 @@ const PROVIDER_REASONS: Record<string, (detail: string) => string> = {
   no_match: () =>
     "The account you picked does not match this resource and target. Connect again and pick another, or check the account's resource types and targets in your accounts list.",
   mfa_required: () =>
-    "This account can only be released after connect-time MFA. Ask the resource's owner to tick “Require MFA re-validation” on this connection profile.",
+    "This account can only be released after connect-time MFA. Ask the resource's owner to tick “Require MFA re-validation” on this connection profile, or turn off “Require MFA at Connect” on the account.",
   bad_request: (d) => `The credential provider refused the request: ${d}`,
   bad_provider_output: () =>
     "The credential provider returned an account this app cannot use; nothing was opened. Tell an administrator.",
