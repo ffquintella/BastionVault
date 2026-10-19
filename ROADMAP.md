@@ -106,6 +106,8 @@ Next-up list recorded before the migration, in its order:
 - [/] T17 Seal the vault with a hardware security module (S17, S91)
   - source: roadmap.md feature row "HSM Support", status `[/]` In progress
   - old-notes: [spec](features/hsm-support.md) — YubiHSM 2 + mock backends, HSM auto-unseal, hybrid PQC custody, and cluster enrollment/replication implemented and tested with the mock; `v2/sys/hsm/status` + `bvault operator hsm status` + GUI HSM / Seal status page shipped. Remaining: the networked enroll / rotate-epoch HTTP handshake (validated against real hardware / a live cluster).
+- [ ] T454 Serve an N-node cluster from a pool of two YubiHSM 2 devices (S114, S17)
+  - note: [spec](features/hsm-pool-ha.md) — up to 12 nodes share two devices through an mTLS HSM gateway; every node keeps its own SCP03 session per device. Dual-wrap: independent non-exportable wrap keys, one blob per device, under-replicated sets repaired automatically; opt-in ML-KEM-768 recovery copy with Shamir-split shares. Seven phases (formats, pool backend, link crate, ceremonies and repair, recovery, audit, hardware validation); changes the seal record, blob AAD and authz counter formats (read-old/write-new).
 
 ## [M4] Core vault
 > outcome: Done when the Vault-compatible core, KV, policy, identity, scoping and audit surfaces are complete and connect-only access is enforced end to end.
@@ -655,3 +657,4 @@ Next-up list recorded before the migration, in its order:
 | S111 | Feature: MCP Brokered Sessions — vault-brokered SSH, web and RDP access to resources for MCP clients | features/mcp-brokered-sessions.md |
 | S112 | Feature: SFTP Connect — dual-pane file transfer to server resources | features/sftp-connect.md |
 | S113 | Feature: Module Policies — per-module full / read / connect / shared baselines | features/module-policies.md |
+| S114 | Feature: HSM Pool HA — an N-node cluster served by two YubiHSM 2 devices | features/hsm-pool-ha.md |
