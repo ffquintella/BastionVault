@@ -33,7 +33,7 @@ use x509_cert::{
 use super::{
     composite::CompositeSigner,
     path_roles::RoleEntry,
-    x509::{RevokedEntry, SubjectInput},
+    x509::{IssuingCa, RevokedEntry, SubjectInput},
     x509_pqc,
 };
 use crate::errors::RvError;
@@ -53,6 +53,16 @@ fn composite_spki(signer: &CompositeSigner) -> Result<SubjectPublicKeyInfoOwned,
         algorithm: composite_alg_id(signer),
         subject_public_key: BitString::from_bytes(&pk_der).map_err(x509_pqc::der_err)?,
     })
+}
+
+/// Issuer name and AKI for a certificate `ca_signer` signs, through the
+/// loader every issuing path shares. The composite key is
+/// `SEQUENCE { ML-DSA key, classical key }`, so comparing it with the CA
+/// certificate compares both components; the classical half is derived by
+/// `ring` from its private key, the ML-DSA half is checked against its seed.
+fn load_composite_issuing_ca(ca_cert_pem: &str, ca_signer: &CompositeSigner) -> Result<IssuingCa, RvError> {
+    ca_signer.pqc().ensure_public_key_matches_seed()?;
+    super::x509::load_issuing_ca(ca_cert_pem, &composite_spki(ca_signer)?)
 }
 
 fn sign_tbs<T: Encode>(tbs: &T, signer: &CompositeSigner) -> Result<BitString, RvError> {
@@ -124,9 +134,7 @@ pub fn build_leaf(
     let alg_id = composite_alg_id(ca_signer);
     let leaf_spki = composite_spki(leaf_signer)?;
 
-    let ca_cert = parse_cert_pem(ca_cert_pem)?;
-    let issuer = ca_cert.tbs_certificate.subject.clone();
-    let ca_ski = x509_pqc::extract_ski(&ca_cert)?;
+    let ca = load_composite_issuing_ca(ca_cert_pem, ca_signer)?;
 
     let subject_dn = x509_pqc::build_leaf_dn(role, &subject.common_name)?;
     let validity = x509_pqc::build_validity(role.not_before_duration, ttl)?;
@@ -146,8 +154,8 @@ pub fn build_leaf(
             false,
             x509_pqc::subject_key_identifier(&leaf_pk_bytes)?,
         )?,
-        x509_pqc::encode_aki(&ca_ski)?,
     ];
+    extensions.extend(ca.authority_key_identifier()?);
     if let Some(eku) = x509_pqc::build_extended_key_usage(role)? {
         extensions.push(eku);
     }
@@ -165,7 +173,7 @@ pub fn build_leaf(
         version: Version::V3,
         serial_number: serial,
         signature: alg_id.clone(),
-        issuer,
+        issuer: ca.name,
         validity,
         subject: subject_dn,
         subject_public_key_info: leaf_spki,
@@ -243,4 +251,137 @@ fn parse_cert_pem(pem: &str) -> Result<Certificate, RvError> {
 
 fn pem_encode(label: &str, der: &[u8]) -> String {
     x509_pqc::pem_encode(label, der)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Composite issuance must chain to its CA the way classical issuance
+    //! does (T147), and the CA certificate must certify both halves of the
+    //! composite key that signs. Fixtures are shared with `x509::tests`.
+
+    use rcgen::PublicKeyData as _;
+    use x509_cert::{
+        der::{asn1::SequenceOf, Decode},
+        name::Name,
+    };
+
+    use super::*;
+    use crate::{
+        crypto::KeyAlgorithm,
+        x509::{
+            tests::{
+                ad_cs_subject, assert_issuer_and_aki, assert_key_mismatch_refused, leaf_role, leaf_subject,
+                multi_valued_subject, self_signed_ca_pem, unsort_multi_valued_rdn, FIELD_SKI,
+            },
+            IssuanceUrls,
+        },
+    };
+
+    const ALG: KeyAlgorithm = KeyAlgorithm::CompositeEcdsaP256MlDsa44;
+
+    /// A composite SubjectPublicKeyInfo from explicit halves, in the
+    /// `SEQUENCE { ML-DSA key, classical key }` shape the signer emits.
+    fn spki_from_halves(signer: &CompositeSigner, pq: &[u8], classical: &[u8]) -> SubjectPublicKeyInfoOwned {
+        let mut seq: SequenceOf<BitString, 2> = SequenceOf::new();
+        seq.add(BitString::from_bytes(pq).unwrap()).unwrap();
+        seq.add(BitString::from_bytes(classical).unwrap()).unwrap();
+        SubjectPublicKeyInfoOwned {
+            algorithm: composite_alg_id(signer),
+            subject_public_key: BitString::from_bytes(&seq.to_der().unwrap()).unwrap(),
+        }
+    }
+
+    /// Self-signed composite CA certifying `certified`, signed by `signer`.
+    fn composite_ca_pem(
+        signer: &CompositeSigner,
+        certified: SubjectPublicKeyInfoOwned,
+        subject: Name,
+        ski: Option<&[u8]>,
+        patch: impl Fn(Vec<u8>) -> Vec<u8>,
+    ) -> String {
+        self_signed_ca_pem(certified, composite_alg_id(signer), subject, ski, patch, |tbs| signer.sign(tbs).unwrap())
+    }
+
+    fn own_ca_pem(signer: &CompositeSigner, subject: Name, ski: Option<&[u8]>) -> String {
+        composite_ca_pem(signer, composite_spki(signer).unwrap(), subject, ski, |der| der)
+    }
+
+    fn issue(ca_signer: &CompositeSigner, ca_pem: &str) -> Result<(String, Vec<u8>), RvError> {
+        let leaf = CompositeSigner::generate(ALG).unwrap();
+        build_leaf(
+            &leaf_role(),
+            &leaf_subject("hybrid.fgv.br"),
+            Duration::from_secs(3600),
+            &leaf,
+            ca_signer,
+            ca_pem,
+            &IssuanceUrls::default(),
+        )
+    }
+
+    #[test]
+    fn composite_leaf_issuer_is_ca_subject_verbatim_and_aki_is_ca_ski() {
+        let ca = CompositeSigner::generate(ALG).unwrap();
+        let ca_pem = own_ca_pem(&ca, ad_cs_subject(), Some(&FIELD_SKI));
+        let (pem, _) = issue(&ca, &ca_pem).expect("issue under an AD CS-named composite CA");
+        assert_issuer_and_aki(&pem, &ca_pem, Some(&FIELD_SKI));
+    }
+
+    #[test]
+    fn composite_ca_without_ski_issues_without_aki() {
+        // This used to derive a key id from the CA key, matching nothing
+        // the CA advertises.
+        let ca = CompositeSigner::generate(ALG).unwrap();
+        let ca_pem = own_ca_pem(&ca, ad_cs_subject(), None);
+        let (pem, _) = issue(&ca, &ca_pem).expect("issue under a composite CA without SKI");
+        assert_issuer_and_aki(&pem, &ca_pem, None);
+    }
+
+    #[test]
+    fn composite_non_canonical_ca_subject_is_refused() {
+        let ca = CompositeSigner::generate(ALG).unwrap();
+        let spki = composite_spki(&ca).unwrap();
+        let ca_pem = composite_ca_pem(&ca, spki, multi_valued_subject(), Some(&FIELD_SKI), unsort_multi_valued_rdn);
+        let err = issue(&ca, &ca_pem).expect_err("a CA subject that cannot be copied verbatim must be refused");
+        assert!(format!("{err:?}").contains("byte-for-byte"), "operator-facing reason: {err:?}");
+    }
+
+    #[test]
+    fn composite_ca_certificate_must_certify_both_halves_of_the_signing_key() {
+        let ca = CompositeSigner::generate(ALG).unwrap();
+        let other = CompositeSigner::generate(ALG).unwrap();
+        let (ca_pq, ca_classical) = (ca.pqc().public_key(), ca.classical().key_pair().der_bytes());
+        let (other_pq, other_classical) = (other.pqc().public_key(), other.classical().key_pair().der_bytes());
+
+        // Sanity: the halves are where the shared encoder puts them.
+        let own = composite_spki(&ca).unwrap();
+        assert_eq!(own, spki_from_halves(&ca, ca_pq, ca_classical));
+        let halves = SequenceOf::<BitString, 2>::from_der(own.subject_public_key.raw_bytes()).unwrap();
+        assert_eq!(halves.get(0).unwrap().raw_bytes(), ca_pq);
+
+        let reason = "is not the public key of the stored private key";
+        for (what, certified) in [
+            ("another composite key", composite_spki(&other).unwrap()),
+            ("the ML-DSA half differs", spki_from_halves(&ca, other_pq, ca_classical)),
+            ("the classical half differs", spki_from_halves(&ca, ca_pq, other_classical)),
+        ] {
+            let ca_pem = composite_ca_pem(&ca, certified, ad_cs_subject(), Some(&FIELD_SKI), |der| der);
+            let result = issue(&ca, &ca_pem);
+            assert!(result.is_err(), "{what}: must be refused");
+            assert_key_mismatch_refused(result, reason);
+        }
+        issue(&ca, &own_ca_pem(&ca, ad_cs_subject(), Some(&FIELD_SKI))).expect("the CA's own certificate issues");
+    }
+
+    #[test]
+    fn composite_signer_whose_stored_ml_dsa_key_is_not_its_seed_is_refused() {
+        // The CA certificate matches the cached ML-DSA public key, but the
+        // seed that signs belongs to another key.
+        let ca = CompositeSigner::generate(ALG).unwrap();
+        let other = CompositeSigner::generate(ALG).unwrap();
+        let tampered = ca.with_pqc_cached_public_key(other.pqc().public_key().to_vec()).unwrap();
+        let ca_pem = own_ca_pem(&tampered, ad_cs_subject(), Some(&FIELD_SKI));
+        let err = issue(&tampered, &ca_pem).expect_err("a signer inconsistent with its seed must be refused");
+        assert!(format!("{err:?}").contains("not the one its private seed derives"), "reason: {err:?}");
+    }
 }

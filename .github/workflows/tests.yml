@@ -25,6 +25,10 @@ name: Tests
 #     `--all-features` is banned (AGENTS.md §5), so the whole surface was
 #     unbuilt until the container image built it, twice, minutes into a
 #     cross-compile
+#   * `make test-pki-composite` — bv-engine-pki's unit tests with
+#     `pki_pqc_composite` on. Same reason as the HSM backends: the feature is
+#     off by default and `--all-features` is banned, so the composite
+#     issuance arms and their regression tests ran nowhere.
 #   * `cargo check -p <crate>` over every member in isolation, because
 #     `cargo check --workspace` is NOT a proxy for "each crate builds": feature
 #     unification makes it strictly weaker, and Phase 4.5 shipped a `bv-server`
@@ -38,6 +42,10 @@ name: Tests
 # NOT RUN HERE, and why:
 #
 #   * `tests/e2e/rustion-ssh` — needs real remote hosts. Cannot be hermetic.
+#   * `tests/test_pki_composite.rs` — gated on `pki_pqc_composite` through the
+#     root crate, so every integration shard compiles it to nothing. Running it
+#     needs a second feature variant of the root crate; `pki-composite` covers
+#     the engine's own composite tests instead.
 #   * the plugin substrate (`make plugins-test`) has no job of its own because
 #     it has no tests of its own: it is `-p bastion-plugin-testkit --lib`,
 #     `--test test_plugin_testkit_parity` and the root crate's `plugins::*` lib
@@ -106,6 +114,7 @@ jobs:
       run_cucumber: ${{ steps.plan.outputs.run_cucumber }}
       run_isolation: ${{ steps.plan.outputs.run_isolation }}
       run_hsm: ${{ steps.plan.outputs.run_hsm }}
+      run_pki_composite: ${{ steps.plan.outputs.run_pki_composite }}
       run_gui: ${{ steps.plan.outputs.run_gui }}
 
     steps:
@@ -493,6 +502,43 @@ jobs:
       - name: make check-hsm
         run: make check-hsm
 
+  # ── Composite PKI issuance, which no other job builds ─────────
+  #
+  # `pki_pqc_composite` is off in every other build in this file and AGENTS.md
+  # §5 bans `--all-features`, so the composite (classical + ML-DSA) issuance
+  # arms of bv-engine-pki and their regression tests — issuer chaining, AKI, the
+  # CA-key check, literal subject DNs (T147, T148, T150) — compiled in no job.
+  # Planned on bv-engine-pki being affected, which includes every change
+  # beneath it. The feature only adds code to that one crate, so on the
+  # `build` cache everything else restores and only bv-engine-pki recompiles.
+  pki-composite:
+    name: PKI composite issuance
+    needs: plan
+    if: needs.plan.outputs.run_pki_composite == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: build
+
+      # Via make so the feature flag has one definition.
+      - name: make test-pki-composite
+        run: make test-pki-composite NEXTEST_PROFILE=ci
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit-pki-composite
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
   gui:
     name: GUI frontend tests (vitest)
     needs: plan
@@ -681,6 +727,7 @@ jobs:
       - cucumber
       - isolation
       - hsm
+      - pki-composite
       - gui
       - gui-host
       - deps

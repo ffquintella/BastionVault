@@ -116,6 +116,36 @@ impl MlDsaSigner {
         &self.public_key
     }
 
+    /// Refuse a signer whose cached public key is not the one its seed
+    /// derives. [`sign`](Self::sign) uses the seed, while the storage
+    /// envelope carries the public key as a separate field that
+    /// [`from_storage_pem`](Self::from_storage_pem) takes on trust; issuers
+    /// call this before comparing [`public_key`](Self::public_key) with
+    /// their CA certificate. Compares public keys only.
+    pub(crate) fn ensure_public_key_matches_seed(&self) -> Result<(), RvError> {
+        let seed = self.seed.as_slice();
+        let derived = match self.level {
+            MlDsaLevel::L44 => MlDsa44Provider.keypair_from_seed(seed).map_err(pqc_err)?.public_key().to_vec(),
+            MlDsaLevel::L65 => MlDsa65Provider.keypair_from_seed(seed).map_err(pqc_err)?.public_key().to_vec(),
+            MlDsaLevel::L87 => MlDsa87Provider.keypair_from_seed(seed).map_err(pqc_err)?.public_key().to_vec(),
+        };
+        if derived != self.public_key {
+            return Err(RvError::ErrString(format!(
+                "pki: the stored {} key is inconsistent: its public key is not the one its private seed derives; \
+                 refusing to use it",
+                self.level.as_str()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Test-only: the same seed with a different cached public key, the
+    /// shape of a tampered or corrupted storage envelope.
+    #[cfg(test)]
+    pub(crate) fn with_cached_public_key(&self, public_key: Vec<u8>) -> Self {
+        Self { level: self.level, seed: self.seed.clone(), public_key }
+    }
+
     /// Sign `message` with an empty context (Vault parity — no caller-supplied
     /// context octets in the PKI engine). The caller passes the DER bytes of
     /// the TBSCertificate or TBSCertList directly.

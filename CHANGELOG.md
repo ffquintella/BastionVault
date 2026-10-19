@@ -58,6 +58,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### CI: composite PKI issuance is tested
+
+- Run the PKI engine's unit tests with composite (classical + ML-DSA) issuance compiled in, on every pull request that can reach `bv-engine-pki` and in `make test-release` (T150, S38)
+  -- `pki_pqc_composite` is off by default and no job enabled it, so the composite regression tests for issuer chaining, Authority Key Identifiers, the CA-key check and literal subjects never ran. New `make test-pki-composite` target and `pki-composite` job in `.github/workflows/tests.yml`, planned by `scripts/ci-plan.sh` (output `run_pki_composite`).
+
 #### Module policies (features/module-policies.md)
 
 - Assign a module's access by name with seeded `<module>-full`, `-read`, `-connect` and `-shared` policies (T146, S113)
@@ -85,9 +90,16 @@ EXAMPLE ENTRY:
 #### PKI — certificates issued by an imported CA
 
 - Chain certificates issued by a classical CA whose subject repeats an attribute, such as an AD CS CA named `DC=br, DC=fgv, CN=…` (T147, S38)
-  -- leaves and intermediates signed by an RSA, ECDSA or Ed25519 issuer carried an issuer name rebuilt from the CA subject, which kept only the last value of each attribute type (`DC=fgv, CN=FGV-SSL-CA-V1` instead of `DC=br, DC=fgv, CN=FGV-SSL-CA-V1`), and no Authority Key Identifier, so clients could not build the chain. The issuer name is now the CA subject copied byte for byte, and the Authority Key Identifier is the CA's Subject Key Identifier; a CA without one gets no Authority Key Identifier and a warning in the server log. A CA whose subject has a multi-valued RDN, which was refused, can now issue. `pki/issue`, `pki/sign`, `pki/sign-verbatim`, approved sign requests, ACME and `pki/root/sign-intermediate` are all covered; PQC and composite issuers already behaved this way. Certificates issued before the upgrade are not changed — re-issue them.
+  -- leaves and intermediates signed by an RSA, ECDSA or Ed25519 issuer carried an issuer name rebuilt from the CA subject, which kept only the last value of each attribute type (`DC=fgv, CN=FGV-SSL-CA-V1` instead of `DC=br, DC=fgv, CN=FGV-SSL-CA-V1`), and no Authority Key Identifier, so clients could not build the chain. The issuer name is now the CA subject copied byte for byte, and the Authority Key Identifier is the CA's Subject Key Identifier; a CA without one gets no Authority Key Identifier and a warning in the server log. A CA whose subject has a multi-valued RDN, which was refused, can now issue. `pki/issue`, `pki/sign`, `pki/sign-verbatim`, approved sign requests, ACME and `pki/root/sign-intermediate` are all covered; ML-DSA and composite issuers are brought in line by a later entry. Certificates issued before the upgrade are not changed — re-issue them.
 - Refuse to issue, with an error naming the cause, when the CA certificate's subject is not DER-canonical or its Subject Key Identifier is malformed, empty or repeated, and when a requested DNS name is not ASCII (T147, S38)
   -- these used to produce a certificate that did not chain, or an unclear signing error.
+- Chain certificates issued by an ML-DSA or composite CA the same way as classical ones, and refuse a CA certificate that does not belong to the issuer's key (T148, S38)
+  -- ML-DSA and composite issuers rebuilt the issuer name from the CA subject, so a CA subject that was not DER-canonical (an unsorted multi-valued RDN) came out re-sorted and no longer matched the CA, and a CA without a Subject Key Identifier got an Authority Key Identifier the engine made up from its key, which matched nothing the CA advertises. They now refuse such a CA subject with an error, leave the Authority Key Identifier out (with a warning in the server log) when the CA has no Subject Key Identifier, and refuse a malformed, empty or repeated one — the same rules as classical issuers. Every issuer, classical, ML-DSA and composite, now also checks before signing that the CA certificate holds the public key of the issuer's private key (for composite keys, both halves; for ML-DSA, the key its seed derives) and refuses with an error naming the CA otherwise, where it used to issue certificates that could never verify against that CA. An issuer whose stored key and certificate disagree stops issuing until the CA certificate is re-imported with its own key. Covers `pki/issue`, `pki/sign`, `pki/sign-verbatim`, approved sign requests, ACME and `pki/root/sign-intermediate`; CRLs are unchanged.
+
+#### PKI — ML-DSA and composite root CAs
+
+- Take the common name and organisation literally when generating an ML-DSA or composite root CA (T150, S38)
+  -- the root subject was assembled as an `RFC 4514` string and parsed back, so an organisation such as `Acme, Inc.` made the request fail, a value such as `Acme,OU=Ops` added an attribute, and a leading `#` or a `\` was decoded as DN syntax. The subject is now built attribute by attribute; roots whose values contain none of these characters keep byte-identical subjects (O, then CN).
 
 #### Sharing — identity groups inside a namespace
 
@@ -100,6 +112,11 @@ EXAMPLE ENTRY:
   -- the session pump knew the cause (the server's disconnect reason, a dropped or reset socket, a protocol error) but logged it only to the app's stderr, which a Finder- or Start-menu-launched app does not keep, and sent the pane an empty close event. The pane header now shows the reason, the host logs it on one line with the session label, and a failed write of a response frame now ends the session at once instead of carrying on over a dead socket until the next read. When a write is what notices the drop ("broken pipe"), the host first reads for up to a second for the disconnect reason Windows sends before hanging up, and reports that if it is there. The server's DisplayControl limits and every resize sent are now logged at `info`, so a drop that follows a resize can be told apart.
 
 ### Security
+
+#### PKI — ML-DSA and composite certificate subjects
+
+- Take the requested common name and the role's subject fields literally in ML-DSA and composite certificates (T148, S38)
+  -- these subjects were assembled as an `RFC 4514` string and parsed back, so a `,` or `+` in a common name or role field split it into extra attributes, and a `\` or a leading `#` was decoded as an escape. A requester could add subject attributes the role does not set (`O`, `OU`, …), and a role allowing subdomains of `example.com` accepted the common name `evil.example.net,CN=app.example.com` and issued a certificate whose last CN was `evil.example.net`. Each field is now one attribute holding exactly the value given. Subjects without those characters are byte-for-byte unchanged, CN still last; a role country that is not a valid PrintableString is now refused instead of being written as an invalid one.
 
 #### Post-quantum signing keys
 

@@ -14,18 +14,18 @@
 
 use std::{
     net::IpAddr,
-    str::FromStr,
     time::{Duration, SystemTime},
 };
 
 use const_oid::{AssociatedOid, ObjectIdentifier};
 use sha2::{Digest, Sha256};
 use x509_cert::{
+    attr::AttributeTypeAndValue,
     certificate::{CertificateInner, TbsCertificateInner, Version},
     crl::{CertificateList, RevokedCert, TbsCertList},
     der::{
-        asn1::{BitString, GeneralizedTime, Ia5String, OctetString, UtcTime},
-        Decode, Encode,
+        asn1::{Any, BitString, GeneralizedTime, Ia5String, OctetString, PrintableStringRef, SetOfVec, UtcTime},
+        Decode, Encode, Tag,
     },
     ext::{
         pkix::{
@@ -36,7 +36,7 @@ use x509_cert::{
         },
         Extension,
     },
-    name::Name,
+    name::{Name, RdnSequence, RelativeDistinguishedName},
     serial_number::SerialNumber,
     spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned},
     time::{Time, Validity},
@@ -46,7 +46,7 @@ use x509_cert::{
 use super::{
     path_roles::RoleEntry,
     pqc::{MlDsaLevel, MlDsaSigner},
-    x509::{RevokedEntry, SubjectInput},
+    x509::{IssuingCa, RevokedEntry, SubjectInput},
 };
 use crate::errors::RvError;
 
@@ -110,10 +110,7 @@ pub fn build_leaf(
         subject_public_key: BitString::from_bytes(leaf_signer.public_key()).map_err(der_err)?,
     };
 
-    // Reload the CA cert so we can pull issuer DN + AKI from it.
-    let ca_cert = parse_cert_pem(ca_cert_pem)?;
-    let issuer = ca_cert.tbs_certificate.subject.clone();
-    let ca_ski = extract_ski(&ca_cert)?;
+    let ca = load_ml_dsa_issuing_ca(ca_cert_pem, ca_signer)?;
 
     let subject_dn = build_leaf_dn(role, &subject.common_name)?;
     let validity = build_validity(role.not_before_duration, ttl)?;
@@ -127,8 +124,8 @@ pub fn build_leaf(
             &KeyUsage(KeyUsages::DigitalSignature | KeyUsages::KeyEncipherment | KeyUsages::KeyAgreement),
         )?,
         encode_ext_octets(SubjectKeyIdentifier::OID, false, subject_key_identifier(leaf_signer.public_key())?)?,
-        encode_aki(&ca_ski)?,
     ];
+    extensions.extend(ca.authority_key_identifier()?);
     if let Some(eku) = build_extended_key_usage(role)? {
         extensions.push(eku);
     }
@@ -146,7 +143,7 @@ pub fn build_leaf(
         version: Version::V3,
         serial_number: serial,
         signature: ca_alg.clone(),
-        issuer,
+        issuer: ca.name,
         validity,
         subject: subject_dn,
         subject_public_key_info: spki,
@@ -181,9 +178,7 @@ pub fn build_leaf_from_pqc_spki(
         subject_public_key: BitString::from_bytes(leaf_pk_bytes).map_err(der_err)?,
     };
 
-    let ca_cert = parse_cert_pem(ca_cert_pem)?;
-    let issuer = ca_cert.tbs_certificate.subject.clone();
-    let ca_ski = extract_ski(&ca_cert)?;
+    let ca = load_ml_dsa_issuing_ca(ca_cert_pem, ca_signer)?;
 
     let subject_dn = build_leaf_dn(role, &subject.common_name)?;
     let validity = build_validity(role.not_before_duration, ttl)?;
@@ -197,8 +192,8 @@ pub fn build_leaf_from_pqc_spki(
             &KeyUsage(KeyUsages::DigitalSignature | KeyUsages::KeyEncipherment | KeyUsages::KeyAgreement),
         )?,
         encode_ext_octets(SubjectKeyIdentifier::OID, false, subject_key_identifier(leaf_pk_bytes)?)?,
-        encode_aki(&ca_ski)?,
     ];
+    extensions.extend(ca.authority_key_identifier()?);
     if let Some(eku) = build_extended_key_usage(role)? {
         extensions.push(eku);
     }
@@ -216,7 +211,7 @@ pub fn build_leaf_from_pqc_spki(
         version: Version::V3,
         serial_number: serial,
         signature: ca_alg.clone(),
-        issuer,
+        issuer: ca.name,
         validity,
         subject: subject_dn,
         subject_public_key_info: spki,
@@ -319,6 +314,18 @@ where
 
 // ── helpers ────────────────────────────────────────────────────────────
 
+/// Issuer name and AKI for a certificate `ca_signer` signs, through the
+/// loader every issuing path shares, after checking the CA certificate
+/// certifies the public key the CA's seed derives.
+fn load_ml_dsa_issuing_ca(ca_cert_pem: &str, ca_signer: &MlDsaSigner) -> Result<IssuingCa, RvError> {
+    ca_signer.ensure_public_key_matches_seed()?;
+    let signing_key = SubjectPublicKeyInfoOwned {
+        algorithm: AlgorithmIdentifierOwned { oid: ca_signer.level().oid(), parameters: None },
+        subject_public_key: BitString::from_bytes(ca_signer.public_key()).map_err(der_err)?,
+    };
+    super::x509::load_issuing_ca(ca_cert_pem, &signing_key)
+}
+
 pub(super) fn sign_certificate(
     tbs: TbsCertificateInner,
     signer: &MlDsaSigner,
@@ -353,36 +360,64 @@ where
     })
 }
 
+/// Root CA subject for ML-DSA and composite certificates: O (when set), then
+/// CN, each a single-valued UTF8String RDN — the bytes the RFC 4514 parse
+/// used here before produced for plain values. Values are taken literally:
+/// that parse split an organisation such as `Acme, Inc.` into extra
+/// attributes. CN is always written, as the classical root builder does.
 pub(super) fn build_dn_cn_o(common_name: &str, organization: &str) -> Result<Name, RvError> {
-    let s = if organization.is_empty() {
-        format!("CN={}", common_name)
-    } else {
-        format!("CN={},O={}", common_name, organization)
-    };
-    Name::from_str(&s).map_err(der_err)
+    use super::x509::{ATTR_COMMON_NAME, ATTR_ORGANIZATION};
+    let mut rdns = Vec::with_capacity(2);
+    if !organization.is_empty() {
+        rdns.push(literal_rdn(ATTR_ORGANIZATION, organization)?);
+    }
+    rdns.push(literal_rdn(ATTR_COMMON_NAME, common_name)?);
+    Ok(RdnSequence(rdns))
 }
 
+/// One single-valued RDN holding `value` verbatim. C is a PrintableString
+/// (refused if `value` is not one), every other attribute a UTF8String.
+fn literal_rdn(oid: ObjectIdentifier, value: &str) -> Result<RelativeDistinguishedName, RvError> {
+    let tag = if oid == super::x509::ATTR_COUNTRY {
+        PrintableStringRef::new(value).map_err(|e| {
+            RvError::ErrString(format!("pki: role country `{value}` is not a valid PrintableString ({e})"))
+        })?;
+        Tag::PrintableString
+    } else {
+        Tag::Utf8String
+    };
+    let atv = AttributeTypeAndValue { oid, value: Any::new(tag, value.as_bytes()).map_err(der_err)? };
+    Ok(RelativeDistinguishedName(SetOfVec::try_from(vec![atv]).map_err(der_err)?))
+}
+
+/// Leaf subject for ML-DSA and composite certificates: one single-valued RDN
+/// per non-empty field, encoded ST, L, C, OU, O, CN (the order the RFC 4514
+/// parse used here before produced, so issued subjects keep their bytes);
+/// C is a PrintableString, the rest UTF8String. Values are taken literally:
+/// that parse read `,` `+` `\` and a leading `#` as DN syntax, so a
+/// requested CN such as `a.example.com,CN=b` added attributes.
 pub(super) fn build_leaf_dn(role: &RoleEntry, cn: &str) -> Result<Name, RvError> {
-    let mut parts: Vec<String> = Vec::new();
-    if !cn.is_empty() {
-        parts.push(format!("CN={cn}"));
+    use super::x509::{
+        ATTR_COMMON_NAME, ATTR_COUNTRY, ATTR_LOCALITY, ATTR_ORGANIZATION, ATTR_ORGANIZATIONAL_UNIT, ATTR_PROVINCE,
+    };
+    let fields = [
+        (ATTR_PROVINCE, role.province.as_str()),
+        (ATTR_LOCALITY, role.locality.as_str()),
+        (ATTR_COUNTRY, role.country.as_str()),
+        (ATTR_ORGANIZATIONAL_UNIT, role.ou.as_str()),
+        (ATTR_ORGANIZATION, role.organization.as_str()),
+        (ATTR_COMMON_NAME, cn),
+    ];
+    let mut rdns = Vec::with_capacity(fields.len());
+    for (oid, value) in fields.into_iter().filter(|(_, value)| !value.is_empty()) {
+        rdns.push(literal_rdn(oid, value)?);
     }
-    if !role.organization.is_empty() {
-        parts.push(format!("O={}", role.organization));
+    if rdns.is_empty() {
+        return Err(RvError::ErrString(
+            "pki: the certificate subject would be empty; set a common_name or the role's subject fields".into(),
+        ));
     }
-    if !role.ou.is_empty() {
-        parts.push(format!("OU={}", role.ou));
-    }
-    if !role.country.is_empty() {
-        parts.push(format!("C={}", role.country));
-    }
-    if !role.locality.is_empty() {
-        parts.push(format!("L={}", role.locality));
-    }
-    if !role.province.is_empty() {
-        parts.push(format!("ST={}", role.province));
-    }
-    Name::from_str(&parts.join(",")).map_err(der_err)
+    Ok(RdnSequence(rdns))
 }
 
 pub(super) fn build_validity(backdate: Duration, lifetime: Duration) -> Result<Validity, RvError> {
@@ -574,26 +609,6 @@ pub(super) fn parse_cert_pem(pem: &str) -> Result<Certificate, RvError> {
     Certificate::from_der(&der).map_err(der_err)
 }
 
-pub(super) fn extract_ski(cert: &Certificate) -> Result<OctetString, RvError> {
-    if let Some(exts) = &cert.tbs_certificate.extensions {
-        for ext in exts {
-            if ext.extn_id == SubjectKeyIdentifier::OID {
-                let ski = SubjectKeyIdentifier::from_der(ext.extn_value.as_bytes()).map_err(der_err)?;
-                return Ok(ski.0);
-            }
-        }
-    }
-    // Fall back to a SHA-256 of the SPKI bit string. Matches what we emit for
-    // self-signed roots that pre-date this code, so we never fail to build an
-    // AKI for a chained leaf.
-    let pk_der = cert
-        .tbs_certificate
-        .subject_public_key_info
-        .subject_public_key
-        .raw_bytes();
-    subject_key_identifier(pk_der)
-}
-
 pub(super) fn pem_decode_first(pem: &str) -> Result<Vec<u8>, RvError> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let mut in_block = false;
@@ -633,4 +648,266 @@ pub(super) fn pem_encode(label: &str, der: &[u8]) -> String {
 pub(super) fn der_err(e: impl std::fmt::Debug) -> RvError {
     log::error!("pki/x509-pqc: DER error: {e:?}");
     RvError::ErrPkiInternal
+}
+
+#[cfg(test)]
+mod tests {
+    //! ML-DSA issuance must chain to its CA the way classical issuance does
+    //! (T147): issuer copied verbatim, AKI = the CA's SKI or absent, and the
+    //! CA certificate must certify the key that signs. Fixtures are shared
+    //! with `x509::tests`.
+
+    use std::str::FromStr;
+
+    use x509_cert::der::Tagged;
+
+    use bv_crypto::{ML_DSA_65_PUBLIC_KEY_LEN, ML_DSA_65_SIGNATURE_LEN};
+    use fips204::{
+        ml_dsa_65,
+        traits::{SerDes, Verifier},
+    };
+
+    use super::*;
+    use crate::x509::{
+        tests::{
+            ad_cs_subject, assert_issuer_and_aki, assert_key_mismatch_refused, der_of, leaf_role, leaf_subject,
+            multi_valued_subject, self_signed_ca_pem, unsort_multi_valued_rdn, FIELD_SKI,
+        },
+        IssuanceUrls,
+    };
+
+    const LEVEL: MlDsaLevel = MlDsaLevel::L65;
+
+    struct PqcCa {
+        signer: MlDsaSigner,
+        pem: String,
+    }
+
+    fn ml_dsa_spki(public_key: &[u8]) -> SubjectPublicKeyInfoOwned {
+        SubjectPublicKeyInfoOwned {
+            algorithm: AlgorithmIdentifierOwned { oid: LEVEL.oid(), parameters: None },
+            subject_public_key: BitString::from_bytes(public_key).unwrap(),
+        }
+    }
+
+    /// Self-signed ML-DSA CA certifying `certified_key`, signed by `signer`.
+    fn pqc_ca_for(
+        signer: MlDsaSigner,
+        certified_key: &[u8],
+        subject: Name,
+        ski: Option<&[u8]>,
+        patch: impl Fn(Vec<u8>) -> Vec<u8>,
+    ) -> PqcCa {
+        let alg = AlgorithmIdentifierOwned { oid: LEVEL.oid(), parameters: None };
+        let pem =
+            self_signed_ca_pem(ml_dsa_spki(certified_key), alg, subject, ski, patch, |tbs| signer.sign(tbs).unwrap());
+        PqcCa { signer, pem }
+    }
+
+    fn pqc_ca(subject: Name, ski: Option<&[u8]>) -> PqcCa {
+        let signer = MlDsaSigner::generate(LEVEL).unwrap();
+        let public_key = signer.public_key().to_vec();
+        pqc_ca_for(signer, &public_key, subject, ski, |der| der)
+    }
+
+    /// Both ML-DSA entry points: `pki/issue` and `pki/sign` / ACME.
+    fn issue_both(ca_signer: &MlDsaSigner, ca_pem: &str) -> [Result<(String, Vec<u8>), RvError>; 2] {
+        let leaf = MlDsaSigner::generate(LEVEL).unwrap();
+        let (role, subject, ttl, urls) =
+            (leaf_role(), leaf_subject("pqc.fgv.br"), Duration::from_secs(3600), IssuanceUrls::default());
+        [
+            build_leaf(&role, &subject, ttl, &leaf, ca_signer, ca_pem, &urls),
+            build_leaf_from_pqc_spki(&role, &subject, ttl, leaf.public_key(), LEVEL, ca_signer, ca_pem, &urls),
+        ]
+    }
+
+    fn assert_ml_dsa_signed_by(cert_pem: &str, ca: &MlDsaSigner) {
+        let cert = Certificate::from_der(&der_of(cert_pem)).unwrap();
+        let pk: [u8; ML_DSA_65_PUBLIC_KEY_LEN] = ca.public_key().try_into().unwrap();
+        let sig: [u8; ML_DSA_65_SIGNATURE_LEN] = cert.signature.raw_bytes().try_into().unwrap();
+        let tbs = cert.tbs_certificate.to_der().unwrap();
+        assert!(ml_dsa_65::PublicKey::try_from_bytes(pk).unwrap().verify(&tbs, &sig, &[]), "signature verifies");
+    }
+
+    #[test]
+    fn pqc_leaf_issuer_is_ca_subject_verbatim_and_aki_is_ca_ski() {
+        let ca = pqc_ca(ad_cs_subject(), Some(&FIELD_SKI));
+        for issued in issue_both(&ca.signer, &ca.pem) {
+            let (pem, _) = issued.expect("issue under an AD CS-named ML-DSA CA");
+            assert_issuer_and_aki(&pem, &ca.pem, Some(&FIELD_SKI));
+            assert_ml_dsa_signed_by(&pem, &ca.signer);
+        }
+    }
+
+    #[test]
+    fn pqc_ca_without_ski_issues_without_aki() {
+        // This used to derive a key id from the CA key, matching nothing
+        // the CA advertises.
+        let ca = pqc_ca(ad_cs_subject(), None);
+        for issued in issue_both(&ca.signer, &ca.pem) {
+            let (pem, _) = issued.expect("issue under an ML-DSA CA without SKI");
+            assert_issuer_and_aki(&pem, &ca.pem, None);
+        }
+    }
+
+    #[test]
+    fn pqc_non_canonical_ca_subject_is_refused() {
+        let signer = MlDsaSigner::generate(LEVEL).unwrap();
+        let public_key = signer.public_key().to_vec();
+        let ca = pqc_ca_for(signer, &public_key, multi_valued_subject(), Some(&FIELD_SKI), unsort_multi_valued_rdn);
+        for issued in issue_both(&ca.signer, &ca.pem) {
+            let err = issued.expect_err("a CA subject that cannot be copied verbatim must be refused");
+            assert!(format!("{err:?}").contains("byte-for-byte"), "operator-facing reason: {err:?}");
+        }
+    }
+
+    #[test]
+    fn pqc_empty_ca_ski_is_refused() {
+        let ca = pqc_ca(ad_cs_subject(), Some(&[]));
+        for issued in issue_both(&ca.signer, &ca.pem) {
+            let err = issued.expect_err("an empty CA SubjectKeyIdentifier must be refused");
+            assert!(format!("{err:?}").contains("malformed SubjectKeyIdentifier"), "operator-facing reason: {err:?}");
+        }
+    }
+
+    #[test]
+    fn pqc_ca_certificate_for_another_key_is_refused() {
+        let ca = pqc_ca(ad_cs_subject(), Some(&FIELD_SKI));
+        let wrong = MlDsaSigner::generate(LEVEL).unwrap();
+        for issued in issue_both(&wrong, &ca.pem) {
+            assert_key_mismatch_refused(issued, "is not the public key of the stored private key");
+        }
+        let other_level = MlDsaSigner::generate(MlDsaLevel::L44).unwrap();
+        for issued in issue_both(&other_level, &ca.pem) {
+            assert_key_mismatch_refused(issued, "the certificate holds a 2.16.840.1.101.3.4.3.18 key");
+        }
+    }
+
+    #[test]
+    fn pqc_signer_whose_stored_public_key_is_not_its_seed_is_refused() {
+        // The CA certificate matches the cached public key, but the seed
+        // that signs belongs to another key: a check on the cached copy
+        // alone would pass and issue certificates that do not verify.
+        let certified = MlDsaSigner::generate(LEVEL).unwrap();
+        let seed_owner = MlDsaSigner::generate(LEVEL).unwrap();
+        let tampered = seed_owner.with_cached_public_key(certified.public_key().to_vec());
+        let ca = pqc_ca_for(certified, &tampered.public_key().to_vec(), ad_cs_subject(), Some(&FIELD_SKI), |der| der);
+        for issued in issue_both(&tampered, &ca.pem) {
+            let err = issued.expect_err("a signer inconsistent with its seed must be refused");
+            assert!(format!("{err:?}").contains("not the one its private seed derives"), "reason: {err:?}");
+        }
+    }
+
+    // ── build_dn_cn_o ──────────────────────────────────────────────────
+
+    fn single_valued_attrs(dn: &Name) -> Vec<(String, Tag, Vec<u8>)> {
+        dn.0.iter()
+            .map(|rdn| {
+                assert_eq!(rdn.0.len(), 1, "every RDN is single-valued");
+                let atv = rdn.0.get(0).unwrap();
+                (atv.oid.to_string(), atv.value.tag(), atv.value.value().to_vec())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn root_dn_bytes_are_unchanged_for_plain_values() {
+        // The RFC 4514 parse this replaced, for values with no DN syntax in
+        // them: root subjects must keep their bytes (O first, CN last, both
+        // UTF8String).
+        let before = Name::from_str("CN=Root CA,O=FGV").unwrap();
+        let after = build_dn_cn_o("Root CA", "FGV").unwrap();
+        assert_eq!(after.to_der().unwrap(), before.to_der().unwrap());
+        assert_eq!(
+            single_valued_attrs(&after),
+            vec![
+                ("2.5.4.10".to_string(), Tag::Utf8String, b"FGV".to_vec()),
+                ("2.5.4.3".to_string(), Tag::Utf8String, b"Root CA".to_vec()),
+            ],
+        );
+
+        let cn_only = build_dn_cn_o("Root CA", "").unwrap();
+        assert_eq!(cn_only.to_der().unwrap(), Name::from_str("CN=Root CA").unwrap().to_der().unwrap());
+    }
+
+    #[test]
+    fn root_dn_takes_dn_syntax_in_values_literally() {
+        // An organisation the old string parse split into an extra
+        // attribute, and a CN carrying separators, an escape and a leading
+        // `#` that it read as DN syntax.
+        let cn = r"#0c0141 RootC CA+O=Evil";
+        let dn = build_dn_cn_o(cn, "Acme, Inc.").unwrap();
+        assert_eq!(
+            single_valued_attrs(&dn),
+            vec![
+                ("2.5.4.10".to_string(), Tag::Utf8String, b"Acme, Inc.".to_vec()),
+                ("2.5.4.3".to_string(), Tag::Utf8String, cn.as_bytes().to_vec()),
+            ],
+        );
+    }
+
+    // ── build_leaf_dn ──────────────────────────────────────────────────
+
+    fn dn_role() -> RoleEntry {
+        RoleEntry {
+            organization: "FGV".into(),
+            ou: "TI".into(),
+            country: "BR".into(),
+            locality: "Rio de Janeiro".into(),
+            province: "RJ".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn leaf_dn_bytes_are_unchanged_for_plain_values() {
+        // The RFC 4514 parse this replaced, for values with no DN syntax in
+        // them: issued subjects must keep their bytes (ST … CN order, C as
+        // PrintableString).
+        let before = Name::from_str("CN=app.fgv.br,O=FGV,OU=TI,C=BR,L=Rio de Janeiro,ST=RJ").unwrap();
+        let after = build_leaf_dn(&dn_role(), "app.fgv.br").unwrap();
+        assert_eq!(after.to_der().unwrap(), before.to_der().unwrap());
+        assert_eq!(after.0.first().unwrap().0.get(0).unwrap().oid, crate::x509::ATTR_PROVINCE, "ST encoded first");
+        assert_eq!(after.0.last().unwrap().0.get(0).unwrap().oid, crate::x509::ATTR_COMMON_NAME, "CN encoded last");
+
+        let cn_only = build_leaf_dn(&RoleEntry::default(), "only.example").unwrap();
+        assert_eq!(cn_only.to_der().unwrap(), Name::from_str("CN=only.example").unwrap().to_der().unwrap());
+    }
+
+    #[test]
+    fn leaf_dn_takes_dn_syntax_in_values_literally() {
+        // A requested CN the old string parse split into extra CN and O
+        // attributes; separators, escapes and a leading `#` in role values.
+        let cn = "a.example.com,CN=evil.example.net+O=Evil";
+        let role = RoleEntry {
+            organization: "Acme, Inc.".into(),
+            ou: r"R\2CD".into(),
+            locality: "#0c0141".into(),
+            ..Default::default()
+        };
+        let dn = build_leaf_dn(&role, cn).unwrap();
+        let attrs: Vec<(String, Vec<u8>)> =
+            dn.0.iter()
+                .map(|rdn| {
+                    assert_eq!(rdn.0.len(), 1, "every RDN is single-valued");
+                    let atv = rdn.0.get(0).unwrap();
+                    (atv.oid.to_string(), atv.value.value().to_vec())
+                })
+                .collect();
+        let expected: Vec<(String, Vec<u8>)> =
+            [("2.5.4.7", "#0c0141"), ("2.5.4.11", r"R\2CD"), ("2.5.4.10", "Acme, Inc."), ("2.5.4.3", cn)]
+                .iter()
+                .map(|(oid, value)| (oid.to_string(), value.as_bytes().to_vec()))
+                .collect();
+        assert_eq!(attrs, expected);
+    }
+
+    #[test]
+    fn leaf_dn_refuses_unencodable_country_and_empty_subject() {
+        let role = RoleEntry { country: "B&R".into(), ..Default::default() };
+        let err = build_leaf_dn(&role, "x.example").expect_err("`&` is not a PrintableString character");
+        assert!(format!("{err:?}").contains("PrintableString"), "reason: {err:?}");
+        let err = build_leaf_dn(&RoleEntry::default(), "").expect_err("an empty subject must be refused");
+        assert!(format!("{err:?}").contains("subject would be empty"), "reason: {err:?}");
+    }
 }
