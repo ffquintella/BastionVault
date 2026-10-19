@@ -6,6 +6,11 @@ Add hardware security module (HSM) integration so that BastionVault's master key
 
 Because the YubiHSM 2 has no native ML-KEM / ML-DSA support, post-quantum keys use a **hybrid custody model**: the HSM acts as the custody, policy, wrapping, and attestation anchor, while ML-KEM-768 / ML-DSA-65 operations are performed in software on transiently-unwrapped key material that is zeroized immediately after use. **No persisted key material is decryptable without the key inside an enrolled YubiHSM 2.**
 
+> **Second topology (planned):** [HSM Pool HA](hsm-pool-ha.md) (S114, T454) lets a
+> cluster of up to 12 nodes run on exactly two YubiHSM 2 devices reached over an
+> mTLS gateway, instead of one device per node. The per-node topology below is
+> unchanged.
+
 ## Implementation Status
 
 - **Phase 1 — HSM abstraction + YubiHSM 2 + mock + auto-unseal: Done.** `HsmBackend` trait,
