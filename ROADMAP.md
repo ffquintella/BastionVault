@@ -472,6 +472,8 @@ Next-up list recorded before the migration, in its order:
   - note: Phase 2 of [MCP Brokered Sessions](features/mcp-brokered-sessions.md). Server-side `GET`/`HEAD` for `open` and `http-auth` profiles only, same-origin-set redirects, HTML reduced to text, credential scrubbed from output; no session URL or cookie is ever handed back. MFA-gated profiles go through the operator step-up from T136. Form mode waits on T106 or T97. Builds on T136.
 - [ ] T138 Let a paired MCP client act on RDP resources through a vault-side worker that returns screenshots (S111, S109, S51)
   - note: Phase 3 of [MCP Brokered Sessions](features/mcp-brokered-sessions.md). Depends on T124 (plugin ABI 1.4 process substrate) for the worker that hosts IronRDP outside the vault process, and waits for it: no desktop-app fallback (owner decision 2026-10-14). Screenshots go to the model without a second review and are kept whole in the 30-day transcript. Builds on T136.
+- [ ] T457 Run MCP agent calls in the operator's child namespace instead of root (S115, S111, S104)
+  - note: [spec](features/mcp-namespace-selection.md) — design only. The pairing token is minted root-bound and dispatch sets no namespace, so an operator in `dti/esi` sees root resources and cannot complete MFA. Recommended: stamp the operator's namespace on the minted token (never child-visible), route every call by that binding, never by a client string; descendant narrowing (Phase 2, policies must resolve in the target namespace) is in scope; the token follows the operator's current session, no pinning. Userpass MFA in a child namespace must be confirmed by a live test. Authn/authz, so `make test-release` is required.
 - [x] T81 Keep client requests under the abuse guard with coherent caching (S6)
   - note: old roadmap listed this as Active with Phases 1-2 done; features/client-request-efficiency.md says all five phases are complete, so status inferred during PTF migration
   - source: roadmap.md active list: Client request efficiency
@@ -663,3 +665,4 @@ Next-up list recorded before the migration, in its order:
 | S112 | Feature: SFTP Connect — dual-pane file transfer to server resources | features/sftp-connect.md |
 | S113 | Feature: Module Policies — per-module full / read / connect / shared baselines | features/module-policies.md |
 | S114 | Feature: HSM Pool HA — an N-node cluster served by two YubiHSM 2 devices | features/hsm-pool-ha.md |
+| S115 | Feature: MCP Namespace Selection — agent calls run in the operator's child namespace | features/mcp-namespace-selection.md |
