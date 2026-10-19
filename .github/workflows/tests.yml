@@ -26,9 +26,11 @@ name: Tests
 #     unbuilt until the container image built it, twice, minutes into a
 #     cross-compile
 #   * `make test-pki-composite` — bv-engine-pki's unit tests with
-#     `pki_pqc_composite` on. Same reason as the HSM backends: the feature is
+#     `pki_pqc_composite` on, then `tests/test_pki_composite.rs` against the
+#     root crate built with it. Same reason as the HSM backends: the feature is
 #     off by default and `--all-features` is banned, so the composite
-#     issuance arms and their regression tests ran nowhere.
+#     issuance arms and their regression tests ran nowhere, and every
+#     integration shard compiles that test file to nothing.
 #   * `cargo check -p <crate>` over every member in isolation, because
 #     `cargo check --workspace` is NOT a proxy for "each crate builds": feature
 #     unification makes it strictly weaker, and Phase 4.5 shipped a `bv-server`
@@ -42,10 +44,6 @@ name: Tests
 # NOT RUN HERE, and why:
 #
 #   * `tests/e2e/rustion-ssh` — needs real remote hosts. Cannot be hermetic.
-#   * `tests/test_pki_composite.rs` — gated on `pki_pqc_composite` through the
-#     root crate, so every integration shard compiles it to nothing. Running it
-#     needs a second feature variant of the root crate; `pki-composite` covers
-#     the engine's own composite tests instead.
 #   * the plugin substrate (`make plugins-test`) has no job of its own because
 #     it has no tests of its own: it is `-p bastion-plugin-testkit --lib`,
 #     `--test test_plugin_testkit_parity` and the root crate's `plugins::*` lib
@@ -509,8 +507,25 @@ jobs:
   # arms of bv-engine-pki and their regression tests — issuer chaining, AKI, the
   # CA-key check, literal subject DNs (T147, T148, T150) — compiled in no job.
   # Planned on bv-engine-pki being affected, which includes every change
-  # beneath it. The feature only adds code to that one crate, so on the
-  # `build` cache everything else restores and only bv-engine-pki recompiles.
+  # beneath it, or on tests/test_pki_composite.rs itself moving.
+  #
+  # Two steps, two JUnit files: the engine's unit tests, then
+  # tests/test_pki_composite.rs, the only test that verifies BOTH halves of a
+  # composite signature against an implementation separate from the engine's
+  # (fips204 + p256 directly). It is gated on the same feature through the root
+  # crate, so every integration shard compiles it to nothing; until T152 it
+  # had not run since the ML-DSA-65 prehash moved to SHA-512, and still
+  # expected SHA-256.
+  #
+  # Budget note: the integration step builds a second feature variant of
+  # bv-engine-pki, bastion_vault and bv-server plus one test link, and nothing
+  # else — it runs at the integration suite's scope (`--workspace`), so the
+  # third-party graph unifies as it does for the `build` cache and restores.
+  # Measured non-incrementally (as rust-cache builds) on a warm local tree:
+  # bv-engine-pki 5.2 s -> bastion_vault 4.9 s -> bv-server 3.5 s -> test link
+  # 3.8 s, ~17 s of critical path; the test runs in ~1 s. Put in this job,
+  # rather than a job of its own, so it pays no second checkout or cache
+  # restore.
   pki-composite:
     name: PKI composite issuance
     needs: plan
@@ -527,16 +542,24 @@ jobs:
         with:
           cache-key: build
 
-      # Via make so the feature flag has one definition.
-      - name: make test-pki-composite
-        run: make test-pki-composite NEXTEST_PROFILE=ci
+      # Via make so the feature flag has one definition. `make
+      # test-pki-composite` is these two in order; they are separate steps
+      # here because both write target/nextest/ci/junit.xml. The rename runs
+      # only on success, so a failing first step still uploads its own file.
+      - name: make test-pki-composite-lib
+        run: |
+          make test-pki-composite-lib NEXTEST_PROFILE=ci
+          mv target/nextest/ci/junit.xml target/nextest/ci/junit-lib.xml
+
+      - name: make test-pki-composite-integration
+        run: make test-pki-composite-integration NEXTEST_PROFILE=ci
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: nextest-junit-pki-composite
-          path: target/nextest/ci/junit.xml
+          path: target/nextest/ci/junit*.xml
           if-no-files-found: warn
 
   gui:

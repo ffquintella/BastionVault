@@ -120,7 +120,7 @@ endif
 # affect cargo's own internal parallelism, which is where the cores actually go.
 .NOTPARALLEL:
 
-.PHONY: help build run-dev run-dev-gui run-dev-gui-proxy gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-pki-composite test-integration test-doc test-cucumber test-hiqlite test-all test-release verify-gates verify-routes verify-fast verify-kani verify-differential verify verify-full verification-report docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test downloads-image downloads-image-run downloads-image-test container-deps-key container-deps-ref container-deps-image container-deps-push container-cache-clean container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all install uninstall gui-linux-packages gui-windows-msi gui-windows-nsis windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings release release-version-check release-dispatch release-linux-appimage release-macos-pkg release-windows-msi release-local release-checksums
+.PHONY: help build run-dev run-dev-gui run-dev-gui-proxy gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-pki-composite test-pki-composite-lib test-pki-composite-integration test-integration test-doc test-cucumber test-hiqlite test-all test-release verify-gates verify-routes verify-fast verify-kani verify-differential verify verify-full verification-report docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test downloads-image downloads-image-run downloads-image-test container-deps-key container-deps-ref container-deps-image container-deps-push container-cache-clean container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all install uninstall gui-linux-packages gui-windows-msi gui-windows-nsis windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings release release-version-check release-dispatch release-linux-appimage release-macos-pkg release-windows-msi release-local release-checksums
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -480,15 +480,27 @@ check-hsm: prune-stale ## cargo check the HSM seal backends (nothing else compil
 # `pki_pqc_composite` is off by default and `--all-features` is banned
 # (AGENTS.md §5), so bv-engine-pki's composite arms — and the composite
 # regression tests for the issuance hardening (T147, T148, T150) — compile in
-# no other target. Scoped to the one crate on purpose: the feature adds code
-# only there and changes nothing beneath it, so a warm tree rebuilds just
-# bv-engine-pki. NEXTEST_PROFILE=ci selects the profile CI writes JUnit with.
+# no other target. NEXTEST_PROFILE=ci selects the profile CI writes JUnit with;
+# CI calls the two halves as separate steps because both write the same file.
 #
-# tests/test_pki_composite.rs is gated on the same feature through the root
-# crate and is not run here: it needs a second feature variant of the whole
-# root crate, which is a different cost from this one.
-test-pki-composite: require-nextest prune-stale ## Run bv-engine-pki unit tests with the composite (pki_pqc_composite) feature on
+# -lib: scoped to the one crate on purpose. The feature adds code only there
+# and changes nothing beneath it, so a warm tree rebuilds just bv-engine-pki.
+#
+# -integration: tests/test_pki_composite.rs, gated on the same feature through
+# the root crate (`bastion_vault/pki_pqc_composite`), so every integration
+# shard compiles it to nothing. It is the one test that verifies both halves of
+# a composite signature with fips204 + p256 instead of the engine's own code.
+# Run at $(TEST_SCOPE), the integration suite's scope, so the third-party
+# graph unifies as it does for `make test-integration` and only bv-engine-pki,
+# bastion_vault, bv-server and the test binary build a second variant: ~17 s
+# of critical path measured non-incrementally on a warm tree (T152).
+test-pki-composite: test-pki-composite-lib test-pki-composite-integration ## Run the composite (pki_pqc_composite) PKI tests: engine unit tests + tests/test_pki_composite.rs
+
+test-pki-composite-lib: require-nextest prune-stale ## Run bv-engine-pki unit tests with the composite (pki_pqc_composite) feature on
 	cargo nextest run $(if $(NEXTEST_PROFILE),--profile $(NEXTEST_PROFILE)) -p bv-engine-pki --lib --features pki_pqc_composite
+
+test-pki-composite-integration: require-nextest prune-stale ## Run tests/test_pki_composite.rs with the root crate's pki_pqc_composite feature on
+	cargo nextest run $(if $(NEXTEST_PROFILE),--profile $(NEXTEST_PROFILE)) $(TEST_SCOPE) --features bastion_vault/pki_pqc_composite --test test_pki_composite
 
 test-integration: require-nextest prune-stale ## Run the tests/ integration suite with nextest (links ~30 binaries; slow)
 	cargo nextest run $(TEST_SCOPE) --tests
@@ -538,9 +550,8 @@ test-all: test test-integration test-doc ## Run unit + integration + doctests (e
 # queue on the shared target/ lock (AGENTS.md §5).
 #
 # Deliberately NOT here: `make build` (a release *build* is its own step) and
-# `tests/e2e/rustion-ssh` (needs real remote hosts, cannot be hermetic). Also
-# not run, though not by choice: `tests/test_pki_composite.rs`, which compiles
-# to nothing without the root crate's `pki_pqc_composite` (see test-pki-composite).
+# `tests/e2e/rustion-ssh` (needs real remote hosts, cannot be hermetic).
+# `tests/test_pki_composite.rs` compiles to nothing in step 2; step 8 runs it.
 test-release: require-nextest ## Every suite, for a release or a high-risk merge (slow: tens of minutes)
 	@echo "==> [1/9] unit tests (lib + bins)"      && $(MAKE) --no-print-directory test
 	@echo "==> [2/9] integration tests (tests/)"   && $(MAKE) --no-print-directory test-integration

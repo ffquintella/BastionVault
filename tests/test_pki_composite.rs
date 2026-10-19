@@ -1,7 +1,8 @@
 //! PKI Secret Engine — Phase 3 (composite / hybrid) preview tests.
 //!
 //! This test only compiles and runs when the `pki_pqc_composite` feature is
-//! on:  `cargo test --features pki_pqc_composite --test test_pki_composite`.
+//! on: `make test-pki-composite` runs it, along with the engine's own
+//! composite unit tests.
 //!
 //! What it asserts:
 //! - Composite role + composite root issue end-to-end and the cert's
@@ -16,7 +17,7 @@
 //! well-formed DER.
 //! - The CRL signed by a composite CA carries the composite OID and lists the
 //!   revoked serial.
-//! - Mixed-chain rejection: a composite role on a classical CA fails.
+//! - Mixed-chain rejection: a classical role on a composite CA fails.
 
 #![cfg(feature = "pki_pqc_composite")]
 
@@ -35,7 +36,7 @@ use fips204::{
 use go_defer::defer;
 use p256::ecdsa::{signature::Verifier as EcdsaVerifier, Signature as EcdsaSig, VerifyingKey};
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha512};
 use x509_cert::{
     crl::CertificateList,
     der::{Decode, Encode},
@@ -259,10 +260,11 @@ fn verify_composite_chain_signature(leaf: &Certificate, ca_pq_pk: &[u8], ca_clas
 }
 
 /// Reproduce the engine's prehash and verify the ML-DSA-65 half. Must stay
-/// in sync with `composite::bv_prehash` — the constant below is the source
-/// of truth in the test, the engine has the matching constant in
-/// `src/modules/pki/composite.rs`. If we ever change the prehash without
-/// bumping the OID, this test will fail and force a synchronised update.
+/// in sync with `Variant::prehash` / `Variant::domain` for `P256L65` in
+/// `crates/bv-engine-pki/src/composite.rs`; this copy is deliberately
+/// independent, so a change to the engine's construction fails here instead
+/// of passing silently. Nothing else in the tree verifies either half of a
+/// composite signature against a separate implementation.
 fn verify_pq_half(msg: &[u8], pk_bytes: &[u8], sig: &[u8]) {
     assert_eq!(sig.len(), ML_DSA_65_SIG_LEN);
     let prehashed = bv_prehash_v0(msg);
@@ -280,9 +282,13 @@ fn verify_classical_half(msg: &[u8], pk_bytes: &[u8], sig: &[u8]) {
     vk.verify(&prehashed, &sig).expect("classical half (ECDSA-P256) of composite signature must verify");
 }
 
+/// `SHA-512(domain || msg)`: the hash named by the OID
+/// (`id-MLDSA65-ECDSA-P256-SHA512`). Was SHA-256 before the engine grew the
+/// L44 / L87 variants (3426a660); this test was not run then and kept the old
+/// hash until T152.
 fn bv_prehash_v0(msg: &[u8]) -> Vec<u8> {
     const DOMAIN: &[u8] = b"BastionVault-PKI-Composite-v0/MLDSA65+ECDSAP256/v0";
-    let mut h = Sha256::new();
+    let mut h = Sha512::new();
     h.update(DOMAIN);
     h.update(msg);
     h.finalize().to_vec()

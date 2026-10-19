@@ -62,6 +62,8 @@ EXAMPLE ENTRY:
 
 - Run the PKI engine's unit tests with composite (classical + ML-DSA) issuance compiled in, on every pull request that can reach `bv-engine-pki` and in `make test-release` (T150, S38)
   -- `pki_pqc_composite` is off by default and no job enabled it, so the composite regression tests for issuer chaining, Authority Key Identifiers, the CA-key check and literal subjects never ran. New `make test-pki-composite` target and `pki-composite` job in `.github/workflows/tests.yml`, planned by `scripts/ci-plan.sh` (output `run_pki_composite`).
+- Run the composite PKI integration test, `tests/test_pki_composite.rs`, in `make test-pki-composite`, the `pki-composite` CI job and `make test-release` (T152, S38)
+  -- it is gated on `pki_pqc_composite` through the root crate, so every integration run compiled it to nothing, and it still expected the SHA-256 prehash the ML-DSA-65 + ECDSA-P256 composite used before it moved to SHA-512. Corrected, it is the one test that checks both halves of a composite signature with independent ML-DSA and ECDSA verifiers. `make test-pki-composite` now runs `test-pki-composite-lib` and `test-pki-composite-integration`; the CI job is also planned when the test file alone changes.
 
 #### Module policies (features/module-policies.md)
 
