@@ -56,6 +56,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.44.45] - 2026-10-19
+
 ### Added
 
 #### CI: composite PKI issuance is tested
