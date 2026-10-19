@@ -80,6 +80,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### PKI Export
+
+- Fix exporting an issuer certificate as PKCS#7 failing with "HTTP 500: export: DER error: SET OF contains duplicate"; a certificate that appears both as the leaf and in the chain (always the case for an issuer export) is now bundled once.
+
 #### Resource Connect RDP
 
 - Fix "mixed username format" when connecting over RDP with a `DOMAIN\user` or `user@domain` account: the qualified name is split into user and domain (or kept as a UPN with the separate domain dropped) before CredSSP sees it

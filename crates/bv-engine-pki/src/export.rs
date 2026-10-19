@@ -144,7 +144,13 @@ pub fn pkcs7_certs_only(
     let mut certs: Vec<Certificate> = Vec::with_capacity(chain_pems.len() + 1);
     certs.push(leaf);
     for p in chain_pems {
-        certs.push(parse_cert_pem(p)?);
+        let cert = parse_cert_pem(p)?;
+        // A DER `SET OF` cannot hold the same element twice, and callers
+        // legitimately repeat the leaf in the chain (issuer export, a
+        // self-signed root). Collapse by encoded certificate, not by error.
+        if !certs.contains(&cert) {
+            certs.push(cert);
+        }
     }
 
     // Hand-build the SignedData here rather than going through
@@ -716,6 +722,21 @@ GLacNrytqq7jmwIEAcciE0sn9aGO7vrPc47k0MR8I+5Dqlx6Fpnvcai0\n\
         let text = String::from_utf8(bundle.body).expect("pkcs7 body is text");
         assert!(text.contains("BEGIN PKCS7"), "got: {text}");
         assert!(!text.contains("PRIVATE KEY"));
+    }
+
+    /// The issuer export route passes `build_issuer_chain`, whose first
+    /// element is the issuer's own certificate, so the leaf reappears in
+    /// the chain. A DER `SET OF` rejects duplicates; the bundle must carry
+    /// the certificate once instead of failing the export.
+    #[test]
+    fn pkcs7_tolerates_leaf_repeated_in_chain() {
+        let chain = vec![FIXTURE_CERT_PEM.to_string(), FIXTURE_CERT_PEM.to_string()];
+        let bundle = pkcs7_certs_only(FIXTURE_CERT_PEM, &chain).expect("duplicates are collapsed");
+        let text = String::from_utf8(bundle.body).expect("pkcs7 body is text");
+        let der = pem::parse(text.trim()).expect("armored").into_contents();
+        let ci = ContentInfo::from_der(&der).expect("content info");
+        let sd: SignedData = ci.content.decode_as().expect("signed data");
+        assert_eq!(sd.certificates.expect("certs present").0.len(), 1);
     }
 
     #[test]
