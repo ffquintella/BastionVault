@@ -404,9 +404,8 @@ Required before cutting a release, and before merging anything that touches a
 persisted format, a storage barrier, authn/authz, or the plugin ABI. Runs
 `test`, `test-integration`, `test-doc`, `test-hiqlite`, `test-cucumber`,
 `plugins-test`, `gui-check`, `gui-test`, `test-pki-composite` and
-`check-hsm DEEP=1`. Left out: `tests/e2e/rustion-ssh` (needs real remote
-hosts) and `tests/test_pki_composite.rs` (compiles to nothing unless the root
-crate is built with `pki_pqc_composite`).
+`check-hsm DEEP=1`. Only `tests/e2e/rustion-ssh` is left out — it needs real
+remote hosts.
 
 The pieces, when you want one of them on its own:
 
@@ -416,7 +415,7 @@ make test-hiqlite       # port-bound, single process, CARGO_TEST_HIQLITE=1
 make test-cucumber      # harness = false, fixed ports 28100/28200
 make plugins-test       # testkit + host ABI parity + plugin substrate
 make check-hsm          # the HSM seal backends; DEEP=1 for the container image's own graph
-make test-pki-composite # bv-engine-pki with pki_pqc_composite, which no other target enables
+make test-pki-composite # pki_pqc_composite, which no other target enables: engine unit tests + tests/test_pki_composite.rs
 make test-all           # test + test-integration + test-doc
 make build              # release build
 ```
@@ -434,8 +433,9 @@ that pass the flags down.
 
 CI (`.github/workflows/tests.yml`) runs **everything except
 `tests/e2e/rustion-ssh`** — unit, doctests, `tests/`, hiqlite, cucumber, the
-per-crate isolation check, the HSM seal backends, the Tauri host's
-`cargo check` and the GUI frontend. A push to `main`
+per-crate isolation check, the HSM seal backends, the composite PKI tests
+(`make test-pki-composite`), the Tauri host's `cargo check` and the GUI
+frontend. A push to `main`
 runs the lot; a pull request runs only the packages the change can reach,
 derived from the same
 `cargo metadata` graph `make test-changed` uses. The one exception is the

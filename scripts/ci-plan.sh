@@ -39,8 +39,9 @@
 #   isolation      `cargo check -p X` over every member, when any manifest moved
 #   hsm            `make check-hsm`, when bv-core, a manifest or the image recipe
 #                  moved — the seal backends are off in every other job
-#   pki-composite  `make test-pki-composite`, when bv-engine-pki is affected —
-#                  the `pki_pqc_composite` arms are off in every other job
+#   pki-composite  `make test-pki-composite`, when bv-engine-pki is affected or
+#                  tests/test_pki_composite.rs moved — the `pki_pqc_composite`
+#                  arms are off in every other job
 #   gui            tsc + vitest, when gui/ (not gui/src-tauri) moved
 #   kani           verify.yml's tier-1 Kani job, when bv-policy-core or the
 #                  verification tooling moved (output `run_kani`)
@@ -93,7 +94,7 @@ while [[ $# -gt 0 ]]; do
     --base)  BASE="${2:?--base needs a git ref}"; shift 2 ;;
     --full)  FORCE_FULL=1; shift ;;
     --pkg)   SEED_PKGS+=("${2:?--pkg needs a package name}"); shift 2 ;;
-    -h|--help) sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "ci-plan: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
@@ -200,8 +201,14 @@ run_hsm = (
 # `pki_pqc_composite`, which no other job enables, so their regression tests
 # ran nowhere. The feature adds code only to bv-engine-pki, so that crate in
 # the affected set is the trigger; it is there whenever anything beneath it
-# moved, too, because lib_pkgs is the reverse-dependency closure.
-run_pki_composite = full or "bv-engine-pki" in lib_pkgs
+# moved, too, because lib_pkgs is the reverse-dependency closure. The job also
+# runs tests/test_pki_composite.rs, which belongs to the root crate and so
+# does not put bv-engine-pki in the set when it is the only file that moved.
+run_pki_composite = (
+    full
+    or "bv-engine-pki" in lib_pkgs
+    or "tests/test_pki_composite.rs" in plan["integration_files"]
+)
 # verify.yml (T31 Phase 4). The Kani proofs are statements about
 # bv-policy-core's source and nothing else — the crate has no dependencies — so
 # a change that cannot reach it cannot change a Kani result. The differential
@@ -262,7 +269,7 @@ lines = [
     f"| cucumber | {'run' if run_cucumber else 'skipped (root crate not affected)'} |",
     f"| isolation | {'run' if run_isolation else 'skipped (no manifest changed)'} |",
     f"| hsm | {'run' if run_hsm else 'skipped (bv-core, manifests and the image recipe all untouched)'} |",
-    f"| pki-composite | {'run' if run_pki_composite else 'skipped (bv-engine-pki not affected)'} |",
+    f"| pki-composite | {'run' if run_pki_composite else 'skipped (bv-engine-pki and tests/test_pki_composite.rs untouched)'} |",
     f"| gui | {'run' if run_gui else 'skipped (gui/ not touched)'} |",
     f"| verify: kani (fast set on a PR) | {'run' if run_kani else 'skipped (bv-policy-core and the verification tooling untouched)'} |",
     f"| verify: differential | {'run' if run_differential else 'skipped (bv-kernel not affected)'} |",
