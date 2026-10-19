@@ -101,6 +101,11 @@ EXAMPLE ENTRY:
 
 ### Security
 
+#### Post-quantum signing keys
+
+- **Wipe ML-DSA private-key seeds from memory after use** (T149, S86)
+  -- the ML-DSA-44/65/87 keypair type kept its 32-byte seed, which is the whole private key, in a buffer that was freed without being cleared, and printed it in debug output. PKI issuance, transit and SSH signing derive a keypair from the seed on every operation, so each one left another copy in process memory. The seed is now overwritten when the keypair is dropped, debug output shows `<redacted>` in its place, and signing, verification and key derivation clear their temporary copy of the seed before returning.
+
 #### Rustion sessions — desktop app
 
 - **Let a session window renew, end or read only its own bastion session** (T145, S51, S112)
