@@ -42,6 +42,7 @@ use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use rand::RngExt;
 use sha2::Sha256;
+use zeroize::Zeroizing;
 use x25519_dalek::{PublicKey as XPublicKey, StaticSecret as XStaticSecret};
 
 use super::{ed25519, ml_dsa, ml_kem};
@@ -65,7 +66,10 @@ const X25519_KEY_LEN: usize = 32;
 /// classical ed25519) without breaking the parser.
 pub fn generate_signing_keypair() -> Result<(Vec<u8>, Vec<u8>), RvError> {
     let (ed_seed, ed_pk) = ed25519::generate_keypair();
+    let ed_seed = Zeroizing::new(ed_seed);
     let (ml_seed, ml_pk) = ml_dsa::generate_keypair(super::super::keytype::KeyType::MlDsa65)?;
+    // Both seeds are copied into `material`; wipe these copies.
+    let ml_seed = Zeroizing::new(ml_seed);
 
     let material = pack_two(&ed_seed, &ml_seed);
     let pk = pack_two(&ed_pk, &ml_pk);
@@ -144,6 +148,8 @@ pub fn generate_kem_keypair() -> Result<(Vec<u8>, Vec<u8>), RvError> {
     let x_public = XPublicKey::from(&x_secret).to_bytes();
 
     let (ml_sk, ml_pk) = ml_kem::generate_keypair()?;
+    // Copied into `material` below; wipe this copy.
+    let ml_sk = Zeroizing::new(ml_sk);
 
     let material = pack_two(x_secret.as_bytes().as_slice(), &ml_sk);
     let pk = pack_two(&x_public, &ml_pk);

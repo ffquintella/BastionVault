@@ -35,6 +35,9 @@ hmac = "0.13"
 rand = "^0.10"
 sha2 = "0.11"
 subtle = "2.6"
+# Wipes `policy::KeyVersion.material` (raw keys and ML-DSA seeds) on drop.
+# Same crate and version `bv_crypto` already uses.
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
 # X25519 for the optional `hybrid-x25519+ml-kem-768` key type. Optional for
 # the same reason as in the root manifest: only `transit_pqc_hybrid` pays.
 x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }

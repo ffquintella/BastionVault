@@ -10,9 +10,10 @@
 //! the barrier (ChaCha20-Poly1305) wraps the JSON before it ever
 //! touches physical storage. Plaintext key material never persists.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::keytype::KeyType;
 
@@ -31,7 +32,10 @@ pub const POLICY_PREFIX: &str = "policy/";
 /// `pk` is the public-key material for asymmetric types — kept
 /// separate from `material` so `GET /keys/:name` can return it
 /// without ever loading the secret half through the same code path.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `material` is secret, so a `KeyVersion` is wiped when it is dropped and
+/// `Debug` leaves `material` out. Neither changes the serialized form.
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct KeyVersion {
     /// Sequence number; the latest is what `encrypt` / `sign` use.
     pub version: u32,
@@ -43,6 +47,17 @@ pub struct KeyVersion {
     /// Public material for asymmetric types. Empty for symmetric.
     #[serde(default)]
     pub pk: Vec<u8>,
+}
+
+impl fmt::Debug for KeyVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeyVersion")
+            .field("version", &self.version)
+            .field("created_at", &self.created_at)
+            .field("material", &"<redacted>")
+            .field("pk", &self.pk)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,5 +184,45 @@ mod tests {
         assert!(p.version_for_decrypt(1).is_err());
         assert!(p.version_for_decrypt(2).is_ok());
         assert!(p.version_for_decrypt(3).is_err());
+    }
+
+    fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+    #[test]
+    fn key_version_wipes_material() {
+        assert_zeroize_on_drop::<KeyVersion>();
+        let mut v = sample(vec![0xa5; 32]);
+        v.zeroize();
+        assert!(v.material.iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn key_version_debug_redacts_material() {
+        let mut v = sample(vec![0xa5; 32]);
+        v.pk = vec![0x11; 2];
+        let rendered = format!("{v:?}");
+        assert!(rendered.contains("material: \"<redacted>\""), "{rendered}");
+        assert!(rendered.contains("pk: [17, 17]"), "{rendered}");
+        assert!(!rendered.contains("165"), "key material leaked into Debug: {rendered}");
+
+        // KeyPolicy's derived Debug goes through KeyVersion's.
+        let p = KeyPolicy::new("k".into(), KeyType::Chacha20Poly1305, v);
+        assert!(!format!("{p:?}").contains("165"), "key material leaked into KeyPolicy Debug");
+    }
+
+    #[test]
+    fn key_version_serialized_form_is_unchanged() {
+        let v = KeyVersion {
+            version: 3,
+            created_at: 7,
+            material: vec![1, 2],
+            pk: vec![9],
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(json, r#"{"version":3,"created_at":7,"material":[1,2],"pk":[9]}"#);
+        let back: KeyVersion = serde_json::from_str(&json).unwrap();
+        assert_eq!((back.version, back.created_at), (3, 7));
+        assert_eq!(back.material, vec![1, 2]);
+        assert_eq!(back.pk, vec![9]);
     }
 }

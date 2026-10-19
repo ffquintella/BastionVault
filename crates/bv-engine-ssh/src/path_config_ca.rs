@@ -290,7 +290,7 @@ impl SshBackendInner {
             // hex fields below and never touches `private_key_openssh`.
             private_key_openssh: String::new(),
             public_key_openssh: public_key_openssh.clone(),
-            pqc_secret_seed_hex: hex::encode(ca.secret_seed),
+            pqc_secret_seed_hex: hex::encode(&ca.secret_seed),
             pqc_public_key_hex: hex::encode(&ca.public_key),
         };
         let bytes = serde_json::to_vec(&cfg)?;
