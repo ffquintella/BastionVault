@@ -32,6 +32,11 @@ pub fn seed_len(kt: KeyType) -> usize {
 
 /// Generate a fresh ML-DSA keypair at the requested level. Returns
 /// `(seed, public_key)`.
+///
+/// The seed `Vec` is the only copy that outlives this call (the
+/// `bv_crypto` keypair wipes its own on drop). Move it straight into
+/// `KeyVersion::material`, which wipes on drop, or wrap it in
+/// `zeroize::Zeroizing` if it has to live anywhere else.
 pub fn generate_keypair(kt: KeyType) -> Result<(Vec<u8>, Vec<u8>), RvError> {
     match kt {
         KeyType::MlDsa44 => {

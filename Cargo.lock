@@ -2066,6 +2066,7 @@ dependencies = [
  "sha2 0.11.0",
  "ssh-encoding 0.2.0",
  "ssh-key 0.6.7",
+ "zeroize",
 ]
 
 [[package]]
@@ -2138,6 +2139,7 @@ dependencies = [
  "sha2 0.11.0",
  "subtle",
  "x25519-dalek 2.0.1",
+ "zeroize",
 ]
 
 [[package]]
