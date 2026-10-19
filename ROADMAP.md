@@ -99,6 +99,8 @@ Next-up list recorded before the migration, in its order:
 - [x] T16 Rotate keys and re-encrypt stored data
   - source: roadmap.md feature row "Key Rotation & Re-encryption", status `[x]` Done
   - old-notes: Re-encrypt with new barrier key on rotate.
+- [x] T149 Wipe ML-DSA private-key seeds from memory when a keypair is dropped (S86)
+  - note: `MlDsa{44,65,87}Keypair` in `crates/bv_crypto` held the 32-byte seed — the whole private key — in a plain array that was dropped without being cleared, and `Debug` printed it; every `keypair_from_seed` / `sign` / `verify` call also left an uncleared stack copy. The keypairs now derive `Zeroize` + `ZeroizeOnDrop` (as `KemKeypair` already did), redact the seed in `Debug`, and the provider methods copy the seed into a `Zeroizing` buffer. Public API unchanged (patch bump for `bv_crypto`).
 - [/] T17 Seal the vault with a hardware security module (S17, S91)
   - source: roadmap.md feature row "HSM Support", status `[/]` In progress
   - old-notes: [spec](features/hsm-support.md) — YubiHSM 2 + mock backends, HSM auto-unseal, hybrid PQC custody, and cluster enrollment/replication implemented and tested with the mock; `v2/sys/hsm/status` + `bvault operator hsm status` + GUI HSM / Seal status page shipped. Remaining: the networked enroll / rotate-epoch HTTP handshake (validated against real hardware / a live cluster).
