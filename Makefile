@@ -2273,6 +2273,14 @@ bootstrap: ## Install dependencies and set up the development environment
 		&& echo "==> cargo-kani already installed: $$(cargo kani --version)" \
 		|| cargo install --locked kani-verifier
 	cargo kani setup
+	@# `cross` is required for cross-compiling process plugins (e.g.
+	@# darwin → x86_64-unknown-linux-gnu). Bare cargo fails at link time
+	@# because rust-lld rejects GCC-style flags. The Makefile auto-detects
+	@# `cross` and switches to it when PLUGINS_PROCESS_TARGET differs from
+	@# the host triple. Needs Docker or Podman running at build time.
+	@command -v cross >/dev/null 2>&1 \
+		&& echo "==> cross already installed: $$(cross --version | head -n1)" \
+		|| cargo install cross --git https://github.com/cross-rs/cross
 	cargo check
 	@echo "Bootstrap complete."
 
@@ -2453,7 +2461,7 @@ _exe := $(if $(_is_windows_target),.exe,)
 # what it reads from the file anyway, and cargo ignores the Docker variable.
 _registry_index = $(shell sed -n 's/^$(1) = { index = "\(.*\)" }.*/\1/p' .cargo/config.toml)
 _plugins_cross_env := \
-	CROSS_CONFIG=$(CURDIR)/Cross.toml \
+	CROSS_CONFIG='$(CURDIR)/Cross.toml' \
 	DOCKER_DEFAULT_PLATFORM=linux/amd64 \
 	CARGO_REGISTRIES_UOX_BASTIONVAULT_INDEX=$(call _registry_index,uox-bastionvault) \
 	CARGO_REGISTRIES_UOX_FERROGATE_INDEX=$(call _registry_index,uox-ferrogate)
