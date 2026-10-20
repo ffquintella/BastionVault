@@ -38,7 +38,11 @@ bv_plugin_surface = { path = "../../crates/bv_plugin_surface" }
 rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
+# `net` / `io-util` / `time` are named explicitly for Web Connect proxy mode
+# (`session/web_proxy_listener.rs`): a loopback listener, `copy_bidirectional`
+# and connect timeouts. The RDP path already relied on them arriving through
+# feature unification; naming them keeps this crate buildable on its own.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "net", "io-util", "time"] }
 # Argon2id KDF used by the password-encrypted backup envelope
 # (`commands/backup.rs`). Mirrors the host crate's argon2 pin.
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "std"] }
@@ -250,6 +254,43 @@ wasmtime = { version = "46", default-features = false, features = ["cranelift", 
 # boilerplate.
 thiserror = "2"
 
+# ---------------------------------------------------------------------------
+# Web Connect proxy mode (features/web-application-connect.md §10, T106).
+#
+# The host-local proxy the session webview is pointed at: `CONNECT`-only,
+# loopback, one listener per session. Every crate below is ALREADY in this
+# crate's dependency graph at exactly these versions (the Phase 6 spike
+# checked with `cargo tree -p bastion-vault-gui -i`), so naming them directly
+# changes no lockfile entry and adds no package — it only makes the
+# dependency visible where the code is. Deliberately NOT added: an
+# off-the-shelf MITM proxy crate (`hudsucker`, `http-mitm-proxy`), rejected on
+# trusted-computing-base grounds, and anything pulling `openssl-sys`.
+#
+# `hyper` parses and frames the terminated HTTP/1.1 leg in both directions
+# (chunked bodies, keep-alive, 101 upgrades) so this crate does not hand-roll
+# a parser on the credential path; `hyper-util` is only its tokio IO adapter
+# and `http-body-util` the body combinators.
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+# TLS for both legs: terminating the webview's `CONNECT` with a per-session
+# leaf, and dialling the upstream origin.
+tokio-rustls = "0.26"
+# The upstream leg's trust decision: the OS trust store on macOS and Windows,
+# native roots on Linux. The profile's `tls_pin_sha256` is layered on top of
+# it through `bastion_vault::utils::tls_pin::decide`, the same function the
+# Phase 4 webview gate uses — a pin is an override, never a restriction.
+rustls-platform-verifier = "0.7"
+# The per-session CA and leaves (`session/web_proxy_ca.rs`), minted in memory
+# at launch. Default features, i.e. the `ring` backend — explicitly *not*
+# `aws_lc_rs`, mirroring the root manifest's PKI pin. Was a dev-dependency
+# here (the PKI import-parser tests); those still build against it.
+rcgen = { version = "0.14", features = ["x509-parser"] }
+# rcgen's exposed timestamp type, for the session certificates' validity
+# window. Mirrors the root manifest's pin.
+time = { version = "0.3", default-features = false, features = ["std"] }
+
 [target.'cfg(windows)'.dependencies]
 # Force winapi's "std" feature so winapi::ctypes::c_void unifies with
 # std::ffi::c_void. Works around authenticator 0.5.0 Windows build error
@@ -406,10 +447,10 @@ bastion_vault = { path = "../..", default-features = false, features = ["test-su
 # without dragging the wasmtime `wat` feature into the runtime
 # build (which would balloon the GUI binary).
 wat = "1"
-# Generates self-signed cert + key fixtures for the PKI cert/key
-# import parser tests (`commands/pki.rs`). Test-only; matches the
-# workspace `rcgen` pin so no extra version lands in the lockfile.
-rcgen = { version = "0.14", features = ["x509-parser"] }
+# NOTE: `rcgen` used to be declared here, test-only, for the PKI cert/key
+# import parser fixtures (`commands/pki.rs`). Web Connect proxy mode mints
+# the per-session CA at run time, so it is a normal dependency now (see the
+# block at the end of `[dependencies]`); the fixtures build against that.
 # ABI-parity guard: the testkit's `bvx` conformance module is
 # instantiated against the *real* `plugin_apps` linker so a drift
 # between the testkit mock and this runtime fails CI (Phase 6).

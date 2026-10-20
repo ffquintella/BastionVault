@@ -2214,19 +2214,84 @@ content always in its own webview, never a shared realm.
   re-run, a re-run for `http-auth`, CI coverage of the feature build.
 - **Carried forward as caveats:** the per-platform manual checks.
 
-### Phase 6 — proxy mode — **Spike done; the build is T106 (Todo)**
+### Phase 6 — proxy mode — **Spike done; the build is T106 (In progress)**
 
 See *Current State → Phase 6 spike findings*.
+
+- **Done (T106 step 1):** `gui/src-tauri/src/session/web_proxy.rs`, the
+  Tauri-free decisions: the per-launch placeholder, the submit-request
+  substitution rule with per-body-type encoding and the exactly-once refusal,
+  the response scrub across raw, form, JSON and HTML encodings, the
+  `Alt-Svc` strip, and host-plus-port termination scope. Unit-tested.
+
+- **Done (T106 step 2 — the certificates and the listener):**
+  - [`web_proxy_ca.rs`](../gui/src-tauri/src/session/web_proxy_ca.rs): one
+    ECDSA P-256 key per session and one leaf per terminated host, signed by a
+    per-session CA that is name-constrained to those hosts (dNSName subtrees,
+    and a single-address subnet for an IP-literal origin) and whose signing
+    key is scoped so it is dropped the moment the last leaf is signed — it is
+    never stored on the returned value. Certificates are valid for seven days
+    (they have no revocation path). Each host gets a prebuilt rustls
+    `ServerConfig` whose resolver serves that host's leaf only, so an SNI
+    other than the `CONNECT` authority is refused rather than answered; ALPN
+    is `http/1.1` only. `ca_pin()` and `leaf_pin()` are the two pins step 4
+    hands the Phase 4 gate.
+  - Known residual: X.509 DNS name constraints permit the named domain and
+    all its subdomains; they cannot express an exact host. The CA therefore
+    admits certificates for subdomains of each terminated host while the
+    session lives. The exposure is bounded by the dropped signing key: no
+    new certificate can be minted, so only a leaked in-memory key could use
+    it. Exact-host pinning would need a leaf-SPKI model with no CA, which
+    departs from this section and is not planned.
+  - [`web_proxy_listener.rs`](../gui/src-tauri/src/session/web_proxy_listener.rs):
+    `WebProxy::start` binds `127.0.0.1:0`, one listener per session, and
+    answers `CONNECT` only — a non-`CONNECT` request gets `405` and a
+    malformed one `400`, both closed. A `CONNECT` inside the termination
+    scope is terminated with that host's leaf and its inner HTTP/1.1 requests
+    are proxied (hyper on both legs); a `CONNECT` anywhere else is
+    blind-tunnelled. Only a request matching the recipe's submit origin and
+    path is buffered (1 MiB cap) and run through `substitute_submit`:
+    `Substituted` goes out with the real secret, a recomputed
+    `Content-Length` and `Accept-Encoding: identity`, `Refused` never leaves
+    the proxy (`502` plus the fixed `proxy_submit_*` check name), `Unchanged`
+    is forwarded as received. That request's response is buffered (8 MiB cap)
+    and scrubbed; a response that comes back compressed despite the identity
+    request is refused rather than scrubbed blind. Hop-by-hop headers and
+    `Alt-Svc` are stripped from every terminated response, `101` upgrades are
+    relayed byte for byte, and everything else streams. `has_terminated()` is
+    recorded before the `200` for step 6's bypass check.
+- **Done (T106 step 3 — the upstream leg):**
+  [`web_proxy_upstream.rs`](../gui/src-tauri/src/session/web_proxy_upstream.rs)
+  verifies the origin with `rustls-platform-verifier` and layers the
+  profile's `tls_pin_sha256` on top through the shared
+  `bastion_vault::utils::tls_pin::decide` — a pin is an override, never a
+  restriction, and there is no prompt and no trust on first use. The
+  upstream is dialled and verified **before** the `CONNECT` is answered, so a
+  certificate nothing admits fails the `CONNECT` (`502`) and no byte of the
+  session ever enters that tunnel.
+- **Dependencies:** `hyper`, `hyper-util`, `http-body-util`, `bytes`,
+  `tokio-rustls`, `rustls-platform-verifier`, `rcgen` (promoted from
+  dev-dependency, `ring` backend) and `time` are now direct dependencies of
+  `bastion-vault-gui`. All were already in its graph at those versions; the
+  lockfile gained no package. No OpenSSL, no MITM-proxy crate.
 
 - **Done (T96):** the spike — per-platform trust of a per-session in-memory
   CA without the OS store (macOS: go, run on macOS 27; Windows and Linux:
   conditional go, read from the pinned sources), and the dependency question
   (everything needed is already in the graph; no OpenSSL).
-- **Not done (T106):** the proxy, placeholder substitution, scrubbing and
-  header injection (§10); the per-platform wiring through the Phase 4 shims;
-  the submit target in the recipe format; a Windows and a Linux run before
-  either is enabled; a macOS 13 launch check of a `macos-proxy` build. Ships
-  per platform; visibly unavailable elsewhere.
+- **Not done (T106, steps 4–7):** the per-platform webview wiring
+  (`proxy_url`, `tauri/macos-proxy` and its manifest justification, the macOS
+  14 gate, the Phase 4 shims given the session's CA and leaf pins, Linux
+  pre-registration of each leaf, no Windows `additional_browser_args`); the
+  submit target in the versioned recipe format with server-side validation,
+  `launch` releasing the credential at exposure `proxy`, and
+  `allow_insecure_http` refused for proxy mode; header injection; the bypass
+  check, the `proxied` lock state and the audit lines for termination,
+  substitution, refusal and scrubbing; a Windows and a Linux run before
+  either is enabled; a macOS 13 launch check of a `macos-proxy` build; and
+  `make test-release` before merging. Nothing constructs a `WebProxy` yet, so
+  the four modules carry a documented `#![allow(dead_code)]` that step 4
+  removes. Ships per platform; visibly unavailable elsewhere.
 
 ### Phase 7 — `sso` mode — **Todo, blocked by T52 (S19); tracked as T107**
 
@@ -2342,6 +2407,17 @@ as T97 in the roadmap backlog.
   - `when_url` glob semantics;
   - recipe parsing rejects unknown actions and non-enum values;
   - fill-routine argument serialisation round-trips hostile selectors.
+- `bastion-vault-gui`, proxy mode (§10, T106): the substitution rule and its
+  refusals, the scrub across every encoding, the name-constrained session CA
+  (a leaf outside the session does not verify under it, nor any leaf under
+  another session's CA), strict `CONNECT` request-line parsing, hop-by-hop
+  and `Alt-Svc` stripping, and — against a loopback https origin — a posted
+  placeholder reaching the upstream as the real secret while the page's copy
+  of the response holds only the placeholder, an out-of-scope `CONNECT`
+  tunnelled, a non-`CONNECT` refused, an SNI other than the `CONNECT`
+  authority refused, a repeated placeholder refused before the upstream sees
+  it, an unverifiable upstream failing the `CONNECT`, and a `101` upgrade
+  relayed.
 
 ### Frontend (vitest)
 
