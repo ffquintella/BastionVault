@@ -22,11 +22,12 @@
 //!   (G5). The engine takes it on the first ready snapshot at or past the
 //!   threshold and clears it when a run starts and ends.
 //!
-//! Per-platform attachment lives in `macos.rs`, `linux.rs` and (Task 3)
+//! Per-platform attachment lives in `macos.rs`, `linux.rs` and
 //! `windows.rs`, declared in this file behind `#[cfg(target_os = "…")]`.
 //! Every shim's `attach(&tauri::Webview, NavBarConfig) -> Box<dyn NavBar>`
-//! has the same signature. The orchestrator, `transfer`, `linux_model` and
-//! their unit tests compile on every host.
+//! has the same signature. The orchestrator, `transfer`, `linux_model`,
+//! `windows_model`, `windows_refetch` and their unit tests compile on every
+//! host.
 //!
 //! Dead-code allow: Tasks 2–7 of
 //! docs/plans/2026-10-20-web-session-nav-controls.md consume every item
@@ -42,16 +43,20 @@ pub mod filename;
 mod transfer;
 // The GTK shim's pure half. Not cfg-gated, so its tests run on every host.
 mod linux_model;
+// The WebView2 shim's pure half and its own re-request of the shown
+// document. Not cfg-gated either, for the same reason.
+mod windows_model;
+mod windows_refetch;
 
 // Per-platform shim modules (Tasks 2–4 of
-// docs/plans/2026-10-20-web-session-nav-controls.md); the Windows one is
-// still to come:
-//   #[cfg(target_os = "windows")] pub mod windows;  // Task 3
-// They all consume the trait, state and audit types defined below.
+// docs/plans/2026-10-20-web-session-nav-controls.md). They all consume the
+// trait, state and audit types defined below.
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -231,10 +236,23 @@ pub struct NavBarConfig {
     /// only. Unused on Linux: WebKitGTK runs the bar's download in the
     /// webview's own web context, whose TLS policy and the certificate
     /// exceptions the gate recorded there apply to it unchanged.
+    ///
+    /// Windows: the bar's download is a request of its own, verified by the
+    /// platform's trust store only, so it is refused (`refetch_blocked`)
+    /// when the gate has pins or the operator accepted an untrusted
+    /// certificate for the origin, and when there is no gate at all (the
+    /// session's TLS profile is then unknown).
     pub tls_pin: Option<Arc<TlsPinGate>>,
-    /// macOS only. On Linux the window's `GtkBox` lays the webview out in
-    /// both builds, so the shim never sets a frame.
+    /// macOS and Windows. On Linux the window's `GtkBox` lays the webview
+    /// out in both builds, so the shim never sets a frame.
     pub frame: WebviewFrame,
+    /// The session's webview loads through the proxy-mode loopback proxy
+    /// (T106, `proxy_url`). Windows refuses the bar's download then
+    /// (`refetch_blocked`): its request of its own would not go through the
+    /// proxy. macOS and Linux download in the webview's own network stack,
+    /// proxy included, and do not read it. No session sets it before T106's
+    /// platform wiring; that wiring must.
+    pub proxy_mode: bool,
 }
 
 /// Which download path the shim took. The spec audits this so a
@@ -247,8 +265,10 @@ pub enum DownloadPath {
     /// quarantine is set on macOS and Windows by the OS.
     Webview,
     /// Fallback: `URLSession` on macOS 10.15–11.2, WebKitGTK's
-    /// `webkit_web_view_download_uri` (re-requests). No MOTW; the audit
-    /// line names it so a reviewer can see which path was taken.
+    /// `webkit_web_view_download_uri` (re-requests), and the Windows bar's
+    /// own HTTP request (`windows_refetch`). No MOTW on macOS and Linux; the
+    /// Windows shim writes the `Zone.Identifier` stream itself. The audit
+    /// line names the path so a reviewer can see which one was taken.
     Refetch,
 }
 
@@ -288,6 +308,11 @@ pub mod reason {
     /// The transfer failed after it started (network or webview error), or
     /// the window closed while it was in flight.
     pub const TRANSFER_FAILED: &str = "transfer_failed";
+    /// The bar would have to request the document itself, and that request
+    /// could not honour the session's TLS profile (pins, an untrusted
+    /// certificate the operator accepted, or no TLS gate to tell) or its
+    /// proxy mode. Refused before anything is requested (Windows).
+    pub const REFETCH_BLOCKED: &str = "refetch_blocked";
 }
 
 /// Map a [`NextPathError`] to its fixed audit reason token. The
@@ -791,6 +816,7 @@ mod audit {
             reason::INVALID_FILENAME,
             reason::UNAVAILABLE,
             reason::TRANSFER_FAILED,
+            reason::REFETCH_BLOCKED,
         ];
         for r in all {
             assert!(is_reason_token(r), "{r}");

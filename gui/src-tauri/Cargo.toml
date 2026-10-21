@@ -312,7 +312,14 @@ webview2-com = "0.38"
 # win32metadata — so the structs and entry points are hand-written there.
 # Pinned to 0.61 to match the version tauri-runtime-wry/wry resolve, so
 # `WebviewWindow::hwnd()` hands back an `HWND` of the same type.
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+# The features after `Win32_System_LibraryLoader` are for the web session nav
+# bar (`session/web_nav_bar/windows.rs`): its child windows, buttons,
+# tooltips and fonts, the subclass on the session window, and freeing
+# WebView2's cookie strings (`GetDpiForWindow` is looked up at run time
+# through `Win32_System_LibraryLoader`). tao 0.35 and wry 0.55 already enable
+# every one of them on windows 0.61, so listing them changes no crate's
+# feature set (and rebuilds nothing).
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_SystemServices", "Win32_UI_Controls", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Web Connect `http-auth` mode (features/web-application-connect.md §7, T96

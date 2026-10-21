@@ -206,6 +206,10 @@ pub(crate) fn refusal_message(refusal: &str) -> &'static str {
         reason::UNAVAILABLE => {
             "This file cannot be fetched again from here (it may need a form submission or a one-time link)."
         }
+        reason::REFETCH_BLOCKED => {
+            "This session's TLS or proxy settings do not let the bar fetch this file again; use the page's own \
+             download link."
+        }
         _ => "The download failed.",
     }
 }
@@ -816,9 +820,11 @@ mod tests {
             reason::INVALID_FILENAME,
             reason::UNAVAILABLE,
             reason::TRANSFER_FAILED,
+            reason::REFETCH_BLOCKED,
         ] {
             assert!(!refusal_message(r).is_empty(), "{r}");
         }
+        assert_ne!(refusal_message(reason::REFETCH_BLOCKED), refusal_message(reason::TRANSFER_FAILED));
         assert_ne!(refusal_message(reason::TOO_MANY_DOWNLOADS), refusal_message(reason::TRANSFER_FAILED));
     }
 
