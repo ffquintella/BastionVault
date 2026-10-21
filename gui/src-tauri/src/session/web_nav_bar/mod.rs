@@ -12,6 +12,9 @@
 //!   rate limiter the shim's download delegate consults.
 //! - [`sanitize_filename`] and [`next_free_path`] (re-exported from
 //!   [`filename`]), the pure-Rust path helpers.
+//! - `transfer`, the download button's platform-neutral model (response
+//!   tracker, policy and response checks, naming, the download job and the
+//!   per-download state machine) every shim drives.
 //! - [`mark_operator_reload`] / [`take_operator_reload`] /
 //!   [`clear_operator_reload`], the load-generation threshold the Reload
 //!   button sets so the fill engine runs no step on the reload's own load
@@ -33,6 +36,8 @@
 #![allow(dead_code)]
 
 pub mod filename;
+// Not cfg-gated: the per-platform shims below all drive it.
+mod transfer;
 
 // Per-platform shim modules are declared by Tasks 2–4 of
 // docs/plans/2026-10-20-web-session-nav-controls.md:

@@ -28,14 +28,14 @@
 //! **Download.** Never a bypass of `RemotePolicy::on_download` (A6): the
 //! click runs the same `web::download_decision` on the shown URL *before*
 //! any request is made, a redirect and the final response URL are held to
-//! it again, and the response must be 2xx and downloadable (`model`). On
+//! it again, and the response must be 2xx and downloadable (`transfer`). On
 //! macOS 11.3+ the document is fetched again by `WKWebView.startDownload(using:)`
 //! — the webview's own network session, cookies and proxy — with this
 //! module's `WKDownloadDelegate`; on 10.15–11.2 by an ephemeral `URLSession`
 //! carrying a copy of the webview's cookies (`path=refetch`). Either way the
 //! bytes are counted against the per-window [`DownloadLimiter`] on every
 //! report, written to a private staging file and moved over the name
-//! `next_free_path` reserved in the Downloads folder (`model::DownloadJob`).
+//! `next_free_path` reserved in the Downloads folder (`transfer::DownloadJob`).
 //! A server-trust challenge on either route is decided by the window's TLS
 //! pin gate exactly as for the page (`connect_web_tls_pin::macos`), without
 //! ever asking the operator from here.
@@ -55,7 +55,7 @@
 //!
 //! **Only compile-verified.** The AppKit / WebKit / Foundation calls below
 //! need a running `NSApplication` and a live WKWebView, which unit tests do
-//! not have; the decisions they apply are in `model` and are tested there.
+//! not have; the decisions they apply are in `model` and `transfer` and are tested there.
 
 mod model;
 
@@ -91,9 +91,8 @@ use objc2_web_kit::{
 };
 use tauri::{AppHandle, Url};
 
-use self::model::{
-    Destination, DownloadRoute, Frame, MainFrameResponse, ResponseFacts, ResponseTracker, Settled, Transfer,
-};
+use self::model::{DownloadRoute, Frame};
+use super::transfer::{self, Destination, MainFrameResponse, ResponseFacts, ResponseTracker, Settled, Transfer};
 use super::{mark_operator_reload, reason, DownloadLimiter, DownloadPath, NavAction, NavBar, NavBarAudit, NavState};
 use crate::session::web::{OriginSet, WebShared};
 use crate::session::web_tls_pin::TlsPinGate;
@@ -343,7 +342,7 @@ fn file_url(path: &Path) -> Option<Retained<NSURL>> {
 
 fn destination() -> Option<Destination> {
     Some(Destination {
-        downloads_dir: model::downloads_dir(dirs::download_dir(), dirs::home_dir())?,
+        downloads_dir: transfer::downloads_dir(dirs::download_dir(), dirs::home_dir())?,
         staging_root: std::env::temp_dir(),
     })
 }
@@ -537,7 +536,7 @@ impl NativeBar {
         let shown = shown.as_deref().and_then(to_url);
         let state = {
             let tracker = self.tracker.borrow();
-            model::nav_state(back, forward, loading, tracker.for_document(shown.as_ref()), self.allow_downloads)
+            transfer::nav_state(back, forward, loading, tracker.for_document(shown.as_ref()), self.allow_downloads)
         };
         self.render(&state);
         *self.state.borrow_mut() = state;
@@ -550,8 +549,8 @@ impl NativeBar {
         reload.setEnabled(!state.is_loading);
         download.setEnabled(state.download_enabled());
         let (tip, tint) = match self.flash.get() {
-            Some(refusal) => (model::refusal_message(refusal), Some(NSColor::systemRedColor())),
-            None => (model::download_tooltip(state), None),
+            Some(refusal) => (transfer::refusal_message(refusal), Some(NSColor::systemRedColor())),
+            None => (transfer::download_tooltip(state), None),
         };
         download.setToolTip(Some(&NSString::from_str(tip)));
         download.setContentTintColor(tint.as_deref());
@@ -636,7 +635,7 @@ impl NativeBar {
         let Some(url) = shown else { return self.refuse(reason::UNAVAILABLE) };
         // The same decision the webview's own downloads get (A6), before
         // any byte is requested.
-        if let Err(refusal) = model::url_policy(self.allow_downloads, &self.origins, &url) {
+        if let Err(refusal) = transfer::url_policy(self.allow_downloads, &self.origins, &url) {
             return self.refuse(refusal);
         }
         let Some(slot) = self.limiter.try_acquire() else { return self.refuse(reason::TOO_MANY_DOWNLOADS) };
@@ -905,7 +904,7 @@ fn note_response(bar_id: u64, response: &WKNavigationResponse) {
     }
     let facts = response_facts(&ns_response, None);
     let Some(url) = facts.url else { return };
-    let attachment = facts.content_disposition.as_deref().is_some_and(model::is_attachment);
+    let attachment = facts.content_disposition.as_deref().is_some_and(transfer::is_attachment);
     with_bar(bar_id, |native| {
         native.tracker.borrow_mut().record(MainFrameResponse { url, mime: facts.mime, attachment });
         native.refresh();
@@ -1395,7 +1394,11 @@ mod tests {
             concat!("evaluate", "JavaScript"),
             concat!("WKScript", "MessageHandler"),
         ];
-        let sources = [("macos.rs", include_str!("macos.rs")), ("macos/model.rs", include_str!("macos/model.rs"))];
+        let sources = [
+            ("macos.rs", include_str!("macos.rs")),
+            ("macos/model.rs", include_str!("macos/model.rs")),
+            ("transfer.rs", include_str!("transfer.rs")),
+        ];
         for (name, src) in sources {
             for f in forbidden {
                 assert!(!src.contains(f), "{name} uses {f}: the bar must stay a native view (spec §7.2, §8.1)");
