@@ -870,6 +870,80 @@ mod mod_policy_tests {
         assert!(Policy::from_str(lowercase_alias).is_err());
     }
 
+    /// An unknown capability name is a hard parse error for the whole
+    /// policy: the valid `secret/*` block beside it is not kept, so a typo
+    /// can never leave an operator with a silently narrower (or wider)
+    /// policy than the text they wrote. The error must name the offending
+    /// capability so the operator can find it.
+    #[test]
+    fn unknown_sql_like_name_refuses_the_whole_policy() {
+        let hcl = r#"path "resources/resources/r/sql/*" { capabilities = ["sql_selekt"] }
+                 path "secret/*" { capabilities = ["read"] }"#;
+        let err = Policy::from_str(hcl).expect_err("an unknown capability name must refuse the policy");
+        assert!(err.to_string().contains("sql_selekt"), "error does not name the capability: {err}");
+
+        // The same document with the correct spelling parses, so the refusal
+        // above comes from the capability name and not from the layout.
+        let valid = hcl.replace("sql_selekt", "sql_select");
+        let policy = Policy::from_str(&valid).unwrap_or_else(|e| panic!("valid sql_select policy refused: {e}"));
+        assert_eq!(policy.paths.len(), 2);
+        let sql = policy.paths.iter().find(|p| p.path == "resources/resources/r/sql/").unwrap();
+        assert_eq!(sql.permissions.capabilities_bitmap, Capability::SqlSelect.to_bits());
+        let secret = policy.paths.iter().find(|p| p.path == "secret/").unwrap();
+        assert_eq!(secret.permissions.capabilities_bitmap, Capability::Read.to_bits());
+    }
+
+    /// The capability listing (`ACL::capabilities`,
+    /// `Permissions::get_granting_capabilities`) names a SQL capability only
+    /// when its own bit is set: no plain grant surfaces a `sql_*` name, and
+    /// `deny` still short-circuits the list.
+    #[test]
+    fn sql_names_list_only_when_their_bits_are_granted() {
+        use bv_policy_core::{
+            CAP_CONNECT, CAP_CREATE, CAP_DELETE, CAP_DENY, CAP_LIST, CAP_PATCH, CAP_READ, CAP_ROOT, CAP_SQL_ADMIN,
+            CAP_SQL_ALTER, CAP_SQL_CREATE, CAP_SQL_DELETE, CAP_SQL_DROP, CAP_SQL_EXECUTE, CAP_SQL_EXPORT,
+            CAP_SQL_INSERT, CAP_SQL_SCRIPT, CAP_SQL_SELECT, CAP_SQL_UPDATE, CAP_SUDO, CAP_UPDATE,
+        };
+
+        let names = to_granting_capabilities(CAP_SQL_SELECT);
+        assert_eq!(names, vec!["sql_select".to_string()]);
+
+        let plain =
+            CAP_CREATE | CAP_READ | CAP_UPDATE | CAP_DELETE | CAP_LIST | CAP_SUDO | CAP_PATCH | CAP_ROOT | CAP_CONNECT;
+        let plain_names = to_granting_capabilities(plain);
+        assert!(plain_names.iter().all(|n| !n.starts_with("sql_")), "plain grant listed a SQL name: {plain_names:?}");
+
+        let all_sql = CAP_SQL_SELECT
+            | CAP_SQL_INSERT
+            | CAP_SQL_UPDATE
+            | CAP_SQL_DELETE
+            | CAP_SQL_ALTER
+            | CAP_SQL_CREATE
+            | CAP_SQL_DROP
+            | CAP_SQL_EXECUTE
+            | CAP_SQL_ADMIN
+            | CAP_SQL_EXPORT
+            | CAP_SQL_SCRIPT;
+        assert_eq!(
+            to_granting_capabilities(all_sql),
+            vec![
+                "sql_select",
+                "sql_insert",
+                "sql_update",
+                "sql_delete",
+                "sql_alter",
+                "sql_create",
+                "sql_drop",
+                "sql_execute",
+                "sql_admin",
+                "sql_export",
+                "sql_script",
+            ]
+        );
+        assert_eq!(to_granting_capabilities(CAP_READ | CAP_SQL_SELECT), vec!["read", "sql_select"]);
+        assert_eq!(to_granting_capabilities(CAP_DENY | all_sql), vec!["deny"]);
+    }
+
     #[test]
     fn test_policy_from_str_invalid_wildcards() {
         let invalid_policy = r#"
