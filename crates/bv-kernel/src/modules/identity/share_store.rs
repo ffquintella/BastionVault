@@ -870,7 +870,8 @@ fn normalize_capabilities(caps: Vec<String>) -> Vec<String> {
 
 #[cfg(test)]
 mod normalize_capability_tests {
-    use super::normalize_capabilities;
+    use super::{normalize_capabilities, SecretShare};
+    use bv_policy_core::ShareCap;
 
     fn norm(caps: &[&str]) -> Vec<String> {
         normalize_capabilities(caps.iter().map(|s| s.to_string()).collect())
@@ -898,5 +899,21 @@ mod normalize_capability_tests {
         assert!(norm(&["sudo"]).is_empty());
         assert!(norm(&["conect"]).is_empty());
         assert_eq!(norm(&["read", "deny"]), vec!["read".to_string()]);
+    }
+
+    /// T124 widened `ShareCap` from four entries to fifteen. A share record
+    /// as the store has always written it (the original schema: no
+    /// `grantee_kind`, no `expires_at`) must still read back, normalize and
+    /// map onto the four pre-T124 variants, in order, and back to the same
+    /// names.
+    #[test]
+    fn pre_t124_share_record_maps_onto_share_cap_unchanged() {
+        let stored = br#"{"target_kind":"resource","target_path":"db-1","grantee_entity_id":"e-2","granted_by_entity_id":"e-1","capabilities":["read","list","update","delete"],"granted_at":"2026-01-01T00:00:00Z"}"#;
+        let share: SecretShare = serde_json::from_slice(stored).expect("a pre-T124 share record parses");
+        assert_eq!(normalize_capabilities(share.capabilities.clone()), share.capabilities);
+        let names: Vec<&str> = share.capabilities.iter().map(String::as_str).collect();
+        let caps = ShareCap::from_names(&names).expect("every pre-T124 share name is a ShareCap");
+        assert_eq!(caps, [ShareCap::Read, ShareCap::List, ShareCap::Update, ShareCap::Delete]);
+        assert_eq!(ShareCap::to_names(&caps), names);
     }
 }

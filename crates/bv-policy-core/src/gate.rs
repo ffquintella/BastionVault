@@ -1,5 +1,7 @@
 //! The two per-rule gates: asset-group membership and ownership scopes.
 
+use alloc::vec::Vec;
+
 use crate::Op;
 
 /// Does a group-gated rule's gate pass?
@@ -37,8 +39,12 @@ pub enum Scope {
     Unknown,
 }
 
-/// The share capability an operation needs, in `SecretShare.capabilities`
-/// vocabulary.
+/// A share capability, in `SecretShare.capabilities` vocabulary.
+///
+/// The first four are what an operation needs ([`share_capability`]). The
+/// eleven `Sql*` entries are the SQL capabilities of features/sql-browser.md
+/// §3.1, named as the policy capability is (`sql_select` …); no operation
+/// needs one, so [`share_capability`] never returns them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(kani, derive(kani::Arbitrary))]
 pub enum ShareCap {
@@ -50,7 +56,49 @@ pub enum ShareCap {
     Update,
     /// `"delete"`
     Delete,
+    /// `"sql_select"`
+    SqlSelect,
+    /// `"sql_insert"`
+    SqlInsert,
+    /// `"sql_update"`
+    SqlUpdate,
+    /// `"sql_delete"`
+    SqlDelete,
+    /// `"sql_alter"`
+    SqlAlter,
+    /// `"sql_create"`
+    SqlCreate,
+    /// `"sql_drop"`
+    SqlDrop,
+    /// `"sql_execute"`
+    SqlExecute,
+    /// `"sql_admin"`
+    SqlAdmin,
+    /// `"sql_export"`
+    SqlExport,
+    /// `"sql_script"`
+    SqlScript,
 }
+
+/// Every [`ShareCap`], in declaration order: the vocabulary
+/// [`ShareCap::from_names`] accepts.
+const SHARE_CAPS: [ShareCap; 15] = [
+    ShareCap::Read,
+    ShareCap::List,
+    ShareCap::Update,
+    ShareCap::Delete,
+    ShareCap::SqlSelect,
+    ShareCap::SqlInsert,
+    ShareCap::SqlUpdate,
+    ShareCap::SqlDelete,
+    ShareCap::SqlAlter,
+    ShareCap::SqlCreate,
+    ShareCap::SqlDrop,
+    ShareCap::SqlExecute,
+    ShareCap::SqlAdmin,
+    ShareCap::SqlExport,
+    ShareCap::SqlScript,
+];
 
 impl ShareCap {
     /// The capability name as a share records it.
@@ -60,7 +108,37 @@ impl ShareCap {
             ShareCap::List => "list",
             ShareCap::Update => "update",
             ShareCap::Delete => "delete",
+            ShareCap::SqlSelect => "sql_select",
+            ShareCap::SqlInsert => "sql_insert",
+            ShareCap::SqlUpdate => "sql_update",
+            ShareCap::SqlDelete => "sql_delete",
+            ShareCap::SqlAlter => "sql_alter",
+            ShareCap::SqlCreate => "sql_create",
+            ShareCap::SqlDrop => "sql_drop",
+            ShareCap::SqlExecute => "sql_execute",
+            ShareCap::SqlAdmin => "sql_admin",
+            ShareCap::SqlExport => "sql_export",
+            ShareCap::SqlScript => "sql_script",
         }
+    }
+
+    /// The capabilities a share's name list records, in order, duplicates
+    /// kept. The inverse of [`ShareCap::to_names`].
+    ///
+    /// `None` when any name is not exactly the [`ShareCap::as_str`] of a
+    /// variant: an unknown, misspelled or differently cased entry refuses
+    /// the whole list rather than being dropped, so a typo cannot silently
+    /// narrow or widen a share. The share store also accepts `create` and
+    /// `connect`, which have no `ShareCap`; a list naming either yields
+    /// `None`.
+    pub fn from_names(names: &[&str]) -> Option<Vec<ShareCap>> {
+        names.iter().map(|name| SHARE_CAPS.iter().copied().find(|cap| cap.as_str() == *name)).collect()
+    }
+
+    /// The names a share records for `caps`, in order. The inverse of
+    /// [`ShareCap::from_names`].
+    pub fn to_names(caps: &[ShareCap]) -> Vec<&'static str> {
+        caps.iter().map(|cap| cap.as_str()).collect()
     }
 }
 
@@ -146,7 +224,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::ModelCaller;
+    use crate::model::{share_bit, ModelCaller, SHARE_MASK};
 
     #[test]
     fn group_gate() {
@@ -174,5 +252,75 @@ mod tests {
         let connect = ModelCaller { share_override: Some(false), ..reader };
         assert!(!scope_passes([Scope::Shared], Op::Read, &connect));
         assert!(!scope_passes([Scope::Unknown], Op::Read, &reader));
+    }
+
+    #[test]
+    fn share_bits_fit_u16_and_keep_existing_values() {
+        assert_eq!(share_bit(ShareCap::Read), 1 << 0);
+        assert_eq!(share_bit(ShareCap::Delete), 1 << 3);
+        let max = [ShareCap::SqlScript].iter().map(|c| share_bit(*c)).max().unwrap();
+        assert!(max <= 1 << 14);
+    }
+
+    #[test]
+    fn existing_share_record_round_trips_unchanged() {
+        // fixture: the name list the share store writes today
+        let names = ["read", "list", "update", "delete"];
+        let caps = ShareCap::from_names(&names).unwrap();
+        assert_eq!(ShareCap::to_names(&caps), names.to_vec());
+    }
+
+    /// The share bit and the share name of every variant, fixed here rather
+    /// than derived: the four pre-T124 entries keep their values and the
+    /// eleven SQL entries (features/sql-browser.md §3.1) take bits 4..=14 in
+    /// `CAP_SQL_*` order, under the policy capability's own `sql_*` name.
+    #[test]
+    fn share_caps_have_fixed_bits_and_names() {
+        let table: [(ShareCap, u16, &str); 15] = [
+            (ShareCap::Read, 1 << 0, "read"),
+            (ShareCap::List, 1 << 1, "list"),
+            (ShareCap::Update, 1 << 2, "update"),
+            (ShareCap::Delete, 1 << 3, "delete"),
+            (ShareCap::SqlSelect, 1 << 4, "sql_select"),
+            (ShareCap::SqlInsert, 1 << 5, "sql_insert"),
+            (ShareCap::SqlUpdate, 1 << 6, "sql_update"),
+            (ShareCap::SqlDelete, 1 << 7, "sql_delete"),
+            (ShareCap::SqlAlter, 1 << 8, "sql_alter"),
+            (ShareCap::SqlCreate, 1 << 9, "sql_create"),
+            (ShareCap::SqlDrop, 1 << 10, "sql_drop"),
+            (ShareCap::SqlExecute, 1 << 11, "sql_execute"),
+            (ShareCap::SqlAdmin, 1 << 12, "sql_admin"),
+            (ShareCap::SqlExport, 1 << 13, "sql_export"),
+            (ShareCap::SqlScript, 1 << 14, "sql_script"),
+        ];
+        for (i, (cap, bit, name)) in table.iter().enumerate() {
+            assert_eq!(SHARE_CAPS[i], *cap, "SHARE_CAPS is in declaration order");
+            assert_eq!(share_bit(*cap), *bit, "{name}");
+            assert_eq!(cap.as_str(), *name);
+            assert_eq!(ShareCap::from_names(&[*name]), Some([*cap].to_vec()));
+        }
+        assert_eq!(SHARE_MASK, (1 << 15) - 1, "fifteen distinct bits, nothing above bit 14");
+    }
+
+    /// An unknown or differently spelled name is refused as a whole, never
+    /// dropped: a caller cannot widen or narrow a share by a typo.
+    #[test]
+    fn from_names_refuses_unknown_names() {
+        assert_eq!(ShareCap::from_names(&["read", "connect"]), None);
+        assert_eq!(ShareCap::from_names(&["sqlselect"]), None);
+        assert_eq!(ShareCap::from_names(&["READ"]), None);
+        assert_eq!(ShareCap::from_names(&[]), Some([].to_vec()));
+    }
+
+    /// No request operation needs an SQL share capability, so an SQL-only
+    /// share never passes a `shared` scope unless the request names the
+    /// capability as its override.
+    #[test]
+    fn sql_only_shares_grant_no_operation() {
+        let sql_only =
+            ModelCaller { has_entity: true, has_shares: true, shares: SHARE_MASK & !0b1111, ..ModelCaller::default() };
+        for op in [Op::List, Op::Read, Op::Write, Op::Delete, Op::Help, Op::Renew, Op::Revoke, Op::Rollback] {
+            assert!(!scope_passes([Scope::Shared], op, &sql_only), "{op:?}");
+        }
     }
 }

@@ -23,11 +23,13 @@
 //! - [`compare`] / [`MostSpecific`] — which non-exact rule is the most specific.
 //! - [`merge_caps`] — how two rules with an identical path combine.
 //!
-//! The crate is `no_std`, allocation-free, `unsafe`-free and has no
-//! dependencies, so `cargo kani -p bv-policy-core` builds and verifies it in
-//! isolation. The harnesses are in `src/proofs.rs` (compiled only under
-//! `cfg(kani)`); `docs/verification.md` states what they prove, the bounds,
-//! and what is therefore *not* proved.
+//! The crate is `no_std`, `unsafe`-free and has no dependencies, so
+//! `cargo kani -p bv-policy-core` builds and verifies it in isolation. The
+//! decision code is allocation-free: the only items that allocate are the
+//! share-name conversions [`ShareCap::from_names`] and
+//! [`ShareCap::to_names`], which no decision calls. The harnesses are in
+//! `src/proofs.rs` (compiled only under `cfg(kani)`); `docs/verification.md`
+//! states what they prove, the bounds, and what is therefore *not* proved.
 //!
 //! Every generic parameter here is instantiated twice: by the host with real
 //! strings and JSON, and by the proofs with the abstract model in
@@ -38,6 +40,10 @@
 #![no_std]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+// Only for `ShareCap::from_names` / `to_names`, which return a `Vec`. The
+// decision code does not allocate.
+extern crate alloc;
 
 mod check;
 mod decide;

@@ -62,7 +62,7 @@ harness t4_the_most_specific_candidate_wins_in_any_order theorem slow 2      81.
 harness t4_segment_wildcards_match_by_shape           theorem  fast  2        3.3   T4
 harness t5_group_gate_is_sound                        theorem  fast  1        5.2   T5
 harness t5_t6_a_failed_gate_contributes_nothing       theorem  slow  1       26.3   T5 T6
-harness t6_scope_gate_is_sound                        theorem  fast  4        2.0   T6
+harness t6_scope_gate_is_sound                        theorem  fast  5        2.0   T6
 harness t5b_gated_list_always_carries_a_filter        theorem  fast  1        5.2   T5b
 harness t5b_an_unfiltered_list_needs_the_governing_rule theorem fast 1      10.5   T5b
 harness t5b_a_non_governing_list_rule_keeps_the_filter theorem fast 1        6.2   T5b F7

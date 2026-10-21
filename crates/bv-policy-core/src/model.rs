@@ -280,17 +280,33 @@ pub struct ModelCaller {
     pub unowned: bool,
     pub has_shares: bool,
     pub share_override: Option<bool>,
-    pub shares: u8,
+    pub shares: u16,
 }
 
-pub const fn share_bit(cap: ShareCap) -> u8 {
+/// The bit of `cap` in [`ModelCaller::shares`]. The values are fixed by
+/// `gate::tests::share_caps_have_fixed_bits_and_names`.
+pub const fn share_bit(cap: ShareCap) -> u16 {
     match cap {
         ShareCap::Read => 1 << 0,
         ShareCap::List => 1 << 1,
         ShareCap::Update => 1 << 2,
         ShareCap::Delete => 1 << 3,
+        ShareCap::SqlSelect => 1 << 4,
+        ShareCap::SqlInsert => 1 << 5,
+        ShareCap::SqlUpdate => 1 << 6,
+        ShareCap::SqlDelete => 1 << 7,
+        ShareCap::SqlAlter => 1 << 8,
+        ShareCap::SqlCreate => 1 << 9,
+        ShareCap::SqlDrop => 1 << 10,
+        ShareCap::SqlExecute => 1 << 11,
+        ShareCap::SqlAdmin => 1 << 12,
+        ShareCap::SqlExport => 1 << 13,
+        ShareCap::SqlScript => 1 << 14,
     }
 }
+
+/// Every bit [`share_bit`] assigns, one per [`ShareCap`]: bits 0..=14.
+pub const SHARE_MASK: u16 = (1 << 15) - 1;
 
 impl ModelCaller {
     /// The combinations the host can produce: owning a target needs a caller
@@ -301,7 +317,7 @@ impl ModelCaller {
         (!self.owns || (self.has_entity && !self.unowned))
             && (self.shares == 0 || self.has_shares)
             && (self.share_override != Some(true) || self.has_shares)
-            && self.shares & !0b1111 == 0
+            && self.shares & !SHARE_MASK == 0
     }
 }
 

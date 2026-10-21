@@ -10,8 +10,10 @@ An overclaimed guarantee is worse than none, so every claim below is scoped.
 
 Every ACL verdict — `ACL::allow_operation` and `Permissions::check` in
 `crates/bv-kernel/src/modules/policy/` — is computed by
-[`bv-policy-core`](../crates/bv-policy-core), a `no_std`, allocation-free,
-`unsafe`-free crate with no dependencies. The kernel keeps only the *index*:
+[`bv-policy-core`](../crates/bv-policy-core), a `no_std`, `unsafe`-free crate
+with no dependencies whose decision code is allocation-free (only the
+share-name conversions `ShareCap::from_names` / `to_names` allocate, and no
+decision calls them). The kernel keeps only the *index*:
 the radix tries and the segment-wildcard map that find the candidate rules for
 a path, and the code that answers the core's questions about a request
 (`core_bridge.rs`). Removing the crate breaks the kernel build.

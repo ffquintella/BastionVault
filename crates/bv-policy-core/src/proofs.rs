@@ -529,6 +529,12 @@ fn t6_scope_gate_is_sound() {
         !passes && c.owns && listed.contains(&Scope::Unknown) && !listed.contains(&Scope::Owner),
         "an owner refused by an unknown scope"
     );
+    // The vacuity guard for the u16 widening: a caller whose shares carry an
+    // `Sql*` bit (4..=14) is inside the quantified space, not assumed away.
+    kani::cover!(
+        c.has_entity && listed.contains(&Scope::Shared) && c.shares & !0b1111 != 0,
+        "a share carrying an SQL capability"
+    );
 }
 
 // ── T5b — the LIST carve-out ───────────────────────────────────────
